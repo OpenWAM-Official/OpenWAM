@@ -117,7 +117,7 @@ Built upon [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) an
 Nano-WAM is released under the MIT License, which permits commercial use, modification, distribution, and private use. Rebases are allowed for forks and feature branches; when rebasing from upstream StarVLA, use descriptive commit messages (e.g., "chore: rebase from StarVLA") and keep at least the two latest upstream commits as separate. See [License](LICENSE) for details.
 
 ```
-@misc{starvla2025,
+@misc{nanowam2026,
   title        = {NanoWAM: A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment},
   author       = {NanoWAM Contributors},
   year         = {2026},
