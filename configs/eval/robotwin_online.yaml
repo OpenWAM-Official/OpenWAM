@@ -1,0 +1,10 @@
+type: online
+num_episodes: 50
+max_steps_per_episode: 500
+env:
+  name: robotwin
+  task_name: null
+  robot: arx-x5
+policy:
+  history_len: 10
+  action_cache_size: 49

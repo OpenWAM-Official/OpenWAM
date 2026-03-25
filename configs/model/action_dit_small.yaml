@@ -1,0 +1,8 @@
+action_dim: 14
+dim: 768
+ffn_dim: 3072
+num_heads: 12
+num_layers: 8
+max_action_len: 49
+bridge_type: cross_attn_detach
+bridge_layers: [3, 7, 11, 15, 19, 23, 26, 29]

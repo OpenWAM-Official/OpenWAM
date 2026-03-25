@@ -1,0 +1,5 @@
+schedule_type: sync
+num_steps: 50
+shift: 5.0
+cfg_scale: 1.0
+seed: null

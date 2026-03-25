@@ -1,0 +1,16 @@
+type: robotwin
+hdf5_data_root: ???
+task_name: null
+robot: aloha-agilex
+variant: clean_50
+num_frames: 49
+height: 480
+width: 832
+split: train
+val_ratio: 0.1
+repeat: 1
+target_camera: head_camera
+window_stride: 1
+multiview: false
+action_stats_path: null
+max_val_samples: 500

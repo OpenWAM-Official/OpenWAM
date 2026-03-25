@@ -1,0 +1,6 @@
+schedule_type: cascade
+video_steps: 20
+action_steps: 20
+shift: 5.0
+cfg_scale: 1.0
+seed: null

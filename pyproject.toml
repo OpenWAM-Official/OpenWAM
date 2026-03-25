@@ -3,11 +3,11 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "diffsynth"
-version = "2.0.4"
-description = "Enjoy the magic of Diffusion models!"
-authors = [{name = "ModelScope Team"}]
-license = {text = "Apache-2.0"}
+name = "open-wam"
+version = "0.1.0"
+description = "OpenWAM: A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment"
+authors = [{name = "OpenWAM Contributors"}]
+license = {text = "MIT"}
 requires-python = ">=3.10.1"
 dependencies = [
     "torch>=2.0.0",
@@ -26,16 +26,18 @@ dependencies = [
     "peft",
     "datasets",
     "wandb",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 
 [tool.setuptools.packages.find]
 where = ["./"]
-include = ["diffsynth", "diffsynth.*"]
+include = ["open_wam", "open_wam.*", "diffsynth", "diffsynth.*"]
 
 [project.optional-dependencies]
 npu_aarch64 = [

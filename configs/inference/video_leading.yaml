@@ -1,0 +1,6 @@
+schedule_type: video_leading
+num_steps: 50
+lead_steps: 10
+shift: 5.0
+cfg_scale: 1.0
+seed: null

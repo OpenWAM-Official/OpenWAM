@@ -1,8 +1,10 @@
 /data/*
 !/data/robotwin/
 /models
-/scripts
 /diffusers
+
+# Hydra outputs
+outputs/
 *.pkl
 *.safetensors
 *.pth

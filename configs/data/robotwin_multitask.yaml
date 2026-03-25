@@ -1,0 +1,19 @@
+type: robotwin_multitask
+dataset_dir: ???
+robot: arx-x5
+variant: clean_50
+num_frames: 49
+height: 480
+width: 832
+split: train
+val_ratio: 0.1
+repeat: 1
+target_camera: head_camera
+window_stride: 1
+multiview: true
+camera_layout: [head_camera, third_person, left_camera, right_camera]
+action_stats_path: null
+train_tasks: null
+holdout_tasks: null
+val_variant: null
+max_val_samples: 500
