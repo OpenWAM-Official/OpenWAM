@@ -1,6 +1,6 @@
-# Nano-WAM
+# OpenWAM
 
-**Nano World-Action Model** — A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment
+**Open World-Action Model** — A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment
 
 ![Architecture](assets/arch.png)
 
@@ -8,7 +8,7 @@
 ## Project Structure
 
 ```
-nano-WAM/
+OpenWAM/
 ├── diffsynth/                          # Core diffusion framework
 │   ├── models/
 │   │   └── action_dit.py              # ActionDiT: lightweight action generation stream
@@ -33,7 +33,7 @@ nano-WAM/
 ### Installation
 
 ```bash
-cd nano-WAM
+cd OpenWAM
 pip install -e .
 ```
 
@@ -114,12 +114,12 @@ Built upon [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) an
 
 ## Citation & Copyright
 
-Nano-WAM is released under the MIT License, which permits commercial use, modification, distribution, and private use. Rebases are allowed for forks and feature branches; when rebasing from upstream StarVLA, use descriptive commit messages (e.g., "chore: rebase from StarVLA") and keep at least the two latest upstream commits as separate. See [License](LICENSE) for details.
+OpenWAM is released under the MIT License, which permits commercial use, modification, distribution, and private use. Rebases are allowed for forks and feature branches; when rebasing from upstream StarVLA, use descriptive commit messages (e.g., "chore: rebase from StarVLA") and keep at least the two latest upstream commits as separate. See [License](LICENSE) for details.
 
 ```
-@misc{nanowam2026,
-  title        = {NanoWAM: A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment},
-  author       = {NanoWAM Contributors},
+@misc{openwam2026,
+  title        = {OpenWAM: A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment},
+  author       = {OpenWAM Contributors},
   year         = {2026},
   month        = {tbd},
   version      = {1.0.0},

@@ -1,6 +1,6 @@
     MIT License
 
-    Copyright (c) NanoWAM Team.
+    Copyright (c) OpenWAM Team.
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -12,8 +12,8 @@
     The above copyright notice and this permission notice shall be included in all
     copies or substantial portions of the Software.
 
-    Rebases are allowed for forks and feature branches. When rebasing from upstream NanoWAM, use descriptive commit messages, e.g., "chore: clone from NanoWAM".
-    Preserve attribution: keep at least the two latest upstream NanoWAM commits as separate.
+    Rebases are allowed for forks and feature branches. When rebasing from upstream OpenWAM, use descriptive commit messages, e.g., "chore: clone from OpenWAM".
+    Preserve attribution: keep at least the two latest upstream OpenWAM commits as separate.
 
     THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
     IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
