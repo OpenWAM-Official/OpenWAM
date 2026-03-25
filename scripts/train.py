@@ -306,9 +306,19 @@ def main(cfg: DictConfig) -> None:
         keep_last_k_ckpts=args.keep_last_k_ckpts,
     )
 
-    # --- Validation callback setup ---
-    val_callback = None
+    # --- Callback system (DynamiCrafter-inspired) ---
+    from open_wam.training.callbacks import (
+        CallbackRunner, ValidationLossCallback, VideoLogCallback, SetupCallback,
+    )
+
+    runner = CallbackRunner()
+    runner.add(SetupCallback(output_dir=args.output_path, config_dict=vars(args)))
+
     if args.val_steps is not None:
+        val_datasets = {}
+        video_datasets = {}
+        _video_log_steps = args.video_log_steps if args.video_log_steps is not None else args.val_steps
+
         if args.dataset_type == "robotwin_multitask":
             from video_action_dataset import MultiTaskRoboTwinDataset, ROBOTWIN_HOLDOUT_TASKS
             val_variant = args.val_variant or args.variant
@@ -325,7 +335,7 @@ def main(cfg: DictConfig) -> None:
                 multiview=args.multiview,
                 backbone=args.backbone,
             )
-            val_id_dataset = MultiTaskRoboTwinDataset(
+            val_datasets["val_id"] = MultiTaskRoboTwinDataset(
                 dataset_dir=args.dataset_dir,
                 robot=args.robot,
                 variant=args.variant,
@@ -334,7 +344,7 @@ def main(cfg: DictConfig) -> None:
                 num_val_samples=0,
                 **_mt_val_common,
             )
-            val_ood_dataset = MultiTaskRoboTwinDataset(
+            val_datasets["val_ood"] = MultiTaskRoboTwinDataset(
                 dataset_dir=args.dataset_dir,
                 robot=args.robot,
                 variant=val_variant,
@@ -343,25 +353,10 @@ def main(cfg: DictConfig) -> None:
                 num_val_samples=5,
                 **_mt_val_common,
             )
-            _max_val = args.max_val_samples
-            _val_steps = args.val_steps
-            _video_log_steps = args.video_log_steps if args.video_log_steps is not None else args.val_steps
-            def val_callback(step):
-                if step % _val_steps == 0:
-                    model.compute_val_losses(
-                        val_id_dataset, step, model_logger.wandb_run,
-                        prefix="val_id", max_samples=_max_val)
-                    model.compute_val_losses(
-                        val_ood_dataset, step, model_logger.wandb_run,
-                        prefix="val_ood")
-                if step % _video_log_steps == 0:
-                    model.validate_during_training(
-                        val_id_dataset[0], step, model_logger.wandb_run, prefix="val_id")
-                    model.validate_during_training(
-                        val_ood_dataset[0], step, model_logger.wandb_run, prefix="val_ood")
+            video_datasets = dict(val_datasets)
         else:
             from video_action_dataset import RoboTwinDataset
-            val_dataset = RoboTwinDataset(
+            val_ds = RoboTwinDataset(
                 data_root=args.hdf5_data_root,
                 num_frames=args.num_frames,
                 height=args.height,
@@ -379,21 +374,24 @@ def main(cfg: DictConfig) -> None:
                 variant=args.variant,
                 backbone=args.backbone,
             )
-            _max_val = args.max_val_samples
-            _val_steps = args.val_steps
-            _video_log_steps = args.video_log_steps if args.video_log_steps is not None else args.val_steps
-            def val_callback(step):
-                if step % _val_steps == 0:
-                    model.compute_val_losses(
-                        val_dataset, step, model_logger.wandb_run,
-                        prefix="val", max_samples=_max_val)
-                if step % _video_log_steps == 0:
-                    model.validate_during_training(
-                        val_dataset[0], step, model_logger.wandb_run)
+            val_datasets["val"] = val_ds
+            video_datasets["val"] = val_ds
 
-    callback_interval = args.val_steps
-    if args.val_steps is not None and args.video_log_steps is not None:
-        callback_interval = math.gcd(args.val_steps, args.video_log_steps)
+        runner.add(ValidationLossCallback(
+            model=model,
+            datasets=val_datasets,
+            wandb_run=model_logger.wandb_run,
+            every_n_steps=args.val_steps,
+            max_samples=args.max_val_samples,
+        ))
+        runner.add(VideoLogCallback(
+            model=model,
+            datasets=video_datasets,
+            wandb_run=model_logger.wandb_run,
+            every_n_steps=_video_log_steps,
+        ))
+
+    val_callback, callback_interval = runner.as_legacy_val_callback()
 
     launch_training_task(
         accelerator, dataset, model, model_logger, args=args,
