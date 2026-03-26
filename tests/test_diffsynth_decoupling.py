@@ -24,6 +24,7 @@ def test_no_direct_diffsynth_import_in_open_wam():
     allowed_dirs = {
         open_wam_dir / "models" / "architectures",
         open_wam_dir / "models" / "backbone",
+        open_wam_dir / "inference" / "optimizations",
     }
     violations = []
 

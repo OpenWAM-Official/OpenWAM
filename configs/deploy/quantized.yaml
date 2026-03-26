@@ -1,0 +1,31 @@
+# Quantized deployment configuration
+# Post-training quantization for reduced memory and faster inference.
+
+deploy:
+  quantization:
+    enabled: true
+    dtype: float8_e4m3fn   # or bfloat16, float16
+    quantize_models: [dit, vace]  # Models to quantize
+
+  # All realtime optimizations also apply
+  dit_cache:
+    enabled: true
+    cosine_threshold: 0.98  # Slightly more aggressive with quantization
+
+  tea_cache:
+    enabled: true
+    l1_thresh: 0.4
+
+  cfg:
+    mode: batch_merge
+    scale: 1.0
+
+  schedule:
+    type: decoupled_flash
+    action_steps: 1
+    shift: 5.0
+
+  async_execution:
+    enabled: true
+    prefetch: true
+    chunk_size: 49
