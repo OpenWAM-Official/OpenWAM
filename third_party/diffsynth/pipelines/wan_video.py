@@ -28,6 +28,7 @@ from ..models.wan_video_mot import MotWanModel
 from ..models.wav2vec import WanS2VAudioEncoder
 from ..models.longcat_video_dit import LongCatVideoTransformer3DModel
 from ..models.action_dit import ActionDiTState
+from ..models.moe_action_expert import MoEExpertState
 
 
 class WanVideoPipeline(BasePipeline):
@@ -1164,6 +1165,7 @@ def model_fn_wan_video(
     bridge_feature_layers: Optional[set] = None,
     bridge_feature_detach: bool = False,
     action_dit_state: Optional[ActionDiTState] = None,
+    moe_expert_state: Optional['MoEExpertState'] = None,
     **kwargs,
 ):
     if sliding_window_size is not None and sliding_window_stride is not None:
@@ -1319,6 +1321,21 @@ def model_fn_wan_video(
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload
         )
     
+    # MoE Action Expert: concatenate action tokens to video sequence
+    _moe_n_action = 0
+    if moe_expert_state is not None:
+        _moe_n_action = moe_expert_state.n_action_tokens
+        # Append projected action tokens to the video sequence
+        x = torch.cat([x, moe_expert_state.action_tokens.to(x.dtype)], dim=1)
+        # Extend RoPE freqs with identity rotation for action positions.
+        # Identity = exp(i*0) = polar(1, 0). Use position-0 freqs which
+        # are always identity in standard RoPE.
+        _identity_freq = torch.polar(
+            torch.ones(_moe_n_action, 1, freqs.shape[-1], device=freqs.device),
+            torch.zeros(_moe_n_action, 1, freqs.shape[-1], device=freqs.device),
+        )
+        freqs = torch.cat([freqs, _identity_freq], dim=0)
+
     # blocks
     if use_unified_sequence_parallel:
         if dist.is_initialized() and dist.get_world_size() > 1:
@@ -1372,6 +1389,15 @@ def model_fn_wan_video(
             # Capture bridge features (after VACE hint addition)
             if bridge_feature_store is not None and bridge_feature_layers is not None and block_id in bridge_feature_layers:
                 bridge_feature_store.append(x.detach() if bridge_feature_detach else x)
+
+            # MoE Action Expert: apply expert FFN correction at designated layers
+            if moe_expert_state is not None and block_id in moe_expert_state.moe_dit.expert_layers_set:
+                _n_video = x.shape[1] - _moe_n_action
+                _x_action = x[:, _n_video:, :]
+                _x_action = moe_expert_state.moe_dit.apply_expert(moe_expert_state, _x_action)
+                x = torch.cat([x[:, :_n_video, :], _x_action], dim=1)
+                # Keep action tokens updated for finalize
+                moe_expert_state.action_tokens = _x_action
 
             # Interleaved joint_self_attn: run ActionDiT block inside video loop
             if action_dit_state is not None and block_id in action_dit_state.action_dit.bridge_layers_set:
@@ -1438,6 +1464,18 @@ def model_fn_wan_video(
     # Finalize interleaved action output
     if action_dit_state is not None:
         action_dit_state.action_noise_pred = action_dit_state.action_dit.finalize_action_output(action_dit_state)
+
+    # MoE Action Expert: extract action tokens from combined sequence
+    if moe_expert_state is not None:
+        _n_video = x.shape[1] - _moe_n_action
+        # Update final action tokens in state
+        moe_expert_state.action_tokens = x[:, _n_video:, :]
+        # Remove action tokens from video sequence for head processing
+        x = x[:, :_n_video, :]
+        # Restore original freqs length (not needed since freqs isn't used after loop,
+        # but clean up for safety)
+        # Finalize action prediction
+        moe_expert_state.action_noise_pred = moe_expert_state.moe_dit.finalize_output(moe_expert_state)
 
     # CRITICAL (batched training): Head.forward has a 2D path and a 3D path.
     # The 2D path (t shape = (B, dim)) is BROKEN for B>1: PyTorch broadcasting

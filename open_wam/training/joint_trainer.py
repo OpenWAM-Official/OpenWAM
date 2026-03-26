@@ -5,10 +5,13 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import logging
 import torch
 import numpy as np
 
 from open_wam.training.base import BaseTrainer
+
+logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _WAM_DIR = str(_PROJECT_ROOT / "examples" / "wanvideo" / "wam")
@@ -64,7 +67,7 @@ class JointTrainer(BaseTrainer):
             preset_lora_model=t.preset_lora_model,
             use_gradient_checkpointing=bool(t.use_gradient_checkpointing),
             use_gradient_checkpointing_offload=bool(t.use_gradient_checkpointing_offload),
-            extra_inputs="vace_video,vace_reference_image,action_trajectory",
+            extra_inputs=getattr(t, "extra_inputs", "vace_video,vace_reference_image,action_trajectory"),
             fp8_models=t.fp8_models,
             offload_models=t.offload_models,
             task="sft",
@@ -99,6 +102,16 @@ class JointTrainer(BaseTrainer):
                 self._legacy_module.action_dit.action_std.copy_(
                     torch.from_numpy(stats["std"].astype(np.float32))
                 )
+
+        # Decoupled training support (DreamZero-Flash inspired)
+        decoupled_cfg = getattr(t, "decoupled", None)
+        if decoupled_cfg is not None and getattr(decoupled_cfg, "enabled", False):
+            from open_wam.training.decoupled_loss import DecoupledFlowMatchLoss
+            self._legacy_module.decoupled_sampler = DecoupledFlowMatchLoss(
+                video_beta_a=float(getattr(decoupled_cfg, "video_beta_a", 0.5)),
+                video_beta_b=float(getattr(decoupled_cfg, "video_beta_b", 1.0)),
+                warmup_steps=int(getattr(decoupled_cfg, "warmup_steps", 0)),
+            )
 
         self.model = self._legacy_module
 
@@ -145,9 +158,25 @@ class JointTrainer(BaseTrainer):
 
         # Handle action_dit prefix
         action_keys = {k: v for k, v in state_dict.items() if k.startswith("action_dit.")}
+        other_keys = {k for k in state_dict if not k.startswith("action_dit.")}
+        if other_keys:
+            logger.warning(
+                "Checkpoint contains %d non-ActionDiT keys that will be ignored: %s",
+                len(other_keys),
+                ", ".join(sorted(other_keys)[:5]) + ("..." if len(other_keys) > 5 else ""),
+            )
         if action_keys:
             cleaned = {k.removeprefix("action_dit."): v for k, v in action_keys.items()}
-            self._legacy_module.action_dit.load_state_dict(cleaned, strict=False)
+            missing, unexpected = self._legacy_module.action_dit.load_state_dict(cleaned, strict=False)
+            if missing:
+                logger.warning("Missing keys in ActionDiT checkpoint: %s", missing)
+            if unexpected:
+                logger.warning("Unexpected keys in ActionDiT checkpoint: %s", unexpected)
+        else:
+            # Try loading directly (no prefix)
+            missing, unexpected = self._legacy_module.action_dit.load_state_dict(state_dict, strict=False)
+            if missing:
+                logger.warning("Missing keys in ActionDiT checkpoint: %s", missing[:10])
 
     @property
     def pipe(self):

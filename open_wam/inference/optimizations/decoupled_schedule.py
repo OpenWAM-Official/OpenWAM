@@ -140,17 +140,16 @@ def sample_decoupled_timesteps(
     # Beta(0.5, 1.0) has PDF peaked at x=0, meaning samples cluster near 0
     # We flip: t_video = (1 - beta_sample) * num_train_timesteps
     # so samples cluster near high timesteps (high noise)
-    beta_samples = np.random.beta(video_beta_a, video_beta_b, size=batch_size)
-    video_t = (1.0 - beta_samples) * num_train_timesteps
-    video_timesteps = torch.from_numpy(video_t.astype(np.float32)).clamp(0, num_train_timesteps - 1)
+    # Use torch.distributions for reproducibility with torch.manual_seed
+    beta_dist = torch.distributions.Beta(video_beta_a, video_beta_b)
+    beta_samples = beta_dist.sample((batch_size,))
+    video_timesteps = ((1.0 - beta_samples) * num_train_timesteps).clamp(0, num_train_timesteps - 1)
 
     # Action: uniform sampling (standard)
     if action_uniform:
         action_timesteps = torch.randint(0, num_train_timesteps, (batch_size,)).float()
     else:
-        # Can also use Beta with different params for action
-        beta_samples_a = np.random.beta(1.0, 1.0, size=batch_size)  # uniform
-        action_t = beta_samples_a * num_train_timesteps
-        action_timesteps = torch.from_numpy(action_t.astype(np.float32)).clamp(0, num_train_timesteps - 1)
+        action_timesteps = torch.rand(batch_size) * num_train_timesteps
+        action_timesteps = action_timesteps.clamp(0, num_train_timesteps - 1)
 
     return video_timesteps.to(device), action_timesteps.to(device)

@@ -31,18 +31,27 @@ def test_build_architecture_dual_system():
 
 def test_build_architecture_moe():
     from open_wam.models.architectures import build_architecture
-    cfg = {"action_dim": 7, "num_action_tokens": 10, "expert_layers": (1, 3)}
+    cfg = {
+        "action_dim": 7,
+        "video_dim": 128,
+        "expert_ffn_dim": 256,
+        "num_experts": 2,
+        "expert_layers": (1, 3),
+    }
     arch = build_architecture("moe_expert", cfg)
     assert arch.action_dim == 7
     assert arch.bridge_layers == (1, 3)
+    assert arch.moe_dit is not None
+    assert len(arch.moe_dit.expert_blocks) == 2
 
 
 def test_build_architecture_shared():
+    """SharedBackbone is not yet implemented — verify it raises early."""
     from open_wam.models.architectures import build_architecture
+    import pytest
     cfg = {"action_dim": 7, "video_dim": 256, "num_action_tokens": 10}
-    arch = build_architecture("shared_backbone", cfg)
-    assert arch.action_dim == 7
-    assert arch.bridge_layers == ()
+    with pytest.raises(NotImplementedError, match="not yet implemented"):
+        build_architecture("shared_backbone", cfg)
 
 
 def test_build_architecture_unknown():
@@ -85,6 +94,69 @@ def test_dual_system_prepare_and_extract():
     with torch.no_grad():
         action_pred = arch.extract_action_prediction(state)
     assert action_pred.shape == (B, T_action, 7)
+
+
+def test_moe_expert_prepare_and_extract():
+    """Smoke test: MoE prepare action tokens, expert FFN, and extract prediction."""
+    from open_wam.models.architectures import build_architecture
+    cfg = {
+        "action_dim": 7,
+        "video_dim": 128,
+        "expert_ffn_dim": 256,
+        "num_experts": 2,
+        "expert_layers": (0, 1),
+    }
+    arch = build_architecture("moe_expert", cfg)
+    arch.eval()
+
+    B, T_action, T_video = 1, 10, 20
+
+    noisy_actions = torch.randn(B, T_action, 7)
+    timestep = torch.tensor([500.0])
+
+    state = arch.prepare_action_tokens(noisy_actions, timestep)
+    assert "moe_state" in state.extra
+
+    moe_state = state.extra["moe_state"]
+    assert moe_state.action_tokens.shape == (B, T_action, 128)
+    assert moe_state.n_action_tokens == T_action
+
+    # Simulate video DiT blocks: action tokens are part of the combined sequence
+    # In real pipeline, concatenation happens in model_fn_wan_video.
+    # Here we simulate by creating a combined hidden state.
+    video_hidden = torch.randn(B, T_video + T_action, 128)  # combined sequence
+
+    for block_id in range(2):
+        video_hidden, state = arch.on_dit_block(block_id, video_hidden, state)
+
+    assert moe_state.expert_block_counter == 2
+
+    # Extract action prediction
+    with torch.no_grad():
+        action_pred = arch.extract_action_prediction(state)
+    assert action_pred.shape == (B, T_action, 7)
+
+
+def test_moe_expert_ffn_zero_init():
+    """Verify expert FFN and output head are zero-initialized."""
+    from diffsynth.models.moe_action_expert import MoEExpertDiT
+    import sys
+    from pathlib import Path
+    _tp = str(Path(__file__).resolve().parent.parent / "third_party")
+    if _tp not in sys.path:
+        sys.path.insert(0, _tp)
+
+    dit = MoEExpertDiT(
+        action_dim=7, video_dim=64, expert_ffn_dim=128,
+        num_experts=2, expert_layers=(0, 1),
+    )
+    # Expert FFN output layer should be zero
+    for block in dit.expert_blocks:
+        assert torch.all(block.ffn[2].weight == 0)
+        assert torch.all(block.ffn[2].bias == 0)
+    # Output head should be zero
+    assert torch.all(dit.output_head.weight == 0)
+    assert torch.all(dit.output_head.bias == 0)
 
 
 def test_register_custom_architecture():

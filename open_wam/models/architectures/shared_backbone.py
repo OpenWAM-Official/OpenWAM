@@ -40,14 +40,11 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
 
     def __init__(self, cfg=None):
         super().__init__(cfg)
-        self._action_dim = int(cfg.get("action_dim", 14)) if cfg else 14
-        self._video_dim = int(cfg.get("video_dim", 1536)) if cfg else 1536
-        self._num_action_tokens = int(cfg.get("num_action_tokens", 49)) if cfg else 49
-
-        # TODO: Implement action token embedding and output projection
-        # self.action_input_proj = nn.Linear(action_dim, video_dim)
-        # self.action_output_proj = nn.Linear(video_dim, action_dim)
-        # self.action_pos_embed = nn.Parameter(...)
+        raise NotImplementedError(
+            "SharedBackboneArchitecture is not yet implemented. "
+            "Use 'dual_system' or 'moe_expert' instead. "
+            "See assets/arch.png for architecture diagrams."
+        )
 
     def prepare_action_tokens(
         self, noisy_actions: Tensor, timestep: Tensor, **kwargs

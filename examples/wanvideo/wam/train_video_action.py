@@ -85,6 +85,7 @@ def FlowMatchVideoActionSFTLoss(
     lambda_action: float = 1.0,
     current_step: int = 0,
     detach_bridge: bool = False,
+    decoupled_sampler=None,
     **inputs,
 ):
     """
@@ -141,7 +142,18 @@ def FlowMatchVideoActionSFTLoss(
     B = inputs["input_latents"].shape[0]
 
     # Sample per-sample video timesteps
-    video_timestep_ids = torch.randint(min_timestep_boundary, max_timestep_boundary, (B,))
+    if decoupled_sampler is not None:
+        # Decoupled training: Beta-distributed video timesteps
+        _video_t, _action_t = decoupled_sampler.sample_timesteps(
+            B, current_step=current_step, device="cpu"
+        )
+        # Map continuous timesteps to scheduler indices
+        num_ts = len(pipe.scheduler.timesteps)
+        video_timestep_ids = (_video_t / decoupled_sampler.num_train_timesteps * num_ts).long().clamp(
+            min_timestep_boundary, max_timestep_boundary - 1
+        )
+    else:
+        video_timestep_ids = torch.randint(min_timestep_boundary, max_timestep_boundary, (B,))
     video_timesteps = pipe.scheduler.timesteps[video_timestep_ids].to(
         dtype=pipe.torch_dtype, device=pipe.device
     )
@@ -171,7 +183,12 @@ def FlowMatchVideoActionSFTLoss(
 
     if lambda_action > 0:
         # Sample per-sample independent action timesteps
-        action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
+        if decoupled_sampler is not None:
+            # Decoupled training: use action timesteps from sampler
+            num_ts_a = len(action_scheduler.timesteps)
+            action_timestep_ids = (_action_t / decoupled_sampler.num_train_timesteps * num_ts_a).long().clamp(0, num_ts_a - 1)
+        else:
+            action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
         action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(
             dtype=pipe.torch_dtype, device=pipe.device
         )
@@ -668,6 +685,7 @@ class VideoActionTrainingModule(DiffusionTrainingModule):
             lambda_action=self.lambda_action,
             current_step=self.current_step,
             detach_bridge=(self.bridge_type == "cross_attn_detach"),
+            decoupled_sampler=getattr(self, "decoupled_sampler", None),
             **inputs_shared,
             **inputs_posi,
         )
@@ -859,6 +877,7 @@ class VideoActionTrainingModule(DiffusionTrainingModule):
             lambda_action=self.lambda_action,
             current_step=self.current_step,
             detach_bridge=(self.bridge_type == "cross_attn_detach"),
+            decoupled_sampler=getattr(self, "decoupled_sampler", None),
             **batched_shared,
             **batched_posi,
         )

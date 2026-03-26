@@ -592,6 +592,10 @@ class ActionDiT(nn.Module):
             (B, T_action, action_dim) - predicted action noise
         """
         B, T, _ = action_tokens.shape
+        assert T <= self.pos_embedding.shape[1], (
+            f"Action sequence length {T} exceeds max_action_len "
+            f"{self.pos_embedding.shape[1]}"
+        )
 
         # Embed actions
         x = self.action_embedding(action_tokens)

@@ -180,7 +180,8 @@ class DROIDDataset(BaseActionDataset):
     def _load_video_frames(self, video_path: str, start: int, end: int) -> List[Image.Image]:
         """Load and resize video frames from MP4."""
         if not os.path.exists(video_path):
-            # Return placeholder frames
+            import logging
+            logging.getLogger(__name__).warning("Video file not found: %s — using black placeholder frames", video_path)
             return [Image.new("RGB", (self.width, self.height)) for _ in range(end - start)]
 
         import imageio

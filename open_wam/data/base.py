@@ -19,11 +19,19 @@ class BaseActionDataset(ABC, torch.utils.data.Dataset):
         """Return a single training sample.
 
         Expected keys:
-            video:           Tensor (T, C, H, W)
+            video:           List[PIL.Image] — raw frames (the training
+                             pipeline's ``preprocess_video`` handles
+                             conversion to tensors and resizing)
             action:          Tensor (T, action_dim)
+            action_trajectory: Tensor (T, action_dim) — alias for action
             prompt:          str
-            reference_image: Tensor (C, H, W), optional
-            context_video:   Tensor (T, C, H, W), optional (VACE)
+            reference_image: List[PIL.Image], optional
+            context_video:   List[PIL.Image], optional (VACE conditioning)
+
+        Note: video is returned as PIL Images (not Tensors) because the
+        legacy WanVideoPipeline.preprocess_video handles cropping, resizing,
+        and VAE encoding internally. Converting to Tensor prematurely would
+        bypass this preprocessing.
         """
         ...
 

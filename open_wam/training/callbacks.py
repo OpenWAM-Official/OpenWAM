@@ -198,8 +198,13 @@ class VideoLogCallback(TrainingCallback):
     def on_step_end(self, state: TrainingState) -> None:
         wandb_run = self.wandb_run or state.wandb_run
         for prefix, dataset in self.datasets.items():
+            try:
+                sample = dataset[0]
+            except (IndexError, TypeError):
+                # Fallback for IterableDataset or empty datasets
+                sample = next(iter(dataset))
             self.model.validate_during_training(
-                dataset[0], state.step, wandb_run, prefix=prefix,
+                sample, state.step, wandb_run, prefix=prefix,
             )
 
 

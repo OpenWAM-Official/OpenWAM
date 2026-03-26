@@ -1,10 +1,19 @@
-# MoE Action Expert Architecture (stub)
-# Action tokens route to specialized expert FFN within video DiT blocks.
-# See assets/arch.png (middle).
+# MoE Action Expert Architecture (BAGEL MoT-inspired)
+#
+# Action tokens are concatenated to the video token sequence.
+# Shared self-attention provides cross-modal grounding.
+# Expert FFN layers provide modality-specific capacity at designated layers.
+#
+# References:
+# - BAGEL (ByteDance Seed, arXiv:2505.14683): Shared attention + expert FFN
+# - DreamZero: Shared backbone WAM
+#
+# See assets/arch.png for architecture diagram.
 
 architecture:
   type: moe_expert
   action_dim: 14
-  num_action_tokens: 49
+  video_dim: 1536       # Must match backbone video_dim
+  expert_ffn_dim: 4096
+  num_experts: 8
   expert_layers: [3, 7, 11, 15, 19, 23, 26, 29]
-  expert_ffn_dim: 3072
