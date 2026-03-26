@@ -1,0 +1,14 @@
+# Dual-System WAM Architecture (default)
+# Separate ActionDiT with bridge attention to video DiT layers.
+# See assets/arch.png (rightmost) and assets/modal_merging.png.
+
+architecture:
+  type: dual_system
+  action_dim: 14
+  dim: 768
+  ffn_dim: 3072
+  num_heads: 12
+  num_layers: 8
+  video_dim: 1536
+  bridge_layers: [3, 7, 11, 15, 19, 23, 26, 29]
+  bridge_type: cross_attn_detach

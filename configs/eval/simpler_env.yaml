@@ -1,0 +1,19 @@
+# SimplerEnv evaluation configuration
+# Simulated environments for policy evaluation (Google Robot / WidowX)
+# Install: pip install simpler-env
+
+eval:
+  type: online
+  num_episodes: 50
+  max_steps_per_episode: 200
+
+  env:
+    name: google_robot_pick_coke_can
+    robot: google_robot
+    image_height: 256
+    image_width: 256
+    action_scale: 1.0
+
+  policy:
+    history_len: 10
+    action_cache_size: 49

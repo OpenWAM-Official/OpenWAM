@@ -1,0 +1,9 @@
+# Shared Backbone Architecture (stub)
+# Action tokens concatenated to video token sequence, processed by same DiT.
+# See assets/arch.png (leftmost).
+
+architecture:
+  type: shared_backbone
+  action_dim: 14
+  video_dim: 1536
+  num_action_tokens: 49
