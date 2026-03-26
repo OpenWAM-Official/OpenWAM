@@ -13,7 +13,8 @@ class BaseTrainer(ABC):
     ``train_step``, ``validate``, ``save_checkpoint``, ``load_checkpoint``.
     """
 
-    def __init__(self, cfg, model: torch.nn.Module, dataset, accelerator):
+    def __init__(self, cfg, model: Optional[torch.nn.Module] = None,
+                 dataset=None, accelerator=None):
         self.cfg = cfg
         self.model = model
         self.dataset = dataset

@@ -33,6 +33,12 @@ class BaseActionDataset(ABC, torch.utils.data.Dataset):
 
     @property
     @abstractmethod
+    def action_dim(self) -> int:
+        """Dimensionality of the action vector."""
+        ...
+
+    @property
+    @abstractmethod
     def action_stats(self) -> Optional[dict]:
         """Return ``{"mean": ndarray, "std": ndarray}`` or ``None``."""
         ...

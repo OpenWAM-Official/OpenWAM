@@ -1,0 +1,159 @@
+"""Verify that all open_wam modules can be imported successfully."""
+
+
+def test_import_open_wam():
+    import open_wam
+    assert hasattr(open_wam, "__version__")
+
+
+def test_import_data_base():
+    from open_wam.data.base import BaseActionDataset
+    assert hasattr(BaseActionDataset, "__getitem__")
+    assert hasattr(BaseActionDataset, "action_dim")
+    assert hasattr(BaseActionDataset, "action_stats")
+
+
+def test_import_data_robotwin():
+    from open_wam.data.robotwin import (
+        RoboTwinActionDataset,
+        MultiTaskRoboTwinActionDataset,
+        ROBOTWIN_TRAIN_TASKS,
+        ROBOTWIN_HOLDOUT_TASKS,
+        ROBOTWIN_ALL_TASKS,
+        MULTIVIEW_LAYOUT,
+        MULTIVIEW_CAMERAS,
+        discover_robotwin_roots,
+        assemble_multiview_grid,
+        extract_quadrant,
+    )
+    assert len(ROBOTWIN_TRAIN_TASKS) == 42
+    assert len(ROBOTWIN_HOLDOUT_TASKS) == 8
+    assert len(ROBOTWIN_ALL_TASKS) == 50
+
+
+def test_import_data_transforms():
+    from open_wam.data.transforms import crop_and_resize, pad_and_resize, resize_frame
+
+
+def test_import_data_action_stats():
+    from open_wam.data.action_stats import (
+        compute_action_stats,
+        compute_multitask_robotwin_stats,
+        parse_tasks_file,
+    )
+
+
+def test_import_data_init():
+    from open_wam.data import (
+        BaseActionDataset,
+        RoboTwinActionDataset,
+        MultiTaskRoboTwinActionDataset,
+    )
+
+
+def test_import_inference_base():
+    from open_wam.inference.base import BaseInferenceEngine
+    assert hasattr(BaseInferenceEngine, "generate")
+
+
+def test_import_inference_schedule():
+    from open_wam.inference.schedule import (
+        Schedule,
+        make_schedule,
+        schedule_sync,
+        schedule_video_leading,
+        schedule_cascade,
+        schedule_action_only,
+    )
+
+
+def test_import_inference_joint_engine():
+    from open_wam.inference.joint_engine import JointInferenceEngine
+
+
+def test_import_inference_init():
+    from open_wam.inference import (
+        BaseInferenceEngine,
+        JointInferenceEngine,
+        Schedule,
+        make_schedule,
+    )
+
+
+def test_import_training_base():
+    from open_wam.training.base import BaseTrainer
+    assert hasattr(BaseTrainer, "compute_loss")
+    assert hasattr(BaseTrainer, "train_step")
+
+
+def test_import_training_loss():
+    from open_wam.training.loss import FlowMatchVideoActionSFTLoss
+
+
+def test_import_training_joint_trainer():
+    from open_wam.training.joint_trainer import JointTrainer
+
+
+def test_import_training_callbacks():
+    from open_wam.training.callbacks import (
+        TrainingCallback,
+        CallbackRunner,
+        ValidationLossCallback,
+        VideoLogCallback,
+        SetupCallback,
+    )
+
+
+def test_import_training_init():
+    from open_wam.training import (
+        BaseTrainer,
+        JointTrainer,
+        FlowMatchVideoActionSFTLoss,
+        CallbackRunner,
+    )
+
+
+def test_import_evaluation_base():
+    from open_wam.evaluation.base import BaseEvaluator
+    assert hasattr(BaseEvaluator, "evaluate")
+
+
+def test_import_evaluation_policy():
+    from open_wam.evaluation.policy import WAMPolicy
+
+
+def test_import_evaluation_robotwin():
+    from open_wam.evaluation.robotwin_evaluator import (
+        RoboTwinOfflineEvaluator,
+        RoboTwinOnlineEvaluator,
+    )
+
+
+def test_import_evaluation_robotwin_policy():
+    from open_wam.evaluation.robotwin_policy import (
+        get_model,
+        eval_one_step,
+        reset_model,
+    )
+
+
+def test_import_evaluation_envs():
+    from open_wam.evaluation.envs.base import BaseEnvAdapter
+    from open_wam.evaluation.envs.robotwin import RoboTwinEnvAdapter
+
+
+def test_import_evaluation_metrics():
+    from open_wam.evaluation.metrics import compute_video_metrics
+
+
+def test_import_evaluation_init():
+    from open_wam.evaluation import (
+        BaseEvaluator,
+        WAMPolicy,
+        RoboTwinOfflineEvaluator,
+        RoboTwinOnlineEvaluator,
+    )
+
+
+def test_import_models_backbone():
+    from open_wam.models.backbone.base import BaseVideoBackbone
