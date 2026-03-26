@@ -37,7 +37,7 @@ classifiers = [
 
 [tool.setuptools.packages.find]
 where = ["./"]
-include = ["open_wam", "open_wam.*", "diffsynth", "diffsynth.*"]
+include = ["open_wam", "open_wam.*", "third_party.diffsynth", "third_party.diffsynth.*"]
 
 [project.optional-dependencies]
 npu_aarch64 = [

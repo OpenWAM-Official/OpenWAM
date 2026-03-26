@@ -25,6 +25,7 @@ from omegaconf import DictConfig, OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WAM_DIR = PROJECT_ROOT / "examples" / "wanvideo" / "wam"
+THIRD_PARTY = PROJECT_ROOT / "third_party"
 
 
 def _load_models(cfg, device="cuda"):
@@ -33,6 +34,7 @@ def _load_models(cfg, device="cuda"):
 
     sys.path.insert(0, str(WAM_DIR))
     sys.path.insert(0, str(PROJECT_ROOT))
+    sys.path.insert(0, str(THIRD_PARTY))
 
     from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
     from diffsynth.models.action_dit import ActionDiT
@@ -115,6 +117,7 @@ def main(cfg: DictConfig) -> None:
 
     sys.path.insert(0, str(WAM_DIR))
     sys.path.insert(0, str(PROJECT_ROOT))
+    sys.path.insert(0, str(THIRD_PARTY))
 
     eval_cfg = cfg.eval
 

@@ -25,6 +25,7 @@ from omegaconf import DictConfig, OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WAM_DIR = PROJECT_ROOT / "examples" / "wanvideo" / "wam"
+THIRD_PARTY = PROJECT_ROOT / "third_party"
 
 
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="config")
@@ -37,6 +38,7 @@ def main(cfg: DictConfig) -> None:
 
     sys.path.insert(0, str(WAM_DIR))
     sys.path.insert(0, str(PROJECT_ROOT))
+    sys.path.insert(0, str(THIRD_PARTY))
 
     import torch
     import numpy as np
