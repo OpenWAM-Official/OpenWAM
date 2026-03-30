@@ -243,6 +243,15 @@ pytest -q tests
 
 This validates the `open_wam/` package without pulling in example/dev-only tests.
 
+Standard repo validation commands:
+
+```bash
+make test
+make check
+```
+
+`make check` runs a syntax-level compile pass plus the core test suite. CI uses the same entrypoint.
+
 ## Roadmap
 
 The active maturity roadmap is tracked in `plan.md`.
