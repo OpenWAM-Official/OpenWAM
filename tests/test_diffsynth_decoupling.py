@@ -17,8 +17,8 @@ def test_no_direct_diffsynth_import_in_open_wam():
 
     Exception: architecture wrappers (open_wam/models/architectures/),
     backbone wrappers (open_wam/models/backbone/), inference optimization
-    wrappers, and the package-native model loader are allowed to import from
-    diffsynth via sys.path, as they are designated boundary layers.
+    wrappers, and the package-native inference boundary modules are allowed to
+    import from diffsynth via sys.path, as they are designated boundary layers.
     """
     open_wam_dir = PROJECT_ROOT / "open_wam"
     # Directories allowed to import diffsynth (boundary wrappers)
@@ -29,6 +29,7 @@ def test_no_direct_diffsynth_import_in_open_wam():
     }
     allowed_files = {
         open_wam_dir / "inference" / "model_loader.py",
+        open_wam_dir / "inference" / "schedule.py",
     }
     violations = []
 

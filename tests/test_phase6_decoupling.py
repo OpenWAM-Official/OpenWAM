@@ -28,6 +28,12 @@ def test_joint_engine_no_longer_imports_legacy_joint_inference():
     assert "from joint_inference import generate_video_and_actions" not in source
 
 
+def test_schedule_module_no_longer_imports_legacy_joint_inference():
+    """Schedule generation should now live in the package."""
+    source = Path("open_wam/inference/schedule.py").read_text()
+    assert "from joint_inference import" not in source
+
+
 def test_robotwin_evaluator_no_longer_imports_legacy_eval_robotwin():
     """RoboTwin evaluator should use package-native metrics."""
     source = Path("open_wam/evaluation/robotwin_evaluator.py").read_text()
