@@ -11,13 +11,13 @@ Usage:
 
     # Override from CLI
     python scripts/train.py training=video_only model/backbone=ti2v_5b \
-        dataset.dataset_dir=/data/robotwin trainer.learning_rate=5e-5
+        data.dataset_dir=/data/robotwin training.learning_rate=5e-5
 
     # Print resolved config without running
     python scripts/train.py --cfg job
 
     # Multi-run sweep
-    python scripts/train.py -m trainer.learning_rate=1e-4,5e-5,1e-5
+    python scripts/train.py -m training.learning_rate=1e-4,5e-5,1e-5
 """
 
 import os
@@ -205,7 +205,7 @@ def main(cfg: DictConfig) -> None:
             MultiTaskRoboTwinDataset, ROBOTWIN_TRAIN_TASKS, ROBOTWIN_ALL_TASKS,
         )
         if not args.dataset_dir:
-            raise ValueError("dataset.dataset_dir is required for robotwin_multitask")
+            raise ValueError("data.dataset_dir is required for robotwin_multitask")
         if _train_tasks is not None:
             train_tasks = _train_tasks
         elif _holdout_tasks is not None:

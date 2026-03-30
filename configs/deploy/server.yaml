@@ -1,5 +1,5 @@
 # Policy server deployment configuration
-# Start with: python -m open_wam.serving.policy_server
+# Loaded by deployment code that constructs `open_wam.serving.PolicyServer`.
 
 server:
   host: "0.0.0.0"

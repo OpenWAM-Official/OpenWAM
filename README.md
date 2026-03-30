@@ -1,132 +1,246 @@
 # OpenWAM
 
-**Open World-Action Model** — A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment
+OpenWAM is an open-source framework for **World-Action Models (WAMs)**: video-diffusion policies that jointly model future visual dynamics and robot actions.
+
+The repository is organized around the `open_wam/` package and currently supports:
+
+- Hydra-based training, inference, and evaluation entrypoints
+- WAM-specific action/video scheduling and receding-horizon execution
+- multi-dataset training utilities and embodiment-aware action conversion
+- benchmark adapters for RoboTwin, SimplerEnv, and LIBERO
+- a policy server for robot deployment workflows
 
 ![Architecture](assets/arch.png)
 
+## What OpenWAM Focuses On
 
-## Project Structure
+OpenWAM is not a VLA clone. Its core direction is to use a video world model as the control backbone.
 
-```
+- Backbone: Wan-family video diffusion models
+- Action modeling: flow-matched action generation coupled to video denoising
+- Strengths: temporal coherence, world-model-style rollout, flexible denoising schedules
+- Primary use cases: joint video-action generation, action-only rollout, embodied evaluation, robot serving
+
+## Repository Layout
+
+The main path is package-first.
+
+```text
 OpenWAM/
-├── diffsynth/                          # Core diffusion framework
-│   ├── models/
-│   │   └── action_dit.py              # ActionDiT: lightweight action generation stream
-│   ├── core/                          # Attention, data loading, VRAM management
-│   ├── configs/                       # Model configurations
-│   ├── diffusion/                     # Diffusion schedulers & losses
-│   ├── pipelines/                     # Inference pipelines
-│   └── utils/                         # Utilities
-├── examples/wanvideo/wam/     # Training & evaluation scripts
-│   ├── train_video_action.py          # Joint training module
-│   ├── video_action_dataset.py        # RoboTwin dataset loaders
-│   ├── joint_inference.py             # Joint denoising loop & schedule generators
-│   ├── eval_robotwin.py               # Offline/online evaluation
-│   └── compute_action_stats.py        # Action normalization stats
-├── data/robotwin/                     # Precomputed action statistics
-├── assets/                            # Architecture diagrams
-└── pyproject.toml
+├── open_wam/
+│   ├── data/          # Dataset adapters, action stats, embodiment abstraction
+│   ├── models/        # WAM architectures and conditioning modules
+│   ├── training/      # Trainer abstractions and loss modules
+│   ├── inference/     # Joint inference engine and schedule utilities
+│   ├── evaluation/    # Policies, evaluators, benchmark adapters
+│   └── serving/       # Policy server for deployment
+├── scripts/           # Hydra entrypoints: train / infer / eval
+├── configs/           # Hydra configs for model, data, training, eval, deploy
+├── tests/             # Unit tests for core OpenWAM functionality
+├── assets/            # Architecture and scheduling diagrams
+└── third_party/       # Vendored dependencies required by current main path
+```
+
+Notes on legacy code:
+
+- `examples/wanvideo/wam/` still exists and parts of the current training/inference stack depend on it internally.
+- The recommended user-facing entrypoints are `scripts/train.py`, `scripts/infer.py`, and `scripts/eval.py`.
+- Full package-native decoupling from legacy WanVideo scripts is planned and tracked in `plan.md`.
+
+## Support Status
+
+### Architectures
+
+| Component | Status | Notes |
+|---|---|---|
+| `dual_system` | Supported | Main architecture path for current training/inference stack |
+| `moe_expert` | Supported | Implemented and covered by unit tests |
+| `shared_backbone` | Experimental | Registry/config stub exists, not production-ready |
+
+### Benchmarks and Deployment
+
+| Capability | Status | Notes |
+|---|---|---|
+| RoboTwin offline eval | Supported | Primary documented evaluation path |
+| RoboTwin online eval | Supported | Environment-dependent |
+| SimplerEnv eval | Supported in code | Requires external environment setup |
+| LIBERO eval | Supported in code | Requires external environment setup |
+| Policy server | Supported in code | Phase 2 will further productize deployment workflow |
+
+## Installation
+
+### Base installation
+
+```bash
+pip install -e .
+```
+
+### Optional serving dependencies
+
+The policy server requires extra runtime packages that are not yet bundled into the default install:
+
+```bash
+pip install websockets aiohttp
 ```
 
 ## Quick Start
 
-### Installation
+### 1. Training
+
+Default training uses Hydra config composition from `configs/`.
 
 ```bash
-cd OpenWAM
-pip install -e .
+python scripts/train.py \
+  data.dataset_dir=/path/to/robotwin_2_0/dataset
 ```
 
-### Training
-
-![modal_merging](assets/modal_merging.png)
+Useful overrides:
 
 ```bash
-accelerate launch examples/wanvideo/wam/train_video_action.py \
-  --dataset_type robotwin_multitask \
-  --dataset_dir /path/to/robotwin_2_0/dataset \
-  --robot arx-x5 --variant clean_50 \
-  --backbone vace \
-  --trainable_models vace \
-  --extra_inputs "vace_video,vace_reference_image,action_trajectory" \
-  --bridge_type cross_attn_detach \
-  --lambda_video 1.0 --lambda_action 1.0
+python scripts/train.py \
+  training=joint \
+  model/backbone=vace_1_3b \
+  data=robotwin_multitask \
+  data.dataset_dir=/path/to/robotwin_2_0/dataset \
+  data.robot=arx-x5 \
+  data.variant=clean_50
 ```
 
-### Key Training Flags
+Other common training presets:
 
-| Flag | Description |
-|------|-------------|
-| `--backbone vace\|ti2v` | Video backbone selection |
-| `--bridge_type` | `cross_attn`, `cross_attn_detach` (default), `joint_self_attn` |
-| `--lambda_video` / `--lambda_action` | Loss weights (set `--lambda_action 0` for video-only) |
-| `--multiview` | Assemble head/left/right cameras into 2x2 grid |
-| `--dataset_type` | `robotwin` (single-task) or `robotwin_multitask` |
+- `training=video_only`
+- `training=action_finetune`
+- `training=decoupled`
+- `model/backbone=ti2v_5b`
+- `data=robotwin`
+- `data=mixture`
 
-### Inference
+Current caveat:
 
-![denoising_schedule](assets/denoising_schedule.png)
+- The training entrypoint is the recommended interface, but it still delegates part of the implementation to legacy WanVideo training code internally.
 
-```python
-from joint_inference import make_schedule, generate_video_and_actions
-
-# Synchronized denoising
-schedule = make_schedule("sync", num_steps=20)
-
-# Action-only (video clean, action denoises)
-schedule = make_schedule("action_only", num_steps=20)
-
-# Video leads action by N steps
-schedule = make_schedule("video_leading", num_steps=20, lead_steps=10)
-
-# Cascade: video first, then action
-schedule = make_schedule("cascade", video_steps=20, action_steps=20)
-```
-
-### Evaluation
+### 2. Inference
 
 ```bash
-python examples/wanvideo/wam/eval_robotwin.py \
-  --action_checkpoint /path/to/checkpoint.safetensors \
-  --task_name adjust_bottle --robot arx-x5 \
-  --hdf5_data_root /path/to/dataset \
-  --offline --num_eval_samples 5
+python scripts/infer.py \
+  inference=sync \
+  inference.prompt="robot picks up the bottle" \
+  inference.seed=42
 ```
 
-## Supported Backbones
+Available inference schedules in `configs/inference/`:
 
-| Backbone | Model | Conditioning | Hidden Dim | Resolution |
-|----------|-------|-------------|------------|------------|
-| `vace` | Wan2.1-VACE-1.3B | Frozen DiT + Context Blocks | 1536 | 480x832, 720x1280 |
-| `ti2v` | Wan2.2-TI2V-5B | Per-token timestep | 3072 | Any (h%32==0, w%32==0) |
+- `sync`
+- `action_only`
+- `video_leading`
+- `cascade`
 
-## Dataset
+Programmatic schedule utilities are available in `open_wam.inference.schedule`.
 
-**RoboTwin 2.0** — 50 bimanual manipulation tasks across 5 robot embodiments: `aloha-agilex`, `arx-x5`, `franka`, `ur5`, `airbot`.
+### 3. Evaluation
 
-- training tasks plus held-out tasks for zero-shot transfer evaluation
-- Each HDF5 episode contains JPEG-encoded camera frames and `joint_action/vector` (T, 14) actions
+Offline RoboTwin evaluation:
 
+```bash
+python scripts/eval.py \
+  eval=robotwin_offline \
+  eval.ckpt_path=/path/to/checkpoint.safetensors
+```
+
+Online RoboTwin evaluation:
+
+```bash
+python scripts/eval.py \
+  eval=robotwin_online \
+  eval.ckpt_path=/path/to/checkpoint.safetensors
+```
+
+Additional benchmark configs already in the repo:
+
+- `eval=simpler_env`
+- `eval=libero`
+
+These benchmarks require their own simulator/environment dependencies.
+
+### 4. Deployment
+
+The deployment module lives in `open_wam.serving.policy_server` and the default deployment config is `configs/deploy/server.yaml`.
+
+Current deployment usage is package-level rather than CLI-level. The server is created from `open_wam.serving.PolicyServer` and wrapped around a configured inference engine.
+
+CLI startup and deployment packaging will be tightened in Phase 2 of `plan.md`.
+
+## Config System
+
+OpenWAM uses Hydra composition rooted at `configs/config.yaml`.
+
+Default stack:
+
+- model: `action_dit_small`
+- backbone: `vace_1_3b`
+- data: `robotwin_multitask`
+- training: `joint`
+- inference: `sync`
+- eval: `robotwin_offline`
+
+Important config groups:
+
+- `configs/model/`
+- `configs/data/`
+- `configs/training/`
+- `configs/inference/`
+- `configs/eval/`
+- `configs/deploy/`
+
+## Core Features
+
+- Joint video-action denoising with configurable schedules
+- receding-horizon execution with temporal ensembling
+- `MixtureDataset` for multi-dataset co-training
+- embodiment-aware action conversion for cross-robot use
+- proprioceptive conditioning module for robot state input
+- benchmark adapters for RoboTwin, SimplerEnv, and LIBERO
+- WebSocket + HTTP policy server for deployment workflows
+
+## Tests
+
+Run the core test suite with:
+
+```bash
+pytest -q tests
+```
+
+This validates the `open_wam/` package without pulling in example/dev-only tests.
+
+## Roadmap
+
+The active maturity roadmap is tracked in `plan.md`.
+
+Current phase:
+
+- Phase 1 - Repo Narrative and Main-Path Alignment
 
 ## Acknowledgements
 
-Built upon [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) and inspired by [StarVLA](https://github.com/starVLA/starVLA).
+OpenWAM builds on ideas and components from:
 
-## Citation & Copyright
+- [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio)
+- [StarVLA](https://github.com/starVLA/starVLA)
 
-OpenWAM is released under the MIT License, which permits commercial use, modification, distribution, and private use. Rebases are allowed for forks and feature branches; when rebasing from upstream StarVLA, use descriptive commit messages (e.g., "chore: rebase from StarVLA") and keep at least the two latest upstream commits as separate. See [License](LICENSE) for details.
+## License
 
-```
+OpenWAM is released under the MIT License. See `LICENSE`.
+
+## Citation
+
+If you use OpenWAM, please cite the repository directly:
+
+```bibtex
 @misc{openwam2026,
   title        = {OpenWAM: A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment},
   author       = {OpenWAM Contributors},
   year         = {2026},
-  month        = {tbd},
-  version      = {1.0.0},
-  url          = {https://github.com/starVLA/starVLA},
-  doi          = {10.5281/zenodo.18264214},
-  howpublished = {GitHub repository},
-  publisher    = {GitHub},
-  keywords     = {vision-language-action, robot-learning, modular-framework}
+  url          = {https://github.com/KraHsu/OpenWAM},
+  howpublished = {GitHub repository}
 }
 ```
