@@ -1,0 +1,51 @@
+# Mixture dataset configuration for multi-dataset co-training
+# Combines multiple datasets with configurable sampling weights
+#
+# Usage:
+#   python train.py data=mixture
+#   python train.py data=mixture data.datasets.0.weight=0.6
+
+type: mixture
+seed: 42
+action_dim_override: null
+
+# Sub-dataset definitions with sampling weights
+# Each entry follows the same schema as individual dataset configs
+datasets:
+  - type: robotwin_multitask
+    weight: 0.5
+    dataset_dir: ???
+    robot: arx-x5
+    variant: clean_50
+    num_frames: 49
+    height: 480
+    width: 832
+    split: train
+    val_ratio: 0.1
+    target_camera: head_camera
+    window_stride: 1
+    multiview: true
+    action_stats_path: null
+
+  - type: droid
+    weight: 0.3
+    dataset_dir: /path/to/vla_data/droid
+    num_frames: 49
+    height: 480
+    width: 832
+    camera: exterior_image_1_left
+    action_type: absolute
+    action_stats_path: null
+    val_ratio: 0.1
+    split: train
+
+  - type: bridge_v2
+    weight: 0.2
+    dataset_dir: /path/to/vla_data/bridge_v2
+    num_frames: 49
+    height: 480
+    width: 832
+    camera: image_0
+    action_stats_path: null
+    val_ratio: 0.1
+    split: train
