@@ -8,3 +8,8 @@ env:
 policy:
   history_len: 10
   action_cache_size: 49
+  # Receding-horizon execution (set to null for greedy/full-chunk mode)
+  execute_horizon: 8
+  # Temporal ensembling of overlapping predictions
+  temporal_ensemble: true
+  ensemble_decay: 0.5
