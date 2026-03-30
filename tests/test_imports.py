@@ -94,6 +94,15 @@ def test_import_training_joint_trainer():
     from open_wam.training.joint_trainer import JointTrainer
 
 
+def test_import_training_runtime():
+    from open_wam.training.runtime import (
+        build_training_dataset,
+        build_training_module,
+        build_validation_datasets,
+        cfg_to_flat_namespace,
+    )
+
+
 def test_import_training_callbacks():
     from open_wam.training.callbacks import (
         TrainingCallback,

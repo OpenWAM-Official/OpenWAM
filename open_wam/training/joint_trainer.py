@@ -1,24 +1,14 @@
-"""Joint video-action trainer wrapping the legacy VideoActionTrainingModule."""
+"""Joint video-action trainer wrapping the supported training runtime."""
 
-import sys
 import os
-from pathlib import Path
-from typing import Optional
 
 import logging
 import torch
-import numpy as np
 
 from open_wam.training.base import BaseTrainer
+from open_wam.training.runtime import build_training_module, cfg_to_flat_namespace
 
 logger = logging.getLogger(__name__)
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_WAM_DIR = str(_PROJECT_ROOT / "examples" / "wanvideo" / "wam")
-if _WAM_DIR not in sys.path:
-    sys.path.insert(0, _WAM_DIR)
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 class JointTrainer(BaseTrainer):
@@ -39,72 +29,16 @@ class JointTrainer(BaseTrainer):
         self._build_legacy_module(cfg, accelerator, dataset)
 
     def _build_legacy_module(self, cfg, accelerator, dataset):
-        """Construct the legacy VideoActionTrainingModule from Hydra config."""
-        from train_video_action import VideoActionTrainingModule  # noqa: E402
-
-        t = cfg.training
-        m = cfg.model
-        b = cfg.model.backbone
-        d = cfg.data
-
-        bridge_layers_str = ",".join(str(x) for x in m.bridge_layers)
-
-        device = "cpu"
-        if getattr(t, "initialize_model_on_cpu", True) is False and accelerator is not None:
-            device = accelerator.device
-
-        self._legacy_module = VideoActionTrainingModule(
-            model_paths=t.model_paths,
-            model_id_with_origin_paths=t.model_id_with_origin_paths,
-            tokenizer_path=t.tokenizer_path,
-            audio_processor_path=None,
-            trainable_models=",".join(t.trainable_models) if t.trainable_models else None,
-            lora_base_model=t.lora_base_model,
-            lora_target_modules=t.lora_target_modules,
-            lora_rank=int(t.lora_rank),
-            lora_checkpoint=t.lora_checkpoint,
-            preset_lora_path=t.preset_lora_path,
-            preset_lora_model=t.preset_lora_model,
-            use_gradient_checkpointing=bool(t.use_gradient_checkpointing),
-            use_gradient_checkpointing_offload=bool(t.use_gradient_checkpointing_offload),
-            extra_inputs=getattr(t, "extra_inputs", "vace_video,vace_reference_image,action_trajectory"),
-            fp8_models=t.fp8_models,
-            offload_models=t.offload_models,
-            task="sft",
-            device=device,
-            max_timestep_boundary=float(t.max_timestep_boundary),
-            min_timestep_boundary=float(t.min_timestep_boundary),
-            action_dim=int(m.action_dim),
-            action_dit_dim=int(m.dim),
-            action_dit_ffn_dim=int(m.ffn_dim),
-            action_dit_num_heads=int(m.num_heads),
-            action_dit_num_layers=int(m.num_layers),
-            action_dit_bridge_layers=bridge_layers_str,
-            video_dim=int(b.video_dim),
-            lambda_video=float(t.lambda_video),
-            lambda_action=float(t.lambda_action),
-            bridge_type=m.bridge_type,
-            action_lr=float(t.action_lr) if t.action_lr is not None else None,
-            action_stats_path=getattr(d, "action_stats_path", None),
+        """Construct the training module from the package-native runtime."""
+        args = cfg_to_flat_namespace(cfg)
+        self._legacy_module = build_training_module(
+            args,
+            accelerator=accelerator,
+            dataset=dataset,
         )
 
-        # Load action stats into ActionDiT buffers from dataset
-        if dataset is not None and float(t.lambda_action) > 0:
-            stats = getattr(dataset, "action_stats", None)
-            if callable(stats):
-                stats = stats()
-            elif hasattr(dataset, "_legacy") and hasattr(dataset._legacy, "action_stats"):
-                stats = dataset._legacy.action_stats
-            if stats is not None:
-                self._legacy_module.action_dit.action_mean.copy_(
-                    torch.from_numpy(stats["mean"].astype(np.float32))
-                )
-                self._legacy_module.action_dit.action_std.copy_(
-                    torch.from_numpy(stats["std"].astype(np.float32))
-                )
-
         # Decoupled training support (DreamZero-Flash inspired)
-        decoupled_cfg = getattr(t, "decoupled", None)
+        decoupled_cfg = getattr(cfg.training, "decoupled", None)
         if decoupled_cfg is not None and getattr(decoupled_cfg, "enabled", False):
             from open_wam.training.decoupled_loss import DecoupledFlowMatchLoss
             self._legacy_module.decoupled_sampler = DecoupledFlowMatchLoss(
