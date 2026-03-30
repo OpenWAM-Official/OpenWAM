@@ -32,3 +32,9 @@ def test_robotwin_evaluator_no_longer_imports_legacy_eval_robotwin():
     """RoboTwin evaluator should use package-native metrics."""
     source = Path("open_wam/evaluation/robotwin_evaluator.py").read_text()
     assert "from eval_robotwin import compute_video_metrics" not in source
+
+
+def test_robotwin_policy_no_longer_imports_legacy_eval_robotwin():
+    """RoboTwin policy compatibility layer should be package-native."""
+    source = Path("open_wam/evaluation/robotwin_policy.py").read_text()
+    assert "from eval_robotwin import" not in source
