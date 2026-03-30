@@ -1,5 +1,12 @@
-"""Loss functions re-exported from legacy training module."""
+"""Loss functions for joint video-action training.
 
+Provides both the standalone FlowMatchVideoActionLoss class and the legacy
+FlowMatchVideoActionSFTLoss function for backward compatibility.
+"""
+
+from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+
+# Legacy re-export for backward compatibility
 import sys
 from pathlib import Path
 
@@ -9,4 +16,4 @@ if _WAM_DIR not in sys.path:
 
 from train_video_action import FlowMatchVideoActionSFTLoss  # noqa: E402
 
-__all__ = ["FlowMatchVideoActionSFTLoss"]
+__all__ = ["FlowMatchVideoActionLoss", "FlowMatchVideoActionSFTLoss"]
