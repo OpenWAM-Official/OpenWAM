@@ -5,6 +5,7 @@ from open_wam.models.architectures import (
     ARCHITECTURE_REGISTRY,
     build_architecture,
 )
+from open_wam.models.proprioceptive import ProprioceptiveEncoder
 
 __all__ = [
     "BaseVideoBackbone",
@@ -12,4 +13,5 @@ __all__ = [
     "ActionState",
     "ARCHITECTURE_REGISTRY",
     "build_architecture",
+    "ProprioceptiveEncoder",
 ]
