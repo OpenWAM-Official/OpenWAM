@@ -1,20 +1,10 @@
-"""RoboTwin offline and online evaluators wrapping legacy eval logic."""
-
-import sys
-import os
-import json
-from pathlib import Path
-from typing import Optional
+"""RoboTwin offline and online evaluators."""
 
 import numpy as np
-import torch
 
 from open_wam.evaluation.base import BaseEvaluator
+from open_wam.evaluation.metrics import compute_video_metrics
 from open_wam.inference.base import BaseInferenceEngine
-
-_WAM_DIR = str(Path(__file__).resolve().parent.parent.parent / "examples" / "wanvideo" / "wam")
-if _WAM_DIR not in sys.path:
-    sys.path.insert(0, _WAM_DIR)
 
 
 class RoboTwinOfflineEvaluator(BaseEvaluator):
@@ -41,9 +31,6 @@ class RoboTwinOfflineEvaluator(BaseEvaluator):
         Returns:
             dict of aggregated metrics (action_mse, action_mae, video_psnr, etc.)
         """
-        from eval_robotwin import compute_video_metrics  # noqa: E402
-        from open_wam.inference.schedule import make_schedule
-
         eval_cfg = self.cfg.eval
         num_samples = min(
             getattr(eval_cfg, "num_eval_samples", len(dataset)),

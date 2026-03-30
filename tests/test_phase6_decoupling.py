@@ -26,3 +26,9 @@ def test_joint_engine_no_longer_imports_legacy_joint_inference():
     """Joint inference engine should use package-native generation code."""
     source = Path("open_wam/inference/joint_engine.py").read_text()
     assert "from joint_inference import generate_video_and_actions" not in source
+
+
+def test_robotwin_evaluator_no_longer_imports_legacy_eval_robotwin():
+    """RoboTwin evaluator should use package-native metrics."""
+    source = Path("open_wam/evaluation/robotwin_evaluator.py").read_text()
+    assert "from eval_robotwin import compute_video_metrics" not in source
