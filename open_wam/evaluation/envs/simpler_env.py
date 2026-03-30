@@ -107,8 +107,7 @@ class SimplerEnvAdapter(BaseEnvAdapter):
 
     def get_language_instruction(self) -> str:
         """Get the natural language task instruction."""
-        self._lazy_init_env()
-        if hasattr(self._env, "get_language_instruction"):
+        if self._env is not None and hasattr(self._env, "get_language_instruction"):
             return self._env.get_language_instruction()
         return self.env_name.replace("_", " ")
 
