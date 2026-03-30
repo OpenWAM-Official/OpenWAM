@@ -4,11 +4,26 @@ import torch
 
 
 def test_architecture_registry_populated():
-    from open_wam.models.architectures import ARCHITECTURE_REGISTRY
+    from open_wam.models.architectures import ARCHITECTURE_REGISTRY, ARCHITECTURE_SUPPORT
     assert "dual_system" in ARCHITECTURE_REGISTRY
     assert "moe_expert" in ARCHITECTURE_REGISTRY
     assert "shared_backbone" in ARCHITECTURE_REGISTRY
     assert len(ARCHITECTURE_REGISTRY) == 3
+    assert ARCHITECTURE_SUPPORT["dual_system"].supported is True
+    assert ARCHITECTURE_SUPPORT["moe_expert"].supported is True
+    assert ARCHITECTURE_SUPPORT["shared_backbone"].supported is False
+
+
+def test_architecture_support_lists():
+    from open_wam.models.architectures import (
+        get_architecture_support,
+        list_experimental_architectures,
+        list_supported_architectures,
+    )
+
+    assert list_supported_architectures() == ("dual_system", "moe_expert")
+    assert list_experimental_architectures() == ("shared_backbone",)
+    assert get_architecture_support("shared_backbone").status == "experimental"
 
 
 def test_build_architecture_dual_system():
@@ -46,11 +61,11 @@ def test_build_architecture_moe():
 
 
 def test_build_architecture_shared():
-    """SharedBackbone is not yet implemented — verify it raises early."""
+    """Experimental architectures should fail fast on the default path."""
     from open_wam.models.architectures import build_architecture
     import pytest
     cfg = {"action_dim": 7, "video_dim": 256, "num_action_tokens": 10}
-    with pytest.raises(NotImplementedError, match="not yet implemented"):
+    with pytest.raises(NotImplementedError, match="experimental"):
         build_architecture("shared_backbone", cfg)
 
 

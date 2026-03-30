@@ -19,7 +19,11 @@ from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
 from open_wam.models.architectures.registry import register_architecture
 
 
-@register_architecture("shared_backbone")
+@register_architecture(
+    "shared_backbone",
+    status="experimental",
+    note="Use 'dual_system' or 'moe_expert' until the shared-backbone path is implemented.",
+)
 class SharedBackboneArchitecture(BaseWAMArchitecture):
     """Shared Backbone: video DiT processes both video and action tokens.
 

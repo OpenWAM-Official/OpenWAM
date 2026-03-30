@@ -37,7 +37,11 @@ if _THIRD_PARTY not in sys.path:
 from diffsynth.models.moe_action_expert import MoEExpertDiT, MoEExpertState  # noqa: E402
 
 
-@register_architecture("moe_expert")
+@register_architecture(
+    "moe_expert",
+    status="supported",
+    note="Supported alternative architecture with unit-test coverage.",
+)
 class MoEActionExpertArchitecture(BaseWAMArchitecture):
     """MoE Action Expert: shared attention + expert FFN within video DiT.
 

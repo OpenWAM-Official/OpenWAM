@@ -1,6 +1,7 @@
-# Shared Backbone Architecture (stub)
+# Shared Backbone Architecture (experimental stub)
 # Action tokens concatenated to video token sequence, processed by same DiT.
-# See assets/arch.png (leftmost).
+# See assets/arch.png (leftmost). The registry keeps this visible for future
+# work, but the supported path remains dual_system / moe_expert for now.
 
 architecture:
   type: shared_backbone

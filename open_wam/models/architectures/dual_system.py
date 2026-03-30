@@ -28,7 +28,11 @@ if _THIRD_PARTY not in sys.path:
 from diffsynth.models.action_dit import ActionDiT, ActionDiTState  # noqa: E402
 
 
-@register_architecture("dual_system")
+@register_architecture(
+    "dual_system",
+    status="supported",
+    note="Primary production architecture for the current OpenWAM stack.",
+)
 class DualSystemArchitecture(BaseWAMArchitecture):
     """Dual-System: independent ActionDiT with bridge attention to video DiT.
 

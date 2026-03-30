@@ -55,7 +55,7 @@ Notes on legacy code:
 |---|---|---|
 | `dual_system` | Supported | Main architecture path for current training/inference stack |
 | `moe_expert` | Supported | Implemented and covered by unit tests |
-| `shared_backbone` | Experimental | Registry/config stub exists, not production-ready |
+| `shared_backbone` | Experimental | Registry keeps it visible, but the default builder blocks it from the supported path until implementation lands |
 
 ### Benchmarks and Deployment
 
