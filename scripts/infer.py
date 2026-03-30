@@ -24,7 +24,6 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-WAM_DIR = PROJECT_ROOT / "examples" / "wanvideo" / "wam"
 THIRD_PARTY = PROJECT_ROOT / "third_party"
 
 
@@ -36,7 +35,6 @@ def main(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
     print("=" * 60)
 
-    sys.path.insert(0, str(WAM_DIR))
     sys.path.insert(0, str(PROJECT_ROOT))
     sys.path.insert(0, str(THIRD_PARTY))
 
@@ -45,13 +43,13 @@ def main(cfg: DictConfig) -> None:
 
     inf_cfg = cfg.inference
 
-    # Load models (reuse eval script's loader)
-    from scripts.eval import _load_models
+    # Load models via package-native loader
     device = getattr(inf_cfg, "device", "cuda")
-    pipe, action_dit = _load_models(cfg, device=device)
+    from open_wam.inference import JointInferenceEngine, load_wam_models
+
+    pipe, action_dit = load_wam_models(cfg, device=device)
 
     # Create inference engine
-    from open_wam.inference import JointInferenceEngine
     engine = JointInferenceEngine(cfg=cfg, pipeline=pipe, action_dit=action_dit)
 
     # Build conditions from config

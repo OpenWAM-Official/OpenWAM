@@ -240,6 +240,7 @@ These snapshots are intended to make checkpoints easier to reproduce even while 
 
 - Joint video-action denoising with configurable schedules
 - receding-horizon execution with temporal ensembling
+- shared package-native model-loading path for inference, evaluation, and serving
 - `MixtureDataset` for multi-dataset co-training
 - embodiment-aware action conversion for cross-robot use
 - proprioceptive conditioning module for robot state input

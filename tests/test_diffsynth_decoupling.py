@@ -15,9 +15,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def test_no_direct_diffsynth_import_in_open_wam():
     """open_wam/ source files must not contain 'from diffsynth' or 'import diffsynth'.
 
-    Exception: architecture wrappers (open_wam/models/architectures/) and
-    backbone wrappers (open_wam/models/backbone/) are allowed to import
-    from diffsynth via sys.path, as they are the designated boundary layer.
+    Exception: architecture wrappers (open_wam/models/architectures/),
+    backbone wrappers (open_wam/models/backbone/), inference optimization
+    wrappers, and the package-native model loader are allowed to import from
+    diffsynth via sys.path, as they are designated boundary layers.
     """
     open_wam_dir = PROJECT_ROOT / "open_wam"
     # Directories allowed to import diffsynth (boundary wrappers)
@@ -26,11 +27,14 @@ def test_no_direct_diffsynth_import_in_open_wam():
         open_wam_dir / "models" / "backbone",
         open_wam_dir / "inference" / "optimizations",
     }
+    allowed_files = {
+        open_wam_dir / "inference" / "model_loader.py",
+    }
     violations = []
 
     for py_file in open_wam_dir.rglob("*.py"):
         # Skip files in allowed wrapper directories
-        if any(py_file.is_relative_to(d) for d in allowed_dirs):
+        if py_file in allowed_files or any(py_file.is_relative_to(d) for d in allowed_dirs):
             continue
         with open(py_file) as f:
             for i, line in enumerate(f, 1):
@@ -43,7 +47,7 @@ def test_no_direct_diffsynth_import_in_open_wam():
 
     assert violations == [], (
         "open_wam/ should not directly import from diffsynth "
-        "(except in models/architectures/ and models/backbone/).\n"
+        "(except in designated boundary layers).\n"
         "Violations:\n" + "\n".join(violations)
     )
 

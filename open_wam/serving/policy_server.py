@@ -248,11 +248,10 @@ class PolicyServer:
 
 def build_server_from_config(cfg, ckpt_path: str, device: str = "cuda", embodiment: Optional[str] = None):
     """Build a PolicyServer from Hydra-style config and checkpoint path."""
-    from open_wam.inference import JointInferenceEngine
-    from scripts.eval import _load_models
+    from open_wam.inference import JointInferenceEngine, load_wam_models
 
     cfg.eval.ckpt_path = ckpt_path
-    pipe, action_dit = _load_models(cfg, device=device)
+    pipe, action_dit = load_wam_models(cfg, device=device)
     engine = JointInferenceEngine(cfg=cfg, pipeline=pipe, action_dit=action_dit)
     return PolicyServer(engine=engine, cfg=cfg, embodiment=embodiment)
 
