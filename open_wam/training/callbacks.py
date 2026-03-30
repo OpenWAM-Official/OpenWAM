@@ -211,10 +211,22 @@ class VideoLogCallback(TrainingCallback):
 class SetupCallback(TrainingCallback):
     """Save resolved config and create output directories at training start."""
 
-    def __init__(self, output_dir: str, config_dict: Optional[dict] = None):
+    def __init__(
+        self,
+        output_dir: str,
+        config_dict: Optional[dict] = None,
+        resolved_config_yaml: Optional[str] = None,
+        resolved_config_dict: Optional[dict] = None,
+        flat_args_dict: Optional[dict] = None,
+        run_metadata: Optional[dict] = None,
+    ):
         super().__init__()
         self.output_dir = output_dir
         self.config_dict = config_dict
+        self.resolved_config_yaml = resolved_config_yaml
+        self.resolved_config_dict = resolved_config_dict
+        self.flat_args_dict = flat_args_dict
+        self.run_metadata = run_metadata
 
     def on_train_start(self, state: TrainingState) -> None:
         import os
@@ -224,6 +236,29 @@ class SetupCallback(TrainingCallback):
             config_path = os.path.join(self.output_dir, "config.json")
             with open(config_path, "w") as f:
                 json.dump(self.config_dict, f, indent=2, default=str)
+        if any(
+            item is not None
+            for item in (
+                self.resolved_config_yaml,
+                self.resolved_config_dict,
+                self.flat_args_dict,
+                self.run_metadata,
+            )
+        ):
+            from open_wam.training.config_tracking import write_run_artifacts
+
+            run_id = None if self.run_metadata is None else self.run_metadata.get("run_id")
+            artifact_dir = (
+                os.path.join(self.output_dir, "run_artifacts", run_id)
+                if run_id else os.path.join(self.output_dir, "run_artifacts", "latest")
+            )
+            write_run_artifacts(
+                artifact_dir,
+                resolved_config_yaml=self.resolved_config_yaml,
+                resolved_config_dict=self.resolved_config_dict,
+                flat_args_dict=self.flat_args_dict,
+                run_metadata=self.run_metadata,
+            )
 
 
 class LearningRateLogCallback(TrainingCallback):

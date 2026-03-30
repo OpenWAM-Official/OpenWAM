@@ -223,6 +223,17 @@ Important config groups:
 - `configs/eval/`
 - `configs/deploy/`
 
+Run traceability:
+
+- training startup now writes run artifacts under `OUTPUT_PATH/run_artifacts/<RUN_ID>/`
+- saved files include:
+  - `resolved_config.yaml`
+  - `resolved_config.json`
+  - `flat_args.json`
+  - `run_metadata.json`
+
+These snapshots are intended to make checkpoints easier to reproduce even while the main training path still wraps legacy internals.
+
 ## Core Features
 
 - Joint video-action denoising with configurable schedules

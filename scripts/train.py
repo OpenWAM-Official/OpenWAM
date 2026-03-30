@@ -28,6 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -180,7 +181,25 @@ def main(cfg: DictConfig) -> None:
     sys.path.insert(0, str(PROJECT_ROOT))
     sys.path.insert(0, str(THIRD_PARTY))
 
+    from open_wam.training.config_tracking import (
+        build_run_metadata,
+        get_git_commit,
+        make_run_id,
+    )
+
     args = _cfg_to_flat_namespace(cfg)
+    resolved_config_yaml = OmegaConf.to_yaml(cfg, resolve=True)
+    resolved_config_dict = OmegaConf.to_container(cfg, resolve=True)
+    run_id = make_run_id()
+    hydra_output_dir = None
+    if HydraConfig.initialized():
+        hydra_output_dir = HydraConfig.get().runtime.output_dir
+    run_metadata = build_run_metadata(
+        run_id=run_id,
+        output_dir=args.output_path,
+        hydra_output_dir=hydra_output_dir,
+        git_commit=get_git_commit(PROJECT_ROOT),
+    )
 
     import accelerate
     accelerator = accelerate.Accelerator(
@@ -314,7 +333,16 @@ def main(cfg: DictConfig) -> None:
     )
 
     runner = CallbackRunner()
-    runner.add(SetupCallback(output_dir=args.output_path, config_dict=vars(args)))
+    runner.add(
+        SetupCallback(
+            output_dir=args.output_path,
+            config_dict=vars(args),
+            resolved_config_yaml=resolved_config_yaml,
+            resolved_config_dict=resolved_config_dict,
+            flat_args_dict=vars(args),
+            run_metadata=run_metadata,
+        )
+    )
 
     if args.val_steps is not None:
         val_datasets = {}
