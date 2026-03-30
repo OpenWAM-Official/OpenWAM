@@ -17,6 +17,7 @@ from open_wam.data.robotwin import (
     ROBOTWIN_TRAIN_TASKS,
 )
 from open_wam.training.legacy import VideoActionTrainingModule
+from open_wam.training.optimizer_groups import attach_optimizer_groups
 
 
 def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
@@ -75,6 +76,8 @@ def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
         lambda_action=float(t.lambda_action),
         bridge_type=m.bridge_type,
         action_lr=float(t.action_lr) if t.action_lr is not None else None,
+        video_lr=float(t.video_lr) if t.get("video_lr", None) is not None else None,
+        lora_lr=float(t.lora_lr) if t.get("lora_lr", None) is not None else None,
         action_stats_path=d.action_stats_path,
         backbone=b.name,
         height=int(d.height),
@@ -320,6 +323,13 @@ def build_training_module(
 
     if dataset is not None and float(args.lambda_action) > 0:
         load_action_stats_into_model(model, dataset)
+
+    attach_optimizer_groups(
+        model,
+        action_lr=getattr(args, "action_lr", None),
+        video_lr=getattr(args, "video_lr", None),
+        lora_lr=getattr(args, "lora_lr", None),
+    )
 
     return model
 

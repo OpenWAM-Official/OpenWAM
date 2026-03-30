@@ -103,6 +103,13 @@ def test_import_training_runtime():
     )
 
 
+def test_import_training_optimizer_groups():
+    from open_wam.training.optimizer_groups import (
+        attach_optimizer_groups,
+        build_trainable_parameters,
+    )
+
+
 def test_import_training_callbacks():
     from open_wam.training.callbacks import (
         TrainingCallback,

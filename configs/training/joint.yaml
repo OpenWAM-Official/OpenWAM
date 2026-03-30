@@ -2,6 +2,8 @@ lambda_video: 1.0
 lambda_action: 1.0
 learning_rate: 1e-4
 action_lr: null
+video_lr: null
+lora_lr: null
 weight_decay: 0.01
 num_epochs: 1
 max_steps: null

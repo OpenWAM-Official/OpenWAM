@@ -81,6 +81,24 @@ The policy server can be installed via the optional `serving` extra:
 
 ```bash
 pip install -e ".[serving]"
+
+### Scale-oriented training controls
+
+The training configs now support separate optimizer knobs for the action
+branch, the video backbone, and LoRA adapters:
+
+- `training.action_lr`
+- `training.video_lr`
+- `training.lora_lr`
+
+For large backbones, start from the dedicated preset:
+
+```bash
+python scripts/train.py training=large_backbone model/backbone=ti2v_5b
+```
+
+This preset enables gradient checkpointing, initializes the model on CPU,
+and uses more conservative video-backbone learning rates for 5B-class runs.
 ```
 
 ## Quick Start
