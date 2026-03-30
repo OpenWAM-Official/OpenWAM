@@ -40,6 +40,10 @@ where = ["./"]
 include = ["open_wam", "open_wam.*", "third_party.diffsynth", "third_party.diffsynth.*"]
 
 [project.optional-dependencies]
+serving = [
+    "websockets",
+    "aiohttp"
+]
 npu_aarch64 = [
     "torch==2.7.1",
     "torch-npu==2.7.1",
@@ -53,3 +57,6 @@ npu = [
 
 [tool.setuptools]
 include-package-data = true
+
+[project.scripts]
+openwam-serve = "open_wam.serving.policy_server:main"

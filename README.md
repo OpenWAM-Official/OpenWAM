@@ -77,10 +77,10 @@ pip install -e .
 
 ### Optional serving dependencies
 
-The policy server requires extra runtime packages that are not yet bundled into the default install:
+The policy server can be installed via the optional `serving` extra:
 
 ```bash
-pip install websockets aiohttp
+pip install -e ".[serving]"
 ```
 
 ## Quick Start
@@ -166,9 +166,40 @@ These benchmarks require their own simulator/environment dependencies.
 
 The deployment module lives in `open_wam.serving.policy_server` and the default deployment config is `configs/deploy/server.yaml`.
 
-Current deployment usage is package-level rather than CLI-level. The server is created from `open_wam.serving.PolicyServer` and wrapped around a configured inference engine.
+Recommended startup path:
 
-CLI startup and deployment packaging will be tightened in Phase 2 of `plan.md`.
+```bash
+openwam-serve \
+  --ckpt-path /path/to/checkpoint.safetensors \
+  --config configs/config.yaml \
+  --host 0.0.0.0 \
+  --ws-port 8765 \
+  --http-port 8766
+```
+
+Equivalent module invocation:
+
+```bash
+python -m open_wam.serving.policy_server \
+  --ckpt-path /path/to/checkpoint.safetensors
+```
+
+Server endpoints:
+
+- WebSocket: `ws://HOST:WS_PORT`
+- HTTP `POST /predict`
+- HTTP `POST /reset`
+- HTTP `GET /health`
+- HTTP `GET /info`
+
+Minimal HTTP client example:
+
+```bash
+python scripts/policy_client.py \
+  --server http://127.0.0.1:8766 \
+  --image /path/to/frame.jpg \
+  --prompt "pick up the bottle"
+```
 
 ## Config System
 

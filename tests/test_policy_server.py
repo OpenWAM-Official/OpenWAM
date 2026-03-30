@@ -3,13 +3,14 @@
 import base64
 import io
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 from types import SimpleNamespace
 from PIL import Image
 
-from open_wam.serving.policy_server import PolicyServer
+from open_wam.serving.policy_server import PolicyServer, _build_argparser
 
 
 class MockEngine:
@@ -128,3 +129,18 @@ def test_server_latency_tracking():
     assert result["latency_ms"] >= 0
     info = server.get_info()
     assert info["avg_latency_ms"] >= 0
+
+
+def test_server_cli_parser():
+    """CLI parser should expose the serving startup surface."""
+    parser = _build_argparser()
+    args = parser.parse_args(["--ckpt-path", "model.safetensors", "--ws-port", "9000"])
+
+    assert args.ckpt_path == "model.safetensors"
+    assert args.ws_port == 9000
+    assert args.http_port is None
+
+
+def test_policy_client_script_exists():
+    """Minimal deployment client script should ship with the repo."""
+    assert Path("scripts/policy_client.py").exists()

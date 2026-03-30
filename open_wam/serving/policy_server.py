@@ -27,6 +27,8 @@ import base64
 import io
 import json
 import logging
+import argparse
+from pathlib import Path
 import time
 from typing import Optional
 
@@ -150,7 +152,7 @@ class PolicyServer:
 
         return obs
 
-    def run(self, host: str = "0.0.0.0", port: int = 8765):
+    def run(self, host: str = "0.0.0.0", port: int = 8765, http_port: Optional[int] = None):
         """Start the WebSocket + HTTP server.
 
         Requires ``websockets`` and ``aiohttp`` packages.
@@ -226,15 +228,94 @@ class PolicyServer:
 
             runner = web.AppRunner(app)
             await runner.setup()
-            http_port = port + 1
-            site = web.TCPSite(runner, host, http_port)
+            resolved_http_port = port + 1 if http_port is None else http_port
+            site = web.TCPSite(runner, host, resolved_http_port)
             await site.start()
-            logger.info("HTTP server started on %s:%d", host, http_port)
+            logger.info("HTTP server started on %s:%d", host, resolved_http_port)
 
             # WebSocket server
             async with websockets.serve(ws_handler, host, port):
                 logger.info("WebSocket server started on ws://%s:%d", host, port)
                 await asyncio.Future()  # Run forever
 
-        logger.info("Starting PolicyServer on %s:%d (WS) and %s:%d (HTTP)", host, port, host, port + 1)
+        resolved_http_port = port + 1 if http_port is None else http_port
+        logger.info(
+            "Starting PolicyServer on %s:%d (WS) and %s:%d (HTTP)",
+            host, port, host, resolved_http_port,
+        )
         asyncio.run(start_servers())
+
+
+def build_server_from_config(cfg, ckpt_path: str, device: str = "cuda", embodiment: Optional[str] = None):
+    """Build a PolicyServer from Hydra-style config and checkpoint path."""
+    from open_wam.inference import JointInferenceEngine
+    from scripts.eval import _load_models
+
+    cfg.eval.ckpt_path = ckpt_path
+    pipe, action_dit = _load_models(cfg, device=device)
+    engine = JointInferenceEngine(cfg=cfg, pipeline=pipe, action_dit=action_dit)
+    return PolicyServer(engine=engine, cfg=cfg, embodiment=embodiment)
+
+
+def _build_argparser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Start the OpenWAM policy server.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to a YAML config. Defaults to configs/config.yaml from the repo root.",
+    )
+    parser.add_argument(
+        "--ckpt-path",
+        type=str,
+        required=True,
+        help="Checkpoint path passed to the model loader.",
+    )
+    parser.add_argument("--device", type=str, default="cuda", help="Inference device.")
+    parser.add_argument("--host", type=str, default=None, help="WebSocket/HTTP bind host override.")
+    parser.add_argument("--ws-port", type=int, default=None, help="WebSocket port override.")
+    parser.add_argument("--http-port", type=int, default=None, help="HTTP port override.")
+    parser.add_argument("--embodiment", type=str, default=None, help="Optional embodiment name.")
+    parser.add_argument(
+        "overrides",
+        nargs="*",
+        help="Additional OmegaConf dotlist overrides, e.g. model/backbone=ti2v_5b",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None):
+    """CLI entrypoint for running the OpenWAM policy server."""
+    from omegaconf import OmegaConf
+
+    parser = _build_argparser()
+    args = parser.parse_args(argv)
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    config_path = Path(args.config) if args.config else project_root / "configs" / "config.yaml"
+    cfg = OmegaConf.load(config_path)
+    if args.overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+
+    server_cfg = getattr(cfg, "server", None)
+    if server_cfg is None:
+        deploy_cfg = getattr(cfg, "deploy", None)
+        server_cfg = getattr(deploy_cfg, "server", None) if deploy_cfg is not None else None
+
+    host = args.host or getattr(server_cfg, "host", "0.0.0.0")
+    ws_port = args.ws_port or getattr(server_cfg, "ws_port", 8765)
+    http_port = args.http_port or getattr(server_cfg, "http_port", ws_port + 1)
+    embodiment = args.embodiment if args.embodiment is not None else getattr(cfg, "embodiment", None)
+
+    server = build_server_from_config(
+        cfg=cfg,
+        ckpt_path=args.ckpt_path,
+        device=args.device,
+        embodiment=embodiment,
+    )
+    server.run(host=host, port=ws_port, http_port=http_port)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    main()
