@@ -107,6 +107,15 @@ def _load_models(cfg, device="cuda"):
     return pipe, action_dit
 
 
+def _save_results(results: dict, output_dir: str) -> str:
+    """Save evaluation results to disk and return the path."""
+    os.makedirs(output_dir, exist_ok=True)
+    result_path = os.path.join(output_dir, "results.json")
+    with open(result_path, "w") as f:
+        json.dump(results, f, indent=2)
+    return result_path
+
+
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="config")
 def main(cfg: DictConfig) -> None:
     print("=" * 60)
@@ -171,13 +180,9 @@ def main(cfg: DictConfig) -> None:
             print(f"  {k}: {v}")
         print("=" * 60)
 
-        # Save results
         output_dir = getattr(eval_cfg, "output_dir", "eval_results")
-        os.makedirs(output_dir, exist_ok=True)
-        import json
-        with open(os.path.join(output_dir, "results.json"), "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"Results saved to {output_dir}/results.json")
+        result_path = _save_results(results, output_dir)
+        print(f"Results saved to {result_path}")
 
     elif eval_type == "online":
         from open_wam.evaluation import RoboTwinOnlineEvaluator
@@ -196,8 +201,47 @@ def main(cfg: DictConfig) -> None:
             print(f"  {k}: {v}")
         print("=" * 60)
 
+        output_dir = getattr(eval_cfg, "output_dir", "eval_results")
+        result_path = _save_results(results, output_dir)
+        print(f"Results saved to {result_path}")
+
+    elif eval_type == "simpler_env":
+        from open_wam.evaluation import SimplerEnvEvaluator
+
+        evaluator = SimplerEnvEvaluator(cfg=cfg, engine=engine)
+        results = evaluator.evaluate()
+
+        print("\n" + "=" * 60)
+        print("SimplerEnv Evaluation Results:")
+        for k, v in results.items():
+            print(f"  {k}: {v}")
+        print("=" * 60)
+
+        output_dir = getattr(eval_cfg, "output_dir", "eval_results/simpler_env")
+        result_path = _save_results(results, output_dir)
+        print(f"Results saved to {result_path}")
+
+    elif eval_type == "libero":
+        from open_wam.evaluation import LIBEROEvaluator
+
+        evaluator = LIBEROEvaluator(cfg=cfg, engine=engine)
+        results = evaluator.evaluate()
+
+        print("\n" + "=" * 60)
+        print("LIBERO Evaluation Results:")
+        for k, v in results.items():
+            print(f"  {k}: {v}")
+        print("=" * 60)
+
+        output_dir = getattr(eval_cfg, "output_dir", "eval_results/libero")
+        result_path = _save_results(results, output_dir)
+        print(f"Results saved to {result_path}")
+
     else:
-        raise ValueError(f"Unknown eval type: {eval_type}. Use 'offline' or 'online'.")
+        raise ValueError(
+            f"Unknown eval type: {eval_type}. "
+            "Use 'offline', 'online', 'simpler_env', or 'libero'."
+        )
 
 
 if __name__ == "__main__":

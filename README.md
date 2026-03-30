@@ -162,6 +162,8 @@ Additional benchmark configs already in the repo:
 
 These benchmarks require their own simulator/environment dependencies.
 
+See `docs/benchmarks/README.md` for the benchmark support matrix, expected dependencies, and example commands for RoboTwin, SimplerEnv, and LIBERO.
+
 ### 4. Deployment
 
 The deployment module lives in `open_wam.serving.policy_server` and the default deployment config is `configs/deploy/server.yaml`.

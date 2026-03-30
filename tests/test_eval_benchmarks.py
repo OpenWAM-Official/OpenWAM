@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 from types import SimpleNamespace
+from omegaconf import OmegaConf
 
 from open_wam.evaluation.envs.base import BaseEnvAdapter
 
@@ -153,3 +154,18 @@ def test_all_env_adapters_in_envs_init():
     )
     for cls in [RoboTwinEnvAdapter, SimplerEnvAdapter, LIBEROEnvAdapter]:
         assert issubclass(cls, BaseEnvAdapter)
+
+
+def test_simpler_env_config_shape():
+    """SimplerEnv config should merge directly under cfg.eval."""
+    cfg = OmegaConf.load("configs/eval/simpler_env.yaml")
+    assert cfg.type == "simpler_env"
+    assert cfg.robot == "google_robot"
+    assert cfg.policy.execute_horizon == 8
+
+
+def test_libero_config_shape():
+    """LIBERO config should expose task suites at the top eval level."""
+    cfg = OmegaConf.load("configs/eval/libero.yaml")
+    assert cfg.type == "libero"
+    assert cfg.task_suites[0] == "libero_spatial"

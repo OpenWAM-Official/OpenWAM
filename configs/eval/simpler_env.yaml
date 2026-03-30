@@ -2,28 +2,27 @@
 # Simulated environments for policy evaluation (Google Robot / WidowX)
 # Install: pip install simpler-env
 
-eval:
-  type: simpler_env
-  num_episodes: 20
-  max_steps_per_episode: 200
+type: simpler_env
+num_episodes: 20
+max_steps_per_episode: 200
+image_height: 256
+image_width: 256
+
+# Robot type: "google_robot" or "widowx"
+# When tasks is null, evaluates all standard tasks for the robot
+robot: google_robot
+tasks: null
+
+env:
+  name: google_robot_pick_coke_can
+  robot: google_robot
   image_height: 256
   image_width: 256
+  action_scale: 1.0
 
-  # Robot type: "google_robot" or "widowx"
-  # When tasks is null, evaluates all standard tasks for the robot
-  robot: google_robot
-  tasks: null
-
-  env:
-    name: google_robot_pick_coke_can
-    robot: google_robot
-    image_height: 256
-    image_width: 256
-    action_scale: 1.0
-
-  policy:
-    history_len: 10
-    action_cache_size: 49
-    execute_horizon: 8
-    temporal_ensemble: true
-    ensemble_decay: 0.5
+policy:
+  history_len: 10
+  action_cache_size: 49
+  execute_horizon: 8
+  temporal_ensemble: true
+  ensemble_decay: 0.5
