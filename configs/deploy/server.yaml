@@ -1,0 +1,16 @@
+# Policy server deployment configuration
+# Start with: python -m open_wam.serving.policy_server
+
+server:
+  host: "0.0.0.0"
+  ws_port: 8765
+  http_port: 8766
+
+# Embodiment for action space conversion (null = raw actions)
+embodiment: null
+
+policy:
+  history_len: 10
+  execute_horizon: 8
+  temporal_ensemble: true
+  ensemble_decay: 0.5
