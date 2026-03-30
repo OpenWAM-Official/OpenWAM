@@ -1,26 +1,17 @@
-"""Joint video-action inference engine wrapping the legacy generate function."""
-
-import sys
-from pathlib import Path
-from typing import Optional
+"""Joint video-action inference engine using package-native generation code."""
 
 import torch
 
 from open_wam.inference.base import BaseInferenceEngine
+from open_wam.inference.joint_generation import generate_video_and_actions
 from open_wam.inference.schedule import make_schedule
-
-_WAM_DIR = str(Path(__file__).resolve().parent.parent.parent / "examples" / "wanvideo" / "wam")
-if _WAM_DIR not in sys.path:
-    sys.path.insert(0, _WAM_DIR)
-
-from joint_inference import generate_video_and_actions  # noqa: E402
 
 
 class JointInferenceEngine(BaseInferenceEngine):
     """Joint video-action inference engine.
 
-    Wraps :func:`generate_video_and_actions` from the legacy inference module,
-    exposing it through the :class:`BaseInferenceEngine` interface.
+    Wraps the package-native joint generation loop through the
+    :class:`BaseInferenceEngine` interface.
 
     Args:
         cfg: Hydra config (must contain ``cfg.inference``).

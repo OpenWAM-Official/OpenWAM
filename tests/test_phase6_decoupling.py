@@ -20,3 +20,9 @@ def test_policy_server_no_longer_imports_eval_script():
     """Serving path should no longer depend on script-level eval helpers."""
     source = Path("open_wam/serving/policy_server.py").read_text()
     assert "from scripts.eval import _load_models" not in source
+
+
+def test_joint_engine_no_longer_imports_legacy_joint_inference():
+    """Joint inference engine should use package-native generation code."""
+    source = Path("open_wam/inference/joint_engine.py").read_text()
+    assert "from joint_inference import generate_video_and_actions" not in source
