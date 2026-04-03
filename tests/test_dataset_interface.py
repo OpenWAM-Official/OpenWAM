@@ -88,3 +88,49 @@ def test_normalize_actions():
     stats = {"mean": np.array([4.0, 5.0]), "std": np.array([2.0, 2.0])}
     normalized = normalize_actions(actions, stats)
     np.testing.assert_allclose(normalized, [[0.0, 0.0], [1.0, 1.0]])
+
+
+def test_build_training_dataset_dispatch():
+    """Verify build_training_dataset dispatches to correct dataset class."""
+    import argparse
+    from open_wam.training.runtime import build_training_dataset
+    from open_wam.data import DROIDDataset, BridgeV2Dataset, MixtureDataset
+    import os
+    import tempfile
+
+    # Create a minimal fake LeRobot directory structure
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = os.path.join(tmpdir, "data")
+        video_dir = os.path.join(tmpdir, "videos", "exterior_image_1_left")
+        os.makedirs(data_dir)
+        os.makedirs(video_dir)
+        # Create a minimal parquet file
+        import pandas as pd
+        df = pd.DataFrame({
+            "episode_index": [0] * 5,
+            "action": [[0.0] * 7] * 5,
+        })
+        df.to_parquet(os.path.join(data_dir, "chunk_0.parquet"))
+
+        # Test DROID dispatch
+        args = argparse.Namespace(
+            dataset_type="droid",
+            dataset_dir=tmpdir,
+            num_frames=5,
+            height=64,
+            width=64,
+            camera="exterior_image_1_left",
+            action_stats_path=None,
+            action_type="absolute",
+            val_ratio=0.1,
+        )
+        ds = build_training_dataset(args)
+        assert isinstance(ds, DROIDDataset)
+        assert ds.action_dim == 7
+
+        # Test Bridge V2 dispatch
+        args.dataset_type = "bridge_v2"
+        args.camera = "image_0"
+        ds = build_training_dataset(args)
+        assert isinstance(ds, BridgeV2Dataset)
+        assert ds.action_dim == 7

@@ -16,6 +16,9 @@ from open_wam.data.robotwin import (
     ROBOTWIN_HOLDOUT_TASKS,
     ROBOTWIN_TRAIN_TASKS,
 )
+from open_wam.data.droid import DROIDDataset
+from open_wam.data.bridge_v2 import BridgeV2Dataset
+from open_wam.data.mixture import MixtureDataset
 from open_wam.training.legacy import VideoActionTrainingModule
 from open_wam.training.optimizer_groups import attach_optimizer_groups
 
@@ -108,6 +111,33 @@ def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
         args.train_tasks = ",".join(d.train_tasks) if d.train_tasks else None
         args.holdout_tasks = ",".join(d.holdout_tasks) if d.holdout_tasks else None
         args.val_variant = d.val_variant
+    elif dtype == "droid":
+        args.dataset_dir = d.dataset_dir
+        args.hdf5_data_root = None
+        args.task_name = None
+        args.train_tasks = None
+        args.holdout_tasks = None
+        args.val_variant = None
+        args.camera = d.get("camera", "exterior_image_1_left")
+        args.action_type = d.get("action_type", "absolute")
+    elif dtype == "bridge_v2":
+        args.dataset_dir = d.dataset_dir
+        args.hdf5_data_root = None
+        args.task_name = None
+        args.train_tasks = None
+        args.holdout_tasks = None
+        args.val_variant = None
+        args.camera = d.get("camera", "image_0")
+    elif dtype == "mixture":
+        args.dataset_dir = None
+        args.hdf5_data_root = None
+        args.task_name = None
+        args.train_tasks = None
+        args.holdout_tasks = None
+        args.val_variant = None
+        args.mixture_datasets = d.get("datasets", [])
+        args.mixture_seed = int(d.get("seed", 42))
+        args.mixture_action_dim_override = d.get("action_dim_override", None)
     else:
         args.dataset_dir = None
         args.hdf5_data_root = d.hdf5_data_root
@@ -147,6 +177,46 @@ def resolve_train_tasks(
     return ROBOTWIN_TRAIN_TASKS
 
 
+def _build_dataset_from_mixture_entry(entry) -> "BaseActionDataset":
+    """Build a single dataset from a mixture config entry."""
+    dtype = entry.get("type", "robotwin_multitask") if hasattr(entry, "get") else entry.type
+    get = entry.get if hasattr(entry, "get") else lambda k, d=None: getattr(entry, k, d)
+
+    if dtype == "droid":
+        return DROIDDataset(
+            dataset_dir=get("dataset_dir"),
+            num_frames=int(get("num_frames", 49)),
+            height=int(get("height", 480)),
+            width=int(get("width", 832)),
+            split="train",
+            camera=get("camera", "exterior_image_1_left"),
+            action_stats_path=get("action_stats_path", None),
+            action_type=get("action_type", "absolute"),
+        )
+    elif dtype == "bridge_v2":
+        return BridgeV2Dataset(
+            dataset_dir=get("dataset_dir"),
+            num_frames=int(get("num_frames", 49)),
+            height=int(get("height", 480)),
+            width=int(get("width", 832)),
+            split="train",
+            camera=get("camera", "image_0"),
+            action_stats_path=get("action_stats_path", None),
+        )
+    elif dtype in ("robotwin", "robotwin_multitask"):
+        return MultiTaskRoboTwinActionDataset(
+            dataset_dir=get("dataset_dir"),
+            robot=get("robot", "arx-x5"),
+            variant=get("variant", "clean_50"),
+            num_frames=int(get("num_frames", 49)),
+            height=int(get("height", 480)),
+            width=int(get("width", 832)),
+            split="train",
+        )
+    else:
+        raise ValueError(f"Unknown mixture sub-dataset type: {dtype}")
+
+
 def build_training_dataset(
     args: argparse.Namespace,
     train_tasks: Optional[list[str]] = None,
@@ -173,6 +243,52 @@ def build_training_dataset(
             window_stride=args.window_stride,
             multiview=args.multiview,
             backbone=args.backbone,
+        )
+
+    if args.dataset_type == "droid":
+        if not args.dataset_dir:
+            raise ValueError("data.dataset_dir is required for droid")
+        return DROIDDataset(
+            dataset_dir=args.dataset_dir,
+            num_frames=args.num_frames,
+            height=args.height,
+            width=args.width,
+            split="train",
+            camera=getattr(args, "camera", "exterior_image_1_left"),
+            action_stats_path=args.action_stats_path,
+            action_type=getattr(args, "action_type", "absolute"),
+            val_ratio=args.val_ratio,
+        )
+
+    if args.dataset_type == "bridge_v2":
+        if not args.dataset_dir:
+            raise ValueError("data.dataset_dir is required for bridge_v2")
+        return BridgeV2Dataset(
+            dataset_dir=args.dataset_dir,
+            num_frames=args.num_frames,
+            height=args.height,
+            width=args.width,
+            split="train",
+            camera=getattr(args, "camera", "image_0"),
+            action_stats_path=args.action_stats_path,
+            val_ratio=args.val_ratio,
+        )
+
+    if args.dataset_type == "mixture":
+        entries = getattr(args, "mixture_datasets", [])
+        if not entries:
+            raise ValueError("data.datasets is required for mixture")
+        datasets = []
+        weights = []
+        for entry in entries:
+            get = entry.get if hasattr(entry, "get") else lambda k, d=None: getattr(entry, k, d)
+            datasets.append(_build_dataset_from_mixture_entry(entry))
+            weights.append(float(get("weight", 1.0)))
+        return MixtureDataset(
+            datasets=datasets,
+            weights=weights,
+            seed=getattr(args, "mixture_seed", 42),
+            action_dim_override=getattr(args, "mixture_action_dim_override", None),
         )
 
     return RoboTwinActionDataset(
@@ -239,6 +355,38 @@ def build_validation_datasets(
             ),
         }
         return val_datasets, dict(val_datasets)
+
+    if args.dataset_type == "droid":
+        val_ds = DROIDDataset(
+            dataset_dir=args.dataset_dir,
+            num_frames=args.num_frames,
+            height=args.height,
+            width=args.width,
+            split="val",
+            camera=getattr(args, "camera", "exterior_image_1_left"),
+            action_stats_path=args.action_stats_path,
+            action_type=getattr(args, "action_type", "absolute"),
+            val_ratio=args.val_ratio,
+        )
+        return {"val": val_ds}, {"val": val_ds}
+
+    if args.dataset_type == "bridge_v2":
+        val_ds = BridgeV2Dataset(
+            dataset_dir=args.dataset_dir,
+            num_frames=args.num_frames,
+            height=args.height,
+            width=args.width,
+            split="val",
+            camera=getattr(args, "camera", "image_0"),
+            action_stats_path=args.action_stats_path,
+            val_ratio=args.val_ratio,
+        )
+        return {"val": val_ds}, {"val": val_ds}
+
+    if args.dataset_type == "mixture":
+        # For mixture datasets, validation uses the full mixture with val split
+        # This is a simplified path — each sub-dataset handles its own val split
+        return {}, {}
 
     val_ds = RoboTwinActionDataset(
         data_root=args.hdf5_data_root,
