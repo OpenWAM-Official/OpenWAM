@@ -166,3 +166,19 @@ class MoEActionExpertArchitecture(BaseWAMArchitecture):
     @property
     def bridge_layers(self) -> tuple:
         return self.moe_dit.expert_layers if self.moe_dit else ()
+
+    @property
+    def is_interleaved(self) -> bool:
+        return True
+
+    @property
+    def action_mean(self) -> Tensor:
+        if self.moe_dit is not None:
+            return self.moe_dit.action_mean
+        return torch.zeros(self.action_dim)
+
+    @property
+    def action_std(self) -> Tensor:
+        if self.moe_dit is not None:
+            return self.moe_dit.action_std
+        return torch.ones(self.action_dim)

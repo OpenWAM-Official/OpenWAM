@@ -1,10 +1,13 @@
 """Joint video-action inference engine using package-native generation code."""
 
+from typing import Optional
+
 import torch
 
 from open_wam.inference.base import BaseInferenceEngine
 from open_wam.inference.joint_generation import generate_video_and_actions
 from open_wam.inference.schedule import make_schedule
+from open_wam.models.architectures.base import BaseWAMArchitecture
 
 
 class JointInferenceEngine(BaseInferenceEngine):
@@ -16,11 +19,21 @@ class JointInferenceEngine(BaseInferenceEngine):
     Args:
         cfg: Hydra config (must contain ``cfg.inference``).
         pipeline: Loaded ``WanVideoPipeline`` instance.
-        action_dit: Loaded ``ActionDiT`` instance (eval mode).
+        action_dit: Loaded ``ActionDiT`` instance (legacy, prefer ``architecture``).
+        architecture: WAM architecture wrapping the action model. If not
+            provided and ``action_dit`` is given, a ``DualSystemArchitecture``
+            is constructed automatically for backward compatibility.
     """
 
-    def __init__(self, cfg, pipeline, action_dit):
-        super().__init__(cfg, pipeline, action_dit)
+    def __init__(self, cfg, pipeline, action_dit=None, architecture: Optional[BaseWAMArchitecture] = None):
+        super().__init__(cfg, pipeline, action_dit, architecture)
+
+        if self.architecture is None and self.action_dit is not None:
+            # Backward compat: wrap raw ActionDiT in DualSystemArchitecture
+            from open_wam.models.architectures.dual_system import DualSystemArchitecture
+            arch = DualSystemArchitecture(cfg=None)
+            arch.action_dit = self.action_dit
+            self.architecture = arch
 
     @torch.no_grad()
     def generate(self, conditions: dict) -> dict:
@@ -64,7 +77,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         # Extract generation params
         video_frames, actions = generate_video_and_actions(
             pipe=self.pipeline,
-            action_dit=self.action_dit,
+            architecture=self.architecture,
             schedule=schedule,
             prompt=conditions.get("prompt", ""),
             negative_prompt=conditions.get("negative_prompt", ""),

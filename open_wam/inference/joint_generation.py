@@ -9,6 +9,8 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
+from open_wam.models.architectures.base import BaseWAMArchitecture
+
 
 def prepare_pipeline_inputs(
     pipe: Any,
@@ -93,7 +95,7 @@ def prepare_pipeline_inputs(
 @torch.no_grad()
 def generate_video_and_actions(
     pipe: Any,
-    action_dit: Any,
+    architecture: BaseWAMArchitecture,
     schedule,
     prompt: str,
     negative_prompt: str = "",
@@ -107,7 +109,27 @@ def generate_video_and_actions(
     tiled: bool = True,
     input_video_latents: Optional[torch.Tensor] = None,
 ):
-    """Execute joint video-action denoising driven by a schedule."""
+    """Execute joint video-action denoising driven by a schedule.
+
+    Args:
+        pipe: Loaded WanVideoPipeline.
+        architecture: WAM architecture implementing BaseWAMArchitecture.
+        schedule: List of (video_timestep, action_timestep) pairs.
+        prompt: Text prompt for generation.
+        negative_prompt: Negative prompt for CFG.
+        vace_video: Optional VACE conditioning video.
+        vace_reference_image: Optional reference image(s).
+        num_frames: Number of video frames to generate.
+        height: Video height in pixels.
+        width: Video width in pixels.
+        seed: Random seed.
+        cfg_scale: Classifier-free guidance scale.
+        tiled: Whether to use tiled VAE decoding.
+        input_video_latents: Pre-encoded video latents (for action-only mode).
+
+    Returns:
+        (video_frames, actions) — list of PIL images and (T, action_dim) numpy array.
+    """
     device = pipe.device
     dtype = pipe.torch_dtype
 
@@ -144,7 +166,7 @@ def generate_video_and_actions(
     action_latents = torch.randn(
         1,
         num_frames,
-        action_dit.action_dim,
+        architecture.action_dim,
         device=device,
         dtype=dtype,
         generator=torch.Generator(device=device).manual_seed(seed),
@@ -152,8 +174,10 @@ def generate_video_and_actions(
 
     pipe.load_models_to_device(pipe.in_iteration_models)
     models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
+
+    use_interleaved = architecture.is_interleaved
+    bridge_layers_set = set(architecture.bridge_layers)
     cached_bridge = None
-    use_interleaved = action_dit.bridge_type == "joint_self_attn"
 
     for i in tqdm(range(len(schedule) - 1), desc="Joint denoising"):
         t_v, t_a = schedule[i]
@@ -175,18 +199,25 @@ def generate_video_and_actions(
         action_noise_pred = None
 
         if use_interleaved and action_stepping:
+            # Interleaved path: action processing happens inside the video
+            # DiT forward pass. Prepare action state through the architecture
+            # and pass the internal state to pipe.model_fn.
             a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
 
-            action_dit_state = action_dit.prepare_action_state(action_latents, a_timestep)
+            action_state = architecture.prepare_action_tokens(action_latents, a_timestep)
+            # The interleaved architecture stores its pipe-compatible state
+            # in action_state.extra["dit_state"]
+            dit_state = action_state.extra.get("dit_state")
+
             noise_pred_posi = pipe.model_fn(
                 **models,
                 **inputs_shared,
                 **inputs_posi,
                 timestep=v_timestep,
-                action_dit_state=action_dit_state,
+                action_dit_state=dit_state,
             )
-            action_noise_pred = action_dit_state.action_noise_pred
+            action_noise_pred = dit_state.action_noise_pred if dit_state is not None else None
 
             if cfg_scale != 1.0:
                 noise_pred_nega = pipe.model_fn(
@@ -200,6 +231,8 @@ def generate_video_and_actions(
                 noise_pred = noise_pred_posi
 
         elif video_stepping or (action_stepping and cached_bridge is None):
+            # Bridge-collection path: run video DiT, collect bridge features
+            # at the architecture's designated layers.
             bridge_features = []
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
 
@@ -209,7 +242,7 @@ def generate_video_and_actions(
                 **inputs_posi,
                 timestep=v_timestep,
                 bridge_feature_store=bridge_features,
-                bridge_feature_layers=action_dit.bridge_layers_set,
+                bridge_feature_layers=bridge_layers_set,
                 bridge_feature_detach=True,
             )
 
@@ -235,12 +268,17 @@ def generate_video_and_actions(
 
         if action_stepping:
             if action_noise_pred is None:
+                # Use the architecture interface: prepare → feed bridge
+                # features through on_dit_block → extract prediction.
                 a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
-                action_noise_pred = action_dit(
-                    action_tokens=action_latents,
-                    video_features=bridge_features,
-                    timestep=a_timestep,
-                )
+                action_state = architecture.prepare_action_tokens(action_latents, a_timestep)
+                sorted_layers = sorted(architecture.bridge_layers)
+                for layer_idx, layer_id in enumerate(sorted_layers):
+                    if bridge_features is not None and layer_idx < len(bridge_features):
+                        _, action_state = architecture.on_dit_block(
+                            layer_id, bridge_features[layer_idx], action_state
+                        )
+                action_noise_pred = architecture.extract_action_prediction(action_state)
             action_latents = action_latents + action_noise_pred * (sigma_a_next - sigma_a)
 
     if vace_reference_image is not None:
@@ -252,7 +290,7 @@ def generate_video_and_actions(
     video_frames = pipe.vae_output_to_video(video)
 
     actions = action_latents.squeeze(0).float().cpu().numpy()
-    actions = actions * action_dit.action_std.float().cpu().numpy() + action_dit.action_mean.float().cpu().numpy()
+    actions = actions * architecture.action_std.float().cpu().numpy() + architecture.action_mean.float().cpu().numpy()
 
     pipe.load_models_to_device([])
     return video_frames, actions

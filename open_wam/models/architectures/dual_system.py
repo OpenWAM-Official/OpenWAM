@@ -139,3 +139,19 @@ class DualSystemArchitecture(BaseWAMArchitecture):
     @property
     def bridge_layers(self) -> tuple:
         return self.action_dit.bridge_layers if self.action_dit else ()
+
+    @property
+    def is_interleaved(self) -> bool:
+        return self.action_dit is not None and self.action_dit.bridge_type == "joint_self_attn"
+
+    @property
+    def action_mean(self) -> Tensor:
+        if self.action_dit is not None:
+            return self.action_dit.action_mean
+        return torch.zeros(self.action_dim)
+
+    @property
+    def action_std(self) -> Tensor:
+        if self.action_dit is not None:
+            return self.action_dit.action_std
+        return torch.ones(self.action_dim)

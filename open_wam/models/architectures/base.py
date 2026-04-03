@@ -129,3 +129,23 @@ class BaseWAMArchitecture(ABC, nn.Module):
         For DualSystem this returns the configured bridge layer indices.
         """
         ...
+
+    @property
+    def is_interleaved(self) -> bool:
+        """Whether the architecture participates in the video DiT forward pass.
+
+        When True, action processing happens inside the video DiT block loop
+        (e.g. joint_self_attn, MoE). When False, bridge features are collected
+        first and action processing happens separately (e.g. cross_attn).
+        """
+        return False
+
+    @property
+    def action_mean(self) -> Tensor:
+        """Per-dimension action mean for denormalization."""
+        return torch.zeros(self.action_dim)
+
+    @property
+    def action_std(self) -> Tensor:
+        """Per-dimension action std for denormalization."""
+        return torch.ones(self.action_dim)
