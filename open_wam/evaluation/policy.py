@@ -103,16 +103,16 @@ class WAMPolicy:
                     self._ensemble_buffer[t] = []
                 self._ensemble_buffer[t].append((1.0, a))
 
-            # Decay older predictions: each older generation gets decay^k weight
-            # The newest generation always has weight 1.0
+            # Reweight by generation age: entry at age k gets weight decay^k.
+            # Newest (last) entry always has weight 1.0 (age 0).
             for t in list(self._ensemble_buffer.keys()):
                 entries = self._ensemble_buffer[t]
                 if len(entries) > 1:
-                    # Re-weight: newest is last, oldest is first
                     n = len(entries)
-                    for j in range(n - 1):
-                        w, a = entries[j]
-                        entries[j] = (w * self.ensemble_decay, a)
+                    for j in range(n):
+                        age = n - 1 - j
+                        _, a = entries[j]
+                        entries[j] = (self.ensemble_decay ** age, a)
 
             # Build fused action buffer for the next execute_horizon steps
             self._action_buffer.clear()
