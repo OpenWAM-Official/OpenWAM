@@ -1,0 +1,28 @@
+# Accelerate config for DeepSpeed ZeRO Stage 3.
+#
+# ZeRO-3 partitions model parameters, optimizer states, and gradients.
+# Use when the model itself doesn't fit on a single GPU (e.g. TI2V-5B
+# without LoRA, or very large action models).
+#
+# Usage:
+#   accelerate launch --config_file configs/accelerate/deepspeed_zero3.yaml \
+#       scripts/train.py training=deepspeed_zero2 ...
+#
+# Caveats:
+# - Slower than ZeRO-2 due to parameter gathering
+# - offload_param_device=cpu further reduces GPU memory at the cost of speed
+
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+num_machines: 1
+num_processes: 8
+mixed_precision: bf16
+
+deepspeed_config:
+  zero_stage: 3
+  gradient_accumulation_steps: 4
+  gradient_clipping: 1.0
+  offload_optimizer_device: none
+  offload_param_device: none
+  zero3_init_flag: true
+  zero3_save_16bit_model: true
