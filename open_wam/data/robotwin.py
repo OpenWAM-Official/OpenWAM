@@ -1,32 +1,22 @@
 """RoboTwin dataset wrappers conforming to the BaseActionDataset interface.
 
 Thin wrappers around the legacy ``video_action_dataset.py`` implementations.
-The legacy code is imported via sys.path manipulation and all behavior is
-delegated unchanged — this guarantees functional equivalence.
+The legacy code is imported via the ``_legacy_imports`` boundary module and
+all behavior is delegated unchanged — this guarantees functional equivalence.
 """
 
-import sys
-from pathlib import Path
 from typing import Optional
 
 from open_wam.data.base import BaseActionDataset
-
-# Make legacy module importable
-_WAM_DIR = str(Path(__file__).resolve().parent.parent.parent / "examples" / "wanvideo" / "wam")
-if _WAM_DIR not in sys.path:
-    sys.path.insert(0, _WAM_DIR)
-
-from video_action_dataset import (  # noqa: E402
-    RoboTwinDataset as _LegacyRoboTwinDataset,
-    MultiTaskRoboTwinDataset as _LegacyMultiTaskRoboTwinDataset,
-    # Constants
+from open_wam._legacy_imports import (
+    LegacyRoboTwinDataset as _LegacyRoboTwinDataset,
+    LegacyMultiTaskRoboTwinDataset as _LegacyMultiTaskRoboTwinDataset,
     ROBOTWIN_TRAIN_TASKS,
     ROBOTWIN_HOLDOUT_TASKS,
     ROBOTWIN_ALL_TASKS,
     MULTIVIEW_LAYOUT,
     MULTIVIEW_CAMERAS,
     BACKBONE_SUPPORTED_RESOLUTIONS,
-    # Helpers
     discover_robotwin_roots,
     assemble_multiview_grid,
     extract_quadrant,

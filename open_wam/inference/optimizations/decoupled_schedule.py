@@ -12,8 +12,6 @@ This module provides:
   video noise during training
 """
 
-import sys
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 import torch
@@ -22,14 +20,10 @@ import numpy as np
 # Type alias (same as joint_inference.py)
 Schedule = List[Tuple[float, float]]
 
-_THIRD_PARTY = str(Path(__file__).resolve().parent.parent.parent.parent / "third_party")
-if _THIRD_PARTY not in sys.path:
-    sys.path.insert(0, _THIRD_PARTY)
-
 
 def _base_timesteps(num_steps: int, shift: float) -> List[float]:
     """Generate Wan-style descending timesteps."""
-    from diffsynth.diffusion import FlowMatchScheduler  # lazy import
+    from third_party.diffsynth.diffusion import FlowMatchScheduler
     scheduler = FlowMatchScheduler("Wan")
     scheduler.set_timesteps(num_steps, shift=shift)
     return scheduler.timesteps.tolist()

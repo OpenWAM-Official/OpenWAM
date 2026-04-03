@@ -19,8 +19,6 @@ Status: Fully implemented. Requires MoE-aware pipeline support in
 model_fn_wan_video (moe_expert_state parameter).
 """
 
-import sys
-from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
@@ -28,13 +26,7 @@ from torch import Tensor
 
 from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
 from open_wam.models.architectures.registry import register_architecture
-
-# Import MoEExpertDiT from third_party
-_THIRD_PARTY = str(Path(__file__).resolve().parent.parent.parent.parent / "third_party")
-if _THIRD_PARTY not in sys.path:
-    sys.path.insert(0, _THIRD_PARTY)
-
-from diffsynth.models.moe_action_expert import MoEExpertDiT, MoEExpertState  # noqa: E402
+from third_party.diffsynth.models.moe_action_expert import MoEExpertDiT, MoEExpertState
 
 
 @register_architecture(

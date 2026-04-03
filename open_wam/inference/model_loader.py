@@ -7,8 +7,8 @@ from typing import Any
 
 import torch
 
-from diffsynth.models.action_dit import ActionDiT
-from diffsynth.pipelines.wan_video import ModelConfig, WanVideoPipeline
+from third_party.diffsynth.models.action_dit import ActionDiT
+from third_party.diffsynth.pipelines.wan_video import ModelConfig, WanVideoPipeline
 
 
 def load_wam_models(cfg: Any, device: str = "cuda"):

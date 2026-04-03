@@ -10,8 +10,6 @@ bridge types in assets/modal_merging.png:
 - joint_self_attn: bidirectional MMDiT-style
 """
 
-import sys
-from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
@@ -19,13 +17,7 @@ from torch import Tensor
 
 from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
 from open_wam.models.architectures.registry import register_architecture
-
-# Import ActionDiT from third_party
-_THIRD_PARTY = str(Path(__file__).resolve().parent.parent.parent.parent / "third_party")
-if _THIRD_PARTY not in sys.path:
-    sys.path.insert(0, _THIRD_PARTY)
-
-from diffsynth.models.action_dit import ActionDiT, ActionDiTState  # noqa: E402
+from third_party.diffsynth.models.action_dit import ActionDiT, ActionDiTState
 
 
 @register_architecture(

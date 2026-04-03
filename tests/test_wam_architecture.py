@@ -154,12 +154,7 @@ def test_moe_expert_prepare_and_extract():
 
 def test_moe_expert_ffn_zero_init():
     """Verify expert FFN and output head are zero-initialized."""
-    from diffsynth.models.moe_action_expert import MoEExpertDiT
-    import sys
-    from pathlib import Path
-    _tp = str(Path(__file__).resolve().parent.parent / "third_party")
-    if _tp not in sys.path:
-        sys.path.insert(0, _tp)
+    from third_party.diffsynth.models.moe_action_expert import MoEExpertDiT
 
     dit = MoEExpertDiT(
         action_dim=7, video_dim=64, expert_ffn_dim=128,
