@@ -1,8 +1,8 @@
-"""Legacy training boundary helpers for OpenWAM's package-native entrypoints."""
+"""Training boundary helpers for OpenWAM's package-native entrypoints."""
 
 from __future__ import annotations
 
-from open_wam._legacy_imports import (
+from open_wam.training.video_action_module import (
     FlowMatchVideoActionSFTLoss,
     VideoActionTrainingModule,
 )
