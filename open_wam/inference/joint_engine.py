@@ -8,6 +8,7 @@ from open_wam.inference.base import BaseInferenceEngine
 from open_wam.inference.joint_generation import generate_video_and_actions
 from open_wam.inference.schedule import make_schedule
 from open_wam.models.architectures.base import BaseWAMArchitecture
+from open_wam.models.action_repr.base import BaseActionRepresentation
 
 
 class JointInferenceEngine(BaseInferenceEngine):
@@ -25,8 +26,13 @@ class JointInferenceEngine(BaseInferenceEngine):
             is constructed automatically for backward compatibility.
     """
 
-    def __init__(self, cfg, pipeline, action_dit=None, architecture: Optional[BaseWAMArchitecture] = None):
+    def __init__(
+        self, cfg, pipeline, action_dit=None,
+        architecture: Optional[BaseWAMArchitecture] = None,
+        action_repr: Optional[BaseActionRepresentation] = None,
+    ):
         super().__init__(cfg, pipeline, action_dit, architecture)
+        self.action_repr = action_repr
 
         if self.architecture is None and self.action_dit is not None:
             # Backward compat: wrap raw ActionDiT in DualSystemArchitecture
@@ -92,6 +98,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             input_video_latents=conditions.get("input_video_latents", None),
             num_inference_steps=num_steps,
             shift=shift,
+            action_repr=self.action_repr,
         )
 
         return {"video": video_frames, "actions": actions}

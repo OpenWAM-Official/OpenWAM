@@ -1,0 +1,3 @@
+action_repr:
+  type: continuous
+  action_dim: 14

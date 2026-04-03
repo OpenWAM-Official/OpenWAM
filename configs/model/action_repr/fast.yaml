@@ -1,0 +1,7 @@
+action_repr:
+  type: fast
+  native_dim: 14
+  vocab_size: 1024
+  num_tokens_per_step: 1
+  embed_dim: 64
+  tokenizer_name: "physical-intelligence/fast"

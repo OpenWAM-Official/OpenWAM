@@ -29,6 +29,7 @@ import torch
 import torch.nn.functional as F
 
 from open_wam.models.architectures.base import BaseWAMArchitecture
+from open_wam.models.action_repr.base import BaseActionRepresentation
 
 
 class FlowMatchVideoActionLoss:
@@ -63,6 +64,7 @@ class FlowMatchVideoActionLoss:
         current_step: int = 0,
         decoupled_sampler=None,
         architecture: Optional[BaseWAMArchitecture] = None,
+        action_repr: Optional[BaseActionRepresentation] = None,
         **inputs,
     ) -> dict:
         """Compute joint video-action flow matching loss.
@@ -122,6 +124,7 @@ class FlowMatchVideoActionLoss:
             self._prepare_actions(
                 B, architecture, action_scheduler, action_data,
                 decoupled_sampler, current_step, pipe, inputs,
+                action_repr=action_repr,
             )
         )
 
@@ -224,6 +227,7 @@ class FlowMatchVideoActionLoss:
     def _prepare_actions(
         self, B, architecture, action_scheduler, action_data,
         decoupled_sampler, current_step, pipe, inputs,
+        action_repr=None,
     ):
         """Prepare noisy actions, targets, and optional interleaved state."""
         if self.lambda_action == 0:
@@ -255,6 +259,10 @@ class FlowMatchVideoActionLoss:
         if T_action > T_video_frames:
             indices = torch.linspace(0, T_action - 1, T_video_frames).long()
             action_data = action_data[:, indices]
+
+        # Encode actions into diffusion latent space (identity for continuous)
+        if action_repr is not None:
+            action_data = action_repr.encode(action_data)
 
         # Add noise
         action_noise = torch.randn_like(action_data)

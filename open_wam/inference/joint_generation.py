@@ -10,6 +10,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from open_wam.models.architectures.base import BaseWAMArchitecture
+from open_wam.models.action_repr.base import BaseActionRepresentation
 
 
 def prepare_pipeline_inputs(
@@ -140,6 +141,7 @@ def generate_video_and_actions(
     shift: float = 5.0,
     tile_size: tuple = (30, 52),
     tile_stride: tuple = (15, 26),
+    action_repr: Optional[BaseActionRepresentation] = None,
 ):
     """Execute joint video-action denoising driven by a schedule.
 
@@ -331,8 +333,13 @@ def generate_video_and_actions(
     video = pipe.vae.decode(inputs_shared["latents"], device=device, tiled=tiled)
     video_frames = pipe.vae_output_to_video(video)
 
-    actions = action_latents.squeeze(0).float().cpu().numpy()
-    actions = actions * architecture.action_std.float().cpu().numpy() + architecture.action_mean.float().cpu().numpy()
+    if action_repr is not None:
+        # Decode from diffusion latent space back to raw actions
+        actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
+    else:
+        # Legacy path: denormalize with action_mean/action_std
+        actions = action_latents.squeeze(0).float().cpu().numpy()
+        actions = actions * architecture.action_std.float().cpu().numpy() + architecture.action_mean.float().cpu().numpy()
 
     pipe.load_models_to_device([])
     return video_frames, actions
