@@ -1,10 +1,8 @@
-"""Loss functions for joint video-action training.
-
-Provides both the standalone FlowMatchVideoActionLoss class and the legacy
-FlowMatchVideoActionSFTLoss function for backward compatibility.
-"""
+"""Loss functions for joint video-action training."""
 
 from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
-from open_wam.training.legacy import FlowMatchVideoActionSFTLoss
+
+# Backward-compat alias
+FlowMatchVideoActionSFTLoss = FlowMatchVideoActionLoss
 
 __all__ = ["FlowMatchVideoActionLoss", "FlowMatchVideoActionSFTLoss"]

@@ -70,253 +70,20 @@ import numpy as np
 from einops import rearrange
 
 from third_party.diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
-from third_party.diffsynth.diffusion import *
+from third_party.diffsynth.diffusion import (
+    DiffusionTrainingModule,
+    FlowMatchScheduler,
+    ModelLogger,
+    add_general_config,
+    add_video_size_config,
+)
+from third_party.diffsynth.diffusion.runner import launch_training_task
 from third_party.diffsynth.models.action_dit import ActionDiT, ActionDiTState
 
+from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+from open_wam.models.architectures.dual_system import DualSystemArchitecture
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-
-def FlowMatchVideoActionSFTLoss(
-    pipe,
-    action_dit: ActionDiT,
-    action_scheduler,
-    action_data: torch.Tensor,
-    lambda_video: float = 1.0,
-    lambda_action: float = 1.0,
-    current_step: int = 0,
-    detach_bridge: bool = False,
-    decoupled_sampler=None,
-    **inputs,
-):
-    """
-    Joint video-action supervised finetuning loss with per-sample timesteps.
-
-    Implements the training objective::
-
-        L = lambda_video(step) * L_video + lambda_action * L_action
-
-    where each sample in the batch draws its own independent video timestep t_v[i]
-    and action timestep t_a[i] (UWM-style).
-
-    Timestep & noise handling
-    -------------------------
-    The scheduler's ``add_noise()`` / ``training_target()`` only accept scalar
-    timesteps, so per-sample noise is computed inline:
-
-        σ = sigmas[timestep_ids]            # (B,)
-        x_t = (1 - σ) * x_0 + σ * ε        # σ broadcast via view(B,1,1,1,1)
-        target = ε - x_0                    # flow matching velocity target
-
-    This function **generates its own noise** and **overwrites inputs["latents"]**,
-    so the caller does not need to provide meaningful noise — only ``input_latents``
-    (the clean encoded video) matters.
-
-    Per-sample loss weighting
-    -------------------------
-    Each sample's MSE is weighted by ``scheduler.linear_timesteps_weights[t_id]``
-    (a Gaussian-like schedule centered at t=500).  The final loss is the mean of
-    per-sample weighted MSE values.  When B=1, a fused ``mse_loss(reduction='mean')``
-    fast path avoids materializing the full unreduced (1,C,T,H,W) intermediate.
-
-    Bridge features
-    ---------------
-    Passed WITH gradients (no detach) by default, so the action loss provides a
-    training signal to the video DiT.  Set ``detach_bridge=True`` to block gradients.
-
-    Args:
-        pipe: WanVideoPipeline
-        action_dit: ActionDiT model
-        action_scheduler: FlowMatchScheduler for action stream
-        action_data: (B, T_action, action_dim) ground truth actions
-        lambda_video: Target weight for video loss
-        lambda_action: Weight for action loss
-        current_step: Current training step
-        detach_bridge: If True, detach bridge features to prevent action loss
-            gradients from flowing back to the video DiT
-        **inputs: Must contain ``input_latents`` (B, C, T, H, W) clean video latents.
-            ``latents`` key is ignored and overwritten.
-    """
-    # ==================== Common Setup ====================
-    max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
-    min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
-    B = inputs["input_latents"].shape[0]
-
-    # Sample per-sample video timesteps
-    if decoupled_sampler is not None:
-        # Decoupled training: Beta-distributed video timesteps
-        _video_t, _action_t = decoupled_sampler.sample_timesteps(
-            B, current_step=current_step, device="cpu"
-        )
-        # Map continuous timesteps to scheduler indices
-        num_ts = len(pipe.scheduler.timesteps)
-        video_timestep_ids = (_video_t / decoupled_sampler.num_train_timesteps * num_ts).long().clamp(
-            min_timestep_boundary, max_timestep_boundary - 1
-        )
-    else:
-        video_timestep_ids = torch.randint(min_timestep_boundary, max_timestep_boundary, (B,))
-    video_timesteps = pipe.scheduler.timesteps[video_timestep_ids].to(
-        dtype=pipe.torch_dtype, device=pipe.device
-    )
-    video_sigmas = pipe.scheduler.sigmas[video_timestep_ids].to(
-        dtype=pipe.torch_dtype, device=pipe.device
-    )
-
-    # Add noise with per-sample sigmas: x_t = (1 - σ) * x_0 + σ * ε
-    video_noise = torch.randn_like(inputs["input_latents"])
-    sigma_bc = video_sigmas.view(B, 1, 1, 1, 1)
-    inputs["latents"] = (1 - sigma_bc) * inputs["input_latents"] + sigma_bc * video_noise
-    video_training_target = video_noise - inputs["input_latents"]
-
-    if inputs.get("first_frame_latents") is not None:
-        inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
-
-    models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
-
-    use_interleaved = (action_dit.bridge_type == "joint_self_attn" and lambda_action > 0)
-
-    # ==================== Prepare action data ====================
-    action_dit_state = None
-    action_timesteps = None
-    action_timestep_ids = None
-    action_training_target = None
-    noisy_actions = None
-
-    if lambda_action > 0:
-        # Sample per-sample independent action timesteps
-        if decoupled_sampler is not None:
-            # Decoupled training: use action timesteps from sampler
-            num_ts_a = len(action_scheduler.timesteps)
-            action_timestep_ids = (_action_t / decoupled_sampler.num_train_timesteps * num_ts_a).long().clamp(0, num_ts_a - 1)
-        else:
-            action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
-        action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(
-            dtype=pipe.torch_dtype, device=pipe.device
-        )
-        action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(
-            dtype=pipe.torch_dtype, device=pipe.device
-        )
-
-        # Ensure action_data is on correct device
-        action_data = action_data.to(dtype=pipe.torch_dtype, device=pipe.device)
-        if action_data.dim() == 2:
-            action_data = action_data.unsqueeze(0)  # (1, T, action_dim)
-
-        # Subsample actions to match video frame count
-        T_action = action_data.shape[1]
-        T_video_frames = inputs.get("num_frames", 49)
-        if T_action > T_video_frames:
-            indices = torch.linspace(0, T_action - 1, T_video_frames).long()
-            action_data = action_data[:, indices]
-
-        # Add noise with per-sample sigmas
-        action_noise = torch.randn_like(action_data)
-        action_sigma_bc = action_sigmas.view(B, 1, 1)
-        noisy_actions = (1 - action_sigma_bc) * action_data + action_sigma_bc * action_noise
-        action_training_target = action_noise - action_data
-
-        if use_interleaved:
-            action_dit_state = action_dit.prepare_action_state(
-                noisy_actions, action_timesteps,
-                use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
-                use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
-            )
-
-    # ==================== Video Forward ====================
-    if use_interleaved:
-        video_noise_pred = pipe.model_fn(
-            **models, **inputs, timestep=video_timesteps,
-            action_dit_state=action_dit_state,
-        )
-    else:
-        bridge_features = []
-        video_noise_pred = pipe.model_fn(
-            **models, **inputs, timestep=video_timesteps,
-            bridge_feature_store=bridge_features,
-            bridge_feature_layers=action_dit.bridge_layers_set,
-            bridge_feature_detach=detach_bridge,
-        )
-
-    # ==================== Video Loss ====================
-    _has_first_frame = inputs.get("first_frame_latents") is not None
-    if _has_first_frame:
-        video_noise_pred_loss = video_noise_pred[:, :, 1:]
-        video_training_target = video_training_target[:, :, 1:]
-    else:
-        video_noise_pred_loss = video_noise_pred
-
-    # MSE weighted by per-sample training weights
-    video_tw = pipe.scheduler.linear_timesteps_weights[video_timestep_ids].to(
-        dtype=torch.float32, device=pipe.device
-    )
-    if B == 1:
-        loss_video = torch.nn.functional.mse_loss(
-            video_noise_pred_loss.float(), video_training_target.float()
-        ) * video_tw[0]
-    else:
-        video_mse_per_sample = torch.nn.functional.mse_loss(
-            video_noise_pred_loss.float(), video_training_target.float(), reduction='none'
-        ).mean(dim=list(range(1, video_noise_pred_loss.ndim)))  # (B,)
-        loss_video = (video_mse_per_sample * video_tw).mean()
-
-    # ==================== Action Loss ====================
-    if lambda_action == 0:
-        return {
-            "loss": lambda_video * loss_video,
-            "loss_video": loss_video.detach(),
-            "video_weight": lambda_video,
-        }
-
-    # Get action noise prediction
-    if use_interleaved:
-        action_noise_pred = action_dit_state.action_noise_pred
-    else:
-        assert len(bridge_features) == len(action_dit.bridge_layers), (
-            f"Expected {len(action_dit.bridge_layers)} bridge features, got {len(bridge_features)}. "
-            f"Check that bridge_layers indices are valid for the video DiT."
-        )
-        action_noise_pred = action_dit(
-            action_tokens=noisy_actions,
-            video_features=bridge_features,
-            timestep=action_timesteps,
-            use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
-            use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
-        )
-
-    # Action MSE weighted by per-sample training weights
-    action_tw = action_scheduler.linear_timesteps_weights[action_timestep_ids].to(
-        dtype=torch.float32, device=pipe.device
-    )
-    if B == 1:
-        loss_action = torch.nn.functional.mse_loss(
-            action_noise_pred.float(), action_training_target.float()
-        ) * action_tw[0]
-    else:
-        action_mse_per_sample = torch.nn.functional.mse_loss(
-            action_noise_pred.float(), action_training_target.float(), reduction='none'
-        ).mean(dim=list(range(1, action_noise_pred.ndim)))  # (B,)
-        loss_action = (action_mse_per_sample * action_tw).mean()
-
-    # ==================== Combined Loss ====================
-    video_weight = lambda_video
-
-    if video_weight == 0:
-        loss = lambda_action * loss_action
-    else:
-        loss = video_weight * loss_video + lambda_action * loss_action
-
-    # Unweighted losses for scale monitoring
-    loss_video_uw = (loss_video / (video_tw.mean() + 1e-8)).detach()
-    loss_action_uw = (loss_action / (action_tw.mean() + 1e-8)).detach()
-
-    return {
-        "loss": loss,
-        "loss_video": loss_video.detach(),
-        "loss_action": loss_action.detach(),
-        "video_weight": video_weight,
-        "loss_video_unweighted": loss_video_uw,
-        "loss_action_unweighted": loss_action_uw,
-        "loss_scale_ratio": (loss_video.detach() / (loss_action.detach() + 1e-8)),
-    }
 
 
 class VideoActionTrainingModule(DiffusionTrainingModule):
@@ -421,9 +188,20 @@ class VideoActionTrainingModule(DiffusionTrainingModule):
         total_params = sum(p.numel() for p in self.action_dit.parameters())
         print(f"ActionDiT created: {total_params / 1e6:.1f}M params, dtype=bfloat16")
 
+        # Wrap ActionDiT in architecture interface
+        self.architecture = DualSystemArchitecture(cfg=None)
+        self.architecture.action_dit = self.action_dit
+
         # Action scheduler (independent from video)
         self.action_scheduler = FlowMatchScheduler("Wan")
         self.action_scheduler.set_timesteps(1000, training=True)
+
+        # Package-native loss function
+        self.loss_fn = FlowMatchVideoActionLoss(
+            lambda_video=lambda_video,
+            lambda_action=lambda_action,
+            detach_bridge=(bridge_type == "cross_attn_detach"),
+        )
 
         # Store configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
@@ -483,7 +261,7 @@ class VideoActionTrainingModule(DiffusionTrainingModule):
                 try:
                     video, generated_denorm = generate_video_and_actions(
                         pipe=self.pipe,
-                        action_dit=self.action_dit,
+                        architecture=self.architecture,
                         schedule=schedule,
                         prompt=prompt_text,
                         vace_video=val_sample.get("vace_video"),
@@ -676,16 +454,13 @@ class VideoActionTrainingModule(DiffusionTrainingModule):
 
         inputs_shared, inputs_posi, inputs_nega = inputs
 
-        # Compute joint loss
-        result = FlowMatchVideoActionSFTLoss(
+        # Compute joint loss via package-native loss function
+        result = self.loss_fn(
             pipe=self.pipe,
-            action_dit=self.action_dit,
+            architecture=self.architecture,
             action_scheduler=self.action_scheduler,
             action_data=action_data,
-            lambda_video=self.lambda_video,
-            lambda_action=self.lambda_action,
             current_step=self.current_step,
-            detach_bridge=(self.bridge_type == "cross_attn_detach"),
             decoupled_sampler=getattr(self, "decoupled_sampler", None),
             **inputs_shared,
             **inputs_posi,
@@ -868,16 +643,13 @@ class VideoActionTrainingModule(DiffusionTrainingModule):
         else:
             action_data = None
 
-        # 9. Compute joint loss
-        result = FlowMatchVideoActionSFTLoss(
+        # 9. Compute joint loss via package-native loss function
+        result = self.loss_fn(
             pipe=self.pipe,
-            action_dit=self.action_dit,
+            architecture=self.architecture,
             action_scheduler=self.action_scheduler,
             action_data=action_data,
-            lambda_video=self.lambda_video,
-            lambda_action=self.lambda_action,
             current_step=self.current_step,
-            detach_bridge=(self.bridge_type == "cross_attn_detach"),
             decoupled_sampler=getattr(self, "decoupled_sampler", None),
             **batched_shared,
             **batched_posi,
