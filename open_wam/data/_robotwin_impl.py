@@ -17,7 +17,8 @@ import random
 import numpy as np
 import torch
 import h5py
-from abc import ABC, abstractmethod
+
+from open_wam.data.base import BaseActionDataset
 from PIL import Image
 from typing import Optional
 
@@ -245,35 +246,7 @@ def _resize_frame(
     return _crop_and_resize(image, target_height, target_width)
 
 
-class VideoActionDataset(torch.utils.data.Dataset, ABC):
-    """Abstract base for video-action datasets.
-
-    Subclasses must implement __getitem__ returning a dict with keys:
-        "video":                List[PIL.Image]   # target video (robot)
-        "vace_video":           List[PIL.Image] | None  # control video (optional)
-        "vace_reference_image": List[PIL.Image]   # [first frame of target]
-        "action_trajectory":    torch.Tensor       # (T, action_dim) normalized
-        "prompt":               str
-
-    All temporal dimensions must be aligned 1:1.
-    """
-
-    @property
-    @abstractmethod
-    def action_dim(self) -> int:
-        ...
-
-    @property
-    @abstractmethod
-    def action_stats(self) -> dict:
-        """Return {"mean": np.ndarray(action_dim,), "std": np.ndarray(action_dim,)}"""
-        ...
-
-    def denormalize_action(self, action: np.ndarray) -> np.ndarray:
-        stats = self.action_stats
-        return action * stats["std"] + stats["mean"]
-
-class RoboTwinDataset(VideoActionDataset):
+class RoboTwinDataset(BaseActionDataset):
     """RoboTwin 2.0 HDF5 dataset for bimanual robot video-action training.
 
     Reads episode HDF5 files with JPEG-encoded camera observations and
@@ -490,6 +463,10 @@ class RoboTwinDataset(VideoActionDataset):
     def action_stats(self) -> dict:
         return self._action_stats
 
+    def denormalize_action(self, action: np.ndarray) -> np.ndarray:
+        stats = self.action_stats
+        return action * stats["std"] + stats["mean"]
+
     def __len__(self):
         if self._val_samples is not None:
             return len(self._val_samples)
@@ -659,11 +636,13 @@ class RoboTwinDataset(VideoActionDataset):
         ep_info = ep_scene.get("info", ep_scene)
         active_arm = ep_info.get("{a}", ep_info.get("active_arm", "both"))
 
+        action_tensor = torch.from_numpy(actions)
         result = {
             "video": video,
             "vace_video": None,
             "vace_reference_image": vace_reference_image,
-            "action_trajectory": torch.from_numpy(actions),
+            "action_trajectory": action_tensor,
+            "action": action_tensor,  # BaseActionDataset compat
             "action_mask": action_mask,
             "prompt": prompt,
             # Metadata
@@ -678,7 +657,7 @@ class RoboTwinDataset(VideoActionDataset):
         return result
 
 
-class MultiTaskRoboTwinDataset(VideoActionDataset):
+class MultiTaskRoboTwinDataset(BaseActionDataset):
     """Multi-task wrapper over multiple RoboTwinDatasets.
 
     Concatenates per-task RoboTwinDatasets so one epoch covers all tasks.
@@ -755,6 +734,10 @@ class MultiTaskRoboTwinDataset(VideoActionDataset):
     @property
     def action_stats(self) -> dict:
         return self._action_stats_shared
+
+    def denormalize_action(self, action: np.ndarray) -> np.ndarray:
+        stats = self.action_stats
+        return action * stats["std"] + stats["mean"]
 
     def __len__(self):
         return self._total_length

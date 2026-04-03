@@ -1,15 +1,13 @@
-"""RoboTwin dataset wrappers conforming to the BaseActionDataset interface.
+"""RoboTwin dataset classes implementing BaseActionDataset.
 
-Thin wrappers around the package-native ``_robotwin_impl`` module.
-All behavior is delegated unchanged — this guarantees functional equivalence.
+The dataset implementations live in ``_robotwin_impl`` and directly
+implement the ``BaseActionDataset`` interface. This module re-exports
+them under the public API names along with constants and helpers.
 """
 
-from typing import Optional
-
-from open_wam.data.base import BaseActionDataset
 from open_wam.data._robotwin_impl import (
-    RoboTwinDataset as _LegacyRoboTwinDataset,
-    MultiTaskRoboTwinDataset as _LegacyMultiTaskRoboTwinDataset,
+    RoboTwinDataset as RoboTwinActionDataset,
+    MultiTaskRoboTwinDataset as MultiTaskRoboTwinActionDataset,
     ROBOTWIN_TRAIN_TASKS,
     ROBOTWIN_HOLDOUT_TASKS,
     ROBOTWIN_ALL_TASKS,
@@ -37,116 +35,3 @@ __all__ = [
     "assemble_multiview_grid",
     "extract_quadrant",
 ]
-
-
-class RoboTwinActionDataset(BaseActionDataset):
-    """RoboTwin 2.0 single-task dataset (wraps legacy RoboTwinDataset).
-
-    All parameters are forwarded to the legacy implementation unchanged.
-    ``__getitem__`` returns the legacy dict with ``action_trajectory`` aliased
-    as ``action`` for BaseActionDataset compatibility.
-    """
-
-    def __init__(
-        self,
-        data_root: str,
-        num_frames: int = 49,
-        height: int = 480,
-        width: int = 832,
-        split: str = "train",
-        val_ratio: float = 0.1,
-        repeat: int = 1,
-        task_name: Optional[str] = None,
-        seed: int = 42,
-        action_stats_path: Optional[str] = None,
-        num_val_samples: int = 4,
-        target_camera: str = "head_camera",
-        window_stride: int = 1,
-        multiview: bool = False,
-        robot: Optional[str] = None,
-        variant: str = "clean_50",
-        backbone: Optional[str] = None,
-    ):
-        self._legacy = _LegacyRoboTwinDataset(
-            data_root=data_root,
-            num_frames=num_frames,
-            height=height,
-            width=width,
-            split=split,
-            val_ratio=val_ratio,
-            repeat=repeat,
-            task_name=task_name,
-            seed=seed,
-            action_stats_path=action_stats_path,
-            num_val_samples=num_val_samples,
-            target_camera=target_camera,
-            window_stride=window_stride,
-            multiview=multiview,
-            robot=robot,
-            variant=variant,
-            backbone=backbone,
-        )
-
-    def __getitem__(self, idx: int) -> dict:
-        sample = self._legacy[idx]
-        # Alias for BaseActionDataset compatibility
-        sample["action"] = sample["action_trajectory"]
-        return sample
-
-    def __len__(self) -> int:
-        return len(self._legacy)
-
-    @property
-    def action_dim(self) -> int:
-        return self._legacy.action_dim
-
-    @property
-    def action_stats(self) -> Optional[dict]:
-        return self._legacy.action_stats
-
-    def denormalize_action(self, action):
-        return self._legacy.denormalize_action(action)
-
-
-class MultiTaskRoboTwinActionDataset(BaseActionDataset):
-    """RoboTwin 2.0 multi-task dataset (wraps legacy MultiTaskRoboTwinDataset).
-
-    All parameters are forwarded to the legacy implementation unchanged.
-    """
-
-    def __init__(
-        self,
-        dataset_dir: str,
-        robot: str,
-        variant: str = "clean_50",
-        tasks: Optional[list] = None,
-        action_stats_path: Optional[str] = None,
-        **kwargs,
-    ):
-        self._legacy = _LegacyMultiTaskRoboTwinDataset(
-            dataset_dir=dataset_dir,
-            robot=robot,
-            variant=variant,
-            tasks=tasks,
-            action_stats_path=action_stats_path,
-            **kwargs,
-        )
-
-    def __getitem__(self, idx: int) -> dict:
-        sample = self._legacy[idx]
-        sample["action"] = sample["action_trajectory"]
-        return sample
-
-    def __len__(self) -> int:
-        return len(self._legacy)
-
-    @property
-    def action_dim(self) -> int:
-        return self._legacy.action_dim
-
-    @property
-    def action_stats(self) -> Optional[dict]:
-        return self._legacy.action_stats
-
-    def denormalize_action(self, action):
-        return self._legacy.denormalize_action(action)
