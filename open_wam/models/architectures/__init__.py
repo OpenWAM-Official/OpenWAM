@@ -12,7 +12,6 @@ from open_wam.models.architectures.registry import (
 from open_wam.models.architectures.dual_system import DualSystemArchitecture  # noqa: F401
 from open_wam.models.architectures.moe_expert import MoEActionExpertArchitecture  # noqa: F401
 from open_wam.models.architectures.shared_backbone import SharedBackboneArchitecture  # noqa: F401
-from open_wam.models.architectures.mlp_action_head import MLPActionHeadArchitecture  # noqa: F401
 
 __all__ = [
     "BaseWAMArchitecture",
@@ -27,5 +26,4 @@ __all__ = [
     "DualSystemArchitecture",
     "MoEActionExpertArchitecture",
     "SharedBackboneArchitecture",
-    "MLPActionHeadArchitecture",
 ]

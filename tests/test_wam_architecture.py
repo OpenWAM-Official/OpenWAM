@@ -8,12 +8,10 @@ def test_architecture_registry_populated():
     assert "dual_system" in ARCHITECTURE_REGISTRY
     assert "moe_expert" in ARCHITECTURE_REGISTRY
     assert "shared_backbone" in ARCHITECTURE_REGISTRY
-    assert "mlp_action_head" in ARCHITECTURE_REGISTRY
-    assert len(ARCHITECTURE_REGISTRY) >= 4
+    assert len(ARCHITECTURE_REGISTRY) == 3
     assert ARCHITECTURE_SUPPORT["dual_system"].supported is True
     assert ARCHITECTURE_SUPPORT["moe_expert"].supported is True
     assert ARCHITECTURE_SUPPORT["shared_backbone"].supported is True
-    assert ARCHITECTURE_SUPPORT["mlp_action_head"].supported is True
 
 
 def test_architecture_support_lists():
@@ -27,9 +25,7 @@ def test_architecture_support_lists():
     assert "dual_system" in supported
     assert "moe_expert" in supported
     assert "shared_backbone" in supported
-    assert "mlp_action_head" in supported
     assert get_architecture_support("shared_backbone").status == "supported"
-    assert get_architecture_support("mlp_action_head").status == "supported"
 
 
 def test_build_architecture_dual_system():
@@ -212,66 +208,6 @@ def test_moe_expert_ffn_zero_init():
     # Output head should be zero
     assert torch.all(dit.output_head.weight == 0)
     assert torch.all(dit.output_head.bias == 0)
-
-
-def test_build_architecture_mlp_action_head():
-    """MLP action head should build successfully."""
-    from open_wam.models.architectures import build_architecture
-    cfg = {
-        "action_dim": 7,
-        "video_dim": 128,
-        "hidden_dim": 64,
-        "bridge_layers": (0, 1),
-    }
-    arch = build_architecture("mlp_action_head", cfg)
-    assert arch.action_dim == 7
-    assert arch.bridge_layers == (0, 1)
-    assert arch.is_interleaved is False
-
-
-def test_mlp_action_head_prepare_and_extract():
-    """Smoke test: MLP action head prepare, collect bridges, and extract."""
-    from open_wam.models.architectures import build_architecture
-    cfg = {
-        "action_dim": 7,
-        "video_dim": 128,
-        "hidden_dim": 64,
-        "bridge_layers": (0, 1),
-    }
-    arch = build_architecture("mlp_action_head", cfg)
-    arch.eval()
-
-    B, T_action, T_video = 1, 10, 20
-
-    noisy_actions = torch.randn(B, T_action, 7)
-    timestep = torch.tensor([500.0])
-
-    state = arch.prepare_action_tokens(noisy_actions, timestep)
-    assert "bridge_features" in state.extra
-    assert len(state.extra["bridge_features"]) == 0
-
-    # Simulate video DiT blocks producing video hidden states
-    video_hidden = torch.randn(B, T_video, 128)
-    for block_id in range(2):
-        video_hidden, state = arch.on_dit_block(block_id, video_hidden, state)
-
-    assert len(state.extra["bridge_features"]) == 2
-
-    # Extract action prediction
-    with torch.no_grad():
-        action_pred = arch.extract_action_prediction(state)
-    assert action_pred.shape == (B, T_action, 7)
-
-
-def test_mlp_action_head_output_zero_init():
-    """Verify MLP output layer is zero-initialized."""
-    from open_wam.models.architectures import build_architecture
-    cfg = {"action_dim": 7, "video_dim": 64, "hidden_dim": 32, "bridge_layers": (0,)}
-    arch = build_architecture("mlp_action_head", cfg)
-    # Last layer of mlp sequential is the output linear
-    output_layer = arch.mlp[-1]
-    assert torch.all(output_layer.weight == 0)
-    assert torch.all(output_layer.bias == 0)
 
 
 def test_register_custom_architecture():
