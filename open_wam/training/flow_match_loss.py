@@ -23,9 +23,12 @@ Usage:
     )
 """
 
+from typing import Optional, Union
+
 import torch
 import torch.nn.functional as F
-from typing import Optional
+
+from open_wam.models.architectures.base import BaseWAMArchitecture
 
 
 class FlowMatchVideoActionLoss:
@@ -54,23 +57,25 @@ class FlowMatchVideoActionLoss:
     def __call__(
         self,
         pipe,
-        action_dit,
-        action_scheduler,
-        action_data: torch.Tensor,
+        action_dit=None,
+        action_scheduler=None,
+        action_data: Optional[torch.Tensor] = None,
         current_step: int = 0,
         decoupled_sampler=None,
+        architecture: Optional[BaseWAMArchitecture] = None,
         **inputs,
     ) -> dict:
         """Compute joint video-action flow matching loss.
 
         Args:
             pipe: WanVideoPipeline with scheduler and model_fn.
-            action_dit: ActionDiT model.
+            action_dit: Raw ActionDiT model (legacy, prefer ``architecture``).
             action_scheduler: FlowMatchScheduler for action stream.
             action_data: (B, T_action, action_dim) ground truth actions.
             current_step: Current training step (for decoupled warmup).
             decoupled_sampler: Optional DecoupledFlowMatchLoss for
                 Beta-distributed video timesteps.
+            architecture: WAM architecture (preferred over raw action_dit).
             **inputs: Pipeline inputs, must include ``input_latents``
                 (B, C, T, H, W) clean video latents.
 
@@ -78,6 +83,11 @@ class FlowMatchVideoActionLoss:
             dict with keys: loss, loss_video, loss_action, video_weight,
             loss_video_unweighted, loss_action_unweighted, loss_scale_ratio.
         """
+        # Resolve architecture from action_dit for backward compat
+        if architecture is None and action_dit is not None:
+            from open_wam.models.architectures.dual_system import DualSystemArchitecture
+            architecture = DualSystemArchitecture(cfg=None)
+            architecture.action_dit = action_dit
         max_timestep_boundary = int(
             inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps)
         )
@@ -110,7 +120,7 @@ class FlowMatchVideoActionLoss:
         # --- Prepare action data ---
         action_dit_state, noisy_actions, action_target, action_timesteps, action_timestep_ids = (
             self._prepare_actions(
-                B, action_dit, action_scheduler, action_data,
+                B, architecture, action_scheduler, action_data,
                 decoupled_sampler, current_step, pipe, inputs,
             )
         )
@@ -118,7 +128,7 @@ class FlowMatchVideoActionLoss:
         # --- Video forward pass ---
         models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
         use_interleaved = (
-            action_dit.bridge_type == "joint_self_attn" and self.lambda_action > 0
+            architecture.is_interleaved and self.lambda_action > 0
         )
 
         if use_interleaved:
@@ -131,7 +141,7 @@ class FlowMatchVideoActionLoss:
             video_noise_pred = pipe.model_fn(
                 **models, **inputs, timestep=video_timesteps,
                 bridge_feature_store=bridge_features,
-                bridge_feature_layers=action_dit.bridge_layers_set,
+                bridge_feature_layers=set(architecture.bridge_layers),
                 bridge_feature_detach=self.detach_bridge,
             )
 
@@ -152,13 +162,19 @@ class FlowMatchVideoActionLoss:
         if use_interleaved:
             action_noise_pred = action_dit_state.action_noise_pred
         else:
-            action_noise_pred = action_dit(
-                action_tokens=noisy_actions,
-                video_features=bridge_features,
-                timestep=action_timesteps,
+            # Use architecture interface: prepare → feed bridge features → extract
+            action_state = architecture.prepare_action_tokens(
+                noisy_actions, action_timesteps,
                 use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
             )
+            sorted_layers = sorted(architecture.bridge_layers)
+            for layer_idx, layer_id in enumerate(sorted_layers):
+                if layer_idx < len(bridge_features):
+                    _, action_state = architecture.on_dit_block(
+                        layer_id, bridge_features[layer_idx], action_state
+                    )
+            action_noise_pred = architecture.extract_action_prediction(action_state)
 
         loss_action = self._compute_action_loss(
             action_noise_pred, action_target, action_timestep_ids,
@@ -206,7 +222,7 @@ class FlowMatchVideoActionLoss:
             return torch.randint(min_b, max_b, (B,))
 
     def _prepare_actions(
-        self, B, action_dit, action_scheduler, action_data,
+        self, B, architecture, action_scheduler, action_data,
         decoupled_sampler, current_step, pipe, inputs,
     ):
         """Prepare noisy actions, targets, and optional interleaved state."""
@@ -246,15 +262,16 @@ class FlowMatchVideoActionLoss:
         noisy_actions = (1 - sigma_bc) * action_data + sigma_bc * action_noise
         action_target = action_noise - action_data
 
-        # Interleaved state for joint_self_attn
+        # Interleaved state for joint_self_attn — the pipe.model_fn needs
+        # the internal dit_state from the architecture's ActionState.
         action_dit_state = None
-        use_interleaved = (action_dit.bridge_type == "joint_self_attn")
-        if use_interleaved:
-            action_dit_state = action_dit.prepare_action_state(
+        if architecture.is_interleaved:
+            action_state = architecture.prepare_action_tokens(
                 noisy_actions, action_timesteps,
                 use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
             )
+            action_dit_state = action_state.extra.get("dit_state")
 
         return action_dit_state, noisy_actions, action_target, action_timesteps, action_timestep_ids
 
