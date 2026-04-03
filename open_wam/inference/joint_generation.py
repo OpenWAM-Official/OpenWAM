@@ -302,9 +302,11 @@ def generate_video_and_actions(
             bridge_features = cached_bridge
 
         if video_stepping:
-            inputs_shared["latents"] = inputs_shared["latents"] + noise_pred * (sigma_v_next - sigma_v)
+            new_latents = inputs_shared["latents"] + noise_pred * (sigma_v_next - sigma_v)
             if "first_frame_latents" in inputs_shared:
-                inputs_shared["latents"][:, :, 0:1] = inputs_shared["first_frame_latents"]
+                new_latents = new_latents.clone()
+                new_latents[:, :, 0:1] = inputs_shared["first_frame_latents"]
+            inputs_shared["latents"] = new_latents
 
         if action_stepping:
             if action_noise_pred is None:
