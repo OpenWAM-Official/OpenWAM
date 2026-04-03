@@ -1,6 +1,6 @@
-"""Action statistics computation, re-exported from legacy module."""
+"""Action statistics computation for RoboTwin datasets."""
 
-from open_wam._legacy_imports import (
+from open_wam.data._action_stats_impl import (
     compute_action_stats,
     compute_multitask_robotwin_stats,
     parse_tasks_file,
