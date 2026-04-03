@@ -47,8 +47,8 @@ include = ["open_wam", "open_wam.*", "third_party.diffsynth", "third_party.diffs
 
 [project.optional-dependencies]
 serving = [
-    "websockets",
-    "aiohttp"
+    "websockets<15",
+    "aiohttp<4"
 ]
 npu_aarch64 = [
     "torch==2.7.1",
