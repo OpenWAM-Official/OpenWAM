@@ -11,7 +11,7 @@ def test_architecture_registry_populated():
     assert len(ARCHITECTURE_REGISTRY) == 3
     assert ARCHITECTURE_SUPPORT["dual_system"].supported is True
     assert ARCHITECTURE_SUPPORT["moe_expert"].supported is True
-    assert ARCHITECTURE_SUPPORT["shared_backbone"].supported is False
+    assert ARCHITECTURE_SUPPORT["shared_backbone"].supported is True
 
 
 def test_architecture_support_lists():
@@ -21,9 +21,11 @@ def test_architecture_support_lists():
         list_supported_architectures,
     )
 
-    assert list_supported_architectures() == ("dual_system", "moe_expert")
-    assert list_experimental_architectures() == ("shared_backbone",)
-    assert get_architecture_support("shared_backbone").status == "experimental"
+    supported = list_supported_architectures()
+    assert "dual_system" in supported
+    assert "moe_expert" in supported
+    assert "shared_backbone" in supported
+    assert get_architecture_support("shared_backbone").status == "supported"
 
 
 def test_build_architecture_dual_system():
@@ -61,12 +63,13 @@ def test_build_architecture_moe():
 
 
 def test_build_architecture_shared():
-    """Experimental architectures should fail fast on the default path."""
+    """Shared backbone should build successfully."""
     from open_wam.models.architectures import build_architecture
-    import pytest
-    cfg = {"action_dim": 7, "video_dim": 256, "num_action_tokens": 10}
-    with pytest.raises(NotImplementedError, match="experimental"):
-        build_architecture("shared_backbone", cfg)
+    cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
+    arch = build_architecture("shared_backbone", cfg)
+    assert arch.action_dim == 7
+    assert arch.bridge_layers == ()
+    assert arch.is_interleaved is True
 
 
 def test_build_architecture_unknown():
@@ -150,6 +153,44 @@ def test_moe_expert_prepare_and_extract():
     with torch.no_grad():
         action_pred = arch.extract_action_prediction(state)
     assert action_pred.shape == (B, T_action, 7)
+
+
+def test_shared_backbone_prepare_and_extract():
+    """Smoke test: shared backbone prepare, on_dit_block (no-op), and extract."""
+    from open_wam.models.architectures import build_architecture
+    cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
+    arch = build_architecture("shared_backbone", cfg)
+    arch.eval()
+
+    B, T_action, T_video = 1, 10, 20
+
+    noisy_actions = torch.randn(B, T_action, 7)
+    timestep = torch.tensor([500.0])
+
+    state = arch.prepare_action_tokens(noisy_actions, timestep)
+    assert state.action_latents.shape == (B, T_action, 128)
+    assert state.extra["num_action_tokens"] == T_action
+
+    # Simulate video DiT blocks: action tokens are part of the combined sequence
+    video_hidden = torch.randn(B, T_video + T_action, 128)
+    for block_id in range(2):
+        video_hidden, state = arch.on_dit_block(block_id, video_hidden, state)
+
+    # Store final hidden state for extraction
+    state.extra["final_hidden"] = video_hidden
+
+    with torch.no_grad():
+        action_pred = arch.extract_action_prediction(state)
+    assert action_pred.shape == (B, T_action, 7)
+
+
+def test_shared_backbone_output_zero_init():
+    """Verify output head is zero-initialized."""
+    from open_wam.models.architectures import build_architecture
+    cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
+    arch = build_architecture("shared_backbone", cfg)
+    assert torch.all(arch.output_head.weight == 0)
+    assert torch.all(arch.output_head.bias == 0)
 
 
 def test_moe_expert_ffn_zero_init():
