@@ -87,7 +87,7 @@ def test_temporal_ensemble_fuses_predictions():
     a2 = policy.predict_action(obs)  # step 2, ensemble of gen1 + gen2
     assert engine.call_count == 2
     # a2 should be between 1.0 and 2.0 (weighted average)
-    assert 1.0 < float(a2) < 2.0 + 1e-6
+    assert 1.0 < float(a2.item()) < 2.0 + 1e-6
 
 
 def test_ensemble_newer_predictions_weighted_higher():
@@ -108,7 +108,7 @@ def test_ensemble_newer_predictions_weighted_higher():
     # With decay=0.3, gen1 weight=0.3, gen2 weight=1.0
     # Expected: (0.3*1 + 1.0*2) / (0.3+1.0) = 2.3/1.3 ≈ 1.77
     expected = (0.3 * 1.0 + 1.0 * 2.0) / (0.3 + 1.0)
-    np.testing.assert_allclose(float(a2), expected, atol=1e-5)
+    np.testing.assert_allclose(float(a2.item()), expected, atol=1e-5)
 
 
 def test_reset_clears_state():
