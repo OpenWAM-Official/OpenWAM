@@ -12,11 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_no_bare_diffsynth_import_in_open_wam():
-    """open_wam/ source files must use 'from third_party.diffsynth', not bare 'from diffsynth'.
-
-    The single exception is ``_legacy_imports.py`` which is the designated
-    boundary module for examples/wanvideo/wam legacy code.
-    """
+    """open_wam/ source files must use 'from third_party.diffsynth', not bare 'from diffsynth'."""
     open_wam_dir = PROJECT_ROOT / "open_wam"
     violations = []
 
@@ -40,17 +36,12 @@ def test_no_bare_diffsynth_import_in_open_wam():
     )
 
 
-def test_no_sys_path_insert_in_open_wam_except_legacy():
-    """open_wam/ must not use sys.path.insert except in _legacy_imports.py."""
+def test_no_sys_path_insert_in_open_wam():
+    """open_wam/ must not use sys.path.insert anywhere."""
     open_wam_dir = PROJECT_ROOT / "open_wam"
-    allowed_files = {
-        open_wam_dir / "_legacy_imports.py",
-    }
     violations = []
 
     for py_file in open_wam_dir.rglob("*.py"):
-        if py_file in allowed_files:
-            continue
         with open(py_file) as f:
             for i, line in enumerate(f, 1):
                 stripped = line.strip()
@@ -61,9 +52,16 @@ def test_no_sys_path_insert_in_open_wam_except_legacy():
                     violations.append(f"{rel}:{i}: {stripped}")
 
     assert violations == [], (
-        "open_wam/ should not use sys.path manipulation "
-        "(except in _legacy_imports.py).\n"
+        "open_wam/ must not use sys.path manipulation.\n"
         "Violations:\n" + "\n".join(violations)
+    )
+
+
+def test_no_legacy_imports_boundary():
+    """_legacy_imports.py should no longer exist — all code is package-native."""
+    assert not (PROJECT_ROOT / "open_wam" / "_legacy_imports.py").exists(), (
+        "open_wam/_legacy_imports.py still exists — legacy code should be "
+        "internalized into the package"
     )
 
 
