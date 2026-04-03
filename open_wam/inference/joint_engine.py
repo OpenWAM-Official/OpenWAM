@@ -90,6 +90,8 @@ class JointInferenceEngine(BaseInferenceEngine):
             cfg_scale=conditions.get("cfg_scale", getattr(inf_cfg, "cfg_scale", 1.0)),
             tiled=conditions.get("tiled", True),
             input_video_latents=conditions.get("input_video_latents", None),
+            num_inference_steps=num_steps,
+            shift=shift,
         )
 
         return {"video": video_frames, "actions": actions}

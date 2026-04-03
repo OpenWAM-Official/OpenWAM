@@ -24,24 +24,52 @@ def prepare_pipeline_inputs(
     seed: int = 42,
     cfg_scale: float = 1.0,
     tiled: bool = True,
+    num_inference_steps: int = 50,
+    shift: float = 5.0,
+    tile_size: tuple = (30, 52),
+    tile_stride: tuple = (15, 26),
 ):
-    """Replicate the pipeline input setup required by joint generation."""
-    pipe.scheduler.set_timesteps(num_inference_steps=50, shift=5.0)
+    """Build the full input dicts required by the Wan pipeline.
+
+    Args:
+        pipe: Loaded WanVideoPipeline.
+        prompt: Text prompt for generation.
+        negative_prompt: Negative prompt for CFG.
+        vace_video: Optional VACE conditioning video.
+        vace_reference_image: Optional reference image(s).
+        num_frames: Number of video frames to generate.
+        height: Video height in pixels.
+        width: Video width in pixels.
+        seed: Random seed.
+        cfg_scale: Classifier-free guidance scale.
+        tiled: Whether to use tiled VAE decoding.
+        num_inference_steps: Number of denoising steps for the scheduler.
+        shift: Timestep shift parameter for the Wan scheduler.
+        tile_size: Spatial tile size for tiled processing.
+        tile_stride: Spatial tile stride for tiled processing.
+    """
+    pipe.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
 
     inputs_posi = {
         "prompt": prompt,
         "vap_prompt": " ",
         "tea_cache_l1_thresh": None,
         "tea_cache_model_id": "",
-        "num_inference_steps": 50,
+        "num_inference_steps": num_inference_steps,
     }
     inputs_nega = {
         "negative_prompt": negative_prompt,
         "negative_vap_prompt": " ",
         "tea_cache_l1_thresh": None,
         "tea_cache_model_id": "",
-        "num_inference_steps": 50,
+        "num_inference_steps": num_inference_steps,
     }
+    # Default camera pose matrix — only used when camera_control_direction is
+    # not None, so this is effectively inert for WAM inference.
+    _DEFAULT_CAMERA_ORIGIN = (
+        0, 0.532139961, 0.946026558, 0.5, 0.5,
+        0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+    )
     inputs_shared = {
         "input_image": None,
         "end_image": None,
@@ -51,7 +79,7 @@ def prepare_pipeline_inputs(
         "reference_image": None,
         "camera_control_direction": None,
         "camera_control_speed": 1 / 54,
-        "camera_control_origin": (0, 0.532139961, 0.946026558, 0.5, 0.5, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0),
+        "camera_control_origin": _DEFAULT_CAMERA_ORIGIN,
         "vace_video": vace_video,
         "vace_video_mask": None,
         "vace_reference_image": vace_reference_image,
@@ -63,12 +91,12 @@ def prepare_pipeline_inputs(
         "num_frames": num_frames,
         "cfg_scale": cfg_scale,
         "cfg_merge": False,
-        "sigma_shift": 5.0,
+        "sigma_shift": shift,
         "motion_bucket_id": None,
         "longcat_video": None,
         "tiled": tiled,
-        "tile_size": (30, 52),
-        "tile_stride": (15, 26),
+        "tile_size": tile_size,
+        "tile_stride": tile_stride,
         "sliding_window_size": None,
         "sliding_window_stride": None,
         "input_audio": None,
@@ -108,6 +136,10 @@ def generate_video_and_actions(
     cfg_scale: float = 1.0,
     tiled: bool = True,
     input_video_latents: Optional[torch.Tensor] = None,
+    num_inference_steps: int = 50,
+    shift: float = 5.0,
+    tile_size: tuple = (30, 52),
+    tile_stride: tuple = (15, 26),
 ):
     """Execute joint video-action denoising driven by a schedule.
 
@@ -126,6 +158,10 @@ def generate_video_and_actions(
         cfg_scale: Classifier-free guidance scale.
         tiled: Whether to use tiled VAE decoding.
         input_video_latents: Pre-encoded video latents (for action-only mode).
+        num_inference_steps: Number of denoising steps for the scheduler.
+        shift: Timestep shift parameter for the Wan scheduler.
+        tile_size: Spatial tile size for tiled processing.
+        tile_stride: Spatial tile stride for tiled processing.
 
     Returns:
         (video_frames, actions) — list of PIL images and (T, action_dim) numpy array.
@@ -145,6 +181,10 @@ def generate_video_and_actions(
         seed,
         cfg_scale,
         tiled,
+        num_inference_steps=num_inference_steps,
+        shift=shift,
+        tile_size=tile_size,
+        tile_stride=tile_stride,
     )
 
     if input_video_latents is not None:
