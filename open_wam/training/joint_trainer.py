@@ -1,6 +1,14 @@
-"""Joint video-action trainer wrapping the supported training runtime."""
+"""Joint video-action trainer wrapping the supported training runtime.
+
+.. deprecated::
+    Use :class:`~open_wam.training.native_trainer.NativeTrainer` instead.
+    ``JointTrainer`` delegates to the legacy ``VideoActionTrainingModule`` which
+    depends on ``third_party/diffsynth``. The ``NativeTrainer`` consumes Hydra
+    config directly and has no legacy dependencies.
+"""
 
 import os
+import warnings
 
 import logging
 import torch
@@ -12,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class JointTrainer(BaseTrainer):
-    """Joint video-action trainer.
+    """Joint video-action trainer (deprecated — use NativeTrainer instead).
 
     Wraps the legacy ``VideoActionTrainingModule`` behind the
     :class:`BaseTrainer` interface. The legacy module handles model
@@ -25,6 +33,12 @@ class JointTrainer(BaseTrainer):
     """
 
     def __init__(self, cfg, accelerator=None, dataset=None):
+        warnings.warn(
+            "JointTrainer is deprecated and will be removed in a future version. "
+            "Use NativeTrainer instead: training.trainer=native",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(cfg, model=None, dataset=dataset, accelerator=accelerator)
         self._build_legacy_module(cfg, accelerator, dataset)
 

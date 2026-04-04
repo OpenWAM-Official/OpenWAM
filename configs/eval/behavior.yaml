@@ -1,0 +1,21 @@
+# BEHAVIOR-1K benchmark evaluation configuration
+# Everyday household activities in OmniGibson
+# Install: pip install omnigibson
+# See: https://behavior.stanford.edu/
+
+type: behavior
+num_episodes: 10
+max_steps_per_episode: 1000
+image_height: 256
+image_width: 256
+scene_model: Rs_int
+robot: Fetch
+
+# Task list (null = all BEHAVIOR_TASKS)
+tasks: null
+
+policy:
+  history_len: 10
+  execute_horizon: 8
+  temporal_ensemble: true
+  ensemble_decay: 0.5

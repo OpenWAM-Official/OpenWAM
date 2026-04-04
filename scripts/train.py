@@ -1,8 +1,11 @@
 """Hydra entry point for the supported OpenWAM training workflow.
 
 Usage:
-    # Default config (joint training, vace backbone, robotwin_multitask)
-    python scripts/train.py
+    # Default: native trainer (no legacy dependencies)
+    python scripts/train.py training.trainer=native
+
+    # Legacy trainer (backward-compatible, deprecated)
+    python scripts/train.py training.trainer=legacy
 
     # Override from CLI
     python scripts/train.py training=video_only model/backbone=ti2v_5b \
@@ -27,19 +30,59 @@ WAM_DIR = PROJECT_ROOT / "examples" / "wanvideo" / "wam"
 THIRD_PARTY = PROJECT_ROOT / "third_party"
 
 
-@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="config")
-def main(cfg: DictConfig) -> None:
-    print("=" * 60)
-    print("OpenWAM Training — Hydra Config")
-    print("=" * 60)
-    print(OmegaConf.to_yaml(cfg))
-    print("=" * 60)
+def _train_native(cfg: DictConfig) -> None:
+    """Package-native training path — no legacy dependencies."""
+    import accelerate
 
-    # Ensure WAM example scripts and third-party packages are importable
-    sys.path.insert(0, str(WAM_DIR))
-    sys.path.insert(0, str(PROJECT_ROOT))
-    sys.path.insert(0, str(THIRD_PARTY))
+    from open_wam.training.native_trainer import NativeTrainer
+    from open_wam.training.runtime import (
+        build_training_dataset,
+        cfg_to_flat_namespace,
+        parse_task_overrides,
+    )
+    from open_wam.training.config_tracking import (
+        build_run_metadata,
+        get_git_commit,
+        make_run_id,
+    )
 
+    t = cfg.training
+
+    accelerator = accelerate.Accelerator(
+        gradient_accumulation_steps=int(t.gradient_accumulation_steps),
+        kwargs_handlers=[
+            accelerate.DistributedDataParallelKwargs(
+                find_unused_parameters=bool(t.find_unused_parameters)
+            )
+        ],
+    )
+
+    # Build dataset (still uses cfg_to_flat_namespace for dataset routing)
+    args = cfg_to_flat_namespace(cfg)
+    train_tasks, holdout_tasks = parse_task_overrides(args)
+    dataset = build_training_dataset(args, train_tasks=train_tasks, holdout_tasks=holdout_tasks)
+
+    # Build native trainer
+    trainer = NativeTrainer(cfg, accelerator=accelerator, dataset=dataset)
+
+    # Save config artifacts
+    run_id = make_run_id()
+    hydra_output_dir = None
+    if HydraConfig.initialized():
+        hydra_output_dir = HydraConfig.get().runtime.output_dir
+    run_metadata = build_run_metadata(
+        run_id=run_id,
+        output_dir=t.output_path,
+        hydra_output_dir=hydra_output_dir,
+        git_commit=get_git_commit(PROJECT_ROOT),
+    )
+
+    # Run training
+    trainer.train()
+
+
+def _train_legacy(cfg: DictConfig) -> None:
+    """Legacy training path — uses VideoActionTrainingModule + third_party/diffsynth."""
     from open_wam.training.config_tracking import (
         build_run_metadata,
         get_git_commit,
@@ -92,7 +135,7 @@ def main(cfg: DictConfig) -> None:
         keep_last_k_ckpts=args.keep_last_k_ckpts,
     )
 
-    # --- Callback system (DynamiCrafter-inspired) ---
+    # --- Callback system ---
     from open_wam.training.callbacks import (
         CallbackRunner, ValidationLossCallback, VideoLogCallback, SetupCallback,
     )
@@ -137,6 +180,27 @@ def main(cfg: DictConfig) -> None:
         accelerator, dataset, model, model_logger, args=args,
         val_callback=val_callback, val_steps=callback_interval,
     )
+
+
+@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="config")
+def main(cfg: DictConfig) -> None:
+    print("=" * 60)
+    print("OpenWAM Training — Hydra Config")
+    print("=" * 60)
+    print(OmegaConf.to_yaml(cfg))
+    print("=" * 60)
+
+    # Ensure WAM example scripts and third-party packages are importable
+    sys.path.insert(0, str(WAM_DIR))
+    sys.path.insert(0, str(PROJECT_ROOT))
+    sys.path.insert(0, str(THIRD_PARTY))
+
+    trainer_type = getattr(cfg.training, "trainer", "legacy")
+
+    if trainer_type == "native":
+        _train_native(cfg)
+    else:
+        _train_legacy(cfg)
 
 
 if __name__ == "__main__":

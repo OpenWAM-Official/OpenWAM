@@ -1,4 +1,10 @@
-"""Training boundary helpers for OpenWAM's package-native entrypoints."""
+"""Training boundary helpers for OpenWAM's package-native entrypoints.
+
+.. deprecated::
+    This module wraps ``third_party/diffsynth`` training infrastructure.
+    Use :class:`~open_wam.training.native_trainer.NativeTrainer` instead,
+    which has no legacy dependencies.
+"""
 
 from __future__ import annotations
 

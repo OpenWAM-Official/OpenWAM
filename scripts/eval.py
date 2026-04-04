@@ -157,10 +157,70 @@ def main(cfg: DictConfig) -> None:
         result_path = _save_results(results, output_dir)
         print(f"Results saved to {result_path}")
 
+    elif eval_type == "robocasa":
+        from open_wam.evaluation import RoboCasaEvaluator
+
+        evaluator = RoboCasaEvaluator(cfg=cfg, engine=engine)
+        results = evaluator.evaluate()
+
+        print("\n" + "=" * 60)
+        print("RoboCasa Evaluation Results:")
+        for k, v in results.items():
+            if k != "per_task":
+                print(f"  {k}: {v}")
+        print("=" * 60)
+
+        output_dir = getattr(eval_cfg, "output_dir", "eval_results/robocasa")
+        result_path = _save_results(results, output_dir)
+        print(f"Results saved to {result_path}")
+
+    elif eval_type == "calvin":
+        from open_wam.evaluation import CalvinEvaluator
+
+        evaluator = CalvinEvaluator(cfg=cfg, engine=engine)
+        results = evaluator.evaluate()
+
+        print("\n" + "=" * 60)
+        print("Calvin Evaluation Results:")
+        for k, v in results.items():
+            if k not in ("per_length_success", "completion_distribution"):
+                print(f"  {k}: {v}")
+        if "per_length_success" in results:
+            print("  Per-length success rates:")
+            for k, v in results["per_length_success"].items():
+                print(f"    {k}: {v:.3f}")
+        print("=" * 60)
+
+        output_dir = getattr(eval_cfg, "output_dir", "eval_results/calvin")
+        result_path = _save_results(results, output_dir)
+        print(f"Results saved to {result_path}")
+
+    elif eval_type == "behavior":
+        from open_wam.evaluation import BehaviorEvaluator
+
+        evaluator = BehaviorEvaluator(cfg=cfg, engine=engine)
+        results = evaluator.evaluate()
+
+        print("\n" + "=" * 60)
+        print("BEHAVIOR-1K Evaluation Results:")
+        for k, v in results.items():
+            if k not in ("per_task", "per_category"):
+                print(f"  {k}: {v}")
+        if "per_category" in results:
+            print("  Per-category success rates:")
+            for cat, cat_data in results["per_category"].items():
+                print(f"    {cat}: {cat_data['success_rate']:.3f}")
+        print("=" * 60)
+
+        output_dir = getattr(eval_cfg, "output_dir", "eval_results/behavior")
+        result_path = _save_results(results, output_dir)
+        print(f"Results saved to {result_path}")
+
     else:
         raise ValueError(
             f"Unknown eval type: {eval_type}. "
-            "Use 'offline', 'online', 'simpler_env', or 'libero'."
+            "Use 'offline', 'online', 'simpler_env', 'libero', "
+            "'robocasa', 'calvin', or 'behavior'."
         )
 
 

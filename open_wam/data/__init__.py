@@ -8,6 +8,7 @@ from open_wam.data.robotwin import (
 )
 from open_wam.data.droid import DROIDDataset
 from open_wam.data.bridge_v2 import BridgeV2Dataset
+from open_wam.data.oxe import OXEDataset, OXE_DATASET_REGISTRY
 from open_wam.data.mixture import MixtureDataset
 from open_wam.data.embodiment import (
     ActionSpaceAdapter,
@@ -25,6 +26,8 @@ __all__ = [
     "MultiTaskRoboTwinActionDataset",
     "DROIDDataset",
     "BridgeV2Dataset",
+    "OXEDataset",
+    "OXE_DATASET_REGISTRY",
     "MixtureDataset",
     "ActionSpaceAdapter",
     "EmbodimentConfig",

@@ -134,6 +134,51 @@ register_embodiment("arx-x5", EmbodimentConfig(
     },
 ))
 
+# KUKA iiwa (OXE) - 7DoF EEF delta
+register_embodiment("kuka", EmbodimentConfig(
+    name="kuka",
+    native_action_dim=7,
+    action_type="ee_delta",
+    bimanual=False,
+    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+))
+
+# Universal Robots UR5 (OXE) - 6DoF + gripper
+register_embodiment("ur5", EmbodimentConfig(
+    name="ur5",
+    native_action_dim=7,
+    action_type="ee_delta",
+    bimanual=False,
+    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+))
+
+# Rethink Sawyer (OXE) - 7DoF EEF delta
+register_embodiment("sawyer", EmbodimentConfig(
+    name="sawyer",
+    native_action_dim=7,
+    action_type="ee_delta",
+    bimanual=False,
+    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+))
+
+# UFactory xArm (OXE) - 7DoF EEF delta
+register_embodiment("xarm", EmbodimentConfig(
+    name="xarm",
+    native_action_dim=7,
+    action_type="ee_delta",
+    bimanual=False,
+    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+))
+
+# Kinova Jaco (OXE) - 7DoF EEF delta
+register_embodiment("jaco", EmbodimentConfig(
+    name="jaco",
+    native_action_dim=7,
+    action_type="ee_delta",
+    bimanual=False,
+    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+))
+
 # Aloha (bimanual) - 14DoF joint delta
 register_embodiment("aloha", EmbodimentConfig(
     name="aloha",

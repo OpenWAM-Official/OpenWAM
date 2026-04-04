@@ -18,13 +18,19 @@ from open_wam.data.robotwin import (
 )
 from open_wam.data.droid import DROIDDataset
 from open_wam.data.bridge_v2 import BridgeV2Dataset
+from open_wam.data.oxe import OXEDataset
 from open_wam.data.mixture import MixtureDataset
 from open_wam.training.legacy import VideoActionTrainingModule
 from open_wam.training.optimizer_groups import attach_optimizer_groups
 
 
 def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
-    """Convert Hydra config groups to the legacy training module arguments."""
+    """Convert Hydra config groups to the legacy training module arguments.
+
+    .. deprecated::
+        Used by the legacy training path. Prefer :class:`NativeTrainer`
+        which consumes DictConfig directly.
+    """
     t = cfg.training
     d = cfg.data
     m = cfg.model
@@ -128,6 +134,18 @@ def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
         args.holdout_tasks = None
         args.val_variant = None
         args.camera = d.get("camera", "image_0")
+    elif dtype == "oxe":
+        args.dataset_dir = d.dataset_dir
+        args.hdf5_data_root = None
+        args.task_name = None
+        args.train_tasks = None
+        args.holdout_tasks = None
+        args.val_variant = None
+        args.dataset_name = d.get("dataset_name", "fractal")
+        args.camera = d.get("camera", None)
+        args.action_key = d.get("action_key", None)
+        args.embodiment = d.get("embodiment", None)
+        args.canonical_action_dim = int(d.get("canonical_action_dim", 7))
     elif dtype == "mixture":
         args.dataset_dir = None
         args.hdf5_data_root = None
@@ -203,6 +221,20 @@ def _build_dataset_from_mixture_entry(entry) -> "BaseActionDataset":
             camera=get("camera", "image_0"),
             action_stats_path=get("action_stats_path", None),
         )
+    elif dtype == "oxe":
+        return OXEDataset(
+            dataset_dir=get("dataset_dir"),
+            dataset_name=get("dataset_name", "fractal"),
+            num_frames=int(get("num_frames", 49)),
+            height=int(get("height", 480)),
+            width=int(get("width", 832)),
+            split="train",
+            camera=get("camera", None),
+            action_key=get("action_key", None),
+            embodiment=get("embodiment", None),
+            canonical_action_dim=int(get("canonical_action_dim", 7)),
+            action_stats_path=get("action_stats_path", None),
+        )
     elif dtype in ("robotwin", "robotwin_multitask"):
         return MultiTaskRoboTwinActionDataset(
             dataset_dir=get("dataset_dir"),
@@ -270,6 +302,24 @@ def build_training_dataset(
             width=args.width,
             split="train",
             camera=getattr(args, "camera", "image_0"),
+            action_stats_path=args.action_stats_path,
+            val_ratio=args.val_ratio,
+        )
+
+    if args.dataset_type == "oxe":
+        if not args.dataset_dir:
+            raise ValueError("data.dataset_dir is required for oxe")
+        return OXEDataset(
+            dataset_dir=args.dataset_dir,
+            dataset_name=getattr(args, "dataset_name", "fractal"),
+            num_frames=args.num_frames,
+            height=args.height,
+            width=args.width,
+            split="train",
+            camera=getattr(args, "camera", None),
+            action_key=getattr(args, "action_key", None),
+            embodiment=getattr(args, "embodiment", None),
+            canonical_action_dim=int(getattr(args, "canonical_action_dim", 7)),
             action_stats_path=args.action_stats_path,
             val_ratio=args.val_ratio,
         )
@@ -378,6 +428,23 @@ def build_validation_datasets(
             width=args.width,
             split="val",
             camera=getattr(args, "camera", "image_0"),
+            action_stats_path=args.action_stats_path,
+            val_ratio=args.val_ratio,
+        )
+        return {"val": val_ds}, {"val": val_ds}
+
+    if args.dataset_type == "oxe":
+        val_ds = OXEDataset(
+            dataset_dir=args.dataset_dir,
+            dataset_name=getattr(args, "dataset_name", "fractal"),
+            num_frames=args.num_frames,
+            height=args.height,
+            width=args.width,
+            split="val",
+            camera=getattr(args, "camera", None),
+            action_key=getattr(args, "action_key", None),
+            embodiment=getattr(args, "embodiment", None),
+            canonical_action_dim=int(getattr(args, "canonical_action_dim", 7)),
             action_stats_path=args.action_stats_path,
             val_ratio=args.val_ratio,
         )

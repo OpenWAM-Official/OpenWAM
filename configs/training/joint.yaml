@@ -1,3 +1,6 @@
+# Trainer: "native" (package-native, recommended) or "legacy" (deprecated)
+trainer: native
+
 lambda_video: 1.0
 lambda_action: 1.0
 learning_rate: 1e-4

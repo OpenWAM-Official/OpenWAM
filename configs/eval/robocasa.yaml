@@ -1,0 +1,21 @@
+# RoboCasa benchmark evaluation configuration
+# Supports 23 kitchen manipulation tasks
+# Install: pip install robocasa robosuite
+
+type: robocasa
+num_episodes: 20
+max_steps_per_episode: 500
+seed: 42
+image_height: 256
+image_width: 256
+layout: 0
+style: 0
+
+# Task list (null = all ROBOCASA_TASKS)
+tasks: null
+
+policy:
+  history_len: 10
+  execute_horizon: 8
+  temporal_ensemble: true
+  ensemble_decay: 0.5
