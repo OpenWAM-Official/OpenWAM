@@ -14,3 +14,18 @@ data:
   val_ratio: 0.1
   split: train
   robot: franka
+
+  # Transform pipeline (optional — omit or set to null for legacy z-score path)
+  # transforms:
+  #   normalize:
+  #     mode: q99             # q99 | min_max | mean_std | scale
+  #     gripper_mode: binary  # binarize gripper dimension
+  #     gripper_indices: [6]
+  #   augmentation:
+  #     random_crop:
+  #       scale: [0.8, 1.0]
+  #     color_jitter:
+  #       brightness: 0.1
+  #       contrast: 0.1
+  #       saturation: 0.1
+  transforms: null

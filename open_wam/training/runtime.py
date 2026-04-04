@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from typing import Optional
 
 import numpy as np
@@ -20,6 +21,7 @@ from open_wam.data.droid import DROIDDataset
 from open_wam.data.bridge_v2 import BridgeV2Dataset
 from open_wam.data.oxe import OXEDataset
 from open_wam.data.mixture import MixtureDataset
+from open_wam.data.transforms.builder import build_transforms
 from open_wam.training.legacy import VideoActionTrainingModule
 from open_wam.training.optimizer_groups import attach_optimizer_groups
 
@@ -106,6 +108,9 @@ def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
         video_log_steps=t.video_log_steps,
         max_val_samples=int(d.get("max_val_samples", 500)),
     )
+
+    # Transform pipeline config (optional, None = legacy z-score path)
+    args.transforms_cfg = d.get("transforms", None)
 
     dtype = d.type
     args.dataset_type = dtype
@@ -196,57 +201,33 @@ def resolve_train_tasks(
 
 
 def _build_dataset_from_mixture_entry(entry) -> "BaseActionDataset":
-    """Build a single dataset from a mixture config entry."""
-    dtype = entry.get("type", "robotwin_multitask") if hasattr(entry, "get") else entry.type
-    get = entry.get if hasattr(entry, "get") else lambda k, d=None: getattr(entry, k, d)
+    """Build a single dataset from a mixture config entry.
 
-    if dtype == "droid":
-        return DROIDDataset(
-            dataset_dir=get("dataset_dir"),
-            num_frames=int(get("num_frames", 49)),
-            height=int(get("height", 480)),
-            width=int(get("width", 832)),
-            split="train",
-            camera=get("camera", "exterior_image_1_left"),
-            action_stats_path=get("action_stats_path", None),
-            action_type=get("action_type", "absolute"),
-        )
-    elif dtype == "bridge_v2":
-        return BridgeV2Dataset(
-            dataset_dir=get("dataset_dir"),
-            num_frames=int(get("num_frames", 49)),
-            height=int(get("height", 480)),
-            width=int(get("width", 832)),
-            split="train",
-            camera=get("camera", "image_0"),
-            action_stats_path=get("action_stats_path", None),
-        )
-    elif dtype == "oxe":
-        return OXEDataset(
-            dataset_dir=get("dataset_dir"),
-            dataset_name=get("dataset_name", "fractal"),
-            num_frames=int(get("num_frames", 49)),
-            height=int(get("height", 480)),
-            width=int(get("width", 832)),
-            split="train",
-            camera=get("camera", None),
-            action_key=get("action_key", None),
-            embodiment=get("embodiment", None),
-            canonical_action_dim=int(get("canonical_action_dim", 7)),
-            action_stats_path=get("action_stats_path", None),
-        )
-    elif dtype in ("robotwin", "robotwin_multitask"):
-        return MultiTaskRoboTwinActionDataset(
-            dataset_dir=get("dataset_dir"),
-            robot=get("robot", "arx-x5"),
-            variant=get("variant", "clean_50"),
-            num_frames=int(get("num_frames", 49)),
-            height=int(get("height", 480)),
-            width=int(get("width", 832)),
-            split="train",
-        )
-    else:
-        raise ValueError(f"Unknown mixture sub-dataset type: {dtype}")
+    Uses the Dataset Registry for dispatch — no more if-else chains.
+    """
+    from open_wam.data.registry import build_dataset
+    return build_dataset(entry, split="train")
+
+
+def _build_transforms_from_args(args: argparse.Namespace):
+    """Build transform pipeline from namespace config, if present."""
+    transforms_cfg = getattr(args, "transforms_cfg", None)
+    if transforms_cfg is None:
+        return None
+
+    # Load action stats for normalization if available
+    action_stats = None
+    stats_path = getattr(args, "action_stats_path", None)
+    if stats_path and os.path.exists(stats_path):
+        stats = np.load(stats_path, allow_pickle=True).item()
+        action_stats = stats
+
+    return build_transforms(
+        transforms_cfg,
+        action_stats=action_stats,
+        height=args.height,
+        width=args.width,
+    )
 
 
 def build_training_dataset(
@@ -277,6 +258,8 @@ def build_training_dataset(
             backbone=args.backbone,
         )
 
+    transforms = _build_transforms_from_args(args)
+
     if args.dataset_type == "droid":
         if not args.dataset_dir:
             raise ValueError("data.dataset_dir is required for droid")
@@ -287,9 +270,10 @@ def build_training_dataset(
             width=args.width,
             split="train",
             camera=getattr(args, "camera", "exterior_image_1_left"),
-            action_stats_path=args.action_stats_path,
+            action_stats_path=args.action_stats_path if transforms is None else None,
             action_type=getattr(args, "action_type", "absolute"),
             val_ratio=args.val_ratio,
+            transforms=transforms,
         )
 
     if args.dataset_type == "bridge_v2":
@@ -302,8 +286,9 @@ def build_training_dataset(
             width=args.width,
             split="train",
             camera=getattr(args, "camera", "image_0"),
-            action_stats_path=args.action_stats_path,
+            action_stats_path=args.action_stats_path if transforms is None else None,
             val_ratio=args.val_ratio,
+            transforms=transforms,
         )
 
     if args.dataset_type == "oxe":
@@ -320,8 +305,9 @@ def build_training_dataset(
             action_key=getattr(args, "action_key", None),
             embodiment=getattr(args, "embodiment", None),
             canonical_action_dim=int(getattr(args, "canonical_action_dim", 7)),
-            action_stats_path=args.action_stats_path,
+            action_stats_path=args.action_stats_path if transforms is None else None,
             val_ratio=args.val_ratio,
+            transforms=transforms,
         )
 
     if args.dataset_type == "mixture":

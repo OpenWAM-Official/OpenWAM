@@ -161,9 +161,11 @@ class ActionNormalizer(Normalizer):
         stats: Optional[Dict[str, np.ndarray]] = None,
         gripper_mode: Optional[str] = None,
         gripper_indices: Optional[list] = None,
-        **kwargs,
+        binary_threshold: float = 0.5,
+        eps: float = 1e-6,
     ):
-        super().__init__(mode=mode, stats=stats, apply_to=["action", "action_trajectory"], **kwargs)
+        super().__init__(mode=mode, stats=stats, binary_threshold=binary_threshold, eps=eps)
+        self.apply_to = ["action", "action_trajectory"]
         self.gripper_mode = gripper_mode
         self.gripper_indices = gripper_indices or []
 
@@ -172,7 +174,7 @@ class ActionNormalizer(Normalizer):
         if gripper_mode and gripper_indices:
             self._gripper_normalizer = Normalizer(
                 mode=gripper_mode,
-                binary_threshold=kwargs.get("binary_threshold", 0.5),
+                binary_threshold=binary_threshold,
             )
 
     def normalize(self, x: np.ndarray) -> np.ndarray:

@@ -20,3 +20,6 @@ canonical_action_dim: 7
 action_stats_path: null
 val_ratio: 0.1
 seed: 42
+
+# Transform pipeline (optional — omit or set to null for legacy z-score path)
+transforms: null

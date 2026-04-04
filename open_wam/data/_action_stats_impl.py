@@ -35,7 +35,10 @@ def compute_action_stats(data_root: str) -> dict:
 
 
 def _compute_robotwin_stats(data_root: str) -> dict:
-    """Compute stats for RoboTwin format: joint_action/vector (T, 14|16)."""
+    """Compute extended stats for RoboTwin format: joint_action/vector (T, 14|16).
+
+    Returns dict with mean, std, min, max, q01, q99 (backward compatible).
+    """
     # RoboTwin uses episode0.hdf5 (no underscore)
     pattern = os.path.join(data_root, "episode*.hdf5")
     files = sorted(glob.glob(pattern))
@@ -47,6 +50,7 @@ def _compute_robotwin_stats(data_root: str) -> dict:
         action_dim = f["joint_action/vector"].shape[1]
     print(f"  Auto-detected action_dim={action_dim} from {os.path.basename(files[0])}")
 
+    all_actions = []
     running_sum = np.zeros(action_dim, dtype=np.float64)
     running_sum_sq = np.zeros(action_dim, dtype=np.float64)
     total_count = 0
@@ -67,6 +71,7 @@ def _compute_robotwin_stats(data_root: str) -> dict:
         running_sum += actions.sum(axis=0)
         running_sum_sq += (actions ** 2).sum(axis=0)
         total_count += T
+        all_actions.append(actions)
 
         if (i + 1) % 100 == 0 or (i + 1) == len(files):
             print(f"  [{i+1}/{len(files)}] processed, total timesteps: {total_count}")
@@ -80,7 +85,17 @@ def _compute_robotwin_stats(data_root: str) -> dict:
     std = np.sqrt(variance)
     std = np.maximum(std, 1e-3)
 
-    return {"mean": mean, "std": std}
+    # Compute percentile stats for q99 normalization
+    concatenated = np.concatenate(all_actions, axis=0)
+
+    return {
+        "mean": mean,
+        "std": std,
+        "min": concatenated.min(axis=0),
+        "max": concatenated.max(axis=0),
+        "q01": np.percentile(concatenated, 1, axis=0),
+        "q99": np.percentile(concatenated, 99, axis=0),
+    }
 
 
 def compute_multitask_robotwin_stats(
@@ -153,8 +168,42 @@ def compute_multitask_robotwin_stats(
     std = np.sqrt(variance)
     std = np.maximum(std, 1e-3)
 
+    # Compute percentile stats — requires collecting all actions
+    # For very large datasets this may use significant memory;
+    # consider streaming percentile estimation for production use.
+    all_actions_list = []
+    for _, data_root in task_roots:
+        pattern = os.path.join(data_root, "episode*.hdf5")
+        for path in sorted(glob.glob(pattern)):
+            try:
+                with h5py.File(path, "r") as f:
+                    if "joint_action/vector" not in f:
+                        continue
+                    all_actions_list.append(f["joint_action/vector"][:].astype(np.float64))
+            except Exception:
+                continue
+
+    if all_actions_list:
+        concatenated = np.concatenate(all_actions_list, axis=0)
+        stats_min = concatenated.min(axis=0)
+        stats_max = concatenated.max(axis=0)
+        q01 = np.percentile(concatenated, 1, axis=0)
+        q99 = np.percentile(concatenated, 99, axis=0)
+    else:
+        stats_min = mean - 3 * std
+        stats_max = mean + 3 * std
+        q01 = mean - 2.326 * std  # ~1st percentile of normal
+        q99 = mean + 2.326 * std
+
     print(f"\nTotal: {total_count} timesteps across {len(task_roots)} tasks")
-    return {"mean": mean, "std": std}
+    return {
+        "mean": mean,
+        "std": std,
+        "min": stats_min,
+        "max": stats_max,
+        "q01": q01,
+        "q99": q99,
+    }
 
 
 def parse_tasks_file(tasks_file: str) -> list:

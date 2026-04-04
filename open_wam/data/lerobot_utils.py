@@ -87,13 +87,16 @@ def load_episode_video_frames(
 def compute_dataset_action_stats(
     all_actions: List[np.ndarray],
 ) -> dict:
-    """Compute mean and std of actions across all episodes.
+    """Compute extended action statistics across all episodes.
+
+    Computes mean, std, min, max, q01, q99 for all normalization modes.
+    Backward compatible — old code that reads only ``mean``/``std`` still works.
 
     Args:
         all_actions: List of (T_i, action_dim) arrays.
 
     Returns:
-        {"mean": (action_dim,), "std": (action_dim,)} as float32.
+        dict with float32 arrays: mean, std, min, max, q01, q99.
     """
     concatenated = np.concatenate(all_actions, axis=0).astype(np.float64)
     mean = concatenated.mean(axis=0)
@@ -101,6 +104,10 @@ def compute_dataset_action_stats(
     return {
         "mean": mean.astype(np.float32),
         "std": std.astype(np.float32),
+        "min": concatenated.min(axis=0).astype(np.float32),
+        "max": concatenated.max(axis=0).astype(np.float32),
+        "q01": np.percentile(concatenated, 1, axis=0).astype(np.float32),
+        "q99": np.percentile(concatenated, 99, axis=0).astype(np.float32),
     }
 
 
