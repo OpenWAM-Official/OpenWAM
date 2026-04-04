@@ -430,6 +430,10 @@ class VideoActionTrainingModule(DiffusionTrainingModule):
 
     def _forward_single(self, data, inputs=None):
         """Original single-sample forward path."""
+        # Add pipeline-specific conditioning (VACE fields) if missing
+        from open_wam.data.transforms.pipeline import VACEConditioningTransform
+        data = VACEConditioningTransform().apply(data)
+
         if inputs is None:
             inputs = self.get_pipeline_inputs(data)
         inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
@@ -470,6 +474,10 @@ class VideoActionTrainingModule(DiffusionTrainingModule):
 
     def _forward_batch(self, data_list):
         """Batched forward: encode all samples in one VAE / text-encoder pass."""
+        from open_wam.data.transforms.pipeline import VACEConditioningTransform
+        _vace_tf = VACEConditioningTransform()
+        data_list = [_vace_tf.apply(s) for s in data_list]
+
         B = len(data_list)
         pipe = self.pipe
 

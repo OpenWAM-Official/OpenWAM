@@ -180,8 +180,6 @@ class LeRobotBaseDataset(BaseActionDataset):
             "action_trajectory": torch.from_numpy(actions),
             "action_mask": torch.from_numpy(action_mask),
             "prompt": "robot manipulation task",
-            "vace_video": None,
-            "vace_reference_image": [frames[0]] if frames else None,
             "episode_index": episode_id,
         }
 
@@ -196,7 +194,12 @@ class LeRobotBaseDataset(BaseActionDataset):
     def _load_video_frames(
         self, episode: dict, episode_id: int, start: int, end: int,
     ) -> List[Image.Image]:
-        """Load video frames from MP4."""
+        """Load video frames from MP4 using the best available backend.
+
+        Backend priority: decord → opencv → imageio.
+        Override via ``OPENWAM_VIDEO_BACKEND`` env var or
+        ``open_wam.data.video_reader.set_video_backend()``.
+        """
         video_dir = episode.get("video_dir")
         if video_dir is None:
             return [Image.new("RGB", (self.width, self.height)) for _ in range(end - start)]
@@ -208,18 +211,11 @@ class LeRobotBaseDataset(BaseActionDataset):
             logger.warning("Video not found: %s — using placeholder frames", video_path)
             return [Image.new("RGB", (self.width, self.height)) for _ in range(end - start)]
 
-        import imageio
-        reader = imageio.get_reader(video_path)
-        frames = []
-        for i, frame in enumerate(reader):
-            if i < start:
-                continue
-            if i >= end:
-                break
-            img = Image.fromarray(frame).resize((self.width, self.height), Image.LANCZOS)
-            frames.append(img)
-        reader.close()
-        return frames
+        from open_wam.data.video_reader import read_video_frames
+        return read_video_frames(
+            video_path, start=start, end=end,
+            height=self.height, width=self.width,
+        )
 
     def _pad_actions(self, actions: np.ndarray):
         """Pad actions to num_frames, return (padded_actions, mask)."""

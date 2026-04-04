@@ -103,6 +103,10 @@ class NativeTrainer(BaseTrainer):
         # Store reference for BaseTrainer interface
         self.model = self
 
+        # Pipeline-level conditioning transform (adds VACE fields if missing)
+        from open_wam.data.transforms.pipeline import VACEConditioningTransform
+        self._pipeline_transform = VACEConditioningTransform()
+
         # Step counter
         self._current_step = 0
         self._last_loss_components = {}
@@ -259,6 +263,9 @@ class NativeTrainer(BaseTrainer):
 
     def _forward_single(self, data) -> dict:
         """Single-sample forward pass."""
+        # Add pipeline-specific conditioning (VACE fields) if missing
+        data = self._pipeline_transform.apply(data)
+
         # Extract action data
         action_data = data.get("action_trajectory", None)
         if self.lambda_action > 0 and action_data is None:
@@ -331,6 +338,9 @@ class NativeTrainer(BaseTrainer):
         """Batched forward pass — encode all samples in one VAE/text-encoder pass."""
         from einops import rearrange
         import torch.nn.functional as F
+
+        # Add pipeline-specific conditioning (VACE fields) if missing
+        data_list = [self._pipeline_transform.apply(s) for s in data_list]
 
         B = len(data_list)
         pipe = self.pipe

@@ -17,6 +17,8 @@ from open_wam.data.transforms.video import (
     VideoColorJitter,
     VideoHorizontalFlip,
 )
+from open_wam.data.transforms.pipeline import VACEConditioningTransform
+from open_wam.data.transforms.builder import build_transforms
 
 __all__ = [
     "ModalityTransform",
@@ -30,4 +32,6 @@ __all__ = [
     "VideoRandomCrop",
     "VideoColorJitter",
     "VideoHorizontalFlip",
+    "VACEConditioningTransform",
+    "build_transforms",
 ]

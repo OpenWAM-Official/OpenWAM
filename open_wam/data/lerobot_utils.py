@@ -54,6 +54,8 @@ def load_episode_video_frames(
 ) -> List[Image.Image]:
     """Load video frames from an MP4 file.
 
+    Uses the multi-backend video reader (decord → opencv → imageio).
+
     Args:
         video_path: Path to the MP4 video file.
         start_frame: First frame to extract.
@@ -64,24 +66,13 @@ def load_episode_video_frames(
     Returns:
         List of PIL Images.
     """
-    try:
-        import imageio
-        reader = imageio.get_reader(video_path)
-        frames = []
-        for i, frame in enumerate(reader):
-            if i < start_frame:
-                continue
-            if num_frames is not None and len(frames) >= num_frames:
-                break
-            img = Image.fromarray(frame).resize((width, height), Image.LANCZOS)
-            frames.append(img)
-        reader.close()
-        return frames
-    except ImportError:
-        raise ImportError(
-            "imageio is required for video loading. "
-            "Install with: pip install imageio[ffmpeg]"
-        )
+    from open_wam.data.video_reader import read_video_frames
+
+    end = start_frame + num_frames if num_frames is not None else None
+    return read_video_frames(
+        video_path, start=start_frame, end=end,
+        height=height, width=width,
+    )
 
 
 def compute_dataset_action_stats(
