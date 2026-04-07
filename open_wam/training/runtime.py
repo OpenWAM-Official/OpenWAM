@@ -22,8 +22,6 @@ from open_wam.data.bridge_v2 import BridgeV2Dataset
 from open_wam.data.oxe import OXEDataset
 from open_wam.data.mixture import MixtureDataset
 from open_wam.data.transforms.builder import build_transforms
-from open_wam.training.legacy import VideoActionTrainingModule
-from open_wam.training.optimizer_groups import attach_optimizer_groups
 
 
 def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
@@ -477,67 +475,8 @@ def load_action_stats_into_model(model, dataset) -> None:
     model.action_dit.action_std.copy_(torch.from_numpy(stats["std"].astype(np.float32)))
 
 
-def build_training_module(
-    args: argparse.Namespace,
-    accelerator=None,
-    dataset=None,
-):
-    """Construct the legacy training module behind the package-native API."""
-    device = "cpu"
-    if not getattr(args, "initialize_model_on_cpu", True) and accelerator is not None:
-        device = accelerator.device
-
-    model = VideoActionTrainingModule(
-        model_paths=args.model_paths,
-        model_id_with_origin_paths=args.model_id_with_origin_paths,
-        tokenizer_path=args.tokenizer_path,
-        audio_processor_path=args.audio_processor_path,
-        trainable_models=args.trainable_models,
-        lora_base_model=args.lora_base_model,
-        lora_target_modules=args.lora_target_modules,
-        lora_rank=int(args.lora_rank),
-        lora_checkpoint=args.lora_checkpoint,
-        preset_lora_path=args.preset_lora_path,
-        preset_lora_model=args.preset_lora_model,
-        use_gradient_checkpointing=bool(args.use_gradient_checkpointing),
-        use_gradient_checkpointing_offload=bool(args.use_gradient_checkpointing_offload),
-        extra_inputs=getattr(args, "extra_inputs", "vace_video,vace_reference_image,action_trajectory"),
-        fp8_models=args.fp8_models,
-        offload_models=args.offload_models,
-        task=getattr(args, "task", "sft"),
-        device=device,
-        max_timestep_boundary=float(args.max_timestep_boundary),
-        min_timestep_boundary=float(args.min_timestep_boundary),
-        action_dim=int(args.action_dim),
-        action_dit_dim=int(args.action_dit_dim),
-        action_dit_ffn_dim=int(args.action_dit_ffn_dim),
-        action_dit_num_heads=int(args.action_dit_num_heads),
-        action_dit_num_layers=int(args.action_dit_num_layers),
-        action_dit_bridge_layers=args.action_dit_bridge_layers,
-        video_dim=int(args.video_dim),
-        lambda_video=float(args.lambda_video),
-        lambda_action=float(args.lambda_action),
-        bridge_type=args.bridge_type,
-        action_lr=float(args.action_lr) if args.action_lr is not None else None,
-        action_stats_path=getattr(args, "action_stats_path", None),
-    )
-
-    if dataset is not None and float(args.lambda_action) > 0:
-        load_action_stats_into_model(model, dataset)
-
-    attach_optimizer_groups(
-        model,
-        action_lr=getattr(args, "action_lr", None),
-        video_lr=getattr(args, "video_lr", None),
-        lora_lr=getattr(args, "lora_lr", None),
-    )
-
-    return model
-
-
 __all__ = [
     "build_training_dataset",
-    "build_training_module",
     "build_validation_datasets",
     "cfg_to_flat_namespace",
     "load_action_stats_into_model",

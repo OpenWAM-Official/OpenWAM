@@ -15,7 +15,7 @@ data:
   split: train
   robot: franka
 
-  # Transform pipeline (optional — omit or set to null for legacy z-score path)
+  # Transform pipeline (optional — omit or set to null for default z-score normalization)
   # transforms:
   #   normalize:
   #     mode: q99             # q99 | min_max | mean_std | scale

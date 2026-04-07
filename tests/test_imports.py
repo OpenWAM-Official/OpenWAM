@@ -90,14 +90,9 @@ def test_import_training_loss():
     from open_wam.training.loss import FlowMatchVideoActionSFTLoss
 
 
-def test_import_training_joint_trainer():
-    from open_wam.training.joint_trainer import JointTrainer
-
-
 def test_import_training_runtime():
     from open_wam.training.runtime import (
         build_training_dataset,
-        build_training_module,
         build_validation_datasets,
         cfg_to_flat_namespace,
     )
@@ -123,7 +118,7 @@ def test_import_training_callbacks():
 def test_import_training_init():
     from open_wam.training import (
         BaseTrainer,
-        JointTrainer,
+        NativeTrainer,
         FlowMatchVideoActionSFTLoss,
         CallbackRunner,
     )
@@ -169,6 +164,58 @@ def test_import_evaluation_init():
         RoboTwinOfflineEvaluator,
         RoboTwinOnlineEvaluator,
     )
+
+
+def test_import_evaluation_registry():
+    from open_wam.evaluation.registry import (
+        build_evaluator,
+        list_registered_evaluators,
+    )
+    registered = list_registered_evaluators()
+    assert "offline" in registered
+    assert "online" in registered
+    assert "libero" in registered
+    assert "robocasa" in registered
+    assert "calvin" in registered
+    assert "behavior" in registered
+    assert "simpler_env" in registered
+
+
+def test_import_action_repr_registry():
+    from open_wam.models.action_repr import (
+        build_action_representation,
+        list_registered_action_reprs,
+    )
+    registered = list_registered_action_reprs()
+    assert "continuous" in registered
+
+
+def test_import_action_dit():
+    from open_wam.models.action_dit import (
+        ActionDiT,
+        ActionDiTState,
+        sinusoidal_embedding_1d,
+        RMSNorm,
+    )
+
+
+def test_import_moe_expert_dit():
+    from open_wam.models.moe_expert_dit import MoEExpertDiT, MoEExpertState
+
+
+def test_import_flow_match_scheduler():
+    from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
+    s = FlowMatchScheduler("Wan")
+    s.set_timesteps(20, shift=5.0)
+    assert len(s.timesteps) == 20
+
+
+def test_import_model_config():
+    from open_wam.inference.model_config import ModelConfig
+
+
+def test_import_video_pipeline_wrapper():
+    from open_wam.inference.video_pipeline import WanVideoPipeline
 
 
 def test_import_models_backbone():

@@ -10,13 +10,6 @@ def test_package_native_model_loader_exists():
     assert callable(load_wam_models)
 
 
-def test_package_native_training_runtime_exists():
-    """Training package should expose a package-level runtime builder."""
-    from open_wam.training.runtime import build_training_module
-
-    assert callable(build_training_module)
-
-
 def test_infer_script_no_longer_imports_eval_script():
     """Inference script should not depend on the eval script helper."""
     source = Path("scripts/infer.py").read_text()
@@ -46,12 +39,6 @@ def test_schedule_module_no_longer_imports_legacy_joint_inference():
     """Schedule generation should now live in the package."""
     source = Path("open_wam/inference/schedule.py").read_text()
     assert "from joint_inference import" not in source
-
-
-def test_joint_trainer_no_longer_imports_legacy_train_module():
-    """Joint trainer should use the package-native training runtime."""
-    source = Path("open_wam/training/joint_trainer.py").read_text()
-    assert "from train_video_action import" not in source
 
 
 def test_training_loss_no_longer_imports_legacy_train_module():

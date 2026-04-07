@@ -1,4 +1,3 @@
-# Trainer: "native" (package-native, recommended) or "legacy" (deprecated)
 trainer: native
 
 lambda_video: 1.0
