@@ -26,7 +26,7 @@ from torch import Tensor
 
 from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
 from open_wam.models.architectures.registry import register_architecture
-from third_party.diffsynth.models.moe_action_expert import MoEExpertDiT, MoEExpertState
+from open_wam.models.moe_expert_dit import MoEExpertDiT, MoEExpertState
 
 
 @register_architecture(

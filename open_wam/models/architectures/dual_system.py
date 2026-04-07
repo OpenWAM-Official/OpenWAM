@@ -17,7 +17,7 @@ from torch import Tensor
 
 from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
 from open_wam.models.architectures.registry import register_architecture
-from third_party.diffsynth.models.action_dit import ActionDiT, ActionDiTState
+from open_wam.models.action_dit import ActionDiT, ActionDiTState
 
 
 @register_architecture(

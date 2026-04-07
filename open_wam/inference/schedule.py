@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from third_party.diffsynth.diffusion import FlowMatchScheduler
+from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
 
 Schedule = List[Tuple[float, float]]
 

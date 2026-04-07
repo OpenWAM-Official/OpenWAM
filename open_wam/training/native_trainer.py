@@ -60,7 +60,7 @@ class NativeTrainer(BaseTrainer):
         self.architecture.action_dit = self.action_dit
 
         # Action scheduler (independent from video)
-        from third_party.diffsynth.diffusion import FlowMatchScheduler
+        from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
         self.action_scheduler = FlowMatchScheduler("Wan")
         self.action_scheduler.set_timesteps(1000, training=True)
 
@@ -119,8 +119,9 @@ class NativeTrainer(BaseTrainer):
         """Build pipeline and ActionDiT from Hydra config."""
         import json
 
-        from third_party.diffsynth.models.action_dit import ActionDiT
-        from third_party.diffsynth.pipelines.wan_video import ModelConfig, WanVideoPipeline
+        from open_wam.models.action_dit import ActionDiT
+        from open_wam.inference.model_config import ModelConfig
+        from open_wam.inference.video_pipeline import WanVideoPipeline
 
         t = cfg.training
         m = cfg.model

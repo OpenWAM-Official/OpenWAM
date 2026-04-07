@@ -65,6 +65,30 @@ def test_no_legacy_imports_boundary():
     )
 
 
+def test_only_video_pipeline_imports_third_party_diffsynth():
+    """Only video_pipeline.py should import from third_party.diffsynth."""
+    open_wam_dir = PROJECT_ROOT / "open_wam"
+    violations = []
+
+    for py_file in open_wam_dir.rglob("*.py"):
+        rel = py_file.relative_to(PROJECT_ROOT)
+        if str(rel) == "open_wam/inference/video_pipeline.py":
+            continue
+        with open(py_file) as f:
+            for i, line in enumerate(f, 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'"):
+                    continue
+                if "from third_party.diffsynth" in stripped or "import third_party.diffsynth" in stripped:
+                    violations.append(f"{rel}:{i}: {stripped}")
+
+    assert violations == [], (
+        "Only open_wam/inference/video_pipeline.py should import from "
+        "third_party.diffsynth. All other diffsynth classes have been "
+        "internalized.\nViolations:\n" + "\n".join(violations)
+    )
+
+
 def test_diffsynth_moved_to_third_party():
     """diffsynth/ should no longer exist at project root."""
     assert not (PROJECT_ROOT / "diffsynth").is_dir(), (

@@ -23,7 +23,7 @@ Schedule = List[Tuple[float, float]]
 
 def _base_timesteps(num_steps: int, shift: float) -> List[float]:
     """Generate Wan-style descending timesteps."""
-    from third_party.diffsynth.diffusion import FlowMatchScheduler
+    from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
     scheduler = FlowMatchScheduler("Wan")
     scheduler.set_timesteps(num_steps, shift=shift)
     return scheduler.timesteps.tolist()
