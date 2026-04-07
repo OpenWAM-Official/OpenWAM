@@ -21,13 +21,25 @@ References:
     - Cosmos Policy: action tokens in video diffusion sequence
 """
 
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
 
 import torch
 from torch import Tensor, nn
 
 from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
 from open_wam.models.architectures.registry import register_architecture
+
+
+@dataclass
+class SharedBackboneState:
+    """State passed to model_fn_wan_video for SharedBackbone token concat/extract."""
+    action_tokens: torch.Tensor          # (B, T_action, video_dim) projected
+    n_action_tokens: int = 0
+    action_noise_pred: Optional[torch.Tensor] = None  # filled after finalization
+    # Back-reference to architecture for finalize
+    _architecture: Optional["SharedBackboneArchitecture"] = field(default=None, repr=False)
+    _action_state: Optional[ActionState] = field(default=None, repr=False)
 
 
 def _sinusoidal_embedding_1d(dim: int, position: Tensor) -> Tensor:
@@ -143,7 +155,7 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         )
         t_mod = self.time_projection(t)  # (B, video_dim * 2)
 
-        return ActionState(
+        action_state = ActionState(
             action_latents=x,  # (B, T_action, video_dim)
             timestep=timestep,
             extra={
@@ -152,6 +164,15 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
                 "t_mod": t_mod,
             },
         )
+        # State for model_fn_wan_video to handle concatenation/extraction
+        sb_state = SharedBackboneState(
+            action_tokens=x,
+            n_action_tokens=T,
+            _architecture=self,
+            _action_state=action_state,
+        )
+        action_state.extra["shared_backbone_state"] = sb_state
+        return action_state
 
     def on_dit_block(
         self,

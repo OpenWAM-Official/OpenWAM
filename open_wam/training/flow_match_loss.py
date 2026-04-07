@@ -120,7 +120,7 @@ class FlowMatchVideoActionLoss:
             inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
 
         # --- Prepare action data ---
-        action_dit_state, noisy_actions, action_target, action_timesteps, action_timestep_ids = (
+        action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids = (
             self._prepare_actions(
                 B, architecture, action_scheduler, action_data,
                 decoupled_sampler, current_step, pipe, inputs,
@@ -135,9 +135,19 @@ class FlowMatchVideoActionLoss:
         )
 
         if use_interleaved:
+            # Build model_fn kwargs based on architecture state
+            interleaved_kwargs = {}
+            if action_state is not None:
+                extra = action_state.extra
+                if "dit_state" in extra:
+                    interleaved_kwargs["action_dit_state"] = extra["dit_state"]
+                if "moe_state" in extra:
+                    interleaved_kwargs["moe_expert_state"] = extra["moe_state"]
+                if "shared_backbone_state" in extra:
+                    interleaved_kwargs["shared_backbone_state"] = extra["shared_backbone_state"]
             video_noise_pred = pipe.model_fn(
                 **models, **inputs, timestep=video_timesteps,
-                action_dit_state=action_dit_state,
+                **interleaved_kwargs,
             )
         else:
             bridge_features = []
@@ -163,7 +173,15 @@ class FlowMatchVideoActionLoss:
 
         # --- Action loss ---
         if use_interleaved:
-            action_noise_pred = action_dit_state.action_noise_pred
+            extra = action_state.extra
+            if "dit_state" in extra:
+                action_noise_pred = extra["dit_state"].action_noise_pred
+            elif "moe_state" in extra:
+                action_noise_pred = extra["moe_state"].action_noise_pred
+            elif "shared_backbone_state" in extra:
+                action_noise_pred = extra["shared_backbone_state"].action_noise_pred
+            else:
+                raise RuntimeError("Interleaved architecture did not produce action predictions")
         else:
             # Use architecture interface: prepare → feed bridge features → extract
             action_state = architecture.prepare_action_tokens(
@@ -229,7 +247,13 @@ class FlowMatchVideoActionLoss:
         decoupled_sampler, current_step, pipe, inputs,
         action_repr=None,
     ):
-        """Prepare noisy actions, targets, and optional interleaved state."""
+        """Prepare noisy actions, targets, and optional interleaved state.
+
+        Returns:
+            (action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids)
+            where action_state is the full ActionState for interleaved architectures
+            (MoE, SharedBackbone, joint_self_attn), or None for non-interleaved.
+        """
         if self.lambda_action == 0:
             return None, None, None, None, None
 
@@ -270,18 +294,17 @@ class FlowMatchVideoActionLoss:
         noisy_actions = (1 - sigma_bc) * action_data + sigma_bc * action_noise
         action_target = action_noise - action_data
 
-        # Interleaved state for joint_self_attn — the pipe.model_fn needs
-        # the internal dit_state from the architecture's ActionState.
-        action_dit_state = None
+        # Interleaved architectures (MoE, SharedBackbone, joint_self_attn)
+        # need their state prepared before the video forward pass.
+        action_state = None
         if architecture.is_interleaved:
             action_state = architecture.prepare_action_tokens(
                 noisy_actions, action_timesteps,
                 use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
             )
-            action_dit_state = action_state.extra.get("dit_state")
 
-        return action_dit_state, noisy_actions, action_target, action_timesteps, action_timestep_ids
+        return action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids
 
     def _compute_video_loss(
         self, noise_pred, target, timestep_ids, pipe, inputs, B,

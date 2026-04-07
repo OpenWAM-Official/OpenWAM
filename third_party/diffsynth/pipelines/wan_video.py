@@ -1166,6 +1166,7 @@ def model_fn_wan_video(
     bridge_feature_detach: bool = False,
     action_dit_state: Optional[ActionDiTState] = None,
     moe_expert_state: Optional['MoEExpertState'] = None,
+    shared_backbone_state = None,
     **kwargs,
 ):
     if sliding_window_size is not None and sliding_window_stride is not None:
@@ -1336,6 +1337,17 @@ def model_fn_wan_video(
         )
         freqs = torch.cat([freqs, _identity_freq], dim=0)
 
+    # Shared Backbone: concatenate action tokens (same as MoE but no expert FFN)
+    _sb_n_action = 0
+    if shared_backbone_state is not None:
+        _sb_n_action = shared_backbone_state.n_action_tokens
+        x = torch.cat([x, shared_backbone_state.action_tokens.to(x.dtype)], dim=1)
+        _identity_freq = torch.polar(
+            torch.ones(_sb_n_action, 1, freqs.shape[-1], device=freqs.device),
+            torch.zeros(_sb_n_action, 1, freqs.shape[-1], device=freqs.device),
+        )
+        freqs = torch.cat([freqs, _identity_freq], dim=0)
+
     # blocks
     if use_unified_sequence_parallel:
         if dist.is_initialized() and dist.get_world_size() > 1:
@@ -1472,10 +1484,20 @@ def model_fn_wan_video(
         moe_expert_state.action_tokens = x[:, _n_video:, :]
         # Remove action tokens from video sequence for head processing
         x = x[:, :_n_video, :]
-        # Restore original freqs length (not needed since freqs isn't used after loop,
-        # but clean up for safety)
         # Finalize action prediction
         moe_expert_state.action_noise_pred = moe_expert_state.moe_dit.finalize_output(moe_expert_state)
+
+    # Shared Backbone: extract action tokens and finalize
+    if shared_backbone_state is not None:
+        _n_video = x.shape[1] - _sb_n_action
+        _action_state = shared_backbone_state._action_state
+        _action_state.extra["final_hidden"] = x
+        # Remove action tokens from video sequence for head processing
+        x = x[:, :_n_video, :]
+        # Finalize via architecture's output projection
+        shared_backbone_state.action_noise_pred = (
+            shared_backbone_state._architecture.extract_action_prediction(_action_state)
+        )
 
     # CRITICAL (batched training): Head.forward has a 2D path and a 3D path.
     # The 2D path (t shape = (B, dim)) is BROKEN for B>1: PyTorch broadcasting
