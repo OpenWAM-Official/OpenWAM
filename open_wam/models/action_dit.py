@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from typing import Tuple, Optional, List
 from einops import rearrange
 
+from open_wam.models.attention_utils import get_attention_fn
+
 
 @dataclass
 class ActionDiTState:
@@ -113,7 +115,7 @@ class ActionSelfAttention(nn.Module):
         q = rearrange(q, "b s (n d) -> b n s d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b n s d", n=self.num_heads)
         v = rearrange(v, "b s (n d) -> b n s d", n=self.num_heads)
-        x = F.scaled_dot_product_attention(q, k, v)
+        x = get_attention_fn()(q, k, v)
         x = rearrange(x, "b n s d -> b s (n d)", n=self.num_heads)
         return self.o(x)
 
@@ -153,7 +155,7 @@ class BridgeCrossAttention(nn.Module):
         q = rearrange(q, "b s (n d) -> b n s d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b n s d", n=self.num_heads)
         v = rearrange(v, "b s (n d) -> b n s d", n=self.num_heads)
-        x = F.scaled_dot_product_attention(q, k, v)
+        x = get_attention_fn()(q, k, v)
         x = rearrange(x, "b n s d -> b s (n d)", n=self.num_heads)
         return self.o(x)
 
@@ -221,8 +223,9 @@ class JointSelfAttention(nn.Module):
         v = torch.cat([v_v, v_a], dim=2)
 
         # Each modality attends to the joint KV
-        out_a = F.scaled_dot_product_attention(q_a, k, v)
-        out_v = F.scaled_dot_product_attention(q_v, k, v)
+        _attn = get_attention_fn()
+        out_a = _attn(q_a, k, v)
+        out_v = _attn(q_v, k, v)
 
         out_a = rearrange(out_a, "b n s d -> b s (n d)", n=self.num_heads)
         out_v = rearrange(out_v, "b n s d -> b s (n d)", n=self.num_heads)

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import logging
+import os
+import time
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -11,6 +14,8 @@ from tqdm import tqdm
 
 from open_wam.models.architectures.base import BaseWAMArchitecture
 from open_wam.models.action_repr.base import BaseActionRepresentation
+
+logger = logging.getLogger(__name__)
 
 
 def prepare_pipeline_inputs(
@@ -29,27 +34,40 @@ def prepare_pipeline_inputs(
     shift: float = 5.0,
     tile_size: tuple = (30, 52),
     tile_stride: tuple = (15, 26),
+    vace_cache: Optional[dict] = None,
 ):
     """Build the full input dicts required by the Wan pipeline.
 
-    Args:
-        pipe: Loaded WanVideoPipeline.
-        prompt: Text prompt for generation.
-        negative_prompt: Negative prompt for CFG.
-        vace_video: Optional VACE conditioning video.
-        vace_reference_image: Optional reference image(s).
-        num_frames: Number of video frames to generate.
-        height: Video height in pixels.
-        width: Video width in pixels.
-        seed: Random seed.
-        cfg_scale: Classifier-free guidance scale.
-        tiled: Whether to use tiled VAE decoding.
-        num_inference_steps: Number of denoising steps for the scheduler.
-        shift: Timestep shift parameter for the Wan scheduler.
-        tile_size: Spatial tile size for tiled processing.
-        tile_stride: Spatial tile stride for tiled processing.
+    When ``vace_cache`` is provided and already populated from a prior call,
+    static inputs (text embeddings, reference image encodings) are reused.
+    Only the observation-dependent portions are re-computed.
     """
     pipe.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
+
+    # Check if we can reuse cached pipeline outputs
+    if vace_cache and vace_cache.get("populated"):
+        # Reuse cached static inputs
+        inputs_shared = vace_cache["inputs_shared"].copy()
+        inputs_posi = vace_cache["inputs_posi"].copy()
+        inputs_nega = vace_cache["inputs_nega"].copy()
+
+        # Update only dynamic fields
+        inputs_shared["seed"] = seed
+        inputs_shared["vace_video"] = vace_video
+        inputs_shared["num_frames"] = num_frames
+
+        # Re-run only units that process dynamic content (VACE video encoding)
+        # Pipeline units that handle text/reference are skipped via cache
+        for unit in pipe.units:
+            unit_name = getattr(unit, "__class__", type(unit)).__name__
+            # Skip text encoder and reference image units (cached)
+            if any(kw in unit_name.lower() for kw in ("text", "prompt", "clip")):
+                continue
+            inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(
+                unit, pipe, inputs_shared, inputs_posi, inputs_nega
+            )
+
+        return inputs_shared, inputs_posi, inputs_nega
 
     inputs_posi = {
         "prompt": prompt,
@@ -118,7 +136,23 @@ def prepare_pipeline_inputs(
             unit, pipe, inputs_shared, inputs_posi, inputs_nega
         )
 
+    # Populate VACE cache for future closed-loop calls
+    if vace_cache is not None:
+        vace_cache["inputs_shared"] = inputs_shared.copy()
+        vace_cache["inputs_posi"] = inputs_posi.copy()
+        vace_cache["inputs_nega"] = inputs_nega.copy()
+        vace_cache["populated"] = True
+
     return inputs_shared, inputs_posi, inputs_nega
+
+
+def _profile_sync(msg: str, t_start: float, profile: bool):
+    """Print profiling message if enabled."""
+    if profile:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elapsed = time.time() - t_start
+        logger.info("[WAM_PROFILE] %s: %.3fs", msg, elapsed)
 
 
 @torch.no_grad()
@@ -142,6 +176,12 @@ def generate_video_and_actions(
     tile_size: tuple = (30, 52),
     tile_stride: tuple = (15, 26),
     action_repr: Optional[BaseActionRepresentation] = None,
+    # Optimization params
+    dit_cache=None,
+    cfg_handler=None,
+    decode_video: bool = True,
+    profile: bool = False,
+    vace_cache: Optional[dict] = None,
 ):
     """Execute joint video-action denoising driven by a schedule.
 
@@ -164,12 +204,19 @@ def generate_video_and_actions(
         shift: Timestep shift parameter for the Wan scheduler.
         tile_size: Spatial tile size for tiled processing.
         tile_stride: Spatial tile stride for tiled processing.
+        dit_cache: Optional DiTVelocityCache for skipping redundant video DiT passes.
+        cfg_handler: Optional CFGBatchMerger or CFGParallelExecutor.
+        decode_video: If False, skip VAE decoding (action-only deployment).
+        profile: If True, print per-stage timing info.
+        vace_cache: Optional dict for caching static pipeline inputs across calls.
 
     Returns:
-        (video_frames, actions) — list of PIL images and (T, action_dim) numpy array.
+        (video_frames, actions) — list of PIL images (or None) and (T, action_dim) numpy array.
     """
     device = pipe.device
     dtype = pipe.torch_dtype
+
+    t0 = time.time()
 
     inputs_shared, inputs_posi, inputs_nega = prepare_pipeline_inputs(
         pipe,
@@ -187,7 +234,10 @@ def generate_video_and_actions(
         shift=shift,
         tile_size=tile_size,
         tile_stride=tile_stride,
+        vace_cache=vace_cache,
     )
+
+    _profile_sync("pipeline_prep", t0, profile)
 
     if input_video_latents is not None:
         inputs_shared["latents"] = input_video_latents
@@ -221,6 +271,8 @@ def generate_video_and_actions(
     bridge_layers_set = set(architecture.bridge_layers)
     cached_bridge = None
 
+    t_loop = time.time()
+
     for i in tqdm(range(len(schedule) - 1), desc="Joint denoising"):
         t_v, t_a = schedule[i]
         t_v_next, t_a_next = schedule[i + 1]
@@ -242,14 +294,11 @@ def generate_video_and_actions(
 
         if use_interleaved and action_stepping:
             # Interleaved path: action processing happens inside the video
-            # DiT forward pass. Prepare action state through the architecture
-            # and pass the internal state to pipe.model_fn.
+            # DiT forward pass.
             a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
 
             action_state = architecture.prepare_action_tokens(action_latents, a_timestep)
-            # The interleaved architecture stores its pipe-compatible state
-            # in action_state.extra["dit_state"]
             dit_state = action_state.extra.get("dit_state")
 
             noise_pred_posi = pipe.model_fn(
@@ -262,42 +311,66 @@ def generate_video_and_actions(
             action_noise_pred = dit_state.action_noise_pred if dit_state is not None else None
 
             if cfg_scale != 1.0:
-                noise_pred_nega = pipe.model_fn(
-                    **models,
-                    **inputs_shared,
-                    **inputs_nega,
-                    timestep=v_timestep,
-                )
-                noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
+                if cfg_handler is not None:
+                    noise_pred = cfg_handler.forward(
+                        pipe.model_fn, models, inputs_shared,
+                        inputs_posi, inputs_nega, v_timestep,
+                    )
+                else:
+                    noise_pred_nega = pipe.model_fn(
+                        **models,
+                        **inputs_shared,
+                        **inputs_nega,
+                        timestep=v_timestep,
+                    )
+                    noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
             else:
                 noise_pred = noise_pred_posi
 
         elif video_stepping or (action_stepping and cached_bridge is None):
-            # Bridge-collection path: run video DiT, collect bridge features
-            # at the architecture's designated layers.
-            bridge_features = []
+            # Bridge-collection path: run video DiT, collect bridge features.
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
 
-            noise_pred_posi = pipe.model_fn(
-                **models,
-                **inputs_shared,
-                **inputs_posi,
-                timestep=v_timestep,
-                bridge_feature_store=bridge_features,
-                bridge_feature_layers=bridge_layers_set,
-                bridge_feature_detach=True,
-            )
-
-            if cfg_scale != 1.0:
-                noise_pred_nega = pipe.model_fn(
-                    **models,
-                    **inputs_shared,
-                    **inputs_nega,
-                    timestep=v_timestep,
-                )
-                noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
+            # DiT velocity cache: skip video DiT if prediction is stable
+            if dit_cache is not None and video_stepping and not dit_cache.should_recompute(sigma_v):
+                noise_pred = dit_cache.get_cached()
+                bridge_features = cached_bridge
             else:
-                noise_pred = noise_pred_posi
+                bridge_features = []
+
+                if cfg_handler is not None and cfg_scale != 1.0:
+                    noise_pred = cfg_handler.forward(
+                        pipe.model_fn, models, inputs_shared,
+                        inputs_posi, inputs_nega, v_timestep,
+                        bridge_feature_store=bridge_features,
+                        bridge_feature_layers=bridge_layers_set,
+                        bridge_feature_detach=True,
+                    )
+                else:
+                    noise_pred_posi = pipe.model_fn(
+                        **models,
+                        **inputs_shared,
+                        **inputs_posi,
+                        timestep=v_timestep,
+                        bridge_feature_store=bridge_features,
+                        bridge_feature_layers=bridge_layers_set,
+                        bridge_feature_detach=True,
+                    )
+
+                    if cfg_scale != 1.0:
+                        noise_pred_nega = pipe.model_fn(
+                            **models,
+                            **inputs_shared,
+                            **inputs_nega,
+                            timestep=v_timestep,
+                        )
+                        noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
+                    else:
+                        noise_pred = noise_pred_posi
+
+                # Update DiT cache after actual forward pass
+                if dit_cache is not None and video_stepping:
+                    dit_cache.update(noise_pred, sigma_v)
 
             cached_bridge = None if video_stepping else bridge_features
         else:
@@ -312,8 +385,6 @@ def generate_video_and_actions(
 
         if action_stepping:
             if action_noise_pred is None:
-                # Use the architecture interface: prepare → feed bridge
-                # features through on_dit_block → extract prediction.
                 a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
                 action_state = architecture.prepare_action_tokens(action_latents, a_timestep)
                 sorted_layers = sorted(architecture.bridge_layers)
@@ -325,21 +396,32 @@ def generate_video_and_actions(
                 action_noise_pred = architecture.extract_action_prediction(action_state)
             action_latents = action_latents + action_noise_pred * (sigma_a_next - sigma_a)
 
-    if vace_reference_image is not None:
-        ref_count = len(vace_reference_image) if isinstance(vace_reference_image, list) else 1
-        inputs_shared["latents"] = inputs_shared["latents"][:, :, ref_count:]
+    _profile_sync("denoising_loop", t_loop, profile)
 
-    pipe.load_models_to_device(["vae"])
-    video = pipe.vae.decode(inputs_shared["latents"], device=device, tiled=tiled)
-    video_frames = pipe.vae_output_to_video(video)
+    # VAE decode
+    t_vae = time.time()
+    if decode_video:
+        if vace_reference_image is not None:
+            ref_count = len(vace_reference_image) if isinstance(vace_reference_image, list) else 1
+            inputs_shared["latents"] = inputs_shared["latents"][:, :, ref_count:]
 
+        pipe.load_models_to_device(["vae"])
+        video = pipe.vae.decode(inputs_shared["latents"], device=device, tiled=tiled)
+        video_frames = pipe.vae_output_to_video(video)
+    else:
+        video_frames = None
+
+    _profile_sync("vae_decode", t_vae, profile)
+
+    # Action decode
+    t_action = time.time()
     if action_repr is not None:
-        # Decode from diffusion latent space back to raw actions
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
     else:
-        # Legacy path: denormalize with action_mean/action_std
         actions = action_latents.squeeze(0).float().cpu().numpy()
         actions = actions * architecture.action_std.float().cpu().numpy() + architecture.action_mean.float().cpu().numpy()
+
+    _profile_sync("action_decode", t_action, profile)
 
     pipe.load_models_to_device([])
     return video_frames, actions

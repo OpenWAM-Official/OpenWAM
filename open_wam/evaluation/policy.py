@@ -10,6 +10,9 @@ Supports two execution modes:
    Overlapping predictions are fused via temporal ensembling (exponential
    weighting) to reduce jitter.  This is the standard approach used in
    ACT, Diffusion Policy, and similar action-chunking policies.
+
+Optionally wraps inference in an :class:`AsyncInferenceExecutor` for
+double-buffered closed-loop control that overlaps computation with execution.
 """
 
 from collections import deque
@@ -33,11 +36,30 @@ class WAMPolicy:
               overlapping predictions (default True when receding-horizon).
             - ``ensemble_decay``: Exponential decay weight for older
               predictions.  Lower = trust newer predictions more (default 0.5).
+        async_config: Optional config for async inference. When enabled,
+            wraps the engine in AsyncInferenceExecutor for double-buffered
+            closed-loop execution. Expected fields:
+            - ``enabled`` (bool): Enable async mode.
+            - ``chunk_size`` (int): Actions per chunk (default 49).
+            - ``prefetch`` (bool): Start next inference early (default True).
     """
 
-    def __init__(self, engine: BaseInferenceEngine, cfg):
-        self.engine = engine
+    def __init__(self, engine: BaseInferenceEngine, cfg, async_config=None):
         self.cfg = cfg
+        self._async = False
+        self._async_executor = None
+
+        if async_config is not None and getattr(async_config, "enabled", False):
+            from open_wam.inference.optimizations import AsyncInferenceExecutor
+            self._async_executor = AsyncInferenceExecutor(
+                engine=engine,
+                chunk_size=getattr(async_config, "chunk_size", 49),
+                prefetch=getattr(async_config, "prefetch", True),
+            )
+            self._async = True
+            self.engine = engine  # keep reference for stats
+        else:
+            self.engine = engine
 
         history_len = getattr(cfg, "history_len", 10)
         self.obs_history: deque = deque(maxlen=history_len)
@@ -58,10 +80,16 @@ class WAMPolicy:
     def predict_action(self, obs: dict) -> np.ndarray:
         """Return the next action for the given observation.
 
-        In receding-horizon mode, triggers re-generation every
-        ``execute_horizon`` steps and fuses overlapping predictions.
+        In async mode, delegates to the AsyncInferenceExecutor's buffer
+        management. Otherwise uses receding-horizon or greedy mode.
         """
         self.obs_history.append(obs)
+
+        if self._async:
+            conditions = self._build_conditions(obs)
+            action = self._async_executor.predict_action(conditions)
+            self._current_step += 1
+            return action
 
         need_generate = (
             len(self._action_buffer) == 0
@@ -150,6 +178,13 @@ class WAMPolicy:
         self.obs_history.clear()
         self._current_step = 0
         self._steps_since_generate = 0
+        if self._async_executor is not None:
+            self._async_executor.reset()
+
+    def shutdown(self):
+        """Clean up async resources."""
+        if self._async_executor is not None:
+            self._async_executor.shutdown()
 
     def _build_conditions(self, obs: dict) -> dict:
         """Assemble inference conditions from current observation + history."""

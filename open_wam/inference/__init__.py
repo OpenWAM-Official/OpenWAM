@@ -10,6 +10,8 @@ from open_wam.inference.schedule import (
     schedule_video_leading,
     schedule_cascade,
     schedule_action_only,
+    schedule_decoupled_flash,
+    schedule_decoupled_asymmetric,
 )
 
 __all__ = [
@@ -24,4 +26,6 @@ __all__ = [
     "schedule_video_leading",
     "schedule_cascade",
     "schedule_action_only",
+    "schedule_decoupled_flash",
+    "schedule_decoupled_asymmetric",
 ]

@@ -5,6 +5,7 @@ defaults:
   - training: joint
   - inference: sync
   - eval: robotwin_offline
+  - optional deploy: null
   - _self_
 
 project:

@@ -65,7 +65,11 @@ class PolicyServer:
         from open_wam.evaluation.policy import WAMPolicy
 
         policy_cfg = getattr(self.cfg, "policy", self.cfg)
-        self._policy = WAMPolicy(engine=self.engine, cfg=policy_cfg)
+        deploy = getattr(self.cfg, "deploy", None)
+        async_config = getattr(deploy, "async_execution", None) if deploy else None
+        self._policy = WAMPolicy(
+            engine=self.engine, cfg=policy_cfg, async_config=async_config,
+        )
 
         if self.embodiment:
             from open_wam.data.embodiment import ActionSpaceAdapter
@@ -111,6 +115,11 @@ class PolicyServer:
             self._policy.reset()
         self._request_count = 0
         self._total_latency = 0.0
+
+    def shutdown(self):
+        """Clean up async resources."""
+        if self._policy is not None:
+            self._policy.shutdown()
 
     def get_info(self) -> dict:
         """Return server info and statistics."""

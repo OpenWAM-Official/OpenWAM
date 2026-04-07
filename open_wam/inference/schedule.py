@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import List, Tuple
 
 from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
+from open_wam.inference.optimizations.decoupled_schedule import (
+    schedule_decoupled_flash,
+    schedule_decoupled_asymmetric,
+)
 
 Schedule = List[Tuple[float, float]]
 
@@ -64,6 +68,8 @@ _SCHEDULE_REGISTRY = {
     "video_leading": schedule_video_leading,
     "cascade": schedule_cascade,
     "action_only": schedule_action_only,
+    "decoupled_flash": schedule_decoupled_flash,
+    "decoupled_asymmetric": schedule_decoupled_asymmetric,
 }
 
 
@@ -79,6 +85,11 @@ def make_schedule(strategy: str, num_steps: int = 50, shift: float = 5.0, **kwar
     if strategy == "cascade":
         call_kwargs["video_steps"] = kwargs.get("video_steps", num_steps)
         call_kwargs["action_steps"] = kwargs.get("action_steps", num_steps)
+    elif strategy == "decoupled_flash":
+        call_kwargs["action_steps"] = kwargs.get("action_steps", num_steps)
+    elif strategy == "decoupled_asymmetric":
+        call_kwargs["video_steps"] = kwargs.get("video_steps", num_steps)
+        call_kwargs["action_steps"] = kwargs.get("action_steps", max(1, num_steps // 5))
     else:
         call_kwargs["num_steps"] = num_steps
     if strategy == "video_leading":
@@ -92,5 +103,7 @@ __all__ = [
     "schedule_video_leading",
     "schedule_cascade",
     "schedule_action_only",
+    "schedule_decoupled_flash",
+    "schedule_decoupled_asymmetric",
     "make_schedule",
 ]
