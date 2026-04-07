@@ -7,7 +7,7 @@ The repository is organized around the `open_wam/` package and currently support
 - Hydra-based training, inference, and evaluation entrypoints
 - WAM-specific action/video scheduling and receding-horizon execution
 - multi-dataset training utilities and embodiment-aware action conversion
-- benchmark adapters for RoboTwin, SimplerEnv, and LIBERO
+- benchmark adapters for RoboTwin, SimplerEnv, LIBERO, RoboCasa, Calvin, and BEHAVIOR-1K
 - a policy server for robot deployment workflows
 
 ![Architecture](assets/arch.png)
@@ -23,39 +23,31 @@ OpenWAM is not a VLA clone. Its core direction is to use a video world model as 
 
 ## Repository Layout
 
-The main path is package-first.
-
 ```text
 OpenWAM/
 ├── open_wam/
 │   ├── data/          # Dataset adapters, action stats, embodiment abstraction
-│   ├── models/        # WAM architectures and conditioning modules
-│   ├── training/      # Trainer abstractions and loss modules
-│   ├── inference/     # Joint inference engine and schedule utilities
-│   ├── evaluation/    # Policies, evaluators, benchmark adapters
+│   ├── models/        # WAM architectures, ActionDiT, MoE, conditioning modules
+│   ├── training/      # NativeTrainer, loss modules, callbacks
+│   ├── inference/     # Joint inference engine, schedule utilities, FlowMatchScheduler
+│   ├── evaluation/    # Evaluator registry, benchmark adapters
 │   └── serving/       # Policy server for deployment
 ├── scripts/           # Hydra entrypoints: train / infer / eval
 ├── configs/           # Hydra configs for model, data, training, eval, deploy
 ├── tests/             # Unit tests for core OpenWAM functionality
 ├── assets/            # Architecture and scheduling diagrams
-└── third_party/       # Vendored dependencies required by current main path
+└── third_party/       # Vendored video pipeline (WanVideoPipeline)
 ```
-
-Notes on legacy code:
-
-- `examples/wanvideo/wam/` still exists and parts of the current training/inference stack depend on it internally.
-- The recommended user-facing entrypoints are `scripts/train.py`, `scripts/infer.py`, and `scripts/eval.py`.
-- Full package-native decoupling from legacy WanVideo scripts is planned and tracked in `plan.md`.
 
 ## Support Status
 
 ### Architectures
 
-| Component | Status | Notes |
+| Architecture | Status | Description |
 |---|---|---|
-| `dual_system` | Supported | Main architecture path for current training/inference stack |
-| `moe_expert` | Supported | Implemented and covered by unit tests |
-| `shared_backbone` | Experimental | Registry keeps it visible, but the default builder blocks it from the supported path until implementation lands |
+| `dual_system` | Supported | Separate ActionDiT with cross-attention or joint self-attention bridge |
+| `moe_expert` | Supported | Shared attention + expert FFN within video DiT (BAGEL/MoT-inspired) |
+| `shared_backbone` | Supported | Action tokens processed by video DiT directly (DreamZero-style) |
 
 ### Benchmarks and Deployment
 
@@ -63,9 +55,12 @@ Notes on legacy code:
 |---|---|---|
 | RoboTwin offline eval | Supported | Primary documented evaluation path |
 | RoboTwin online eval | Supported | Environment-dependent |
-| SimplerEnv eval | Supported in code | Requires external environment setup |
-| LIBERO eval | Supported in code | Requires external environment setup |
-| Policy server | Supported in code | Phase 2 will further productize deployment workflow |
+| SimplerEnv eval | Supported | Requires external environment setup |
+| LIBERO eval | Supported | Requires external environment setup |
+| RoboCasa eval | Supported | Requires external environment setup |
+| Calvin eval | Supported | Requires external environment setup |
+| BEHAVIOR-1K eval | Supported | Requires external environment setup |
+| Policy server | Supported | WebSocket + HTTP deployment |
 
 ## Installation
 
@@ -81,10 +76,11 @@ The policy server can be installed via the optional `serving` extra:
 
 ```bash
 pip install -e ".[serving]"
+```
 
 ### Scale-oriented training controls
 
-The training configs now support separate optimizer knobs for the action
+The training configs support separate optimizer knobs for the action
 branch, the video backbone, and LoRA adapters:
 
 - `training.action_lr`
@@ -99,7 +95,6 @@ python scripts/train.py training=large_backbone model/backbone=ti2v_5b
 
 This preset enables gradient checkpointing, initializes the model on CPU,
 and uses more conservative video-backbone learning rates for 5B-class runs.
-```
 
 ## Quick Start
 
@@ -133,10 +128,6 @@ Other common training presets:
 - `data=robotwin`
 - `data=mixture`
 
-Current caveat:
-
-- The training entrypoint is the recommended interface, but it still delegates part of the implementation to legacy WanVideo training code internally.
-
 ### 2. Inference
 
 ```bash
@@ -148,10 +139,12 @@ python scripts/infer.py \
 
 Available inference schedules in `configs/inference/`:
 
-- `sync`
-- `action_only`
-- `video_leading`
-- `cascade`
+- `sync` — synchronized video + action denoising
+- `action_only` — action denoising only (no video generation)
+- `video_leading` — video denoises ahead of action
+- `cascade` — sequential video then action
+- `decoupled_flash` — 1-4 step action inference (DreamZero-Flash)
+- `decoupled_asymmetric` — asymmetric video/action step counts
 
 Programmatic schedule utilities are available in `open_wam.inference.schedule`.
 
@@ -173,14 +166,15 @@ python scripts/eval.py \
   eval.ckpt_path=/path/to/checkpoint.safetensors
 ```
 
-Additional benchmark configs already in the repo:
+Additional benchmark configs:
 
 - `eval=simpler_env`
 - `eval=libero`
+- `eval=robocasa`
+- `eval=calvin`
+- `eval=behavior`
 
 These benchmarks require their own simulator/environment dependencies.
-
-See `docs/benchmarks/README.md` for the benchmark support matrix, expected dependencies, and example commands for RoboTwin, SimplerEnv, and LIBERO.
 
 ### 4. Deployment
 
@@ -236,61 +230,52 @@ Default stack:
 
 Important config groups:
 
-- `configs/model/`
-- `configs/data/`
-- `configs/training/`
-- `configs/inference/`
-- `configs/eval/`
-- `configs/deploy/`
+- `configs/model/` — ActionDiT size, architecture, backbone
+- `configs/data/` — dataset adapters (robotwin, droid, oxe, bridge_v2, mixture)
+- `configs/training/` — training presets (joint, decoupled, action_finetune, etc.)
+- `configs/inference/` — denoising schedules
+- `configs/eval/` — benchmark configurations
+- `configs/deploy/` — policy server deployment
 
 Run traceability:
 
-- training startup now writes run artifacts under `OUTPUT_PATH/run_artifacts/<RUN_ID>/`
-- saved files include:
-  - `resolved_config.yaml`
-  - `resolved_config.json`
-  - `flat_args.json`
-  - `run_metadata.json`
-
-These snapshots are intended to make checkpoints easier to reproduce even while the main training path still wraps legacy internals.
+- Training writes run artifacts under `OUTPUT_PATH/run_artifacts/<RUN_ID>/`
+- Saved files include: `resolved_config.yaml`, `resolved_config.json`, `flat_args.json`, `run_metadata.json`
 
 ## Core Features
 
 - Joint video-action denoising with configurable schedules
-- receding-horizon execution with temporal ensembling
-- shared package-native model-loading path for inference, evaluation, and serving
+- Receding-horizon execution with temporal ensembling
+- Three WAM architectures: dual-system, MoE expert, shared backbone
+- Package-native model loading for inference, evaluation, and serving
 - `MixtureDataset` for multi-dataset co-training
-- embodiment-aware action conversion for cross-robot use
-- proprioceptive conditioning module for robot state input
-- benchmark adapters for RoboTwin, SimplerEnv, and LIBERO
+- Embodiment-aware action conversion for cross-robot use
+- Proprioceptive conditioning module for robot state input
+- Evaluator registry with 7 benchmark adapters
 - WebSocket + HTTP policy server for deployment workflows
 
-## Tests
+## Development
 
-Run the core test suite with:
-
-```bash
-pytest -q tests
-```
-
-This validates the `open_wam/` package without pulling in example/dev-only tests.
-
-Standard repo validation commands:
+Run the core test suite:
 
 ```bash
 make test
+```
+
+Full validation (compile check + tests):
+
+```bash
 make check
 ```
 
-`make check` runs a syntax-level compile pass plus the core test suite. CI uses the same entrypoint.
+Lint and format:
 
-## Roadmap
+```bash
+make lint      # check for issues
+make format    # auto-fix formatting
+```
 
-The active maturity roadmap is tracked in `plan.md`.
-
-Current phase:
-
-- Phase 1 - Repo Narrative and Main-Path Alignment
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and PR guidelines.
 
 ## Acknowledgements
 

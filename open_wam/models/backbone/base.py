@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 from typing import List
 
-import torch
 from torch import Tensor
 
 

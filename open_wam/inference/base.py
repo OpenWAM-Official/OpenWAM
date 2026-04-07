@@ -3,9 +3,6 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
-import torch
-from torch import Tensor
-
 from open_wam.models.architectures.base import BaseWAMArchitecture
 
 

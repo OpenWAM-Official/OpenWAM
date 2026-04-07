@@ -11,11 +11,10 @@ The video DiT already routes through diffsynth's attention system;
 this module only affects ActionDiT and other open_wam-owned models.
 """
 
-import os
 import logging
+import os
 from typing import Callable
 
-import torch
 import torch.nn.functional as F
 from torch import Tensor
 
@@ -114,10 +113,7 @@ def get_attention_fn() -> Callable:
 
     if override:
         if override not in _BACKEND_MAP:
-            raise ValueError(
-                f"Unknown WAM_ATTENTION_IMPL='{override}'. "
-                f"Choose from: {list(_BACKEND_MAP.keys())}"
-            )
+            raise ValueError(f"Unknown WAM_ATTENTION_IMPL='{override}'. Choose from: {list(_BACKEND_MAP.keys())}")
         fn = _BACKEND_MAP[override]()
         if fn is None:
             logger.warning(

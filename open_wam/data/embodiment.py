@@ -17,15 +17,13 @@ Canonical format: (max_dim,) vector where:
 - [13]    = right gripper (bimanual only)
 """
 
-from abc import ABC, abstractmethod
 from typing import Dict, Optional
 
 import numpy as np
 
-
 # Canonical action dimensions
-CANONICAL_SINGLE_ARM_DIM = 7   # pos(3) + rot(3) + grip(1)
-CANONICAL_BIMANUAL_DIM = 14    # 2 * single_arm
+CANONICAL_SINGLE_ARM_DIM = 7  # pos(3) + rot(3) + grip(1)
+CANONICAL_BIMANUAL_DIM = 14  # 2 * single_arm
 
 
 class EmbodimentConfig:
@@ -84,112 +82,164 @@ def register_embodiment(name: str, config: EmbodimentConfig):
 def get_embodiment(name: str) -> EmbodimentConfig:
     """Get a registered embodiment config by name."""
     if name not in EMBODIMENTS:
-        raise KeyError(
-            f"Unknown embodiment '{name}'. Available: {list(EMBODIMENTS.keys())}"
-        )
+        raise KeyError(f"Unknown embodiment '{name}'. Available: {list(EMBODIMENTS.keys())}")
     return EMBODIMENTS[name]
 
 
 # --- Register standard embodiments ---
 
 # Franka Panda (DROID) - 7DoF EEF absolute/delta
-register_embodiment("franka", EmbodimentConfig(
-    name="franka",
-    native_action_dim=7,
-    action_type="ee_delta",
-    bimanual=False,
-    # (x, y, z, roll, pitch, yaw, gripper) -> canonical (same layout)
-    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
-))
+register_embodiment(
+    "franka",
+    EmbodimentConfig(
+        name="franka",
+        native_action_dim=7,
+        action_type="ee_delta",
+        bimanual=False,
+        # (x, y, z, roll, pitch, yaw, gripper) -> canonical (same layout)
+        native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+    ),
+)
 
 # WidowX (Bridge V2) - 7DoF EEF delta
-register_embodiment("widowx", EmbodimentConfig(
-    name="widowx",
-    native_action_dim=7,
-    action_type="ee_delta",
-    bimanual=False,
-    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
-))
+register_embodiment(
+    "widowx",
+    EmbodimentConfig(
+        name="widowx",
+        native_action_dim=7,
+        action_type="ee_delta",
+        bimanual=False,
+        native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+    ),
+)
 
 # Google Robot (SimplerEnv) - 7DoF EEF delta
-register_embodiment("google_robot", EmbodimentConfig(
-    name="google_robot",
-    native_action_dim=7,
-    action_type="ee_delta",
-    bimanual=False,
-    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
-))
+register_embodiment(
+    "google_robot",
+    EmbodimentConfig(
+        name="google_robot",
+        native_action_dim=7,
+        action_type="ee_delta",
+        bimanual=False,
+        native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+    ),
+)
 
 # ARX-X5 (RoboTwin) - 14DoF bimanual
-register_embodiment("arx-x5", EmbodimentConfig(
-    name="arx-x5",
-    native_action_dim=14,
-    action_type="ee_delta",
-    bimanual=True,
-    # Left arm: native[0:7] -> canonical[0:7]
-    # Right arm: native[7:14] -> canonical[7:14]
-    native_to_canonical={
-        0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6,
-        7: 7, 8: 8, 9: 9, 10: 10, 11: 11, 12: 12, 13: 13,
-    },
-))
+register_embodiment(
+    "arx-x5",
+    EmbodimentConfig(
+        name="arx-x5",
+        native_action_dim=14,
+        action_type="ee_delta",
+        bimanual=True,
+        # Left arm: native[0:7] -> canonical[0:7]
+        # Right arm: native[7:14] -> canonical[7:14]
+        native_to_canonical={
+            0: 0,
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 4,
+            5: 5,
+            6: 6,
+            7: 7,
+            8: 8,
+            9: 9,
+            10: 10,
+            11: 11,
+            12: 12,
+            13: 13,
+        },
+    ),
+)
 
 # KUKA iiwa (OXE) - 7DoF EEF delta
-register_embodiment("kuka", EmbodimentConfig(
-    name="kuka",
-    native_action_dim=7,
-    action_type="ee_delta",
-    bimanual=False,
-    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
-))
+register_embodiment(
+    "kuka",
+    EmbodimentConfig(
+        name="kuka",
+        native_action_dim=7,
+        action_type="ee_delta",
+        bimanual=False,
+        native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+    ),
+)
 
 # Universal Robots UR5 (OXE) - 6DoF + gripper
-register_embodiment("ur5", EmbodimentConfig(
-    name="ur5",
-    native_action_dim=7,
-    action_type="ee_delta",
-    bimanual=False,
-    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
-))
+register_embodiment(
+    "ur5",
+    EmbodimentConfig(
+        name="ur5",
+        native_action_dim=7,
+        action_type="ee_delta",
+        bimanual=False,
+        native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+    ),
+)
 
 # Rethink Sawyer (OXE) - 7DoF EEF delta
-register_embodiment("sawyer", EmbodimentConfig(
-    name="sawyer",
-    native_action_dim=7,
-    action_type="ee_delta",
-    bimanual=False,
-    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
-))
+register_embodiment(
+    "sawyer",
+    EmbodimentConfig(
+        name="sawyer",
+        native_action_dim=7,
+        action_type="ee_delta",
+        bimanual=False,
+        native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+    ),
+)
 
 # UFactory xArm (OXE) - 7DoF EEF delta
-register_embodiment("xarm", EmbodimentConfig(
-    name="xarm",
-    native_action_dim=7,
-    action_type="ee_delta",
-    bimanual=False,
-    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
-))
+register_embodiment(
+    "xarm",
+    EmbodimentConfig(
+        name="xarm",
+        native_action_dim=7,
+        action_type="ee_delta",
+        bimanual=False,
+        native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+    ),
+)
 
 # Kinova Jaco (OXE) - 7DoF EEF delta
-register_embodiment("jaco", EmbodimentConfig(
-    name="jaco",
-    native_action_dim=7,
-    action_type="ee_delta",
-    bimanual=False,
-    native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
-))
+register_embodiment(
+    "jaco",
+    EmbodimentConfig(
+        name="jaco",
+        native_action_dim=7,
+        action_type="ee_delta",
+        bimanual=False,
+        native_to_canonical={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6},
+    ),
+)
 
 # Aloha (bimanual) - 14DoF joint delta
-register_embodiment("aloha", EmbodimentConfig(
-    name="aloha",
-    native_action_dim=14,
-    action_type="joint_delta",
-    bimanual=True,
-    native_to_canonical={
-        0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6,
-        7: 7, 8: 8, 9: 9, 10: 10, 11: 11, 12: 12, 13: 13,
-    },
-))
+register_embodiment(
+    "aloha",
+    EmbodimentConfig(
+        name="aloha",
+        native_action_dim=14,
+        action_type="joint_delta",
+        bimanual=True,
+        native_to_canonical={
+            0: 0,
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 4,
+            5: 5,
+            6: 6,
+            7: 7,
+            8: 8,
+            9: 9,
+            10: 10,
+            11: 11,
+            12: 12,
+            13: 13,
+        },
+    ),
+)
 
 
 class ActionSpaceAdapter:

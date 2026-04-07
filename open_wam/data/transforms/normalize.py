@@ -10,8 +10,8 @@ Supported modes:
 All modes except ``binary`` are invertible for inference-time unnormalization.
 """
 
-from typing import Optional, Dict, Union
 from enum import Enum
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -85,9 +85,7 @@ class Normalizer(InvertibleModalityTransform):
 
         elif self.mode == NormMode.MEAN_STD:
             self._offset = np.asarray(s["mean"], dtype=np.float32)
-            self._scale = 1.0 / np.maximum(
-                np.asarray(s["std"], dtype=np.float32), self.eps
-            )
+            self._scale = 1.0 / np.maximum(np.asarray(s["std"], dtype=np.float32), self.eps)
 
         elif self.mode == NormMode.SCALE:
             lo = np.asarray(s["min"], dtype=np.float32)
@@ -124,9 +122,7 @@ class Normalizer(InvertibleModalityTransform):
             if key in data and data[key] is not None:
                 val = data[key]
                 if isinstance(val, torch.Tensor):
-                    data[key] = torch.from_numpy(
-                        self.normalize(val.numpy())
-                    )
+                    data[key] = torch.from_numpy(self.normalize(val.numpy()))
                 elif isinstance(val, np.ndarray):
                     data[key] = self.normalize(val)
         return data
@@ -136,9 +132,7 @@ class Normalizer(InvertibleModalityTransform):
             if key in data and data[key] is not None:
                 val = data[key]
                 if isinstance(val, torch.Tensor):
-                    data[key] = torch.from_numpy(
-                        self.unnormalize(val.numpy())
-                    )
+                    data[key] = torch.from_numpy(self.unnormalize(val.numpy()))
                 elif isinstance(val, np.ndarray):
                     data[key] = self.unnormalize(val)
         return data

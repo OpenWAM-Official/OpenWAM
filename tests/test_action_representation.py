@@ -1,13 +1,13 @@
 """Tests for the action representation layer."""
 
-import torch
-import numpy as np
 import pytest
+import torch
 
 
 def test_base_is_abstract():
     """BaseActionRepresentation cannot be instantiated directly."""
     from open_wam.models.action_repr.base import BaseActionRepresentation
+
     with pytest.raises(TypeError):
         BaseActionRepresentation()
 
@@ -39,7 +39,7 @@ def test_continuous_repr_default_dim():
 
 def test_build_action_representation_continuous():
     """Factory builds ContinuousActionRepresentation."""
-    from open_wam.models.action_repr import build_action_representation, ContinuousActionRepresentation
+    from open_wam.models.action_repr import ContinuousActionRepresentation, build_action_representation
 
     repr = build_action_representation("continuous", action_dim=7)
     assert isinstance(repr, ContinuousActionRepresentation)
@@ -57,6 +57,7 @@ def test_build_action_representation_unknown():
 def test_fast_repr_imports():
     """FASTActionRepresentation should be importable."""
     from open_wam.models.action_repr.fast import FASTActionRepresentation
+
     assert FASTActionRepresentation is not None
 
 
@@ -93,9 +94,10 @@ def test_fast_repr_embedding_and_projection():
 
 def test_fast_repr_encode_requires_tokenizer():
     """Encoding should fail with clear message when tokenizer not installed."""
-    from open_wam.models.action_repr.fast import FASTActionRepresentation
-    from unittest.mock import patch
     import builtins
+    from unittest.mock import patch
+
+    from open_wam.models.action_repr.fast import FASTActionRepresentation
 
     repr = FASTActionRepresentation(
         native_dim=7,
@@ -105,6 +107,7 @@ def test_fast_repr_encode_requires_tokenizer():
     )
     # Mock the import to simulate fast_tokenizer not being installed
     original_import = builtins.__import__
+
     def mock_import(name, *args, **kwargs):
         if name == "fast_tokenizer":
             raise ImportError("No module named 'fast_tokenizer'")

@@ -9,13 +9,13 @@ the canonical 7D/14D action space.
 """
 
 import logging
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 import numpy as np
 
+from open_wam.data.embodiment import CANONICAL_SINGLE_ARM_DIM, ActionSpaceAdapter
 from open_wam.data.lerobot_base import LeRobotBaseDataset
 from open_wam.data.transforms.base import ModalityTransform
-from open_wam.data.embodiment import ActionSpaceAdapter, CANONICAL_SINGLE_ARM_DIM
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,11 @@ class OXEDataset(LeRobotBaseDataset):
 
         logger.info(
             "OXEDataset '%s': %d episodes (%s split), embodiment=%s, camera=%s",
-            dataset_name, len(self._indices), split, embodiment_name, resolved_camera,
+            dataset_name,
+            len(self._indices),
+            split,
+            embodiment_name,
+            resolved_camera,
         )
 
     def _post_load_actions(self, actions: np.ndarray) -> np.ndarray:

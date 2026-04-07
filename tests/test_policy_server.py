@@ -2,12 +2,10 @@
 
 import base64
 import io
-import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
-import pytest
-from types import SimpleNamespace
 from PIL import Image
 
 from open_wam.serving.policy_server import PolicyServer, _build_argparser
@@ -15,6 +13,7 @@ from open_wam.serving.policy_server import PolicyServer, _build_argparser
 
 class MockEngine:
     """Mock inference engine."""
+
     def __init__(self, action_dim=7):
         self.action_dim = action_dim
         self.call_count = 0
@@ -28,7 +27,11 @@ class MockEngine:
 
 
 def make_cfg(**kwargs):
-    defaults = {"history_len": 3, "execute_horizon": None, "policy": SimpleNamespace(history_len=3, execute_horizon=None)}
+    defaults = {
+        "history_len": 3,
+        "execute_horizon": None,
+        "policy": SimpleNamespace(history_len=3, execute_horizon=None),
+    }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
@@ -44,6 +47,7 @@ def make_base64_image(width=64, height=64):
 def test_server_import():
     """PolicyServer should be importable."""
     from open_wam.serving import PolicyServer
+
     assert callable(PolicyServer)
 
 
@@ -74,10 +78,12 @@ def test_server_predict_base64_image():
 def test_server_predict_with_state():
     """Server should handle state arrays."""
     server = PolicyServer(MockEngine(), make_cfg())
-    result = server.predict({
-        "image": Image.new("RGB", (64, 64)),
-        "state": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
-    })
+    result = server.predict(
+        {
+            "image": Image.new("RGB", (64, 64)),
+            "state": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        }
+    )
 
     assert "action" in result
 

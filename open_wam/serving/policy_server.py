@@ -22,14 +22,14 @@ Usage:
     server.run(host="0.0.0.0", port=8765)
 """
 
+import argparse
 import asyncio
 import base64
 import io
 import json
 import logging
-import argparse
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -68,11 +68,14 @@ class PolicyServer:
         deploy = getattr(self.cfg, "deploy", None)
         async_config = getattr(deploy, "async_execution", None) if deploy else None
         self._policy = WAMPolicy(
-            engine=self.engine, cfg=policy_cfg, async_config=async_config,
+            engine=self.engine,
+            cfg=policy_cfg,
+            async_config=async_config,
         )
 
         if self.embodiment:
             from open_wam.data.embodiment import ActionSpaceAdapter
+
             self._adapter = ActionSpaceAdapter(self.embodiment)
 
     def predict(self, obs: dict) -> dict:
@@ -95,9 +98,7 @@ class PolicyServer:
 
         # Convert from canonical to native action space
         if self._adapter is not None:
-            action = self._adapter.canonical_to_native(
-                action.reshape(1, -1)
-            )[0]
+            action = self._adapter.canonical_to_native(action.reshape(1, -1))[0]
 
         latency_ms = (time.monotonic() - t0) * 1000
         self._request_count += 1
@@ -123,25 +124,15 @@ class PolicyServer:
 
     def get_info(self) -> dict:
         """Return server info and statistics."""
-        avg_latency = (
-            self._total_latency / self._request_count
-            if self._request_count > 0
-            else 0.0
-        )
+        avg_latency = self._total_latency / self._request_count if self._request_count > 0 else 0.0
         return {
             "model": "OpenWAM",
             "embodiment": self.embodiment,
             "total_requests": self._request_count,
             "avg_latency_ms": round(avg_latency, 2),
             "policy_config": {
-                "execute_horizon": getattr(
-                    getattr(self.cfg, "policy", self.cfg),
-                    "execute_horizon", None
-                ),
-                "temporal_ensemble": getattr(
-                    getattr(self.cfg, "policy", self.cfg),
-                    "temporal_ensemble", True
-                ),
+                "execute_horizon": getattr(getattr(self.cfg, "policy", self.cfg), "execute_horizon", None),
+                "temporal_ensemble": getattr(getattr(self.cfg, "policy", self.cfg), "temporal_ensemble", True),
             },
         }
 
@@ -167,14 +158,11 @@ class PolicyServer:
         Requires ``websockets`` and ``aiohttp`` packages.
         """
         try:
+            import aiohttp  # noqa: F401
             import websockets
-            import aiohttp
             from aiohttp import web
         except ImportError:
-            raise ImportError(
-                "Server dependencies required. Install with:\n"
-                "  pip install websockets aiohttp"
-            )
+            raise ImportError("Server dependencies required. Install with:\n  pip install websockets aiohttp")
 
         self._init_policy()
 
@@ -195,16 +183,24 @@ class PolicyServer:
                             result["type"] = "action"
                             await websocket.send(json.dumps(result))
                         else:
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "message": f"Unknown message type: {msg_type}",
-                            }))
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "error",
+                                        "message": f"Unknown message type: {msg_type}",
+                                    }
+                                )
+                            )
                     except Exception as e:
                         logger.error("Error processing message: %s", e)
-                        await websocket.send(json.dumps({
-                            "type": "error",
-                            "message": str(e),
-                        }))
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": "error",
+                                    "message": str(e),
+                                }
+                            )
+                        )
             except websockets.exceptions.ConnectionClosed:
                 logger.info("Client disconnected")
 
@@ -250,7 +246,10 @@ class PolicyServer:
         resolved_http_port = port + 1 if http_port is None else http_port
         logger.info(
             "Starting PolicyServer on %s:%d (WS) and %s:%d (HTTP)",
-            host, port, host, resolved_http_port,
+            host,
+            port,
+            host,
+            resolved_http_port,
         )
         asyncio.run(start_servers())
 

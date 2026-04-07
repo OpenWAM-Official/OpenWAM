@@ -9,16 +9,16 @@ override ``_post_load_actions()`` for dataset-specific processing
 (e.g., OXE's embodiment adapter).
 """
 
-import os
 import logging
-from typing import Optional, List
+import os
+from typing import List, Optional
 
 import numpy as np
 import torch
 from PIL import Image
 
 from open_wam.data.base import BaseActionDataset
-from open_wam.data.transforms.base import ComposedTransform, ModalityTransform
+from open_wam.data.transforms.base import ModalityTransform
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,7 @@ class LeRobotBaseDataset(BaseActionDataset):
         self._episodes = self._discover_episodes(dataset_dir)
         if not self._episodes:
             raise FileNotFoundError(
-                f"No episodes found in {dataset_dir}. "
-                f"Expected LeRobot format: data/*.parquet + videos/*.mp4"
+                f"No episodes found in {dataset_dir}. Expected LeRobot format: data/*.parquet + videos/*.mp4"
             )
 
         # Train/val split
@@ -108,14 +107,15 @@ class LeRobotBaseDataset(BaseActionDataset):
 
         if os.path.isdir(parquet_dir):
             import glob as globmod
-            parquet_files = sorted(
-                globmod.glob(os.path.join(parquet_dir, "**/*.parquet"), recursive=True)
-            )
+
+            parquet_files = sorted(globmod.glob(os.path.join(parquet_dir, "**/*.parquet"), recursive=True))
             for pf in parquet_files:
-                episodes.append({
-                    "parquet": pf,
-                    "video_dir": video_dir if os.path.isdir(video_dir) else None,
-                })
+                episodes.append(
+                    {
+                        "parquet": pf,
+                        "video_dir": video_dir if os.path.isdir(video_dir) else None,
+                    }
+                )
         else:
             # Fallback: list directories as episodes
             for entry in sorted(os.listdir(dataset_dir)):
@@ -132,9 +132,7 @@ class LeRobotBaseDataset(BaseActionDataset):
         if "parquet" in episode:
             data = self._load_lerobot_episode(episode, ep_idx)
         else:
-            raise NotImplementedError(
-                "Raw directory loading not implemented. Convert to LeRobot format."
-            )
+            raise NotImplementedError("Raw directory loading not implemented. Convert to LeRobot format.")
 
         # Apply transforms if configured
         if self.transforms is not None:
@@ -192,7 +190,11 @@ class LeRobotBaseDataset(BaseActionDataset):
         return actions
 
     def _load_video_frames(
-        self, episode: dict, episode_id: int, start: int, end: int,
+        self,
+        episode: dict,
+        episode_id: int,
+        start: int,
+        end: int,
     ) -> List[Image.Image]:
         """Load video frames from MP4 using the best available backend.
 
@@ -204,24 +206,26 @@ class LeRobotBaseDataset(BaseActionDataset):
         if video_dir is None:
             return [Image.new("RGB", (self.width, self.height)) for _ in range(end - start)]
 
-        video_path = os.path.join(
-            video_dir, self.camera, f"episode_{episode_id:06d}.mp4"
-        )
+        video_path = os.path.join(video_dir, self.camera, f"episode_{episode_id:06d}.mp4")
         if not os.path.exists(video_path):
             logger.warning("Video not found: %s — using placeholder frames", video_path)
             return [Image.new("RGB", (self.width, self.height)) for _ in range(end - start)]
 
         from open_wam.data.video_reader import read_video_frames
+
         return read_video_frames(
-            video_path, start=start, end=end,
-            height=self.height, width=self.width,
+            video_path,
+            start=start,
+            end=end,
+            height=self.height,
+            width=self.width,
         )
 
     def _pad_actions(self, actions: np.ndarray):
         """Pad actions to num_frames, return (padded_actions, mask)."""
         T = len(actions)
         if T >= self.num_frames:
-            return actions[:self.num_frames], np.ones(self.num_frames, dtype=bool)
+            return actions[: self.num_frames], np.ones(self.num_frames, dtype=bool)
         pad = np.zeros((self.num_frames - T, actions.shape[1]), dtype=np.float32)
         padded = np.concatenate([actions, pad], axis=0)
         mask = np.concatenate([np.ones(T, dtype=bool), np.zeros(self.num_frames - T, dtype=bool)])
@@ -230,7 +234,7 @@ class LeRobotBaseDataset(BaseActionDataset):
     def _pad_frames(self, frames: List[Image.Image]) -> List[Image.Image]:
         """Pad frame list to num_frames."""
         if len(frames) >= self.num_frames:
-            return frames[:self.num_frames]
+            return frames[: self.num_frames]
         last = frames[-1] if frames else Image.new("RGB", (self.width, self.height))
         return frames + [last] * (self.num_frames - len(frames))
 

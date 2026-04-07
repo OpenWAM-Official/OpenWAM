@@ -10,7 +10,7 @@ Metrics follow the standard Calvin protocol:
 """
 
 import logging
-from typing import Optional, List, Dict
+from typing import Dict, List
 
 import numpy as np
 
@@ -51,6 +51,7 @@ class CalvinEvaluator(BaseEvaluator):
 
         if env_adapter is None:
             from open_wam.evaluation.envs.calvin import CalvinEnvAdapter
+
             env_adapter = CalvinEnvAdapter(
                 dataset_path=dataset_path,
                 split=split,
@@ -88,7 +89,7 @@ class CalvinEvaluator(BaseEvaluator):
                 completed = 0
 
                 for subtask_idx in range(min(max_subtasks, len(subtask_instructions))):
-                    instruction = subtask_instructions[subtask_idx]
+                    _instruction = subtask_instructions[subtask_idx]  # noqa: F841
                     subtask_success = False
 
                     for step in range(max_subtask_steps):
@@ -110,7 +111,8 @@ class CalvinEvaluator(BaseEvaluator):
                 if (seq_idx + 1) % 100 == 0:
                     logger.info(
                         "Calvin eval: %d/%d sequences, avg completed: %.2f",
-                        seq_idx + 1, num_sequences,
+                        seq_idx + 1,
+                        num_sequences,
                         total_completed / (seq_idx + 1),
                     )
         finally:
@@ -130,13 +132,14 @@ class CalvinEvaluator(BaseEvaluator):
             "num_sequences": num_evaluated,
             "total_completed_subtasks": int(total_completed),
             "per_length_success": per_length,
-            "completion_distribution": {
-                str(k): int(completion_counts[k]) for k in range(max_subtasks + 1)
-            },
+            "completion_distribution": {str(k): int(completion_counts[k]) for k in range(max_subtasks + 1)},
         }
 
     def _load_annotations(
-        self, dataset_path: str, split: str, num_sequences: int,
+        self,
+        dataset_path: str,
+        split: str,
+        num_sequences: int,
     ) -> List[Dict]:
         """Load Calvin evaluation annotations.
 
@@ -149,22 +152,23 @@ class CalvinEvaluator(BaseEvaluator):
         import os
 
         # Try to load from Calvin dataset
-        ann_path = os.path.join(dataset_path, f"lang_annotations/auto_lang_ann.npy")
+        ann_path = os.path.join(dataset_path, "lang_annotations/auto_lang_ann.npy")
         if os.path.exists(ann_path):
             data = np.load(ann_path, allow_pickle=True).item()
             annotations = []
             lang_anns = data.get("language", {}).get("ann", [])
             for i in range(min(num_sequences, len(lang_anns))):
-                annotations.append({
-                    "instructions": lang_anns[i] if isinstance(lang_anns[i], list) else [lang_anns[i]],
-                    "initial_state": None,
-                })
+                annotations.append(
+                    {
+                        "instructions": lang_anns[i] if isinstance(lang_anns[i], list) else [lang_anns[i]],
+                        "initial_state": None,
+                    }
+                )
             return annotations
 
         # Fallback: generate placeholder sequences for testing
         logger.warning(
-            "Calvin annotations not found at %s. "
-            "Using placeholder sequences for dry-run evaluation.",
+            "Calvin annotations not found at %s. Using placeholder sequences for dry-run evaluation.",
             ann_path,
         )
         placeholder_instructions = [
@@ -174,7 +178,4 @@ class CalvinEvaluator(BaseEvaluator):
             "pick up the blue block",
             "place the block in the drawer",
         ]
-        return [
-            {"instructions": placeholder_instructions, "initial_state": None}
-            for _ in range(num_sequences)
-        ]
+        return [{"instructions": placeholder_instructions, "initial_state": None} for _ in range(num_sequences)]

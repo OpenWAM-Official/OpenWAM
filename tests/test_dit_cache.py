@@ -29,7 +29,7 @@ def test_cache_hit_with_similar_velocities():
     cache = DiTVelocityCache(cosine_threshold=0.9)
     v = torch.randn(1, 4, 8, 8)
 
-    cache.update(v, 0.9)          # step 1
+    cache.update(v, 0.9)  # step 1
     cache.update(v * 1.01, 0.85)  # step 2: very similar to step 1
 
     # step 3: should skip (v and v*1.01 have cosine sim ≈ 1.0)

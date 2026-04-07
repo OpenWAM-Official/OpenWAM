@@ -12,7 +12,6 @@ import torch
 import torch.nn.functional as F
 
 from open_wam.models.architectures.dual_system import DualSystemArchitecture
-from open_wam.models.architectures.base import ActionState
 
 
 def _make_tiny_architecture():
@@ -67,7 +66,7 @@ def test_e2e_train_save_load_infer():
     # --- 5. Save weights ---
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_path = Path(tmpdir) / "action_dit.safetensors"
-        from safetensors.torch import save_file, load_file
+        from safetensors.torch import load_file, save_file
 
         save_file(arch.action_dit.state_dict(), str(ckpt_path))
         assert ckpt_path.exists()

@@ -5,7 +5,6 @@ All diffsynth access within open_wam/ must use the qualified path
 form which requires sys.path manipulation.
 """
 
-import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -51,17 +50,13 @@ def test_no_sys_path_insert_in_open_wam():
                     rel = py_file.relative_to(PROJECT_ROOT)
                     violations.append(f"{rel}:{i}: {stripped}")
 
-    assert violations == [], (
-        "open_wam/ must not use sys.path manipulation.\n"
-        "Violations:\n" + "\n".join(violations)
-    )
+    assert violations == [], "open_wam/ must not use sys.path manipulation.\nViolations:\n" + "\n".join(violations)
 
 
 def test_no_legacy_imports_boundary():
     """_legacy_imports.py should no longer exist — all code is package-native."""
     assert not (PROJECT_ROOT / "open_wam" / "_legacy_imports.py").exists(), (
-        "open_wam/_legacy_imports.py still exists — legacy code should be "
-        "internalized into the package"
+        "open_wam/_legacy_imports.py still exists — legacy code should be internalized into the package"
     )
 
 
@@ -94,14 +89,13 @@ def test_diffsynth_moved_to_third_party():
     assert not (PROJECT_ROOT / "diffsynth").is_dir(), (
         "diffsynth/ still exists at project root — should be third_party/diffsynth/"
     )
-    assert (PROJECT_ROOT / "third_party" / "diffsynth").is_dir(), (
-        "third_party/diffsynth/ does not exist"
-    )
+    assert (PROJECT_ROOT / "third_party" / "diffsynth").is_dir(), "third_party/diffsynth/ does not exist"
 
 
 def test_diffsynth_importable_via_qualified_path():
     """diffsynth should be importable via third_party.diffsynth."""
-    from third_party.diffsynth import core  # noqa: F401
     from third_party import diffsynth
+    from third_party.diffsynth import core  # noqa: F401
+
     assert hasattr(diffsynth, "__file__")
     assert "third_party" in str(Path(diffsynth.__file__).resolve())

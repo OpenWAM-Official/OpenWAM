@@ -13,7 +13,7 @@ Installation: pip install omnigibson
 See: https://behavior.stanford.edu/omnigibson/getting_started/installation.html
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -78,13 +78,15 @@ class BehaviorEnvAdapter(BaseEnvAdapter):
                 "type": "InteractiveTraversableScene",
                 "scene_model": self.scene_model,
             },
-            "robots": [{
-                "type": self.robot,
-                "obs_modalities": ["rgb", "proprio"],
-                "controller_config": {
-                    "arm_0": {"name": self.controller},
-                },
-            }],
+            "robots": [
+                {
+                    "type": self.robot,
+                    "obs_modalities": ["rgb", "proprio"],
+                    "controller_config": {
+                        "arm_0": {"name": self.controller},
+                    },
+                }
+            ],
             "task": {
                 "type": "BehaviorTask",
                 "activity_name": self.activity_name,
@@ -158,9 +160,7 @@ class BehaviorEnvAdapter(BaseEnvAdapter):
                         if img_array.dtype != np.uint8:
                             img_array = (img_array * 255).clip(0, 255).astype(np.uint8)
                         pil_img = Image.fromarray(img_array)
-                        pil_img = pil_img.resize(
-                            (self.image_width, self.image_height), Image.LANCZOS
-                        )
+                        pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
                         obs_dict["image"] = pil_img
                     break
 

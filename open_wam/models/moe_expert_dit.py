@@ -25,13 +25,13 @@ References:
 - DreamZero: Shared backbone WAM with action+video in same DiT
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from open_wam.models.action_dit import sinusoidal_embedding_1d, RMSNorm
+import torch
+import torch.nn as nn
+
+from open_wam.models.action_dit import sinusoidal_embedding_1d
 
 
 @dataclass
@@ -55,7 +55,8 @@ class MoEExpertState:
             during RoPE (they still attend via content-based attention).
         action_noise_pred: Filled after finalize_output.
     """
-    moe_dit: 'MoEExpertDiT'
+
+    moe_dit: "MoEExpertDiT"
     action_tokens: torch.Tensor
     t_mod: torch.Tensor
     t_embed: torch.Tensor
@@ -85,11 +86,11 @@ class ExpertFFNBlock(nn.Module):
         self.norm = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim),
-            nn.GELU(approximate='tanh'),
+            nn.GELU(approximate="tanh"),
             nn.Linear(ffn_dim, dim),
         )
         # AdaLN base modulation (3 params: shift, scale, gate)
-        self.modulation = nn.Parameter(torch.randn(1, 3, dim) / dim ** 0.5)
+        self.modulation = nn.Parameter(torch.randn(1, 3, dim) / dim**0.5)
 
         # Zero-initialize output so expert correction starts at zero,
         # preserving pretrained video DiT behavior at initialization.
@@ -104,9 +105,7 @@ class ExpertFFNBlock(nn.Module):
         Returns:
             (B, T_action, dim) corrected action tokens
         """
-        shift, scale, gate = (
-            self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
-        ).chunk(3, dim=1)
+        shift, scale, gate = (self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(3, dim=1)
 
         h = self.norm(x) * (1 + scale) + shift
         return x + gate * self.ffn(h)
@@ -175,14 +174,12 @@ class MoEExpertDiT(nn.Module):
         # Action token projection: action_dim -> video_dim
         self.action_input_proj = nn.Sequential(
             nn.Linear(action_dim, video_dim),
-            nn.GELU(approximate='tanh'),
+            nn.GELU(approximate="tanh"),
             nn.Linear(video_dim, video_dim),
         )
 
         # Learned positional encoding in video_dim space
-        self.pos_embedding = nn.Parameter(
-            torch.randn(1, max_action_len, video_dim) * 0.02
-        )
+        self.pos_embedding = nn.Parameter(torch.randn(1, max_action_len, video_dim) * 0.02)
 
         # Timestep embedding (independent from video timestep)
         self.time_embedding = nn.Sequential(
@@ -198,25 +195,20 @@ class MoEExpertDiT(nn.Module):
         )
 
         # Expert FFN blocks (one per expert layer)
-        self.expert_blocks = nn.ModuleList([
-            ExpertFFNBlock(video_dim, expert_ffn_dim, eps)
-            for _ in range(num_experts)
-        ])
+        self.expert_blocks = nn.ModuleList([ExpertFFNBlock(video_dim, expert_ffn_dim, eps) for _ in range(num_experts)])
 
         # Output head: video_dim -> action_dim
         self.output_norm = nn.LayerNorm(video_dim, eps=eps, elementwise_affine=False)
         self.output_head = nn.Linear(video_dim, action_dim)
-        self.output_modulation = nn.Parameter(
-            torch.randn(1, 2, video_dim) / video_dim ** 0.5
-        )
+        self.output_modulation = nn.Parameter(torch.randn(1, 2, video_dim) / video_dim**0.5)
 
         # Zero-initialize output for stable training start
         nn.init.zeros_(self.output_head.weight)
         nn.init.zeros_(self.output_head.bias)
 
         # Action normalization stats (saved as persistent buffers)
-        self.register_buffer('action_mean', torch.zeros(action_dim), persistent=True)
-        self.register_buffer('action_std', torch.ones(action_dim), persistent=True)
+        self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
+        self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
 
     def prepare_state(
         self,
@@ -236,8 +228,7 @@ class MoEExpertDiT(nn.Module):
         """
         B, T, _ = action_tokens.shape
         assert T <= self.pos_embedding.shape[1], (
-            f"Action sequence length {T} exceeds max_action_len "
-            f"{self.pos_embedding.shape[1]}"
+            f"Action sequence length {T} exceeds max_action_len {self.pos_embedding.shape[1]}"
         )
 
         # Project to video_dim and add positional encoding
@@ -259,9 +250,7 @@ class MoEExpertDiT(nn.Module):
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
 
-    def apply_expert(
-        self, state: MoEExpertState, x_action: torch.Tensor
-    ) -> torch.Tensor:
+    def apply_expert(self, state: MoEExpertState, x_action: torch.Tensor) -> torch.Tensor:
         """Apply expert FFN correction at the current expert layer.
 
         Args:
@@ -276,17 +265,23 @@ class MoEExpertDiT(nn.Module):
         block = self.expert_blocks[i]
 
         if state.use_gradient_checkpointing and self.training:
+
             def _ckpt_fn(x, t):
                 return block(x, t)
+
             if state.use_gradient_checkpointing_offload:
                 with torch.autograd.graph.save_on_cpu():
                     x_action = torch.utils.checkpoint.checkpoint(
-                        _ckpt_fn, x_action, state.t_mod,
+                        _ckpt_fn,
+                        x_action,
+                        state.t_mod,
                         use_reentrant=False,
                     )
             else:
                 x_action = torch.utils.checkpoint.checkpoint(
-                    _ckpt_fn, x_action, state.t_mod,
+                    _ckpt_fn,
+                    x_action,
+                    state.t_mod,
                     use_reentrant=False,
                 )
         else:
@@ -308,13 +303,10 @@ class MoEExpertDiT(nn.Module):
         t = state.t_embed
 
         shift_out, scale_out = (
-            self.output_modulation.to(dtype=t.dtype, device=t.device)
-            + t.unsqueeze(1).expand(-1, 2, -1)
+            self.output_modulation.to(dtype=t.dtype, device=t.device) + t.unsqueeze(1).expand(-1, 2, -1)
         ).chunk(2, dim=1)
 
-        return self.output_head(
-            self.output_norm(x) * (1 + scale_out) + shift_out
-        )
+        return self.output_head(self.output_norm(x) * (1 + scale_out) + shift_out)
 
     @staticmethod
     def state_dict_converter():

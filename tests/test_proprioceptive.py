@@ -1,7 +1,7 @@
 """Tests for proprioceptive state conditioning."""
 
-import torch
 import pytest
+import torch
 
 from open_wam.models.proprioceptive import ProprioceptiveEncoder
 
@@ -9,6 +9,7 @@ from open_wam.models.proprioceptive import ProprioceptiveEncoder
 def test_import():
     """ProprioceptiveEncoder should be importable from models package."""
     from open_wam.models import ProprioceptiveEncoder
+
     assert callable(ProprioceptiveEncoder)
 
 
@@ -24,9 +25,7 @@ def test_add_mode_shape():
 
 def test_concat_mode_shape():
     """Concat mode should add extra tokens."""
-    enc = ProprioceptiveEncoder(
-        state_dim=14, hidden_dim=64, mode="concat", num_state_tokens=4
-    )
+    enc = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="concat", num_state_tokens=4)
     action_embeds = torch.randn(2, 49, 64)
     state = torch.randn(2, 14)
     out = enc(action_embeds, state)
@@ -37,9 +36,7 @@ def test_concat_mode_shape():
 def test_extra_tokens_property():
     """extra_tokens should match mode."""
     enc_add = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="add")
-    enc_cat = ProprioceptiveEncoder(
-        state_dim=7, hidden_dim=32, mode="concat", num_state_tokens=8
-    )
+    enc_cat = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="concat", num_state_tokens=8)
     assert enc_add.extra_tokens == 0
     assert enc_cat.extra_tokens == 8
 
@@ -58,9 +55,7 @@ def test_zero_init():
 
 def test_zero_init_concat():
     """Concat mode state tokens should also start near-zero."""
-    enc = ProprioceptiveEncoder(
-        state_dim=7, hidden_dim=32, mode="concat", num_state_tokens=4
-    )
+    enc = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="concat", num_state_tokens=4)
     state = torch.randn(1, 7)
     action_embeds = torch.randn(1, 10, 32)
     out = enc(action_embeds, state)
@@ -86,9 +81,7 @@ def test_gradient_flow():
 
 def test_gradient_flow_concat():
     """Concat mode should also propagate gradients."""
-    enc = ProprioceptiveEncoder(
-        state_dim=7, hidden_dim=32, mode="concat", num_state_tokens=2
-    )
+    enc = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="concat", num_state_tokens=2)
     state = torch.randn(1, 7, requires_grad=True)
     action_embeds = torch.randn(1, 10, 32, requires_grad=True)
 

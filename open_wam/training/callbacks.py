@@ -26,14 +26,15 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-
 # ---------------------------------------------------------------------------
 # Training state container — passed to every hook
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TrainingState:
     """Mutable state bag threaded through all callback hooks."""
+
     step: int = 0
     epoch: int = 0
     loss: float = 0.0
@@ -48,6 +49,7 @@ class TrainingState:
 # ---------------------------------------------------------------------------
 # Base callback
 # ---------------------------------------------------------------------------
+
 
 class TrainingCallback:
     """Base class for training callbacks.
@@ -82,6 +84,7 @@ class TrainingCallback:
 # ---------------------------------------------------------------------------
 # Callback runner — dispatches events to a list of callbacks
 # ---------------------------------------------------------------------------
+
 
 class CallbackRunner:
     """Manages a list of callbacks and dispatches training events.
@@ -163,11 +166,13 @@ class CallbackRunner:
 # Concrete callbacks
 # ---------------------------------------------------------------------------
 
+
 class ValidationLossCallback(TrainingCallback):
     """Compute validation loss on one or more datasets at regular intervals."""
 
-    def __init__(self, model, datasets: Dict[str, Any], wandb_run=None,
-                 every_n_steps: int = 500, max_samples: int = 500):
+    def __init__(
+        self, model, datasets: Dict[str, Any], wandb_run=None, every_n_steps: int = 500, max_samples: int = 500
+    ):
         super().__init__()
         self.every_n_steps = every_n_steps
         self.model = model
@@ -179,16 +184,18 @@ class ValidationLossCallback(TrainingCallback):
         wandb_run = self.wandb_run or state.wandb_run
         for prefix, dataset in self.datasets.items():
             self.model.compute_val_losses(
-                dataset, state.step, wandb_run,
-                prefix=prefix, max_samples=self.max_samples,
+                dataset,
+                state.step,
+                wandb_run,
+                prefix=prefix,
+                max_samples=self.max_samples,
             )
 
 
 class VideoLogCallback(TrainingCallback):
     """Generate and log sample videos/actions to W&B at regular intervals."""
 
-    def __init__(self, model, datasets: Dict[str, Any], wandb_run=None,
-                 every_n_steps: int = 1000):
+    def __init__(self, model, datasets: Dict[str, Any], wandb_run=None, every_n_steps: int = 1000):
         super().__init__()
         self.every_n_steps = every_n_steps
         self.model = model
@@ -204,7 +211,10 @@ class VideoLogCallback(TrainingCallback):
                 # Fallback for IterableDataset or empty datasets
                 sample = next(iter(dataset))
             self.model.validate_during_training(
-                sample, state.step, wandb_run, prefix=prefix,
+                sample,
+                state.step,
+                wandb_run,
+                prefix=prefix,
             )
 
 
@@ -230,9 +240,11 @@ class SetupCallback(TrainingCallback):
 
     def on_train_start(self, state: TrainingState) -> None:
         import os
+
         os.makedirs(self.output_dir, exist_ok=True)
         if self.config_dict is not None:
             import json
+
             config_path = os.path.join(self.output_dir, "config.json")
             with open(config_path, "w") as f:
                 json.dump(self.config_dict, f, indent=2, default=str)
@@ -250,7 +262,8 @@ class SetupCallback(TrainingCallback):
             run_id = None if self.run_metadata is None else self.run_metadata.get("run_id")
             artifact_dir = (
                 os.path.join(self.output_dir, "run_artifacts", run_id)
-                if run_id else os.path.join(self.output_dir, "run_artifacts", "latest")
+                if run_id
+                else os.path.join(self.output_dir, "run_artifacts", "latest")
             )
             write_run_artifacts(
                 artifact_dir,

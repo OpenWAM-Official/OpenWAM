@@ -15,9 +15,9 @@ Usage:
     python scripts/eval.py --cfg job
 """
 
+import json
 import os
 import sys
-import json
 from pathlib import Path
 
 import hydra
@@ -51,8 +51,8 @@ def main(cfg: DictConfig) -> None:
 
     # Load models
     device = getattr(eval_cfg, "device", "cuda")
-    from open_wam.inference import JointInferenceEngine, load_wam_models
     from open_wam.evaluation.registry import build_evaluator
+    from open_wam.inference import JointInferenceEngine, load_wam_models
 
     pipe, action_dit = load_wam_models(cfg, device=device)
 
@@ -65,24 +65,36 @@ def main(cfg: DictConfig) -> None:
     # Build eval target (dataset or env) depending on evaluator type
     eval_target = None
     if eval_type == "offline":
-        from open_wam.data.robotwin import RoboTwinActionDataset, MultiTaskRoboTwinActionDataset
+        from open_wam.data.robotwin import MultiTaskRoboTwinActionDataset, RoboTwinActionDataset
+
         d = cfg.data
         if d.type == "robotwin_multitask":
             eval_target = MultiTaskRoboTwinActionDataset(
-                dataset_dir=d.dataset_dir, robot=d.robot, variant=d.variant,
-                num_frames=int(d.num_frames), height=int(d.height), width=int(d.width),
-                split="val", val_ratio=float(d.val_ratio),
-                multiview=bool(d.multiview), backbone=cfg.model.backbone.name,
+                dataset_dir=d.dataset_dir,
+                robot=d.robot,
+                variant=d.variant,
+                num_frames=int(d.num_frames),
+                height=int(d.height),
+                width=int(d.width),
+                split="val",
+                val_ratio=float(d.val_ratio),
+                multiview=bool(d.multiview),
+                backbone=cfg.model.backbone.name,
             )
         else:
             eval_target = RoboTwinActionDataset(
                 data_root=d.hdf5_data_root,
-                num_frames=int(d.num_frames), height=int(d.height), width=int(d.width),
-                split="val", val_ratio=float(d.val_ratio),
-                multiview=bool(d.multiview), backbone=cfg.model.backbone.name,
+                num_frames=int(d.num_frames),
+                height=int(d.height),
+                width=int(d.width),
+                split="val",
+                val_ratio=float(d.val_ratio),
+                multiview=bool(d.multiview),
+                backbone=cfg.model.backbone.name,
             )
     elif eval_type == "online":
         from open_wam.evaluation.envs.robotwin import RoboTwinEnvAdapter
+
         task_name = getattr(eval_cfg, "task_name", "adjust_bottle")
         eval_target = RoboTwinEnvAdapter(task_name=task_name, robot=cfg.data.robot)
 

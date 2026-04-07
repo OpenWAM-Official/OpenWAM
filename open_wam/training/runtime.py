@@ -10,17 +10,17 @@ import numpy as np
 import torch
 from omegaconf import DictConfig
 
+from open_wam.data.bridge_v2 import BridgeV2Dataset
+from open_wam.data.droid import DROIDDataset
+from open_wam.data.mixture import MixtureDataset
+from open_wam.data.oxe import OXEDataset
 from open_wam.data.robotwin import (
-    MultiTaskRoboTwinActionDataset,
-    RoboTwinActionDataset,
     ROBOTWIN_ALL_TASKS,
     ROBOTWIN_HOLDOUT_TASKS,
     ROBOTWIN_TRAIN_TASKS,
+    MultiTaskRoboTwinActionDataset,
+    RoboTwinActionDataset,
 )
-from open_wam.data.droid import DROIDDataset
-from open_wam.data.bridge_v2 import BridgeV2Dataset
-from open_wam.data.oxe import OXEDataset
-from open_wam.data.mixture import MixtureDataset
 from open_wam.data.transforms.builder import build_transforms
 
 
@@ -198,12 +198,13 @@ def resolve_train_tasks(
     return ROBOTWIN_TRAIN_TASKS
 
 
-def _build_dataset_from_mixture_entry(entry) -> "BaseActionDataset":
+def _build_dataset_from_mixture_entry(entry):
     """Build a single dataset from a mixture config entry.
 
     Uses the Dataset Registry for dispatch — no more if-else chains.
     """
     from open_wam.data.registry import build_dataset
+
     return build_dataset(entry, split="train")
 
 
@@ -351,9 +352,7 @@ def build_validation_datasets(
 ) -> tuple[dict, dict]:
     """Build validation and video logging datasets for training callbacks."""
     if args.dataset_type == "robotwin_multitask":
-        resolved_train_tasks = resolve_train_tasks(
-            args, train_tasks=train_tasks, holdout_tasks=holdout_tasks
-        )
+        resolved_train_tasks = resolve_train_tasks(args, train_tasks=train_tasks, holdout_tasks=holdout_tasks)
         val_variant = args.val_variant or args.variant
         resolved_holdout = holdout_tasks if holdout_tasks else ROBOTWIN_HOLDOUT_TASKS
         common_kwargs = dict(

@@ -12,10 +12,9 @@ This module provides:
   video noise during training
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
-import numpy as np
 
 # Type alias (same as joint_inference.py)
 Schedule = List[Tuple[float, float]]
@@ -24,6 +23,7 @@ Schedule = List[Tuple[float, float]]
 def _base_timesteps(num_steps: int, shift: float) -> List[float]:
     """Generate Wan-style descending timesteps."""
     from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
+
     scheduler = FlowMatchScheduler("Wan")
     scheduler.set_timesteps(num_steps, shift=shift)
     return scheduler.timesteps.tolist()
@@ -73,9 +73,7 @@ def schedule_decoupled_asymmetric(
     Returns:
         Schedule with asymmetric video/action step counts.
     """
-    assert action_steps <= video_steps, (
-        f"action_steps ({action_steps}) must be <= video_steps ({video_steps})"
-    )
+    assert action_steps <= video_steps, f"action_steps ({action_steps}) must be <= video_steps ({video_steps})"
 
     video_ts = _base_timesteps(video_steps, shift)
     action_ts = _base_timesteps(action_steps, shift)
@@ -100,6 +98,7 @@ def schedule_decoupled_asymmetric(
 # ---------------------------------------------------------------------------
 # Training-side utilities
 # ---------------------------------------------------------------------------
+
 
 def sample_decoupled_timesteps(
     batch_size: int,

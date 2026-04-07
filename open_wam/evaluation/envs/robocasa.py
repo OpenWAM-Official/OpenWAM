@@ -10,7 +10,7 @@ Action format: 7D delta EEF (dx, dy, dz, droll, dpitch, dyaw, gripper)
 Installation: pip install robocasa
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -62,7 +62,7 @@ class RoboCasaEnvAdapter(BaseEnvAdapter):
             return
 
         try:
-            import robocasa
+            import robocasa  # noqa: F401
             import robosuite as suite
         except ImportError:
             raise ImportError(
@@ -74,9 +74,7 @@ class RoboCasaEnvAdapter(BaseEnvAdapter):
         self._env = suite.make(
             self.task_name,
             robots=["PandaMobile"],
-            controller_configs=suite.load_controller_config(
-                default_controller="OSC_POSE"
-            ),
+            controller_configs=suite.load_controller_config(default_controller="OSC_POSE"),
             layout_ids=self.layout,
             style_ids=self.style,
             has_renderer=False,
@@ -146,18 +144,18 @@ class RoboCasaEnvAdapter(BaseEnvAdapter):
                     if img_array.dtype == np.float64 or img_array.dtype == np.float32:
                         img_array = (img_array * 255).clip(0, 255).astype(np.uint8)
                     pil_img = Image.fromarray(img_array[::-1])  # robosuite images are vertically flipped
-                    pil_img = pil_img.resize(
-                        (self.image_width, self.image_height), Image.LANCZOS
-                    )
+                    pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
                     obs_dict["image"] = pil_img
                 break
 
         # Proprioception
         if "robot0_eef_pos" in obs and "robot0_eef_quat" in obs:
-            obs_dict["state"] = np.concatenate([
-                obs["robot0_eef_pos"],
-                obs["robot0_eef_quat"],
-            ])
+            obs_dict["state"] = np.concatenate(
+                [
+                    obs["robot0_eef_pos"],
+                    obs["robot0_eef_quat"],
+                ]
+            )
 
         obs_dict["step"] = self._step_count
         return obs_dict

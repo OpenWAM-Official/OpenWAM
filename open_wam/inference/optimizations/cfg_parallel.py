@@ -12,10 +12,11 @@ Two strategies for reducing CFG overhead:
    on the main device. Near 2x speedup for the DiT forward pass portion.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, List
+
 import torch
 from torch import Tensor
-from typing import Callable, Dict, List, Optional
-from concurrent.futures import ThreadPoolExecutor
 
 
 class CFGBatchMerger:
@@ -50,8 +51,7 @@ class CFGBatchMerger:
         runs a single model_fn call, splits, and applies CFG formula.
         """
         if self.cfg_scale == 1.0:
-            return model_fn(**models, **inputs_shared, **inputs_posi,
-                          timestep=timestep, **extra_kwargs)
+            return model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep, **extra_kwargs)
 
         # Batch positive and negative
         batched_inputs = {}
@@ -78,8 +78,12 @@ class CFGBatchMerger:
 
         # Single forward pass
         noise_pred_batched = model_fn(
-            **models, **batched_inputs, **cond_inputs,
-            timestep=t_batched, cfg_merge=True, **extra_kwargs,
+            **models,
+            **batched_inputs,
+            **cond_inputs,
+            timestep=t_batched,
+            cfg_merge=True,
+            **extra_kwargs,
         )
 
         # Split and apply CFG
@@ -129,28 +133,31 @@ class CFGParallelExecutor:
         gathered on the first device for CFG combination.
         """
         if self.cfg_scale == 1.0:
-            return model_fn(**models, **inputs_shared, **inputs_posi,
-                          timestep=timestep, **extra_kwargs)
+            return model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep, **extra_kwargs)
 
         main_device = self.devices[0]
         neg_device = self.devices[1]
 
         def _run_positive():
             return model_fn(
-                **models, **inputs_shared, **inputs_posi,
-                timestep=timestep, **extra_kwargs,
+                **models,
+                **inputs_shared,
+                **inputs_posi,
+                timestep=timestep,
+                **extra_kwargs,
             )
 
         def _run_negative():
             # Move inputs to second device
-            neg_shared = {k: v.to(neg_device) if isinstance(v, Tensor) else v
-                         for k, v in inputs_shared.items()}
-            neg_inputs = {k: v.to(neg_device) if isinstance(v, Tensor) else v
-                         for k, v in inputs_nega.items()}
+            neg_shared = {k: v.to(neg_device) if isinstance(v, Tensor) else v for k, v in inputs_shared.items()}
+            neg_inputs = {k: v.to(neg_device) if isinstance(v, Tensor) else v for k, v in inputs_nega.items()}
             neg_t = timestep.to(neg_device) if isinstance(timestep, Tensor) else timestep
             return model_fn(
-                **models, **neg_shared, **neg_inputs,
-                timestep=neg_t, **extra_kwargs,
+                **models,
+                **neg_shared,
+                **neg_inputs,
+                timestep=neg_t,
+                **extra_kwargs,
             )
 
         # Submit both passes concurrently

@@ -5,7 +5,6 @@ per-task and aggregate success rate reporting.
 """
 
 import logging
-from typing import Optional, List
 
 import numpy as np
 
@@ -47,7 +46,7 @@ class LIBEROEvaluator(BaseEvaluator):
             return self._evaluate_single(env_adapter, num_episodes, max_steps)
 
         # Multi-task suite evaluation
-        from open_wam.evaluation.envs.libero import LIBEROEnvAdapter, LIBERO_SUITES
+        from open_wam.evaluation.envs.libero import LIBERO_SUITES, LIBEROEnvAdapter
 
         suites = getattr(eval_cfg, "task_suites", ["libero_spatial"])
         if isinstance(suites, str):

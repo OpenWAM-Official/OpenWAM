@@ -3,8 +3,6 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 # Ensure project root and third-party packages are importable
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 THIRD_PARTY = PROJECT_ROOT / "third_party"

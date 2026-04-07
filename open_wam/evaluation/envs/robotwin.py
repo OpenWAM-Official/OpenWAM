@@ -145,9 +145,7 @@ class RoboTwinEnvAdapter(BaseEnvAdapter):
                     if isinstance(img, np.ndarray):
                         if img.ndim == 3:
                             pil_img = Image.fromarray(img.astype(np.uint8))
-                            pil_img = pil_img.resize(
-                                (self.image_width, self.image_height), Image.LANCZOS
-                            )
+                            pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
                             obs_dict[key] = pil_img
 
             # Primary image for WAM policy — prefer head_camera
@@ -157,8 +155,16 @@ class RoboTwinEnvAdapter(BaseEnvAdapter):
                     break
 
             # Robot state / proprioception
-            for key in ["joint_positions", "joint_velocities", "eef_pos", "eef_quat",
-                         "gripper_qpos", "state", "robot_state", "qpos"]:
+            for key in [
+                "joint_positions",
+                "joint_velocities",
+                "eef_pos",
+                "eef_quat",
+                "gripper_qpos",
+                "state",
+                "robot_state",
+                "qpos",
+            ]:
                 if key in obs:
                     val = obs[key]
                     if isinstance(val, np.ndarray):
@@ -175,9 +181,7 @@ class RoboTwinEnvAdapter(BaseEnvAdapter):
         elif isinstance(obs, np.ndarray):
             # Raw image observation
             pil_img = Image.fromarray(obs.astype(np.uint8))
-            pil_img = pil_img.resize(
-                (self.image_width, self.image_height), Image.LANCZOS
-            )
+            pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
             obs_dict["image"] = pil_img
 
         obs_dict["step"] = self._step_count

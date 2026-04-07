@@ -8,12 +8,11 @@ This module provides common functions for loading episodes as
 (video_frames, action_trajectory) pairs compatible with BaseActionDataset.
 """
 
-import os
 import glob
-import numpy as np
-from typing import List, Optional, Tuple
-from pathlib import Path
+import os
+from typing import List, Optional
 
+import numpy as np
 from PIL import Image
 
 
@@ -34,14 +33,14 @@ def load_episode_actions(
     """
     try:
         import pandas as pd
+
         df = pd.read_parquet(parquet_path)
         episode_data = df[df["episode_index"] == episode_id]
         actions = np.stack(episode_data[action_key].values)
         return actions.astype(np.float32)
     except ImportError:
         raise ImportError(
-            "pandas and pyarrow are required for LeRobot format. "
-            "Install with: pip install pandas pyarrow"
+            "pandas and pyarrow are required for LeRobot format. Install with: pip install pandas pyarrow"
         )
 
 
@@ -70,8 +69,11 @@ def load_episode_video_frames(
 
     end = start_frame + num_frames if num_frames is not None else None
     return read_video_frames(
-        video_path, start=start_frame, end=end,
-        height=height, width=width,
+        video_path,
+        start=start_frame,
+        end=end,
+        height=height,
+        width=width,
     )
 
 

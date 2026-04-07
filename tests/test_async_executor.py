@@ -1,6 +1,7 @@
 """Tests for async inference executor."""
 
 import time
+
 import numpy as np
 
 from open_wam.inference.optimizations.async_executor import AsyncInferenceExecutor

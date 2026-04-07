@@ -14,7 +14,7 @@ Uses scipy for conversions (no pytorch3d dependency).
 """
 
 from enum import Enum
-from typing import Optional, List, Tuple
+from typing import List, Optional
 
 import numpy as np
 
@@ -42,12 +42,14 @@ _REPR_DIM = {
 def _axis_angle_to_matrix(aa: np.ndarray) -> np.ndarray:
     """(N, 3) axis-angle → (N, 3, 3) rotation matrices."""
     from scipy.spatial.transform import Rotation
+
     return Rotation.from_rotvec(aa).as_matrix()
 
 
 def _quaternion_to_matrix(q: np.ndarray) -> np.ndarray:
     """(N, 4) wxyz quaternion → (N, 3, 3) rotation matrices."""
     from scipy.spatial.transform import Rotation
+
     # scipy uses xyzw, our convention is wxyz
     xyzw = np.concatenate([q[..., 1:], q[..., :1]], axis=-1)
     return Rotation.from_quat(xyzw).as_matrix()
@@ -56,6 +58,7 @@ def _quaternion_to_matrix(q: np.ndarray) -> np.ndarray:
 def _euler_to_matrix(e: np.ndarray, convention: str) -> np.ndarray:
     """(N, 3) euler angles → (N, 3, 3) rotation matrices."""
     from scipy.spatial.transform import Rotation
+
     return Rotation.from_euler(convention.upper(), e).as_matrix()
 
 
@@ -76,12 +79,14 @@ def _rotation_6d_to_matrix(r6d: np.ndarray) -> np.ndarray:
 def _matrix_to_axis_angle(mat: np.ndarray) -> np.ndarray:
     """(N, 3, 3) rotation matrices → (N, 3) axis-angle."""
     from scipy.spatial.transform import Rotation
+
     return Rotation.from_matrix(mat).as_rotvec()
 
 
 def _matrix_to_quaternion(mat: np.ndarray) -> np.ndarray:
     """(N, 3, 3) rotation matrices → (N, 4) wxyz quaternion."""
     from scipy.spatial.transform import Rotation
+
     xyzw = Rotation.from_matrix(mat).as_quat()
     return np.concatenate([xyzw[..., 3:], xyzw[..., :3]], axis=-1)
 
@@ -89,6 +94,7 @@ def _matrix_to_quaternion(mat: np.ndarray) -> np.ndarray:
 def _matrix_to_euler(mat: np.ndarray, convention: str) -> np.ndarray:
     """(N, 3, 3) rotation matrices → (N, 3) euler angles."""
     from scipy.spatial.transform import Rotation
+
     return Rotation.from_matrix(mat).as_euler(convention.upper())
 
 
@@ -179,8 +185,8 @@ class RotationTransform(InvertibleModalityTransform):
         converted = convert_rotation(rot_data, source, target)
 
         # Reconstruct the action vector with new rotation dim
-        pre = x[..., :s.start]
-        post = x[..., s.stop:]
+        pre = x[..., : s.start]
+        post = x[..., s.stop :]
         return np.concatenate([pre, converted, post], axis=-1).astype(np.float32)
 
     def apply(self, data: dict) -> dict:
@@ -210,8 +216,8 @@ class RotationTransform(InvertibleModalityTransform):
                 )
                 rot_data = arr[..., reverse_slice]
                 converted = convert_rotation(rot_data, self.target, self.source)
-                pre = arr[..., :reverse_slice.start]
-                post = arr[..., reverse_slice.stop:]
+                pre = arr[..., : reverse_slice.start]
+                post = arr[..., reverse_slice.stop :]
                 arr = np.concatenate([pre, converted, post], axis=-1).astype(np.float32)
                 data[key] = _torch.from_numpy(arr) if is_tensor else arr
         return data

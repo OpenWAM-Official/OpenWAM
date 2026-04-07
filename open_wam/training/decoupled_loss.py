@@ -16,9 +16,8 @@ Usage:
     # Use in place of standard FlowMatchVideoActionSFTLoss
 """
 
+
 import torch
-import numpy as np
-from typing import Optional
 
 from open_wam.inference.optimizations.decoupled_schedule import sample_decoupled_timesteps
 

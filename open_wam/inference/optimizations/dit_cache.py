@@ -10,9 +10,10 @@ embedding similarity within a single step). DiT velocity caching
 operates across steps in the denoising loop.
 """
 
+from typing import Optional
+
 import torch
 from torch import Tensor
-from typing import Optional
 
 
 class DiTVelocityCache:

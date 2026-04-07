@@ -1,17 +1,17 @@
 from open_wam.training.base import BaseTrainer
 from open_wam.training.callbacks import (
+    CallbackRunner,
+    LearningRateLogCallback,
+    SetupCallback,
     TrainingCallback,
     TrainingState,
-    CallbackRunner,
     ValidationLossCallback,
     VideoLogCallback,
-    SetupCallback,
-    LearningRateLogCallback,
 )
-from open_wam.training.native_trainer import NativeTrainer
-from open_wam.training.loss import FlowMatchVideoActionSFTLoss
-from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
 from open_wam.training.decoupled_loss import DecoupledFlowMatchLoss
+from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+from open_wam.training.loss import FlowMatchVideoActionSFTLoss
+from open_wam.training.native_trainer import NativeTrainer
 from open_wam.training.optimizer_groups import (
     attach_optimizer_groups,
     build_trainable_parameters,

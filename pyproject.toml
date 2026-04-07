@@ -66,3 +66,15 @@ include-package-data = true
 
 [project.scripts]
 openwam-serve = "open_wam.serving.policy_server:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = ["third_party/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501", "E741"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["open_wam"]

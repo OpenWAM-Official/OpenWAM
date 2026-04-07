@@ -13,7 +13,7 @@ Action format: 7D delta EEF (dx, dy, dz, droll, dpitch, dyaw, gripper)
 Installation: pip install simpler-env
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -61,6 +61,7 @@ class SimplerEnvAdapter(BaseEnvAdapter):
 
         try:
             import simpler_env
+
             self._env = simpler_env.make(
                 self.env_name,
                 max_episode_steps=self.max_episode_steps,
@@ -124,9 +125,7 @@ class SimplerEnvAdapter(BaseEnvAdapter):
                     img = obs[key]
                     if isinstance(img, np.ndarray):
                         pil_img = Image.fromarray(img.astype(np.uint8))
-                        pil_img = pil_img.resize(
-                            (self.image_width, self.image_height), Image.LANCZOS
-                        )
+                        pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
                         obs_dict["image"] = pil_img
                     break
             # Proprioception
@@ -137,9 +136,7 @@ class SimplerEnvAdapter(BaseEnvAdapter):
         elif isinstance(obs, np.ndarray):
             # Some envs return raw image as observation
             pil_img = Image.fromarray(obs.astype(np.uint8))
-            pil_img = pil_img.resize(
-                (self.image_width, self.image_height), Image.LANCZOS
-            )
+            pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
             obs_dict["image"] = pil_img
 
         obs_dict["step"] = self._step_count

@@ -10,14 +10,14 @@ bridge types in assets/modal_merging.png:
 - joint_self_attn: bidirectional MMDiT-style
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 from torch import Tensor
 
+from open_wam.models.action_dit import ActionDiT
 from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
 from open_wam.models.architectures.registry import register_architecture
-from open_wam.models.action_dit import ActionDiT, ActionDiTState
 
 
 @register_architecture(
@@ -60,16 +60,15 @@ class DualSystemArchitecture(BaseWAMArchitecture):
         else:
             self.action_dit = None
 
-    def prepare_action_tokens(
-        self, noisy_actions: Tensor, timestep: Tensor, **kwargs
-    ) -> ActionState:
+    def prepare_action_tokens(self, noisy_actions: Tensor, timestep: Tensor, **kwargs) -> ActionState:
         state = ActionState(
             action_latents=noisy_actions,
             timestep=timestep,
         )
         if self.action_dit is not None and self.action_dit.bridge_type == "joint_self_attn":
             dit_state = self.action_dit.prepare_action_state(
-                noisy_actions, timestep,
+                noisy_actions,
+                timestep,
                 use_gradient_checkpointing=kwargs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=kwargs.get("use_gradient_checkpointing_offload", False),
             )

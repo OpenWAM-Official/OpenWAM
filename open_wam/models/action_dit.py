@@ -33,12 +33,11 @@ The ActionDiT is designed to be non-invasive: it reads intermediate video
 features but does not modify the video generation path.
 """
 
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
-from dataclasses import dataclass, field
-from typing import Tuple, Optional, List
 from einops import rearrange
 
 from open_wam.models.attention_utils import get_attention_fn
@@ -57,10 +56,11 @@ class ActionDiTState:
 
     After the block loop, ``finalize_action_output`` produces ``action_noise_pred``.
     """
-    action_dit: 'ActionDiT'
-    x_action: torch.Tensor                  # (B, T_action, dim)
-    t_mod: torch.Tensor                     # (B, t_mod_params, dim)
-    t_embed: torch.Tensor                   # (B, dim) — for output head
+
+    action_dit: "ActionDiT"
+    x_action: torch.Tensor  # (B, T_action, dim)
+    t_mod: torch.Tensor  # (B, t_mod_params, dim)
+    t_embed: torch.Tensor  # (B, dim) — for output head
     x_video_proj: Optional[torch.Tensor] = None  # running projected video features
     action_noise_pred: Optional[torch.Tensor] = None  # filled after finalize
     bridge_block_counter: int = 0
@@ -73,7 +73,7 @@ def sinusoidal_embedding_1d(dim, position):
     """Sinusoidal positional embedding for timestep conditioning."""
     sinusoid = torch.outer(
         position.type(torch.float64),
-        torch.pow(10000, -torch.arange(dim // 2, dtype=torch.float64, device=position.device).div(dim // 2))
+        torch.pow(10000, -torch.arange(dim // 2, dtype=torch.float64, device=position.device).div(dim // 2)),
     )
     x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
     return x.to(position.dtype)
@@ -257,15 +257,11 @@ class ActionDiTBlock(nn.Module):
         self.norm2 = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
 
         # FFN
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, ffn_dim),
-            nn.GELU(approximate='tanh'),
-            nn.Linear(ffn_dim, dim)
-        )
+        self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim))
         self.norm3 = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
 
         # AdaLN modulation (6 params: shift/scale for self-attn, cross-attn, ffn + gates)
-        self.modulation = nn.Parameter(torch.randn(1, 9, dim) / dim ** 0.5)
+        self.modulation = nn.Parameter(torch.randn(1, 9, dim) / dim**0.5)
 
     def forward(self, x_action, x_video, t_mod):
         """
@@ -274,9 +270,7 @@ class ActionDiTBlock(nn.Module):
             x_video: (B, T_video, dim) - video features for cross-attention
             t_mod: (B, 1, 9*dim) - timestep modulation
         """
-        (shift_sa, scale_sa, gate_sa,
-         shift_ca, scale_ca, gate_ca,
-         shift_ff, scale_ff, gate_ff) = (
+        (shift_sa, scale_sa, gate_sa, shift_ca, scale_ca, gate_ca, shift_ff, scale_ff, gate_ff) = (
             self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
         ).chunk(9, dim=1)
 
@@ -320,7 +314,7 @@ class JointActionDiTBlock(nn.Module):
         # Action FFN
         self.ffn_action = nn.Sequential(
             nn.Linear(dim, ffn_dim),
-            nn.GELU(approximate='tanh'),
+            nn.GELU(approximate="tanh"),
             nn.Linear(ffn_dim, dim),
         )
         self.norm_ffn_action = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
@@ -328,15 +322,15 @@ class JointActionDiTBlock(nn.Module):
         # Video FFN
         self.ffn_video = nn.Sequential(
             nn.Linear(dim, ffn_dim),
-            nn.GELU(approximate='tanh'),
+            nn.GELU(approximate="tanh"),
             nn.Linear(ffn_dim, dim),
         )
         self.norm_ffn_video = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
 
         # Action: base modulation (added to timestep)
-        self.action_modulation = nn.Parameter(torch.randn(1, 6, dim) / dim ** 0.5)
+        self.action_modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
         # Video: static modulation (no timestep)
-        self.video_modulation = nn.Parameter(torch.randn(1, 6, dim) / dim ** 0.5)
+        self.video_modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
     def forward(self, x_action, x_video, t_mod):
         """
@@ -346,14 +340,12 @@ class JointActionDiTBlock(nn.Module):
             t_mod: (B, 6, dim) - timestep modulation for action side
         """
         # Unpack action modulation (timestep-dependent)
-        (shift_a, scale_a, gate_a,
-         shift_ffa, scale_ffa, gate_ffa) = (
+        (shift_a, scale_a, gate_a, shift_ffa, scale_ffa, gate_ffa) = (
             self.action_modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
         ).chunk(6, dim=1)
 
         # Unpack video modulation (static, no timestep)
-        (shift_v, scale_v, gate_v,
-         shift_ffv, scale_ffv, gate_ffv) = (
+        (shift_v, scale_v, gate_v, shift_ffv, scale_ffv, gate_ffv) = (
             self.video_modulation.to(dtype=t_mod.dtype, device=t_mod.device)
         ).chunk(6, dim=1)
 
@@ -432,8 +424,7 @@ class ActionDiT(nn.Module):
             f"Each ActionDiT block connects to exactly one video DiT layer."
         )
         assert bridge_type in ("cross_attn", "cross_attn_detach", "joint_self_attn"), (
-            f"Unknown bridge_type '{bridge_type}'. "
-            f"Choose from: cross_attn, cross_attn_detach, joint_self_attn"
+            f"Unknown bridge_type '{bridge_type}'. Choose from: cross_attn, cross_attn_detach, joint_self_attn"
         )
         self.action_dim = action_dim
         self.dim = dim
@@ -446,7 +437,7 @@ class ActionDiT(nn.Module):
         # Action token embedding: projects raw action to hidden dim
         self.action_embedding = nn.Sequential(
             nn.Linear(action_dim, dim),
-            nn.GELU(approximate='tanh'),
+            nn.GELU(approximate="tanh"),
             nn.Linear(dim, dim),
         )
 
@@ -457,21 +448,15 @@ class ActionDiT(nn.Module):
         # Each ActionDiT block has its own projection since features from
         # different video DiT layers have different distributions.
         if video_dim != dim:
-            self.video_projs = nn.ModuleList([
-                nn.Linear(video_dim, dim) for _ in range(num_layers)
-            ])
+            self.video_projs = nn.ModuleList([nn.Linear(video_dim, dim) for _ in range(num_layers)])
         else:
-            self.video_projs = nn.ModuleList([
-                nn.Identity() for _ in range(num_layers)
-            ])
+            self.video_projs = nn.ModuleList([nn.Identity() for _ in range(num_layers)])
 
         # Back-projection layers (dim -> video_dim) for joint_self_attn only.
         # Zero-initialized so action→video injection starts at zero,
         # preserving pretrained video behavior at initialization.
         if bridge_type == "joint_self_attn":
-            self.video_back_projs = nn.ModuleList([
-                nn.Linear(dim, video_dim) for _ in range(num_layers)
-            ])
+            self.video_back_projs = nn.ModuleList([nn.Linear(dim, video_dim) for _ in range(num_layers)])
             for proj in self.video_back_projs:
                 nn.init.zeros_(proj.weight)
                 nn.init.zeros_(proj.bias)
@@ -495,28 +480,22 @@ class ActionDiT(nn.Module):
 
         # Transformer blocks
         if bridge_type == "joint_self_attn":
-            self.blocks = nn.ModuleList([
-                JointActionDiTBlock(dim, num_heads, ffn_dim, eps)
-                for _ in range(num_layers)
-            ])
+            self.blocks = nn.ModuleList([JointActionDiTBlock(dim, num_heads, ffn_dim, eps) for _ in range(num_layers)])
         else:
-            self.blocks = nn.ModuleList([
-                ActionDiTBlock(dim, num_heads, ffn_dim, eps)
-                for _ in range(num_layers)
-            ])
+            self.blocks = nn.ModuleList([ActionDiTBlock(dim, num_heads, ffn_dim, eps) for _ in range(num_layers)])
 
         # Output head
         self.output_norm = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
         self.output_head = nn.Linear(dim, action_dim)
-        self.output_modulation = nn.Parameter(torch.randn(1, 2, dim) / dim ** 0.5)
+        self.output_modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
         # Initialize output to near-zero for stable training start
         nn.init.zeros_(self.output_head.weight)
         nn.init.zeros_(self.output_head.bias)
 
         # Action normalization stats (saved as persistent buffers for checkpoint)
-        self.register_buffer('action_mean', torch.zeros(action_dim), persistent=True)
-        self.register_buffer('action_std', torch.ones(action_dim), persistent=True)
+        self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
+        self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
 
     def prepare_action_state(
         self,
@@ -569,8 +548,7 @@ class ActionDiT(nn.Module):
         t = state.t_embed
         x = state.x_action
         shift_out, scale_out = (
-            self.output_modulation.to(dtype=t.dtype, device=t.device)
-            + t.unsqueeze(1).expand(-1, 2, -1)
+            self.output_modulation.to(dtype=t.dtype, device=t.device) + t.unsqueeze(1).expand(-1, 2, -1)
         ).chunk(2, dim=1)
         return self.output_head(self.output_norm(x) * (1 + scale_out) + shift_out)
 
@@ -596,8 +574,7 @@ class ActionDiT(nn.Module):
         """
         B, T, _ = action_tokens.shape
         assert T <= self.pos_embedding.shape[1], (
-            f"Action sequence length {T} exceeds max_action_len "
-            f"{self.pos_embedding.shape[1]}"
+            f"Action sequence length {T} exceeds max_action_len {self.pos_embedding.shape[1]}"
         )
 
         # Embed actions
@@ -617,6 +594,7 @@ class ActionDiT(nn.Module):
         def create_custom_forward(block):
             def custom_forward(*inputs):
                 return block(*inputs)
+
             return custom_forward
 
         if self.bridge_type == "joint_self_attn":
@@ -633,13 +611,17 @@ class ActionDiT(nn.Module):
                         with torch.autograd.graph.save_on_cpu():
                             x, x_video = torch.utils.checkpoint.checkpoint(
                                 create_custom_forward(block),
-                                x, x_video, t_mod,
+                                x,
+                                x_video,
+                                t_mod,
                                 use_reentrant=False,
                             )
                     else:
                         x, x_video = torch.utils.checkpoint.checkpoint(
                             create_custom_forward(block),
-                            x, x_video, t_mod,
+                            x,
+                            x_video,
+                            t_mod,
                             use_reentrant=False,
                         )
                 else:
@@ -653,13 +635,17 @@ class ActionDiT(nn.Module):
                         with torch.autograd.graph.save_on_cpu():
                             x = torch.utils.checkpoint.checkpoint(
                                 create_custom_forward(block),
-                                x, x_video_i, t_mod,
+                                x,
+                                x_video_i,
+                                t_mod,
                                 use_reentrant=False,
                             )
                     else:
                         x = torch.utils.checkpoint.checkpoint(
                             create_custom_forward(block),
-                            x, x_video_i, t_mod,
+                            x,
+                            x_video_i,
+                            t_mod,
                             use_reentrant=False,
                         )
                 else:
@@ -667,8 +653,7 @@ class ActionDiT(nn.Module):
 
         # Output head with AdaLN modulation (reuse t from timestep embedding above)
         shift_out, scale_out = (
-            self.output_modulation.to(dtype=t.dtype, device=t.device)
-            + t.unsqueeze(1).expand(-1, 2, -1)
+            self.output_modulation.to(dtype=t.dtype, device=t.device) + t.unsqueeze(1).expand(-1, 2, -1)
         ).chunk(2, dim=1)
         x = self.output_head(self.output_norm(x) * (1 + scale_out) + shift_out)
 

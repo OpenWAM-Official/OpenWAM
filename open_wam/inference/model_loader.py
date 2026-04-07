@@ -7,9 +7,9 @@ from typing import Any
 
 import torch
 
-from open_wam.models.action_dit import ActionDiT
 from open_wam.inference.model_config import ModelConfig
 from open_wam.inference.video_pipeline import WanVideoPipeline
+from open_wam.models.action_dit import ActionDiT
 
 
 def load_wam_models(cfg: Any, device: str = "cuda"):

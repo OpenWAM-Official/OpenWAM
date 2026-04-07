@@ -17,7 +17,6 @@ Usage:
 
 import os
 import sys
-import json
 from pathlib import Path
 
 import hydra
@@ -38,7 +37,6 @@ def main(cfg: DictConfig) -> None:
     sys.path.insert(0, str(PROJECT_ROOT))
     sys.path.insert(0, str(THIRD_PARTY))
 
-    import torch
     import numpy as np
 
     inf_cfg = cfg.inference
@@ -66,14 +64,16 @@ def main(cfg: DictConfig) -> None:
     ref_image_path = getattr(inf_cfg, "reference_image_path", None)
     if ref_image_path is not None:
         from PIL import Image
+
         ref_img = Image.open(ref_image_path).convert("RGB")
         conditions["vace_reference_image"] = [ref_img]
 
     # Load context video if provided
     context_video_path = getattr(inf_cfg, "context_video_path", None)
     if context_video_path is not None:
-        from PIL import Image
         import imageio
+        from PIL import Image
+
         reader = imageio.get_reader(context_video_path)
         frames = [Image.fromarray(f) for f in reader]
         reader.close()
@@ -96,6 +96,7 @@ def main(cfg: DictConfig) -> None:
     # Save video
     if video_frames:
         import imageio
+
         video_path = os.path.join(output_dir, "generated_video.mp4")
         imageio.mimsave(video_path, [np.array(f) for f in video_frames], fps=15)
         print(f"Video saved to {video_path}")

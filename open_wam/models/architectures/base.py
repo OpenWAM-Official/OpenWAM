@@ -16,7 +16,7 @@ Three paradigms are supported (see assets/arch.png):
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -33,10 +33,11 @@ class ActionState:
 
     The ``extra`` dict allows architecture-specific state without subclassing.
     """
-    action_latents: Optional[Tensor] = None    # (B, T_action, dim) or None
+
+    action_latents: Optional[Tensor] = None  # (B, T_action, dim) or None
     action_prediction: Optional[Tensor] = None  # filled after extract_action_prediction
-    timestep: Optional[Tensor] = None           # diffusion timestep for action stream
-    extra: dict = field(default_factory=dict)    # architecture-specific state
+    timestep: Optional[Tensor] = None  # diffusion timestep for action stream
+    extra: dict = field(default_factory=dict)  # architecture-specific state
 
 
 class BaseWAMArchitecture(ABC, nn.Module):
@@ -61,9 +62,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         self.cfg = cfg
 
     @abstractmethod
-    def prepare_action_tokens(
-        self, noisy_actions: Tensor, timestep: Tensor, **kwargs
-    ) -> ActionState:
+    def prepare_action_tokens(self, noisy_actions: Tensor, timestep: Tensor, **kwargs) -> ActionState:
         """Initialize action state before the video DiT block loop.
 
         Args:

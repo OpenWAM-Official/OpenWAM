@@ -5,7 +5,6 @@ per-task and aggregate success rate reporting.
 """
 
 import logging
-from typing import Optional, List
 
 import numpy as np
 

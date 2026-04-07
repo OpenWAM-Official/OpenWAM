@@ -14,8 +14,8 @@ Usage::
     frames = read_video_frames(path, start=10, end=30, height=480, width=832)
 """
 
-import os
 import logging
+import os
 from typing import List, Optional
 
 from PIL import Image
@@ -53,12 +53,15 @@ def _check_available(name: str) -> bool:
         try:
             if name == "decord":
                 import decord  # noqa: F401
+
                 _AVAILABLE[name] = True
             elif name == "opencv":
                 import cv2  # noqa: F401
+
                 _AVAILABLE[name] = True
             elif name == "imageio":
                 import imageio  # noqa: F401
+
                 _AVAILABLE[name] = True
             else:
                 _AVAILABLE[name] = False
@@ -73,9 +76,7 @@ def _resolve_backend() -> str:
     if _BACKEND is not None:
         if _check_available(_BACKEND):
             return _BACKEND
-        logger.warning(
-            "Requested video backend '%s' not available, falling back", _BACKEND
-        )
+        logger.warning("Requested video backend '%s' not available, falling back", _BACKEND)
 
     # Environment variable
     env_backend = os.environ.get("OPENWAM_VIDEO_BACKEND")
@@ -131,7 +132,6 @@ def read_video_frames(
 def _read_decord(path: str, start: int, end: Optional[int]) -> List[Image.Image]:
     """Read frames using decord (fastest backend)."""
     import decord
-    import numpy as np
 
     decord.bridge.set_bridge("native")
     vr = decord.VideoReader(path)

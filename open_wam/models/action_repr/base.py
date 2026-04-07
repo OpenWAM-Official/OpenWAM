@@ -14,7 +14,6 @@ Two representations are supported:
 
 from abc import ABC, abstractmethod
 
-import torch
 from torch import Tensor, nn
 
 

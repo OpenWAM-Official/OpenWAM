@@ -34,7 +34,8 @@ from open_wam.models.architectures.registry import register_architecture
 @dataclass
 class SharedBackboneState:
     """State passed to model_fn_wan_video for SharedBackbone token concat/extract."""
-    action_tokens: torch.Tensor          # (B, T_action, video_dim) projected
+
+    action_tokens: torch.Tensor  # (B, T_action, video_dim) projected
     n_action_tokens: int = 0
     action_noise_pred: Optional[torch.Tensor] = None  # filled after finalization
     # Back-reference to architecture for finalize
@@ -45,8 +46,9 @@ class SharedBackboneState:
 def _sinusoidal_embedding_1d(dim: int, position: Tensor) -> Tensor:
     """Sinusoidal timestep embedding matching ActionDiT/MoEExpertDiT."""
     half = dim // 2
-    freq = torch.exp(-torch.arange(half, device=position.device, dtype=torch.float32)
-                     * (torch.log(torch.tensor(10000.0)) / half))
+    freq = torch.exp(
+        -torch.arange(half, device=position.device, dtype=torch.float32) * (torch.log(torch.tensor(10000.0)) / half)
+    )
     args = position.float().unsqueeze(-1) * freq.unsqueeze(0)
     return torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
 
@@ -93,9 +95,7 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         )
 
         # Learned positional encoding
-        self.pos_embedding = nn.Parameter(
-            torch.randn(1, max_action_len, self._video_dim) * 0.02
-        )
+        self.pos_embedding = nn.Parameter(torch.randn(1, max_action_len, self._video_dim) * 0.02)
 
         # Timestep embedding (independent from video timestep)
         self.time_embedding = nn.Sequential(
@@ -111,9 +111,7 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         )
 
         # Output head: video_dim -> action_dim
-        self.output_norm = nn.LayerNorm(
-            self._video_dim, eps=1e-6, elementwise_affine=False
-        )
+        self.output_norm = nn.LayerNorm(self._video_dim, eps=1e-6, elementwise_affine=False)
         self.output_head = nn.Linear(self._video_dim, self._action_dim)
 
         # Zero-initialize output for stable training start
@@ -125,9 +123,7 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         self.register_buffer("_norm_action_mean", torch.zeros(self._action_dim), persistent=True)
         self.register_buffer("_norm_action_std", torch.ones(self._action_dim), persistent=True)
 
-    def prepare_action_tokens(
-        self, noisy_actions: Tensor, timestep: Tensor, **kwargs
-    ) -> ActionState:
+    def prepare_action_tokens(self, noisy_actions: Tensor, timestep: Tensor, **kwargs) -> ActionState:
         """Project noisy actions to video_dim and prepare for concatenation.
 
         Args:
@@ -140,8 +136,7 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         """
         B, T, _ = noisy_actions.shape
         assert T <= self.pos_embedding.shape[1], (
-            f"Action sequence length {T} exceeds max_action_len "
-            f"{self.pos_embedding.shape[1]}"
+            f"Action sequence length {T} exceeds max_action_len {self.pos_embedding.shape[1]}"
         )
 
         # Project to video_dim and add positional encoding
@@ -150,9 +145,7 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
 
         # Timestep embedding for output modulation
         timestep = timestep.flatten()
-        t = self.time_embedding(
-            _sinusoidal_embedding_1d(self._freq_dim, timestep)
-        )
+        t = self.time_embedding(_sinusoidal_embedding_1d(self._freq_dim, timestep))
         t_mod = self.time_projection(t)  # (B, video_dim * 2)
 
         action_state = ActionState(

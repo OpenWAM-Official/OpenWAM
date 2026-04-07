@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Iterable
-
 import numpy as np
 import torch
 from PIL import Image
-
 
 _lpips_model = None
 

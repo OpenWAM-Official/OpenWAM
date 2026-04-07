@@ -23,9 +23,9 @@ Usage:
     action_embeds = encoder(action_embeds, state_vector)
 """
 
+
 import torch
 import torch.nn as nn
-from typing import Optional
 
 
 class ProprioceptiveEncoder(nn.Module):
@@ -71,9 +71,7 @@ class ProprioceptiveEncoder(nn.Module):
             # Project single state vector to num_state_tokens token embeddings
             self.token_proj = nn.Linear(hidden_dim, hidden_dim * num_state_tokens)
             # Learned positional embeddings for state tokens (zero-init)
-            self.state_pos_embedding = nn.Parameter(
-                torch.zeros(1, num_state_tokens, hidden_dim)
-            )
+            self.state_pos_embedding = nn.Parameter(torch.zeros(1, num_state_tokens, hidden_dim))
         # In "add" mode, encoder output is directly added as a global bias
 
         self._init_weights()

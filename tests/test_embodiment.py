@@ -4,13 +4,13 @@ import numpy as np
 import pytest
 
 from open_wam.data.embodiment import (
+    CANONICAL_BIMANUAL_DIM,
+    CANONICAL_SINGLE_ARM_DIM,
+    EMBODIMENTS,
     ActionSpaceAdapter,
     EmbodimentConfig,
-    EMBODIMENTS,
-    register_embodiment,
     get_embodiment,
-    CANONICAL_SINGLE_ARM_DIM,
-    CANONICAL_BIMANUAL_DIM,
+    register_embodiment,
 )
 
 
@@ -158,5 +158,6 @@ def test_adapter_properties():
 
 def test_import_from_package():
     """Embodiment module should be importable from open_wam.data."""
-    from open_wam.data import ActionSpaceAdapter, EmbodimentConfig, EMBODIMENTS
+    from open_wam.data import ActionSpaceAdapter
+
     assert callable(ActionSpaceAdapter)

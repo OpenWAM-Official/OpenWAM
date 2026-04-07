@@ -19,14 +19,14 @@ Status: Fully implemented. Requires MoE-aware pipeline support in
 model_fn_wan_video (moe_expert_state parameter).
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 from torch import Tensor
 
 from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
 from open_wam.models.architectures.registry import register_architecture
-from open_wam.models.moe_expert_dit import MoEExpertDiT, MoEExpertState
+from open_wam.models.moe_expert_dit import MoEExpertDiT
 
 
 @register_architecture(
@@ -84,22 +84,17 @@ class MoEActionExpertArchitecture(BaseWAMArchitecture):
         else:
             self.moe_dit = None
 
-    def prepare_action_tokens(
-        self, noisy_actions: Tensor, timestep: Tensor, **kwargs
-    ) -> ActionState:
+    def prepare_action_tokens(self, noisy_actions: Tensor, timestep: Tensor, **kwargs) -> ActionState:
         state = ActionState(
             action_latents=noisy_actions,
             timestep=timestep,
         )
         if self.moe_dit is not None:
             moe_state = self.moe_dit.prepare_state(
-                noisy_actions, timestep,
-                use_gradient_checkpointing=kwargs.get(
-                    "use_gradient_checkpointing", False
-                ),
-                use_gradient_checkpointing_offload=kwargs.get(
-                    "use_gradient_checkpointing_offload", False
-                ),
+                noisy_actions,
+                timestep,
+                use_gradient_checkpointing=kwargs.get("use_gradient_checkpointing", False),
+                use_gradient_checkpointing_offload=kwargs.get("use_gradient_checkpointing_offload", False),
             )
             state.extra["moe_state"] = moe_state
         return state
@@ -140,9 +135,7 @@ class MoEActionExpertArchitecture(BaseWAMArchitecture):
         x_action = self.moe_dit.apply_expert(moe_state, x_action)
 
         # Put corrected action tokens back
-        video_hidden = torch.cat(
-            [video_hidden[:, :n_video, :], x_action], dim=1
-        )
+        video_hidden = torch.cat([video_hidden[:, :n_video, :], x_action], dim=1)
 
         # Update action tokens in state (for finalize)
         moe_state.action_tokens = x_action

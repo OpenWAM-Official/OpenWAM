@@ -36,8 +36,7 @@ class BaseActionDataset(ABC, torch.utils.data.Dataset):
         ...
 
     @abstractmethod
-    def __len__(self) -> int:
-        ...
+    def __len__(self) -> int: ...
 
     @property
     @abstractmethod

@@ -1,8 +1,8 @@
 """Tests for WAMPolicy receding-horizon execution and temporal ensembling."""
 
-import numpy as np
-import pytest
 from types import SimpleNamespace
+
+import numpy as np
 
 from open_wam.evaluation.policy import WAMPolicy
 
@@ -58,12 +58,12 @@ def test_receding_horizon_triggers_regeneration():
     obs = {"image": np.zeros(3)}
 
     # Steps 0,1 from generation 1
-    a0 = policy.predict_action(obs)
-    a1 = policy.predict_action(obs)
+    policy.predict_action(obs)
+    policy.predict_action(obs)
     assert engine.call_count == 1
 
     # Step 2 triggers generation 2
-    a2 = policy.predict_action(obs)
+    policy.predict_action(obs)
     assert engine.call_count == 2
 
 

@@ -20,7 +20,6 @@ Example config (configs/data/mixture.yaml):
 """
 
 import logging
-import math
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
@@ -71,16 +70,15 @@ class MixtureDataset(BaseActionDataset):
             logger.warning(
                 "Sub-datasets have different action dims %s, padding to max=%d. "
                 "Consider setting action_dim_override explicitly.",
-                dims, self._action_dim,
+                dims,
+                self._action_dim,
             )
 
         # Normalize weights
         if weights is None:
             weights = [float(len(d)) for d in self._datasets]
         if len(weights) != len(self._datasets):
-            raise ValueError(
-                f"weights length ({len(weights)}) != datasets length ({len(self._datasets)})"
-            )
+            raise ValueError(f"weights length ({len(weights)}) != datasets length ({len(self._datasets)})")
         total_w = sum(weights)
         self._weights = [w / total_w for w in weights]
 
@@ -133,7 +131,7 @@ class MixtureDataset(BaseActionDataset):
             m = stats["mean"].astype(np.float64)
             if len(m) < self._action_dim:
                 m = np.pad(m, (0, self._action_dim - len(m)))
-            mean += w * m[:self._action_dim]
+            mean += w * m[: self._action_dim]
 
         # Weighted std (using pooled variance formula)
         var = np.zeros(self._action_dim, dtype=np.float64)
@@ -144,7 +142,7 @@ class MixtureDataset(BaseActionDataset):
                 s = np.pad(s, (0, self._action_dim - len(s)), constant_values=1e-3)
                 m = np.pad(m, (0, self._action_dim - len(m)))
             # Var = E[X^2] - E[X]^2, pooled across datasets
-            var += w * (s[:self._action_dim] ** 2 + (m[:self._action_dim] - mean) ** 2)
+            var += w * (s[: self._action_dim] ** 2 + (m[: self._action_dim] - mean) ** 2)
 
         std = np.maximum(np.sqrt(var), 1e-3)
         return {

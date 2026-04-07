@@ -36,10 +36,7 @@ class VideoResize(ModalityTransform):
 
     def apply(self, data: dict) -> dict:
         if "video" in data and data["video"]:
-            data["video"] = [
-                frame.resize((self.width, self.height), self.resample)
-                for frame in data["video"]
-            ]
+            data["video"] = [frame.resize((self.width, self.height), self.resample) for frame in data["video"]]
         return data
 
 
@@ -93,10 +90,7 @@ class VideoRandomCrop(ModalityTransform):
         w, h = frames[0].size
         crop = self._get_crop_params(w, h)
 
-        data["video"] = [
-            frame.crop(crop).resize((self.width, self.height), Image.LANCZOS)
-            for frame in frames
-        ]
+        data["video"] = [frame.crop(crop).resize((self.width, self.height), Image.LANCZOS) for frame in frames]
         return data
 
 
@@ -169,8 +163,5 @@ class VideoHorizontalFlip(ModalityTransform):
             return data
 
         if "video" in data and data["video"]:
-            data["video"] = [
-                frame.transpose(Image.FLIP_LEFT_RIGHT)
-                for frame in data["video"]
-            ]
+            data["video"] = [frame.transpose(Image.FLIP_LEFT_RIGHT) for frame in data["video"]]
         return data

@@ -1,8 +1,8 @@
 """Tests for expanded evaluation benchmarks (SimplerEnv + LIBERO)."""
 
-import numpy as np
-import pytest
 from types import SimpleNamespace
+
+import numpy as np
 from omegaconf import OmegaConf
 
 from open_wam.evaluation.envs.base import BaseEnvAdapter
@@ -11,23 +11,26 @@ from open_wam.evaluation.envs.base import BaseEnvAdapter
 def test_simpler_env_adapter_imports():
     """SimplerEnvAdapter should be importable and inherit BaseEnvAdapter."""
     from open_wam.evaluation.envs import SimplerEnvAdapter
+
     assert issubclass(SimplerEnvAdapter, BaseEnvAdapter)
 
 
 def test_libero_env_adapter_imports():
     """LIBEROEnvAdapter should be importable and inherit BaseEnvAdapter."""
     from open_wam.evaluation.envs import LIBEROEnvAdapter
+
     assert issubclass(LIBEROEnvAdapter, BaseEnvAdapter)
 
 
 def test_libero_task_suites():
     """LIBERO task suite constants should be populated."""
     from open_wam.evaluation.envs.libero import (
-        LIBERO_SUITES,
-        LIBERO_SPATIAL_TASKS,
-        LIBERO_OBJECT_TASKS,
         LIBERO_GOAL_TASKS,
+        LIBERO_OBJECT_TASKS,
+        LIBERO_SPATIAL_TASKS,
+        LIBERO_SUITES,
     )
+
     assert len(LIBERO_SPATIAL_TASKS) == 10
     assert len(LIBERO_OBJECT_TASKS) == 10
     assert len(LIBERO_GOAL_TASKS) == 10
@@ -38,6 +41,7 @@ def test_simpler_env_evaluator_imports():
     """SimplerEnvEvaluator should be importable from evaluation package."""
     from open_wam.evaluation import SimplerEnvEvaluator
     from open_wam.evaluation.base import BaseEvaluator
+
     assert issubclass(SimplerEnvEvaluator, BaseEvaluator)
 
 
@@ -45,6 +49,7 @@ def test_libero_evaluator_imports():
     """LIBEROEvaluator should be importable from evaluation package."""
     from open_wam.evaluation import LIBEROEvaluator
     from open_wam.evaluation.base import BaseEvaluator
+
     assert issubclass(LIBEROEvaluator, BaseEvaluator)
 
 
@@ -54,6 +59,7 @@ def test_simpler_env_task_lists():
         GOOGLE_ROBOT_TASKS,
         WIDOWX_TASKS,
     )
+
     assert len(GOOGLE_ROBOT_TASKS) >= 3
     assert len(WIDOWX_TASKS) >= 3
     assert all("google_robot" in t for t in GOOGLE_ROBOT_TASKS)
@@ -96,11 +102,13 @@ def test_simpler_env_evaluator_single_env():
     """SimplerEnvEvaluator should work with a single mock env."""
     from open_wam.evaluation.simpler_env_evaluator import SimplerEnvEvaluator
 
-    cfg = SimpleNamespace(eval=SimpleNamespace(
-        num_episodes=3,
-        max_steps_per_episode=5,
-        policy=SimpleNamespace(history_len=2, execute_horizon=None),
-    ))
+    cfg = SimpleNamespace(
+        eval=SimpleNamespace(
+            num_episodes=3,
+            max_steps_per_episode=5,
+            policy=SimpleNamespace(history_len=2, execute_horizon=None),
+        )
+    )
     evaluator = SimplerEnvEvaluator(cfg, MockEngine())
     result = evaluator.evaluate(MockEnvAdapter())
 
@@ -113,11 +121,13 @@ def test_libero_evaluator_single_env():
     """LIBEROEvaluator should work with a single mock env."""
     from open_wam.evaluation.libero_evaluator import LIBEROEvaluator
 
-    cfg = SimpleNamespace(eval=SimpleNamespace(
-        num_episodes=2,
-        max_steps_per_episode=5,
-        policy=SimpleNamespace(history_len=2, execute_horizon=None),
-    ))
+    cfg = SimpleNamespace(
+        eval=SimpleNamespace(
+            num_episodes=2,
+            max_steps_per_episode=5,
+            policy=SimpleNamespace(history_len=2, execute_horizon=None),
+        )
+    )
     evaluator = LIBEROEvaluator(cfg, MockEngine())
     result = evaluator.evaluate(MockEnvAdapter())
 
@@ -148,10 +158,11 @@ def test_all_env_adapters_in_envs_init():
     """All env adapters should be importable from envs package."""
     from open_wam.evaluation.envs import (
         BaseEnvAdapter,
+        LIBEROEnvAdapter,
         RoboTwinEnvAdapter,
         SimplerEnvAdapter,
-        LIBEROEnvAdapter,
     )
+
     for cls in [RoboTwinEnvAdapter, SimplerEnvAdapter, LIBEROEnvAdapter]:
         assert issubclass(cls, BaseEnvAdapter)
 

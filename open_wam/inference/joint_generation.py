@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
-import numpy as np
 import torch
-from PIL import Image
 from tqdm import tqdm
 
-from open_wam.models.architectures.base import BaseWAMArchitecture
 from open_wam.models.action_repr.base import BaseActionRepresentation
+from open_wam.models.architectures.base import BaseWAMArchitecture
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +83,25 @@ def prepare_pipeline_inputs(
     # Default camera pose matrix — only used when camera_control_direction is
     # not None, so this is effectively inert for WAM inference.
     _DEFAULT_CAMERA_ORIGIN = (
-        0, 0.532139961, 0.946026558, 0.5, 0.5,
-        0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+        0,
+        0.532139961,
+        0.946026558,
+        0.5,
+        0.5,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
     )
     inputs_shared = {
         "input_image": None,
@@ -132,9 +146,7 @@ def prepare_pipeline_inputs(
     }
 
     for unit in pipe.units:
-        inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(
-            unit, pipe, inputs_shared, inputs_posi, inputs_nega
-        )
+        inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(unit, pipe, inputs_shared, inputs_posi, inputs_nega)
 
     # Populate VACE cache for future closed-loop calls
     if vace_cache is not None:
@@ -313,8 +325,12 @@ def generate_video_and_actions(
             if cfg_scale != 1.0:
                 if cfg_handler is not None:
                     noise_pred = cfg_handler.forward(
-                        pipe.model_fn, models, inputs_shared,
-                        inputs_posi, inputs_nega, v_timestep,
+                        pipe.model_fn,
+                        models,
+                        inputs_shared,
+                        inputs_posi,
+                        inputs_nega,
+                        v_timestep,
                     )
                 else:
                     noise_pred_nega = pipe.model_fn(
@@ -340,8 +356,12 @@ def generate_video_and_actions(
 
                 if cfg_handler is not None and cfg_scale != 1.0:
                     noise_pred = cfg_handler.forward(
-                        pipe.model_fn, models, inputs_shared,
-                        inputs_posi, inputs_nega, v_timestep,
+                        pipe.model_fn,
+                        models,
+                        inputs_shared,
+                        inputs_posi,
+                        inputs_nega,
+                        v_timestep,
                         bridge_feature_store=bridge_features,
                         bridge_feature_layers=bridge_layers_set,
                         bridge_feature_detach=True,
@@ -390,9 +410,7 @@ def generate_video_and_actions(
                 sorted_layers = sorted(architecture.bridge_layers)
                 for layer_idx, layer_id in enumerate(sorted_layers):
                     if bridge_features is not None and layer_idx < len(bridge_features):
-                        _, action_state = architecture.on_dit_block(
-                            layer_id, bridge_features[layer_idx], action_state
-                        )
+                        _, action_state = architecture.on_dit_block(layer_id, bridge_features[layer_idx], action_state)
                 action_noise_pred = architecture.extract_action_prediction(action_state)
             action_latents = action_latents + action_noise_pred * (sigma_a_next - sigma_a)
 
@@ -419,7 +437,9 @@ def generate_video_and_actions(
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
     else:
         actions = action_latents.squeeze(0).float().cpu().numpy()
-        actions = actions * architecture.action_std.float().cpu().numpy() + architecture.action_mean.float().cpu().numpy()
+        actions = (
+            actions * architecture.action_std.float().cpu().numpy() + architecture.action_mean.float().cpu().numpy()
+        )
 
     _profile_sync("action_decode", t_action, profile)
 

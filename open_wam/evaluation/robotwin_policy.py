@@ -6,14 +6,16 @@ from collections import deque
 
 import numpy as np
 import torch
-from PIL import Image
 from omegaconf import OmegaConf
+from PIL import Image
 
 from open_wam.data.robotwin import (
     MULTIVIEW_CAMERAS,
     MULTIVIEW_LAYOUT,
-    _crop_and_resize as _mv_crop_and_resize,
     assemble_multiview_grid,
+)
+from open_wam.data.robotwin import (
+    _crop_and_resize as _mv_crop_and_resize,
 )
 from open_wam.inference import load_wam_models, make_schedule
 from open_wam.inference.joint_generation import generate_video_and_actions
@@ -114,7 +116,7 @@ class RoboTwinVAMPolicy:
         while len(context_frames) < self.num_frames:
             context_frames.insert(0, context_frames[0])
         if len(context_frames) > self.num_frames:
-            context_frames = context_frames[-self.num_frames:]
+            context_frames = context_frames[-self.num_frames :]
 
         schedule = make_schedule("action_only", num_steps=self.num_denoise_steps, shift=5.0)
 

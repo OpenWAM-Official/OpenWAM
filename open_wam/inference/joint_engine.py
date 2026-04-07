@@ -2,15 +2,15 @@
 
 import logging
 import os
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 
 from open_wam.inference.base import BaseInferenceEngine
 from open_wam.inference.joint_generation import generate_video_and_actions
 from open_wam.inference.schedule import make_schedule
-from open_wam.models.architectures.base import BaseWAMArchitecture
 from open_wam.models.action_repr.base import BaseActionRepresentation
+from open_wam.models.architectures.base import BaseWAMArchitecture
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,10 @@ class JointInferenceEngine(BaseInferenceEngine):
     """
 
     def __init__(
-        self, cfg, pipeline, action_dit=None,
+        self,
+        cfg,
+        pipeline,
+        action_dit=None,
         architecture: Optional[BaseWAMArchitecture] = None,
         action_repr: Optional[BaseActionRepresentation] = None,
     ):
@@ -41,6 +44,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         if self.architecture is None and self.action_dit is not None:
             # Backward compat: wrap raw ActionDiT in DualSystemArchitecture
             from open_wam.models.architectures.dual_system import DualSystemArchitecture
+
             arch = DualSystemArchitecture(cfg=None)
             arch.action_dit = self.action_dit
             self.architecture = arch
@@ -57,6 +61,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             dc = deploy.dit_cache
             if getattr(dc, "enabled", False):
                 from open_wam.inference.optimizations import DiTVelocityCache
+
                 self._dit_cache = DiTVelocityCache(
                     cosine_threshold=getattr(dc, "cosine_threshold", 0.99),
                     max_consecutive_skips=getattr(dc, "max_skips", 3),
@@ -71,10 +76,12 @@ class JointInferenceEngine(BaseInferenceEngine):
             scale = getattr(cfg_opt, "scale", 1.0)
             if mode == "batch_merge":
                 from open_wam.inference.optimizations import CFGBatchMerger
+
                 self._cfg_handler = CFGBatchMerger(cfg_scale=scale)
                 logger.info("CFG batch merge enabled")
             elif mode == "parallel":
                 from open_wam.inference.optimizations import CFGParallelExecutor
+
                 devices = getattr(cfg_opt, "devices", ["cuda:0", "cuda:1"])
                 self._cfg_handler = CFGParallelExecutor(devices=devices, cfg_scale=scale)
                 logger.info("CFG parallel execution enabled on %s", devices)
@@ -86,7 +93,8 @@ class JointInferenceEngine(BaseInferenceEngine):
                     action_dit = getattr(self.architecture, "action_dit", None)
                     if action_dit is not None:
                         self.architecture.action_dit = torch.compile(
-                            action_dit, dynamic=True,
+                            action_dit,
+                            dynamic=True,
                         )
                         logger.info("torch.compile enabled for ActionDiT")
                 except Exception as e:

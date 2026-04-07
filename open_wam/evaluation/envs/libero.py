@@ -11,12 +11,11 @@ suite for lifelong robot learning with:
 Installation: pip install libero
 """
 
-from typing import Optional, Tuple, List
+from typing import Tuple
 
 import numpy as np
 
 from open_wam.evaluation.envs.base import BaseEnvAdapter
-
 
 # LIBERO task suites
 LIBERO_SPATIAL_TASKS = [
@@ -124,8 +123,7 @@ class LIBEROEnvAdapter(BaseEnvAdapter):
                 break
         if task_idx is None:
             raise ValueError(
-                f"Task '{self.task_name}' not found in suite '{self.task_suite}'. "
-                f"Available: {bench.get_task_names()}"
+                f"Task '{self.task_name}' not found in suite '{self.task_suite}'. Available: {bench.get_task_names()}"
             )
 
         task = bench.get_task(task_idx)
@@ -193,9 +191,7 @@ class LIBEROEnvAdapter(BaseEnvAdapter):
                     if img.ndim == 3:
                         img = img[::-1]
                     pil_img = Image.fromarray(img.astype(np.uint8))
-                    pil_img = pil_img.resize(
-                        (self.image_width, self.image_height), Image.LANCZOS
-                    )
+                    pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
                     obs_dict[key] = pil_img
 
         # Primary image for WAM policy

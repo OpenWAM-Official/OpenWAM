@@ -6,12 +6,12 @@ import torch
 
 def test_dataset_base_class_interface():
     """Verify BaseActionDataset has required abstract methods."""
-    from open_wam.data.base import BaseActionDataset
     import inspect
 
+    from open_wam.data.base import BaseActionDataset
+
     abstracts = {
-        name for name, method in inspect.getmembers(BaseActionDataset)
-        if getattr(method, "__isabstractmethod__", False)
+        name for name, method in inspect.getmembers(BaseActionDataset) if getattr(method, "__isabstractmethod__", False)
     }
     assert "action_dim" in abstracts
     assert "action_stats" in abstracts
@@ -21,7 +21,8 @@ def test_dataset_base_class_interface():
 
 def test_robotwin_dataset_imports():
     """RoboTwin datasets should be importable and follow interface."""
-    from open_wam.data import RoboTwinActionDataset, MultiTaskRoboTwinActionDataset
+    from open_wam.data import MultiTaskRoboTwinActionDataset, RoboTwinActionDataset
+
     assert issubclass(RoboTwinActionDataset, torch.utils.data.Dataset)
     assert issubclass(MultiTaskRoboTwinActionDataset, torch.utils.data.Dataset)
 
@@ -29,6 +30,7 @@ def test_robotwin_dataset_imports():
 def test_droid_dataset_imports():
     """DROID dataset should be importable."""
     from open_wam.data import DROIDDataset
+
     assert issubclass(DROIDDataset, torch.utils.data.Dataset)
     assert DROIDDataset._ACTION_DIM == 7
 
@@ -36,31 +38,27 @@ def test_droid_dataset_imports():
 def test_bridge_v2_dataset_imports():
     """Bridge V2 dataset should be importable."""
     from open_wam.data import BridgeV2Dataset
+
     assert issubclass(BridgeV2Dataset, torch.utils.data.Dataset)
     assert BridgeV2Dataset._ACTION_DIM == 7
 
 
 def test_all_datasets_inherit_base():
     """All concrete datasets must inherit from BaseActionDataset."""
-    from open_wam.data.base import BaseActionDataset
     from open_wam.data import (
-        RoboTwinActionDataset,
-        MultiTaskRoboTwinActionDataset,
-        DROIDDataset,
         BridgeV2Dataset,
+        DROIDDataset,
+        MultiTaskRoboTwinActionDataset,
+        RoboTwinActionDataset,
     )
-    for cls in [RoboTwinActionDataset, MultiTaskRoboTwinActionDataset,
-                DROIDDataset, BridgeV2Dataset]:
+    from open_wam.data.base import BaseActionDataset
+
+    for cls in [RoboTwinActionDataset, MultiTaskRoboTwinActionDataset, DROIDDataset, BridgeV2Dataset]:
         assert issubclass(cls, BaseActionDataset), f"{cls.__name__} missing BaseActionDataset"
 
 
 def test_lerobot_utils_imports():
     """LeRobot utility functions should be importable."""
-    from open_wam.data.lerobot_utils import (
-        compute_dataset_action_stats,
-        normalize_actions,
-        discover_episodes,
-    )
 
 
 def test_action_stats_computation():
@@ -93,10 +91,11 @@ def test_normalize_actions():
 def test_build_training_dataset_dispatch():
     """Verify build_training_dataset dispatches to correct dataset class."""
     import argparse
-    from open_wam.training.runtime import build_training_dataset
-    from open_wam.data import DROIDDataset, BridgeV2Dataset, MixtureDataset
     import os
     import tempfile
+
+    from open_wam.data import BridgeV2Dataset, DROIDDataset
+    from open_wam.training.runtime import build_training_dataset
 
     # Create a minimal fake LeRobot directory structure
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -106,10 +105,13 @@ def test_build_training_dataset_dispatch():
         os.makedirs(video_dir)
         # Create a minimal parquet file
         import pandas as pd
-        df = pd.DataFrame({
-            "episode_index": [0] * 5,
-            "action": [[0.0] * 7] * 5,
-        })
+
+        df = pd.DataFrame(
+            {
+                "episode_index": [0] * 5,
+                "action": [[0.0] * 7] * 5,
+            }
+        )
         df.to_parquet(os.path.join(data_dir, "chunk_0.parquet"))
 
         # Test DROID dispatch

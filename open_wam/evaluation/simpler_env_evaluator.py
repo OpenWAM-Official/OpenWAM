@@ -1,7 +1,6 @@
 """SimplerEnv evaluator for Google Robot and WidowX tasks."""
 
 import logging
-from typing import Optional, List
 
 import numpy as np
 

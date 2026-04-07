@@ -51,6 +51,7 @@ class WAMPolicy:
 
         if async_config is not None and getattr(async_config, "enabled", False):
             from open_wam.inference.optimizations import AsyncInferenceExecutor
+
             self._async_executor = AsyncInferenceExecutor(
                 engine=engine,
                 chunk_size=getattr(async_config, "chunk_size", 49),
@@ -91,12 +92,8 @@ class WAMPolicy:
             self._current_step += 1
             return action
 
-        need_generate = (
-            len(self._action_buffer) == 0
-            or (
-                self.execute_horizon is not None
-                and self._steps_since_generate >= self.execute_horizon
-            )
+        need_generate = len(self._action_buffer) == 0 or (
+            self.execute_horizon is not None and self._steps_since_generate >= self.execute_horizon
         )
 
         if need_generate:
@@ -140,11 +137,11 @@ class WAMPolicy:
                     for j in range(n):
                         age = n - 1 - j
                         _, a = entries[j]
-                        entries[j] = (self.ensemble_decay ** age, a)
+                        entries[j] = (self.ensemble_decay**age, a)
 
             # Build fused action buffer for the next execute_horizon steps
             self._action_buffer.clear()
-            horizon = self.execute_horizon if self.execute_horizon else chunk_len
+            _horizon = self.execute_horizon if self.execute_horizon else chunk_len  # noqa: F841
             for i in range(chunk_len):
                 t = t_start + i
                 entries = self._ensemble_buffer.get(t, [])

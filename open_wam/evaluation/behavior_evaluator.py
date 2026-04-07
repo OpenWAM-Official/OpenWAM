@@ -5,7 +5,6 @@ with per-task success rate and optional partial completion scoring.
 """
 
 import logging
-from typing import Optional, List
 
 import numpy as np
 
@@ -114,14 +113,8 @@ class BehaviorEvaluator(BaseEvaluator):
         # Per-category aggregation
         per_category = {}
         for cat_name, cat_tasks in BEHAVIOR_CATEGORIES.items():
-            cat_success = sum(
-                all_results[t]["successes"]
-                for t in cat_tasks if t in all_results
-            )
-            cat_episodes = sum(
-                all_results[t]["num_episodes"]
-                for t in cat_tasks if t in all_results
-            )
+            cat_success = sum(all_results[t]["successes"] for t in cat_tasks if t in all_results)
+            cat_episodes = sum(all_results[t]["num_episodes"] for t in cat_tasks if t in all_results)
             per_category[cat_name] = {
                 "success_rate": cat_success / cat_episodes if cat_episodes > 0 else 0.0,
                 "successes": cat_success,

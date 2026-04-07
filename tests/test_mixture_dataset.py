@@ -1,8 +1,8 @@
 """Tests for MixtureDataset multi-dataset co-training."""
 
 import numpy as np
-import torch
 import pytest
+import torch
 
 from open_wam.data.base import BaseActionDataset
 from open_wam.data.mixture import MixtureDataset
@@ -182,4 +182,5 @@ def test_mixture_deterministic_with_seed():
 def test_mixture_import_from_package():
     """MixtureDataset should be importable from open_wam.data."""
     from open_wam.data import MixtureDataset as M
+
     assert M is MixtureDataset

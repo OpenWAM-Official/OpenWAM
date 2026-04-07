@@ -77,6 +77,7 @@ class FASTActionRepresentation(BaseActionRepresentation):
 
         try:
             from fast_tokenizer import FastTokenizer
+
             self._tokenizer = FastTokenizer.from_pretrained(self._tokenizer_name)
         except ImportError:
             raise ImportError(
@@ -143,6 +144,7 @@ class FASTActionRepresentation(BaseActionRepresentation):
             (B, T, num_tokens_per_step) numpy array of token IDs.
         """
         import numpy as np
+
         B, T, D = actions_np.shape
 
         if hasattr(self._tokenizer, "encoder_action2fastoken"):
@@ -176,6 +178,7 @@ class FASTActionRepresentation(BaseActionRepresentation):
             (B, T, native_dim) numpy array of continuous actions.
         """
         import numpy as np
+
         B, T, K = token_ids_np.shape
 
         if hasattr(self._tokenizer, "decoder_action"):

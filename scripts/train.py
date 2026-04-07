@@ -30,16 +30,16 @@ def _train(cfg: DictConfig) -> None:
     """Package-native training path."""
     import accelerate
 
+    from open_wam.training.config_tracking import (
+        build_run_metadata,
+        get_git_commit,
+        make_run_id,
+    )
     from open_wam.training.native_trainer import NativeTrainer
     from open_wam.training.runtime import (
         build_training_dataset,
         cfg_to_flat_namespace,
         parse_task_overrides,
-    )
-    from open_wam.training.config_tracking import (
-        build_run_metadata,
-        get_git_commit,
-        make_run_id,
     )
 
     t = cfg.training
@@ -47,9 +47,7 @@ def _train(cfg: DictConfig) -> None:
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=int(t.gradient_accumulation_steps),
         kwargs_handlers=[
-            accelerate.DistributedDataParallelKwargs(
-                find_unused_parameters=bool(t.find_unused_parameters)
-            )
+            accelerate.DistributedDataParallelKwargs(find_unused_parameters=bool(t.find_unused_parameters))
         ],
     )
 
@@ -66,7 +64,7 @@ def _train(cfg: DictConfig) -> None:
     hydra_output_dir = None
     if HydraConfig.initialized():
         hydra_output_dir = HydraConfig.get().runtime.output_dir
-    run_metadata = build_run_metadata(
+    _run_metadata = build_run_metadata(  # noqa: F841
         run_id=run_id,
         output_dir=t.output_path,
         hydra_output_dir=hydra_output_dir,

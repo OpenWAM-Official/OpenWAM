@@ -1,18 +1,19 @@
 """Tests for standalone FlowMatchVideoActionLoss."""
 
 import torch
-import pytest
 
 
 def test_flow_match_loss_importable():
     """FlowMatchVideoActionLoss should be importable from training package."""
     from open_wam.training import FlowMatchVideoActionLoss
+
     assert callable(FlowMatchVideoActionLoss)
 
 
 def test_flow_match_loss_from_module():
     """Direct import from flow_match_loss module."""
     from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+
     loss_fn = FlowMatchVideoActionLoss(lambda_video=1.0, lambda_action=1.0)
     assert loss_fn.lambda_video == 1.0
     assert loss_fn.lambda_action == 1.0
@@ -36,12 +37,14 @@ def test_flow_match_loss_config():
 def test_legacy_loss_still_importable():
     """Legacy FlowMatchVideoActionSFTLoss should still be importable."""
     from open_wam.training.loss import FlowMatchVideoActionSFTLoss
+
     assert callable(FlowMatchVideoActionSFTLoss)
 
 
 def test_both_losses_in_training_init():
     """Both loss functions should be in training __all__."""
     from open_wam.training import FlowMatchVideoActionLoss, FlowMatchVideoActionSFTLoss
+
     assert callable(FlowMatchVideoActionLoss)
     assert callable(FlowMatchVideoActionSFTLoss)
 
@@ -68,9 +71,7 @@ def test_flow_match_loss_video_loss_computation():
         device = "cpu"
         scheduler = MockScheduler()
 
-    loss = loss_fn._compute_video_loss(
-        noise_pred, target, timestep_ids, MockPipe(), {}, B=2
-    )
+    loss = loss_fn._compute_video_loss(noise_pred, target, timestep_ids, MockPipe(), {}, B=2)
     assert loss.shape == ()
     assert loss.item() > 0
 
@@ -92,9 +93,7 @@ def test_flow_match_loss_action_loss_computation():
         torch_dtype = torch.float32
         device = "cpu"
 
-    loss = loss_fn._compute_action_loss(
-        noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=2
-    )
+    loss = loss_fn._compute_action_loss(noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=2)
     assert loss.shape == ()
     assert loss.item() > 0
 
@@ -116,7 +115,5 @@ def test_flow_match_loss_single_sample():
         torch_dtype = torch.float32
         device = "cpu"
 
-    loss = loss_fn._compute_action_loss(
-        noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=1
-    )
+    loss = loss_fn._compute_action_loss(noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=1)
     assert loss.shape == ()

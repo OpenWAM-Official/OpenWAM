@@ -82,9 +82,7 @@ class AsyncInferenceExecutor:
             action = self._action_buffer.popleft()
 
             # Prefetch: start next inference when buffer is half empty
-            if (self.prefetch
-                    and self._pending_future is None
-                    and len(self._action_buffer) <= self.chunk_size // 2):
+            if self.prefetch and self._pending_future is None and len(self._action_buffer) <= self.chunk_size // 2:
                 self._start_async_inference(conditions)
 
         return action
@@ -115,6 +113,7 @@ class AsyncInferenceExecutor:
 
     def _start_async_inference(self, conditions: dict):
         """Start inference in the background thread pool."""
+
         def _infer():
             t0 = time.monotonic()
             with torch.no_grad():
@@ -145,11 +144,7 @@ class AsyncInferenceExecutor:
         wait_times = self._wait_times
         return {
             "num_inferences": len(inf_times),
-            "avg_inference_time_ms": (
-                1000 * sum(inf_times) / len(inf_times) if inf_times else 0.0
-            ),
-            "avg_wait_time_ms": (
-                1000 * sum(wait_times) / len(wait_times) if wait_times else 0.0
-            ),
+            "avg_inference_time_ms": (1000 * sum(inf_times) / len(inf_times) if inf_times else 0.0),
+            "avg_wait_time_ms": (1000 * sum(wait_times) / len(wait_times) if wait_times else 0.0),
             "buffer_size": len(self._action_buffer),
         }

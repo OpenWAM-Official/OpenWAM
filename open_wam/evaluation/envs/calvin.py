@@ -12,7 +12,7 @@ Action format: 7D delta EEF (dx, dy, dz, droll, dpitch, dyaw, gripper)
 Installation: See https://github.com/mees/calvin for setup instructions.
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -58,12 +58,11 @@ class CalvinEnvAdapter(BaseEnvAdapter):
             return
 
         try:
+            import hydra  # noqa: F401
             from calvin_env.envs.play_table_env import PlayTableSimEnv
-            import hydra
         except ImportError:
             raise ImportError(
-                "Calvin environment is required for this adapter. "
-                "See: https://github.com/mees/calvin for installation."
+                "Calvin environment is required for this adapter. See: https://github.com/mees/calvin for installation."
             )
 
         # Load Calvin environment with default config
@@ -129,9 +128,7 @@ class CalvinEnvAdapter(BaseEnvAdapter):
                         if img_array.dtype != np.uint8:
                             img_array = (img_array * 255).clip(0, 255).astype(np.uint8)
                         pil_img = Image.fromarray(img_array)
-                        pil_img = pil_img.resize(
-                            (self.image_width, self.image_height), Image.LANCZOS
-                        )
+                        pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
                         obs_dict["image"] = pil_img
                     break
 
@@ -140,9 +137,7 @@ class CalvinEnvAdapter(BaseEnvAdapter):
                 obs_dict["state"] = np.asarray(obs["robot_obs"], dtype=np.float32)
         elif isinstance(obs, np.ndarray):
             pil_img = Image.fromarray(obs.astype(np.uint8))
-            pil_img = pil_img.resize(
-                (self.image_width, self.image_height), Image.LANCZOS
-            )
+            pil_img = pil_img.resize((self.image_width, self.image_height), Image.LANCZOS)
             obs_dict["image"] = pil_img
 
         obs_dict["step"] = self._step_count

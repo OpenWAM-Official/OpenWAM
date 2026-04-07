@@ -13,8 +13,7 @@ class BaseTrainer(ABC):
     ``train_step``, ``validate``, ``save_checkpoint``, ``load_checkpoint``.
     """
 
-    def __init__(self, cfg, model: Optional[torch.nn.Module] = None,
-                 dataset=None, accelerator=None):
+    def __init__(self, cfg, model: Optional[torch.nn.Module] = None, dataset=None, accelerator=None):
         self.cfg = cfg
         self.model = model
         self.dataset = dataset
@@ -44,9 +43,7 @@ class BaseTrainer(ABC):
         return {}
 
     @abstractmethod
-    def save_checkpoint(self, path: str):
-        ...
+    def save_checkpoint(self, path: str): ...
 
     @abstractmethod
-    def load_checkpoint(self, path: str):
-        ...
+    def load_checkpoint(self, path: str): ...

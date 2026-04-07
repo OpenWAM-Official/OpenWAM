@@ -6,8 +6,8 @@ from typing import List, Tuple
 
 from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
 from open_wam.inference.optimizations.decoupled_schedule import (
-    schedule_decoupled_flash,
     schedule_decoupled_asymmetric,
+    schedule_decoupled_flash,
 )
 
 Schedule = List[Tuple[float, float]]
@@ -75,10 +75,7 @@ _SCHEDULE_REGISTRY = {
 
 def make_schedule(strategy: str, num_steps: int = 50, shift: float = 5.0, **kwargs) -> Schedule:
     if strategy not in _SCHEDULE_REGISTRY:
-        raise ValueError(
-            f"Unknown schedule strategy '{strategy}'. "
-            f"Choose from: {list(_SCHEDULE_REGISTRY.keys())}"
-        )
+        raise ValueError(f"Unknown schedule strategy '{strategy}'. Choose from: {list(_SCHEDULE_REGISTRY.keys())}")
 
     fn = _SCHEDULE_REGISTRY[strategy]
     call_kwargs = {"shift": shift}

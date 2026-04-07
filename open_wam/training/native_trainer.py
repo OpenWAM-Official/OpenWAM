@@ -15,10 +15,7 @@ Usage:
 """
 
 import logging
-import math
 import os
-import warnings
-from typing import Optional
 
 import numpy as np
 import torch
@@ -49,18 +46,19 @@ class NativeTrainer(BaseTrainer):
 
         t = cfg.training
         m = cfg.model
-        b = cfg.model.backbone
 
         # Build models
         self.pipe, self.action_dit = self._build_models(cfg)
 
         # Wrap in architecture interface
         from open_wam.models.architectures.dual_system import DualSystemArchitecture
+
         self.architecture = DualSystemArchitecture(cfg=None)
         self.architecture.action_dit = self.action_dit
 
         # Action scheduler (independent from video)
         from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
+
         self.action_scheduler = FlowMatchScheduler("Wan")
         self.action_scheduler.set_timesteps(1000, training=True)
 
@@ -80,6 +78,7 @@ class NativeTrainer(BaseTrainer):
         self.decoupled_sampler = None
         if decoupled_cfg is not None and getattr(decoupled_cfg, "enabled", False):
             from open_wam.training.decoupled_loss import DecoupledFlowMatchLoss
+
             self.decoupled_sampler = DecoupledFlowMatchLoss(
                 video_beta_a=float(getattr(decoupled_cfg, "video_beta_a", 0.5)),
                 video_beta_b=float(getattr(decoupled_cfg, "video_beta_b", 1.0)),
@@ -105,6 +104,7 @@ class NativeTrainer(BaseTrainer):
 
         # Pipeline-level conditioning transform (adds VACE fields if missing)
         from open_wam.data.transforms.pipeline import VACEConditioningTransform
+
         self._pipeline_transform = VACEConditioningTransform()
 
         # Step counter
@@ -119,9 +119,9 @@ class NativeTrainer(BaseTrainer):
         """Build pipeline and ActionDiT from Hydra config."""
         import json
 
-        from open_wam.models.action_dit import ActionDiT
         from open_wam.inference.model_config import ModelConfig
         from open_wam.inference.video_pipeline import WanVideoPipeline
+        from open_wam.models.action_dit import ActionDiT
 
         t = cfg.training
         m = cfg.model
@@ -165,7 +165,9 @@ class NativeTrainer(BaseTrainer):
         # Training mode setup for pipeline
         trainable_models = t.trainable_models
         if trainable_models:
-            trainable_str = ",".join(trainable_models) if isinstance(trainable_models, (list, tuple)) else trainable_models
+            trainable_str = (
+                ",".join(trainable_models) if isinstance(trainable_models, (list, tuple)) else trainable_models
+            )
         else:
             trainable_str = None
 
@@ -173,9 +175,14 @@ class NativeTrainer(BaseTrainer):
         lora_base_model = getattr(t, "lora_base_model", None)
         if lora_base_model:
             pipe = self._setup_training_mode(
-                pipe, trainable_str, lora_base_model,
-                t.lora_target_modules, int(t.lora_rank),
-                t.lora_checkpoint, t.preset_lora_path, t.preset_lora_model,
+                pipe,
+                trainable_str,
+                lora_base_model,
+                t.lora_target_modules,
+                int(t.lora_rank),
+                t.lora_checkpoint,
+                t.preset_lora_path,
+                t.preset_lora_model,
             )
 
         # Gradient checkpointing
@@ -199,9 +206,17 @@ class NativeTrainer(BaseTrainer):
 
         return pipe, action_dit
 
-    def _setup_training_mode(self, pipe, trainable_models, lora_base_model,
-                              lora_target_modules, lora_rank, lora_checkpoint,
-                              preset_lora_path, preset_lora_model):
+    def _setup_training_mode(
+        self,
+        pipe,
+        trainable_models,
+        lora_base_model,
+        lora_target_modules,
+        lora_rank,
+        lora_checkpoint,
+        preset_lora_path,
+        preset_lora_model,
+    ):
         """Set up LoRA and training mode on the pipeline."""
         # Delegate to DiffusionTrainingModule's static methods if needed.
         # For NativeTrainer, we use a simpler approach: direct PEFT injection.
@@ -231,12 +246,8 @@ class NativeTrainer(BaseTrainer):
         if stats is None:
             return
 
-        self.action_dit.action_mean.copy_(
-            torch.from_numpy(stats["mean"].astype(np.float32))
-        )
-        self.action_dit.action_std.copy_(
-            torch.from_numpy(np.maximum(stats["std"].astype(np.float32), 1e-3))
-        )
+        self.action_dit.action_mean.copy_(torch.from_numpy(stats["mean"].astype(np.float32)))
+        self.action_dit.action_std.copy_(torch.from_numpy(np.maximum(stats["std"].astype(np.float32), 1e-3)))
         logger.info("Loaded action stats into ActionDiT buffers from dataset")
 
     def get_trainable_parameters(self):
@@ -270,9 +281,7 @@ class NativeTrainer(BaseTrainer):
         # Extract action data
         action_data = data.get("action_trajectory", None)
         if self.lambda_action > 0 and action_data is None:
-            raise ValueError(
-                "lambda_action > 0 but no action_trajectory in data."
-            )
+            raise ValueError("lambda_action > 0 but no action_trajectory in data.")
         if action_data is not None:
             if isinstance(action_data, np.ndarray):
                 action_data = torch.from_numpy(action_data)
@@ -337,8 +346,8 @@ class NativeTrainer(BaseTrainer):
 
     def _forward_batch(self, data_list) -> dict:
         """Batched forward pass — encode all samples in one VAE/text-encoder pass."""
-        from einops import rearrange
         import torch.nn.functional as F
+        from einops import rearrange
 
         # Add pipeline-specific conditioning (VACE fields) if missing
         data_list = [self._pipeline_transform.apply(s) for s in data_list]
@@ -367,8 +376,7 @@ class NativeTrainer(BaseTrainer):
                 all_vace_videos.append(pipe.preprocess_video(vv))
             else:
                 all_vace_videos.append(
-                    torch.zeros(1, 3, num_frames, height, width,
-                                dtype=pipe.torch_dtype, device=pipe.device)
+                    torch.zeros(1, 3, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device)
                 )
 
             ref = sample.get("vace_reference_image")
@@ -392,9 +400,7 @@ class NativeTrainer(BaseTrainer):
 
         ref_flags = [r is not None for r in all_ref_images]
         if any(ref_flags) and not all(ref_flags):
-            raise ValueError(
-                "Mixed reference images in batch: all samples must be consistent."
-            )
+            raise ValueError("Mixed reference images in batch: all samples must be consistent.")
         has_ref = ref_flags[0] if ref_flags else False
 
         # Batch text encoding
@@ -427,21 +433,15 @@ class NativeTrainer(BaseTrainer):
             reactive_latents = pipe.vae.batch_encode(stacked_vace, pipe.device).to(
                 dtype=pipe.torch_dtype, device=pipe.device
             )
-            single_zero = torch.zeros(
-                1, 3, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device
-            )
+            single_zero = torch.zeros(1, 3, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device)
             inactive_latent = pipe.vae.batch_encode(single_zero, pipe.device).to(
                 dtype=pipe.torch_dtype, device=pipe.device
             )
             inactive_latents = inactive_latent.expand(B, -1, -1, -1, -1)
             vace_video_latents = torch.cat([inactive_latents, reactive_latents], dim=1)
 
-            vace_mask = torch.ones(
-                B, 1, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device
-            )
-            vace_mask_latents = rearrange(
-                vace_mask[:, 0], "B T (H P) (W Q) -> B (P Q) T H W", P=8, Q=8
-            )
+            vace_mask = torch.ones(B, 1, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device)
+            vace_mask_latents = rearrange(vace_mask[:, 0], "B T (H P) (W Q) -> B (P Q) T H W", P=8, Q=8)
             T_lat = (vace_mask_latents.shape[2] + 3) // 4
             vace_mask_latents = F.interpolate(
                 vace_mask_latents,
@@ -451,25 +451,28 @@ class NativeTrainer(BaseTrainer):
 
             if has_ref:
                 ref_f = ref_latents.shape[2]
-                vace_ref_latents = torch.cat(
-                    [ref_latents, torch.zeros_like(ref_latents)], dim=1
+                vace_ref_latents = torch.cat([ref_latents, torch.zeros_like(ref_latents)], dim=1)
+                vace_video_latents = torch.cat([vace_ref_latents, vace_video_latents], dim=2)
+                vace_mask_latents = torch.cat(
+                    [
+                        torch.zeros(
+                            B,
+                            vace_mask_latents.shape[1],
+                            ref_f,
+                            vace_mask_latents.shape[3],
+                            vace_mask_latents.shape[4],
+                            dtype=pipe.torch_dtype,
+                            device=pipe.device,
+                        ),
+                        vace_mask_latents,
+                    ],
+                    dim=2,
                 )
-                vace_video_latents = torch.cat(
-                    [vace_ref_latents, vace_video_latents], dim=2
-                )
-                vace_mask_latents = torch.cat([
-                    torch.zeros(
-                        B, vace_mask_latents.shape[1], ref_f,
-                        vace_mask_latents.shape[3], vace_mask_latents.shape[4],
-                        dtype=pipe.torch_dtype, device=pipe.device,
-                    ),
-                    vace_mask_latents,
-                ], dim=2)
 
             vace_context = torch.cat([vace_video_latents, vace_mask_latents], dim=1)
 
         # TI2V handling
-        is_ti2v = getattr(pipe.dit, 'fuse_vae_embedding_in_latents', False)
+        is_ti2v = getattr(pipe.dit, "fuse_vae_embedding_in_latents", False)
         first_frame_latents = None
         num_clean_prefix = 0
         if is_ti2v and has_ref:
@@ -601,6 +604,7 @@ class NativeTrainer(BaseTrainer):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         if path.endswith(".safetensors"):
             from safetensors.torch import save_file
+
             save_file(state_dict, path)
         else:
             torch.save(state_dict, path)
@@ -611,6 +615,7 @@ class NativeTrainer(BaseTrainer):
         """Load a checkpoint into the model."""
         if path.endswith(".safetensors"):
             from safetensors.torch import load_file
+
             state_dict = load_file(path)
         else:
             state_dict = torch.load(path, map_location="cpu")

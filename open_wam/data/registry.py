@@ -13,10 +13,9 @@ Usage:
     dataset = build_dataset(config, split="train")
 """
 
-from typing import Dict, Optional, Type
+from typing import Dict, Type
 
 from open_wam.data.base import BaseActionDataset
-
 
 DATASET_REGISTRY: Dict[str, Type[BaseActionDataset]] = {}
 
@@ -27,9 +26,11 @@ def register_dataset(name: str):
     Args:
         name: Config-level type name (e.g., "droid", "bridge_v2", "oxe").
     """
+
     def wrapper(cls):
         DATASET_REGISTRY[name] = cls
         return cls
+
     return wrapper
 
 
@@ -49,10 +50,7 @@ def build_dataset(config, split: str = "train") -> BaseActionDataset:
     """
     dtype = _get(config, "type")
     if dtype not in DATASET_REGISTRY:
-        raise ValueError(
-            f"Unknown dataset type '{dtype}'. "
-            f"Available: {list(DATASET_REGISTRY.keys())}"
-        )
+        raise ValueError(f"Unknown dataset type '{dtype}'. Available: {list(DATASET_REGISTRY.keys())}")
 
     cls = DATASET_REGISTRY[dtype]
 
@@ -96,8 +94,15 @@ def _build_from_config(cls, config, split: str):
 
     # Common parameters shared across all LeRobot datasets
     for param in [
-        "dataset_dir", "num_frames", "height", "width", "camera",
-        "action_stats_path", "val_ratio", "seed", "action_key",
+        "dataset_dir",
+        "num_frames",
+        "height",
+        "width",
+        "camera",
+        "action_stats_path",
+        "val_ratio",
+        "seed",
+        "action_key",
     ]:
         val = _get(config, param)
         if val is not None:
@@ -105,16 +110,17 @@ def _build_from_config(cls, config, split: str):
 
     # Dataset-specific parameters
     for param in [
-        "action_type",          # DROID
-        "dataset_name",         # OXE
-        "embodiment",           # OXE
-        "canonical_action_dim", # OXE
-        "hdf5_data_root",       # RoboTwin (single-task)
-        "robot", "variant",     # RoboTwin
-        "multiview",            # RoboTwin
-        "target_camera",        # RoboTwin
-        "window_stride",        # RoboTwin
-        "tasks",                # RoboTwin multitask
+        "action_type",  # DROID
+        "dataset_name",  # OXE
+        "embodiment",  # OXE
+        "canonical_action_dim",  # OXE
+        "hdf5_data_root",  # RoboTwin (single-task)
+        "robot",
+        "variant",  # RoboTwin
+        "multiview",  # RoboTwin
+        "target_camera",  # RoboTwin
+        "window_stride",  # RoboTwin
+        "tasks",  # RoboTwin multitask
     ]:
         val = _get(config, param)
         if val is not None:
@@ -126,16 +132,17 @@ def _build_from_config(cls, config, split: str):
 # ---- Auto-registration of built-in datasets ----
 # This runs when the module is first imported.
 
+
 def _register_builtins():
     """Register all built-in dataset classes."""
-    from open_wam.data.droid import DROIDDataset
     from open_wam.data.bridge_v2 import BridgeV2Dataset
+    from open_wam.data.droid import DROIDDataset
+    from open_wam.data.mixture import MixtureDataset
     from open_wam.data.oxe import OXEDataset
     from open_wam.data.robotwin import (
-        RoboTwinActionDataset,
         MultiTaskRoboTwinActionDataset,
+        RoboTwinActionDataset,
     )
-    from open_wam.data.mixture import MixtureDataset
 
     register_dataset("droid")(DROIDDataset)
     register_dataset("bridge_v2")(BridgeV2Dataset)

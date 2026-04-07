@@ -27,13 +27,13 @@ Config example::
 
 from typing import Optional
 
-from open_wam.data.transforms.base import ComposedTransform, ModalityTransform
+from open_wam.data.transforms.base import ComposedTransform
 from open_wam.data.transforms.normalize import ActionNormalizer
 from open_wam.data.transforms.rotation import RotationTransform
 from open_wam.data.transforms.video import (
-    VideoRandomCrop,
     VideoColorJitter,
     VideoHorizontalFlip,
+    VideoRandomCrop,
 )
 
 
@@ -68,11 +68,13 @@ def build_transforms(
         rot_slice = _get(rot_cfg, "rotation_slice", [3, 6])
         if isinstance(rot_slice, (list, tuple)):
             rot_slice = slice(int(rot_slice[0]), int(rot_slice[1]))
-        transforms.append(RotationTransform(
-            source_repr=source,
-            target_repr=target,
-            rotation_slice=rot_slice,
-        ))
+        transforms.append(
+            RotationTransform(
+                source_repr=source,
+                target_repr=target,
+                rotation_slice=rot_slice,
+            )
+        )
 
     # 2. Action normalization
     norm_cfg = _get(transform_cfg, "normalize")
@@ -99,24 +101,32 @@ def build_transforms(
             scale = _get(crop_cfg, "scale", [0.8, 1.0])
             if not isinstance(scale, (list, tuple)):
                 scale = [scale, 1.0]
-            transforms.append(VideoRandomCrop(
-                height=height, width=width, scale=tuple(scale),
-            ))
+            transforms.append(
+                VideoRandomCrop(
+                    height=height,
+                    width=width,
+                    scale=tuple(scale),
+                )
+            )
 
         jitter_cfg = _get(aug_cfg, "color_jitter")
         if jitter_cfg is not None:
-            transforms.append(VideoColorJitter(
-                brightness=float(_get(jitter_cfg, "brightness", 0.1)),
-                contrast=float(_get(jitter_cfg, "contrast", 0.1)),
-                saturation=float(_get(jitter_cfg, "saturation", 0.1)),
-                hue=float(_get(jitter_cfg, "hue", 0.0)),
-            ))
+            transforms.append(
+                VideoColorJitter(
+                    brightness=float(_get(jitter_cfg, "brightness", 0.1)),
+                    contrast=float(_get(jitter_cfg, "contrast", 0.1)),
+                    saturation=float(_get(jitter_cfg, "saturation", 0.1)),
+                    hue=float(_get(jitter_cfg, "hue", 0.0)),
+                )
+            )
 
         flip_cfg = _get(aug_cfg, "horizontal_flip")
         if flip_cfg is not None:
-            transforms.append(VideoHorizontalFlip(
-                p=float(_get(flip_cfg, "p", 0.5)),
-            ))
+            transforms.append(
+                VideoHorizontalFlip(
+                    p=float(_get(flip_cfg, "p", 0.5)),
+                )
+            )
 
     if not transforms:
         return None

@@ -23,13 +23,13 @@ Usage:
     )
 """
 
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
 
-from open_wam.models.architectures.base import BaseWAMArchitecture
 from open_wam.models.action_repr.base import BaseActionRepresentation
+from open_wam.models.architectures.base import BaseWAMArchitecture
 
 
 class FlowMatchVideoActionLoss:
@@ -88,27 +88,24 @@ class FlowMatchVideoActionLoss:
         # Resolve architecture from action_dit for backward compat
         if architecture is None and action_dit is not None:
             from open_wam.models.architectures.dual_system import DualSystemArchitecture
+
             architecture = DualSystemArchitecture(cfg=None)
             architecture.action_dit = action_dit
-        max_timestep_boundary = int(
-            inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps)
-        )
-        min_timestep_boundary = int(
-            inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps)
-        )
+        max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
+        min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
         B = inputs["input_latents"].shape[0]
 
         # --- Sample video timesteps ---
         video_timestep_ids = self._sample_video_timesteps(
-            B, min_timestep_boundary, max_timestep_boundary,
-            decoupled_sampler, current_step, pipe,
+            B,
+            min_timestep_boundary,
+            max_timestep_boundary,
+            decoupled_sampler,
+            current_step,
+            pipe,
         )
-        video_timesteps = pipe.scheduler.timesteps[video_timestep_ids].to(
-            dtype=pipe.torch_dtype, device=pipe.device
-        )
-        video_sigmas = pipe.scheduler.sigmas[video_timestep_ids].to(
-            dtype=pipe.torch_dtype, device=pipe.device
-        )
+        video_timesteps = pipe.scheduler.timesteps[video_timestep_ids].to(dtype=pipe.torch_dtype, device=pipe.device)
+        video_sigmas = pipe.scheduler.sigmas[video_timestep_ids].to(dtype=pipe.torch_dtype, device=pipe.device)
 
         # --- Add video noise: x_t = (1 - sigma) * x_0 + sigma * epsilon ---
         video_noise = torch.randn_like(inputs["input_latents"])
@@ -120,19 +117,21 @@ class FlowMatchVideoActionLoss:
             inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
 
         # --- Prepare action data ---
-        action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids = (
-            self._prepare_actions(
-                B, architecture, action_scheduler, action_data,
-                decoupled_sampler, current_step, pipe, inputs,
-                action_repr=action_repr,
-            )
+        action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids = self._prepare_actions(
+            B,
+            architecture,
+            action_scheduler,
+            action_data,
+            decoupled_sampler,
+            current_step,
+            pipe,
+            inputs,
+            action_repr=action_repr,
         )
 
         # --- Video forward pass ---
         models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
-        use_interleaved = (
-            architecture.is_interleaved and self.lambda_action > 0
-        )
+        use_interleaved = architecture.is_interleaved and self.lambda_action > 0
 
         if use_interleaved:
             # Build model_fn kwargs based on architecture state
@@ -146,13 +145,17 @@ class FlowMatchVideoActionLoss:
                 if "shared_backbone_state" in extra:
                     interleaved_kwargs["shared_backbone_state"] = extra["shared_backbone_state"]
             video_noise_pred = pipe.model_fn(
-                **models, **inputs, timestep=video_timesteps,
+                **models,
+                **inputs,
+                timestep=video_timesteps,
                 **interleaved_kwargs,
             )
         else:
             bridge_features = []
             video_noise_pred = pipe.model_fn(
-                **models, **inputs, timestep=video_timesteps,
+                **models,
+                **inputs,
+                timestep=video_timesteps,
                 bridge_feature_store=bridge_features,
                 bridge_feature_layers=set(architecture.bridge_layers),
                 bridge_feature_detach=self.detach_bridge,
@@ -160,8 +163,12 @@ class FlowMatchVideoActionLoss:
 
         # --- Video loss ---
         loss_video = self._compute_video_loss(
-            video_noise_pred, video_target, video_timestep_ids,
-            pipe, inputs, B,
+            video_noise_pred,
+            video_target,
+            video_timestep_ids,
+            pipe,
+            inputs,
+            B,
         )
 
         if self.lambda_action == 0:
@@ -185,21 +192,24 @@ class FlowMatchVideoActionLoss:
         else:
             # Use architecture interface: prepare → feed bridge features → extract
             action_state = architecture.prepare_action_tokens(
-                noisy_actions, action_timesteps,
+                noisy_actions,
+                action_timesteps,
                 use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
             )
             sorted_layers = sorted(architecture.bridge_layers)
             for layer_idx, layer_id in enumerate(sorted_layers):
                 if layer_idx < len(bridge_features):
-                    _, action_state = architecture.on_dit_block(
-                        layer_id, bridge_features[layer_idx], action_state
-                    )
+                    _, action_state = architecture.on_dit_block(layer_id, bridge_features[layer_idx], action_state)
             action_noise_pred = architecture.extract_action_prediction(action_state)
 
         loss_action = self._compute_action_loss(
-            action_noise_pred, action_target, action_timestep_ids,
-            action_scheduler, pipe, B,
+            action_noise_pred,
+            action_target,
+            action_timestep_ids,
+            action_scheduler,
+            pipe,
+            B,
         )
 
         # --- Combined loss ---
@@ -229,7 +239,13 @@ class FlowMatchVideoActionLoss:
         }
 
     def _sample_video_timesteps(
-        self, B, min_b, max_b, decoupled_sampler, current_step, pipe,
+        self,
+        B,
+        min_b,
+        max_b,
+        decoupled_sampler,
+        current_step,
+        pipe,
     ):
         """Sample per-sample video timestep indices."""
         if decoupled_sampler is not None:
@@ -243,8 +259,15 @@ class FlowMatchVideoActionLoss:
             return torch.randint(min_b, max_b, (B,))
 
     def _prepare_actions(
-        self, B, architecture, action_scheduler, action_data,
-        decoupled_sampler, current_step, pipe, inputs,
+        self,
+        B,
+        architecture,
+        action_scheduler,
+        action_data,
+        decoupled_sampler,
+        current_step,
+        pipe,
+        inputs,
         action_repr=None,
     ):
         """Prepare noisy actions, targets, and optional interleaved state.
@@ -261,17 +284,17 @@ class FlowMatchVideoActionLoss:
         if decoupled_sampler is not None and self._decoupled_action_t is not None:
             num_ts_a = len(action_scheduler.timesteps)
             action_timestep_ids = (
-                self._decoupled_action_t / decoupled_sampler.num_train_timesteps * num_ts_a
-            ).long().clamp(0, num_ts_a - 1)
+                (self._decoupled_action_t / decoupled_sampler.num_train_timesteps * num_ts_a)
+                .long()
+                .clamp(0, num_ts_a - 1)
+            )
         else:
             action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
 
         action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(
             dtype=pipe.torch_dtype, device=pipe.device
         )
-        action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(
-            dtype=pipe.torch_dtype, device=pipe.device
-        )
+        action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(dtype=pipe.torch_dtype, device=pipe.device)
 
         action_data = action_data.to(dtype=pipe.torch_dtype, device=pipe.device)
         if action_data.dim() == 2:
@@ -299,7 +322,8 @@ class FlowMatchVideoActionLoss:
         action_state = None
         if architecture.is_interleaved:
             action_state = architecture.prepare_action_tokens(
-                noisy_actions, action_timesteps,
+                noisy_actions,
+                action_timesteps,
                 use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
             )
@@ -307,35 +331,43 @@ class FlowMatchVideoActionLoss:
         return action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids
 
     def _compute_video_loss(
-        self, noise_pred, target, timestep_ids, pipe, inputs, B,
+        self,
+        noise_pred,
+        target,
+        timestep_ids,
+        pipe,
+        inputs,
+        B,
     ):
         """Compute per-sample weighted video MSE loss."""
         if inputs.get("first_frame_latents") is not None:
             noise_pred = noise_pred[:, :, 1:]
             target = target[:, :, 1:]
 
-        tw = pipe.scheduler.linear_timesteps_weights[timestep_ids].to(
-            dtype=torch.float32, device=pipe.device
-        )
+        tw = pipe.scheduler.linear_timesteps_weights[timestep_ids].to(dtype=torch.float32, device=pipe.device)
         if B == 1:
             return F.mse_loss(noise_pred.float(), target.float()) * tw[0]
 
-        per_sample = F.mse_loss(
-            noise_pred.float(), target.float(), reduction="none"
-        ).mean(dim=list(range(1, noise_pred.ndim)))
+        per_sample = F.mse_loss(noise_pred.float(), target.float(), reduction="none").mean(
+            dim=list(range(1, noise_pred.ndim))
+        )
         return (per_sample * tw).mean()
 
     def _compute_action_loss(
-        self, noise_pred, target, timestep_ids, scheduler, pipe, B,
+        self,
+        noise_pred,
+        target,
+        timestep_ids,
+        scheduler,
+        pipe,
+        B,
     ):
         """Compute per-sample weighted action MSE loss."""
-        tw = scheduler.linear_timesteps_weights[timestep_ids].to(
-            dtype=torch.float32, device=pipe.device
-        )
+        tw = scheduler.linear_timesteps_weights[timestep_ids].to(dtype=torch.float32, device=pipe.device)
         if B == 1:
             return F.mse_loss(noise_pred.float(), target.float()) * tw[0]
 
-        per_sample = F.mse_loss(
-            noise_pred.float(), target.float(), reduction="none"
-        ).mean(dim=list(range(1, noise_pred.ndim)))
+        per_sample = F.mse_loss(noise_pred.float(), target.float(), reduction="none").mean(
+            dim=list(range(1, noise_pred.ndim))
+        )
         return (per_sample * tw).mean()

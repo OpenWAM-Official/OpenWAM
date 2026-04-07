@@ -9,19 +9,19 @@ Classes:
     MultiTaskRoboTwinDataset — Multi-task dataset using discover_robotwin_roots().
 """
 
+import glob
 import io
 import json
 import os
-import glob
 import random
-import numpy as np
-import torch
-import h5py
-
-from open_wam.data.base import BaseActionDataset
-from PIL import Image
 from typing import Optional
 
+import h5py
+import numpy as np
+import torch
+from PIL import Image
+
+from open_wam.data.base import BaseActionDataset
 
 # ---------------------------------------------------------------------------
 # Per-backbone supported resolutions
@@ -33,7 +33,7 @@ from typing import Optional
 
 BACKBONE_SUPPORTED_RESOLUTIONS: dict = {
     "vace": {(480, 832), (720, 1280)},
-    "ti2v": None,   # any (h%32==0, w%32==0) is valid
+    "ti2v": None,  # any (h%32==0, w%32==0) is valid
 }
 
 # ---------------------------------------------------------------------------
@@ -45,39 +45,70 @@ BACKBONE_SUPPORTED_RESOLUTIONS: dict = {
 # ---------------------------------------------------------------------------
 
 ROBOTWIN_HOLDOUT_TASKS = [
-    "handover_block",       # handover  (handover_mic remains in train)
-    "move_can_pot",         # place/move (20 other place/move tasks in train)
-    "open_laptop",          # open      (open_microwave remains in train)
-    "pick_dual_bottles",    # pick      (adjust_bottle, grab_roller, pick_diverse_bottles in train)
+    "handover_block",  # handover  (handover_mic remains in train)
+    "move_can_pot",  # place/move (20 other place/move tasks in train)
+    "open_laptop",  # open      (open_microwave remains in train)
+    "pick_dual_bottles",  # pick      (adjust_bottle, grab_roller, pick_diverse_bottles in train)
     "place_object_basket",  # place     (16 other place_* tasks in train)
-    "press_stapler",        # press     (click_alarmclock, click_bell in train)
-    "stack_bowls_two",      # stack     (stack_blocks_two/three, stack_bowls_three in train)
-    "turn_switch",          # rotate    (rotate_qrcode, scan_object, shake_bottle* in train)
+    "press_stapler",  # press     (click_alarmclock, click_bell in train)
+    "stack_bowls_two",  # stack     (stack_blocks_two/three, stack_bowls_three in train)
+    "turn_switch",  # rotate    (rotate_qrcode, scan_object, shake_bottle* in train)
 ]
 
 ROBOTWIN_ALL_TASKS = [
-    "adjust_bottle", "beat_block_hammer", "blocks_ranking_rgb",
-    "blocks_ranking_size", "click_alarmclock", "click_bell",
-    "dump_bin_bigbin", "grab_roller", "handover_block",
-    "handover_mic", "hanging_mug", "lift_pot",
-    "move_can_pot", "move_pillbottle_pad", "move_playingcard_away",
-    "move_stapler_pad", "open_laptop", "open_microwave",
-    "pick_diverse_bottles", "pick_dual_bottles", "place_a2b_left",
-    "place_a2b_right", "place_bread_basket", "place_bread_skillet",
-    "place_burger_fries", "place_can_basket", "place_cans_plasticbox",
-    "place_container_plate", "place_dual_shoes", "place_empty_cup",
-    "place_fan", "place_mouse_pad", "place_object_basket",
-    "place_object_scale", "place_object_stand", "place_phone_stand",
-    "place_shoe", "press_stapler", "put_bottles_dustbin",
-    "put_object_cabinet", "rotate_qrcode", "scan_object",
-    "shake_bottle", "shake_bottle_horizontally", "stack_blocks_three",
-    "stack_blocks_two", "stack_bowls_three", "stack_bowls_two",
-    "stamp_seal", "turn_switch",
+    "adjust_bottle",
+    "beat_block_hammer",
+    "blocks_ranking_rgb",
+    "blocks_ranking_size",
+    "click_alarmclock",
+    "click_bell",
+    "dump_bin_bigbin",
+    "grab_roller",
+    "handover_block",
+    "handover_mic",
+    "hanging_mug",
+    "lift_pot",
+    "move_can_pot",
+    "move_pillbottle_pad",
+    "move_playingcard_away",
+    "move_stapler_pad",
+    "open_laptop",
+    "open_microwave",
+    "pick_diverse_bottles",
+    "pick_dual_bottles",
+    "place_a2b_left",
+    "place_a2b_right",
+    "place_bread_basket",
+    "place_bread_skillet",
+    "place_burger_fries",
+    "place_can_basket",
+    "place_cans_plasticbox",
+    "place_container_plate",
+    "place_dual_shoes",
+    "place_empty_cup",
+    "place_fan",
+    "place_mouse_pad",
+    "place_object_basket",
+    "place_object_scale",
+    "place_object_stand",
+    "place_phone_stand",
+    "place_shoe",
+    "press_stapler",
+    "put_bottles_dustbin",
+    "put_object_cabinet",
+    "rotate_qrcode",
+    "scan_object",
+    "shake_bottle",
+    "shake_bottle_horizontally",
+    "stack_blocks_three",
+    "stack_blocks_two",
+    "stack_bowls_three",
+    "stack_bowls_two",
+    "stamp_seal",
+    "turn_switch",
 ]
 
-ROBOTWIN_TRAIN_TASKS = sorted(
-    t for t in ROBOTWIN_ALL_TASKS if t not in ROBOTWIN_HOLDOUT_TASKS
-)
+ROBOTWIN_TRAIN_TASKS = sorted(t for t in ROBOTWIN_ALL_TASKS if t not in ROBOTWIN_HOLDOUT_TASKS)
 
 
 def discover_robotwin_roots(
@@ -291,13 +322,11 @@ class RoboTwinDataset(BaseActionDataset):
             if (height, width) not in _supported:
                 supported_str = ", ".join(f"{h}x{w}" for h, w in sorted(_supported))
                 raise ValueError(
-                    f"backbone='{backbone}' only supports resolutions: {supported_str}. "
-                    f"Got {height}x{width}."
+                    f"backbone='{backbone}' only supports resolutions: {supported_str}. Got {height}x{width}."
                 )
         elif height % 32 != 0 or width % 32 != 0:
             raise ValueError(
-                f"Resolution {height}x{width} must be divisible by 32 "
-                f"(VAE downsamples by 16, patch size 2)."
+                f"Resolution {height}x{width} must be divisible by 32 (VAE downsamples by 16, patch size 2)."
             )
 
         self.data_root = data_root
@@ -356,9 +385,11 @@ class RoboTwinDataset(BaseActionDataset):
                 if self._action_dim_detected is None:
                     self._action_dim_detected = f["joint_action/vector"].shape[1]
 
-        print(f"  Episode lengths: min={min(self._episode_lengths)}, "
-              f"max={max(self._episode_lengths)}, "
-              f"action_dim={self._action_dim_detected}")
+        print(
+            f"  Episode lengths: min={min(self._episode_lengths)}, "
+            f"max={max(self._episode_lengths)}, "
+            f"action_dim={self._action_dim_detected}"
+        )
 
         # ---- Validate multiview cameras ----
         if self.multiview:
@@ -367,17 +398,20 @@ class RoboTwinDataset(BaseActionDataset):
                 for cam in self.cameras:
                     if cam == "third_view_rgb":
                         if "third_view_rgb" not in f:
-                            print(f"  WARNING: '{cam}' not found at top level in "
-                                  f"{self._episode_files[0]}. "
-                                  f"Will use black frames.")
+                            print(
+                                f"  WARNING: '{cam}' not found at top level in "
+                                f"{self._episode_files[0]}. "
+                                f"Will use black frames."
+                            )
                     else:
                         cam_key = f"observation/{cam}/rgb"
                         if cam_key not in f:
-                            print(f"  WARNING: multiview camera '{cam}' not found in "
-                                  f"{self._episode_files[0]}. Available: {obs_keys}. "
-                                  f"Will use black frames for missing cameras.")
-            print(f"  Multiview mode: layout={self.camera_layout}, "
-                  f"quadrant={self.quadrant_h}x{self.quadrant_w}")
+                            print(
+                                f"  WARNING: multiview camera '{cam}' not found in "
+                                f"{self._episode_files[0]}. Available: {obs_keys}. "
+                                f"Will use black frames for missing cameras."
+                            )
+            print(f"  Multiview mode: layout={self.camera_layout}, quadrant={self.quadrant_h}x{self.quadrant_w}")
 
         # ---- Exhaustive window enumeration ----
         self._window_index = []  # List of (episode_idx, start_frame)
@@ -387,8 +421,7 @@ class RoboTwinDataset(BaseActionDataset):
                 self._window_index.append((ep_idx, start))
         if repeat > 1:
             self._window_index = self._window_index * repeat
-        print(f"  Exhaustive windows: {len(self._window_index)} "
-              f"(stride={self.window_stride}, repeat={repeat})")
+        print(f"  Exhaustive windows: {len(self._window_index)} (stride={self.window_stride}, repeat={repeat})")
 
         # ---- Load scene_info for active arm detection ----
         self._scene_info = {}
@@ -398,10 +431,9 @@ class RoboTwinDataset(BaseActionDataset):
         if os.path.exists(scene_info_path):
             with open(scene_info_path) as _f:
                 self._scene_info = json.load(_f)
-            print(f"  Scene info loaded from {scene_info_path} "
-                  f"({len(self._scene_info)} entries)")
+            print(f"  Scene info loaded from {scene_info_path} ({len(self._scene_info)} entries)")
         else:
-            print(f"  No scene_info.json found, active_arm will default to 'both'")
+            print("  No scene_info.json found, active_arm will default to 'both'")
 
         # ---- Load action stats ----
         self._action_dim_value = self._action_dim_detected or 14
@@ -423,8 +455,7 @@ class RoboTwinDataset(BaseActionDataset):
             print(f"    Mean: {mean}")
             print(f"    Std:  {std}")
         else:
-            print(f"  WARNING: No action stats found at {stats_path}, "
-                  "actions will NOT be normalized")
+            print(f"  WARNING: No action stats found at {stats_path}, actions will NOT be normalized")
 
         # ---- Try loading instruction prompts ----
         self._instructions = {}
@@ -516,19 +547,14 @@ class RoboTwinDataset(BaseActionDataset):
                 per_camera[cam] = self._read_camera_frames(f, cam, start, end)
             except KeyError:
                 n = end - start
-                per_camera[cam] = [
-                    Image.new("RGB", (self.quadrant_w, self.quadrant_h), (0, 0, 0))
-                    for _ in range(n)
-                ]
+                per_camera[cam] = [Image.new("RGB", (self.quadrant_w, self.quadrant_h), (0, 0, 0)) for _ in range(n)]
 
         # Assemble per-timestep grids
         n = end - start
         grids = []
         for t in range(n):
             frames_t = {cam: per_camera[cam][t] for cam in cameras}
-            grid = assemble_multiview_grid(
-                frames_t, self.camera_layout, self.quadrant_h, self.quadrant_w
-            )
+            grid = assemble_multiview_grid(frames_t, self.camera_layout, self.quadrant_h, self.quadrant_w)
             grids.append(grid)
         return grids
 
@@ -589,13 +615,9 @@ class RoboTwinDataset(BaseActionDataset):
         # ---- Read target frames + actions ----
         with h5py.File(path, "r") as f:
             if self.multiview:
-                target_frames = self._read_multiview_frames(
-                    f, self.cameras, start, actual_end
-                )
+                target_frames = self._read_multiview_frames(f, self.cameras, start, actual_end)
             else:
-                target_frames = self._read_camera_frames(
-                    f, self.target_camera, start, actual_end
-                )
+                target_frames = self._read_camera_frames(f, self.target_camera, start, actual_end)
             actions = f["joint_action/vector"][start:actual_end].astype(np.float32)
 
         actual_len = len(target_frames)
@@ -605,10 +627,13 @@ class RoboTwinDataset(BaseActionDataset):
         if actual_len < self.num_frames:
             pad_len = self.num_frames - actual_len
             target_frames = target_frames + [target_frames[-1]] * pad_len
-            actions = np.concatenate([
-                actions,
-                np.repeat(actions[-1:], pad_len, axis=0),
-            ], axis=0)
+            actions = np.concatenate(
+                [
+                    actions,
+                    np.repeat(actions[-1:], pad_len, axis=0),
+                ],
+                axis=0,
+            )
 
         # Action mask: True for real frames, False for padded frames
         action_mask = torch.ones(self.num_frames, dtype=torch.bool)
@@ -622,10 +647,7 @@ class RoboTwinDataset(BaseActionDataset):
         if self.multiview:
             video = target_frames
         else:
-            video = [
-                _crop_and_resize(frame, self.height, self.width)
-                for frame in target_frames
-            ]
+            video = [_crop_and_resize(frame, self.height, self.width) for frame in target_frames]
         vace_reference_image = [video[0]]
 
         prompt = self._get_prompt(ep_idx)
@@ -700,8 +722,7 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         self._cumulative_lengths = []
         cumulative = 0
 
-        print(f"MultiTaskRoboTwinDataset: {len(roots)} tasks, "
-              f"robot={robot}, variant={variant}")
+        print(f"MultiTaskRoboTwinDataset: {len(roots)} tasks, robot={robot}, variant={variant}")
 
         for task_name, data_root in roots:
             ds = RoboTwinDataset(
@@ -717,15 +738,10 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             self._cumulative_lengths.append(cumulative)
 
         self._total_length = cumulative
-        self._action_stats_shared = (
-            self._sub_datasets[0].action_stats if self._sub_datasets else None
-        )
-        self._action_dim_value = (
-            self._sub_datasets[0].action_dim if self._sub_datasets else 14
-        )
+        self._action_stats_shared = self._sub_datasets[0].action_stats if self._sub_datasets else None
+        self._action_dim_value = self._sub_datasets[0].action_dim if self._sub_datasets else 14
 
-        print(f"  Total samples: {self._total_length} "
-              f"(across {len(self._sub_datasets)} tasks)")
+        print(f"  Total samples: {self._total_length} (across {len(self._sub_datasets)} tasks)")
 
     @property
     def action_dim(self) -> int:

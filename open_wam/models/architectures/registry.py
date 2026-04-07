@@ -35,6 +35,7 @@ class ArchitectureSupport:
 
 def register_architecture(name: str, *, status: str = "supported", note: str = ""):
     """Decorator to register a WAM architecture class."""
+
     def decorator(cls: Type[BaseWAMArchitecture]):
         if name in ARCHITECTURE_REGISTRY:
             raise ValueError(f"Architecture '{name}' already registered")
@@ -43,6 +44,7 @@ def register_architecture(name: str, *, status: str = "supported", note: str = "
         ARCHITECTURE_REGISTRY[name] = cls
         ARCHITECTURE_SUPPORT[name] = ArchitectureSupport(status=status, note=note)
         return cls
+
     return decorator
 
 
@@ -56,18 +58,12 @@ def get_architecture_support(name: str) -> ArchitectureSupport:
 
 def list_supported_architectures() -> tuple[str, ...]:
     """List architecture names that are part of the supported matrix."""
-    return tuple(
-        name for name in sorted(ARCHITECTURE_REGISTRY.keys())
-        if ARCHITECTURE_SUPPORT[name].supported
-    )
+    return tuple(name for name in sorted(ARCHITECTURE_REGISTRY.keys()) if ARCHITECTURE_SUPPORT[name].supported)
 
 
 def list_experimental_architectures() -> tuple[str, ...]:
     """List architecture names that remain explicitly experimental."""
-    return tuple(
-        name for name in sorted(ARCHITECTURE_REGISTRY.keys())
-        if not ARCHITECTURE_SUPPORT[name].supported
-    )
+    return tuple(name for name in sorted(ARCHITECTURE_REGISTRY.keys()) if not ARCHITECTURE_SUPPORT[name].supported)
 
 
 def build_architecture(name: str, cfg=None, *, allow_experimental: bool = False) -> BaseWAMArchitecture:
@@ -83,14 +79,11 @@ def build_architecture(name: str, cfg=None, *, allow_experimental: bool = False)
     """
     if name not in ARCHITECTURE_REGISTRY:
         available = ", ".join(sorted(ARCHITECTURE_REGISTRY.keys()))
-        raise KeyError(
-            f"Unknown architecture '{name}'. Available: {available}"
-        )
+        raise KeyError(f"Unknown architecture '{name}'. Available: {available}")
     support = ARCHITECTURE_SUPPORT[name]
     if not support.supported and not allow_experimental:
         detail = f" {support.note}" if support.note else ""
         raise NotImplementedError(
-            f"Architecture '{name}' is experimental and not part of the supported "
-            f"OpenWAM matrix.{detail}"
+            f"Architecture '{name}' is experimental and not part of the supported OpenWAM matrix.{detail}"
         )
     return ARCHITECTURE_REGISTRY[name](cfg)
