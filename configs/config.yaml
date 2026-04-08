@@ -1,5 +1,6 @@
 defaults:
   - model: action_dit_small
+  - model/architecture: dual_system
   - model/backbone: vace_1_3b
   - data: robotwin_multitask
   - training: joint

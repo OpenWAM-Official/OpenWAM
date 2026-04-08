@@ -47,14 +47,38 @@ class NativeTrainer(BaseTrainer):
         t = cfg.training
         m = cfg.model
 
-        # Build models
-        self.pipe, self.action_dit = self._build_models(cfg)
+        # Build video pipeline
+        self.pipe = self._build_pipeline(cfg)
 
-        # Wrap in architecture interface
-        from open_wam.models.architectures.dual_system import DualSystemArchitecture
+        # Build architecture from config (supports dual_system, moe_expert, shared_backbone)
+        arch_cfg = getattr(m, "architecture", None)
+        if arch_cfg is not None and hasattr(arch_cfg, "type"):
+            from open_wam.models.architectures.registry import build_architecture
 
-        self.architecture = DualSystemArchitecture(cfg=None)
-        self.architecture.action_dit = self.action_dit
+            arch_type = arch_cfg.type
+            # Convert OmegaConf to plain dict for architecture constructor
+            arch_params = {k: v for k, v in arch_cfg.items() if k != "type"}
+            self.architecture = build_architecture(arch_type, arch_params)
+            logger.info("Architecture: %s (from config)", arch_type)
+        else:
+            # Fallback: build DualSystem from flat model config (backward compat)
+            from open_wam.models.architectures.dual_system import DualSystemArchitecture
+
+            # Merge video_dim from backbone config into model config for DualSystem
+            b = cfg.model.backbone
+            dual_cfg = {k: v for k, v in m.items()}
+            dual_cfg.setdefault("video_dim", int(b.video_dim))
+            self.architecture = DualSystemArchitecture(cfg=dual_cfg)
+            logger.info("Architecture: dual_system (default)")
+
+        # Build ActionDiT for DualSystem, or get it from the architecture
+        if hasattr(self.architecture, "action_dit") and self.architecture.action_dit is not None:
+            self.action_dit = self.architecture.action_dit
+        elif hasattr(self.architecture, "moe_dit"):
+            self.action_dit = self.architecture.moe_dit
+        else:
+            # SharedBackbone: the architecture IS the action model
+            self.action_dit = self.architecture
 
         # Action scheduler (independent from video)
         from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
@@ -65,7 +89,7 @@ class NativeTrainer(BaseTrainer):
         # Loss function
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)
-        bridge_type = m.bridge_type
+        bridge_type = getattr(m, "bridge_type", "cross_attn_detach")
 
         self.loss_fn = FlowMatchVideoActionLoss(
             lambda_video=self.lambda_video,
@@ -115,17 +139,14 @@ class NativeTrainer(BaseTrainer):
         action_params = sum(p.numel() for p in self.action_dit.parameters())
         logger.info("NativeTrainer: ActionDiT %.1fM params", action_params / 1e6)
 
-    def _build_models(self, cfg: DictConfig):
-        """Build pipeline and ActionDiT from Hydra config."""
+    def _build_pipeline(self, cfg: DictConfig):
+        """Build WanVideoPipeline from Hydra config."""
         import json
 
         from open_wam.inference.model_config import ModelConfig
         from open_wam.inference.video_pipeline import WanVideoPipeline
-        from open_wam.models.action_dit import ActionDiT
 
         t = cfg.training
-        m = cfg.model
-        b = cfg.model.backbone
 
         device = "cpu" if bool(t.initialize_model_on_cpu) else "cuda"
 
@@ -191,20 +212,7 @@ class NativeTrainer(BaseTrainer):
                 if hasattr(module, "gradient_checkpointing_enable"):
                     module.gradient_checkpointing_enable()
 
-        # Build ActionDiT
-        bridge_layers = tuple(int(x) for x in m.bridge_layers)
-        action_dit = ActionDiT(
-            action_dim=int(m.action_dim),
-            dim=int(m.dim),
-            ffn_dim=int(m.ffn_dim),
-            num_heads=int(m.num_heads),
-            num_layers=int(m.num_layers),
-            video_dim=int(b.video_dim),
-            bridge_layers=bridge_layers,
-            bridge_type=m.bridge_type,
-        ).to(dtype=torch.bfloat16)
-
-        return pipe, action_dit
+        return pipe
 
     def _setup_training_mode(
         self,
@@ -238,7 +246,7 @@ class NativeTrainer(BaseTrainer):
         return pipe
 
     def _load_action_stats(self, dataset):
-        """Load action normalization stats from dataset into ActionDiT buffers."""
+        """Load action normalization stats from dataset into architecture buffers."""
         stats = getattr(dataset, "action_stats", None)
         if callable(stats):
             stats = stats()
@@ -246,9 +254,11 @@ class NativeTrainer(BaseTrainer):
         if stats is None:
             return
 
-        self.action_dit.action_mean.copy_(torch.from_numpy(stats["mean"].astype(np.float32)))
-        self.action_dit.action_std.copy_(torch.from_numpy(np.maximum(stats["std"].astype(np.float32), 1e-3)))
-        logger.info("Loaded action stats into ActionDiT buffers from dataset")
+        mean = torch.from_numpy(stats["mean"].astype(np.float32))
+        std = torch.from_numpy(np.maximum(stats["std"].astype(np.float32), 1e-3))
+        self.architecture.action_mean.copy_(mean)
+        self.architecture.action_std.copy_(std)
+        logger.info("Loaded action stats into architecture buffers from dataset")
 
     def get_trainable_parameters(self):
         """Return optimizer parameter groups."""
