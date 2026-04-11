@@ -7,6 +7,9 @@ them under the public API names along with constants and helpers.
 
 from open_wam.data._robotwin_impl import (
     BACKBONE_SUPPORTED_RESOLUTIONS,
+    EEF_ACTION_DIM,
+    EEF_GRIPPER_INDICES,
+    JOINT_GRIPPER_INDICES,
     MULTIVIEW_CAMERAS,
     MULTIVIEW_LAYOUT,
     ROBOTWIN_ALL_TASKS,
@@ -32,6 +35,9 @@ __all__ = [
     "ROBOTWIN_TRAIN_TASKS",
     "ROBOTWIN_HOLDOUT_TASKS",
     "ROBOTWIN_ALL_TASKS",
+    "EEF_ACTION_DIM",
+    "EEF_GRIPPER_INDICES",
+    "JOINT_GRIPPER_INDICES",
     "MULTIVIEW_LAYOUT",
     "MULTIVIEW_CAMERAS",
     "BACKBONE_SUPPORTED_RESOLUTIONS",

@@ -4,7 +4,7 @@
 
 architecture:
   type: dual_system
-  action_dim: 14
+  action_dim: 20
   dim: 768
   ffn_dim: 3072
   num_heads: 12

@@ -12,7 +12,7 @@ action_dim_override: null
 # Sub-dataset definitions with sampling weights
 # Each entry follows the same schema as individual dataset configs
 datasets:
-  - type: robotwin_multitask
+  - type: robotwin
     weight: 0.5
     dataset_dir: ???
     robot: arx-x5

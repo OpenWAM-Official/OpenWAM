@@ -120,6 +120,7 @@ def _build_from_config(cls, config, split: str):
         "multiview",  # RoboTwin
         "target_camera",  # RoboTwin
         "window_stride",  # RoboTwin
+        "action_mode",  # RoboTwin ("joint" or "eef")
         "tasks",  # RoboTwin multitask
     ]:
         val = _get(config, param)
@@ -148,6 +149,8 @@ def _register_builtins():
     register_dataset("bridge_v2")(BridgeV2Dataset)
     register_dataset("oxe")(OXEDataset)
     register_dataset("robotwin")(RoboTwinActionDataset)
+    # Backward-compat alias — old configs using type: robotwin_multitask still work.
+    # New configs should use type: robotwin with task_name: null for multi-task.
     register_dataset("robotwin_multitask")(MultiTaskRoboTwinActionDataset)
     register_dataset("mixture")(MixtureDataset)
 

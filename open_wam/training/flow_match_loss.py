@@ -45,15 +45,20 @@ class FlowMatchVideoActionLoss:
             gradients from flowing to the video DiT.
     """
 
+    # EEF 20D gripper positions: left_grip=dim9, right_grip=dim19
+    EEF_GRIPPER_INDICES = (9, 19)
+
     def __init__(
         self,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
         detach_bridge: bool = False,
+        action_mode: str = "joint",
     ):
         self.lambda_video = lambda_video
         self.lambda_action = lambda_action
         self.detach_bridge = detach_bridge
+        self.action_mode = action_mode
 
     def __call__(
         self,
@@ -117,7 +122,7 @@ class FlowMatchVideoActionLoss:
             inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
 
         # --- Prepare action data ---
-        action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids = self._prepare_actions(
+        ap = self._prepare_actions(
             B,
             architecture,
             action_scheduler,
@@ -128,6 +133,11 @@ class FlowMatchVideoActionLoss:
             inputs,
             action_repr=action_repr,
         )
+        action_state = ap["action_state"]
+        noisy_actions = ap["noisy_actions"]
+        action_target = ap["action_target"]
+        action_timesteps = ap["action_timesteps"]
+        action_timestep_ids = ap["action_timestep_ids"]
 
         # --- Video forward pass ---
         models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
@@ -210,6 +220,9 @@ class FlowMatchVideoActionLoss:
             action_scheduler,
             pipe,
             B,
+            noisy_actions=noisy_actions,
+            action_sigmas=ap["action_sigmas"],
+            action_data_clean=ap["action_data_clean"],
         )
 
         # --- Combined loss ---
@@ -273,12 +286,21 @@ class FlowMatchVideoActionLoss:
         """Prepare noisy actions, targets, and optional interleaved state.
 
         Returns:
-            (action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids)
-            where action_state is the full ActionState for interleaved architectures
-            (MoE, SharedBackbone, joint_self_attn), or None for non-interleaved.
+            dict with keys: action_state, noisy_actions, action_target,
+            action_timesteps, action_timestep_ids, action_data_clean,
+            action_sigmas.
         """
+        _empty = {
+            "action_state": None,
+            "noisy_actions": None,
+            "action_target": None,
+            "action_timesteps": None,
+            "action_timestep_ids": None,
+            "action_data_clean": None,
+            "action_sigmas": None,
+        }
         if self.lambda_action == 0:
-            return None, None, None, None, None
+            return _empty
 
         # Sample action timesteps
         if decoupled_sampler is not None and self._decoupled_action_t is not None:
@@ -328,7 +350,15 @@ class FlowMatchVideoActionLoss:
                 use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
             )
 
-        return action_state, noisy_actions, action_target, action_timesteps, action_timestep_ids
+        return {
+            "action_state": action_state,
+            "noisy_actions": noisy_actions,
+            "action_target": action_target,
+            "action_timesteps": action_timesteps,
+            "action_timestep_ids": action_timestep_ids,
+            "action_data_clean": action_data,
+            "action_sigmas": action_sigmas,
+        }
 
     def _compute_video_loss(
         self,
@@ -361,13 +391,59 @@ class FlowMatchVideoActionLoss:
         scheduler,
         pipe,
         B,
+        noisy_actions=None,
+        action_sigmas=None,
+        action_data_clean=None,
     ):
-        """Compute per-sample weighted action MSE loss."""
-        tw = scheduler.linear_timesteps_weights[timestep_ids].to(dtype=torch.float32, device=pipe.device)
-        if B == 1:
-            return F.mse_loss(noise_pred.float(), target.float()) * tw[0]
+        """Compute per-sample weighted action loss.
 
-        per_sample = F.mse_loss(noise_pred.float(), target.float(), reduction="none").mean(
-            dim=list(range(1, noise_pred.ndim))
-        )
-        return (per_sample * tw).mean()
+        When ``action_mode == "eef"``, the 20D action vector is split:
+        - Continuous dims (18D): flow matching MSE on velocity prediction.
+        - Gripper dims [9, 19] (2D): reconstruct x_0_hat from velocity
+          prediction via ``x_0_hat = x_t - sigma * v_pred``, then apply
+          binary cross-entropy against the ground-truth binary values.
+
+        Otherwise (joint mode, etc.): standard MSE on all dims.
+        """
+        tw = scheduler.linear_timesteps_weights[timestep_ids].to(dtype=torch.float32, device=pipe.device)
+        pred_f = noise_pred.float()
+        target_f = target.float()
+
+        if self.action_mode != "eef":
+            # Standard MSE for all dims
+            if B == 1:
+                return F.mse_loss(pred_f, target_f) * tw[0]
+            per_sample = F.mse_loss(pred_f, target_f, reduction="none").mean(dim=list(range(1, pred_f.ndim)))
+            return (per_sample * tw).mean()
+
+        # --- EEF mode: split continuous / gripper ---
+        gi = list(self.EEF_GRIPPER_INDICES)  # [9, 19]
+        D = pred_f.shape[-1]
+        cont_mask = torch.ones(D, dtype=torch.bool, device=pred_f.device)
+        cont_mask[gi] = False
+        ci = cont_mask.nonzero(as_tuple=True)[0]
+
+        # Continuous dims: MSE on velocity
+        pred_cont = pred_f[..., ci]
+        target_cont = target_f[..., ci]
+        if B == 1:
+            mse_loss = F.mse_loss(pred_cont, target_cont) * tw[0]
+        else:
+            per_sample_mse = F.mse_loss(pred_cont, target_cont, reduction="none").mean(
+                dim=list(range(1, pred_cont.ndim))
+            )
+            mse_loss = (per_sample_mse * tw).mean()
+
+        # Gripper dims: BCE on reconstructed x_0_hat
+        # x_t = x_0 + sigma * v  =>  x_0_hat = x_t - sigma * v_pred
+        sigma_bc = action_sigmas.float().view(B, 1, 1)
+        x0_hat_grip = noisy_actions.float()[..., gi] - sigma_bc * pred_f[..., gi]
+        gt_grip = action_data_clean.float()[..., gi]
+        bce_raw = F.binary_cross_entropy_with_logits(x0_hat_grip, gt_grip, reduction="none")
+        if B == 1:
+            bce_loss = bce_raw.mean() * tw[0]
+        else:
+            per_sample_bce = bce_raw.mean(dim=list(range(1, bce_raw.ndim)))
+            bce_loss = (per_sample_bce * tw).mean()
+
+        return mse_loss + bce_loss

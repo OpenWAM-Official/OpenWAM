@@ -12,7 +12,7 @@
 
 architecture:
   type: moe_expert
-  action_dim: 14
+  action_dim: 20
   video_dim: 1536       # Must match backbone video_dim
   expert_ffn_dim: 4096
   num_experts: 8

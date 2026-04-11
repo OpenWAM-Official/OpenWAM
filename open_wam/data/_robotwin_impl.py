@@ -10,18 +10,19 @@ Classes:
 """
 
 import glob
-import io
 import json
 import os
 import random
 from typing import Optional
 
+import cv2
 import h5py
 import numpy as np
 import torch
 from PIL import Image
 
 from open_wam.data.base import BaseActionDataset
+from open_wam.data.transforms.rotation import quat_xyzw_to_rotation_6d
 
 # ---------------------------------------------------------------------------
 # Per-backbone supported resolutions
@@ -44,16 +45,19 @@ BACKBONE_SUPPORTED_RESOLUTIONS: dict = {
 # RoboTwin 2.0 paper (Table 3, Section 4.3).
 # ---------------------------------------------------------------------------
 
-ROBOTWIN_HOLDOUT_TASKS = [
-    "handover_block",  # handover  (handover_mic remains in train)
-    "move_can_pot",  # place/move (20 other place/move tasks in train)
-    "open_laptop",  # open      (open_microwave remains in train)
-    "pick_dual_bottles",  # pick      (adjust_bottle, grab_roller, pick_diverse_bottles in train)
-    "place_object_basket",  # place     (16 other place_* tasks in train)
-    "press_stapler",  # press     (click_alarmclock, click_bell in train)
-    "stack_bowls_two",  # stack     (stack_blocks_two/three, stack_bowls_three in train)
-    "turn_switch",  # rotate    (rotate_qrcode, scan_object, shake_bottle* in train)
-]
+# All 50 tasks participate in training by default.
+# Uncomment below to hold out 8 tasks for OOD evaluation:
+# ROBOTWIN_HOLDOUT_TASKS = [
+#     "handover_block",       # handover
+#     "move_can_pot",         # place/move
+#     "open_laptop",          # open
+#     "pick_dual_bottles",    # pick
+#     "place_object_basket",  # place
+#     "press_stapler",        # press
+#     "stack_bowls_two",      # stack
+#     "turn_switch",          # rotate
+# ]
+ROBOTWIN_HOLDOUT_TASKS = []
 
 ROBOTWIN_ALL_TASKS = [
     "adjust_bottle",
@@ -110,6 +114,14 @@ ROBOTWIN_ALL_TASKS = [
 
 ROBOTWIN_TRAIN_TASKS = sorted(t for t in ROBOTWIN_ALL_TASKS if t not in ROBOTWIN_HOLDOUT_TASKS)
 
+# ---------------------------------------------------------------------------
+# Action mode constants
+# ---------------------------------------------------------------------------
+
+EEF_ACTION_DIM = 20  # [xyz(3) + rot6d(6) + gripper(1)] × 2 arms
+EEF_GRIPPER_INDICES = [9, 19]  # gripper positions in 20D EEF vector
+JOINT_GRIPPER_INDICES = [6, 13]  # gripper positions in 14D joint vector
+
 
 def discover_robotwin_roots(
     dataset_dir: str,
@@ -146,17 +158,19 @@ def discover_robotwin_roots(
 # resolution.  Each quadrant is (height//2, width//2).
 #
 #   +------------------+------------------+
-#   |   head_camera    | third_view_rgb   |
+#   |   head_camera    |  front_camera    |
 #   +------------------+------------------+
 #   |  left_camera     |  right_camera    |
 #   +------------------+------------------+
 #
-# third_view_rgb is a fixed external camera shared across arx-x5, franka,
-# and ur5.  It provides a front-facing overview of the full workspace.
+# front_camera is a fixed external camera providing a front-facing overview
+# of the full workspace.  (Note: arx-x5 data uses "third_view_rgb" at the
+# top level instead of "observation/front_camera/rgb" — the _read_camera_frames
+# method handles this transparently.)
 # ---------------------------------------------------------------------------
 
-MULTIVIEW_LAYOUT = [["head_camera", "third_view_rgb"], ["left_camera", "right_camera"]]
-MULTIVIEW_CAMERAS = ["head_camera", "third_view_rgb", "left_camera", "right_camera"]
+MULTIVIEW_LAYOUT = [["head_camera", "front_camera"], ["left_camera", "right_camera"]]
+MULTIVIEW_CAMERAS = ["head_camera", "front_camera", "left_camera", "right_camera"]
 
 
 def _crop_and_resize(image: Image.Image, target_height: int, target_width: int) -> Image.Image:
@@ -281,15 +295,22 @@ class RoboTwinDataset(BaseActionDataset):
     """RoboTwin 2.0 HDF5 dataset for bimanual robot video-action training.
 
     Reads episode HDF5 files with JPEG-encoded camera observations and
-    14/16-DoF joint-space actions (qpos). Supports all 5 RoboTwin embodiments.
+    either joint-space or end-effector actions. Supports all 5 RoboTwin
+    embodiments.
+
+    Action modes:
+        ``joint`` — reads ``joint_action/vector`` (14/16D qpos).
+            Normalisation: min-max → [-1, 1] for joints, binary {0, 1}
+            for grippers (1 = closed, 0 = open).
+        ``eef`` — reads ``endpose/`` keys and assembles 20D EEF vector:
+            ``[xyz(3) + rot6d(6) + gripper(1)] × 2 arms``.
+            No normalisation applied; gripper inverted so 1 = closed.
 
     Epoch strategy:
         Training enumerates all valid ``(episode, start_frame)`` windows
         exhaustively with configurable stride (``window_stride``), so one
-        epoch = one pass through every window. ``repeat`` multiplies the
+        epoch = one pass through every window.  ``repeat`` multiplies the
         window list for additional passes.
-
-    Action = joint_action/vector (T, 14|16): [left_arm, left_gripper, right_arm, right_gripper]
     """
 
     def __init__(
@@ -311,10 +332,15 @@ class RoboTwinDataset(BaseActionDataset):
         robot: Optional[str] = None,
         variant: str = "clean_50",
         backbone: Optional[str] = None,
+        action_mode: str = "joint",
     ):
         super().__init__()
         self.robot = robot
         self.variant = variant
+        self.action_mode = action_mode
+
+        if action_mode not in ("joint", "eef"):
+            raise ValueError(f"action_mode must be 'joint' or 'eef', got '{action_mode}'")
 
         # Validate resolution against backbone constraints.
         _supported = BACKBONE_SUPPORTED_RESOLUTIONS.get(backbone, None) if backbone else None
@@ -371,7 +397,7 @@ class RoboTwinDataset(BaseActionDataset):
                 f"No episodes selected for split='{split}' with val_ratio={val_ratio} "
                 f"({len(all_files)} total episodes in {data_root})"
             )
-        print(f"RoboTwinDataset: {len(self._episode_files)} episodes ({split})")
+        print(f"RoboTwinDataset: {len(self._episode_files)} episodes ({split}, action_mode={action_mode})")
 
         # Probe episodes for length and action dim
         self._episode_lengths = []
@@ -383,7 +409,15 @@ class RoboTwinDataset(BaseActionDataset):
                 self._episode_lengths.append(T)
 
                 if self._action_dim_detected is None:
-                    self._action_dim_detected = f["joint_action/vector"].shape[1]
+                    if action_mode == "eef":
+                        # Validate endpose keys exist
+                        if "endpose/left_endpose" not in f:
+                            raise KeyError(
+                                f"action_mode='eef' requires 'endpose/left_endpose' in HDF5. Not found in {path}"
+                            )
+                        self._action_dim_detected = EEF_ACTION_DIM
+                    else:
+                        self._action_dim_detected = f["joint_action/vector"].shape[1]
 
         print(
             f"  Episode lengths: min={min(self._episode_lengths)}, "
@@ -396,21 +430,15 @@ class RoboTwinDataset(BaseActionDataset):
             with h5py.File(self._episode_files[0], "r") as f:
                 obs_keys = list(f["observation"].keys()) if "observation" in f else []
                 for cam in self.cameras:
-                    if cam == "third_view_rgb":
-                        if "third_view_rgb" not in f:
-                            print(
-                                f"  WARNING: '{cam}' not found at top level in "
-                                f"{self._episode_files[0]}. "
-                                f"Will use black frames."
-                            )
-                    else:
-                        cam_key = f"observation/{cam}/rgb"
-                        if cam_key not in f:
-                            print(
-                                f"  WARNING: multiview camera '{cam}' not found in "
-                                f"{self._episode_files[0]}. Available: {obs_keys}. "
-                                f"Will use black frames for missing cameras."
-                            )
+                    obs_path = f"observation/{cam}/rgb"
+                    # front_camera may live at top-level "third_view_rgb" in arx-x5 data
+                    found = obs_path in f or (cam == "front_camera" and "third_view_rgb" in f)
+                    if not found:
+                        print(
+                            f"  WARNING: multiview camera '{cam}' not found in "
+                            f"{self._episode_files[0]}. Available obs: {obs_keys}. "
+                            f"Will use black frames for missing cameras."
+                        )
             print(f"  Multiview mode: layout={self.camera_layout}, quadrant={self.quadrant_h}x{self.quadrant_w}")
 
         # ---- Exhaustive window enumeration ----
@@ -435,27 +463,41 @@ class RoboTwinDataset(BaseActionDataset):
         else:
             print("  No scene_info.json found, active_arm will default to 'both'")
 
-        # ---- Load action stats ----
+        # ---- Load action stats (joint mode: min-max; eef mode: none) ----
         self._action_dim_value = self._action_dim_detected or 14
         self._action_stats = None
-        stats_path = action_stats_path or os.path.join(data_root, "action_stats.npy")
-        if os.path.exists(stats_path):
-            stats = np.load(stats_path, allow_pickle=True).item()
-            mean = stats["mean"].astype(np.float32)
-            std = np.maximum(stats["std"].astype(np.float32), 1e-3)
-            if self._action_dim_detected is not None and len(mean) != self._action_dim_detected:
-                raise ValueError(
-                    f"Action stats dimension ({len(mean)}) does not match "
-                    f"detected action_dim ({self._action_dim_detected}) from data. "
-                    f"Check that {stats_path} was computed for this robot/dataset."
-                )
-            self._action_stats = {"mean": mean, "std": std}
-            self._action_dim_value = len(mean)
-            print(f"  Action stats loaded from {stats_path}")
-            print(f"    Mean: {mean}")
-            print(f"    Std:  {std}")
+        self._norm_min = None
+        self._norm_max = None
+        self._norm_range = None
+
+        if action_mode == "eef":
+            self._action_dim_value = EEF_ACTION_DIM
+            print("  EEF mode: no action normalization applied")
         else:
-            print(f"  WARNING: No action stats found at {stats_path}, actions will NOT be normalized")
+            stats_path = action_stats_path or os.path.join(data_root, "action_stats.npy")
+            if os.path.exists(stats_path):
+                stats = np.load(stats_path, allow_pickle=True).item()
+                if "min" not in stats or "max" not in stats:
+                    raise ValueError(
+                        f"Joint mode requires 'min' and 'max' keys in action stats. "
+                        f"Found keys: {list(stats.keys())}. Re-run action stats computation."
+                    )
+                self._norm_min = stats["min"].astype(np.float32)
+                self._norm_max = stats["max"].astype(np.float32)
+                if self._action_dim_detected is not None and len(self._norm_min) != self._action_dim_detected:
+                    raise ValueError(
+                        f"Action stats dimension ({len(self._norm_min)}) does not match "
+                        f"detected action_dim ({self._action_dim_detected}) from data. "
+                        f"Check that {stats_path} was computed for this robot/dataset."
+                    )
+                self._norm_range = np.maximum(self._norm_max - self._norm_min, 1e-6)
+                self._action_stats = {"min": self._norm_min, "max": self._norm_max}
+                self._action_dim_value = len(self._norm_min)
+                print(f"  Action stats loaded from {stats_path} (min-max normalization)")
+                print(f"    Min: {self._norm_min}")
+                print(f"    Max: {self._norm_max}")
+            else:
+                print(f"  WARNING: No action stats found at {stats_path}, joint actions will NOT be normalized")
 
         # ---- Try loading instruction prompts ----
         self._instructions = {}
@@ -492,11 +534,49 @@ class RoboTwinDataset(BaseActionDataset):
 
     @property
     def action_stats(self) -> dict:
-        return self._action_stats
+        if self._action_stats is None:
+            return None
+        if self.action_mode == "eef":
+            return None
+        # Return min/max plus equivalent mean/std for model buffer compatibility.
+        # min-max [-1,1] ↔ z-score with mean=(min+max)/2, std=(max-min)/2.
+        stats = dict(self._action_stats)
+        equiv_mean = (stats["min"] + stats["max"]) / 2.0
+        equiv_std = np.maximum(stats["max"] - stats["min"], 1e-6) / 2.0
+        for gi in JOINT_GRIPPER_INDICES:
+            if gi < len(equiv_mean):
+                equiv_mean[gi] = 0.0
+                equiv_std[gi] = 1.0
+        stats["mean"] = equiv_mean
+        stats["std"] = equiv_std
+        return stats
 
     def denormalize_action(self, action: np.ndarray) -> np.ndarray:
-        stats = self.action_stats
-        return action * stats["std"] + stats["mean"]
+        """Convert normalized actions back to the robot-native format.
+
+        Joint mode: min-max inverse for joint dims; gripper dims are binary
+            {0=open, 1=closed} and are re-inverted to raw RoboTwin convention
+            (1=open, 0=closed).
+        EEF mode: gripper is binary {0=open, 1=closed}, re-inverted to raw.
+        """
+        if self.action_mode == "eef":
+            result = action.copy() if isinstance(action, np.ndarray) else np.array(action)
+            for gi in EEF_GRIPPER_INDICES:
+                if gi < result.shape[-1]:
+                    # Binary 1=closed → raw 1=open
+                    result[..., gi] = 1.0 - (result[..., gi] > 0.5).astype(np.float32)
+            return result
+        # Joint mode
+        if self._action_stats is None:
+            result = action.copy() if isinstance(action, np.ndarray) else np.array(action)
+        else:
+            stats = self._action_stats
+            result = 0.5 * (action + 1.0) * (stats["max"] - stats["min"]) + stats["min"]
+        # Gripper: binary 1=closed → raw 1=open
+        for gi in JOINT_GRIPPER_INDICES:
+            if gi < result.shape[-1]:
+                result[..., gi] = 1.0 - (action[..., gi] > 0.5).astype(np.float32)
+        return result
 
     def __len__(self):
         if self._val_samples is not None:
@@ -504,28 +584,47 @@ class RoboTwinDataset(BaseActionDataset):
         return len(self._window_index)
 
     def _decode_jpeg(self, jpeg_bytes) -> Image.Image:
-        """Decode JPEG bytes from HDF5 to a PIL RGB image."""
-        return Image.open(io.BytesIO(bytes(jpeg_bytes))).convert("RGB")
+        """Decode JPEG bytes from HDF5 to a PIL RGB image.
+
+        RoboTwin encodes frames by passing RGB arrays directly to
+        ``cv2.imencode`` (which expects BGR), so R and B channels are
+        swapped inside the JPEG. Using ``cv2.imdecode`` reverses this
+        swap, giving back the original RGB order — no further
+        conversion needed.
+        """
+        arr = cv2.imdecode(np.frombuffer(bytes(jpeg_bytes), np.uint8), cv2.IMREAD_COLOR)
+        return Image.fromarray(arr)
 
     def _read_camera_frames(self, f, camera_key: str, start: int, end: int):
-        """Read and decode JPEG frames from an observation camera or third_view_rgb.
+        """Read and decode JPEG frames from an observation camera.
+
+        Handles two HDF5 layouts transparently:
+        - ``observation/{camera_key}/rgb`` — standard per-camera path
+          (aloha-agilex, franka, ur5, tiangong)
+        - ``third_view_rgb`` — top-level key used by arx-x5 for the
+          external fixed camera (equivalent to front_camera)
+
+        When *camera_key* is ``"front_camera"``, the method first tries
+        ``observation/front_camera/rgb`` and falls back to the top-level
+        ``third_view_rgb`` key for backward compatibility with arx-x5 data.
 
         Args:
             f: Open HDF5 file handle.
-            camera_key: Camera identifier. For observation cameras this is just
-                the camera name (e.g. "head_camera") and data lives at
-                ``observation/{camera_key}/rgb``.  The special value
-                ``"third_view_rgb"`` reads directly from the top-level dataset.
+            camera_key: Camera name (e.g. ``"head_camera"``, ``"front_camera"``).
             start: Start frame index (inclusive).
             end: End frame index (exclusive).
 
         Returns:
             List of PIL.Image.Image in RGB.
         """
-        if camera_key == "third_view_rgb":
+        obs_path = f"observation/{camera_key}/rgb"
+        if obs_path in f:
+            raw = f[obs_path][start:end]
+        elif camera_key == "front_camera" and "third_view_rgb" in f:
+            # arx-x5 stores the front/third-person camera at top level
             raw = f["third_view_rgb"][start:end]
         else:
-            raw = f[f"observation/{camera_key}/rgb"][start:end]
+            raise KeyError(f"Camera '{camera_key}' not found. Tried '{obs_path}' and top-level 'third_view_rgb'.")
         return [self._decode_jpeg(raw[i]) for i in range(len(raw))]
 
     def _read_multiview_frames(self, f, cameras, start, end):
@@ -591,14 +690,64 @@ class RoboTwinDataset(BaseActionDataset):
             base_prompt = f"The bimanual robot is performing a {self.task_name} task."
 
         if self.multiview:
+            # Ensure base_prompt ends with punctuation before appending view description
+            if base_prompt and base_prompt[-1] not in ".!?":
+                base_prompt += "."
             return (
                 f"A multi-view video shows that {base_prompt} "
                 f"The video is split into four views: "
-                f"head camera (top-left), third-person view (top-right), "
+                f"head camera (top-left), front camera (top-right), "
                 f"left camera (bottom-left), right camera (bottom-right)."
             )
 
         return base_prompt
+
+    def _read_eef_actions(self, f, start: int, end: int) -> np.ndarray:
+        """Read endpose keys and assemble 20D EEF action vector.
+
+        Layout: [left_xyz(3), left_rot6d(6), left_grip(1),
+                 right_xyz(3), right_rot6d(6), right_grip(1)]
+        Gripper convention: 1 = closed, 0 = open (inverted from raw HDF5).
+        """
+        left_ep = f["endpose/left_endpose"][start:end]  # (T, 7): xyz + quat_xyzw
+        right_ep = f["endpose/right_endpose"][start:end]
+        # Binarize + invert: raw 1=open → (raw > 0.5) gives True=open
+        # → invert to 1=closed, 0=open (matching X-VLA / starVLA convention)
+        left_grip = 1.0 - (f["endpose/left_gripper"][start:end] > 0.5).astype(np.float64)
+        right_grip = 1.0 - (f["endpose/right_gripper"][start:end] > 0.5).astype(np.float64)
+
+        left = np.concatenate(
+            [
+                left_ep[:, :3],
+                quat_xyzw_to_rotation_6d(left_ep[:, 3:]),
+                left_grip[:, None] if left_grip.ndim == 1 else left_grip,
+            ],
+            axis=-1,
+        )  # (T, 10)
+
+        right = np.concatenate(
+            [
+                right_ep[:, :3],
+                quat_xyzw_to_rotation_6d(right_ep[:, 3:]),
+                right_grip[:, None] if right_grip.ndim == 1 else right_grip,
+            ],
+            axis=-1,
+        )  # (T, 10)
+
+        return np.concatenate([left, right], axis=-1).astype(np.float32)  # (T, 20)
+
+    def _normalize_joint_actions(self, actions: np.ndarray) -> np.ndarray:
+        """Min-max normalize joint dims to [-1,1], preserve binary gripper dims.
+
+        Gripper channels are already binarized (1=closed, 0=open) before this
+        method is called, so they are copied through unchanged.
+        """
+        normalized = 2.0 * (actions - self._norm_min) / self._norm_range - 1.0
+        # Restore pre-binarized gripper values (skip min-max for gripper dims)
+        for gi in JOINT_GRIPPER_INDICES:
+            if gi < actions.shape[1]:
+                normalized[:, gi] = actions[:, gi]
+        return normalized
 
     def __getitem__(self, idx):
         # ---- Determine episode index and start frame ----
@@ -618,7 +767,10 @@ class RoboTwinDataset(BaseActionDataset):
                 target_frames = self._read_multiview_frames(f, self.cameras, start, actual_end)
             else:
                 target_frames = self._read_camera_frames(f, self.target_camera, start, actual_end)
-            actions = f["joint_action/vector"][start:actual_end].astype(np.float32)
+            if self.action_mode == "eef":
+                actions = self._read_eef_actions(f, start, actual_end)
+            else:
+                actions = f["joint_action/vector"][start:actual_end].astype(np.float32)
 
         actual_len = len(target_frames)
 
@@ -640,8 +792,14 @@ class RoboTwinDataset(BaseActionDataset):
         action_mask[valid_len:] = False
 
         # ---- Normalize actions ----
-        if self._action_stats is not None:
-            actions = (actions - self._action_stats["mean"]) / self._action_stats["std"]
+        if self.action_mode == "joint":
+            # Binarize gripper channels (raw: 1=open, 0=closed → 1=closed, 0=open)
+            for gi in JOINT_GRIPPER_INDICES:
+                if gi < actions.shape[1]:
+                    actions[:, gi] = 1.0 - (actions[:, gi] > 0.5).astype(np.float32)
+            # Min-max normalize joint dims if stats are available
+            if self._norm_min is not None:
+                actions = self._normalize_joint_actions(actions)
 
         # ---- Crop and resize frames to target resolution ----
         if self.multiview:
@@ -691,13 +849,17 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
     Args:
         dataset_dir: Top-level RoboTwin dataset directory.
         robot: Target robot name (e.g. ``"aloha-agilex"``).
-        variant: Data variant (``"clean_50"`` or ``"randomized_500"``).
+        variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``
+            (merges clean_50 + randomized_500 into a single dataset).
         tasks: List of task names.  Defaults to ``ROBOTWIN_TRAIN_TASKS``.
         action_stats_path: Path to shared action stats (.npy).
+        action_mode: ``"joint"`` (14D) or ``"eef"`` (20D).
         **kwargs: Forwarded to each ``RoboTwinDataset`` (num_frames, height,
             width, split, val_ratio, repeat, seed, target_camera,
             window_stride, num_val_samples, backbone, ...).
     """
+
+    _BOTH_VARIANTS = ["clean_50", "randomized_500"]
 
     def __init__(
         self,
@@ -706,33 +868,74 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         variant: str = "clean_50",
         tasks: Optional[list] = None,
         action_stats_path: Optional[str] = None,
+        action_mode: str = "joint",
         **kwargs,
     ):
         super().__init__()
+        self.action_mode = action_mode
 
-        roots = discover_robotwin_roots(dataset_dir, robot, variant, tasks)
-        if not roots:
+        # ---- Resolve variant(s) ----
+        if variant == "both":
+            variant_list = self._BOTH_VARIANTS
+        else:
+            variant_list = [variant]
+
+        # ---- Discover per-task roots ----
+        all_roots = []  # list of (display_name, data_root, variant_name)
+        for v in variant_list:
+            roots = discover_robotwin_roots(dataset_dir, robot, v, tasks)
+            for task_name, data_root in roots:
+                display = f"{task_name}/{v}" if len(variant_list) > 1 else task_name
+                all_roots.append((display, data_root, v))
+
+        if not all_roots:
             task_list = tasks or ROBOTWIN_TRAIN_TASKS
             raise FileNotFoundError(
                 f"No task data found in {dataset_dir} for robot={robot}, "
                 f"variant={variant}. Checked {len(task_list)} tasks."
             )
 
+        print(
+            f"MultiTaskRoboTwinDataset: {len(all_roots)} task-variant pairs, "
+            f"robot={robot}, variant={variant}, action_mode={action_mode}"
+        )
+
         self._sub_datasets = []
         self._cumulative_lengths = []
         cumulative = 0
 
-        print(f"MultiTaskRoboTwinDataset: {len(roots)} tasks, robot={robot}, variant={variant}")
+        try:
+            from tqdm import tqdm
 
-        for task_name, data_root in roots:
-            ds = RoboTwinDataset(
-                data_root=data_root,
-                task_name=task_name.replace("_", " "),
-                action_stats_path=action_stats_path,
-                robot=robot,
-                variant=variant,
-                **kwargs,
-            )
+            task_iter = tqdm(all_roots, desc="Loading tasks", unit="task")
+            _use_tqdm = True
+        except ImportError:
+            task_iter = all_roots
+            _use_tqdm = False
+
+        import os as _os
+        import sys
+
+        for display_name, data_root, v in task_iter:
+            if _use_tqdm:
+                task_iter.set_postfix_str(display_name)
+                # Suppress per-task prints to keep progress bar clean
+                _old_stdout = sys.stdout
+                sys.stdout = open(_os.devnull, "w")
+            try:
+                ds = RoboTwinDataset(
+                    data_root=data_root,
+                    task_name=display_name.split("/")[0].replace("_", " "),
+                    action_stats_path=action_stats_path,
+                    robot=robot,
+                    variant=v,
+                    action_mode=action_mode,
+                    **kwargs,
+                )
+            finally:
+                if _use_tqdm:
+                    sys.stdout.close()
+                    sys.stdout = _old_stdout
             self._sub_datasets.append(ds)
             cumulative += len(ds)
             self._cumulative_lengths.append(cumulative)
@@ -741,7 +944,7 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         self._action_stats_shared = self._sub_datasets[0].action_stats if self._sub_datasets else None
         self._action_dim_value = self._sub_datasets[0].action_dim if self._sub_datasets else 14
 
-        print(f"  Total samples: {self._total_length} (across {len(self._sub_datasets)} tasks)")
+        print(f"  Total samples: {self._total_length} (across {len(self._sub_datasets)} sub-datasets)")
 
     @property
     def action_dim(self) -> int:
@@ -752,8 +955,9 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         return self._action_stats_shared
 
     def denormalize_action(self, action: np.ndarray) -> np.ndarray:
-        stats = self.action_stats
-        return action * stats["std"] + stats["mean"]
+        if not self._sub_datasets:
+            return action
+        return self._sub_datasets[0].denormalize_action(action)
 
     def __len__(self):
         return self._total_length

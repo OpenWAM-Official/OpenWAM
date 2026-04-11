@@ -21,6 +21,9 @@ from open_wam.data.registry import (
     register_dataset,
 )
 from open_wam.data.robotwin import (
+    EEF_ACTION_DIM,
+    EEF_GRIPPER_INDICES,
+    JOINT_GRIPPER_INDICES,
     ROBOTWIN_ALL_TASKS,
     ROBOTWIN_HOLDOUT_TASKS,
     ROBOTWIN_TRAIN_TASKS,
@@ -53,4 +56,7 @@ __all__ = [
     "ROBOTWIN_TRAIN_TASKS",
     "ROBOTWIN_HOLDOUT_TASKS",
     "ROBOTWIN_ALL_TASKS",
+    "EEF_ACTION_DIM",
+    "EEF_GRIPPER_INDICES",
+    "JOINT_GRIPPER_INDICES",
 ]

@@ -68,29 +68,36 @@ def main(cfg: DictConfig) -> None:
         from open_wam.data.robotwin import MultiTaskRoboTwinActionDataset, RoboTwinActionDataset
 
         d = cfg.data
-        if d.type == "robotwin_multitask":
+        common_kwargs = dict(
+            num_frames=int(d.num_frames),
+            height=int(d.height),
+            width=int(d.width),
+            split="val",
+            val_ratio=float(d.val_ratio),
+            multiview=bool(d.multiview),
+            backbone=cfg.model.backbone.name,
+            action_mode=d.get("action_mode", "joint"),
+        )
+        task_name = d.get("task_name", None)
+        if not task_name:
+            # Multi-task mode
             eval_target = MultiTaskRoboTwinActionDataset(
                 dataset_dir=d.dataset_dir,
                 robot=d.robot,
                 variant=d.variant,
-                num_frames=int(d.num_frames),
-                height=int(d.height),
-                width=int(d.width),
-                split="val",
-                val_ratio=float(d.val_ratio),
-                multiview=bool(d.multiview),
-                backbone=cfg.model.backbone.name,
+                **common_kwargs,
             )
         else:
+            # Single-task mode
+            import os
+
+            data_root = os.path.join(d.dataset_dir, task_name, f"{d.robot}_{d.variant}", "data")
             eval_target = RoboTwinActionDataset(
-                data_root=d.hdf5_data_root,
-                num_frames=int(d.num_frames),
-                height=int(d.height),
-                width=int(d.width),
-                split="val",
-                val_ratio=float(d.val_ratio),
-                multiview=bool(d.multiview),
-                backbone=cfg.model.backbone.name,
+                data_root=data_root,
+                task_name=task_name,
+                robot=d.robot,
+                variant=d.variant,
+                **common_kwargs,
             )
     elif eval_type == "online":
         from open_wam.evaluation.envs.robotwin import RoboTwinEnvAdapter

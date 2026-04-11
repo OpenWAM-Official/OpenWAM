@@ -15,6 +15,7 @@ Usage:
 """
 
 import logging
+import math
 import os
 
 import numpy as np
@@ -80,9 +81,13 @@ class NativeTrainer(BaseTrainer):
             # SharedBackbone: the architecture IS the action model
             self.action_dit = self.architecture
 
-        # Action scheduler (independent from video)
+        # Move ActionDiT to pipeline device and dtype
+        self.action_dit.to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
+
+        # Schedulers (video + action, independent timesteps)
         from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
 
+        self.pipe.scheduler.set_timesteps(1000, training=True)
         self.action_scheduler = FlowMatchScheduler("Wan")
         self.action_scheduler.set_timesteps(1000, training=True)
 
@@ -91,10 +96,13 @@ class NativeTrainer(BaseTrainer):
         self.lambda_action = float(t.lambda_action)
         bridge_type = getattr(m, "bridge_type", "cross_attn_detach")
 
+        action_mode = cfg.data.get("action_mode", "joint")
+
         self.loss_fn = FlowMatchVideoActionLoss(
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
             detach_bridge=(bridge_type == "cross_attn_detach"),
+            action_mode=action_mode,
         )
 
         # Decoupled training support
@@ -151,29 +159,76 @@ class NativeTrainer(BaseTrainer):
         device = "cpu" if bool(t.initialize_model_on_cpu) else "cuda"
 
         # Parse model paths
+        # Accepts:
+        #   - A directory path (str): auto-groups sharded safetensors by name prefix,
+        #     each .pth file becomes its own ModelConfig.
+        #   - A list where each element is either a str (single file) or a list[str]
+        #     (multiple shards that form one model, e.g. DiT split across 3 files).
+        #   - A JSON string (for CLI overrides).
         model_paths = t.model_paths
         if isinstance(model_paths, str):
-            model_paths = json.loads(model_paths)
-        model_id_with_origin = t.model_id_with_origin_paths
+            try:
+                model_paths = json.loads(model_paths)
+            except json.JSONDecodeError:
+                model_paths = [model_paths]
+
+        # Expand a single directory into grouped model entries
+        if model_paths and len(model_paths) == 1 and isinstance(model_paths[0], str) and os.path.isdir(model_paths[0]):
+            import glob as _glob
+            from collections import defaultdict
+
+            model_dir = model_paths[0]
+            safetensors = sorted(_glob.glob(os.path.join(model_dir, "*.safetensors")))
+            pth_files = sorted(_glob.glob(os.path.join(model_dir, "*.pth")))
+            if not safetensors and not pth_files:
+                raise FileNotFoundError(f"No *.safetensors or *.pth files found in {model_dir}")
+
+            # Group sharded safetensors by prefix (e.g. "diffusion_pytorch_model-0000X-of-00003")
+            # Files matching *-NNNNN-of-NNNNN.safetensors are shards of the same model.
+            import re
+
+            shard_groups = defaultdict(list)
+            standalone = []
+            for f in safetensors:
+                basename = os.path.basename(f)
+                m = re.match(r"^(.+)-\d{5}-of-\d{5}\.safetensors$", basename)
+                if m:
+                    shard_groups[m.group(1)].append(f)
+                else:
+                    standalone.append(f)
+
+            model_paths = []
+            for prefix in sorted(shard_groups):
+                shards = sorted(shard_groups[prefix])
+                model_paths.append(shards)  # list[str] → one ModelConfig with multiple files
+                logger.info("Grouped %d shards as one model: %s-*", len(shards), prefix)
+            for f in standalone:
+                model_paths.append(f)
+            for f in pth_files:
+                model_paths.append(f)
+            logger.info("Auto-discovered %d model entries from %s", len(model_paths), model_dir)
 
         model_configs = []
         if model_paths:
             for p in model_paths:
+                # p is either str (single file) or list[str] (sharded model)
                 model_configs.append(ModelConfig(p))
-        if model_id_with_origin:
-            for entry in model_id_with_origin:
-                parts = entry.split(",")
-                if len(parts) == 2:
-                    model_configs.append(ModelConfig(parts[0], origin_file_pattern=parts[1]))
-                else:
-                    model_configs.append(ModelConfig(entry))
 
         tokenizer_path = t.tokenizer_path
-        tokenizer_config = (
-            ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/")
-            if tokenizer_path is None
-            else ModelConfig(tokenizer_path)
-        )
+        if tokenizer_path is None:
+            # Auto-detect: look for google/umt5-xxl under model_paths directory
+            _raw = t.model_paths
+            _model_dir = _raw if isinstance(_raw, str) and os.path.isdir(_raw) else None
+            _auto_tok = os.path.join(_model_dir, "google", "umt5-xxl") if _model_dir else None
+            if _auto_tok and os.path.isdir(_auto_tok):
+                tokenizer_config = ModelConfig(_auto_tok)
+                logger.info("Auto-detected tokenizer at %s", _auto_tok)
+            else:
+                tokenizer_config = ModelConfig(
+                    model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/"
+                )
+        else:
+            tokenizer_config = ModelConfig(tokenizer_path)
 
         # Load pipeline
         pipe = WanVideoPipeline.from_pretrained(
@@ -205,6 +260,14 @@ class NativeTrainer(BaseTrainer):
                 t.preset_lora_path,
                 t.preset_lora_model,
             )
+
+        # Freeze inference-only components (text encoder, VAE, image encoder)
+        # Only DiT, VACE, and ActionDiT should be trainable
+        for name in ("text_encoder", "vae", "image_encoder"):
+            module = getattr(pipe, name, None)
+            if module is not None:
+                module.requires_grad_(False)
+                logger.info("Frozen: pipe.%s", name)
 
         # Gradient checkpointing
         if bool(t.use_gradient_checkpointing):
@@ -531,11 +594,63 @@ class NativeTrainer(BaseTrainer):
             **{k: v for k, v in result.items() if k != "loss"},
         }
 
+    def _manage_checkpoints(self, output_dir: str, keep_last_k: int):
+        """Delete old checkpoints, keeping only the most recent *keep_last_k*."""
+        import glob as _glob
+        import re
+
+        pattern = os.path.join(output_dir, "checkpoint_step_*")
+        files = _glob.glob(pattern)
+
+        # Sort numerically by step number
+        def _step_num(path):
+            m = re.search(r"checkpoint_step_(\d+)", path)
+            return int(m.group(1)) if m else 0
+
+        files.sort(key=_step_num)
+        while len(files) > keep_last_k:
+            old = files.pop(0)
+            if os.path.isfile(old):
+                os.remove(old)
+                logger.info("Removed old checkpoint: %s", old)
+
+    def _init_wandb(self):
+        """Initialize wandb run from project config. Returns the run or None."""
+        wandb_cfg = self.cfg.project.get("wandb", None)
+        if wandb_cfg is None:
+            return None
+        project = getattr(wandb_cfg, "project", None)
+        if not project:
+            return None
+        try:
+            import wandb
+        except ImportError:
+            logger.warning("wandb not installed, skipping wandb logging")
+            return None
+
+        run_name = getattr(wandb_cfg, "run_name", None)
+        entity = getattr(wandb_cfg, "entity", None)
+        from omegaconf import OmegaConf
+
+        run = wandb.init(
+            project=project,
+            name=run_name,
+            entity=entity,
+            config=OmegaConf.to_container(self.cfg, resolve=True),
+            resume="allow",
+        )
+        logger.info("wandb initialized: %s/%s", project, run.name)
+        return run
+
     def train(self, num_epochs: int = None, max_steps: int = None):
         """Run the native training loop.
 
         This replaces ``launch_training_task`` from third_party/diffsynth.
         Uses HuggingFace Accelerate for distributed training.
+
+        Args:
+            num_epochs: Override for ``training.num_epochs``.
+            max_steps: Override for ``training.max_steps``.
         """
         t = self.cfg.training
         num_epochs = num_epochs or int(t.num_epochs)
@@ -544,9 +659,16 @@ class NativeTrainer(BaseTrainer):
         lr = float(t.learning_rate)
         grad_accum = int(t.gradient_accumulation_steps)
 
+        # Debug mode: override to a short sanity-check run
+        debug = bool(getattr(t, "debug", False))
+        if debug:
+            max_steps = 20
+            save_steps_override = 5
+            logger.info("DEBUG mode: max_steps=20, save@5, constant LR")
+
         # Build optimizer
         params = self.get_trainable_parameters()
-        optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=float(t.weight_decay))
+        optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=float(t.weight_decay), betas=(0.9, 0.95))
 
         # Build dataloader
         dataloader = torch.utils.data.DataLoader(
@@ -558,11 +680,85 @@ class NativeTrainer(BaseTrainer):
             pin_memory=True,
         )
 
+        # Gradient clipping
+        max_grad_norm = float(t.max_grad_norm) if getattr(t, "max_grad_norm", None) else None
+
+        # LR scheduler (cosine with linear warmup; disabled in debug mode)
+        scheduler = None
+        lr_scheduler_type = getattr(t, "lr_scheduler", None)
+        if debug:
+            lr_scheduler_type = None  # constant LR in debug mode
+        if lr_scheduler_type == "cosine":
+            from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+
+            warmup_ratio = float(getattr(t, "warmup_ratio", 0.05))
+            lr_min_ratio = float(getattr(t, "lr_min_ratio", 0.01))
+            steps_per_epoch = math.ceil(len(dataloader) / grad_accum)
+            total_opt_steps = steps_per_epoch * num_epochs
+            if max_steps:
+                total_opt_steps = min(total_opt_steps, max_steps)
+            warmup_steps = int(total_opt_steps * warmup_ratio)
+            cosine_steps = max(total_opt_steps - warmup_steps, 1)
+            warmup_sched = LinearLR(
+                optimizer,
+                start_factor=1.0 / max(warmup_steps, 1),
+                total_iters=warmup_steps,
+            )
+            cosine_sched = CosineAnnealingLR(
+                optimizer,
+                T_max=cosine_steps,
+                eta_min=lr * lr_min_ratio,
+            )
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[warmup_sched, cosine_sched],
+                milestones=[warmup_steps],
+            )
+            logger.info(
+                "LR scheduler: cosine | total_opt_steps=%d warmup=%d eta_min=%.2e",
+                total_opt_steps,
+                warmup_steps,
+                lr * lr_min_ratio,
+            )
+
+        # Checkpoint intervals
+        if debug:
+            save_steps = save_steps_override
+        else:
+            save_steps = getattr(t, "save_steps", None)
+            if save_steps is not None:
+                save_steps = int(save_steps)
+        keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
+        base_output_path = getattr(t, "output_path", "./models")
+        from datetime import datetime
+
+        run_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        if debug:
+            run_dir_name += "_debug"
+        output_path = os.path.join(base_output_path, run_dir_name)
+        os.makedirs(output_path, exist_ok=True)
+        logger.info("Checkpoints will be saved to %s", output_path)
+
         # Prepare with accelerator
         if self.accelerator is not None:
             optimizer, dataloader = self.accelerator.prepare(optimizer, dataloader)
 
+        # Collect all trainable params for grad clipping
+        all_params = [p for group in optimizer.param_groups for p in group["params"]]
+
+        # Initialize wandb (skip in debug mode)
+        wandb_run = None if debug else self._init_wandb()
+
+        from tqdm import tqdm
+
+        # Estimate total steps for progress bar
+        total_steps = len(dataloader) * num_epochs
+        if max_steps:
+            total_steps = min(total_steps, max_steps)
+
+        opt_step = 0
         global_step = 0
+        pbar = tqdm(total=total_steps, desc="Training", unit="step")
         for epoch in range(num_epochs):
             for batch in dataloader:
                 losses = self.compute_loss(batch)
@@ -574,23 +770,69 @@ class NativeTrainer(BaseTrainer):
                     loss.backward()
 
                 if (global_step + 1) % grad_accum == 0:
+                    if max_grad_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(all_params, max_grad_norm)
                     optimizer.step()
                     optimizer.zero_grad()
+                    if scheduler is not None:
+                        scheduler.step()
+                    opt_step += 1
 
                 self._current_step = global_step
                 global_step += 1
 
-                if global_step % 100 == 0:
-                    logger.info(
-                        "Step %d | loss=%.4f video=%.4f action=%.4f",
-                        global_step,
-                        losses["total"].item(),
-                        losses["video"].item() if isinstance(losses["video"], torch.Tensor) else losses["video"],
-                        losses["action"].item() if isinstance(losses["action"], torch.Tensor) else losses["action"],
-                    )
+                # --- Progress bar ---
+                current_lr = optimizer.param_groups[0]["lr"]
+                loss_total = losses["total"].item()
+                loss_video = losses["video"].item() if isinstance(losses["video"], torch.Tensor) else losses["video"]
+                loss_action = (
+                    losses["action"].item() if isinstance(losses["action"], torch.Tensor) else losses["action"]
+                )
+                pbar.set_postfix(
+                    loss=f"{loss_total:.4f}",
+                    video=f"{loss_video:.4f}",
+                    action=f"{loss_action:.4f}",
+                    lr=f"{current_lr:.2e}",
+                    epoch=epoch,
+                )
+                pbar.update(1)
+
+                # --- wandb ---
+                if wandb_run is not None:
+                    log_dict = {
+                        "train/loss": loss_total,
+                        "train/loss_video": loss_video,
+                        "train/loss_action": loss_action,
+                        "train/lr": current_lr,
+                        "train/epoch": epoch,
+                    }
+                    for key in ("loss_video_unweighted", "loss_action_unweighted", "loss_scale_ratio"):
+                        if key in losses and isinstance(losses[key], torch.Tensor):
+                            log_dict[f"train/{key}"] = losses[key].item()
+                    wandb_run.log(log_dict, step=global_step)
+
+                # Periodic checkpoint saving
+                if save_steps and global_step % save_steps == 0:
+                    ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
+                    self.save_checkpoint(ckpt_path)
+                    self._manage_checkpoints(output_path, keep_last_k)
 
                 if max_steps and global_step >= max_steps:
+                    pbar.close()
+                    if wandb_run is not None:
+                        wandb_run.finish()
                     return
+
+        pbar.close()
+
+        # Save final checkpoint
+        if save_steps:
+            ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
+            self.save_checkpoint(ckpt_path)
+            self._manage_checkpoints(output_path, keep_last_k)
+
+        if wandb_run is not None:
+            wandb_run.finish()
 
     def save_checkpoint(self, path: str):
         """Export trainable state dict to safetensors."""

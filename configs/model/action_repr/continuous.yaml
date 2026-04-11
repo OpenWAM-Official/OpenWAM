@@ -1,3 +1,3 @@
 action_repr:
   type: continuous
-  action_dim: 14
+  action_dim: 20

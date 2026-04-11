@@ -1,8 +1,8 @@
 defaults:
   - model: action_dit_small
   - model/architecture: dual_system
-  - model/backbone: vace_1_3b
-  - data: robotwin_multitask
+  - model/backbone: ti2v_5b
+  - data: robotwin
   - training: joint
   - inference: sync
   - eval: robotwin_offline

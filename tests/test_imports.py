@@ -22,8 +22,8 @@ def test_import_data_robotwin():
         ROBOTWIN_TRAIN_TASKS,
     )
 
-    assert len(ROBOTWIN_TRAIN_TASKS) == 42
-    assert len(ROBOTWIN_HOLDOUT_TASKS) == 8
+    assert len(ROBOTWIN_TRAIN_TASKS) == 50  # All tasks in training by default
+    assert len(ROBOTWIN_HOLDOUT_TASKS) == 0
     assert len(ROBOTWIN_ALL_TASKS) == 50
 
 

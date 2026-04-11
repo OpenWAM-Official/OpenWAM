@@ -40,7 +40,6 @@ def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
 
     args = argparse.Namespace(
         model_paths=t.model_paths,
-        model_id_with_origin_paths=t.model_id_with_origin_paths,
         tokenizer_path=t.tokenizer_path,
         audio_processor_path=None,
         extra_inputs="vace_video,vace_reference_image,action_trajectory",
@@ -102,8 +101,6 @@ def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
         dataset_base_path="",
         dataset_metadata_path=None,
         data_file_keys="image,video",
-        val_steps=t.val_steps,
-        video_log_steps=t.video_log_steps,
         max_val_samples=int(d.get("max_val_samples", 500)),
     )
 
@@ -113,13 +110,20 @@ def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
     dtype = d.type
     args.dataset_type = dtype
 
-    if dtype == "robotwin_multitask":
+    args.action_mode = d.get("action_mode", "joint")
+
+    if dtype in ("robotwin", "robotwin_multitask"):
         args.dataset_dir = d.dataset_dir
-        args.hdf5_data_root = None
-        args.task_name = None
-        args.train_tasks = ",".join(d.train_tasks) if d.train_tasks else None
-        args.holdout_tasks = ",".join(d.holdout_tasks) if d.holdout_tasks else None
-        args.val_variant = d.val_variant
+        task_name = d.get("task_name", None)
+        args.task_name = task_name
+        if task_name:
+            # Single-task: derive data_root from dataset_dir
+            args.hdf5_data_root = os.path.join(d.dataset_dir, task_name, f"{d.robot}_{d.variant}", "data")
+        else:
+            args.hdf5_data_root = None
+        args.train_tasks = ",".join(d.train_tasks) if d.get("train_tasks") else None
+        args.holdout_tasks = ",".join(d.holdout_tasks) if d.get("holdout_tasks") else None
+        args.val_variant = d.get("val_variant", None)
     elif dtype == "droid":
         args.dataset_dir = d.dataset_dir
         args.hdf5_data_root = None
@@ -160,12 +164,7 @@ def cfg_to_flat_namespace(cfg: DictConfig) -> argparse.Namespace:
         args.mixture_seed = int(d.get("seed", 42))
         args.mixture_action_dim_override = d.get("action_dim_override", None)
     else:
-        args.dataset_dir = None
-        args.hdf5_data_root = d.hdf5_data_root
-        args.task_name = d.get("task_name", None)
-        args.train_tasks = None
-        args.holdout_tasks = None
-        args.val_variant = None
+        raise ValueError(f"Unknown dataset type '{dtype}'")
 
     return args
 
@@ -183,13 +182,18 @@ def parse_task_overrides(args: argparse.Namespace) -> tuple[Optional[list[str]],
     return train_tasks, holdout_tasks
 
 
+def _is_robotwin_multitask(args: argparse.Namespace) -> bool:
+    """Check if args represent a multi-task RoboTwin config."""
+    return args.dataset_type in ("robotwin", "robotwin_multitask") and not getattr(args, "task_name", None)
+
+
 def resolve_train_tasks(
     args: argparse.Namespace,
     train_tasks: Optional[list[str]] = None,
     holdout_tasks: Optional[list[str]] = None,
 ) -> Optional[list[str]]:
     """Resolve the multitask training split used by the supported train path."""
-    if args.dataset_type != "robotwin_multitask":
+    if not _is_robotwin_multitask(args):
         return None
     if train_tasks is not None:
         return train_tasks
@@ -235,16 +239,13 @@ def build_training_dataset(
     holdout_tasks: Optional[list[str]] = None,
 ):
     """Build the training dataset from the supported package-native adapters."""
-    if args.dataset_type == "robotwin_multitask":
+    if args.dataset_type in ("robotwin", "robotwin_multitask"):
         if not args.dataset_dir:
-            raise ValueError("data.dataset_dir is required for robotwin_multitask")
-        resolved_tasks = resolve_train_tasks(args, train_tasks=train_tasks, holdout_tasks=holdout_tasks)
-        return MultiTaskRoboTwinActionDataset(
-            dataset_dir=args.dataset_dir,
-            robot=args.robot,
-            variant=args.variant,
-            tasks=resolved_tasks,
+            raise ValueError("data.dataset_dir is required for robotwin")
+        action_mode = getattr(args, "action_mode", "joint")
+        common_kwargs = dict(
             action_stats_path=args.action_stats_path,
+            action_mode=action_mode,
             num_frames=args.num_frames,
             height=args.height,
             width=args.width,
@@ -256,6 +257,25 @@ def build_training_dataset(
             multiview=args.multiview,
             backbone=args.backbone,
         )
+        if _is_robotwin_multitask(args):
+            resolved_tasks = resolve_train_tasks(args, train_tasks=train_tasks, holdout_tasks=holdout_tasks)
+            return MultiTaskRoboTwinActionDataset(
+                dataset_dir=args.dataset_dir,
+                robot=args.robot,
+                variant=args.variant,
+                tasks=resolved_tasks,
+                **common_kwargs,
+            )
+        else:
+            # Single-task: use MultiTaskRoboTwinActionDataset with tasks=[task_name]
+            # so that variant="both" is handled correctly (expands to clean_50 + randomized_500)
+            return MultiTaskRoboTwinActionDataset(
+                dataset_dir=args.dataset_dir,
+                robot=args.robot,
+                variant=args.variant,
+                tasks=[args.task_name],
+                **common_kwargs,
+            )
 
     transforms = _build_transforms_from_args(args)
 
@@ -326,23 +346,7 @@ def build_training_dataset(
             action_dim_override=getattr(args, "mixture_action_dim_override", None),
         )
 
-    return RoboTwinActionDataset(
-        data_root=args.hdf5_data_root,
-        num_frames=args.num_frames,
-        height=args.height,
-        width=args.width,
-        split="train",
-        val_ratio=args.val_ratio,
-        repeat=args.dataset_repeat,
-        task_name=args.task_name,
-        action_stats_path=args.action_stats_path,
-        target_camera=args.target_camera,
-        window_stride=args.window_stride,
-        multiview=args.multiview,
-        robot=args.robot,
-        variant=args.variant,
-        backbone=args.backbone,
-    )
+    raise ValueError(f"Unknown dataset_type '{args.dataset_type}'")
 
 
 def build_validation_datasets(
@@ -351,12 +355,11 @@ def build_validation_datasets(
     holdout_tasks: Optional[list[str]] = None,
 ) -> tuple[dict, dict]:
     """Build validation and video logging datasets for training callbacks."""
-    if args.dataset_type == "robotwin_multitask":
-        resolved_train_tasks = resolve_train_tasks(args, train_tasks=train_tasks, holdout_tasks=holdout_tasks)
-        val_variant = args.val_variant or args.variant
-        resolved_holdout = holdout_tasks if holdout_tasks else ROBOTWIN_HOLDOUT_TASKS
+    if args.dataset_type in ("robotwin", "robotwin_multitask"):
+        action_mode = getattr(args, "action_mode", "joint")
         common_kwargs = dict(
             action_stats_path=args.action_stats_path,
+            action_mode=action_mode,
             num_frames=args.num_frames,
             height=args.height,
             width=args.width,
@@ -367,27 +370,45 @@ def build_validation_datasets(
             multiview=args.multiview,
             backbone=args.backbone,
         )
-        val_datasets = {
-            "val_id": MultiTaskRoboTwinActionDataset(
-                dataset_dir=args.dataset_dir,
+        if _is_robotwin_multitask(args):
+            resolved_train_tasks = resolve_train_tasks(args, train_tasks=train_tasks, holdout_tasks=holdout_tasks)
+            val_variant = getattr(args, "val_variant", None) or args.variant
+            resolved_holdout = holdout_tasks if holdout_tasks else ROBOTWIN_HOLDOUT_TASKS
+            max_val = int(getattr(args, "max_val_samples", 500))
+            val_datasets = {
+                "val_id": MultiTaskRoboTwinActionDataset(
+                    dataset_dir=args.dataset_dir,
+                    robot=args.robot,
+                    variant=args.variant,
+                    tasks=resolved_train_tasks,
+                    val_ratio=args.val_ratio,
+                    num_val_samples=max_val,
+                    **common_kwargs,
+                ),
+            }
+            # OOD val only if holdout tasks are defined
+            if resolved_holdout:
+                val_datasets["val_ood"] = MultiTaskRoboTwinActionDataset(
+                    dataset_dir=args.dataset_dir,
+                    robot=args.robot,
+                    variant=val_variant,
+                    tasks=resolved_holdout,
+                    val_ratio=1.0,
+                    num_val_samples=5,
+                    **common_kwargs,
+                )
+            return val_datasets, dict(val_datasets)
+        else:
+            val_ds = RoboTwinActionDataset(
+                data_root=args.hdf5_data_root,
+                task_name=args.task_name,
                 robot=args.robot,
                 variant=args.variant,
-                tasks=resolved_train_tasks,
                 val_ratio=args.val_ratio,
-                num_val_samples=0,
+                num_val_samples=4,
                 **common_kwargs,
-            ),
-            "val_ood": MultiTaskRoboTwinActionDataset(
-                dataset_dir=args.dataset_dir,
-                robot=args.robot,
-                variant=val_variant,
-                tasks=resolved_holdout,
-                val_ratio=1.0,
-                num_val_samples=5,
-                **common_kwargs,
-            ),
-        }
-        return val_datasets, dict(val_datasets)
+            )
+            return {"val": val_ds}, {"val": val_ds}
 
     if args.dataset_type == "droid":
         val_ds = DROIDDataset(
@@ -438,25 +459,7 @@ def build_validation_datasets(
         # This is a simplified path — each sub-dataset handles its own val split
         return {}, {}
 
-    val_ds = RoboTwinActionDataset(
-        data_root=args.hdf5_data_root,
-        num_frames=args.num_frames,
-        height=args.height,
-        width=args.width,
-        split="val",
-        val_ratio=args.val_ratio,
-        repeat=1,
-        task_name=args.task_name,
-        action_stats_path=args.action_stats_path,
-        num_val_samples=4,
-        target_camera=args.target_camera,
-        window_stride=args.window_stride,
-        multiview=args.multiview,
-        robot=args.robot,
-        variant=args.variant,
-        backbone=args.backbone,
-    )
-    return {"val": val_ds}, {"val": val_ds}
+    raise ValueError(f"Unknown dataset_type '{args.dataset_type}'")
 
 
 def load_action_stats_into_model(model, dataset) -> None:

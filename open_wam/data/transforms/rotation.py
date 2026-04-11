@@ -152,6 +152,41 @@ def convert_rotation(
     return result.reshape(*original_shape, target_dim).astype(np.float32)
 
 
+# ---------------------------------------------------------------------------
+# Convenience helpers for RoboTwin HDF5 xyzw quaternion ↔ 6D rotation
+#
+# RoboTwin HDF5 stores quaternions as xyzw (scipy default) while
+# OpenWAM's convert_rotation() uses wxyz.  These thin wrappers handle
+# the convention swap so callers don't have to think about it.
+# ---------------------------------------------------------------------------
+
+
+def quat_xyzw_to_rotation_6d(q: np.ndarray) -> np.ndarray:
+    """Convert xyzw quaternion to 6D rotation representation.
+
+    Args:
+        q: (..., 4) quaternion in xyzw format (scipy / RoboTwin convention).
+
+    Returns:
+        (..., 6) 6D rotation (first two columns of the rotation matrix).
+    """
+    wxyz = np.concatenate([q[..., 3:], q[..., :3]], axis=-1)
+    return convert_rotation(wxyz, RotationType.QUATERNION, RotationType.ROTATION_6D)
+
+
+def rotation_6d_to_quat_xyzw(r6d: np.ndarray) -> np.ndarray:
+    """Convert 6D rotation representation to xyzw quaternion.
+
+    Args:
+        r6d: (..., 6) 6D rotation representation.
+
+    Returns:
+        (..., 4) quaternion in xyzw format (scipy / RoboTwin convention).
+    """
+    wxyz = convert_rotation(r6d, RotationType.ROTATION_6D, RotationType.QUATERNION)
+    return np.concatenate([wxyz[..., 1:], wxyz[..., :1]], axis=-1)
+
+
 class RotationTransform(InvertibleModalityTransform):
     """Convert rotation components in action vectors between representations.
 
