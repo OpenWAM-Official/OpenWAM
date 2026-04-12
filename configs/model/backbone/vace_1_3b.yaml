@@ -1,5 +1,5 @@
 name: vace
-video_dim: 1536
+video_dim: 3072
 resolution:
   height: 480
   width: 832

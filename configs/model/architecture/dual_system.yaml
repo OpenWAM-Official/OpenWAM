@@ -9,6 +9,6 @@ architecture:
   ffn_dim: 3072
   num_heads: 12
   num_layers: 8
-  video_dim: 1536
+  video_dim: 3072
   bridge_layers: [3, 7, 11, 15, 19, 23, 26, 29]
   bridge_type: cross_attn_detach

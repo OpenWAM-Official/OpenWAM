@@ -29,6 +29,25 @@ from open_wam.training.optimizer_groups import build_trainable_parameters
 logger = logging.getLogger(__name__)
 
 
+class TrainableModuleWrapper(torch.nn.Module):
+    """Thin nn.Module wrapper around trainable components for DeepSpeed.
+
+    DeepSpeed requires a single nn.Module to wrap with its engine.
+    This collects the ActionDiT and trainable pipeline sub-modules (DiT, VACE)
+    so DeepSpeed can manage their optimizer states and gradient sync.
+
+    Not used for forward pass — NativeTrainer.compute_loss() drives execution.
+    """
+
+    def __init__(self, action_dit, pipe_trainable_modules: dict):
+        super().__init__()
+        self.action_dit = action_dit
+        self.pipe_modules = torch.nn.ModuleDict(pipe_trainable_modules)
+
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("Forward pass is handled by NativeTrainer.compute_loss()")
+
+
 class NativeTrainer(BaseTrainer):
     """Package-native joint video-action trainer.
 
@@ -81,8 +100,24 @@ class NativeTrainer(BaseTrainer):
             # SharedBackbone: the architecture IS the action model
             self.action_dit = self.architecture
 
-        # Move ActionDiT to pipeline device and dtype
-        self.action_dit.to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
+        # Device placement: skip .to(device) when initialize_model_on_cpu + DeepSpeed,
+        # because DeepSpeed's prepare() will handle the move.
+        _init_on_cpu = bool(t.get("initialize_model_on_cpu", False))
+        _use_deepspeed = (
+            accelerator is not None
+            and hasattr(accelerator, "distributed_type")
+            and str(accelerator.distributed_type).endswith("DEEPSPEED")
+        )
+        if not (_init_on_cpu and _use_deepspeed):
+            self.action_dit.to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
+
+        # Build trainable module wrapper for DeepSpeed
+        pipe_trainable = {}
+        if self.pipe.dit is not None and any(p.requires_grad for p in self.pipe.dit.parameters()):
+            pipe_trainable["dit"] = self.pipe.dit
+        if getattr(self.pipe, "vace", None) is not None and any(p.requires_grad for p in self.pipe.vace.parameters()):
+            pipe_trainable["vace"] = self.pipe.vace
+        self.trainable_wrapper = TrainableModuleWrapper(self.action_dit, pipe_trainable)
 
         # Schedulers (video + action, independent timesteps)
         from open_wam.inference.flow_match_scheduler import FlowMatchScheduler
@@ -739,15 +774,53 @@ class NativeTrainer(BaseTrainer):
         os.makedirs(output_path, exist_ok=True)
         logger.info("Checkpoints will be saved to %s", output_path)
 
+        # Detect DeepSpeed
+        use_deepspeed = (
+            self.accelerator is not None
+            and hasattr(self.accelerator, "distributed_type")
+            and str(self.accelerator.distributed_type).endswith("DEEPSPEED")
+        )
+
         # Prepare with accelerator
-        if self.accelerator is not None:
+        if use_deepspeed:
+            # DeepSpeed needs the model wrapper to manage params/optimizer/gradients
+            prepare_args = [self.trainable_wrapper, optimizer, dataloader]
+            if scheduler is not None:
+                prepare_args.append(scheduler)
+                self.trainable_wrapper, optimizer, dataloader, scheduler = self.accelerator.prepare(*prepare_args)
+            else:
+                self.trainable_wrapper, optimizer, dataloader = self.accelerator.prepare(*prepare_args)
+
+            # Update references — DeepSpeed wraps the module
+            unwrapped = self.accelerator.unwrap_model(self.trainable_wrapper)
+            self.action_dit = unwrapped.action_dit
+
+            # Sync pipe's trainable sub-modules with DeepSpeed-managed versions
+            if "dit" in unwrapped.pipe_modules:
+                self.pipe.dit = unwrapped.pipe_modules["dit"]
+            if "vace" in unwrapped.pipe_modules:
+                self.pipe.vace = unwrapped.pipe_modules["vace"]
+
+            # Fix pipe.device — may still be "cpu" after initialize_model_on_cpu
+            self.pipe.device = self.accelerator.device
+
+            # Move frozen modules (T5, VAE) to device
+            for name in ("text_encoder", "vae"):
+                mod = getattr(self.pipe, name, None)
+                if mod is not None:
+                    mod.to(device=self.accelerator.device)
+
+            logger.info("DeepSpeed: model wrapped, device=%s", self.accelerator.device)
+        elif self.accelerator is not None:
+            # Plain DDP / single GPU
             optimizer, dataloader = self.accelerator.prepare(optimizer, dataloader)
 
         # Collect all trainable params for grad clipping
         all_params = [p for group in optimizer.param_groups for p in group["params"]]
 
-        # Initialize wandb (skip in debug mode)
-        wandb_run = None if debug else self._init_wandb()
+        # Initialize wandb (skip in debug mode; rank 0 only for multi-GPU)
+        _is_main = self.accelerator is None or self.accelerator.is_main_process
+        wandb_run = None if (debug or not _is_main) else self._init_wandb()
 
         from tqdm import tqdm
 
@@ -771,7 +844,10 @@ class NativeTrainer(BaseTrainer):
 
                 if (global_step + 1) % grad_accum == 0:
                     if max_grad_norm is not None:
-                        torch.nn.utils.clip_grad_norm_(all_params, max_grad_norm)
+                        if use_deepspeed:
+                            self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(all_params, max_grad_norm)
                     optimizer.step()
                     optimizer.zero_grad()
                     if scheduler is not None:
@@ -811,8 +887,9 @@ class NativeTrainer(BaseTrainer):
                             log_dict[f"train/{key}"] = losses[key].item()
                     wandb_run.log(log_dict, step=global_step)
 
-                # Periodic checkpoint saving
-                if save_steps and global_step % save_steps == 0:
+                # Periodic checkpoint saving (rank 0 only for multi-GPU)
+                _is_main = self.accelerator is None or self.accelerator.is_main_process
+                if save_steps and global_step % save_steps == 0 and _is_main:
                     ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
                     self.save_checkpoint(ckpt_path)
                     self._manage_checkpoints(output_path, keep_last_k)
@@ -825,8 +902,9 @@ class NativeTrainer(BaseTrainer):
 
         pbar.close()
 
-        # Save final checkpoint
-        if save_steps:
+        # Save final checkpoint (rank 0 only)
+        _is_main = self.accelerator is None or self.accelerator.is_main_process
+        if save_steps and _is_main:
             ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
             self.save_checkpoint(ckpt_path)
             self._manage_checkpoints(output_path, keep_last_k)

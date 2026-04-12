@@ -11,7 +11,7 @@
 # This preset inherits from large_backbone and adjusts defaults for DeepSpeed.
 
 defaults:
-  - large_backbone
+  - joint
 
 # Override defaults suitable for DeepSpeed
 batch_size: 2

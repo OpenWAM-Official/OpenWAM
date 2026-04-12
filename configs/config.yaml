@@ -1,4 +1,5 @@
 defaults:
+  - accelerate: deepspeed_zero2
   - model: action_dit_small
   - model/architecture: dual_system
   - model/backbone: ti2v_5b

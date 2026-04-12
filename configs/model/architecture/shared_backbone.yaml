@@ -5,5 +5,5 @@
 architecture:
   type: shared_backbone
   action_dim: 20
-  video_dim: 1536
+  video_dim: 3072
   num_action_tokens: 49

@@ -1,5 +1,5 @@
 trainer: native
-debug: true                    # debug mode: 50 steps, save@10, val@25, constant LR
+debug: false                    # debug mode: 50 steps, save@10, val@25, constant LR
 
 lambda_video: 1.0
 lambda_action: 1.0
@@ -12,7 +12,7 @@ max_grad_norm: 1.0              # max gradient norm for clipping, null = no clip
 num_epochs: 5
 max_steps: null
 batch_size: 1
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 4
 use_gradient_checkpointing: true
 use_gradient_checkpointing_offload: false
 max_timestep_boundary: 1.0
@@ -20,8 +20,10 @@ min_timestep_boundary: 0.0
 find_unused_parameters: false
 
 # Model loading
-model_paths: /path/to/Wan2.1-VACE-1.3B
-tokenizer_path: /path/to/Wan2.1-VACE-1.3B/google/umt5-xxl
+# model_paths: /path/to/Wan2.1-VACE-1.3B
+# tokenizer_path: /path/to/Wan2.1-VACE-1.3B/google/umt5-xxl
+model_paths: /path/to/Wan2.2-TI2V-5B
+tokenizer_path: /path/to/Wan2.2-TI2V-5B/google/umt5-xxl
 
 initialize_model_on_cpu: false
 
