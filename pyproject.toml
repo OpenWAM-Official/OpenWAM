@@ -43,7 +43,7 @@ classifiers = [
 
 [tool.setuptools.packages.find]
 where = ["./"]
-include = ["open_wam", "open_wam.*", "third_party.diffsynth", "third_party.diffsynth.*"]
+include = ["openwam", "openwam.*", "third_party.diffsynth", "third_party.diffsynth.*"]
 
 [project.optional-dependencies]
 serving = [
@@ -65,16 +65,16 @@ npu = [
 include-package-data = true
 
 [project.scripts]
-openwam-serve = "open_wam.serving.policy_server:main"
+openwam-serve = "openwam.deployment.policy_server:main"
 
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-exclude = ["third_party/"]
+exclude = ["third_party/", "previous_codebase/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = ["E501", "E741"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["open_wam"]
+known-first-party = ["openwam"]

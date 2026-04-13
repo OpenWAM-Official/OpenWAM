@@ -1,9 +1,8 @@
 """Tests for decoupled noise schedules."""
 
 
-
 def test_schedule_decoupled_flash_length():
-    from open_wam.inference.optimizations.decoupled_schedule import schedule_decoupled_flash
+    from openwam.deployment.optimizations.decoupled_schedule import schedule_decoupled_flash
 
     for steps in [1, 2, 4]:
         s = schedule_decoupled_flash(action_steps=steps)
@@ -16,7 +15,7 @@ def test_schedule_decoupled_flash_length():
 
 
 def test_schedule_decoupled_flash_descending():
-    from open_wam.inference.optimizations.decoupled_schedule import schedule_decoupled_flash
+    from openwam.deployment.optimizations.decoupled_schedule import schedule_decoupled_flash
 
     s = schedule_decoupled_flash(action_steps=4)
     action_ts = [t_a for _, t_a in s]
@@ -26,7 +25,7 @@ def test_schedule_decoupled_flash_descending():
 
 
 def test_schedule_decoupled_asymmetric():
-    from open_wam.inference.optimizations.decoupled_schedule import schedule_decoupled_asymmetric
+    from openwam.deployment.optimizations.decoupled_schedule import schedule_decoupled_asymmetric
 
     s = schedule_decoupled_asymmetric(video_steps=10, action_steps=3)
     assert len(s) == 11  # 10 steps + terminal
@@ -39,14 +38,14 @@ def test_schedule_decoupled_asymmetric():
 def test_schedule_decoupled_asymmetric_validation():
     import pytest
 
-    from open_wam.inference.optimizations.decoupled_schedule import schedule_decoupled_asymmetric
+    from openwam.deployment.optimizations.decoupled_schedule import schedule_decoupled_asymmetric
 
     with pytest.raises(AssertionError):
         schedule_decoupled_asymmetric(video_steps=5, action_steps=10)
 
 
 def test_sample_decoupled_timesteps_shapes():
-    from open_wam.inference.optimizations.decoupled_schedule import sample_decoupled_timesteps
+    from openwam.deployment.optimizations.decoupled_schedule import sample_decoupled_timesteps
 
     v_t, a_t = sample_decoupled_timesteps(batch_size=8)
     assert v_t.shape == (8,)
@@ -59,7 +58,7 @@ def test_sample_decoupled_timesteps_shapes():
 
 def test_sample_decoupled_timesteps_video_biased_high():
     """Video timesteps should be biased toward high values (high noise)."""
-    from open_wam.inference.optimizations.decoupled_schedule import sample_decoupled_timesteps
+    from openwam.deployment.optimizations.decoupled_schedule import sample_decoupled_timesteps
 
     # With Beta(0.5, 1.0) flipped, mean should be > 500
     v_t, _ = sample_decoupled_timesteps(batch_size=1000, video_beta_a=0.5, video_beta_b=1.0)
@@ -68,7 +67,7 @@ def test_sample_decoupled_timesteps_video_biased_high():
 
 
 def test_decoupled_loss_warmup():
-    from open_wam.training.decoupled_loss import DecoupledFlowMatchLoss
+    from openwam.train.loss.decoupled_loss import DecoupledFlowMatchLoss
 
     loss_fn = DecoupledFlowMatchLoss(warmup_steps=100)
 

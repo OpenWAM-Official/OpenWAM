@@ -36,7 +36,7 @@ def _save_results(results: dict, output_dir: str) -> str:
     return result_path
 
 
-@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="config")
+@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")
 def main(cfg: DictConfig) -> None:
     print("=" * 60)
     print("OpenWAM Evaluation — Hydra Config")
@@ -51,8 +51,8 @@ def main(cfg: DictConfig) -> None:
 
     # Load models
     device = getattr(eval_cfg, "device", "cuda")
-    from open_wam.evaluation.registry import build_evaluator
-    from open_wam.inference import JointInferenceEngine, load_wam_models
+    from openwam.deployment import JointInferenceEngine, load_wam_models
+    from openwam.evaluation.registry import build_evaluator
 
     pipe, action_dit = load_wam_models(cfg, device=device)
 
@@ -65,7 +65,7 @@ def main(cfg: DictConfig) -> None:
     # Build eval target (dataset or env) depending on evaluator type
     eval_target = None
     if eval_type == "offline":
-        from open_wam.data.robotwin import MultiTaskRoboTwinActionDataset, RoboTwinActionDataset
+        from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset, RoboTwinDataset
 
         d = cfg.data
         common_kwargs = dict(
@@ -81,7 +81,7 @@ def main(cfg: DictConfig) -> None:
         task_name = d.get("task_name", None)
         if not task_name:
             # Multi-task mode
-            eval_target = MultiTaskRoboTwinActionDataset(
+            eval_target = MultiTaskRoboTwinDataset(
                 dataset_dir=d.dataset_dir,
                 robot=d.robot,
                 variant=d.variant,
@@ -92,7 +92,7 @@ def main(cfg: DictConfig) -> None:
             import os
 
             data_root = os.path.join(d.dataset_dir, task_name, f"{d.robot}_{d.variant}", "data")
-            eval_target = RoboTwinActionDataset(
+            eval_target = RoboTwinDataset(
                 data_root=data_root,
                 task_name=task_name,
                 robot=d.robot,
@@ -100,7 +100,7 @@ def main(cfg: DictConfig) -> None:
                 **common_kwargs,
             )
     elif eval_type == "online":
-        from open_wam.evaluation.envs.robotwin import RoboTwinEnvAdapter
+        from openwam.evaluation.envs.robotwin import RoboTwinEnvAdapter
 
         task_name = getattr(eval_cfg, "task_name", "adjust_bottle")
         eval_target = RoboTwinEnvAdapter(task_name=task_name, robot=cfg.data.robot)

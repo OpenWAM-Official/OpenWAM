@@ -21,7 +21,7 @@ jobs:
         run: pip install ruff
 
       - name: Lint
-        run: ruff check open_wam/ scripts/ tests/
+        run: ruff check openwam/ scripts/ tests/
 
   tests:
     runs-on: ubuntu-latest

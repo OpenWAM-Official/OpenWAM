@@ -4,7 +4,7 @@ import torch
 
 
 def test_architecture_registry_populated():
-    from open_wam.models.architectures import ARCHITECTURE_REGISTRY, ARCHITECTURE_SUPPORT
+    from openwam.model import ARCHITECTURE_REGISTRY, ARCHITECTURE_SUPPORT
 
     assert "dual_system" in ARCHITECTURE_REGISTRY
     assert "moe_expert" in ARCHITECTURE_REGISTRY
@@ -16,7 +16,7 @@ def test_architecture_registry_populated():
 
 
 def test_architecture_support_lists():
-    from open_wam.models.architectures import (
+    from openwam.model import (
         get_architecture_support,
         list_supported_architectures,
     )
@@ -29,7 +29,7 @@ def test_architecture_support_lists():
 
 
 def test_build_architecture_dual_system():
-    from open_wam.models.architectures import build_architecture
+    from openwam.model import build_architecture
 
     cfg = {
         "action_dim": 7,
@@ -48,7 +48,7 @@ def test_build_architecture_dual_system():
 
 
 def test_build_architecture_moe():
-    from open_wam.models.architectures import build_architecture
+    from openwam.model import build_architecture
 
     cfg = {
         "action_dim": 7,
@@ -66,7 +66,7 @@ def test_build_architecture_moe():
 
 def test_build_architecture_shared():
     """Shared backbone should build successfully."""
-    from open_wam.models.architectures import build_architecture
+    from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
     arch = build_architecture("shared_backbone", cfg)
@@ -78,7 +78,7 @@ def test_build_architecture_shared():
 def test_build_architecture_unknown():
     import pytest
 
-    from open_wam.models.architectures import build_architecture
+    from openwam.model import build_architecture
 
     with pytest.raises(KeyError, match="Unknown architecture"):
         build_architecture("nonexistent", {})
@@ -86,7 +86,7 @@ def test_build_architecture_unknown():
 
 def test_dual_system_prepare_and_extract():
     """Smoke test: prepare action tokens and extract prediction (cross_attn)."""
-    from open_wam.models.architectures import build_architecture
+    from openwam.model import build_architecture
 
     cfg = {
         "action_dim": 7,
@@ -122,7 +122,7 @@ def test_dual_system_prepare_and_extract():
 
 def test_moe_expert_prepare_and_extract():
     """Smoke test: MoE prepare action tokens, expert FFN, and extract prediction."""
-    from open_wam.models.architectures import build_architecture
+    from openwam.model import build_architecture
 
     cfg = {
         "action_dim": 7,
@@ -164,7 +164,7 @@ def test_moe_expert_prepare_and_extract():
 
 def test_shared_backbone_prepare_and_extract():
     """Smoke test: shared backbone prepare, on_dit_block (no-op), and extract."""
-    from open_wam.models.architectures import build_architecture
+    from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
     arch = build_architecture("shared_backbone", cfg)
@@ -194,7 +194,7 @@ def test_shared_backbone_prepare_and_extract():
 
 def test_shared_backbone_output_zero_init():
     """Verify output head is zero-initialized."""
-    from open_wam.models.architectures import build_architecture
+    from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
     arch = build_architecture("shared_backbone", cfg)
@@ -224,8 +224,8 @@ def test_moe_expert_ffn_zero_init():
 
 def test_register_custom_architecture():
     """Verify that custom architectures can be registered."""
-    from open_wam.models.architectures.base import ActionState, BaseWAMArchitecture
-    from open_wam.models.architectures.registry import ARCHITECTURE_REGISTRY, register_architecture
+    from openwam.model.base import ActionState, BaseWAMArchitecture
+    from openwam.model.registry import ARCHITECTURE_REGISTRY, register_architecture
 
     @register_architecture("test_custom")
     class TestArch(BaseWAMArchitecture):

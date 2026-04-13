@@ -2,7 +2,7 @@
 
 import torch
 
-from open_wam.inference.optimizations.dit_cache import DiTVelocityCache
+from openwam.deployment.optimizations.dit_cache import DiTVelocityCache
 
 
 def test_cache_init():

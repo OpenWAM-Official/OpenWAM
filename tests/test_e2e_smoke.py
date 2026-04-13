@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from open_wam.models.architectures.dual_system import DualSystemArchitecture
+from openwam.model.dual_system import DualSystemArchitecture
 
 
 def _make_tiny_architecture():

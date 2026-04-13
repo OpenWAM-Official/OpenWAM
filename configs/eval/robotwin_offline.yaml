@@ -1,6 +1,0 @@
-type: offline
-num_eval_samples: 5
-env:
-  name: robotwin
-  task_name: null
-  robot: arx-x5

@@ -1,0 +1,40 @@
+type: robotwin
+dataset_dir: /path/to/RoboTwin2.0/dataset    # top-level dataset dir (e.g. /path/to/RoboTwin2.0/dataset)
+task_name: null                   # null = multi-task (discover all), set name = single-task
+
+robot: aloha-agilex              # robot embodiment name, maps to directory {robot}_{variant}
+variant: both                     # "clean_50", "randomized_500", or "both"
+action_mode: eef                  # "eef" (20D xyz+rot6d+grip, default) or "joint" (14D qpos)
+
+num_frames: 33                    # observation window size (total frames read from HDF5)
+video_stride: 4                   # video subsampling stride (e.g. 4 → 9 video frames from 33-frame window). Actions stay at full resolution.
+height: 480                       # output video height in pixels
+width: 640                        # output video width in pixels
+split: train                      # "train" or "val"
+val_ratio: 0.0                    # fraction of episodes reserved for validation
+repeat: 1                         # repeat the window list N times per epoch
+window_stride: 1                  # sliding window step size (1 = every frame is a start point)
+multiview: true                   # true = 2x2 grid of 4 cameras, false = single camera
+target_camera: head_camera        # camera used in single-view mode (ignored if multiview=true)
+camera_layout: [head_camera, front_camera, left_camera, right_camera]  # multiview grid order
+action_stats_path: null           # path to precomputed action_stats.npy for normalization. EEF don't need this, but JOINT action mode does.
+max_val_samples: 500              # cap on validation samples
+
+# Multi-task only (ignored when task_name is set)
+#
+# train_tasks: Override the default training task list.
+#   null  = use all 50 tasks (default)
+#   list  = only train on these tasks, e.g. [adjust_bottle, lift_pot]
+train_tasks: null
+
+# holdout_tasks: Tasks to exclude from training and use for OOD evaluation.
+#   null  = no holdout, all 50 tasks participate in training (default)
+#   list  = exclude these tasks from training, e.g. [open_laptop, turn_switch]
+#   When set, training tasks = all 50 tasks - holdout_tasks
+holdout_tasks: null
+
+# val_variant: Data variant used for the OOD validation set.
+#   null  = same as 'variant' above (default)
+#   str   = use a different variant for OOD val, e.g. "randomized_500"
+#   Useful for testing generalization: train on clean_50, validate on randomized_500
+val_variant: null

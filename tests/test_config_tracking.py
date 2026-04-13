@@ -3,7 +3,7 @@
 import json
 from datetime import datetime, timezone
 
-from open_wam.training.config_tracking import (
+from openwam.train.config_tracking import (
     build_run_metadata,
     make_run_id,
     write_run_artifacts,

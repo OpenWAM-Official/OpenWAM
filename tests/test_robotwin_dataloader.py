@@ -84,7 +84,7 @@ def _create_action_stats(path, action_dim=14):
 
 def test_joint_mode_basic():
     """Joint mode loads correctly and returns action_dim=14."""
-    from open_wam.data._robotwin_impl import RoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -108,7 +108,7 @@ def test_joint_mode_basic():
 
 def test_joint_mode_minmax_normalization():
     """Joint mode applies min-max normalization to joints and binary to grippers."""
-    from open_wam.data._robotwin_impl import RoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=42)
@@ -141,7 +141,7 @@ def test_joint_mode_minmax_normalization():
 
 def test_joint_mode_gripper_convention():
     """Joint mode gripper: 1=closed, 0=open (inverted from raw)."""
-    from open_wam.data._robotwin_impl import RoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create episode where gripper raw > 0.5 (open) for all frames
@@ -170,7 +170,7 @@ def test_joint_mode_gripper_convention():
 
 def test_joint_mode_denormalize_roundtrip():
     """Joint mode denormalize_action inverts normalization for joint dims."""
-    from open_wam.data._robotwin_impl import RoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=0)
@@ -214,7 +214,7 @@ def test_joint_mode_denormalize_roundtrip():
 
 def test_eef_mode_basic():
     """EEF mode loads correctly and returns action_dim=20."""
-    from open_wam.data._robotwin_impl import RoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -238,7 +238,7 @@ def test_eef_mode_basic():
 
 def test_eef_mode_no_normalization():
     """EEF mode returns raw values, even if stats file exists."""
-    from open_wam.data._robotwin_impl import RoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=0)
@@ -260,7 +260,7 @@ def test_eef_mode_no_normalization():
 
 def test_eef_gripper_inversion():
     """EEF mode inverts gripper: raw 1=open → output 0, raw 0=closed → output 1."""
-    from open_wam.data._robotwin_impl import RoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -289,7 +289,7 @@ def test_eef_gripper_inversion():
 
 def test_eef_denormalize_inverts_gripper():
     """EEF mode denormalize_action inverts gripper dims back to raw convention."""
-    from open_wam.data._robotwin_impl import EEF_GRIPPER_INDICES, RoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import EEF_GRIPPER_INDICES, RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -324,7 +324,7 @@ def test_eef_denormalize_inverts_gripper():
 
 def test_multi_variant_discovery():
     """MultiTaskRoboTwinDataset with variant='both' discovers clean and randomized."""
-    from open_wam.data._robotwin_impl import MultiTaskRoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create directory structure for 2 tasks × 2 variants
@@ -353,7 +353,7 @@ def test_multi_variant_discovery():
 
 def test_multi_variant_single_variant_compat():
     """MultiTaskRoboTwinDataset with variant='clean_50' loads a single variant."""
-    from open_wam.data._robotwin_impl import MultiTaskRoboTwinDataset
+    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for task in ["task_a"]:
@@ -383,7 +383,7 @@ def test_multi_variant_single_variant_compat():
 
 def test_rotation_conversion_roundtrip():
     """quat_xyzw → rot6d → quat_xyzw should approximately roundtrip."""
-    from open_wam.data.transforms.rotation import (
+    from openwam.dataloader.transforms.rotation import (
         quat_xyzw_to_rotation_6d,
         rotation_6d_to_quat_xyzw,
     )
@@ -415,7 +415,7 @@ def test_rotation_conversion_roundtrip():
 
 def test_action_stats_eef_mode():
     """Action stats computation works in EEF mode."""
-    from open_wam.data._action_stats_impl import compute_action_stats
+    from openwam.dataloader.robotwin_stats_computation import compute_action_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -429,7 +429,7 @@ def test_action_stats_eef_mode():
 
 def test_action_stats_joint_mode():
     """Action stats computation works in joint mode."""
-    from open_wam.data._action_stats_impl import compute_action_stats
+    from openwam.dataloader.robotwin_stats_computation import compute_action_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -438,3 +438,137 @@ def test_action_stats_joint_mode():
         stats = compute_action_stats(tmpdir, action_mode="joint")
         assert stats["mean"].shape == (14,)
         assert stats["min"].shape == (14,)
+
+
+# ---------------------------------------------------------------------------
+# Registry integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_registry_robotwin_is_multitask():
+    """Registry 'robotwin' type maps to MultiTaskRoboTwinDataset."""
+    from openwam.dataloader.registry import DATASET_REGISTRY
+    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+
+    assert "robotwin" in DATASET_REGISTRY
+    assert DATASET_REGISTRY["robotwin"] is MultiTaskRoboTwinDataset
+
+
+def test_registry_robotwin_multitask_removed():
+    """The 'robotwin_multitask' alias should no longer be registered."""
+    from openwam.dataloader.registry import DATASET_REGISTRY
+
+    assert "robotwin_multitask" not in DATASET_REGISTRY
+
+
+def test_from_config_task_resolution_single_task():
+    """from_config with task_name set resolves to [task_name]."""
+    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+
+    config = {
+        "type": "robotwin",
+        "dataset_dir": "/dummy",
+        "task_name": "adjust_bottle",
+        "robot": "aloha-agilex",
+        "variant": "clean_50",
+    }
+
+    # We can't construct a real dataset without data, but we can test
+    # that from_config calls __init__ with the right tasks list by
+    # monkeypatching __init__.
+    captured = {}
+    original_init = MultiTaskRoboTwinDataset.__init__
+
+    def mock_init(self, **kwargs):
+        captured.update(kwargs)
+        raise _SkipInit()
+
+    class _SkipInit(Exception):
+        pass
+
+    MultiTaskRoboTwinDataset.__init__ = mock_init
+    try:
+        MultiTaskRoboTwinDataset.from_config(config, split="train")
+    except _SkipInit:
+        pass
+    finally:
+        MultiTaskRoboTwinDataset.__init__ = original_init
+
+    assert captured["tasks"] == ["adjust_bottle"]
+    assert captured["split"] == "train"
+
+
+def test_from_config_task_resolution_holdout():
+    """from_config with holdout_tasks excludes them from training tasks."""
+    from openwam.dataloader.robotwin_dataset import (
+        ROBOTWIN_ALL_TASKS,
+        MultiTaskRoboTwinDataset,
+    )
+
+    holdout = ["open_laptop", "turn_switch"]
+    config = {
+        "type": "robotwin",
+        "dataset_dir": "/dummy",
+        "task_name": None,
+        "train_tasks": None,
+        "holdout_tasks": holdout,
+        "robot": "aloha-agilex",
+        "variant": "clean_50",
+    }
+
+    captured = {}
+    original_init = MultiTaskRoboTwinDataset.__init__
+
+    def mock_init(self, **kwargs):
+        captured.update(kwargs)
+        raise _SkipInit()
+
+    class _SkipInit(Exception):
+        pass
+
+    MultiTaskRoboTwinDataset.__init__ = mock_init
+    try:
+        MultiTaskRoboTwinDataset.from_config(config, split="train")
+    except _SkipInit:
+        pass
+    finally:
+        MultiTaskRoboTwinDataset.__init__ = original_init
+
+    expected = sorted(t for t in ROBOTWIN_ALL_TASKS if t not in holdout)
+    assert captured["tasks"] == expected
+
+
+def test_from_config_via_registry():
+    """build_dataset dispatches to MultiTaskRoboTwinDataset.from_config."""
+    from openwam.dataloader.registry import build_dataset
+    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+
+    config = {
+        "type": "robotwin",
+        "dataset_dir": "/dummy",
+        "task_name": "adjust_bottle",
+        "robot": "aloha-agilex",
+        "variant": "clean_50",
+    }
+
+    captured = {}
+    original_init = MultiTaskRoboTwinDataset.__init__
+
+    def mock_init(self, **kwargs):
+        captured.update(kwargs)
+        raise _SkipInit()
+
+    class _SkipInit(Exception):
+        pass
+
+    MultiTaskRoboTwinDataset.__init__ = mock_init
+    try:
+        build_dataset(config, split="train")
+    except _SkipInit:
+        pass
+    finally:
+        MultiTaskRoboTwinDataset.__init__ = original_init
+
+    assert captured["dataset_dir"] == "/dummy"
+    assert captured["tasks"] == ["adjust_bottle"]
+    assert captured["action_mode"] == "eef"

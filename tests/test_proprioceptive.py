@@ -3,12 +3,12 @@
 import pytest
 import torch
 
-from open_wam.models.proprioceptive import ProprioceptiveEncoder
+from openwam.model.action_model.proprioceptive import ProprioceptiveEncoder
 
 
 def test_import():
     """ProprioceptiveEncoder should be importable from models package."""
-    from open_wam.models import ProprioceptiveEncoder
+    from openwam.model import ProprioceptiveEncoder
 
     assert callable(ProprioceptiveEncoder)
 

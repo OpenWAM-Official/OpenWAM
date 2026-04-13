@@ -1,0 +1,18 @@
+defaults:
+  - model: dual_system
+  - model/video_backbone: ti2v_5b
+  - model/action_backbone: action_dit_small
+  - model/bridge: cross_attn_detach
+  - _self_
+
+deployment:
+  checkpoint_path: null
+  device: cuda
+  server:
+    host: "0.0.0.0"
+    ws_port: 8765
+    http_port: 8766
+
+project:
+  name: open-wam
+  seed: 42

@@ -1,0 +1,4 @@
+# Video-only training — no action stream
+lambda_video: 1.0
+lambda_action: 0.0
+freeze_modules: [action_dit]

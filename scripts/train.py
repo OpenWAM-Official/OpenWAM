@@ -30,16 +30,15 @@ def _train(cfg: DictConfig) -> None:
     """Package-native training path."""
     import accelerate
 
-    from open_wam.training.config_tracking import (
+    from openwam.train.config_tracking import (
         build_run_metadata,
         get_git_commit,
         make_run_id,
     )
-    from open_wam.training.native_trainer import NativeTrainer
-    from open_wam.training.runtime import (
+    from openwam.train.native_trainer import NativeTrainer
+    from openwam.train.runtime import (
         build_training_dataset,
         cfg_to_flat_namespace,
-        parse_task_overrides,
     )
 
     t = cfg.training
@@ -53,8 +52,7 @@ def _train(cfg: DictConfig) -> None:
 
     # Build dataset
     args = cfg_to_flat_namespace(cfg)
-    train_tasks, holdout_tasks = parse_task_overrides(args)
-    dataset = build_training_dataset(args, train_tasks=train_tasks, holdout_tasks=holdout_tasks)
+    dataset = build_training_dataset(args, data_config=cfg.data)
 
     # Build trainer
     trainer = NativeTrainer(cfg, accelerator=accelerator, dataset=dataset)
@@ -75,7 +73,7 @@ def _train(cfg: DictConfig) -> None:
     trainer.train()
 
 
-@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="config")
+@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")
 def main(cfg: DictConfig) -> None:
     print("=" * 60)
     print("OpenWAM Training — Hydra Config")

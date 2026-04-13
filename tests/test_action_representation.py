@@ -6,7 +6,7 @@ import torch
 
 def test_base_is_abstract():
     """BaseActionRepresentation cannot be instantiated directly."""
-    from open_wam.models.action_repr.base import BaseActionRepresentation
+    from openwam.model.action_model.action_repr.base import BaseActionRepresentation
 
     with pytest.raises(TypeError):
         BaseActionRepresentation()
@@ -14,7 +14,7 @@ def test_base_is_abstract():
 
 def test_continuous_repr_identity():
     """ContinuousActionRepresentation is an identity transform."""
-    from open_wam.models.action_repr import ContinuousActionRepresentation
+    from openwam.model.action_model.action_repr import ContinuousActionRepresentation
 
     repr = ContinuousActionRepresentation(action_dim=7)
     assert repr.latent_dim == 7
@@ -30,7 +30,7 @@ def test_continuous_repr_identity():
 
 def test_continuous_repr_default_dim():
     """Default action_dim is 14 (bimanual)."""
-    from open_wam.models.action_repr import ContinuousActionRepresentation
+    from openwam.model.action_model.action_repr import ContinuousActionRepresentation
 
     repr = ContinuousActionRepresentation()
     assert repr.latent_dim == 14
@@ -39,7 +39,7 @@ def test_continuous_repr_default_dim():
 
 def test_build_action_representation_continuous():
     """Factory builds ContinuousActionRepresentation."""
-    from open_wam.models.action_repr import ContinuousActionRepresentation, build_action_representation
+    from openwam.model.action_model.action_repr import ContinuousActionRepresentation, build_action_representation
 
     repr = build_action_representation("continuous", action_dim=7)
     assert isinstance(repr, ContinuousActionRepresentation)
@@ -48,7 +48,7 @@ def test_build_action_representation_continuous():
 
 def test_build_action_representation_unknown():
     """Factory raises on unknown representation name."""
-    from open_wam.models.action_repr import build_action_representation
+    from openwam.model.action_model.action_repr import build_action_representation
 
     with pytest.raises(ValueError, match="Unknown action representation"):
         build_action_representation("nonexistent")
@@ -56,14 +56,14 @@ def test_build_action_representation_unknown():
 
 def test_fast_repr_imports():
     """FASTActionRepresentation should be importable."""
-    from open_wam.models.action_repr.fast import FASTActionRepresentation
+    from openwam.model.action_model.action_repr.fast import FASTActionRepresentation
 
     assert FASTActionRepresentation is not None
 
 
 def test_fast_repr_construction():
     """FASTActionRepresentation should construct without tokenizer."""
-    from open_wam.models.action_repr.fast import FASTActionRepresentation
+    from openwam.model.action_model.action_repr.fast import FASTActionRepresentation
 
     repr = FASTActionRepresentation(
         native_dim=7,
@@ -78,7 +78,7 @@ def test_fast_repr_construction():
 
 def test_fast_repr_embedding_and_projection():
     """Verify embedding and output projection shapes."""
-    from open_wam.models.action_repr.fast import FASTActionRepresentation
+    from openwam.model.action_model.action_repr.fast import FASTActionRepresentation
 
     repr = FASTActionRepresentation(
         native_dim=7,
@@ -97,7 +97,7 @@ def test_fast_repr_encode_requires_tokenizer():
     import builtins
     from unittest.mock import patch
 
-    from open_wam.models.action_repr.fast import FASTActionRepresentation
+    from openwam.model.action_model.action_repr.fast import FASTActionRepresentation
 
     repr = FASTActionRepresentation(
         native_dim=7,
@@ -121,8 +121,8 @@ def test_fast_repr_encode_requires_tokenizer():
 
 def test_build_fast_via_factory():
     """Factory should build FAST representation."""
-    from open_wam.models.action_repr import build_action_representation
-    from open_wam.models.action_repr.fast import FASTActionRepresentation
+    from openwam.model.action_model.action_repr import build_action_representation
+    from openwam.model.action_model.action_repr.fast import FASTActionRepresentation
 
     repr = build_action_representation(
         "fast",
@@ -138,7 +138,7 @@ def test_build_fast_via_factory():
 def test_continuous_backward_compatible_with_none():
     """When action_repr is None, training/inference should work unchanged."""
     # This tests that our integration points handle None gracefully
-    from open_wam.models.action_repr import ContinuousActionRepresentation
+    from openwam.model.action_model.action_repr import ContinuousActionRepresentation
 
     repr = ContinuousActionRepresentation(action_dim=14)
     data = torch.randn(2, 49, 14)

@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 THIRD_PARTY = PROJECT_ROOT / "third_party"
 
 
-@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="config")
+@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")
 def main(cfg: DictConfig) -> None:
     print("=" * 60)
     print("OpenWAM Inference — Hydra Config")
@@ -43,7 +43,7 @@ def main(cfg: DictConfig) -> None:
 
     # Load models via package-native loader
     device = getattr(inf_cfg, "device", "cuda")
-    from open_wam.inference import JointInferenceEngine, load_wam_models
+    from openwam.deployment import JointInferenceEngine, load_wam_models
 
     pipe, action_dit = load_wam_models(cfg, device=device)
 

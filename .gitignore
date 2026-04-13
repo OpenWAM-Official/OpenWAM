@@ -2,6 +2,8 @@
 !/data/robotwin/
 /models
 /diffusers
+.claude/
+
 
 # Hydra outputs
 outputs/
@@ -40,7 +42,9 @@ sdist/
 var/
 wheels/
 share/python-wheels/
+previous_codebase/
 references/
+third_party/
 *.egg-info/
 .installed.cfg
 *.egg

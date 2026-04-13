@@ -15,14 +15,14 @@ test:
 	$(PYTHON) -m pytest -q tests
 
 lint:
-	$(PYTHON) -m ruff check open_wam/ scripts/ tests/
+	$(PYTHON) -m ruff check openwam/ scripts/ tests/
 
 format:
-	$(PYTHON) -m ruff format open_wam/ scripts/ tests/
-	$(PYTHON) -m ruff check --fix open_wam/ scripts/ tests/
+	$(PYTHON) -m ruff format openwam/ scripts/ tests/
+	$(PYTHON) -m ruff check --fix openwam/ scripts/ tests/
 
 compile:
-	$(PYTHON) -m compileall open_wam scripts tests
+	$(PYTHON) -m compileall openwam scripts tests
 
 check: compile test
 

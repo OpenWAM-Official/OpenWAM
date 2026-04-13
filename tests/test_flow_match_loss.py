@@ -5,14 +5,14 @@ import torch
 
 def test_flow_match_loss_importable():
     """FlowMatchVideoActionLoss should be importable from training package."""
-    from open_wam.training import FlowMatchVideoActionLoss
+    from openwam.train import FlowMatchVideoActionLoss
 
     assert callable(FlowMatchVideoActionLoss)
 
 
 def test_flow_match_loss_from_module():
     """Direct import from flow_match_loss module."""
-    from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 
     loss_fn = FlowMatchVideoActionLoss(lambda_video=1.0, lambda_action=1.0)
     assert loss_fn.lambda_video == 1.0
@@ -22,7 +22,7 @@ def test_flow_match_loss_from_module():
 
 def test_flow_match_loss_config():
     """Loss function should accept all configuration options."""
-    from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 
     loss_fn = FlowMatchVideoActionLoss(
         lambda_video=0.5,
@@ -36,14 +36,14 @@ def test_flow_match_loss_config():
 
 def test_legacy_loss_still_importable():
     """Legacy FlowMatchVideoActionSFTLoss should still be importable."""
-    from open_wam.training.loss import FlowMatchVideoActionSFTLoss
+    from openwam.train.loss.sft_loss import FlowMatchVideoActionSFTLoss
 
     assert callable(FlowMatchVideoActionSFTLoss)
 
 
 def test_both_losses_in_training_init():
     """Both loss functions should be in training __all__."""
-    from open_wam.training import FlowMatchVideoActionLoss, FlowMatchVideoActionSFTLoss
+    from openwam.train import FlowMatchVideoActionLoss, FlowMatchVideoActionSFTLoss
 
     assert callable(FlowMatchVideoActionLoss)
     assert callable(FlowMatchVideoActionSFTLoss)
@@ -51,7 +51,7 @@ def test_both_losses_in_training_init():
 
 def test_flow_match_loss_video_loss_computation():
     """Test video loss computation with mock tensors."""
-    from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 
     loss_fn = FlowMatchVideoActionLoss()
 
@@ -78,7 +78,7 @@ def test_flow_match_loss_video_loss_computation():
 
 def test_flow_match_loss_action_loss_computation():
     """Test action loss computation with mock tensors."""
-    from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 
     loss_fn = FlowMatchVideoActionLoss()
 
@@ -100,7 +100,7 @@ def test_flow_match_loss_action_loss_computation():
 
 def test_flow_match_loss_single_sample():
     """Loss computation should handle B=1 fast path."""
-    from open_wam.training.flow_match_loss import FlowMatchVideoActionLoss
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 
     loss_fn = FlowMatchVideoActionLoss()
 
