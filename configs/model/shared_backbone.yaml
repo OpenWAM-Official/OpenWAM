@@ -1,10 +1,14 @@
 # Shared Backbone Architecture
 # Action tokens concatenated to video token sequence, processed by same DiT.
-# See assets/arch.png (leftmost).
+# No separate action transformer.
 
 architecture:
   type: shared_backbone
-  action_dim: 20
-  video_dim: 3072
-  num_action_tokens: 49
-  proprioception: none
+  action_dim: 14
+
+# Video backbone
+# Resolution: any height/width where height % 32 == 0 and width % 32 == 0.
+# Actual training resolution is determined by dataloader config.
+video_backbone:
+  name: ti2v_5b
+  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory

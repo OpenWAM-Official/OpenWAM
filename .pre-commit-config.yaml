@@ -10,7 +10,7 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^third_party/
+        exclude: ^(third_party/|openwam/model/video_backbone/diffsynth/)
       - id: end-of-file-fixer
-        exclude: ^third_party/
+        exclude: ^(third_party/|openwam/model/video_backbone/diffsynth/)
       - id: check-yaml

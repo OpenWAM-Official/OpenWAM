@@ -198,13 +198,13 @@ def test_shared_backbone_output_zero_init():
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
     arch = build_architecture("shared_backbone", cfg)
-    assert torch.all(arch.output_head.weight == 0)
-    assert torch.all(arch.output_head.bias == 0)
+    assert torch.all(arch.action_output_head.head.weight == 0)
+    assert torch.all(arch.action_output_head.head.bias == 0)
 
 
 def test_moe_expert_ffn_zero_init():
     """Verify expert FFN and output head are zero-initialized."""
-    from third_party.diffsynth.models.moe_action_expert import MoEExpertDiT
+    from openwam.model.action_model.moe_expert_dit import MoEExpertDiT
 
     dit = MoEExpertDiT(
         action_dim=7,
@@ -218,8 +218,8 @@ def test_moe_expert_ffn_zero_init():
         assert torch.all(block.ffn[2].weight == 0)
         assert torch.all(block.ffn[2].bias == 0)
     # Output head should be zero
-    assert torch.all(dit.output_head.weight == 0)
-    assert torch.all(dit.output_head.bias == 0)
+    assert torch.all(dit.action_output_head.head.weight == 0)
+    assert torch.all(dit.action_output_head.head.bias == 0)
 
 
 def test_register_custom_architecture():

@@ -5,7 +5,6 @@ import openwam.model.shared_backbone  # noqa: F401
 from openwam.model.action_model.action_dit import ActionDiT, ActionDiTState
 from openwam.model.action_model.moe_expert_dit import MoEExpertDiT, MoEExpertState
 from openwam.model.action_model.proprioceptive import ProprioceptiveEncoder
-from openwam.model.backbone.base import BaseVideoBackbone
 from openwam.model.base import ActionState, BaseWAMArchitecture
 from openwam.model.registry import (
     ARCHITECTURE_REGISTRY,
@@ -16,7 +15,6 @@ from openwam.model.registry import (
 )
 
 __all__ = [
-    "BaseVideoBackbone",
     "ActionDiT",
     "ActionDiTState",
     "MoEExpertDiT",

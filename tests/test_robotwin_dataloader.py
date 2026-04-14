@@ -128,23 +128,16 @@ def test_joint_mode_minmax_normalization():
         sample = ds[0]
         actions = sample["action_trajectory"].numpy()
 
-        # Joint dims should be in [-1, 1] (min-max normalized)
-        joint_mask = np.ones(14, dtype=bool)
-        joint_mask[[6, 13]] = False
-        assert actions[:, joint_mask].min() >= -1.0 - 1e-6
-        assert actions[:, joint_mask].max() <= 1.0 + 1e-6
-
-        # Gripper dims should be binary {0, 1}
-        gripper_vals = set(actions[:, 6].tolist() + actions[:, 13].tolist())
-        assert gripper_vals.issubset({0.0, 1.0}), f"Gripper values not binary: {gripper_vals}"
+        # All dims (including gripper) should be in [-1, 1] (min-max normalized)
+        assert actions.min() >= -1.0 - 1e-6
+        assert actions.max() <= 1.0 + 1e-6
 
 
-def test_joint_mode_gripper_convention():
-    """Joint mode gripper: 1=closed, 0=open (inverted from raw)."""
+def test_joint_mode_gripper_continuous():
+    """Joint mode gripper uses raw continuous values, min-max normalized like all dims."""
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Create episode where gripper raw > 0.5 (open) for all frames
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=0)
         stats_path = os.path.join(tmpdir, "action_stats.npy")
         _create_action_stats(stats_path, action_dim=14)
@@ -162,10 +155,10 @@ def test_joint_mode_gripper_convention():
         sample = ds[0]
         actions = sample["action_trajectory"].numpy()
 
-        # First half: raw gripper > 0.5 (open) → normalized = 1 - 1 = 0 (open)
-        assert all(actions[:5, 6] == 0.0), "First half should be 0 (open)"
-        # Second half: raw gripper < 0.5 (closed) → normalized = 1 - 0 = 1 (closed)
-        assert all(actions[5:, 6] == 1.0), "Second half should be 1 (closed)"
+        # Gripper dims should be continuous (min-max normalized), not binary
+        gripper_vals = actions[:, 6]
+        assert gripper_vals.min() >= -1.0 - 1e-6
+        assert gripper_vals.max() <= 1.0 + 1e-6
 
 
 def test_joint_mode_denormalize_roundtrip():
@@ -258,8 +251,8 @@ def test_eef_mode_no_normalization():
         assert ds.action_stats is None  # EEF ignores stats
 
 
-def test_eef_gripper_inversion():
-    """EEF mode inverts gripper: raw 1=open → output 0, raw 0=closed → output 1."""
+def test_eef_gripper_raw_values():
+    """EEF mode uses raw continuous gripper values from HDF5 without inversion."""
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -278,18 +271,18 @@ def test_eef_gripper_inversion():
         sample = ds[0]
         actions = sample["action_trajectory"].numpy()
 
-        # First half: raw gripper = 1.0 (open) → inverted = 0.0 (open in our convention)
-        np.testing.assert_allclose(actions[:5, 9], 0.0, atol=1e-6)
-        np.testing.assert_allclose(actions[:5, 19], 0.0, atol=1e-6)
+        # First half: raw gripper = 1.0 (open) → should remain 1.0 (no inversion)
+        np.testing.assert_allclose(actions[:5, 9], 1.0, atol=1e-6)
+        np.testing.assert_allclose(actions[:5, 19], 1.0, atol=1e-6)
 
-        # Second half: raw gripper = 0.0 (closed) → inverted = 1.0 (closed)
-        np.testing.assert_allclose(actions[5:, 9], 1.0, atol=1e-6)
-        np.testing.assert_allclose(actions[5:, 19], 1.0, atol=1e-6)
+        # Second half: raw gripper = 0.0 (closed) → should remain 0.0
+        np.testing.assert_allclose(actions[5:, 9], 0.0, atol=1e-6)
+        np.testing.assert_allclose(actions[5:, 19], 0.0, atol=1e-6)
 
 
-def test_eef_denormalize_inverts_gripper():
-    """EEF mode denormalize_action inverts gripper dims back to raw convention."""
-    from openwam.dataloader.robotwin_dataset import EEF_GRIPPER_INDICES, RoboTwinDataset
+def test_eef_denormalize_passthrough():
+    """EEF mode denormalize_action is a passthrough (no transformation)."""
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -304,17 +297,10 @@ def test_eef_denormalize_inverts_gripper():
             val_ratio=0.0,
         )
 
-        # Non-gripper dims should pass through unchanged
+        # All dims should pass through unchanged (no inversion, no normalization)
         test_data = np.random.randn(5, 20).astype(np.float32)
         result = ds.denormalize_action(test_data)
-        non_grip_mask = np.ones(20, dtype=bool)
-        non_grip_mask[EEF_GRIPPER_INDICES] = False
-        np.testing.assert_array_equal(result[:, non_grip_mask], test_data[:, non_grip_mask])
-
-        # Gripper dims: binary inversion (1=closed → 0=open raw, 0=open → 1=open raw)
-        for gi in EEF_GRIPPER_INDICES:
-            expected = 1.0 - (test_data[:, gi] > 0.5).astype(np.float32)
-            np.testing.assert_array_equal(result[:, gi], expected)
+        np.testing.assert_array_equal(result, test_data)
 
 
 # ---------------------------------------------------------------------------

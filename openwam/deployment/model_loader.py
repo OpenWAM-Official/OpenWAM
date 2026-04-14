@@ -9,7 +9,7 @@ import torch
 
 from openwam.deployment.model_config import ModelConfig
 from openwam.model.action_model.action_dit import ActionDiT
-from openwam.model.video_model.video_pipeline import WanVideoPipeline
+from openwam.model.video_backbone import WanVideoPipeline
 
 
 def load_wam_models(cfg: Any, device: str = "cuda"):
@@ -20,7 +20,6 @@ def load_wam_models(cfg: Any, device: str = "cuda"):
     """
     eval_cfg = cfg.eval
     model_cfg = cfg.model
-    backbone_cfg = cfg.model.backbone
 
     model_paths = getattr(eval_cfg, "model_paths", None)
     tokenizer_path = getattr(eval_cfg, "tokenizer_path", None)
@@ -46,16 +45,23 @@ def load_wam_models(cfg: Any, device: str = "cuda"):
         tokenizer_config=tokenizer_config,
     )
 
-    bridge_layers = tuple(int(x) for x in model_cfg.bridge_layers)
+    # Derive video_dim from the loaded model instead of config
+    video_dim = pipe.dit.dim
+
+    # Merge architecture + action_backbone configs
+    arch_cfg = getattr(model_cfg, "architecture", model_cfg)
+    action_cfg = getattr(model_cfg, "action_backbone", {})
+
+    bridge_layers = tuple(int(x) for x in arch_cfg.bridge_layers)
     action_dit = ActionDiT(
-        action_dim=int(model_cfg.action_dim),
-        dim=int(model_cfg.dim),
-        ffn_dim=int(model_cfg.ffn_dim),
-        num_heads=int(model_cfg.num_heads),
-        num_layers=int(model_cfg.num_layers),
-        video_dim=int(backbone_cfg.video_dim),
+        action_dim=int(arch_cfg.get("action_dim", 14)),
+        dim=int(action_cfg.get("dim", arch_cfg.get("dim", 768))),
+        ffn_dim=int(action_cfg.get("ffn_dim", arch_cfg.get("ffn_dim", 3072))),
+        num_heads=int(action_cfg.get("num_heads", arch_cfg.get("num_heads", 12))),
+        num_layers=len(bridge_layers),
+        video_dim=int(video_dim),
         bridge_layers=bridge_layers,
-        bridge_type=model_cfg.bridge_type,
+        bridge_type=arch_cfg.get("bridge_type", "cross_attn_detach"),
     ).to(dtype=torch.bfloat16, device=device)
 
     ckpt_path = eval_cfg.ckpt_path

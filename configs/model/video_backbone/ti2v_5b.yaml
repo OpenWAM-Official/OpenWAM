@@ -1,6 +1,0 @@
-name: ti2v
-video_dim: 3072
-resolution:
-  height: 480
-  width: 640
-model_id: Wan-AI/Wan2.2-T2V-5B

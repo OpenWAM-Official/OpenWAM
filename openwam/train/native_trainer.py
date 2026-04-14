@@ -28,6 +28,40 @@ from openwam.train.optimizer_groups import build_trainable_parameters
 
 logger = logging.getLogger(__name__)
 
+VAE_TEMPORAL_FACTOR = 4  # Wan VAE encodes every 4 video frames into 1 latent time step
+
+
+def _downsample_video_mask_to_latent(video_is_pad: torch.Tensor) -> torch.Tensor:
+    """Downsample frame-level padding mask to VAE latent temporal dimension.
+
+    Following FastWAM: separate frame 0 (conditioning, excluded from loss),
+    then group the tail frames by VAE_TEMPORAL_FACTOR. A latent step is
+    padded only if ALL frames in the group are padded.
+
+    The returned mask covers tail latent steps only (frame 0 excluded),
+    matching the loss which trims pred/target via ``[:, :, 1:]``.
+
+    Args:
+        video_is_pad: (T_video,) bool, True=padded.
+
+    Returns:
+        (T_latent_tail,) bool mask where
+        T_latent_tail = ceil((T_video - 1) / VAE_TEMPORAL_FACTOR).
+    """
+    T = video_is_pad.shape[0]
+    if T <= 1:
+        return torch.zeros(0, dtype=torch.bool)
+
+    # Separate frame 0 (conditioning), group tail by VAE_TEMPORAL_FACTOR
+    tail_is_pad = video_is_pad[1:]  # (T_video - 1,)
+
+    T_tail = tail_is_pad.shape[0]
+    pad_len = (VAE_TEMPORAL_FACTOR - T_tail % VAE_TEMPORAL_FACTOR) % VAE_TEMPORAL_FACTOR
+    if pad_len > 0:
+        tail_is_pad = torch.cat([tail_is_pad, torch.ones(pad_len, dtype=torch.bool)])
+
+    return tail_is_pad.view(-1, VAE_TEMPORAL_FACTOR).all(dim=1)
+
 
 class TrainableModuleWrapper(torch.nn.Module):
     """Thin nn.Module wrapper around trainable components for DeepSpeed.
@@ -70,26 +104,27 @@ class NativeTrainer(BaseTrainer):
         # Build video pipeline
         self.pipe = self._build_pipeline(cfg)
 
-        # Build architecture from config (supports dual_system, moe_expert, shared_backbone)
-        arch_cfg = getattr(m, "architecture", None)
-        if arch_cfg is not None and hasattr(arch_cfg, "type"):
-            from openwam.model.registry import build_architecture
+        # Derive video_dim from the loaded model instead of config
+        video_dim = int(self.pipe.dit.dim)
 
-            arch_type = arch_cfg.type
-            # Convert OmegaConf to plain dict for architecture constructor
-            arch_params = {k: v for k, v in arch_cfg.items() if k != "type"}
-            self.architecture = build_architecture(arch_type, arch_params)
-            logger.info("Architecture: %s (from config)", arch_type)
-        else:
-            # Fallback: build DualSystem from flat model config (backward compat)
-            from openwam.model.dual_system import DualSystemArchitecture
+        # Build architecture from 3 config sources:
+        #   1. cfg.model.architecture  — type, action_dim, bridge_type, bridge_layers
+        #   2. cfg.model.action_backbone — dim, ffn_dim, num_heads, ... (DualSystem only)
+        #   3. video_dim — derived from loaded model
+        from openwam.model.registry import build_architecture
 
-            # Merge video_dim from backbone config into model config for DualSystem
-            b = cfg.model.backbone
-            dual_cfg = {k: v for k, v in m.items()}
-            dual_cfg.setdefault("video_dim", int(b.video_dim))
-            self.architecture = DualSystemArchitecture(cfg=dual_cfg)
-            logger.info("Architecture: dual_system (default)")
+        arch_cfg = getattr(m, "architecture", {})
+        action_cfg = getattr(m, "action_backbone", {})
+
+        # Merge: architecture params + action_backbone params + video_dim
+        params = {k: v for k, v in arch_cfg.items() if k != "type"}
+        if action_cfg:
+            params.update({k: v for k, v in action_cfg.items()})
+        params["video_dim"] = video_dim
+
+        arch_type = arch_cfg.get("type", "dual_system")
+        self.architecture = build_architecture(arch_type, params)
+        logger.info("Architecture: %s (video_dim=%d)", arch_type, video_dim)
 
         # Build ActionDiT for DualSystem, or get it from the architecture
         if hasattr(self.architecture, "action_dit") and self.architecture.action_dit is not None:
@@ -111,6 +146,20 @@ class NativeTrainer(BaseTrainer):
         if not (_init_on_cpu and _use_deepspeed):
             self.action_dit.to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
 
+        # --- Freeze: apply after all models are built ---
+        # Read from training_strategy config (e.g. joint.yaml / video_only.yaml)
+        strategy = cfg.training_strategy
+        freeze_list = list(getattr(strategy, "freeze", []))
+        for name in freeze_list:
+            # Check pipeline sub-modules (text_encoder, vae, dit, vace, ...)
+            module = getattr(self.pipe, name, None)
+            # Check trainer-level modules (action_dit)
+            if module is None:
+                module = getattr(self, name, None)
+            if module is not None:
+                module.requires_grad_(False)
+                logger.info("Frozen: %s", name)
+
         # Build trainable module wrapper for DeepSpeed
         pipe_trainable = {}
         if self.pipe.dit is not None and any(p.requires_grad for p in self.pipe.dit.parameters()):
@@ -126,18 +175,15 @@ class NativeTrainer(BaseTrainer):
         self.action_scheduler = FlowMatchScheduler("Wan")
         self.action_scheduler.set_timesteps(1000, training=True)
 
-        # Loss function
-        self.lambda_video = float(t.lambda_video)
-        self.lambda_action = float(t.lambda_action)
-        bridge_type = getattr(m, "bridge_type", "cross_attn_detach")
-
-        action_mode = cfg.data.get("action_mode", "joint")
+        # Loss function (lambda weights from training_strategy config)
+        self.lambda_video = float(strategy.lambda_video)
+        self.lambda_action = float(strategy.lambda_action)
+        bridge_type = getattr(m.architecture, "bridge_type", "cross_attn_detach")
 
         self.loss_fn = FlowMatchVideoActionLoss(
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
             detach_bridge=(bridge_type == "cross_attn_detach"),
-            action_mode=action_mode,
         )
 
         # Decoupled training support
@@ -184,86 +230,60 @@ class NativeTrainer(BaseTrainer):
 
     def _build_pipeline(self, cfg: DictConfig):
         """Build WanVideoPipeline from Hydra config."""
-        import json
-
         from openwam.deployment.model_config import ModelConfig
-        from openwam.model.video_model.video_pipeline import WanVideoPipeline
+        from openwam.model.video_backbone import WanVideoPipeline
 
         t = cfg.training
+        backbone_cfg = cfg.model.video_backbone
 
         device = "cpu" if bool(t.initialize_model_on_cpu) else "cuda"
 
-        # Parse model paths
-        # Accepts:
-        #   - A directory path (str): auto-groups sharded safetensors by name prefix,
-        #     each .pth file becomes its own ModelConfig.
-        #   - A list where each element is either a str (single file) or a list[str]
-        #     (multiple shards that form one model, e.g. DiT split across 3 files).
-        #   - A JSON string (for CLI overrides).
-        model_paths = t.model_paths
-        if isinstance(model_paths, str):
-            try:
-                model_paths = json.loads(model_paths)
-            except json.JSONDecodeError:
-                model_paths = [model_paths]
+        # Read model_path from video_backbone config (e.g. ti2v_5b.yaml / vace_1_3b.yaml)
+        model_dir = str(backbone_cfg.model_path)
+        if not os.path.isdir(model_dir):
+            raise FileNotFoundError(f"video_backbone.model_path does not exist: {model_dir}")
 
-        # Expand a single directory into grouped model entries
-        if model_paths and len(model_paths) == 1 and isinstance(model_paths[0], str) and os.path.isdir(model_paths[0]):
-            import glob as _glob
-            from collections import defaultdict
+        # Auto-discover model files in the directory
+        import glob as _glob
+        import re
+        from collections import defaultdict
 
-            model_dir = model_paths[0]
-            safetensors = sorted(_glob.glob(os.path.join(model_dir, "*.safetensors")))
-            pth_files = sorted(_glob.glob(os.path.join(model_dir, "*.pth")))
-            if not safetensors and not pth_files:
-                raise FileNotFoundError(f"No *.safetensors or *.pth files found in {model_dir}")
+        safetensors = sorted(_glob.glob(os.path.join(model_dir, "*.safetensors")))
+        pth_files = sorted(_glob.glob(os.path.join(model_dir, "*.pth")))
+        if not safetensors and not pth_files:
+            raise FileNotFoundError(f"No *.safetensors or *.pth files found in {model_dir}")
 
-            # Group sharded safetensors by prefix (e.g. "diffusion_pytorch_model-0000X-of-00003")
-            # Files matching *-NNNNN-of-NNNNN.safetensors are shards of the same model.
-            import re
-
-            shard_groups = defaultdict(list)
-            standalone = []
-            for f in safetensors:
-                basename = os.path.basename(f)
-                m = re.match(r"^(.+)-\d{5}-of-\d{5}\.safetensors$", basename)
-                if m:
-                    shard_groups[m.group(1)].append(f)
-                else:
-                    standalone.append(f)
-
-            model_paths = []
-            for prefix in sorted(shard_groups):
-                shards = sorted(shard_groups[prefix])
-                model_paths.append(shards)  # list[str] → one ModelConfig with multiple files
-                logger.info("Grouped %d shards as one model: %s-*", len(shards), prefix)
-            for f in standalone:
-                model_paths.append(f)
-            for f in pth_files:
-                model_paths.append(f)
-            logger.info("Auto-discovered %d model entries from %s", len(model_paths), model_dir)
-
-        model_configs = []
-        if model_paths:
-            for p in model_paths:
-                # p is either str (single file) or list[str] (sharded model)
-                model_configs.append(ModelConfig(p))
-
-        tokenizer_path = t.tokenizer_path
-        if tokenizer_path is None:
-            # Auto-detect: look for google/umt5-xxl under model_paths directory
-            _raw = t.model_paths
-            _model_dir = _raw if isinstance(_raw, str) and os.path.isdir(_raw) else None
-            _auto_tok = os.path.join(_model_dir, "google", "umt5-xxl") if _model_dir else None
-            if _auto_tok and os.path.isdir(_auto_tok):
-                tokenizer_config = ModelConfig(_auto_tok)
-                logger.info("Auto-detected tokenizer at %s", _auto_tok)
+        # Group sharded safetensors by prefix (e.g. "diffusion_pytorch_model-0000X-of-00003")
+        shard_groups = defaultdict(list)
+        standalone = []
+        for f in safetensors:
+            basename = os.path.basename(f)
+            m = re.match(r"^(.+)-\d{5}-of-\d{5}\.safetensors$", basename)
+            if m:
+                shard_groups[m.group(1)].append(f)
             else:
-                tokenizer_config = ModelConfig(
-                    model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/"
-                )
+                standalone.append(f)
+
+        model_paths = []
+        for prefix in sorted(shard_groups):
+            shards = sorted(shard_groups[prefix])
+            model_paths.append(shards)
+            logger.info("Grouped %d shards as one model: %s-*", len(shards), prefix)
+        for f in standalone:
+            model_paths.append(f)
+        for f in pth_files:
+            model_paths.append(f)
+        logger.info("Auto-discovered %d model entries from %s", len(model_paths), model_dir)
+
+        model_configs = [ModelConfig(p) for p in model_paths]
+
+        # Auto-detect tokenizer: look for google/umt5-xxl under model_path directory
+        tokenizer_dir = os.path.join(model_dir, "google", "umt5-xxl")
+        if os.path.isdir(tokenizer_dir):
+            tokenizer_config = ModelConfig(tokenizer_dir)
+            logger.info("Auto-detected tokenizer at %s", tokenizer_dir)
         else:
-            tokenizer_config = ModelConfig(tokenizer_path)
+            tokenizer_config = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/")
 
         # Load pipeline
         pipe = WanVideoPipeline.from_pretrained(
@@ -295,14 +315,6 @@ class NativeTrainer(BaseTrainer):
                 t.preset_lora_path,
                 t.preset_lora_model,
             )
-
-        # Freeze inference-only components (text encoder, VAE, image encoder)
-        # Only DiT, VACE, and ActionDiT should be trainable
-        for name in ("text_encoder", "vae", "image_encoder"):
-            module = getattr(pipe, name, None)
-            if module is not None:
-                module.requires_grad_(False)
-                logger.info("Frozen: pipe.%s", name)
 
         # Gradient checkpointing
         if bool(t.use_gradient_checkpointing):
@@ -432,6 +444,30 @@ class NativeTrainer(BaseTrainer):
             inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
         inputs_shared, inputs_posi, _ = inputs
 
+        # Padding masks: mask (True=valid) → is_pad (True=padded)
+        #
+        # action_mask: (num_frames,) full resolution — matches action_trajectory.
+        # video_mask:  (num_video_frames,) after video_stride subsampling.
+        #   For video loss: VAE temporally downsamples ~4x. Following FastWAM,
+        #   group frames by 4, mark padded only if ALL in group are padded.
+        #   First-frame exclusion is handled inside _compute_video_loss.
+        action_mask = data.get("action_mask", None)
+        video_mask = data.get("video_mask", None)
+        if action_mask is not None:
+            if isinstance(action_mask, np.ndarray):
+                action_mask = torch.from_numpy(action_mask)
+            inputs_shared["action_is_pad"] = (~action_mask).unsqueeze(0).to(device=self.pipe.device)
+        if video_mask is not None:
+            if isinstance(video_mask, np.ndarray):
+                video_mask = torch.from_numpy(video_mask)
+            inputs_shared["video_is_pad"] = (
+                _downsample_video_mask_to_latent(
+                    ~video_mask,
+                )
+                .unsqueeze(0)
+                .to(device=self.pipe.device)
+            )
+
         # Compute loss
         result = self.loss_fn(
             pipe=self.pipe,
@@ -443,13 +479,11 @@ class NativeTrainer(BaseTrainer):
             **inputs_shared,
             **inputs_posi,
         )
-        self._last_loss_components = {k: v for k, v in result.items() if k != "loss"}
 
         return {
             "total": result["loss"],
             "video": result.get("loss_video", torch.tensor(0.0)),
             "action": result.get("loss_action", torch.tensor(0.0)),
-            **{k: v for k, v in result.items() if k != "loss"},
         }
 
     def _forward_batch(self, data_list) -> dict:
@@ -475,6 +509,8 @@ class NativeTrainer(BaseTrainer):
         all_ref_images = []
         all_prompts = []
         all_actions = []
+        all_action_masks = []
+        all_video_masks = []
 
         for sample in data_list:
             all_input_videos.append(pipe.preprocess_video(sample["video"]))
@@ -505,6 +541,22 @@ class NativeTrainer(BaseTrainer):
                     action = torch.from_numpy(action)
                 action = action.to(dtype=pipe.torch_dtype, device=pipe.device).unsqueeze(0)
             all_actions.append(action)
+
+            # Collect masks (True=valid) for padding-aware loss
+            amask = sample.get("action_mask", None)
+            vmask = sample.get("video_mask", None)
+            if amask is not None:
+                if isinstance(amask, np.ndarray):
+                    amask = torch.from_numpy(amask)
+                all_action_masks.append(amask)
+            else:
+                all_action_masks.append(None)
+            if vmask is not None:
+                if isinstance(vmask, np.ndarray):
+                    vmask = torch.from_numpy(vmask)
+                all_video_masks.append(vmask)
+            else:
+                all_video_masks.append(None)
 
         ref_flags = [r is not None for r in all_ref_images]
         if any(ref_flags) and not all(ref_flags):
@@ -610,6 +662,16 @@ class NativeTrainer(BaseTrainer):
 
         action_data = torch.cat(all_actions, dim=0) if all_actions[0] is not None else None
 
+        # Padding masks: action at full resolution, video downsampled to latent.
+        if all_action_masks[0] is not None:
+            batched_shared["action_is_pad"] = torch.stack(
+                [~m for m in all_action_masks],
+                dim=0,
+            ).to(device=pipe.device)  # (B, num_frames) full resolution
+        if all_video_masks[0] is not None:
+            latent_masks = [_downsample_video_mask_to_latent(~m) for m in all_video_masks]
+            batched_shared["video_is_pad"] = torch.stack(latent_masks, dim=0).to(device=pipe.device)
+
         result = self.loss_fn(
             pipe=self.pipe,
             architecture=self.architecture,
@@ -620,13 +682,11 @@ class NativeTrainer(BaseTrainer):
             **batched_shared,
             context=context,
         )
-        self._last_loss_components = {k: v for k, v in result.items() if k != "loss"}
 
         return {
             "total": result["loss"],
             "video": result.get("loss_video", torch.tensor(0.0)),
             "action": result.get("loss_action", torch.tensor(0.0)),
-            **{k: v for k, v in result.items() if k != "loss"},
         }
 
     def _manage_checkpoints(self, output_dir: str, keep_last_k: int):
@@ -703,7 +763,8 @@ class NativeTrainer(BaseTrainer):
 
         # Build optimizer
         params = self.get_trainable_parameters()
-        optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=float(t.weight_decay), betas=(0.9, 0.95))
+        betas = tuple(getattr(t, "adam_betas", [0.9, 0.95]))
+        optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=float(t.weight_decay), betas=betas)
 
         # Build dataloader
         dataloader = torch.utils.data.DataLoader(
@@ -829,8 +890,11 @@ class NativeTrainer(BaseTrainer):
         if max_steps:
             total_steps = min(total_steps, max_steps)
 
+        import time as _time
+
         opt_step = 0
         global_step = 0
+        _step_t0 = _time.monotonic()
         pbar = tqdm(total=total_steps, desc="Training", unit="step")
         for epoch in range(num_epochs):
             for batch in dataloader:
@@ -842,12 +906,15 @@ class NativeTrainer(BaseTrainer):
                 else:
                     loss.backward()
 
+                # Gradient clipping & optimizer step
+                grad_norm = torch.tensor(0.0, device=loss.device)
                 if (global_step + 1) % grad_accum == 0:
                     if max_grad_norm is not None:
                         if use_deepspeed:
-                            self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
+                            grad_norm_val = self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
                         else:
-                            torch.nn.utils.clip_grad_norm_(all_params, max_grad_norm)
+                            grad_norm_val = torch.nn.utils.clip_grad_norm_(all_params, max_grad_norm)
+                        grad_norm = torch.tensor(float(grad_norm_val), device=loss.device)
                     optimizer.step()
                     optimizer.zero_grad()
                     if scheduler is not None:
@@ -857,13 +924,44 @@ class NativeTrainer(BaseTrainer):
                 self._current_step = global_step
                 global_step += 1
 
+                # --- Gather losses across all ranks ---
+                _device = loss.device
+                if self.accelerator is not None and self.accelerator.num_processes > 1:
+                    # Build tensor of metrics to gather in one call
+                    local_metrics = torch.tensor(
+                        [
+                            loss.detach().float().item(),
+                            losses["video"].item()
+                            if isinstance(losses["video"], torch.Tensor)
+                            else float(losses["video"]),
+                            losses["action"].item()
+                            if isinstance(losses["action"], torch.Tensor)
+                            else float(losses["action"]),
+                            grad_norm.item(),
+                        ],
+                        device=_device,
+                        dtype=torch.float32,
+                    ).reshape(1, -1)
+                    gathered = self.accelerator.gather(local_metrics)  # (num_processes, 4)
+                    global_metrics = gathered.mean(dim=0)
+                    loss_total = global_metrics[0].item()
+                    loss_video = global_metrics[1].item()
+                    loss_action = global_metrics[2].item()
+                    global_grad_norm = global_metrics[3].item()
+                else:
+                    loss_total = loss.detach().item()
+                    loss_video = (
+                        losses["video"].item() if isinstance(losses["video"], torch.Tensor) else float(losses["video"])
+                    )
+                    loss_action = (
+                        losses["action"].item()
+                        if isinstance(losses["action"], torch.Tensor)
+                        else float(losses["action"])
+                    )
+                    global_grad_norm = grad_norm.item()
+
                 # --- Progress bar ---
                 current_lr = optimizer.param_groups[0]["lr"]
-                loss_total = losses["total"].item()
-                loss_video = losses["video"].item() if isinstance(losses["video"], torch.Tensor) else losses["video"]
-                loss_action = (
-                    losses["action"].item() if isinstance(losses["action"], torch.Tensor) else losses["action"]
-                )
                 pbar.set_postfix(
                     loss=f"{loss_total:.4f}",
                     video=f"{loss_video:.4f}",
@@ -873,18 +971,21 @@ class NativeTrainer(BaseTrainer):
                 )
                 pbar.update(1)
 
-                # --- wandb ---
+                # --- wandb (rank 0 only, with global-averaged metrics) ---
                 if wandb_run is not None:
+                    _now = _time.monotonic()
+                    steps_per_sec = 1.0 / max(_now - _step_t0, 1e-9)
+                    _step_t0 = _now
+                    _num_procs = self.accelerator.num_processes if self.accelerator is not None else 1
                     log_dict = {
                         "train/loss": loss_total,
                         "train/loss_video": loss_video,
                         "train/loss_action": loss_action,
+                        "train/grad_norm": global_grad_norm,
                         "train/lr": current_lr,
-                        "train/epoch": epoch,
+                        "performance/steps_per_sec": steps_per_sec,
+                        "performance/samples_per_sec": steps_per_sec * batch_size * _num_procs,
                     }
-                    for key in ("loss_video_unweighted", "loss_action_unweighted", "loss_scale_ratio"):
-                        if key in losses and isinstance(losses[key], torch.Tensor):
-                            log_dict[f"train/{key}"] = losses[key].item()
                     wandb_run.log(log_dict, step=global_step)
 
                 # Periodic checkpoint saving (rank 0 only for multi-GPU)

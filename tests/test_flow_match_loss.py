@@ -34,21 +34,6 @@ def test_flow_match_loss_config():
     assert loss_fn.detach_bridge is True
 
 
-def test_legacy_loss_still_importable():
-    """Legacy FlowMatchVideoActionSFTLoss should still be importable."""
-    from openwam.train.loss.sft_loss import FlowMatchVideoActionSFTLoss
-
-    assert callable(FlowMatchVideoActionSFTLoss)
-
-
-def test_both_losses_in_training_init():
-    """Both loss functions should be in training __all__."""
-    from openwam.train import FlowMatchVideoActionLoss, FlowMatchVideoActionSFTLoss
-
-    assert callable(FlowMatchVideoActionLoss)
-    assert callable(FlowMatchVideoActionSFTLoss)
-
-
 def test_flow_match_loss_video_loss_computation():
     """Test video loss computation with mock tensors."""
     from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss

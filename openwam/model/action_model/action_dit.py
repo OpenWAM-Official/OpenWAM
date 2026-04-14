@@ -42,6 +42,9 @@ from einops import rearrange
 
 from openwam.model.action_model.attention_utils import get_attention_fn
 
+# Re-export shared components for backward compatibility
+from openwam.model.action_model.components import RMSNorm, sinusoidal_embedding_1d  # noqa: F401, E402
+
 
 @dataclass
 class ActionDiTState:
@@ -67,28 +70,6 @@ class ActionDiTState:
     skip_prefix_tokens: int = 0
     use_gradient_checkpointing: bool = False
     use_gradient_checkpointing_offload: bool = False
-
-
-def sinusoidal_embedding_1d(dim, position):
-    """Sinusoidal positional embedding for timestep conditioning."""
-    sinusoid = torch.outer(
-        position.type(torch.float64),
-        torch.pow(10000, -torch.arange(dim // 2, dtype=torch.float64, device=position.device).div(dim // 2)),
-    )
-    x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
-    return x.to(position.dtype)
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        dtype = x.dtype
-        normed = x.float() * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return normed.to(dtype) * self.weight
 
 
 class ActionSelfAttention(nn.Module):
@@ -434,15 +415,19 @@ class ActionDiT(nn.Module):
         self.bridge_layers_set = set(bridge_layers)
         self.bridge_type = bridge_type
 
-        # Action token embedding: projects raw action to hidden dim
-        self.action_embedding = nn.Sequential(
-            nn.Linear(action_dim, dim),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(dim, dim),
+        from openwam.model.action_model.components import (
+            ActionEmbedding,
+            ActionOutputHead,
+            LearnedPositionalEncoding,
+            TimestepEmbedding,
+            TimestepModulation,
         )
 
+        # Action token embedding: projects raw action to hidden dim
+        self.action_embedding = ActionEmbedding(action_dim, dim)
+
         # Learned positional encoding for action sequence
-        self.pos_embedding = nn.Parameter(torch.randn(1, max_action_len, dim) * 0.02)
+        self.pos_encoding = LearnedPositionalEncoding(max_action_len, dim)
 
         # Per-block video feature projections (video_dim -> dim)
         # Each ActionDiT block has its own projection since features from
@@ -462,21 +447,14 @@ class ActionDiT(nn.Module):
                 nn.init.zeros_(proj.bias)
 
         # Timestep embedding (independent from video timestep)
-        self.time_embedding = nn.Sequential(
-            nn.Linear(freq_dim, dim),
-            nn.SiLU(),
-            nn.Linear(dim, dim),
-        )
+        self.time_embedding = TimestepEmbedding(freq_dim, dim)
 
         # Number of modulation params per block depends on bridge type:
         # cross_attn / cross_attn_detach: 9 (3 self-attn + 3 cross-attn + 3 ffn)
         # joint_self_attn: 6 (3 joint-attn + 3 ffn; video has static modulation)
         t_mod_params = 6 if bridge_type == "joint_self_attn" else 9
         self.t_mod_params = t_mod_params
-        self.time_projection = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(dim, dim * t_mod_params),
-        )
+        self.time_projection = TimestepModulation(dim, t_mod_params)
 
         # Transformer blocks
         if bridge_type == "joint_self_attn":
@@ -485,13 +463,7 @@ class ActionDiT(nn.Module):
             self.blocks = nn.ModuleList([ActionDiTBlock(dim, num_heads, ffn_dim, eps) for _ in range(num_layers)])
 
         # Output head
-        self.output_norm = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
-        self.output_head = nn.Linear(dim, action_dim)
-        self.output_modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
-
-        # Initialize output to near-zero for stable training start
-        nn.init.zeros_(self.output_head.weight)
-        nn.init.zeros_(self.output_head.bias)
+        self.action_output_head = ActionOutputHead(dim, action_dim, eps)
 
         # Action normalization stats (saved as persistent buffers for checkpoint)
         self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
@@ -520,12 +492,12 @@ class ActionDiT(nn.Module):
 
         # Embed actions
         x = self.action_embedding(action_tokens)
-        x = x + self.pos_embedding[:, :T, :]
+        x = self.pos_encoding(x)
 
         # Timestep conditioning
         timestep = timestep.flatten()
-        t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
-        t_mod = self.time_projection(t).unflatten(1, (self.t_mod_params, self.dim))
+        t = self.time_embedding(timestep)
+        t_mod = self.time_projection(t)
 
         return ActionDiTState(
             action_dit=self,
@@ -545,12 +517,7 @@ class ActionDiT(nn.Module):
         Returns:
             (B, T_action, action_dim) — predicted action noise
         """
-        t = state.t_embed
-        x = state.x_action
-        shift_out, scale_out = (
-            self.output_modulation.to(dtype=t.dtype, device=t.device) + t.unsqueeze(1).expand(-1, 2, -1)
-        ).chunk(2, dim=1)
-        return self.output_head(self.output_norm(x) * (1 + scale_out) + shift_out)
+        return self.action_output_head(state.x_action, state.t_embed)
 
     def forward(
         self,
@@ -573,22 +540,22 @@ class ActionDiT(nn.Module):
             (B, T_action, action_dim) - predicted action noise
         """
         B, T, _ = action_tokens.shape
-        assert T <= self.pos_embedding.shape[1], (
-            f"Action sequence length {T} exceeds max_action_len {self.pos_embedding.shape[1]}"
+        assert T <= self.pos_encoding.embedding.shape[1], (
+            f"Action sequence length {T} exceeds max_action_len {self.pos_encoding.embedding.shape[1]}"
         )
 
         # Embed actions
         x = self.action_embedding(action_tokens)
 
         # Add positional encoding
-        x = x + self.pos_embedding[:, :T, :]
+        x = self.pos_encoding(x)
 
         # Ensure timestep is 1D
         timestep = timestep.flatten()
 
         # Timestep conditioning
-        t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
-        t_mod = self.time_projection(t).unflatten(1, (self.t_mod_params, self.dim))
+        t = self.time_embedding(timestep)
+        t_mod = self.time_projection(t)
 
         # Transformer blocks — each block gets its own projected video feature
         def create_custom_forward(block):
@@ -651,13 +618,7 @@ class ActionDiT(nn.Module):
                 else:
                     x = block(x, x_video_i, t_mod)
 
-        # Output head with AdaLN modulation (reuse t from timestep embedding above)
-        shift_out, scale_out = (
-            self.output_modulation.to(dtype=t.dtype, device=t.device) + t.unsqueeze(1).expand(-1, 2, -1)
-        ).chunk(2, dim=1)
-        x = self.output_head(self.output_norm(x) * (1 + scale_out) + shift_out)
-
-        return x
+        return self.action_output_head(x, t)
 
     @staticmethod
     def state_dict_converter():

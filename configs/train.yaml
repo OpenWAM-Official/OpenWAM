@@ -1,57 +1,64 @@
 defaults:
-  - accelerate: deepspeed_zero2
-  - model: dual_system
-  - model/video_backbone: ti2v_5b
-  - model/action_backbone: action_dit_small
-  - model/bridge: cross_attn_detach
-  - dataloader: robotwin
-  - training_strategy: joint
+  - accelerate: deepspeed_zero2   # [Optional]: deepspeed_zero1, deepspeed_zero2(default), deepspeed_zero3
+  - model: dual_system            # [Optional]: dual_system(default), shared_backbone, moe_expert
+  - dataloader: robotwin          # [Optional]: robotwin(default)
+  - training_strategy: joint      # [Optional]: joint(default) or video_only
   - _self_
 
-# Training hyperparams (absorbed from old training/joint.yaml)
 training:
-  learning_rate: 1e-4
-  weight_decay: 0.01
-  max_grad_norm: 1.0
-  num_epochs: 5
-  max_steps: null
-  batch_size: 1
-  gradient_accumulation_steps: 4
-  use_gradient_checkpointing: true
-  use_gradient_checkpointing_offload: false
-  max_timestep_boundary: 1.0
-  min_timestep_boundary: 0.0
-  find_unused_parameters: false
-  # Model loading
-  model_paths: null
-  tokenizer_path: null
-  initialize_model_on_cpu: false
-  # LoRA
-  lora_base_model: null
-  lora_target_modules: "q,k,v,o,ffn.0,ffn.2"
-  lora_rank: 32
-  lora_checkpoint: null
-  preset_lora_path: null
-  preset_lora_model: null
-  trainable_models: null
-  # FP8 & offload
-  fp8_models: null
-  offload_models: null
-  # Checkpointing
-  output_path: ./models
-  save_steps: 2000
-  keep_last_k_ckpts: 3
-  dataset_num_workers: 0
-  # LR scheduler
-  lr_scheduler: cosine
-  warmup_ratio: 0.05
-  lr_min_ratio: 0.01
-  # Per-module LR
-  action_lr: null
-  video_lr: null
-  lora_lr: null
-  # Debug
-  debug: false
+  # --- Optimizer ---
+  learning_rate: 1e-4             # Base learning rate for AdamW
+  adam_betas: [0.9, 0.95]         # AdamW (beta1, beta2)
+  weight_decay: 0.01              # AdamW weight decay
+  max_grad_norm: 1.0              # Gradient clipping max norm
+
+  # --- Schedule ---
+  num_epochs: 5                   # Total training epochs
+  max_steps: null                 # Early stop after N steps (null = no limit)
+  batch_size: 1                   # Per-GPU batch size
+  gradient_accumulation_steps: 4  # Accumulate N micro-batches before optimizer step
+
+  # --- LR scheduler ---
+  lr_scheduler: cosine            # cosine with linear warmup; null = constant LR
+  warmup_ratio: 0.05              # Fraction of total steps for linear warmup
+  lr_min_ratio: 0.01              # Minimum LR as fraction of learning_rate
+
+  # --- Per-module LR (null = use base learning_rate) ---
+  action_lr: null                 # Override LR for action model parameters
+  video_lr: null                  # Override LR for video DiT parameters
+  lora_lr: null                   # Override LR for LoRA parameters
+
+  # --- Memory optimization ---
+  use_gradient_checkpointing: true       # Trade compute for memory in DiT blocks
+  use_gradient_checkpointing_offload: false  # Offload checkpointed activations to CPU
+  initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
+
+  # --- Flow matching timestep range ---
+  max_timestep_boundary: 1.0      # Upper bound (fraction of total timesteps)
+  min_timestep_boundary: 0.0      # Lower bound (fraction of total timesteps)
+
+  # --- LoRA ---
+  lora_base_model: null           # Pipeline sub-module to apply LoRA (e.g. "dit"); null = no LoRA
+  lora_target_modules: "q,k,v,o,ffn.0,ffn.2"  # Comma-separated target module names
+  lora_rank: 32                   # LoRA rank
+
+  # --- Checkpoint ---
+  output_path: ./models           # Base directory for checkpoint output
+  save_steps: 2000                # Save checkpoint every N steps
+  keep_last_k_ckpts: 3           # Rolling window: keep only the last K checkpoints
+
+  # --- Data loading ---
+  dataset_num_workers: 0          # DataLoader num_workers (0 = main process)
+
+  # --- Debug ---
+  debug: false                    # Debug mode: max_steps=20, save@5, constant LR
+
+  # --- Decoupled training (DreamZero-Flash style) ---
+  decoupled:
+    enabled: false                # Enable Beta-distributed video timestep sampling
+    video_beta_a: 0.5            # Beta(a, b): lower a = more bias toward high noise
+    video_beta_b: 1.0            # Beta(a, b)
+    warmup_steps: 0              # Steps of uniform sampling before switching to Beta
 
 project:
   name: open-wam

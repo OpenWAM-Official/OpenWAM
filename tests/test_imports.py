@@ -85,15 +85,7 @@ def test_import_training_base():
 
 
 def test_import_training_loss():
-    from openwam.train.loss.sft_loss import FlowMatchVideoActionSFTLoss  # noqa: F401
-
-
-def test_import_training_runtime():
-    from openwam.train.runtime import (  # noqa: F401
-        build_training_dataset,
-        build_validation_datasets,
-        cfg_to_flat_namespace,
-    )
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss  # noqa: F401
 
 
 def test_import_training_optimizer_groups():
@@ -103,21 +95,10 @@ def test_import_training_optimizer_groups():
     )
 
 
-def test_import_training_callbacks():
-    from openwam.train.callbacks import (  # noqa: F401
-        CallbackRunner,
-        SetupCallback,
-        TrainingCallback,
-        ValidationLossCallback,
-        VideoLogCallback,
-    )
-
-
 def test_import_training_init():
     from openwam.train import (  # noqa: F401
         BaseTrainer,
-        CallbackRunner,
-        FlowMatchVideoActionSFTLoss,
+        FlowMatchVideoActionLoss,
         NativeTrainer,
     )
 
@@ -154,12 +135,8 @@ def test_import_model_config():
     from openwam.deployment.model_config import ModelConfig  # noqa: F401
 
 
-def test_import_video_pipeline_wrapper():
-    from openwam.model.video_model.video_pipeline import WanVideoPipeline  # noqa: F401
-
-
-def test_import_models_backbone():
-    from openwam.model.backbone.base import BaseVideoBackbone  # noqa: F401
+def test_import_video_backbone():
+    from openwam.model.video_backbone import WanVideoPipeline  # noqa: F401
 
 
 def test_import_architecture_registry():

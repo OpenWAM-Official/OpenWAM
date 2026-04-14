@@ -52,7 +52,7 @@ class DualSystemArchitecture(BaseWAMArchitecture):
                 dim=int(cfg.get("dim", 768)),
                 ffn_dim=int(cfg.get("ffn_dim", 3072)),
                 num_heads=int(cfg.get("num_heads", 12)),
-                num_layers=int(cfg.get("num_layers", 8)),
+                num_layers=len(bl),  # auto-derived from bridge_layers
                 video_dim=int(cfg.get("video_dim", 1536)),
                 bridge_layers=bl,
                 bridge_type=cfg.get("bridge_type", "cross_attn_detach"),

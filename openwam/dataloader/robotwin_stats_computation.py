@@ -35,14 +35,14 @@ def _read_eef_actions_from_file(f) -> np.ndarray:
 
     Layout: [left_xyz(3), left_rot6d(6), left_grip(1),
              right_xyz(3), right_rot6d(6), right_grip(1)]
-    Gripper: 1 = closed, 0 = open (inverted from raw HDF5).
+    Gripper values are raw continuous values from HDF5 (1=open, 0=closed).
     """
     from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
 
     left_ep = f["endpose/left_endpose"][()].astype(np.float64)  # (T, 7)
     right_ep = f["endpose/right_endpose"][()].astype(np.float64)
-    left_grip = 1.0 - f["endpose/left_gripper"][()].astype(np.float64)
-    right_grip = 1.0 - f["endpose/right_gripper"][()].astype(np.float64)
+    left_grip = f["endpose/left_gripper"][()].astype(np.float64)
+    right_grip = f["endpose/right_gripper"][()].astype(np.float64)
 
     left = np.concatenate(
         [

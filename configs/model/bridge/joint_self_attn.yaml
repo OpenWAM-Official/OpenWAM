@@ -1,3 +1,0 @@
-bridge:
-  type: joint_self_attn
-  layers: [3, 7, 11, 15, 19, 23, 26, 29]

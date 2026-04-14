@@ -1,6 +1,0 @@
-name: vace
-video_dim: 3072
-resolution:
-  height: 480
-  width: 832
-model_id: Wan-AI/Wan2.1-VACE-1.3B

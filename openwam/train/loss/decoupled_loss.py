@@ -13,7 +13,7 @@ Usage:
     loss_fn = DecoupledFlowMatchLoss(
         video_beta_a=0.5, video_beta_b=1.0,
     )
-    # Use in place of standard FlowMatchVideoActionSFTLoss
+    # Use in place of standard FlowMatchVideoActionLoss
 """
 
 import torch
@@ -27,7 +27,7 @@ class DecoupledFlowMatchLoss:
     Wraps the standard loss computation with Beta-distributed video
     timestep sampling. This is not a standalone loss function — it
     provides the timestep sampling logic that should be used with
-    the existing FlowMatchVideoActionSFTLoss.
+    the existing FlowMatchVideoActionLoss.
 
     Args:
         video_beta_a: Beta distribution alpha for video timesteps.

@@ -300,11 +300,10 @@ class RoboTwinDataset(BaseActionDataset):
 
     Action modes:
         ``joint`` — reads ``joint_action/vector`` (14/16D qpos).
-            Normalisation: min-max → [-1, 1] for joints, binary {0, 1}
-            for grippers (1 = closed, 0 = open).
+            Normalisation: min-max → [-1, 1] for all dims including gripper.
         ``eef`` — reads ``endpose/`` keys and assembles 20D EEF vector:
             ``[xyz(3) + rot6d(6) + gripper(1)] × 2 arms``.
-            No normalisation applied; gripper inverted so 1 = closed.
+            No normalisation applied; gripper uses raw continuous values.
 
     Epoch strategy:
         Training enumerates all valid ``(episode, start_frame)`` windows
@@ -551,10 +550,6 @@ class RoboTwinDataset(BaseActionDataset):
         stats = dict(self._action_stats)
         equiv_mean = (stats["min"] + stats["max"]) / 2.0
         equiv_std = np.maximum(stats["max"] - stats["min"], 1e-6) / 2.0
-        for gi in JOINT_GRIPPER_INDICES:
-            if gi < len(equiv_mean):
-                equiv_mean[gi] = 0.0
-                equiv_std[gi] = 1.0
         stats["mean"] = equiv_mean
         stats["std"] = equiv_std
         return stats
@@ -562,29 +557,16 @@ class RoboTwinDataset(BaseActionDataset):
     def denormalize_action(self, action: np.ndarray) -> np.ndarray:
         """Convert normalized actions back to the robot-native format.
 
-        Joint mode: min-max inverse for joint dims; gripper dims are binary
-            {0=open, 1=closed} and are re-inverted to raw RoboTwin convention
-            (1=open, 0=closed).
-        EEF mode: gripper is binary {0=open, 1=closed}, re-inverted to raw.
+        Joint mode: min-max inverse for all dims (including gripper).
+        EEF mode: no normalization applied, return as-is.
         """
         if self.action_mode == "eef":
-            result = action.copy() if isinstance(action, np.ndarray) else np.array(action)
-            for gi in EEF_GRIPPER_INDICES:
-                if gi < result.shape[-1]:
-                    # Binary 1=closed → raw 1=open
-                    result[..., gi] = 1.0 - (result[..., gi] > 0.5).astype(np.float32)
-            return result
-        # Joint mode
+            return action.copy() if isinstance(action, np.ndarray) else np.array(action)
+        # Joint mode: min-max inverse
         if self._action_stats is None:
-            result = action.copy() if isinstance(action, np.ndarray) else np.array(action)
-        else:
-            stats = self._action_stats
-            result = 0.5 * (action + 1.0) * (stats["max"] - stats["min"]) + stats["min"]
-        # Gripper: binary 1=closed → raw 1=open
-        for gi in JOINT_GRIPPER_INDICES:
-            if gi < result.shape[-1]:
-                result[..., gi] = 1.0 - (action[..., gi] > 0.5).astype(np.float32)
-        return result
+            return action.copy() if isinstance(action, np.ndarray) else np.array(action)
+        stats = self._action_stats
+        return 0.5 * (action + 1.0) * (stats["max"] - stats["min"]) + stats["min"]
 
     def __len__(self):
         if self._val_samples is not None:
@@ -715,14 +697,12 @@ class RoboTwinDataset(BaseActionDataset):
 
         Layout: [left_xyz(3), left_rot6d(6), left_grip(1),
                  right_xyz(3), right_rot6d(6), right_grip(1)]
-        Gripper convention: 1 = closed, 0 = open (inverted from raw HDF5).
+        Gripper values are raw continuous values from HDF5 (1=open, 0=closed).
         """
         left_ep = f["endpose/left_endpose"][start:end]  # (T, 7): xyz + quat_xyzw
         right_ep = f["endpose/right_endpose"][start:end]
-        # Binarize + invert: raw 1=open → (raw > 0.5) gives True=open
-        # → invert to 1=closed, 0=open (matching X-VLA / starVLA convention)
-        left_grip = 1.0 - (f["endpose/left_gripper"][start:end] > 0.5).astype(np.float64)
-        right_grip = 1.0 - (f["endpose/right_gripper"][start:end] > 0.5).astype(np.float64)
+        left_grip = f["endpose/left_gripper"][start:end].astype(np.float64)
+        right_grip = f["endpose/right_gripper"][start:end].astype(np.float64)
 
         left = np.concatenate(
             [
@@ -745,17 +725,8 @@ class RoboTwinDataset(BaseActionDataset):
         return np.concatenate([left, right], axis=-1).astype(np.float32)  # (T, 20)
 
     def _normalize_joint_actions(self, actions: np.ndarray) -> np.ndarray:
-        """Min-max normalize joint dims to [-1,1], preserve binary gripper dims.
-
-        Gripper channels are already binarized (1=closed, 0=open) before this
-        method is called, so they are copied through unchanged.
-        """
-        normalized = 2.0 * (actions - self._norm_min) / self._norm_range - 1.0
-        # Restore pre-binarized gripper values (skip min-max for gripper dims)
-        for gi in JOINT_GRIPPER_INDICES:
-            if gi < actions.shape[1]:
-                normalized[:, gi] = actions[:, gi]
-        return normalized
+        """Min-max normalize all joint dims (including gripper) to [-1,1]."""
+        return 2.0 * (actions - self._norm_min) / self._norm_range - 1.0
 
     def __getitem__(self, idx):
         # ---- Determine episode index and start frame ----
@@ -795,17 +766,9 @@ class RoboTwinDataset(BaseActionDataset):
                 axis=0,
             )
 
-        # Action mask: True for real frames, False for padded frames
-        action_mask = torch.ones(self.num_frames, dtype=torch.bool)
-        action_mask[valid_len:] = False
-
         # ---- Normalize actions ----
         if self.action_mode == "joint":
-            # Binarize gripper channels (raw: 1=open, 0=closed → 1=closed, 0=open)
-            for gi in JOINT_GRIPPER_INDICES:
-                if gi < actions.shape[1]:
-                    actions[:, gi] = 1.0 - (actions[:, gi] > 0.5).astype(np.float32)
-            # Min-max normalize joint dims if stats are available
+            # Min-max normalize all dims (including gripper) if stats are available
             if self._norm_min is not None:
                 actions = self._normalize_joint_actions(actions)
 
@@ -819,6 +782,17 @@ class RoboTwinDataset(BaseActionDataset):
         if self.video_stride > 1:
             video_indices = list(range(0, len(video), self.video_stride))
             video = [video[i] for i in video_indices]
+        else:
+            video_indices = list(range(len(video)))
+
+        # ---- Build masks ----
+        # action_mask: (num_frames,) True=valid, False=padded — full resolution
+        action_mask = torch.ones(self.num_frames, dtype=torch.bool)
+        action_mask[valid_len:] = False
+
+        # video_mask: (num_video_frames,) True=valid, False=padded — after subsampling
+        # A subsampled video frame is valid if its source index < valid_len.
+        video_mask = torch.tensor([i < valid_len for i in video_indices], dtype=torch.bool)
 
         vace_reference_image = [video[0]]
 
@@ -837,7 +811,8 @@ class RoboTwinDataset(BaseActionDataset):
             "vace_reference_image": vace_reference_image,
             "action_trajectory": action_tensor,
             "action": action_tensor,  # BaseActionDataset compat
-            "action_mask": action_mask,
+            "action_mask": action_mask,  # (num_frames,) True=valid
+            "video_mask": video_mask,  # (num_video_frames,) True=valid
             "prompt": prompt,
             # Metadata
             "episode_index": ep_idx,

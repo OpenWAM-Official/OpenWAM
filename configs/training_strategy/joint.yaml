@@ -1,4 +1,6 @@
 # Joint video+action training — both streams active
 lambda_video: 1.0
 lambda_action: 1.0
-freeze_modules: []  # nothing frozen
+freeze:
+  - text_encoder
+  - vae

@@ -89,11 +89,13 @@ from omegaconf import DictConfig  # noqa: E402
 
 # EEF 20D layout: [left_xyz(3), left_rot6d(6), left_grip(1),
 #                  right_xyz(3), right_rot6d(6), right_grip(1)]
+# Gripper: raw continuous values from HDF5 (1=open, 0=closed)
 _EEF_LABELS = (
     ["left_xyz"] * 3 + ["left_rot6d"] * 6 + ["left_grip"] + ["right_xyz"] * 3 + ["right_rot6d"] * 6 + ["right_grip"]
 )
 
 # Joint 14D layout: [left_arm(6), left_grip(1), right_arm(6), right_grip(1)]
+# All dims (including gripper) min-max normalized to [-1, 1]
 _JOINT_LABELS = ["left_arm"] * 6 + ["left_grip"] + ["right_arm"] * 6 + ["right_grip"]
 
 

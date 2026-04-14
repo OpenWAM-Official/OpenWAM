@@ -1,20 +1,17 @@
 # MoE Action Expert Architecture (BAGEL MoT-inspired)
-#
-# Action tokens are concatenated to the video token sequence.
-# Shared self-attention provides cross-modal grounding.
+# Action tokens concatenated to video sequence with shared self-attention.
 # Expert FFN layers provide modality-specific capacity at designated layers.
-#
-# References:
-# - BAGEL (ByteDance Seed, arXiv:2505.14683): Shared attention + expert FFN
-# - DreamZero: Shared backbone WAM
-#
-# See assets/arch.png for architecture diagram.
 
 architecture:
   type: moe_expert
-  action_dim: 20
-  video_dim: 3072       # Must match backbone video_dim
+  action_dim: 14
   expert_ffn_dim: 4096
-  num_experts: 8
-  expert_layers: [3, 7, 11, 15, 19, 23, 26, 29]
-  proprioception: none
+  # len(bridge_layers) auto-determines num_experts.
+  bridge_layers: [3, 7, 11, 15, 19, 23, 26, 29]  # TI2V-5B/VACE-1.3B: 30 layers (index 0-29)
+
+# Video backbone
+# Resolution: any height/width where height % 32 == 0 and width % 32 == 0.
+# Actual training resolution is determined by dataloader config.
+video_backbone:
+  name: ti2v_5b
+  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory

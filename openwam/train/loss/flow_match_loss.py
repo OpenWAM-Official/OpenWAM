@@ -1,11 +1,6 @@
 """Standalone flow matching loss for joint video-action training.
 
-Replaces the legacy ``FlowMatchVideoActionSFTLoss`` function from
-``examples/wanvideo/wam/train_video_action.py`` with a clean,
-self-contained implementation that has no sys.path manipulation or
-legacy module imports.
-
-The loss implements the UWM-style training objective:
+Standalone flow matching loss for the UWM-style training objective:
 
     L = lambda_video * L_video + lambda_action * L_action
 
@@ -38,6 +33,10 @@ class FlowMatchVideoActionLoss:
     Implements per-sample timestep sampling, noise injection, and weighted
     MSE loss computation for both video and action modalities.
 
+    Supports padding masks for variable-length batches:
+      - video_is_pad: (B, T) bool mask, True for padded video frames.
+      - action_is_pad: (B, T_action) bool mask, True for padded action steps.
+
     Args:
         lambda_video: Weight for video loss term.
         lambda_action: Weight for action loss term.
@@ -45,20 +44,15 @@ class FlowMatchVideoActionLoss:
             gradients from flowing to the video DiT.
     """
 
-    # EEF 20D gripper positions: left_grip=dim9, right_grip=dim19
-    EEF_GRIPPER_INDICES = (9, 19)
-
     def __init__(
         self,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
         detach_bridge: bool = False,
-        action_mode: str = "joint",
     ):
         self.lambda_video = lambda_video
         self.lambda_action = lambda_action
         self.detach_bridge = detach_bridge
-        self.action_mode = action_mode
 
     def __call__(
         self,
@@ -85,10 +79,11 @@ class FlowMatchVideoActionLoss:
             architecture: WAM architecture (preferred over raw action_dit).
             **inputs: Pipeline inputs, must include ``input_latents``
                 (B, C, T, H, W) clean video latents.
+                Optional: ``video_is_pad`` (B, T) and ``action_is_pad``
+                (B, T_action) boolean padding masks.
 
         Returns:
-            dict with keys: loss, loss_video, loss_action, video_weight,
-            loss_video_unweighted, loss_action_unweighted, loss_scale_ratio.
+            dict with keys: loss, loss_video, loss_action.
         """
         # Resolve architecture from action_dit for backward compat
         if architecture is None and action_dit is not None:
@@ -172,6 +167,7 @@ class FlowMatchVideoActionLoss:
             )
 
         # --- Video loss ---
+        video_is_pad = inputs.get("video_is_pad", None)  # (B, T) or None
         loss_video = self._compute_video_loss(
             video_noise_pred,
             video_target,
@@ -179,13 +175,14 @@ class FlowMatchVideoActionLoss:
             pipe,
             inputs,
             B,
+            video_is_pad=video_is_pad,
         )
 
         if self.lambda_action == 0:
             return {
                 "loss": self.lambda_video * loss_video,
-                "loss_video": loss_video.detach(),
-                "video_weight": self.lambda_video,
+                "loss_video": self.lambda_video * loss_video.detach(),
+                "loss_action": torch.tensor(0.0, device=loss_video.device),
             }
 
         # --- Action loss ---
@@ -213,6 +210,7 @@ class FlowMatchVideoActionLoss:
                     _, action_state = architecture.on_dit_block(layer_id, bridge_features[layer_idx], action_state)
             action_noise_pred = architecture.extract_action_prediction(action_state)
 
+        action_is_pad = inputs.get("action_is_pad", None)  # (B, T_action) or None
         loss_action = self._compute_action_loss(
             action_noise_pred,
             action_target,
@@ -220,9 +218,7 @@ class FlowMatchVideoActionLoss:
             action_scheduler,
             pipe,
             B,
-            noisy_actions=noisy_actions,
-            action_sigmas=ap["action_sigmas"],
-            action_data_clean=ap["action_data_clean"],
+            action_is_pad=action_is_pad,
         )
 
         # --- Combined loss ---
@@ -231,24 +227,10 @@ class FlowMatchVideoActionLoss:
         else:
             loss = self.lambda_video * loss_video + self.lambda_action * loss_action
 
-        # Unweighted for monitoring
-        video_tw = pipe.scheduler.linear_timesteps_weights[video_timestep_ids].to(
-            dtype=torch.float32, device=pipe.device
-        )
-        action_tw = action_scheduler.linear_timesteps_weights[action_timestep_ids].to(
-            dtype=torch.float32, device=pipe.device
-        )
-        loss_video_uw = (loss_video / (video_tw.mean() + 1e-8)).detach()
-        loss_action_uw = (loss_action / (action_tw.mean() + 1e-8)).detach()
-
         return {
             "loss": loss,
-            "loss_video": loss_video.detach(),
-            "loss_action": loss_action.detach(),
-            "video_weight": self.lambda_video,
-            "loss_video_unweighted": loss_video_uw,
-            "loss_action_unweighted": loss_action_uw,
-            "loss_scale_ratio": (loss_video.detach() / (loss_action.detach() + 1e-8)),
+            "loss_video": self.lambda_video * loss_video.detach(),
+            "loss_action": self.lambda_action * loss_action.detach(),
         }
 
     def _sample_video_timesteps(
@@ -322,12 +304,8 @@ class FlowMatchVideoActionLoss:
         if action_data.dim() == 2:
             action_data = action_data.unsqueeze(0)
 
-        # Subsample actions to match video frames
-        T_action = action_data.shape[1]
-        T_video_frames = inputs.get("num_frames", 49)
-        if T_action > T_video_frames:
-            indices = torch.linspace(0, T_action - 1, T_video_frames).long()
-            action_data = action_data[:, indices]
+        # Actions stay at full temporal resolution (e.g. 33 steps),
+        # independent of video frame count (e.g. 9 frames after stride).
 
         # Encode actions into diffusion latent space (identity for continuous)
         if action_repr is not None:
@@ -368,19 +346,48 @@ class FlowMatchVideoActionLoss:
         pipe,
         inputs,
         B,
+        video_is_pad=None,
     ):
-        """Compute per-sample weighted video MSE loss."""
+        """Compute per-sample weighted video MSE loss.
+
+        Reduction follows FastWAM: mean over (C, H, W), then masked mean
+        over T, then weighted mean over B with timestep weights.
+
+        Args:
+            noise_pred: (B, C, T, H, W) predicted noise.
+            target: (B, C, T, H, W) target noise.
+            timestep_ids: (B,) sampled timestep indices.
+            pipe: Pipeline (for scheduler weights and device).
+            inputs: Dict with optional ``first_frame_latents``.
+            B: Batch size.
+            video_is_pad: (B, T_latent) bool, True for padded frames.
+                T_latent is the temporal dim of the latent (after VAE
+                temporal downsampling). If None, no masking.
+        """
         if inputs.get("first_frame_latents") is not None:
             noise_pred = noise_pred[:, :, 1:]
             target = target[:, :, 1:]
+            # video_is_pad already excludes frame 0 (built with
+            # include_first_frame=False in the trainer), so no trim needed.
 
         tw = pipe.scheduler.linear_timesteps_weights[timestep_ids].to(dtype=torch.float32, device=pipe.device)
-        if B == 1:
-            return F.mse_loss(noise_pred.float(), target.float()) * tw[0]
 
-        per_sample = F.mse_loss(noise_pred.float(), target.float(), reduction="none").mean(
-            dim=list(range(1, noise_pred.ndim))
-        )
+        # Per-element MSE → mean over (C, H, W), keep (B, T)
+        # noise_pred shape: (B, C, T, H, W)
+        per_element = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
+        per_frame = per_element.mean(dim=(1, 3, 4))  # (B, T)
+
+        if video_is_pad is not None:
+            # video_is_pad: (B, T_latent) — already downsampled to latent
+            # temporal dim by the trainer.
+            video_is_pad = video_is_pad.to(device=per_frame.device, dtype=torch.bool)
+            valid_mask = ~video_is_pad  # True for valid frames
+            per_frame = per_frame * valid_mask.float()
+            valid_count = valid_mask.float().sum(dim=1).clamp(min=1)
+            per_sample = per_frame.sum(dim=1) / valid_count  # (B,)
+        else:
+            per_sample = per_frame.mean(dim=1)  # (B,)
+
         return (per_sample * tw).mean()
 
     def _compute_action_loss(
@@ -391,59 +398,40 @@ class FlowMatchVideoActionLoss:
         scheduler,
         pipe,
         B,
-        noisy_actions=None,
-        action_sigmas=None,
-        action_data_clean=None,
+        action_is_pad=None,
     ):
-        """Compute per-sample weighted action loss.
+        """Compute per-sample weighted action MSE loss.
 
-        When ``action_mode == "eef"``, the 20D action vector is split:
-        - Continuous dims (18D): flow matching MSE on velocity prediction.
-        - Gripper dims [9, 19] (2D): reconstruct x_0_hat from velocity
-          prediction via ``x_0_hat = x_t - sigma * v_pred``, then apply
-          binary cross-entropy against the ground-truth binary values.
+        Reduction: mean over action_dim, then masked mean over T,
+        then weighted mean over B with timestep weights.
 
-        Otherwise (joint mode, etc.): standard MSE on all dims.
+        Args:
+            noise_pred: (B, T, action_dim) predicted noise.
+            target: (B, T, action_dim) target noise.
+            timestep_ids: (B,) sampled timestep indices.
+            scheduler: Action flow matching scheduler.
+            pipe: Pipeline (for device).
+            B: Batch size.
+            action_is_pad: (B, T) bool, True for padded timesteps.
+                If None, no masking.
         """
         tw = scheduler.linear_timesteps_weights[timestep_ids].to(dtype=torch.float32, device=pipe.device)
         pred_f = noise_pred.float()
         target_f = target.float()
 
-        if self.action_mode != "eef":
-            # Standard MSE for all dims
-            if B == 1:
-                return F.mse_loss(pred_f, target_f) * tw[0]
-            per_sample = F.mse_loss(pred_f, target_f, reduction="none").mean(dim=list(range(1, pred_f.ndim)))
-            return (per_sample * tw).mean()
+        # Per-element MSE → mean over action_dim, keep (B, T)
+        per_element = F.mse_loss(pred_f, target_f, reduction="none")
+        per_step = per_element.mean(dim=2)  # (B, T)
 
-        # --- EEF mode: split continuous / gripper ---
-        gi = list(self.EEF_GRIPPER_INDICES)  # [9, 19]
-        D = pred_f.shape[-1]
-        cont_mask = torch.ones(D, dtype=torch.bool, device=pred_f.device)
-        cont_mask[gi] = False
-        ci = cont_mask.nonzero(as_tuple=True)[0]
-
-        # Continuous dims: MSE on velocity
-        pred_cont = pred_f[..., ci]
-        target_cont = target_f[..., ci]
-        if B == 1:
-            mse_loss = F.mse_loss(pred_cont, target_cont) * tw[0]
+        if action_is_pad is not None:
+            # action_is_pad: (B, T) — already aligned to the subsampled
+            # action temporal dim by the trainer.
+            action_is_pad = action_is_pad.to(device=per_step.device, dtype=torch.bool)
+            valid_mask = ~action_is_pad
+            per_step = per_step * valid_mask.float()
+            valid_count = valid_mask.float().sum(dim=1).clamp(min=1)
+            per_sample = per_step.sum(dim=1) / valid_count  # (B,)
         else:
-            per_sample_mse = F.mse_loss(pred_cont, target_cont, reduction="none").mean(
-                dim=list(range(1, pred_cont.ndim))
-            )
-            mse_loss = (per_sample_mse * tw).mean()
+            per_sample = per_step.mean(dim=1)  # (B,)
 
-        # Gripper dims: BCE on reconstructed x_0_hat
-        # x_t = x_0 + sigma * v  =>  x_0_hat = x_t - sigma * v_pred
-        sigma_bc = action_sigmas.float().view(B, 1, 1)
-        x0_hat_grip = noisy_actions.float()[..., gi] - sigma_bc * pred_f[..., gi]
-        gt_grip = action_data_clean.float()[..., gi]
-        bce_raw = F.binary_cross_entropy_with_logits(x0_hat_grip, gt_grip, reduction="none")
-        if B == 1:
-            bce_loss = bce_raw.mean() * tw[0]
-        else:
-            per_sample_bce = bce_raw.mean(dim=list(range(1, bce_raw.ndim)))
-            bce_loss = (per_sample_bce * tw).mean()
-
-        return mse_loss + bce_loss
+        return (per_sample * tw).mean()

@@ -68,7 +68,8 @@ class MoEActionExpertArchitecture(BaseWAMArchitecture):
     def __init__(self, cfg=None):
         super().__init__(cfg)
         if cfg is not None:
-            el = cfg.get("expert_layers", (3, 7, 11, 15, 19, 23, 26, 29))
+            # expert_layers can come from architecture config as "bridge_layers" or "expert_layers"
+            el = cfg.get("expert_layers", cfg.get("bridge_layers", (3, 7, 11, 15, 19, 23, 26, 29)))
             if isinstance(el, str):
                 el = tuple(int(x) for x in el.split(","))
             elif not isinstance(el, tuple):

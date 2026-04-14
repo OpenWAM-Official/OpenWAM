@@ -43,7 +43,7 @@ classifiers = [
 
 [tool.setuptools.packages.find]
 where = ["./"]
-include = ["openwam", "openwam.*", "third_party.diffsynth", "third_party.diffsynth.*"]
+include = ["openwam", "openwam.*"]
 
 [project.optional-dependencies]
 serving = [
@@ -70,7 +70,7 @@ openwam-serve = "openwam.deployment.policy_server:main"
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-exclude = ["third_party/", "previous_codebase/"]
+exclude = ["third_party/", "previous_codebase/", "openwam/model/video_backbone/diffsynth/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]

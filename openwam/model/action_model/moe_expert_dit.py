@@ -31,7 +31,14 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from openwam.model.action_model.action_dit import sinusoidal_embedding_1d
+from openwam.model.action_model.components import (
+    ActionEmbedding,
+    ActionOutputHead,
+    LearnedPositionalEncoding,
+    TimestepEmbedding,
+    TimestepModulation,
+    sinusoidal_embedding_1d,  # noqa: F401
+)
 
 
 @dataclass
@@ -172,39 +179,22 @@ class MoEExpertDiT(nn.Module):
         self.expert_layers_set = set(expert_layers)
 
         # Action token projection: action_dim -> video_dim
-        self.action_input_proj = nn.Sequential(
-            nn.Linear(action_dim, video_dim),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(video_dim, video_dim),
-        )
+        self.action_input_proj = ActionEmbedding(action_dim, video_dim)
 
         # Learned positional encoding in video_dim space
-        self.pos_embedding = nn.Parameter(torch.randn(1, max_action_len, video_dim) * 0.02)
+        self.pos_encoding = LearnedPositionalEncoding(max_action_len, video_dim)
 
         # Timestep embedding (independent from video timestep)
-        self.time_embedding = nn.Sequential(
-            nn.Linear(freq_dim, video_dim),
-            nn.SiLU(),
-            nn.Linear(video_dim, video_dim),
-        )
+        self.time_embedding = TimestepEmbedding(freq_dim, video_dim)
 
         # Time projection -> 3 modulation params (shift, scale, gate)
-        self.time_projection = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(video_dim, video_dim * 3),
-        )
+        self.time_projection = TimestepModulation(video_dim, 3)
 
         # Expert FFN blocks (one per expert layer)
         self.expert_blocks = nn.ModuleList([ExpertFFNBlock(video_dim, expert_ffn_dim, eps) for _ in range(num_experts)])
 
         # Output head: video_dim -> action_dim
-        self.output_norm = nn.LayerNorm(video_dim, eps=eps, elementwise_affine=False)
-        self.output_head = nn.Linear(video_dim, action_dim)
-        self.output_modulation = nn.Parameter(torch.randn(1, 2, video_dim) / video_dim**0.5)
-
-        # Zero-initialize output for stable training start
-        nn.init.zeros_(self.output_head.weight)
-        nn.init.zeros_(self.output_head.bias)
+        self.action_output_head = ActionOutputHead(video_dim, action_dim, eps)
 
         # Action normalization stats (saved as persistent buffers)
         self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
@@ -227,18 +217,18 @@ class MoEExpertDiT(nn.Module):
             MoEExpertState ready for model_fn_wan_video
         """
         B, T, _ = action_tokens.shape
-        assert T <= self.pos_embedding.shape[1], (
-            f"Action sequence length {T} exceeds max_action_len {self.pos_embedding.shape[1]}"
+        assert T <= self.pos_encoding.embedding.shape[1], (
+            f"Action sequence length {T} exceeds max_action_len {self.pos_encoding.embedding.shape[1]}"
         )
 
         # Project to video_dim and add positional encoding
         x = self.action_input_proj(action_tokens)
-        x = x + self.pos_embedding[:, :T, :]
+        x = self.pos_encoding(x)
 
         # Timestep modulation for expert FFN
         timestep = timestep.flatten()
-        t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
-        t_mod = self.time_projection(t).unflatten(1, (3, self.video_dim))
+        t = self.time_embedding(timestep)
+        t_mod = self.time_projection(t)
 
         return MoEExpertState(
             moe_dit=self,
@@ -299,14 +289,7 @@ class MoEExpertDiT(nn.Module):
         Returns:
             (B, T_action, action_dim) predicted action noise
         """
-        x = state.action_tokens
-        t = state.t_embed
-
-        shift_out, scale_out = (
-            self.output_modulation.to(dtype=t.dtype, device=t.device) + t.unsqueeze(1).expand(-1, 2, -1)
-        ).chunk(2, dim=1)
-
-        return self.output_head(self.output_norm(x) * (1 + scale_out) + shift_out)
+        return self.action_output_head(state.action_tokens, state.t_embed)
 
     @staticmethod
     def state_dict_converter():
