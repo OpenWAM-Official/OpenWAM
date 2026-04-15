@@ -138,6 +138,7 @@ def _print_sample(sample, idx: int, action_mode: str, save_frames: bool, out_dir
     video = sample["video"]
     action = sample["action"]
     action_mask = sample["action_mask"]
+    video_mask = sample.get("video_mask", None)
     prompt = sample["prompt"]
 
     n_frames = len(video)
@@ -147,6 +148,8 @@ def _print_sample(sample, idx: int, action_mode: str, save_frames: bool, out_dir
     print(f"  video:        {n_frames} x PIL({w}x{h} {frame0.mode})")
     print(f"  action:       {action.shape}  dtype={action.dtype}")
     print(f"  action_mask:  {action_mask.shape}  ({action_mask.sum().item()} valid)")
+    if video_mask is not None:
+        print(f"  video_mask:   {video_mask.shape}  ({video_mask.sum().item()} valid)")
     print(f'  prompt:       "{prompt[:80]}{"..." if len(prompt) > 80 else ""}"')
 
     # Metadata

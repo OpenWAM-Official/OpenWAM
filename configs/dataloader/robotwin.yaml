@@ -1,6 +1,6 @@
 type: robotwin
 dataset_dir: /path/to/RoboTwin2.0/dataset    # top-level dataset dir (e.g. /path/to/RoboTwin2.0/dataset)
-task_name: null                   # null = multi-task (discover all), set name = single-task
+task_name: adjust_bottle                   # null = multi-task (discover all), set name = single-task （e.g. adjust_bottle）
 
 robot: aloha-agilex              # robot embodiment name, maps to directory {robot}_{variant}
 variant: both                     # "clean_50", "randomized_500", or "both"

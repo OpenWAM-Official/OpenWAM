@@ -24,7 +24,7 @@ class _DummyTrainingModule:
 
 
 def test_build_trainable_parameters_defaults_to_flat_list():
-    from openwam.train.optimizer_groups import build_trainable_parameters
+    from openwam.train.utils.optimizer_groups import build_trainable_parameters
 
     model = _DummyTrainingModule()
     params = build_trainable_parameters(model)
@@ -34,7 +34,7 @@ def test_build_trainable_parameters_defaults_to_flat_list():
 
 
 def test_build_trainable_parameters_supports_per_group_lrs():
-    from openwam.train.optimizer_groups import build_trainable_parameters
+    from openwam.train.utils.optimizer_groups import build_trainable_parameters
 
     model = _DummyTrainingModule()
     groups = build_trainable_parameters(
@@ -54,7 +54,7 @@ def test_build_trainable_parameters_supports_per_group_lrs():
 
 
 def test_build_trainable_parameters_drops_action_branch_for_video_only():
-    from openwam.train.optimizer_groups import build_trainable_parameters
+    from openwam.train.utils.optimizer_groups import build_trainable_parameters
 
     model = _DummyTrainingModule(lambda_action=0.0)
     groups = build_trainable_parameters(model, video_lr=5e-5)

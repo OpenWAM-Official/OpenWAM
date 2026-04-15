@@ -1,88 +1,102 @@
 """Hydra entry point for OpenWAM training.
 
-Usage:
-    # Train with default config
-    python scripts/train.py
+Supports two launch modes:
 
-    # Override from CLI
-    python scripts/train.py training=video_only model/backbone=ti2v_5b \
-        data.dataset_dir=/data/robotwin training.learning_rate=5e-5
+1. torchrun (recommended for cloud / multi-node):
+    torchrun --nproc_per_node=2 scripts/train.py
 
-    # Print resolved config without running
-    python scripts/train.py --cfg job
+   DeepSpeed stage is controlled by the ``DEEPSPEED_ZERO_STAGE`` env var
+   (default: 2) or by the Hydra config ``accelerate.deepspeed_config.zero_stage``.
 
-    # Multi-run sweep
-    python scripts/train.py -m training.learning_rate=1e-4,5e-5,1e-5
+2. accelerate launch (local convenience):
+    accelerate launch --config_file configs/accelerate/deepspeed_zero2.yaml scripts/train.py
+
+Both modes use HuggingFace Accelerate internally for DeepSpeed integration.
 """
 
+import os
 import sys
 from pathlib import Path
 
 import hydra
-from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-THIRD_PARTY = PROJECT_ROOT / "third_party"
+
+
+def _build_accelerator(cfg: DictConfig):
+    """Build an Accelerator, optionally with DeepSpeed plugin.
+
+    When launched via ``torchrun``, torch.distributed is already initialised
+    (``RANK``, ``WORLD_SIZE``, ``LOCAL_RANK`` are set).  We construct a
+    ``DeepSpeedPlugin`` from the Hydra accelerate config and pass it to
+    ``Accelerator`` so that DeepSpeed is activated without needing
+    ``accelerate launch``.
+
+    When launched via ``accelerate launch``, the accelerate config file
+    already provides the DeepSpeed settings, so we just create a plain
+    ``Accelerator``.
+    """
+    import accelerate
+
+    t = cfg.training
+    grad_accum = int(t.gradient_accumulation_steps)
+
+    # Detect if we were launched by accelerate (it sets ACCELERATE_MIXED_PRECISION etc.)
+    launched_by_accelerate = os.environ.get("ACCELERATE_MIXED_PRECISION") is not None
+
+    if launched_by_accelerate:
+        # accelerate launch already configured everything
+        return accelerate.Accelerator(gradient_accumulation_steps=grad_accum)
+
+    # torchrun path: build DeepSpeed plugin from Hydra config
+    ds_cfg = cfg.accelerate.deepspeed_config
+    zero_stage = int(os.environ.get("DEEPSPEED_ZERO_STAGE", ds_cfg.zero_stage))
+
+    plugin = accelerate.DeepSpeedPlugin(
+        zero_stage=zero_stage,
+        gradient_accumulation_steps=grad_accum,
+        gradient_clipping=float(ds_cfg.gradient_clipping),
+        offload_optimizer_device=str(ds_cfg.offload_optimizer_device),
+        offload_param_device=str(ds_cfg.offload_param_device),
+        zero3_init_flag=bool(ds_cfg.zero3_init_flag),
+        zero3_save_16bit_model=bool(ds_cfg.zero3_save_16bit_model),
+    )
+
+    return accelerate.Accelerator(
+        gradient_accumulation_steps=grad_accum,
+        deepspeed_plugin=plugin,
+        mixed_precision=str(cfg.accelerate.mixed_precision),
+    )
 
 
 def _train(cfg: DictConfig) -> None:
     """Package-native training path."""
-    import accelerate
+    from openwam.dataloader.registry import build_dataset
+    from openwam.train.openwam_trainer import OpenWAMTrainer
 
-    from openwam.train.config_tracking import (
-        build_run_metadata,
-        get_git_commit,
-        make_run_id,
-    )
-    from openwam.train.native_trainer import NativeTrainer
-    from openwam.train.runtime import (
-        build_training_dataset,
-        cfg_to_flat_namespace,
-    )
+    accelerator = _build_accelerator(cfg)
 
-    t = cfg.training
+    # Build dataset via registry
+    dataset = build_dataset(cfg.dataloader, split="train")
 
-    accelerator = accelerate.Accelerator(
-        gradient_accumulation_steps=int(t.gradient_accumulation_steps),
-        kwargs_handlers=[
-            accelerate.DistributedDataParallelKwargs(find_unused_parameters=bool(t.find_unused_parameters))
-        ],
-    )
-
-    # Build dataset
-    args = cfg_to_flat_namespace(cfg)
-    dataset = build_training_dataset(args, data_config=cfg.data)
-
-    # Build trainer
-    trainer = NativeTrainer(cfg, accelerator=accelerator, dataset=dataset)
-
-    # Save config artifacts
-    run_id = make_run_id()
-    hydra_output_dir = None
-    if HydraConfig.initialized():
-        hydra_output_dir = HydraConfig.get().runtime.output_dir
-    _run_metadata = build_run_metadata(  # noqa: F841
-        run_id=run_id,
-        output_dir=t.output_path,
-        hydra_output_dir=hydra_output_dir,
-        git_commit=get_git_commit(PROJECT_ROOT),
-    )
-
-    # Run training
+    # Build trainer and run
+    trainer = OpenWAMTrainer(cfg, accelerator=accelerator, dataset=dataset)
     trainer.train()
 
 
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")
 def main(cfg: DictConfig) -> None:
-    print("=" * 60)
-    print("OpenWAM Training — Hydra Config")
-    print("=" * 60)
-    print(OmegaConf.to_yaml(cfg))
-    print("=" * 60)
+    # Only print on rank 0
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if local_rank == 0:
+        print("=" * 60)
+        print("OpenWAM Training")
+        print("=" * 60)
+        print(OmegaConf.to_yaml(cfg))
+        print("=" * 60)
 
     sys.path.insert(0, str(PROJECT_ROOT))
-    sys.path.insert(0, str(THIRD_PARTY))
 
     _train(cfg)
 

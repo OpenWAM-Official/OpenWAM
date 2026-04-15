@@ -15,7 +15,7 @@ class MockPipeline:
 
 
 def _apply_freeze(pipe, freeze_list):
-    """Replicate the freeze logic from NativeTrainer."""
+    """Replicate the freeze logic from OpenWAMTrainer."""
     for name in freeze_list:
         module = getattr(pipe, name, None)
         if module is not None:

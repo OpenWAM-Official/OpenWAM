@@ -89,7 +89,7 @@ def test_import_training_loss():
 
 
 def test_import_training_optimizer_groups():
-    from openwam.train.optimizer_groups import (  # noqa: F401
+    from openwam.train.utils.optimizer_groups import (  # noqa: F401
         attach_optimizer_groups,
         build_trainable_parameters,
     )
@@ -99,7 +99,7 @@ def test_import_training_init():
     from openwam.train import (  # noqa: F401
         BaseTrainer,
         FlowMatchVideoActionLoss,
-        NativeTrainer,
+        OpenWAMTrainer,
     )
 
 

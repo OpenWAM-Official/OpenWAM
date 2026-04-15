@@ -365,10 +365,13 @@ class FlowMatchVideoActionLoss:
                 temporal downsampling). If None, no masking.
         """
         if inputs.get("first_frame_latents") is not None:
-            noise_pred = noise_pred[:, :, 1:]
-            target = target[:, :, 1:]
-            # video_is_pad already excludes frame 0 (built with
-            # include_first_frame=False in the trainer), so no trim needed.
+            # Skip clean prefix: ref frame(s) + video frame 0 (conditioning, t=0).
+            # num_clean_prefix_frames counts ref frame latent steps;
+            # +1 for the video's own frame 0 whose latent is also excluded from loss.
+            # video_is_pad already excludes frame 0 (tail-only), so no mask trim needed.
+            n_skip = inputs.get("num_clean_prefix_frames", 0) + 1
+            noise_pred = noise_pred[:, :, n_skip:]
+            target = target[:, :, n_skip:]
 
         tw = pipe.scheduler.linear_timesteps_weights[timestep_ids].to(dtype=torch.float32, device=pipe.device)
 

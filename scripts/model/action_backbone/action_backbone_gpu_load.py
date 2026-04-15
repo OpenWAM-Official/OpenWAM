@@ -1,7 +1,8 @@
 """GPU-based ActionDiT model test.
 
-Loads ActionDiT parameters from YAML configs (architecture + action_backbone),
-creates fake video features, runs forward pass, and prints output shapes.
+Loads ActionDiT parameters from YAML config (architecture + action_backbone
+inline in dual_system.yaml), creates fake video features, runs forward pass,
+and prints output shapes.
 
 Usage:
     python scripts/model/action_backbone/action_backbone_gpu_load.py
@@ -58,7 +59,6 @@ def main():
         video_dim=int(params["video_dim"]),
         bridge_layers=bridge_layers,
         bridge_type=params.get("bridge_type", "cross_attn_detach"),
-        max_action_len=int(params.get("max_action_len", 33)),
     ).to(dtype=torch.bfloat16, device=args.device)
 
     param_count = sum(p.numel() for p in dit.parameters()) / 1e6

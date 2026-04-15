@@ -5,18 +5,16 @@ or CLI argument), creates fake inputs, runs a forward pass, and prints
 output shapes. Requires GPU and model weights.
 
 Usage:
-    # Use TI2V-5B config (default)
-    python scripts/model/video_backbone/video_backbone_gpu_load.py --model_path /path/to/Wan2.2-TI2V-5B
+    # Use dual_system config (default, reads video_backbone.model_path)
+    python scripts/model/video_backbone/video_backbone_gpu_load.py
 
-    # Use VACE-1.3B config
-    python scripts/model/video_backbone/video_backbone_gpu_load.py \
-        --config configs/model/video_backbone/vace_1_3b.yaml \
-        --model_path /path/to/Wan2.1-VACE-1.3B
+    # Override model path
+    python scripts/model/video_backbone/video_backbone_gpu_load.py --model_path /path/to/model
 
-    # Override device
-    python scripts/model/video_backbone/video_backbone_gpu_load.py --model_path /path/to/model --device cpu
+    # Use a different architecture config
+    python scripts/model/video_backbone/video_backbone_gpu_load.py --config configs/model/moe_expert.yaml
 
-GPU memory requirements (approximate， only for loading, not for training):
+GPU memory requirements (approximate, only for loading, not for training):
     VACE-1.3B:  ~16 GB
     TI2V-5B:    ~24 GB
 """
@@ -93,39 +91,38 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/model/video_backbone/ti2v_5b.yaml",
-        help="Path to video backbone YAML config",
+        default="configs/model/dual_system.yaml",
+        help="Path to architecture YAML config (reads video_backbone.model_path)",
     )
     parser.add_argument("--device", type=str, default="cuda", help="Device to load model on")
     args = parser.parse_args()
 
-    # Load config for resolution info
+    # Load config
     with open(args.config) as f:
-        backbone_cfg = yaml.safe_load(f)
+        raw_cfg = yaml.safe_load(f)
+    video_cfg = raw_cfg.get("video_backbone", {})
 
     # Resolve model_path: CLI override > YAML > error
-    model_path = args.model_path or backbone_cfg.get("model_path")
+    model_path = args.model_path or video_cfg.get("model_path")
     if not model_path or not os.path.isdir(model_path):
         parser.error(
             f"model_path not found. "
-            f"Either set model_path in {args.config} or pass --model_path /path/to/model.\n"
-            f"  YAML model_path: {backbone_cfg.get('model_path')}\n"
+            f"Either set video_backbone.model_path in {args.config} or pass --model_path.\n"
+            f"  YAML model_path: {video_cfg.get('model_path')}\n"
             f"  CLI  model_path: {args.model_path}"
         )
-    args.model_path = model_path
 
     print("=" * 60)
     print("Video Backbone GPU Test")
     print(f"  Config:     {args.config}")
-    print(f"  Model path: {args.model_path}")
+    print(f"  Model path: {model_path}")
     print(f"  Device:     {args.device}")
-    print(f"  Backbone:   {backbone_cfg['name']}")
-    print(f"  Resolution: {backbone_cfg['resolution']['height']}x{backbone_cfg['resolution']['width']}")
+    print(f"  Backbone:   {video_cfg.get('name', 'unknown')}")
     print("=" * 60)
 
     # --- Load model ---
     print("\n[1/4] Loading video backbone...")
-    pipe = load_backbone(args.model_path, device=args.device)
+    pipe = load_backbone(model_path, device=args.device)
 
     video_dim = pipe.dit.dim
     num_layers = len(pipe.dit.blocks)
@@ -139,20 +136,18 @@ def main():
 
     # --- Create fake inputs ---
     print("\n[2/4] Creating fake inputs...")
-    height = backbone_cfg["resolution"]["height"]
-    width = backbone_cfg["resolution"]["width"]
     num_frames = 9
     batch_size = 1
 
     # VAE latent dimensions: spatial / 8, temporal / 4, channels = in_dim
-    latent_h = height // 8
-    latent_w = width // 8
+    latent_h = 480 // 8  # default
+    latent_w = 640 // 8
     latent_t = (num_frames - 1) // 4 + 1  # Wan VAE temporal compression
     in_dim = pipe.dit.in_dim if hasattr(pipe.dit, "in_dim") else 16
 
     latents = torch.randn(batch_size, in_dim, latent_t, latent_h, latent_w, dtype=torch.bfloat16, device=args.device)
     timestep = torch.tensor([500.0], dtype=torch.bfloat16, device=args.device)
-    context = torch.randn(batch_size, 64, 4096, dtype=torch.bfloat16, device=args.device)  # Fake text embeddings
+    context = torch.randn(batch_size, 64, 4096, dtype=torch.bfloat16, device=args.device)
 
     print(f"  latents:   {latents.shape}  (B, C, T, H, W)")
     print(f"  timestep:  {timestep.shape}")
@@ -160,8 +155,9 @@ def main():
 
     # --- Forward pass via model_fn (includes bridge feature extraction) ---
     print("\n[3/4] Running forward pass via model_fn...")
-    bridge_layers = backbone_cfg.get("bridge_layers", [3, 7, 11, 15, 19, 23, 26, 29])
-    valid_bridge_layers = [l for l in bridge_layers if l < num_layers]
+    arch_cfg = raw_cfg.get("architecture", {})
+    bridge_layers = arch_cfg.get("bridge_layers", [3, 7, 11, 15, 19, 23, 26, 29])
+    valid_bridge_layers = [layer for layer in bridge_layers if layer < num_layers]
 
     bridge_features = []
     with torch.no_grad():
@@ -179,7 +175,7 @@ def main():
 
     # --- Bridge features ---
     print("\n[4/4] Bridge feature shapes...")
-    print(f"  Requested bridge layers: {valid_bridge_layers}(default, code-defined)")
+    print(f"  Requested bridge layers: {valid_bridge_layers}")
     print(f"  Collected features:      {len(bridge_features)}")
     for i, feat in enumerate(bridge_features):
         print(f"    layer {valid_bridge_layers[i]:2d}: {feat.shape}  (B, seq_len, {video_dim})")

@@ -1,16 +1,14 @@
-"""Package-native trainer that consumes Hydra DictConfig directly.
+"""OpenWAM trainer that consumes Hydra DictConfig directly.
 
-Replaces the legacy training path that required:
-  cfg_to_flat_namespace → argparse → VideoActionTrainingModule → third_party/diffsynth
-
-This trainer composes existing package-native components:
-  - Model loading: open_wam.inference.model_loader.load_wam_models
-  - Loss: open_wam.training.flow_match_loss.FlowMatchVideoActionLoss
-  - Optimizer groups: open_wam.training.optimizer_groups.build_trainable_parameters
-  - Architecture: open_wam.models.architectures (DualSystemArchitecture)
+Composes package-native components:
+  - Pipeline building: openwam.train.utils.pipeline_builder
+  - Loss: openwam.train.loss.flow_match_loss.FlowMatchVideoActionLoss
+  - Optimizer groups: openwam.train.utils.optimizer_groups
+  - Checkpointing: openwam.train.utils.checkpointing
+  - Architecture: openwam.model.registry (DualSystem / MoE / SharedBackbone)
 
 Usage:
-    trainer = NativeTrainer(cfg, accelerator, dataset)
+    trainer = OpenWAMTrainer(cfg, accelerator, dataset)
     trainer.train()
 """
 
@@ -24,7 +22,13 @@ from omegaconf import DictConfig
 
 from openwam.train.base import BaseTrainer
 from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
-from openwam.train.optimizer_groups import build_trainable_parameters
+from openwam.train.utils.checkpointing import (
+    load_trainable_checkpoint,
+    manage_checkpoints,
+    save_trainable_checkpoint,
+)
+from openwam.train.utils.optimizer_groups import build_trainable_parameters
+from openwam.train.utils.pipeline_builder import build_training_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +74,7 @@ class TrainableModuleWrapper(torch.nn.Module):
     This collects the ActionDiT and trainable pipeline sub-modules (DiT, VACE)
     so DeepSpeed can manage their optimizer states and gradient sync.
 
-    Not used for forward pass — NativeTrainer.compute_loss() drives execution.
+    Not used for forward pass — OpenWAMTrainer.compute_loss() drives execution.
     """
 
     def __init__(self, action_dit, pipe_trainable_modules: dict):
@@ -79,11 +83,11 @@ class TrainableModuleWrapper(torch.nn.Module):
         self.pipe_modules = torch.nn.ModuleDict(pipe_trainable_modules)
 
     def forward(self, *args, **kwargs):
-        raise NotImplementedError("Forward pass is handled by NativeTrainer.compute_loss()")
+        raise NotImplementedError("Forward pass is handled by OpenWAMTrainer.compute_loss()")
 
 
-class NativeTrainer(BaseTrainer):
-    """Package-native joint video-action trainer.
+class OpenWAMTrainer(BaseTrainer):
+    """Joint video-action trainer for OpenWAM.
 
     Directly consumes Hydra DictConfig without argparse conversion.
     Builds all components from package-native modules, with no dependency
@@ -101,8 +105,8 @@ class NativeTrainer(BaseTrainer):
         t = cfg.training
         m = cfg.model
 
-        # Build video pipeline
-        self.pipe = self._build_pipeline(cfg)
+        # Build video pipeline (delegated to utils/pipeline_builder.py)
+        self.pipe = build_training_pipeline(cfg)
 
         # Derive video_dim from the loaded model instead of config
         video_dim = int(self.pipe.dit.dim)
@@ -226,134 +230,7 @@ class NativeTrainer(BaseTrainer):
 
         # Print param counts
         action_params = sum(p.numel() for p in self.action_dit.parameters())
-        logger.info("NativeTrainer: ActionDiT %.1fM params", action_params / 1e6)
-
-    def _build_pipeline(self, cfg: DictConfig):
-        """Build WanVideoPipeline from Hydra config."""
-        from openwam.deployment.model_config import ModelConfig
-        from openwam.model.video_backbone import WanVideoPipeline
-
-        t = cfg.training
-        backbone_cfg = cfg.model.video_backbone
-
-        device = "cpu" if bool(t.initialize_model_on_cpu) else "cuda"
-
-        # Read model_path from video_backbone config (e.g. ti2v_5b.yaml / vace_1_3b.yaml)
-        model_dir = str(backbone_cfg.model_path)
-        if not os.path.isdir(model_dir):
-            raise FileNotFoundError(f"video_backbone.model_path does not exist: {model_dir}")
-
-        # Auto-discover model files in the directory
-        import glob as _glob
-        import re
-        from collections import defaultdict
-
-        safetensors = sorted(_glob.glob(os.path.join(model_dir, "*.safetensors")))
-        pth_files = sorted(_glob.glob(os.path.join(model_dir, "*.pth")))
-        if not safetensors and not pth_files:
-            raise FileNotFoundError(f"No *.safetensors or *.pth files found in {model_dir}")
-
-        # Group sharded safetensors by prefix (e.g. "diffusion_pytorch_model-0000X-of-00003")
-        shard_groups = defaultdict(list)
-        standalone = []
-        for f in safetensors:
-            basename = os.path.basename(f)
-            m = re.match(r"^(.+)-\d{5}-of-\d{5}\.safetensors$", basename)
-            if m:
-                shard_groups[m.group(1)].append(f)
-            else:
-                standalone.append(f)
-
-        model_paths = []
-        for prefix in sorted(shard_groups):
-            shards = sorted(shard_groups[prefix])
-            model_paths.append(shards)
-            logger.info("Grouped %d shards as one model: %s-*", len(shards), prefix)
-        for f in standalone:
-            model_paths.append(f)
-        for f in pth_files:
-            model_paths.append(f)
-        logger.info("Auto-discovered %d model entries from %s", len(model_paths), model_dir)
-
-        model_configs = [ModelConfig(p) for p in model_paths]
-
-        # Auto-detect tokenizer: look for google/umt5-xxl under model_path directory
-        tokenizer_dir = os.path.join(model_dir, "google", "umt5-xxl")
-        if os.path.isdir(tokenizer_dir):
-            tokenizer_config = ModelConfig(tokenizer_dir)
-            logger.info("Auto-detected tokenizer at %s", tokenizer_dir)
-        else:
-            tokenizer_config = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/")
-
-        # Load pipeline
-        pipe = WanVideoPipeline.from_pretrained(
-            torch_dtype=torch.bfloat16,
-            device=device,
-            model_configs=model_configs,
-            tokenizer_config=tokenizer_config,
-        )
-
-        # Training mode setup for pipeline
-        trainable_models = t.trainable_models
-        if trainable_models:
-            trainable_str = (
-                ",".join(trainable_models) if isinstance(trainable_models, (list, tuple)) else trainable_models
-            )
-        else:
-            trainable_str = None
-
-        # Apply LoRA if configured
-        lora_base_model = getattr(t, "lora_base_model", None)
-        if lora_base_model:
-            pipe = self._setup_training_mode(
-                pipe,
-                trainable_str,
-                lora_base_model,
-                t.lora_target_modules,
-                int(t.lora_rank),
-                t.lora_checkpoint,
-                t.preset_lora_path,
-                t.preset_lora_model,
-            )
-
-        # Gradient checkpointing
-        if bool(t.use_gradient_checkpointing):
-            for module in pipe.modules():
-                if hasattr(module, "gradient_checkpointing_enable"):
-                    module.gradient_checkpointing_enable()
-
-        return pipe
-
-    def _setup_training_mode(
-        self,
-        pipe,
-        trainable_models,
-        lora_base_model,
-        lora_target_modules,
-        lora_rank,
-        lora_checkpoint,
-        preset_lora_path,
-        preset_lora_model,
-    ):
-        """Set up LoRA and training mode on the pipeline."""
-        # Delegate to DiffusionTrainingModule's static methods if needed.
-        # For NativeTrainer, we use a simpler approach: direct PEFT injection.
-        try:
-            from peft import LoraConfig, get_peft_model
-        except ImportError:
-            logger.warning("PEFT not available, skipping LoRA setup")
-            return pipe
-
-        if lora_base_model and hasattr(pipe, lora_base_model):
-            base_model = getattr(pipe, lora_base_model)
-            target_modules = lora_target_modules.split(",") if lora_target_modules else None
-            lora_config = LoraConfig(
-                r=lora_rank,
-                target_modules=target_modules,
-            )
-            setattr(pipe, lora_base_model, get_peft_model(base_model, lora_config))
-
-        return pipe
+        logger.info("OpenWAMTrainer: ActionDiT %.1fM params", action_params / 1e6)
 
     def _load_action_stats(self, dataset):
         """Load action normalization stats from dataset into architecture buffers."""
@@ -689,26 +566,6 @@ class NativeTrainer(BaseTrainer):
             "action": result.get("loss_action", torch.tensor(0.0)),
         }
 
-    def _manage_checkpoints(self, output_dir: str, keep_last_k: int):
-        """Delete old checkpoints, keeping only the most recent *keep_last_k*."""
-        import glob as _glob
-        import re
-
-        pattern = os.path.join(output_dir, "checkpoint_step_*")
-        files = _glob.glob(pattern)
-
-        # Sort numerically by step number
-        def _step_num(path):
-            m = re.search(r"checkpoint_step_(\d+)", path)
-            return int(m.group(1)) if m else 0
-
-        files.sort(key=_step_num)
-        while len(files) > keep_last_k:
-            old = files.pop(0)
-            if os.path.isfile(old):
-                os.remove(old)
-                logger.info("Removed old checkpoint: %s", old)
-
     def _init_wandb(self):
         """Initialize wandb run from project config. Returns the run or None."""
         wandb_cfg = self.cfg.project.get("wandb", None)
@@ -738,9 +595,8 @@ class NativeTrainer(BaseTrainer):
         return run
 
     def train(self, num_epochs: int = None, max_steps: int = None):
-        """Run the native training loop.
+        """Run the training loop.
 
-        This replaces ``launch_training_task`` from third_party/diffsynth.
         Uses HuggingFace Accelerate for distributed training.
 
         Args:
@@ -993,7 +849,7 @@ class NativeTrainer(BaseTrainer):
                 if save_steps and global_step % save_steps == 0 and _is_main:
                     ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
                     self.save_checkpoint(ckpt_path)
-                    self._manage_checkpoints(output_path, keep_last_k)
+                    manage_checkpoints(output_path, keep_last_k)
 
                 if max_steps and global_step >= max_steps:
                     pbar.close()
@@ -1008,62 +864,21 @@ class NativeTrainer(BaseTrainer):
         if save_steps and _is_main:
             ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
             self.save_checkpoint(ckpt_path)
-            self._manage_checkpoints(output_path, keep_last_k)
+            manage_checkpoints(output_path, keep_last_k)
 
         if wandb_run is not None:
             wandb_run.finish()
 
     def save_checkpoint(self, path: str):
         """Export trainable state dict to safetensors."""
-        state_dict = {}
-
-        # ActionDiT parameters and buffers
-        if self.lambda_action > 0:
-            for name, param in self.action_dit.named_parameters():
-                if param.requires_grad:
-                    state_dict[f"action_dit.{name}"] = param.data
-            for buf_name in ("action_mean", "action_std"):
-                buf = getattr(self.action_dit, buf_name, None)
-                if buf is not None:
-                    state_dict[f"action_dit.{buf_name}"] = buf
-
-        # Video pipeline trainable parameters
-        for name, param in self.pipe.named_parameters():
-            if param.requires_grad:
-                state_dict[name] = param.data
-
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        if path.endswith(".safetensors"):
-            from safetensors.torch import save_file
-
-            save_file(state_dict, path)
-        else:
-            torch.save(state_dict, path)
-
-        logger.info("Saved checkpoint to %s (%d keys)", path, len(state_dict))
+        save_trainable_checkpoint(path, self.action_dit, self.pipe, self.lambda_action)
 
     def load_checkpoint(self, path: str):
         """Load a checkpoint into the model."""
-        if path.endswith(".safetensors"):
-            from safetensors.torch import load_file
-
-            state_dict = load_file(path)
-        else:
-            state_dict = torch.load(path, map_location="cpu")
-
-        action_keys = {k: v for k, v in state_dict.items() if k.startswith("action_dit.")}
-        if action_keys:
-            cleaned = {k.removeprefix("action_dit."): v for k, v in action_keys.items()}
-            self.action_dit.load_state_dict(cleaned, strict=False)
-
-        pipe_keys = {k: v for k, v in state_dict.items() if not k.startswith("action_dit.")}
-        if pipe_keys:
-            self.pipe.load_state_dict(pipe_keys, strict=False)
-
-        logger.info("Loaded checkpoint from %s", path)
+        load_trainable_checkpoint(path, self.action_dit, self.pipe)
 
     # --- Compatibility with build_trainable_parameters ---
-    # These properties allow optimizer_groups.py to work on NativeTrainer
+    # These properties allow optimizer_groups.py to work on OpenWAMTrainer
 
     @property
     def lambda_action_compat(self):

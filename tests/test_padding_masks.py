@@ -31,7 +31,7 @@ def _build_masks(num_frames: int, video_stride: int, valid_len: int):
 
 def _downsample(video_is_pad):
     """Import and call the actual trainer helper."""
-    from openwam.train.native_trainer import _downsample_video_mask_to_latent
+    from openwam.train.openwam_trainer import _downsample_video_mask_to_latent
 
     return _downsample_video_mask_to_latent(video_is_pad)
 

@@ -15,7 +15,7 @@ training:
   # --- Schedule ---
   num_epochs: 5                   # Total training epochs
   max_steps: null                 # Early stop after N steps (null = no limit)
-  batch_size: 1                   # Per-GPU batch size
+  batch_size: 16                   # Per-GPU batch size
   gradient_accumulation_steps: 4  # Accumulate N micro-batches before optimizer step
 
   # --- LR scheduler ---
@@ -51,7 +51,7 @@ training:
   dataset_num_workers: 0          # DataLoader num_workers (0 = main process)
 
   # --- Debug ---
-  debug: false                    # Debug mode: max_steps=20, save@5, constant LR
+  debug: true                    # Debug mode: max_steps=20, save@5, constant LR
 
   # --- Decoupled training (DreamZero-Flash style) ---
   decoupled:

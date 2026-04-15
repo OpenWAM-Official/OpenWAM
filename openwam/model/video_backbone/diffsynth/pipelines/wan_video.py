@@ -1655,16 +1655,20 @@ def model_fn_wan_video(
 
     # Timestep
     if dit.seperated_timestep and fuse_vae_embedding_in_latents:
+        # Per-token timestep: frame 0..num_clean-1 get t=0, rest get sampled t.
+        # Aligned with wan_video_dit.py forward() — supports batched timestep (B,).
+        batch_size = latents.shape[0]
         num_clean = max(num_clean_prefix_frames, 1)  # at least 1 (original I2V behavior)
+        f = latents.shape[2]
         tokens_per_frame = latents.shape[3] * latents.shape[4] // 4
-        timestep = torch.concat(
-            [
-                torch.zeros((num_clean, tokens_per_frame), dtype=latents.dtype, device=latents.device),
-                torch.ones((latents.shape[2] - num_clean, tokens_per_frame), dtype=latents.dtype, device=latents.device)
-                * timestep,
-            ]
-        ).flatten()
-        t = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).unsqueeze(0))
+        token_timesteps = (
+            torch.ones(batch_size, f, tokens_per_frame, dtype=latents.dtype, device=latents.device)
+            * timestep.view(batch_size, 1, 1)
+        )
+        token_timesteps[:, :num_clean, :] = 0  # clean conditioning frames
+        token_timesteps = token_timesteps.reshape(batch_size, -1)  # (B, f*tokens_per_frame)
+        t_emb = sinusoidal_embedding_1d(dit.freq_dim, token_timesteps.reshape(-1))
+        t = dit.time_embedding(t_emb.to(latents.dtype)).reshape(batch_size, -1, dit.dim)
         if use_unified_sequence_parallel and dist.is_initialized() and dist.get_world_size() > 1:
             t_chunks = torch.chunk(t, get_sequence_parallel_world_size(), dim=1)
             t_chunks = [
