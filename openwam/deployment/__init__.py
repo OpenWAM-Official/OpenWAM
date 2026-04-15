@@ -6,8 +6,7 @@ except ImportError:
     PolicyServer = None
 from openwam.deployment.flow_match_scheduler import FlowMatchScheduler
 from openwam.deployment.joint_engine import JointInferenceEngine
-from openwam.deployment.model_config import ModelConfig
-from openwam.deployment.model_loader import load_wam_models
+from openwam.deployment.model_loader import load_from_checkpoint_dir
 from openwam.deployment.schedule import (
     Schedule,
     make_schedule,
@@ -22,8 +21,7 @@ from openwam.deployment.schedule import (
 __all__ = [
     "BaseInferenceEngine",
     "JointInferenceEngine",
-    "load_wam_models",
-    "ModelConfig",
+    "load_from_checkpoint_dir",
     "FlowMatchScheduler",
     "Schedule",
     "make_schedule",

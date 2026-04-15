@@ -32,8 +32,8 @@ def build_training_pipeline(cfg: DictConfig):
     Returns:
         Initialized WanVideoPipeline ready for training.
     """
-    from openwam.deployment.model_config import ModelConfig
     from openwam.model.video_backbone import WanVideoPipeline
+    from openwam.model.video_backbone.diffsynth.core.loader import ModelConfig
 
     t = cfg.training
     backbone_cfg = cfg.model.video_backbone

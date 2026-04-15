@@ -25,6 +25,7 @@ from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 from openwam.train.utils.checkpointing import (
     load_trainable_checkpoint,
     manage_checkpoints,
+    save_config,
     save_trainable_checkpoint,
 )
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
@@ -682,13 +683,30 @@ class OpenWAMTrainer(BaseTrainer):
                 save_steps = int(save_steps)
         keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
         base_output_path = getattr(t, "output_path", "./models")
-        from datetime import datetime
 
-        run_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        if debug:
-            run_dir_name += "_debug"
-        output_path = os.path.join(base_output_path, run_dir_name)
-        os.makedirs(output_path, exist_ok=True)
+        # Create output directory on rank 0 only, then broadcast the path
+        # so all ranks share the same directory (avoids duplicate dirs from
+        # slightly different timestamps across processes).
+        _is_main = self.accelerator is None or self.accelerator.is_main_process
+        if _is_main:
+            from datetime import datetime
+
+            run_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            if debug:
+                run_dir_name += "_debug"
+            output_path = os.path.join(base_output_path, run_dir_name)
+            os.makedirs(output_path, exist_ok=True)
+            save_config(output_path, self.cfg)
+        else:
+            output_path = None
+
+        if self.accelerator is not None:
+            import torch.distributed as dist
+
+            path_list = [output_path] if _is_main else [None]
+            dist.broadcast_object_list(path_list, src=0)
+            output_path = path_list[0]
+
         logger.info("Checkpoints will be saved to %s", output_path)
 
         # Detect DeepSpeed

@@ -10,40 +10,56 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def save_config(output_dir: str, cfg):
+    """Save Hydra DictConfig as config.yaml in the checkpoint directory.
+
+    Only written once (skipped if the file already exists).
+
+    Args:
+        output_dir: Checkpoint directory.
+        cfg: Hydra DictConfig to serialize.
+    """
+    config_path = os.path.join(output_dir, "config.yaml")
+    if os.path.exists(config_path):
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    from omegaconf import OmegaConf
+
+    OmegaConf.save(cfg, config_path)
+    logger.info("Saved config to %s", config_path)
+
+
 def save_trainable_checkpoint(
     path: str,
     action_dit: torch.nn.Module,
     pipe,
     lambda_action: float,
 ):
-    """Export trainable state dict to safetensors or .pt.
+    """Export full model state dict to safetensors or .pt.
 
-    Saves all parameters with ``requires_grad=True`` from both the
-    action model and the video pipeline, plus action normalization
-    buffers (``action_mean``, ``action_std``).
+    Saves all parameters and buffers from both the action model and
+    the video pipeline, so the checkpoint is self-contained and can
+    restore the entire model without needing original pretrained weights.
 
     Args:
         path: Output file path (``.safetensors`` or ``.pt``).
         action_dit: Action model (ActionDiT / MoEExpertDiT / etc.).
         pipe: WanVideoPipeline instance.
-        lambda_action: Action loss weight — if 0, action params are skipped.
+        lambda_action: Action loss weight (unused, kept for API compat).
     """
     state_dict = {}
 
-    # ActionDiT parameters and buffers
-    if lambda_action > 0:
-        for name, param in action_dit.named_parameters():
-            if param.requires_grad:
-                state_dict[f"action_dit.{name}"] = param.data
-        for buf_name in ("action_mean", "action_std"):
-            buf = getattr(action_dit, buf_name, None)
-            if buf is not None:
-                state_dict[f"action_dit.{buf_name}"] = buf
+    # ActionDiT: all parameters + all buffers
+    for name, param in action_dit.named_parameters():
+        state_dict[f"action_dit.{name}"] = param.data
+    for name, buf in action_dit.named_buffers():
+        state_dict[f"action_dit.{name}"] = buf
 
-    # Video pipeline trainable parameters
+    # Video pipeline: all parameters + all buffers
     for name, param in pipe.named_parameters():
-        if param.requires_grad:
-            state_dict[name] = param.data
+        state_dict[name] = param.data
+    for name, buf in pipe.named_buffers():
+        state_dict[name] = buf
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     if path.endswith(".safetensors"):

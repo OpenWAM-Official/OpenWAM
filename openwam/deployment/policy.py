@@ -50,7 +50,7 @@ class WAMPolicy:
         self._async_executor = None
 
         if async_config is not None and getattr(async_config, "enabled", False):
-            from open_wam.inference.optimizations import AsyncInferenceExecutor
+            from openwam.deployment.optimizations import AsyncInferenceExecutor
 
             self._async_executor = AsyncInferenceExecutor(
                 engine=engine,

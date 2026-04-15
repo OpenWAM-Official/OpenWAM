@@ -1,5 +1,14 @@
 # OpenWAM
 
+## TODO
+
+- [ ] **DeepSpeed ZeRO-3 support**
+- [ ] **Video-Backbone Architecture Re-Built**
+- [ ] **LeRobot Dataset Combination**
+- [ ] **RoboTwin2 Benchmark Support**
+
+## What is OpenWAM
+
 OpenWAM is an open-source framework for **World-Action Models (WAMs)**: video-diffusion policies that jointly model future visual dynamics and robot actions.
 
 The repository is organized around the `open_wam/` package and currently supports:
@@ -10,7 +19,7 @@ The repository is organized around the `open_wam/` package and currently support
 - benchmark adapters for RoboTwin, SimplerEnv, LIBERO, RoboCasa, Calvin, and BEHAVIOR-1K
 - a policy server for robot deployment workflows
 
-![Architecture](assets/arch.png)
+![Architecture](assets_repo/arch.png)
 
 ## What OpenWAM Focuses On
 
@@ -35,7 +44,7 @@ OpenWAM/
 ├── scripts/           # Hydra entrypoints: train / infer / eval
 ├── configs/           # Hydra configs for model, data, training, eval, deploy
 ├── tests/             # Unit tests for core OpenWAM functionality
-├── assets/            # Architecture and scheduling diagrams
+├── assets_repo/            # Architecture and scheduling diagrams
 └── third_party/       # Vendored video pipeline (WanVideoPipeline)
 ```
 
