@@ -42,7 +42,7 @@ OpenWAM/
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
 │   ├── deployment/    # Policy server, model loader, joint inference engine, scheduler
 │   └── utils/         # Shared utilities
-├── scripts/           # Entrypoints: train.sh, deploy.sh, fake_client_test.py
+├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests
 ├── configs/           # Hydra configs for model, dataloader, training_strategy, accelerate
 ├── tests/             # Unit tests
 ├── assets_repo/       # Architecture diagrams
@@ -202,20 +202,26 @@ Server endpoints:
 
 ### 3. Testing the Server
 
-Smoke test with a random image:
+**Single inference test** — verify the server returns a valid action:
 
 ```bash
-python scripts/fake_client_test.py --test
-```
+# Smoke test with a random image
+python scripts/inference_single_test.py --test
 
-With a real image:
-
-```bash
-python scripts/fake_client_test.py \
+# With a real image
+python scripts/inference_single_test.py \
   --server http://127.0.0.1:8766 \
   --image /path/to/frame.jpg \
   --prompt "pick up the bottle"
 ```
+
+**Continuous inference test** — simulate a real robot control loop:
+
+```bash
+python scripts/inference_continuous_test.py --steps 100
+```
+
+This simulates 100 control steps, showing how the server handles action chunking internally: the first call triggers full inference (slow, generates an entire action chunk), subsequent calls pop cached actions from the buffer (fast, <10ms), and re-inference is triggered when the buffer is exhausted.
 
 ## Config System
 

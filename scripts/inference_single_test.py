@@ -1,13 +1,13 @@
-"""Fake client test for the OpenWAM policy server.
+"""Single inference test for the OpenWAM policy server.
 
-Sends a random image and dummy prompt to verify the server is working.
+Sends a single image and prompt, verifies the server returns a valid action.
 
 Usage:
     # Quick smoke test with a random image (no file needed)
-    python scripts/fake_client_test.py --test
+    python scripts/inference_single_test.py --test
 
     # With a real image
-    python scripts/fake_client_test.py --image /path/to/frame.jpg --prompt "robot picks up the bottle"
+    python scripts/inference_single_test.py --image /path/to/frame.jpg --prompt "robot picks up the bottle"
 """
 
 import argparse
