@@ -81,6 +81,14 @@ OpenWAM/
 
 ### Base installation
 
+We recommend using PyTorch 2.7.1 with CUDA 12.8 （others may also work）:
+
+```bash
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+```
+
+Then install OpenWAM:
+
 ```bash
 pip install -e .
 ```
