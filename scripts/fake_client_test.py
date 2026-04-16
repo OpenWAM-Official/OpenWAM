@@ -1,11 +1,13 @@
-"""Minimal HTTP client for the OpenWAM policy server.
+"""Fake client test for the OpenWAM policy server.
+
+Sends a random image and dummy prompt to verify the server is working.
 
 Usage:
-    # With a real image
-    python scripts/policy_client.py --image /path/to/frame.jpg --prompt "robot picks up the bottle"
-
     # Quick smoke test with a random image (no file needed)
-    python scripts/policy_client.py --test
+    python scripts/fake_client_test.py --test
+
+    # With a real image
+    python scripts/fake_client_test.py --image /path/to/frame.jpg --prompt "robot picks up the bottle"
 """
 
 import argparse

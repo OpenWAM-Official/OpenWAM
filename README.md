@@ -11,13 +11,13 @@
 
 OpenWAM is an open-source framework for **World-Action Models (WAMs)**: video-diffusion policies that jointly model future visual dynamics and robot actions.
 
-The repository is organized around the `open_wam/` package and currently supports:
+The repository is organized around the `openwam/` package and currently supports:
 
-- Hydra-based training, inference, and evaluation entrypoints
+- Hydra-based training and deployment entrypoints
 - WAM-specific action/video scheduling and receding-horizon execution
-- multi-dataset training utilities and embodiment-aware action conversion
-- benchmark adapters for RoboTwin, SimplerEnv, LIBERO, RoboCasa, Calvin, and BEHAVIOR-1K
-- a policy server for robot deployment workflows
+- RoboTwin dataset adapter with multi-task, multi-view support
+- Three WAM architectures: dual-system, MoE expert, shared backbone
+- A policy server for robot deployment workflows
 
 ![Architecture](assets_repo/arch.png)
 
@@ -28,24 +28,26 @@ OpenWAM is not a VLA clone. Its core direction is to use a video world model as 
 - Backbone: Wan-family video diffusion models
 - Action modeling: flow-matched action generation coupled to video denoising
 - Strengths: temporal coherence, world-model-style rollout, flexible denoising schedules
-- Primary use cases: joint video-action generation, action-only rollout, embodied evaluation, robot serving
+- Primary use cases: joint video-action generation, action-only rollout, robot deployment
 
 ## Repository Layout
 
 ```text
 OpenWAM/
-├── open_wam/
-│   ├── data/          # Dataset adapters, action stats, embodiment abstraction
-│   ├── models/        # WAM architectures, ActionDiT, MoE, conditioning modules
-│   ├── training/      # NativeTrainer, loss modules, callbacks
-│   ├── inference/     # Joint inference engine, schedule utilities, FlowMatchScheduler
-│   ├── evaluation/    # Evaluator registry, benchmark adapters
-│   └── serving/       # Policy server for deployment
-├── scripts/           # Hydra entrypoints: train / infer / eval
-├── configs/           # Hydra configs for model, data, training, eval, deploy
-├── tests/             # Unit tests for core OpenWAM functionality
-├── assets_repo/            # Architecture and scheduling diagrams
-└── third_party/       # Vendored video pipeline (WanVideoPipeline)
+├── openwam/
+│   ├── dataloader/    # Dataset adapters (RoboTwin), transforms, registry
+│   ├── model/         # WAM architectures (DualSystem, MoE, SharedBackbone), ActionDiT
+│   │   ├── action_model/      # ActionDiT, MoE expert, components, proprioceptive encoder
+│   │   └── video_backbone/    # Vendored video pipeline (WanVideoPipeline, VAE, DiT)
+│   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
+│   ├── deployment/    # Policy server, model loader, joint inference engine, scheduler
+│   └── utils/         # Shared utilities
+├── scripts/           # Entrypoints: train.sh, deploy.sh, fake_client_test.py
+├── configs/           # Hydra configs for model, dataloader, training_strategy, accelerate
+├── tests/             # Unit tests
+├── assets_repo/       # Architecture diagrams
+├── references/        # Reference implementations (FastWAM)
+└── benchmarks/        # Benchmark adapters (WIP)
 ```
 
 ## Support Status
@@ -58,18 +60,22 @@ OpenWAM/
 | `moe_expert` | Supported | Shared attention + expert FFN within video DiT (BAGEL/MoT-inspired) |
 | `shared_backbone` | Supported | Action tokens processed by video DiT directly (DreamZero-style) |
 
-### Benchmarks and Deployment
+### Benchmarks and Evaluation
 
-| Capability | Status | Notes |
+| Benchmark | Status | Notes |
 |---|---|---|
-| RoboTwin offline eval | Supported | Primary documented evaluation path |
-| RoboTwin online eval | Supported | Environment-dependent |
-| SimplerEnv eval | Supported | Requires external environment setup |
-| LIBERO eval | Supported | Requires external environment setup |
-| RoboCasa eval | Supported | Requires external environment setup |
-| Calvin eval | Supported | Requires external environment setup |
-| BEHAVIOR-1K eval | Supported | Requires external environment setup |
-| Policy server | Supported | WebSocket + HTTP deployment |
+| RoboTwin eval | Supported | Multi-task, multi-view, multi-variant |
+| SimplerEnv eval | Planned | Requires external environment setup |
+| LIBERO eval | Planned | Requires external environment setup |
+| RoboCasa eval | Planned | Requires external environment setup |
+| Calvin eval | Planned | Requires external environment setup |
+| BEHAVIOR-1K eval | Planned | Requires external environment setup |
+
+### Datasets
+
+| Dataset | Status | Notes |
+|---|---|---|
+| RoboTwin | Supported | Multi-task, multi-view, multi-variant |
 
 ## Installation
 
@@ -77,14 +83,6 @@ OpenWAM/
 
 ```bash
 pip install -e .
-```
-
-### Optional serving dependencies
-
-The policy server can be installed via the optional `serving` extra:
-
-```bash
-pip install -e ".[serving]"
 ```
 
 ### Scale-oriented training controls
@@ -96,129 +94,116 @@ branch, the video backbone, and LoRA adapters:
 - `training.video_lr`
 - `training.lora_lr`
 
-For large backbones, start from the dedicated preset:
+## Quick Start
+
+### 0. Data Preparation
+
+**Download the video backbone (Wan2.2-TI2V-5B):**
 
 ```bash
-python scripts/train.py training=large_backbone model/backbone=ti2v_5b
+huggingface-cli download Wan-AI/Wan2.2-TI2V-5B \
+  --local-dir /path/to/Wan2.2-TI2V-5B
 ```
 
-This preset enables gradient checkpointing, initializes the model on CPU,
-and uses more conservative video-backbone learning rates for 5B-class runs.
+**Download the RoboTwin dataset:**
 
-## Quick Start
+Full dataset or individual task zips can be downloaded from the HuggingFace Hub. For example, to download a single task:
+
+```bash
+huggingface-cli download TianxingChen/RoboTwin2.0 \
+  dataset/adjust_bottle/aloha-agilex_clean_50.zip \
+  --repo-type dataset \
+  --local-dir /path/to/robotwin_2_0
+```
+
+After downloading, unzip the task files:
+
+```bash
+cd /path/to/robotwin_2_0/dataset/adjust_bottle
+unzip aloha-agilex_clean_50.zip
+```
 
 ### 1. Training
 
-Default training uses Hydra config composition from `configs/`.
+Training uses Hydra config composition from `configs/`. Quick sanity check after data preparation:
 
 ```bash
-python scripts/train.py \
-  data.dataset_dir=/path/to/robotwin_2_0/dataset
+bash scripts/train.sh \
+  dataloader.dataset_dir=/path/to/robotwin_2_0/dataset \
+  dataloader.task_name=adjust_bottle \
+  dataloader.variant=clean_50 \
+  model.video_backbone.model_path=/path/to/Wan2.2-TI2V-5B \
+  training.debug=true \
+  training.batch_size=1 \
+  training.output_path=/path/to/your/output_dir
 ```
 
-Useful overrides:
+This runs a short debug training (20 steps) on a single task to verify the full pipeline works end-to-end.
+
+For full training, remove the `training.debug=true` override and adjust other config as needed:
 
 ```bash
-python scripts/train.py \
-  training=joint \
-  model/backbone=vace_1_3b \
-  data=robotwin_multitask \
-  data.dataset_dir=/path/to/robotwin_2_0/dataset \
-  data.robot=arx-x5 \
-  data.variant=clean_50
+bash scripts/train.sh \
+  dataloader.dataset_dir=/path/to/robotwin_2_0/dataset \
+  model.video_backbone.model_path=/path/to/Wan2.2-TI2V-5B
 ```
 
-Other common training presets:
+The main config is `configs/train.yaml`. All fields can be overridden via Hydra CLI as shown above.
 
-- `training=video_only`
-- `training=action_finetune`
-- `training=decoupled`
-- `model/backbone=ti2v_5b`
-- `data=robotwin`
-- `data=mixture`
+Training strategy presets in `configs/training_strategy/`:
 
-### 2. Inference
+- `joint.yaml` — joint video + action training
+- `video_only.yaml` — video-only training (action head frozen)
+
+Architecture configs in `configs/model/`:
+
+- `dual_system.yaml`
+- `moe_expert.yaml`
+- `shared_backbone.yaml`
+
+Accelerate/DeepSpeed configs in `configs/accelerate/`:
+
+- `deepspeed_zero1.yaml`
+- `deepspeed_zero2.yaml`
+- `deepspeed_zero3.yaml`
+
+### 2. Deployment
+
+Deploy a trained checkpoint as a policy server:
 
 ```bash
-python scripts/infer.py \
-  inference=sync \
-  inference.prompt="robot picks up the bottle" \
-  inference.seed=42
+bash scripts/deploy.sh /path/to/checkpoint_dir
 ```
 
-Available inference schedules in `configs/inference/`:
+This reads the `config.yaml` saved alongside checkpoints and starts an HTTP policy server. The latest checkpoint in the directory is loaded automatically.
 
-- `sync` — synchronized video + action denoising
-- `action_only` — action denoising only (no video generation)
-- `video_leading` — video denoises ahead of action
-- `cascade` — sequential video then action
-- `decoupled_flash` — 1-4 step action inference (DreamZero-Flash)
-- `decoupled_asymmetric` — asymmetric video/action step counts
-
-Programmatic schedule utilities are available in `open_wam.inference.schedule`.
-
-### 3. Evaluation
-
-Offline RoboTwin evaluation:
+Options:
 
 ```bash
-python scripts/eval.py \
-  eval=robotwin_offline \
-  eval.ckpt_path=/path/to/checkpoint.safetensors
-```
-
-Online RoboTwin evaluation:
-
-```bash
-python scripts/eval.py \
-  eval=robotwin_online \
-  eval.ckpt_path=/path/to/checkpoint.safetensors
-```
-
-Additional benchmark configs:
-
-- `eval=simpler_env`
-- `eval=libero`
-- `eval=robocasa`
-- `eval=calvin`
-- `eval=behavior`
-
-These benchmarks require their own simulator/environment dependencies.
-
-### 4. Deployment
-
-The deployment module lives in `open_wam.serving.policy_server` and the default deployment config is `configs/deploy/server.yaml`.
-
-Recommended startup path:
-
-```bash
-openwam-serve \
-  --ckpt-path /path/to/checkpoint.safetensors \
-  --config configs/config.yaml \
+bash scripts/deploy.sh /path/to/checkpoint_dir \
   --host 0.0.0.0 \
-  --ws-port 8765 \
-  --http-port 8766
-```
-
-Equivalent module invocation:
-
-```bash
-python -m open_wam.serving.policy_server \
-  --ckpt-path /path/to/checkpoint.safetensors
+  --http-port 8766 \
+  --ckpt-name checkpoint_step_10000.safetensors
 ```
 
 Server endpoints:
 
-- WebSocket: `ws://HOST:WS_PORT`
-- HTTP `POST /predict`
-- HTTP `POST /reset`
-- HTTP `GET /health`
-- HTTP `GET /info`
+- HTTP `POST /predict` — send image + prompt, receive action
+- HTTP `POST /reset` — reset policy state
+- HTTP `GET /health` — health check
 
-Minimal HTTP client example:
+### 3. Testing the Server
+
+Smoke test with a random image:
 
 ```bash
-python scripts/policy_client.py \
+python scripts/fake_client_test.py --test
+```
+
+With a real image:
+
+```bash
+python scripts/fake_client_test.py \
   --server http://127.0.0.1:8766 \
   --image /path/to/frame.jpg \
   --prompt "pick up the bottle"
@@ -226,30 +211,20 @@ python scripts/policy_client.py \
 
 ## Config System
 
-OpenWAM uses Hydra composition rooted at `configs/config.yaml`.
+OpenWAM uses Hydra composition rooted at `configs/train.yaml`.
 
-Default stack:
+Key config groups:
 
-- model: `action_dit_small`
-- backbone: `vace_1_3b`
-- data: `robotwin_multitask`
-- training: `joint`
-- inference: `sync`
-- eval: `robotwin_offline`
+- `configs/model/` — architecture type, action backbone, video backbone
+- `configs/dataloader/` — dataset adapters (RoboTwin)
+- `configs/training_strategy/` — training presets (joint, video_only)
+- `configs/accelerate/` — distributed training (DeepSpeed ZeRO stages)
+- `configs/deployment.yaml` — policy server defaults
 
-Important config groups:
+Checkpoint outputs include:
 
-- `configs/model/` — ActionDiT size, architecture, backbone
-- `configs/data/` — dataset adapters (robotwin, droid, oxe, bridge_v2, mixture)
-- `configs/training/` — training presets (joint, decoupled, action_finetune, etc.)
-- `configs/inference/` — denoising schedules
-- `configs/eval/` — benchmark configurations
-- `configs/deploy/` — policy server deployment
-
-Run traceability:
-
-- Training writes run artifacts under `OUTPUT_PATH/run_artifacts/<RUN_ID>/`
-- Saved files include: `resolved_config.yaml`, `resolved_config.json`, `flat_args.json`, `run_metadata.json`
+- `checkpoint_step_*.safetensors` — full model weights
+- `config.yaml` — complete training config snapshot (self-contained for deployment)
 
 ## Core Features
 
@@ -257,7 +232,7 @@ Run traceability:
 - Receding-horizon execution with temporal ensembling
 - Three WAM architectures: dual-system, MoE expert, shared backbone
 - Package-native model loading for inference, evaluation, and serving
-- `MixtureDataset` for multi-dataset co-training
+- MixtureDataset for multi-dataset co-training
 - Embodiment-aware action conversion for cross-robot use
 - Proprioceptive conditioning module for robot state input
 - Evaluator registry with 7 benchmark adapters

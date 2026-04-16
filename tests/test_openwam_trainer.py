@@ -67,6 +67,9 @@ class _MockPipeline:
     def named_parameters(self):
         yield from self.dit.named_parameters(prefix="dit")
 
+    def named_buffers(self):
+        yield from self.dit.named_buffers(prefix="dit")
+
     def load_state_dict(self, state_dict, strict=True):
         pass
 

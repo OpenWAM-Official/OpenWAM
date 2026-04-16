@@ -132,7 +132,7 @@ def test_import_flow_match_scheduler():
 
 
 def test_import_model_config():
-    from openwam.deployment.model_config import ModelConfig  # noqa: F401
+    from openwam.model.video_backbone.diffsynth.core.loader import ModelConfig  # noqa: F401
 
 
 def test_import_video_backbone():
