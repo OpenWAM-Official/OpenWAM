@@ -25,9 +25,11 @@ from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 from openwam.train.utils.checkpointing import (
     load_trainable_checkpoint,
     manage_checkpoints,
+    save_action_stats,
     save_config,
     save_trainable_checkpoint,
 )
+from openwam.train.utils.manifest import save_video_backbone_artifacts
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.pipeline_builder import build_training_pipeline
 
@@ -214,16 +216,23 @@ class OpenWAMTrainer(BaseTrainer):
         self.min_timestep_boundary = float(t.min_timestep_boundary)
 
         # Extra inputs
-        extra_inputs = getattr(t, "extra_inputs", "vace_video,vace_reference_image,action_trajectory")
+        extra_inputs = getattr(t, "extra_inputs", "vace_video,first_frame_image,action_trajectory")
         self.extra_inputs = extra_inputs.split(",") if extra_inputs else []
+        if "vace_reference_image" in self.extra_inputs:
+            raise ValueError(
+                "training.extra_inputs contains deprecated 'vace_reference_image'. "
+                "Rename it to 'first_frame_image' in your config "
+                "(the OpenWAM-native name; it still maps to diffsynth's "
+                "'vace_reference_image' at the pipeline boundary)."
+            )
 
         # Store reference for BaseTrainer interface
         self.model = self
 
-        # Pipeline-level conditioning transform (adds VACE fields if missing)
-        from openwam.dataloader.transforms.pipeline import VACEConditioningTransform
+        # Pipeline-level conditioning transform (adds first-frame fields if missing)
+        from openwam.dataloader.transforms.pipeline import FirstFrameConditioningTransform
 
-        self._pipeline_transform = VACEConditioningTransform()
+        self._pipeline_transform = FirstFrameConditioningTransform()
 
         # Step counter
         self._current_step = 0
@@ -304,11 +313,14 @@ class OpenWAMTrainer(BaseTrainer):
             "min_timestep_boundary": self.min_timestep_boundary,
         }
 
-        # Extra inputs (vace_video, vace_reference_image)
+        # Extra inputs (vace_video, first_frame_image)
         for key in self.extra_inputs:
-            if key == "vace_reference_image":
+            if key == "first_frame_image":
+                # Boundary: OpenWAM first_frame_image -> diffsynth vace_reference_image.
+                # The diffsynth pipeline expects a single frame (not a list) in the
+                # single-sample path; grab [0] when present.
                 val = data.get(key)
-                inputs_shared[key] = val[0] if val is not None else None
+                inputs_shared["vace_reference_image"] = val[0] if val is not None else None
             elif key == "action_trajectory":
                 pass
             else:
@@ -324,10 +336,10 @@ class OpenWAMTrainer(BaseTrainer):
 
         # Padding masks: mask (True=valid) → is_pad (True=padded)
         #
-        # action_mask: (num_frames,) full resolution — matches action_trajectory.
-        # video_mask:  (num_video_frames,) after video_stride subsampling.
-        #   For video loss: VAE temporally downsamples ~4x. Following FastWAM,
-        #   group frames by 4, mark padded only if ALL in group are padded.
+        # action_mask: (num_frames - 1,) — matches action_trajectory at raw rate.
+        # video_mask:  (num_video_frames,) — already stride-subsampled by dataset.
+        #   For video loss: VAE temporally downsamples ~4x. Drop frame 0 then
+        #   group frames by 4 and mark padded only if ALL in group are padded.
         #   First-frame exclusion is handled inside _compute_video_loss.
         action_mask = data.get("action_mask", None)
         video_mask = data.get("video_mask", None)
@@ -401,7 +413,7 @@ class OpenWAMTrainer(BaseTrainer):
                     torch.zeros(1, 3, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device)
                 )
 
-            ref = sample.get("vace_reference_image")
+            ref = sample.get("first_frame_image")
             if ref is not None:
                 if not isinstance(ref, list):
                     ref = [ref]
@@ -697,6 +709,12 @@ class OpenWAMTrainer(BaseTrainer):
             output_path = os.path.join(base_output_path, run_dir_name)
             os.makedirs(output_path, exist_ok=True)
             save_config(output_path, self.cfg)
+            if self.dataset is not None:
+                save_action_stats(output_path, self.dataset)
+            # Write a self-contained video-backbone manifest + tokenizer so
+            # deploy on a new machine needs only the checkpoint dir (no external
+            # video-backbone source). Silent no-op if model_path is missing.
+            save_video_backbone_artifacts(output_path, self.cfg)
         else:
             output_path = None
 

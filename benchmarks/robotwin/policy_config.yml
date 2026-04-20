@@ -1,0 +1,37 @@
+policy_name: openwam2robotwin_interface
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# --- OpenWAM Policy Server connection ---
+host: "127.0.0.1"
+http_port: 8848           # patched at runtime by single_eval.sh
+
+# --- Observation settings ---
+# The client always sends the 3 cameras RoboTwin exposes (head / left / right)
+# to the server as ``images = {head_camera, left_wrist_camera, right_wrist_camera}``.
+# The server decides from the checkpoint's config.yaml whether to use only the
+# head (multiview=false) or compose the L-shape layout (multiview=true), and
+# applies the resize/crop and prompt wrapping used during training. No client
+# config is needed for that any more.
+
+send_state: false          # include joint state vector in /predict request
+request_timeout: 300      # HTTP timeout in seconds
+
+# --- Action settings ---
+# Must match the action_mode used at training time.
+#
+#   ee   — End-effector: the server returns 20D (xyz+rot6d+grip)×2, which is
+#           automatically converted to 16D (xyz+quat_xyzw+grip)×2 before calling
+#           take_action(action_type='ee'). Use with EEF-mode training (action_mode: eef). Default.
+#
+#   qpos — 14D joint angles: [l_joints(6), l_grip(1), r_joints(6), r_grip(1)]
+#           Use with joint-mode training (action_mode: joint).
+action_type: ee
+
+# action_indices: null    # optional index reordering of the returned action vector
+
+debug: false
+debug_dir: "./debug_images"  # where to save the raw per-camera JPEGs + meta.json

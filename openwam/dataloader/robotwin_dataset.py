@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import random
+import warnings
 from typing import Optional
 
 import cv2
@@ -22,7 +23,49 @@ import torch
 from PIL import Image
 
 from openwam.dataloader.base_dataset import BaseActionDataset
+from openwam.dataloader.transforms.normalize import ActionNormalizer
 from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
+
+# Map user-facing yaml strings to the internal Normalizer modes.
+_YAML_TO_NORM_MODE = {
+    "min-max": "min_max",
+    "z-score": "mean_std",
+}
+_JOINT_ACTION_DIM = 14  # aloha-agilex qpos vector
+
+# Single source of truth for the L-shape multiview layout:
+# [head_camera (top, full width), left_camera (bot-left), right_camera (bot-right)].
+# Imported by ``policy_server`` so train-side and deploy-side fallbacks stay in
+# sync. The matching yaml key in ``configs/dataloader/robotwin.yaml`` is
+# ``camera_layout`` and should mirror this list byte-for-byte.
+DEFAULT_MULTIVIEW_CAMERA_LAYOUT = ("head_camera", "left_camera", "right_camera")
+
+
+def _load_mode_stats(stats_path: str, action_mode: str) -> Optional[dict]:
+    """Load action_stats.npy and return the sub-dict for the requested mode.
+
+    Supports two schemas:
+      - **Nested** (new): ``{"joint": {...}, "eef": {...}, "num_timesteps": ...}``
+      - **Flat** (legacy): ``{"mean": ..., "std": ..., "min": ..., "max": ..., ...}`` —
+        assumed to belong to ``action_mode``; a DeprecationWarning is emitted.
+
+    Returns the per-mode stats dict, or ``None`` if the file does not contain
+    the requested mode.
+    """
+    raw = np.load(stats_path, allow_pickle=True).item()
+    if action_mode in raw and isinstance(raw[action_mode], dict):
+        return raw[action_mode]
+    # Legacy flat schema: treat it as belonging to the active mode
+    if all(k in raw for k in ("mean", "std", "min", "max")):
+        warnings.warn(
+            f"Stats file {stats_path} uses legacy flat schema; assuming it belongs to "
+            f"action_mode='{action_mode}'. Re-run robotwin_stats_computation.py to upgrade.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return {k: raw[k] for k in ("mean", "std", "min", "max", "q01", "q99") if k in raw}
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Per-backbone supported resolutions
@@ -152,25 +195,14 @@ def discover_robotwin_roots(
 
 
 # ---------------------------------------------------------------------------
-# Multi-view 2x2 grid layout (DreamZero / DreamGen style)
+# 3-camera L-shape multi-view layout
 #
-# Tiles 4 camera views into a spatial grid at the original training
-# resolution.  Each quadrant is (height//2, width//2).
-#
-#   +------------------+------------------+
-#   |   head_camera    |  front_camera    |
-#   +------------------+------------------+
-#   |  left_camera     |  right_camera    |
-#   +------------------+------------------+
-#
-# front_camera is a fixed external camera providing a front-facing overview
-# of the full workspace.  (Note: arx-x5 data uses "third_view_rgb" at the
-# top level instead of "observation/front_camera/rgb" — the _read_camera_frames
-# method handles this transparently.)
+#   +---------------------------+
+#   |       camera_layout[0]    |   top, full width, ~2/3 height
+#   +-------------+-------------+
+#   |   cam[1]    |   cam[2]    |   bottom halves
+#   +-------------+-------------+
 # ---------------------------------------------------------------------------
-
-MULTIVIEW_LAYOUT = [["head_camera", "front_camera"], ["left_camera", "right_camera"]]
-MULTIVIEW_CAMERAS = ["head_camera", "front_camera", "left_camera", "right_camera"]
 
 
 def _crop_and_resize(image: Image.Image, target_height: int, target_width: int) -> Image.Image:
@@ -189,64 +221,74 @@ def _crop_and_resize(image: Image.Image, target_height: int, target_width: int) 
     return image.crop((left, top, left + target_width, top + target_height))
 
 
-def assemble_multiview_grid(
+def _stretch_resize(image: Image.Image, target_height: int, target_width: int) -> Image.Image:
+    """Direct BILINEAR resize to (target_width, target_height).
+
+    Does NOT preserve aspect ratio — this matches FastWAM's per-camera
+    ``torchvision.transforms.functional.resize(..., BILINEAR, antialias=True)``
+    step in its RoboTwin multi-view composition.
+    """
+    return image.resize((target_width, target_height), Image.BILINEAR)
+
+
+def assemble_multiview_layout(
     frames_by_camera: dict,
     camera_layout: list,
-    quadrant_h: int,
-    quadrant_w: int,
+    out_h: int,
+    out_w: int,
+    top_height_ratio: float = 2.0 / 3.0,
 ) -> Image.Image:
-    """Assemble per-camera frames into a 2x2 spatial grid.
+    """3-camera L-shape composition (FastWAM-compatible).
+
+    Layout with the default ratio:
+        top    -> (out_h * 2/3, out_w)          full width, 2/3 of height
+        bot-L  -> (out_h * 1/3, out_w / 2)      half width, 1/3 of height
+        bot-R  -> (out_h * 1/3, out_w / 2)      half width, 1/3 of height
+
+    Each camera is BILINEAR-resized directly to its slot with no aspect-ratio
+    preservation (i.e. slight horizontal/vertical stretch is accepted), then
+    pasted without gaps — identical to FastWAM's ``concat_multi_camera='robotwin'``
+    path in ``robot_video_dataset.py``.  At out_h=384, out_w=320 this produces
+    a canvas with top=256x320 and each bottom=128x160, matching FastWAM exactly.
 
     Args:
-        frames_by_camera: ``{camera_name: PIL.Image}`` for each camera.
-            Missing cameras are rendered as black.
-        camera_layout: 2D list of camera names (or ``None`` for black).
-        quadrant_h: Height of each quadrant in pixels.
-        quadrant_w: Width of each quadrant in pixels.
+        frames_by_camera: ``{camera_name: PIL.Image}``. Missing -> black region.
+        camera_layout: ordered list of 3 camera names (top, bot-left, bot-right).
+        out_h, out_w: final canvas size in pixels.
+        top_height_ratio: fraction of height allocated to the top camera.
 
     Returns:
-        Assembled PIL Image of size ``(cols * quadrant_w, rows * quadrant_h)``.
+        PIL Image of size ``(out_w, out_h)``.
     """
-    rows = len(camera_layout)
-    cols = max(len(row) for row in camera_layout)
-    canvas = Image.new("RGB", (cols * quadrant_w, rows * quadrant_h), (0, 0, 0))
+    if len(camera_layout) != 3:
+        raise ValueError(f"multiview layout expects 3 cameras, got {len(camera_layout)}")
 
-    for r, row in enumerate(camera_layout):
-        for c, cam_name in enumerate(row):
-            if cam_name is None:
-                continue  # black quadrant
-            frame = frames_by_camera.get(cam_name)
-            if frame is None:
-                continue  # missing camera → black
-            # Crop-and-resize to quadrant size
-            frame = _crop_and_resize(frame, quadrant_h, quadrant_w)
-            canvas.paste(frame, (c * quadrant_w, r * quadrant_h))
+    top_h = int(round(out_h * top_height_ratio))
+    bottom_h = out_h - top_h
+    half_w = out_w // 2
+    right_w = out_w - half_w
+
+    canvas = Image.new("RGB", (out_w, out_h), (0, 0, 0))
+
+    # Top camera: full width × top_h (BILINEAR stretch)
+    top_name = camera_layout[0]
+    top_frame = frames_by_camera.get(top_name)
+    if top_frame is not None:
+        canvas.paste(_stretch_resize(top_frame, top_h, out_w), (0, 0))
+
+    # Bottom-left: half_w × bottom_h (BILINEAR stretch)
+    bl_name = camera_layout[1]
+    bl_frame = frames_by_camera.get(bl_name)
+    if bl_frame is not None:
+        canvas.paste(_stretch_resize(bl_frame, bottom_h, half_w), (0, top_h))
+
+    # Bottom-right: right_w × bottom_h (BILINEAR stretch)
+    br_name = camera_layout[2]
+    br_frame = frames_by_camera.get(br_name)
+    if br_frame is not None:
+        canvas.paste(_stretch_resize(br_frame, bottom_h, right_w), (half_w, top_h))
 
     return canvas
-
-
-def extract_quadrant(
-    grid_image: Image.Image,
-    row: int,
-    col: int,
-    quadrant_h: int,
-    quadrant_w: int,
-) -> Image.Image:
-    """Crop a single quadrant from a grid image (for eval visualization).
-
-    Args:
-        grid_image: Full grid PIL Image.
-        row: Row index (0-based).
-        col: Column index (0-based).
-        quadrant_h: Height of each quadrant.
-        quadrant_w: Width of each quadrant.
-
-    Returns:
-        Cropped PIL Image of size ``(quadrant_w, quadrant_h)``.
-    """
-    left = col * quadrant_w
-    top = row * quadrant_h
-    return grid_image.crop((left, top, left + quadrant_w, top + quadrant_h))
 
 
 def _pad_and_resize(image: Image.Image, target_height: int, target_width: int) -> Image.Image:
@@ -291,6 +333,90 @@ def _resize_frame(
     return _crop_and_resize(image, target_height, target_width)
 
 
+def _resolve_prompt(
+    instructions: dict,
+    ep_file: str,
+    split: str,
+    task_name: str,
+    multiview: bool,
+    camera_layout,
+) -> str:
+    """Pure function: build the training-time prompt from raw state.
+
+    Extracted from :meth:`RoboTwinDataset._get_prompt` so tests and
+    downstream adapters can reproduce training-time prompts without having
+    to instantiate a full dataset (no ``__new__`` + private-attr injection).
+
+    Must stay byte-compatible with what training sees — deployment relies
+    on it indirectly through ``format_prompt_for_inference``.
+
+    Args:
+        instructions: Mapping from ``episode<N>.json`` to a RoboTwin
+            instruction dict (``{"seen": [...], "unseen": [...]}``) or a
+            plain string / list.
+        ep_file: Episode file name or full path (``episode<N>.hdf5``).
+        split: ``"train"`` samples a random instruction from ``seen``;
+            anything else deterministically picks the first entry.
+        task_name: Falls back to ``f"... performing a {task_name} task."``
+            when instructions don't supply a prompt for this episode.
+        multiview: Whether to wrap the base prompt in the 3-view layout
+            description via :func:`format_prompt_for_inference`.
+        camera_layout: 3-element sequence of camera names used for the
+            L-shape layout wrapper (only read when ``multiview=True``).
+
+    Returns:
+        The final wrapped prompt string that the model sees.
+    """
+    ep_basename = os.path.basename(ep_file)
+    ep_num = ep_basename.replace("episode", "").replace(".hdf5", "")
+    instr_key = f"episode{ep_num}.json"
+
+    base_prompt = None
+    if instr_key in instructions:
+        instr = instructions[instr_key]
+        if isinstance(instr, dict):
+            # RoboTwin format: {"seen": [...], "unseen": [...]}
+            pool = instr.get("seen") or instr.get("unseen") or []
+            if pool:
+                if split == "train":
+                    base_prompt = random.choice(pool)
+                else:
+                    base_prompt = pool[0]
+            elif "instruction" in instr:
+                base_prompt = instr["instruction"]
+        elif isinstance(instr, str):
+            base_prompt = instr
+        elif isinstance(instr, list) and len(instr) > 0:
+            base_prompt = instr[0] if isinstance(instr[0], str) else str(instr[0])
+
+    if base_prompt is None:
+        base_prompt = f"The bimanual robot is performing a {task_name} task."
+
+    return format_prompt_for_inference(base_prompt, multiview, camera_layout)
+
+
+def format_prompt_for_inference(base_prompt: str, multiview: bool, camera_layout) -> str:
+    """Format a base task prompt for model inference.
+
+    Must match :meth:`RoboTwinDataset._get_prompt` byte-for-byte so that
+    the deployment-time prompt stays in-distribution with training.
+
+    - Single-view: returns ``base_prompt`` unchanged.
+    - Multi-view:  wraps with the 3-view layout description used at training.
+    """
+    if not multiview:
+        return base_prompt
+    if base_prompt and base_prompt[-1] not in ".!?":
+        base_prompt = base_prompt + "."
+    return (
+        f"A multi-view video shows that {base_prompt} "
+        f"The video is composed of three views: "
+        f"{camera_layout[0].replace('_', ' ')} (top), "
+        f"{camera_layout[1].replace('_', ' ')} (bottom-left), "
+        f"{camera_layout[2].replace('_', ' ')} (bottom-right)."
+    )
+
+
 class RoboTwinDataset(BaseActionDataset):
     """RoboTwin 2.0 HDF5 dataset for bimanual robot video-action training.
 
@@ -315,7 +441,7 @@ class RoboTwinDataset(BaseActionDataset):
     def __init__(
         self,
         data_root: str,
-        num_frames: int = 49,
+        num_frames: int = 33,
         height: int = 480,
         width: int = 832,
         split: str = "train",
@@ -324,20 +450,29 @@ class RoboTwinDataset(BaseActionDataset):
         task_name: Optional[str] = None,
         seed: int = 42,
         action_stats_path: Optional[str] = None,
+        normalize_mode: Optional[str] = "min-max",
         num_val_samples: int = 4,
         target_camera: str = "head_camera",
         window_stride: int = 1,
         video_stride: int = 4,
         multiview: bool = False,
+        camera_layout: Optional[list] = None,
         robot: Optional[str] = None,
         variant: str = "clean_50",
         backbone: Optional[str] = None,
         action_mode: str = "joint",
+        filter_static_segments: bool = True,
+        static_segment_threshold: float = 1e-5,
+        max_static_retry: int = 3,
     ):
         super().__init__()
         self.robot = robot
         self.variant = variant
         self.action_mode = action_mode
+        self.normalize_mode = normalize_mode if normalize_mode not in ("", "none", "null") else None
+        self._filter_static_segments = bool(filter_static_segments)
+        self._static_segment_threshold = float(static_segment_threshold)
+        self._max_static_retry = int(max_static_retry)
 
         if action_mode not in ("joint", "eef"):
             raise ValueError(f"action_mode must be 'joint' or 'eef', got '{action_mode}'")
@@ -356,7 +491,10 @@ class RoboTwinDataset(BaseActionDataset):
             )
 
         self.data_root = data_root
-        self.num_frames = num_frames
+        if num_frames < 2:
+            raise ValueError(f"num_frames must be >= 2, got {num_frames}")
+        self.num_frames = int(num_frames)
+        self.num_action_steps = self.num_frames - 1
         self.height = height
         self.width = width
         self.repeat = repeat
@@ -365,11 +503,41 @@ class RoboTwinDataset(BaseActionDataset):
         self.target_camera = target_camera
         self.window_stride = max(1, window_stride)
         self.video_stride = max(1, video_stride)
-        self.multiview = multiview
-        self.cameras = MULTIVIEW_CAMERAS if multiview else [target_camera]
-        self.camera_layout = MULTIVIEW_LAYOUT if multiview else None
-        self.quadrant_h = height // 2 if multiview else height
-        self.quadrant_w = width // 2 if multiview else width
+        if (self.num_frames - 1) % self.video_stride != 0:
+            valid = [s for s in range(1, self.num_frames) if (self.num_frames - 1) % s == 0]
+            raise ValueError(
+                f"(num_frames - 1) must be divisible by video_stride. "
+                f"Got num_frames={self.num_frames}, video_stride={self.video_stride}. "
+                f"Valid strides for num_frames={self.num_frames}: {valid}"
+            )
+        self._raw_window_len = self.num_frames
+        self._video_sample_indices = list(range(0, self.num_frames, self.video_stride))
+        self.num_video_frames = len(self._video_sample_indices)
+        # Wan VAE temporal downsampling requires (num_video_frames - 1) % 4 == 0.
+        # Otherwise the pipeline silently rounds up num_frames (see base_pipeline.
+        # check_resize_height_width) and vace_video/video tensors end up at
+        # mismatched temporal lengths.
+        if (self.num_video_frames - 1) % 4 != 0:
+            raise ValueError(
+                f"After video_stride sub-sampling, num_video_frames={self.num_video_frames} "
+                f"violates (num_video_frames - 1) % 4 == 0 (required by Wan VAE). "
+                f"Pick num_frames/video_stride so that (num_frames-1)//video_stride is a "
+                f"multiple of 4. Example: num_frames=33, video_stride=4 → 8 (= 4×2)."
+            )
+        self.multiview = bool(multiview)
+        if self.multiview:
+            if camera_layout is None:
+                camera_layout = list(DEFAULT_MULTIVIEW_CAMERA_LAYOUT)
+            if len(camera_layout) != 3:
+                raise ValueError(
+                    f"multiview requires exactly 3 cameras [top, bot-left, bot-right], "
+                    f"got {len(camera_layout)}: {camera_layout}"
+                )
+            self.cameras = list(camera_layout)
+            self.camera_layout = list(camera_layout)
+        else:
+            self.cameras = [target_camera]
+            self.camera_layout = None
 
         # ---- Discover and sort target episode files ----
         pattern = os.path.join(data_root, "episode*.hdf5")
@@ -426,6 +594,20 @@ class RoboTwinDataset(BaseActionDataset):
             f"action_dim={self._action_dim_detected}"
         )
 
+        # ---- Probe original observation image size (first camera, first episode) ----
+        self._obs_image_size = None  # (H, W) of the raw JPEG frames in HDF5
+        with h5py.File(self._episode_files[0], "r") as f:
+            probe_cam = self.cameras[0]
+            obs_path = f"observation/{probe_cam}/rgb"
+            if obs_path in f and f[obs_path].shape[0] > 0:
+                probe_jpeg = f[obs_path][0]
+                probe_img = self._decode_jpeg(probe_jpeg)
+                self._obs_image_size = (probe_img.height, probe_img.width)
+                print(
+                    f"  Raw observation image size: {self._obs_image_size[0]}x{self._obs_image_size[1]} "
+                    f"(probed from camera '{probe_cam}')"
+                )
+
         # ---- Validate multiview cameras ----
         if self.multiview:
             with h5py.File(self._episode_files[0], "r") as f:
@@ -440,22 +622,22 @@ class RoboTwinDataset(BaseActionDataset):
                             f"{self._episode_files[0]}. Available obs: {obs_keys}. "
                             f"Will use black frames for missing cameras."
                         )
-            print(f"  Multiview mode: layout={self.camera_layout}, quadrant={self.quadrant_h}x{self.quadrant_w}")
+            print(f"  Multiview mode: 3-cam L-shape, cameras={self.cameras}, output={self.height}x{self.width}")
 
         # ---- Exhaustive window enumeration ----
         self._window_index = []  # List of (episode_idx, start_frame)
         for ep_idx, ep_len in enumerate(self._episode_lengths):
-            max_start = max(0, ep_len - self.num_frames)
+            max_start = max(0, ep_len - self._raw_window_len)
             for start in range(0, max_start + 1, self.window_stride):
                 self._window_index.append((ep_idx, start))
         if repeat > 1:
             self._window_index = self._window_index * repeat
-        num_video_frames = len(list(range(0, self.num_frames, self.video_stride)))
         print(
             f"  Exhaustive windows: {len(self._window_index)} "
-            f"(stride={self.window_stride}, repeat={repeat}, "
-            f"video_stride={self.video_stride} → {num_video_frames} video frames, "
-            f"{self.num_frames} action steps)"
+            f"(window_stride={self.window_stride}, repeat={repeat}, "
+            f"raw_window_len={self._raw_window_len}, video_stride={self.video_stride}, "
+            f"→ {self.num_video_frames} video frames, "
+            f"{self.num_action_steps} action steps + 1 proprio)"
         )
 
         # ---- Load scene_info for active arm detection ----
@@ -470,41 +652,82 @@ class RoboTwinDataset(BaseActionDataset):
         else:
             print("  No scene_info.json found, active_arm will default to 'both'")
 
-        # ---- Load action stats (joint mode: min-max; eef mode: none) ----
-        self._action_dim_value = self._action_dim_detected or 14
-        self._action_stats = None
-        self._norm_min = None
-        self._norm_max = None
-        self._norm_range = None
+        # ---- Action normalization (unified for joint & eef via ActionNormalizer) ----
+        self._action_dim_value = (
+            EEF_ACTION_DIM if self.action_mode == "eef" else (self._action_dim_detected or _JOINT_ACTION_DIM)
+        )
+        self._action_normalizer = None  # ActionNormalizer or None if disabled / stats missing
+        self._mode_stats: Optional[dict] = None  # raw stats dict for the active mode
+        self.action_stats_path: Optional[str] = None  # resolved path to the stats .npy file
 
-        if action_mode == "eef":
-            self._action_dim_value = EEF_ACTION_DIM
-            print("  EEF mode: no action normalization applied")
-        else:
-            stats_path = action_stats_path or os.path.join(data_root, "action_stats.npy")
-            if os.path.exists(stats_path):
-                stats = np.load(stats_path, allow_pickle=True).item()
-                if "min" not in stats or "max" not in stats:
-                    raise ValueError(
-                        f"Joint mode requires 'min' and 'max' keys in action stats. "
-                        f"Found keys: {list(stats.keys())}. Re-run action stats computation."
+        if self.normalize_mode is not None:
+            if self.normalize_mode not in _YAML_TO_NORM_MODE:
+                raise ValueError(
+                    f"normalize_mode must be one of {list(_YAML_TO_NORM_MODE)} or null, got '{self.normalize_mode}'"
+                )
+            print(
+                f"  [normalizer] Loading action normalizer "
+                f"(normalize_mode={self.normalize_mode}, action_mode={self.action_mode})"
+            )
+            # Resolve stats path: explicit > default under data_root
+            if action_stats_path is not None:
+                stats_path = action_stats_path
+                if os.path.exists(stats_path):
+                    print(f"  [normalizer] Using explicit stats file: {stats_path} (exists ✓)")
+                else:
+                    print(
+                        f"  [normalizer] WARNING: explicit action_stats_path does not exist: {stats_path}\n"
+                        f"  [normalizer]          '{self.normalize_mode}' normalization DISABLED."
                     )
-                self._norm_min = stats["min"].astype(np.float32)
-                self._norm_max = stats["max"].astype(np.float32)
-                if self._action_dim_detected is not None and len(self._norm_min) != self._action_dim_detected:
-                    raise ValueError(
-                        f"Action stats dimension ({len(self._norm_min)}) does not match "
-                        f"detected action_dim ({self._action_dim_detected}) from data. "
-                        f"Check that {stats_path} was computed for this robot/dataset."
-                    )
-                self._norm_range = np.maximum(self._norm_max - self._norm_min, 1e-6)
-                self._action_stats = {"min": self._norm_min, "max": self._norm_max}
-                self._action_dim_value = len(self._norm_min)
-                print(f"  Action stats loaded from {stats_path} (min-max normalization)")
-                print(f"    Min: {self._norm_min}")
-                print(f"    Max: {self._norm_max}")
+                    stats_path = None
             else:
-                print(f"  WARNING: No action stats found at {stats_path}, joint actions will NOT be normalized")
+                robot_tag = self.robot or "robot"
+                variant_tag = self.variant or "variant"
+                stats_name = f"{self.task_name}_{robot_tag}_{variant_tag}_stats.npy"
+                stats_path = os.path.join(data_root, stats_name)
+                if os.path.exists(stats_path):
+                    print(
+                        f"  [normalizer] Found pre-computed single-task stats file: {stats_path} (exists ✓, will load)"
+                    )
+                else:
+                    from openwam.dataloader.robotwin_stats_computation import compute_action_stats
+
+                    print(
+                        f"  [normalizer] No pre-computed stats at default location: {stats_path}\n"
+                        f"  [normalizer]   → computing now from {data_root} "
+                        f"and will save to: {stats_path}"
+                    )
+                    stats = compute_action_stats(data_root)
+                    np.save(stats_path, stats, allow_pickle=True)
+                    print(f"  [normalizer] Saved newly-computed single-task stats → {stats_path}")
+
+            if stats_path is not None:
+                mode_stats = _load_mode_stats(stats_path, self.action_mode)
+                if mode_stats is None:
+                    print(
+                        f"  [normalizer] WARNING: stats file {stats_path} has no '{self.action_mode}' entry; "
+                        f"normalization DISABLED."
+                    )
+                else:
+                    expected_dim = self._action_dim_value
+                    got_dim = len(mode_stats["mean"])
+                    if got_dim != expected_dim:
+                        raise ValueError(
+                            f"Stats dim mismatch for action_mode='{self.action_mode}': "
+                            f"expected {expected_dim}, got {got_dim} from {stats_path}."
+                        )
+                    self._mode_stats = mode_stats
+                    self._action_normalizer = ActionNormalizer(
+                        mode=_YAML_TO_NORM_MODE[self.normalize_mode],
+                        stats=mode_stats,
+                    )
+                    self.action_stats_path = stats_path
+                    print(
+                        f"  [normalizer] Active: mode={self.normalize_mode}, "
+                        f"action_mode={self.action_mode}, dim={got_dim}, stats={stats_path}"
+                    )
+        else:
+            print("  [normalizer] Action normalization DISABLED (normalize_mode=None)")
 
         # ---- Try loading instruction prompts ----
         self._instructions = {}
@@ -528,7 +751,7 @@ class RoboTwinDataset(BaseActionDataset):
             for _ in range(num_val_samples):
                 ep_idx = val_rng.randint(0, len(self._episode_files) - 1)
                 ep_len = self._episode_lengths[ep_idx]
-                max_start = max(0, ep_len - self.num_frames)
+                max_start = max(0, ep_len - self._raw_window_len)
                 start_idx = val_rng.randint(0, max_start)
                 self._val_samples.append((ep_idx, start_idx))
             print(f"  Val: {len(self._val_samples)} fixed samples")
@@ -540,33 +763,20 @@ class RoboTwinDataset(BaseActionDataset):
         return self._action_dim_value
 
     @property
-    def action_stats(self) -> dict:
-        if self._action_stats is None:
-            return None
-        if self.action_mode == "eef":
-            return None
-        # Return min/max plus equivalent mean/std for model buffer compatibility.
-        # min-max [-1,1] ↔ z-score with mean=(min+max)/2, std=(max-min)/2.
-        stats = dict(self._action_stats)
-        equiv_mean = (stats["min"] + stats["max"]) / 2.0
-        equiv_std = np.maximum(stats["max"] - stats["min"], 1e-6) / 2.0
-        stats["mean"] = equiv_mean
-        stats["std"] = equiv_std
-        return stats
+    def action_stats(self) -> Optional[dict]:
+        """Return the raw stats dict for the active action_mode (or None)."""
+        return dict(self._mode_stats) if self._mode_stats is not None else None
 
-    def denormalize_action(self, action: np.ndarray) -> np.ndarray:
-        """Convert normalized actions back to the robot-native format.
+    def denormalize_action(self, action) -> np.ndarray:
+        """Invert normalization for downstream inference / deployment.
 
-        Joint mode: min-max inverse for all dims (including gripper).
-        EEF mode: no normalization applied, return as-is.
+        If no normalizer is active (no stats / normalize_mode=None), returns
+        the input unchanged.
         """
-        if self.action_mode == "eef":
-            return action.copy() if isinstance(action, np.ndarray) else np.array(action)
-        # Joint mode: min-max inverse
-        if self._action_stats is None:
-            return action.copy() if isinstance(action, np.ndarray) else np.array(action)
-        stats = self._action_stats
-        return 0.5 * (action + 1.0) * (stats["max"] - stats["min"]) + stats["min"]
+        arr = np.asarray(action) if not isinstance(action, np.ndarray) else action
+        if self._action_normalizer is None:
+            return arr.copy()
+        return self._action_normalizer.unnormalize(arr)
 
     def __len__(self):
         if self._val_samples is not None:
@@ -618,79 +828,47 @@ class RoboTwinDataset(BaseActionDataset):
         return [self._decode_jpeg(raw[i]) for i in range(len(raw))]
 
     def _read_multiview_frames(self, f, cameras, start, end):
-        """Read frames from multiple cameras and assemble into 2x2 grids.
+        """Read 3 cameras and assemble into L-shape composition at (height, width).
 
-        Args:
-            f: Open HDF5 file handle.
-            cameras: List of camera names to read.
-            start: Start frame index (inclusive).
-            end: End frame index (exclusive).
-
-        Returns:
-            List of grid PIL Images (already at full resolution).
+        Missing cameras are black-padded.
         """
-        # Read frames per camera, falling back to black on KeyError
+        n = end - start
         per_camera = {}
         for cam in cameras:
             try:
                 per_camera[cam] = self._read_camera_frames(f, cam, start, end)
             except KeyError:
-                n = end - start
-                per_camera[cam] = [Image.new("RGB", (self.quadrant_w, self.quadrant_h), (0, 0, 0)) for _ in range(n)]
+                ph, pw = self._obs_image_size or (self.height, self.width)
+                per_camera[cam] = [Image.new("RGB", (pw, ph), (0, 0, 0)) for _ in range(n)]
 
-        # Assemble per-timestep grids
-        n = end - start
-        grids = []
+        images = []
         for t in range(n):
             frames_t = {cam: per_camera[cam][t] for cam in cameras}
-            grid = assemble_multiview_grid(frames_t, self.camera_layout, self.quadrant_h, self.quadrant_w)
-            grids.append(grid)
-        return grids
+            images.append(
+                assemble_multiview_layout(
+                    frames_t,
+                    self.camera_layout,
+                    self.height,
+                    self.width,
+                )
+            )
+        return images
 
     def _get_prompt(self, ep_idx: int) -> str:
-        """Get text prompt for episode, from instructions or task_name.
+        """Get the wrapped text prompt for episode *ep_idx*.
 
-        Instruction files use RoboTwin format: ``{"seen": [...], "unseen": [...]}``.
-        During training, a random instruction is sampled from "seen".
-        During validation, the first "seen" instruction is used for reproducibility.
+        Thin wrapper over :func:`_resolve_prompt` — all logic lives in the
+        pure helper so tests and downstream adapters don't need a fully
+        constructed ``RoboTwinDataset`` to reproduce training-time prompts.
         """
-        ep_file = os.path.basename(self._episode_files[ep_idx])
-        ep_num = ep_file.replace("episode", "").replace(".hdf5", "")
-        instr_key = f"episode{ep_num}.json"
-
-        base_prompt = None
-        if instr_key in self._instructions:
-            instr = self._instructions[instr_key]
-            if isinstance(instr, dict):
-                # RoboTwin format: {"seen": [...], "unseen": [...]}
-                pool = instr.get("seen") or instr.get("unseen") or []
-                if pool:
-                    if self.split == "train":
-                        base_prompt = random.choice(pool)
-                    else:
-                        base_prompt = pool[0]
-                elif "instruction" in instr:
-                    base_prompt = instr["instruction"]
-            elif isinstance(instr, str):
-                base_prompt = instr
-            elif isinstance(instr, list) and len(instr) > 0:
-                base_prompt = instr[0] if isinstance(instr[0], str) else str(instr[0])
-
-        if base_prompt is None:
-            base_prompt = f"The bimanual robot is performing a {self.task_name} task."
-
-        if self.multiview:
-            # Ensure base_prompt ends with punctuation before appending view description
-            if base_prompt and base_prompt[-1] not in ".!?":
-                base_prompt += "."
-            return (
-                f"A multi-view video shows that {base_prompt} "
-                f"The video is split into four views: "
-                f"head camera (top-left), front camera (top-right), "
-                f"left camera (bottom-left), right camera (bottom-right)."
-            )
-
-        return base_prompt
+        return _resolve_prompt(
+            instructions=self._instructions,
+            ep_file=self._episode_files[ep_idx],
+            split=self.split,
+            task_name=self.task_name,
+            multiview=self.multiview,
+            camera_layout=self.camera_layout,
+        )
 
     def _read_eef_actions(self, f, start: int, end: int) -> np.ndarray:
         """Read endpose keys and assemble 20D EEF action vector.
@@ -724,106 +902,132 @@ class RoboTwinDataset(BaseActionDataset):
 
         return np.concatenate([left, right], axis=-1).astype(np.float32)  # (T, 20)
 
-    def _normalize_joint_actions(self, actions: np.ndarray) -> np.ndarray:
-        """Min-max normalize all joint dims (including gripper) to [-1,1]."""
-        return 2.0 * (actions - self._norm_min) / self._norm_range - 1.0
+    def _read_raw_actions(self, f, start: int, end: int) -> np.ndarray:
+        """Read raw action array (``joint`` or ``eef``) in the given [start, end) range."""
+        if self.action_mode == "eef":
+            return self._read_eef_actions(f, start, end)
+        return f["joint_action/vector"][start:end].astype(np.float32)
+
+    def _build_sample(self, ep_idx: int, start: int) -> dict:
+        """Assemble a single sample at (ep_idx, start).
+
+        - ``num_frames``: raw HDF5 window length (state/action rate).
+        - Video is subsampled by ``video_stride`` to ``num_video_frames``.
+        - State/action stay at raw rate.
+        - ``proprio = raw_actions[0:1]`` (time dim kept).
+        - ``action = raw_actions[1:num_frames]`` (length ``num_frames-1``).
+        """
+        path = self._episode_files[ep_idx]
+        ep_len = self._episode_lengths[ep_idx]
+
+        raw_end = start + self._raw_window_len
+        actual_raw_end = min(raw_end, ep_len)
+        actual_raw_len = max(0, actual_raw_end - start)
+
+        if actual_raw_len <= 0:
+            raise IndexError(f"Window [{start}, {raw_end}) has no frames (ep_len={ep_len}).")
+
+        with h5py.File(path, "r") as f:
+            if self.multiview:
+                raw_frames = self._read_multiview_frames(f, self.cameras, start, actual_raw_end)
+            else:
+                raw_frames = self._read_camera_frames(f, self.target_camera, start, actual_raw_end)
+            raw_actions = self._read_raw_actions(f, start, actual_raw_end)
+
+        # Pad to full window if the episode ended early
+        if actual_raw_len < self._raw_window_len:
+            pad_len = self._raw_window_len - actual_raw_len
+            raw_frames = raw_frames + [raw_frames[-1]] * pad_len
+            raw_actions = np.concatenate(
+                [raw_actions, np.repeat(raw_actions[-1:], pad_len, axis=0)],
+                axis=0,
+            )
+
+        # Normalize before splitting so proprio and action share the same space
+        if self._action_normalizer is not None:
+            raw_actions = self._action_normalizer.normalize(raw_actions)
+
+        # Video: subsampled. State/action: raw rate.
+        sampled_video = [raw_frames[i] for i in self._video_sample_indices]
+        if not self.multiview:
+            sampled_video = [_crop_and_resize(frame, self.height, self.width) for frame in sampled_video]
+
+        proprio_np = raw_actions[0:1].astype(np.float32)
+        action_np = raw_actions[1 : self.num_frames].astype(np.float32)
+
+        video_mask = torch.tensor(
+            [idx < actual_raw_len for idx in self._video_sample_indices],
+            dtype=torch.bool,
+        )
+        action_mask = torch.tensor(
+            [(t + 1) < actual_raw_len for t in range(self.num_action_steps)],
+            dtype=torch.bool,
+        )
+        proprio_mask = torch.tensor([0 < actual_raw_len], dtype=torch.bool)
+
+        # Step-0-only by design: drop "hasn't-started-yet" windows, not mid-episode pauses.
+        if self.num_action_steps > 0:
+            first_delta_max = float(np.max(np.abs(action_np[0] - proprio_np[0])))
+        else:
+            first_delta_max = 0.0
+        is_static = first_delta_max < self._static_segment_threshold
+
+        prompt = self._get_prompt(ep_idx)
+
+        ep_key = f"episode_{ep_idx}"
+        ep_scene = self._scene_info.get(ep_key, {})
+        ep_info = ep_scene.get("info", ep_scene)
+        active_arm = ep_info.get("active_arm", "both")
+
+        action_tensor = torch.from_numpy(action_np)
+        proprio_tensor = torch.from_numpy(proprio_np)
+
+        return {
+            "video": sampled_video,
+            "vace_video": None,
+            "first_frame_image": [sampled_video[0]],
+            "action_trajectory": action_tensor,
+            "action": action_tensor,
+            "action_mask": action_mask,
+            "video_mask": video_mask,
+            "proprio": proprio_tensor,
+            "proprio_mask": proprio_mask,
+            "prompt": prompt,
+            "episode_index": ep_idx,
+            "episode_path": path,
+            "start_frame": start,
+            "end_frame": min(raw_end, ep_len),
+            "episode_length": ep_len,
+            "task_name": self.task_name,
+            "active_arm": active_arm,
+            "_is_static": is_static,
+        }
 
     def __getitem__(self, idx):
-        # ---- Determine episode index and start frame ----
         if self._val_samples is not None:
             ep_idx, start = self._val_samples[idx]
         else:
             ep_idx, start = self._window_index[idx]
 
-        end = start + self.num_frames
-        path = self._episode_files[ep_idx]
-        ep_len = self._episode_lengths[ep_idx]
-        actual_end = min(end, ep_len)
+        sample = self._build_sample(ep_idx, start)
 
-        # ---- Read target frames + actions ----
-        with h5py.File(path, "r") as f:
-            if self.multiview:
-                target_frames = self._read_multiview_frames(f, self.cameras, start, actual_end)
-            else:
-                target_frames = self._read_camera_frames(f, self.target_camera, start, actual_end)
-            if self.action_mode == "eef":
-                actions = self._read_eef_actions(f, start, actual_end)
-            else:
-                actions = f["joint_action/vector"][start:actual_end].astype(np.float32)
+        # Training-only: resample on static segments (keep val deterministic)
+        if (
+            self._filter_static_segments
+            and self.split == "train"
+            and sample["_is_static"]
+            and len(self._window_index) > 1
+        ):
+            for _ in range(self._max_static_retry):
+                rand_idx = random.randint(0, len(self._window_index) - 1)
+                ep_idx2, start2 = self._window_index[rand_idx]
+                alt = self._build_sample(ep_idx2, start2)
+                if not alt["_is_static"]:
+                    sample = alt
+                    break
 
-        actual_len = len(target_frames)
-
-        # ---- Pad target + actions if shorter than num_frames ----
-        valid_len = actual_len
-        if actual_len < self.num_frames:
-            pad_len = self.num_frames - actual_len
-            target_frames = target_frames + [target_frames[-1]] * pad_len
-            actions = np.concatenate(
-                [
-                    actions,
-                    np.repeat(actions[-1:], pad_len, axis=0),
-                ],
-                axis=0,
-            )
-
-        # ---- Normalize actions ----
-        if self.action_mode == "joint":
-            # Min-max normalize all dims (including gripper) if stats are available
-            if self._norm_min is not None:
-                actions = self._normalize_joint_actions(actions)
-
-        # ---- Crop and resize frames to target resolution ----
-        if self.multiview:
-            video = target_frames
-        else:
-            video = [_crop_and_resize(frame, self.height, self.width) for frame in target_frames]
-
-        # ---- Subsample video frames (actions stay at full resolution) ----
-        if self.video_stride > 1:
-            video_indices = list(range(0, len(video), self.video_stride))
-            video = [video[i] for i in video_indices]
-        else:
-            video_indices = list(range(len(video)))
-
-        # ---- Build masks ----
-        # action_mask: (num_frames,) True=valid, False=padded — full resolution
-        action_mask = torch.ones(self.num_frames, dtype=torch.bool)
-        action_mask[valid_len:] = False
-
-        # video_mask: (num_video_frames,) True=valid, False=padded — after subsampling
-        # A subsampled video frame is valid if its source index < valid_len.
-        video_mask = torch.tensor([i < valid_len for i in video_indices], dtype=torch.bool)
-
-        vace_reference_image = [video[0]]
-
-        prompt = self._get_prompt(ep_idx)
-
-        # ---- Extract active arm from scene_info ----
-        ep_key = f"episode_{ep_idx}"
-        ep_scene = self._scene_info.get(ep_key, {})
-        ep_info = ep_scene.get("info", ep_scene)
-        active_arm = ep_info.get("{a}", ep_info.get("active_arm", "both"))
-
-        action_tensor = torch.from_numpy(actions)
-        result = {
-            "video": video,
-            "vace_video": None,
-            "vace_reference_image": vace_reference_image,
-            "action_trajectory": action_tensor,
-            "action": action_tensor,  # BaseActionDataset compat
-            "action_mask": action_mask,  # (num_frames,) True=valid
-            "video_mask": video_mask,  # (num_video_frames,) True=valid
-            "prompt": prompt,
-            # Metadata
-            "episode_index": ep_idx,
-            "episode_path": path,
-            "start_frame": start,
-            "end_frame": min(end, ep_len),
-            "episode_length": ep_len,
-            "task_name": self.task_name,
-            "active_arm": active_arm,
-        }
-        return result
+        sample.pop("_is_static", None)
+        return sample
 
 
 class MultiTaskRoboTwinDataset(BaseActionDataset):
@@ -882,16 +1086,28 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             else:
                 tasks = ROBOTWIN_TRAIN_TASKS
 
+        # Optional camera_layout may be a ListConfig; normalize to a plain list
+        _cam_layout = _get("camera_layout", None)
+        if _cam_layout is not None:
+            _cam_layout = list(_cam_layout)
+
+        # normalize_mode can be null/None to disable
+        _norm_mode = _get("normalize_mode", "min-max")
+        if isinstance(_norm_mode, str) and _norm_mode.lower() in ("none", "null", ""):
+            _norm_mode = None
+
         return cls(
             dataset_dir=_get("dataset_dir"),
             robot=_get("robot", "aloha-agilex"),
             variant=_get("variant", "both"),
             tasks=tasks,
+            task_name=task_name,  # drives single- vs multi-task stats filename
             action_stats_path=_get("action_stats_path", None),
+            normalize_mode=_norm_mode,
             action_mode=_get("action_mode", "eef"),
             num_frames=int(_get("num_frames", 33)),
             height=int(_get("height", 480)),
-            width=int(_get("width", 640)),
+            width=int(_get("width", 832)),
             split=split,
             val_ratio=float(_get("val_ratio", 0.0)),
             repeat=int(_get("repeat", 1)),
@@ -899,7 +1115,11 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             window_stride=int(_get("window_stride", 1)),
             video_stride=int(_get("video_stride", 4)),
             multiview=bool(_get("multiview", True)),
+            camera_layout=_cam_layout,
             backbone=_get("backbone", None),
+            filter_static_segments=bool(_get("filter_static_segments", True)),
+            static_segment_threshold=float(_get("static_segment_threshold", 1e-5)),
+            max_static_retry=int(_get("max_static_retry", 3)),
         )
 
     def __init__(
@@ -908,12 +1128,14 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         robot: str,
         variant: str = "clean_50",
         tasks: Optional[list] = None,
+        task_name: Optional[str] = None,
         action_stats_path: Optional[str] = None,
         action_mode: str = "joint",
         **kwargs,
     ):
         super().__init__()
         self.action_mode = action_mode
+        self.task_name = task_name
 
         # ---- Resolve variant(s) ----
         if variant == "both":
@@ -925,8 +1147,8 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         all_roots = []  # list of (display_name, data_root, variant_name)
         for v in variant_list:
             roots = discover_robotwin_roots(dataset_dir, robot, v, tasks)
-            for task_name, data_root in roots:
-                display = f"{task_name}/{v}" if len(variant_list) > 1 else task_name
+            for _t, data_root in roots:
+                display = f"{_t}/{v}" if len(variant_list) > 1 else _t
                 all_roots.append((display, data_root, v))
 
         if not all_roots:
@@ -941,6 +1163,73 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             f"robot={robot}, variant={variant}, action_mode={action_mode}"
         )
 
+        # ---- Resolve shared action-stats path (auto-compute if missing) ----
+        _norm_mode_kw = kwargs.get("normalize_mode", "min-max")
+        if isinstance(_norm_mode_kw, str) and _norm_mode_kw.lower() in ("none", "null", ""):
+            _norm_mode_kw = None
+
+        # Single-task vs multi-task is decided by task_name (single when a specific
+        # task was named in the yaml; multi when task_name=null / unset).
+        _is_single_task = bool(task_name)
+        if _is_single_task:
+            _default_stats_name = f"{task_name}_{robot}_{variant}_stats.npy"
+            _scope_label = f"single-task ({task_name})"
+        else:
+            _default_stats_name = f"{robot}_{variant}_stats.npy"
+            _scope_label = "multi-task"
+
+        if _norm_mode_kw is None:
+            print(
+                f"[normalizer] {_scope_label} normalization DISABLED (normalize_mode=None); "
+                f"sub-datasets will run with raw action values."
+            )
+        else:
+            print(
+                f"[normalizer] Resolving {_scope_label} shared stats "
+                f"(normalize_mode={_norm_mode_kw}, action_mode={action_mode}, "
+                f"robot={robot}, variant={variant})"
+            )
+            if action_stats_path is not None:
+                if os.path.exists(action_stats_path):
+                    print(
+                        f"[normalizer] Using explicit shared stats file: {action_stats_path} "
+                        f"(exists ✓, will be forwarded to every sub-dataset)"
+                    )
+                else:
+                    print(
+                        f"[normalizer] WARNING: explicit action_stats_path does not exist: "
+                        f"{action_stats_path}\n"
+                        f"[normalizer]          sub-datasets will fall back to their own auto-resolution."
+                    )
+            else:
+                action_stats_path = os.path.join(dataset_dir, _default_stats_name)
+                if os.path.exists(action_stats_path):
+                    print(
+                        f"[normalizer] Found pre-computed {_scope_label} stats file: {action_stats_path} "
+                        f"(exists ✓, will load)"
+                    )
+                else:
+                    from openwam.dataloader.robotwin_stats_computation import (
+                        compute_multitask_robotwin_stats,
+                    )
+
+                    print(
+                        f"[normalizer] No pre-computed {_scope_label} stats at default location: "
+                        f"{action_stats_path}\n"
+                        f"[normalizer]   → computing now across {len(all_roots)} task-variant pairs "
+                        f"and will save to: {action_stats_path}\n"
+                        f"[normalizer]   (this may take a while for large datasets)"
+                    )
+                    stats = compute_multitask_robotwin_stats(
+                        dataset_dir=dataset_dir,
+                        robot=robot,
+                        variant=variant,
+                        tasks=tasks,
+                    )
+                    np.save(action_stats_path, stats, allow_pickle=True)
+                    print(f"[normalizer] Saved newly-computed {_scope_label} stats → {action_stats_path}")
+        self.action_stats_path: Optional[str] = action_stats_path
+
         self._sub_datasets = []
         self._cumulative_lengths = []
         cumulative = 0
@@ -954,16 +1243,19 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             task_iter = all_roots
             _use_tqdm = False
 
+        import contextlib
         import os as _os
-        import sys
 
         for display_name, data_root, v in task_iter:
-            if _use_tqdm:
-                task_iter.set_postfix_str(display_name)
-                # Suppress per-task prints to keep progress bar clean
-                _old_stdout = sys.stdout
-                sys.stdout = open(_os.devnull, "w")
-            try:
+            # Suppress per-task prints to keep the tqdm progress bar clean.
+            # ExitStack guarantees both the devnull file and the stdout
+            # redirection are torn down even if RoboTwinDataset.__init__ raises
+            # — the old ``sys.stdout = open(...)`` idiom leaked stdout on error.
+            with contextlib.ExitStack() as _stack:
+                if _use_tqdm:
+                    task_iter.set_postfix_str(display_name)
+                    _devnull = _stack.enter_context(open(_os.devnull, "w"))
+                    _stack.enter_context(contextlib.redirect_stdout(_devnull))
                 ds = RoboTwinDataset(
                     data_root=data_root,
                     task_name=display_name.split("/")[0].replace("_", " "),
@@ -973,10 +1265,6 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
                     action_mode=action_mode,
                     **kwargs,
                 )
-            finally:
-                if _use_tqdm:
-                    sys.stdout.close()
-                    sys.stdout = _old_stdout
             self._sub_datasets.append(ds)
             cumulative += len(ds)
             self._cumulative_lengths.append(cumulative)

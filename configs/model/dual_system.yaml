@@ -4,7 +4,7 @@
 architecture:
   type: dual_system
   action_dim: 20
-  bridge_type: cross_attn   # [Optional]: cross_attn, cross_attn_detach or joint_self_attn
+  bridge_type: cross_attn_detach   # [Optional]: cross_attn, cross_attn_detach or joint_self_attn
   # len(bridge_layers) auto-determines ActionDiT num_layers.
   bridge_layers: [3, 7, 11, 15, 19, 23, 26, 29]  # TI2V-5B/VACE-1.3B: 30 layers (index 0-29)
 

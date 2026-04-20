@@ -40,14 +40,15 @@ OpenWAM/
 │   │   ├── action_model/      # ActionDiT, MoE expert, components, proprioceptive encoder
 │   │   └── video_backbone/    # Vendored video pipeline (WanVideoPipeline, VAE, DiT)
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
-│   ├── deployment/    # Policy server, model loader, joint inference engine, scheduler
+│   ├── deployment/    # Policy server, model loader, joint/mock inference engines, scheduler
 │   └── utils/         # Shared utilities
 ├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests
 ├── configs/           # Hydra configs for model, dataloader, training_strategy, accelerate
 ├── tests/             # Unit tests
 ├── assets_repo/       # Architecture diagrams
 ├── references/        # Reference implementations (FastWAM)
-└── benchmarks/        # Benchmark adapters (WIP)
+└── benchmarks/
+    └── robotwin/      # RoboTwin eval client, single_eval.sh / multi_eval.sh scripts
 ```
 
 ## Support Status
@@ -64,18 +65,12 @@ OpenWAM/
 
 | Benchmark | Status | Notes |
 |---|---|---|
-| RoboTwin eval | Supported | Multi-task, multi-view, multi-variant |
+| RoboTwin eval | Supported | All 50 tasks; see `benchmarks/robotwin/` |
 | SimplerEnv eval | Planned | Requires external environment setup |
 | LIBERO eval | Planned | Requires external environment setup |
 | RoboCasa eval | Planned | Requires external environment setup |
 | Calvin eval | Planned | Requires external environment setup |
 | BEHAVIOR-1K eval | Planned | Requires external environment setup |
-
-### Datasets
-
-| Dataset | Status | Notes |
-|---|---|---|
-| RoboTwin | Supported | Multi-task, multi-view, multi-variant |
 
 ## Installation
 
@@ -190,28 +185,75 @@ Options:
 ```bash
 bash scripts/deploy.sh /path/to/checkpoint_dir \
   --host 0.0.0.0 \
-  --http-port 8766 \
+  --http-port 8848 \
   --ckpt-name checkpoint_step_10000.safetensors
+```
+
+#### Mock mode (no GPU or model weights required)
+
+`MockInferenceEngine` implements the same interface as `JointInferenceEngine` but returns random Gaussian actions immediately, making it suitable for integration testing, client benchmarking, and CI environments without a GPU.
+
+```bash
+# Start a mock server (no checkpoint needed)
+python scripts/deploy.py --mock --mock-action-dim 20 --mock-latency-ms 2000
+```
+
+Mock-mode options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--mock` | — | Enable mock mode (skips model loading) |
+| `--mock-action-dim N` | `20` | Dimensionality of the returned action vector |
+| `--mock-latency-ms T` | `2000` | Simulated inference latency in milliseconds |
+
+Once the mock server is running, all normal client scripts work against it without modification:
+
+```bash
+python scripts/inference_single_test.py --test
+python scripts/inference_continuous_test.py --steps 100
 ```
 
 Server endpoints:
 
-- HTTP `POST /predict` — send image + prompt, receive action
-- HTTP `POST /reset` — reset policy state
+- HTTP `POST /predict` — send 3-camera `images` dict + base prompt, receive action (already denormalized to physical units)
+- HTTP `POST /reset` — reset policy state between episodes
 - HTTP `GET /health` — health check
+- HTTP `GET /info` — model info and config
+
+See [benchmarks/README.md](benchmarks/README.md) for the full client payload contract.
+
+#### Debug mode (capture server-side requests)
+
+Pass `--debug` to `scripts/deploy.py` (or the `deploy.sh` wrapper) to save the post-preprocessing image and per-step metadata under `--debug-dir` (default `./server_debug`):
+
+```bash
+python scripts/deploy.py --ckpt-dir /path/to/ckpt_dir \
+    --debug --debug-dir ./server_debug
+```
+
+Each request writes `server_debug/ep<N>/step_<N>/{image_processed.jpg, meta.json}` — useful when debugging client/server contract issues.
 
 ### 3. Testing the Server
+
+Client always sends the same 3-camera payload (head required, wrists optional). Server reads the checkpoint's `config.yaml` and dispatches to single- or multi-view preprocessing automatically. See [benchmarks/README.md](benchmarks/README.md) for the full client integration guide.
 
 **Single inference test** — verify the server returns a valid action:
 
 ```bash
-# Smoke test with a random image
+# Smoke test with 3 random images (no files needed)
 python scripts/inference_single_test.py --test
 
-# With a real image
+# With real images
 python scripts/inference_single_test.py \
-  --server http://127.0.0.1:8766 \
-  --image /path/to/frame.jpg \
+  --server http://127.0.0.1:8848 \
+  --head-camera /path/to/head.jpg \
+  --left-wrist-camera /path/to/left.jpg \
+  --right-wrist-camera /path/to/right.jpg \
+  --prompt "pick up the bottle"
+
+# Head-only (wrists sent as null — server black-fills if multi-view)
+python scripts/inference_single_test.py \
+  --head-camera /path/to/head.jpg \
   --prompt "pick up the bottle"
 ```
 
@@ -222,6 +264,19 @@ python scripts/inference_continuous_test.py --steps 100
 ```
 
 This simulates 100 control steps, showing how the server handles action chunking internally: the first call triggers full inference (slow, generates an entire action chunk), subsequent calls pop cached actions from the buffer (fast, <10ms), and re-inference is triggered when the buffer is exhausted.
+
+### 4. Benchmarks Support
+
+Evaluation adapters live under `benchmarks/`. Each adapter connects to an **already-running** OpenWAM policy server via HTTP — no model weights are needed on the evaluator machine.
+
+| Benchmark | Status | Notes |
+|---|---|---|
+| [RoboTwin Benchmark](benchmarks/robotwin/README.md) | Supported | All 50 RoboTwin 2.0 tasks; single-task & multi-task eval scripts |
+| SimplerEnv | Planned | Requires external environment setup |
+| LIBERO | Planned | Requires external environment setup |
+| RoboCasa | Planned | Requires external environment setup |
+| Calvin | Planned | Requires external environment setup |
+| BEHAVIOR-1K | Planned | Requires external environment setup |
 
 ## Config System
 
@@ -242,15 +297,14 @@ Checkpoint outputs include:
 
 ## Core Features
 
-- Joint video-action denoising with configurable schedules
+- Joint video-action denoising with configurable schedules (sync, cascade, video-leading, action-only, decoupled)
 - Receding-horizon execution with temporal ensembling
 - Three WAM architectures: dual-system, MoE expert, shared backbone
-- Package-native model loading for inference, evaluation, and serving
-- MixtureDataset for multi-dataset co-training
-- Embodiment-aware action conversion for cross-robot use
+- Package-native model loading for inference and serving (no dependency on training infrastructure at deploy time)
 - Proprioceptive conditioning module for robot state input
-- Evaluator registry with 7 benchmark adapters
-- WebSocket + HTTP policy server for deployment workflows
+- RoboTwin benchmark adapter (see `benchmarks/robotwin/`)
+- WebSocket + HTTP policy server with unified 3-camera client contract; server handles all preprocessing and prompt wrapping from the checkpoint's saved config
+- Mock inference engine for GPU-free integration testing and CI
 
 ## Development
 

@@ -8,18 +8,20 @@ dataset), keeping the dataset output model-agnostic.
 from openwam.dataloader.transforms.base import ModalityTransform
 
 
-class VACEConditioningTransform(ModalityTransform):
-    """Add VACE-specific conditioning fields to a sample.
+class FirstFrameConditioningTransform(ModalityTransform):
+    """Add first-frame conditioning fields to a sample.
 
     Reads ``data["video"]`` and derives:
-    - ``vace_reference_image``: First frame as reference for spatial grounding.
+    - ``first_frame_image``: First frame, used as TI2V first-frame condition
+      on Wan2.2-TI2V backbones, or as VACE spatial reference on Wan2.1-VACE
+      backbones. The OpenWAM layer stays backend-agnostic; the mapping to
+      diffsynth's ``vace_reference_image`` input happens at the pipeline
+      boundary (see openwam/deployment/joint_generation.py and
+      openwam/train/openwam_trainer.py).
     - ``vace_video``: Set to None (inactive conditioning by default).
 
-    This keeps the dataset layer model-agnostic while providing the fields
-    that the VACE video pipeline expects.
-
     Args:
-        use_first_frame_as_reference: If True, set ``vace_reference_image``
+        use_first_frame_as_reference: If True, set ``first_frame_image``
             to ``[video[0]]``. If False, set to None.
     """
 
@@ -28,14 +30,13 @@ class VACEConditioningTransform(ModalityTransform):
         self.use_first_frame_as_reference = use_first_frame_as_reference
 
     def apply(self, data: dict) -> dict:
-        # Only add if not already present (don't overwrite RoboTwin's explicit values)
         if "vace_video" not in data:
             data["vace_video"] = None
 
-        if "vace_reference_image" not in data:
+        if "first_frame_image" not in data:
             if self.use_first_frame_as_reference and "video" in data and data["video"]:
-                data["vace_reference_image"] = [data["video"][0]]
+                data["first_frame_image"] = [data["video"][0]]
             else:
-                data["vace_reference_image"] = None
+                data["first_frame_image"] = None
 
         return data

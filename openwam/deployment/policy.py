@@ -184,8 +184,20 @@ class WAMPolicy:
             self._async_executor.shutdown()
 
     def _build_conditions(self, obs: dict) -> dict:
-        """Assemble inference conditions from current observation + history."""
-        return {
+        """Assemble inference conditions from current observation + history.
+
+        Populates the engine-facing fields (``first_frame_image``,
+        ``prompt``) from the server-preprocessed observation so the
+        pipeline receives images without any further client-side work.
+        """
+        conditions = {
             "observation": obs,
             "obs_history": list(self.obs_history),
         }
+        img = obs.get("image")
+        if img is not None:
+            # Single first frame — pipeline expects list[PIL.Image]
+            conditions["first_frame_image"] = [img]
+        if obs.get("prompt"):
+            conditions["prompt"] = obs["prompt"]
+        return conditions

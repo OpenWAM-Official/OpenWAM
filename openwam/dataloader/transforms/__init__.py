@@ -11,7 +11,7 @@ from openwam.dataloader.transforms.base import (
 )
 from openwam.dataloader.transforms.builder import build_transforms
 from openwam.dataloader.transforms.normalize import ActionNormalizer, Normalizer
-from openwam.dataloader.transforms.pipeline import VACEConditioningTransform
+from openwam.dataloader.transforms.pipeline import FirstFrameConditioningTransform
 from openwam.dataloader.transforms.rotation import RotationTransform, RotationType
 from openwam.dataloader.transforms.video import (
     VideoColorJitter,
@@ -32,6 +32,6 @@ __all__ = [
     "VideoRandomCrop",
     "VideoColorJitter",
     "VideoHorizontalFlip",
-    "VACEConditioningTransform",
+    "FirstFrameConditioningTransform",
     "build_transforms",
 ]

@@ -20,7 +20,7 @@ def prepare_pipeline_inputs(
     prompt: str,
     negative_prompt: str = "",
     vace_video=None,
-    vace_reference_image=None,
+    first_frame_image=None,
     num_frames: int = 49,
     height: int = 480,
     width: int = 832,
@@ -115,7 +115,11 @@ def prepare_pipeline_inputs(
         "camera_control_origin": _DEFAULT_CAMERA_ORIGIN,
         "vace_video": vace_video,
         "vace_video_mask": None,
-        "vace_reference_image": vace_reference_image,
+        # Boundary: OpenWAM first_frame_image -> diffsynth vace_reference_image.
+        # On Wan2.2-TI2V this becomes first_frame_latents; on Wan2.1-VACE it
+        # becomes the VACE spatial reference. The field name is dictated by
+        # the vendored diffsynth pipeline units.
+        "vace_reference_image": first_frame_image,
         "vace_scale": 1.0,
         "seed": seed,
         "rand_device": "cpu",
@@ -175,7 +179,7 @@ def generate_video_and_actions(
     prompt: str,
     negative_prompt: str = "",
     vace_video=None,
-    vace_reference_image=None,
+    first_frame_image=None,
     num_frames: int = 49,
     height: int = 480,
     width: int = 832,
@@ -203,8 +207,11 @@ def generate_video_and_actions(
         schedule: List of (video_timestep, action_timestep) pairs.
         prompt: Text prompt for generation.
         negative_prompt: Negative prompt for CFG.
-        vace_video: Optional VACE conditioning video.
-        vace_reference_image: Optional reference image(s).
+        vace_video: Optional VACE conditioning video (Wan2.1-VACE only).
+        first_frame_image: Optional first-frame image, used as the TI2V
+            first-frame condition on Wan2.2-TI2V backbones or the VACE
+            spatial reference on Wan2.1-VACE backbones. Mapped to diffsynth's
+            ``vace_reference_image`` field at the pipeline boundary.
         num_frames: Number of video frames to generate.
         height: Video height in pixels.
         width: Video width in pixels.
@@ -235,7 +242,7 @@ def generate_video_and_actions(
         prompt,
         negative_prompt,
         vace_video,
-        vace_reference_image,
+        first_frame_image,
         num_frames,
         height,
         width,
@@ -255,13 +262,13 @@ def generate_video_and_actions(
         inputs_shared["latents"] = input_video_latents
 
     is_ti2v = getattr(pipe.dit, "fuse_vae_embedding_in_latents", False)
-    if is_ti2v and vace_reference_image is not None:
+    if is_ti2v and first_frame_image is not None:
         inputs_shared["fuse_vae_embedding_in_latents"] = True
         num_clean_prefix = 0
-        ref_f = len(vace_reference_image) if isinstance(vace_reference_image, list) else 1
+        ref_f = len(first_frame_image) if isinstance(first_frame_image, list) else 1
         num_clean_prefix += ref_f
         inputs_shared["num_clean_prefix_frames"] = num_clean_prefix
-        ref_frames = vace_reference_image if isinstance(vace_reference_image, list) else [vace_reference_image]
+        ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
         pipe.load_models_to_device(["vae"])
         ref_tensor = pipe.preprocess_video(ref_frames)
         ref_image_latents = pipe.vae.encode(ref_tensor, device=device, tiled=tiled).to(dtype=dtype, device=device)
@@ -269,7 +276,7 @@ def generate_video_and_actions(
 
     action_latents = torch.randn(
         1,
-        num_frames,
+        num_frames - 1,
         architecture.action_dim,
         device=device,
         dtype=dtype,
@@ -419,8 +426,8 @@ def generate_video_and_actions(
     # VAE decode
     t_vae = time.time()
     if decode_video:
-        if vace_reference_image is not None:
-            ref_count = len(vace_reference_image) if isinstance(vace_reference_image, list) else 1
+        if first_frame_image is not None:
+            ref_count = len(first_frame_image) if isinstance(first_frame_image, list) else 1
             inputs_shared["latents"] = inputs_shared["latents"][:, :, ref_count:]
 
         pipe.load_models_to_device(["vae"])
@@ -437,9 +444,16 @@ def generate_video_and_actions(
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
     else:
         actions = action_latents.squeeze(0).float().cpu().numpy()
-        actions = (
-            actions * architecture.action_std.float().cpu().numpy() + architecture.action_mean.float().cpu().numpy()
-        )
+        denorm = getattr(architecture, "action_denormalizer", None)
+        if denorm is not None:
+            # ActionNormalizer covers both min-max and z-score correctly
+            actions = denorm.unnormalize(actions)
+        else:
+            # Legacy fallback for checkpoints without a saved action_stats.npy
+            # (buffer-based z-score — only correct when training used z-score).
+            actions = (
+                actions * architecture.action_std.float().cpu().numpy() + architecture.action_mean.float().cpu().numpy()
+            )
 
     _profile_sync("action_decode", t_action, profile)
 

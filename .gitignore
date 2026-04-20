@@ -176,6 +176,14 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Policy-server / client per-step debug artifacts
+server_debug/
+debug_images/
+
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

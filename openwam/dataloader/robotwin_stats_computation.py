@@ -1,45 +1,60 @@
+"""Compute per-episode action normalization stats for RoboTwin data.
+
+The output is a single ``.npy`` file containing BOTH joint and eef stats:
+
+    {
+        "joint": {"mean", "std", "min", "max", "q01", "q99"},   # shape (14,)
+        "eef":   {"mean", "std", "min", "max", "q01", "q99"},   # shape (20,)
+        "num_timesteps": int,
+    }
+
+Running once produces stats for both action modes — downstream loading picks
+whichever sub-dict matches ``action_mode`` at dataset-construction time.
+
+Usage
+-----
+    # yaml-driven (preferred)
+    python -m openwam.dataloader.robotwin_stats_computation \
+        --config configs/dataloader/robotwin.yaml
+
+    # single-task
+    python -m openwam.dataloader.robotwin_stats_computation \
+        --data_root /path/to/task/{robot}_{variant}/data
+
+    # multi-task
+    python -m openwam.dataloader.robotwin_stats_computation \
+        --dataset_dir /path/to/RoboTwin2.0/dataset --robot aloha-agilex --variant both
 """
-Compute global action normalization stats (mean, std, min, max) from episode HDF5 files.
 
-Uses a memory-efficient single-pass algorithm: accumulates running_sum and
-running_sum_sq in float64 precision, then computes mean and std at the end.
-
-Supports two action modes via --action_mode:
-  joint (default)  — reads joint_action/vector (T, 14|16)
-  eef              — reads endpose/ keys, converts to 20D EEF representation
-
-Mode auto-detection:
-  --data_root            → single-task stats
-  --dataset_dir          → multi-task stats (aggregate across all training tasks)
-
-Multi-variant support via --variant:
-  --variant both   (aggregate across clean_50 + randomized_500)
-
-Usage:
-    python -m openwam.dataloader.robotwin_stats_computation --data_root /path/to/episodes
-    python -m openwam.dataloader.robotwin_stats_computation --dataset_dir /path/to/dataset --robot arx-x5
-    python -m openwam.dataloader.robotwin_stats_computation --dataset_dir /path/to/dataset --robot arx-x5 \\
-        --variant both --action_mode eef
-"""
+from __future__ import annotations
 
 import argparse
 import glob
 import os
+from typing import Optional
 
 import h5py
 import numpy as np
 
+# Per-mode action dim is fixed by the HDF5 layout
+_JOINT_ACTION_DIM = 14  # aloha-agilex qpos vector
+_EEF_ACTION_DIM = 20  # [xyz(3) + rot6d(6) + grip(1)] x 2 arms
+_MODES = ("joint", "eef")
 
-def _read_eef_actions_from_file(f) -> np.ndarray:
-    """Read endpose keys from an open HDF5 file and assemble 20D EEF actions.
 
-    Layout: [left_xyz(3), left_rot6d(6), left_grip(1),
-             right_xyz(3), right_rot6d(6), right_grip(1)]
-    Gripper values are raw continuous values from HDF5 (1=open, 0=closed).
-    """
+def _read_joint_actions(f) -> Optional[np.ndarray]:
+    if "joint_action/vector" not in f:
+        return None
+    return f["joint_action/vector"][()].astype(np.float64)
+
+
+def _read_eef_actions(f) -> Optional[np.ndarray]:
+    if "endpose/left_endpose" not in f:
+        return None
+    # Local import avoids a hard dependency when only joint is needed in tests
     from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
 
-    left_ep = f["endpose/left_endpose"][()].astype(np.float64)  # (T, 7)
+    left_ep = f["endpose/left_endpose"][()].astype(np.float64)
     right_ep = f["endpose/right_endpose"][()].astype(np.float64)
     left_grip = f["endpose/left_gripper"][()].astype(np.float64)
     right_grip = f["endpose/right_gripper"][()].astype(np.float64)
@@ -63,118 +78,132 @@ def _read_eef_actions_from_file(f) -> np.ndarray:
     return np.concatenate([left, right], axis=-1)  # (T, 20)
 
 
-def compute_action_stats(data_root: str, action_mode: str = "joint") -> dict:
-    """Compute global mean and std of actions across all episodes.
+class _ModeAccumulator:
+    """Online accumulator for one action modality."""
 
-    Args:
-        data_root: Directory containing episode HDF5 files (RoboTwin format).
-        action_mode: ``"joint"`` or ``"eef"``.
+    def __init__(self, action_dim: int):
+        self.action_dim = action_dim
+        self.running_sum = np.zeros(action_dim, dtype=np.float64)
+        self.running_sum_sq = np.zeros(action_dim, dtype=np.float64)
+        self.total_count = 0
+        self._buffers: list[np.ndarray] = []
 
-    Returns:
-        dict with mean, std, min, max, q01, q99.
-    """
-    return _compute_robotwin_stats(data_root, action_mode=action_mode)
+    def update(self, actions: np.ndarray) -> None:
+        if actions is None:
+            return
+        if actions.shape[1] != self.action_dim:
+            raise ValueError(f"Expected action_dim={self.action_dim}, got shape {actions.shape}")
+        self.running_sum += actions.sum(axis=0)
+        self.running_sum_sq += (actions**2).sum(axis=0)
+        self.total_count += actions.shape[0]
+        self._buffers.append(actions)
+
+    def finalize(self) -> dict:
+        if self.total_count == 0:
+            raise ValueError("No data accumulated for this mode")
+        mean = self.running_sum / self.total_count
+        variance = np.maximum(self.running_sum_sq / self.total_count - mean**2, 0.0)
+        std = np.maximum(np.sqrt(variance), 1e-3)
+
+        concatenated = np.concatenate(self._buffers, axis=0)
+        return {
+            "mean": mean.astype(np.float32),
+            "std": std.astype(np.float32),
+            "min": concatenated.min(axis=0).astype(np.float32),
+            "max": concatenated.max(axis=0).astype(np.float32),
+            "q01": np.percentile(concatenated, 1, axis=0).astype(np.float32),
+            "q99": np.percentile(concatenated, 99, axis=0).astype(np.float32),
+        }
 
 
-def _compute_robotwin_stats(data_root: str, action_mode: str = "joint") -> dict:
-    """Compute extended stats for RoboTwin format.
-
-    Returns dict with mean, std, min, max, q01, q99 (backward compatible).
-    """
+def _iter_episode_files(data_root: str) -> list[str]:
     pattern = os.path.join(data_root, "episode*.hdf5")
     files = sorted(glob.glob(pattern))
     if not files:
         raise FileNotFoundError(f"No episode*.hdf5 files found in {data_root}")
+    return files
 
-    # Auto-detect action dim from first file
-    with h5py.File(files[0], "r") as f:
-        if action_mode == "eef":
-            action_dim = 20
-        else:
-            action_dim = f["joint_action/vector"].shape[1]
-    print(f"  action_mode={action_mode}, action_dim={action_dim} from {os.path.basename(files[0])}")
 
-    all_actions = []
-    running_sum = np.zeros(action_dim, dtype=np.float64)
-    running_sum_sq = np.zeros(action_dim, dtype=np.float64)
-    total_count = 0
-
+def _accumulate_from_files(
+    files: list[str],
+    joint_acc: _ModeAccumulator,
+    eef_acc: _ModeAccumulator,
+    label: str = "",
+) -> int:
+    """Run a single file pass, feeding BOTH accumulators."""
+    total = 0
     for i, path in enumerate(files):
         try:
             with h5py.File(path, "r") as f:
-                if action_mode == "eef":
-                    if "endpose/left_endpose" not in f:
-                        print(f"  [{i + 1}/{len(files)}] {os.path.basename(path)}: no endpose keys, skipping")
-                        continue
-                    actions = _read_eef_actions_from_file(f)
-                else:
-                    if "joint_action/vector" not in f:
-                        print(f"  [{i + 1}/{len(files)}] {os.path.basename(path)}: no joint_action/vector, skipping")
-                        continue
-                    actions = f["joint_action/vector"][:].astype(np.float64)
+                joint_actions = _read_joint_actions(f)
+                eef_actions = _read_eef_actions(f)
         except Exception as e:
-            print(f"  [{i + 1}/{len(files)}] {os.path.basename(path)}: error {e}, skipping")
+            print(f"  [{label}][{i + 1}/{len(files)}] {os.path.basename(path)}: error {e}, skipping")
             continue
 
-        T = actions.shape[0]
-        running_sum += actions.sum(axis=0)
-        running_sum_sq += (actions**2).sum(axis=0)
-        total_count += T
-        all_actions.append(actions)
+        if joint_actions is not None:
+            joint_acc.update(joint_actions)
+            total = max(total, joint_acc.total_count)
+        if eef_actions is not None:
+            eef_acc.update(eef_actions)
+            total = max(total, eef_acc.total_count)
 
         if (i + 1) % 100 == 0 or (i + 1) == len(files):
-            print(f"  [{i + 1}/{len(files)}] processed, total timesteps: {total_count}")
+            print(f"  [{label}][{i + 1}/{len(files)}] processed; total timesteps so far: {total}")
+    return total
 
-    if total_count == 0:
-        raise ValueError("No action data found in any episode")
 
-    mean = running_sum / total_count
-    variance = running_sum_sq / total_count - mean**2
-    variance = np.maximum(variance, 0.0)
-    std = np.sqrt(variance)
-    std = np.maximum(std, 1e-3)
+def compute_action_stats(data_root: str) -> dict:
+    """Compute stats for a single-task directory, covering joint + eef.
 
-    concatenated = np.concatenate(all_actions, axis=0)
+    Args:
+        data_root: Directory containing ``episode*.hdf5`` files.
 
-    return {
-        "mean": mean,
-        "std": std,
-        "min": concatenated.min(axis=0),
-        "max": concatenated.max(axis=0),
-        "q01": np.percentile(concatenated, 1, axis=0),
-        "q99": np.percentile(concatenated, 99, axis=0),
-    }
+    Returns:
+        Nested dict ``{"joint": {...}, "eef": {...}, "num_timesteps": int}``.
+        A mode key is omitted if the corresponding HDF5 fields were absent in
+        every episode.
+    """
+    files = _iter_episode_files(data_root)
+    joint_acc = _ModeAccumulator(_JOINT_ACTION_DIM)
+    eef_acc = _ModeAccumulator(_EEF_ACTION_DIM)
+
+    print(f"Computing joint+eef stats from {len(files)} episodes in {data_root}")
+    total = _accumulate_from_files(files, joint_acc, eef_acc)
+
+    result: dict = {"num_timesteps": int(max(joint_acc.total_count, eef_acc.total_count, total))}
+    if joint_acc.total_count > 0:
+        result["joint"] = joint_acc.finalize()
+    else:
+        print("  WARNING: no joint_action/vector found in any episode; joint stats omitted.")
+    if eef_acc.total_count > 0:
+        result["eef"] = eef_acc.finalize()
+    else:
+        print("  WARNING: no endpose/* found in any episode; eef stats omitted.")
+    return result
 
 
 def compute_multitask_robotwin_stats(
     dataset_dir: str,
     robot: str,
     variant: str = "clean_50",
-    tasks: list = None,
-    action_mode: str = "joint",
+    tasks: Optional[list] = None,
 ) -> dict:
-    """Compute action stats across multiple RoboTwin tasks.
+    """Compute joint+eef stats aggregated across many task/variant roots.
 
     Args:
-        dataset_dir: Top-level dataset directory (e.g. /path/to/robotwin_2_0/dataset).
-        robot: Robot name (e.g. "aloha-agilex").
-        variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``
-            (aggregates across clean_50 + randomized_500).
-        tasks: List of task names.  If None, uses configured training tasks.
-        action_mode: ``"joint"`` or ``"eef"``.
+        dataset_dir: Top-level RoboTwin dataset directory.
+        robot: Robot embodiment name.
+        variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``.
+        tasks: Optional list of task names. Defaults to all training tasks.
 
     Returns:
-        dict with mean, std, min, max, q01, q99.
+        Nested dict identical in shape to :func:`compute_action_stats`.
     """
     from openwam.dataloader.robotwin_dataset import discover_robotwin_roots
 
-    # Resolve variant(s)
-    if variant == "both":
-        variant_list = ["clean_50", "randomized_500"]
-    else:
-        variant_list = [variant]
+    variant_list = ["clean_50", "randomized_500"] if variant == "both" else [variant]
 
-    # Discover task roots across one or more variants
     task_roots = []
     for v in variant_list:
         task_roots.extend(discover_robotwin_roots(dataset_dir, robot, v, tasks))
@@ -182,94 +211,33 @@ def compute_multitask_robotwin_stats(
     if not task_roots:
         raise FileNotFoundError(f"No task data found in {dataset_dir} for robot={robot}, variant={variant}")
 
-    print(f"Computing stats across {len(task_roots)} task-variant pairs for {robot}, action_mode={action_mode}")
+    print(f"Computing joint+eef stats across {len(task_roots)} task-variant pairs for robot={robot}")
 
-    def _read_actions(f):
-        if action_mode == "eef":
-            if "endpose/left_endpose" not in f:
-                return None
-            return _read_eef_actions_from_file(f)
-        else:
-            if "joint_action/vector" not in f:
-                return None
-            return f["joint_action/vector"][:].astype(np.float64)
-
-    running_sum = None
-    running_sum_sq = None
-    total_count = 0
+    joint_acc = _ModeAccumulator(_JOINT_ACTION_DIM)
+    eef_acc = _ModeAccumulator(_EEF_ACTION_DIM)
 
     for task_idx, (task_name, data_root) in enumerate(task_roots):
-        pattern = os.path.join(data_root, "episode*.hdf5")
-        files = sorted(glob.glob(pattern))
-        if not files:
-            print(f"  [{task_idx + 1}/{len(task_roots)}] {task_name}: no episodes, skipping")
+        label = f"{task_idx + 1}/{len(task_roots)} {task_name}"
+        try:
+            files = _iter_episode_files(data_root)
+        except FileNotFoundError:
+            print(f"  [{label}] no episodes, skipping")
             continue
+        _accumulate_from_files(files, joint_acc, eef_acc, label=label)
 
-        task_count = 0
-        for path in files:
-            try:
-                with h5py.File(path, "r") as f:
-                    actions = _read_actions(f)
-            except Exception:
-                continue
-            if actions is None:
-                continue
-
-            if running_sum is None:
-                action_dim = actions.shape[1]
-                running_sum = np.zeros(action_dim, dtype=np.float64)
-                running_sum_sq = np.zeros(action_dim, dtype=np.float64)
-
-            running_sum += actions.sum(axis=0)
-            running_sum_sq += (actions**2).sum(axis=0)
-            total_count += actions.shape[0]
-            task_count += actions.shape[0]
-
-        print(f"  [{task_idx + 1}/{len(task_roots)}] {task_name}: {len(files)} episodes, {task_count} timesteps")
-
-    if total_count == 0:
-        raise ValueError("No action data found in any task")
-
-    mean = running_sum / total_count
-    variance = running_sum_sq / total_count - mean**2
-    variance = np.maximum(variance, 0.0)
-    std = np.sqrt(variance)
-    std = np.maximum(std, 1e-3)
-
-    # Compute percentile stats — requires collecting all actions (second pass)
-    all_actions_list = []
-    for _, data_root in task_roots:
-        pattern = os.path.join(data_root, "episode*.hdf5")
-        for path in sorted(glob.glob(pattern)):
-            try:
-                with h5py.File(path, "r") as f:
-                    actions = _read_actions(f)
-                    if actions is not None:
-                        all_actions_list.append(actions)
-            except Exception:
-                continue
-
-    if all_actions_list:
-        concatenated = np.concatenate(all_actions_list, axis=0)
-        stats_min = concatenated.min(axis=0)
-        stats_max = concatenated.max(axis=0)
-        q01 = np.percentile(concatenated, 1, axis=0)
-        q99 = np.percentile(concatenated, 99, axis=0)
-    else:
-        stats_min = mean - 3 * std
-        stats_max = mean + 3 * std
-        q01 = mean - 2.326 * std
-        q99 = mean + 2.326 * std
-
-    print(f"\nTotal: {total_count} timesteps across {len(task_roots)} task-variant pairs")
-    return {
-        "mean": mean,
-        "std": std,
-        "min": stats_min,
-        "max": stats_max,
-        "q01": q01,
-        "q99": q99,
+    result: dict = {
+        "num_timesteps": int(max(joint_acc.total_count, eef_acc.total_count)),
     }
+    if joint_acc.total_count > 0:
+        result["joint"] = joint_acc.finalize()
+    else:
+        print("  WARNING: joint stats are empty; no joint_action/vector seen.")
+    if eef_acc.total_count > 0:
+        result["eef"] = eef_acc.finalize()
+    else:
+        print("  WARNING: eef stats are empty; no endpose/* seen.")
+
+    return result
 
 
 def parse_tasks_file(tasks_file: str) -> list:
@@ -283,82 +251,115 @@ def parse_tasks_file(tasks_file: str) -> list:
     return tasks
 
 
+def _load_yaml_config(path: str) -> dict:
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.load(path)
+    return OmegaConf.to_container(cfg, resolve=True)
+
+
+def _resolve_tasks_from_config(cfg: dict) -> Optional[list]:
+    """Match the task-resolution semantics of ``MultiTaskRoboTwinDataset.from_config``."""
+    from openwam.dataloader.robotwin_dataset import ROBOTWIN_ALL_TASKS, ROBOTWIN_TRAIN_TASKS
+
+    task_name = cfg.get("task_name")
+    if task_name:
+        return [task_name]
+    train_tasks = cfg.get("train_tasks")
+    holdout_tasks = cfg.get("holdout_tasks")
+    if train_tasks:
+        return list(train_tasks)
+    if holdout_tasks:
+        return sorted(t for t in ROBOTWIN_ALL_TASKS if t not in holdout_tasks)
+    return ROBOTWIN_TRAIN_TASKS
+
+
+def _print_summary(stats: dict) -> None:
+    for mode in _MODES:
+        sub = stats.get(mode)
+        if sub is None:
+            continue
+        print(f"\n[{mode}] dim={sub['mean'].shape[0]}")
+        print(f"  mean: {np.round(sub['mean'], 4)}")
+        print(f"  std:  {np.round(sub['std'], 4)}")
+        print(f"  min:  {np.round(sub['min'], 4)}")
+        print(f"  max:  {np.round(sub['max'], 4)}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Compute action normalization stats from episode HDF5 files.")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--data_root", type=str, default=None, help="Directory containing episode HDF5 files (for single-task mode)"
-    )
-    parser.add_argument(
-        "--output",
+        "--config",
         type=str,
         default=None,
-        help="Output path for action_stats.npy (default: <data_root>/action_stats.npy)",
+        help="Path to a dataloader yaml (e.g. configs/dataloader/robotwin.yaml). "
+        "CLI flags below override values read from it.",
     )
     parser.add_argument(
-        "--format",
+        "--data_root",
         type=str,
-        default="robotwin",
-        choices=["robotwin", "robotwin_multitask"],
-        help="HDF5 format: robotwin (default). 'robotwin_multitask' is a backward-compat "
-        "alias — use --dataset_dir without --data_root for multi-task mode.",
+        default=None,
+        help="Single-task mode: directory with episode*.hdf5 files",
     )
     parser.add_argument(
         "--dataset_dir",
         type=str,
         default=None,
-        help="Top-level RoboTwin dataset directory (for multi-task mode)",
+        help="Multi-task mode: top-level RoboTwin dataset directory",
     )
-    parser.add_argument("--robot", type=str, default="aloha-agilex", help="Robot name")
+    parser.add_argument("--robot", type=str, default=None, help="Robot name")
+    parser.add_argument("--variant", type=str, default=None, help='"clean_50" | "randomized_500" | "both"')
     parser.add_argument(
-        "--variant",
-        type=str,
-        default="clean_50",
-        help='Data variant: "clean_50", "randomized_500", or "both" (merge both)',
+        "--tasks_file", type=str, default=None, help="Optional file listing tasks to include (one per line)"
     )
-    parser.add_argument("--tasks_file", type=str, default=None, help="Optional file listing task names to include")
     parser.add_argument(
-        "--action_mode",
+        "--output",
         type=str,
-        default="joint",
-        choices=["joint", "eef"],
-        help="Action mode: joint (joint_action/vector) or eef (endpose/ → 20D)",
+        default=None,
+        help="Output .npy path (default: "
+        "<data_root>/<task_name>_<robot>_<variant>_stats.npy for single-task; "
+        "<dataset_dir>/<robot>_<variant>_stats.npy for multi-task)",
     )
     args = parser.parse_args()
 
-    tasks = parse_tasks_file(args.tasks_file) if args.tasks_file else None
+    # Load yaml first, then let CLI flags override
+    cfg: dict = {}
+    if args.config:
+        cfg = _load_yaml_config(args.config)
 
-    # Auto-detect mode: --dataset_dir without --data_root → multi-task
-    # --data_root → single-task, --format robotwin_multitask → backward compat
-    is_multitask = (args.format == "robotwin_multitask") or (args.dataset_dir and not args.data_root)
+    dataset_dir = args.dataset_dir or cfg.get("dataset_dir")
+    data_root = args.data_root  # data_root is not a yaml concept, CLI-only
+    robot = args.robot or cfg.get("robot", "aloha-agilex")
+    variant = args.variant or cfg.get("variant", "clean_50")
+    tasks = parse_tasks_file(args.tasks_file) if args.tasks_file else _resolve_tasks_from_config(cfg)
+    output = args.output
 
-    if is_multitask:
-        if not args.dataset_dir:
-            parser.error("--dataset_dir is required for multi-task mode")
-        output_path = args.output or os.path.join(args.dataset_dir, f"{args.robot}_action_stats.npy")
-        print(
-            f"Computing multi-task action stats: {args.dataset_dir} "
-            f"(robot={args.robot}, variant={args.variant}, action_mode={args.action_mode})"
-        )
-        stats = compute_multitask_robotwin_stats(
-            args.dataset_dir,
-            args.robot,
-            variant=args.variant,
-            tasks=tasks,
-            action_mode=args.action_mode,
-        )
+    if data_root:
+        # Single-task CLI: infer task_name from layout .../<task>/<robot>_<variant>/data
+        inferred_task = os.path.basename(os.path.abspath(os.path.join(data_root, "..", "..")))
+        if inferred_task:
+            stats_name = f"{inferred_task}_{robot}_{variant}_stats.npy"
+        else:
+            stats_name = f"{robot}_{variant}_stats.npy"
+        resolved_output = output or os.path.join(data_root, stats_name)
+        print(f"Single-task stats from: {data_root}")
+        stats = compute_action_stats(data_root)
     else:
-        if not args.data_root:
-            parser.error("--data_root is required for single-task mode")
-        output_path = args.output or os.path.join(args.data_root, "action_stats.npy")
-        print(f"Computing action stats from: {args.data_root} (action_mode={args.action_mode})")
-        stats = compute_action_stats(args.data_root, action_mode=args.action_mode)
+        if not dataset_dir:
+            parser.error("either --data_root or --dataset_dir / --config providing one is required")
+        resolved_output = output or os.path.join(dataset_dir, f"{robot}_{variant}_stats.npy")
+        print(f"Multi-task stats from: {dataset_dir} (robot={robot}, variant={variant})")
+        stats = compute_multitask_robotwin_stats(
+            dataset_dir=dataset_dir,
+            robot=robot,
+            variant=variant,
+            tasks=tasks,
+        )
 
-    print(f"\nResults ({stats['mean'].shape[0]}D actions, saved to {output_path}):")
-    print(f"  Mean: {stats['mean']}")
-    print(f"  Std:  {stats['std']}")
-
-    np.save(output_path, stats)
-    print("Done.")
+    _print_summary(stats)
+    os.makedirs(os.path.dirname(os.path.abspath(resolved_output)) or ".", exist_ok=True)
+    np.save(resolved_output, stats, allow_pickle=True)
+    print(f"\nSaved stats ({stats.get('num_timesteps', 0)} timesteps) to {resolved_output}")
 
 
 if __name__ == "__main__":

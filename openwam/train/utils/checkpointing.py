@@ -29,6 +29,45 @@ def save_config(output_dir: str, cfg):
     logger.info("Saved config to %s", config_path)
 
 
+def save_action_stats(output_dir: str, dataset) -> None:
+    """Copy the dataset's resolved action-stats .npy into the checkpoint dir.
+
+    Written once (skipped if ``action_stats.npy`` already exists in
+    *output_dir*).  Silently no-ops when the dataset has no stats path
+    (e.g. normalization disabled or unsupported dataset type).
+
+    The copied file preserves the nested ``{"joint": ..., "eef": ...}``
+    schema so deployment can pick whichever sub-dict matches the saved
+    config's ``action_mode``.
+    """
+    import shutil
+
+    dst = os.path.join(output_dir, "action_stats.npy")
+    if os.path.exists(dst):
+        logger.info(
+            "[normalizer] action_stats.npy already present in checkpoint dir: %s (skip copy)",
+            dst,
+        )
+        return
+    src = getattr(dataset, "action_stats_path", None)
+    if not src:
+        logger.info(
+            "[normalizer] Dataset has no action_stats_path (normalization likely disabled); "
+            "nothing copied into checkpoint dir."
+        )
+        return
+    if not os.path.exists(src):
+        logger.warning(
+            "[normalizer] Dataset reports action_stats_path=%s but file does not exist; "
+            "nothing copied into checkpoint dir.",
+            src,
+        )
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    shutil.copyfile(src, dst)
+    logger.info("[normalizer] Copied action stats into checkpoint dir:\n  src: %s\n  dst: %s", src, dst)
+
+
 def save_trainable_checkpoint(
     path: str,
     action_dit: torch.nn.Module,

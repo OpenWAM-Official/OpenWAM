@@ -6,19 +6,53 @@ robot: aloha-agilex              # robot embodiment name, maps to directory {rob
 variant: both                     # "clean_50", "randomized_500", or "both"
 action_mode: eef                  # "eef" (20D xyz+rot6d+grip, default) or "joint" (14D qpos)
 
-num_frames: 33                    # observation window size (total frames read from HDF5)
-video_stride: 4                   # video subsampling stride (e.g. 4 → 9 video frames from 33-frame window). Actions stay at full resolution.
-height: 480                       # output video height in pixels
-width: 640                        # output video width in pixels
+# --- Frame sampling ---
+# num_frames   = state/action window length in raw HDF5 frames.
+# video_stride = stride applied to video only; state and action stay at raw rate.
+# action horizon = num_frames - 1
+# video length   = (num_frames - 1) // video_stride + 1  (must divide evenly)
+# proprio        = raw_actions[0:1], shape (1, action_dim) — single frame, time dim kept.
+num_frames: 33
+video_stride: 4                   # video-only stride; with num_frames=33 → 9 video frames
+height: 384                       # output video height in pixels (FastWAM multi-view: 256 top + 128 bottom)
+width: 320                        # output video width in pixels (FastWAM multi-view: 320 top, 160+160 bottom)
 split: train                      # "train" or "val"
 val_ratio: 0.0                    # fraction of episodes reserved for validation
 repeat: 1                         # repeat the window list N times per epoch
 window_stride: 1                  # sliding window step size (1 = every frame is a start point)
-multiview: true                   # true = 2x2 grid of 4 cameras, false = single camera
-target_camera: head_camera        # camera used in single-view mode (ignored if multiview=true)
-camera_layout: [head_camera, front_camera, left_camera, right_camera]  # multiview grid order
-action_stats_path: null           # path to precomputed action_stats.npy for normalization. EEF don't need this, but JOINT action mode does.
-max_val_samples: 500              # cap on validation samples
+
+# --- Multi-view composition (3-cam L-shape, FastWAM-compatible) ---
+# At height=384, width=320 this reproduces FastWAM's exact layout:
+#   +---------------------------+   <- head_camera (top), 256H × 320W
+#   |       camera_layout[0]    |      full width, 2/3 of height
+#   +-------------+-------------+
+#   |   cam[1]    |   cam[2]    |   <- wrist cameras (bottom), 128H × 160W each
+#   +-------------+-------------+      exact halves, 1/3 of height
+# Each tile is BILINEAR-stretched to its slot (no aspect-ratio preservation,
+# matching FastWAM's per-camera resize + concat).  Output canvas size is
+# controlled by height/width above.
+multiview: true
+camera_layout: [head_camera, left_camera, right_camera]
+target_camera: head_camera        # camera used in single-view mode (ignored when multiview=true)
+
+# --- Action normalization ---
+# Applied to BOTH joint and eef at dataset load time so downstream sees a
+# consistent numerical scale. The stats file is auto-resolved and, if absent,
+# auto-computed on first load. Conventional locations:
+#   - multi-task: <dataset_dir>/<robot>_<variant>_stats.npy
+#   - single-task: <data_root>/<task_name>_<robot>_<variant>_stats.npy
+#   "min-max" → rescale each dim into [-1, 1] using {min, max}
+#   "z-score" → (x - mean) / std, zero-mean unit-variance
+#   null      → disable, keep raw physical units
+normalize_mode: min-max
+
+# --- Static-segment filtering (training only) ---
+# Skips windows whose first commanded action is almost identical to the current
+# state (|action[0] - proprio| < threshold). Retries with a random window up to
+# max_static_retry times.
+filter_static_segments: true
+static_segment_threshold: 1.0e-5
+max_static_retry: 3
 
 # Multi-task only (ignored when task_name is set)
 #

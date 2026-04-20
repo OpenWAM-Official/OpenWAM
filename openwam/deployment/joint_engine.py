@@ -119,8 +119,10 @@ class JointInferenceEngine(BaseInferenceEngine):
             conditions: dict with keys:
                 - prompt (str): text prompt
                 - negative_prompt (str, optional): negative prompt for CFG
-                - vace_video (list[PIL.Image], optional): VACE conditioning video
-                - vace_reference_image (list[PIL.Image], optional): reference image
+                - vace_video (list[PIL.Image], optional): VACE conditioning video (Wan2.1-VACE only)
+                - first_frame_image (list[PIL.Image], optional): first frame of the
+                  observation window; used as TI2V first-frame condition on Wan2.2-TI2V
+                  or as VACE spatial reference on Wan2.1-VACE
                 - num_frames (int, optional): defaults from cfg
                 - height (int, optional): defaults from cfg
                 - width (int, optional): defaults from cfg
@@ -180,7 +182,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             prompt=conditions.get("prompt", ""),
             negative_prompt=conditions.get("negative_prompt", ""),
             vace_video=conditions.get("vace_video", None),
-            vace_reference_image=conditions.get("vace_reference_image", None),
+            first_frame_image=conditions.get("first_frame_image", None),
             num_frames=conditions.get("num_frames", getattr(inf_cfg, "num_frames", 49)),
             height=conditions.get("height", getattr(inf_cfg, "height", 480)),
             width=conditions.get("width", getattr(inf_cfg, "width", 832)),

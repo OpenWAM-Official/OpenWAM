@@ -64,17 +64,32 @@ def _create_mock_episode(path, T=20, action_dim=14, seed=0):
             cam_ds[i] = jpeg
 
 
-def _create_action_stats(path, action_dim=14):
-    """Create a mock action_stats.npy with min/max keys."""
-    stats = {
-        "mean": np.zeros(action_dim, dtype=np.float64),
-        "std": np.ones(action_dim, dtype=np.float64),
-        "min": np.full(action_dim, -1.0, dtype=np.float64),
-        "max": np.full(action_dim, 1.0, dtype=np.float64),
-        "q01": np.full(action_dim, -0.99, dtype=np.float64),
-        "q99": np.full(action_dim, 0.99, dtype=np.float64),
+def _flat_stats(action_dim: int, mean: float = 0.0, std: float = 1.0, low: float = -1.0, high: float = 1.0) -> dict:
+    return {
+        "mean": np.full(action_dim, mean, dtype=np.float64),
+        "std": np.full(action_dim, std, dtype=np.float64),
+        "min": np.full(action_dim, low, dtype=np.float64),
+        "max": np.full(action_dim, high, dtype=np.float64),
+        "q01": np.full(action_dim, low + 0.01 * (high - low), dtype=np.float64),
+        "q99": np.full(action_dim, high - 0.01 * (high - low), dtype=np.float64),
     }
-    np.save(path, stats)
+
+
+def _create_action_stats(path, joint_dim: int = 14, eef_dim: int = 20, joint_flat: bool = False) -> None:
+    """Create a mock action_stats.npy with both joint and eef sub-dicts.
+
+    When ``joint_flat=True`` writes the legacy flat schema instead (for
+    backward-compat tests); the flat dict uses ``joint_dim``.
+    """
+    if joint_flat:
+        np.save(path, _flat_stats(joint_dim))
+        return
+    nested = {
+        "joint": _flat_stats(joint_dim),
+        "eef": _flat_stats(eef_dim),
+        "num_timesteps": 1000,
+    }
+    np.save(path, nested)
 
 
 # ---------------------------------------------------------------------------
@@ -83,12 +98,17 @@ def _create_action_stats(path, action_dim=14):
 
 
 def test_joint_mode_basic():
-    """Joint mode loads correctly and returns action_dim=14."""
+    """Joint mode loads correctly and returns action_dim=14.
+
+    With the new semantics num_frames = *sampled* frames; one window covers
+    (num_frames-1)*video_stride + 1 raw frames. Action trajectory has
+    num_frames-1 steps; proprio is the first sampled action.
+    """
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
-            _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=10, seed=i)
+            _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=20, seed=i)
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
@@ -97,13 +117,127 @@ def test_joint_mode_basic():
             width=32,
             action_mode="joint",
             val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
         )
         assert ds.action_dim == 14
         assert ds.action_mode == "joint"
 
         sample = ds[0]
-        assert sample["action_trajectory"].shape == (5, 14)
-        assert sample["action_mask"].shape == (5,)
+        # action horizon = num_frames - 1
+        assert sample["action_trajectory"].shape == (4, 14)
+        assert sample["action_mask"].shape == (4,)
+        # proprio is a single frame with time dim kept (shape (1, D))
+        assert sample["proprio"].shape == (1, 14)
+        assert sample["proprio_mask"].shape == (1,)
+        # video_mask length matches sampled frames
+        assert sample["video_mask"].shape == (5,)
+
+
+def test_short_episode_pads_and_masks():
+    """Episode shorter than the requested window must pad frames + action_mask.
+
+    Layout for T=10, num_frames=17:
+      - raw_window_len   = 17
+      - actual_raw_len   = 10  (ep_len < window)
+      - pad_len          = 7   (last frame repeated in video + actions)
+      - action_mask[t]   = (t + 1) < 10  → first 9 True, remaining 7 False
+    """
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=0)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=17,
+            video_stride=4,  # (17-1)%4==0 ✓ video_frames=5 (5-1)%4==0 ✓
+            height=32,
+            width=32,
+            action_mode="joint",
+            val_ratio=0.0,
+            filter_static_segments=False,
+            normalize_mode=None,
+        )
+
+        # One window starting at 0 (max_start = max(0, 10 - 17) = 0)
+        assert len(ds) == 1
+        sample = ds[0]
+
+        # Shapes are still the full horizon regardless of episode length
+        assert sample["action_trajectory"].shape == (16, 14)
+        assert len(sample["video"]) == 5
+
+        # Only steps whose source raw frame exists are unmasked.
+        # action_mask[t] is (t + 1) < actual_raw_len = 10 → True for t in 0..8
+        mask = sample["action_mask"].bool().tolist()
+        assert mask[:9] == [True] * 9
+        assert mask[9:] == [False] * 7
+
+        # The padded tail actions should exactly repeat the last real action.
+        last_real = sample["action_trajectory"][8]
+        for t in range(9, 16):
+            assert (sample["action_trajectory"][t] == last_real).all(), (
+                f"padded step {t} does not equal last real action"
+            )
+
+
+def test_video_stride_does_not_affect_action_length():
+    """video_stride must subsample VIDEO only; state/action stay at raw HDF5 rate.
+
+    Layout under num_frames=17, video_stride=4:
+      - raw window      = 17 HDF5 frames
+      - video frames    = (17-1)//4 + 1 = 5  (subsampled, also satisfies VAE (5-1)%4==0)
+      - action horizon  = num_frames - 1 = 16  (full raw rate)
+      - proprio         = raw_actions[0:1], shape (1, D)
+    """
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=30, seed=0)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=17,
+            video_stride=4,  # (17-1) % 4 == 0 ✓ and (5-1) % 4 == 0 for VAE ✓
+            height=32,
+            width=32,
+            action_mode="joint",
+            val_ratio=0.0,
+            filter_static_segments=False,
+            normalize_mode=None,
+        )
+
+        sample = ds[0]
+        assert sample["action_trajectory"].shape == (16, 14)
+        assert sample["action_mask"].shape == (16,)
+        assert len(sample["video"]) == 5
+        assert sample["video_mask"].shape == (5,)
+        assert sample["proprio"].shape == (1, 14)
+        assert sample["proprio_mask"].shape == (1,)
+
+
+def test_invalid_video_stride_rejected():
+    """(num_frames - 1) must be divisible by video_stride; else ValueError."""
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+        # num_frames=10, video_stride=4 → (10-1) % 4 == 1, invalid
+        try:
+            RoboTwinDataset(
+                data_root=tmpdir,
+                num_frames=10,
+                video_stride=4,
+                height=32,
+                width=32,
+                action_mode="joint",
+                val_ratio=0.0,
+            )
+        except ValueError as e:
+            assert "divisible" in str(e)
+        else:
+            raise AssertionError("Expected ValueError for (num_frames-1) not divisible by video_stride")
 
 
 def test_joint_mode_minmax_normalization():
@@ -111,9 +245,9 @@ def test_joint_mode_minmax_normalization():
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=42)
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=42)
         stats_path = os.path.join(tmpdir, "action_stats.npy")
-        _create_action_stats(stats_path, action_dim=14)
+        _create_action_stats(stats_path)
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
@@ -123,14 +257,20 @@ def test_joint_mode_minmax_normalization():
             action_mode="joint",
             action_stats_path=stats_path,
             val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
         )
 
         sample = ds[0]
         actions = sample["action_trajectory"].numpy()
+        proprio = sample["proprio"].numpy()
 
         # All dims (including gripper) should be in [-1, 1] (min-max normalized)
         assert actions.min() >= -1.0 - 1e-6
         assert actions.max() <= 1.0 + 1e-6
+        # proprio shares the normalized space
+        assert proprio.min() >= -1.0 - 1e-6
+        assert proprio.max() <= 1.0 + 1e-6
 
 
 def test_joint_mode_gripper_continuous():
@@ -138,18 +278,20 @@ def test_joint_mode_gripper_continuous():
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=0)
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
         stats_path = os.path.join(tmpdir, "action_stats.npy")
-        _create_action_stats(stats_path, action_dim=14)
+        _create_action_stats(stats_path)
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
-            num_frames=10,
+            num_frames=5,
             height=32,
             width=32,
             action_mode="joint",
             action_stats_path=stats_path,
             val_ratio=0.0,
+            video_stride=1,  # num_video_frames=5 → (5-1)%4=0 ✓
+            filter_static_segments=False,
         )
 
         sample = ds[0]
@@ -162,21 +304,17 @@ def test_joint_mode_gripper_continuous():
 
 
 def test_joint_mode_denormalize_roundtrip():
-    """Joint mode denormalize_action inverts normalization for joint dims."""
+    """denormalize_action inverts normalization back to raw units."""
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=0)
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
         stats_path = os.path.join(tmpdir, "action_stats.npy")
 
-        # Custom stats: min=0, max=2 for all dims
+        # Joint stats: min=0, max=2 for all dims; eef filler
         stats = {
-            "mean": np.ones(14, dtype=np.float64),
-            "std": np.ones(14, dtype=np.float64),
-            "min": np.zeros(14, dtype=np.float64),
-            "max": np.full(14, 2.0, dtype=np.float64),
-            "q01": np.zeros(14, dtype=np.float64),
-            "q99": np.full(14, 2.0, dtype=np.float64),
+            "joint": _flat_stats(14, mean=1.0, std=1.0, low=0.0, high=2.0),
+            "eef": _flat_stats(20),
         }
         np.save(stats_path, stats)
 
@@ -188,16 +326,45 @@ def test_joint_mode_denormalize_roundtrip():
             action_mode="joint",
             action_stats_path=stats_path,
             val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
         )
 
-        # Test a known normalized value: normalized = -1 → original = min = 0
-        test_normalized = np.full((1, 14), -1.0)
+        # normalized = -1 → raw = min = 0 under min-max
+        test_normalized = np.full((1, 14), -1.0, dtype=np.float32)
         denormed = ds.denormalize_action(test_normalized)
-        # Joint dims (non-gripper) should map -1 → 0
-        for d in range(14):
-            if d in (6, 13):
-                continue  # gripper handled separately
-            np.testing.assert_allclose(denormed[0, d], 0.0, atol=1e-5)
+        np.testing.assert_allclose(denormed[0], 0.0, atol=1e-5)
+
+
+def test_legacy_flat_stats_file_backward_compat():
+    """Old flat-schema stats files still load with a DeprecationWarning."""
+    import warnings
+
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+        stats_path = os.path.join(tmpdir, "action_stats.npy")
+        _create_action_stats(stats_path, joint_flat=True)  # legacy flat schema
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ds = RoboTwinDataset(
+                data_root=tmpdir,
+                num_frames=5,
+                height=32,
+                width=32,
+                action_mode="joint",
+                action_stats_path=stats_path,
+                val_ratio=0.0,
+                video_stride=1,
+                filter_static_segments=False,
+            )
+            assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+        sample = ds[0]
+        actions = sample["action_trajectory"].numpy()
+        assert actions.min() >= -1.0 - 1e-6
+        assert actions.max() <= 1.0 + 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +378,7 @@ def test_eef_mode_basic():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
-            _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=10, seed=i)
+            _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=20, seed=i)
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
@@ -220,24 +387,28 @@ def test_eef_mode_basic():
             width=32,
             action_mode="eef",
             val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
+            normalize_mode=None,  # raw values for this test
         )
         assert ds.action_dim == 20
         assert ds.action_mode == "eef"
-        assert ds.action_stats is None
+        assert ds.action_stats is None  # no stats loaded when normalize_mode=None
 
         sample = ds[0]
-        assert sample["action_trajectory"].shape == (5, 20)
+        # action horizon = num_frames - 1
+        assert sample["action_trajectory"].shape == (4, 20)
+        assert sample["proprio"].shape == (1, 20)
 
 
-def test_eef_mode_no_normalization():
-    """EEF mode returns raw values, even if stats file exists."""
+def test_eef_mode_minmax_normalization():
+    """EEF mode with normalize_mode='min-max' rescales all 20 dims into [-1, 1]."""
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=0)
-        # Create stats file that would be loaded in joint mode
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
         stats_path = os.path.join(tmpdir, "action_stats.npy")
-        _create_action_stats(stats_path, action_dim=14)
+        _create_action_stats(stats_path)  # nested {joint, eef}
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
@@ -246,9 +417,89 @@ def test_eef_mode_no_normalization():
             width=32,
             action_mode="eef",
             action_stats_path=stats_path,
+            normalize_mode="min-max",
             val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
         )
-        assert ds.action_stats is None  # EEF ignores stats
+        assert ds.action_stats is not None and "min" in ds.action_stats
+
+        sample = ds[0]
+        actions = sample["action_trajectory"].numpy()
+        proprio = sample["proprio"].numpy()
+        # With stats {min:-1, max:+1} and raw values roughly in that range,
+        # normalized outputs should stay in [-1, 1] after min-max.
+        assert actions.min() >= -1.0 - 1e-6
+        assert actions.max() <= 1.0 + 1e-6
+        assert proprio.min() >= -1.0 - 1e-6
+        assert proprio.max() <= 1.0 + 1e-6
+
+
+def test_eef_mode_zscore_normalization():
+    """EEF mode with normalize_mode='z-score' centers around the stats mean."""
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=40, seed=0)
+        stats_path = os.path.join(tmpdir, "action_stats.npy")
+        # Deliberately small std so normalized magnitudes are large — makes it
+        # easy to tell the mapping actually applied.
+        nested = {
+            "joint": _flat_stats(14, mean=0.0, std=1.0, low=-1.0, high=1.0),
+            "eef": _flat_stats(20, mean=0.5, std=0.25, low=0.0, high=1.0),
+        }
+        np.save(stats_path, nested)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=5,
+            height=32,
+            width=32,
+            action_mode="eef",
+            action_stats_path=stats_path,
+            normalize_mode="z-score",
+            val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
+        )
+        sample = ds[0]
+        actions = sample["action_trajectory"].numpy()
+        # z-score: (x - 0.5) / 0.25 → scale-up by 4.
+        # Raw xyz/gripper are in [0, 1] so they map into roughly [-2, 2].
+        # rot6d can extend beyond [0, 1], so allow a wider envelope.
+        assert actions.min() >= -8.0
+        assert actions.max() <= 8.0
+        # Confirm the mapping actually applied (not a no-op): mean should shift
+        # substantially away from 0.5 because we subtracted 0.5 before dividing.
+        assert abs(actions.mean()) > 0.1
+
+
+def test_eef_roundtrip_denormalize():
+    """EEF normalize → denormalize should recover the raw value for both modes."""
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    for mode in ("min-max", "z-score"):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+            stats_path = os.path.join(tmpdir, "action_stats.npy")
+            _create_action_stats(stats_path)
+
+            ds = RoboTwinDataset(
+                data_root=tmpdir,
+                num_frames=5,
+                height=32,
+                width=32,
+                action_mode="eef",
+                action_stats_path=stats_path,
+                normalize_mode=mode,
+                val_ratio=0.0,
+                video_stride=1,
+                filter_static_segments=False,
+            )
+            raw = np.random.RandomState(0).uniform(-1, 1, size=(7, 20)).astype(np.float32)
+            normed = ds._action_normalizer.normalize(raw)
+            recovered = ds.denormalize_action(normed)
+            np.testing.assert_allclose(recovered, raw, atol=1e-4, err_msg=f"mode={mode}")
 
 
 def test_eef_gripper_raw_values():
@@ -256,37 +507,48 @@ def test_eef_gripper_raw_values():
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        # T=10, num_frames=9, video_stride=2 → window [0..8], num_video_frames=5.
+        # Mock data: gripper 1.0 (open) for frames 0-4, 0.0 (closed) for frames 5-9.
+        # action_trajectory = raw[1..8], so first 4 actions open, last 4 closed.
         for i in range(3):
             _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=10, seed=i)
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
-            num_frames=10,
+            num_frames=9,
             height=32,
             width=32,
             action_mode="eef",
             val_ratio=0.0,
+            video_stride=2,  # (9-1)%2==0 and (5-1)%4==0 for VAE ✓
+            filter_static_segments=False,
+            normalize_mode=None,  # keep raw gripper values for this assertion
         )
 
         sample = ds[0]
-        actions = sample["action_trajectory"].numpy()
+        actions = sample["action_trajectory"].numpy()  # (8, 20)
+        proprio = sample["proprio"].numpy()  # (1, 20)
 
-        # First half: raw gripper = 1.0 (open) → should remain 1.0 (no inversion)
-        np.testing.assert_allclose(actions[:5, 9], 1.0, atol=1e-6)
-        np.testing.assert_allclose(actions[:5, 19], 1.0, atol=1e-6)
+        # proprio is from frame 0 → gripper open (1.0)
+        np.testing.assert_allclose(proprio[0, 9], 1.0, atol=1e-6)
+        np.testing.assert_allclose(proprio[0, 19], 1.0, atol=1e-6)
 
-        # Second half: raw gripper = 0.0 (closed) → should remain 0.0
-        np.testing.assert_allclose(actions[5:, 9], 0.0, atol=1e-6)
-        np.testing.assert_allclose(actions[5:, 19], 0.0, atol=1e-6)
+        # First 4 action steps: raw gripper = 1.0 (open) → remain 1.0
+        np.testing.assert_allclose(actions[:4, 9], 1.0, atol=1e-6)
+        np.testing.assert_allclose(actions[:4, 19], 1.0, atol=1e-6)
+
+        # Remaining 4 action steps: raw gripper = 0.0 (closed) → remain 0.0
+        np.testing.assert_allclose(actions[4:, 9], 0.0, atol=1e-6)
+        np.testing.assert_allclose(actions[4:, 19], 0.0, atol=1e-6)
 
 
 def test_eef_denormalize_passthrough():
-    """EEF mode denormalize_action is a passthrough (no transformation)."""
+    """With normalize_mode=None, denormalize_action is an identity."""
     from openwam.dataloader.robotwin_dataset import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
-            _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=10, seed=i)
+            _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=20, seed=i)
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
@@ -295,6 +557,9 @@ def test_eef_denormalize_passthrough():
             width=32,
             action_mode="eef",
             val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
+            normalize_mode=None,
         )
 
         # All dims should pass through unchanged (no inversion, no normalization)
@@ -318,7 +583,7 @@ def test_multi_variant_discovery():
             for variant in ["clean_50", "randomized_500"]:
                 data_dir = os.path.join(tmpdir, task, f"test-robot_{variant}", "data")
                 os.makedirs(data_dir)
-                _create_mock_episode(os.path.join(data_dir, "episode0.hdf5"), T=10, seed=hash(task + variant) % 1000)
+                _create_mock_episode(os.path.join(data_dir, "episode0.hdf5"), T=20, seed=hash(task + variant) % 1000)
 
         ds = MultiTaskRoboTwinDataset(
             dataset_dir=tmpdir,
@@ -330,6 +595,8 @@ def test_multi_variant_discovery():
             width=32,
             action_mode="joint",
             val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
         )
 
         # Should have 4 sub-datasets (2 tasks × 2 variants)
@@ -345,7 +612,7 @@ def test_multi_variant_single_variant_compat():
         for task in ["task_a"]:
             data_dir = os.path.join(tmpdir, task, "test-robot_clean_50", "data")
             os.makedirs(data_dir)
-            _create_mock_episode(os.path.join(data_dir, "episode0.hdf5"), T=10, seed=0)
+            _create_mock_episode(os.path.join(data_dir, "episode0.hdf5"), T=20, seed=0)
 
         ds = MultiTaskRoboTwinDataset(
             dataset_dir=tmpdir,
@@ -357,6 +624,8 @@ def test_multi_variant_single_variant_compat():
             width=32,
             action_mode="joint",
             val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
         )
 
         assert len(ds._sub_datasets) == 1
@@ -399,31 +668,50 @@ def test_rotation_conversion_roundtrip():
 # ---------------------------------------------------------------------------
 
 
-def test_action_stats_eef_mode():
-    """Action stats computation works in EEF mode."""
+def test_action_stats_nested_schema_contains_both_modes():
+    """compute_action_stats returns a nested dict with both 'joint' and 'eef'."""
     from openwam.dataloader.robotwin_stats_computation import compute_action_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
             _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=10, seed=i)
 
-        stats = compute_action_stats(tmpdir, action_mode="eef")
-        assert stats["mean"].shape == (20,)
-        assert stats["min"].shape == (20,)
-        assert stats["max"].shape == (20,)
+        stats = compute_action_stats(tmpdir)
+        assert "joint" in stats and "eef" in stats
+        assert stats["joint"]["mean"].shape == (14,)
+        assert stats["joint"]["std"].shape == (14,)
+        assert stats["eef"]["mean"].shape == (20,)
+        assert stats["eef"]["std"].shape == (20,)
+        # Per-dim stats cover a non-zero range (mock actions are uniform in [0, 1])
+        assert stats["joint"]["max"].max() > stats["joint"]["min"].min()
+        assert stats["eef"]["max"].max() > stats["eef"]["min"].min()
+        assert stats["num_timesteps"] > 0
 
 
-def test_action_stats_joint_mode():
-    """Action stats computation works in joint mode."""
-    from openwam.dataloader.robotwin_stats_computation import compute_action_stats
+def test_multitask_action_stats_nested_schema():
+    """compute_multitask_robotwin_stats also returns both modes."""
+    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        for i in range(3):
-            _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=10, seed=i)
+        for task in ["task_a", "task_b"]:
+            for variant in ["clean_50", "randomized_500"]:
+                data_dir = os.path.join(tmpdir, task, f"test-robot_{variant}", "data")
+                os.makedirs(data_dir)
+                _create_mock_episode(
+                    os.path.join(data_dir, "episode0.hdf5"),
+                    T=10,
+                    seed=hash(task + variant) % 1000,
+                )
 
-        stats = compute_action_stats(tmpdir, action_mode="joint")
-        assert stats["mean"].shape == (14,)
-        assert stats["min"].shape == (14,)
+        stats = compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="both",
+            tasks=["task_a", "task_b"],
+        )
+        assert "joint" in stats and "eef" in stats
+        assert stats["joint"]["mean"].shape == (14,)
+        assert stats["eef"]["mean"].shape == (20,)
 
 
 # ---------------------------------------------------------------------------

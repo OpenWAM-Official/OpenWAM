@@ -24,24 +24,50 @@ from omegaconf import DictConfig, OmegaConf
 from openwam.model.base import BaseWAMArchitecture
 from openwam.model.video_backbone import WanVideoPipeline
 from openwam.train.utils.checkpointing import load_trainable_checkpoint
-from openwam.train.utils.pipeline_builder import build_training_pipeline
+from openwam.train.utils.pipeline_builder import (
+    build_training_pipeline,
+    build_video_backbone_from_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _find_latest_checkpoint(ckpt_dir: str) -> str:
-    """Return the path to the highest-step .safetensors file in *ckpt_dir*."""
+    """Return the path to the highest-step ``checkpoint_step_N.safetensors`` in *ckpt_dir*.
+
+    Malformed filenames that glob-match but don't carry a numeric step are
+    skipped (instead of silently getting step=0 and competing for latest).
+    If every remaining file has step == 0 we warn — typically that means
+    training crashed before the first save_steps interval and the caller is
+    about to deploy uninitialized weights.
+    """
     pattern = os.path.join(ckpt_dir, "checkpoint_step_*.safetensors")
     files = glob.glob(pattern)
     if not files:
         raise FileNotFoundError(f"No checkpoint_step_*.safetensors found in {ckpt_dir}")
 
-    def _step(path):
-        m = re.search(r"checkpoint_step_(\d+)", path)
-        return int(m.group(1)) if m else 0
+    step_re = re.compile(r"checkpoint_step_(\d+)\.safetensors$")
+    numbered: list[tuple[int, str]] = []
+    for f in files:
+        m = step_re.search(os.path.basename(f))
+        if m is not None:
+            numbered.append((int(m.group(1)), f))
+        else:
+            logger.warning("Skipping malformed checkpoint name: %s", f)
 
-    files.sort(key=_step)
-    return files[-1]
+    if not numbered:
+        raise FileNotFoundError(f"No checkpoint file in {ckpt_dir} matches checkpoint_step_<int>.safetensors")
+
+    numbered.sort(key=lambda p: p[0])
+    latest_step, latest_path = numbered[-1]
+    if latest_step == 0:
+        logger.warning(
+            "Latest checkpoint in %s is step 0 (%s) — this usually means training "
+            "crashed before completing its first save_steps interval. Verify before deploying.",
+            ckpt_dir,
+            os.path.basename(latest_path),
+        )
+    return latest_path
 
 
 def load_from_checkpoint_dir(
@@ -78,8 +104,15 @@ def load_from_checkpoint_dir(
         ckpt_path = _find_latest_checkpoint(ckpt_dir)
     logger.info("Loading checkpoint: %s", ckpt_path)
 
-    # 3. Build video pipeline (structure + pretrained weights from model_path)
-    pipe = build_training_pipeline(cfg)
+    # 3. Build video backbone.
+    #    Prefer manifest-based path (self-contained: no external backbone source needed);
+    #    fall back to training pipeline builder (requires cfg.model.video_backbone.model_path).
+    manifest_path = os.path.join(ckpt_dir, "video_backbone_manifest.json")
+    if os.path.exists(manifest_path):
+        logger.info("Using manifest-based video-backbone builder: %s", manifest_path)
+        pipe = build_video_backbone_from_manifest(manifest_path, device="cpu")
+    else:
+        pipe = build_training_pipeline(cfg)
     pipe.device = device
 
     # 4. Build architecture (same logic as OpenWAMTrainer.__init__)
@@ -120,5 +153,78 @@ def load_from_checkpoint_dir(
             mod.to(device=device)
             mod.eval()
 
+    # 8. Attach denormalizer built from saved action_stats.npy + config.
+    #    joint_generation will pick this up via getattr(architecture, "action_denormalizer")
+    #    and use it in place of the legacy z-score buffer path.
+    architecture.action_denormalizer = _build_action_denormalizer(cfg, ckpt_dir)
+
     logger.info("Model loaded successfully on %s", device)
     return cfg, pipe, architecture
+
+
+def _build_action_denormalizer(cfg: DictConfig, ckpt_dir: str):
+    """Load action_stats.npy from *ckpt_dir* and wrap in an ActionNormalizer.
+
+    Reads ``dataloader.normalize_mode`` and ``dataloader.action_mode`` from the
+    saved config to decide which mode to apply and which sub-dict to pull out
+    of the nested stats schema.  Returns ``None`` when any prerequisite is
+    missing (legacy checkpoint without stats, normalization disabled, etc.);
+    the caller then falls back to the buffer-based z-score path.
+    """
+    logger.info("[normalizer] Resolving deployment denormalizer from checkpoint dir: %s", ckpt_dir)
+    stats_path = os.path.join(ckpt_dir, "action_stats.npy")
+    if not os.path.exists(stats_path):
+        logger.warning(
+            "[normalizer] No pre-computed stats file at expected location: %s\n"
+            "[normalizer]   → denormalizer DISABLED; falling back to legacy "
+            "buffer-based z-score path (action_mean/action_std from checkpoint).\n"
+            "[normalizer]   This fallback is only correct if training used z-score normalization.",
+            stats_path,
+        )
+        return None
+    logger.info("[normalizer] Found pre-computed stats file: %s (exists ✓)", stats_path)
+
+    dl = OmegaConf.select(cfg, "dataloader", default=None)
+    norm_mode = OmegaConf.select(cfg, "dataloader.normalize_mode", default=None)
+    action_mode = OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
+    if dl is None or norm_mode in (None, "", "none", "null"):
+        logger.info(
+            "[normalizer] normalize_mode=%r disabled in saved config; denormalizer INACTIVE "
+            "(actions will be returned as-is from the model).",
+            norm_mode,
+        )
+        return None
+    logger.info(
+        "[normalizer] Saved config: normalize_mode=%s, action_mode=%s",
+        norm_mode,
+        action_mode,
+    )
+
+    from openwam.dataloader.robotwin_dataset import _YAML_TO_NORM_MODE, _load_mode_stats
+    from openwam.dataloader.transforms.normalize import ActionNormalizer
+
+    if norm_mode not in _YAML_TO_NORM_MODE:
+        logger.warning(
+            "[normalizer] Unknown normalize_mode %r in checkpoint config; denormalizer DISABLED.",
+            norm_mode,
+        )
+        return None
+
+    mode_stats = _load_mode_stats(stats_path, action_mode)
+    if mode_stats is None:
+        logger.warning(
+            "[normalizer] Stats file %s has no '%s' entry; denormalizer DISABLED.",
+            stats_path,
+            action_mode,
+        )
+        return None
+
+    denorm = ActionNormalizer(mode=_YAML_TO_NORM_MODE[norm_mode], stats=mode_stats)
+    logger.info(
+        "[normalizer] Active: mode=%s action_mode=%s dim=%d stats=%s",
+        norm_mode,
+        action_mode,
+        len(mode_stats["mean"]),
+        stats_path,
+    )
+    return denorm

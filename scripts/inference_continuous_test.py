@@ -3,47 +3,59 @@
 Demonstrates how the OpenWAM policy server handles action chunking:
 
   ┌─────────────────────────────────────────────────────────────────┐
-  │  Client sends image+prompt  ──►  Server runs full inference     │
-  │  (first request or buffer     ◄──  Returns action chunk         │
-  │   exhausted)                       (e.g. 33 steps cached)       │
+  │  Client sends 3 cams + prompt ──►  Server runs full inference   │
+  │  (first request or buffer        ◄──  Returns action chunk      │
+  │   exhausted)                           (e.g. 33 steps cached)   │
   │                                                                 │
-  │  Client sends image+prompt  ──►  Server pops from buffer        │
-  │  (buffer still has actions)   ◄──  Returns cached action        │
-  │                                    (NO inference, fast)          │
+  │  Client sends 3 cams + prompt ──►  Server pops from buffer      │
+  │  (buffer still has actions)      ◄──  Returns cached action     │
+  │                                         (NO inference, fast)    │
   │                                                                 │
-  │  ... repeat until buffer empty, then re-infer with new image    │
+  │  ... repeat until buffer empty, then re-infer with new images   │
   └─────────────────────────────────────────────────────────────────┘
 
-Key points:
-  - The client ALWAYS sends the current image with every /predict call.
-  - The server decides internally whether to run inference or pop from buffer.
-  - In greedy mode (execute_horizon=None, default): the full chunk is consumed
-    before re-inference. Chunk length = num_frames in training (e.g. 33).
-  - In receding-horizon mode (execute_horizon=K): only K actions are executed
-    before re-inference with a new image, enabling temporal ensembling.
+Client contract (unified regardless of server multiview setting):
+    payload["images"] = {
+        "head_camera":        <base64 JPEG>,       # required
+        "left_wrist_camera":  <base64 JPEG>|null,  # optional
+        "right_wrist_camera": <base64 JPEG>|null   # optional
+    }
 
 Usage:
     # Start the server first:
     bash scripts/deploy.sh /path/to/checkpoint_dir
 
-    # Then run this test:
-    python scripts/inference_continuous_test.py
+    # Smoke / stream mode — every step sends 3 fresh random images:
+    python scripts/inference_continuous_test.py --steps 100
 
-    # With custom settings:
+    # Real robot mode — reuse the same static frames each step:
     python scripts/inference_continuous_test.py \
-        --server http://127.0.0.1:8766 \
-        --steps 100 \
-        --height 480 --width 640
+        --head-camera /path/to/head.jpg \
+        --left-wrist-camera /path/to/left.jpg \
+        --right-wrist-camera /path/to/right.jpg \
+        --steps 50
 """
 
 import argparse
 import base64
 import io
-import json
-from urllib import request
+import os
+import sys
+
+# Canonical client helpers live under benchmarks.utils — add project root so import works.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from benchmarks.utils.client import (  # noqa: E402
+    build_payload,
+    encode_path_b64,
+    get,
+    post,
+    reset,
+)
 
 
 def _make_random_image_b64(height: int, width: int) -> str:
+    """Test-only: random RGB JPEG for smoke tests (not a real client helper)."""
     import numpy as np
     from PIL import Image
 
@@ -54,84 +66,78 @@ def _make_random_image_b64(height: int, width: int) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _post(server: str, endpoint: str, payload: dict) -> dict:
-    url = f"{server.rstrip('/')}{endpoint}"
-    data = json.dumps(payload).encode("utf-8")
-    req = request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-    with request.urlopen(req, timeout=300) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _get(server: str, endpoint: str) -> dict:
-    url = f"{server.rstrip('/')}{endpoint}"
-    with request.urlopen(url, timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
 def main():
     parser = argparse.ArgumentParser(description="Continuous inference test for OpenWAM policy server.")
-    parser.add_argument("--server", type=str, default="http://127.0.0.1:8766")
+    parser.add_argument("--server", type=str, default="http://127.0.0.1:8848")
     parser.add_argument("--steps", type=int, default=100, help="Total control steps to simulate.")
-    parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480, help="Random-image height (ignored if --head-camera given).")
+    parser.add_argument("--width", type=int, default=640, help="Random-image width (ignored if --head-camera given).")
     parser.add_argument("--prompt", type=str, default="robot picks up the red bottle from the table")
+    parser.add_argument(
+        "--head-camera", type=str, default=None, help="Static path for head camera (reused every step)."
+    )
+    parser.add_argument("--left-wrist-camera", type=str, default=None, help="Static path for left wrist camera.")
+    parser.add_argument("--right-wrist-camera", type=str, default=None, help="Static path for right wrist camera.")
     args = parser.parse_args()
+
+    static_head = encode_path_b64(args.head_camera) if args.head_camera else None
+    static_left = encode_path_b64(args.left_wrist_camera) if args.left_wrist_camera else None
+    static_right = encode_path_b64(args.right_wrist_camera) if args.right_wrist_camera else None
+    stream_random = args.head_camera is None
 
     print(f"Server:  {args.server}")
     print(f"Steps:   {args.steps}")
-    print(f"Image:   {args.height}x{args.width} (random)")
+    if stream_random:
+        print(f"Mode:    random {args.height}x{args.width} images every step (all 3 cameras)")
+    else:
+        print(
+            f"Mode:    static frames  head={args.head_camera}  "
+            f"left={args.left_wrist_camera or '(null)'}  "
+            f"right={args.right_wrist_camera or '(null)'}"
+        )
     print(f"Prompt:  {args.prompt}")
     print("=" * 60)
 
     # Health check
-    health = _get(args.server, "/health")
+    health = get(args.server, "/health")
     print(f"Health:  {health}")
 
-    # Reset server state
-    _post(args.server, "/reset", {})
+    # Reset server state at the start of the episode
+    reset(args.server)
     print("Reset:   OK")
     print("=" * 60)
-
-    # ----------------------------------------------------------------
-    # Control loop
-    #
-    # In a real robot scenario:
-    #   - image = current camera frame from the robot
-    #   - action = sent to the robot's motor controller
-    #   - The loop runs at the robot's control frequency (e.g. 10-50 Hz)
-    #
-    # The server handles chunking internally:
-    #   - Step 0: buffer empty → full inference (~seconds), caches chunk
-    #   - Step 1..N-1: buffer has actions → instant pop (~ms)
-    #   - Step N: buffer empty again → re-inference with fresh image
-    # ----------------------------------------------------------------
 
     inference_count = 0
     total_latency = 0.0
     latencies = []
 
     print(f"\n{'Step':>5}  {'Latency':>10}  {'Type':>12}  {'Action (first 5 dims)':>30}")
-    print("-" * 65)
+    print("-" * 72)
+
+    last_action = None
 
     for step in range(args.steps):
-        # In reality, this would be the current camera frame.
-        # We generate a new random image each step to simulate changing observations.
-        image_b64 = _make_random_image_b64(args.height, args.width)
+        if stream_random:
+            head_b64 = _make_random_image_b64(args.height, args.width)
+            left_b64 = _make_random_image_b64(args.height, args.width)
+            right_b64 = _make_random_image_b64(args.height, args.width)
+        else:
+            head_b64, left_b64, right_b64 = static_head, static_left, static_right
 
-        payload = {
-            "image": image_b64,
-            "prompt": args.prompt,
-        }
-
-        result = _post(args.server, "/predict", payload)
+        payload = build_payload(
+            head=head_b64,
+            left_wrist=left_b64,
+            right_wrist=right_b64,
+            prompt=args.prompt,
+        )
+        result = post(args.server, "/predict", payload)
 
         action = result["action"]
+        last_action = action
         server_latency = result.get("latency_ms", 0)
         latencies.append(server_latency)
         total_latency += server_latency
 
-        # Heuristic: if server latency > 500ms, it likely ran full inference.
-        # Otherwise it was a buffer pop.
         is_inference = server_latency > 500
         if is_inference:
             inference_count += 1
@@ -142,30 +148,23 @@ def main():
         action_preview = [round(a, 4) for a in action[:5]]
         print(f"{step:5d}  {server_latency:8.1f}ms  {step_type:>12}  {action_preview}")
 
-    # ----------------------------------------------------------------
-    # Summary
-    # ----------------------------------------------------------------
     print("=" * 60)
     print("Summary")
     print("=" * 60)
     print(f"  Total steps:        {args.steps}")
-    print(f"  Action dim:         {len(action)}")
+    print(f"  Action dim:         {len(last_action) if last_action else '?'}")
     print(f"  Inference calls:    {inference_count}")
     print(f"  Buffer pops:        {args.steps - inference_count}")
     if inference_count > 0:
         chunk_size_est = args.steps / inference_count
         print(f"  Est. chunk size:    ~{chunk_size_est:.0f} steps")
     print(f"  Avg latency:        {total_latency / args.steps:.1f}ms")
-    inf_latencies = [l for l in latencies if l > 500]
-    pop_latencies = [l for l in latencies if l <= 500]
+    inf_latencies = [latency_ms for latency_ms in latencies if latency_ms > 500]
     if inf_latencies:
-        print(f"  Avg inference:      {sum(inf_latencies) / len(inf_latencies):.1f}ms")
+        print(f"  Avg inference:      {sum(inf_latencies) / len(inf_latencies):.0f}ms")
+    pop_latencies = [latency_ms for latency_ms in latencies if latency_ms <= 500]
     if pop_latencies:
         print(f"  Avg buffer pop:     {sum(pop_latencies) / len(pop_latencies):.1f}ms")
-
-    # Reset
-    _post(args.server, "/reset", {})
-    print("\nServer reset. Done.")
 
 
 if __name__ == "__main__":

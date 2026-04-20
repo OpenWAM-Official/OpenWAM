@@ -6,6 +6,8 @@ applying LoRA and gradient checkpointing.
 """
 
 import glob as _glob
+import importlib
+import json
 import logging
 import os
 import re
@@ -15,6 +17,117 @@ import torch
 from omegaconf import DictConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _import_class(dotted: str):
+    """Import ``pkg.mod.Class`` dotted path."""
+    module_path, cls_name = dotted.rsplit(".", 1)
+    return getattr(importlib.import_module(module_path), cls_name)
+
+
+def _build_tokenizer(tok_cfg: dict, manifest_dir: str):
+    """Instantiate a tokenizer described by a manifest ``tokenizer`` block.
+
+    Two construction modes:
+      - ``method`` absent / ``"__init__"`` → ``cls(**{path_kwarg: path, **kwargs})``
+      - ``method: "from_pretrained"``      → ``cls.from_pretrained(path, **kwargs)``
+
+    ``subdir`` is resolved relative to ``manifest_dir``.
+    """
+    cls = _import_class(tok_cfg["class"])
+    subdir = tok_cfg.get("subdir")
+    path = os.path.join(manifest_dir, subdir) if subdir else None
+    if path is not None and not os.path.isdir(path):
+        raise FileNotFoundError(f"tokenizer subdir does not exist: {path}")
+
+    kwargs = dict(tok_cfg.get("kwargs", {}) or {})
+    method = tok_cfg.get("method")
+    if method == "from_pretrained":
+        return cls.from_pretrained(path, **kwargs) if path else cls.from_pretrained(**kwargs)
+    path_kwarg = tok_cfg.get("path_kwarg", "name")
+    if path is not None:
+        kwargs[path_kwarg] = path
+    return cls(**kwargs)
+
+
+def build_video_backbone_from_manifest(manifest_path: str, device: str = "cpu"):
+    """Build an empty pipeline from a ``video_backbone_manifest.json``.
+
+    Self-contained inference: the checkpoint's safetensors will overwrite all
+    weights, so we only need (1) architecture — class + extra_kwargs for each
+    sub-module, (2) a local tokenizer. No backbone-source directory required.
+
+    Manifest schema (backbone-agnostic)::
+
+        {
+          "pipeline": {
+            "class": "openwam.model.video_backbone.diffsynth.pipelines.wan_video.WanVideoPipeline",
+            "kwargs": {}               # extra ctor kwargs (beyond device/torch_dtype)
+          },
+          "tokenizer": {                # optional
+            "class":      "<dotted.path.ClassName>",
+            "attr":       "tokenizer", # where to attach on pipe
+            "subdir":     "tokenizer/...",
+            "method":     "__init__",  # or "from_pretrained"
+            "path_kwarg": "name",      # kwarg name receiving the resolved subdir path
+            "kwargs":     {...}        # extra construction kwargs
+          },
+          "vae_division_factor_scale": 2,   # optional: sets pipe.height/width_division_factor
+          "models": [
+            {"attr": "text_encoder|dit|vae|...",
+             "model_class": "<dotted.path>",
+             "extra_kwargs": {...}},
+            ...
+          ]
+        }
+
+    Args:
+        manifest_path: Absolute path to ``video_backbone_manifest.json``.
+        device: Device on which empty model instances are constructed.
+
+    Returns:
+        A pipeline instance with models + tokenizer attached, ready for
+        ``pipe.load_state_dict`` to fill in real weights.
+    """
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+
+    pipeline_cfg = manifest["pipeline"]
+    pipeline_cls = _import_class(pipeline_cfg["class"])
+    pipeline_kwargs = dict(pipeline_cfg.get("kwargs", {}) or {})
+    pipeline_kwargs.setdefault("device", device)
+    pipeline_kwargs.setdefault("torch_dtype", torch.bfloat16)
+    pipe = pipeline_cls(**pipeline_kwargs)
+
+    for entry in manifest.get("models", []):
+        cls = _import_class(entry["model_class"])
+        kwargs = entry.get("extra_kwargs", {}) or {}
+        logger.info(
+            "Instantiating %s as pipe.%s (extra_kwargs keys=%s)",
+            entry["model_class"],
+            entry["attr"],
+            list(kwargs.keys()),
+        )
+        with torch.device(device):
+            model = cls(**kwargs)
+        model.to(dtype=torch.bfloat16)
+        setattr(pipe, entry["attr"], model)
+
+    scale = manifest.get("vae_division_factor_scale")
+    if scale and getattr(pipe, "vae", None) is not None and hasattr(pipe.vae, "upsampling_factor"):
+        pipe.height_division_factor = pipe.vae.upsampling_factor * int(scale)
+        pipe.width_division_factor = pipe.vae.upsampling_factor * int(scale)
+
+    tok_cfg = manifest.get("tokenizer")
+    if tok_cfg:
+        tokenizer = _build_tokenizer(tok_cfg, manifest_dir)
+        attr = tok_cfg.get("attr", "tokenizer")
+        setattr(pipe, attr, tokenizer)
+        logger.info("Loaded tokenizer %s → pipe.%s", tok_cfg["class"], attr)
+
+    return pipe
 
 
 def build_training_pipeline(cfg: DictConfig):
