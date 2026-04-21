@@ -1,24 +1,15 @@
-"""WAM Architecture registry.
-
-Provides a decorator-based registration pattern (inspired by StarVLA's
-FRAMEWORK_REGISTRY) for discovering and instantiating WAM architectures
-from configuration.
-
-Usage:
-    @register_architecture("dual_system")
-    class DualSystemArchitecture(BaseWAMArchitecture):
-        ...
-
-    arch = build_architecture("dual_system", cfg)
-"""
+'Public implementation.'
 
 from dataclasses import dataclass
 from typing import Dict, Type
+
+import torch.nn as nn
 
 from openwam.model.base import BaseWAMArchitecture
 
 ARCHITECTURE_REGISTRY: Dict[str, Type[BaseWAMArchitecture]] = {}
 ARCHITECTURE_SUPPORT: Dict[str, "ArchitectureSupport"] = {}
+
 
 
 @dataclass(frozen=True)
@@ -67,15 +58,20 @@ def list_experimental_architectures() -> tuple[str, ...]:
 
 
 def build_architecture(name: str, cfg=None, *, allow_experimental: bool = False) -> BaseWAMArchitecture:
-    """Instantiate a registered WAM architecture by name.
+    """
+    Instantiate a registered WAM architecture by registry key.
 
-    Args:
-        name: Registry key (e.g. "dual_system", "moe_expert", "shared_backbone").
-        cfg: Architecture configuration (passed to constructor).
-        allow_experimental: Allow experimental architectures to instantiate.
+    Parameters:
+        name (str): Registry key of the architecture (e.g., "dual_system", "moe_expert").
+        cfg: Configuration object passed to the architecture constructor.
+        allow_experimental (bool): If False, prevent instantiation of architectures marked as experimental.
 
     Returns:
-        Instantiated BaseWAMArchitecture subclass.
+        BaseWAMArchitecture: An instance of the registered architecture class.
+
+    Raises:
+        KeyError: If `name` is not a registered architecture.
+        NotImplementedError: If the architecture is marked experimental and `allow_experimental` is False.
     """
     if name not in ARCHITECTURE_REGISTRY:
         available = ", ".join(sorted(ARCHITECTURE_REGISTRY.keys()))
@@ -87,3 +83,12 @@ def build_architecture(name: str, cfg=None, *, allow_experimental: bool = False)
             f"Architecture '{name}' is experimental and not part of the supported OpenWAM matrix.{detail}"
         )
     return ARCHITECTURE_REGISTRY[name](cfg)
+
+
+# ---------------------------------------------------------------------------
+# Standalone model registry (non-WAM architectures, e.g. VLA models)
+# ---------------------------------------------------------------------------
+
+
+
+

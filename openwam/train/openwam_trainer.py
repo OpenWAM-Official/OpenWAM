@@ -65,8 +65,8 @@ def _downsample_video_mask_to_latent(video_is_pad: torch.Tensor) -> torch.Tensor
     T_tail = tail_is_pad.shape[0]
     pad_len = (VAE_TEMPORAL_FACTOR - T_tail % VAE_TEMPORAL_FACTOR) % VAE_TEMPORAL_FACTOR
     if pad_len > 0:
-        tail_is_pad = torch.cat([tail_is_pad, torch.ones(pad_len, dtype=torch.bool)])
-
+        # tail_is_pad = torch.cat([tail_is_pad, torch.ones(pad_len, dtype=torch.bool)])
+        tail_is_pad = torch.cat([tail_is_pad, torch.ones(pad_len, dtype=torch.bool, device=tail_is_pad.device)])
     return tail_is_pad.view(-1, VAE_TEMPORAL_FACTOR).all(dim=1)
 
 

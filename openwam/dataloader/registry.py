@@ -110,9 +110,17 @@ def _build_from_config(cls, config, split: str):
 
 def _register_builtins():
     """Register all built-in dataset classes."""
+    from openwam.dataloader.agibot import AgibotDataset
+    from openwam.dataloader.galaxea import GalaxeaDataset
+    from openwam.dataloader.lerobot_v3_base import LeRobot3Dataset
+    from openwam.dataloader.mixture import MixtureDataset
     from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
+    register_dataset("agibot")(AgibotDataset)
+    register_dataset("galaxea")(GalaxeaDataset)
+    register_dataset("mixture")(MixtureDataset)
+    register_dataset("lerobot_v3")(LeRobot3Dataset)
 
 
 _register_builtins()
