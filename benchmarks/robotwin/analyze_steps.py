@@ -89,6 +89,7 @@ def summarize(records: List[dict]):
 
 def write_csv(rows: List[dict], path: Path) -> None:
     import csv
+
     if not rows:
         path.write_text("", encoding="utf-8")
         return
@@ -118,8 +119,7 @@ def write_markdown(rows: List[dict], path: Path) -> None:
         ("failure_min", "f_min"),
         ("failure_max", "f_max"),
     ]
-    lines = ["| " + " | ".join(label for _, label in cols) + " |",
-             "|" + "|".join("---" for _ in cols) + "|"]
+    lines = ["| " + " | ".join(label for _, label in cols) + " |", "|" + "|".join("---" for _ in cols) + "|"]
     for r in rows:
         lines.append("| " + " | ".join(str(r.get(k, "")) for k, _ in cols) + " |")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

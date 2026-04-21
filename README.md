@@ -178,16 +178,49 @@ Deploy a trained checkpoint as a policy server:
 bash scripts/deploy.sh /path/to/checkpoint_dir
 ```
 
-This reads the `config.yaml` saved alongside checkpoints and starts an HTTP policy server. The latest checkpoint in the directory is loaded automatically.
+This reads `configs/deployment.yaml` for base settings (device, ports, inference parameters) and the `config.yaml` saved inside the checkpoint directory for model architecture. The latest checkpoint in the directory is loaded automatically.
 
-Options:
+#### Configuration
+
+`configs/deployment.yaml` is the central configuration file for deployment. Key sections:
+
+```yaml
+deployment:
+  checkpoint_path: /path/to/checkpoint_dir  # used when --ckpt-dir is not passed
+  device: cuda:0
+  server:
+    host: "0.0.0.0"
+    ws_port: 8850
+    http_port: 8848
+
+inference:
+  denoise_steps: 20      # denoising steps
+  schedule_type: sync    # sync | cascade | decoupled_flash | decoupled_asymmetric
+  cfg_scale: 1.0         # 1.0 = CFG disabled (recommended for robotics)
+  shift: 5.0
+
+deploy:
+  decode_video: false    # false = action-only mode (skip VAE decode, faster)
+  compile:
+    enabled: true        # torch.compile ActionDiT (~30s one-time JIT warmup)
+    video_dit: true      # torch.compile Video DiT blocks — default on; pay ~3-5 min
+                         # CUDA Graph capture on first inference. Set false for
+                         # short runs where warmup > per-step saving.
+    vae: false           # torch.compile VAE decoder (only effective when tiled=false)
+```
+
+CLI flags override the yaml values for their respective fields:
 
 ```bash
 bash scripts/deploy.sh /path/to/checkpoint_dir \
-  --host 0.0.0.0 \
-  --http-port 8848 \
+  --device cuda:1 \
+  --ws-port 9000 \
+  --http-port 9001 \
+  --denoise-steps 10 \
   --ckpt-name checkpoint_step_10000.safetensors
 ```
+
+All inference overrides (`--denoise-steps`, `--schedule-type`, `--cfg-scale`, `--shift`) are optional; the yaml values are used when they are not provided.
 
 #### Mock mode (no GPU or model weights required)
 

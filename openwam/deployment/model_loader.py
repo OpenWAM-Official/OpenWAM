@@ -144,13 +144,20 @@ def load_from_checkpoint_dir(
     # 6. Load all weights from checkpoint
     load_trainable_checkpoint(ckpt_path, action_dit, pipe)
 
-    # 7. Move to device and set eval mode
-    action_dit.to(dtype=torch.bfloat16, device=device)
+    # 7. Move to device and set eval mode.
+    #    Dtype is driven by cfg.training.mixed_precision (default: bf16).
+    _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")
+    _DTYPE_MAP = {"bf16": torch.bfloat16, "fp16": torch.float16, "no": torch.float32}
+    model_dtype = _DTYPE_MAP.get(str(_mp).strip().lower(), torch.bfloat16)
+    logger.info("Loading all models with dtype=%s (mixed_precision=%s)", model_dtype, _mp)
+
+    action_dit.to(dtype=model_dtype, device=device)
     action_dit.eval()
+    # VAE is cast to model_dtype too; set mixed_precision: no if fp32 VAE is needed.
     for name in ("dit", "vace", "text_encoder", "vae"):
         mod = getattr(pipe, name, None)
         if mod is not None:
-            mod.to(device=device)
+            mod.to(dtype=model_dtype, device=device)
             mod.eval()
 
     # 8. Attach denormalizer built from saved action_stats.npy + config.

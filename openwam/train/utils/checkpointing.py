@@ -68,37 +68,63 @@ def save_action_stats(output_dir: str, dataset) -> None:
     logger.info("[normalizer] Copied action stats into checkpoint dir:\n  src: %s\n  dst: %s", src, dst)
 
 
+_MIXED_PRECISION_TO_DTYPE = {
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+    "no": torch.float32,
+}
+
+
+def _parse_dtype(mixed_precision: str) -> torch.dtype:
+    dtype = _MIXED_PRECISION_TO_DTYPE.get(str(mixed_precision).strip().lower())
+    if dtype is None:
+        raise ValueError(
+            f"Unknown mixed_precision={mixed_precision!r}. Expected one of: {list(_MIXED_PRECISION_TO_DTYPE)}"
+        )
+    return dtype
+
+
+_MISSING_MIXED_PRECISION = object()
+
+
 def save_trainable_checkpoint(
     path: str,
     action_dit: torch.nn.Module,
     pipe,
     lambda_action: float,
+    mixed_precision=_MISSING_MIXED_PRECISION,
 ):
     """Export full model state dict to safetensors or .pt.
-
-    Saves all parameters and buffers from both the action model and
-    the video pipeline, so the checkpoint is self-contained and can
-    restore the entire model without needing original pretrained weights.
 
     Args:
         path: Output file path (``.safetensors`` or ``.pt``).
         action_dit: Action model (ActionDiT / MoEExpertDiT / etc.).
         pipe: WanVideoPipeline instance.
         lambda_action: Action loss weight (unused, kept for API compat).
+        mixed_precision: ``"bf16"`` / ``"fp16"`` / ``"no"`` — target dtype for
+            floating-point tensors. If omitted, defaults to ``"bf16"`` with
+            a WARNING so the dtype decision is explicit.
     """
+    if mixed_precision is _MISSING_MIXED_PRECISION:
+        logger.warning("save_trainable_checkpoint: mixed_precision not provided, defaulting to 'bf16'")
+        mixed_precision = "bf16"
+    target_dtype = _parse_dtype(mixed_precision)
     state_dict = {}
+
+    def _maybe_cast(t: torch.Tensor) -> torch.Tensor:
+        return t.to(dtype=target_dtype) if t.is_floating_point() else t
 
     # ActionDiT: all parameters + all buffers
     for name, param in action_dit.named_parameters():
-        state_dict[f"action_dit.{name}"] = param.data
+        state_dict[f"action_dit.{name}"] = _maybe_cast(param.data)
     for name, buf in action_dit.named_buffers():
-        state_dict[f"action_dit.{name}"] = buf
+        state_dict[f"action_dit.{name}"] = _maybe_cast(buf)
 
     # Video pipeline: all parameters + all buffers
     for name, param in pipe.named_parameters():
-        state_dict[name] = param.data
+        state_dict[name] = _maybe_cast(param.data)
     for name, buf in pipe.named_buffers():
-        state_dict[name] = buf
+        state_dict[name] = _maybe_cast(buf)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     if path.endswith(".safetensors"):
@@ -108,7 +134,12 @@ def save_trainable_checkpoint(
     else:
         torch.save(state_dict, path)
 
-    logger.info("Saved checkpoint to %s (%d keys)", path, len(state_dict))
+    logger.info(
+        "Saved checkpoint to %s (%d keys, dtype=%s)",
+        path,
+        len(state_dict),
+        target_dtype,
+    )
 
 
 def load_trainable_checkpoint(

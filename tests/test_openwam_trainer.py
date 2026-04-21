@@ -377,13 +377,20 @@ def test_save_load_checkpoint():
         pipe2 = _MockPipeline()
         load_trainable_checkpoint(ckpt_path, arch2.action_dit, pipe2)
 
-        # Verify action_dit weights match
+        # Verify action_dit weights match at the save precision (bf16).
+        # save_trainable_checkpoint defaults to mixed_precision="bf16", so weights
+        # go through a float32 → bf16 → float32 round-trip on save+load.  Exact
+        # float32 equality is impossible after that round-trip; compare in bf16
+        # instead, which is the precision at which the data was actually stored.
         for (k1, v1), (k2, v2) in zip(
             arch.action_dit.state_dict().items(),
             arch2.action_dit.state_dict().items(),
         ):
             assert k1 == k2
-            assert torch.equal(v1, v2), f"Weight mismatch for {k1}"
+            if v1.is_floating_point():
+                assert torch.equal(v1.to(torch.bfloat16), v2.to(torch.bfloat16)), f"Weight mismatch for {k1}"
+            else:
+                assert torch.equal(v1, v2), f"Buffer mismatch for {k1}"
 
 
 def test_manage_checkpoints():

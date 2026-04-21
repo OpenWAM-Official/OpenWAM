@@ -15,6 +15,31 @@ from openwam.model.base import BaseWAMArchitecture
 logger = logging.getLogger(__name__)
 
 
+# Allowlist of pipeline-unit class names that emit text embeddings.
+# Substring matching silently miscounts ClipLatentDenormalizer and misses
+# renamed encoders, so we match by exact class name or an opt-in flag.
+_TEXT_UNIT_CLASS_NAMES = frozenset({"WanVideoUnit_PromptEmbedder"})
+
+_UNKNOWN_UNIT_WARNED: set = set()
+
+
+def _is_text_unit(unit) -> bool:
+    flag = getattr(unit, "is_text_unit", None)
+    if flag is not None:
+        return bool(flag)
+    cls_name = getattr(unit, "__class__", type(unit)).__name__
+    if cls_name in _TEXT_UNIT_CLASS_NAMES:
+        return True
+    lowered = cls_name.lower()
+    if cls_name not in _UNKNOWN_UNIT_WARNED and any(kw in lowered for kw in ("text", "prompt")):
+        _UNKNOWN_UNIT_WARNED.add(cls_name)
+        logger.warning(
+            "_is_text_unit: %s looks text-related but is not in the allowlist; treating as non-text",
+            cls_name,
+        )
+    return False
+
+
 def prepare_pipeline_inputs(
     pipe: Any,
     prompt: str,
@@ -32,33 +57,35 @@ def prepare_pipeline_inputs(
     tile_size: tuple = (30, 52),
     tile_stride: tuple = (15, 26),
     vace_cache: Optional[dict] = None,
+    prompt_embed_cache: Optional[dict] = None,
 ):
     """Build the full input dicts required by the Wan pipeline.
 
-    When ``vace_cache`` is provided and already populated from a prior call,
-    static inputs (text embeddings, reference image encodings) are reused.
-    Only the observation-dependent portions are re-computed.
+    When ``vace_cache`` is provided and populated with the same prompt,
+    static inputs (text embeddings, reference image encodings) are reused
+    and only the observation-dependent portions are re-computed.
+
+    When ``prompt_embed_cache`` is provided, text embeddings are cached
+    per-prompt across episodes.  On prompt change or fresh server start,
+    the text encoder runs once and the result is stored; subsequent calls
+    with the same prompt skip the text encoder entirely (~290ms saved).
     """
     pipe.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
 
-    # Check if we can reuse cached pipeline outputs
-    if vace_cache and vace_cache.get("populated"):
-        # Reuse cached static inputs
+    prompt_key = (prompt, negative_prompt)
+
+    # Fast path: full pipeline cache hit — same prompt, same session.
+    if vace_cache and vace_cache.get("populated") and vace_cache.get("prompt_key") == prompt_key:
         inputs_shared = vace_cache["inputs_shared"].copy()
         inputs_posi = vace_cache["inputs_posi"].copy()
         inputs_nega = vace_cache["inputs_nega"].copy()
 
-        # Update only dynamic fields
         inputs_shared["seed"] = seed
         inputs_shared["vace_video"] = vace_video
         inputs_shared["num_frames"] = num_frames
 
-        # Re-run only units that process dynamic content (VACE video encoding)
-        # Pipeline units that handle text/reference are skipped via cache
         for unit in pipe.units:
-            unit_name = getattr(unit, "__class__", type(unit)).__name__
-            # Skip text encoder and reference image units (cached)
-            if any(kw in unit_name.lower() for kw in ("text", "prompt", "clip")):
+            if _is_text_unit(unit):
                 continue
             inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(
                 unit, pipe, inputs_shared, inputs_posi, inputs_nega
@@ -66,20 +93,33 @@ def prepare_pipeline_inputs(
 
         return inputs_shared, inputs_posi, inputs_nega
 
-    inputs_posi = {
-        "prompt": prompt,
-        "vap_prompt": " ",
-        "tea_cache_l1_thresh": None,
-        "tea_cache_model_id": "",
-        "num_inference_steps": num_inference_steps,
-    }
-    inputs_nega = {
-        "negative_prompt": negative_prompt,
-        "negative_vap_prompt": " ",
-        "tea_cache_l1_thresh": None,
-        "tea_cache_model_id": "",
-        "num_inference_steps": num_inference_steps,
-    }
+    # Check prompt_embed_cache: if same prompt was seen before, text encoder can be skipped.
+    _text_embed_hit = prompt_embed_cache is not None and prompt_key in prompt_embed_cache
+    if _text_embed_hit:
+        cached_posi, cached_nega = prompt_embed_cache[prompt_key]
+        inputs_posi = dict(cached_posi)
+        inputs_nega = dict(cached_nega)
+        # Keep dynamic fields fresh
+        inputs_posi["num_inference_steps"] = num_inference_steps
+        inputs_nega["num_inference_steps"] = num_inference_steps
+        logger.debug("[text_cache] HIT — skipping text encoder for prompt: %r", prompt[:60])
+    else:
+        if prompt_embed_cache is not None:
+            logger.info("[text_cache] MISS — running text encoder for prompt: %r", prompt[:60])
+        inputs_posi = {
+            "prompt": prompt,
+            "vap_prompt": " ",
+            "tea_cache_l1_thresh": None,
+            "tea_cache_model_id": "",
+            "num_inference_steps": num_inference_steps,
+        }
+        inputs_nega = {
+            "negative_prompt": negative_prompt,
+            "negative_vap_prompt": " ",
+            "tea_cache_l1_thresh": None,
+            "tea_cache_model_id": "",
+            "num_inference_steps": num_inference_steps,
+        }
     # Default camera pose matrix — only used when camera_control_direction is
     # not None, so this is effectively inert for WAM inference.
     _DEFAULT_CAMERA_ORIGIN = (
@@ -149,15 +189,48 @@ def prepare_pipeline_inputs(
         "vap_video": None,
     }
 
-    for unit in pipe.units:
-        inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(unit, pipe, inputs_shared, inputs_posi, inputs_nega)
+    _t_text = time.time()
+    if _text_embed_hit:
+        # Text context tensors are already in inputs_posi/inputs_nega — skip text units.
+        for unit in pipe.units:
+            if _is_text_unit(unit):
+                continue
+            inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(
+                unit, pipe, inputs_shared, inputs_posi, inputs_nega
+            )
+    else:
+        # Snapshot between text units and the first non-text unit so the
+        # cache only stores text embeddings, not per-episode observation
+        # tensors that subsequent units would write into posi/nega.
+        snapshotted = False
+        for unit in pipe.units:
+            if not _is_text_unit(unit) and not snapshotted:
+                if prompt_embed_cache is not None:
+                    prompt_embed_cache[prompt_key] = (inputs_posi.copy(), inputs_nega.copy())
+                    logger.info(
+                        "[text_cache] stored embedding (pipeline_prep=%.3fs) for prompt: %r",
+                        time.time() - _t_text,
+                        prompt[:60],
+                    )
+                snapshotted = True
+            inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(
+                unit, pipe, inputs_shared, inputs_posi, inputs_nega
+            )
+        if not snapshotted and prompt_embed_cache is not None:
+            prompt_embed_cache[prompt_key] = (inputs_posi.copy(), inputs_nega.copy())
+            logger.info(
+                "[text_cache] stored embedding (pipeline_prep=%.3fs) for prompt: %r",
+                time.time() - _t_text,
+                prompt[:60],
+            )
 
-    # Populate VACE cache for future closed-loop calls
+    # Populate VACE cache for future closed-loop calls (now prompt-aware)
     if vace_cache is not None:
         vace_cache["inputs_shared"] = inputs_shared.copy()
         vace_cache["inputs_posi"] = inputs_posi.copy()
         vace_cache["inputs_nega"] = inputs_nega.copy()
         vace_cache["populated"] = True
+        vace_cache["prompt_key"] = prompt_key
 
     return inputs_shared, inputs_posi, inputs_nega
 
@@ -198,6 +271,7 @@ def generate_video_and_actions(
     decode_video: bool = True,
     profile: bool = False,
     vace_cache: Optional[dict] = None,
+    prompt_embed_cache: Optional[dict] = None,
 ):
     """Execute joint video-action denoising driven by a schedule.
 
@@ -254,6 +328,7 @@ def generate_video_and_actions(
         tile_size=tile_size,
         tile_stride=tile_stride,
         vace_cache=vace_cache,
+        prompt_embed_cache=prompt_embed_cache,
     )
 
     _profile_sync("pipeline_prep", t0, profile)
@@ -320,6 +395,11 @@ def generate_video_and_actions(
             action_state = architecture.prepare_action_tokens(action_latents, a_timestep)
             dit_state = action_state.extra.get("dit_state")
 
+            # Required when compile.video_dit=true: marks a new denoising step for
+            # the CUDA Graph tree so outputs aren't overwritten mid-step. All direct
+            # pipe.model_fn and cfg_handler dispatches below are preceded by this
+            # mark; the grep-count invariant is enforced by TestCudagraphMarkStepBegin.
+            torch.compiler.cudagraph_mark_step_begin()
             noise_pred_posi = pipe.model_fn(
                 **models,
                 **inputs_shared,
@@ -331,6 +411,8 @@ def generate_video_and_actions(
 
             if cfg_scale != 1.0:
                 if cfg_handler is not None:
+                    # cfg_handler dispatches to pipe.model_fn internally.
+                    torch.compiler.cudagraph_mark_step_begin()
                     noise_pred = cfg_handler.forward(
                         pipe.model_fn,
                         models,
@@ -340,6 +422,7 @@ def generate_video_and_actions(
                         v_timestep,
                     )
                 else:
+                    torch.compiler.cudagraph_mark_step_begin()
                     noise_pred_nega = pipe.model_fn(
                         **models,
                         **inputs_shared,
@@ -362,6 +445,8 @@ def generate_video_and_actions(
                 bridge_features = []
 
                 if cfg_handler is not None and cfg_scale != 1.0:
+                    # cfg_handler dispatches to pipe.model_fn internally.
+                    torch.compiler.cudagraph_mark_step_begin()
                     noise_pred = cfg_handler.forward(
                         pipe.model_fn,
                         models,
@@ -374,6 +459,7 @@ def generate_video_and_actions(
                         bridge_feature_detach=True,
                     )
                 else:
+                    torch.compiler.cudagraph_mark_step_begin()
                     noise_pred_posi = pipe.model_fn(
                         **models,
                         **inputs_shared,
@@ -385,6 +471,7 @@ def generate_video_and_actions(
                     )
 
                     if cfg_scale != 1.0:
+                        torch.compiler.cudagraph_mark_step_begin()
                         noise_pred_nega = pipe.model_fn(
                             **models,
                             **inputs_shared,

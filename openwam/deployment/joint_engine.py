@@ -2,7 +2,8 @@
 
 import logging
 import os
-from typing import Optional
+from collections import OrderedDict
+from typing import Any, Optional
 
 import torch
 
@@ -13,6 +14,32 @@ from openwam.model.action_model.action_repr.base import BaseActionRepresentation
 from openwam.model.base import BaseWAMArchitecture
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE = 32
+
+
+class _BoundedPromptEmbedCache(OrderedDict):
+    """LRU-bounded dict for ``(prompt, neg_prompt) -> (inputs_posi, inputs_nega)``."""
+
+    def __init__(self, maxsize: int = DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE):
+        super().__init__()
+        self._maxsize = max(1, int(maxsize))
+        self._evict_warned = False
+
+    def __getitem__(self, key: Any) -> Any:
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        while len(self) > self._maxsize:
+            evicted_key, _ = self.popitem(last=False)
+            if not self._evict_warned:
+                self._evict_warned = True
+                logger.warning("prompt_embed_cache exceeded maxsize=%d; evicted %r", self._maxsize, evicted_key)
 
 
 class JointInferenceEngine(BaseInferenceEngine):
@@ -68,27 +95,34 @@ class JointInferenceEngine(BaseInferenceEngine):
                 )
                 logger.info("DiT velocity cache enabled (threshold=%.3f)", dc.cosine_threshold)
 
-        # CFG handler
+        # CFG handler — scale always derives from inference.cfg_scale.
         self._cfg_handler = None
         if deploy and getattr(deploy, "cfg", None):
             cfg_opt = deploy.cfg
             mode = getattr(cfg_opt, "mode", None)
-            scale = getattr(cfg_opt, "scale", 1.0)
+            scale = float(getattr(getattr(self.cfg, "inference", None), "cfg_scale", 1.0))
             if mode == "batch_merge":
                 from openwam.deployment.optimizations import CFGBatchMerger
 
                 self._cfg_handler = CFGBatchMerger(cfg_scale=scale)
-                logger.info("CFG batch merge enabled")
+                logger.info("CFG batch merge enabled (scale=%s)", scale)
             elif mode == "parallel":
                 from openwam.deployment.optimizations import CFGParallelExecutor
 
-                devices = getattr(cfg_opt, "devices", ["cuda:0", "cuda:1"])
+                devices = getattr(cfg_opt, "devices", None)
+                if devices is None:
+                    raise ValueError(
+                        "deploy.cfg.mode=parallel requires deploy.cfg.devices to be set (a list like [cuda:0, cuda:1])."
+                    )
                 self._cfg_handler = CFGParallelExecutor(devices=devices, cfg_scale=scale)
-                logger.info("CFG parallel execution enabled on %s", devices)
+                logger.info("CFG parallel execution enabled on %s (scale=%s)", devices, scale)
 
-        # torch.compile on ActionDiT
+        # torch.compile — ActionDiT, Video DiT, VAE
         if deploy and getattr(deploy, "compile", None):
-            if getattr(deploy.compile, "enabled", False):
+            compile_cfg = deploy.compile
+
+            # ActionDiT (101M): safe, fast warmup (~30s), recommended
+            if getattr(compile_cfg, "enabled", False):
                 try:
                     action_dit = getattr(self.architecture, "action_dit", None)
                     if action_dit is not None:
@@ -98,7 +132,43 @@ class JointInferenceEngine(BaseInferenceEngine):
                         )
                         logger.info("torch.compile enabled for ActionDiT")
                 except Exception as e:
-                    logger.warning("torch.compile failed, continuing without: %s", e)
+                    logger.warning("torch.compile failed for ActionDiT, continuing without: %s", e)
+
+            # Video DiT (5B): large speedup per step, but ~3-5 min warmup on first call.
+            # IMPORTANT: model_fn_wan_video iterates dit.blocks manually (never calls dit.forward()),
+            # so compiling pipe.dit as a whole is a no-op. Compile each block individually instead.
+            if getattr(compile_cfg, "video_dit", False):
+                try:
+                    dit = getattr(self.pipeline, "dit", None)
+                    if dit is not None and hasattr(dit, "blocks"):
+                        n = len(dit.blocks)
+                        for i in range(n):
+                            dit.blocks[i] = torch.compile(dit.blocks[i], dynamic=True, mode="reduce-overhead")
+                        logger.info(
+                            "torch.compile enabled for Video DiT: compiled %d blocks "
+                            "(~3-5 min warmup on first inference)",
+                            n,
+                        )
+                    else:
+                        logger.warning("torch.compile video_dit=true but pipeline.dit or dit.blocks not found; skipped")
+                except Exception as e:
+                    logger.warning("torch.compile failed for Video DiT blocks, continuing without: %s", e)
+
+            # VAE decoder (704M): only effective when tiled=false.
+            # Tiled decoding has Python-level loops that break graph capture.
+            if getattr(compile_cfg, "vae", False):
+                try:
+                    vae = getattr(self.pipeline, "vae", None)
+                    if vae is not None:
+                        self.pipeline.vae = torch.compile(vae, dynamic=True)
+                        logger.info(
+                            "torch.compile enabled for VAE — "
+                            "only effective when tiled=false; tiled=true will fall back to eager"
+                        )
+                    else:
+                        logger.warning("torch.compile vae=true but pipeline.vae not found; skipped")
+                except Exception as e:
+                    logger.warning("torch.compile failed for VAE, continuing without: %s", e)
 
         # VAE decode skip
         self._decode_video = True
@@ -110,6 +180,14 @@ class JointInferenceEngine(BaseInferenceEngine):
 
         # VACE context cache for closed-loop reuse
         self._vace_cache: dict = {}
+
+        # Prompt-keyed text embedding cache (bounded LRU).
+        cache_maxsize = DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE
+        if deploy is not None:
+            cache_cfg = getattr(deploy, "prompt_embed_cache", None)
+            if cache_cfg is not None:
+                cache_maxsize = int(getattr(cache_cfg, "maxsize", cache_maxsize))
+        self._prompt_embed_cache = _BoundedPromptEmbedCache(maxsize=cache_maxsize)
 
     @torch.no_grad()
     def generate(self, conditions: dict) -> dict:
@@ -131,7 +209,7 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): for action_only mode
                 - schedule_type (str, optional): override schedule type
-                - num_steps (int, optional): override num denoising steps
+                - denoise_steps (int, optional): override num denoising steps
 
         Returns:
             dict with ``video`` (list of PIL images or None) and ``actions`` (numpy array).
@@ -141,34 +219,32 @@ class JointInferenceEngine(BaseInferenceEngine):
 
         # Build schedule
         schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
-        # Deploy config can override schedule type
+        # Deploy config can override schedule type; null means "use inference.schedule_type"
         if deploy and getattr(deploy, "schedule", None):
-            schedule_type = conditions.get(
-                "schedule_type",
-                getattr(deploy.schedule, "type", schedule_type),
-            )
-        num_steps = conditions.get("num_steps", inf_cfg.num_steps)
+            _deploy_type = getattr(deploy.schedule, "type", None)
+            schedule_type = conditions.get("schedule_type", _deploy_type or schedule_type)
+        denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
         shift = conditions.get("shift", getattr(inf_cfg, "shift", 5.0))
 
         schedule_kwargs = {}
         if schedule_type == "video_leading":
             schedule_kwargs["lead_steps"] = getattr(inf_cfg, "lead_steps", 10)
         elif schedule_type == "cascade":
-            schedule_kwargs["video_steps"] = getattr(inf_cfg, "video_steps", num_steps)
-            schedule_kwargs["action_steps"] = getattr(inf_cfg, "action_steps", num_steps)
+            schedule_kwargs["video_steps"] = getattr(inf_cfg, "video_steps", denoise_steps)
+            schedule_kwargs["action_steps"] = getattr(inf_cfg, "action_steps", denoise_steps)
         elif schedule_type == "decoupled_flash":
-            action_steps = num_steps
+            action_steps = denoise_steps
             if deploy and getattr(deploy, "schedule", None):
-                action_steps = getattr(deploy.schedule, "action_steps", num_steps)
+                action_steps = getattr(deploy.schedule, "action_steps", denoise_steps)
             schedule_kwargs["action_steps"] = conditions.get("action_steps", action_steps)
         elif schedule_type == "decoupled_asymmetric":
-            schedule_kwargs["video_steps"] = getattr(inf_cfg, "video_steps", num_steps)
-            action_steps = num_steps
+            schedule_kwargs["video_steps"] = getattr(inf_cfg, "video_steps", denoise_steps)
+            action_steps = denoise_steps
             if deploy and getattr(deploy, "schedule", None):
-                action_steps = getattr(deploy.schedule, "action_steps", num_steps)
+                action_steps = getattr(deploy.schedule, "action_steps", denoise_steps)
             schedule_kwargs["action_steps"] = conditions.get("action_steps", action_steps)
 
-        schedule = make_schedule(schedule_type, num_steps=num_steps, shift=shift, **schedule_kwargs)
+        schedule = make_schedule(schedule_type, num_steps=denoise_steps, shift=shift, **schedule_kwargs)
 
         # Reset dit cache for each generation
         if self._dit_cache is not None:
@@ -190,7 +266,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             cfg_scale=conditions.get("cfg_scale", getattr(inf_cfg, "cfg_scale", 1.0)),
             tiled=conditions.get("tiled", True),
             input_video_latents=conditions.get("input_video_latents", None),
-            num_inference_steps=num_steps,
+            num_inference_steps=denoise_steps,
             shift=shift,
             action_repr=self.action_repr,
             # Optimization params
@@ -199,6 +275,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             decode_video=self._decode_video,
             profile=self._profile,
             vace_cache=self._vace_cache,
+            prompt_embed_cache=self._prompt_embed_cache,
         )
 
         result = {"video": video_frames, "actions": actions}

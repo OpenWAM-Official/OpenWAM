@@ -907,7 +907,8 @@ class OpenWAMTrainer(BaseTrainer):
 
     def save_checkpoint(self, path: str):
         """Export trainable state dict to safetensors."""
-        save_trainable_checkpoint(path, self.action_dit, self.pipe, self.lambda_action)
+        mixed_precision = str(getattr(self.cfg.training, "mixed_precision", "bf16"))
+        save_trainable_checkpoint(path, self.action_dit, self.pipe, self.lambda_action, mixed_precision)
 
     def load_checkpoint(self, path: str):
         """Load a checkpoint into the model."""
