@@ -27,9 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROBOTWIN_PATH="${ROBOTWIN_PATH:?ROBOTWIN_PATH must be set to the RoboTwin repository root}"
 [[ -d "${ROBOTWIN_PATH}" ]] || { echo "[ERROR] ROBOTWIN_PATH not found: ${ROBOTWIN_PATH}" >&2; exit 1; }
 
-# Allow a drop-in replacement (e.g. benchmarks/robotwin/eval_policy_steps.py)
-# to override RoboTwin's default eval_policy.py for one-off analyses.
-robotwin_eval_script="${ROBOTWIN_EVAL_SCRIPT:-${ROBOTWIN_PATH}/script/eval_policy.py}"
+robotwin_eval_script="${ROBOTWIN_PATH}/script/eval_policy.py"
 [[ -f "${robotwin_eval_script}" ]] || { echo "[ERROR] eval script not found: ${robotwin_eval_script}" >&2; exit 1; }
 
 task_name="$1"

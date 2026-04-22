@@ -1,0 +1,80 @@
+# Per-task step_lim overrides for RoboTwin evaluation.
+#
+# Format: <task_name>: <int>
+#
+# Semantics:
+#   - Any task listed here overrides RoboTwin's upstream
+#     task_config/_eval_step_limit.yml value for that task.
+#   - Tasks NOT listed here keep RoboTwin's original value (or its
+#     built-in fallback of 1000 when the upstream file also lacks
+#     the task).
+#   - Override is applied by `openwam2robotwin_interface.py` at the
+#     start of every episode, so you can tweak a number and rerun
+#     without touching the RoboTwin source tree.
+#
+# Note: This is for evaluation not training.
+#
+# Each value is `ceil(avg / 32) * 32`. The `# avg N` comment on each line
+# preserves the raw per-task mean step count from the earlier step-analysis
+# pass (see `benchmarks/robotwin/analyze_steps.py` in git history for the
+# exact methodology) before rounding. Because it's a central-tendency
+# estimate — not a ceiling — a non-trivial fraction of rollouts will run
+# longer than `avg`.
+#
+# The headroom between `avg` and its `ceil(/32)*32` bucket can be as small
+# as a single step (e.g. `turn_switch` avg 95 -> 96, `handover_mic` avg
+# 223 -> 224). The 32-step rounding is *not* a safety margin. If a task
+# starts to hit `step limit reached` during eval, bump its value here
+# manually — e.g. round up to the next bucket, or double it for tasks
+# where avg and max are known to diverge.
+
+adjust_bottle: 160               # avg 147
+beat_block_hammer: 128           # avg 113
+blocks_ranking_rgb: 480          # avg 466
+blocks_ranking_size: 480         # avg 466
+click_alarmclock: 96             # avg 85
+click_bell: 96                   # avg 85
+dump_bin_bigbin: 288             # avg 265
+grab_roller: 96                  # avg 94
+handover_block: 288              # avg 283
+handover_mic: 224                # avg 223
+hanging_mug: 352                 # avg 340
+lift_pot: 128                    # avg 112
+move_can_pot: 160                # avg 151
+move_pillbottle_pad: 160         # avg 147
+move_playingcard_away: 128       # avg 120
+move_stapler_pad: 160            # avg 152
+open_laptop: 288                 # avg 258
+open_microwave: 544              # avg 537
+pick_diverse_bottles: 128        # avg 122
+pick_dual_bottles: 128           # avg 127
+place_a2b_left: 160              # avg 155
+place_a2b_right: 160             # avg 145
+place_bread_basket: 256          # avg 231
+place_bread_skillet: 192         # avg 162
+place_burger_fries: 256          # avg 242
+place_can_basket: 256            # avg 255
+place_cans_plasticbox: 320       # avg 289
+place_container_plate: 160       # avg 156
+place_dual_shoes: 256            # avg 228
+place_empty_cup: 192             # avg 174
+place_fan: 160                   # avg 148
+place_mouse_pad: 160             # avg 149
+place_object_basket: 256         # avg 252
+place_object_scale: 160          # avg 146
+place_object_stand: 160          # avg 138
+place_phone_stand: 160           # avg 130
+place_shoe: 192                  # avg 178
+press_stapler: 160               # avg 141
+put_bottles_dustbin: 640         # avg 637
+put_object_cabinet: 288          # avg 274
+rotate_qrcode: 160               # avg 155
+scan_object: 192                 # avg 170
+shake_bottle: 256                # avg 246
+shake_bottle_horizontally: 288   # avg 276
+stack_blocks_three: 512          # avg 481
+stack_blocks_two: 320            # avg 316
+stack_bowls_three: 480           # avg 476
+stack_bowls_two: 320             # avg 313
+stamp_seal: 160                  # avg 151
+turn_switch: 96                  # avg 95

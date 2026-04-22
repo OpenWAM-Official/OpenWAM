@@ -38,30 +38,92 @@ _PROJECT_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..",
 if _PROJECT_ROOT not in _sys.path:
     _sys.path.insert(0, _PROJECT_ROOT)
 
-import atexit  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import time  # noqa: E402
-from typing import Optional  # noqa: E402
+from typing import Dict, Optional  # noqa: E402
 
 import cv2 as cv  # noqa: E402
 import numpy as np  # noqa: E402
+import yaml  # noqa: E402
 
 from benchmarks.utils import action_conversion, client  # noqa: E402
-
-# --- Optional per-episode step-count logging ---
-# Activated when OPENWAM_STEP_LOG_PATH is set in the environment. Used by the
-# step_analysis runner to gather {task, mode, episode, steps, success} records
-# without modifying RoboTwin itself.
-_STEP_LOG_PATH = os.environ.get("OPENWAM_STEP_LOG_PATH")
-_STEP_LOG_TASK = os.environ.get("OPENWAM_STEP_LOG_TASK", "unknown")
-_STEP_LOG_MODE = os.environ.get("OPENWAM_STEP_LOG_MODE", "unknown")
 
 # Fields that earlier versions of policy_config.yml used. They are ignored by
 # the current client contract (server decides multiview/single-view and camera
 # layout from the checkpoint's config.yaml), but we log them once so users can
 # clean up their YAML.
 _DEPRECATED_YAML_FIELDS = ("image_key", "image_size", "multiview", "multiview_image_size")
+
+# --- Per-task step_lim overrides ---
+# A single YAML file of {task_name: int} lets users override RoboTwin's
+# upstream task_config/_eval_step_limit.yml without touching the RoboTwin
+# source tree. Missing tasks keep their upstream value (RoboTwin falls back
+# to 1000 when neither side defines one).
+_STEP_LIMITS_PATH = os.path.join(os.path.dirname(__file__), "step_limits.yml")
+
+
+def _load_step_lim_overrides(path: str) -> Dict[str, int]:
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError) as exc:
+        print(f"[OpenWAMClient] Failed to load step_lim overrides from {path}: {exc}")
+        return {}
+    if not isinstance(data, dict):
+        print(f"[OpenWAMClient] {path} must be a task_name->int mapping; ignoring.")
+        return {}
+    out: Dict[str, int] = {}
+    for k, v in data.items():
+        # Reject bool (which is an int subclass in Python) and non-int numerics
+        # explicitly — silent ``int(True) == 1`` or ``int(160.9) == 160`` caps
+        # would be nearly impossible to debug from a one-line override log.
+        if isinstance(v, bool) or not isinstance(v, int):
+            print(
+                f"[OpenWAMClient] Skipping step_lim override {k!r}={v!r}: "
+                f"value must be a plain int (got {type(v).__name__})"
+            )
+            continue
+        out[str(k)] = v
+    return out
+
+
+_STEP_LIM_OVERRIDES: Dict[str, int] = _load_step_lim_overrides(_STEP_LIMITS_PATH)
+_MISSING_TASK_NAME_WARNED: bool = False
+# RoboTwin resets ``TASK_ENV.step_lim`` from its own upstream YAML at the start
+# of every episode, so a naive ``prev != override`` check would re-log on every
+# episode. Track the ``(task_name, override)`` pairs we have already announced
+# and stay silent for the rest of the process.
+_LOGGED_OVERRIDES: set = set()
+
+
+def _apply_step_lim_override(task_env) -> None:
+    # First step of each episode: apply per-task step_lim override (if any).
+    # The RoboTwin eval loop re-checks ``task_env.step_lim`` on every iteration,
+    # so mutating it here takes effect from the next iteration onward.
+    if not _STEP_LIM_OVERRIDES or getattr(task_env, "take_action_cnt", -1) != 0:
+        return
+    task_name = getattr(task_env, "task_name", None)
+    if not task_name:
+        global _MISSING_TASK_NAME_WARNED
+        if not _MISSING_TASK_NAME_WARNED:
+            _MISSING_TASK_NAME_WARNED = True
+            print(
+                "[OpenWAMClient] step_lim overrides loaded but TASK_ENV.task_name "
+                f"is missing/empty ({task_name!r}); overrides will not be applied."
+            )
+        return
+    override = _STEP_LIM_OVERRIDES.get(task_name)
+    if override is None or getattr(task_env, "step_lim", None) == override:
+        return
+    prev = getattr(task_env, "step_lim", None)
+    task_env.step_lim = override
+    key = (task_name, override)
+    if key not in _LOGGED_OVERRIDES:
+        _LOGGED_OVERRIDES.add(key)
+        print(f"[OpenWAMClient] step_lim override: {task_name} {prev} -> {override}")
 
 
 class ModelClient:
@@ -119,23 +181,6 @@ class ModelClient:
         self._episode = -1  # incremented to 0 on the first reset_model() call
         self._step = 0
 
-        # Step-log bookkeeping — only writes when OPENWAM_STEP_LOG_PATH is set.
-        # take_action_cnt gets reset to 0 by TASK_ENV.setup_demo() for the NEXT
-        # episode before reset_model() fires, so we snapshot the counter + flag
-        # inside eval() and consume the snapshot on the next episode boundary.
-        self._step_log_enabled = bool(_STEP_LOG_PATH)
-        self._last_step_count: Optional[int] = None
-        self._last_eval_success: Optional[bool] = None
-        self._last_step_lim: Optional[int] = None
-        self._last_logged_episode: int = -1
-        if self._step_log_enabled:
-            log_dir = os.path.dirname(_STEP_LOG_PATH)
-            if log_dir:
-                os.makedirs(log_dir, exist_ok=True)
-            # atexit captures the final episode since reset_model() is not
-            # called after the last rollout in eval_policy.py's outer loop.
-            atexit.register(self._flush_last_episode)
-
         self._server = f"http://{host}:{http_port}"
 
         # Warn about legacy YAML fields once so users know they're no-ops now.
@@ -178,8 +223,6 @@ class ModelClient:
         mid-rollout, in which case ``task_description`` is non-empty.
         """
         if task_description == "":
-            # Log the previous episode's stats before bumping the counter.
-            self._write_step_log_record()
             # Episode boundary — create a fresh debug dir.
             self._episode += 1
             self._step = 0
@@ -191,51 +234,6 @@ class ModelClient:
         result = client.reset(self._server, timeout=30)
         if result.get("status") != "ok":
             raise RuntimeError(f"[OpenWAMClient] Server reset failed: {result}")
-
-    def record_env_state(self, TASK_ENV) -> None:
-        """Snapshot per-step info from TASK_ENV for the step log.
-
-        Called by ``eval()`` on every step. We cache the counter and success
-        flag here because TASK_ENV.setup_demo() zeroes ``take_action_cnt`` for
-        the next episode before reset_model() fires.
-        """
-        if not self._step_log_enabled:
-            return
-        try:
-            self._last_step_count = int(TASK_ENV.take_action_cnt)
-            self._last_eval_success = bool(getattr(TASK_ENV, "eval_success", False))
-            self._last_step_lim = int(getattr(TASK_ENV, "step_lim", -1))
-        except Exception as exc:
-            print(f"[OpenWAMClient] step-log snapshot failed: {exc}")
-
-    def _write_step_log_record(self) -> None:
-        if not self._step_log_enabled:
-            return
-        if self._last_step_count is None:
-            return  # no episode to log yet
-        if self._last_logged_episode == self._episode:
-            return  # already logged this episode
-        record = {
-            "task": _STEP_LOG_TASK,
-            "mode": _STEP_LOG_MODE,
-            "episode": self._episode,
-            "steps": self._last_step_count,
-            "success": bool(self._last_eval_success),
-            "step_lim": self._last_step_lim,
-        }
-        try:
-            with open(_STEP_LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
-        except Exception as exc:
-            print(f"[OpenWAMClient] step-log write failed: {exc}")
-            return
-        self._last_logged_episode = self._episode
-        self._last_step_count = None
-        self._last_eval_success = None
-        self._last_step_lim = None
-
-    def _flush_last_episode(self) -> None:
-        self._write_step_log_record()
 
     def _save_debug_step(
         self,
@@ -358,6 +356,8 @@ def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
     to the OpenWAM client API's fixed fields (head / left_wrist / right_wrist).
     ``front_camera`` is ignored — it's not part of the server contract.
     """
+    _apply_step_lim_override(TASK_ENV)
+
     instruction = TASK_ENV.get_instruction()
     obs = observation["observation"]
 
@@ -378,8 +378,3 @@ def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
         action = action_conversion.eef20d_to_ee16d(action)
 
     TASK_ENV.take_action(action, action_type=model._action_type)
-
-    # Snapshot step counter + success flag AFTER take_action so the step-log
-    # records each episode's final count (RoboTwin breaks out of the step loop
-    # on eval_success, which is set inside take_action).
-    model.record_env_state(TASK_ENV)

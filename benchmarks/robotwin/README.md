@@ -4,13 +4,13 @@ These scripts assume the OpenWAM policy server is **already running**. They only
 
 ## README TODOs
 
-- [ ] Update per-task `limit_steps` based on observed episode lengths.
+- [x] Update per-task `limit_steps` based on observed episode lengths.
 - [ ] Confirm that `state` is correctly forwarded to the server: check whether [`policy_config.yml`](policy_config.yml)'s `send_state` flag still works, and decide whether to keep the switch or always send `state`.
 - [ ] Flesh out the debug-mode docs: spell out what gets saved, where, and under what names, so the user experience stays friendly.
 - [ ] Investigate the timestamp-folder mismatch in RoboTwin's built-in `eval_results/` directory and see whether it can be fixed.
 - [ ] Document `multi_eval.sh`'s `-n <name>` flag (what output path it produces); if `-n` is not strictly required, consider removing it.
 - [ ] Clean up [`policy_config.yml`](policy_config.yml) — drop parameters that no longer have an effect.
-- [ ] Update [`README.md`](README.md): remove the per-task step-analysis section (and the scripts it references). Keep the resolved `limit_steps` numbers inline so users don't have to rerun the analysis.
+- [x] Update [`README.md`](README.md): remove the per-task step-analysis section (and the scripts it references). Keep the resolved `limit_steps` numbers inline so users don't have to rerun the analysis.
 
 ## Files
 
@@ -20,9 +20,25 @@ These scripts assume the OpenWAM policy server is **already running**. They only
 | `policy_config.yml` | Config template; `host` / `http_port` are injected at runtime. |
 | `single_eval.sh` | Run evaluation on a single task. |
 | `multi_eval.sh` | Run evaluation on multiple tasks sequentially. |
-| `eval_policy_steps.py` | Runtime patch for `script/eval_policy.py`: overrides the hard-coded `test_num=100` via `ROBOTWIN_TEST_NUM`. |
-| `step_analysis.sh` | Per-task step-count analysis orchestrator (50 tasks × clean/random × N episodes). |
-| `analyze_steps.py` | Reads `steps.jsonl` and emits summary tables grouped by task / mode / success-failure. |
+| `step_limits.yml` | Per-task `step_lim` overrides (see below). |
+
+## Per-task step_lim overrides
+
+RoboTwin ships upstream per-task step limits in `task_config/_eval_step_limit.yml`. To tweak them without patching the RoboTwin source tree, edit [`step_limits.yml`](step_limits.yml) in this directory:
+
+```yaml
+# step_limits.yml (values here match what is checked in)
+adjust_bottle: 160
+open_laptop: 288
+put_bottles_dustbin: 640
+```
+
+Semantics:
+
+- Any task listed here overrides RoboTwin's upstream value for that task.
+- Tasks not listed keep RoboTwin's original value (which itself falls back to `1000` when the upstream file also lacks the task).
+- The file is loaded once at adapter import and applied at the first step of each episode via `TASK_ENV.step_lim = <override>`. Edits to the YAML only take effect in a fresh eval process — restart the evaluation after tweaking values.
+- Leaving the file empty (comments only) reproduces stock RoboTwin behavior.
 
 ## Environment Setup
 
@@ -110,73 +126,6 @@ bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir \
 
 # Read the task list from a file (one task per line, `#` comments supported)
 bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir tasks.txt
-```
-
-### Per-task step-count analysis
-
-`step_analysis.sh` runs N episodes (default: 5) on each of the 50 tasks under both `demo_clean` and `demo_randomized`, writes per-episode `{steps, success}` records to JSONL, and then hands the JSONL to `analyze_steps.py` for summary tables.
-
-```bash
-# Server already running on 127.0.0.1:8848
-bash step_analysis.sh
-
-# Common options
-bash step_analysis.sh \
-    --host 192.0.2.1 --http-port 8768 \
-    -g 0 -s 0 \
-    --test-num 5 \
-    --modes demo_clean,demo_randomized \
-    -n my_run \
-    -o ./my_output_dir
-
-# Run a subset of tasks
-bash step_analysis.sh adjust_bottle open_laptop
-
-# Read the task list from a file (one task per line, `#` comments supported)
-bash step_analysis.sh tasks.txt
-
-# Only emit the JSONL, skip the downstream analysis
-bash step_analysis.sh --skip-analyze
-```
-
-**Main options:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--host` | `127.0.0.1` | OpenWAM server address. |
-| `--http-port` | `8848` | OpenWAM HTTP port. |
-| `-g`, `--gpu` | `0` | CUDA device for the RoboTwin simulator. |
-| `-s`, `--seed` | `0` | Evaluation random seed. |
-| `-n`, `--name` | `step_analysis` | Run label (used for output directory naming and as the `ckpt_setting` tag). |
-| `-o`, `--output-dir` | `./step_analysis_results/<name>_<ts>` | Output root directory. |
-| `--test-num` | `5` | Episodes per (task, mode) pair (exported as `ROBOTWIN_TEST_NUM`). |
-| `--modes` | `demo_clean,demo_randomized` | Comma-separated list of modes. |
-| `--skip-analyze` | — | Don't auto-invoke `analyze_steps.py` at the end. |
-
-**Output layout:**
-
-```
-<output_dir>/
-├── steps.jsonl         # One episode per line: {task, mode, episode, steps, success, step_lim}
-├── summary.csv         # One row per (task, mode), broken down into success / failure / all with count/mean/median/min/max.
-├── summary.md          # Markdown rendering of summary.csv.
-├── policy_config.yml   # Effective config used for this run (debug auto-disabled to avoid ~150k frames hitting disk).
-└── logs/<mode>_<task>.log
-```
-
-**Implementation notes:**
-
-- `eval_policy_steps.py` monkey-patches RoboTwin's `script/eval_policy.py` so the hard-coded `test_num = 100` becomes `ROBOTWIN_TEST_NUM` (default `5`); the third-party repo itself is not modified.
-- The extra step-log hook only activates when `OPENWAM_STEP_LOG_PATH` is set — normal evaluation runs are unaffected.
-- Step counts come from `TASK_ENV.take_action_cnt`; success / failure comes from `TASK_ENV.eval_success`.
-- The final episode is flushed via `atexit` (RoboTwin doesn't call `reset_model` after the last rollout, so the in-memory buffer would otherwise be dropped).
-
-**Run analysis standalone:**
-
-```bash
-python3 analyze_steps.py <output_dir>/steps.jsonl \
-    --output summary.csv \
-    --markdown summary.md
 ```
 
 ## FAQ
