@@ -21,3 +21,12 @@ action_backbone:
   dim: 768
   ffn_dim: 3072
   num_heads: 12
+
+  # Proprioceptive state conditioning (TRAINING-ONLY in this PR — the
+  # deployment path has not been wired up yet, see docs/proprioception.md).
+  # When enabled, the start-of-window robot state is injected into the
+  # action token stream. See assets/modal_merging.png.
+  use_proprioception: false        # master switch; false = baseline behavior
+  proprio_fusion: channel_concat   # "sequence_concat" | "channel_concat" | "add"
+  num_state_tokens: 4              # only used when proprio_fusion == sequence_concat
+  state_dim: null                  # null → defaults to action_dim

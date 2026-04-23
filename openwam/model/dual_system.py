@@ -56,11 +56,16 @@ class DualSystemArchitecture(BaseWAMArchitecture):
                 video_dim=int(cfg.get("video_dim", 1536)),
                 bridge_layers=bl,
                 bridge_type=cfg.get("bridge_type", "cross_attn_detach"),
+                use_proprioception=bool(cfg.get("use_proprioception", False)),
+                state_dim=int(cfg.get("state_dim") or 0),  # null/0/missing → auto = action_dim
+                proprio_fusion=cfg.get("proprio_fusion", "channel_concat"),
+                num_state_tokens=int(cfg.get("num_state_tokens", 4)),
             )
         else:
             self.action_dit = None
 
     def prepare_action_tokens(self, noisy_actions: Tensor, timestep: Tensor, **kwargs) -> ActionState:
+        proprio_state = kwargs.get("proprio_state", None)
         state = ActionState(
             action_latents=noisy_actions,
             timestep=timestep,
@@ -71,11 +76,16 @@ class DualSystemArchitecture(BaseWAMArchitecture):
                 timestep,
                 use_gradient_checkpointing=kwargs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=kwargs.get("use_gradient_checkpointing_offload", False),
+                proprio_state=proprio_state,
             )
             state.extra["dit_state"] = dit_state
         else:
             state.extra["bridge_features"] = []
             state.extra["bridge_block_counter"] = 0
+            # Stash for extract_action_prediction (cross_attn path runs the
+            # ActionDiT forward only after the video DiT loop finishes).
+            if proprio_state is not None:
+                state.extra["proprio_state"] = proprio_state
         return state
 
     def on_dit_block(
@@ -129,6 +139,7 @@ class DualSystemArchitecture(BaseWAMArchitecture):
                 action_tokens=action_state.action_latents,
                 video_features=bridge_features,
                 timestep=action_state.timestep,
+                proprio_state=action_state.extra.get("proprio_state", None),
             )
 
     @property
@@ -142,6 +153,11 @@ class DualSystemArchitecture(BaseWAMArchitecture):
     @property
     def is_interleaved(self) -> bool:
         return self.action_dit is not None and self.action_dit.bridge_type == "joint_self_attn"
+
+    @property
+    def uses_proprioception(self) -> bool:
+        """Whether the architecture expects a ``proprio_state`` input."""
+        return self.action_dit is not None and self.action_dit.proprio_encoder is not None
 
     @property
     def action_mean(self) -> Tensor:

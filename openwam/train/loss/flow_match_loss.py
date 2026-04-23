@@ -203,6 +203,7 @@ class FlowMatchVideoActionLoss:
                 action_timesteps,
                 use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
+                proprio_state=inputs.get("proprio_state", None),
             )
             sorted_layers = sorted(architecture.bridge_layers)
             for layer_idx, layer_id in enumerate(sorted_layers):
@@ -326,6 +327,7 @@ class FlowMatchVideoActionLoss:
                 action_timesteps,
                 use_gradient_checkpointing=inputs.get("use_gradient_checkpointing", False),
                 use_gradient_checkpointing_offload=inputs.get("use_gradient_checkpointing_offload", False),
+                proprio_state=inputs.get("proprio_state", None),
             )
 
         return {

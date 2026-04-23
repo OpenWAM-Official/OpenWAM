@@ -67,7 +67,12 @@ class ActionDiTState:
     x_video_proj: Optional[torch.Tensor] = None  # running projected video features
     action_noise_pred: Optional[torch.Tensor] = None  # filled after finalize
     bridge_block_counter: int = 0
+    # Number of reference-frame prefix tokens in the *video* sequence. Read by
+    # wan_video.py to slice video hidden states before bridge projection.
     skip_prefix_tokens: int = 0
+    # Number of proprio tokens prepended to the *action* sequence
+    # (sequence_concat mode). Independent from skip_prefix_tokens — do not mix.
+    action_prefix_tokens: int = 0
     use_gradient_checkpointing: bool = False
     use_gradient_checkpointing_offload: bool = False
 
@@ -383,6 +388,14 @@ class ActionDiT(nn.Module):
         bridge_type: Bridge attention type. One of 'cross_attn',
             'cross_attn_detach', or 'joint_self_attn'.
         eps: Epsilon for layer norm
+        use_proprioception: If True, build a ProprioceptiveEncoder that injects
+            robot state into the action token stream after positional encoding.
+        state_dim: Dimension of the proprioceptive state vector. Defaults to
+            ``action_dim`` when 0 or None.
+        proprio_fusion: ``"sequence_concat"`` (prepend state tokens) or
+            ``"channel_concat"`` (concat along channel and project back).
+        num_state_tokens: Number of prepended state tokens when
+            ``proprio_fusion == "sequence_concat"``.
     """
 
     def __init__(
@@ -398,6 +411,10 @@ class ActionDiT(nn.Module):
         bridge_layers: Tuple[int, ...] = (3, 7, 11, 15, 19, 23, 26, 29),
         bridge_type: str = "cross_attn",
         eps: float = 1e-6,
+        use_proprioception: bool = False,
+        state_dim: int = 0,
+        proprio_fusion: str = "channel_concat",
+        num_state_tokens: int = 4,
     ):
         super().__init__()
         assert len(bridge_layers) == num_layers, (
@@ -469,12 +486,66 @@ class ActionDiT(nn.Module):
         self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
         self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
 
+        # Optional proprioceptive state conditioning
+        self.use_proprioception = use_proprioception
+        self.proprio_fusion = proprio_fusion if use_proprioception else None
+        self.proprio_encoder: Optional[nn.Module] = None
+        if use_proprioception:
+            from openwam.model.action_model.proprioceptive import ProprioceptiveEncoder
+
+            fusion_to_mode = {
+                "sequence_concat": "sequence_concat",
+                "channel_concat": "channel_concat",
+                "add": "add",
+            }
+            if proprio_fusion not in fusion_to_mode:
+                raise ValueError(
+                    f"proprio_fusion must be one of {list(fusion_to_mode)}, got '{proprio_fusion}'"
+                )
+            effective_state_dim = state_dim if state_dim and state_dim > 0 else action_dim
+            self.state_dim = effective_state_dim
+            self.proprio_encoder = ProprioceptiveEncoder(
+                state_dim=effective_state_dim,
+                hidden_dim=dim,
+                mode=fusion_to_mode[proprio_fusion],
+                num_state_tokens=num_state_tokens,
+            )
+        else:
+            self.state_dim = 0
+
+    @property
+    def num_proprio_tokens(self) -> int:
+        """Extra tokens prepended to the action sequence by proprio injection."""
+        if self.proprio_encoder is None:
+            return 0
+        return self.proprio_encoder.extra_tokens
+
+    def _inject_proprio(
+        self, x: torch.Tensor, proprio_state: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        """Run the proprio encoder if enabled; no-op otherwise.
+
+        Training always supplies ``proprio_state`` when the encoder is built,
+        so a missing tensor signals a wiring bug (e.g. a future deployment
+        path forgetting to forward the kwarg). Asserting here avoids a silent
+        fallback to baseline behavior.
+        """
+        if self.proprio_encoder is None:
+            return x
+        assert proprio_state is not None, (
+            "ActionDiT was built with use_proprioception=True but forward "
+            "received proprio_state=None. The proprio path would be silently "
+            "skipped — pass the state explicitly."
+        )
+        return self.proprio_encoder(x, proprio_state)
+
     def prepare_action_state(
         self,
         action_tokens: torch.Tensor,
         timestep: torch.Tensor,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
+        proprio_state: Optional[torch.Tensor] = None,
     ) -> ActionDiTState:
         """Embed actions, compute timestep modulation, return initial state.
 
@@ -484,15 +555,18 @@ class ActionDiT(nn.Module):
         Args:
             action_tokens: (B, T_action, action_dim) — noisy action sequence
             timestep: (B,) or (1,) — action diffusion timestep
+            proprio_state: (B, state_dim) — optional proprioceptive state;
+                ignored unless the module was built with ``use_proprioception``.
 
         Returns:
             ActionDiTState ready to be threaded through model_fn_wan_video
         """
         B, T, _ = action_tokens.shape
 
-        # Embed actions
+        # Embed actions, add positional encoding, inject proprio state
         x = self.action_embedding(action_tokens)
         x = self.pos_encoding(x)
+        x = self._inject_proprio(x, proprio_state)
 
         # Timestep conditioning
         timestep = timestep.flatten()
@@ -506,6 +580,7 @@ class ActionDiT(nn.Module):
             t_embed=t,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            action_prefix_tokens=self.num_proprio_tokens,
         )
 
     def finalize_action_output(self, state: ActionDiTState) -> torch.Tensor:
@@ -517,7 +592,12 @@ class ActionDiT(nn.Module):
         Returns:
             (B, T_action, action_dim) — predicted action noise
         """
-        return self.action_output_head(state.x_action, state.t_embed)
+        x = state.x_action
+        # Strip prepended proprio tokens (sequence_concat mode) before the head,
+        # so the predicted noise is aligned with the original action sequence.
+        if state.action_prefix_tokens:
+            x = x[:, state.action_prefix_tokens :, :]
+        return self.action_output_head(x, state.t_embed)
 
     def forward(
         self,
@@ -526,6 +606,7 @@ class ActionDiT(nn.Module):
         timestep: torch.Tensor,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
+        proprio_state: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass for action noise prediction.
@@ -535,6 +616,8 @@ class ActionDiT(nn.Module):
             video_features: List of num_layers tensors, each (B, T_video, video_dim),
                 one per ActionDiT block from the corresponding bridge layer
             timestep: (B,) or (1,) - action diffusion timestep
+            proprio_state: (B, state_dim) - optional proprioceptive state;
+                ignored unless the module was built with ``use_proprioception``.
 
         Returns:
             (B, T_action, action_dim) - predicted action noise
@@ -544,11 +627,10 @@ class ActionDiT(nn.Module):
             f"Action sequence length {T} exceeds max_action_len {self.pos_encoding.embedding.shape[1]}"
         )
 
-        # Embed actions
+        # Embed actions, add positional encoding, inject proprio state
         x = self.action_embedding(action_tokens)
-
-        # Add positional encoding
         x = self.pos_encoding(x)
+        x = self._inject_proprio(x, proprio_state)
 
         # Ensure timestep is 1D
         timestep = timestep.flatten()
@@ -618,6 +700,10 @@ class ActionDiT(nn.Module):
                 else:
                     x = block(x, x_video_i, t_mod)
 
+        # Strip prepended proprio tokens before the output head so the
+        # returned noise prediction is aligned with the original action seq.
+        if self.num_proprio_tokens:
+            x = x[:, self.num_proprio_tokens :, :]
         return self.action_output_head(x, t)
 
     @staticmethod

@@ -296,6 +296,13 @@ class OpenWAMTrainer(BaseTrainer):
             if action_data.dim() == 2:
                 action_data = action_data.unsqueeze(0)
 
+        # Proprioceptive state: use the start-of-window action as the robot's
+        # current state. Cheap, avoids dataset schema changes, and aligned with
+        # the action stream's normalization.
+        proprio_state = None
+        if action_data is not None and self.architecture.uses_proprioception:
+            proprio_state = action_data[:, 0, :].contiguous()
+
         # Prepare pipeline inputs
         inputs_shared = {
             "input_video": data["video"],
@@ -357,6 +364,9 @@ class OpenWAMTrainer(BaseTrainer):
                 .unsqueeze(0)
                 .to(device=self.pipe.device)
             )
+
+        if proprio_state is not None:
+            inputs_shared["proprio_state"] = proprio_state
 
         # Compute loss
         result = self.loss_fn(
@@ -551,6 +561,10 @@ class OpenWAMTrainer(BaseTrainer):
         }
 
         action_data = torch.cat(all_actions, dim=0) if all_actions[0] is not None else None
+
+        # Proprioceptive state (start-of-window action) — batch-stacked.
+        if action_data is not None and self.architecture.uses_proprioception:
+            batched_shared["proprio_state"] = action_data[:, 0, :].contiguous()
 
         # Padding masks: action at full resolution, video downsampled to latent.
         if all_action_masks[0] is not None:

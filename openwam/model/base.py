@@ -140,6 +140,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
         return False
 
     @property
+    def uses_proprioception(self) -> bool:
+        """Whether the architecture consumes a ``proprio_state`` input.
+
+        Subclasses that support proprioceptive conditioning should override.
+        """
+        return False
+
+    @property
     def action_mean(self) -> Tensor:
         """Per-dimension action mean for denormalization."""
         return torch.zeros(self.action_dim)
