@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import torch
+import torch.nn as nn
 from torch import Tensor
 
 from openwam.model.action_model.components import (
@@ -40,10 +41,21 @@ from openwam.model.registry import register_architecture
 
 @dataclass
 class SharedBackboneState:
-    """State passed to model_fn_wan_video for SharedBackbone token concat/extract."""
+    """State passed to model_fn_wan_video for SharedBackbone token concat/extract.
+
+    Fields:
+        action_tokens: (B, T_action, video_dim) projected action tokens.
+        n_action_tokens: Number of action tokens appended to the video sequence.
+        timestep: (B,) raw action diffusion timestep. Required when video DiT
+            uses per-token t_mod (Wan2.2-TI2V-5B fuse_vae_embedding_in_latents
+            path); used by model_fn_wan_video to build action-position t_mod
+            rows via the video DiT's time_projection.
+        action_noise_pred: Filled after finalization.
+    """
 
     action_tokens: torch.Tensor  # (B, T_action, video_dim) projected
     n_action_tokens: int = 0
+    timestep: Optional[torch.Tensor] = None
     action_noise_pred: Optional[torch.Tensor] = None  # filled after finalization
     # Back-reference to architecture for finalize
     _architecture: Optional["SharedBackboneArchitecture"] = field(default=None, repr=False)
@@ -98,6 +110,15 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         # Output head: video_dim -> action_dim
         self.action_output_head = ActionOutputHead(self._video_dim, self._action_dim)
 
+        # Per-modality bias on the video DiT's AdaLN modulation signal (6 params
+        # per dim: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp).
+        # Zero-initialized so action tokens start by using video's time_projection
+        # output verbatim at the action timestep; training pulls the modalities
+        # apart as needed. Excluded from weight decay via NO_WD_PARAM_SUFFIXES
+        # in openwam/train/utils/optimizer_groups.py (AdamW wd would otherwise
+        # pull it back to zero).
+        self.modality_tmod_bias = nn.Parameter(torch.zeros(1, 1, 6, self._video_dim))
+
         # Action normalization stats (persistent buffers)
         # Use _norm_ prefix to avoid conflict with base class properties
         self.register_buffer("_norm_action_mean", torch.zeros(self._action_dim), persistent=True)
@@ -141,6 +162,7 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         sb_state = SharedBackboneState(
             action_tokens=x,
             n_action_tokens=T,
+            timestep=timestep,
             _architecture=self,
             _action_state=action_state,
         )

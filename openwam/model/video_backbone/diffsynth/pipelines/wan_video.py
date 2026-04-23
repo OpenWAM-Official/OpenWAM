@@ -1768,6 +1768,50 @@ def model_fn_wan_video(
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
 
+    # When t_mod is per-token (shape (B, L, 6, dim) — Wan2.2-TI2V-5B's
+    # fuse_vae_embedding_in_latents path), appending action tokens to `x`
+    # requires appending matching modulation rows so DiTBlock's `modulate`
+    # broadcast works. Reuse video DiT's time_embedding/time_projection on
+    # the action's own diffusion timestep, then add a per-modality learnable
+    # bias from the architecture so video vs action get distinct signals.
+    _t_mod_per_token = dit.seperated_timestep and fuse_vae_embedding_in_latents
+
+    # SP + per-token t_mod + action tokens: t_mod is chunked to local length
+    # before the action concat below, while x is concatenated to full length
+    # then chunked at the SP site further down. Local lengths don't match.
+    # Full support requires moving action t_mod concat to the SP-chunk site;
+    # tracked as a follow-up. For now, fail fast with a clear error.
+    if (
+        _t_mod_per_token
+        and use_unified_sequence_parallel
+        and (moe_expert_state is not None or shared_backbone_state is not None)
+    ):
+        raise NotImplementedError(
+            "Per-token t_mod (Wan2.2-TI2V-5B fuse_vae_embedding_in_latents) + "
+            "sequence parallel + action tokens (MoE/SharedBackbone) is not yet "
+            "supported: disable SP, use a non-5B backbone, or use DualSystem."
+        )
+
+    def _build_action_t_mod(action_timestep, modality_bias, n_action):
+        assert action_timestep is not None, (
+            "State.timestep must be set before model_fn_wan_video when per-token "
+            "t_mod is active (Wan2.2-TI2V-5B fuse_vae_embedding_in_latents path)."
+        )
+        # Normally video_dim is derived from dit.dim by the trainer / model_loader
+        # (params['video_dim'] = int(pipe.dit.dim)); this assert catches direct
+        # instantiations where the architecture was built against a different
+        # backbone dim.
+        assert modality_bias.shape[-1] == dit.dim, (
+            f"modality_tmod_bias last-dim ({modality_bias.shape[-1]}) must match "
+            f"video DiT dim ({dit.dim}). Architecture's video_dim was not "
+            "synchronized with the loaded video backbone."
+        )
+        action_t_emb = sinusoidal_embedding_1d(dit.freq_dim, action_timestep.flatten())
+        action_t = dit.time_embedding(action_t_emb.to(latents.dtype))  # (B, dim)
+        action_t_mod = dit.time_projection(action_t).unflatten(1, (6, dit.dim))  # (B, 6, dim)
+        action_t_mod = action_t_mod.unsqueeze(1).expand(-1, n_action, -1, -1)
+        return action_t_mod + modality_bias.to(dtype=action_t_mod.dtype, device=action_t_mod.device)
+
     # MoE Action Expert: concatenate action tokens to video sequence
     _moe_n_action = 0
     if moe_expert_state is not None:
@@ -1782,6 +1826,13 @@ def model_fn_wan_video(
             torch.zeros(_moe_n_action, 1, freqs.shape[-1], device=freqs.device),
         )
         freqs = torch.cat([freqs, _identity_freq], dim=0)
+        if _t_mod_per_token:
+            a_tmod = _build_action_t_mod(
+                moe_expert_state.timestep,
+                moe_expert_state.moe_dit.modality_tmod_bias,
+                _moe_n_action,
+            )
+            t_mod = torch.cat([t_mod, a_tmod.to(t_mod.dtype)], dim=1)
 
     # Shared Backbone: concatenate action tokens (same as MoE but no expert FFN)
     _sb_n_action = 0
@@ -1793,6 +1844,13 @@ def model_fn_wan_video(
             torch.zeros(_sb_n_action, 1, freqs.shape[-1], device=freqs.device),
         )
         freqs = torch.cat([freqs, _identity_freq], dim=0)
+        if _t_mod_per_token:
+            a_tmod = _build_action_t_mod(
+                shared_backbone_state.timestep,
+                shared_backbone_state._architecture.modality_tmod_bias,
+                _sb_n_action,
+            )
+            t_mod = torch.cat([t_mod, a_tmod.to(t_mod.dtype)], dim=1)
 
     # blocks
     if use_unified_sequence_parallel:

@@ -56,6 +56,10 @@ class MoEExpertState:
         t_mod: (B, 3, video_dim) timestep modulation for expert FFN.
         t_embed: (B, video_dim) timestep embedding for output head.
         n_action_tokens: Number of action tokens appended to sequence.
+        timestep: (B,) raw action diffusion timestep. Required when video DiT
+            uses per-token t_mod (Wan2.2-TI2V-5B fuse_vae_embedding_in_latents
+            path); used to build action-position t_mod rows via the video
+            DiT's time_projection.
         expert_block_counter: Tracks which expert block to apply next.
         skip_prefix_tokens: Number of reference-frame prefix tokens in
             the video sequence that action tokens should NOT attend to
@@ -68,6 +72,9 @@ class MoEExpertState:
     t_mod: torch.Tensor
     t_embed: torch.Tensor
     n_action_tokens: int = 0
+    # Raw action diffusion timestep (B,) — used by model_fn_wan_video to build
+    # per-token t_mod for action positions via the video DiT's time_projection.
+    timestep: Optional[torch.Tensor] = None
     expert_block_counter: int = 0
     skip_prefix_tokens: int = 0
     action_noise_pred: Optional[torch.Tensor] = None
@@ -196,6 +203,11 @@ class MoEExpertDiT(nn.Module):
         # Output head: video_dim -> action_dim
         self.action_output_head = ActionOutputHead(video_dim, action_dim, eps)
 
+        # Per-modality bias on the video DiT's AdaLN modulation signal for action
+        # tokens appended to the video sequence. See SharedBackboneArchitecture's
+        # modality_tmod_bias for full rationale (zero-init, no-weight-decay).
+        self.modality_tmod_bias = nn.Parameter(torch.zeros(1, 1, 6, video_dim))
+
         # Action normalization stats (saved as persistent buffers)
         self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
         self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
@@ -236,6 +248,7 @@ class MoEExpertDiT(nn.Module):
             t_mod=t_mod,
             t_embed=t,
             n_action_tokens=T,
+            timestep=timestep,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
