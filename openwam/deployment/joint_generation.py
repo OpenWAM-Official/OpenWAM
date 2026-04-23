@@ -199,23 +199,36 @@ def prepare_pipeline_inputs(
                 unit, pipe, inputs_shared, inputs_posi, inputs_nega
             )
     else:
-        # Snapshot between text units and the first non-text unit so the
-        # cache only stores text embeddings, not per-episode observation
-        # tensors that subsequent units would write into posi/nega.
+        # Snapshot AFTER the last text unit runs, so the cache stores the
+        # text embedding ("context") but not per-episode observation tensors
+        # written by later units (ImageEmbedder, VACE, ...).
+        #
+        # Assumption on pipe.units[:last_text_idx+1]: every unit in this prefix
+        # is either (a) a text unit itself, or (b) writes only to inputs_shared
+        # (e.g., ShapeChecker, NoiseInitializer). If a future unit is inserted
+        # before last_text_idx and writes inputs_posi / inputs_nega, the
+        # snapshot will over-capture per-episode tensors into the cache and
+        # the HIT path will replay stale data. Mitigations when that happens:
+        # either move the new unit after last_text_idx, mark it as a text unit
+        # via is_text_unit=True / _TEXT_UNIT_CLASS_NAMES, or split the cache
+        # so only the text-embedding subkeys are snapshotted here.
+        last_text_idx = max(
+            (i for i, u in enumerate(pipe.units) if _is_text_unit(u)),
+            default=-1,
+        )
         snapshotted = False
-        for unit in pipe.units:
-            if not _is_text_unit(unit) and not snapshotted:
-                if prompt_embed_cache is not None:
-                    prompt_embed_cache[prompt_key] = (inputs_posi.copy(), inputs_nega.copy())
-                    logger.info(
-                        "[text_cache] stored embedding (pipeline_prep=%.3fs) for prompt: %r",
-                        time.time() - _t_text,
-                        prompt[:60],
-                    )
-                snapshotted = True
+        for i, unit in enumerate(pipe.units):
             inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(
                 unit, pipe, inputs_shared, inputs_posi, inputs_nega
             )
+            if i == last_text_idx and prompt_embed_cache is not None:
+                prompt_embed_cache[prompt_key] = (inputs_posi.copy(), inputs_nega.copy())
+                logger.info(
+                    "[text_cache] stored embedding (pipeline_prep=%.3fs) for prompt: %r",
+                    time.time() - _t_text,
+                    prompt[:60],
+                )
+                snapshotted = True
         if not snapshotted and prompt_embed_cache is not None:
             prompt_embed_cache[prompt_key] = (inputs_posi.copy(), inputs_nega.copy())
             logger.info(
