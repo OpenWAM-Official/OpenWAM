@@ -102,3 +102,71 @@ def test_flow_match_loss_single_sample():
 
     loss = loss_fn._compute_action_loss(noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=1)
     assert loss.shape == ()
+
+
+def test_flow_match_loss_per_token_timestep_flag_default_false():
+    """Default constructor keeps per-token sampling disabled."""
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
+
+    loss_fn = FlowMatchVideoActionLoss()
+    assert loss_fn.action_timestep_per_token is False
+
+    loss_fn = FlowMatchVideoActionLoss(action_timestep_per_token=True)
+    assert loss_fn.action_timestep_per_token is True
+
+
+def test_flow_match_loss_action_loss_per_token_timestep():
+    """_compute_action_loss accepts (B, T) timestep_ids (per-token mode)."""
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
+
+    loss_fn = FlowMatchVideoActionLoss()
+
+    B, T, action_dim = 2, 49, 14
+    noise_pred = torch.randn(B, T, action_dim)
+    target = torch.randn(B, T, action_dim)
+    timestep_ids = torch.randint(0, 1000, (B, T))
+
+    class MockScheduler:
+        linear_timesteps_weights = torch.ones(1000)
+
+    class MockPipe:
+        torch_dtype = torch.float32
+        device = "cpu"
+
+    loss = loss_fn._compute_action_loss(noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=B)
+    assert loss.shape == ()
+    assert loss.item() > 0
+
+
+def test_flow_match_loss_action_loss_per_token_timestep_with_pad():
+    """Per-token timestep + action_is_pad should respect the mask."""
+    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
+
+    loss_fn = FlowMatchVideoActionLoss()
+
+    B, T, action_dim = 2, 10, 4
+    noise_pred = torch.randn(B, T, action_dim)
+    target = torch.randn(B, T, action_dim)
+    timestep_ids = torch.randint(0, 1000, (B, T))
+    action_is_pad = torch.zeros(B, T, dtype=torch.bool)
+    action_is_pad[0, 7:] = True
+    action_is_pad[1, 4:] = True
+
+    class MockScheduler:
+        linear_timesteps_weights = torch.ones(1000)
+
+    class MockPipe:
+        torch_dtype = torch.float32
+        device = "cpu"
+
+    loss = loss_fn._compute_action_loss(
+        noise_pred,
+        target,
+        timestep_ids,
+        MockScheduler(),
+        MockPipe(),
+        B=B,
+        action_is_pad=action_is_pad,
+    )
+    assert loss.shape == ()
+    assert loss.item() > 0

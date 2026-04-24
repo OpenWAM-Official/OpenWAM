@@ -192,18 +192,22 @@ def test_shared_backbone_prepare_and_extract():
     assert action_pred.shape == (B, T_action, 7)
 
 
-def test_shared_backbone_output_zero_init():
-    """Verify output head is zero-initialized."""
+def test_shared_backbone_output_head_init():
+    """SharedBackbone output head (ActionOutputMLP) uses small-random init."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
     arch = build_architecture("shared_backbone", cfg)
-    assert torch.all(arch.action_output_head.head.weight == 0)
-    assert torch.all(arch.action_output_head.head.bias == 0)
+    head = arch.action_output_head
+    assert torch.all(head.layer1.bias == 0)
+    assert torch.all(head.layer2.bias == 0)
+    for w in (head.layer1.weight, head.layer2.weight):
+        assert not torch.all(w == 0), "weights should be small-random, not zero"
+        assert w.abs().max() < 0.2, "weights should be small (std ~ 0.02)"
 
 
-def test_moe_expert_ffn_zero_init():
-    """Verify expert FFN and output head are zero-initialized."""
+def test_moe_expert_ffn_and_output_head_init():
+    """MoE: expert FFN output stays zero-init; action output head uses small-random init."""
     from openwam.model.action_model.moe_expert_dit import MoEExpertDiT
 
     dit = MoEExpertDiT(
@@ -213,13 +217,18 @@ def test_moe_expert_ffn_zero_init():
         num_experts=2,
         expert_layers=(0, 1),
     )
-    # Expert FFN output layer should be zero
+    # Expert FFN output layer: zero-init preserved (pretrained video DiT
+    # behavior at init for action tokens).
     for block in dit.expert_blocks:
         assert torch.all(block.ffn[2].weight == 0)
         assert torch.all(block.ffn[2].bias == 0)
-    # Output head should be zero
-    assert torch.all(dit.action_output_head.head.weight == 0)
-    assert torch.all(dit.action_output_head.head.bias == 0)
+    # Action output head (ActionOutputMLP): small-random, not zero.
+    head = dit.action_output_head
+    assert torch.all(head.layer1.bias == 0)
+    assert torch.all(head.layer2.bias == 0)
+    for w in (head.layer1.weight, head.layer2.weight):
+        assert not torch.all(w == 0)
+        assert w.abs().max() < 0.2
 
 
 def test_register_custom_architecture():

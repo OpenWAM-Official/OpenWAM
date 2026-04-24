@@ -42,6 +42,20 @@ class FlowMatchVideoActionLoss:
         lambda_action: Weight for action loss term.
         detach_bridge: If True, detach bridge features to prevent action
             gradients from flowing to the video DiT.
+        action_timestep_per_token: If True, sample an independent diffusion
+            timestep per action token (shape (B, T_action)) instead of one
+            per sample (shape (B,)). Default False keeps the per-sample
+            behavior; the per-token path is plumbed end-to-end but opt-in
+            for future ablations. Has no effect when `decoupled_sampler`
+            supplies the action timesteps.
+
+            TRAINING PATH ONLY. The inference path in
+            `openwam/deployment/joint_generation.py:405, 515` still builds
+            a per-sample `a_timestep = torch.tensor([t_a])` and broadcasts
+            it across all action tokens. Before flipping this flag on for
+            a real per-token ablation (PT2 Round 4), the inference side
+            must be updated in lockstep — otherwise train and inference
+            sample distributions diverge and the ablation reads junk.
     """
 
     def __init__(
@@ -49,10 +63,12 @@ class FlowMatchVideoActionLoss:
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
         detach_bridge: bool = False,
+        action_timestep_per_token: bool = False,
     ):
         self.lambda_video = lambda_video
         self.lambda_action = lambda_action
         self.detach_bridge = detach_bridge
+        self.action_timestep_per_token = action_timestep_per_token
 
     def __call__(
         self,
@@ -293,6 +309,13 @@ class FlowMatchVideoActionLoss:
                 .long()
                 .clamp(0, num_ts_a - 1)
             )
+        elif self.action_timestep_per_token:
+            # Per-token sampling: each action step gets an independent
+            # diffusion timestep. action_data is (B, T, action_dim) or
+            # (T, action_dim) (2D gets unsqueezed below); shape[-2] gives
+            # T in both cases.
+            T_action = action_data.shape[-2]
+            action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B, T_action))
         else:
             action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
 
@@ -312,9 +335,14 @@ class FlowMatchVideoActionLoss:
         if action_repr is not None:
             action_data = action_repr.encode(action_data)
 
-        # Add noise
+        # Add noise. sigma shape depends on timestep sampling mode:
+        #   per-sample: action_sigmas (B,)   -> broadcast as (B, 1, 1)
+        #   per-token:  action_sigmas (B, T) -> broadcast as (B, T, 1)
         action_noise = torch.randn_like(action_data)
-        sigma_bc = action_sigmas.view(B, 1, 1)
+        if action_sigmas.dim() == 1:
+            sigma_bc = action_sigmas.view(B, 1, 1)
+        else:
+            sigma_bc = action_sigmas.unsqueeze(-1)
         noisy_actions = (1 - sigma_bc) * action_data + sigma_bc * action_noise
         action_target = action_noise - action_data
 
@@ -405,15 +433,16 @@ class FlowMatchVideoActionLoss:
         B,
         action_is_pad=None,
     ):
-        """Compute per-sample weighted action MSE loss.
+        """Compute weighted action MSE loss.
 
-        Reduction: mean over action_dim, then masked mean over T,
-        then weighted mean over B with timestep weights.
+        Reduction: mean over action_dim, then masked mean over T, then
+        weighted mean over B with timestep weights. Supports both
+        per-sample ((B,)) and per-token ((B, T)) `timestep_ids`.
 
         Args:
             noise_pred: (B, T, action_dim) predicted noise.
             target: (B, T, action_dim) target noise.
-            timestep_ids: (B,) sampled timestep indices.
+            timestep_ids: (B,) per-sample or (B, T) per-token indices.
             scheduler: Action flow matching scheduler.
             pipe: Pipeline (for device).
             B: Batch size.
@@ -428,6 +457,8 @@ class FlowMatchVideoActionLoss:
         per_element = F.mse_loss(pred_f, target_f, reduction="none")
         per_step = per_element.mean(dim=2)  # (B, T)
 
+        per_token_weight = tw.dim() == 2
+
         if action_is_pad is not None:
             # action_is_pad: (B, T) — already aligned to the subsampled
             # action temporal dim by the trainer.
@@ -435,8 +466,14 @@ class FlowMatchVideoActionLoss:
             valid_mask = ~action_is_pad
             per_step = per_step * valid_mask.float()
             valid_count = valid_mask.float().sum(dim=1).clamp(min=1)
-            per_sample = per_step.sum(dim=1) / valid_count  # (B,)
-        else:
-            per_sample = per_step.mean(dim=1)  # (B,)
 
+            if per_token_weight:
+                per_step = per_step * tw
+                return (per_step.sum(dim=1) / valid_count).mean()
+            per_sample = per_step.sum(dim=1) / valid_count  # (B,)
+            return (per_sample * tw).mean()
+
+        if per_token_weight:
+            return (per_step * tw).mean()
+        per_sample = per_step.mean(dim=1)  # (B,)
         return (per_sample * tw).mean()

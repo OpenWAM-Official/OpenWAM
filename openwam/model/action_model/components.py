@@ -4,8 +4,11 @@ These building blocks are used identically across DualSystem (ActionDiT),
 MoE Expert (MoEExpertDiT), and SharedBackbone architectures.
 """
 
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
@@ -128,3 +131,120 @@ class ActionOutputHead(nn.Module):
         shift, scale = (self.modulation + t_embed.unsqueeze(1)).chunk(2, dim=1)
         x = self.norm(x) * (1 + scale) + shift
         return self.head(x)
+
+
+class SinusoidalPositionalEncoding(nn.Module):
+    """Sinusoidal encoding for timestep conditioning inside ActionEncoder.
+
+    Generates a (B, T, embedding_dim) encoding from (B, T) timesteps —
+    distinct from `sinusoidal_embedding_1d` above which operates on (B,)
+    timesteps and returns (B, dim).
+    """
+
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        assert embedding_dim % 2 == 0, (
+            f"SinusoidalPositionalEncoding requires even embedding_dim got {embedding_dim}"
+        )
+        self.embedding_dim = embedding_dim
+
+    def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            timesteps: (B, T) float tensor.
+        Returns:
+            (B, T, embedding_dim) tensor.
+        """
+        timesteps = timesteps.float()
+        half_dim = self.embedding_dim // 2
+        exponent = -torch.arange(half_dim, dtype=torch.float, device=timesteps.device) * (
+            math.log(10000.0) / half_dim
+        )
+        freqs = timesteps.unsqueeze(-1) * exponent.exp()
+        return torch.cat([torch.sin(freqs), torch.cos(freqs)], dim=-1)
+
+
+class ActionEncoder(nn.Module):
+    """3-layer MLP action projector with timestep sinusoid fusion.
+
+    Fuses the diffusion timestep into the action embedding inside the
+    encoder itself, in addition to any AdaLN modulation that may happen
+    downstream.
+
+    Accepts timesteps of shape (1,), (B,), or (B, T) — broadcasts (1,) or
+    (B,) to (B, T).
+    """
+
+    def __init__(self, action_dim: int, hidden_dim: int):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.W1 = nn.Linear(action_dim, hidden_dim)
+        self.W2 = nn.Linear(2 * hidden_dim, hidden_dim)
+        self.W3 = nn.Linear(hidden_dim, hidden_dim)
+        self.pos_encoding = SinusoidalPositionalEncoding(hidden_dim)
+
+    def forward(self, actions: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            actions:   (B, T, action_dim).
+            timesteps: (1,) scalar broadcast, (B,) per-sample, or (B, T) per-token diffusion timestep.
+        Returns:
+            (B, T, hidden_dim).
+        """
+        B, T, _ = actions.shape
+        if timesteps.dim() == 1:
+            if timesteps.numel() == 1:
+                # (1,) -> broadcast to (B, T)
+                timesteps = timesteps.expand(B, T)
+            elif timesteps.shape[0] != B:
+                raise ValueError(
+                    f"timesteps {tuple(timesteps.shape)} does not match actions batch {B}"
+                )
+            else:
+                # (B,) -> expand to (B, T)
+                timesteps = timesteps.unsqueeze(1).expand(B, T)
+        elif timesteps.shape != (B, T):
+            raise ValueError(
+                f"timesteps {tuple(timesteps.shape)} must be (1,), (B,) or (B, T) with actions (B={B}, T={T})"
+            )
+
+        a_emb = self.W1(actions)
+        tau_emb = self.pos_encoding(timesteps).to(dtype=a_emb.dtype)
+        x = torch.cat([a_emb, tau_emb], dim=-1)
+        x = F.silu(self.W2(x))
+        x = self.W3(x)
+        return x
+
+
+class ActionOutputMLP(nn.Module):
+    """2-layer MLP output projection with a narrow bottleneck hidden dim.
+
+    Unlike `ActionOutputHead` (LayerNorm + AdaLN + Linear, zero-init output
+    for a stable start), this head is a plain Linear -> ReLU -> Linear stack
+    with small-random weight initialization (N(0, 0.02), zero bias) on both
+    layers. Used by SharedBackbone / MoE architectures; DualSystem's
+    ActionDiT keeps the AdaLN head.
+
+    Args:
+        input_dim:  Hidden size of incoming action tokens (= video_dim).
+        hidden_dim: Bottleneck width.
+        action_dim: Raw action vector dimension.
+    """
+
+    def __init__(self, input_dim: int, hidden_dim: int, action_dim: int):
+        super().__init__()
+        self.layer1 = nn.Linear(input_dim, hidden_dim)
+        self.layer2 = nn.Linear(hidden_dim, action_dim)
+        nn.init.normal_(self.layer1.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.layer1.bias)
+        nn.init.normal_(self.layer2.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.layer2.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, T, input_dim) hidden states.
+        Returns:
+            (B, T, action_dim) predicted action noise.
+        """
+        return self.layer2(F.relu(self.layer1(x)))

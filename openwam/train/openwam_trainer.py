@@ -187,10 +187,23 @@ class OpenWAMTrainer(BaseTrainer):
         self.lambda_action = float(strategy.lambda_action)
         bridge_type = getattr(m.architecture, "bridge_type", "cross_attn_detach")
 
+        # Opt-in per-token action timestep sampling. Default False keeps
+        # the per-sample behavior; surfaced via `training.action_timestep_per_token`.
+        action_timestep_per_token = bool(getattr(t, "action_timestep_per_token", False))
+        if action_timestep_per_token:
+            logger.warning(
+                "action_timestep_per_token=True: training samples per-token diffusion "
+                "timesteps, but the inference path in openwam/deployment/joint_generation.py "
+                "still broadcasts a per-sample a_timestep. Train/inference sampling will "
+                "diverge until the inference side is updated — only use this flag for "
+                "training-only ablations (e.g. PT2 Round 4 prep)."
+            )
+
         self.loss_fn = FlowMatchVideoActionLoss(
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
             detach_bridge=(bridge_type == "cross_attn_detach"),
+            action_timestep_per_token=action_timestep_per_token,
         )
 
         # Decoupled training support

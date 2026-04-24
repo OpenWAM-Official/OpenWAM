@@ -29,8 +29,8 @@ import torch.nn as nn
 from torch import Tensor
 
 from openwam.model.action_model.components import (
-    ActionEmbedding,
-    ActionOutputHead,
+    ActionEncoder,
+    ActionOutputMLP,
     LearnedPositionalEncoding,
     TimestepEmbedding,
     TimestepModulation,
@@ -46,10 +46,11 @@ class SharedBackboneState:
     Fields:
         action_tokens: (B, T_action, video_dim) projected action tokens.
         n_action_tokens: Number of action tokens appended to the video sequence.
-        timestep: (B,) raw action diffusion timestep. Required when video DiT
-            uses per-token t_mod (Wan2.2-TI2V-5B fuse_vae_embedding_in_latents
-            path); used by model_fn_wan_video to build action-position t_mod
-            rows via the video DiT's time_projection.
+        timestep: Raw action diffusion timestep at loss-time granularity —
+            (1,) broadcast, (B,) per-sample, or (B, T_action) per-token.
+            Consumed by model_fn_wan_video._build_action_t_mod (which
+            dispatches on ndim) when the video DiT uses per-token t_mod
+            (Wan2.2-TI2V-5B fuse_vae_embedding_in_latents path).
         action_noise_pred: Filled after finalization.
     """
 
@@ -95,20 +96,23 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         self._freq_dim = int(cfg.get("freq_dim", 256))
         max_action_len = int(cfg.get("max_action_len", 512))
 
-        # Input projection: action_dim -> video_dim
-        self.input_proj = ActionEmbedding(self._action_dim, self._video_dim)
+        # Input projection fuses the diffusion timestep into the action
+        # embedding inside the encoder (see ActionEncoder).
+        self.input_proj = ActionEncoder(self._action_dim, self._video_dim)
 
-        # Learned positional encoding
+        # Learned positional encoding for action sequence positions.
         self.pos_encoding = LearnedPositionalEncoding(max_action_len, self._video_dim)
 
-        # Timestep embedding (independent from video timestep)
+        # Dead code (kept per project convention: do not delete dead code).
+        # After the output head switch to ActionOutputMLP below, t_embed /
+        # t_mod are no longer consumed by extract_action_prediction; the
+        # modules remain so prior state_dicts still load and so DualSystem
+        # parity is preserved.
         self.time_embedding = TimestepEmbedding(self._freq_dim, self._video_dim)
-
-        # Output modulation: shift + scale (2 params)
         self.time_projection = TimestepModulation(self._video_dim, 2)
 
-        # Output head: video_dim -> action_dim
-        self.action_output_head = ActionOutputHead(self._video_dim, self._action_dim)
+        # Output head: 2-layer MLP video_dim -> 64 -> action_dim.
+        self.action_output_head = ActionOutputMLP(self._video_dim, 64, self._action_dim)
 
         # Per-modality bias on the video DiT's AdaLN modulation signal (6 params
         # per dim: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp).
@@ -129,7 +133,8 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
 
         Args:
             noisy_actions: (B, T_action, action_dim) noisy action trajectory.
-            timestep: (B,) diffusion timestep for the action stream.
+            timestep: (1,) scalar broadcast, (B,) per-sample or (B, T_action)
+                per-token diffusion timestep (ActionEncoder accepts all three).
 
         Returns:
             ActionState with projected action tokens stored in
@@ -140,25 +145,33 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
             f"Action sequence length {T} exceeds max_action_len {self.pos_encoding.embedding.shape[1]}"
         )
 
-        # Project to video_dim and add positional encoding
-        x = self.input_proj(noisy_actions)
+        # Project to video_dim; ActionEncoder fuses timestep internally.
+        x = self.input_proj(noisy_actions, timestep)
         x = self.pos_encoding(x)
 
-        # Timestep embedding for output modulation
-        timestep = timestep.flatten()
-        t = self.time_embedding(timestep)
+        # Collapse to per-sample timestep (for per-token inputs, take the
+        # first column). Supports (1,), (B,), and (B, T) inputs.
+        timestep_flat = timestep.flatten()
+        if timestep.numel() == 1:
+            timestep_flat = timestep_flat.expand(B)
+        elif timestep_flat.shape[0] != B:
+            timestep_flat = timestep.view(B, -1)[:, 0]
+        t = self.time_embedding(timestep_flat)
         t_mod = self.time_projection(t)
 
         action_state = ActionState(
             action_latents=x,  # (B, T_action, video_dim)
-            timestep=timestep,
+            timestep=timestep_flat,
             extra={
                 "num_action_tokens": T,
-                "t_embed": t,
-                "t_mod": t_mod,
+                "t_embed": t,    # no consumer after output head swap; kept for state-dict stability
+                "t_mod": t_mod,  # no consumer after output head swap
             },
         )
-        # State for model_fn_wan_video to handle concatenation/extraction
+        # State for model_fn_wan_video to handle concatenation/extraction.
+        # Preserve the raw timestep shape — model_fn_wan_video's
+        # _build_action_t_mod dispatches on ndim to build per-sample
+        # (B,) or per-token (B, T) t_mod rows for action positions.
         sb_state = SharedBackboneState(
             action_tokens=x,
             n_action_tokens=T,
@@ -202,8 +215,7 @@ class SharedBackboneArchitecture(BaseWAMArchitecture):
         else:
             x = action_state.action_latents
 
-        t_embed = action_state.extra["t_embed"]
-        return self.action_output_head(x, t_embed)
+        return self.action_output_head(x)
 
     @property
     def action_dim(self) -> int:

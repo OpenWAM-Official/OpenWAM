@@ -1806,10 +1806,28 @@ def model_fn_wan_video(
             f"video DiT dim ({dit.dim}). Architecture's video_dim was not "
             "synchronized with the loaded video backbone."
         )
-        action_t_emb = sinusoidal_embedding_1d(dit.freq_dim, action_timestep.flatten())
-        action_t = dit.time_embedding(action_t_emb.to(latents.dtype))  # (B, dim)
-        action_t_mod = dit.time_projection(action_t).unflatten(1, (6, dit.dim))  # (B, 6, dim)
-        action_t_mod = action_t_mod.unsqueeze(1).expand(-1, n_action, -1, -1)
+        # action_timestep shape options (set by architecture.prepare_action_tokens):
+        #   (1,)            : scalar broadcast (single-sample inference).
+        #   (B,)            : per-sample — one diffusion timestep for all action tokens.
+        #   (B, n_action)   : per-token (action_timestep_per_token=True) — one timestep
+        #                     per action token; required for Round 4 per-token ablation
+        #                     to deliver non-degenerate AdaLN modulation.
+        if action_timestep.dim() == 2:
+            assert action_timestep.shape[1] == n_action, (
+                f"per-token action_timestep shape {tuple(action_timestep.shape)} "
+                f"must have T={n_action} along dim=1 to match concatenated action tokens."
+            )
+            B_t = action_timestep.shape[0]
+            flat = action_timestep.reshape(B_t * n_action)
+            action_t_emb = sinusoidal_embedding_1d(dit.freq_dim, flat)
+            action_t = dit.time_embedding(action_t_emb.to(latents.dtype))  # (B*T, dim)
+            action_t_mod = dit.time_projection(action_t).unflatten(1, (6, dit.dim))  # (B*T, 6, dim)
+            action_t_mod = action_t_mod.view(B_t, n_action, 6, dit.dim)
+        else:
+            action_t_emb = sinusoidal_embedding_1d(dit.freq_dim, action_timestep.flatten())
+            action_t = dit.time_embedding(action_t_emb.to(latents.dtype))  # (B, dim)
+            action_t_mod = dit.time_projection(action_t).unflatten(1, (6, dit.dim))  # (B, 6, dim)
+            action_t_mod = action_t_mod.unsqueeze(1).expand(-1, n_action, -1, -1)
         return action_t_mod + modality_bias.to(dtype=action_t_mod.dtype, device=action_t_mod.device)
 
     # MoE Action Expert: concatenate action tokens to video sequence

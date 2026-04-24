@@ -12,7 +12,8 @@ Inspired by BAGEL's Mixture-of-Transformer-Experts (MoT) pattern:
 This achieves cross-modal grounding via shared attention while preserving
 modality-specific representational capacity via expert FFN layers.
 
-Architecture at each expert layer:
+Architecture at every DiT layer (PT1-0b alignment — previously only a
+subset of layers had expert FFNs):
     Before DiT block: action tokens appended to video sequence
     DiT block self-attention: all tokens attend to each other (shared)
     DiT block FFN: standard video FFN processes all tokens (base transform)
@@ -32,8 +33,8 @@ import torch
 import torch.nn as nn
 
 from openwam.model.action_model.components import (
-    ActionEmbedding,
-    ActionOutputHead,
+    ActionEncoder,
+    ActionOutputMLP,
     LearnedPositionalEncoding,
     TimestepEmbedding,
     TimestepModulation,
@@ -53,13 +54,20 @@ class MoEExpertState:
         moe_dit: Reference to MoEExpertDiT module.
         action_tokens: (B, T_action, video_dim) projected action tokens.
             Updated in-place as they flow through the block loop.
-        t_mod: (B, 3, video_dim) timestep modulation for expert FFN.
+        t_mod: Timestep modulation for expert FFN. Shape depends on the
+            diffusion timestep granularity chosen by the loss:
+                (B, 3, video_dim)     — per-sample (default).
+                (B, T, 3, video_dim)  — per-token (action_timestep_per_token).
+            ExpertFFNBlock.forward accepts both.
         t_embed: (B, video_dim) timestep embedding for output head.
         n_action_tokens: Number of action tokens appended to sequence.
-        timestep: (B,) raw action diffusion timestep. Required when video DiT
-            uses per-token t_mod (Wan2.2-TI2V-5B fuse_vae_embedding_in_latents
-            path); used to build action-position t_mod rows via the video
-            DiT's time_projection.
+        timestep: Raw action diffusion timestep preserved at the granularity
+            sampled by the loss. Shape:
+                (1,)  scalar broadcast across the batch (1-sample inference).
+                (B,)  per-sample (default).
+                (B, T_action) per-token (action_timestep_per_token).
+            Consumed by model_fn_wan_video._build_action_t_mod to build
+            action-position t_mod rows for the video DiT's AdaLN.
         expert_block_counter: Tracks which expert block to apply next.
         skip_prefix_tokens: Number of reference-frame prefix tokens in
             the video sequence that action tokens should NOT attend to
@@ -72,8 +80,9 @@ class MoEExpertState:
     t_mod: torch.Tensor
     t_embed: torch.Tensor
     n_action_tokens: int = 0
-    # Raw action diffusion timestep (B,) — used by model_fn_wan_video to build
-    # per-token t_mod for action positions via the video DiT's time_projection.
+    # Raw action diffusion timestep preserved at loss-time granularity:
+    # (1,) broadcast, (B,) per-sample, or (B, T_action) per-token.
+    # Consumed by model_fn_wan_video._build_action_t_mod (see wan_video.py).
     timestep: Optional[torch.Tensor] = None
     expert_block_counter: int = 0
     skip_prefix_tokens: int = 0
@@ -112,14 +121,29 @@ class ExpertFFNBlock(nn.Module):
         nn.init.zeros_(self.ffn[2].bias)
 
     def forward(self, x: torch.Tensor, t_mod: torch.Tensor) -> torch.Tensor:
-        """
+        """Apply AdaLN-modulated expert FFN as a residual correction.
+
         Args:
-            x: (B, T_action, dim) action tokens after video DiT block
-            t_mod: (B, 3, dim) timestep modulation
+            x: (B, T_action, dim) action tokens after the video DiT block.
+            t_mod: Timestep modulation. Two supported layouts:
+                - (B, 3, dim): per-sample modulation, broadcast across tokens.
+                - (B, T_action, 3, dim): per-token modulation, aligned with
+                  ``x`` along the token dimension (used when the loss samples
+                  one diffusion timestep per action token).
+
         Returns:
-            (B, T_action, dim) corrected action tokens
+            (B, T_action, dim) corrected action tokens.
         """
-        shift, scale, gate = (self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(3, dim=1)
+        base = self.modulation.to(dtype=t_mod.dtype, device=t_mod.device)
+        if t_mod.dim() == 4:
+            # Per-token: base (1, 3, dim) broadcasts over (B, T_action, 3, dim).
+            # chunk(3) along the params dim (=2) → each is (B, T_action, 1, dim).
+            shift, scale, gate = (base.unsqueeze(1) + t_mod).chunk(3, dim=2)
+            shift = shift.squeeze(2)
+            scale = scale.squeeze(2)
+            gate = gate.squeeze(2)
+        else:
+            shift, scale, gate = (base + t_mod).chunk(3, dim=1)
 
         h = self.norm(x) * (1 + scale) + shift
         return x + gate * self.ffn(h)
@@ -145,9 +169,11 @@ class MoEExpertDiT(nn.Module):
     specifically to action tokens. This is conceptually similar to
     BAGEL's MoT where different token types route through different FFNs.
 
-    Design note: Both the expert FFN output layer and the final output
-    head are zero-initialized, so at initialization the model behaves
-    identically to the vanilla video DiT (action predictions are zero).
+    Init note: the expert FFN output layer is zero-initialized so the
+    expert correction is zero at step 0 (pretrained video DiT behavior
+    preserved for action tokens at init). The final output MLP uses
+    small-random init (std=0.02) rather than zero, so initial action
+    predictions are small-random, not exactly zero.
 
     Args:
         action_dim: Raw action vector dimension (e.g., 14 for bimanual)
@@ -165,11 +191,11 @@ class MoEExpertDiT(nn.Module):
         self,
         action_dim: int = 14,
         video_dim: int = 1536,
-        expert_ffn_dim: int = 4096,
-        num_experts: int = 8,
+        expert_ffn_dim: int = 14336,
+        num_experts: int = 30,
         freq_dim: int = 256,
         max_action_len: int = 512,
-        expert_layers: Tuple[int, ...] = (3, 7, 11, 15, 19, 23, 26, 29),
+        expert_layers: Tuple[int, ...] = tuple(range(30)),
         eps: float = 1e-6,
     ):
         super().__init__()
@@ -185,8 +211,9 @@ class MoEExpertDiT(nn.Module):
         self.expert_layers = expert_layers
         self.expert_layers_set = set(expert_layers)
 
-        # Action token projection: action_dim -> video_dim
-        self.action_input_proj = ActionEmbedding(action_dim, video_dim)
+        # Action token projection fuses the diffusion timestep into the
+        # action embedding inside the encoder (see ActionEncoder).
+        self.action_input_proj = ActionEncoder(action_dim, video_dim)
 
         # Learned positional encoding in video_dim space
         self.pos_encoding = LearnedPositionalEncoding(max_action_len, video_dim)
@@ -200,8 +227,8 @@ class MoEExpertDiT(nn.Module):
         # Expert FFN blocks (one per expert layer)
         self.expert_blocks = nn.ModuleList([ExpertFFNBlock(video_dim, expert_ffn_dim, eps) for _ in range(num_experts)])
 
-        # Output head: video_dim -> action_dim
-        self.action_output_head = ActionOutputHead(video_dim, action_dim, eps)
+        # Output head: 2-layer MLP video_dim -> 64 -> action_dim.
+        self.action_output_head = ActionOutputMLP(video_dim, 64, action_dim)
 
         # Per-modality bias on the video DiT's AdaLN modulation signal for action
         # tokens appended to the video sequence. See SharedBackboneArchitecture's
@@ -222,25 +249,49 @@ class MoEExpertDiT(nn.Module):
         """Project actions to video_dim and prepare state for block loop.
 
         Args:
-            action_tokens: (B, T_action, action_dim) noisy actions
-            timestep: (B,) or (1,) action diffusion timestep
+            action_tokens: (B, T_action, action_dim) noisy actions.
+            timestep: Action diffusion timestep. Supported shapes:
+                (1,)            scalar broadcast.
+                (B,)            per-sample (default).
+                (B, T_action)   per-token (action_timestep_per_token=True).
+                ActionEncoder accepts all three. ExpertFFN AdaLN consumes
+                the same granularity: per-sample inputs yield a
+                (B, 3, dim) t_mod; per-token inputs yield (B, T, 3, dim).
 
         Returns:
-            MoEExpertState ready for model_fn_wan_video
+            MoEExpertState ready for model_fn_wan_video.
         """
         B, T, _ = action_tokens.shape
         assert T <= self.pos_encoding.embedding.shape[1], (
             f"Action sequence length {T} exceeds max_action_len {self.pos_encoding.embedding.shape[1]}"
         )
 
-        # Project to video_dim and add positional encoding
-        x = self.action_input_proj(action_tokens)
+        # ActionEncoder fuses timestep into the action embedding
+        # internally. Accepts (1,), (B,), or (B, T) timestep.
+        x = self.action_input_proj(action_tokens, timestep)
         x = self.pos_encoding(x)
 
-        # Timestep modulation for expert FFN
-        timestep = timestep.flatten()
-        t = self.time_embedding(timestep)
-        t_mod = self.time_projection(t)
+        # Build ExpertFFN AdaLN modulation at the same granularity as the
+        # incoming timestep. Per-token modulation is required so that each
+        # action token's AdaLN shift/scale/gate track its own noise level
+        # when action_timestep_per_token=True; otherwise the expert FFN
+        # becomes a silent performance ceiling on per-token ablations.
+        per_token = timestep.dim() == 2 and timestep.shape == (B, T)
+        if per_token:
+            flat = timestep.reshape(B * T)
+            t_flat = self.time_embedding(flat)  # (B*T, dim)
+            t = t_flat.view(B, T, -1)
+            t_mod_flat = self.time_projection(t_flat)  # (B*T, 3, dim)
+            t_mod = t_mod_flat.view(B, T, self.time_projection.n_params, -1)
+        else:
+            timestep_flat = timestep.flatten()
+            if timestep_flat.numel() == 1:
+                timestep_flat = timestep_flat.expand(B)
+            elif timestep_flat.shape[0] != B:
+                # Defensive: shape mismatch (e.g. numel==B*T but not (B,T)).
+                timestep_flat = timestep.view(B, -1)[:, 0]
+            t = self.time_embedding(timestep_flat)
+            t_mod = self.time_projection(t)
 
         return MoEExpertState(
             moe_dit=self,
@@ -248,6 +299,9 @@ class MoEExpertDiT(nn.Module):
             t_mod=t_mod,
             t_embed=t,
             n_action_tokens=T,
+            # Preserve the raw timestep shape — model_fn_wan_video's
+            # _build_action_t_mod dispatches on ndim to build per-sample vs
+            # per-token t_mod for the video DiT's AdaLN (see wan_video.py).
             timestep=timestep,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
@@ -302,7 +356,7 @@ class MoEExpertDiT(nn.Module):
         Returns:
             (B, T_action, action_dim) predicted action noise
         """
-        return self.action_output_head(state.action_tokens, state.t_embed)
+        return self.action_output_head(state.action_tokens)
 
     @staticmethod
     def state_dict_converter():

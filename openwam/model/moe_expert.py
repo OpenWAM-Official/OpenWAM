@@ -40,8 +40,9 @@ class MoEActionExpertArchitecture(BaseWAMArchitecture):
     Action tokens are projected to the video DiT's hidden dimension and
     concatenated to the video token sequence. The video DiT processes
     the combined sequence with its standard self-attention and FFN blocks.
-    At designated expert layers, an additional expert FFN applies a
-    correction specifically to the action tokens.
+    At every DiT layer (PT1-0b: previously only a subset of layers), an
+    additional expert FFN applies a correction specifically to the action
+    tokens.
 
     This design achieves:
     - Cross-modal grounding via shared self-attention (action tokens
@@ -68,8 +69,9 @@ class MoEActionExpertArchitecture(BaseWAMArchitecture):
     def __init__(self, cfg=None):
         super().__init__(cfg)
         if cfg is not None:
-            # expert_layers can come from architecture config as "bridge_layers" or "expert_layers"
-            el = cfg.get("expert_layers", cfg.get("bridge_layers", (3, 7, 11, 15, 19, 23, 26, 29)))
+            # expert_layers can come from architecture config as "bridge_layers" or "expert_layers".
+            # PT1-0b: default fallback covers all 30 Wan2.2-TI2V-5B DiT layers.
+            el = cfg.get("expert_layers", cfg.get("bridge_layers", tuple(range(30))))
             if isinstance(el, str):
                 el = tuple(int(x) for x in el.split(","))
             elif not isinstance(el, tuple):
@@ -78,7 +80,7 @@ class MoEActionExpertArchitecture(BaseWAMArchitecture):
             self.moe_dit = MoEExpertDiT(
                 action_dim=int(cfg.get("action_dim", 14)),
                 video_dim=int(cfg.get("video_dim", 1536)),
-                expert_ffn_dim=int(cfg.get("expert_ffn_dim", 4096)),
+                expert_ffn_dim=int(cfg.get("expert_ffn_dim", 14336)),
                 num_experts=int(cfg.get("num_experts", len(el))),
                 expert_layers=el,
             )
