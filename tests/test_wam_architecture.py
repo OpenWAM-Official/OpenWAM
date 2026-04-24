@@ -231,6 +231,170 @@ def test_moe_expert_ffn_and_output_head_init():
         assert w.abs().max() < 0.2
 
 
+def test_dual_system_bridge_interval_resolves():
+    """bridge_layers: null + bridge_interval resolves to range(0, N, step)."""
+    from openwam.model import build_architecture
+
+    cfg = {
+        "action_dim": 7,
+        "dim": 64,
+        "ffn_dim": 128,
+        "num_heads": 4,
+        "video_dim": 128,
+        "bridge_layers": None,
+        "bridge_interval": 2,
+        "num_dit_layers": 30,
+        "bridge_type": "cross_attn_detach",
+    }
+    arch = build_architecture("dual_system", cfg)
+    assert arch.bridge_layers == tuple(range(0, 30, 2))
+    assert len(arch.bridge_layers) == 15
+
+    cfg["bridge_interval"] = 1
+    arch_full = build_architecture("dual_system", cfg)
+    assert arch_full.bridge_layers == tuple(range(30))
+
+
+def test_dual_system_bridge_interval_backward_compat():
+    """bridge_layers: null without bridge_interval keeps legacy 8-layer default."""
+    from openwam.model import build_architecture
+
+    cfg = {
+        "action_dim": 7,
+        "dim": 64,
+        "ffn_dim": 128,
+        "num_heads": 4,
+        "video_dim": 128,
+        "bridge_layers": None,
+        "bridge_type": "cross_attn_detach",
+    }
+    arch = build_architecture("dual_system", cfg)
+    assert arch.bridge_layers == (3, 7, 11, 15, 19, 23, 26, 29)
+
+
+def test_action_self_attention_rope_breaks_permutation_equivariance():
+    """Without positional info, self-attention is permutation-equivariant.
+    RoPE injects absolute position into Q/K, so permuting the input tokens
+    must NOT merely permute the output (the model distinguishes positions).
+    Also: supplying RoPE freqs must change the output relative to freqs=None.
+    """
+    from openwam.model.action_model.action_dit import ActionSelfAttention
+    from openwam.model.action_model.components import precompute_freqs_cis_1d
+
+    dim, num_heads, seq = 32, 4, 4
+    head_dim = dim // num_heads
+    attn = ActionSelfAttention(dim=dim, num_heads=num_heads).eval()
+
+    x = torch.randn(1, seq, dim)
+    freqs = precompute_freqs_cis_1d(head_dim, max_len=seq)
+    perm = torch.tensor([3, 1, 2, 0])  # non-identity permutation
+    x_perm = x[:, perm, :]
+
+    with torch.no_grad():
+        out_plain = attn(x, freqs=None)
+        out_plain_perm = attn(x_perm, freqs=None)
+        out_rope = attn(x, freqs=freqs)
+        out_rope_perm = attn(x_perm, freqs=freqs)
+
+    # Sanity: freqs=None is permutation-equivariant.
+    assert torch.allclose(out_plain_perm, out_plain[:, perm, :], atol=1e-5)
+    # RoPE must break that symmetry (content same, positions shuffled → non-permute-equivalent output).
+    assert not torch.allclose(out_rope_perm, out_rope[:, perm, :], atol=1e-5), (
+        "RoPE had no effect: permuted output equals permuted-input output"
+    )
+    # And RoPE output must differ from no-freqs output on the same input.
+    assert not torch.allclose(out_rope, out_plain, atol=1e-5)
+
+
+def test_action_dit_rope_cross_attn_path():
+    """ActionDiT cross_attn_detach path runs end-to-end with RoPE instead of
+    LearnedPositionalEncoding.
+    """
+    from openwam.model.action_model.action_dit import ActionDiT
+
+    dit = ActionDiT(
+        action_dim=7,
+        dim=64,
+        ffn_dim=128,
+        num_heads=4,
+        num_layers=2,
+        video_dim=128,
+        bridge_layers=(0, 1),
+        bridge_type="cross_attn_detach",
+    )
+    assert dit.pos_encoding is None  # RoPE path
+    assert hasattr(dit, "freqs") and dit.freqs.shape == (1024, 64 // 4 // 2)
+
+    actions = torch.randn(2, 5, 7)
+    video_features = [torch.randn(2, 10, 128) for _ in range(2)]
+    timestep = torch.tensor([0.5, 0.8])
+    out = dit(actions, video_features, timestep)
+    assert out.shape == (2, 5, 7)
+
+
+def test_action_dit_joint_self_attn_keeps_learned_pe():
+    """joint_self_attn keeps learned action PE while also preparing joint RoPE."""
+    from openwam.model.action_model.action_dit import ActionDiT
+
+    dit = ActionDiT(
+        action_dim=7,
+        dim=64,
+        ffn_dim=128,
+        num_heads=4,
+        num_layers=2,
+        video_dim=64,  # match dim so no video_projs Linear mismatch
+        bridge_layers=(0, 1),
+        bridge_type="joint_self_attn",
+    )
+    assert dit.pos_encoding is not None
+
+    state = dit.prepare_action_state(torch.randn(2, 5, 7), torch.tensor([0.5, 0.8]))
+    assert state.use_joint_rope is True
+
+
+def test_dual_system_joint_self_attn_production_path_applies_rope():
+    """Interleaved joint_self_attn path should wire RoPE into production blocks."""
+    from openwam.model import build_architecture
+
+    cfg = {
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "bridge_layers": (0,),
+        "bridge_type": "joint_self_attn",
+    }
+    arch = build_architecture("dual_system", cfg)
+    arch.eval()
+
+    captured = {}
+    original_forward = arch.action_dit.blocks[0].joint_attn.forward
+
+    def wrapped_forward(x_action, x_video, freqs_action=None, freqs_video=None):
+        captured["freqs_action"] = freqs_action
+        captured["freqs_video"] = freqs_video
+        return original_forward(x_action, x_video, freqs_action=freqs_action, freqs_video=freqs_video)
+
+    arch.action_dit.blocks[0].joint_attn.forward = wrapped_forward
+    try:
+        noisy_actions = torch.randn(2, 5, 7)
+        timestep = torch.tensor([0.5, 0.8])
+        state = arch.prepare_action_tokens(noisy_actions, timestep)
+        video_hidden = torch.randn(2, 9, 32)
+        _, state = arch.on_dit_block(0, video_hidden, state)
+        with torch.no_grad():
+            action_pred = arch.extract_action_prediction(state)
+    finally:
+        arch.action_dit.blocks[0].joint_attn.forward = original_forward
+
+    assert action_pred.shape == (2, 5, 7)
+    assert captured["freqs_action"] is not None
+    assert captured["freqs_video"] is not None
+    assert captured["freqs_action"].shape[0] == state.extra["dit_state"].x_action.shape[1]
+    assert captured["freqs_video"].shape[0] == state.extra["dit_state"].x_video_proj.shape[1]
+
+
 def test_register_custom_architecture():
     """Verify that custom architectures can be registered."""
     from openwam.model.base import ActionState, BaseWAMArchitecture

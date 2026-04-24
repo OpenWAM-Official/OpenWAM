@@ -43,7 +43,12 @@ from einops import rearrange
 from openwam.model.action_model.attention_utils import get_attention_fn
 
 # Re-export shared components for backward compatibility
-from openwam.model.action_model.components import RMSNorm, sinusoidal_embedding_1d  # noqa: F401, E402
+from openwam.model.action_model.components import (  # noqa: F401, E402
+    RMSNorm,
+    precompute_freqs_cis_1d,
+    rope_apply_1d,
+    sinusoidal_embedding_1d,
+)
 
 
 @dataclass
@@ -64,6 +69,7 @@ class ActionDiTState:
     x_action: torch.Tensor  # (B, T_action, dim)
     t_mod: torch.Tensor  # (B, t_mod_params, dim)
     t_embed: torch.Tensor  # (B, dim) — for output head
+    use_joint_rope: bool = False
     x_video_proj: Optional[torch.Tensor] = None  # running projected video features
     action_noise_pred: Optional[torch.Tensor] = None  # filled after finalize
     bridge_block_counter: int = 0
@@ -78,7 +84,13 @@ class ActionDiTState:
 
 
 class ActionSelfAttention(nn.Module):
-    """Self-attention over action tokens with learned positional encoding."""
+    """Self-attention over action tokens.
+
+    Applies 1D rotary position embedding (RoPE) to Q/K when ``freqs`` is
+    supplied, mirroring FastWAM's action DiT. Call with ``freqs=None`` to
+    fall back to position-free attention (e.g. when the caller injects
+    a learned positional encoding upstream).
+    """
 
     def __init__(self, dim: int, num_heads: int, eps: float = 1e-6):
         super().__init__()
@@ -93,7 +105,7 @@ class ActionSelfAttention(nn.Module):
         self.norm_q = RMSNorm(dim, eps=eps)
         self.norm_k = RMSNorm(dim, eps=eps)
 
-    def forward(self, x):
+    def forward(self, x, freqs: Optional[torch.Tensor] = None):
         q = self.norm_q(self.q(x))
         k = self.norm_k(self.k(x))
         v = self.v(x)
@@ -101,6 +113,9 @@ class ActionSelfAttention(nn.Module):
         q = rearrange(q, "b s (n d) -> b n s d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b n s d", n=self.num_heads)
         v = rearrange(v, "b s (n d) -> b n s d", n=self.num_heads)
+        if freqs is not None:
+            q = rope_apply_1d(q, freqs)
+            k = rope_apply_1d(k, freqs)
         x = get_attention_fn()(q, k, v)
         x = rearrange(x, "b n s d -> b s (n d)", n=self.num_heads)
         return self.o(x)
@@ -176,16 +191,28 @@ class JointSelfAttention(nn.Module):
         self.norm_q_video = RMSNorm(dim, eps=eps)
         self.norm_k_video = RMSNorm(dim, eps=eps)
 
-    def forward(self, x_action: torch.Tensor, x_video: torch.Tensor):
+    def forward(
+        self,
+        x_action: torch.Tensor,
+        x_video: torch.Tensor,
+        freqs_action: Optional[torch.Tensor] = None,
+        freqs_video: Optional[torch.Tensor] = None,
+    ):
         """
         Args:
             x_action: (B, T_action, dim)
             x_video: (B, T_video, dim)
+            freqs_action: (T_action, head_dim // 2) complex freqs for action positions, or None
+            freqs_video: (T_video, head_dim // 2) complex freqs for video positions, or None.
+                For joint_self_attn, both modalities need explicit position signals since
+                bridge features lack explicit positional encoding. FastWAM applies RoPE to
+                both video and action branches in MoT.
 
         Returns:
             out_action: (B, T_action, dim)
             out_video: (B, T_video, dim)
         """
+
         # Project action
         q_a = self.norm_q_action(self.q_action(x_action))
         k_a = self.norm_k_action(self.k_action(x_action))
@@ -203,6 +230,16 @@ class JointSelfAttention(nn.Module):
         q_v = rearrange(q_v, "b s (n d) -> b n s d", n=self.num_heads)
         k_v = rearrange(k_v, "b s (n d) -> b n s d", n=self.num_heads)
         v_v = rearrange(v_v, "b s (n d) -> b n s d", n=self.num_heads)
+
+        # Apply 1D RoPE to both branches (FastWAM alignment)
+        if freqs_action is not None:
+            assert freqs_video is not None, "RoPE requires both freqs_action and freqs_video for joint attention"
+            q_a = rope_apply_1d(q_a, freqs_action)
+            k_a = rope_apply_1d(k_a, freqs_action)
+            q_v = rope_apply_1d(q_v, freqs_video)
+            k_v = rope_apply_1d(k_v, freqs_video)
+        else:
+            assert freqs_video is None, "freqs_video requires freqs_action for joint attention"
 
         # Concat K, V across modalities for joint attention
         k = torch.cat([k_v, k_a], dim=2)  # (B, n_heads, T_video+T_action, head_dim)
@@ -249,12 +286,13 @@ class ActionDiTBlock(nn.Module):
         # AdaLN modulation (6 params: shift/scale for self-attn, cross-attn, ffn + gates)
         self.modulation = nn.Parameter(torch.randn(1, 9, dim) / dim**0.5)
 
-    def forward(self, x_action, x_video, t_mod):
+    def forward(self, x_action, x_video, t_mod, freqs: Optional[torch.Tensor] = None):
         """
         Args:
             x_action: (B, T_action, dim)
             x_video: (B, T_video, dim) - video features for cross-attention
             t_mod: (B, 1, 9*dim) - timestep modulation
+            freqs: (T_action, head_dim // 2) complex RoPE freqs, or None
         """
         (shift_sa, scale_sa, gate_sa, shift_ca, scale_ca, gate_ca, shift_ff, scale_ff, gate_ff) = (
             self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
@@ -262,7 +300,7 @@ class ActionDiTBlock(nn.Module):
 
         # Self-attention
         h = self.norm1(x_action) * (1 + scale_sa) + shift_sa
-        x_action = x_action + gate_sa * self.self_attn(h)
+        x_action = x_action + gate_sa * self.self_attn(h, freqs=freqs)
 
         # Cross-attention to video features
         h = self.norm2(x_action) * (1 + scale_ca) + shift_ca
@@ -318,12 +356,21 @@ class JointActionDiTBlock(nn.Module):
         # Video: static modulation (no timestep)
         self.video_modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
-    def forward(self, x_action, x_video, t_mod):
+    def forward(
+        self,
+        x_action,
+        x_video,
+        t_mod,
+        freqs_action: Optional[torch.Tensor] = None,
+        freqs_video: Optional[torch.Tensor] = None,
+    ):
         """
         Args:
             x_action: (B, T_action, dim)
             x_video: (B, T_video, dim)
             t_mod: (B, 6, dim) - timestep modulation for action side
+            freqs_action: (T_action, head_dim // 2) RoPE freqs for action, or None (uses 1..T)
+            freqs_video: (T_video, head_dim // 2) RoPE freqs for video, or None
         """
         # Unpack action modulation (timestep-dependent)
         (shift_a, scale_a, gate_a, shift_ffa, scale_ffa, gate_ffa) = (
@@ -335,10 +382,10 @@ class JointActionDiTBlock(nn.Module):
             self.video_modulation.to(dtype=t_mod.dtype, device=t_mod.device)
         ).chunk(6, dim=1)
 
-        # Joint attention
+        # Joint attention with RoPE options
         h_a = self.norm_attn_action(x_action) * (1 + scale_a) + shift_a
         h_v = self.norm_attn_video(x_video) * (1 + scale_v) + shift_v
-        out_a, out_v = self.joint_attn(h_a, h_v)
+        out_a, out_v = self.joint_attn(h_a, h_v, freqs_action=freqs_action, freqs_video=freqs_video)
         x_action = x_action + gate_a * out_a
         x_video = x_video + gate_v * out_v
 
@@ -406,7 +453,7 @@ class ActionDiT(nn.Module):
         num_heads: int = 12,
         num_layers: int = 8,
         freq_dim: int = 256,
-        max_action_len: int = 512,
+        max_action_len: int = 1024,  # Align with FastWAM's 1024 action context support
         video_dim: int = 1536,
         bridge_layers: Tuple[int, ...] = (3, 7, 11, 15, 19, 23, 26, 29),
         bridge_type: str = "cross_attn",
@@ -424,10 +471,14 @@ class ActionDiT(nn.Module):
         assert bridge_type in ("cross_attn", "cross_attn_detach", "joint_self_attn"), (
             f"Unknown bridge_type '{bridge_type}'. Choose from: cross_attn, cross_attn_detach, joint_self_attn"
         )
+        head_dim = dim // num_heads
+        assert head_dim * num_heads == dim, f"dim ({dim}) must be divisible by num_heads ({num_heads})"
         self.action_dim = action_dim
         self.dim = dim
+        self.head_dim = head_dim
         self.freq_dim = freq_dim
         self.num_layers = num_layers
+        self.max_action_len = max_action_len
         self.bridge_layers = bridge_layers
         self.bridge_layers_set = set(bridge_layers)
         self.bridge_type = bridge_type
@@ -443,8 +494,18 @@ class ActionDiT(nn.Module):
         # Action token embedding: projects raw action to hidden dim
         self.action_embedding = ActionEmbedding(action_dim, dim)
 
-        # Learned positional encoding for action sequence
-        self.pos_encoding = LearnedPositionalEncoding(max_action_len, dim)
+        # Positional encoding:
+        # - cross_attn / cross_attn_detach: ActionSelfAttention applies 1D RoPE on Q/K.
+        # - joint_self_attn: keep learned absolute PE on action tokens for checkpoint
+        #   compatibility; the production joint path injects RoPE for both action and
+        #   video tokens inside JointSelfAttention.
+        if bridge_type == "joint_self_attn":
+            self.pos_encoding: Optional[nn.Module] = LearnedPositionalEncoding(max_action_len, dim)
+        else:
+            self.pos_encoding = None
+        # persistent=False: freqs is complex64 and safetensors rejects complex dtype.
+        # save_trainable_checkpoint skips non-persistent buffers to respect this.
+        self.register_buffer("freqs", precompute_freqs_cis_1d(head_dim, max_action_len), persistent=False)
 
         # Per-block video feature projections (video_dim -> dim)
         # Each ActionDiT block has its own projection since features from
@@ -499,9 +560,7 @@ class ActionDiT(nn.Module):
                 "add": "add",
             }
             if proprio_fusion not in fusion_to_mode:
-                raise ValueError(
-                    f"proprio_fusion must be one of {list(fusion_to_mode)}, got '{proprio_fusion}'"
-                )
+                raise ValueError(f"proprio_fusion must be one of {list(fusion_to_mode)}, got '{proprio_fusion}'")
             effective_state_dim = state_dim if state_dim and state_dim > 0 else action_dim
             self.state_dim = effective_state_dim
             self.proprio_encoder = ProprioceptiveEncoder(
@@ -520,9 +579,7 @@ class ActionDiT(nn.Module):
             return 0
         return self.proprio_encoder.extra_tokens
 
-    def _inject_proprio(
-        self, x: torch.Tensor, proprio_state: Optional[torch.Tensor]
-    ) -> torch.Tensor:
+    def _inject_proprio(self, x: torch.Tensor, proprio_state: Optional[torch.Tensor]) -> torch.Tensor:
         """Run the proprio encoder if enabled; no-op otherwise.
 
         Training always supplies ``proprio_state`` when the encoder is built,
@@ -562,10 +619,12 @@ class ActionDiT(nn.Module):
             ActionDiTState ready to be threaded through model_fn_wan_video
         """
         B, T, _ = action_tokens.shape
+        assert T <= self.max_action_len, f"Action sequence length {T} exceeds max_action_len {self.max_action_len}"
 
         # Embed actions, add positional encoding, inject proprio state
         x = self.action_embedding(action_tokens)
-        x = self.pos_encoding(x)
+        if self.pos_encoding is not None:
+            x = self.pos_encoding(x)
         x = self._inject_proprio(x, proprio_state)
 
         # Timestep conditioning
@@ -578,10 +637,18 @@ class ActionDiT(nn.Module):
             x_action=x,
             t_mod=t_mod,
             t_embed=t,
+            use_joint_rope=self.bridge_type == "joint_self_attn",
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             action_prefix_tokens=self.num_proprio_tokens,
         )
+
+    def _get_rope_freqs(self, seq_len: int, label: str) -> torch.Tensor:
+        assert seq_len <= self.freqs.shape[0], (
+            f"{label} sequence length {seq_len} exceeds precomputed freqs length "
+            f"{self.freqs.shape[0]}. Increase max_action_len."
+        )
+        return self.freqs[:seq_len]
 
     def finalize_action_output(self, state: ActionDiTState) -> torch.Tensor:
         """Run output normalization and head on the action hidden state.
@@ -623,13 +690,12 @@ class ActionDiT(nn.Module):
             (B, T_action, action_dim) - predicted action noise
         """
         B, T, _ = action_tokens.shape
-        assert T <= self.pos_encoding.embedding.shape[1], (
-            f"Action sequence length {T} exceeds max_action_len {self.pos_encoding.embedding.shape[1]}"
-        )
+        assert T <= self.max_action_len, f"Action sequence length {T} exceeds max_action_len {self.max_action_len}"
 
         # Embed actions, add positional encoding, inject proprio state
         x = self.action_embedding(action_tokens)
-        x = self.pos_encoding(x)
+        if self.pos_encoding is not None:
+            x = self.pos_encoding(x)
         x = self._inject_proprio(x, proprio_state)
 
         # Ensure timestep is 1D
@@ -647,7 +713,10 @@ class ActionDiT(nn.Module):
             return custom_forward
 
         if self.bridge_type == "joint_self_attn":
-            # Dual-stream: video features carry across blocks with residual addition
+            # Dual-stream: video features carry across blocks with residual addition.
+            # Keep the non-interleaved path behavior aligned with the production
+            # interleaved path by applying joint RoPE to both action and video tokens.
+            freqs_action = self._get_rope_freqs(x.shape[1], label="Action")
             x_video = None
             for i, block in enumerate(self.blocks):
                 x_video_i = self.video_projs[i](video_features[i])
@@ -655,6 +724,9 @@ class ActionDiT(nn.Module):
                     x_video = x_video_i
                 else:
                     x_video = x_video + x_video_i
+
+                freqs_video = self._get_rope_freqs(x_video.shape[1], label="Video")
+
                 if self.training and use_gradient_checkpointing:
                     if use_gradient_checkpointing_offload:
                         with torch.autograd.graph.save_on_cpu():
@@ -663,6 +735,8 @@ class ActionDiT(nn.Module):
                                 x,
                                 x_video,
                                 t_mod,
+                                freqs_action,
+                                freqs_video,
                                 use_reentrant=False,
                             )
                     else:
@@ -671,12 +745,15 @@ class ActionDiT(nn.Module):
                             x,
                             x_video,
                             t_mod,
+                            freqs_action,
+                            freqs_video,
                             use_reentrant=False,
                         )
                 else:
-                    x, x_video = block(x, x_video, t_mod)
+                    x, x_video = block(x, x_video, t_mod, freqs_action=freqs_action, freqs_video=freqs_video)
         else:
             # cross_attn / cross_attn_detach: each block gets independent video features
+            freqs = self._get_rope_freqs(x.shape[1], label="Action")
             for i, block in enumerate(self.blocks):
                 x_video_i = self.video_projs[i](video_features[i])
                 if self.training and use_gradient_checkpointing:
@@ -687,6 +764,7 @@ class ActionDiT(nn.Module):
                                 x,
                                 x_video_i,
                                 t_mod,
+                                freqs,
                                 use_reentrant=False,
                             )
                     else:
@@ -695,10 +773,11 @@ class ActionDiT(nn.Module):
                             x,
                             x_video_i,
                             t_mod,
+                            freqs,
                             use_reentrant=False,
                         )
                 else:
-                    x = block(x, x_video_i, t_mod)
+                    x = block(x, x_video_i, t_mod, freqs=freqs)
 
         # Strip prepended proprio tokens before the output head so the
         # returned noise prediction is aligned with the original action seq.

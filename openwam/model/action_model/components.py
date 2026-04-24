@@ -21,6 +21,41 @@ def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
     return x.to(position.dtype)
 
 
+def precompute_freqs_cis_1d(head_dim: int, max_len: int = 1024, theta: float = 10000.0) -> torch.Tensor:  # noqa: B008
+    """Precompute complex rotary frequencies for 1D RoPE.
+
+    Returns a complex64 tensor of shape (max_len, head_dim // 2).
+
+    Note:
+        This mirrors FastWAM's `precompute_freqs_cis` in `wan_video_dit.py`.
+        The default `max_len=1024` matches FastWAM to support action sequences
+        up to 1024 steps (e.g., ~3.5s at 300Hz or ~7s at 150Hz).
+    """
+    assert head_dim % 2 == 0, f"head_dim must be even for RoPE, got {head_dim}"
+    freqs = 1.0 / (theta ** (torch.arange(0, head_dim, 2).double() / head_dim))
+    freqs = torch.outer(torch.arange(max_len).double(), freqs)
+    return torch.polar(torch.ones_like(freqs), freqs)
+
+
+def rope_apply_1d(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    """Apply 1D rotary position embedding to Q or K.
+
+    Temporarily promotes the head tensor to fp32 because ``view_as_complex``
+    requires float32/64 inputs; callers running bf16/fp16 get the original
+    dtype restored on return.
+
+    Args:
+        x:     (B, H, S, D) head-split tensor.
+        freqs: (S, D // 2) complex frequencies from ``precompute_freqs_cis_1d``.
+
+    Returns:
+        Rotated tensor with the same dtype and shape as ``x``.
+    """
+    x_c = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+    freqs = freqs.to(x_c.device).view(1, 1, x_c.shape[-2], x_c.shape[-1])
+    return torch.view_as_real(x_c * freqs).flatten(-2).to(x.dtype)
+
+
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization."""
 

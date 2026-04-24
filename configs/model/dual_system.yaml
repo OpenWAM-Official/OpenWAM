@@ -5,8 +5,17 @@ architecture:
   type: dual_system
   action_dim: 20
   bridge_type: cross_attn_detach   # [Optional]: cross_attn, cross_attn_detach or joint_self_attn
-  # len(bridge_layers) auto-determines ActionDiT num_layers.
-  bridge_layers: [3, 7, 11, 15, 19, 23, 26, 29]  # TI2V-5B/VACE-1.3B: 30 layers (index 0-29)
+  # Two ways to choose which video DiT layers feed the ActionDiT bridge.
+  # len(bridge_layers) auto-determines ActionDiT num_layers either way.
+  #   (a) Explicit list:  bridge_layers: [0, 1, ..., 29]
+  #   (b) Interval mode:  set bridge_layers: null and use bridge_interval.
+  #       - interval=1 → range(0, num_dit_layers) = all layers
+  #       - interval=2 → [0, 2, 4, ...]
+  #       This lets the same config target different-size WAN backbones
+  #       (TI2V-5B/VACE-1.3B = 30 layers, T2V-14B/I2V-14B = 40 layers).
+  bridge_layers: null
+  bridge_interval: 1
+  num_dit_layers: 30   # Size of the paired video DiT (TI2V-5B=30, T2V-14B=40).
 
 # Video backbone
 # Resolution: VACE only supports 480x832 or 720x1280; TI2V supports any height/width % 32 == 0.
@@ -18,9 +27,9 @@ video_backbone:
 # ActionDiT transformer parameters
 # num_layers is auto-derived from len(bridge_layers) — do not specify here.
 action_backbone:
-  dim: 768
-  ffn_dim: 3072
-  num_heads: 12
+  dim: 1024
+  ffn_dim: 4096
+  num_heads: 16
 
   # Proprioceptive state conditioning (TRAINING-ONLY in this PR — the
   # deployment path has not been wired up yet, see docs/proprioception.md).

@@ -114,16 +114,39 @@ def save_trainable_checkpoint(
     def _maybe_cast(t: torch.Tensor) -> torch.Tensor:
         return t.to(dtype=target_dtype) if t.is_floating_point() else t
 
-    # ActionDiT: all parameters + all buffers
+    def _non_persistent_names(root) -> set[str]:
+        """Fully-qualified names of non-persistent buffers to skip on save.
+
+        ``named_buffers`` yields non-persistent buffers (e.g. RoPE freqs)
+        too — and complex dtypes like ``complex64`` are not supported by
+        safetensors. Falls back to an empty set for plain objects that
+        don't expose ``named_modules`` (test mocks).
+        """
+        if not hasattr(root, "named_modules"):
+            return set()
+        names: set[str] = set()
+        for mod_prefix, submodule in root.named_modules():
+            nonp = getattr(submodule, "_non_persistent_buffers_set", set())
+            for bname in nonp:
+                names.add(f"{mod_prefix}.{bname}" if mod_prefix else bname)
+        return names
+
+    # ActionDiT: all parameters + persistent buffers
     for name, param in action_dit.named_parameters():
         state_dict[f"action_dit.{name}"] = _maybe_cast(param.data)
+    skip_action = _non_persistent_names(action_dit)
     for name, buf in action_dit.named_buffers():
+        if name in skip_action:
+            continue
         state_dict[f"action_dit.{name}"] = _maybe_cast(buf)
 
-    # Video pipeline: all parameters + all buffers
+    # Video pipeline: all parameters + persistent buffers
     for name, param in pipe.named_parameters():
         state_dict[name] = _maybe_cast(param.data)
+    skip_pipe = _non_persistent_names(pipe)
     for name, buf in pipe.named_buffers():
+        if name in skip_pipe:
+            continue
         state_dict[name] = _maybe_cast(buf)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

@@ -41,11 +41,30 @@ class DualSystemArchitecture(BaseWAMArchitecture):
     def __init__(self, cfg=None):
         super().__init__(cfg)
         if cfg is not None:
-            bl = cfg.get("bridge_layers", (3, 7, 11, 15, 19, 23, 26, 29))
-            if isinstance(bl, str):
-                bl = tuple(int(x) for x in bl.split(","))
-            elif not isinstance(bl, tuple):
-                bl = tuple(bl)
+            # bridge_layers: explicit list/tuple/comma-string. When null/missing,
+            # fall back to `bridge_interval` + `num_dit_layers` (range(0, N, step)),
+            # or the legacy 8-layer default when neither is provided.
+            bl_raw = cfg.get("bridge_layers", None)
+            if bl_raw is None:
+                if "bridge_interval" in cfg:
+                    num_dit_layers = int(cfg.get("num_dit_layers", 30))
+                    interval = int(cfg["bridge_interval"])
+                    assert interval >= 1, f"bridge_interval must be >= 1, got {interval}"
+                    bl = tuple(range(0, num_dit_layers, interval))
+                else:
+                    bl = (3, 7, 11, 15, 19, 23, 26, 29)
+            elif isinstance(bl_raw, str):
+                bl = tuple(int(x) for x in bl_raw.split(","))
+            elif isinstance(bl_raw, tuple):
+                bl = bl_raw
+            else:
+                bl = tuple(bl_raw)
+
+            # Enforce ascending order for bridge_layers to match model_fn_wan_video iteration order.
+            # The video DiT iterates blocks 0..N-1 and appends to bridge_features; sorting here
+            # guarantees bridge_features[i] matches the i-th sorted layer regardless of config order.
+            bl = tuple(sorted(bl))
+            assert len(set(bl)) == len(bl), f"bridge_layers must be unique, got {bl}"
 
             self.action_dit = ActionDiT(
                 action_dim=int(cfg.get("action_dim", 14)),
@@ -111,9 +130,20 @@ class DualSystemArchitecture(BaseWAMArchitecture):
                 dit_state.x_video_proj = dit_state.x_video_proj + x_video_proj
 
             block = self.action_dit.blocks[i]
-            dit_state.x_action, dit_state.x_video_proj = block(
-                dit_state.x_action, dit_state.x_video_proj, dit_state.t_mod
-            )
+            if dit_state.use_joint_rope:
+                freqs_action = self.action_dit._get_rope_freqs(dit_state.x_action.shape[1], label="Action")
+                freqs_video = self.action_dit._get_rope_freqs(dit_state.x_video_proj.shape[1], label="Video")
+                dit_state.x_action, dit_state.x_video_proj = block(
+                    dit_state.x_action,
+                    dit_state.x_video_proj,
+                    dit_state.t_mod,
+                    freqs_action=freqs_action,
+                    freqs_video=freqs_video,
+                )
+            else:
+                dit_state.x_action, dit_state.x_video_proj = block(
+                    dit_state.x_action, dit_state.x_video_proj, dit_state.t_mod
+                )
 
             # Back-project video residual
             x_video_new = self.action_dit.video_back_projs[i](dit_state.x_video_proj)
