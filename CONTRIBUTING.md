@@ -6,7 +6,7 @@
 # Clone and install in editable mode
 git clone https://github.com/KraHsu/OpenWAM.git
 cd OpenWAM
-pip install -e ".[serving]"
+pip install -e .
 
 # Install dev tools
 pip install ruff pytest pre-commit

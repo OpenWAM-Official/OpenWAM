@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "open-wam"
 version = "0.1.0"
 description = "OpenWAM: A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment"
-authors = [{name = "OpenWAM Contributors"}]
-license = {text = "MIT"}
+authors = [{ name = "OpenWAM Contributors" }]
+license = { text = "MIT" }
 requires-python = ">=3.10.1"
 dependencies = [
     "numpy<3",
@@ -35,6 +35,8 @@ dependencies = [
     "wandb<1",
     "hydra-core>=1.3,<2",
     "omegaconf>=2.3,<3",
+    "websockets<15",
+    "aiohttp<4",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -47,20 +49,8 @@ where = ["./"]
 include = ["openwam", "openwam.*"]
 
 [project.optional-dependencies]
-serving = [
-    "websockets<15",
-    "aiohttp<4"
-]
-npu_aarch64 = [
-    "torch==2.7.1",
-    "torch-npu==2.7.1",
-    "torchvision==0.22.1"
-]
-npu = [
-    "torch==2.7.1+cpu",
-    "torch-npu==2.7.1",
-    "torchvision==0.22.1+cpu"
-]
+npu_aarch64 = ["torch==2.7.1", "torch-npu==2.7.1", "torchvision==0.22.1"]
+npu = ["torch==2.7.1+cpu", "torch-npu==2.7.1", "torchvision==0.22.1+cpu"]
 
 [tool.setuptools]
 include-package-data = true
@@ -71,7 +61,11 @@ openwam-serve = "openwam.deployment.policy_server:main"
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-exclude = ["third_party/", "previous_codebase/", "openwam/model/video_backbone/diffsynth/"]
+exclude = [
+    "third_party/",
+    "previous_codebase/",
+    "openwam/model/video_backbone/diffsynth/",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
