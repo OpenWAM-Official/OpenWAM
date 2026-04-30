@@ -3,13 +3,13 @@
 PYTHON ?= python
 
 help:
-	@echo "make test    - run the core OpenWAM test suite"
-	@echo "make lint    - check code with ruff"
-	@echo "make format  - auto-format code with ruff"
-	@echo "make compile - syntax-check Python sources with compileall"
-	@echo "make check   - run compile checks and the core test suite"
-	@echo "make all     - lint + test (full validation)"
-	@echo "make clean   - remove Python cache files"
+	@echo "make test           - run the core OpenWAM test suite"
+	@echo "make lint           - check code with ruff"
+	@echo "make format         - auto-format code with ruff"
+	@echo "make compile        - syntax-check Python sources with compileall"
+	@echo "make check          - run compile checks and the core test suite"
+	@echo "make all            - lint + test (full validation)"
+	@echo "make clean          - remove Python cache files"
 
 test:
 	$(PYTHON) -m pytest -q tests

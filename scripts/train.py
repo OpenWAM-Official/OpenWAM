@@ -72,6 +72,13 @@ def _build_accelerator(cfg: DictConfig):
 
 def _train(cfg: DictConfig) -> None:
     """Package-native training path."""
+    training_mode = cfg.get("training_mode", "openwam")
+
+    _train_openwam(cfg)
+
+
+def _train_openwam(cfg: DictConfig) -> None:
+    """Original OpenWAM training path."""
     from openwam.dataloader.registry import build_dataset
     from openwam.train.openwam_trainer import OpenWAMTrainer
 
@@ -83,6 +90,8 @@ def _train(cfg: DictConfig) -> None:
     # Build trainer and run
     trainer = OpenWAMTrainer(cfg, accelerator=accelerator, dataset=dataset)
     trainer.train()
+
+
 
 
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")
