@@ -1,0 +1,9 @@
+This directory contains OpenWAM's first-class Wan backbone code, extracted from the
+previous vendored DiffSynth-based implementation.
+
+Source attribution:
+- Derived from DiffSynth-Studio (Apache 2.0)
+- Original Wan-related implementation previously lived in OpenWAM's vendored
+  video-backbone package.
+
+OpenWAM keeps the original Apache 2.0 license in `license/LICENSE`.

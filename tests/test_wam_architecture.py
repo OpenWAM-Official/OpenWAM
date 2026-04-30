@@ -1,18 +1,31 @@
 """Tests for WAM Architecture registry and implementations."""
 
+import pytest
 import torch
 
+from openwam.model.base import ExecutionPlan
 
-def test_architecture_registry_populated():
-    from openwam.model import ARCHITECTURE_REGISTRY, ARCHITECTURE_SUPPORT
 
-    assert "dual_system" in ARCHITECTURE_REGISTRY
-    assert "moe_expert" in ARCHITECTURE_REGISTRY
-    assert "shared_backbone" in ARCHITECTURE_REGISTRY
-    assert len(ARCHITECTURE_REGISTRY) == 3
-    assert ARCHITECTURE_SUPPORT["dual_system"].supported is True
-    assert ARCHITECTURE_SUPPORT["moe_expert"].supported is True
-    assert ARCHITECTURE_SUPPORT["shared_backbone"].supported is True
+def test_architecture_module_layout_imports():
+    from openwam.model.architectures.dual_system import (
+        DualSystemCrossAttnArchitecture,
+        DualSystemSelfAttnArchitecture,
+    )
+    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
+    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
+
+    assert DualSystemCrossAttnArchitecture is not None
+    assert DualSystemSelfAttnArchitecture is not None
+    assert SharedBackboneMoEArchitecture is not None
+    assert SharedBackboneVanillaArchitecture is not None
+
+
+def test_architecture_state_types_import():
+    from openwam.model.action_backbone.action_dit import ActionDiTState
+    from openwam.model.action_backbone.shared_vanilla import SharedVanillaState
+
+    assert ActionDiTState is not None
+    assert SharedVanillaState is not None
 
 
 def test_architecture_support_lists():
@@ -22,16 +35,21 @@ def test_architecture_support_lists():
     )
 
     supported = list_supported_architectures()
-    assert "dual_system" in supported
-    assert "moe_expert" in supported
-    assert "shared_backbone" in supported
-    assert get_architecture_support("shared_backbone").status == "supported"
+    assert "dual_system_cross_attn" in supported
+    assert "dual_system_self_attn" in supported
+    assert "shared_backbone_vanilla" in supported
+    assert "shared_backbone_moe" in supported
+    assert get_architecture_support("shared_backbone_moe").status == "supported"
+    assert get_architecture_support("shared_backbone_vanilla").status == "supported"
 
 
 def test_build_architecture_dual_system():
     from openwam.model import build_architecture
 
     cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": True,
         "action_dim": 7,
         "dim": 128,
         "ffn_dim": 256,
@@ -39,40 +57,41 @@ def test_build_architecture_dual_system():
         "num_layers": 2,
         "video_dim": 256,
         "bridge_layers": (0, 1),
-        "bridge_type": "cross_attn_detach",
     }
-    arch = build_architecture("dual_system", cfg)
+    arch = build_architecture("dual_system_cross_attn", cfg)
     assert arch.action_dim == 7
     assert arch.bridge_layers == (0, 1)
-    assert arch.action_dit is not None
+    assert arch.action_backbone is not None
 
 
-def test_build_architecture_moe():
+def test_build_architecture_shared_backbone_moe():
     from openwam.model import build_architecture
 
     cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
         "num_experts": 2,
-        "expert_layers": (1, 3),
+        "bridge_layers": (1, 3),
     }
-    arch = build_architecture("moe_expert", cfg)
+    arch = build_architecture("shared_backbone_moe", cfg)
     assert arch.action_dim == 7
     assert arch.bridge_layers == (1, 3)
-    assert arch.moe_dit is not None
-    assert len(arch.moe_dit.expert_blocks) == 2
+    assert arch.action_backbone is not None
+    assert len(arch.action_backbone.expert_blocks) == 2
 
 
 def test_build_architecture_shared():
-    """Shared backbone should build successfully."""
+    """Shared backbone vanilla should build successfully."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
-    arch = build_architecture("shared_backbone", cfg)
+    arch = build_architecture("shared_backbone_vanilla", cfg)
     assert arch.action_dim == 7
     assert arch.bridge_layers == ()
-    assert arch.is_interleaved is True
+    assert arch.execution_plan == ExecutionPlan.INTERLEAVED_WHOLE_BLOCK
 
 
 def test_build_architecture_unknown():
@@ -89,6 +108,9 @@ def test_dual_system_prepare_and_extract():
     from openwam.model import build_architecture
 
     cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
         "action_dim": 7,
         "dim": 64,
         "ffn_dim": 128,
@@ -96,42 +118,43 @@ def test_dual_system_prepare_and_extract():
         "num_layers": 2,
         "video_dim": 128,
         "bridge_layers": (0, 1),
-        "bridge_type": "cross_attn",
     }
-    arch = build_architecture("dual_system", cfg)
+    arch = build_architecture("dual_system_cross_attn", cfg)
     arch.eval()
 
     B, T_action = 1, 10
     noisy_actions = torch.randn(B, T_action, 7)
     timestep = torch.tensor([500.0])
 
-    state = arch.prepare_action_tokens(noisy_actions, timestep)
+    state = arch.action_backbone.prepare_state(noisy_actions, timestep)
     assert state.action_latents is not None
-    assert "bridge_features" in state.extra
+    assert state.bridge_features == []
 
-    # Simulate two DiT blocks producing video hidden states
-    video_hidden = torch.randn(B, 20, 128)
-    for block_id in range(2):
-        video_hidden, state = arch.on_dit_block(block_id, video_hidden, state)
+    # Simulate two DiT blocks producing video hidden states (cross_attn collects
+    # features at every bridge_layer; ordering matches sorted bridge_layers).
+    for _ in arch.action_backbone.bridge_layers:
+        state.bridge_features.append(torch.randn(B, 20, 128))
 
     # Extract action prediction
     with torch.no_grad():
-        action_pred = arch.extract_action_prediction(state)
+        action_pred = arch.action_backbone.extract_prediction(state)
     assert action_pred.shape == (B, T_action, 7)
 
 
-def test_moe_expert_prepare_and_extract():
-    """Smoke test: MoE prepare action tokens, expert FFN, and extract prediction."""
+def test_shared_backbone_moe_prepare_and_extract():
+    """Smoke test: shared_backbone moe variant prepare action tokens, expert FFN, and extract prediction."""
     from openwam.model import build_architecture
 
     cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
         "num_experts": 2,
-        "expert_layers": (0, 1),
+        "bridge_layers": (0, 1),
     }
-    arch = build_architecture("moe_expert", cfg)
+    arch = build_architecture("shared_backbone_moe", cfg)
     arch.eval()
 
     B, T_action, T_video = 1, 10, 20
@@ -139,35 +162,44 @@ def test_moe_expert_prepare_and_extract():
     noisy_actions = torch.randn(B, T_action, 7)
     timestep = torch.tensor([500.0])
 
-    state = arch.prepare_action_tokens(noisy_actions, timestep)
-    assert "moe_state" in state.extra
+    state = arch.action_backbone.prepare_state(noisy_actions, timestep)
+    assert state.runtime_state is not None
 
-    moe_state = state.extra["moe_state"]
+    moe_state = state.runtime_state.payload
     assert moe_state.action_tokens.shape == (B, T_action, 128)
     assert moe_state.n_action_tokens == T_action
 
-    # Simulate video DiT blocks: action tokens are part of the combined sequence
-    # In real pipeline, concatenation happens in model_fn_wan_video.
-    # Here we simulate by creating a combined hidden state.
-    video_hidden = torch.randn(B, T_video + T_action, 128)  # combined sequence
+    # Drive run_block with a mock video state where action tokens sit at the
+    # tail of vstate.x (matching what before_loop would inject).
+    class _MockVState:
+        def __init__(self, x):
+            self.x = x
 
+    vstate = _MockVState(torch.cat([torch.randn(B, T_video, 128), moe_state.action_tokens], dim=1))
+
+    class _MockVB:
+        def run_block(self, _bid, vs):
+            return vs
+
+    vb = _MockVB()
+    ab = arch.action_backbone
     for block_id in range(2):
-        video_hidden, state = arch.on_dit_block(block_id, video_hidden, state)
+        vstate, state = ab.run_block(block_id, vb, vstate, state)
 
     assert moe_state.expert_block_counter == 2
 
     # Extract action prediction
     with torch.no_grad():
-        action_pred = arch.extract_action_prediction(state)
+        action_pred = ab.extract_prediction(state)
     assert action_pred.shape == (B, T_action, 7)
 
 
 def test_shared_backbone_prepare_and_extract():
-    """Smoke test: shared backbone prepare, on_dit_block (no-op), and extract."""
+    """Smoke test: shared backbone prepare, run_block (no-op), and extract."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
-    arch = build_architecture("shared_backbone", cfg)
+    arch = build_architecture("shared_backbone_vanilla", cfg)
     arch.eval()
 
     B, T_action, T_video = 1, 10, 20
@@ -175,20 +207,15 @@ def test_shared_backbone_prepare_and_extract():
     noisy_actions = torch.randn(B, T_action, 7)
     timestep = torch.tensor([500.0])
 
-    state = arch.prepare_action_tokens(noisy_actions, timestep)
+    state = arch.action_backbone.prepare_state(noisy_actions, timestep)
     assert state.action_latents.shape == (B, T_action, 128)
-    assert state.extra["num_action_tokens"] == T_action
+    assert state.num_action_tokens == T_action
 
-    # Simulate video DiT blocks: action tokens are part of the combined sequence
-    video_hidden = torch.randn(B, T_video + T_action, 128)
-    for block_id in range(2):
-        video_hidden, state = arch.on_dit_block(block_id, video_hidden, state)
-
-    # Store final hidden state for extraction
-    state.extra["final_hidden"] = video_hidden
+    # SharedBackbone vanilla: per-block is no-op; extract uses final_hidden.
+    state.final_hidden = torch.randn(B, T_video + T_action, 128)
 
     with torch.no_grad():
-        action_pred = arch.extract_action_prediction(state)
+        action_pred = arch.action_backbone.extract_prediction(state)
     assert action_pred.shape == (B, T_action, 7)
 
 
@@ -197,8 +224,8 @@ def test_shared_backbone_output_head_init():
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
-    arch = build_architecture("shared_backbone", cfg)
-    head = arch.action_output_head
+    arch = build_architecture("shared_backbone_vanilla", cfg)
+    head = arch.action_backbone.action_output_head
     assert torch.all(head.layer1.bias == 0)
     assert torch.all(head.layer2.bias == 0)
     for w in (head.layer1.weight, head.layer2.weight):
@@ -208,7 +235,7 @@ def test_shared_backbone_output_head_init():
 
 def test_moe_expert_ffn_and_output_head_init():
     """MoE: expert FFN output stays zero-init; action output head uses small-random init."""
-    from openwam.model.action_model.moe_expert_dit import MoEExpertDiT
+    from openwam.model.action_backbone.moe_dit import MoEExpertDiT
 
     dit = MoEExpertDiT(
         action_dim=7,
@@ -232,10 +259,13 @@ def test_moe_expert_ffn_and_output_head_init():
 
 
 def test_dual_system_bridge_interval_resolves():
-    """bridge_layers: null + bridge_interval resolves to range(0, N, step)."""
+    """bridge_layers: null + bridge_interval resolves from injected num_dit_layers."""
     from openwam.model import build_architecture
 
     cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": True,
         "action_dim": 7,
         "dim": 64,
         "ffn_dim": 128,
@@ -244,32 +274,33 @@ def test_dual_system_bridge_interval_resolves():
         "bridge_layers": None,
         "bridge_interval": 2,
         "num_dit_layers": 30,
-        "bridge_type": "cross_attn_detach",
     }
-    arch = build_architecture("dual_system", cfg)
+    arch = build_architecture("dual_system_cross_attn", cfg)
     assert arch.bridge_layers == tuple(range(0, 30, 2))
     assert len(arch.bridge_layers) == 15
 
     cfg["bridge_interval"] = 1
-    arch_full = build_architecture("dual_system", cfg)
+    arch_full = build_architecture("dual_system_cross_attn", cfg)
     assert arch_full.bridge_layers == tuple(range(30))
 
 
-def test_dual_system_bridge_interval_backward_compat():
-    """bridge_layers: null without bridge_interval keeps legacy 8-layer default."""
+def test_dual_system_bridge_interval_missing_raises():
+    """bridge_layers: null without bridge_interval should fail explicitly."""
     from openwam.model import build_architecture
 
     cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": True,
         "action_dim": 7,
         "dim": 64,
         "ffn_dim": 128,
         "num_heads": 4,
         "video_dim": 128,
         "bridge_layers": None,
-        "bridge_type": "cross_attn_detach",
     }
-    arch = build_architecture("dual_system", cfg)
-    assert arch.bridge_layers == (3, 7, 11, 15, 19, 23, 26, 29)
+    with pytest.raises(ValueError, match="bridge_layers is null but bridge_interval is not set"):
+        build_architecture("dual_system_cross_attn", cfg)
 
 
 def test_action_self_attention_rope_breaks_permutation_equivariance():
@@ -278,8 +309,8 @@ def test_action_self_attention_rope_breaks_permutation_equivariance():
     must NOT merely permute the output (the model distinguishes positions).
     Also: supplying RoPE freqs must change the output relative to freqs=None.
     """
-    from openwam.model.action_model.action_dit import ActionSelfAttention
-    from openwam.model.action_model.components import precompute_freqs_cis_1d
+    from openwam.model.action_backbone.action_dit import ActionSelfAttention
+    from openwam.model.action_backbone.components import precompute_freqs_cis_1d
 
     dim, num_heads, seq = 32, 4, 4
     head_dim = dim // num_heads
@@ -306,11 +337,11 @@ def test_action_self_attention_rope_breaks_permutation_equivariance():
     assert not torch.allclose(out_rope, out_plain, atol=1e-5)
 
 
-def test_action_dit_rope_cross_attn_path():
-    """ActionDiT cross_attn_detach path runs end-to-end with RoPE instead of
+def test_action_dit_joint_cross_attn_detach_path_uses_rope():
+    """ActionDiT joint_cross_attn with detach_bridge=True runs end-to-end with RoPE instead of
     LearnedPositionalEncoding.
     """
-    from openwam.model.action_model.action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -320,7 +351,8 @@ def test_action_dit_rope_cross_attn_path():
         num_layers=2,
         video_dim=128,
         bridge_layers=(0, 1),
-        bridge_type="cross_attn_detach",
+        variant="joint_cross_attn",
+        detach_bridge=True,
     )
     assert dit.pos_encoding is None  # RoPE path
     assert hasattr(dit, "freqs") and dit.freqs.shape == (1024, 64 // 4 // 2)
@@ -332,9 +364,9 @@ def test_action_dit_rope_cross_attn_path():
     assert out.shape == (2, 5, 7)
 
 
-def test_action_dit_joint_self_attn_keeps_learned_pe():
-    """joint_self_attn keeps learned action PE while also preparing joint RoPE."""
-    from openwam.model.action_model.action_dit import ActionDiT
+def test_action_dit_joint_self_attn_uses_only_rope():
+    """joint_self_attn relies solely on RoPE (no learned absolute PE)."""
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -344,9 +376,9 @@ def test_action_dit_joint_self_attn_keeps_learned_pe():
         num_layers=2,
         video_dim=64,  # match dim so no video_projs Linear mismatch
         bridge_layers=(0, 1),
-        bridge_type="joint_self_attn",
+        variant="joint_self_attn",
     )
-    assert dit.pos_encoding is not None
+    assert dit.pos_encoding is None
 
     state = dit.prepare_action_state(torch.randn(2, 5, 7), torch.tensor([0.5, 0.8]))
     assert state.use_joint_rope is True
@@ -357,55 +389,415 @@ def test_dual_system_joint_self_attn_production_path_applies_rope():
     from openwam.model import build_architecture
 
     cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
         "action_dim": 7,
         "dim": 32,
         "ffn_dim": 64,
         "num_heads": 4,
         "video_dim": 32,
         "bridge_layers": (0,),
-        "bridge_type": "joint_self_attn",
     }
-    arch = build_architecture("dual_system", cfg)
+    arch = build_architecture("dual_system_self_attn", cfg)
     arch.eval()
 
     captured = {}
-    original_forward = arch.action_dit.blocks[0].joint_attn.forward
+    original_forward = arch.action_backbone.blocks[0].joint_attn.forward
 
     def wrapped_forward(x_action, x_video, freqs_action=None, freqs_video=None):
         captured["freqs_action"] = freqs_action
         captured["freqs_video"] = freqs_video
-        return original_forward(x_action, x_video, freqs_action=freqs_action, freqs_video=freqs_video)
+        return original_forward(
+            x_action,
+            x_video,
+            freqs_action=freqs_action,
+            freqs_video=freqs_video,
+        )
 
-    arch.action_dit.blocks[0].joint_attn.forward = wrapped_forward
+    arch.action_backbone.blocks[0].joint_attn.forward = wrapped_forward
     try:
         noisy_actions = torch.randn(2, 5, 7)
         timestep = torch.tensor([0.5, 0.8])
-        state = arch.prepare_action_tokens(noisy_actions, timestep)
-        video_hidden = torch.randn(2, 9, 32)
-        _, state = arch.on_dit_block(0, video_hidden, state)
+        state = arch.action_backbone.prepare_state(noisy_actions, timestep)
+
+        class _MockVState:
+            def __init__(self, x, t_mod, f, h, w):
+                self.x = x
+                self.reference_prefix_len = 0
+                self.t_mod = t_mod
+                self.f = f
+                self.h = h
+                self.w = w
+
+        class _MockVB:
+            def run_block(self, _bid, vs):
+                return vs
+
+        # 9 video tokens treated as 1D temporal axis.
+        vstate = _MockVState(torch.randn(2, 9, 32), t_mod=torch.zeros(2, 6, 32), f=9, h=1, w=1)
+        _, state = arch.action_backbone.run_block(0, _MockVB(), vstate, state)
         with torch.no_grad():
-            action_pred = arch.extract_action_prediction(state)
+            action_pred = arch.action_backbone.extract_prediction(state)
     finally:
-        arch.action_dit.blocks[0].joint_attn.forward = original_forward
+        arch.action_backbone.blocks[0].joint_attn.forward = original_forward
 
     assert action_pred.shape == (2, 5, 7)
     assert captured["freqs_action"] is not None
     assert captured["freqs_video"] is not None
-    assert captured["freqs_action"].shape[0] == state.extra["dit_state"].x_action.shape[1]
-    assert captured["freqs_video"].shape[0] == state.extra["dit_state"].x_video_proj.shape[1]
+    assert captured["freqs_action"].shape[0] == state.runtime_state.payload.x_action.shape[1]
+    assert captured["freqs_video"].shape[0] == state.runtime_state.payload.x_video_proj.shape[1]
+
+
+def test_dual_system_joint_cross_attn_not_interleaved_and_collects_bridge_features():
+    """Joint cross-attn stays in bridge-collection mode and records features."""
+    from openwam.model import build_architecture
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
+        "action_dim": 7,
+        "dim": 64,
+        "ffn_dim": 128,
+        "num_heads": 4,
+        "video_dim": 128,
+        "bridge_layers": (0, 2),
+    }
+    arch = build_architecture("dual_system_cross_attn", cfg)
+    assert arch.execution_plan == ExecutionPlan.BRIDGE_COLLECTION
+
+    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    assert state.bridge_features == []
+    assert state.runtime_state.payload is state
+
+    class _MockVState:
+        def __init__(self, x):
+            self.x = x
+
+    class _MockVB:
+        def run_block(self, _bid, vs):
+            return vs
+
+    vstate = _MockVState(torch.randn(1, 9, 128))
+    vb = _MockVB()
+    for block_id in range(3):
+        vstate, state = arch.action_backbone.run_block(block_id, vb, vstate, state)
+    assert len(state.bridge_features) == 2
+
+
+def test_dual_system_detached_joint_cross_attn_not_interleaved_and_collects_bridge_features():
+    """Detached joint cross-attn shares the same structure and still uses bridge collection."""
+    from openwam.model import build_architecture
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": True,
+        "action_dim": 7,
+        "dim": 64,
+        "ffn_dim": 128,
+        "num_heads": 4,
+        "video_dim": 128,
+        "bridge_layers": (1,),
+    }
+    arch = build_architecture("dual_system_cross_attn", cfg)
+    assert arch.execution_plan == ExecutionPlan.BRIDGE_COLLECTION
+
+    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    assert state.bridge_features == []
+    assert state.runtime_state.payload is state
+
+
+def test_dual_system_joint_self_attn_execution_plan_and_creates_dit_state():
+    """joint_self_attn switches DualSystem into interleaved mode."""
+    from openwam.model import build_architecture
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "bridge_layers": (0, 1),
+    }
+    arch = build_architecture("dual_system_self_attn", cfg)
+    assert arch.execution_plan == ExecutionPlan.INTERLEAVED_SPLIT_SELF_ATTENTION
+
+    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    assert state.runtime_state is not None
+    assert state.runtime_state.variant == "joint_self_attn"
+    assert state.bridge_features == []
+
+
+def test_moe_execution_plan_and_uses_expert_layers_as_bridge_layers():
+    """SharedBackbone moe variant remains interleaved and exposes expert_layers via bridge_layers."""
+    from openwam.model import build_architecture
+
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
+        "action_dim": 7,
+        "video_dim": 128,
+        "expert_ffn_dim": 256,
+        "num_experts": 2,
+        "bridge_layers": (1, 3),
+    }
+    arch = build_architecture("shared_backbone_moe", cfg)
+    assert arch.execution_plan == ExecutionPlan.INTERLEAVED_SPLIT_FFN
+    assert arch.bridge_layers == (1, 3)
+
+    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    assert state.runtime_state is not None
+    assert state.runtime_state.variant == "moe"
+
+
+def test_shared_backbone_execution_plan_and_has_no_bridge_layers():
+    """SharedBackbone is interleaved but has no explicit bridge layers."""
+    from openwam.model import build_architecture
+
+    cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 5}
+    arch = build_architecture("shared_backbone_vanilla", cfg)
+    assert arch.execution_plan == ExecutionPlan.INTERLEAVED_WHOLE_BLOCK
+    assert arch.bridge_layers == ()
+
+
+def test_normalize_architecture_spec_shared_backbone():
+    from openwam.model.architectures.registry import normalize_architecture_spec
+
+    spec = normalize_architecture_spec("shared_backbone_vanilla", {"action_dim": 7})
+    assert spec.framework == "shared_backbone"
+    assert spec.variant == "vanilla"
+    assert spec.options == {}
+
+
+def test_normalize_architecture_spec_shared_backbone_moe():
+    from openwam.model.architectures.registry import normalize_architecture_spec
+
+    spec = normalize_architecture_spec("shared_backbone_moe", {"action_dim": 7})
+    assert spec.framework == "shared_backbone"
+    assert spec.variant == "moe"
+    assert spec.options == {}
+
+
+def test_normalize_architecture_spec_dual_system_joint_cross_attn_detach_false():
+    from openwam.model.architectures.registry import normalize_architecture_spec
+
+    spec = normalize_architecture_spec("dual_system_cross_attn", {"detach_bridge": False})
+    assert spec.framework == "dual_system"
+    assert spec.variant == "joint_cross_attn"
+    assert spec.options == {"detach_bridge": False}
+
+
+def test_normalize_architecture_spec_dual_system_joint_cross_attn_detach_true():
+    from openwam.model.architectures.registry import normalize_architecture_spec
+
+    spec = normalize_architecture_spec("dual_system_cross_attn", {"detach_bridge": True})
+    assert spec.framework == "dual_system"
+    assert spec.variant == "joint_cross_attn"
+    assert spec.options == {"detach_bridge": True}
+
+
+def test_normalize_architecture_spec_dual_system_joint_self_attn():
+    from openwam.model.architectures.registry import normalize_architecture_spec
+
+    spec = normalize_architecture_spec("dual_system_self_attn")
+    assert spec.framework == "dual_system"
+    assert spec.variant == "joint_self_attn"
+    assert spec.options == {}
+
+
+def test_resolve_architecture_config_from_canonical_dual_system_fields():
+    from types import SimpleNamespace
+
+    from openwam.model.registry import resolve_architecture_config
+
+    model_cfg = SimpleNamespace(
+        architecture={
+            "framework": "dual_system",
+            "variant": "joint_cross_attn",
+            "detach_bridge": True,
+            "action_dim": 20,
+        },
+        action_backbone={"dim": 128, "num_heads": 4},
+    )
+    resolved = resolve_architecture_config(model_cfg, video_dim=256)
+
+    assert resolved.registry_name == "dual_system_cross_attn"
+    assert resolved.canonical.framework == "dual_system"
+    assert resolved.canonical.variant == "joint_cross_attn"
+    assert resolved.params["detach_bridge"] is True
+    assert resolved.params["video_dim"] == 256
+    assert resolved.params["dim"] == 128
+
+
+def test_resolve_architecture_config_from_canonical_fields():
+    from types import SimpleNamespace
+
+    from openwam.model.registry import resolve_architecture_config
+
+    model_cfg = SimpleNamespace(
+        architecture={
+            "framework": "shared_backbone",
+            "variant": "moe",
+            "action_dim": 20,
+            "expert_ffn_dim": 512,
+        },
+        action_backbone={},
+    )
+    resolved = resolve_architecture_config(model_cfg, video_dim=192)
+
+    assert resolved.registry_name == "shared_backbone_moe"
+    assert resolved.canonical.framework == "shared_backbone"
+    assert resolved.canonical.variant == "moe"
+    assert resolved.params["framework"] == "shared_backbone"
+    assert resolved.params["variant"] == "moe"
+    assert resolved.params["video_dim"] == 192
+
+
+def test_build_architecture_injects_framework_and_variant_for_shared_backbone():
+    from openwam.model import build_architecture
+
+    cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
+    arch = build_architecture("shared_backbone_vanilla", cfg)
+    assert arch.cfg["framework"] == "shared_backbone"
+    assert arch.cfg["variant"] == "vanilla"
+
+
+def test_build_architecture_injects_framework_variant_and_detach_option():
+    from openwam.model import build_architecture
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": True,
+        "action_dim": 7,
+        "dim": 64,
+        "ffn_dim": 128,
+        "num_heads": 4,
+        "video_dim": 128,
+        "bridge_layers": (0, 1),
+    }
+    arch = build_architecture("dual_system_cross_attn", cfg)
+    assert arch.cfg["framework"] == "dual_system"
+    assert arch.cfg["variant"] == "joint_cross_attn"
+    assert arch.cfg["detach_bridge"] is True
+
+
+def test_build_architecture_shared_backbone_moe_canonical_config():
+    from openwam.model import build_architecture
+
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
+        "action_dim": 7,
+        "video_dim": 128,
+        "expert_ffn_dim": 256,
+        "num_experts": 2,
+        "bridge_layers": (1, 3),
+    }
+    arch = build_architecture("shared_backbone_moe", cfg)
+    assert arch.cfg["framework"] == "shared_backbone"
+    assert arch.cfg["variant"] == "moe"
+
+
+def test_dual_system_runtime_state_cross_attn():
+    from openwam.model import build_architecture
+    from openwam.model.architectures.base import ExecutionPlan
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
+        "action_dim": 7,
+        "dim": 64,
+        "ffn_dim": 128,
+        "num_heads": 4,
+        "video_dim": 128,
+        "bridge_layers": (0, 1),
+    }
+    arch = build_architecture("dual_system_cross_attn", cfg)
+    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    assert state.runtime_state is not None
+    assert state.runtime_state.framework == "dual_system"
+    assert state.runtime_state.variant == "joint_cross_attn"
+    assert state.runtime_state.execution_plan == ExecutionPlan.BRIDGE_COLLECTION
+    assert state.runtime_state.options == {"detach_bridge": False}
+
+
+def test_dual_system_runtime_state_joint_self_attn():
+    from openwam.model import build_architecture
+    from openwam.model.action_backbone.action_dit import ActionDiTState
+    from openwam.model.architectures.base import ExecutionPlan
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "bridge_layers": (0, 1),
+    }
+    arch = build_architecture("dual_system_self_attn", cfg)
+    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    assert state.runtime_state is not None
+    assert state.runtime_state.framework == "dual_system"
+    assert state.runtime_state.variant == "joint_self_attn"
+    assert state.runtime_state.execution_plan == ExecutionPlan.INTERLEAVED_SPLIT_SELF_ATTENTION
+    assert isinstance(state.runtime_state.payload, ActionDiTState)
+
+
+def test_shared_backbone_runtime_state_typed():
+    from openwam.model import build_architecture
+    from openwam.model.action_backbone.shared_vanilla import SharedVanillaState
+    from openwam.model.architectures.base import ExecutionPlan
+
+    arch = build_architecture("shared_backbone_vanilla", {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5})
+    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    assert state.runtime_state is not None
+    assert state.runtime_state.framework == "shared_backbone"
+    assert state.runtime_state.variant == "vanilla"
+    assert state.runtime_state.execution_plan == ExecutionPlan.INTERLEAVED_WHOLE_BLOCK
+    assert isinstance(state.runtime_state.payload, SharedVanillaState)
+
+
+def test_moe_runtime_state_typed():
+    from openwam.model import build_architecture
+    from openwam.model.action_backbone.moe_dit import MoEExpertState
+    from openwam.model.architectures.base import ExecutionPlan
+
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
+        "action_dim": 7,
+        "video_dim": 128,
+        "expert_ffn_dim": 256,
+        "num_experts": 2,
+        "bridge_layers": (1, 3),
+    }
+    arch = build_architecture("shared_backbone_moe", cfg)
+    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    assert state.runtime_state is not None
+    assert state.runtime_state.framework == "shared_backbone"
+    assert state.runtime_state.variant == "moe"
+    assert state.runtime_state.execution_plan == ExecutionPlan.INTERLEAVED_SPLIT_FFN
+    assert isinstance(state.runtime_state.payload, MoEExpertState)
 
 
 def test_register_custom_architecture():
     """Verify that custom architectures can be registered."""
-    from openwam.model.base import ActionState, BaseWAMArchitecture
-    from openwam.model.registry import ARCHITECTURE_REGISTRY, register_architecture
+    from openwam.model.architectures.base import ActionState, BaseWAMArchitecture
+    from openwam.model.architectures.registry import ARCHITECTURE_METADATA, ARCHITECTURE_REGISTRY, register_architecture
 
-    @register_architecture("test_custom")
+    @register_architecture("test_custom", framework="test", variant="custom")
     class TestArch(BaseWAMArchitecture):
-        def prepare_action_tokens(self, noisy_actions, timestep, **kw):
+        def prepare_action_tokens(self, noisy_actions, timestep, **_kw):
             return ActionState(action_latents=noisy_actions, timestep=timestep)
 
-        def on_dit_block(self, block_id, video_hidden, action_state):
+        def on_dit_block(self, _block_id, video_hidden, action_state):
             return video_hidden, action_state
 
         def extract_action_prediction(self, action_state):
@@ -420,6 +812,8 @@ def test_register_custom_architecture():
             return ()
 
     assert "test_custom" in ARCHITECTURE_REGISTRY
+    assert "test_custom" in ARCHITECTURE_METADATA
 
     # Cleanup
     del ARCHITECTURE_REGISTRY["test_custom"]
+    ARCHITECTURE_METADATA.pop("test_custom", None)

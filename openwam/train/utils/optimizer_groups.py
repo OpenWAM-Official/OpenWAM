@@ -18,10 +18,10 @@ def _is_no_wd(name: str) -> bool:
 
 
 def _action_named_parameters(model):
-    action_dit = getattr(model, "action_dit", None)
-    if action_dit is None:
+    action_backbone = getattr(model, "action_backbone", None)
+    if action_backbone is None:
         return []
-    return [(name, param) for name, param in action_dit.named_parameters() if param.requires_grad]
+    return [(name, param) for name, param in action_backbone.named_parameters() if param.requires_grad]
 
 
 def _pipe_named_parameters(model):
@@ -38,14 +38,14 @@ def build_trainable_parameters(
     video_lr=None,
     lora_lr=None,
 ):
-    """Build optimizer params/groups for the legacy training module.
+    """Build optimizer param groups for OpenWAM training.
 
     Returns optimizer param groups. Always isolates `modality_tmod_bias` (and
     any other suffix in ``NO_WD_PARAM_SUFFIXES``) into a dedicated
     ``weight_decay=0`` group, regardless of per-module LR overrides.
     """
-    if getattr(model, "lambda_action", 0) <= 0 and hasattr(model, "action_dit"):
-        model.action_dit.requires_grad_(False)
+    if getattr(model, "lambda_action", 0) <= 0 and hasattr(model, "action_backbone"):
+        model.action_backbone.requires_grad_(False)
 
     action_named = _action_named_parameters(model) if getattr(model, "lambda_action", 0) > 0 else []
     pipe_named = _pipe_named_parameters(model)
@@ -58,7 +58,7 @@ def build_trainable_parameters(
     pipe_named = [(n, p) for n, p in pipe_named if not _is_no_wd(n)]
 
     # When no LR override AND no no-wd params, preserve flat-list behavior for
-    # backward compatibility with existing checkpoints / test expectations.
+    # current optimizer builder and test expectations.
     if action_lr is None and video_lr is None and lora_lr is None and not action_no_wd and not pipe_no_wd:
         return action_params + [param for _, param in pipe_named]
 
@@ -105,7 +105,7 @@ def attach_optimizer_groups(
     video_lr=None,
     lora_lr=None,
 ):
-    """Attach scale-oriented optimizer grouping to the legacy training module."""
+    """Attach scale-oriented optimizer grouping to a model instance."""
 
     def _trainable_modules(self):
         return build_trainable_parameters(

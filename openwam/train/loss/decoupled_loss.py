@@ -1,4 +1,4 @@
-"""Decoupled noise training loss for DreamZero-Flash style training.
+"""Decoupled timestep sampling for DreamZero-Flash style training.
 
 During standard joint training, video and action timesteps are sampled
 independently but from the same uniform distribution. Decoupled training
@@ -10,24 +10,26 @@ action inference at deployment.
 Usage:
     from openwam.train.loss.decoupled_loss import DecoupledFlowMatchLoss
 
-    loss_fn = DecoupledFlowMatchLoss(
+    sampler = DecoupledFlowMatchLoss(
         video_beta_a=0.5, video_beta_b=1.0,
     )
-    # Use in place of standard FlowMatchVideoActionLoss
+    video_t, action_t = sampler.sample_timesteps(batch_size=B)
+
+This module owns the entire training-side decoupled sampling logic.
+The matching deployment-side schedules live in
+``openwam.deploy.optimizations.decoupled_schedule``.
 """
 
 import torch
 
-from openwam.deployment.optimizations.decoupled_schedule import sample_decoupled_timesteps
-
 
 class DecoupledFlowMatchLoss:
-    """Decoupled noise sampling strategy for flow matching training.
+    """Decoupled noise timestep sampler for flow matching training.
 
-    Wraps the standard loss computation with Beta-distributed video
-    timestep sampling. This is not a standalone loss function — it
-    provides the timestep sampling logic that should be used with
-    the existing FlowMatchVideoActionLoss.
+    Despite the historical name, this is not a standalone loss — it
+    provides Beta-distributed video timestep sampling (with uniform
+    action timesteps) used by ``BaseWAMArchitecture.compute_loss``
+    when ``training.decoupled.enabled=true``.
 
     Args:
         video_beta_a: Beta distribution alpha for video timesteps.
@@ -60,7 +62,9 @@ class DecoupledFlowMatchLoss:
         """Sample decoupled video and action timesteps.
 
         During warmup, uses standard uniform sampling for both modalities.
-        After warmup, switches to Beta-distributed video timesteps.
+        After warmup, video timesteps are drawn from a Beta distribution
+        biased toward high noise (samples cluster near ``num_train_timesteps``)
+        while action timesteps stay uniform.
 
         Args:
             batch_size: Number of samples in the batch.
@@ -68,19 +72,18 @@ class DecoupledFlowMatchLoss:
             device: Target device.
 
         Returns:
-            (video_timesteps, action_timesteps) each (batch_size,).
+            (video_timesteps, action_timesteps) each (batch_size,),
+            float tensors with values in [0, num_train_timesteps).
         """
         if current_step < self.warmup_steps:
-            # Standard uniform sampling during warmup
             video_t = torch.randint(0, self.num_train_timesteps, (batch_size,)).float()
             action_t = torch.randint(0, self.num_train_timesteps, (batch_size,)).float()
             return video_t.to(device), action_t.to(device)
 
-        return sample_decoupled_timesteps(
-            batch_size=batch_size,
-            num_train_timesteps=self.num_train_timesteps,
-            video_beta_a=self.video_beta_a,
-            video_beta_b=self.video_beta_b,
-            action_uniform=True,
-            device=device,
-        )
+        # Beta(a, b) with a < b peaks near 0; flipping via (1 - x) makes
+        # samples cluster near num_train_timesteps (i.e. high noise).
+        beta_dist = torch.distributions.Beta(self.video_beta_a, self.video_beta_b)
+        beta_samples = beta_dist.sample((batch_size,))
+        video_t = ((1.0 - beta_samples) * self.num_train_timesteps).clamp(0, self.num_train_timesteps - 1)
+        action_t = torch.randint(0, self.num_train_timesteps, (batch_size,)).float()
+        return video_t.to(device), action_t.to(device)

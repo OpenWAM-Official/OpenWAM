@@ -21,6 +21,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# ── Quiet logging defaults ──
+# Force NCCL_DEBUG to WARN to suppress the per-channel/per-rank INFO spam
+# (RingP2P, comm init, topology probes) that buries training progress. We
+# unconditionally override here because cloud environments commonly export
+# NCCL_DEBUG=INFO by default. Opt back in with OPENWAM_VERBOSE_NCCL=1.
+if [[ "${OPENWAM_VERBOSE_NCCL:-0}" == "1" ]]; then
+    export NCCL_DEBUG=INFO
+else
+    export NCCL_DEBUG=WARN
+fi
+
 # ── GPU / Node topology ──
 NPROC_PER_NODE="${NPROC_PER_NODE:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"

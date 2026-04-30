@@ -20,7 +20,7 @@ class _DummyTrainingModule:
     def __init__(self, lambda_action=1.0):
         self.lambda_action = lambda_action
         self.pipe = _DummyPipe()
-        self.action_dit = _DummyModule()
+        self.action_backbone = _DummyModule()
 
 
 def test_build_trainable_parameters_defaults_to_flat_list():
@@ -62,4 +62,4 @@ def test_build_trainable_parameters_drops_action_branch_for_video_only():
     assert len(groups) == 1
     assert groups[0]["lr"] == 5e-5
     assert len(groups[0]["params"]) == 2
-    assert all(not param.requires_grad for param in model.action_dit.parameters())
+    assert all(not param.requires_grad for param in model.action_backbone.parameters())

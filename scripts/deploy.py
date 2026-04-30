@@ -6,13 +6,12 @@ Usage:
     python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir --num-steps 10 --schedule-type sync
     python scripts/deploy.py --mock --mock-action-dim 20   # no checkpoint or GPU needed
 
-Base configuration is read from configs/deployment.yaml.  CLI flags take precedence
+Base configuration is read from configs/deploy.yaml.  CLI flags take precedence
 over values in the yaml for the fields they cover.
 
 Inference overrides (all optional; yaml values used when absent):
   --denoise-steps N       Denoising step count
   --schedule-type TYPE    Schedule type: sync | cascade | decoupled_flash | decoupled_asymmetric
-  --cfg-scale SCALE       CFG scale (1.0 = disabled, recommended for robotics)
   --shift SHIFT           Flow-matching shift parameter
 """
 
@@ -25,11 +24,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
 
-_DEPLOY_CFG_PATH = PROJECT_ROOT / "configs" / "deployment.yaml"
+_DEPLOY_CFG_PATH = PROJECT_ROOT / "configs" / "deploy.yaml"
 
 
 def _load_deploy_config():
-    """Load configs/deployment.yaml as a base deploy config."""
+    """Load configs/deploy.yaml as a base deploy config."""
     from omegaconf import OmegaConf
 
     if _DEPLOY_CFG_PATH.exists():
@@ -47,21 +46,19 @@ def _apply_cli_overrides(deploy_cfg, args):
 
     # Server / device
     if args.device is not None:
-        OmegaConf.update(deploy_cfg, "deployment.device", args.device, merge=False)
+        OmegaConf.update(deploy_cfg, "device", args.device, merge=False)
     if args.host is not None:
-        OmegaConf.update(deploy_cfg, "deployment.server.host", args.host, merge=False)
+        OmegaConf.update(deploy_cfg, "server.host", args.host, merge=False)
     if args.ws_port is not None:
-        OmegaConf.update(deploy_cfg, "deployment.server.ws_port", args.ws_port, merge=False)
+        OmegaConf.update(deploy_cfg, "server.ws_port", args.ws_port, merge=False)
     if args.http_port is not None:
-        OmegaConf.update(deploy_cfg, "deployment.server.http_port", args.http_port, merge=False)
+        OmegaConf.update(deploy_cfg, "server.http_port", args.http_port, merge=False)
 
     # Inference
     if args.denoise_steps is not None:
         OmegaConf.update(deploy_cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.schedule_type is not None:
         OmegaConf.update(deploy_cfg, "inference.schedule_type", args.schedule_type, merge=False)
-    if args.cfg_scale is not None:
-        OmegaConf.update(deploy_cfg, "inference.cfg_scale", args.cfg_scale, merge=False)
     if args.shift is not None:
         OmegaConf.update(deploy_cfg, "inference.shift", args.shift, merge=False)
 
@@ -99,9 +96,9 @@ def _log_attention_backends(logger):
     """
     lines = ["Attention backend diagnostics:"]
 
-    # --- ActionDiT backend (attention_utils.py, lazy, env: WAM_ATTENTION_IMPL) ---
+    # --- ActionDiT backend (components.py, lazy, env: WAM_ATTENTION_IMPL) ---
     try:
-        from openwam.model.action_model.attention_utils import get_attention_fn
+        from openwam.model.action_backbone.components import get_attention_fn
 
         fn = get_attention_fn()
         name = fn.__name__ if hasattr(fn, "__name__") else repr(fn)
@@ -109,9 +106,9 @@ def _log_attention_backends(logger):
     except Exception as e:
         lines.append(f"  ActionDiT          : ERROR ({e})")
 
-    # --- Video DiT backend (wan_video_dit.py, checked at import time, no env var) ---
+    # --- Video DiT backend (Wan first-class path, checked at import time, no env var) ---
     try:
-        import openwam.model.video_backbone.diffsynth.models.wan_video_dit as _vdit
+        import openwam.model.video_backbone.wan.dit as _vdit
 
         if getattr(_vdit, "FLASH_ATTN_3_AVAILABLE", False):
             vdit_backend = "flash_attention_3"
@@ -125,20 +122,20 @@ def _log_attention_backends(logger):
     except Exception as e:
         lines.append(f"  Video DiT          : ERROR ({e})")
 
-    # --- diffsynth core backend (attention.py, env: DIFFSYNTH_ATTENTION_IMPLEMENTATION) ---
+    # --- Wan shared core backend (attention.py, env: DIFFSYNTH_ATTENTION_IMPLEMENTATION) ---
     try:
-        from openwam.model.video_backbone.diffsynth.core.attention.attention import ATTENTION_IMPLEMENTATION
+        from openwam.model.video_backbone.wan.shared.core.attention.attention import ATTENTION_IMPLEMENTATION
 
-        lines.append(f"  diffsynth core     : {ATTENTION_IMPLEMENTATION}")
+        lines.append(f"  Wan shared core    : {ATTENTION_IMPLEMENTATION}")
     except Exception as e:
-        lines.append(f"  diffsynth core     : ERROR ({e})")
+        lines.append(f"  Wan shared core    : ERROR ({e})")
 
     logger.info("\n".join(lines))
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Deploy OpenWAM policy server. Base config from configs/deployment.yaml; CLI overrides it."
+        description="Deploy OpenWAM policy server. Base config from configs/deploy.yaml; CLI overrides it."
     )
     parser.add_argument("--ckpt-dir", type=str, default=None, help="Checkpoint directory (config.yaml + .safetensors)")
     parser.add_argument("--ckpt-name", type=str, default=None, help="Specific checkpoint filename (default: latest)")
@@ -151,7 +148,6 @@ def main():
         "--denoise-steps", type=int, default=None, dest="denoise_steps", help="Override denoising steps"
     )
     parser.add_argument("--schedule-type", type=str, default=None, dest="schedule_type", help="Override schedule type")
-    parser.add_argument("--cfg-scale", type=float, default=None, dest="cfg_scale", help="Override CFG scale")
     parser.add_argument("--shift", type=float, default=None, help="Override flow-matching shift")
     # Mock mode: no weights or GPU needed
     parser.add_argument(
@@ -186,25 +182,25 @@ def main():
     deploy_cfg = _load_deploy_config()
     deploy_cfg = _apply_cli_overrides(deploy_cfg, args)
 
-    # Resolve checkpoint dir: CLI --ckpt-dir > deployment.checkpoint_path in yaml.
+    # Resolve checkpoint dir: CLI --ckpt-dir > checkpoint_path in yaml.
     if not args.mock and args.ckpt_dir is None:
-        yaml_ckpt = OmegaConf.select(deploy_cfg, "deployment.checkpoint_path", default=None)
+        yaml_ckpt = OmegaConf.select(deploy_cfg, "checkpoint_path", default=None)
         if yaml_ckpt:
             args.ckpt_dir = str(yaml_ckpt)
-            logger.info("Using checkpoint from deployment.yaml: %s", args.ckpt_dir)
+            logger.info("Using checkpoint from deploy.yaml: %s", args.ckpt_dir)
         else:
-            parser.error("--ckpt-dir is required (or set deployment.checkpoint_path in configs/deployment.yaml)")
+            parser.error("--ckpt-dir is required (or set checkpoint_path in configs/deploy.yaml)")
 
     # Resolve server params (with yaml fallbacks).
-    server_cfg = OmegaConf.select(deploy_cfg, "deployment.server", default=OmegaConf.create({}))
-    device = str(OmegaConf.select(deploy_cfg, "deployment.device", default="cuda"))
+    server_cfg = OmegaConf.select(deploy_cfg, "server", default=OmegaConf.create({}))
+    device = str(OmegaConf.select(deploy_cfg, "device", default="cuda"))
     host = str(OmegaConf.select(server_cfg, "host", default="0.0.0.0"))
     ws_port = int(OmegaConf.select(server_cfg, "ws_port", default=8850))
     http_port = int(OmegaConf.select(server_cfg, "http_port", default=8848))
 
     if args.mock:
         # Mock mode: skip model loading entirely
-        from openwam.deployment.mock_engine import MockInferenceEngine
+        from openwam.deploy.mock_engine import MockInferenceEngine
 
         cfg = OmegaConf.merge(OmegaConf.create({}), deploy_cfg)
         engine = MockInferenceEngine(
@@ -219,9 +215,9 @@ def main():
         )
     else:
         # Real mode: load weights from checkpoint directory
-        from openwam.deployment.model_loader import load_from_checkpoint_dir
+        from openwam.deploy.model_loader import load_from_checkpoint_dir
 
-        training_cfg, pipe, architecture = load_from_checkpoint_dir(
+        training_cfg, architecture = load_from_checkpoint_dir(
             ckpt_dir=args.ckpt_dir,
             device=device,
             ckpt_name=args.ckpt_name,
@@ -230,18 +226,17 @@ def main():
         # Merge: training config + deploy config (deploy wins on overlap)
         cfg = _merge_with_training_cfg(training_cfg, deploy_cfg)
 
-        from openwam.deployment.joint_engine import JointInferenceEngine
+        from openwam.deploy.joint_engine import JointInferenceEngine
 
-        engine = JointInferenceEngine(cfg=cfg, pipeline=pipe, architecture=architecture)
+        engine = JointInferenceEngine(cfg=cfg, architecture=architecture)
         logger.info(
-            "Inference engine ready — steps=%d schedule=%s cfg_scale=%.1f",
+            "Inference engine ready — steps=%d schedule=%s",
             OmegaConf.select(cfg, "inference.denoise_steps", default=20),
             OmegaConf.select(cfg, "inference.schedule_type", default="sync"),
-            OmegaConf.select(cfg, "inference.cfg_scale", default=1.0),
         )
 
     # Start server
-    from openwam.deployment.policy_server import PolicyServer
+    from openwam.deploy.policy_server import PolicyServer
 
     server = PolicyServer(engine=engine, cfg=cfg, debug=args.debug, debug_dir=args.debug_dir)
     logger.info("Starting server: ws://%s:%d  http://%s:%d", host, ws_port, host, http_port)

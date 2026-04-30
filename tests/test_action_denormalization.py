@@ -13,7 +13,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from openwam.dataloader.transforms.normalize import ActionNormalizer
-from openwam.deployment.model_loader import _build_action_denormalizer
+from openwam.deploy.model_loader import _build_action_denormalizer
 
 # --- Helper: build a realistic stats dict for a 20D eef action ---
 
@@ -86,15 +86,11 @@ def test_build_denormalizer_happy_path(tmp_path):
     np.testing.assert_allclose(out, expected, atol=1e-5)
 
 
-def test_build_denormalizer_missing_stats_returns_none(tmp_path, caplog):
+def test_build_denormalizer_missing_stats_raises(tmp_path):
     # tmp_path is empty — no action_stats.npy
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef"}})
-    import logging
-
-    with caplog.at_level(logging.WARNING):
-        denorm = _build_action_denormalizer(cfg, str(tmp_path))
-    assert denorm is None
-    assert any("DISABLED" in rec.message for rec in caplog.records)
+    with pytest.raises(FileNotFoundError, match="Missing required action_stats.npy"):
+        _build_action_denormalizer(cfg, str(tmp_path))
 
 
 @pytest.mark.parametrize("disabled_value", [None, "none", "null", ""])
@@ -107,10 +103,9 @@ def test_build_denormalizer_disabled_mode_returns_none(tmp_path, disabled_value)
 
 def test_build_denormalizer_unknown_mode_returns_none(tmp_path):
     _write_stats_file(tmp_path)
-    # "minmax" (missing hyphen) is not in _YAML_TO_NORM_MODE
-    cfg = OmegaConf.create({"dataloader": {"normalize_mode": "minmax", "action_mode": "eef"}})
+    cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef"}})
     denorm = _build_action_denormalizer(cfg, str(tmp_path))
-    assert denorm is None
+    assert denorm is not None
 
 
 def test_build_denormalizer_wrong_action_mode_returns_none(tmp_path):
@@ -128,9 +123,8 @@ def test_deployment_action_range_sanity(tmp_path):
     """Mirrors what generate_video_and_actions does at [joint_generation.py:447-456].
 
     Model output is in [-1, 1] (after flow-matching). After unnormalize, xyz
-    dims must reach physical range (here: ±0.8 m). If denormalize were bypassed
-    (identity fallback), the xyz absolute max would stay <= 1.0 and this guard
-    would catch the regression.
+    dims must reach physical range (here: ±0.8 m). If denormalize were missing,
+    this guard would catch the regression.
     """
     _write_stats_file(tmp_path)
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef"}})
@@ -148,8 +142,7 @@ def test_deployment_action_range_sanity(tmp_path):
     assert xyz_abs_max > 1.0, (
         f"xyz.abs().max()={xyz_abs_max:.4f} after denormalize — expected > 1.0 "
         f"(stats x range is ±0.8 m but full span is ±1.5 m on z). This would fire if the "
-        f"denormalizer was silently bypassed (None → identity)."
+        f"denormalizer path stopped applying."
     )
 
-    # Sanity: the identity fallback would leave actions in [-1, 1]. Confirm we escape.
     assert float(np.abs(actions).max()) > 1.0

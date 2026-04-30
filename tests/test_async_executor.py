@@ -4,7 +4,7 @@ import time
 
 import numpy as np
 
-from openwam.deployment.optimizations.async_executor import AsyncInferenceExecutor
+from openwam.deploy.optimizations.async_executor import AsyncInferenceExecutor
 
 
 class MockEngine:

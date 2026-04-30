@@ -10,8 +10,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from openwam.model.dual_system import DualSystemArchitecture
-from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
+from openwam.model.architectures.dual_system import DualSystemCrossAttnArchitecture
+from openwam.model.video_backbone.adapter import BlockLoopState, VideoBackbone
 
 # ---------------------------------------------------------------------------
 # Mock pipeline: replaces WanVideoPipeline to avoid loading ~20GB of weights
@@ -19,13 +19,15 @@ from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 
 
 class _MockDiT(nn.Module):
-    """Tiny mock DiT with the attributes the trainer expects."""
+    """Tiny mock DiT with the attributes the trainer + adapter expect."""
 
     def __init__(self, dim=64, in_dim=16, num_blocks=2):
         super().__init__()
         self.dim = dim
         self.in_dim = in_dim
         self.fuse_vae_embedding_in_latents = False
+        self.seperated_timestep = False
+        self.freq_dim = dim
         self.blocks = nn.ModuleList([nn.Linear(dim, dim) for _ in range(num_blocks)])
 
     def forward(self, x):
@@ -34,6 +36,8 @@ class _MockDiT(nn.Module):
 
 class _MockScheduler:
     """Mock flow-match scheduler with timestep / sigma tables."""
+
+    num_train_timesteps = 1000
 
     def __init__(self, num_timesteps=1000):
         self.timesteps = torch.linspace(0, 1, num_timesteps)
@@ -44,6 +48,18 @@ class _MockScheduler:
         self.timesteps = torch.linspace(0, 1, n)
         self.sigmas = torch.linspace(1, 0, n)
         self.linear_timesteps_weights = torch.ones(n)
+
+    def add_noise(self, original, noise, sigma):
+        return (1 - sigma) * original + sigma * noise
+
+    def training_target(self, original, noise):
+        return noise - original
+
+    def training_weight(self, timestep_ids):
+        return self.linear_timesteps_weights[timestep_ids]
+
+    def flow_step(self, pred, sigma, sigma_next, sample):
+        return sample + pred * (sigma_next - sigma)
 
 
 class _MockPipeline:
@@ -74,22 +90,144 @@ class _MockPipeline:
         pass
 
     def model_fn(self, dit=None, latents=None, timestep=None, **kwargs):
-        """Return noise_pred matching latents shape, populate bridge features."""
-        # Populate bridge_feature_store if requested (for non-interleaved architectures)
-        store = kwargs.get("bridge_feature_store", None)
-        layers = kwargs.get("bridge_feature_layers", set())
-        if store is not None and layers:
-            B = latents.shape[0]
-            # Flatten latents to (B, num_tokens, dim) for bridge features
-            num_tokens = 1
-            for d in latents.shape[2:]:
-                num_tokens *= d
-            for _ in sorted(layers):
-                store.append(torch.randn(B, num_tokens, self.dit.dim))
+        """Return noise_pred matching latents shape; invoke architecture
+        callbacks so bridge features get populated for cross_attn / interleaved
+        paths. Mirrors how the real model_fn_wan_video calls the hooks.
+        """
+        # Compute the (B, num_tokens, dim) layout the real model_fn produces
+        # after patchify + flatten.
+        B = latents.shape[0]
+        num_tokens = 1
+        for d in latents.shape[2:]:
+            num_tokens *= d
+        x = torch.randn(B, num_tokens, self.dit.dim)
+
+        on_before_blocks = kwargs.get("on_before_blocks")
+        on_after_block = kwargs.get("on_after_block")
+        on_after_blocks = kwargs.get("on_after_blocks")
+        if on_before_blocks is not None:
+            x, _, _ = on_before_blocks(x, torch.zeros(B, 6, self.dit.dim), None)
+        for block_id, _ in enumerate(self.dit.blocks):
+            if on_after_block is not None:
+                x = on_after_block(block_id, x)
+        if on_after_blocks is not None:
+            x = on_after_blocks(x)
         return torch.randn_like(latents)
 
     def unit_runner(self, unit, pipe, shared, posi, nega):
         return shared, posi, nega
+
+
+class _MockVideoBackbone(VideoBackbone):
+    """Minimal VideoBackbone implementing the 17-method ABC for tests."""
+
+    def __init__(self, dim=64, num_layers=2):
+        super().__init__()
+        self._dim = dim
+        self._num_layers = num_layers
+        self._scheduler = _MockScheduler()
+        self._dit = nn.Linear(dim, dim)
+        self._vae = nn.Linear(4, 4)
+        self._text_encoder = nn.Linear(4, 4)
+        self._device = torch.device("cpu")
+        self._dtype = torch.float32
+
+    @classmethod
+    def from_pretrained(cls, source, **kw):
+        return cls()
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+    @property
+    def num_layers(self) -> int:
+        return self._num_layers
+
+    @property
+    def scheduler(self):
+        return self._scheduler
+
+    @property
+    def submodule_names(self) -> list:
+        return ["dit", "vae", "text_encoder"]
+
+    def prepare(self, **inputs) -> BlockLoopState:
+        latents = inputs["latents"]
+        B = latents.shape[0]
+        # Derive (f, h, w) from latent dims so 3D RoPE can index correctly.
+        f, h, w = (latents.shape[2], latents.shape[3], latents.shape[4]) if latents.ndim >= 5 else (1, 1, 1)
+        num_tokens = f * h * w
+        x = torch.randn(B, num_tokens, self._dim)
+        t_mod = torch.zeros(B, 6, self._dim)
+        freq_dim = self._dim // 2
+        freqs = torch.polar(torch.ones(num_tokens, 1, freq_dim), torch.zeros(num_tokens, 1, freq_dim))
+        context = torch.randn(B, 4, self._dim)
+        return BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, f=f, h=h, w=w)
+
+    def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
+        return state
+
+    def finalize(self, state: BlockLoopState):
+        B = state.x.shape[0]
+        return torch.randn(B, 16, 3, 8, 8)
+
+    def inject_action_tokens(self, state, action_tokens, n_action, *, timestep=None, t_mod_bias=None):
+        state.x = torch.cat([state.x, action_tokens.to(state.x.dtype)], dim=1)
+        return state
+
+    def extract_action_tokens(self, state, n_action):
+        n_video = state.x.shape[1] - n_action
+        action_tokens = state.x[:, n_video:, :]
+        state.x = state.x[:, :n_video, :]
+        return state, action_tokens
+
+    def preprocess_input(self, *, frames=None, text=None, **kw):
+        return {
+            "input_latents": torch.randn(1, 16, 3, 8, 8),
+            "context": torch.randn(1, 4, self._dim),
+            "seq_lens": torch.ones(1, dtype=torch.long),
+        }
+
+    def get_submodule(self, name):
+        return getattr(self, f"_{name}", None)
+
+    def set_submodule(self, name, module):
+        setattr(self, f"_{name}", module)
+
+    def decode_video(self, latents, *, tiled=True):
+        return []
+
+    def set_dtype_device(self, dtype, device):
+        pass
+
+
+class _MockScheduler:
+    """Minimal scheduler mock for loss tests."""
+
+    num_train_timesteps = 1000
+
+    def __init__(self, n=1000):
+        self.timesteps = torch.linspace(1, 0, n)
+        self.sigmas = torch.linspace(1, 0, n)
+        self.linear_timesteps_weights = torch.ones(n)
+
+    def set_timesteps(self, n, **kwargs):
+        self.timesteps = torch.linspace(1, 0, n)
+        self.sigmas = torch.linspace(1, 0, n)
+        self.linear_timesteps_weights = torch.ones(n)
+
+    def add_noise(self, original, noise, sigma):
+        return (1 - sigma) * original + sigma * noise
+
+    def training_target(self, original, noise):
+        return noise - original
+
+    def training_weight(self, timestep_ids):
+        return self.linear_timesteps_weights[timestep_ids]
+
+    def flow_step(self, pred, sigma, sigma_next, sample):
+        return sample + pred * (sigma_next - sigma)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +235,9 @@ class _MockPipeline:
 # ---------------------------------------------------------------------------
 
 _TINY_ARCH_CFG = {
+    "framework": "dual_system",
+    "variant": "joint_cross_attn",
+    "detach_bridge": False,
     "action_dim": 7,
     "dim": 64,
     "ffn_dim": 128,
@@ -104,24 +245,19 @@ _TINY_ARCH_CFG = {
     "num_layers": 2,
     "video_dim": 64,
     "bridge_layers": (0, 1),
-    "bridge_type": "cross_attn",
 }
 
 
 def _make_tiny_arch():
-    return DualSystemArchitecture(cfg=_TINY_ARCH_CFG)
-
-
-def _make_loss_fn(lambda_video=1.0, lambda_action=1.0):
-    return FlowMatchVideoActionLoss(
-        lambda_video=lambda_video,
-        lambda_action=lambda_action,
-        detach_bridge=False,
-    )
+    arch = DualSystemCrossAttnArchitecture(cfg=_TINY_ARCH_CFG)
+    arch.video_backbone = _MockVideoBackbone(dim=64, num_layers=2)
+    arch._device = torch.device("cpu")
+    arch._dtype = torch.float32
+    return arch
 
 
 def _make_fake_loss_inputs(B=1, action_dim=7, T_action=5, video_dim=64):
-    """Build the minimal dict that FlowMatchVideoActionLoss.__call__ expects."""
+    """Build the minimal dict that architecture.compute_loss expects."""
     C, T, H, W = 16, 3, 8, 8
     return {
         "input_latents": torch.randn(B, C, T, H, W),
@@ -129,8 +265,6 @@ def _make_fake_loss_inputs(B=1, action_dim=7, T_action=5, video_dim=64):
         "height": H * 8,
         "width": W * 8,
         "num_frames": 9,
-        "cfg_scale": 1,
-        "cfg_merge": False,
         "tiled": False,
         "use_gradient_checkpointing": False,
         "use_gradient_checkpointing_offload": False,
@@ -139,9 +273,27 @@ def _make_fake_loss_inputs(B=1, action_dim=7, T_action=5, video_dim=64):
     }
 
 
-# ---------------------------------------------------------------------------
-# Tests: Freeze strategy (from training_strategy config)
-# ---------------------------------------------------------------------------
+def test_resolve_architecture_config_merges_action_backbone_fields():
+    from types import SimpleNamespace
+
+    from openwam.model import resolve_architecture_config
+
+    model_cfg = SimpleNamespace(
+        architecture={
+            "framework": "dual_system",
+            "variant": "joint_cross_attn",
+            "detach_bridge": False,
+            "action_dim": 7,
+        },
+        action_backbone={"dim": 64, "ffn_dim": 128, "num_heads": 2},
+    )
+    resolved = resolve_architecture_config(model_cfg, video_dim=64, num_dit_layers=12)
+
+    assert resolved.registry_name == "dual_system_cross_attn"
+    assert resolved.params["dim"] == 64
+    assert resolved.params["ffn_dim"] == 128
+    assert resolved.params["num_heads"] == 2
+    assert resolved.params["video_dim"] == 64
 
 
 def _apply_freeze(pipe, trainer_attrs, freeze_list):
@@ -158,7 +310,7 @@ def test_freeze_joint_strategy():
     """joint.yaml: freeze text_encoder + vae; dit + action_dit remain trainable."""
     pipe = _MockPipeline()
     arch = _make_tiny_arch()
-    action_dit = arch.action_dit
+    action_dit = arch.action_backbone
 
     freeze_list = ["text_encoder", "vae"]  # from configs/training_strategy/joint.yaml
     _apply_freeze(pipe, {"action_dit": action_dit}, freeze_list)
@@ -173,7 +325,7 @@ def test_freeze_video_only_strategy():
     """video_only.yaml: freeze text_encoder + vae + action_dit; dit trainable."""
     pipe = _MockPipeline()
     arch = _make_tiny_arch()
-    action_dit = arch.action_dit
+    action_dit = arch.action_backbone
 
     freeze_list = ["text_encoder", "vae", "action_dit"]  # from video_only.yaml
     _apply_freeze(pipe, {"action_dit": action_dit}, freeze_list)
@@ -188,7 +340,7 @@ def test_freeze_custom_list():
     """Custom freeze: dit frozen, action_dit stays trainable."""
     pipe = _MockPipeline()
     arch = _make_tiny_arch()
-    action_dit = arch.action_dit
+    action_dit = arch.action_backbone
 
     freeze_list = ["text_encoder", "vae", "dit"]
     _apply_freeze(pipe, {"action_dit": action_dit}, freeze_list)
@@ -203,24 +355,18 @@ def test_freeze_custom_list():
 
 
 def test_single_batch_loss():
-    """B=1: loss_fn produces valid scalar losses."""
-    pipe = _MockPipeline()
+    """B=1: architecture.compute_loss produces valid scalar losses."""
     arch = _make_tiny_arch()
-    action_scheduler = _MockScheduler()
-    action_scheduler.set_timesteps(1000)
-    loss_fn = _make_loss_fn()
+    arch.action_backbone.scheduler = _MockScheduler()
 
     B, T_action, action_dim = 1, 5, 7
     action_data = torch.randn(B, T_action, action_dim)
     inputs = _make_fake_loss_inputs(B=B, action_dim=action_dim, T_action=T_action)
 
-    result = loss_fn(
-        pipe=pipe,
-        architecture=arch,
-        action_scheduler=action_scheduler,
-        action_data=action_data,
-        current_step=0,
+    result = arch.compute_loss(
         **inputs,
+        actions=action_data,
+        current_step=0,
     )
 
     assert "loss" in result
@@ -233,24 +379,18 @@ def test_single_batch_loss():
 
 
 def test_multi_batch_loss():
-    """B=2: loss_fn produces valid scalar losses with batched input."""
-    pipe = _MockPipeline()
+    """B=2: architecture.compute_loss produces valid scalar losses with batched input."""
     arch = _make_tiny_arch()
-    action_scheduler = _MockScheduler()
-    action_scheduler.set_timesteps(1000)
-    loss_fn = _make_loss_fn()
+    arch.action_backbone.scheduler = _MockScheduler()
 
     B, T_action, action_dim = 2, 5, 7
     action_data = torch.randn(B, T_action, action_dim)
     inputs = _make_fake_loss_inputs(B=B, action_dim=action_dim, T_action=T_action)
 
-    result = loss_fn(
-        pipe=pipe,
-        architecture=arch,
-        action_scheduler=action_scheduler,
-        action_data=action_data,
-        current_step=0,
+    result = arch.compute_loss(
         **inputs,
+        actions=action_data,
+        current_step=0,
     )
 
     assert result["loss"].shape == ()
@@ -259,22 +399,18 @@ def test_multi_batch_loss():
 
 def test_video_only_loss():
     """lambda_action=0: only video loss is computed."""
-    pipe = _MockPipeline()
     arch = _make_tiny_arch()
-    action_scheduler = _MockScheduler()
-    action_scheduler.set_timesteps(1000)
-    loss_fn = _make_loss_fn(lambda_video=1.0, lambda_action=0.0)
+    arch.action_backbone.scheduler = _MockScheduler()
 
     B = 1
     inputs = _make_fake_loss_inputs(B=B)
 
-    result = loss_fn(
-        pipe=pipe,
-        architecture=arch,
-        action_scheduler=action_scheduler,
-        action_data=None,
-        current_step=0,
+    result = arch.compute_loss(
         **inputs,
+        actions=None,
+        lambda_video=1.0,
+        lambda_action=0.0,
+        current_step=0,
     )
 
     assert result["loss"].item() > 0
@@ -283,31 +419,23 @@ def test_video_only_loss():
 
 def test_loss_backward():
     """Loss should be differentiable and backward should succeed."""
-    pipe = _MockPipeline()
     arch = _make_tiny_arch()
     arch.train()
-    action_scheduler = _MockScheduler()
-    action_scheduler.set_timesteps(1000)
-    loss_fn = _make_loss_fn()
+    arch.action_backbone.scheduler = _MockScheduler()
 
     B, T_action, action_dim = 1, 5, 7
     action_data = torch.randn(B, T_action, action_dim)
     inputs = _make_fake_loss_inputs(B=B)
 
-    result = loss_fn(
-        pipe=pipe,
-        architecture=arch,
-        action_scheduler=action_scheduler,
-        action_data=action_data,
-        current_step=0,
+    result = arch.compute_loss(
         **inputs,
+        actions=action_data,
+        current_step=0,
     )
 
-    # Check backward completes without error
     result["loss"].backward()
 
-    # Verify gradients exist on action_dit parameters
-    has_grad = any(p.grad is not None for p in arch.action_dit.parameters())
+    has_grad = any(p.grad is not None for p in arch.action_backbone.parameters())
     assert has_grad, "ActionDiT should have gradients after backward"
 
 
@@ -320,9 +448,7 @@ def test_training_step():
     """Run 3 optimizer steps: loss should decrease or remain stable."""
     arch = _make_tiny_arch()
     arch.train()
-    action_scheduler = _MockScheduler()
-    action_scheduler.set_timesteps(1000)
-    loss_fn = _make_loss_fn()
+    arch.action_backbone.scheduler = _MockScheduler()
 
     optimizer = torch.optim.Adam(arch.parameters(), lr=1e-3)
 
@@ -332,14 +458,10 @@ def test_training_step():
         action_data = torch.randn(B, T_action, action_dim)
         inputs = _make_fake_loss_inputs(B=B)
 
-        pipe = _MockPipeline()
-        result = loss_fn(
-            pipe=pipe,
-            architecture=arch,
-            action_scheduler=action_scheduler,
-            action_data=action_data,
-            current_step=step,
+        result = arch.compute_loss(
             **inputs,
+            actions=action_data,
+            current_step=step,
         )
 
         optimizer.zero_grad()
@@ -358,39 +480,25 @@ def test_training_step():
 
 
 def test_save_load_checkpoint():
-    """Save and load checkpoint; verify weights match."""
-    from openwam.train.utils.checkpointing import (
-        load_trainable_checkpoint,
-        save_trainable_checkpoint,
-    )
-
+    """Save and load checkpoint via architecture; verify weights match."""
     arch = _make_tiny_arch()
-    pipe = _MockPipeline()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_path = str(Path(tmpdir) / "test_ckpt.safetensors")
-        save_trainable_checkpoint(ckpt_path, arch.action_dit, pipe, lambda_action=1.0)
+        arch.save_checkpoint(ckpt_path)
         assert Path(ckpt_path).exists()
 
         # Load into fresh model
         arch2 = _make_tiny_arch()
-        pipe2 = _MockPipeline()
-        load_trainable_checkpoint(ckpt_path, arch2.action_dit, pipe2)
+        arch2.load_checkpoint(ckpt_path)
 
-        # Verify action_dit weights match at the save precision (bf16).
-        # save_trainable_checkpoint defaults to mixed_precision="bf16", so weights
-        # go through a float32 → bf16 → float32 round-trip on save+load.  Exact
-        # float32 equality is impossible after that round-trip; compare in bf16
-        # instead, which is the precision at which the data was actually stored.
+        # Verify action_dit weights match
         for (k1, v1), (k2, v2) in zip(
-            arch.action_dit.state_dict().items(),
-            arch2.action_dit.state_dict().items(),
+            arch.action_backbone.state_dict().items(),
+            arch2.action_backbone.state_dict().items(),
         ):
             assert k1 == k2
-            if v1.is_floating_point():
-                assert torch.equal(v1.to(torch.bfloat16), v2.to(torch.bfloat16)), f"Weight mismatch for {k1}"
-            else:
-                assert torch.equal(v1, v2), f"Buffer mismatch for {k1}"
+            assert torch.equal(v1, v2), f"Weight mismatch for {k1}"
 
 
 def test_manage_checkpoints():
@@ -419,7 +527,7 @@ def test_manage_checkpoints():
 
 def test_downsample_video_mask():
     """Verify the frame → latent mask downsampling logic."""
-    from openwam.train.openwam_trainer import _downsample_video_mask_to_latent
+    from openwam.utils import downsample_video_mask_to_latent as _downsample_video_mask_to_latent
 
     # 9 frames: frame 0 excluded, frames 1-8 grouped by 4
     # All valid (is_pad=False) → all latent steps valid

@@ -75,15 +75,8 @@ def _flat_stats(action_dim: int, mean: float = 0.0, std: float = 1.0, low: float
     }
 
 
-def _create_action_stats(path, joint_dim: int = 14, eef_dim: int = 20, joint_flat: bool = False) -> None:
-    """Create a mock action_stats.npy with both joint and eef sub-dicts.
-
-    When ``joint_flat=True`` writes the legacy flat schema instead (for
-    backward-compat tests); the flat dict uses ``joint_dim``.
-    """
-    if joint_flat:
-        np.save(path, _flat_stats(joint_dim))
-        return
+def _create_action_stats(path, joint_dim: int = 14, eef_dim: int = 20) -> None:
+    """Create a mock nested-schema action_stats.npy with both joint and eef sub-dicts."""
     nested = {
         "joint": _flat_stats(joint_dim),
         "eef": _flat_stats(eef_dim),
@@ -125,7 +118,7 @@ def test_joint_mode_basic():
 
         sample = ds[0]
         # action horizon = num_frames - 1
-        assert sample["action_trajectory"].shape == (4, 14)
+        assert sample["action"].shape == (4, 14)
         assert sample["action_mask"].shape == (4,)
         # proprio is a single frame with time dim kept (shape (1, D))
         assert sample["proprio"].shape == (1, 14)
@@ -165,7 +158,7 @@ def test_short_episode_pads_and_masks():
         sample = ds[0]
 
         # Shapes are still the full horizon regardless of episode length
-        assert sample["action_trajectory"].shape == (16, 14)
+        assert sample["action"].shape == (16, 14)
         assert len(sample["video"]) == 5
 
         # Only steps whose source raw frame exists are unmasked.
@@ -175,11 +168,9 @@ def test_short_episode_pads_and_masks():
         assert mask[9:] == [False] * 7
 
         # The padded tail actions should exactly repeat the last real action.
-        last_real = sample["action_trajectory"][8]
+        last_real = sample["action"][8]
         for t in range(9, 16):
-            assert (sample["action_trajectory"][t] == last_real).all(), (
-                f"padded step {t} does not equal last real action"
-            )
+            assert (sample["action"][t] == last_real).all(), f"padded step {t} does not equal last real action"
 
 
 def test_video_stride_does_not_affect_action_length():
@@ -209,7 +200,7 @@ def test_video_stride_does_not_affect_action_length():
         )
 
         sample = ds[0]
-        assert sample["action_trajectory"].shape == (16, 14)
+        assert sample["action"].shape == (16, 14)
         assert sample["action_mask"].shape == (16,)
         assert len(sample["video"]) == 5
         assert sample["video_mask"].shape == (5,)
@@ -262,7 +253,7 @@ def test_joint_mode_minmax_normalization():
         )
 
         sample = ds[0]
-        actions = sample["action_trajectory"].numpy()
+        actions = sample["action"].numpy()
         proprio = sample["proprio"].numpy()
 
         # All dims (including gripper) should be in [-1, 1] (min-max normalized)
@@ -295,7 +286,7 @@ def test_joint_mode_gripper_continuous():
         )
 
         sample = ds[0]
-        actions = sample["action_trajectory"].numpy()
+        actions = sample["action"].numpy()
 
         # Gripper dims should be continuous (min-max normalized), not binary
         gripper_vals = actions[:, 6]
@@ -336,37 +327,6 @@ def test_joint_mode_denormalize_roundtrip():
         np.testing.assert_allclose(denormed[0], 0.0, atol=1e-5)
 
 
-def test_legacy_flat_stats_file_backward_compat():
-    """Old flat-schema stats files still load with a DeprecationWarning."""
-    import warnings
-
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
-        stats_path = os.path.join(tmpdir, "action_stats.npy")
-        _create_action_stats(stats_path, joint_flat=True)  # legacy flat schema
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            ds = RoboTwinDataset(
-                data_root=tmpdir,
-                num_frames=5,
-                height=32,
-                width=32,
-                action_mode="joint",
-                action_stats_path=stats_path,
-                val_ratio=0.0,
-                video_stride=1,
-                filter_static_segments=False,
-            )
-            assert any(issubclass(w.category, DeprecationWarning) for w in caught)
-        sample = ds[0]
-        actions = sample["action_trajectory"].numpy()
-        assert actions.min() >= -1.0 - 1e-6
-        assert actions.max() <= 1.0 + 1e-6
-
-
 # ---------------------------------------------------------------------------
 # EEF mode tests
 # ---------------------------------------------------------------------------
@@ -397,7 +357,7 @@ def test_eef_mode_basic():
 
         sample = ds[0]
         # action horizon = num_frames - 1
-        assert sample["action_trajectory"].shape == (4, 20)
+        assert sample["action"].shape == (4, 20)
         assert sample["proprio"].shape == (1, 20)
 
 
@@ -425,7 +385,7 @@ def test_eef_mode_minmax_normalization():
         assert ds.action_stats is not None and "min" in ds.action_stats
 
         sample = ds[0]
-        actions = sample["action_trajectory"].numpy()
+        actions = sample["action"].numpy()
         proprio = sample["proprio"].numpy()
         # With stats {min:-1, max:+1} and raw values roughly in that range,
         # normalized outputs should stay in [-1, 1] after min-max.
@@ -463,7 +423,7 @@ def test_eef_mode_zscore_normalization():
             filter_static_segments=False,
         )
         sample = ds[0]
-        actions = sample["action_trajectory"].numpy()
+        actions = sample["action"].numpy()
         # z-score: (x - 0.5) / 0.25 → scale-up by 4.
         # Raw xyz/gripper are in [0, 1] so they map into roughly [-2, 2].
         # rot6d can extend beyond [0, 1], so allow a wider envelope.
@@ -509,7 +469,7 @@ def test_eef_gripper_raw_values():
     with tempfile.TemporaryDirectory() as tmpdir:
         # T=10, num_frames=9, video_stride=2 → window [0..8], num_video_frames=5.
         # Mock data: gripper 1.0 (open) for frames 0-4, 0.0 (closed) for frames 5-9.
-        # action_trajectory = raw[1..8], so first 4 actions open, last 4 closed.
+        # action = raw[1..8], so first 4 actions open, last 4 closed.
         for i in range(3):
             _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=10, seed=i)
 
@@ -526,7 +486,7 @@ def test_eef_gripper_raw_values():
         )
 
         sample = ds[0]
-        actions = sample["action_trajectory"].numpy()  # (8, 20)
+        actions = sample["action"].numpy()  # (8, 20)
         proprio = sample["proprio"].numpy()  # (1, 20)
 
         # proprio is from frame 0 → gripper open (1.0)

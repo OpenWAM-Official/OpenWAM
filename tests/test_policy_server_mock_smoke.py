@@ -54,8 +54,8 @@ def _minimal_cfg(
 
 
 def _make_server(debug: bool = False, debug_dir: str | None = None, multiview: bool = False):
-    from openwam.deployment.mock_engine import MockInferenceEngine
-    from openwam.deployment.policy_server import PolicyServer
+    from openwam.deploy.mock_engine import MockInferenceEngine
+    from openwam.deploy.policy_server import PolicyServer
 
     cfg = _minimal_cfg(multiview=multiview)
     engine = MockInferenceEngine(cfg=cfg, action_dim=14, latency_ms=0.0)
@@ -97,7 +97,7 @@ def test_predict_returns_well_formed_response():
 
 def test_mock_engine_step_count_matches_real_engine():
     """Regression guard for the num_frames - 1 alignment (review item H3)."""
-    from openwam.deployment.mock_engine import MockInferenceEngine
+    from openwam.deploy.mock_engine import MockInferenceEngine
 
     cfg = _minimal_cfg(num_frames=33)
     engine = MockInferenceEngine(cfg=cfg, action_dim=20, latency_ms=0.0)
@@ -135,7 +135,7 @@ def test_reset_clears_state_and_advances_debug_episode():
 
 def test_predict_rejects_missing_head_camera():
     """Server must error out on malformed payload; covers PolicyServer._decode_obs."""
-    from openwam.deployment.policy_server import ObsValidationError
+    from openwam.deploy.policy_server import ObsValidationError
 
     server = _make_server()
     bad_payload = {"images": {"head_camera": None}, "prompt": "x"}

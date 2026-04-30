@@ -91,6 +91,7 @@ def move_masked_to_left(tensor, mask, pad_zero=True):
         result[~new_mask] = 0
     return result, new_mask
 
+
 def get_mask_of_last_masked_index_brute_force(mask, length):
     """
     Produce a boolean mask marking, per row, the final `length` True entries in the input mask.
@@ -114,6 +115,7 @@ def get_mask_of_last_masked_index_brute_force(mask, length):
                 l[j] = False
         results.append(l)
     return torch.tensor(results, dtype=torch.bool)
+
 
 def get_mask_of_last_masked_index(mask, length):
     """
@@ -148,6 +150,7 @@ def test_move_masked_to_left():
         assert mask_1[i][:l].all()
         assert not mask_1[i][l:].any()
 
+
 def test_get_mask_of_last_masked_index():
     """
     Validates that the vectorized and brute-force implementations produce identical masks for the last masked indices.
@@ -158,11 +161,12 @@ def test_get_mask_of_last_masked_index():
     b = 10
     n = 20
     mask = torch.randint(0, 2, (b, n)).bool()
-    length = torch.randint(0, n//2, (b,))
+    length = torch.randint(0, n // 2, (b,))
     last_masked_index_1 = get_mask_of_last_masked_index(mask, length)
     last_masked_index_2 = get_mask_of_last_masked_index_brute_force(mask, length)
     assert (last_masked_index_1 == last_masked_index_2).all()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     test_move_masked_to_left()
     test_get_mask_of_last_masked_index()

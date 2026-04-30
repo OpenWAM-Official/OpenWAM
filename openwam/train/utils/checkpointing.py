@@ -89,7 +89,7 @@ _MISSING_MIXED_PRECISION = object()
 
 def save_trainable_checkpoint(
     path: str,
-    action_dit: torch.nn.Module,
+    action_backbone: torch.nn.Module,
     pipe,
     lambda_action: float,
     mixed_precision=_MISSING_MIXED_PRECISION,
@@ -98,7 +98,7 @@ def save_trainable_checkpoint(
 
     Args:
         path: Output file path (``.safetensors`` or ``.pt``).
-        action_dit: Action model (ActionDiT / MoEExpertDiT / etc.).
+        action_backbone: Action backbone (ActionDiT / MoEExpertDiT / etc.).
         pipe: WanVideoPipeline instance.
         lambda_action: Action loss weight (unused, kept for API compat).
         mixed_precision: ``"bf16"`` / ``"fp16"`` / ``"no"`` — target dtype for
@@ -131,14 +131,14 @@ def save_trainable_checkpoint(
                 names.add(f"{mod_prefix}.{bname}" if mod_prefix else bname)
         return names
 
-    # ActionDiT: all parameters + persistent buffers
-    for name, param in action_dit.named_parameters():
-        state_dict[f"action_dit.{name}"] = _maybe_cast(param.data)
-    skip_action = _non_persistent_names(action_dit)
-    for name, buf in action_dit.named_buffers():
+    # ActionBackbone: all parameters + persistent buffers
+    for name, param in action_backbone.named_parameters():
+        state_dict[f"action_backbone.{name}"] = _maybe_cast(param.data)
+    skip_action = _non_persistent_names(action_backbone)
+    for name, buf in action_backbone.named_buffers():
         if name in skip_action:
             continue
-        state_dict[f"action_dit.{name}"] = _maybe_cast(buf)
+        state_dict[f"action_backbone.{name}"] = _maybe_cast(buf)
 
     # Video pipeline: all parameters + persistent buffers
     for name, param in pipe.named_parameters():
@@ -167,17 +167,17 @@ def save_trainable_checkpoint(
 
 def load_trainable_checkpoint(
     path: str,
-    action_dit: torch.nn.Module,
+    action_backbone: torch.nn.Module,
     pipe,
 ):
-    """Load a checkpoint into action_dit and pipeline.
+    """Load a checkpoint into action_backbone and pipeline.
 
-    Keys prefixed with ``action_dit.`` are loaded into the action model;
+    Keys prefixed with ``action_backbone.`` are loaded into the action model;
     all other keys are loaded into the pipeline.
 
     Args:
         path: Checkpoint file path (``.safetensors`` or ``.pt``).
-        action_dit: Action model to load weights into.
+        action_backbone: Action backbone to load weights into.
         pipe: WanVideoPipeline to load weights into.
     """
     if path.endswith(".safetensors"):
@@ -187,12 +187,12 @@ def load_trainable_checkpoint(
     else:
         state_dict = torch.load(path, map_location="cpu")
 
-    action_keys = {k: v for k, v in state_dict.items() if k.startswith("action_dit.")}
+    action_keys = {k: v for k, v in state_dict.items() if k.startswith("action_backbone.")}
     if action_keys:
-        cleaned = {k.removeprefix("action_dit."): v for k, v in action_keys.items()}
-        action_dit.load_state_dict(cleaned, strict=False)
+        cleaned = {k.removeprefix("action_backbone."): v for k, v in action_keys.items()}
+        action_backbone.load_state_dict(cleaned, strict=False)
 
-    pipe_keys = {k: v for k, v in state_dict.items() if not k.startswith("action_dit.")}
+    pipe_keys = {k: v for k, v in state_dict.items() if not k.startswith("action_backbone.")}
     if pipe_keys:
         pipe.load_state_dict(pipe_keys, strict=False)
 

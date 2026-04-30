@@ -1,14 +1,41 @@
-# Shared Backbone Architecture
-# Action tokens concatenated to video token sequence, processed by same DiT.
-# No separate action transformer.
+# Shared Backbone Architecture Family
+# Action tokens are concatenated to the video token sequence and processed by
+# the same DiT. The family has two variants:
+#   - vanilla: plain shared DiT path, no extra expert FFN
+#   - moe:     shared DiT path + expert FFN corrections on action tokens
 
 architecture:
-  type: shared_backbone
+  framework: shared_backbone
+  variant: vanilla   # vanilla | moe
   action_dim: 20
+
+  # ------------------------------
+  # vanilla-only behavior
+  # ------------------------------
+  # variant=vanilla uses only the shared DiT path and ignores the MoE-only
+  # fields below.
+
+  # ------------------------------
+  # moe-only behavior
+  # ------------------------------
+  # expert_ffn_dim is only used when variant=moe.
+  expert_ffn_dim: 14336
+
+  # The following layer-selection fields are only used when variant=moe.
+  # Two ways to choose which video DiT layers receive the expert FFN.
+  # len(bridge_layers) auto-determines num_experts either way.
+  #   (a) Explicit list:  bridge_layers: [0, 1, ..., 29]
+  #   (b) Interval mode:  set bridge_layers: null and use bridge_interval.
+  #       - interval=1 → all inferred video DiT layers
+  #       - interval=2 → every other inferred layer
+  #       The total layer count is inferred from the loaded video backbone;
+  #       users do not need to set it manually.
+  bridge_layers: null
+  bridge_interval: 1
 
 # Video backbone
 # Resolution: any height/width where height % 32 == 0 and width % 32 == 0.
 # Actual training resolution is determined by dataloader config.
 video_backbone:
-  name: ti2v_5b
+  name: wan22_ti2v_5b
   model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory

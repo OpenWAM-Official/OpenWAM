@@ -1,8 +1,10 @@
 """OpenWAM trainer that consumes Hydra DictConfig directly.
 
 Composes package-native components:
-  - Pipeline building: openwam.train.utils.pipeline_builder
-  - Loss: openwam.train.loss.flow_match_loss.FlowMatchVideoActionLoss
+  - Loss: implemented inside ``BaseWAMArchitecture.compute_loss``
+    (openwam/model/base.py) — joint flow-matching MSE on video and action.
+    Optionally wrapped with ``DecoupledFlowMatchLoss`` for DreamZero-Flash
+    style Beta-distributed video timestep sampling.
   - Optimizer groups: openwam.train.utils.optimizer_groups
   - Checkpointing: openwam.train.utils.checkpointing
   - Architecture: openwam.model.registry (DualSystem / MoE / SharedBackbone)
@@ -18,56 +20,17 @@ import os
 
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 
 from openwam.train.base import BaseTrainer
-from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
 from openwam.train.utils.checkpointing import (
-    load_trainable_checkpoint,
     manage_checkpoints,
     save_action_stats,
     save_config,
-    save_trainable_checkpoint,
 )
-from openwam.train.utils.manifest import save_video_backbone_artifacts
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
-from openwam.train.utils.pipeline_builder import build_training_pipeline
 
 logger = logging.getLogger(__name__)
-
-VAE_TEMPORAL_FACTOR = 4  # Wan VAE encodes every 4 video frames into 1 latent time step
-
-
-def _downsample_video_mask_to_latent(video_is_pad: torch.Tensor) -> torch.Tensor:
-    """Downsample frame-level padding mask to VAE latent temporal dimension.
-
-    Following FastWAM: separate frame 0 (conditioning, excluded from loss),
-    then group the tail frames by VAE_TEMPORAL_FACTOR. A latent step is
-    padded only if ALL frames in the group are padded.
-
-    The returned mask covers tail latent steps only (frame 0 excluded),
-    matching the loss which trims pred/target via ``[:, :, 1:]``.
-
-    Args:
-        video_is_pad: (T_video,) bool, True=padded.
-
-    Returns:
-        (T_latent_tail,) bool mask where
-        T_latent_tail = ceil((T_video - 1) / VAE_TEMPORAL_FACTOR).
-    """
-    T = video_is_pad.shape[0]
-    if T <= 1:
-        return torch.zeros(0, dtype=torch.bool)
-
-    # Separate frame 0 (conditioning), group tail by VAE_TEMPORAL_FACTOR
-    tail_is_pad = video_is_pad[1:]  # (T_video - 1,)
-
-    T_tail = tail_is_pad.shape[0]
-    pad_len = (VAE_TEMPORAL_FACTOR - T_tail % VAE_TEMPORAL_FACTOR) % VAE_TEMPORAL_FACTOR
-    if pad_len > 0:
-        # tail_is_pad = torch.cat([tail_is_pad, torch.ones(pad_len, dtype=torch.bool)])
-        tail_is_pad = torch.cat([tail_is_pad, torch.ones(pad_len, dtype=torch.bool, device=tail_is_pad.device)])
-    return tail_is_pad.view(-1, VAE_TEMPORAL_FACTOR).all(dim=1)
 
 
 class TrainableModuleWrapper(torch.nn.Module):
@@ -80,9 +43,9 @@ class TrainableModuleWrapper(torch.nn.Module):
     Not used for forward pass — OpenWAMTrainer.compute_loss() drives execution.
     """
 
-    def __init__(self, action_dit, pipe_trainable_modules: dict):
+    def __init__(self, action_backbone, pipe_trainable_modules: dict):
         super().__init__()
-        self.action_dit = action_dit
+        self.action_backbone = action_backbone
         self.pipe_modules = torch.nn.ModuleDict(pipe_trainable_modules)
 
     def forward(self, *args, **kwargs):
@@ -94,7 +57,7 @@ class OpenWAMTrainer(BaseTrainer):
 
     Directly consumes Hydra DictConfig without argparse conversion.
     Builds all components from package-native modules, with no dependency
-    on third_party/diffsynth training infrastructure.
+    on the old vendored training infrastructure.
 
     Args:
         cfg: Hydra DictConfig with model, training, data, project sections.
@@ -108,39 +71,20 @@ class OpenWAMTrainer(BaseTrainer):
         t = cfg.training
         m = cfg.model
 
-        # Build video pipeline (delegated to utils/pipeline_builder.py)
-        self.pipe = build_training_pipeline(cfg)
+        # Build architecture (creates video_backbone internally from config).
+        from openwam.model import build_architecture, resolve_architecture_config
 
-        # Derive video_dim from the loaded model instead of config
-        video_dim = int(self.pipe.dit.dim)
+        resolved_arch = resolve_architecture_config(m)
+        self.architecture = build_architecture(resolved_arch.registry_name, resolved_arch.params)
+        logger.info(
+            "Architecture: %s (framework=%s variant=%s)",
+            resolved_arch.registry_name,
+            resolved_arch.canonical.framework,
+            resolved_arch.canonical.variant,
+        )
 
-        # Build architecture from 3 config sources:
-        #   1. cfg.model.architecture  — type, action_dim, bridge_type, bridge_layers
-        #   2. cfg.model.action_backbone — dim, ffn_dim, num_heads, ... (DualSystem only)
-        #   3. video_dim — derived from loaded model
-        from openwam.model.registry import build_architecture
-
-        arch_cfg = getattr(m, "architecture", {})
-        action_cfg = getattr(m, "action_backbone", {})
-
-        # Merge: architecture params + action_backbone params + video_dim
-        params = {k: v for k, v in arch_cfg.items() if k != "type"}
-        if action_cfg:
-            params.update({k: v for k, v in action_cfg.items()})
-        params["video_dim"] = video_dim
-
-        arch_type = arch_cfg.get("type", "dual_system")
-        self.architecture = build_architecture(arch_type, params)
-        logger.info("Architecture: %s (video_dim=%d)", arch_type, video_dim)
-
-        # Build ActionDiT for DualSystem, or get it from the architecture
-        if hasattr(self.architecture, "action_dit") and self.architecture.action_dit is not None:
-            self.action_dit = self.architecture.action_dit
-        elif hasattr(self.architecture, "moe_dit"):
-            self.action_dit = self.architecture.moe_dit
-        else:
-            # SharedBackbone: the architecture IS the action model
-            self.action_dit = self.architecture
+        # Get the action backbone from the resolved architecture.
+        self.action_backbone = self.architecture.action_backbone
 
         # Device placement: skip .to(device) when initialize_model_on_cpu + DeepSpeed,
         # because DeepSpeed's prepare() will handle the move.
@@ -151,60 +95,34 @@ class OpenWAMTrainer(BaseTrainer):
             and str(accelerator.distributed_type).endswith("DEEPSPEED")
         )
         if not (_init_on_cpu and _use_deepspeed):
-            self.action_dit.to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
+            self.action_backbone.to(dtype=self.architecture.dtype, device=self.architecture.device)
 
         # --- Freeze: apply after all models are built ---
         # Read from training_strategy config (e.g. joint.yaml / video_only.yaml)
         strategy = cfg.training_strategy
         freeze_list = list(getattr(strategy, "freeze", []))
-        for name in freeze_list:
-            # Check pipeline sub-modules (text_encoder, vae, dit, vace, ...)
-            module = getattr(self.pipe, name, None)
-            # Check trainer-level modules (action_dit)
-            if module is None:
-                module = getattr(self, name, None)
-            if module is not None:
-                module.requires_grad_(False)
-                logger.info("Frozen: %s", name)
+        for name in self.architecture.freeze_modules(freeze_list):
+            logger.info("Frozen: %s", name)
 
         # Build trainable module wrapper for DeepSpeed
-        pipe_trainable = {}
-        if self.pipe.dit is not None and any(p.requires_grad for p in self.pipe.dit.parameters()):
-            pipe_trainable["dit"] = self.pipe.dit
-        if getattr(self.pipe, "vace", None) is not None and any(p.requires_grad for p in self.pipe.vace.parameters()):
-            pipe_trainable["vace"] = self.pipe.vace
-        self.trainable_wrapper = TrainableModuleWrapper(self.action_dit, pipe_trainable)
+        pipe_trainable = self.architecture.get_trainable_modules(freeze_list=freeze_list)
+        self.trainable_wrapper = TrainableModuleWrapper(self.action_backbone, pipe_trainable)
 
-        # Schedulers (video + action, independent timesteps)
-        from openwam.deployment.flow_match_scheduler import FlowMatchScheduler
+        # Initialize all schedulers (video + action) inside architecture
+        self.architecture.init_training_schedulers(1000)
 
-        self.pipe.scheduler.set_timesteps(1000, training=True)
-        self.action_scheduler = FlowMatchScheduler("Wan")
-        self.action_scheduler.set_timesteps(1000, training=True)
-
-        # Loss function (lambda weights from training_strategy config)
+        # Loss weights from training_strategy config
         self.lambda_video = float(strategy.lambda_video)
         self.lambda_action = float(strategy.lambda_action)
-        bridge_type = getattr(m.architecture, "bridge_type", "cross_attn_detach")
 
-        # Opt-in per-token action timestep sampling. Default False keeps
-        # the per-sample behavior; surfaced via `training.action_timestep_per_token`.
-        action_timestep_per_token = bool(getattr(t, "action_timestep_per_token", False))
-        if action_timestep_per_token:
+        self.action_timestep_per_token = bool(getattr(t, "action_timestep_per_token", False))
+        if self.action_timestep_per_token:
             logger.warning(
                 "action_timestep_per_token=True: training samples per-token diffusion "
-                "timesteps, but the inference path in openwam/deployment/joint_generation.py "
-                "still broadcasts a per-sample a_timestep. Train/inference sampling will "
-                "diverge until the inference side is updated — only use this flag for "
-                "training-only ablations (e.g. PT2 Round 4 prep)."
+                "timesteps, but the inference path still broadcasts a per-sample "
+                "a_timestep. Train/inference sampling will diverge until the inference "
+                "side is updated — only use this flag for training-only ablations."
             )
-
-        self.loss_fn = FlowMatchVideoActionLoss(
-            lambda_video=self.lambda_video,
-            lambda_action=self.lambda_action,
-            detach_bridge=(bridge_type == "cross_attn_detach"),
-            action_timestep_per_token=action_timestep_per_token,
-        )
 
         # Decoupled training support
         decoupled_cfg = getattr(t, "decoupled", None)
@@ -222,38 +140,25 @@ class OpenWAMTrainer(BaseTrainer):
         if dataset is not None and self.lambda_action > 0:
             self._load_action_stats(dataset)
 
-        # Training config
-        self.use_gradient_checkpointing = bool(t.use_gradient_checkpointing)
-        self.use_gradient_checkpointing_offload = bool(t.use_gradient_checkpointing_offload)
-        self.max_timestep_boundary = float(t.max_timestep_boundary)
-        self.min_timestep_boundary = float(t.min_timestep_boundary)
-
-        # Extra inputs
-        extra_inputs = getattr(t, "extra_inputs", "vace_video,first_frame_image,action_trajectory")
-        self.extra_inputs = extra_inputs.split(",") if extra_inputs else []
-        if "vace_reference_image" in self.extra_inputs:
-            raise ValueError(
-                "training.extra_inputs contains deprecated 'vace_reference_image'. "
-                "Rename it to 'first_frame_image' in your config "
-                "(the OpenWAM-native name; it still maps to diffsynth's "
-                "'vace_reference_image' at the pipeline boundary)."
-            )
+        # Push forward-time training flags onto the architecture so prepare_inputs
+        # is self-contained.
+        self.architecture.set_training_runtime(
+            use_gradient_checkpointing=bool(t.use_gradient_checkpointing),
+            use_gradient_checkpointing_offload=bool(t.use_gradient_checkpointing_offload),
+            max_timestep_boundary=float(t.max_timestep_boundary),
+            min_timestep_boundary=float(t.min_timestep_boundary),
+        )
 
         # Store reference for BaseTrainer interface
         self.model = self
-
-        # Pipeline-level conditioning transform (adds first-frame fields if missing)
-        from openwam.dataloader.transforms.pipeline import FirstFrameConditioningTransform
-
-        self._pipeline_transform = FirstFrameConditioningTransform()
 
         # Step counter
         self._current_step = 0
         self._last_loss_components = {}
 
         # Print param counts
-        action_params = sum(p.numel() for p in self.action_dit.parameters())
-        logger.info("OpenWAMTrainer: ActionDiT %.1fM params", action_params / 1e6)
+        action_params = sum(p.numel() for p in self.action_backbone.parameters())
+        logger.info("OpenWAMTrainer: ActionBackbone %.1fM params", action_params / 1e6)
 
     def _load_action_stats(self, dataset):
         """Load action normalization stats from dataset into architecture buffers."""
@@ -289,315 +194,20 @@ class OpenWAMTrainer(BaseTrainer):
         Returns:
             dict with keys: ``total``, ``video``, ``action``.
         """
-        if isinstance(batch, list):
-            return self._forward_batch(batch)
-        return self._forward_single(batch)
+        if not isinstance(batch, list):
+            batch = [batch]
 
-    def _forward_single(self, data) -> dict:
-        """Single-sample forward pass."""
-        # Add pipeline-specific conditioning (VACE fields) if missing
-        data = self._pipeline_transform.apply(data)
+        inputs = self.architecture.prepare_inputs(batch)
+        if self.lambda_action > 0 and inputs.get("actions") is None:
+            raise ValueError("lambda_action > 0 but no action in data.")
 
-        # Extract action data
-        action_data = data.get("action_trajectory", None)
-        if self.lambda_action > 0 and action_data is None:
-            raise ValueError("lambda_action > 0 but no action_trajectory in data.")
-        if action_data is not None:
-            if isinstance(action_data, np.ndarray):
-                action_data = torch.from_numpy(action_data)
-            action_data = action_data.to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
-            if action_data.dim() == 2:
-                action_data = action_data.unsqueeze(0)
-
-        # Proprioceptive state: use the start-of-window action as the robot's
-        # current state. Cheap, avoids dataset schema changes, and aligned with
-        # the action stream's normalization.
-        proprio_state = None
-        if action_data is not None and self.architecture.uses_proprioception:
-            proprio_state = action_data[:, 0, :].contiguous()
-
-        # Prepare pipeline inputs
-        inputs_shared = {
-            "input_video": data["video"],
-            "height": data["video"][0].size[1],
-            "width": data["video"][0].size[0],
-            "num_frames": len(data["video"]),
-            "cfg_scale": 1,
-            "tiled": False,
-            "rand_device": self.pipe.device,
-            "use_gradient_checkpointing": self.use_gradient_checkpointing,
-            "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
-            "cfg_merge": False,
-            "vace_scale": 1,
-            "max_timestep_boundary": self.max_timestep_boundary,
-            "min_timestep_boundary": self.min_timestep_boundary,
-        }
-
-        # Extra inputs (vace_video, first_frame_image)
-        for key in self.extra_inputs:
-            if key == "first_frame_image":
-                # Boundary: OpenWAM first_frame_image -> diffsynth vace_reference_image.
-                # The diffsynth pipeline expects a single frame (not a list) in the
-                # single-sample path; grab [0] when present.
-                val = data.get(key)
-                inputs_shared["vace_reference_image"] = val[0] if val is not None else None
-            elif key == "action_trajectory":
-                pass
-            else:
-                inputs_shared[key] = data.get(key)
-
-        inputs_posi = {"prompt": data["prompt"]}
-
-        # Run pipeline units (data preprocessing)
-        inputs = (inputs_shared, inputs_posi, {})
-        for unit in self.pipe.units:
-            inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
-        inputs_shared, inputs_posi, _ = inputs
-
-        # Padding masks: mask (True=valid) → is_pad (True=padded)
-        #
-        # action_mask: (num_frames - 1,) — matches action_trajectory at raw rate.
-        # video_mask:  (num_video_frames,) — already stride-subsampled by dataset.
-        #   For video loss: VAE temporally downsamples ~4x. Drop frame 0 then
-        #   group frames by 4 and mark padded only if ALL in group are padded.
-        #   First-frame exclusion is handled inside _compute_video_loss.
-        action_mask = data.get("action_mask", None)
-        video_mask = data.get("video_mask", None)
-        if action_mask is not None:
-            if isinstance(action_mask, np.ndarray):
-                action_mask = torch.from_numpy(action_mask)
-            inputs_shared["action_is_pad"] = (~action_mask).unsqueeze(0).to(device=self.pipe.device)
-        if video_mask is not None:
-            if isinstance(video_mask, np.ndarray):
-                video_mask = torch.from_numpy(video_mask)
-            inputs_shared["video_is_pad"] = (
-                _downsample_video_mask_to_latent(
-                    ~video_mask,
-                )
-                .unsqueeze(0)
-                .to(device=self.pipe.device)
-            )
-
-        if proprio_state is not None:
-            inputs_shared["proprio_state"] = proprio_state
-
-        # Compute loss
-        result = self.loss_fn(
-            pipe=self.pipe,
-            architecture=self.architecture,
-            action_scheduler=self.action_scheduler,
-            action_data=action_data,
+        result = self.architecture.compute_loss(
+            **inputs,
+            lambda_video=self.lambda_video,
+            lambda_action=self.lambda_action,
             current_step=self._current_step,
             decoupled_sampler=self.decoupled_sampler,
-            **inputs_shared,
-            **inputs_posi,
-        )
-
-        return {
-            "total": result["loss"],
-            "video": result.get("loss_video", torch.tensor(0.0)),
-            "action": result.get("loss_action", torch.tensor(0.0)),
-        }
-
-    def _forward_batch(self, data_list) -> dict:
-        """Batched forward pass — encode all samples in one VAE/text-encoder pass."""
-        import torch.nn.functional as F
-        from einops import rearrange
-
-        # Add pipeline-specific conditioning (VACE fields) if missing
-        data_list = [self._pipeline_transform.apply(s) for s in data_list]
-
-        B = len(data_list)
-        pipe = self.pipe
-
-        height, width, num_frames = pipe.check_resize_height_width(
-            data_list[0]["video"][0].size[1],
-            data_list[0]["video"][0].size[0],
-            len(data_list[0]["video"]),
-        )
-
-        # Collect data
-        all_input_videos = []
-        all_vace_videos = []
-        all_ref_images = []
-        all_prompts = []
-        all_actions = []
-        all_action_masks = []
-        all_video_masks = []
-
-        for sample in data_list:
-            all_input_videos.append(pipe.preprocess_video(sample["video"]))
-
-            vv = sample.get("vace_video")
-            if vv is not None:
-                all_vace_videos.append(pipe.preprocess_video(vv))
-            else:
-                all_vace_videos.append(
-                    torch.zeros(1, 3, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device)
-                )
-
-            ref = sample.get("first_frame_image")
-            if ref is not None:
-                if not isinstance(ref, list):
-                    ref = [ref]
-                all_ref_images.append(pipe.preprocess_video(ref))
-            else:
-                all_ref_images.append(None)
-
-            all_prompts.append(sample["prompt"])
-
-            action = sample.get("action_trajectory")
-            if self.lambda_action > 0 and action is None:
-                raise ValueError("lambda_action > 0 but no action_trajectory in data.")
-            if action is not None:
-                if isinstance(action, np.ndarray):
-                    action = torch.from_numpy(action)
-                action = action.to(dtype=pipe.torch_dtype, device=pipe.device).unsqueeze(0)
-            all_actions.append(action)
-
-            # Collect masks (True=valid) for padding-aware loss
-            amask = sample.get("action_mask", None)
-            vmask = sample.get("video_mask", None)
-            if amask is not None:
-                if isinstance(amask, np.ndarray):
-                    amask = torch.from_numpy(amask)
-                all_action_masks.append(amask)
-            else:
-                all_action_masks.append(None)
-            if vmask is not None:
-                if isinstance(vmask, np.ndarray):
-                    vmask = torch.from_numpy(vmask)
-                all_video_masks.append(vmask)
-            else:
-                all_video_masks.append(None)
-
-        ref_flags = [r is not None for r in all_ref_images]
-        if any(ref_flags) and not all(ref_flags):
-            raise ValueError("Mixed reference images in batch: all samples must be consistent.")
-        has_ref = ref_flags[0] if ref_flags else False
-
-        # Batch text encoding
-        pipe.load_models_to_device(["text_encoder"])
-        ids, mask = pipe.tokenizer(all_prompts, return_mask=True, add_special_tokens=True)
-        ids, mask = ids.to(pipe.device), mask.to(pipe.device)
-        seq_lens = mask.gt(0).sum(dim=1).long()
-        context = pipe.text_encoder(ids, mask)
-        for i, v in enumerate(seq_lens):
-            context[i, v:] = 0
-
-        # Batch VAE encoding
-        pipe.load_models_to_device(["vae"])
-        stacked_inputs = torch.cat(all_input_videos, dim=0)
-        input_latents = pipe.vae.batch_encode(stacked_inputs, pipe.device).to(
-            dtype=pipe.torch_dtype, device=pipe.device
-        )
-
-        if has_ref:
-            stacked_refs = torch.cat(all_ref_images, dim=0)
-            ref_latents = pipe.vae.batch_encode(stacked_refs, pipe.device).to(
-                dtype=pipe.torch_dtype, device=pipe.device
-            )
-            input_latents = torch.cat([ref_latents, input_latents], dim=2)
-
-        # VACE context assembly
-        vace_context = None
-        if pipe.vace is not None:
-            stacked_vace = torch.cat(all_vace_videos, dim=0)
-            reactive_latents = pipe.vae.batch_encode(stacked_vace, pipe.device).to(
-                dtype=pipe.torch_dtype, device=pipe.device
-            )
-            single_zero = torch.zeros(1, 3, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device)
-            inactive_latent = pipe.vae.batch_encode(single_zero, pipe.device).to(
-                dtype=pipe.torch_dtype, device=pipe.device
-            )
-            inactive_latents = inactive_latent.expand(B, -1, -1, -1, -1)
-            vace_video_latents = torch.cat([inactive_latents, reactive_latents], dim=1)
-
-            vace_mask = torch.ones(B, 1, num_frames, height, width, dtype=pipe.torch_dtype, device=pipe.device)
-            vace_mask_latents = rearrange(vace_mask[:, 0], "B T (H P) (W Q) -> B (P Q) T H W", P=8, Q=8)
-            T_lat = (vace_mask_latents.shape[2] + 3) // 4
-            vace_mask_latents = F.interpolate(
-                vace_mask_latents,
-                size=(T_lat, vace_mask_latents.shape[3], vace_mask_latents.shape[4]),
-                mode="nearest-exact",
-            )
-
-            if has_ref:
-                ref_f = ref_latents.shape[2]
-                vace_ref_latents = torch.cat([ref_latents, torch.zeros_like(ref_latents)], dim=1)
-                vace_video_latents = torch.cat([vace_ref_latents, vace_video_latents], dim=2)
-                vace_mask_latents = torch.cat(
-                    [
-                        torch.zeros(
-                            B,
-                            vace_mask_latents.shape[1],
-                            ref_f,
-                            vace_mask_latents.shape[3],
-                            vace_mask_latents.shape[4],
-                            dtype=pipe.torch_dtype,
-                            device=pipe.device,
-                        ),
-                        vace_mask_latents,
-                    ],
-                    dim=2,
-                )
-
-            vace_context = torch.cat([vace_video_latents, vace_mask_latents], dim=1)
-
-        # TI2V handling
-        is_ti2v = getattr(pipe.dit, "fuse_vae_embedding_in_latents", False)
-        first_frame_latents = None
-        num_clean_prefix = 0
-        if is_ti2v and has_ref:
-            first_frame_latents = ref_latents[:, :, 0:1].clone()
-            num_clean_prefix += ref_latents.shape[2]
-
-        # Assemble inputs
-        batched_shared = {
-            "latents": None,
-            "input_latents": input_latents,
-            "vace_context": vace_context,
-            "vace_scale": 1.0,
-            "height": height,
-            "width": width,
-            "num_frames": num_frames,
-            "cfg_scale": 1,
-            "cfg_merge": False,
-            "tiled": False,
-            "use_gradient_checkpointing": self.use_gradient_checkpointing,
-            "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
-            "max_timestep_boundary": self.max_timestep_boundary,
-            "min_timestep_boundary": self.min_timestep_boundary,
-            "fuse_vae_embedding_in_latents": is_ti2v and has_ref,
-            "num_clean_prefix_frames": num_clean_prefix,
-            "first_frame_latents": first_frame_latents,
-        }
-
-        action_data = torch.cat(all_actions, dim=0) if all_actions[0] is not None else None
-
-        # Proprioceptive state (start-of-window action) — batch-stacked.
-        if action_data is not None and self.architecture.uses_proprioception:
-            batched_shared["proprio_state"] = action_data[:, 0, :].contiguous()
-
-        # Padding masks: action at full resolution, video downsampled to latent.
-        if all_action_masks[0] is not None:
-            batched_shared["action_is_pad"] = torch.stack(
-                [~m for m in all_action_masks],
-                dim=0,
-            ).to(device=pipe.device)  # (B, num_frames) full resolution
-        if all_video_masks[0] is not None:
-            latent_masks = [_downsample_video_mask_to_latent(~m) for m in all_video_masks]
-            batched_shared["video_is_pad"] = torch.stack(latent_masks, dim=0).to(device=pipe.device)
-
-        result = self.loss_fn(
-            pipe=self.pipe,
-            architecture=self.architecture,
-            action_scheduler=self.action_scheduler,
-            action_data=action_data,
-            current_step=self._current_step,
-            decoupled_sampler=self.decoupled_sampler,
-            **batched_shared,
-            context=context,
+            action_timestep_per_token=self.action_timestep_per_token,
         )
 
         return {
@@ -634,61 +244,38 @@ class OpenWAMTrainer(BaseTrainer):
         logger.info("wandb initialized: %s/%s", project, run.name)
         return run
 
-    def train(self, num_epochs: int = None, max_steps: int = None):
-        """Run the training loop.
-
-        Uses HuggingFace Accelerate for distributed training.
-
-        Args:
-            num_epochs: Override for ``training.num_epochs``.
-            max_steps: Override for ``training.max_steps``.
-        """
+    def build_optimizer(self) -> torch.optim.Optimizer:
+        """Build the optimizer. Override to use a different optimizer."""
         t = self.cfg.training
-        num_epochs = num_epochs or int(t.num_epochs)
-        max_steps = max_steps or getattr(t, "max_steps", None)
-        batch_size = int(t.batch_size)
         lr = float(t.learning_rate)
-        grad_accum = int(t.gradient_accumulation_steps)
-
-        # Debug mode: override to a short sanity-check run
-        debug = bool(getattr(t, "debug", False))
-        if debug:
-            max_steps = 20
-            save_steps_override = 5
-            logger.info("DEBUG mode: max_steps=20, save@5, constant LR")
-
-        # Build optimizer
-        params = self.get_trainable_parameters()
         betas = tuple(getattr(t, "adam_betas", [0.9, 0.95]))
-        optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=float(t.weight_decay), betas=betas)
+        params = self.get_trainable_parameters()
+        return torch.optim.AdamW(params, lr=lr, weight_decay=float(t.weight_decay), betas=betas)
 
-        # Build dataloader
-        dataloader = torch.utils.data.DataLoader(
+    def build_dataloader(self, batch_size: int) -> torch.utils.data.DataLoader:
+        """Build the training DataLoader. Override for custom sampling."""
+        t = self.cfg.training
+        return torch.utils.data.DataLoader(
             self.dataset,
             batch_size=batch_size,
             shuffle=True,
             num_workers=int(t.dataset_num_workers),
-            collate_fn=lambda x: x,  # Return list of dicts
+            collate_fn=list,
             pin_memory=True,
         )
 
-        # Gradient clipping
-        max_grad_norm = float(t.max_grad_norm) if getattr(t, "max_grad_norm", None) else None
-
-        # LR scheduler (cosine with linear warmup; disabled in debug mode)
-        scheduler = None
+    def build_lr_scheduler(self, optimizer, total_opt_steps: int, debug: bool = False):
+        """Build the LR scheduler. Returns scheduler or None. Override for custom schedules."""
+        t = self.cfg.training
+        lr = float(t.learning_rate)
         lr_scheduler_type = getattr(t, "lr_scheduler", None)
         if debug:
-            lr_scheduler_type = None  # constant LR in debug mode
+            return None
         if lr_scheduler_type == "cosine":
             from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
             warmup_ratio = float(getattr(t, "warmup_ratio", 0.05))
             lr_min_ratio = float(getattr(t, "lr_min_ratio", 0.01))
-            steps_per_epoch = math.ceil(len(dataloader) / grad_accum)
-            total_opt_steps = steps_per_epoch * num_epochs
-            if max_steps:
-                total_opt_steps = min(total_opt_steps, max_steps)
             warmup_steps = int(total_opt_steps * warmup_ratio)
             cosine_steps = max(total_opt_steps - warmup_steps, 1)
             warmup_sched = LinearLR(
@@ -712,6 +299,99 @@ class OpenWAMTrainer(BaseTrainer):
                 warmup_steps,
                 lr * lr_min_ratio,
             )
+            return scheduler
+        return None
+
+    def on_train_begin(self, *, output_path: str, total_steps: int, **ctx):
+        """Hook called before the training loop starts. Override for custom setup."""
+
+    def on_step_end(
+        self,
+        global_step: int,
+        *,
+        loss_total: float,
+        loss_video: float,
+        loss_action: float,
+        grad_norm: float,
+        lr: float,
+        epoch: int,
+        pbar=None,
+        wandb_run=None,
+        steps_per_sec: float = 0.0,
+        batch_size: int = 1,
+        **ctx,
+    ):
+        """Hook called after each training step. Override for custom logging.
+
+        Default implementation updates the progress bar and logs to wandb.
+        """
+        if pbar is not None:
+            pbar.set_postfix(
+                loss=f"{loss_total:.4f}",
+                video=f"{loss_video:.4f}",
+                action=f"{loss_action:.4f}",
+                lr=f"{lr:.2e}",
+                epoch=epoch,
+            )
+            pbar.update(1)
+
+        if wandb_run is not None:
+            _num_procs = self.accelerator.num_processes if self.accelerator is not None else 1
+            log_dict = {
+                "train/loss": loss_total,
+                "train/loss_video": loss_video,
+                "train/loss_action": loss_action,
+                "train/grad_norm": grad_norm,
+                "train/lr": lr,
+                "performance/steps_per_sec": steps_per_sec,
+                "performance/samples_per_sec": steps_per_sec * batch_size * _num_procs,
+            }
+            wandb_run.log(log_dict, step=global_step)
+
+    def on_train_end(self, global_step: int, *, output_path: str, wandb_run=None, **ctx):
+        """Hook called after training completes. Override for custom teardown."""
+        if wandb_run is not None:
+            wandb_run.finish()
+
+    def should_save_checkpoint(self, global_step: int, save_steps: int | None) -> bool:
+        """Whether to save a checkpoint at this step. Override for custom logic."""
+        return save_steps is not None and global_step > 0 and global_step % save_steps == 0
+
+    def train(self, num_epochs: int = None, max_steps: int = None):
+        """Run the training loop.
+
+        Uses HuggingFace Accelerate for distributed training.
+
+        Args:
+            num_epochs: Override for ``training.num_epochs``.
+            max_steps: Override for ``training.max_steps``.
+        """
+        t = self.cfg.training
+        num_epochs = num_epochs or int(t.num_epochs)
+        max_steps = max_steps or getattr(t, "max_steps", None)
+        batch_size = int(t.batch_size)
+        grad_accum = int(t.gradient_accumulation_steps)
+
+        # Debug mode: override to a short sanity-check run
+        debug = bool(getattr(t, "debug", False))
+        if debug:
+            max_steps = 20
+            save_steps_override = 5
+            logger.info("DEBUG mode: max_steps=20, save@5, constant LR")
+
+        # Build optimizer, dataloader, scheduler via overridable methods
+        optimizer = self.build_optimizer()
+        dataloader = self.build_dataloader(batch_size)
+
+        # Gradient clipping
+        max_grad_norm = float(t.max_grad_norm) if getattr(t, "max_grad_norm", None) else None
+
+        # LR scheduler via overridable method
+        steps_per_epoch = math.ceil(len(dataloader) / grad_accum)
+        total_opt_steps = steps_per_epoch * num_epochs
+        if max_steps:
+            total_opt_steps = min(total_opt_steps, max_steps)
+        scheduler = self.build_lr_scheduler(optimizer, total_opt_steps, debug=debug)
 
         # Checkpoint intervals
         if debug:
@@ -735,13 +415,26 @@ class OpenWAMTrainer(BaseTrainer):
                 run_dir_name += "_debug"
             output_path = os.path.join(base_output_path, run_dir_name)
             os.makedirs(output_path, exist_ok=True)
+            # Inject video backbone component specs into config for
+            # self-contained deployment (no manifest.json needed).
+            model_path = None
+            try:
+                model_path = str(self.cfg.model.video_backbone.model_path)
+            except Exception:
+                pass
+            if model_path and os.path.isdir(model_path):
+                from omegaconf import OmegaConf
+
+                specs = self.architecture.get_component_specs(model_path)
+                if specs is not None:
+                    with open_dict(self.cfg):
+                        if "components" not in self.cfg.model.video_backbone:
+                            OmegaConf.update(self.cfg, "model.video_backbone.components", specs["components"])
+                        if "tokenizer" in specs and "tokenizer" not in self.cfg.model.video_backbone:
+                            OmegaConf.update(self.cfg, "model.video_backbone.tokenizer", specs["tokenizer"])
             save_config(output_path, self.cfg)
             if self.dataset is not None:
                 save_action_stats(output_path, self.dataset)
-            # Write a self-contained video-backbone manifest + tokenizer so
-            # deploy on a new machine needs only the checkpoint dir (no external
-            # video-backbone source). Silent no-op if model_path is missing.
-            save_video_backbone_artifacts(output_path, self.cfg)
         else:
             output_path = None
 
@@ -773,22 +466,16 @@ class OpenWAMTrainer(BaseTrainer):
 
             # Update references — DeepSpeed wraps the module
             unwrapped = self.accelerator.unwrap_model(self.trainable_wrapper)
-            self.action_dit = unwrapped.action_dit
+            self.action_backbone = unwrapped.action_backbone
 
-            # Sync pipe's trainable sub-modules with DeepSpeed-managed versions
-            if "dit" in unwrapped.pipe_modules:
-                self.pipe.dit = unwrapped.pipe_modules["dit"]
-            if "vace" in unwrapped.pipe_modules:
-                self.pipe.vace = unwrapped.pipe_modules["vace"]
+            # Sync video backbone's trainable sub-modules with DeepSpeed-managed versions
+            self.architecture.restore_deepspeed_submodules(dict(unwrapped.pipe_modules))
 
-            # Fix pipe.device — may still be "cpu" after initialize_model_on_cpu
-            self.pipe.device = self.accelerator.device
+            # Propagate device from accelerator down through architecture → video_backbone
+            self.architecture.set_dtype_device(self.architecture.dtype, self.accelerator.device)
 
             # Move frozen modules (T5, VAE) to device
-            for name in ("text_encoder", "vae"):
-                mod = getattr(self.pipe, name, None)
-                if mod is not None:
-                    mod.to(device=self.accelerator.device)
+            self.architecture.move_frozen_to_device(self.accelerator.device)
 
             logger.info("DeepSpeed: model wrapped, device=%s", self.accelerator.device)
         elif self.accelerator is not None:
@@ -815,6 +502,9 @@ class OpenWAMTrainer(BaseTrainer):
         global_step = 0
         _step_t0 = _time.monotonic()
         pbar = tqdm(total=total_steps, desc="Training", unit="step")
+
+        self.on_train_begin(output_path=output_path, total_steps=total_steps)
+
         for epoch in range(num_epochs):
             for batch in dataloader:
                 losses = self.compute_loss(batch)
@@ -846,7 +536,6 @@ class OpenWAMTrainer(BaseTrainer):
                 # --- Gather losses across all ranks ---
                 _device = loss.device
                 if self.accelerator is not None and self.accelerator.num_processes > 1:
-                    # Build tensor of metrics to gather in one call
                     local_metrics = torch.tensor(
                         [
                             loss.detach().float().item(),
@@ -861,7 +550,7 @@ class OpenWAMTrainer(BaseTrainer):
                         device=_device,
                         dtype=torch.float32,
                     ).reshape(1, -1)
-                    gathered = self.accelerator.gather(local_metrics)  # (num_processes, 4)
+                    gathered = self.accelerator.gather(local_metrics)
                     global_metrics = gathered.mean(dim=0)
                     loss_total = global_metrics[0].item()
                     loss_video = global_metrics[1].item()
@@ -879,45 +568,42 @@ class OpenWAMTrainer(BaseTrainer):
                     )
                     global_grad_norm = grad_norm.item()
 
-                # --- Progress bar ---
+                # --- Step hook (logging, progress bar, wandb) ---
                 current_lr = optimizer.param_groups[0]["lr"]
-                pbar.set_postfix(
-                    loss=f"{loss_total:.4f}",
-                    video=f"{loss_video:.4f}",
-                    action=f"{loss_action:.4f}",
-                    lr=f"{current_lr:.2e}",
-                    epoch=epoch,
-                )
-                pbar.update(1)
+                _now = _time.monotonic()
+                steps_per_sec = 1.0 / max(_now - _step_t0, 1e-9)
+                _step_t0 = _now
 
-                # --- wandb (rank 0 only, with global-averaged metrics) ---
-                if wandb_run is not None:
-                    _now = _time.monotonic()
-                    steps_per_sec = 1.0 / max(_now - _step_t0, 1e-9)
-                    _step_t0 = _now
-                    _num_procs = self.accelerator.num_processes if self.accelerator is not None else 1
-                    log_dict = {
-                        "train/loss": loss_total,
-                        "train/loss_video": loss_video,
-                        "train/loss_action": loss_action,
-                        "train/grad_norm": global_grad_norm,
-                        "train/lr": current_lr,
-                        "performance/steps_per_sec": steps_per_sec,
-                        "performance/samples_per_sec": steps_per_sec * batch_size * _num_procs,
-                    }
-                    wandb_run.log(log_dict, step=global_step)
+                self.on_step_end(
+                    global_step,
+                    loss_total=loss_total,
+                    loss_video=loss_video,
+                    loss_action=loss_action,
+                    grad_norm=global_grad_norm,
+                    lr=current_lr,
+                    epoch=epoch,
+                    pbar=pbar,
+                    wandb_run=wandb_run,
+                    steps_per_sec=steps_per_sec,
+                    batch_size=batch_size,
+                )
 
                 # Periodic checkpoint saving (rank 0 only for multi-GPU)
                 _is_main = self.accelerator is None or self.accelerator.is_main_process
-                if save_steps and global_step % save_steps == 0 and _is_main:
+                if self.should_save_checkpoint(global_step, save_steps) and _is_main:
                     ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
+                    msg_start = f"[checkpoint] Saving step {global_step} -> {ckpt_path}"
+                    logger.info(msg_start)
+                    tqdm.write(msg_start)
                     self.save_checkpoint(ckpt_path)
+                    msg_done = f"[checkpoint] Saved: {ckpt_path}"
+                    logger.info(msg_done)
+                    tqdm.write(msg_done)
                     manage_checkpoints(output_path, keep_last_k)
 
                 if max_steps and global_step >= max_steps:
                     pbar.close()
-                    if wandb_run is not None:
-                        wandb_run.finish()
+                    self.on_train_end(global_step, output_path=output_path, wandb_run=wandb_run)
                     return
 
         pbar.close()
@@ -926,47 +612,21 @@ class OpenWAMTrainer(BaseTrainer):
         _is_main = self.accelerator is None or self.accelerator.is_main_process
         if save_steps and _is_main:
             ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
+            msg_start = f"[checkpoint] Saving final step {global_step} -> {ckpt_path}"
+            logger.info(msg_start)
+            tqdm.write(msg_start)
             self.save_checkpoint(ckpt_path)
+            msg_done = f"[checkpoint] Saved final: {ckpt_path}"
+            logger.info(msg_done)
+            tqdm.write(msg_done)
             manage_checkpoints(output_path, keep_last_k)
 
-        if wandb_run is not None:
-            wandb_run.finish()
+        self.on_train_end(global_step, output_path=output_path, wandb_run=wandb_run)
 
     def save_checkpoint(self, path: str):
-        """Export trainable state dict to safetensors."""
-        mixed_precision = str(getattr(self.cfg.training, "mixed_precision", "bf16"))
-        save_trainable_checkpoint(path, self.action_dit, self.pipe, self.lambda_action, mixed_precision)
+        """Export full architecture state to safetensors."""
+        self.architecture.save_checkpoint(path)
 
     def load_checkpoint(self, path: str):
-        """Load a checkpoint into the model."""
-        load_trainable_checkpoint(path, self.action_dit, self.pipe)
-
-    # --- Compatibility with build_trainable_parameters ---
-    # These properties allow optimizer_groups.py to work on OpenWAMTrainer
-
-    @property
-    def lambda_action_compat(self):
-        return self.lambda_action
-
-    def parameters(self):
-        """Yield all parameters (for compatibility)."""
-        yield from self.action_dit.parameters()
-        yield from self.pipe.parameters()
-
-    def named_parameters(self, prefix="", recurse=True):
-        """Yield named parameters (for compatibility)."""
-        for name, param in self.action_dit.named_parameters(prefix="action_dit"):
-            yield name, param
-        for name, param in self.pipe.named_parameters():
-            yield name, param
-
-    def state_dict(self):
-        """Return full state dict."""
-        state = {}
-        for name, param in self.action_dit.named_parameters():
-            state[f"action_dit.{name}"] = param.data
-        for name, buf in self.action_dit.named_buffers():
-            state[f"action_dit.{name}"] = buf
-        for name, param in self.pipe.named_parameters():
-            state[name] = param.data
-        return state
+        """Load a checkpoint into the architecture."""
+        self.architecture.load_checkpoint(path)

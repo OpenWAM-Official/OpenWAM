@@ -1,8 +1,8 @@
 """Tests for deployment-related changes:
 - mixed_precision in train.yaml (save/load dtype enforcement)
-- deployment.yaml inference/deploy sections
+- deploy.yaml inference/optimization sections
 - deploy.py config loading, CLI override logic, and attention backend logging
-- joint_engine.py compile flags via cfg.deploy.compile
+- joint_engine.py compile flags via cfg.optimization.compile
 - joint_generation.py cudagraph_mark_step_begin placement
 """
 
@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.nn as nn
+
+from openwam.model.base import ExecutionPlan
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -135,8 +137,8 @@ class TestSaveTrainableCheckpoint:
         save_trainable_checkpoint(path, m, pipe, lambda_action=1.0, mixed_precision="bf16")
 
         sd = load_file(path)
-        assert sd["action_dit.step"].dtype == torch.int64, "int64 buffer should not be cast"
-        assert sd["action_dit.w"].dtype == torch.bfloat16, "float param should be cast to bf16"
+        assert sd["action_backbone.step"].dtype == torch.int64, "int64 buffer should not be cast"
+        assert sd["action_backbone.w"].dtype == torch.bfloat16, "float param should be cast to bf16"
 
     def test_default_precision_is_bf16(self, tmp_path):
         """Calling without mixed_precision arg should default to bf16."""
@@ -164,7 +166,7 @@ class TestDeploymentYaml:
     def _load(self):
         from omegaconf import OmegaConf
 
-        return OmegaConf.load(PROJECT_ROOT / "configs" / "deployment.yaml")
+        return OmegaConf.load(PROJECT_ROOT / "configs" / "deploy.yaml")
 
     def test_inference_section_exists(self):
         cfg = self._load()
@@ -178,11 +180,11 @@ class TestDeploymentYaml:
         cfg = self._load()
         assert OmegaConf.select(cfg, "inference.denoise_steps") is not None
 
-    def test_inference_cfg_scale_disabled(self):
+    def test_inference_cfg_scale_removed(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "inference.cfg_scale") == 1.0
+        assert OmegaConf.select(cfg, "inference.cfg_scale") is None
 
     def test_inference_schedule_type(self):
         from omegaconf import OmegaConf
@@ -190,39 +192,39 @@ class TestDeploymentYaml:
         cfg = self._load()
         assert OmegaConf.select(cfg, "inference.schedule_type") is not None
 
-    def test_deploy_section_exists(self):
+    def test_optimization_section_exists(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "deploy") is not None
+        assert OmegaConf.select(cfg, "optimization") is not None
 
-    def test_deploy_compile_section_exists(self):
+    def test_optimization_compile_section_exists(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "deploy.compile") is not None
-        assert OmegaConf.select(cfg, "deploy.compile.enabled") is not None
-        assert OmegaConf.select(cfg, "deploy.compile.video_dit") is not None
-        assert OmegaConf.select(cfg, "deploy.compile.vae") is not None
+        assert OmegaConf.select(cfg, "optimization.compile") is not None
+        assert OmegaConf.select(cfg, "optimization.compile.enabled") is not None
+        assert OmegaConf.select(cfg, "optimization.compile.video_dit") is not None
+        assert OmegaConf.select(cfg, "optimization.compile.vae") is not None
 
-    def test_deploy_dit_cache_defaults_off(self):
+    def test_optimization_dit_cache_defaults_off(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert not OmegaConf.select(cfg, "deploy.dit_cache.enabled")
+        assert not OmegaConf.select(cfg, "optimization.dit_cache.enabled")
 
-    def test_deploy_schedule_action_steps(self):
+    def test_optimization_schedule_action_steps(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "deploy.schedule.action_steps") is not None
+        assert OmegaConf.select(cfg, "optimization.schedule.action_steps") is not None
 
     def test_server_defaults_present(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "deployment.server.ws_port") is not None
-        assert OmegaConf.select(cfg, "deployment.server.http_port") is not None
+        assert OmegaConf.select(cfg, "server.ws_port") is not None
+        assert OmegaConf.select(cfg, "server.http_port") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -268,11 +270,10 @@ class TestDeployConfigLoading:
         args.http_port = None
         args.denoise_steps = None
         args.schedule_type = None
-        args.cfg_scale = None
         args.shift = None
 
         cfg = deploy._apply_cli_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "deployment.device") == "cuda:3"
+        assert OmegaConf.select(cfg, "device") == "cuda:3"
 
     def test_cli_denoise_steps_override(self):
         from omegaconf import OmegaConf
@@ -287,7 +288,6 @@ class TestDeployConfigLoading:
         args.http_port = None
         args.denoise_steps = 20
         args.schedule_type = None
-        args.cfg_scale = None
         args.shift = None
 
         cfg = deploy._apply_cli_overrides(cfg, args)
@@ -303,7 +303,7 @@ class TestDeployConfigLoading:
 
         args = MagicMock()
         # All None — nothing should change
-        for attr in ("device", "host", "ws_port", "http_port", "denoise_steps", "schedule_type", "cfg_scale", "shift"):
+        for attr in ("device", "host", "ws_port", "http_port", "denoise_steps", "schedule_type", "shift"):
             setattr(args, attr, None)
 
         cfg = deploy._apply_cli_overrides(cfg, args)
@@ -341,7 +341,7 @@ class TestDeployConfigLoading:
 
 
 # ---------------------------------------------------------------------------
-# 5. joint_engine.py — compile flags parsed from cfg.deploy.compile
+# 5. joint_engine.py — compile flags parsed from cfg.optimization.compile
 # ---------------------------------------------------------------------------
 
 
@@ -351,24 +351,22 @@ class TestJointEngineCompileFlags:
     def _make_engine(self, compile_enabled=False, video_dit=False, vae_compile=False, return_mock=False):
         from omegaconf import OmegaConf
 
-        from openwam.deployment.joint_engine import JointInferenceEngine
+        from openwam.deploy.joint_engine import JointInferenceEngine
 
         cfg = OmegaConf.create(
             {
                 "inference": {
                     "denoise_steps": 10,
                     "schedule_type": "sync",
-                    "cfg_scale": 1.0,
                     "shift": 5.0,
                     "num_frames": 33,
                     "height": 480,
                     "width": 832,
                 },
-                "deploy": {
+                "optimization": {
                     "decode_video": True,
                     "compile": {"enabled": compile_enabled, "video_dit": video_dit, "vae": vae_compile},
                     "dit_cache": {"enabled": False},
-                    "cfg": {"mode": None, "scale": 1.0},
                     "schedule": {"type": None, "action_steps": 4},
                 },
             }
@@ -378,16 +376,19 @@ class TestJointEngineCompileFlags:
         pipe.dit = _tiny_module()
         pipe.vae = _tiny_module()
 
+        vb = MagicMock()
+        vb._pipe = pipe
+
         arch = MagicMock()
-        arch.action_dit = _tiny_module()
-        arch.is_interleaved = False
+        arch.action_backbone = _tiny_module()
+        arch.execution_plan = ExecutionPlan.BRIDGE_COLLECTION
         arch.bridge_layers = []
+        arch.video_backbone = vb
 
         # Patch torch.compile to a passthrough so we don't need a real GPU
         with patch("torch.compile", side_effect=lambda m, **kw: m) as mock_compile:
             engine = JointInferenceEngine.__new__(JointInferenceEngine)
             engine.cfg = cfg
-            engine.pipeline = pipe
             engine.architecture = arch
             engine.action_dit = None
             engine.action_repr = None
@@ -401,82 +402,26 @@ class TestJointEngineCompileFlags:
         mock_compile.assert_not_called()
 
     def test_action_dit_compile_flag(self):
-        orig_module = _tiny_module()
-
-        arch = MagicMock()
-        arch.action_dit = orig_module
-        arch.is_interleaved = False
-        arch.bridge_layers = []
-
+        """compile.enabled=True should torch.compile the action module."""
         from omegaconf import OmegaConf
 
-        from openwam.deployment.joint_engine import JointInferenceEngine
+        from tests.test_openwam_trainer import _make_tiny_arch
 
-        cfg = OmegaConf.create(
-            {
-                "inference": {
-                    "denoise_steps": 10,
-                    "schedule_type": "sync",
-                    "cfg_scale": 1.0,
-                    "shift": 5.0,
-                    "num_frames": 33,
-                    "height": 480,
-                    "width": 832,
-                },
-                "deploy": {
-                    "decode_video": True,
-                    "compile": {"enabled": True, "video_dit": False, "vae": False},
-                    "dit_cache": {"enabled": False},
-                    "cfg": {"mode": None, "scale": 1.0},
-                    "schedule": {"type": None, "action_steps": 4},
-                },
-            }
-        )
+        cfg = OmegaConf.create({"enabled": True, "video_dit": False, "vae": False})
+        arch = _make_tiny_arch()
 
-        pipe = MagicMock()
-        pipe.dit = _tiny_module()
-        pipe.vae = _tiny_module()
+        sentinel = nn.Identity()
+        with patch("torch.compile", return_value=sentinel):
+            arch.apply_compile_optimizations(cfg)
 
-        sentinel = object()
-        with patch("torch.compile", return_value=sentinel) as mock_compile:
-            engine = JointInferenceEngine.__new__(JointInferenceEngine)
-            engine.cfg = cfg
-            engine.pipeline = pipe
-            engine.architecture = arch
-            engine.action_dit = None
-            engine.action_repr = None
-            engine._init_optimizations()
-
-        mock_compile.assert_called()
-        assert engine.architecture.action_dit is sentinel
+        assert arch.action_backbone is sentinel
 
     def test_video_dit_compile_flag(self):
+        """compile.video_dit=True should compile each DiT block via backbone.apply_compile."""
         from omegaconf import OmegaConf
 
-        from openwam.deployment.joint_engine import JointInferenceEngine
+        cfg = OmegaConf.create({"enabled": False, "video_dit": True, "vae": False})
 
-        cfg = OmegaConf.create(
-            {
-                "inference": {
-                    "denoise_steps": 10,
-                    "schedule_type": "sync",
-                    "cfg_scale": 1.0,
-                    "shift": 5.0,
-                    "num_frames": 33,
-                    "height": 480,
-                    "width": 832,
-                },
-                "deploy": {
-                    "decode_video": True,
-                    "compile": {"enabled": False, "video_dit": True, "vae": False},
-                    "dit_cache": {"enabled": False},
-                    "cfg": {"mode": None, "scale": 1.0},
-                    "schedule": {"type": None, "action_steps": 4},
-                },
-            }
-        )
-
-        # model_fn_wan_video iterates dit.blocks individually, so compile targets blocks
         class FakeDiT(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -486,90 +431,64 @@ class TestJointEngineCompileFlags:
         pipe.dit = FakeDiT()
         pipe.vae = _tiny_module()
 
-        arch = MagicMock()
-        arch.action_dit = _tiny_module()
-        arch.is_interleaved = False
-        arch.bridge_layers = []
+        from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 
-        # torch.compile returns an OptimizedModule (nn.Module); use a real Module sentinel
+        vb = WanVideoBackbone(pipe)
+
+        from tests.test_openwam_trainer import _make_tiny_arch
+
+        arch = _make_tiny_arch()
+        arch.video_backbone = vb
+
         sentinel = nn.Identity()
         with patch("torch.compile", return_value=sentinel):
-            engine = JointInferenceEngine.__new__(JointInferenceEngine)
-            engine.cfg = cfg
-            engine.pipeline = pipe
-            engine.architecture = arch
-            engine.action_dit = None
-            engine.action_repr = None
-            engine._init_optimizations()
+            arch.apply_compile_optimizations(cfg)
 
-        # Each block should be replaced by the compiled sentinel
-        assert all(b is sentinel for b in engine.pipeline.dit.blocks)
+        assert all(b is sentinel for b in vb._pipe.dit.blocks)
 
     def test_vae_compile_flag(self):
+        """compile.vae=True should torch.compile the VAE via backbone.apply_compile."""
         from omegaconf import OmegaConf
 
-        from openwam.deployment.joint_engine import JointInferenceEngine
-
-        cfg = OmegaConf.create(
-            {
-                "inference": {
-                    "denoise_steps": 10,
-                    "schedule_type": "sync",
-                    "cfg_scale": 1.0,
-                    "shift": 5.0,
-                    "num_frames": 33,
-                    "height": 480,
-                    "width": 832,
-                },
-                "deploy": {
-                    "decode_video": True,
-                    "compile": {"enabled": False, "video_dit": False, "vae": True},
-                    "dit_cache": {"enabled": False},
-                    "cfg": {"mode": None, "scale": 1.0},
-                    "schedule": {"type": None, "action_steps": 4},
-                },
-            }
-        )
+        cfg = OmegaConf.create({"enabled": False, "video_dit": False, "vae": True})
 
         pipe = MagicMock()
         pipe.dit = _tiny_module()
         pipe.vae = _tiny_module()
 
-        arch = MagicMock()
-        arch.action_dit = _tiny_module()
-        arch.is_interleaved = False
-        arch.bridge_layers = []
+        from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+
+        vb = WanVideoBackbone(pipe)
+
+        from tests.test_openwam_trainer import _make_tiny_arch
+
+        arch = _make_tiny_arch()
+        arch.video_backbone = vb
 
         sentinel = object()
         with patch("torch.compile", return_value=sentinel):
-            engine = JointInferenceEngine.__new__(JointInferenceEngine)
-            engine.cfg = cfg
-            engine.pipeline = pipe
-            engine.architecture = arch
-            engine.action_dit = None
-            engine.action_repr = None
-            engine._init_optimizations()
+            arch.apply_compile_optimizations(cfg)
 
-        assert engine.pipeline.vae is sentinel
+        assert vb._pipe.vae is sentinel
 
     def test_compile_failure_does_not_crash(self):
         """If torch.compile raises, the engine should continue with eager mode."""
         from omegaconf import OmegaConf
 
-        from openwam.deployment.joint_engine import JointInferenceEngine
+        from openwam.deploy.joint_engine import JointInferenceEngine
 
         cfg = OmegaConf.create(
             {
                 "inference": {
                     "denoise_steps": 10,
                     "schedule_type": "sync",
-                    "cfg_scale": 1.0,
+                    "seed": 42,
                     "shift": 5.0,
                     "num_frames": 33,
                     "height": 480,
                     "width": 832,
                 },
-                "deploy": {
+                "optimization": {
                     "decode_video": True,
                     "compile": {"enabled": True, "video_dit": True, "vae": True},
                     "dit_cache": {"enabled": False},
@@ -588,20 +507,150 @@ class TestJointEngineCompileFlags:
         pipe.dit = FakeDiT()
         pipe.vae = _tiny_module()
 
+        vb = MagicMock()
+        vb._pipe = pipe
+
         arch = MagicMock()
-        arch.action_dit = _tiny_module()
-        arch.is_interleaved = False
+        arch.action_backbone = _tiny_module()
+        arch.execution_plan = ExecutionPlan.BRIDGE_COLLECTION
         arch.bridge_layers = []
+        arch.video_backbone = vb
 
         with patch("torch.compile", side_effect=RuntimeError("compile unavailable")):
             engine = JointInferenceEngine.__new__(JointInferenceEngine)
             engine.cfg = cfg
-            engine.pipeline = pipe
             engine.architecture = arch
             engine.action_dit = None
             engine.action_repr = None
             # Should not raise
             engine._init_optimizations()
+
+
+class TestCompileForward:
+    """Verify that torch.compile + forward actually works (eager backend)."""
+
+    def _make_arch(self):
+        from tests.test_openwam_trainer import _make_tiny_arch
+
+        return _make_tiny_arch()
+
+    def test_action_module_compile_forward(self):
+        """Action module should produce correct output after torch.compile."""
+        arch = self._make_arch()
+        arch.eval()
+
+        B, T_action, action_dim = 1, 5, 7
+        noisy = torch.randn(B, T_action, action_dim)
+        timestep = torch.tensor([0.5])
+        # ActionDiT.forward needs video_features (one per bridge layer)
+        video_features = [torch.randn(B, 10, 64) for _ in arch.bridge_layers]
+
+        with torch.no_grad():
+            pred_before = arch.action_backbone(noisy, video_features, timestep)
+
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create({"enabled": True, "video_dit": False, "vae": False})
+        arch.apply_compile_optimizations(cfg)
+
+        with torch.no_grad():
+            pred_after = arch.action_backbone(noisy, video_features, timestep)
+
+        assert pred_after.shape == pred_before.shape == (B, T_action, action_dim)
+
+    def test_backbone_compile_forward(self):
+        """Video backbone submodules should work after torch.compile."""
+        arch = self._make_arch()
+        arch.eval()
+
+        B = 1
+        latents = torch.randn(B, 16, 3, 8, 8)
+        timestep = torch.tensor([0.5])
+        context = torch.randn(B, 4, 64)
+
+        # Forward before compile
+        with torch.no_grad():
+            state = arch.video_backbone.prepare(
+                latents=latents,
+                timestep=timestep,
+                context=context,
+            )
+            for i in range(arch.video_backbone.num_layers):
+                state = arch.video_backbone.run_block(i, state)
+            pred_before = arch.video_backbone.finalize(state)
+
+        # Compile all backbone submodules
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create(
+            {
+                "enabled": False,
+                "video_dit": True,
+                "vae": True,
+                "text_encoder": True,
+            }
+        )
+        arch.apply_compile_optimizations(cfg)
+
+        # Forward after compile
+        with torch.no_grad():
+            state = arch.video_backbone.prepare(
+                latents=latents,
+                timestep=timestep,
+                context=context,
+            )
+            for i in range(arch.video_backbone.num_layers):
+                state = arch.video_backbone.run_block(i, state)
+            pred_after = arch.video_backbone.finalize(state)
+
+        assert pred_after.shape == pred_before.shape
+
+    def test_full_architecture_compile_forward(self):
+        """Full architecture forward (video + action) after compiling everything."""
+        arch = self._make_arch()
+        arch.eval()
+
+        B, T_action, action_dim = 1, 5, 7
+        noisy_actions = torch.randn(B, T_action, action_dim)
+        action_timestep = torch.tensor([0.5])
+        latents = torch.randn(B, 16, 3, 8, 8)
+        video_timestep = torch.tensor([0.5])
+        context = torch.randn(B, 4, 64)
+
+        # Forward before compile
+        with torch.no_grad():
+            v_pred_before, a_pred_before = arch.forward(
+                noisy_actions,
+                action_timestep,
+                latents=latents,
+                timestep=video_timestep,
+                context=context,
+            )
+
+        # Compile everything
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create(
+            {
+                "enabled": True,
+                "video_dit": True,
+                "vae": True,
+            }
+        )
+        arch.apply_compile_optimizations(cfg)
+
+        # Forward after compile
+        with torch.no_grad():
+            v_pred_after, a_pred_after = arch.forward(
+                noisy_actions,
+                action_timestep,
+                latents=latents,
+                timestep=video_timestep,
+                context=context,
+            )
+
+        assert v_pred_after.shape == v_pred_before.shape
+        assert a_pred_after.shape == a_pred_before.shape == (B, T_action, action_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -694,7 +743,7 @@ class TestLogAttentionBackends:
             deploy._log_attention_backends(logging.getLogger("test_attn"))
         assert "ActionDiT" in caplog.text
         assert "Video DiT" in caplog.text
-        assert "diffsynth core" in caplog.text
+        assert "Wan shared core" in caplog.text
 
     def test_check_mark_absent_without_flash_attn(self, caplog):
         """Without flash-attn, torch_sdpa is the backend — no ✓ expected either."""
@@ -708,49 +757,48 @@ class TestLogAttentionBackends:
 
 
 # ---------------------------------------------------------------------------
-# 8. joint_generation.py — cudagraph_mark_step_begin placement
+# 8. architecture.generate() — cudagraph_mark_step_begin placement
 # ---------------------------------------------------------------------------
 
 
 class TestCudagraphMarkStepBegin:
-    """Structural check: every direct ``pipe.model_fn()`` call AND every
-    ``cfg_handler.forward(pipe.model_fn, ...)`` dispatch must be preceded by
-    ``torch.compiler.cudagraph_mark_step_begin()`` to prevent CUDA Graph tree
-    from raising 'tensor output overwritten by subsequent run' when
-    ``compile.video_dit=true``. cfg_handler dispatches to pipe.model_fn
-    internally and shares the same CUDA Graph tree, so the mark requirement
-    applies to it too."""
+    """Structural check: every architecture forward dispatch in generate()
+    must be preceded by ``torch.compiler.cudagraph_mark_step_begin()`` to
+    prevent CUDA Graph tree from raising 'tensor output overwritten by
+    subsequent run' when ``compile.video_dit=true``.
+
+    After the architecture refactor the dispatch site is in
+    ``BaseWAMArchitecture.generate()`` in ``base.py``.
+    """
+
+    _DISPATCH_SUBSTRINGS = (
+        "noise_pred, action_noise_pred = self.forward(",
+        "noise_pred = vb.finalize(state)",
+    )
 
     def _source(self):
-        return (PROJECT_ROOT / "openwam" / "deployment" / "joint_generation.py").read_text()
+        # Only check generate() method, not compute_loss()
+        src = (PROJECT_ROOT / "openwam" / "model" / "base.py").read_text()
+        marker = "def generate("
+        idx = src.index(marker)
+        return src[idx:]
 
     def test_mark_count_equals_dispatch_sites(self):
         src = self._source()
         mark_count = src.count("torch.compiler.cudagraph_mark_step_begin()")
-        # Direct assignments + cfg_handler dispatches — both trigger the same
-        # CUDA Graph tree and both need the mark before them.
-        direct_calls = src.count("noise_pred_posi = pipe.model_fn(") + src.count("noise_pred_nega = pipe.model_fn(")
-        cfg_handler_calls = src.count("cfg_handler.forward(")
-        expected = direct_calls + cfg_handler_calls
+        expected = sum(src.count(sub) for sub in self._DISPATCH_SUBSTRINGS)
         assert mark_count == expected, (
-            f"Expected {expected} cudagraph_mark_step_begin() call(s) "
-            f"({direct_calls} direct pipe.model_fn + {cfg_handler_calls} cfg_handler.forward), "
-            f"found {mark_count}. Add torch.compiler.cudagraph_mark_step_begin() before any new "
-            "pipe.model_fn() or cfg_handler.forward() dispatch."
+            f"Expected {expected} cudagraph_mark_step_begin() call(s), found {mark_count}. "
+            "Add torch.compiler.cudagraph_mark_step_begin() before any new "
+            "architecture forward dispatch."
         )
 
     def test_mark_appears_before_not_after(self):
         """The mark must appear on the line immediately before each dispatch site."""
         src = self._source()
         lines = src.splitlines()
-        trigger_substrings = (
-            "noise_pred_posi = pipe.model_fn(",
-            "noise_pred_nega = pipe.model_fn(",
-            "noise_pred = cfg_handler.forward(",
-        )
         for i, line in enumerate(lines):
-            if any(sub in line for sub in trigger_substrings):
-                # Search backwards (skip blank and comment-only lines) for the mark
+            if any(sub in line for sub in self._DISPATCH_SUBSTRINGS):
                 prev = i - 1
                 while prev >= 0 and (lines[prev].strip() == "" or lines[prev].lstrip().startswith("#")):
                     prev -= 1

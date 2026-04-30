@@ -25,6 +25,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import h5py
 import numpy as np
 import torch
 from omegaconf import OmegaConf
@@ -126,10 +127,77 @@ def save_sample(sample: dict, out_dir: Path) -> None:
     (out_dir / "prompt.txt").write_text(str(prompt))
 
     # Dump key tensors as .npy for later inspection
-    np.save(out_dir / "action_trajectory.npy", sample["action_trajectory"].numpy())
+    np.save(out_dir / "action.npy", sample["action"].numpy())
     np.save(out_dir / "proprio.npy", sample["proprio"].numpy())
     np.save(out_dir / "action_mask.npy", sample["action_mask"].numpy())
     np.save(out_dir / "video_mask.npy", sample["video_mask"].numpy())
+
+
+def _find_subdataset(dataset, idx):
+    """Map a global idx onto the underlying single-task RoboTwinDataset.
+
+    Works for both ``RoboTwinDataset`` (returned as-is) and
+    ``MultiTaskRoboTwinDataset`` (binary-search through cumulative lengths).
+    """
+    subs = getattr(dataset, "_sub_datasets", None)
+    if not subs:
+        return dataset, idx
+    cum = dataset._cumulative_lengths
+    lo, hi = 0, len(cum) - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if idx < cum[mid]:
+            hi = mid
+        else:
+            lo = mid + 1
+    local_idx = idx if lo == 0 else idx - cum[lo - 1]
+    return subs[lo], local_idx
+
+
+def save_raw_per_camera(dataset, idx: int, out_dir: Path) -> None:
+    """Dump the un-composed per-camera frames for the same window as ``dataset[idx]``.
+
+    Reaches into ``RoboTwinDataset`` internals (``_window_index``,
+    ``_episode_files``, ``_read_camera_frames``) — fine for a debug script.
+    Output layout::
+
+        out_dir/raw_per_camera/<camera_name>/frame_00.png ...
+
+    No-op for single-view datasets (the assembled image already shows the
+    only camera).
+    """
+    sub, local_idx = _find_subdataset(dataset, idx)
+    if not getattr(sub, "multiview", False):
+        return
+
+    if getattr(sub, "_val_samples", None) is not None:
+        ep_idx, start = sub._val_samples[local_idx]
+    else:
+        ep_idx, start = sub._window_index[local_idx]
+    path = sub._episode_files[ep_idx]
+    ep_len = sub._episode_lengths[ep_idx]
+    raw_end = min(start + sub._raw_window_len, ep_len)
+
+    raw_root = out_dir / "raw_per_camera"
+    raw_root.mkdir(parents=True, exist_ok=True)
+    (raw_root / "_meta.txt").write_text(
+        f"episode_path={path}\nep_idx={ep_idx} start={start} raw_end={raw_end} "
+        f"ep_len={ep_len}\nvideo_sample_indices={sub._video_sample_indices}\n"
+        f"cameras={list(sub.cameras)}\ncamera_layout={sub.camera_layout}\n"
+    )
+
+    with h5py.File(path, "r") as f:
+        for cam in sub.cameras:
+            cam_dir = raw_root / cam
+            cam_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                frames = sub._read_camera_frames(f, cam, start, raw_end)
+            except KeyError:
+                (cam_dir / "MISSING.txt").write_text(f"camera '{cam}' not present in {path}\n")
+                continue
+            sampled = [frames[i] for i in sub._video_sample_indices if i < len(frames)]
+            for fi, frame in enumerate(sampled):
+                frame.save(cam_dir / f"frame_{fi:02d}.png")
 
 
 def main():
@@ -205,7 +273,7 @@ def main():
         print("-" * 72)
         for key in (
             "video",
-            "action_trajectory",
+            "action",
             "action_mask",
             "video_mask",
             "proprio",
@@ -223,7 +291,7 @@ def main():
                 print("  " + describe(key, sample[key]))
 
         # --- Per-sample normalization range -----------------------------------
-        act = sample["action_trajectory"].numpy()
+        act = sample["action"].numpy()
         prop = sample["proprio"].numpy()
         a_min, a_max = float(act.min()), float(act.max())
         a_mean, a_std = float(act.mean()), float(act.std())
@@ -241,6 +309,7 @@ def main():
 
         sample_dir = out_root / f"sample_{pos:02d}_idx{idx:06d}"
         save_sample(sample, sample_dir)
+        save_raw_per_camera(dataset, idx, sample_dir)
         print(f"  saved → {sample_dir}")
 
     # --- Aggregate normalization report ---------------------------------------
@@ -276,7 +345,7 @@ def main():
             normalizer = getattr(subs[0], "_action_normalizer", None)
     if denorm_fn is not None and normalizer is not None:
         last_sample = dataset[indices[-1]]
-        normalized = last_sample["action_trajectory"].numpy()
+        normalized = last_sample["action"].numpy()
         recovered = np.asarray(denorm_fn(normalized))
         reback = normalizer.normalize(recovered)
         err = float(np.max(np.abs(reback - normalized)))

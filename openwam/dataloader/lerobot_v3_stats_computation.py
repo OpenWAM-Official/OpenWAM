@@ -89,13 +89,12 @@ class _Accumulator:
 
         if self._count == 0:
             self._mean = np.mean(data, axis=0)
-            self._mean_of_squares = np.mean(data ** 2, axis=0)
+            self._mean_of_squares = np.mean(data**2, axis=0)
             self._min = np.min(data, axis=0)
             self._max = np.max(data, axis=0)
             self._histograms = [np.zeros(_NUM_QUANTILE_BINS) for _ in range(self.dim)]
             self._bin_edges = [
-                np.linspace(self._min[i] - 1e-10, self._max[i] + 1e-10, _NUM_QUANTILE_BINS + 1)
-                for i in range(self.dim)
+                np.linspace(self._min[i] - 1e-10, self._max[i] + 1e-10, _NUM_QUANTILE_BINS + 1) for i in range(self.dim)
             ]
         else:
             new_min = np.min(data, axis=0)
@@ -108,7 +107,7 @@ class _Accumulator:
 
         self._count += num_elements
         self._mean += (np.mean(data, axis=0) - self._mean) * (num_elements / self._count)
-        self._mean_of_squares += (np.mean(data ** 2, axis=0) - self._mean_of_squares) * (num_elements / self._count)
+        self._mean_of_squares += (np.mean(data**2, axis=0) - self._mean_of_squares) * (num_elements / self._count)
         self._update_histograms(data)
 
     def _adjust_histograms(self) -> None:
@@ -155,7 +154,7 @@ class _Accumulator:
     def finalize(self) -> dict:
         if self._count == 0:
             raise ValueError("No data accumulated")
-        var = np.maximum(self._mean_of_squares - self._mean ** 2, 0.0)
+        var = np.maximum(self._mean_of_squares - self._mean**2, 0.0)
         std = np.maximum(np.sqrt(var), 1e-3)
         stats = {
             "mean": self._mean.astype(np.float32).tolist(),
@@ -188,6 +187,7 @@ def _load_task_parquets(task_root: str, show_progress: bool = False, desc: str =
     if show_progress:
         try:
             from tqdm import tqdm
+
             iterable = tqdm(parquet_files, desc=desc or "  reading parquets", unit="file", leave=False)
         except ImportError:
             pass
@@ -235,7 +235,7 @@ def _compute_task_stats(
         else:
             offset = 0
             for field, dim in zip(action_fields, field_dims):
-                chunk = raw[:, offset:offset + dim]
+                chunk = raw[:, offset : offset + dim]
                 accs[field].update(chunk)
                 offset += dim
             total += len(raw)
@@ -267,9 +267,9 @@ _AGIBOT_ACTION_DIM_EEF = 20
 
 
 def compute_agibot_task_stats(task_root: str, quat_convention: str = "xyzw") -> Tuple[dict, int]:
-    from openwam.dataloader.agibot import _make_eef_transform
+    from openwam.dataloader.agibot import make_eef_transform
 
-    transform = _make_eef_transform(quat_convention)
+    transform = make_eef_transform(quat_convention)
     return _compute_task_stats(
         task_root,
         action_fields=_AGIBOT_ACTION_FIELDS,
@@ -293,6 +293,7 @@ def _run_tasks(
     """
     try:
         from tqdm import tqdm
+
         task_iter = tqdm(task_roots, desc=desc, unit="task")
         _use_tqdm = True
     except ImportError:
@@ -319,6 +320,7 @@ def run_agibot(dataset_dir: str, quat_convention: str = "xyzw", task_root: Optio
         task_roots = [(os.path.basename(task_root), task_root)]
     else:
         from openwam.dataloader.agibot import discover_agibot_tasks
+
         task_roots = discover_agibot_tasks(dataset_dir)
 
     if not task_roots:
@@ -365,6 +367,7 @@ def run_galaxea(dataset_dir: str, action_format: str = "eef", task_root: Optiona
     fields = _GALAXEA_ACTION_FIELDS_EEF if action_format == "eef" else _GALAXEA_ACTION_FIELDS
 
     import json as _json
+
     # Read field dims from a representative info.json
     sample_info_path = os.path.join(task_roots[0][1], "meta", "info.json")
     with open(sample_info_path) as f:
@@ -384,28 +387,23 @@ def run_galaxea(dataset_dir: str, action_format: str = "eef", task_root: Optiona
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--type", choices=["agibot", "galaxea"], required=True, help="Dataset type")
+    parser.add_argument("--dataset_dir", type=str, default=None, help="Top-level dataset directory (multi-task mode)")
+    parser.add_argument("--task_root", type=str, default=None, help="Single task root directory (single-task mode)")
+    parser.add_argument(
+        "--quat_convention",
+        type=str,
+        default="xyzw",
+        choices=["wxyz", "xyzw"],
+        help="[AgiBot] Quaternion convention in raw parquet data (default: xyzw)",
     )
     parser.add_argument(
-        "--type", choices=["agibot", "galaxea"], required=True,
-        help="Dataset type"
-    )
-    parser.add_argument(
-        "--dataset_dir", type=str, default=None,
-        help="Top-level dataset directory (multi-task mode)"
-    )
-    parser.add_argument(
-        "--task_root", type=str, default=None,
-        help="Single task root directory (single-task mode)"
-    )
-    parser.add_argument(
-        "--quat_convention", type=str, default="xyzw", choices=["wxyz", "xyzw"],
-        help="[AgiBot] Quaternion convention in raw parquet data (default: xyzw)"
-    )
-    parser.add_argument(
-        "--action_format", type=str, default="eef", choices=["full", "eef"],
-        help="[Galaxea] Action format (default: eef)"
+        "--action_format",
+        type=str,
+        default="eef",
+        choices=["full", "eef"],
+        help="[Galaxea] Action format (default: eef)",
     )
     args = parser.parse_args()
 

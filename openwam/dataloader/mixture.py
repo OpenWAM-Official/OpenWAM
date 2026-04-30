@@ -112,9 +112,7 @@ class MixtureDataset(BaseActionDataset):
         if weights is None:
             weights = [float(len(d)) for d in self._datasets]
         if len(weights) != len(self._datasets):
-            raise ValueError(
-                f"weights length ({len(weights)}) != datasets length ({len(self._datasets)})"
-            )
+            raise ValueError(f"weights length ({len(weights)}) != datasets length ({len(self._datasets)})")
         total_w = sum(weights)
         self._weights = [w / total_w for w in weights]
 
@@ -148,7 +146,8 @@ class MixtureDataset(BaseActionDataset):
                     "MixtureDataset: sub-dataset %d (%s) has action_stats=None — "
                     "mixture stats disabled; action_norm_mode will be a no-op. "
                     "If using EEF action_format, provide a pre-computed stats file via action_stats_path.",
-                    i, getattr(ds, "task_name", type(ds).__name__),
+                    i,
+                    getattr(ds, "task_name", type(ds).__name__),
                 )
                 return None
             all_stats.append((stats, w))
@@ -176,14 +175,14 @@ class MixtureDataset(BaseActionDataset):
         di, si = self._index_map[idx]
         sample = self._datasets[di][si]
 
-        action_traj = sample.get("action_trajectory")
+        action_traj = sample.get("action")
         if (
             action_traj is not None
             and isinstance(action_traj, torch.Tensor)
             and action_traj.shape[-1] < self._action_dim
         ):
             pad_size = self._action_dim - action_traj.shape[-1]
-            sample["action_trajectory"] = torch.nn.functional.pad(action_traj, (0, pad_size))
+            sample["action"] = torch.nn.functional.pad(action_traj, (0, pad_size))
 
         sample["_dataset_index"] = di
         return sample

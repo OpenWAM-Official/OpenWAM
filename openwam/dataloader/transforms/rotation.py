@@ -193,7 +193,7 @@ class RotationTransform(InvertibleModalityTransform):
     Args:
         source_repr: Current rotation representation in the data.
         target_repr: Desired rotation representation after transform.
-        keys: Sample dict keys to transform (default: ["action", "action_trajectory"]).
+        keys: Sample dict keys to transform (default: ["action"]).
         rotation_slice: Slice into the action vector for rotation dimensions.
             e.g., slice(3, 6) for standard 7D EEF actions [pos(3), rot(3), grip(1)].
     """
@@ -205,7 +205,7 @@ class RotationTransform(InvertibleModalityTransform):
         keys: Optional[List[str]] = None,
         rotation_slice: slice = slice(3, 6),
     ):
-        super().__init__(apply_to=keys or ["action", "action_trajectory"])
+        super().__init__(apply_to=keys or ["action"])
         self.source = RotationType(source_repr)
         self.target = RotationType(target_repr)
         self.rotation_slice = rotation_slice

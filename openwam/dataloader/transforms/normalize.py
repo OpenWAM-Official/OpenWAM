@@ -139,7 +139,7 @@ class Normalizer(InvertibleModalityTransform):
 
 
 class ActionNormalizer(Normalizer):
-    """Convenience wrapper that normalizes ``action`` and ``action_trajectory``.
+    """Convenience wrapper that normalizes the ``action`` field.
 
     Args:
         mode: Normalization strategy.
@@ -159,7 +159,7 @@ class ActionNormalizer(Normalizer):
         eps: float = 1e-6,
     ):
         super().__init__(mode=mode, stats=stats, binary_threshold=binary_threshold, eps=eps)
-        self.apply_to = ["action", "action_trajectory"]
+        self.apply_to = ["action"]
         self.gripper_mode = gripper_mode
         self.gripper_indices = gripper_indices or []
 
@@ -190,6 +190,30 @@ class ActionNormalizer(Normalizer):
                     result[..., gi] = self._gripper_normalizer.unnormalize(x[..., gi])
 
         return result
+
+
+# ---------------------------------------------------------------------------
+# YAML-config-facing helpers shared by training datasets and deployment.
+# ---------------------------------------------------------------------------
+
+# Map user-facing yaml strings to the internal Normalizer modes.
+YAML_TO_NORM_MODE = {
+    "min-max": "min_max",
+    "z-score": "mean_std",
+}
+
+
+def load_mode_stats(stats_path: str, action_mode: str) -> Optional[dict]:
+    """Load ``action_stats.npy`` and return the sub-dict for the requested mode.
+
+    Expected schema: ``{"joint": {...}, "eef": {...}, "num_timesteps": ...}``.
+    Returns the per-mode stats dict, or ``None`` if the file does not contain
+    the requested mode.
+    """
+    raw = np.load(stats_path, allow_pickle=True).item()
+    if action_mode in raw and isinstance(raw[action_mode], dict):
+        return raw[action_mode]
+    return None
 
 
 def compute_extended_stats(all_actions: list) -> Dict[str, np.ndarray]:

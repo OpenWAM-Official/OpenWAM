@@ -10,7 +10,7 @@ import torch
 
 def test_components_import():
     """Shared components should be importable."""
-    from openwam.model.action_model.components import (
+    from openwam.model.action_backbone.components import (
         ActionEmbedding,
         ActionEncoder,
         ActionOutputHead,
@@ -42,7 +42,7 @@ def test_components_import():
 
 def test_action_embedding_shape():
     """ActionEmbedding should project action_dim -> hidden_dim."""
-    from openwam.model.action_model.components import ActionEmbedding
+    from openwam.model.action_backbone.components import ActionEmbedding
 
     embed = ActionEmbedding(action_dim=7, hidden_dim=64)
     x = torch.randn(2, 10, 7)
@@ -52,7 +52,7 @@ def test_action_embedding_shape():
 
 def test_timestep_embedding_shape():
     """TimestepEmbedding should produce (B, dim) from (B,) timestep."""
-    from openwam.model.action_model.components import TimestepEmbedding
+    from openwam.model.action_backbone.components import TimestepEmbedding
 
     te = TimestepEmbedding(freq_dim=32, dim=64)
     t = torch.tensor([0.5, 0.8])
@@ -62,7 +62,7 @@ def test_timestep_embedding_shape():
 
 def test_timestep_modulation_shape():
     """TimestepModulation should produce (B, n_params, dim)."""
-    from openwam.model.action_model.components import TimestepModulation
+    from openwam.model.action_backbone.components import TimestepModulation
 
     mod = TimestepModulation(dim=64, n_params=9)
     t_embed = torch.randn(2, 64)
@@ -72,7 +72,7 @@ def test_timestep_modulation_shape():
 
 def test_action_output_head_shape():
     """ActionOutputHead should produce (B, T, action_dim)."""
-    from openwam.model.action_model.components import ActionOutputHead
+    from openwam.model.action_backbone.components import ActionOutputHead
 
     head = ActionOutputHead(dim=64, action_dim=7)
     x = torch.randn(2, 10, 64)
@@ -83,7 +83,7 @@ def test_action_output_head_shape():
 
 def test_action_output_head_zero_init():
     """ActionOutputHead weights should be zero-initialized."""
-    from openwam.model.action_model.components import ActionOutputHead
+    from openwam.model.action_backbone.components import ActionOutputHead
 
     head = ActionOutputHead(dim=64, action_dim=7)
     assert torch.all(head.head.weight == 0)
@@ -92,7 +92,7 @@ def test_action_output_head_zero_init():
 
 def test_action_dit_small_instantiate():
     """ActionDiT should instantiate with small parameters."""
-    from openwam.model.action_model.action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -102,7 +102,8 @@ def test_action_dit_small_instantiate():
         num_layers=2,
         video_dim=128,
         bridge_layers=(0, 1),
-        bridge_type="cross_attn_detach",
+        variant="joint_cross_attn",
+        detach_bridge=True,
     )
     assert dit.action_dim == 7
     assert dit.num_layers == 2
@@ -110,7 +111,7 @@ def test_action_dit_small_instantiate():
 
 def test_action_dit_forward_shape():
     """ActionDiT forward should produce (B, T, action_dim)."""
-    from openwam.model.action_model.action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -120,7 +121,8 @@ def test_action_dit_forward_shape():
         num_layers=2,
         video_dim=128,
         bridge_layers=(0, 1),
-        bridge_type="cross_attn_detach",
+        variant="joint_cross_attn",
+        detach_bridge=True,
     )
     actions = torch.randn(2, 5, 7)
     video_features = [torch.randn(2, 10, 128) for _ in range(2)]
@@ -130,9 +132,9 @@ def test_action_dit_forward_shape():
     assert out.shape == (2, 5, 7)
 
 
-def test_moe_expert_dit_instantiate():
+def test_moe_dit_instantiate():
     """MoEExpertDiT should instantiate with small parameters."""
-    from openwam.model.action_model.moe_expert_dit import MoEExpertDiT
+    from openwam.model.action_backbone.moe_dit import MoEExpertDiT
 
     dit = MoEExpertDiT(
         action_dim=7,
@@ -150,13 +152,13 @@ def test_shared_backbone_instantiate():
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
-    arch = build_architecture("shared_backbone", cfg)
+    arch = build_architecture("shared_backbone_vanilla", cfg)
     assert arch.action_dim == 7
 
 
 def test_sinusoidal_positional_encoding_shape():
     """SinusoidalPositionalEncoding maps (B, T) timesteps to (B, T, dim)."""
-    from openwam.model.action_model.components import SinusoidalPositionalEncoding
+    from openwam.model.action_backbone.components import SinusoidalPositionalEncoding
 
     pe = SinusoidalPositionalEncoding(embedding_dim=64)
     t = torch.rand(2, 10)
@@ -166,7 +168,7 @@ def test_sinusoidal_positional_encoding_shape():
 
 def test_action_encoder_shape_per_sample_timestep():
     """ActionEncoder should accept (B,) timestep and broadcast to (B, T)."""
-    from openwam.model.action_model.components import ActionEncoder
+    from openwam.model.action_backbone.components import ActionEncoder
 
     enc = ActionEncoder(action_dim=14, hidden_dim=64)
     actions = torch.randn(2, 10, 14)
@@ -177,7 +179,7 @@ def test_action_encoder_shape_per_sample_timestep():
 
 def test_action_encoder_shape_per_token_timestep():
     """ActionEncoder should accept (B, T) timestep directly."""
-    from openwam.model.action_model.components import ActionEncoder
+    from openwam.model.action_backbone.components import ActionEncoder
 
     enc = ActionEncoder(action_dim=14, hidden_dim=64)
     actions = torch.randn(2, 10, 14)
@@ -188,7 +190,7 @@ def test_action_encoder_shape_per_token_timestep():
 
 def test_action_encoder_timestep_mismatch_raises():
     """ActionEncoder should reject mismatched timestep shapes."""
-    from openwam.model.action_model.components import ActionEncoder
+    from openwam.model.action_backbone.components import ActionEncoder
 
     enc = ActionEncoder(action_dim=14, hidden_dim=64)
     actions = torch.randn(2, 10, 14)
@@ -200,27 +202,27 @@ def test_action_encoder_timestep_mismatch_raises():
 
 def test_shared_backbone_prepare_action_tokens_with_action_encoder():
     """SharedBackbone.prepare_action_tokens should use ActionEncoder internally."""
-    from openwam.model.action_model.components import ActionEncoder
-    from openwam.model.shared_backbone import SharedBackboneArchitecture
+    from openwam.model.action_backbone.components import ActionEncoder
+    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
-    arch = SharedBackboneArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
-    assert isinstance(arch.input_proj, ActionEncoder)
+    arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
+    assert isinstance(arch.action_backbone.input_proj, ActionEncoder)
 
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
-    state = arch.prepare_action_tokens(actions, timestep)
+    state = arch.action_backbone.prepare_state(actions, timestep)
     assert state.action_latents.shape == (2, 16, 128)
-    assert state.extra["num_action_tokens"] == 16
+    assert state.num_action_tokens == 16
 
 
 def test_shared_backbone_prepare_action_tokens_per_token_timestep():
     """SharedBackbone should accept (B, T) per-token timestep via ActionEncoder."""
-    from openwam.model.shared_backbone import SharedBackboneArchitecture
+    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
-    arch = SharedBackboneArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
+    arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2, 16)  # per-token
-    state = arch.prepare_action_tokens(actions, timestep)
+    state = arch.action_backbone.prepare_state(actions, timestep)
     assert state.action_latents.shape == (2, 16, 128)
     # ActionState.timestep is still collapsed to per-sample (used by the
     # dead t_embed / t_mod path and DualSystem's ActionDiT).
@@ -228,43 +230,47 @@ def test_shared_backbone_prepare_action_tokens_per_token_timestep():
     # SharedBackboneState.timestep preserves the raw (B, T) granularity so
     # _build_action_t_mod can build per-token AdaLN modulation in
     # model_fn_wan_video (see wan_video.py _build_action_t_mod).
-    assert state.extra["shared_backbone_state"].timestep.shape == (2, 16)
+    assert state.runtime_state.payload.timestep.shape == (2, 16)
 
 
 def test_moe_expert_prepare_state_with_action_encoder():
     """MoEActionExpertArchitecture.prepare_action_tokens wires ActionEncoder."""
-    from openwam.model.action_model.components import ActionEncoder
-    from openwam.model.moe_expert import MoEActionExpertArchitecture
+    from openwam.model.action_backbone.components import ActionEncoder
+    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 
-    arch = MoEActionExpertArchitecture(cfg={
-        "action_dim": 14,
-        "video_dim": 128,
-        "expert_ffn_dim": 256,
-        "bridge_layers": [0, 1, 2],
-    })
-    assert isinstance(arch.moe_dit.action_input_proj, ActionEncoder)
+    arch = SharedBackboneMoEArchitecture(
+        cfg={
+            "action_dim": 14,
+            "video_dim": 128,
+            "expert_ffn_dim": 256,
+            "bridge_layers": [0, 1, 2],
+        }
+    )
+    assert isinstance(arch.action_backbone.action_input_proj, ActionEncoder)
 
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
-    state = arch.prepare_action_tokens(actions, timestep)
-    assert "moe_state" in state.extra
-    assert state.extra["moe_state"].action_tokens.shape == (2, 16, 128)
+    state = arch.action_backbone.prepare_state(actions, timestep)
+    assert state.runtime_state is not None
+    assert state.runtime_state.payload.action_tokens.shape == (2, 16, 128)
 
 
 def test_moe_expert_prepare_state_per_token_timestep():
     """MoE prepare_state should build per-token ExpertFFN AdaLN under (B, T)."""
-    from openwam.model.moe_expert import MoEActionExpertArchitecture
+    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 
-    arch = MoEActionExpertArchitecture(cfg={
-        "action_dim": 14,
-        "video_dim": 128,
-        "expert_ffn_dim": 256,
-        "bridge_layers": [0, 1, 2],
-    })
+    arch = SharedBackboneMoEArchitecture(
+        cfg={
+            "action_dim": 14,
+            "video_dim": 128,
+            "expert_ffn_dim": 256,
+            "bridge_layers": [0, 1, 2],
+        }
+    )
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2, 16)
-    state = arch.prepare_action_tokens(actions, timestep)
-    moe_state = state.extra["moe_state"]
+    state = arch.action_backbone.prepare_state(actions, timestep)
+    moe_state = state.runtime_state.payload
     assert moe_state.action_tokens.shape == (2, 16, 128)
     # ExpertFFN AdaLN t_mod must be per-token so each action token's
     # shift/scale/gate tracks its own noise level.
@@ -276,7 +282,7 @@ def test_moe_expert_prepare_state_per_token_timestep():
 
 def test_expert_ffn_block_per_token_tmod_shape():
     """ExpertFFNBlock should accept per-token t_mod (B, T, 3, dim)."""
-    from openwam.model.action_model.moe_expert_dit import ExpertFFNBlock
+    from openwam.model.action_backbone.moe_dit import ExpertFFNBlock
 
     block = ExpertFFNBlock(dim=64, ffn_dim=128)
     x = torch.randn(2, 8, 64)
@@ -291,7 +297,7 @@ def test_expert_ffn_block_per_token_matches_broadcast():
     Sanity-checks that the new per-token AdaLN branch introduces no semantic
     drift vs. the per-sample branch when all T tokens share the same t_mod.
     """
-    from openwam.model.action_model.moe_expert_dit import ExpertFFNBlock
+    from openwam.model.action_backbone.moe_dit import ExpertFFNBlock
 
     torch.manual_seed(0)
     block = ExpertFFNBlock(dim=64, ffn_dim=128)
@@ -310,18 +316,20 @@ def test_expert_ffn_block_per_token_matches_broadcast():
 
 def test_moe_expert_prepare_state_per_sample_keeps_tmod_rank3():
     """Per-sample timestep must still produce (B, 3, dim) t_mod (no regression)."""
-    from openwam.model.moe_expert import MoEActionExpertArchitecture
+    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 
-    arch = MoEActionExpertArchitecture(cfg={
-        "action_dim": 14,
-        "video_dim": 128,
-        "expert_ffn_dim": 256,
-        "bridge_layers": [0, 1, 2],
-    })
+    arch = SharedBackboneMoEArchitecture(
+        cfg={
+            "action_dim": 14,
+            "video_dim": 128,
+            "expert_ffn_dim": 256,
+            "bridge_layers": [0, 1, 2],
+        }
+    )
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)  # per-sample
-    state = arch.prepare_action_tokens(actions, timestep)
-    moe_state = state.extra["moe_state"]
+    state = arch.action_backbone.prepare_state(actions, timestep)
+    moe_state = state.runtime_state.payload
     assert moe_state.t_mod.shape == (2, 3, 128)
     assert moe_state.t_embed.shape == (2, 128)
     assert moe_state.timestep.shape == (2,)
@@ -329,7 +337,7 @@ def test_moe_expert_prepare_state_per_sample_keeps_tmod_rank3():
 
 def test_action_output_mlp_shape():
     """ActionOutputMLP should produce (B, T, action_dim)."""
-    from openwam.model.action_model.components import ActionOutputMLP
+    from openwam.model.action_backbone.components import ActionOutputMLP
 
     head = ActionOutputMLP(input_dim=128, hidden_dim=64, action_dim=14)
     x = torch.randn(2, 10, 128)
@@ -339,7 +347,7 @@ def test_action_output_mlp_shape():
 
 def test_action_output_mlp_small_random_init():
     """Weights should be small-random (std=0.02), biases zero on both layers."""
-    from openwam.model.action_model.components import ActionOutputMLP
+    from openwam.model.action_backbone.components import ActionOutputMLP
 
     head = ActionOutputMLP(input_dim=128, hidden_dim=64, action_dim=14)
     assert torch.all(head.layer1.bias == 0)
@@ -351,36 +359,38 @@ def test_action_output_mlp_small_random_init():
 
 def test_shared_backbone_uses_action_output_mlp():
     """SharedBackbone wires ActionOutputMLP as its output head."""
-    from openwam.model.action_model.components import ActionOutputMLP
-    from openwam.model.shared_backbone import SharedBackboneArchitecture
+    from openwam.model.action_backbone.components import ActionOutputMLP
+    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
-    arch = SharedBackboneArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
-    assert isinstance(arch.action_output_head, ActionOutputMLP)
+    arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
+    assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
 
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
-    state = arch.prepare_action_tokens(actions, timestep)
+    state = arch.action_backbone.prepare_state(actions, timestep)
     # Simulate the combined video+action hidden output after the DiT loop.
-    state.extra["final_hidden"] = torch.randn(2, 32, 128)
-    pred = arch.extract_action_prediction(state)
+    state.final_hidden = torch.randn(2, 32, 128)
+    pred = arch.action_backbone.extract_prediction(state)
     assert pred.shape == (2, 16, 14)
 
 
 def test_moe_expert_uses_action_output_mlp():
     """MoE architecture wires ActionOutputMLP as its output head."""
-    from openwam.model.action_model.components import ActionOutputMLP
-    from openwam.model.moe_expert import MoEActionExpertArchitecture
+    from openwam.model.action_backbone.components import ActionOutputMLP
+    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 
-    arch = MoEActionExpertArchitecture(cfg={
-        "action_dim": 14,
-        "video_dim": 128,
-        "expert_ffn_dim": 256,
-        "bridge_layers": [0, 1, 2],
-    })
-    assert isinstance(arch.moe_dit.action_output_head, ActionOutputMLP)
+    arch = SharedBackboneMoEArchitecture(
+        cfg={
+            "action_dim": 14,
+            "video_dim": 128,
+            "expert_ffn_dim": 256,
+            "bridge_layers": [0, 1, 2],
+        }
+    )
+    assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
 
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
-    state = arch.prepare_action_tokens(actions, timestep)
-    pred = arch.extract_action_prediction(state)
+    state = arch.action_backbone.prepare_state(actions, timestep)
+    pred = arch.action_backbone.extract_prediction(state)
     assert pred.shape == (2, 16, 14)

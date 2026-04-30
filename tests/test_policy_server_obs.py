@@ -15,8 +15,8 @@ import pytest
 from omegaconf import OmegaConf
 from PIL import Image
 
-from openwam.dataloader.robotwin_dataset import format_prompt_for_inference
-from openwam.deployment.policy_server import ObsValidationError, PolicyServer
+from openwam.dataloader.transforms.multiview import format_prompt_for_inference
+from openwam.deploy.policy_server import ObsValidationError, PolicyServer
 
 # --- Test fixtures / helpers ---
 

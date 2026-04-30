@@ -16,7 +16,7 @@ The repository is organized around the `openwam/` package and currently supports
 - Hydra-based training and deployment entrypoints
 - WAM-specific action/video scheduling and receding-horizon execution
 - RoboTwin dataset adapter with multi-task, multi-view support
-- Three WAM architectures: dual-system, MoE expert, shared backbone
+- Two WAM architecture families: dual-system and shared backbone variants
 - A policy server for robot deployment workflows
 
 ![Architecture](assets_repo/arch.png)
@@ -36,11 +36,11 @@ OpenWAM is not a VLA clone. Its core direction is to use a video world model as 
 OpenWAM/
 ├── openwam/
 │   ├── dataloader/    # Dataset adapters (RoboTwin), transforms, registry
-│   ├── model/         # WAM architectures (DualSystem, MoE, SharedBackbone), ActionDiT
-│   │   ├── action_model/      # ActionDiT, MoE expert, components, proprioceptive encoder
+│   ├── model/         # WAM architecture families, action backbone, video backbone
+│   │   ├── action_backbone/   # ActionDiT, MoE DiT, components, proprioceptive encoder
 │   │   └── video_backbone/    # Vendored video pipeline (WanVideoPipeline, VAE, DiT)
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
-│   ├── deployment/    # Policy server, model loader, joint/mock inference engines, scheduler
+│   ├── deploy/        # Policy server, model loader, joint/mock inference engines, scheduler
 │   └── utils/         # Shared utilities
 ├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests
 ├── configs/           # Hydra configs for model, dataloader, training_strategy, accelerate
@@ -57,9 +57,8 @@ OpenWAM/
 
 | Architecture | Status | Description |
 |---|---|---|
-| `dual_system` | Supported | Separate ActionDiT with cross-attention or joint self-attention bridge |
-| `moe_expert` | Supported | Shared attention + expert FFN within video DiT (BAGEL/MoT-inspired) |
-| `shared_backbone` | Supported | Action tokens processed by video DiT directly (DreamZero-style) |
+| `dual_system` | Supported | Dual-system family with `joint_cross_attn` / `joint_self_attn` variants |
+| `shared_backbone` | Supported | Shared-backbone family with `vanilla` / `moe` variants |
 
 ### Benchmarks and Evaluation
 
@@ -161,8 +160,7 @@ Training strategy presets in `configs/training_strategy/`:
 Architecture configs in `configs/model/`:
 
 - `dual_system.yaml`
-- `moe_expert.yaml`
-- `shared_backbone.yaml`
+- `shared_backbone.yaml`  # shared_backbone family; choose `variant: vanilla|moe`
 
 Accelerate/DeepSpeed configs in `configs/accelerate/`:
 
@@ -178,20 +176,19 @@ Deploy a trained checkpoint as a policy server:
 bash scripts/deploy.sh /path/to/checkpoint_dir
 ```
 
-This reads `configs/deployment.yaml` for base settings (device, ports, inference parameters) and the `config.yaml` saved inside the checkpoint directory for model architecture. The latest checkpoint in the directory is loaded automatically.
+This reads `configs/deploy.yaml` for base settings (device, ports, inference parameters) and the `config.yaml` saved inside the checkpoint directory for model architecture. The latest checkpoint in the directory is loaded automatically.
 
 #### Configuration
 
-`configs/deployment.yaml` is the central configuration file for deployment. Key sections:
+`configs/deploy.yaml` is the central configuration file for deployment. Key sections:
 
 ```yaml
-deployment:
-  checkpoint_path: /path/to/checkpoint_dir  # used when --ckpt-dir is not passed
-  device: cuda:0
-  server:
-    host: "0.0.0.0"
-    ws_port: 8850
-    http_port: 8848
+checkpoint_path: /path/to/checkpoint_dir  # used when --ckpt-dir is not passed
+device: cuda:0
+server:
+  host: "0.0.0.0"
+  ws_port: 8850
+  http_port: 8848
 
 inference:
   denoise_steps: 20      # denoising steps
@@ -199,7 +196,7 @@ inference:
   cfg_scale: 1.0         # 1.0 = CFG disabled (recommended for robotics)
   shift: 5.0
 
-deploy:
+optimization:
   decode_video: false    # false = action-only mode (skip VAE decode, faster)
   compile:
     enabled: true        # torch.compile ActionDiT (~30s one-time JIT warmup)
@@ -321,7 +318,7 @@ Key config groups:
 - `configs/dataloader/` — dataset adapters (RoboTwin)
 - `configs/training_strategy/` — training presets (joint, video_only)
 - `configs/accelerate/` — distributed training (DeepSpeed ZeRO stages)
-- `configs/deployment.yaml` — policy server defaults
+- `configs/deploy.yaml` — policy server defaults (`checkpoint_path`, `device`, `server`, `inference`, `optimization`)
 
 Checkpoint outputs include:
 
@@ -332,7 +329,7 @@ Checkpoint outputs include:
 
 - Joint video-action denoising with configurable schedules (sync, cascade, video-leading, action-only, decoupled)
 - Receding-horizon execution with temporal ensembling
-- Three WAM architectures: dual-system, MoE expert, shared backbone
+- Two WAM architecture families: dual-system and shared backbone variants
 - Package-native model loading for inference and serving (no dependency on training infrastructure at deploy time)
 - Proprioceptive conditioning module for robot state input
 - RoboTwin benchmark adapter (see `benchmarks/robotwin/`)

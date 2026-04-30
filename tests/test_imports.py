@@ -48,13 +48,13 @@ def test_import_data_init():
 
 
 def test_import_inference_base():
-    from openwam.deployment.base import BaseInferenceEngine  # noqa: F401
+    from openwam.deploy.base import BaseInferenceEngine  # noqa: F401
 
     assert hasattr(BaseInferenceEngine, "generate")
 
 
 def test_import_inference_schedule():
-    from openwam.deployment.schedule import (  # noqa: F401
+    from openwam.deploy.schedule import (  # noqa: F401
         Schedule,
         make_schedule,
         schedule_action_only,
@@ -65,11 +65,11 @@ def test_import_inference_schedule():
 
 
 def test_import_inference_joint_engine():
-    from openwam.deployment.joint_engine import JointInferenceEngine  # noqa: F401
+    from openwam.deploy.joint_engine import JointInferenceEngine  # noqa: F401
 
 
 def test_import_inference_init():
-    from openwam.deployment import (  # noqa: F401
+    from openwam.deploy import (  # noqa: F401
         BaseInferenceEngine,
         JointInferenceEngine,
         Schedule,
@@ -85,7 +85,7 @@ def test_import_training_base():
 
 
 def test_import_training_loss():
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss  # noqa: F401
+    from openwam.train.loss.decoupled_loss import DecoupledFlowMatchLoss  # noqa: F401
 
 
 def test_import_training_optimizer_groups():
@@ -98,59 +98,85 @@ def test_import_training_optimizer_groups():
 def test_import_training_init():
     from openwam.train import (  # noqa: F401
         BaseTrainer,
-        FlowMatchVideoActionLoss,
+        DecoupledFlowMatchLoss,
         OpenWAMTrainer,
     )
 
 
-def test_import_action_repr_registry():
-    from openwam.model.action_model.action_repr import list_registered_action_reprs
-
-    registered = list_registered_action_reprs()
-    assert "continuous" in registered
-
-
 def test_import_action_dit():
-    from openwam.model.action_model.action_dit import (  # noqa: F401
+    from openwam.model.action_backbone.action_dit import (  # noqa: F401
         ActionDiT,
         ActionDiTState,
-        RMSNorm,
-        sinusoidal_embedding_1d,
     )
 
 
-def test_import_moe_expert_dit():
-    from openwam.model.action_model.moe_expert_dit import MoEExpertDiT, MoEExpertState  # noqa: F401
+def test_import_moe_dit():
+    from openwam.model.action_backbone.moe_dit import MoEExpertDiT, MoEExpertState  # noqa: F401
 
 
-def test_import_flow_match_scheduler():
-    from openwam.deployment.flow_match_scheduler import FlowMatchScheduler
+def test_import_action_scheduler():
+    from openwam.model.action_backbone.scheduler import ActionScheduler
 
-    s = FlowMatchScheduler("Wan")
+    s = ActionScheduler()
     s.set_timesteps(20, shift=5.0)
     assert len(s.timesteps) == 20
 
 
 def test_import_model_config():
-    from openwam.model.video_backbone.diffsynth.core.loader import ModelConfig  # noqa: F401
+    from openwam.model.video_backbone.wan.shared.core.loader import ModelConfig  # noqa: F401
 
 
 def test_import_video_backbone():
-    from openwam.model.video_backbone import WanVideoPipeline  # noqa: F401
+    from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline  # noqa: F401
 
 
 def test_import_architecture_registry():
-    from openwam.model.registry import (
-        build_architecture,
-        list_supported_architectures,
-    )
+    from openwam.model import build_architecture, list_supported_architectures
 
     supported = list_supported_architectures()
-    assert "dual_system" in supported
-    assert "moe_expert" in supported
-    assert "shared_backbone" in supported
+    assert "dual_system_cross_attn" in supported
+    assert "dual_system_self_attn" in supported
+    assert "shared_backbone_vanilla" in supported
+    assert "shared_backbone_moe" in supported
 
-    # Verify build_architecture works for each supported type
+    configs = {
+        "dual_system_cross_attn": {
+            "framework": "dual_system",
+            "variant": "joint_cross_attn",
+            "detach_bridge": True,
+            "bridge_layers": (0, 1),
+            "action_dim": 7,
+            "dim": 64,
+            "ffn_dim": 128,
+            "num_heads": 4,
+            "video_dim": 128,
+        },
+        "dual_system_self_attn": {
+            "framework": "dual_system",
+            "variant": "joint_self_attn",
+            "bridge_layers": (0, 1),
+            "action_dim": 7,
+            "dim": 64,
+            "ffn_dim": 128,
+            "num_heads": 4,
+            "video_dim": 128,
+        },
+        "shared_backbone_moe": {
+            "framework": "shared_backbone",
+            "variant": "moe",
+            "action_dim": 7,
+            "video_dim": 128,
+            "expert_ffn_dim": 256,
+            "bridge_layers": (0, 1),
+        },
+        "shared_backbone_vanilla": {
+            "framework": "shared_backbone",
+            "variant": "vanilla",
+            "action_dim": 7,
+            "video_dim": 128,
+        },
+    }
+
     for arch_name in supported:
-        arch = build_architecture(arch_name, {})
+        arch = build_architecture(arch_name, configs[arch_name])
         assert arch is not None

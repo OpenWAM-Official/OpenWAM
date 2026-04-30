@@ -95,10 +95,26 @@ def main(cfg: DictConfig) -> None:
         print("=" * 60)
         print(OmegaConf.to_yaml(cfg))
         print("=" * 60)
+    else:
+        # Silence stray ``print(...)`` calls in vendored loaders (e.g. diffsynth's
+        # ``model_loader.py``) on non-main ranks — they otherwise print "Loading
+        # models from: ..." / "Loaded model: { ... }" once per rank, doubling
+        # the startup log. Logging-based output is unaffected.
+        import builtins
+
+        builtins.print = lambda *a, **kw: None
 
     sys.path.insert(0, str(PROJECT_ROOT))
 
-    _train(cfg)
+    try:
+        _train(cfg)
+    finally:
+        # Avoid `destroy_process_group() was not called before program exit`
+        # warning on shutdown by tearing down the NCCL process group cleanly.
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

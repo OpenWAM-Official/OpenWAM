@@ -25,6 +25,7 @@ import torch
 from PIL import Image
 
 from openwam.dataloader.base_dataset import BaseActionDataset
+from openwam.dataloader.transforms.multiview import assemble_multiview_layout
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ _GETITEM_MAX_RETRIES = 64
 #              fails; harmless, PyAV falls back to software decode automatically.
 try:
     import av as _av
+
     _av.logging.set_level(_av.logging.FATAL)
 except Exception:
     pass
@@ -145,6 +147,7 @@ def _decode_video_frames(
     # 1a. PyAV — hwaccel=none (format-level, fast path for most files)
     try:
         import av
+
         frames = _pyav_decode(av.open(video_path, options={"hwaccel": "none"}), set_threads=True)
     except Exception as e:
         logger.debug("PyAV (hwaccel=none) failed for %s: %s", video_path, e)
@@ -155,6 +158,7 @@ def _decode_video_frames(
     if frames is None:
         try:
             import av
+
             frames = _pyav_decode(av.open(video_path), set_threads=False)
         except Exception as e:
             logger.debug("PyAV (default) failed for %s: %s", video_path, e)
@@ -170,13 +174,17 @@ def _decode_video_frames(
             if len(valid) < len(frame_indices):
                 logger.warning(
                     "%s: clamping %d indices to valid range [0, %d)",
-                    video_path, len(frame_indices) - len(valid), len(vr),
+                    video_path,
+                    len(frame_indices) - len(valid),
+                    len(vr),
                 )
             batch = vr.get_batch(valid).asnumpy()
             idx_map = {fi: Image.fromarray(batch[j]) for j, fi in enumerate(valid)}
             result = [idx_map.get(i) for i in frame_indices]
             if any(f is None for f in result):
-                raise RuntimeError(f"decord: missing frames for indices {[i for i in frame_indices if idx_map.get(i) is None]}")
+                raise RuntimeError(
+                    f"decord: missing frames for indices {[i for i in frame_indices if idx_map.get(i) is None]}"
+                )
             frames = result
         except Exception:
             pass
@@ -223,56 +231,6 @@ def _flatten_layout(camera_layout) -> List[str]:
     return [c for row in camera_layout for c in row]
 
 
-def _stretch_resize(image: Image.Image, target_height: int, target_width: int) -> Image.Image:
-    """Direct BILINEAR resize without aspect-ratio preservation."""
-    return image.resize((target_width, target_height), Image.BILINEAR)
-
-
-def assemble_multiview_layout(
-    frames_by_camera: Dict[str, Image.Image],
-    camera_layout: List[str],
-    out_h: int,
-    out_w: int,
-    top_height_ratio: float = 2.0 / 3.0,
-) -> Image.Image:
-    """3-camera L-shape composition (FastWAM / RoboTwin compatible).
-
-    Layout:
-        top    → (out_h * 2/3, out_w)      full width
-        bot-L  → (out_h * 1/3, out_w // 2) half width
-        bot-R  → (out_h * 1/3, out_w // 2) half width
-
-    Args:
-        frames_by_camera: {camera_name: PIL.Image}. Missing key → black region (caller should pre-pad short cameras).
-        camera_layout:    ordered flat list of 3 camera names [top, bot-left, bot-right].
-        out_h, out_w:     final canvas size in pixels.
-        top_height_ratio: fraction of height for top camera (default 2/3).
-    """
-    if len(camera_layout) != 3:
-        raise ValueError(f"L-shape layout expects 3 cameras, got {len(camera_layout)}: {camera_layout}")
-
-    top_h = int(round(out_h * top_height_ratio))
-    bottom_h = out_h - top_h
-    half_w = out_w // 2
-    right_w = out_w - half_w
-
-    canvas = Image.new("RGB", (out_w, out_h), (0, 0, 0))
-
-    top_frame = frames_by_camera.get(camera_layout[0])
-    if top_frame is not None:
-        canvas.paste(_stretch_resize(top_frame, top_h, out_w), (0, 0))
-
-    bl_frame = frames_by_camera.get(camera_layout[1])
-    if bl_frame is not None:
-        canvas.paste(_stretch_resize(bl_frame, bottom_h, half_w), (0, top_h))
-
-    br_frame = frames_by_camera.get(camera_layout[2])
-    if br_frame is not None:
-        canvas.paste(_stretch_resize(br_frame, bottom_h, right_w), (half_w, top_h))
-
-    return canvas
-
-
 def _assemble_grid(
     frames_by_cam: Dict[str, Image.Image],
     camera_layout: List[List[str]],
@@ -311,12 +269,14 @@ def _probe_frame_count(path: str) -> int:
     n_cv: int = 0
     try:
         import av
+
         with av.open(path) as c:
             n_av = c.streams.video[0].frames
     except Exception:
         pass
     try:
         import cv2
+
         cap = cv2.VideoCapture(path)
         n_cv = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
@@ -328,7 +288,10 @@ def _probe_frame_count(path: str) -> int:
         logger.warning(
             "Frame count mismatch for %s: PyAV=%d cv2=%d — using %d. "
             "This may cause video-action misalignment for subsequent files.",
-            path, n_av, n_cv, n,
+            path,
+            n_av,
+            n_cv,
+            n,
         )
         return n
     n = n_av or n_cv
@@ -484,15 +447,8 @@ class LeRobot3Dataset(BaseActionDataset):
         self.repeat = repeat
         # Normalise and canonicalise normalize_mode value
         _nm = normalize_mode
-        if isinstance(_nm, str):
-            if _nm.lower() in ("none", "null", ""):
-                _nm = None
-            elif _nm.lower() == "minmax":
-                logger.warning("normalize_mode='minmax' is deprecated; use 'min-max'")
-                _nm = "min-max"
-            elif _nm.lower() == "zscore":
-                logger.warning("normalize_mode='zscore' is deprecated; use 'z-score'")
-                _nm = "z-score"
+        if isinstance(_nm, str) and _nm.lower() in ("none", "null", ""):
+            _nm = None
         self.normalize_mode = _nm
         self.fps = fps
         self.action_dim_slice = action_dim_slice
@@ -534,14 +490,15 @@ class LeRobot3Dataset(BaseActionDataset):
                     logger.debug(
                         "%s: observation.state dim=%d != action_dim=%d "
                         "(state space differs from action space); proprio will use action[0:1]",
-                        task_name or os.path.basename(data_root), sc.action_dim, action_dim,
+                        task_name or os.path.basename(data_root),
+                        sc.action_dim,
+                        action_dim,
                     )
             except KeyError:
                 pass
         if self._state_composer is None and "observation.state" not in self._info.get("features", {}):
             logger.debug(
-                "%s: observation.state not in meta/info.json features; "
-                "proprio will use action[0:1] as fallback",
+                "%s: observation.state not in meta/info.json features; proprio will use action[0:1] as fallback",
                 task_name or os.path.basename(data_root),
             )
 
@@ -549,11 +506,7 @@ class LeRobot3Dataset(BaseActionDataset):
         episodes_dir = os.path.join(data_root, "meta", "episodes")
         ep_parquets = sorted(Path(episodes_dir).rglob("*.parquet"))
         ep_dfs = [pd.read_parquet(p) for p in ep_parquets]
-        self._episodes_meta = (
-            pd.concat(ep_dfs, ignore_index=True)
-            .sort_values("episode_index")
-            .reset_index(drop=True)
-        )
+        self._episodes_meta = pd.concat(ep_dfs, ignore_index=True).sort_values("episode_index").reset_index(drop=True)
 
         self.task_name = task_name or os.path.basename(data_root)
         self._task_descriptions = self._load_task_descriptions()
@@ -622,9 +575,7 @@ class LeRobot3Dataset(BaseActionDataset):
         # Startup guards
         _valid_modes = (None, "min-max", "z-score")
         if self.normalize_mode not in _valid_modes:
-            raise ValueError(
-                f"normalize_mode must be one of {_valid_modes}, got {self.normalize_mode!r}"
-            )
+            raise ValueError(f"normalize_mode must be one of {_valid_modes}, got {self.normalize_mode!r}")
         if self.normalize_mode is not None and self._action_stats is None:
             raise RuntimeError(
                 f"normalize_mode={self.normalize_mode!r} but no action_stats available for "
@@ -639,8 +590,10 @@ class LeRobot3Dataset(BaseActionDataset):
 
         logger.info(
             "LeRobot3Dataset [%s] %s: %d episodes, %d windows, action_dim=%d",
-            split, self.task_name,
-            len(self._episode_indices), len(self._window_index),
+            split,
+            self.task_name,
+            len(self._episode_indices),
+            len(self._window_index),
             self._action_composer.action_dim,
         )
 
@@ -709,15 +662,15 @@ class LeRobot3Dataset(BaseActionDataset):
         ep_data = df[df["episode_index"] == ep_idx].reset_index(drop=True)
 
         if len(ep_data) == 0:
-            for alt_file_idx in sorted(
-                fi for (ci, fi) in self._data_file_paths if ci == chunk_idx and fi != file_idx
-            ):
+            for alt_file_idx in sorted(fi for (ci, fi) in self._data_file_paths if ci == chunk_idx and fi != file_idx):
                 alt_df = self._load_data_file(chunk_idx, alt_file_idx)
                 alt_data = alt_df[alt_df["episode_index"] == ep_idx].reset_index(drop=True)
                 if len(alt_data) > 0:
                     logger.warning(
                         "ep_idx=%d: metadata says file-%03d but data in file-%03d — using correct file",
-                        ep_idx, file_idx, alt_file_idx,
+                        ep_idx,
+                        file_idx,
+                        alt_file_idx,
                     )
                     ep_data = alt_data
                     break
@@ -760,9 +713,7 @@ class LeRobot3Dataset(BaseActionDataset):
         # Raise if zero frames were decoded: frame_map exists but global range falls
         # outside all files, which indicates a broken frame offset map.
         if not frames:
-            raise RuntimeError(
-                f"Camera '{camera}': no frames decoded for global range [{frame_start}, {frame_end})"
-            )
+            raise RuntimeError(f"Camera '{camera}': no frames decoded for global range [{frame_start}, {frame_end})")
 
         # Level-2 alignment check: actual decoded count vs expected from parquet index.
         # A mismatch means _probe_frame_count returned a wrong value for at least one
@@ -775,7 +726,11 @@ class LeRobot3Dataset(BaseActionDataset):
                 "Camera '%s': decoded %d frames but expected %d (global [%d, %d)). "
                 "Likely a frame count metadata error in _probe_frame_count — "
                 "check the WARNING above for the relevant mp4 file.",
-                camera, len(frames), expected, frame_start, frame_end,
+                camera,
+                len(frames),
+                expected,
+                frame_start,
+                frame_end,
             )
 
         # Pad short clips with the last frame (same strategy as RoboTwin).
@@ -849,7 +804,9 @@ class LeRobot3Dataset(BaseActionDataset):
                 file_path = self._data_file_paths.get((chunk_idx, file_idx), "unknown")
                 logger.warning(
                     "Empty episode data ep_idx=%d start=%d, file=%s",
-                    ep_idx, start_frame, file_path,
+                    ep_idx,
+                    start_frame,
+                    file_path,
                 )
                 idx = (idx + 1) % len(self)
                 continue
@@ -857,7 +814,7 @@ class LeRobot3Dataset(BaseActionDataset):
             if self.action_transform is not None:
                 actions = self.action_transform(actions)
             elif self.action_dim_slice is not None:
-                actions = actions[:, :self.action_dim_slice]
+                actions = actions[:, : self.action_dim_slice]
 
             # Video
             try:
@@ -870,14 +827,19 @@ class LeRobot3Dataset(BaseActionDataset):
                             logger.warning(
                                 "ep_idx=%d cam='%s': got %d frames, expected %d — "
                                 "padding tail with last frame (likely mp4 frame-count mismatch).",
-                                ep_idx, cam, len(frames), T,
+                                ep_idx,
+                                cam,
+                                len(frames),
+                                T,
                             )
                             all_frames[cam] = frames + [frames[-1]] * (T - len(frames))
                     flat_layout = _flatten_layout(self.camera_layout)
                     video_frames = [
                         assemble_multiview_layout(
                             {cam: all_frames[cam][t] for cam in self.cameras},
-                            flat_layout, out_h=self.height, out_w=self.width,
+                            flat_layout,
+                            out_h=self.height,
+                            out_w=self.width,
                         )
                         for t in range(T)
                     ]
@@ -902,12 +864,12 @@ class LeRobot3Dataset(BaseActionDataset):
             # Prefer observation.state (native sensor reading); fall back to action[0:1].
             if self._state_composer is not None:
                 raw_state = self._state_composer.extract(ep_data)
-                proprio_np = raw_state[0:1]    # (1, state_dim) — native, separate space
+                proprio_np = raw_state[0:1]  # (1, state_dim) — native, separate space
                 proprio_source = "native"
             else:
-                proprio_np = actions[0:1].astype(np.float32)   # already normalized
+                proprio_np = actions[0:1].astype(np.float32)  # already normalized
                 proprio_source = "action_fallback"
-            action_np = actions[1:self.num_frames].astype(np.float32)  # (T-1, D)
+            action_np = actions[1 : self.num_frames].astype(np.float32)  # (T-1, D)
             action_np, action_mask = self._pad_actions(action_np, self.num_frames - 1)
 
             chunk_idx = int(ep_row["data/chunk_index"])
@@ -923,7 +885,7 @@ class LeRobot3Dataset(BaseActionDataset):
                 "video": video_strided,
                 "vace_video": None,
                 "first_frame_image": [video_strided[0]] if video_strided else [],
-                "action_trajectory": torch.from_numpy(action_np),
+                "action": torch.from_numpy(action_np),
                 "action_mask": torch.from_numpy(action_mask),
                 "video_mask": torch.from_numpy(video_mask),
                 "proprio": torch.from_numpy(proprio_np),
@@ -938,8 +900,7 @@ class LeRobot3Dataset(BaseActionDataset):
                 "proprio_source": proprio_source,
             }
         raise RuntimeError(
-            f"No valid sample found after {_GETITEM_MAX_RETRIES} retries "
-            f"starting at idx={idx} in {self.task_name!r}"
+            f"No valid sample found after {_GETITEM_MAX_RETRIES} retries starting at idx={idx} in {self.task_name!r}"
         )
 
     @property
@@ -978,7 +939,10 @@ class MultiTaskLeRobot3Dataset(BaseActionDataset):
             self._cumulative_lengths.append(total)
         logger.info(
             "%s: %d tasks, %d total windows, action_dim=%d",
-            self.__class__.__name__, len(datasets), total, self.action_dim,
+            self.__class__.__name__,
+            len(datasets),
+            total,
+            self.action_dim,
         )
 
     def __len__(self) -> int:

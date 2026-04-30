@@ -13,7 +13,6 @@ import glob
 import json
 import os
 import random
-import warnings
 from typing import Optional
 
 import cv2
@@ -23,48 +22,20 @@ import torch
 from PIL import Image
 
 from openwam.dataloader.base_dataset import BaseActionDataset
-from openwam.dataloader.transforms.normalize import ActionNormalizer
+from openwam.dataloader.transforms.multiview import (
+    DEFAULT_MULTIVIEW_CAMERA_LAYOUT,
+    assemble_multiview_layout,
+    crop_and_resize,
+    format_prompt_for_inference,
+)
+from openwam.dataloader.transforms.normalize import (
+    YAML_TO_NORM_MODE,
+    ActionNormalizer,
+    load_mode_stats,
+)
 from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
 
-# Map user-facing yaml strings to the internal Normalizer modes.
-_YAML_TO_NORM_MODE = {
-    "min-max": "min_max",
-    "z-score": "mean_std",
-}
 _JOINT_ACTION_DIM = 14  # aloha-agilex qpos vector
-
-# Single source of truth for the L-shape multiview layout:
-# [head_camera (top, full width), left_camera (bot-left), right_camera (bot-right)].
-# Imported by ``policy_server`` so train-side and deploy-side fallbacks stay in
-# sync. The matching yaml key in ``configs/dataloader/robotwin.yaml`` is
-# ``camera_layout`` and should mirror this list byte-for-byte.
-DEFAULT_MULTIVIEW_CAMERA_LAYOUT = ("head_camera", "left_camera", "right_camera")
-
-
-def _load_mode_stats(stats_path: str, action_mode: str) -> Optional[dict]:
-    """Load action_stats.npy and return the sub-dict for the requested mode.
-
-    Supports two schemas:
-      - **Nested** (new): ``{"joint": {...}, "eef": {...}, "num_timesteps": ...}``
-      - **Flat** (legacy): ``{"mean": ..., "std": ..., "min": ..., "max": ..., ...}`` —
-        assumed to belong to ``action_mode``; a DeprecationWarning is emitted.
-
-    Returns the per-mode stats dict, or ``None`` if the file does not contain
-    the requested mode.
-    """
-    raw = np.load(stats_path, allow_pickle=True).item()
-    if action_mode in raw and isinstance(raw[action_mode], dict):
-        return raw[action_mode]
-    # Legacy flat schema: treat it as belonging to the active mode
-    if all(k in raw for k in ("mean", "std", "min", "max")):
-        warnings.warn(
-            f"Stats file {stats_path} uses legacy flat schema; assuming it belongs to "
-            f"action_mode='{action_mode}'. Re-run robotwin_stats_computation.py to upgrade.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return {k: raw[k] for k in ("mean", "std", "min", "max", "q01", "q99") if k in raw}
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -205,92 +176,6 @@ def discover_robotwin_roots(
 # ---------------------------------------------------------------------------
 
 
-def _crop_and_resize(image: Image.Image, target_height: int, target_width: int) -> Image.Image:
-    """Center-crop and resize image to target size (preserves aspect ratio).
-
-    Scales the image so the shorter side matches the target, then
-    center-crops to the exact target resolution. Avoids aspect ratio distortion.
-    """
-    img_w, img_h = image.size
-    scale = max(target_width / img_w, target_height / img_h)
-    new_w = int(img_w * scale)
-    new_h = int(img_h * scale)
-    image = image.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - target_width) // 2
-    top = (new_h - target_height) // 2
-    return image.crop((left, top, left + target_width, top + target_height))
-
-
-def _stretch_resize(image: Image.Image, target_height: int, target_width: int) -> Image.Image:
-    """Direct BILINEAR resize to (target_width, target_height).
-
-    Does NOT preserve aspect ratio — this matches FastWAM's per-camera
-    ``torchvision.transforms.functional.resize(..., BILINEAR, antialias=True)``
-    step in its RoboTwin multi-view composition.
-    """
-    return image.resize((target_width, target_height), Image.BILINEAR)
-
-
-def assemble_multiview_layout(
-    frames_by_camera: dict,
-    camera_layout: list,
-    out_h: int,
-    out_w: int,
-    top_height_ratio: float = 2.0 / 3.0,
-) -> Image.Image:
-    """3-camera L-shape composition (FastWAM-compatible).
-
-    Layout with the default ratio:
-        top    -> (out_h * 2/3, out_w)          full width, 2/3 of height
-        bot-L  -> (out_h * 1/3, out_w / 2)      half width, 1/3 of height
-        bot-R  -> (out_h * 1/3, out_w / 2)      half width, 1/3 of height
-
-    Each camera is BILINEAR-resized directly to its slot with no aspect-ratio
-    preservation (i.e. slight horizontal/vertical stretch is accepted), then
-    pasted without gaps — identical to FastWAM's ``concat_multi_camera='robotwin'``
-    path in ``robot_video_dataset.py``.  At out_h=384, out_w=320 this produces
-    a canvas with top=256x320 and each bottom=128x160, matching FastWAM exactly.
-
-    Args:
-        frames_by_camera: ``{camera_name: PIL.Image}``. Missing -> black region.
-        camera_layout: ordered list of 3 camera names (top, bot-left, bot-right).
-        out_h, out_w: final canvas size in pixels.
-        top_height_ratio: fraction of height allocated to the top camera.
-
-    Returns:
-        PIL Image of size ``(out_w, out_h)``.
-    """
-    if len(camera_layout) != 3:
-        raise ValueError(f"multiview layout expects 3 cameras, got {len(camera_layout)}")
-
-    top_h = int(round(out_h * top_height_ratio))
-    bottom_h = out_h - top_h
-    half_w = out_w // 2
-    right_w = out_w - half_w
-
-    canvas = Image.new("RGB", (out_w, out_h), (0, 0, 0))
-
-    # Top camera: full width × top_h (BILINEAR stretch)
-    top_name = camera_layout[0]
-    top_frame = frames_by_camera.get(top_name)
-    if top_frame is not None:
-        canvas.paste(_stretch_resize(top_frame, top_h, out_w), (0, 0))
-
-    # Bottom-left: half_w × bottom_h (BILINEAR stretch)
-    bl_name = camera_layout[1]
-    bl_frame = frames_by_camera.get(bl_name)
-    if bl_frame is not None:
-        canvas.paste(_stretch_resize(bl_frame, bottom_h, half_w), (0, top_h))
-
-    # Bottom-right: right_w × bottom_h (BILINEAR stretch)
-    br_name = camera_layout[2]
-    br_frame = frames_by_camera.get(br_name)
-    if br_frame is not None:
-        canvas.paste(_stretch_resize(br_frame, bottom_h, right_w), (half_w, top_h))
-
-    return canvas
-
-
 def _pad_and_resize(image: Image.Image, target_height: int, target_width: int) -> Image.Image:
     """Resize preserving aspect ratio, then center-pad with black to target size.
 
@@ -330,7 +215,7 @@ def _resize_frame(
         return image.resize((target_width, target_height), Image.LANCZOS)
     if resize_mode == "pad":
         return _pad_and_resize(image, target_height, target_width)
-    return _crop_and_resize(image, target_height, target_width)
+    return crop_and_resize(image, target_height, target_width)
 
 
 def _resolve_prompt(
@@ -393,28 +278,6 @@ def _resolve_prompt(
         base_prompt = f"The bimanual robot is performing a {task_name} task."
 
     return format_prompt_for_inference(base_prompt, multiview, camera_layout)
-
-
-def format_prompt_for_inference(base_prompt: str, multiview: bool, camera_layout) -> str:
-    """Format a base task prompt for model inference.
-
-    Must match :meth:`RoboTwinDataset._get_prompt` byte-for-byte so that
-    the deployment-time prompt stays in-distribution with training.
-
-    - Single-view: returns ``base_prompt`` unchanged.
-    - Multi-view:  wraps with the 3-view layout description used at training.
-    """
-    if not multiview:
-        return base_prompt
-    if base_prompt and base_prompt[-1] not in ".!?":
-        base_prompt = base_prompt + "."
-    return (
-        f"A multi-view video shows that {base_prompt} "
-        f"The video is composed of three views: "
-        f"{camera_layout[0].replace('_', ' ')} (top), "
-        f"{camera_layout[1].replace('_', ' ')} (bottom-left), "
-        f"{camera_layout[2].replace('_', ' ')} (bottom-right)."
-    )
 
 
 class RoboTwinDataset(BaseActionDataset):
@@ -661,9 +524,9 @@ class RoboTwinDataset(BaseActionDataset):
         self.action_stats_path: Optional[str] = None  # resolved path to the stats .npy file
 
         if self.normalize_mode is not None:
-            if self.normalize_mode not in _YAML_TO_NORM_MODE:
+            if self.normalize_mode not in YAML_TO_NORM_MODE:
                 raise ValueError(
-                    f"normalize_mode must be one of {list(_YAML_TO_NORM_MODE)} or null, got '{self.normalize_mode}'"
+                    f"normalize_mode must be one of {list(YAML_TO_NORM_MODE)} or null, got '{self.normalize_mode}'"
                 )
             print(
                 f"  [normalizer] Loading action normalizer "
@@ -702,7 +565,7 @@ class RoboTwinDataset(BaseActionDataset):
                     print(f"  [normalizer] Saved newly-computed single-task stats → {stats_path}")
 
             if stats_path is not None:
-                mode_stats = _load_mode_stats(stats_path, self.action_mode)
+                mode_stats = load_mode_stats(stats_path, self.action_mode)
                 if mode_stats is None:
                     print(
                         f"  [normalizer] WARNING: stats file {stats_path} has no '{self.action_mode}' entry; "
@@ -718,7 +581,7 @@ class RoboTwinDataset(BaseActionDataset):
                         )
                     self._mode_stats = mode_stats
                     self._action_normalizer = ActionNormalizer(
-                        mode=_YAML_TO_NORM_MODE[self.normalize_mode],
+                        mode=YAML_TO_NORM_MODE[self.normalize_mode],
                         stats=mode_stats,
                     )
                     self.action_stats_path = stats_path
@@ -950,7 +813,7 @@ class RoboTwinDataset(BaseActionDataset):
         # Video: subsampled. State/action: raw rate.
         sampled_video = [raw_frames[i] for i in self._video_sample_indices]
         if not self.multiview:
-            sampled_video = [_crop_and_resize(frame, self.height, self.width) for frame in sampled_video]
+            sampled_video = [crop_and_resize(frame, self.height, self.width) for frame in sampled_video]
 
         proprio_np = raw_actions[0:1].astype(np.float32)
         action_np = raw_actions[1 : self.num_frames].astype(np.float32)
@@ -986,7 +849,6 @@ class RoboTwinDataset(BaseActionDataset):
             "video": sampled_video,
             "vace_video": None,
             "first_frame_image": [sampled_video[0]],
-            "action_trajectory": action_tensor,
             "action": action_tensor,
             "action_mask": action_mask,
             "video_mask": video_mask,

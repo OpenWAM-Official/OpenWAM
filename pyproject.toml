@@ -56,7 +56,7 @@ npu = ["torch==2.7.1+cpu", "torch-npu==2.7.1", "torchvision==0.22.1+cpu"]
 include-package-data = true
 
 [project.scripts]
-openwam-serve = "openwam.deployment.policy_server:main"
+openwam-serve = "openwam.deploy.policy_server:main"
 
 [tool.ruff]
 line-length = 120

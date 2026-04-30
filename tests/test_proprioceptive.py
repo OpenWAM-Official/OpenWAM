@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from openwam.model.action_model.proprioceptive import ProprioceptiveEncoder
+from openwam.model.action_backbone.proprioceptive import ProprioceptiveEncoder
 
 
 def test_import():
@@ -36,9 +36,7 @@ def test_sequence_concat_mode_shape():
 def test_concat_alias_backcompat():
     """mode='concat' must remain a working alias of 'sequence_concat'."""
     enc_alias = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="concat", num_state_tokens=4)
-    enc_canonical = ProprioceptiveEncoder(
-        state_dim=14, hidden_dim=64, mode="sequence_concat", num_state_tokens=4
-    )
+    enc_canonical = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="sequence_concat", num_state_tokens=4)
     assert enc_alias.extra_tokens == enc_canonical.extra_tokens == 4
     action_embeds = torch.randn(2, 49, 64)
     state = torch.randn(2, 14)
@@ -50,9 +48,7 @@ def test_concat_alias_backcompat():
 def test_extra_tokens_property():
     """extra_tokens should match mode."""
     enc_add = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="add")
-    enc_cat = ProprioceptiveEncoder(
-        state_dim=7, hidden_dim=32, mode="sequence_concat", num_state_tokens=8
-    )
+    enc_cat = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="sequence_concat", num_state_tokens=8)
     assert enc_add.extra_tokens == 0
     assert enc_cat.extra_tokens == 8
 
@@ -211,7 +207,7 @@ def test_channel_concat_gradient_flow():
 
 def test_action_dit_end_to_end_channel_concat():
     """ActionDiT with channel_concat proprio should produce correctly-shaped predictions."""
-    from openwam.model.action_model.action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     bridge_layers = (0, 1)
     dit = ActionDiT(
@@ -222,7 +218,8 @@ def test_action_dit_end_to_end_channel_concat():
         num_layers=len(bridge_layers),
         video_dim=48,
         bridge_layers=bridge_layers,
-        bridge_type="cross_attn",
+        variant="joint_cross_attn",
+        detach_bridge=False,
         use_proprioception=True,
         proprio_fusion="channel_concat",
     )
@@ -239,7 +236,7 @@ def test_action_dit_end_to_end_channel_concat():
 
 def test_action_dit_end_to_end_sequence_concat():
     """ActionDiT with sequence_concat should slice state tokens off the output."""
-    from openwam.model.action_model.action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     bridge_layers = (0, 1)
     num_state_tokens = 3
@@ -251,7 +248,8 @@ def test_action_dit_end_to_end_sequence_concat():
         num_layers=len(bridge_layers),
         video_dim=48,
         bridge_layers=bridge_layers,
-        bridge_type="cross_attn",
+        variant="joint_cross_attn",
+        detach_bridge=False,
         use_proprioception=True,
         proprio_fusion="sequence_concat",
         num_state_tokens=num_state_tokens,
@@ -282,7 +280,7 @@ def test_action_dit_joint_self_attn_sequence_concat():
     combined setting and that ``skip_prefix_tokens`` (video semantics)
     stays at 0 while ``action_prefix_tokens`` picks up the proprio count.
     """
-    from openwam.model.action_model.action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     bridge_layers = (0, 1)
     num_state_tokens = 3
@@ -294,7 +292,7 @@ def test_action_dit_joint_self_attn_sequence_concat():
         num_layers=len(bridge_layers),
         video_dim=32,
         bridge_layers=bridge_layers,
-        bridge_type="joint_self_attn",
+        variant="joint_self_attn",
         use_proprioception=True,
         proprio_fusion="sequence_concat",
         num_state_tokens=num_state_tokens,
@@ -314,8 +312,7 @@ def test_action_dit_joint_self_attn_sequence_concat():
     # split is correct.
     state = dit.prepare_action_state(action_tokens, timestep, proprio_state=proprio)
     assert state.skip_prefix_tokens == 0, (
-        "skip_prefix_tokens is reserved for video reference-frame slicing; "
-        "the proprio count must not leak into it."
+        "skip_prefix_tokens is reserved for video reference-frame slicing; the proprio count must not leak into it."
     )
     assert state.action_prefix_tokens == num_state_tokens
     final = dit.finalize_action_output(state)
@@ -324,7 +321,7 @@ def test_action_dit_joint_self_attn_sequence_concat():
 
 def test_action_dit_asserts_when_state_missing():
     """Building with use_proprioception=True but forwarding None should fail loudly."""
-    from openwam.model.action_model.action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     bridge_layers = (0,)
     dit = ActionDiT(
@@ -335,7 +332,8 @@ def test_action_dit_asserts_when_state_missing():
         num_layers=1,
         video_dim=32,
         bridge_layers=bridge_layers,
-        bridge_type="cross_attn",
+        variant="joint_cross_attn",
+        detach_bridge=False,
         use_proprioception=True,
         proprio_fusion="channel_concat",
     )
@@ -348,7 +346,7 @@ def test_action_dit_asserts_when_state_missing():
 
 def test_action_dit_proprio_disabled_by_default():
     """When use_proprioception=False the encoder should be None."""
-    from openwam.model.action_model.action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     bridge_layers = (0,)
     dit = ActionDiT(
@@ -359,7 +357,8 @@ def test_action_dit_proprio_disabled_by_default():
         num_layers=1,
         video_dim=32,
         bridge_layers=bridge_layers,
-        bridge_type="cross_attn",
+        variant="joint_cross_attn",
+        detach_bridge=False,
     )
     assert dit.proprio_encoder is None
     assert dit.num_proprio_tokens == 0

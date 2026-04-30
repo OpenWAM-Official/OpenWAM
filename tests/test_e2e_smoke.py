@@ -11,12 +11,16 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from openwam.model.dual_system import DualSystemArchitecture
+from openwam.model.architectures.dual_system import DualSystemCrossAttnArchitecture
+from openwam.model.base import ExecutionPlan
 
 
 def _make_tiny_architecture():
-    """Create a minimal DualSystemArchitecture for testing."""
+    """Create a minimal DualSystemCrossAttnArchitecture for testing."""
     cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
         "action_dim": 7,
         "dim": 64,
         "ffn_dim": 128,
@@ -24,9 +28,8 @@ def _make_tiny_architecture():
         "num_layers": 1,
         "video_dim": 64,
         "bridge_layers": (0,),
-        "bridge_type": "cross_attn",
     }
-    return DualSystemArchitecture(cfg=cfg)
+    return DualSystemCrossAttnArchitecture(cfg=cfg)
 
 
 def test_e2e_train_save_load_infer():
@@ -48,9 +51,9 @@ def test_e2e_train_save_load_infer():
     bridge_feature = torch.randn(B, T * 4, video_dim)  # fake video hidden
 
     # --- 3. Forward pass through architecture interface ---
-    state = arch.prepare_action_tokens(noisy_actions, timestep)
-    _, state = arch.on_dit_block(0, bridge_feature, state)
-    pred = arch.extract_action_prediction(state)
+    state = arch.action_backbone.prepare_state(noisy_actions, timestep)
+    state.bridge_features.append(bridge_feature)
+    pred = arch.action_backbone.extract_prediction(state)
 
     assert pred.shape == (B, T, action_dim), f"Expected {(B, T, action_dim)}, got {pred.shape}"
 
@@ -68,18 +71,18 @@ def test_e2e_train_save_load_infer():
         ckpt_path = Path(tmpdir) / "action_dit.safetensors"
         from safetensors.torch import load_file, save_file
 
-        save_file(arch.action_dit.state_dict(), str(ckpt_path))
+        save_file(arch.action_backbone.state_dict(), str(ckpt_path))
         assert ckpt_path.exists()
 
         # --- 6. Load into fresh model ---
         arch2 = _make_tiny_architecture()
         loaded = load_file(str(ckpt_path))
-        arch2.action_dit.load_state_dict(loaded, strict=True)
+        arch2.action_backbone.load_state_dict(loaded, strict=True)
 
         # Verify weights match
         for (k1, v1), (k2, v2) in zip(
-            arch.action_dit.state_dict().items(),
-            arch2.action_dit.state_dict().items(),
+            arch.action_backbone.state_dict().items(),
+            arch2.action_backbone.state_dict().items(),
         ):
             assert k1 == k2, f"Key mismatch: {k1} vs {k2}"
             assert torch.equal(v1, v2), f"Weight mismatch for {k1}"
@@ -91,9 +94,9 @@ def test_e2e_train_save_load_infer():
         infer_timestep = torch.tensor([300.0])
         infer_bridge = torch.randn(B, T * 4, video_dim)
 
-        state = arch2.prepare_action_tokens(infer_actions, infer_timestep)
-        _, state = arch2.on_dit_block(0, infer_bridge, state)
-        infer_pred = arch2.extract_action_prediction(state)
+        state = arch2.action_backbone.prepare_state(infer_actions, infer_timestep)
+        state.bridge_features.append(infer_bridge)
+        infer_pred = arch2.action_backbone.extract_prediction(state)
 
         assert infer_pred.shape == (B, T, action_dim)
 
@@ -102,14 +105,18 @@ def test_e2e_train_save_load_infer():
     assert arch2.action_std.shape == (action_dim,)
     assert arch2.action_dim == action_dim
     assert arch2.bridge_layers == (0,)
-    assert arch2.is_interleaved is False
+    assert arch2.execution_plan == ExecutionPlan.BRIDGE_COLLECTION
 
 
 def test_e2e_interleaved_forward_pass():
     """Smoke test: joint_self_attn architecture forward pass."""
+    from openwam.model.architectures.dual_system import DualSystemSelfAttnArchitecture
+
     B, T, action_dim, video_dim = 1, 4, 7, 64
 
     cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
         "action_dim": action_dim,
         "dim": 64,
         "ffn_dim": 128,
@@ -117,23 +124,38 @@ def test_e2e_interleaved_forward_pass():
         "num_layers": 1,
         "video_dim": video_dim,
         "bridge_layers": (0,),
-        "bridge_type": "joint_self_attn",
     }
-    arch = DualSystemArchitecture(cfg=cfg)
+    arch = DualSystemSelfAttnArchitecture(cfg=cfg)
     arch.eval()
 
-    assert arch.is_interleaved is True
+    assert arch.execution_plan == ExecutionPlan.INTERLEAVED_SPLIT_SELF_ATTENTION
 
     noisy_actions = torch.randn(B, T, action_dim)
     timestep = torch.tensor([500.0])
     video_hidden = torch.randn(B, T * 4, video_dim)
 
     with torch.no_grad():
-        state = arch.prepare_action_tokens(noisy_actions, timestep)
-        assert "dit_state" in state.extra
+        state = arch.action_backbone.prepare_state(noisy_actions, timestep)
+        assert state.runtime_state is not None
+        assert state.runtime_state.variant == "joint_self_attn"
 
-        video_out, state = arch.on_dit_block(0, video_hidden, state)
-        assert video_out.shape == video_hidden.shape
+        class _MockVState:
+            def __init__(self, x, t_mod, f, h, w):
+                self.x = x
+                self.reference_prefix_len = 0
+                self.t_mod = t_mod
+                self.f = f
+                self.h = h
+                self.w = w
 
-        pred = arch.extract_action_prediction(state)
+        class _MockVB:
+            def run_block(self, _bid, vs):
+                return vs
+
+        # video_hidden has T*4 tokens — pretend it's a 1D temporal axis.
+        vstate = _MockVState(video_hidden, t_mod=torch.zeros(B, 6, video_dim), f=video_hidden.shape[1], h=1, w=1)
+        vstate, state = arch.action_backbone.run_block(0, _MockVB(), vstate, state)
+        assert vstate.x.shape == video_hidden.shape
+
+        pred = arch.action_backbone.extract_prediction(state)
         assert pred.shape == (B, T, action_dim)

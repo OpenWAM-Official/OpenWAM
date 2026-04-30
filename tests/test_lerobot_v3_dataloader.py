@@ -113,9 +113,7 @@ def _create_fake_task(
                 row["observation.state"] = rng.standard_normal(state_dim).astype(np.float32)
             rows.append(row)
             global_idx += 1
-    pd.DataFrame(rows).to_parquet(
-        os.path.join(task_dir, "data", "chunk-000", "file-000.parquet"), index=False
-    )
+    pd.DataFrame(rows).to_parquet(os.path.join(task_dir, "data", "chunk-000", "file-000.parquet"), index=False)
 
     # videos/{camera}/ directory stubs (no real mp4 — patched in integration tests)
     for cam in cameras:
@@ -236,7 +234,7 @@ def test_action_composer_scalar_reshaped_to_column():
 
 
 def test_assemble_multiview_lshape_canvas_size():
-    from openwam.dataloader.lerobot_v3_base import assemble_multiview_layout
+    from openwam.dataloader.transforms.multiview import assemble_multiview_layout
 
     cameras = ["top", "bot_l", "bot_r"]
     frames = {c: Image.new("RGB", (100, 100), color=(255, 0, 0)) for c in cameras}
@@ -251,7 +249,7 @@ def test_assemble_multiview_missing_camera_black_fill():
     frame, so missing keys only occur on genuine data-absence.  The function
     itself still produces black for any absent camera_layout key.
     """
-    from openwam.dataloader.lerobot_v3_base import assemble_multiview_layout
+    from openwam.dataloader.transforms.multiview import assemble_multiview_layout
 
     cameras = ["top", "bot_l", "bot_r"]
     # Only provide top camera; bot_l and bot_r are missing → black region
@@ -264,7 +262,7 @@ def test_assemble_multiview_missing_camera_black_fill():
 
 
 def test_assemble_multiview_wrong_camera_count_raises():
-    from openwam.dataloader.lerobot_v3_base import assemble_multiview_layout
+    from openwam.dataloader.transforms.multiview import assemble_multiview_layout
 
     with pytest.raises(ValueError, match="3 cameras"):
         assemble_multiview_layout({}, ["cam_a", "cam_b"], out_h=60, out_w=60)
@@ -421,11 +419,21 @@ def test_denormalize_zscore_roundtrip():
 # ---------------------------------------------------------------------------
 
 _REQUIRED_KEYS = {
-    "video", "vace_video", "first_frame_image",
-    "action_trajectory", "action_mask", "video_mask",
-    "proprio", "proprio_mask",
-    "prompt", "episode_index", "episode_path",
-    "start_frame", "end_frame", "episode_length", "task_name",
+    "video",
+    "vace_video",
+    "first_frame_image",
+    "action",
+    "action_mask",
+    "video_mask",
+    "proprio",
+    "proprio_mask",
+    "prompt",
+    "episode_index",
+    "episode_path",
+    "start_frame",
+    "end_frame",
+    "episode_length",
+    "task_name",
     "proprio_source",
 }
 
@@ -450,13 +458,11 @@ def test_getitem_return_dict_keys():
         )
         with _mock_video():
             sample = ds[0]
-    assert _REQUIRED_KEYS.issubset(sample.keys()), (
-        f"Missing keys: {_REQUIRED_KEYS - sample.keys()}"
-    )
+    assert _REQUIRED_KEYS.issubset(sample.keys()), f"Missing keys: {_REQUIRED_KEYS - sample.keys()}"
 
 
 def test_getitem_action_and_proprio_shapes():
-    """Window split: proprio=(1,D), action_trajectory=(num_frames-1,D)."""
+    """Window split: proprio=(1,D), action=(num_frames-1,D)."""
     from openwam.dataloader.lerobot_v3_base import LeRobot3Dataset
 
     num_frames = 9
@@ -482,7 +488,7 @@ def test_getitem_action_and_proprio_shapes():
 
     assert sample["proprio"].shape == (1, action_dim)
     assert sample["proprio_mask"].shape == (1,)
-    assert sample["action_trajectory"].shape == (num_frames - 1, action_dim)
+    assert sample["action"].shape == (num_frames - 1, action_dim)
     assert sample["action_mask"].shape == (num_frames - 1,)
 
 
@@ -567,32 +573,6 @@ def test_normalize_mode_raises_when_eef_stats_missing():
             )
 
 
-def test_deprecated_normalize_mode_spellings_converted(caplog):
-    """'minmax' and 'zscore' (no hyphen) should warn and be accepted."""
-    import logging
-
-    from openwam.dataloader.lerobot_v3_base import LeRobot3Dataset
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _create_fake_task(tmpdir, n_episodes=2, ep_len=20)
-        with caplog.at_level(logging.WARNING):
-            ds = LeRobot3Dataset(
-                data_root=tmpdir,
-                action_fields=["action"],
-                target_camera="head",
-                cameras=["head"],
-                num_frames=9,
-                height=16,
-                width=16,
-                split="train",
-                val_ratio=0.0,
-                multiview=False,
-                normalize_mode="minmax",
-            )
-    assert ds.normalize_mode == "min-max"
-    assert any("deprecated" in r.message.lower() for r in caplog.records)
-
-
 # ---------------------------------------------------------------------------
 # MixtureDataset
 # ---------------------------------------------------------------------------
@@ -611,7 +591,7 @@ class _FakeDS:
 
     def __getitem__(self, idx: int) -> dict:
         return {
-            "action_trajectory": torch.zeros(self._action_dim),
+            "action": torch.zeros(self._action_dim),
             "action_mask": torch.ones(self._action_dim, dtype=torch.bool),
         }
 
@@ -682,7 +662,7 @@ def test_mixture_stats_computed_when_all_have_stats():
 
 
 def test_mixture_action_dim_padding():
-    """action_trajectory from a smaller-dim sub-dataset must be zero-padded to action_dim_override."""
+    """action from a smaller-dim sub-dataset must be zero-padded to action_dim_override."""
     from openwam.dataloader.mixture import MixtureDataset
 
     ds_small = _FakeDS(10, 14)  # 14-D
@@ -692,9 +672,9 @@ def test_mixture_action_dim_padding():
     # Find an index that dispatches to ds_small (di=0)
     target_idx = next(i for i, (di, _) in enumerate(mix._index_map) if di == 0)
     sample = mix[target_idx]
-    assert sample["action_trajectory"].shape[-1] == 20
+    assert sample["action"].shape[-1] == 20
     # Padded dims should be zero
-    assert (sample["action_trajectory"][14:] == 0.0).all()
+    assert (sample["action"][14:] == 0.0).all()
 
 
 # ---------------------------------------------------------------------------
@@ -704,38 +684,38 @@ def test_mixture_action_dim_padding():
 
 def test_eef_transform_identity_pose_wxyz():
     """Identity quaternion [1,0,0,0] (wxyz) should produce rot6d = [1,0,0, 0,1,0]."""
-    from openwam.dataloader.agibot import _make_eef_transform
+    from openwam.dataloader.agibot import make_eef_transform
 
-    transform = _make_eef_transform(quat_convention="wxyz")
+    transform = make_eef_transform(quat_convention="wxyz")
 
     # 1-frame 40-D action, only left/right quaternions set to identity.
     # Layout: [gripper_l(1), gripper_r(1), xyz_l(3), xyz_r(3), q_l(4), q_r(4), ...]
     action = np.zeros((1, 40), dtype=np.float32)
-    action[0, 8:12]  = [1, 0, 0, 0]   # q_l wxyz identity
-    action[0, 12:16] = [1, 0, 0, 0]   # q_r wxyz identity
+    action[0, 8:12] = [1, 0, 0, 0]  # q_l wxyz identity
+    action[0, 12:16] = [1, 0, 0, 0]  # q_r wxyz identity
 
     out = transform(action)  # (1, 20)
     assert out.shape == (1, 20)
 
     # left rot6d at cols 3:9, right rot6d at cols 13:19
     identity_rot6d = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
-    np.testing.assert_allclose(out[0, 3:9],  identity_rot6d, atol=1e-5)
+    np.testing.assert_allclose(out[0, 3:9], identity_rot6d, atol=1e-5)
     np.testing.assert_allclose(out[0, 13:19], identity_rot6d, atol=1e-5)
 
 
 def test_eef_transform_identity_pose_xyzw():
     """Identity quaternion [0,0,0,1] (xyzw) should produce rot6d = [1,0,0, 0,1,0]."""
-    from openwam.dataloader.agibot import _make_eef_transform
+    from openwam.dataloader.agibot import make_eef_transform
 
-    transform = _make_eef_transform(quat_convention="xyzw")
+    transform = make_eef_transform(quat_convention="xyzw")
 
     action = np.zeros((1, 40), dtype=np.float32)
-    action[0, 8:12]  = [0, 0, 0, 1]   # q_l xyzw identity
-    action[0, 12:16] = [0, 0, 0, 1]   # q_r xyzw identity
+    action[0, 8:12] = [0, 0, 0, 1]  # q_l xyzw identity
+    action[0, 12:16] = [0, 0, 0, 1]  # q_r xyzw identity
 
     out = transform(action)
     identity_rot6d = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
-    np.testing.assert_allclose(out[0, 3:9],  identity_rot6d, atol=1e-5)
+    np.testing.assert_allclose(out[0, 3:9], identity_rot6d, atol=1e-5)
     np.testing.assert_allclose(out[0, 13:19], identity_rot6d, atol=1e-5)
 
 
@@ -763,14 +743,14 @@ def _make_ds_ep(tmpdir, ep_len: int, num_frames: int = 9):
 
 
 def test_single_frame_episode_pads_correctly():
-    """Single-frame episode: action_trajectory should be all-pad with mask all False."""
+    """Single-frame episode: action should be all-pad with mask all False."""
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_fake_task(tmpdir, n_episodes=2, ep_len=1)
         ds = _make_ds_ep(tmpdir, ep_len=1)
         with _mock_video():
             sample = ds[0]
-        # action_trajectory shape: (num_frames-1, D)
-        assert sample["action_trajectory"].shape[0] == 8
+        # action shape: (num_frames-1, D)
+        assert sample["action"].shape[0] == 8
         # No real actions in a single-frame episode — mask should be all False
         assert not sample["action_mask"].any()
 
@@ -782,8 +762,8 @@ def test_last_frame_pad_repeats_last_action():
         ds = _make_ds_ep(tmpdir, ep_len=5)
         with _mock_video():
             sample = ds[0]
-        action = sample["action_trajectory"]  # (8, D)
-        mask = sample["action_mask"]          # (8,)
+        action = sample["action"]  # (8, D)
+        mask = sample["action_mask"]  # (8,)
         # ep_len=5: proprio=raw[0], action=raw[1:5] → 4 valid frames, 4 padded
         assert mask[:4].all()
         assert not mask[4:].any()

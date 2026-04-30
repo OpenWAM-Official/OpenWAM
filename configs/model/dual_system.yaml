@@ -2,34 +2,39 @@
 # Separate ActionDiT with bridge attention to video DiT layers.
 
 architecture:
-  type: dual_system
+  framework: dual_system
+  variant: joint_self_attn   # joint_self_attn or joint_cross_attn or idm
+  detach_bridge: false         # only applies to joint_cross_attn; if true, no gradients flow from ActionDiT to video DiT (i.e. a one-way bridge)
   action_dim: 20
-  bridge_type: cross_attn_detach   # [Optional]: cross_attn, cross_attn_detach or joint_self_attn
   # Two ways to choose which video DiT layers feed the ActionDiT bridge.
   # len(bridge_layers) auto-determines ActionDiT num_layers either way.
   #   (a) Explicit list:  bridge_layers: [0, 1, ..., 29]
   #   (b) Interval mode:  set bridge_layers: null and use bridge_interval.
-  #       - interval=1 → range(0, num_dit_layers) = all layers
-  #       - interval=2 → [0, 2, 4, ...]
-  #       This lets the same config target different-size WAN backbones
-  #       (TI2V-5B/VACE-1.3B = 30 layers, T2V-14B/I2V-14B = 40 layers).
+  #       - interval=1 → all inferred video DiT layers
+  #       - interval=2 → every other inferred layer
+  #       The total layer count is inferred from the loaded video backbone;
+  #       users do not need to set it manually.
   bridge_layers: null
   bridge_interval: 1
-  num_dit_layers: 30   # Size of the paired video DiT (TI2V-5B=30, T2V-14B=40).
 
 # Video backbone
 # Resolution: VACE only supports 480x832 or 720x1280; TI2V supports any height/width % 32 == 0.
 # Actual training resolution is determined by dataloader config.
 video_backbone:
-  name: ti2v_5b
+  name: wan22_ti2v_5b
   model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
 
 # ActionDiT transformer parameters
 # num_layers is auto-derived from len(bridge_layers) — do not specify here.
 action_backbone:
-  dim: 1024
-  ffn_dim: 4096
-  num_heads: 16
+  # Aligned to Wan2.2-TI2V-5B video DiT (dim=3072, ffn_dim=14336, num_heads=24).
+  # Joint self-attention then operates in the full hidden dim of the video stream,
+  # and video_projs / video_back_projs degenerate to Identity (no info bottleneck).
+  # Cross-attn variant also benefits from the larger capacity.
+  # Memory: ActionDiT param count grows ~84M → ~1.5B; deepspeed_zero3 recommended.
+  dim: 3072
+  ffn_dim: 14336
+  num_heads: 24
 
   # Proprioceptive state conditioning (TRAINING-ONLY in this PR — the
   # deployment path has not been wired up yet, see docs/proprioception.md).

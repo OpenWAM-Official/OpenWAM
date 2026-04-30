@@ -1,13 +1,13 @@
 defaults:
   - accelerate: deepspeed_zero2   # [Optional]: deepspeed_zero1, deepspeed_zero2(default), deepspeed_zero3
-  - model: dual_system            # [Optional]: dual_system(default), shared_backbone, moe_expert
+  - model: dual_system            # [Optional]: dual_system(default), shared_backbone
   - dataloader: robotwin          # [Optional]: robotwin(default)
   - training_strategy: joint      # [Optional]: joint(default) or video_only
   - _self_
 
 training:
   # --- Debug ---
-  debug: false                    # Debug mode: max_steps=20, save@5, constant LR
+  debug: true                    # Debug mode: max_steps=20, save@5, constant LR
 
   # --- Precision ---
   mixed_precision: bf16           # Model dtype: bf16 (recommended), fp16, or no (fp32)
@@ -47,7 +47,7 @@ training:
   # false → one diffusion timestep per sample shared across all action tokens.
   # true  → one independent timestep per action token (DreamZero decoupled-mode style);
   #         enables ExpertFFN per-token AdaLN. TRAINING path only — inference in
-  #         openwam/deployment/joint_engine.py still broadcasts per-sample.
+  #         openwam/deploy/joint_engine.py still broadcasts per-sample.
   #         Surfaced as a schema anchor so Hydra struct-mode catches typos.
   action_timestep_per_token: false
 

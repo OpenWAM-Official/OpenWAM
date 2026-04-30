@@ -23,7 +23,6 @@ class BaseActionDataset(ABC, torch.utils.data.Dataset):
                              pipeline's ``preprocess_video`` handles
                              conversion to tensors and resizing)
             action:          Tensor (T, action_dim)
-            action_trajectory: Tensor (T, action_dim) — alias for action
             prompt:          str
             reference_image: List[PIL.Image], optional
             context_video:   List[PIL.Image], optional (VACE conditioning)

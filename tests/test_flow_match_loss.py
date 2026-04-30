@@ -1,149 +1,90 @@
-"""Tests for standalone FlowMatchVideoActionLoss."""
+"""Tests for video/action loss helpers on BaseWAMArchitecture.
+
+These tests exercise architecture._compute_video_loss and
+architecture._compute_action_loss, which replaced the standalone
+FlowMatchVideoActionLoss class.
+"""
 
 import torch
 
 
-def test_flow_match_loss_importable():
-    """FlowMatchVideoActionLoss should be importable from training package."""
-    from openwam.train import FlowMatchVideoActionLoss
+def _make_arch():
+    """Build a minimal architecture with a mock video backbone for loss tests."""
+    from tests.test_openwam_trainer import _make_tiny_arch
 
-    assert callable(FlowMatchVideoActionLoss)
-
-
-def test_flow_match_loss_from_module():
-    """Direct import from flow_match_loss module."""
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
-
-    loss_fn = FlowMatchVideoActionLoss(lambda_video=1.0, lambda_action=1.0)
-    assert loss_fn.lambda_video == 1.0
-    assert loss_fn.lambda_action == 1.0
-    assert loss_fn.detach_bridge is False
+    return _make_tiny_arch()
 
 
-def test_flow_match_loss_config():
-    """Loss function should accept all configuration options."""
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
+class _MockScheduler:
+    num_train_timesteps = 1000
+    linear_timesteps_weights = torch.ones(1000)
+    timesteps = torch.linspace(0, 1, 1000)
+    sigmas = torch.linspace(1, 0, 1000)
 
-    loss_fn = FlowMatchVideoActionLoss(
-        lambda_video=0.5,
-        lambda_action=2.0,
-        detach_bridge=True,
-    )
-    assert loss_fn.lambda_video == 0.5
-    assert loss_fn.lambda_action == 2.0
-    assert loss_fn.detach_bridge is True
+    def add_noise(self, original, noise, sigma):
+        return (1 - sigma) * original + sigma * noise
+
+    def training_target(self, original, noise):
+        return noise - original
+
+    def training_weight(self, timestep_ids):
+        return self.linear_timesteps_weights[timestep_ids]
+
+    def flow_step(self, pred, sigma, sigma_next, sample):
+        return sample + pred * (sigma_next - sigma)
 
 
-def test_flow_match_loss_video_loss_computation():
-    """Test video loss computation with mock tensors."""
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
-
-    loss_fn = FlowMatchVideoActionLoss()
-
-    # Test the static helper for video loss
+def test_video_loss_basic():
+    """Video loss produces a positive scalar."""
+    arch = _make_arch()
     noise_pred = torch.randn(2, 16, 5, 4, 4)
     target = torch.randn(2, 16, 5, 4, 4)
     timestep_ids = torch.tensor([10, 20])
 
-    # Create mock scheduler weights
-    class MockScheduler:
-        linear_timesteps_weights = torch.ones(1000)
-        timesteps = torch.linspace(0, 1, 1000)
-        sigmas = torch.linspace(1, 0, 1000)
-
-    class MockPipe:
-        torch_dtype = torch.float32
-        device = "cpu"
-        scheduler = MockScheduler()
-
-    loss = loss_fn._compute_video_loss(noise_pred, target, timestep_ids, MockPipe(), {}, B=2)
+    loss = arch._compute_video_loss(noise_pred, target, timestep_ids, {}, device="cpu")
     assert loss.shape == ()
     assert loss.item() > 0
 
 
-def test_flow_match_loss_action_loss_computation():
-    """Test action loss computation with mock tensors."""
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
-
-    loss_fn = FlowMatchVideoActionLoss()
-
+def test_action_loss_basic():
+    """Action loss produces a positive scalar."""
+    arch = _make_arch()
     noise_pred = torch.randn(2, 49, 14)
     target = torch.randn(2, 49, 14)
     timestep_ids = torch.tensor([5, 15])
 
-    class MockScheduler:
-        linear_timesteps_weights = torch.ones(1000)
-
-    class MockPipe:
-        torch_dtype = torch.float32
-        device = "cpu"
-
-    loss = loss_fn._compute_action_loss(noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=2)
+    loss = arch._compute_action_loss(noise_pred, target, timestep_ids, _MockScheduler(), inputs={}, device="cpu")
     assert loss.shape == ()
     assert loss.item() > 0
 
 
-def test_flow_match_loss_single_sample():
-    """Loss computation should handle B=1 fast path."""
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
-
-    loss_fn = FlowMatchVideoActionLoss()
-
+def test_action_loss_single_sample():
+    """Loss computation should handle B=1."""
+    arch = _make_arch()
     noise_pred = torch.randn(1, 49, 14)
     target = torch.randn(1, 49, 14)
     timestep_ids = torch.tensor([10])
 
-    class MockScheduler:
-        linear_timesteps_weights = torch.ones(1000)
-
-    class MockPipe:
-        torch_dtype = torch.float32
-        device = "cpu"
-
-    loss = loss_fn._compute_action_loss(noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=1)
+    loss = arch._compute_action_loss(noise_pred, target, timestep_ids, _MockScheduler(), inputs={}, device="cpu")
     assert loss.shape == ()
 
 
-def test_flow_match_loss_per_token_timestep_flag_default_false():
-    """Default constructor keeps per-token sampling disabled."""
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
-
-    loss_fn = FlowMatchVideoActionLoss()
-    assert loss_fn.action_timestep_per_token is False
-
-    loss_fn = FlowMatchVideoActionLoss(action_timestep_per_token=True)
-    assert loss_fn.action_timestep_per_token is True
-
-
-def test_flow_match_loss_action_loss_per_token_timestep():
+def test_action_loss_per_token_timestep():
     """_compute_action_loss accepts (B, T) timestep_ids (per-token mode)."""
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
-
-    loss_fn = FlowMatchVideoActionLoss()
-
+    arch = _make_arch()
     B, T, action_dim = 2, 49, 14
     noise_pred = torch.randn(B, T, action_dim)
     target = torch.randn(B, T, action_dim)
     timestep_ids = torch.randint(0, 1000, (B, T))
 
-    class MockScheduler:
-        linear_timesteps_weights = torch.ones(1000)
-
-    class MockPipe:
-        torch_dtype = torch.float32
-        device = "cpu"
-
-    loss = loss_fn._compute_action_loss(noise_pred, target, timestep_ids, MockScheduler(), MockPipe(), B=B)
+    loss = arch._compute_action_loss(noise_pred, target, timestep_ids, _MockScheduler(), inputs={}, device="cpu")
     assert loss.shape == ()
     assert loss.item() > 0
 
 
-def test_flow_match_loss_action_loss_per_token_timestep_with_pad():
+def test_action_loss_per_token_timestep_with_pad():
     """Per-token timestep + action_is_pad should respect the mask."""
-    from openwam.train.loss.flow_match_loss import FlowMatchVideoActionLoss
-
-    loss_fn = FlowMatchVideoActionLoss()
-
+    arch = _make_arch()
     B, T, action_dim = 2, 10, 4
     noise_pred = torch.randn(B, T, action_dim)
     target = torch.randn(B, T, action_dim)
@@ -152,21 +93,7 @@ def test_flow_match_loss_action_loss_per_token_timestep_with_pad():
     action_is_pad[0, 7:] = True
     action_is_pad[1, 4:] = True
 
-    class MockScheduler:
-        linear_timesteps_weights = torch.ones(1000)
-
-    class MockPipe:
-        torch_dtype = torch.float32
-        device = "cpu"
-
-    loss = loss_fn._compute_action_loss(
-        noise_pred,
-        target,
-        timestep_ids,
-        MockScheduler(),
-        MockPipe(),
-        B=B,
-        action_is_pad=action_is_pad,
-    )
+    inputs = {"action_is_pad": action_is_pad}
+    loss = arch._compute_action_loss(noise_pred, target, timestep_ids, _MockScheduler(), inputs=inputs, device="cpu")
     assert loss.shape == ()
     assert loss.item() > 0
