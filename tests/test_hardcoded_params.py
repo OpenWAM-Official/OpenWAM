@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 import torch
 
-from openwam.model.action_backbone.action_dit import ActionDiT
-from openwam.model.action_backbone.moe_dit import MoEExpertDiT
+from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+from openwam.model.action_backbone.shared_moe import SharedMoEActionBackbone
 from openwam.model.architectures.dual_system import DualSystemCrossAttnArchitecture
 from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
@@ -61,23 +61,23 @@ def test_action_dit_requires_all_params():
 
 
 def test_moe_dit_requires_all_params():
-    """MoEExpertDiT should raise TypeError when required params are missing."""
+    """SharedMoEActionBackbone should raise TypeError when required params are missing."""
     with pytest.raises(TypeError):
-        MoEExpertDiT()
+        SharedMoEActionBackbone()
 
     with pytest.raises(TypeError):
-        MoEExpertDiT(action_dim=20)
+        SharedMoEActionBackbone(action_dim=20)
 
-    # Should succeed with all required params
-    moe = MoEExpertDiT(
+    # Should succeed with all required params (num_experts is derived from expert_layers)
+    moe = SharedMoEActionBackbone(
         action_dim=14,
         video_dim=128,
         expert_ffn_dim=512,
-        num_experts=3,
         expert_layers=(0, 1, 2),
     )
     assert moe.action_dim == 14
-    assert moe.video_dim == 128
+    assert moe._video_dim == 128
+    assert moe.num_experts == 3
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,6 @@ def test_moe_architecture_no_video_dim_raises():
         "variant": "moe",
         "action_dim": 20,
         "expert_layers": (0, 1, 2),
-        "num_experts": 3,
         "expert_ffn_dim": 512,
     }
     with pytest.raises(ValueError, match="video_dim must be specified"):

@@ -119,12 +119,13 @@ class _MockPipeline:
 
 
 class _MockVideoBackbone(VideoBackbone):
-    """Minimal VideoBackbone implementing the 17-method ABC for tests."""
+    """Minimal VideoBackbone implementing the ABC for tests."""
 
-    def __init__(self, dim=64, num_layers=2):
+    def __init__(self, dim=64, num_layers=2, num_heads=4):
         super().__init__()
         self._dim = dim
         self._num_layers = num_layers
+        self._num_heads = num_heads
         self._scheduler = _MockScheduler()
         self._dit = nn.Linear(dim, dim)
         self._vae = nn.Linear(4, 4)
@@ -145,6 +146,14 @@ class _MockVideoBackbone(VideoBackbone):
         return self._num_layers
 
     @property
+    def num_heads(self) -> int:
+        return self._num_heads
+
+    @property
+    def head_dim(self) -> int:
+        return self._dim // self._num_heads
+
+    @property
     def scheduler(self):
         return self._scheduler
 
@@ -159,13 +168,37 @@ class _MockVideoBackbone(VideoBackbone):
         f, h, w = (latents.shape[2], latents.shape[3], latents.shape[4]) if latents.ndim >= 5 else (1, 1, 1)
         num_tokens = f * h * w
         x = torch.randn(B, num_tokens, self._dim)
-        t_mod = torch.zeros(B, 6, self._dim)
+        # Per-token t_mod (B, T, 6, dim) mirrors Wan2.2-TI2V-5B's
+        # ``seperated_timestep=True + fuse_vae_embedding_in_latents=True`` mode,
+        # which is what production runs and what SharedBackbone's forward
+        # fail-fast enforces.
+        t_mod = torch.zeros(B, num_tokens, 6, self._dim)
         freq_dim = self._dim // 2
         freqs = torch.polar(torch.ones(num_tokens, 1, freq_dim), torch.zeros(num_tokens, 1, freq_dim))
         context = torch.randn(B, 4, self._dim)
         return BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, f=f, h=h, w=w)
 
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
+        return state
+
+    def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState):
+        """Tiny pre-attn split for split-attention path testing.
+
+        Returns x as q/k/v (no projection, no RoPE) so the MoT driver can
+        exercise concat/split shape handling end-to-end. ``post_state`` carries
+        the residual and a no-op modulation that ``post_attn_at_layer`` consumes.
+        """
+        residual = state.x
+        post_state = {"residual": residual}
+        return residual, residual, residual, post_state
+
+    def post_attn_at_layer(self, layer_id: int, state: BlockLoopState, attn_out, post_state: dict) -> BlockLoopState:
+        """Trivial post-attn: residual + attn_out so the driver round-trips.
+
+        No cross-attn, no FFN, no VACE residuals — those are the real
+        backbone's responsibility and aren't exercised by the trainer mock.
+        """
+        state.x = post_state["residual"] + attn_out
         return state
 
     def finalize(self, state: BlockLoopState):

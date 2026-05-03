@@ -1,7 +1,7 @@
 """Shared components for action model architectures.
 
-These building blocks are used identically across DualSystem (ActionDiT),
-MoE Expert (MoEExpertDiT), and SharedBackbone architectures.
+These building blocks are reused across DualSystem (``ActionDiT``) and
+SharedBackbone (``SharedVanillaActionBackbone`` / ``SharedMoEActionBackbone``).
 """
 
 import logging

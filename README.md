@@ -3,6 +3,11 @@
 ## TODO
 
 - [ ] **DeepSpeed ZeRO-3 support**
+  - [ ] Resume-from-checkpoint under ZeRO-3 — `OpenWAMTrainer.load_checkpoint`
+        currently raises when `zero_stage >= 3`. After `accelerator.prepare()`
+        every parameter is sharded across ranks, so loading a flat
+        safetensors needs `deepspeed.zero.GatheredParameters` (or a
+        pre-`prepare()` load hook). See `openwam/train/openwam_trainer.py`.
 - [ ] **Video-Backbone Architecture Re-Built**
 - [ ] **LeRobot Dataset Combination**
 - [ ] **RoboTwin2 Benchmark Support**

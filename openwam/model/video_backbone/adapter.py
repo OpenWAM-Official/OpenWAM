@@ -1,7 +1,7 @@
 """Backbone-agnostic interface for the WAM architecture/backbone split.
 
 The video DiT block loop is backbone-specific (Wan-specific patchify, RoPE,
-VACE, animate, TeaCache, SP, ...). The action injection logic is
+VACE, SP, ...). The action injection logic is
 architecture-specific (DualSystem cross/self attention, SharedBackbone
 vanilla/MoE). This module defines the contract between the two:
 
@@ -38,6 +38,17 @@ class BlockLoopState:
     ``prepare()`` and the first ``run_block()`` call (e.g. to append action
     tokens, extend RoPE freqs, extend per-token t_mod).
 
+    Inject / extract contract (SharedBackbone path):
+        ``inject_action_tokens`` extends ``x`` (sequence dim) and, in
+        per-token t_mod mode, also extends ``freqs`` and ``t_mod`` to match.
+        ``extract_action_tokens`` only undoes the ``x`` extension — ``freqs``
+        and ``t_mod`` keep the action-token tail. This is safe because the
+        block loop is over after extract and ``finalize`` only reads ``x`` /
+        ``t`` / spatial dims; nothing downstream depends on the post-extract
+        length of ``freqs`` / ``t_mod``. Architectures must therefore call
+        ``inject`` and ``extract`` in matched pairs and *not* re-use the
+        state for further block forwards after extract.
+
     Fields marked "backbone-internal" are managed by the backbone and should
     not be modified by architecture code.
     """
@@ -60,12 +71,11 @@ class BlockLoopState:
     reference_prefix_len: int = 0
     vace_hints: Optional[list] = None
     vace_scale: float = 1.0
-    tea_cache_update: bool = False
     sp_pad_shape: int = 0
     use_gradient_checkpointing: bool = False
     use_gradient_checkpointing_offload: bool = False
 
-    # --- Backbone-specific extras (Animate, VAP, TeaCache, etc.) ---
+    # --- Backbone-specific extras ---
     extras: dict = field(default_factory=dict)
 
 
@@ -131,6 +141,48 @@ class VideoBackbone(ABC, nn.Module):
         """
         ...
 
+    @property
+    @abstractmethod
+    def num_heads(self) -> int:
+        """Number of attention heads per DiT block. Used by joint-attention
+        validation to check structural compatibility with an action backbone."""
+        ...
+
+    @property
+    @abstractmethod
+    def head_dim(self) -> int:
+        """Per-head attention dimension. Used by joint-attention validation."""
+        ...
+
+    @property
+    def video_attention_mask_mode(self) -> str:
+        """Video self-attention mask mode used by joint MoT mask construction.
+
+        Default ``bidirectional`` (full v↔v coupling). Concrete backbones
+        override with ``per_frame_causal`` / ``first_frame_causal`` and
+        provide :meth:`build_video_to_video_mask` matching the chosen mode.
+        """
+        return "bidirectional"
+
+    def build_video_to_video_mask(
+        self,
+        video_seq_len: int,
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> Tensor:
+        """Build the v↔v block of the joint attention mask.
+
+        Default implementation honors :attr:`video_attention_mask_mode` set
+        to ``bidirectional`` only. Concrete backbones override to support
+        causal modes.
+        """
+        if self.video_attention_mask_mode != "bidirectional":
+            raise NotImplementedError(
+                f"{type(self).__name__} does not implement build_video_to_video_mask "
+                f"for mode '{self.video_attention_mask_mode}'."
+            )
+        return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
+
     # ================================================================
     # Construction (1)
     # ================================================================
@@ -156,17 +208,16 @@ class VideoBackbone(ABC, nn.Module):
 
     @abstractmethod
     def prepare(self, **pipeline_inputs) -> BlockLoopState:
-        """Pre-block-loop setup: patchify, freqs, t_mod, VACE, TeaCache, SP.
+        """Pre-block-loop setup: patchify, freqs, t_mod, VACE, SP.
 
         Returns a ``BlockLoopState`` that the architecture may modify before
-        calling ``run_block``.  When ``state.tea_cache_update`` is True the
-        architecture should skip the block loop and call ``finalize`` directly.
+        calling ``run_block``.
         """
         ...
 
     @abstractmethod
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
-        """Execute a single DiT block (+ VACE hint + Animate).
+        """Execute a single DiT block (+ VACE hint).
 
         Gradient checkpointing is handled internally — transparent to the
         architecture.  The architecture may inspect/modify ``state.x`` after
@@ -181,6 +232,45 @@ class VideoBackbone(ABC, nn.Module):
         Returns ``(B, C, T, H, W)`` video noise prediction.
         """
         ...
+
+    # ================================================================
+    # Joint self-attention path (2) — split a DiT block into pre/post halves
+    # ================================================================
+
+    def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState) -> Tuple[Tensor, Tensor, Tensor, dict]:
+        """Run norm1 + AdaLN modulate + Q/K/V proj + RMSNorm + RoPE — but **not**
+        the attention itself.
+
+        This is the "first half" of a DiT block. Used by joint-attention
+        drivers (e.g. ``MoTJointDriver``) that need to concatenate Q/K/V
+        across modalities and run a single mixed attention.
+
+        Returns:
+            ``(q, k, v, post_state)``. ``q/k/v`` are shaped ``[B, S, H*D]``.
+            ``post_state`` carries ``residual_x``, ``gate_msa``, ``shift_mlp``,
+            ``scale_mlp``, ``gate_mlp``, plus a reference to the block, so
+            ``post_attn_at_layer`` can finish the block without re-computing
+            the modulation.
+
+        Default implementation raises ``NotImplementedError``; concrete
+        backbones that participate in joint attention must override.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement pre_attn_at_layer; "
+            "joint self-attention is not supported on this backbone."
+        )
+
+    def post_attn_at_layer(
+        self, layer_id: int, state: BlockLoopState, attn_out: Tensor, post_state: dict
+    ) -> BlockLoopState:
+        """Continue from where ``pre_attn_at_layer`` left off:
+        ``block.gate(residual_x, gate_msa, block.self_attn.o(attn_out))`` →
+        cross-attn → FFN, then any backbone-specific post-block residuals
+        (VACE)."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement post_attn_at_layer; "
+            "joint self-attention is not supported on this backbone."
+        )
 
     # ================================================================
     # Action token injection — SharedBackbone path (2)

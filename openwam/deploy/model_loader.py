@@ -132,7 +132,7 @@ def load_from_checkpoint_dir(
     architecture.load_checkpoint(ckpt_path)
 
     # 5. Move to device and set eval mode — top-down: architecture → video_backbone → submodules.
-    _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")
+    _mp = OmegaConf.select(cfg, "accelerate.mixed_precision", default="bf16")
     _DTYPE_MAP = {"bf16": torch.bfloat16, "fp16": torch.float16, "no": torch.float32}
     model_dtype = _DTYPE_MAP.get(str(_mp).strip().lower(), torch.bfloat16)
     logger.info("Loading all models with dtype=%s (mixed_precision=%s)", model_dtype, _mp)

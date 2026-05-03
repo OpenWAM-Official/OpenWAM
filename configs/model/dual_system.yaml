@@ -1,21 +1,47 @@
 # Dual-System WAM Architecture
-# Separate ActionDiT with bridge attention to video DiT layers.
+# Separate ActionDiT paired with the video DiT. Two variants:
+#   - joint_cross_attn: video runs to completion → bridge features captured
+#     at configured layers → ActionDiT runs once with cross-attention to those
+#     features. The two streams interact only through the bridge.
+#   - joint_self_attn:  MoTJointDriver runs a single mixed self-attention at
+#     every transformer layer (FastWAM MoT pattern). Q/K/V from each modality
+#     are concatenated, attention is computed once, then split back. Requires
+#     identical num_layers / num_heads / head_dim across the two backbones.
 
 architecture:
   framework: dual_system
-  variant: joint_self_attn   # joint_self_attn or joint_cross_attn or idm
-  detach_bridge: false         # only applies to joint_cross_attn; if true, no gradients flow from ActionDiT to video DiT (i.e. a one-way bridge)
+  variant: joint_cross_attn   # joint_self_attn or joint_cross_attn or idm
+  detach_bridge: false         # joint_cross_attn only; if true, no gradients flow from ActionDiT to video DiT (one-way bridge). Ignored under joint_self_attn.
   action_dim: 20
-  # Two ways to choose which video DiT layers feed the ActionDiT bridge.
-  # len(bridge_layers) auto-determines ActionDiT num_layers either way.
+  # bridge_layers / bridge_interval are used by joint_cross_attn to choose
+  # which video DiT layers feed the bridge cross-attention. Under
+  # joint_self_attn the MoT driver runs at every layer regardless; these
+  # fields are accepted but only their length matters (it must equal the
+  # video backbone's num_layers — usually leave bridge_layers: null +
+  # bridge_interval: 1 to auto-fill).
   #   (a) Explicit list:  bridge_layers: [0, 1, ..., 29]
   #   (b) Interval mode:  set bridge_layers: null and use bridge_interval.
   #       - interval=1 → all inferred video DiT layers
   #       - interval=2 → every other inferred layer
-  #       The total layer count is inferred from the loaded video backbone;
-  #       users do not need to set it manually.
   bridge_layers: null
   bridge_interval: 1
+
+  # joint_self_attn (MoTJointDriver) options. Ignored when variant is
+  # joint_cross_attn.
+  mot_checkpoint_mixed_attn: true       # gradient-checkpoint the mixed attention itself; trades VRAM for one extra recompute per layer
+  # Joint mask layout (mirrors FastWAM-Joint):
+  #   bidirectional: pass attn_mask=None (full v↔a). Useful for ablations.
+  #   joint        : [Sv+Sa, Sv+Sa] bool mask with v↔v from
+  #                  ``video_attention_mask_mode``, a↔a True, a→v True,
+  #                  v→a False (video doesn't see action; required for
+  #                  optional video-KV prefill).
+  attention_mask_mode: joint
+  # video_attention_mask_mode controls the v↔v block of the joint mask:
+  #   bidirectional       : full v↔v
+  #   per_frame_causal    : token-level frame-causal block-diagonal
+  #   first_frame_causal  : first-frame tokens only see themselves; rest see all
+  # FastWAM-Joint uses ``first_frame_causal`` by default.
+  video_attention_mask_mode: first_frame_causal
 
 # Video backbone
 # Resolution: VACE only supports 480x832 or 720x1280; TI2V supports any height/width % 32 == 0.
@@ -27,14 +53,25 @@ video_backbone:
 # ActionDiT transformer parameters
 # num_layers is auto-derived from len(bridge_layers) — do not specify here.
 action_backbone:
-  # Aligned to Wan2.2-TI2V-5B video DiT (dim=3072, ffn_dim=14336, num_heads=24).
-  # Joint self-attention then operates in the full hidden dim of the video stream,
-  # and video_projs / video_back_projs degenerate to Identity (no info bottleneck).
-  # Cross-attn variant also benefits from the larger capacity.
-  # Memory: ActionDiT param count grows ~84M → ~1.5B; deepspeed_zero3 recommended.
-  dim: 3072
-  ffn_dim: 14336
+  # FastWAM-Joint heterogeneous-hidden layout: action residual stream is
+  # narrower than video (1024 vs 3072) but Q/K/V project to the shared
+  # ``num_heads * attn_head_dim`` attention space (24*128=3072), so the
+  # MoT driver (joint_self_attn) still runs a single mixed attention.
+  # joint_cross_attn accepts the same fields so the two variants can be
+  # compared apples-to-apples — only the inter-modality coupling differs.
+  #   - dim          : action residual hidden dim
+  #   - ffn_dim      : action expert FFN intermediate dim
+  #   - num_heads    : MUST match the video backbone's num_heads (24)
+  #                    under joint_self_attn; free under joint_cross_attn.
+  #   - attn_head_dim: MUST match the video backbone's head_dim (128)
+  #                    under joint_self_attn; free under joint_cross_attn.
+  #                    If omitted, falls back to ``dim // num_heads`` (will
+  #                    raise unless evenly divisible).
+  # Action expert param count at this setup: ~1.0B (vs ~5.0B video expert).
+  dim: 1024
+  ffn_dim: 4096
   num_heads: 24
+  attn_head_dim: 128
 
   # Proprioceptive state conditioning (TRAINING-ONLY in this PR — the
   # deployment path has not been wired up yet, see docs/proprioception.md).

@@ -1,32 +1,26 @@
 """Abstract base class for WAM (World-Action Model) architectures.
 
-Defines how the action prediction stream integrates with the video DiT backbone.
-The current refactor exposes two supported architecture families:
+Two supported architecture families:
 
 1. **Shared Backbone** (`framework=shared_backbone`)
-   Action tokens are integrated into the video DiT sequence.
-   Supported variants include:
-   - `vanilla`: the shared backbone processes both video and action tokens directly.
-   - `moe`: action tokens use expert FFN routing inside selected video DiT blocks.
+   Action tokens are concatenated to the video DiT sequence and ride
+   through the shared blocks. Variants: `vanilla` (no extra capacity) /
+   `moe` (expert FFN at selected layers).
 
 2. **Dual-System** (`framework=dual_system`)
-   A separate lightweight ActionDiT receives bridge features from the video DiT.
-   Supported variants include:
-   - `joint_cross_attn`
-   - `joint_self_attn`
+   A separate ActionDiT consumes features from the video DiT. Variants:
+   `joint_cross_attn` (bridge cross-attention after a full video forward)
+   / `joint_self_attn` (MMDiT-style mixed attention at every layer, driven
+   by :class:`MoTJointDriver`).
 
-The architecture composes a ``video_backbone`` and an ``action_backbone``; all
-action-side state and computation lives inside the action_backbone, and the
-architecture's ``forward()`` orchestrates the two via the ActionBackbone
-five-method block-loop interface (prepare_state / before_loop / run_block /
-after_loop / extract_prediction).
+Each architecture composes a ``video_backbone`` and an ``action_backbone``
+and owns its own ``forward()``.
 """
 
 import logging
-from abc import ABC
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import TYPE_CHECKING, Optional, Tuple
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import numpy as np
 import torch
@@ -39,50 +33,26 @@ if TYPE_CHECKING:
     from openwam.model.video_backbone.adapter import VideoBackbone
 
 
-class ExecutionPlan(str, Enum):
-    """Canonical execution modes for WAM architectures during video DiT integration."""
-
-    BRIDGE_COLLECTION = "bridge_collection"
-    INTERLEAVED_WHOLE_BLOCK = "interleaved_whole_block"
-    INTERLEAVED_SPLIT_FFN = "interleaved_split_ffn"
-    INTERLEAVED_SPLIT_SELF_ATTENTION = "interleaved_split_self_attention"
-
-
-@dataclass
-class RuntimeState:
-    """Typed runtime state for architecture-specific execution.
-
-    New code should prefer this typed field for all architecture execution paths.
-    """
-
-    framework: str
-    variant: str
-    execution_plan: ExecutionPlan
-    payload: object
-    options: dict = field(default_factory=dict)
-
-
 @dataclass
 class ActionState:
-    """Mutable state container threaded through the video DiT block loop.
+    """Mutable state container used by the joint self-attention path.
 
-    Each WAM architecture populates this differently:
-    - DualSystem: holds ActionDiTState (x_action, bridge features, etc.)
-    - MoE: holds routing masks and expert outputs
-    - SharedBackbone: holds indices into the video token sequence
+    Only ``DualSystemSelfAttnArchitecture`` needs this — its action stream is
+    threaded through ``MoTJointDriver``, which mutates the payload across
+    layers. SharedBackbone and DualSystem cross-attn don't go through this
+    container.
 
-    The ``runtime_state`` field is the typed contract used by the refactor.
+    Fields:
+        action_latents: (B, T_action, action_dim) noisy actions (input to forward).
+        timestep: action diffusion timestep (raw shape preserved for the action
+            backbone's internal use).
+        payload: backbone-specific per-forward state (typically
+            ``ActionDiTState``).
     """
 
-    action_latents: Optional[Tensor] = None  # (B, T_action, dim) or None
-    action_prediction: Optional[Tensor] = None  # filled after extract_action_prediction
-    timestep: Optional[Tensor] = None  # diffusion timestep for action stream
-    runtime_state: Optional[RuntimeState] = None
-    bridge_features: list[Tensor] = field(default_factory=list)
-    bridge_block_counter: int = 0
-    proprio_state: Optional[Tensor] = None
-    num_action_tokens: Optional[int] = None
-    final_hidden: Optional[Tensor] = None
+    action_latents: Optional[Tensor] = None
+    timestep: Optional[Tensor] = None
+    payload: Optional[Any] = None
 
 
 class BaseWAMArchitecture(ABC, nn.Module):
@@ -158,7 +128,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         Subclasses with additional backbones (e.g. TriSystem with a VLM
         backbone) should override this to include them. The returned dict
-        is used by ``init_training_schedulers``, ``restore_deepspeed_submodules``,
+        is used by ``init_training_schedulers``, ``set_dtype_device``,
         ``move_frozen_to_device``, and ``get_component_specs`` to iterate
         over all backbones generically.
         """
@@ -185,12 +155,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
     @property
     def bridge_layers(self) -> tuple:
         return self.action_backbone.bridge_layers if self.action_backbone is not None else ()
-
-    @property
-    def execution_plan(self) -> ExecutionPlan:
-        if self.action_backbone is None:
-            return ExecutionPlan.BRIDGE_COLLECTION
-        return self.action_backbone.execution_plan
 
     @property
     def trainable_action_module(self) -> Optional[nn.Module]:
@@ -224,14 +188,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         return self._dtype
 
     def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
-        """Set dtype/device for the entire architecture (video backbone + action module)."""
+        """Dispatch to each backbone — they own their own dtype/device handling."""
         self._dtype = dtype
         self._device = device
-        if self.video_backbone is not None:
-            self.video_backbone.set_dtype_device(dtype, device)
-        action_module = self.trainable_action_module
-        if action_module is not None and action_module is not self:
-            action_module.to(dtype=dtype, device=device)
+        for bb in self.backbones.values():
+            bb.set_dtype_device(dtype, device)
 
     # --- Checkpoint save / load ---
 
@@ -241,12 +202,18 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         save_file(self.state_dict(), path)
 
-    def load_checkpoint(self, path: str) -> None:
-        """Load full architecture state from a safetensors checkpoint."""
+    def load_checkpoint(self, path: str, strict: bool = True) -> None:
+        """Load full architecture state from a safetensors checkpoint.
+
+        ``strict`` defaults to ``True`` so a renamed state-dict (e.g. v1.0 → v1.1
+        where ``moe_expert_dit.*`` became ``shared_moe.*`` and ``action_dit.*``
+        moved into ``dualsystem_dit.*``) raises explicitly rather than dropping
+        weights silently. Pass ``strict=False`` only for deliberate partial loads.
+        """
         from safetensors.torch import load_file
 
         sd = load_file(path)
-        self.load_state_dict(sd, strict=False)
+        self.load_state_dict(sd, strict=strict)
 
     # --- Training: module management ---
 
@@ -274,12 +241,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
         return frozen
 
     def get_trainable_modules(self, freeze_list: list[str] = ()) -> dict[str, nn.Module]:
-        """Return top-level trainable sub-modules for DeepSpeed wrapping.
+        """Return top-level trainable sub-modules.
 
         Walks ``self.named_children()`` and returns modules that have at
         least one parameter with ``requires_grad=True``, excluding those
-        in *freeze_list*. The returned dict is suitable for
-        ``nn.ModuleDict`` / ``TrainableModuleWrapper``.
+        in *freeze_list*. Used by ``optimizer_groups.build_trainable_parameters``
+        to source the param groups for the optimizer.
         """
         result = {}
         freeze_set = set(freeze_list)
@@ -289,22 +256,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if any(p.requires_grad for p in mod.parameters()):
                 result[name] = mod
         return result
-
-    def restore_deepspeed_submodules(self, unwrapped_modules: dict) -> None:
-        """Replace sub-modules with DeepSpeed-managed versions after unwrap.
-
-        Checks top-level children first (e.g. ``action_backbone``), then
-        iterates over all backbones for nested sub-modules (e.g.
-        ``video_backbone.dit``, ``vlm_backbone.encoder``).
-        """
-        for name, mod in unwrapped_modules.items():
-            if hasattr(self, name):
-                setattr(self, name, mod)
-            else:
-                for bb in self.backbones.values():
-                    if hasattr(bb, "set_submodule"):
-                        bb.set_submodule(name, mod)
-                        break
 
     def move_frozen_to_device(self, device: torch.device, names: tuple[str, ...] = ("text_encoder", "vae")) -> None:
         """Move named frozen modules to device.
@@ -769,9 +720,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             generator=torch.Generator(device=device).manual_seed(seed),
         )
 
-        use_interleaved = self.execution_plan != ExecutionPlan.BRIDGE_COLLECTION
-        bridge_layers_set = set(self.bridge_layers)
-        cached_bridge = None
         num_train_ts = float(self.action_scheduler.num_train_timesteps)
 
         t_loop = time.time()
@@ -791,40 +739,36 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if not video_stepping and not action_stepping:
                 continue
 
-            bridge_features = None
-            noise_pred = None
-            action_noise_pred = None
-
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
             a_timestep = torch.tensor([t_a], dtype=dtype, device=device) if action_stepping else None
 
-            if use_interleaved and action_stepping:
+            if dit_cache is not None and video_stepping and not dit_cache.should_recompute(sigma_v):
+                # Reuse cached video noise prediction; still call forward() with
+                # noisy_actions=None to skip the action stream cleanly. This is
+                # only valid when video_stepping=True (the only path that
+                # populates the cache).
+                noise_pred = dit_cache.get_cached()
+                action_noise_pred = None
+                if action_stepping:
+                    # Re-run action with a fresh forward pass; without cached
+                    # bridges we just rerun video too. Acceptable at this scale.
+                    torch.compiler.cudagraph_mark_step_begin()
+                    noise_pred, action_noise_pred = self.forward(
+                        action_latents,
+                        a_timestep,
+                        **inputs_shared,
+                        timestep=v_timestep,
+                    )
+            else:
                 torch.compiler.cudagraph_mark_step_begin()
                 noise_pred, action_noise_pred = self.forward(
-                    action_latents,
+                    action_latents if action_stepping else None,
                     a_timestep,
                     **inputs_shared,
                     timestep=v_timestep,
                 )
-            elif video_stepping or (action_stepping and cached_bridge is None):
-                if dit_cache is not None and video_stepping and not dit_cache.should_recompute(sigma_v):
-                    noise_pred = dit_cache.get_cached()
-                    bridge_features = cached_bridge
-                else:
-                    bridge_features = []
-                    state = vb.prepare(**inputs_shared, timestep=v_timestep)
-                    if not state.tea_cache_update:
-                        for block_id in range(vb.num_layers):
-                            state = vb.run_block(block_id, state)
-                            if block_id in bridge_layers_set:
-                                bridge_features.append(state.x.detach())
-                    torch.compiler.cudagraph_mark_step_begin()
-                    noise_pred = vb.finalize(state)
-                    if dit_cache is not None and video_stepping:
-                        dit_cache.update(noise_pred, sigma_v)
-                cached_bridge = None if video_stepping else bridge_features
-            else:
-                bridge_features = cached_bridge
+                if dit_cache is not None and video_stepping:
+                    dit_cache.update(noise_pred, sigma_v)
 
             if video_stepping:
                 new_latents = inputs_shared["latents"] + noise_pred * (sigma_v_next - sigma_v)
@@ -833,16 +777,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     new_latents[:, :, 0:1] = inputs_shared["first_frame_latents"]
                 inputs_shared["latents"] = new_latents
 
-            if action_stepping:
-                if action_noise_pred is None:
-                    # BRIDGE_COLLECTION cached-bridge path: build action state,
-                    # populate its bridge_features from the cached/just-collected
-                    # video features (in sorted bridge-layer order), then have
-                    # the action_backbone produce the prediction.
-                    astate = self.action_backbone.prepare_state(action_latents, a_timestep)
-                    if bridge_features is not None:
-                        astate.bridge_features = list(bridge_features)
-                    action_noise_pred = self.action_backbone.extract_prediction(astate)
+            if action_stepping and action_noise_pred is not None:
                 action_latents = self.action_scheduler.flow_step(
                     action_noise_pred, sigma_a, sigma_a_next, action_latents
                 )
@@ -892,6 +827,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if hasattr(bb, "apply_compile"):
                 bb.apply_compile(compile_cfg)
 
+    @abstractmethod
     def forward(
         self,
         noisy_actions: Optional[Tensor],
@@ -902,58 +838,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
         use_gradient_checkpointing_offload: bool = False,
         **pipeline_inputs,
     ) -> Tuple[Tensor, Optional[Tensor]]:
-        """Unified joint video + action forward.
+        """Run the joint video + action forward.
 
-        Drives the action_backbone's five-method block-loop interface:
-        ``prepare_state → before_loop → run_block (per video DiT block) →
-        after_loop → extract_prediction``. All four supported execution
-        plans (BRIDGE_COLLECTION, INTERLEAVED_WHOLE_BLOCK,
-        INTERLEAVED_SPLIT_FFN, INTERLEAVED_SPLIT_SELF_ATTENTION) share this
-        single forward; variants differ only in their ActionBackbone
-        subclass implementations.
-
-        When ``noisy_actions`` is None the action stream is skipped
-        entirely (used by CFG nega passes and video-only generation).
-
-        Returns:
-            ``(video_noise_pred, action_noise_pred)``. The action term is
-            None when ``noisy_actions`` is None or no action_backbone is set.
+        Each concrete architecture implements its own forward end-to-end —
+        runs the video DiT block loop, captures or interleaves with the
+        action stream as appropriate, and returns
+        ``(video_noise_pred, action_noise_pred)``. When ``noisy_actions`` is
+        None (CFG nega pass / video-only generation) the action term is
+        None.
         """
-        vb = self.video_backbone
-        if vb is None:
-            raise RuntimeError(
-                "video_backbone is None — pass pipe= to build_architecture or "
-                "architecture.__init__ to enable forward()."
-            )
-
-        vstate = vb.prepare(
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            **pipeline_inputs,
-        )
-
-        ab = self.action_backbone
-        if noisy_actions is None or ab is None:
-            if not vstate.tea_cache_update:
-                for block_id in range(vb.num_layers):
-                    vstate = vb.run_block(block_id, vstate)
-            return vb.finalize(vstate), None
-
-        astate = ab.prepare_state(
-            noisy_actions,
-            action_timestep,
-            proprio_state=proprio_state,
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        )
-        vstate, astate = ab.before_loop(vb, vstate, astate)
-
-        if not vstate.tea_cache_update:
-            for block_id in range(vb.num_layers):
-                vstate, astate = ab.run_block(block_id, vb, vstate, astate)
-
-        vstate, astate = ab.after_loop(vb, vstate, astate)
-
-        video_pred = vb.finalize(vstate)
-        action_pred = ab.extract_prediction(astate)
-        return video_pred, action_pred
+        ...

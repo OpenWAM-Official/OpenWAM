@@ -57,9 +57,14 @@ def _build_arch(registry_name: str, cfg: dict, *, num_layers: int = WAN_NUM_LAYE
     cfg.setdefault("video_dim", WAN_VIDEO_DIM)
     cfg.setdefault("num_dit_layers", num_layers)
     arch = build_architecture(registry_name, cfg)
-    arch.video_backbone = _MockVideoBackbone(dim=WAN_VIDEO_DIM, num_layers=num_layers)
+    num_heads = int(cfg.get("num_heads", 4))
+    arch.video_backbone = _MockVideoBackbone(dim=WAN_VIDEO_DIM, num_layers=num_layers, num_heads=num_heads)
     arch._device = torch.device("cpu")
     arch._dtype = torch.float32
+    # joint_self_attn builds the driver lazily when the video backbone was None
+    # at __init__ time — wire it now that the mock backbone is attached.
+    if hasattr(arch, "build_mot_driver"):
+        arch.build_mot_driver()
     return arch
 
 
@@ -161,61 +166,107 @@ def test_dual_system_cross_attn_explicit_bridge_layers():
     _run_compute_loss(arch)
 
 
+def test_dual_system_cross_attn_heterogeneous_dim():
+    """cross_attn must accept ``dim != num_heads * attn_head_dim`` (FastWAM-Joint layout).
+
+    Mirrors joint_self_attn's heterogeneous-hidden support so a single
+    ``dual_system.yaml`` action_backbone block (``dim=1024, num_heads=24,
+    attn_head_dim=128``) drives both variants identically — required for
+    apples-to-apples cross_attn vs self_attn comparisons.
+    """
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
+        "action_dim": ACTION_DIM,
+        "bridge_layers": None,
+        "bridge_interval": 1,
+        # Heterogeneous: dim (1024) is NOT divisible by num_heads (24);
+        # the explicit attn_head_dim makes the attention space 24*128=3072
+        # while the residual stream stays at 1024.
+        "dim": 1024,
+        "ffn_dim": 4096,
+        "num_heads": 24,
+        "attn_head_dim": 128,
+    }
+    arch = _build_arch("dual_system_cross_attn", cfg, num_layers=WAN_NUM_LAYERS)
+
+    ab = arch.action_backbone
+    assert ab.dim == 1024, "residual hidden dim should match cfg.dim"
+    assert ab.num_heads == 24
+    assert ab.head_dim == 128, "attn_head_dim should propagate from cfg, not be inferred from dim/num_heads"
+    # Q/K/V project from residual width 1024 into shared attention space 24*128=3072.
+    block0 = ab.blocks[0]
+    assert block0.self_attn.q.in_features == 1024
+    assert block0.self_attn.q.out_features == 24 * 128
+    assert block0.self_attn.o.in_features == 24 * 128
+    assert block0.self_attn.o.out_features == 1024
+
+    n_params = _count_params(arch.action_backbone)
+    print(f"\n[dual_system_cross_attn / heterogeneous dim=1024,h=24,hd=128] action_backbone params: {n_params:,}")
+
+    out = _run_compute_loss(arch)
+    assert torch.isfinite(out["loss"])
+    assert torch.isfinite(out["loss_action"])
+    assert torch.isfinite(out["loss_video"])
+
+
 # ---------------------------------------------------------------------------
 # 2. dual_system_self_attn
 # ---------------------------------------------------------------------------
 
 
 def test_dual_system_self_attn_bridge_interval_1():
-    """joint_self_attn with bridge_interval=1: 30 JointActionDiTBlocks."""
+    """joint_self_attn requires bridge_interval=1 (one MoT layer per video DiT block)."""
+    # MoT driver runs a single mixed attention at every layer; len(bridge_layers)
+    # must equal the video backbone's num_layers, and the action hidden dim must
+    # equal the video dim (no inter-modality projection inside attention).
     cfg = {
         "framework": "dual_system",
         "variant": "joint_self_attn",
         "action_dim": ACTION_DIM,
         "bridge_layers": None,
         "bridge_interval": 1,
-        "dim": 128,
-        "ffn_dim": 512,
+        "dim": WAN_VIDEO_DIM,
+        "ffn_dim": 4 * WAN_VIDEO_DIM,
         "num_heads": 4,
     }
     arch = _build_arch("dual_system_self_attn", cfg)
 
     bl = arch.action_backbone.bridge_layers
-    assert len(bl) == WAN_NUM_LAYERS, f"expected {WAN_NUM_LAYERS} joint blocks, got {len(bl)}"
+    assert len(bl) == WAN_NUM_LAYERS, f"expected {WAN_NUM_LAYERS} MoT layers, got {len(bl)}"
     assert bl == tuple(range(WAN_NUM_LAYERS))
-    # joint_self_attn allocates one JointActionDiTBlock per bridge layer.
     assert arch.action_backbone.num_layers == WAN_NUM_LAYERS
-    # video_projs / video_back_projs: one per bridge layer.
-    assert len(arch.action_backbone.video_projs) == WAN_NUM_LAYERS
-    assert len(arch.action_backbone.video_back_projs) == WAN_NUM_LAYERS
+    # The new MoT path no longer keeps video_projs / video_back_projs — Q/K/V
+    # are concatenated in the per-head space and each backbone owns its own
+    # projections.
+    assert not hasattr(arch.action_backbone, "video_projs")
+    assert not hasattr(arch.action_backbone, "video_back_projs")
+    # Driver should be wired up.
+    assert arch._mot_driver is not None
+    assert arch._mot_driver.num_layers == WAN_NUM_LAYERS
 
     n_params = _count_params(arch.action_backbone)
     print(f"\n[dual_system_self_attn / interval=1] action_backbone params: {n_params:,}")
     _run_compute_loss(arch)
 
 
-def test_dual_system_self_attn_bridge_interval_3():
-    """interval=3 → ceil(30/3)=10 joint blocks."""
+def test_dual_system_self_attn_rejects_interval_gt_1():
+    """joint_self_attn rejects bridge_interval>1 — every video layer must have a MoT step."""
     cfg = {
         "framework": "dual_system",
         "variant": "joint_self_attn",
         "action_dim": ACTION_DIM,
         "bridge_layers": None,
         "bridge_interval": 3,
-        "dim": 128,
-        "ffn_dim": 512,
+        "dim": WAN_VIDEO_DIM,
+        "ffn_dim": 4 * WAN_VIDEO_DIM,
         "num_heads": 4,
     }
-    arch = _build_arch("dual_system_self_attn", cfg)
-
-    expected = tuple(range(0, WAN_NUM_LAYERS, 3))
-    assert arch.action_backbone.bridge_layers == expected
-    assert len(expected) == 10
-    assert arch.action_backbone.num_layers == 10
-
-    n_params = _count_params(arch.action_backbone)
-    print(f"\n[dual_system_self_attn / interval=3] action_backbone params: {n_params:,}")
-    _run_compute_loss(arch)
+    # Architecture constructs an ActionDiT with 10 layers, then MoTJointDriver
+    # validates layer-count parity and raises.
+    with pytest.raises(ValueError, match="num_layers"):
+        _build_arch("dual_system_self_attn", cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +285,6 @@ def test_shared_backbone_vanilla_loads_and_runs():
     arch = _build_arch("shared_backbone_vanilla", cfg)
 
     assert arch.action_backbone.bridge_layers == ()
-    from openwam.model.base import ExecutionPlan
-
-    assert arch.action_backbone.execution_plan == ExecutionPlan.INTERLEAVED_WHOLE_BLOCK
 
     n_params = _count_params(arch.action_backbone)
     print(f"\n[shared_backbone_vanilla] action_backbone params: {n_params:,}")
@@ -325,12 +373,12 @@ def test_shared_backbone_moe_explicit_expert_layers():
                 "variant": "joint_self_attn",
                 "action_dim": ACTION_DIM,
                 "bridge_layers": None,
-                "bridge_interval": 2,
-                "dim": 128,
-                "ffn_dim": 512,
+                "bridge_interval": 1,
+                "dim": WAN_VIDEO_DIM,
+                "ffn_dim": 4 * WAN_VIDEO_DIM,
                 "num_heads": 4,
             },
-            15,
+            WAN_NUM_LAYERS,
         ),
         (
             "shared_backbone_vanilla",

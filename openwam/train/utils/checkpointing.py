@@ -98,7 +98,7 @@ def save_trainable_checkpoint(
 
     Args:
         path: Output file path (``.safetensors`` or ``.pt``).
-        action_backbone: Action backbone (ActionDiT / MoEExpertDiT / etc.).
+        action_backbone: Action backbone (``ActionDiT`` / ``SharedMoEActionBackbone`` / ``SharedVanillaActionBackbone``).
         pipe: WanVideoPipeline instance.
         lambda_action: Action loss weight (unused, kept for API compat).
         mixed_precision: ``"bf16"`` / ``"fp16"`` / ``"no"`` — target dtype for

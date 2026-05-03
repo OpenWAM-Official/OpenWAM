@@ -104,14 +104,14 @@ def test_import_training_init():
 
 
 def test_import_action_dit():
-    from openwam.model.action_backbone.action_dit import (  # noqa: F401
+    from openwam.model.action_backbone.dualsystem_dit import (  # noqa: F401
         ActionDiT,
         ActionDiTState,
     )
 
 
-def test_import_moe_dit():
-    from openwam.model.action_backbone.moe_dit import MoEExpertDiT, MoEExpertState  # noqa: F401
+def test_import_moe_action_backbone():
+    from openwam.model.action_backbone.shared_moe import ExpertFFNBlock, SharedMoEActionBackbone  # noqa: F401
 
 
 def test_import_action_scheduler():
@@ -156,8 +156,10 @@ def test_import_architecture_registry():
             "variant": "joint_self_attn",
             "bridge_layers": (0, 1),
             "action_dim": 7,
-            "dim": 64,
-            "ffn_dim": 128,
+            # joint_self_attn requires action dim == video_dim (the MoT driver
+            # runs a single mixed attention with no inter-modality projection).
+            "dim": 128,
+            "ffn_dim": 256,
             "num_heads": 4,
             "video_dim": 128,
         },

@@ -14,8 +14,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from openwam.model.base import ExecutionPlan
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
@@ -42,17 +40,33 @@ def _tiny_pipe(dtype=torch.float32):
 
 
 # ---------------------------------------------------------------------------
-# 1. mixed_precision in train.yaml
+# 1. mixed_precision in accelerate yaml (single source of truth)
 # ---------------------------------------------------------------------------
 
 
-class TestTrainYamlMixedPrecision:
-    def test_field_exists(self):
+class TestAccelerateYamlMixedPrecision:
+    """``cfg.accelerate.mixed_precision`` is the sole source of truth.
+
+    ``cfg.training.mixed_precision`` was removed; both training and deploy
+    must read from the accelerate yaml that ``configs/train.yaml`` composes
+    from (default: ``accelerate/deepspeed_zero2.yaml``).
+    """
+
+    def test_training_field_removed(self):
         from omegaconf import OmegaConf
 
         cfg = OmegaConf.load(PROJECT_ROOT / "configs" / "train.yaml")
-        mp = OmegaConf.select(cfg, "training.mixed_precision")
-        assert mp is not None, "training.mixed_precision missing from train.yaml"
+        assert OmegaConf.select(cfg, "training.mixed_precision") is None, (
+            "training.mixed_precision should be removed; accelerate.mixed_precision is now the only source"
+        )
+
+    @pytest.mark.parametrize("stage", ["deepspeed_zero1", "deepspeed_zero2", "deepspeed_zero3"])
+    def test_accelerate_field_exists(self, stage):
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.load(PROJECT_ROOT / "configs" / "accelerate" / f"{stage}.yaml")
+        mp = OmegaConf.select(cfg, "mixed_precision")
+        assert mp is not None, f"mixed_precision missing from {stage}.yaml"
         assert mp == "bf16", f"Expected 'bf16', got {mp!r}"
 
 
@@ -381,7 +395,6 @@ class TestJointEngineCompileFlags:
 
         arch = MagicMock()
         arch.action_backbone = _tiny_module()
-        arch.execution_plan = ExecutionPlan.BRIDGE_COLLECTION
         arch.bridge_layers = []
         arch.video_backbone = vb
 
@@ -512,7 +525,6 @@ class TestJointEngineCompileFlags:
 
         arch = MagicMock()
         arch.action_backbone = _tiny_module()
-        arch.execution_plan = ExecutionPlan.BRIDGE_COLLECTION
         arch.bridge_layers = []
         arch.video_backbone = vb
 
@@ -542,11 +554,11 @@ class TestCompileForward:
         B, T_action, action_dim = 1, 5, 7
         noisy = torch.randn(B, T_action, action_dim)
         timestep = torch.tensor([0.5])
-        # ActionDiT.forward needs video_features (one per bridge layer)
-        video_features = [torch.randn(B, 10, 64) for _ in arch.bridge_layers]
+        # ActionDiT.forward needs bridges as a {block_id: feat} dict.
+        bridges = {bid: torch.randn(B, 10, 64) for bid in arch.bridge_layers}
 
         with torch.no_grad():
-            pred_before = arch.action_backbone(noisy, video_features, timestep)
+            pred_before = arch.action_backbone(noisy, bridges, timestep)
 
         from omegaconf import OmegaConf
 
@@ -554,7 +566,7 @@ class TestCompileForward:
         arch.apply_compile_optimizations(cfg)
 
         with torch.no_grad():
-            pred_after = arch.action_backbone(noisy, video_features, timestep)
+            pred_after = arch.action_backbone(noisy, bridges, timestep)
 
         assert pred_after.shape == pred_before.shape == (B, T_action, action_dim)
 
@@ -686,18 +698,18 @@ class TestModelLoaderDtype:
         dtype = _DTYPE_MAP.get(str(_mp).strip().lower(), torch.bfloat16)
         assert dtype == torch.bfloat16
 
-    def test_dtype_read_from_training_cfg(self):
+    def test_dtype_read_from_accelerate_cfg(self):
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.create({"training": {"mixed_precision": "fp16"}})
-        _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")
+        cfg = OmegaConf.create({"accelerate": {"mixed_precision": "fp16"}})
+        _mp = OmegaConf.select(cfg, "accelerate.mixed_precision", default="bf16")
         assert _mp == "fp16"
 
     def test_dtype_defaults_to_bf16_when_missing(self):
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.create({})  # no training.mixed_precision
-        _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")
+        cfg = OmegaConf.create({})  # no accelerate.mixed_precision
+        _mp = OmegaConf.select(cfg, "accelerate.mixed_precision", default="bf16")
         assert _mp == "bf16"
 
 

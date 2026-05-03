@@ -6,7 +6,7 @@ original monolithic forward function.
 
 Requires GPU. Mark with @pytest.mark.gpu.
 
-Tests pure DiT forward only (no VACE, no VAP, no Animate, no TeaCache, no SP).
+Tests pure DiT forward only (no VACE, no SP).
 These optional modules are additive — if the core DiT path is bit-exact, the
 optional paths will be too since run_block faithfully reproduces the same logic.
 """
@@ -22,8 +22,11 @@ from safetensors.torch import load_file
 from openwam.model.video_backbone.wan.pipeline import model_fn_wan_video
 from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 
-WAN21_VACE_1_3B = "/path/to/Wan2.1-VACE-1.3B"
-WAN22_TI2V_5B = "/path/to/Wan2.2-TI2V-5B"
+# Override via env vars on machines that mount the checkpoints elsewhere; the
+# defaults match the shared dev box but skipif() makes a missing path a skip,
+# not a hard failure.
+WAN21_VACE_1_3B = os.environ.get("WAN21_VACE_1_3B", "/path/to/Wan2.1-VACE-1.3B")
+WAN22_TI2V_5B = os.environ.get("WAN22_TI2V_5B", "/path/to/Wan2.2-TI2V-5B")
 
 
 def _load_dit_only(model_dir: str, device: str = "cuda:0"):
@@ -87,9 +90,8 @@ def _run_decomposed(pipe, inputs):
     backbone = WanVideoBackbone(pipe)
     with torch.no_grad():
         state = backbone.prepare(dit=pipe.dit, **inputs)
-        if not state.tea_cache_update:
-            for block_id in range(backbone.num_layers):
-                state = backbone.run_block(block_id, state)
+        for block_id in range(backbone.num_layers):
+            state = backbone.run_block(block_id, state)
         return backbone.finalize(state)
 
 

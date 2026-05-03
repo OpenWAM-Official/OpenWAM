@@ -18,17 +18,37 @@ def _is_no_wd(name: str) -> bool:
 
 
 def _action_named_parameters(model):
-    action_backbone = getattr(model, "action_backbone", None)
+    action_backbone = model.architecture.action_backbone
     if action_backbone is None:
         return []
     return [(name, param) for name, param in action_backbone.named_parameters() if param.requires_grad]
 
 
 def _pipe_named_parameters(model):
-    pipe = getattr(model, "pipe", None)
-    if pipe is None:
-        return []
-    return [(name, param) for name, param in pipe.named_parameters() if param.requires_grad]
+    """Yield (name, param) pairs for all trainable non-action top-level modules.
+
+    Source of truth: ``BaseWAMArchitecture.get_trainable_modules()`` — walks
+    ``named_children()`` and returns top-level modules with at least one
+    ``requires_grad=True`` param. We exclude ``action_backbone`` here because
+    ``_action_named_parameters`` handles it independently (its own LR group +
+    lambda_action guard).
+
+    Module name is prefixed onto each param name so the LoRA-by-name partition
+    (``"lora" in name.lower()``) and the ``_is_no_wd`` suffix check both keep
+    working, and any debug log of the param list is unambiguous.
+    """
+    arch = model.architecture
+    pairs = []
+    # freeze_list=() because Item B's freeze_modules has already toggled
+    # requires_grad on nested submodules (e.g. video_backbone._pipe.text_encoder).
+    # We only need the per-param requires_grad filter below.
+    for mod_name, mod in arch.get_trainable_modules(freeze_list=()).items():
+        if mod_name == "action_backbone":
+            continue
+        for name, param in mod.named_parameters():
+            if param.requires_grad:
+                pairs.append((f"{mod_name}.{name}", param))
+    return pairs
 
 
 def build_trainable_parameters(
@@ -44,8 +64,8 @@ def build_trainable_parameters(
     any other suffix in ``NO_WD_PARAM_SUFFIXES``) into a dedicated
     ``weight_decay=0`` group, regardless of per-module LR overrides.
     """
-    if getattr(model, "lambda_action", 0) <= 0 and hasattr(model, "action_backbone"):
-        model.action_backbone.requires_grad_(False)
+    if getattr(model, "lambda_action", 0) <= 0:
+        model.architecture.action_backbone.requires_grad_(False)
 
     action_named = _action_named_parameters(model) if getattr(model, "lambda_action", 0) > 0 else []
     pipe_named = _pipe_named_parameters(model)

@@ -14,6 +14,7 @@ Supports two launch modes:
 Both modes use HuggingFace Accelerate internally for DeepSpeed integration.
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,8 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger(__name__)
 
 
 def _build_accelerator(cfg: DictConfig):
@@ -41,6 +44,8 @@ def _build_accelerator(cfg: DictConfig):
 
     t = cfg.training
     grad_accum = int(t.gradient_accumulation_steps)
+    mixed_precision = str(cfg.accelerate.mixed_precision)
+    logger.info("mixed_precision = %s (from cfg.accelerate.mixed_precision)", mixed_precision)
 
     # Detect if we were launched by accelerate (it sets ACCELERATE_MIXED_PRECISION etc.)
     launched_by_accelerate = os.environ.get("ACCELERATE_MIXED_PRECISION") is not None
@@ -66,7 +71,7 @@ def _build_accelerator(cfg: DictConfig):
     return accelerate.Accelerator(
         gradient_accumulation_steps=grad_accum,
         deepspeed_plugin=plugin,
-        mixed_precision=str(cfg.accelerate.mixed_precision),
+        mixed_precision=mixed_precision,
     )
 
 

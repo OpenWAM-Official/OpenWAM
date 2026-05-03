@@ -1,7 +1,7 @@
 """Wan-specific implementation of :class:`VideoBackbone`.
 
 Lives outside ``wan/`` to keep the ``wan/`` package focused on Wan-internal
-implementation (DiT, VACE, VAP, Animate, TeaCache, SP, etc.). This module
+implementation (DiT, VACE, SP, etc.). This module
 sits at the boundary between architecture-driven action injection and
 Wan's video forward.
 
@@ -28,7 +28,7 @@ from einops import rearrange
 from torch import Tensor
 
 from openwam.model.video_backbone.adapter import BlockLoopState, VideoBackbone
-from openwam.model.video_backbone.wan.dit import sinusoidal_embedding_1d
+from openwam.model.video_backbone.wan.dit import modulate, rope_apply, sinusoidal_embedding_1d
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
 logger = logging.getLogger(__name__)
@@ -152,6 +152,87 @@ class WanVideoBackbone(VideoBackbone):
                 names.append(name)
         return names
 
+    @property
+    def num_heads(self) -> int:
+        return int(self._dit.blocks[0].num_heads)
+
+    @property
+    def head_dim(self) -> int:
+        return int(self._dit.dim) // self.num_heads
+
+    @property
+    def video_attention_mask_mode(self) -> str:
+        """Video self-attention mask mode used by joint MoT mask construction.
+
+        Three modes mirror FastWAM's ``WanVideoDiT.video_attention_mask_mode``
+        (see [wan_video_dit.py:473-507](references/FastWAM/src/fastwam/models/wan22/wan_video_dit.py#L473)):
+
+        - ``bidirectional``: full v↔v coupling (default).
+        - ``per_frame_causal``: each frame's tokens may only attend to its own
+          frame and earlier frames (token-level causal block-diagonal).
+        - ``first_frame_causal``: the first-frame tokens see only themselves;
+          all later frames see the full video. FastWAM-Joint default.
+
+        Sourced from the underlying Wan DiT when available, otherwise from the
+        ``video_attention_mask_mode`` attribute set on this backbone (default
+        ``bidirectional`` for back-compat).
+        """
+        explicit = getattr(self, "_video_attention_mask_mode", None)
+        if explicit is not None:
+            return explicit
+        return getattr(self._dit, "video_attention_mask_mode", "bidirectional")
+
+    @video_attention_mask_mode.setter
+    def video_attention_mask_mode(self, mode: str) -> None:
+        self._video_attention_mask_mode = mode
+
+    def build_video_to_video_mask(
+        self,
+        video_seq_len: int,
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Build the video↔video block of the joint MoT attention mask.
+
+        ``True`` means "attend to". Mirrors FastWAM's
+        :meth:`WanVideoDiT.build_video_to_video_mask` so MoTJointDriver and
+        FastWAM-Joint produce the same mask layout.
+        """
+        if video_seq_len <= 0:
+            raise ValueError(f"video_seq_len must be positive, got {video_seq_len}")
+        if video_tokens_per_frame <= 0:
+            raise ValueError(f"video_tokens_per_frame must be positive, got {video_tokens_per_frame}")
+
+        mode = self.video_attention_mask_mode
+        if mode == "bidirectional":
+            return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
+
+        if mode == "per_frame_causal":
+            if video_seq_len % video_tokens_per_frame != 0:
+                raise ValueError(
+                    "video_seq_len must be divisible by video_tokens_per_frame in 'per_frame_causal' mode, "
+                    f"got {video_seq_len} and {video_tokens_per_frame}"
+                )
+            num_video_frames = video_seq_len // video_tokens_per_frame
+            frame_causal = torch.tril(torch.ones((num_video_frames, num_video_frames), dtype=torch.bool, device=device))
+            return frame_causal.repeat_interleave(video_tokens_per_frame, dim=0).repeat_interleave(
+                video_tokens_per_frame, dim=1
+            )
+
+        if mode == "first_frame_causal":
+            video_mask = torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
+            first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
+            # First-frame query rows can attend only to the first-frame keys
+            # (they don't peek at the rest of the video). All later rows are
+            # left at True (= see everything).
+            video_mask[:first_frame_tokens, first_frame_tokens:] = False
+            return video_mask
+
+        raise ValueError(
+            f"Unsupported video_attention_mask_mode '{mode}'. "
+            "Choose from: bidirectional, per_frame_causal, first_frame_causal."
+        )
+
     # ================================================================
     # ABC: Three-step execution (3)
     # ================================================================
@@ -160,8 +241,6 @@ class WanVideoBackbone(VideoBackbone):
         dit = self._pipe.dit
         motion_controller = getattr(self._pipe, "motion_controller", None)
         vace = getattr(self._pipe, "vace", None)
-        vap = getattr(self._pipe, "vap", None)
-        animate_adapter = getattr(self._pipe, "animate_adapter", None)
         latents = kw["latents"]
         timestep = kw["timestep"]
         context = kw["context"]
@@ -170,19 +249,13 @@ class WanVideoBackbone(VideoBackbone):
         reference_latents = kw.get("reference_latents")
         vace_context = kw.get("vace_context")
         vace_scale = kw.get("vace_scale", 1.0)
-        tea_cache = kw.get("tea_cache")
         use_usp = kw.get("use_unified_sequence_parallel", self._use_unified_sequence_parallel)
         motion_bucket_id = kw.get("motion_bucket_id")
-        pose_latents = kw.get("pose_latents")
-        face_pixel_values = kw.get("face_pixel_values")
         control_camera_latents_input = kw.get("control_camera_latents_input")
         fuse_vae_embedding_in_latents = kw.get("fuse_vae_embedding_in_latents", False)
         num_clean_prefix_frames = kw.get("num_clean_prefix_frames", 0)
         use_gradient_checkpointing = kw.get("use_gradient_checkpointing", False)
         use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
-        vap_hidden_state = kw.get("vap_hidden_state")
-        vap_clip_feature = kw.get("vap_clip_feature")
-        context_vap = kw.get("context_vap")
 
         if use_usp:
             import torch.distributed as dist
@@ -230,10 +303,6 @@ class WanVideoBackbone(VideoBackbone):
 
         x = dit.patchify(x, control_camera_latents_input)
 
-        motion_vec = None
-        if pose_latents is not None and face_pixel_values is not None:
-            x, motion_vec = animate_adapter.after_patch_embedding(x, pose_latents, face_pixel_values)
-
         f, h, w = x.shape[2:]
         x = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
 
@@ -262,34 +331,8 @@ class WanVideoBackbone(VideoBackbone):
         extras = {}
         extras["dit"] = dit
         extras["vace"] = vace
-        extras["vap"] = vap
-        extras["animate_adapter"] = animate_adapter
-        extras["pose_latents"] = pose_latents
-        extras["face_pixel_values"] = face_pixel_values
-        extras["motion_vec"] = motion_vec
-        extras["tea_cache"] = tea_cache
         extras["use_usp"] = use_usp
         extras["reference_latents_for_finalize"] = kw.get("reference_latents")
-
-        if vap is not None:
-            x_vap = vap_hidden_state
-            x_vap = vap.patchify(x_vap)
-            x_vap = rearrange(x_vap, "b c f h w -> b (f h w) c").contiguous()
-            clean_timestep = torch.ones(timestep.shape, device=timestep.device).to(timestep.dtype)
-            t_vap = vap.time_embedding(sinusoidal_embedding_1d(vap.freq_dim, clean_timestep))
-            t_mod_vap = vap.time_projection(t_vap).unflatten(1, (6, vap.dim))
-            freqs_vap = vap.compute_freqs_mot(f, h, w).to(x.device)
-            vap_clip_embedding = vap.img_emb(vap_clip_feature)
-            context_vap_emb = vap.text_embedding(context_vap)
-            context_vap_emb = torch.cat([vap_clip_embedding, context_vap_emb], dim=1)
-            extras["x_vap"] = x_vap
-            extras["t_mod_vap"] = t_mod_vap
-            extras["freqs_vap"] = freqs_vap
-            extras["context_vap"] = context_vap_emb
-
-        tea_cache_update = False
-        if tea_cache is not None:
-            tea_cache_update = tea_cache.check(dit, x, t_mod)
 
         vace_hints = None
         if vace_context is not None:
@@ -326,7 +369,6 @@ class WanVideoBackbone(VideoBackbone):
             reference_prefix_len=ref_prefix_len,
             vace_hints=vace_hints,
             vace_scale=vace_scale,
-            tea_cache_update=tea_cache_update,
             sp_pad_shape=sp_pad_shape,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
@@ -335,78 +377,30 @@ class WanVideoBackbone(VideoBackbone):
 
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
         dit = state.extras["dit"]
-        vap = state.extras.get("vap")
-        vace = state.extras.get("vace")
-        animate_adapter = state.extras.get("animate_adapter")
-        pose_latents = state.extras.get("pose_latents")
-        face_pixel_values = state.extras.get("face_pixel_values")
-        motion_vec = state.extras.get("motion_vec")
-        use_usp = state.extras.get("use_usp", False)
-
         block = dit.blocks[block_id]
 
-        if vap is not None and block_id in vap.mot_layers_mapping:
-            x_vap = state.extras["x_vap"]
-            context_vap = state.extras["context_vap"]
-            t_mod_vap = state.extras["t_mod_vap"]
-            freqs_vap = state.extras["freqs_vap"]
+        state.x = gradient_checkpoint_forward(
+            block,
+            state.use_gradient_checkpointing,
+            state.use_gradient_checkpointing_offload,
+            state.x,
+            state.context,
+            state.t_mod,
+            state.freqs,
+        )
 
-            def _vap_fwd(*inputs):
-                return vap(block, *inputs)
+        self._apply_post_block_residuals(block_id, state)
+        return state
 
-            if state.use_gradient_checkpointing_offload:
-                with torch.autograd.graph.save_on_cpu():
-                    state.x, x_vap = torch.utils.checkpoint.checkpoint(
-                        _vap_fwd,
-                        state.x,
-                        state.context,
-                        state.t_mod,
-                        state.freqs,
-                        x_vap,
-                        context_vap,
-                        t_mod_vap,
-                        freqs_vap,
-                        block_id,
-                        use_reentrant=False,
-                    )
-            elif state.use_gradient_checkpointing:
-                state.x, x_vap = torch.utils.checkpoint.checkpoint(
-                    _vap_fwd,
-                    state.x,
-                    state.context,
-                    state.t_mod,
-                    state.freqs,
-                    x_vap,
-                    context_vap,
-                    t_mod_vap,
-                    freqs_vap,
-                    block_id,
-                    use_reentrant=False,
-                )
-            else:
-                state.x, x_vap = vap(
-                    block,
-                    state.x,
-                    state.context,
-                    state.t_mod,
-                    state.freqs,
-                    x_vap,
-                    context_vap,
-                    t_mod_vap,
-                    freqs_vap,
-                    block_id,
-                )
-            state.extras["x_vap"] = x_vap
-        else:
-            state.x = gradient_checkpoint_forward(
-                block,
-                state.use_gradient_checkpointing,
-                state.use_gradient_checkpointing_offload,
-                state.x,
-                state.context,
-                state.t_mod,
-                state.freqs,
-            )
+    def _apply_post_block_residuals(self, block_id: int, state: BlockLoopState) -> None:
+        """Apply post-block residuals (VACE hint) to ``state.x``.
+
+        Shared by :meth:`run_block` and :meth:`post_attn_at_layer` so the joint
+        self-attention path picks up VACE without duplicating the residual
+        logic. Mutates ``state.x`` in place.
+        """
+        vace = state.extras.get("vace")
+        use_usp = state.extras.get("use_usp", False)
 
         if state.vace_hints is not None and vace is not None and block_id in vace.vace_layers_mapping:
             current_vace_hint = state.vace_hints[vace.vace_layers_mapping[block_id]]
@@ -427,19 +421,69 @@ class WanVideoBackbone(VideoBackbone):
                         )
             state.x = state.x + current_vace_hint * state.vace_scale
 
-        if pose_latents is not None and face_pixel_values is not None:
-            state.x = animate_adapter.after_transformer_block(block_id, state.x, motion_vec)
+    def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState) -> Tuple[Tensor, Tensor, Tensor, dict]:
+        """First half of a Wan DiT block: norm1 + AdaLN modulate + Q/K/V + RoPE.
 
+        Faithful split of :meth:`DiTBlock.forward` (in ``wan/dit.py``) up to the
+        attention call. Used by :class:`MoTJointDriver` to pull video-side
+        Q/K/V before the mixed attention. Pairs with :meth:`post_attn_at_layer`.
+        """
+        block = state.extras["dit"].blocks[layer_id]
+
+        t_mod = state.t_mod
+        has_seq = t_mod.dim() == 4
+        chunk_dim = 2 if has_seq else 1
+        chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=chunk_dim)
+        if has_seq:
+            chunks = tuple(c.squeeze(2) for c in chunks)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
+
+        residual_x = state.x
+        attn_input = modulate(block.norm1(state.x), shift_msa, scale_msa)
+
+        sa = block.self_attn
+        q = sa.norm_q(sa.q(attn_input))
+        k = sa.norm_k(sa.k(attn_input))
+        v = sa.v(attn_input)
+        q = rope_apply(q, state.freqs, sa.num_heads)
+        k = rope_apply(k, state.freqs, sa.num_heads)
+
+        post_state = {
+            "block": block,
+            "residual_x": residual_x,
+            "gate_msa": gate_msa,
+            "shift_mlp": shift_mlp,
+            "scale_mlp": scale_mlp,
+            "gate_mlp": gate_mlp,
+        }
+        return q, k, v, post_state
+
+    def post_attn_at_layer(
+        self, layer_id: int, state: BlockLoopState, attn_out: Tensor, post_state: dict
+    ) -> BlockLoopState:
+        """Second half of a Wan DiT block: gate(residual, self_attn.o(attn_out))
+        → cross-attn (text context) → FFN → VACE residuals.
+
+        ``attn_out`` is the unprojected attention output (pre ``self_attn.o``)
+        for the *video* slice of the joint mixed attention; this method finishes
+        applying the block and the standard post-block residuals.
+        """
+        block = post_state["block"]
+        sa = block.self_attn
+
+        x = block.gate(post_state["residual_x"], post_state["gate_msa"], sa.o(attn_out))
+        x = x + block.cross_attn(block.norm3(x), state.context)
+        mlp_input = modulate(block.norm2(x), post_state["shift_mlp"], post_state["scale_mlp"])
+        x = block.gate(x, post_state["gate_mlp"], block.ffn(mlp_input))
+        state.x = x
+
+        self._apply_post_block_residuals(layer_id, state)
         return state
 
     def finalize(self, state: BlockLoopState) -> Tensor:
         dit = state.extras["dit"]
-        tea_cache = state.extras.get("tea_cache")
         use_usp = state.extras.get("use_usp", False)
         reference_latents = state.extras.get("reference_latents_for_finalize")
-
-        if tea_cache is not None and not state.tea_cache_update:
-            tea_cache.store(state.x)
 
         t_head = state.t if state.t.dim() == 3 else state.t.unsqueeze(1)
         x = dit.head(state.x, t_head)
@@ -492,6 +536,12 @@ class WanVideoBackbone(VideoBackbone):
         state: BlockLoopState,
         n_action: int,
     ) -> Tuple[BlockLoopState, Tensor]:
+        if n_action <= 0 or n_action >= state.x.shape[1]:
+            raise ValueError(
+                f"extract_action_tokens called with n_action={n_action} but state.x has "
+                f"shape[1]={state.x.shape[1]}; expected 0 < n_action < state.x.shape[1] "
+                "(was inject_action_tokens called first with the same n_action?)."
+            )
         n_video = state.x.shape[1] - n_action
         action_tokens = state.x[:, n_video:, :]
         state.x = state.x[:, :n_video, :]
@@ -637,13 +687,25 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
+        """Move all owned submodules to (dtype, device).
+
+        Also syncs ``self._pipe.device`` because ``BasePipeline.device`` is a
+        plain attribute consumed by inference-time pipeline units (VAE encode,
+        image preprocess, control tensors — see ``wan/pipeline.py``). The
+        training path never touches those units, but deploy
+        (``openwam/deploy/model_loader.py``) relies on this single call to
+        keep the pipeline's device record in sync.
+
+        This method must NOT call ``mod.eval()``: trainable submodules
+        (dit, vace) need to stay in train mode; eval/train state of frozen
+        modules is irrelevant since their forward runs under ``no_grad``.
+        """
         self._dtype = dtype
         self._device = device
         for name in self.submodule_names:
             mod = self.get_submodule(name)
             if mod is not None:
                 mod.to(dtype=dtype, device=device)
-                mod.eval()
         self._pipe.device = device
 
     # ================================================================
@@ -731,9 +793,6 @@ class WanVideoBackbone(VideoBackbone):
         else:
             inputs_posi = {
                 "prompt": prompt,
-                "vap_prompt": " ",
-                "tea_cache_l1_thresh": None,
-                "tea_cache_model_id": "",
                 "num_inference_steps": num_inference_steps,
             }
 
@@ -793,11 +852,6 @@ class WanVideoBackbone(VideoBackbone):
             "audio_embeds": None,
             "s2v_pose_latents": None,
             "motion_video": None,
-            "animate_pose_video": None,
-            "animate_face_video": None,
-            "animate_inpaint_video": None,
-            "animate_mask_video": None,
-            "vap_video": None,
         }
 
         _t_text = time.time()
@@ -919,6 +973,26 @@ class WanVideoBackbone(VideoBackbone):
         return t_mod + modality_bias.to(dtype=t_mod.dtype, device=t_mod.device)
 
     def _extend_freqs_with_action_tokens(self, freqs: Tensor, n_action_tokens: int) -> Tensor:
+        """Append ``n_action_tokens`` identity (1+0i) RoPE frequencies to ``freqs``.
+
+        SharedBackbone concatenates action tokens after video tokens before the
+        shared self-attn. Using identity complex (magnitude=1, angle=0) for those
+        positions makes RoPE a no-op on action Q/K, which avoids two failure modes:
+
+        1. Treating action tokens as "extra video frames at positions Sv, Sv+1,
+           ..." would inject a meaningless temporal/spatial relation between the
+           two modalities through the rotation angle.
+        2. Across video↔action attention, identity rotation means the dot product
+           is determined purely by the projected token content, not by a
+           positional bias the modalities don't share.
+
+        Action-token *sequential* ordering is therefore carried by
+        ``LearnedPositionalEncoding`` in the action backbones, NOT by RoPE.
+        Tied to Wan's complex-form ``view_as_complex`` RoPE in
+        ``components.rope_apply_1d`` — switching the video DiT to a different
+        RoPE representation (sincos table, polar pair, …) requires changing
+        this identity element accordingly.
+        """
         if n_action_tokens <= 0:
             return freqs
         identity_freq = torch.polar(

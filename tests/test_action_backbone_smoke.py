@@ -92,7 +92,7 @@ def test_action_output_head_zero_init():
 
 def test_action_dit_small_instantiate():
     """ActionDiT should instantiate with small parameters."""
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -103,7 +103,6 @@ def test_action_dit_small_instantiate():
         video_dim=128,
         bridge_layers=(0, 1),
         variant="joint_cross_attn",
-        detach_bridge=True,
     )
     assert dit.action_dim == 7
     assert dit.num_layers == 2
@@ -111,7 +110,7 @@ def test_action_dit_small_instantiate():
 
 def test_action_dit_forward_shape():
     """ActionDiT forward should produce (B, T, action_dim)."""
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -122,25 +121,23 @@ def test_action_dit_forward_shape():
         video_dim=128,
         bridge_layers=(0, 1),
         variant="joint_cross_attn",
-        detach_bridge=True,
     )
     actions = torch.randn(2, 5, 7)
-    video_features = [torch.randn(2, 10, 128) for _ in range(2)]
+    bridges = {bid: torch.randn(2, 10, 128) for bid in (0, 1)}
     timestep = torch.tensor([0.5, 0.8])
 
-    out = dit(actions, video_features, timestep)
+    out = dit(actions, bridges, timestep)
     assert out.shape == (2, 5, 7)
 
 
 def test_moe_dit_instantiate():
-    """MoEExpertDiT should instantiate with small parameters."""
-    from openwam.model.action_backbone.moe_dit import MoEExpertDiT
+    """SharedMoEActionBackbone should instantiate with small parameters."""
+    from openwam.model.action_backbone.shared_moe import SharedMoEActionBackbone
 
-    dit = MoEExpertDiT(
+    dit = SharedMoEActionBackbone(
         action_dim=7,
         video_dim=64,
         expert_ffn_dim=128,
-        num_experts=2,
         expert_layers=(0, 1),
     )
     assert dit.action_dim == 7
@@ -200,8 +197,8 @@ def test_action_encoder_timestep_mismatch_raises():
         enc(actions, torch.rand(2, 7))
 
 
-def test_shared_backbone_prepare_action_tokens_with_action_encoder():
-    """SharedBackbone.prepare_action_tokens should use ActionEncoder internally."""
+def test_shared_backbone_encode_uses_action_encoder():
+    """SharedVanillaActionBackbone.encode should run ActionEncoder + pos encoding."""
     from openwam.model.action_backbone.components import ActionEncoder
     from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
@@ -210,31 +207,23 @@ def test_shared_backbone_prepare_action_tokens_with_action_encoder():
 
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
-    state = arch.action_backbone.prepare_state(actions, timestep)
-    assert state.action_latents.shape == (2, 16, 128)
-    assert state.num_action_tokens == 16
+    tokens = arch.action_backbone.encode(actions, timestep)
+    assert tokens.shape == (2, 16, 128)
 
 
-def test_shared_backbone_prepare_action_tokens_per_token_timestep():
-    """SharedBackbone should accept (B, T) per-token timestep via ActionEncoder."""
+def test_shared_backbone_encode_per_token_timestep():
+    """SharedVanillaActionBackbone.encode should accept (B, T) per-token timestep."""
     from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
     arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2, 16)  # per-token
-    state = arch.action_backbone.prepare_state(actions, timestep)
-    assert state.action_latents.shape == (2, 16, 128)
-    # ActionState.timestep is still collapsed to per-sample (used by the
-    # dead t_embed / t_mod path and DualSystem's ActionDiT).
-    assert state.timestep.shape == (2,)
-    # SharedBackboneState.timestep preserves the raw (B, T) granularity so
-    # _build_action_t_mod can build per-token AdaLN modulation in
-    # model_fn_wan_video (see wan_video.py _build_action_t_mod).
-    assert state.runtime_state.payload.timestep.shape == (2, 16)
+    tokens = arch.action_backbone.encode(actions, timestep)
+    assert tokens.shape == (2, 16, 128)
 
 
-def test_moe_expert_prepare_state_with_action_encoder():
-    """MoEActionExpertArchitecture.prepare_action_tokens wires ActionEncoder."""
+def test_moe_encode_uses_action_encoder():
+    """SharedMoEActionBackbone.encode wires ActionEncoder."""
     from openwam.model.action_backbone.components import ActionEncoder
     from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 
@@ -243,20 +232,20 @@ def test_moe_expert_prepare_state_with_action_encoder():
             "action_dim": 14,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "bridge_layers": [0, 1, 2],
+            "expert_layers": [0, 1, 2],
         }
     )
-    assert isinstance(arch.action_backbone.action_input_proj, ActionEncoder)
+    assert isinstance(arch.action_backbone.input_proj, ActionEncoder)
 
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
-    state = arch.action_backbone.prepare_state(actions, timestep)
-    assert state.runtime_state is not None
-    assert state.runtime_state.payload.action_tokens.shape == (2, 16, 128)
+    tokens, t_mod = arch.action_backbone.encode(actions, timestep)
+    assert tokens.shape == (2, 16, 128)
+    assert t_mod.shape == (2, 3, 128)
 
 
-def test_moe_expert_prepare_state_per_token_timestep():
-    """MoE prepare_state should build per-token ExpertFFN AdaLN under (B, T)."""
+def test_moe_encode_per_token_timestep():
+    """MoE encode should build per-token ExpertFFN AdaLN under (B, T) timestep."""
     from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 
     arch = SharedBackboneMoEArchitecture(
@@ -264,25 +253,21 @@ def test_moe_expert_prepare_state_per_token_timestep():
             "action_dim": 14,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "bridge_layers": [0, 1, 2],
+            "expert_layers": [0, 1, 2],
         }
     )
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2, 16)
-    state = arch.action_backbone.prepare_state(actions, timestep)
-    moe_state = state.runtime_state.payload
-    assert moe_state.action_tokens.shape == (2, 16, 128)
+    tokens, t_mod = arch.action_backbone.encode(actions, timestep)
+    assert tokens.shape == (2, 16, 128)
     # ExpertFFN AdaLN t_mod must be per-token so each action token's
     # shift/scale/gate tracks its own noise level.
-    assert moe_state.t_embed.shape == (2, 16, 128)
-    assert moe_state.t_mod.shape == (2, 16, 3, 128)
-    # State.timestep preserves the raw (B, T) shape for _build_action_t_mod.
-    assert moe_state.timestep.shape == (2, 16)
+    assert t_mod.shape == (2, 16, 3, 128)
 
 
 def test_expert_ffn_block_per_token_tmod_shape():
     """ExpertFFNBlock should accept per-token t_mod (B, T, 3, dim)."""
-    from openwam.model.action_backbone.moe_dit import ExpertFFNBlock
+    from openwam.model.action_backbone.shared_moe import ExpertFFNBlock
 
     block = ExpertFFNBlock(dim=64, ffn_dim=128)
     x = torch.randn(2, 8, 64)
@@ -297,7 +282,7 @@ def test_expert_ffn_block_per_token_matches_broadcast():
     Sanity-checks that the new per-token AdaLN branch introduces no semantic
     drift vs. the per-sample branch when all T tokens share the same t_mod.
     """
-    from openwam.model.action_backbone.moe_dit import ExpertFFNBlock
+    from openwam.model.action_backbone.shared_moe import ExpertFFNBlock
 
     torch.manual_seed(0)
     block = ExpertFFNBlock(dim=64, ffn_dim=128)
@@ -314,7 +299,7 @@ def test_expert_ffn_block_per_token_matches_broadcast():
     assert torch.allclose(out_per_sample, out_per_token, atol=1e-6)
 
 
-def test_moe_expert_prepare_state_per_sample_keeps_tmod_rank3():
+def test_moe_encode_per_sample_keeps_tmod_rank3():
     """Per-sample timestep must still produce (B, 3, dim) t_mod (no regression)."""
     from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 
@@ -323,16 +308,13 @@ def test_moe_expert_prepare_state_per_sample_keeps_tmod_rank3():
             "action_dim": 14,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "bridge_layers": [0, 1, 2],
+            "expert_layers": [0, 1, 2],
         }
     )
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)  # per-sample
-    state = arch.action_backbone.prepare_state(actions, timestep)
-    moe_state = state.runtime_state.payload
-    assert moe_state.t_mod.shape == (2, 3, 128)
-    assert moe_state.t_embed.shape == (2, 128)
-    assert moe_state.timestep.shape == (2,)
+    _, t_mod = arch.action_backbone.encode(actions, timestep)
+    assert t_mod.shape == (2, 3, 128)
 
 
 def test_action_output_mlp_shape():
@@ -365,12 +347,10 @@ def test_shared_backbone_uses_action_output_mlp():
     arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
 
-    actions = torch.randn(2, 16, 14)
-    timestep = torch.rand(2)
-    state = arch.action_backbone.prepare_state(actions, timestep)
-    # Simulate the combined video+action hidden output after the DiT loop.
-    state.final_hidden = torch.randn(2, 32, 128)
-    pred = arch.action_backbone.extract_prediction(state)
+    # Simulate the (B, T_action, video_dim) action tail extracted by
+    # vb.extract_action_tokens after the DiT loop.
+    final_hidden = torch.randn(2, 16, 128)
+    pred = arch.action_backbone.decode(final_hidden)
     assert pred.shape == (2, 16, 14)
 
 
@@ -384,13 +364,14 @@ def test_moe_expert_uses_action_output_mlp():
             "action_dim": 14,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "bridge_layers": [0, 1, 2],
+            "expert_layers": [0, 1, 2],
         }
     )
     assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
 
+    # encode → simulate per-block updates → decode roundtrip.
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
-    state = arch.action_backbone.prepare_state(actions, timestep)
-    pred = arch.action_backbone.extract_prediction(state)
+    tokens, _ = arch.action_backbone.encode(actions, timestep)
+    pred = arch.action_backbone.decode(tokens)
     assert pred.shape == (2, 16, 14)

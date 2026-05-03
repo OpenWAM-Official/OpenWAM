@@ -2,5 +2,5 @@
 lambda_video: 1.0
 lambda_action: 1.0
 freeze:
-  - text_encoder
-  - vae
+  - video_backbone._pipe.text_encoder
+  - video_backbone._pipe.vae

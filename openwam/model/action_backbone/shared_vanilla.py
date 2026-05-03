@@ -1,16 +1,21 @@
 """Shared-backbone vanilla action backbone.
 
-Used by ``SharedBackboneVanillaArchitecture``: action tokens are projected
-into video_dim, concatenated to the video token sequence, ride through every
-video DiT block, then sliced off and projected back to ``action_dim`` via a
-small MLP. There is no separate action transformer — the shared video DiT
-itself learns the modality boundary.
+Used by ``SharedBackboneVanillaArchitecture``. Owns the action-specific
+parameters (input projection, positional encoding, output head, modality
+AdaLN bias, normalization stats, action scheduler) but does **not**
+implement any control flow — the architecture's ``forward`` runs the
+video DiT block loop with action tokens injected and calls these
+helpers at the right moments.
+
+API surface:
+    encode(noisy_actions, timestep) -> tokens
+    decode(final_hidden) -> action_prediction
+    modality_tmod_bias                          (parameter)
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -18,42 +23,28 @@ import torch.nn as nn
 from openwam.model.action_backbone.backbone import ActionBackbone
 from openwam.model.action_backbone.components import ActionEncoder, ActionOutputMLP, LearnedPositionalEncoding
 
-if TYPE_CHECKING:
-    from openwam.model.base import ActionState, ExecutionPlan
-    from openwam.model.video_backbone.adapter import BlockLoopState, VideoBackbone
-
-
-@dataclass
-class SharedVanillaState:
-    """Mutable per-forward state for SharedVanillaActionBackbone.
-
-    Tracks the action tokens projected into video_dim and the raw timestep
-    at loss-time granularity (preserved for the video DiT's per-token
-    AdaLN, ``_build_action_t_mod`` in ``wan_adapter.py``).
-    """
-
-    action_tokens: torch.Tensor
-    n_action_tokens: int = 0
-    timestep: Optional[torch.Tensor] = None
-    action_noise_pred: Optional[torch.Tensor] = field(default=None)
-
 
 class SharedVanillaActionBackbone(ActionBackbone):
-    """Action stream for SharedBackbone vanilla.
+    """Action-side I/O for SharedBackbone vanilla.
 
-    Owns:
+    Holds:
       - ``input_proj``: action_dim -> video_dim (fuses timestep)
       - ``pos_encoding``: learned positional encoding
       - ``action_output_head``: video_dim -> 64 -> action_dim
       - ``modality_tmod_bias``: per-modality bias added to the video DiT's
-        AdaLN modulation signal for action tokens
-      - ``action_mean`` / ``action_std`` persistent buffers for denormalization
+        AdaLN modulation signal for action tokens. Shape ``(1, 1, 6, video_dim)``
+        — the leading ``6`` mirrors the video DiT block's 6-chunk AdaLN layout
+        (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp); if
+        the video DiT changes that count this bias must be resized in lockstep.
+      - ``action_mean`` / ``action_std`` persistent buffers
+      - ``scheduler``: ActionScheduler (from ActionBackbone.__init__)
     """
 
     def __init__(self, action_dim: int, video_dim: int, max_action_len: int = 512):
         super().__init__()
         self._action_dim = int(action_dim)
         self._video_dim = int(video_dim)
+        self._max_action_len = int(max_action_len)
 
         self.input_proj = ActionEncoder(self._action_dim, self._video_dim)
         self.pos_encoding = LearnedPositionalEncoding(max_action_len, self._video_dim)
@@ -61,14 +52,6 @@ class SharedVanillaActionBackbone(ActionBackbone):
         self.modality_tmod_bias = nn.Parameter(torch.zeros(1, 1, 6, self._video_dim))
         self.register_buffer("action_mean", torch.zeros(self._action_dim), persistent=True)
         self.register_buffer("action_std", torch.ones(self._action_dim), persistent=True)
-
-    # === ActionBackbone interface ===
-
-    @property
-    def execution_plan(self) -> "ExecutionPlan":
-        from openwam.model.base import ExecutionPlan
-
-        return ExecutionPlan.INTERLEAVED_WHOLE_BLOCK
 
     @property
     def action_dim(self) -> int:
@@ -78,94 +61,28 @@ class SharedVanillaActionBackbone(ActionBackbone):
     def bridge_layers(self) -> Tuple[int, ...]:
         return ()
 
-    def prepare_state(
-        self,
-        noisy_actions: torch.Tensor,
-        timestep: torch.Tensor,
-        *,
-        proprio_state: Optional[torch.Tensor] = None,  # noqa: ARG002 — vanilla doesn't consume proprio
-        use_gradient_checkpointing: bool = False,  # noqa: ARG002
-        use_gradient_checkpointing_offload: bool = False,  # noqa: ARG002
-    ) -> "ActionState":
-        from openwam.model.base import ActionState, ExecutionPlan, RuntimeState
+    def encode(self, noisy_actions: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+        """Project noisy actions into video_dim space and add positional encoding.
 
-        B, T, _ = noisy_actions.shape
-        assert T <= self.pos_encoding.embedding.shape[1], (
-            f"Action sequence length {T} exceeds max_action_len {self.pos_encoding.embedding.shape[1]}"
-        )
+        Args:
+            noisy_actions: (B, T, action_dim).
+            timestep: action diffusion timestep, accepted shapes match
+                ``ActionEncoder``: (1,), (B,), or (B, T).
 
+        Returns:
+            (B, T, video_dim) action tokens ready to be appended to the
+            video sequence.
+        """
+        T = noisy_actions.shape[1]
+        if T > self._max_action_len:
+            raise ValueError(f"Action sequence length {T} exceeds max_action_len {self._max_action_len}.")
         x = self.input_proj(noisy_actions, timestep)
         x = self.pos_encoding(x)
+        return x
 
-        timestep_flat = timestep.flatten()
-        if timestep.numel() == 1:
-            timestep_flat = timestep_flat.expand(B)
-        elif timestep_flat.shape[0] != B:
-            timestep_flat = timestep.view(B, -1)[:, 0]
-
-        astate = ActionState(
-            action_latents=x,
-            timestep=timestep_flat,
-            num_action_tokens=T,
-        )
-        astate.runtime_state = RuntimeState(
-            framework="shared_backbone",
-            variant="vanilla",
-            execution_plan=ExecutionPlan.INTERLEAVED_WHOLE_BLOCK,
-            payload=SharedVanillaState(
-                action_tokens=x,
-                n_action_tokens=T,
-                timestep=timestep,
-            ),
-        )
-        return astate
-
-    def before_loop(
-        self,
-        vb: "VideoBackbone",
-        vstate: "BlockLoopState",
-        astate: "ActionState",
-    ) -> Tuple["BlockLoopState", "ActionState"]:
-        payload: SharedVanillaState = astate.runtime_state.payload
-        vstate = vb.inject_action_tokens(
-            vstate,
-            payload.action_tokens,
-            astate.num_action_tokens,
-            timestep=payload.timestep,
-            t_mod_bias=self.modality_tmod_bias,
-        )
-        return vstate, astate
-
-    def run_block(
-        self,
-        block_id: int,
-        vb: "VideoBackbone",
-        vstate: "BlockLoopState",
-        astate: "ActionState",
-    ) -> Tuple["BlockLoopState", "ActionState"]:
-        # Action tokens travel inside the shared video sequence — no per-block
-        # action-side work; just run the video block.
-        vstate = vb.run_block(block_id, vstate)
-        return vstate, astate
-
-    def after_loop(
-        self,
-        vb: "VideoBackbone",
-        vstate: "BlockLoopState",
-        astate: "ActionState",
-    ) -> Tuple["BlockLoopState", "ActionState"]:
-        # Mirror the original vanilla forward: capture full (video+action) hidden
-        # before extracting, then strip the action tail off the video sequence.
-        astate.final_hidden = vstate.x
-        vstate, _ = vb.extract_action_tokens(vstate, astate.num_action_tokens)
-        return vstate, astate
-
-    def extract_prediction(self, astate: "ActionState") -> torch.Tensor:
-        n = astate.num_action_tokens
-        if n is None:
-            raise RuntimeError("SharedVanillaActionBackbone: num_action_tokens not set")
-        x = astate.final_hidden[:, -n:, :] if astate.final_hidden is not None else astate.action_latents
-        return self.action_output_head(x)
+    def decode(self, action_tokens: torch.Tensor) -> torch.Tensor:
+        """(B, T, video_dim) action tail -> (B, T, action_dim) prediction."""
+        return self.action_output_head(action_tokens)
 
 
 __all__ = ["SharedVanillaActionBackbone"]

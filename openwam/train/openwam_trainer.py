@@ -33,25 +33,6 @@ from openwam.train.utils.optimizer_groups import build_trainable_parameters
 logger = logging.getLogger(__name__)
 
 
-class TrainableModuleWrapper(torch.nn.Module):
-    """Thin nn.Module wrapper around trainable components for DeepSpeed.
-
-    DeepSpeed requires a single nn.Module to wrap with its engine.
-    This collects the ActionDiT and trainable pipeline sub-modules (DiT, VACE)
-    so DeepSpeed can manage their optimizer states and gradient sync.
-
-    Not used for forward pass — OpenWAMTrainer.compute_loss() drives execution.
-    """
-
-    def __init__(self, action_backbone, pipe_trainable_modules: dict):
-        super().__init__()
-        self.action_backbone = action_backbone
-        self.pipe_modules = torch.nn.ModuleDict(pipe_trainable_modules)
-
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError("Forward pass is handled by OpenWAMTrainer.compute_loss()")
-
-
 class OpenWAMTrainer(BaseTrainer):
     """Joint video-action trainer for OpenWAM.
 
@@ -72,19 +53,31 @@ class OpenWAMTrainer(BaseTrainer):
         m = cfg.model
 
         # Build architecture (creates video_backbone internally from config).
+        # Wrap construction in a ZeRO-3 init-disable scope: when the Accelerator
+        # was built with ``zero3_init_flag=True``, DeepSpeed enters a global
+        # ``zero.Init(enabled=True)`` context that auto-partitions every
+        # nn.Parameter at allocation time. For OpenWAM that's actively harmful
+        # — frozen modules (text_encoder ~13 GiB umt5-xxl, VAE) get partitioned
+        # along with trainable DiT, and every forward then triggers a ~26 GiB
+        # all-gather spike to materialize them (guaranteed OOM on forward 2 of
+        # training). Wrapping construction in ``zero.Init(enabled=False)``
+        # skips DeepSpeed's per-Parameter tracking (no ``ds_id`` / ``ds_status``
+        # is attached). At ``initialize()`` time, untagged params stay
+        # replicated; only params constructed under the outer
+        # ``zero.Init(enabled=True)`` scope (the trainable DiT/VACE created
+        # by ``build_architecture`` below) get partitioned. So frozen modules
+        # never enter the shard table and never trigger an all-gather.
         from openwam.model import build_architecture, resolve_architecture_config
 
         resolved_arch = resolve_architecture_config(m)
-        self.architecture = build_architecture(resolved_arch.registry_name, resolved_arch.params)
+        with self._zero3_init_disabled():
+            self.architecture = build_architecture(resolved_arch.registry_name, resolved_arch.params)
         logger.info(
             "Architecture: %s (framework=%s variant=%s)",
             resolved_arch.registry_name,
             resolved_arch.canonical.framework,
             resolved_arch.canonical.variant,
         )
-
-        # Get the action backbone from the resolved architecture.
-        self.action_backbone = self.architecture.action_backbone
 
         # Device placement: skip .to(device) when initialize_model_on_cpu + DeepSpeed,
         # because DeepSpeed's prepare() will handle the move.
@@ -95,7 +88,7 @@ class OpenWAMTrainer(BaseTrainer):
             and str(accelerator.distributed_type).endswith("DEEPSPEED")
         )
         if not (_init_on_cpu and _use_deepspeed):
-            self.action_backbone.to(dtype=self.architecture.dtype, device=self.architecture.device)
+            self.architecture.action_backbone.to(dtype=self.architecture.dtype, device=self.architecture.device)
 
         # --- Freeze: apply after all models are built ---
         # Read from training_strategy config (e.g. joint.yaml / video_only.yaml)
@@ -103,10 +96,6 @@ class OpenWAMTrainer(BaseTrainer):
         freeze_list = list(getattr(strategy, "freeze", []))
         for name in self.architecture.freeze_modules(freeze_list):
             logger.info("Frozen: %s", name)
-
-        # Build trainable module wrapper for DeepSpeed
-        pipe_trainable = self.architecture.get_trainable_modules(freeze_list=freeze_list)
-        self.trainable_wrapper = TrainableModuleWrapper(self.action_backbone, pipe_trainable)
 
         # Initialize all schedulers (video + action) inside architecture
         self.architecture.init_training_schedulers(1000)
@@ -156,9 +145,55 @@ class OpenWAMTrainer(BaseTrainer):
         self._current_step = 0
         self._last_loss_components = {}
 
-        # Print param counts
-        action_params = sum(p.numel() for p in self.action_backbone.parameters())
-        logger.info("OpenWAMTrainer: ActionBackbone %.1fM params", action_params / 1e6)
+        # Print param counts (total + trainable, per backbone). Use print()
+        # rather than logger so it survives Hydra's default logging filter,
+        # and gate explicitly on rank-0 instead of relying on train.py's
+        # global ``builtins.print = noop`` on non-main ranks (that suppression
+        # is launch-flow specific; the explicit guard keeps this correct if
+        # the trainer is ever invoked from a different launcher or subprocess).
+        is_main = self.accelerator is None or self.accelerator.is_main_process
+        if is_main:
+
+            def _count(module):
+                if module is None:
+                    return 0, 0
+                total = sum(p.numel() for p in module.parameters())
+                trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                return total, trainable
+
+            vb_total, vb_train = _count(self.architecture.video_backbone)
+            ab_total, ab_train = _count(self.architecture.action_backbone)
+            print("=" * 60)
+            print("Parameter counts")
+            print(f"  VideoBackbone : total={vb_total / 1e6:7.1f}M  trainable={vb_train / 1e6:7.1f}M")
+            print(f"  ActionBackbone: total={ab_total / 1e6:7.1f}M  trainable={ab_train / 1e6:7.1f}M")
+            print(
+                f"  Architecture  : total={(vb_total + ab_total) / 1e6:7.1f}M  "
+                f"trainable={(vb_train + ab_train) / 1e6:7.1f}M"
+            )
+            print("=" * 60, flush=True)
+
+    @staticmethod
+    def _zero3_init_disabled():
+        """Context that disables DeepSpeed ZeRO-3 construction-time partitioning.
+
+        ``deepspeed.zero.Init(enabled=False)`` is the official way to nest a
+        "do-not-partition" scope inside an outer ``zero.Init(enabled=True)``
+        (the same mechanism HuggingFace transformers uses to load frozen
+        adapters under ZeRO-3). Falls back to a no-op context when DeepSpeed
+        isn't importable, so the DDP / single-GPU paths are unaffected.
+
+        See the ``__init__`` rationale for why we disable this — short version:
+        partitioning frozen modules (text_encoder, VAE) causes a ~26 GiB
+        all-gather spike on every forward and OOMs by step 2.
+        """
+        from contextlib import nullcontext
+
+        try:
+            import deepspeed
+        except ImportError:
+            return nullcontext()
+        return deepspeed.zero.Init(enabled=False)
 
     def _load_action_stats(self, dataset):
         """Load action normalization stats from dataset into architecture buffers."""
@@ -454,33 +489,31 @@ class OpenWAMTrainer(BaseTrainer):
             and str(self.accelerator.distributed_type).endswith("DEEPSPEED")
         )
 
-        # Prepare with accelerator
+        # Prepare with accelerator — wrap architecture directly (no intermediate
+        # TrainableModuleWrapper). DeepSpeedEngine forwards attribute access
+        # (.action_backbone / .compute_loss / .prepare_inputs / ...) to the
+        # underlying module via __getattr__, and param-level grad hooks attached
+        # during prepare ensure backward sync works regardless of which forward
+        # path the trainer takes.
         if use_deepspeed:
-            # DeepSpeed needs the model wrapper to manage params/optimizer/gradients
-            prepare_args = [self.trainable_wrapper, optimizer, dataloader]
+            prepare_args = [self.architecture, optimizer, dataloader]
             if scheduler is not None:
                 prepare_args.append(scheduler)
-                self.trainable_wrapper, optimizer, dataloader, scheduler = self.accelerator.prepare(*prepare_args)
+                self.architecture, optimizer, dataloader, scheduler = self.accelerator.prepare(*prepare_args)
             else:
-                self.trainable_wrapper, optimizer, dataloader = self.accelerator.prepare(*prepare_args)
+                self.architecture, optimizer, dataloader = self.accelerator.prepare(*prepare_args)
 
-            # Update references — DeepSpeed wraps the module
-            unwrapped = self.accelerator.unwrap_model(self.trainable_wrapper)
-            self.action_backbone = unwrapped.action_backbone
-
-            # Sync video backbone's trainable sub-modules with DeepSpeed-managed versions
-            self.architecture.restore_deepspeed_submodules(dict(unwrapped.pipe_modules))
-
-            # Propagate device from accelerator down through architecture → video_backbone
+            # Propagate device from accelerator down through architecture → backbones
             self.architecture.set_dtype_device(self.architecture.dtype, self.accelerator.device)
-
-            # Move frozen modules (T5, VAE) to device
+            # Frozen modules (T5, VAE) — idempotent defensive move
             self.architecture.move_frozen_to_device(self.accelerator.device)
 
-            logger.info("DeepSpeed: model wrapped, device=%s", self.accelerator.device)
+            logger.info("DeepSpeed: architecture wrapped, device=%s", self.accelerator.device)
         elif self.accelerator is not None:
-            # Plain DDP / single GPU
-            optimizer, dataloader = self.accelerator.prepare(optimizer, dataloader)
+            # Plain DDP / single GPU — also prepare model so accelerator.accumulate works
+            self.architecture, optimizer, dataloader = self.accelerator.prepare(
+                self.architecture, optimizer, dataloader
+            )
 
         # Collect all trainable params for grad clipping
         all_params = [p for group in optimizer.param_groups for p in group["params"]]
@@ -505,30 +538,30 @@ class OpenWAMTrainer(BaseTrainer):
 
         self.on_train_begin(output_path=output_path, total_steps=total_steps)
 
+        # Accelerator must exist (constructed unconditionally in scripts/train.py).
+        # All paths (DDP / DeepSpeed) go through accelerator.accumulate(...) so
+        # gradient accumulation is delegated to the framework — no manual gating.
+        assert self.accelerator is not None, "OpenWAMTrainer requires an Accelerator"
+
         for epoch in range(num_epochs):
+            if hasattr(dataloader, "set_epoch"):
+                dataloader.set_epoch(epoch)
             for batch in dataloader:
-                losses = self.compute_loss(batch)
-
-                loss = losses["total"]
-                if self.accelerator is not None:
+                with self.accelerator.accumulate(self.architecture):
+                    losses = self.compute_loss(batch)
+                    loss = losses["total"]
                     self.accelerator.backward(loss)
-                else:
-                    loss.backward()
 
-                # Gradient clipping & optimizer step
-                grad_norm = torch.tensor(0.0, device=loss.device)
-                if (global_step + 1) % grad_accum == 0:
-                    if max_grad_norm is not None:
-                        if use_deepspeed:
+                    grad_norm = torch.tensor(0.0, device=loss.device)
+                    if self.accelerator.sync_gradients:
+                        if max_grad_norm is not None:
                             grad_norm_val = self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
-                        else:
-                            grad_norm_val = torch.nn.utils.clip_grad_norm_(all_params, max_grad_norm)
-                        grad_norm = torch.tensor(float(grad_norm_val), device=loss.device)
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    if scheduler is not None:
-                        scheduler.step()
-                    opt_step += 1
+                            grad_norm = torch.tensor(float(grad_norm_val), device=loss.device)
+                        optimizer.step()
+                        if scheduler is not None:
+                            scheduler.step()
+                        optimizer.zero_grad()
+                        opt_step += 1
 
                 self._current_step = global_step
                 global_step += 1
@@ -588,18 +621,23 @@ class OpenWAMTrainer(BaseTrainer):
                     batch_size=batch_size,
                 )
 
-                # Periodic checkpoint saving (rank 0 only for multi-GPU)
+                # Periodic checkpoint saving. ALL ranks must enter
+                # ``save_checkpoint`` together because under ZeRO-3 it issues a
+                # collective all-gather to consolidate sharded params; only the
+                # rank-0 file IO is gated.
                 _is_main = self.accelerator is None or self.accelerator.is_main_process
-                if self.should_save_checkpoint(global_step, save_steps) and _is_main:
+                if self.should_save_checkpoint(global_step, save_steps):
                     ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
-                    msg_start = f"[checkpoint] Saving step {global_step} -> {ckpt_path}"
-                    logger.info(msg_start)
-                    tqdm.write(msg_start)
+                    if _is_main:
+                        msg_start = f"[checkpoint] Saving step {global_step} -> {ckpt_path}"
+                        logger.info(msg_start)
+                        tqdm.write(msg_start)
                     self.save_checkpoint(ckpt_path)
-                    msg_done = f"[checkpoint] Saved: {ckpt_path}"
-                    logger.info(msg_done)
-                    tqdm.write(msg_done)
-                    manage_checkpoints(output_path, keep_last_k)
+                    if _is_main:
+                        msg_done = f"[checkpoint] Saved: {ckpt_path}"
+                        logger.info(msg_done)
+                        tqdm.write(msg_done)
+                        manage_checkpoints(output_path, keep_last_k)
 
                 if max_steps and global_step >= max_steps:
                     pbar.close()
@@ -608,25 +646,89 @@ class OpenWAMTrainer(BaseTrainer):
 
         pbar.close()
 
-        # Save final checkpoint (rank 0 only)
+        # Save final checkpoint. Same rule as periodic saves: ALL ranks enter
+        # ``save_checkpoint`` (collective under ZeRO-3); only rank-0 writes IO.
         _is_main = self.accelerator is None or self.accelerator.is_main_process
-        if save_steps and _is_main:
+        if save_steps:
             ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
-            msg_start = f"[checkpoint] Saving final step {global_step} -> {ckpt_path}"
-            logger.info(msg_start)
-            tqdm.write(msg_start)
+            if _is_main:
+                msg_start = f"[checkpoint] Saving final step {global_step} -> {ckpt_path}"
+                logger.info(msg_start)
+                tqdm.write(msg_start)
             self.save_checkpoint(ckpt_path)
-            msg_done = f"[checkpoint] Saved final: {ckpt_path}"
-            logger.info(msg_done)
-            tqdm.write(msg_done)
-            manage_checkpoints(output_path, keep_last_k)
+            if _is_main:
+                msg_done = f"[checkpoint] Saved final: {ckpt_path}"
+                logger.info(msg_done)
+                tqdm.write(msg_done)
+                manage_checkpoints(output_path, keep_last_k)
 
         self.on_train_end(global_step, output_path=output_path, wandb_run=wandb_run)
 
     def save_checkpoint(self, path: str):
-        """Export full architecture state to safetensors."""
-        self.architecture.save_checkpoint(path)
+        """Export full architecture state to safetensors. Safe under ZeRO-1/2/3, DDP, and single-process.
 
-    def load_checkpoint(self, path: str):
-        """Load a checkpoint into the architecture."""
-        self.architecture.load_checkpoint(path)
+        ALL ranks must call this together. Under ZeRO-3 ``Accelerator.get_state_dict``
+        issues a collective all-gather to consolidate sharded params on rank 0; under
+        ZeRO-1/2 / DDP / single-process it falls back to a local ``unwrap(model).state_dict()``.
+        Only rank 0 writes the file.
+
+        Note: ``self.architecture`` after ``accelerator.prepare()`` is a ``DeepSpeedEngine`` —
+        calling its ``.save_checkpoint(path)`` directly would dispatch to DeepSpeed's own
+        method (collective sharded checkpoint), so we route through ``get_state_dict`` and
+        write the safetensors file ourselves.
+        """
+        from safetensors.torch import save_file
+
+        if self.accelerator is not None:
+            # Collective path. Under ZeRO-3 this gathers sharded params; under ZeRO-1/2
+            # the params are already full on every rank and this is a local copy.
+            state_dict = self.accelerator.get_state_dict(self.architecture)
+            if not self.accelerator.is_main_process:
+                return
+        else:
+            state_dict = self.architecture.state_dict()
+
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        save_file(state_dict, path)
+
+    def load_checkpoint(self, path: str, strict: bool = True):
+        """Load a checkpoint into the architecture.
+
+        Currently supports ZeRO-1 / ZeRO-2 / DDP / single-process. ZeRO-3 is NOT
+        supported: after ``accelerator.prepare()`` each rank holds only a sharded
+        ``ds_tensor`` slice of every parameter, so a naive ``load_state_dict``
+        would either shape-mismatch or silently write a full tensor into a
+        slice slot. Tracked as a TODO in README (resume-from-checkpoint under
+        ZeRO-3 needs ``deepspeed.zero.GatheredParameters`` plumbing).
+
+        Loads weights into the *unwrapped* underlying ``BaseWAMArchitecture`` so we don't
+        invoke ``DeepSpeedEngine.load_checkpoint`` (which expects DeepSpeed's own sharded
+        checkpoint layout, not our flat safetensors).
+
+        ``strict`` defaults to ``True`` so a renamed state-dict (e.g. v1.0 → v1.1
+        where ``moe_expert_dit.*`` became ``shared_moe.*``) raises explicitly
+        rather than dropping weights silently.
+        """
+        from safetensors.torch import load_file
+
+        # ZeRO-3 guard. Raise before doing anything destructive to the in-memory
+        # sharded params; the caller has to either load before prepare() or wrap
+        # the load in ``deepspeed.zero.GatheredParameters``.
+        if self.accelerator is not None:
+            ds_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
+            if ds_plugin is not None:
+                zero_stage = int(getattr(ds_plugin, "zero_stage", 0) or 0)
+                if zero_stage >= 3:
+                    raise RuntimeError(
+                        "load_checkpoint does not support ZeRO-3: params are sharded "
+                        "after accelerator.prepare(). Either call this before prepare(), "
+                        "or wrap the load in deepspeed.zero.GatheredParameters("
+                        "list(unwrapped.parameters()), modifier_rank=0). "
+                        "See the resume-from-checkpoint TODO in README."
+                    )
+
+        unwrapped = (
+            self.accelerator.unwrap_model(self.architecture) if self.accelerator is not None else self.architecture
+        )
+        sd = load_file(path)
+        unwrapped.load_state_dict(sd, strict=strict)

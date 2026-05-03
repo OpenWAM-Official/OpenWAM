@@ -12,7 +12,6 @@ import torch
 import torch.nn.functional as F
 
 from openwam.model.architectures.dual_system import DualSystemCrossAttnArchitecture
-from openwam.model.base import ExecutionPlan
 
 
 def _make_tiny_architecture():
@@ -48,13 +47,10 @@ def test_e2e_train_save_load_infer():
     target = action_noise - action_data  # flow matching velocity
 
     timestep = torch.tensor([500.0])
-    bridge_feature = torch.randn(B, T * 4, video_dim)  # fake video hidden
+    bridges = {bid: torch.randn(B, T * 4, video_dim) for bid in arch.bridge_layers}
 
-    # --- 3. Forward pass through architecture interface ---
-    state = arch.action_backbone.prepare_state(noisy_actions, timestep)
-    state.bridge_features.append(bridge_feature)
-    pred = arch.action_backbone.extract_prediction(state)
-
+    # --- 3. Forward pass through ActionDiT.forward (cross-attn variant) ---
+    pred = arch.action_backbone(noisy_actions, bridges, timestep)
     assert pred.shape == (B, T, action_dim), f"Expected {(B, T, action_dim)}, got {pred.shape}"
 
     # --- 4. Backward + optimizer step ---
@@ -92,12 +88,8 @@ def test_e2e_train_save_load_infer():
     with torch.no_grad():
         infer_actions = torch.randn(B, T, action_dim)
         infer_timestep = torch.tensor([300.0])
-        infer_bridge = torch.randn(B, T * 4, video_dim)
-
-        state = arch2.action_backbone.prepare_state(infer_actions, infer_timestep)
-        state.bridge_features.append(infer_bridge)
-        infer_pred = arch2.action_backbone.extract_prediction(state)
-
+        infer_bridges = {bid: torch.randn(B, T * 4, video_dim) for bid in arch2.bridge_layers}
+        infer_pred = arch2.action_backbone(infer_actions, infer_bridges, infer_timestep)
         assert infer_pred.shape == (B, T, action_dim)
 
     # --- 8. Verify denormalization properties ---
@@ -105,11 +97,10 @@ def test_e2e_train_save_load_infer():
     assert arch2.action_std.shape == (action_dim,)
     assert arch2.action_dim == action_dim
     assert arch2.bridge_layers == (0,)
-    assert arch2.execution_plan == ExecutionPlan.BRIDGE_COLLECTION
 
 
 def test_e2e_interleaved_forward_pass():
-    """Smoke test: joint_self_attn architecture forward pass."""
+    """Smoke test: joint_self_attn architecture pre/post_attn_at_layer round-trip."""
     from openwam.model.architectures.dual_system import DualSystemSelfAttnArchitecture
 
     B, T, action_dim, video_dim = 1, 4, 7, 64
@@ -118,7 +109,7 @@ def test_e2e_interleaved_forward_pass():
         "framework": "dual_system",
         "variant": "joint_self_attn",
         "action_dim": action_dim,
-        "dim": 64,
+        "dim": video_dim,
         "ffn_dim": 128,
         "num_heads": 2,
         "num_layers": 1,
@@ -128,34 +119,20 @@ def test_e2e_interleaved_forward_pass():
     arch = DualSystemSelfAttnArchitecture(cfg=cfg)
     arch.eval()
 
-    assert arch.execution_plan == ExecutionPlan.INTERLEAVED_SPLIT_SELF_ATTENTION
-
     noisy_actions = torch.randn(B, T, action_dim)
     timestep = torch.tensor([500.0])
-    video_hidden = torch.randn(B, T * 4, video_dim)
 
     with torch.no_grad():
-        state = arch.action_backbone.prepare_state(noisy_actions, timestep)
-        assert state.runtime_state is not None
-        assert state.runtime_state.variant == "joint_self_attn"
+        ab = arch.action_backbone
+        astate = ab.prepare_state(noisy_actions, timestep)
+        assert astate.payload is not None
 
-        class _MockVState:
-            def __init__(self, x, t_mod, f, h, w):
-                self.x = x
-                self.reference_prefix_len = 0
-                self.t_mod = t_mod
-                self.f = f
-                self.h = h
-                self.w = w
+        # MoT-style action half-step: pull q/k/v, simulate a mixed-attention
+        # output, push it back through post_attn_at_layer.
+        for layer_id in range(ab.num_layers):
+            q, k, v, post = ab.pre_attn_at_layer(layer_id, astate)
+            attn_out = torch.randn_like(q)
+            astate = ab.post_attn_at_layer(layer_id, astate, attn_out, post)
 
-        class _MockVB:
-            def run_block(self, _bid, vs):
-                return vs
-
-        # video_hidden has T*4 tokens — pretend it's a 1D temporal axis.
-        vstate = _MockVState(video_hidden, t_mod=torch.zeros(B, 6, video_dim), f=video_hidden.shape[1], h=1, w=1)
-        vstate, state = arch.action_backbone.run_block(0, _MockVB(), vstate, state)
-        assert vstate.x.shape == video_hidden.shape
-
-        pred = arch.action_backbone.extract_prediction(state)
+        pred = ab.extract_prediction(astate)
         assert pred.shape == (B, T, action_dim)

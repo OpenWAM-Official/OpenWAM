@@ -21,7 +21,8 @@ Usage:
         hidden_dim=768,    # must match ActionDiT.dim
         mode="channel_concat",
     )
-    # In prepare_action_tokens:
+    # Wired into ActionDiT._embed_actions; the architecture passes proprio_state
+    # into the action backbone's forward / prepare_state.
     action_embeds = action_dit.action_embedding(noisy_actions)
     action_embeds = encoder(action_embeds, state_vector)
 """
@@ -39,8 +40,8 @@ class ProprioceptiveEncoder(nn.Module):
             13 (EE pos + quat + gripper).
         hidden_dim: ActionDiT hidden dimension (must match ``ActionDiT.dim``).
         mode: Injection mode. One of:
-            - ``"concat"`` / ``"sequence_concat"``: prepend ``num_state_tokens``
-              tokens to the action sequence (sequence-wise concat).
+            - ``"sequence_concat"``: prepend ``num_state_tokens`` tokens to the
+              action sequence (sequence-wise concat).
             - ``"channel_concat"``: broadcast state along time and concat along
               channel dim, then project back to ``hidden_dim`` (channel-wise
               concat, preserves sequence length).
@@ -51,9 +52,7 @@ class ProprioceptiveEncoder(nn.Module):
         dropout: Dropout rate on state features (regularization).
     """
 
-    # Accepted mode aliases. "concat" is kept for backward compatibility
-    # and is treated identically to "sequence_concat".
-    _SEQUENCE_CONCAT_ALIASES = ("concat", "sequence_concat")
+    _VALID_MODES = ("sequence_concat", "channel_concat", "add")
 
     def __init__(
         self,
@@ -64,9 +63,8 @@ class ProprioceptiveEncoder(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
-        valid = self._SEQUENCE_CONCAT_ALIASES + ("add", "channel_concat")
-        if mode not in valid:
-            raise ValueError(f"mode must be one of {valid}, got '{mode}'")
+        if mode not in self._VALID_MODES:
+            raise ValueError(f"mode must be one of {self._VALID_MODES}, got '{mode}'")
 
         self.state_dim = state_dim
         self.hidden_dim = hidden_dim
@@ -102,7 +100,7 @@ class ProprioceptiveEncoder(nn.Module):
         self._init_weights()
 
     def _is_sequence_concat(self) -> bool:
-        return self.mode in self._SEQUENCE_CONCAT_ALIASES
+        return self.mode == "sequence_concat"
 
     def _init_weights(self):
         """Initialize with weights that preserve pretrained behavior at t=0."""

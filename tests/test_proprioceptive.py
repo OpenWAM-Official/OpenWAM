@@ -33,18 +33,6 @@ def test_sequence_concat_mode_shape():
     assert out.shape == (2, 53, 64)  # 49 + 4
 
 
-def test_concat_alias_backcompat():
-    """mode='concat' must remain a working alias of 'sequence_concat'."""
-    enc_alias = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="concat", num_state_tokens=4)
-    enc_canonical = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="sequence_concat", num_state_tokens=4)
-    assert enc_alias.extra_tokens == enc_canonical.extra_tokens == 4
-    action_embeds = torch.randn(2, 49, 64)
-    state = torch.randn(2, 14)
-    # Shape parity is enough — identical numerical init isn't guaranteed
-    # because nn.Linear params are independent RNG draws.
-    assert enc_alias(action_embeds, state).shape == enc_canonical(action_embeds, state).shape
-
-
 def test_extra_tokens_property():
     """extra_tokens should match mode."""
     enc_add = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="add")
@@ -207,7 +195,7 @@ def test_channel_concat_gradient_flow():
 
 def test_action_dit_end_to_end_channel_concat():
     """ActionDiT with channel_concat proprio should produce correctly-shaped predictions."""
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
     bridge_layers = (0, 1)
     dit = ActionDiT(
@@ -219,7 +207,6 @@ def test_action_dit_end_to_end_channel_concat():
         video_dim=48,
         bridge_layers=bridge_layers,
         variant="joint_cross_attn",
-        detach_bridge=False,
         use_proprioception=True,
         proprio_fusion="channel_concat",
     )
@@ -227,16 +214,16 @@ def test_action_dit_end_to_end_channel_concat():
     B, T_a, T_v = 2, 8, 5
     action_tokens = torch.randn(B, T_a, 14)
     timestep = torch.randint(0, 1000, (B,)).float()
-    video_features = [torch.randn(B, T_v, 48) for _ in bridge_layers]
+    bridges = {bid: torch.randn(B, T_v, 48) for bid in bridge_layers}
     proprio = torch.randn(B, 14)
 
-    out = dit(action_tokens, video_features, timestep, proprio_state=proprio)
+    out = dit(action_tokens, bridges, timestep, proprio_state=proprio)
     assert out.shape == (B, T_a, 14)
 
 
 def test_action_dit_end_to_end_sequence_concat():
     """ActionDiT with sequence_concat should slice state tokens off the output."""
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
     bridge_layers = (0, 1)
     num_state_tokens = 3
@@ -249,7 +236,6 @@ def test_action_dit_end_to_end_sequence_concat():
         video_dim=48,
         bridge_layers=bridge_layers,
         variant="joint_cross_attn",
-        detach_bridge=False,
         use_proprioception=True,
         proprio_fusion="sequence_concat",
         num_state_tokens=num_state_tokens,
@@ -258,29 +244,25 @@ def test_action_dit_end_to_end_sequence_concat():
     B, T_a, T_v = 2, 8, 5
     action_tokens = torch.randn(B, T_a, 14)
     timestep = torch.randint(0, 1000, (B,)).float()
-    video_features = [torch.randn(B, T_v, 48) for _ in bridge_layers]
+    bridges = {bid: torch.randn(B, T_v, 48) for bid in bridge_layers}
     proprio = torch.randn(B, 14)
 
-    out = dit(action_tokens, video_features, timestep, proprio_state=proprio)
+    out = dit(action_tokens, bridges, timestep, proprio_state=proprio)
     # Output should be aligned with action seq length, not (T_a + num_state_tokens).
     assert out.shape == (B, T_a, 14)
     assert dit.num_proprio_tokens == num_state_tokens
 
 
 def test_action_dit_joint_self_attn_sequence_concat():
-    """joint_self_attn + sequence_concat must not corrupt the video prefix.
+    """joint_self_attn + sequence_concat: proprio prefix is stripped at extract_prediction.
 
-    Regression test for a name-collision bug: an earlier version reused
-    ``ActionDiTState.skip_prefix_tokens`` — a field read by wan_video.py to
-    strip *video* reference-frame prefix — to carry the *action*-side
-    proprio prefix count. That leaked the action count into video slicing
-    when this combo was exercised.
-
-    Here we just confirm the dual-stream forward runs end-to-end with the
-    combined setting and that ``skip_prefix_tokens`` (video semantics)
-    stays at 0 while ``action_prefix_tokens`` picks up the proprio count.
+    Verifies the MoT path's prepare_state → pre/post_attn_at_layer →
+    extract_prediction round trip when proprio is fused via sequence_concat:
+    the proprio prefix is carried in the action stream during attention but
+    must be sliced off by ``extract_prediction`` so the output matches the
+    raw action sequence length.
     """
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
     bridge_layers = (0, 1)
     num_state_tokens = 3
@@ -298,30 +280,30 @@ def test_action_dit_joint_self_attn_sequence_concat():
         num_state_tokens=num_state_tokens,
     )
 
-    B, T_a, T_v = 2, 8, 5
+    B, T_a = 2, 8
     action_tokens = torch.randn(B, T_a, 14)
     timestep = torch.randint(0, 1000, (B,)).float()
-    video_features = [torch.randn(B, T_v, 32) for _ in bridge_layers]
     proprio = torch.randn(B, 14)
 
-    # Full forward — exercises the joint_self_attn code path.
-    out = dit(action_tokens, video_features, timestep, proprio_state=proprio)
-    assert out.shape == (B, T_a, 14)
+    # Drive the MoT half-step pair at every layer with a dummy mixed-attention
+    # output so the action stream traverses all layers; the driver itself is
+    # exercised in tests/test_mot_driver.py.
+    astate = dit.prepare_state(action_tokens, timestep, proprio_state=proprio)
+    payload = astate.payload
+    assert payload.action_prefix_tokens == num_state_tokens
+    for layer_id in range(dit.num_layers):
+        q, k, v, post = dit.pre_attn_at_layer(layer_id, astate)
+        assert q.shape[1] == T_a + num_state_tokens
+        astate = dit.post_attn_at_layer(layer_id, astate, torch.randn_like(q), post)
 
-    # prepare_action_state is what feeds wan_video.py; verify the field
-    # split is correct.
-    state = dit.prepare_action_state(action_tokens, timestep, proprio_state=proprio)
-    assert state.skip_prefix_tokens == 0, (
-        "skip_prefix_tokens is reserved for video reference-frame slicing; the proprio count must not leak into it."
-    )
-    assert state.action_prefix_tokens == num_state_tokens
-    final = dit.finalize_action_output(state)
-    assert final.shape == (B, T_a, 14)
+    out = dit.extract_prediction(astate)
+    # extract_prediction must strip the proprio prefix back off.
+    assert out.shape == (B, T_a, 14)
 
 
 def test_action_dit_asserts_when_state_missing():
     """Building with use_proprioception=True but forwarding None should fail loudly."""
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
     bridge_layers = (0,)
     dit = ActionDiT(
@@ -333,20 +315,19 @@ def test_action_dit_asserts_when_state_missing():
         video_dim=32,
         bridge_layers=bridge_layers,
         variant="joint_cross_attn",
-        detach_bridge=False,
         use_proprioception=True,
         proprio_fusion="channel_concat",
     )
     action_tokens = torch.randn(1, 4, 14)
-    video_features = [torch.randn(1, 3, 32)]
+    bridges = {0: torch.randn(1, 3, 32)}
     timestep = torch.tensor([0.0])
     with pytest.raises(AssertionError, match="proprio_state=None"):
-        dit(action_tokens, video_features, timestep, proprio_state=None)
+        dit(action_tokens, bridges, timestep, proprio_state=None)
 
 
 def test_action_dit_proprio_disabled_by_default():
     """When use_proprioception=False the encoder should be None."""
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
     bridge_layers = (0,)
     dit = ActionDiT(
@@ -358,7 +339,6 @@ def test_action_dit_proprio_disabled_by_default():
         video_dim=32,
         bridge_layers=bridge_layers,
         variant="joint_cross_attn",
-        detach_bridge=False,
     )
     assert dit.proprio_encoder is None
     assert dit.num_proprio_tokens == 0

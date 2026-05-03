@@ -7,10 +7,7 @@ defaults:
 
 training:
   # --- Debug ---
-  debug: true                    # Debug mode: max_steps=20, save@5, constant LR
-
-  # --- Precision ---
-  mixed_precision: bf16           # Model dtype: bf16 (recommended), fp16, or no (fp32)
+  debug: false                    # Debug mode: max_steps=20, save@5, constant LR
 
   # --- Optimizer ---
   learning_rate: 1e-4             # Base learning rate for AdamW
