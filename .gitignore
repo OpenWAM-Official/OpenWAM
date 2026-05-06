@@ -2,6 +2,8 @@
 !/data/robotwin/
 /models
 /diffusers
+others/
+.chrome-tmp/
 .claude/
 
 
@@ -18,6 +20,9 @@ outputs/
 *.mv
 log*.txt
 wandb/
+
+# Local planning scratch
+plans/w0/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

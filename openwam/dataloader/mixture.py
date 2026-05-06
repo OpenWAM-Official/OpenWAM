@@ -127,15 +127,22 @@ class MixtureDataset(BaseActionDataset):
         )
 
     def _build_index_map(self):
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
         total_real = sum(len(d) for d in self._datasets)
-        self._index_map: List[tuple] = []
+        parts: List[np.ndarray] = []
         for di, (ds, w) in enumerate(zip(self._datasets, self._weights)):
             virtual_n = max(1, round(total_real * w))
-            ds_len = len(ds)
-            for vi in range(virtual_n):
-                self._index_map.append((di, vi % ds_len))
+            sample_idx = np.arange(virtual_n, dtype=np.int64) % len(ds)
+            di_arr = np.full(virtual_n, di, dtype=np.int64)
+            parts.append(np.stack([di_arr, sample_idx], axis=1))
+        combined = np.concatenate(parts, axis=0)
         rng = np.random.RandomState(self._seed)
-        rng.shuffle(self._index_map)
+        perm = rng.permutation(len(combined))
+        self._index_map = combined[perm]
 
     def _compute_mixture_stats(self) -> Optional[dict]:
         all_stats = []
@@ -173,6 +180,7 @@ class MixtureDataset(BaseActionDataset):
 
     def __getitem__(self, idx: int) -> dict:
         di, si = self._index_map[idx]
+        di, si = int(di), int(si)
         sample = self._datasets[di][si]
 
         action_traj = sample.get("action")
@@ -207,10 +215,10 @@ class MixtureDataset(BaseActionDataset):
         return self._weights
 
     def dataset_sample_counts(self) -> Dict[int, int]:
-        counts: Dict[int, int] = {}
-        for di, _ in self._index_map:
-            counts[di] = counts.get(di, 0) + 1
-        return counts
+
+        di_col = self._index_map[:, 0]
+        counts = np.bincount(di_col, minlength=len(self._datasets))
+        return {int(i): int(c) for i, c in enumerate(counts)}
 
     @classmethod
     def from_config(cls, config, split: str = "train") -> "MixtureDataset":
@@ -222,6 +230,8 @@ class MixtureDataset(BaseActionDataset):
 
 
 
+        from concurrent.futures import ThreadPoolExecutor
+
         from openwam.dataloader.registry import build_dataset
 
         def _get(cfg, key, default=None):
@@ -230,19 +240,20 @@ class MixtureDataset(BaseActionDataset):
 
         weight_strategy = _get(config, "weight_strategy", "manual")
 
-        sub_datasets: List[BaseActionDataset] = []
-        enabled_cfgs = []
+        enabled_cfgs = [c for c in config.datasets if _get(c, "enabled", True)]
+        for skipped in (c for c in config.datasets if not _get(c, "enabled", True)):
+            logger.info(
+                "MixtureDataset: skipping disabled sub-dataset (type=%s)",
+                _get(skipped, "type", "?"),
+            )
 
-        for sub_cfg in config.datasets:
-            if not _get(sub_cfg, "enabled", True):
-                logger.info(
-                    "MixtureDataset: skipping disabled sub-dataset (type=%s)",
-                    _get(sub_cfg, "type", "?"),
-                )
-                continue
-            ds = build_dataset(sub_cfg, split=split)
-            sub_datasets.append(ds)
-            enabled_cfgs.append(sub_cfg)
+
+
+
+
+        n_workers = min(len(enabled_cfgs), 16)
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            sub_datasets = list(pool.map(lambda c: build_dataset(c, split=split), enabled_cfgs))
 
         if not sub_datasets:
             raise RuntimeError("MixtureDataset: all sub-datasets are disabled or failed to load")

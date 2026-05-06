@@ -14,13 +14,26 @@ Supports two launch modes:
 Both modes use HuggingFace Accelerate internally for DeepSpeed integration.
 """
 
+import faulthandler
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
+
+faulthandler.enable(file=sys.stderr, all_threads=True)
+
+def _force_flush_excepthook(exc_type, exc_value, exc_tb):
+    rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
+    sys.stderr.write(f"\n===== UNHANDLED EXCEPTION ON RANK {rank} =====\n")
+    traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+    sys.stderr.flush()
+    sys.stdout.flush()
+
+sys.excepthook = _force_flush_excepthook
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

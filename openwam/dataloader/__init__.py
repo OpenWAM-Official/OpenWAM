@@ -16,18 +16,4 @@ from openwam.dataloader.robotwin_dataset import (
     RoboTwinDataset,
 )
 
-__all__ = [
-    "BaseActionDataset",
-    "RoboTwinDataset",
-    "MultiTaskRoboTwinDataset",
-    "DATASET_REGISTRY",
-    "register_dataset",
-    "build_dataset",
-    "list_registered_datasets",
-    "ROBOTWIN_TRAIN_TASKS",
-    "ROBOTWIN_HOLDOUT_TASKS",
-    "ROBOTWIN_ALL_TASKS",
-    "EEF_ACTION_DIM",
-    "EEF_GRIPPER_INDICES",
-    "JOINT_GRIPPER_INDICES",
-]
+__all__ = ['BaseActionDataset', 'RoboTwinDataset', 'MultiTaskRoboTwinDataset', 'DATASET_REGISTRY', 'register_dataset', 'build_dataset', 'list_registered_datasets', 'ROBOTWIN_TRAIN_TASKS', 'ROBOTWIN_HOLDOUT_TASKS', 'ROBOTWIN_ALL_TASKS', 'EEF_ACTION_DIM', 'EEF_GRIPPER_INDICES', 'JOINT_GRIPPER_INDICES']
