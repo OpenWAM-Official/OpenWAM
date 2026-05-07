@@ -16,6 +16,11 @@ from torch import Tensor
 from openwam.model.action_backbone.shared_vanilla import SharedVanillaActionBackbone
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
+from openwam.model.architectures.shared_backbone.mask import (
+    attach_shared_attention_mask,
+    set_video_attention_mask_mode,
+    validate_shared_attention_mask_mode,
+)
 
 
 @register_architecture(
@@ -40,10 +45,16 @@ class SharedBackboneVanillaArchitecture(BaseWAMArchitecture):
         action_dim = int(cfg.get("action_dim", 20))
         video_dim = self._resolve_video_dim(cfg)
         max_action_len = int(cfg.get("max_action_len", 512))
+        action_decoder_hidden_dim = cfg.get("action_decoder_hidden_dim")
+        self.attention_mask_mode = validate_shared_attention_mask_mode(str(cfg.get("attention_mask_mode", "joint")))
+        self.video_attention_mask_mode = str(cfg.get("video_attention_mask_mode", "first_frame_causal"))
+        if self.video_backbone is not None:
+            set_video_attention_mask_mode(self.video_backbone, self.video_attention_mask_mode)
         self.action_backbone = SharedVanillaActionBackbone(
             action_dim=action_dim,
             video_dim=video_dim,
             max_action_len=max_action_len,
+            action_decoder_hidden_dim=action_decoder_hidden_dim,
         )
 
     def forward(
@@ -63,6 +74,7 @@ class SharedBackboneVanillaArchitecture(BaseWAMArchitecture):
                 "video_backbone is None — pass pipe= to build_architecture or "
                 "architecture.__init__ to enable forward()."
             )
+        set_video_attention_mask_mode(vb, getattr(self, "video_attention_mask_mode", None))
 
         vstate = vb.prepare(
             use_gradient_checkpointing=use_gradient_checkpointing,
@@ -94,6 +106,12 @@ class SharedBackboneVanillaArchitecture(BaseWAMArchitecture):
             n_action,
             timestep=action_timestep,
             t_mod_bias=ab.modality_tmod_bias,
+        )
+        attach_shared_attention_mask(
+            vb,
+            vstate,
+            n_action,
+            attention_mask_mode=getattr(self, "attention_mask_mode", "joint"),
         )
 
         for block_id in range(vb.num_layers):

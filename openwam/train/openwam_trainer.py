@@ -383,6 +383,35 @@ class OpenWAMTrainer(BaseTrainer):
             }
             wandb_run.log(log_dict, step=global_step)
 
+        if bool(ctx.get("debug", False)):
+            is_main = self.accelerator is None or self.accelerator.is_main_process
+            if not is_main:
+                return
+            opt_step = int(ctx.get("opt_step", global_step))
+            msg = (
+                f"[debug][step {global_step:04d} opt {opt_step:04d}] "
+                f"loss={loss_total:.6f} video={loss_video:.6f} action={loss_action:.6f} "
+                f"grad_norm={grad_norm:.6f} lr={lr:.3e} epoch={epoch} "
+                f"steps_per_sec={steps_per_sec:.3f}"
+            )
+            logger.info(msg)
+            if pbar is not None:
+                pbar.write(msg)
+            else:
+                print(msg, flush=True)
+
+            output_path = ctx.get("output_path")
+            if output_path:
+                loss_log_path = os.path.join(output_path, "debug_loss_history.csv")
+                write_header = not os.path.exists(loss_log_path)
+                with open(loss_log_path, "a", encoding="utf-8") as f:
+                    if write_header:
+                        f.write("step,opt_step,epoch,loss,loss_video,loss_action,grad_norm,lr,steps_per_sec\n")
+                    f.write(
+                        f"{global_step},{opt_step},{epoch},{loss_total:.10g},{loss_video:.10g},"
+                        f"{loss_action:.10g},{grad_norm:.10g},{lr:.10g},{steps_per_sec:.10g}\n"
+                    )
+
     def on_train_end(self, global_step: int, *, output_path: str, wandb_run=None, **ctx):
         """Hook called after training completes. Override for custom teardown."""
         if wandb_run is not None:
@@ -619,6 +648,9 @@ class OpenWAMTrainer(BaseTrainer):
                     wandb_run=wandb_run,
                     steps_per_sec=steps_per_sec,
                     batch_size=batch_size,
+                    debug=debug,
+                    output_path=output_path,
+                    opt_step=opt_step,
                 )
 
                 # Periodic checkpoint saving. ALL ranks must enter

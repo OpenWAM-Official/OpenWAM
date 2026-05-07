@@ -169,7 +169,7 @@ def test_import_architecture_registry():
             "action_dim": 7,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "bridge_layers": (0, 1),
+            "expert_layers": (0, 1),
         },
         "shared_backbone_vanilla": {
             "framework": "shared_backbone",

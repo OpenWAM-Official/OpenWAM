@@ -4,7 +4,7 @@ Each concrete subclass exposes only the methods its architecture's
 ``forward()`` invokes. Required attributes on every subclass:
 
     action_dim:    int
-    bridge_layers: tuple[int, ...]
+    bridge_layers or expert_layers: tuple[int, ...] when used by the architecture
     action_mean:   Tensor — per-dim mean for denormalization
     action_std:    Tensor — per-dim std for denormalization
     scheduler:     ActionScheduler (provided by ``ActionBackbone.__init__``)

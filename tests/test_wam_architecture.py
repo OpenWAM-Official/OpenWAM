@@ -73,7 +73,7 @@ def test_build_architecture_shared_backbone_moe():
     }
     arch = build_architecture("shared_backbone_moe", cfg)
     assert arch.action_dim == 7
-    assert arch.bridge_layers == (1, 3)
+    assert arch.expert_layers == (1, 3)
     assert arch.action_backbone is not None
     assert len(arch.action_backbone.expert_blocks) == 2
 
@@ -85,7 +85,7 @@ def test_build_architecture_shared():
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
     arch = build_architecture("shared_backbone_vanilla", cfg)
     assert arch.action_dim == 7
-    assert arch.bridge_layers == ()
+    assert arch.expert_layers == ()
 
 
 def test_build_architecture_unknown():
@@ -453,8 +453,8 @@ def test_dual_system_joint_self_attn_creates_dit_state():
     assert payload.action_freqs is not None
 
 
-def test_moe_uses_expert_layers_as_bridge_layers():
-    """SharedBackbone moe variant exposes expert_layers via bridge_layers."""
+def test_moe_uses_expert_layers():
+    """SharedBackbone moe variant exposes expert layer ids."""
     from openwam.model import build_architecture
 
     cfg = {
@@ -466,17 +466,17 @@ def test_moe_uses_expert_layers_as_bridge_layers():
         "expert_layers": (1, 3),
     }
     arch = build_architecture("shared_backbone_moe", cfg)
-    assert arch.bridge_layers == (1, 3)
+    assert arch.expert_layers == (1, 3)
     assert arch.action_backbone.expert_layers_set == {1, 3}
 
 
-def test_shared_backbone_has_no_bridge_layers():
-    """SharedBackbone vanilla has no bridge layers."""
+def test_shared_backbone_has_no_expert_layers():
+    """SharedBackbone vanilla has no expert layers."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 5}
     arch = build_architecture("shared_backbone_vanilla", cfg)
-    assert arch.bridge_layers == ()
+    assert arch.expert_layers == ()
 
 
 def test_normalize_architecture_spec_shared_backbone():

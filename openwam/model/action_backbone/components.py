@@ -94,18 +94,6 @@ class ActionEmbedding(nn.Module):
         return self.proj(x)
 
 
-class LearnedPositionalEncoding(nn.Module):
-    """Learned positional encoding for action token sequences."""
-
-    def __init__(self, max_len: int, dim: int, scale: float = 0.02):
-        super().__init__()
-        self.embedding = nn.Parameter(torch.randn(1, max_len, dim) * scale)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Add positional encoding to input tensor (B, T, dim)."""
-        return x + self.embedding[:, : x.shape[1], :]
-
-
 class TimestepEmbedding(nn.Module):
     """Sinusoidal timestep embedding followed by MLP projection.
 
@@ -252,7 +240,7 @@ class ActionEncoder(nn.Module):
 
 
 class ActionOutputMLP(nn.Module):
-    """2-layer MLP output projection with a narrow bottleneck hidden dim.
+    """2-layer MLP output projection for action prediction.
 
     Unlike `ActionOutputHead` (LayerNorm + AdaLN + Linear, zero-init output
     for a stable start), this head is a plain Linear -> ReLU -> Linear stack
@@ -262,7 +250,7 @@ class ActionOutputMLP(nn.Module):
 
     Args:
         input_dim:  Hidden size of incoming action tokens (= video_dim).
-        hidden_dim: Bottleneck width.
+        hidden_dim: Hidden width.
         action_dim: Raw action vector dimension.
     """
 

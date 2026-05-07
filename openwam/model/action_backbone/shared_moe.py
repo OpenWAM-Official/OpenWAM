@@ -29,7 +29,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -38,7 +38,6 @@ from openwam.model.action_backbone.backbone import ActionBackbone
 from openwam.model.action_backbone.components import (
     ActionEncoder,
     ActionOutputMLP,
-    LearnedPositionalEncoding,
     TimestepEmbedding,
     TimestepModulation,
 )
@@ -99,7 +98,7 @@ class SharedMoEActionBackbone(ActionBackbone):
     """Action-side helpers for SharedBackbone MoE.
 
     Owns:
-      - ``input_proj`` / ``pos_encoding`` / ``action_output_head``:
+      - ``input_proj`` / ``action_output_head``:
         encode/decode for action tokens (project into video_dim, decode back).
       - ``time_embedding`` / ``time_projection``: produce the AdaLN t_mod
         consumed by the expert FFN blocks. **Independent from the video DiT's
@@ -130,24 +129,26 @@ class SharedMoEActionBackbone(ActionBackbone):
         expert_layers: Tuple[int, ...],
         freq_dim: int = 256,
         max_action_len: int = 512,
+        action_decoder_hidden_dim: Optional[int] = None,
         eps: float = 1e-6,
     ):
         super().__init__()
         self._action_dim = int(action_dim)
         self._video_dim = int(video_dim)
         self._max_action_len = int(max_action_len)
+        self._action_decoder_hidden_dim = int(action_decoder_hidden_dim or video_dim)
         self.expert_layers = tuple(int(i) for i in expert_layers)
         self.expert_layers_set = set(self.expert_layers)
+        self.expert_layer_to_index = {layer_id: idx for idx, layer_id in enumerate(self.expert_layers)}
         self.num_experts = len(self.expert_layers)
 
         self.input_proj = ActionEncoder(self._action_dim, self._video_dim)
-        self.pos_encoding = LearnedPositionalEncoding(max_action_len, self._video_dim)
         self.time_embedding = TimestepEmbedding(freq_dim, self._video_dim)
         self.time_projection = TimestepModulation(self._video_dim, 3)
         self.expert_blocks = nn.ModuleList(
             [ExpertFFNBlock(self._video_dim, expert_ffn_dim, eps) for _ in range(self.num_experts)]
         )
-        self.action_output_head = ActionOutputMLP(self._video_dim, 64, self._action_dim)
+        self.action_output_head = ActionOutputMLP(self._video_dim, self._action_decoder_hidden_dim, self._action_dim)
         self.modality_tmod_bias = nn.Parameter(torch.zeros(1, 1, 6, self._video_dim))
         self.register_buffer("action_mean", torch.zeros(self._action_dim), persistent=True)
         self.register_buffer("action_std", torch.ones(self._action_dim), persistent=True)
@@ -155,10 +156,6 @@ class SharedMoEActionBackbone(ActionBackbone):
     @property
     def action_dim(self) -> int:
         return self._action_dim
-
-    @property
-    def bridge_layers(self) -> Tuple[int, ...]:
-        return self.expert_layers
 
     def encode(self, noisy_actions: torch.Tensor, timestep: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Project actions and build expert-FFN AdaLN modulation.
@@ -178,7 +175,6 @@ class SharedMoEActionBackbone(ActionBackbone):
             raise ValueError(f"Action sequence length {T} exceeds max_action_len {self._max_action_len}.")
 
         x = self.input_proj(noisy_actions, timestep)
-        x = self.pos_encoding(x)
 
         per_token = timestep.dim() == 2 and timestep.shape == (B, T)
         if per_token:
@@ -213,7 +209,7 @@ class SharedMoEActionBackbone(ActionBackbone):
         Returns:
             (B, T_action, video_dim) corrected action tokens.
         """
-        return self.expert_blocks[self.expert_layers.index(layer_id)](x_action, t_mod)
+        return self.expert_blocks[self.expert_layer_to_index[layer_id]](x_action, t_mod)
 
     def decode(self, action_tokens: torch.Tensor) -> torch.Tensor:
         """Project action tokens back from video_dim to action_dim."""

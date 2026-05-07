@@ -9,7 +9,7 @@ don't need real Wan checkpoints.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -29,6 +29,9 @@ class _StubBlockLoopState:
 
     x: torch.Tensor
     t_mod: torch.Tensor = None  # type: ignore[assignment]
+    h: int = 1
+    w: int = 1
+    extras: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.t_mod is None:
@@ -51,6 +54,7 @@ class _StubVideoBackbone(nn.Module):
         # The block list is real torch.nn.Linears so grad flows through if needed.
         self.blocks = nn.ModuleList([nn.Linear(dim, dim) for _ in range(num_layers)])
         self.run_block_calls: list[int] = []
+        self.seen_shared_attention_masks: list[torch.Tensor | None] = []
         self.injected_action_tokens = 0
 
     @property
@@ -59,12 +63,21 @@ class _StubVideoBackbone(nn.Module):
 
     def prepare(self, **_kw):
         B = 1
-        return _StubBlockLoopState(x=torch.zeros(B, self._video_seq, self.dim))
+        return _StubBlockLoopState(
+            x=torch.zeros(B, self._video_seq, self.dim),
+            h=1,
+            w=self._video_seq,
+            extras={},
+        )
 
     def run_block(self, block_id, state):
         self.run_block_calls.append(block_id)
+        self.seen_shared_attention_masks.append(state.extras.get("shared_attention_mask"))
         state.x = self.blocks[block_id](state.x)
         return state
+
+    def build_video_to_video_mask(self, *, video_seq_len, video_tokens_per_frame, device):  # noqa: ARG002
+        return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
 
     def finalize(self, state):
         # Caller has already extracted action tokens; just return a fixed-shape
@@ -133,6 +146,29 @@ def test_vanilla_forward_runs_full_block_loop_with_action_tokens():
     assert video_pred is not None
 
 
+def test_vanilla_forward_passes_joint_mask_to_every_video_block():
+    arch = _make_vanilla(video_dim=64, num_layers=4)
+    arch.eval()
+    vb = arch.video_backbone
+
+    B, T = 1, 5
+    actions = torch.randn(B, T, 7)
+    timestep = torch.tensor([100.0])
+
+    with torch.no_grad():
+        arch.forward(actions, timestep)
+
+    assert len(vb.seen_shared_attention_masks) == vb.num_layers
+    assert all(mask is not None for mask in vb.seen_shared_attention_masks)
+    first_mask = vb.seen_shared_attention_masks[0]
+    assert all(mask is first_mask for mask in vb.seen_shared_attention_masks)
+    assert first_mask.shape == (vb._video_seq + T, vb._video_seq + T)
+    assert first_mask.dtype == torch.bool
+    assert not first_mask[: vb._video_seq, vb._video_seq :].any()
+    assert first_mask[vb._video_seq :, : vb._video_seq].all()
+    assert first_mask[vb._video_seq :, vb._video_seq :].all()
+
+
 def test_vanilla_forward_video_only_when_actions_none():
     arch = _make_vanilla(video_dim=64, num_layers=3)
     arch.eval()
@@ -174,6 +210,29 @@ def test_moe_forward_calls_apply_expert_only_at_expert_layers():
     assert vb.run_block_calls == list(range(vb.num_layers))
     assert apply_expert_calls == [0, 2, 4]
     assert action_pred.shape == (B, T, 7)
+
+
+def test_moe_forward_passes_joint_mask_to_every_video_block():
+    arch = _make_moe(video_dim=64, num_layers=5, expert_layers=(0, 2, 4))
+    arch.eval()
+    vb = arch.video_backbone
+
+    B, T = 1, 6
+    actions = torch.randn(B, T, 7)
+    timestep = torch.tensor([100.0])
+
+    with torch.no_grad():
+        arch.forward(actions, timestep)
+
+    assert len(vb.seen_shared_attention_masks) == vb.num_layers
+    assert all(mask is not None for mask in vb.seen_shared_attention_masks)
+    first_mask = vb.seen_shared_attention_masks[0]
+    assert all(mask is first_mask for mask in vb.seen_shared_attention_masks)
+    assert first_mask.shape == (vb._video_seq + T, vb._video_seq + T)
+    assert first_mask.dtype == torch.bool
+    assert not first_mask[: vb._video_seq, vb._video_seq :].any()
+    assert first_mask[vb._video_seq :, : vb._video_seq].all()
+    assert first_mask[vb._video_seq :, vb._video_seq :].all()
 
 
 def test_action_backbone_does_not_implement_run_block():

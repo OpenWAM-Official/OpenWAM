@@ -24,6 +24,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
@@ -378,6 +379,23 @@ class WanVideoBackbone(VideoBackbone):
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
         dit = state.extras["dit"]
         block = dit.blocks[block_id]
+        attn_mask = state.extras.get("shared_attention_mask")
+
+        if attn_mask is not None:
+            state.x = gradient_checkpoint_forward(
+                lambda x, context, t_mod, freqs, mask, _block=block: self._run_masked_block(
+                    _block, x, context, t_mod, freqs, mask
+                ),
+                state.use_gradient_checkpointing,
+                state.use_gradient_checkpointing_offload,
+                state.x,
+                state.context,
+                state.t_mod,
+                state.freqs,
+                attn_mask,
+            )
+            self._apply_post_block_residuals(block_id, state)
+            return state
 
         state.x = gradient_checkpoint_forward(
             block,
@@ -391,6 +409,42 @@ class WanVideoBackbone(VideoBackbone):
 
         self._apply_post_block_residuals(block_id, state)
         return state
+
+    @staticmethod
+    def _run_masked_block(block, x: Tensor, context: Tensor, t_mod: Tensor, freqs: Tensor, attn_mask: Tensor) -> Tensor:
+        """Wan DiT block forward with an explicit self-attention mask.
+
+        This mirrors :meth:`openwam.model.video_backbone.wan.dit.DiTBlock.forward`
+        and only swaps the self-attention call to SDPA so the bool mask can be
+        honored. Cross-attention and FFN stay byte-for-byte equivalent in
+        ordering to the standard block.
+        """
+        has_seq = t_mod.dim() == 4
+        chunk_dim = 2 if has_seq else 1
+        chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=chunk_dim)
+        if has_seq:
+            chunks = tuple(c.squeeze(2) for c in chunks)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
+
+        input_x = modulate(block.norm1(x), shift_msa, scale_msa)
+        sa = block.self_attn
+        q = sa.norm_q(sa.q(input_x))
+        k = sa.norm_k(sa.k(input_x))
+        v = sa.v(input_x)
+        q = rope_apply(q, freqs, sa.num_heads)
+        k = rope_apply(k, freqs, sa.num_heads)
+
+        q = rearrange(q, "b s (n d) -> b n s d", n=sa.num_heads)
+        k = rearrange(k, "b s (n d) -> b n s d", n=sa.num_heads)
+        v = rearrange(v, "b s (n d) -> b n s d", n=sa.num_heads)
+        attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        attn_out = rearrange(attn_out, "b n s d -> b s (n d)", n=sa.num_heads)
+
+        x = block.gate(x, gate_msa, sa.o(attn_out))
+        x = x + block.cross_attn(block.norm3(x), context)
+        input_x = modulate(block.norm2(x), shift_mlp, scale_mlp)
+        x = block.gate(x, gate_mlp, block.ffn(input_x))
+        return x
 
     def _apply_post_block_residuals(self, block_id: int, state: BlockLoopState) -> None:
         """Apply post-block residuals (VACE hint) to ``state.x``.
@@ -527,7 +581,7 @@ class WanVideoBackbone(VideoBackbone):
         state.x = torch.cat([state.x, action_tokens.to(state.x.dtype)], dim=1)
         state.freqs = self._extend_freqs_with_action_tokens(state.freqs, n_action)
         if self._is_per_token_t_mod_active(state) and timestep is not None and t_mod_bias is not None:
-            a_tmod = self._build_action_t_mod(timestep, t_mod_bias, n_action)
+            a_tmod = self._build_action_t_mod(timestep, t_mod_bias, n_action, batch_size=state.x.shape[0])
             state.t_mod = torch.cat([state.t_mod, a_tmod.to(state.t_mod.dtype)], dim=1)
         return state
 
@@ -956,9 +1010,21 @@ class WanVideoBackbone(VideoBackbone):
     def _is_per_token_t_mod_active(self, state: BlockLoopState) -> bool:
         return state.t_mod.dim() == 4
 
-    def _build_action_t_mod(self, action_timestep: Tensor, modality_bias: Tensor, n_action_tokens: int) -> Tensor:
+    def _build_action_t_mod(
+        self,
+        action_timestep: Tensor,
+        modality_bias: Tensor,
+        n_action_tokens: int,
+        *,
+        batch_size: int,
+    ) -> Tensor:
         dit = self._dit
         if action_timestep.dim() == 2:
+            if action_timestep.shape != (batch_size, n_action_tokens):
+                raise ValueError(
+                    f"action_timestep has shape {tuple(action_timestep.shape)}; expected "
+                    f"(B={batch_size}, n_action_tokens={n_action_tokens})."
+                )
             B_t = action_timestep.shape[0]
             flat = action_timestep.reshape(B_t * n_action_tokens)
             t_emb = sinusoidal_embedding_1d(dit.freq_dim, flat)
@@ -966,40 +1032,44 @@ class WanVideoBackbone(VideoBackbone):
             t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
             t_mod = t_mod.view(B_t, n_action_tokens, 6, dit.dim)
         else:
-            t_emb = sinusoidal_embedding_1d(dit.freq_dim, action_timestep.flatten())
+            timestep_flat = action_timestep.flatten()
+            if timestep_flat.numel() == 1:
+                timestep_flat = timestep_flat.expand(batch_size)
+            elif timestep_flat.numel() != batch_size:
+                raise ValueError(
+                    f"action_timestep has shape {tuple(action_timestep.shape)}; expected scalar, "
+                    f"(B={batch_size},), or (B={batch_size}, n_action_tokens={n_action_tokens})."
+                )
+            t_emb = sinusoidal_embedding_1d(dit.freq_dim, timestep_flat)
             t = dit.time_embedding(t_emb.to(modality_bias.dtype))
             t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
             t_mod = t_mod.unsqueeze(1).expand(-1, n_action_tokens, -1, -1)
         return t_mod + modality_bias.to(dtype=t_mod.dtype, device=t_mod.device)
 
     def _extend_freqs_with_action_tokens(self, freqs: Tensor, n_action_tokens: int) -> Tensor:
-        """Append ``n_action_tokens`` identity (1+0i) RoPE frequencies to ``freqs``.
+        """Append SharedBackbone 1D action RoPE frequencies to ``freqs``.
 
-        SharedBackbone concatenates action tokens after video tokens before the
-        shared self-attn. Using identity complex (magnitude=1, angle=0) for those
-        positions makes RoPE a no-op on action Q/K, which avoids two failure modes:
+        This mirrors DreamZero's separate action RoPE: action tokens receive a
+        1D sequence position in action-horizon space instead of being treated as
+        extra video tokens.
 
-        1. Treating action tokens as "extra video frames at positions Sv, Sv+1,
-           ..." would inject a meaningless temporal/spatial relation between the
-           two modalities through the rotation angle.
-        2. Across video↔action attention, identity rotation means the dot product
-           is determined purely by the projected token content, not by a
-           positional bias the modalities don't share.
-
-        Action-token *sequential* ordering is therefore carried by
-        ``LearnedPositionalEncoding`` in the action backbones, NOT by RoPE.
         Tied to Wan's complex-form ``view_as_complex`` RoPE in
         ``components.rope_apply_1d`` — switching the video DiT to a different
-        RoPE representation (sincos table, polar pair, …) requires changing
-        this identity element accordingly.
+        RoPE representation (sincos table, polar pair, …) requires changing this
+        helper accordingly.
         """
         if n_action_tokens <= 0:
             return freqs
-        identity_freq = torch.polar(
-            torch.ones(n_action_tokens, 1, freqs.shape[-1], device=freqs.device),
-            torch.zeros(n_action_tokens, 1, freqs.shape[-1], device=freqs.device),
-        )
-        return torch.cat([freqs, identity_freq], dim=0)
+        return torch.cat([freqs, self._build_1d_action_freqs(freqs, n_action_tokens)], dim=0)
+
+    @staticmethod
+    def _build_1d_action_freqs(freqs: Tensor, n_action_tokens: int, theta: float = 10000.0) -> Tensor:
+        head_dim = int(freqs.shape[-1]) * 2
+        positions = torch.arange(n_action_tokens, dtype=torch.float64, device=freqs.device)
+        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float64, device=freqs.device) / head_dim))
+        angles = torch.outer(positions, inv_freq)
+        action_freqs = torch.polar(torch.ones_like(angles), angles).view(n_action_tokens, 1, -1)
+        return action_freqs.to(dtype=freqs.dtype)
 
     def _compute_reference_prefix_len(self, reference_latents: Optional[Tensor]) -> int:
         if reference_latents is None:

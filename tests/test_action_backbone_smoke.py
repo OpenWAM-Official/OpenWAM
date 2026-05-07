@@ -15,7 +15,6 @@ def test_components_import():
         ActionEncoder,
         ActionOutputHead,
         ActionOutputMLP,
-        LearnedPositionalEncoding,
         RMSNorm,
         SinusoidalPositionalEncoding,
         TimestepEmbedding,
@@ -30,7 +29,6 @@ def test_components_import():
             ActionEncoder,
             ActionOutputHead,
             ActionOutputMLP,
-            LearnedPositionalEncoding,
             RMSNorm,
             SinusoidalPositionalEncoding,
             TimestepEmbedding,
@@ -198,12 +196,13 @@ def test_action_encoder_timestep_mismatch_raises():
 
 
 def test_shared_backbone_encode_uses_action_encoder():
-    """SharedVanillaActionBackbone.encode should run ActionEncoder + pos encoding."""
+    """SharedVanillaActionBackbone.encode should run ActionEncoder without learned PE."""
     from openwam.model.action_backbone.components import ActionEncoder
     from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
     arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     assert isinstance(arch.action_backbone.input_proj, ActionEncoder)
+    assert not hasattr(arch.action_backbone, "pos_encoding")
 
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
@@ -236,6 +235,7 @@ def test_moe_encode_uses_action_encoder():
         }
     )
     assert isinstance(arch.action_backbone.input_proj, ActionEncoder)
+    assert not hasattr(arch.action_backbone, "pos_encoding")
 
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2)
@@ -346,12 +346,29 @@ def test_shared_backbone_uses_action_output_mlp():
 
     arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
+    assert arch.action_backbone.action_output_head.layer1.out_features == 128
 
     # Simulate the (B, T_action, video_dim) action tail extracted by
     # vb.extract_action_tokens after the DiT loop.
     final_hidden = torch.randn(2, 16, 128)
     pred = arch.action_backbone.decode(final_hidden)
     assert pred.shape == (2, 16, 14)
+
+
+def test_shared_backbone_action_decoder_hidden_dim_can_be_overridden():
+    """SharedBackbone decoder defaults wide but still supports explicit config."""
+    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
+
+    arch = SharedBackboneVanillaArchitecture(
+        cfg={
+            "action_dim": 14,
+            "video_dim": 128,
+            "max_action_len": 64,
+            "action_decoder_hidden_dim": 256,
+        }
+    )
+
+    assert arch.action_backbone.action_output_head.layer1.out_features == 256
 
 
 def test_moe_expert_uses_action_output_mlp():
@@ -368,6 +385,7 @@ def test_moe_expert_uses_action_output_mlp():
         }
     )
     assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
+    assert arch.action_backbone.action_output_head.layer1.out_features == 128
 
     # encode → simulate per-block updates → decode roundtrip.
     actions = torch.randn(2, 16, 14)

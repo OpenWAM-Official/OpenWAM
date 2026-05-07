@@ -10,8 +10,8 @@ verify that:
   1. The architecture builds from a yaml-shaped config (canonical
      ``framework`` + ``variant`` fields) under a Wan2.2-TI2V-5B-shaped mock
      video backbone (30 layers).
-  2. ``len(action_backbone.bridge_layers)`` matches what the config specifies
-     (explicit list, ``bridge_interval``, or empty for vanilla).
+  2. The selected action-side layer ids match what the config specifies
+     (dual bridge layers, shared expert layers, or empty for vanilla).
   3. ``compute_loss(...)`` runs end-to-end and returns finite scalar losses.
 
 Action backbone parameter counts are reported via the test's ``-s`` output for
@@ -49,7 +49,7 @@ def _build_arch(registry_name: str, cfg: dict, *, num_layers: int = WAN_NUM_LAYE
     so we inject those fields directly into the cfg and attach a mock
     backbone afterwards. This exercises exactly the same architecture
     init code path as production for everything that matters here
-    (bridge_interval resolution, action_backbone instantiation).
+    (bridge/expert layer resolution, action_backbone instantiation).
     """
     from openwam.model import build_architecture
 
@@ -65,6 +65,28 @@ def _build_arch(registry_name: str, cfg: dict, *, num_layers: int = WAN_NUM_LAYE
     # at __init__ time — wire it now that the mock backbone is attached.
     if hasattr(arch, "build_mot_driver"):
         arch.build_mot_driver()
+    return arch
+
+
+def _build_shared_moe_arch(cfg: dict, *, num_layers: int = WAN_NUM_LAYERS):
+    """Build SharedBackbone MoE with the mock backbone present during __init__.
+
+    MoE interval mode must resolve from the actual video_backbone.num_layers,
+    so unlike other variants this cannot be initialized first and patched later.
+    """
+    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
+
+    cfg = dict(cfg)
+    cfg.setdefault("video_dim", WAN_VIDEO_DIM)
+    num_heads = int(cfg.get("num_heads", 4))
+
+    class _SharedMoEWithMockBackbone(SharedBackboneMoEArchitecture):
+        def _init_video_backbone(self, _cfg):
+            self.video_backbone = _MockVideoBackbone(dim=WAN_VIDEO_DIM, num_layers=num_layers, num_heads=num_heads)
+
+    arch = _SharedMoEWithMockBackbone(cfg)
+    arch._device = torch.device("cpu")
+    arch._dtype = torch.float32
     return arch
 
 
@@ -275,7 +297,7 @@ def test_dual_system_self_attn_rejects_interval_gt_1():
 
 
 def test_shared_backbone_vanilla_loads_and_runs():
-    """Vanilla SharedBackbone has no bridge_layers — action rides the video DiT."""
+    """Vanilla SharedBackbone has no experts — action rides the video DiT."""
     cfg = {
         "framework": "shared_backbone",
         "variant": "vanilla",
@@ -284,7 +306,7 @@ def test_shared_backbone_vanilla_loads_and_runs():
     }
     arch = _build_arch("shared_backbone_vanilla", cfg)
 
-    assert arch.action_backbone.bridge_layers == ()
+    assert arch.action_backbone.expert_layers == ()
 
     n_params = _count_params(arch.action_backbone)
     print(f"\n[shared_backbone_vanilla] action_backbone params: {n_params:,}")
@@ -298,23 +320,20 @@ def test_shared_backbone_vanilla_loads_and_runs():
 
 
 def test_shared_backbone_moe_default_all_layers():
-    """MoE with ``bridge_layers: null + bridge_interval: 1``: one expert per video DiT layer."""
-    # shared_backbone_moe shares ``resolve_bridge_layers`` with dual_system: pass
-    # ``bridge_layers: null`` + ``bridge_interval: 1`` to mean "one expert per
-    # inferred video DiT layer".
+    """MoE with ``expert_layers: null + expert_interval: 1``: one expert per video DiT layer."""
     cfg = {
         "framework": "shared_backbone",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 1024,
-        "bridge_layers": None,
-        "bridge_interval": 1,
+        "expert_layers": None,
+        "expert_interval": 1,
     }
-    arch = _build_arch("shared_backbone_moe", cfg)
+    arch = _build_shared_moe_arch(cfg)
 
-    bl = arch.action_backbone.bridge_layers  # MoE exposes expert_layers via bridge_layers
-    assert len(bl) == WAN_NUM_LAYERS, f"expected {WAN_NUM_LAYERS} expert layers, got {len(bl)}"
-    assert bl == tuple(range(WAN_NUM_LAYERS))
+    expert_layers = arch.action_backbone.expert_layers
+    assert len(expert_layers) == WAN_NUM_LAYERS, f"expected {WAN_NUM_LAYERS} expert layers, got {len(expert_layers)}"
+    assert expert_layers == tuple(range(WAN_NUM_LAYERS))
     assert len(arch.action_backbone.expert_blocks) == WAN_NUM_LAYERS
 
     n_params = _count_params(arch.action_backbone)
@@ -323,19 +342,119 @@ def test_shared_backbone_moe_default_all_layers():
     assert torch.isfinite(out["loss"])
 
 
+def test_shared_backbone_moe_interval_uses_video_backbone_num_layers():
+    """MoE expert_interval resolves from the attached video backbone depth."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
+        "action_dim": ACTION_DIM,
+        "expert_ffn_dim": 256,
+        "expert_layers": None,
+        "expert_interval": 2,
+    }
+
+    arch = _build_shared_moe_arch(cfg, num_layers=4)
+
+    assert arch.action_backbone.expert_layers == (0, 2)
+
+
+def test_shared_backbone_moe_default_expert_ffn_dim_matches_yaml_default():
+    """Direct construction should use the same expert_ffn_dim default as shared_backbone.yaml."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
+        "action_dim": ACTION_DIM,
+        "expert_layers": [0],
+    }
+
+    arch = _build_shared_moe_arch(cfg, num_layers=2)
+
+    assert arch.action_backbone.expert_blocks[0].ffn[0].out_features == 4096
+
+
+def test_shared_backbone_moe_interval_requires_video_backbone():
+    """Interval mode should not fall back to num_dit_layers/30 without a backbone."""
+    from openwam.model import build_architecture
+
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
+        "action_dim": ACTION_DIM,
+        "video_dim": WAN_VIDEO_DIM,
+        "expert_ffn_dim": 256,
+        "expert_layers": None,
+        "expert_interval": 2,
+    }
+
+    with pytest.raises(ValueError, match="video_backbone.num_layers"):
+        build_architecture("shared_backbone_moe", cfg)
+
+
+def test_shared_backbone_moe_rejects_legacy_bridge_layers_key():
+    """Old shared_backbone MoE configs should fail loudly instead of changing topology silently."""
+    from openwam.model.architectures.shared_backbone.moe import resolve_expert_layers
+
+    with pytest.raises(ValueError, match="expert_layers"):
+        resolve_expert_layers({"bridge_layers": [0, 2]}, num_layers=4)
+
+
+def test_shared_backbone_moe_rejects_legacy_bridge_interval_key():
+    """Old interval configs must be renamed to expert_interval."""
+    from openwam.model.architectures.shared_backbone.moe import resolve_expert_layers
+
+    with pytest.raises(ValueError, match="expert_interval"):
+        resolve_expert_layers({"expert_layers": None, "bridge_interval": 2}, num_layers=4)
+
+
+def test_shared_backbone_moe_prefers_expert_keys_when_legacy_keys_are_also_present():
+    """Presence of old keys does not alias or override explicit expert_* keys."""
+    from openwam.model.architectures.shared_backbone.moe import resolve_expert_layers
+
+    layers = resolve_expert_layers(
+        {
+            "bridge_layers": [0, 1, 2],
+            "bridge_interval": 1,
+            "expert_layers": None,
+            "expert_interval": 2,
+        },
+        num_layers=5,
+    )
+
+    assert layers == (0, 2, 4)
+
+
+def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth():
+    """Explicit expert layers can build without a backbone but must match the attached backbone at forward."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
+        "action_dim": ACTION_DIM,
+        "video_dim": WAN_VIDEO_DIM,
+        "expert_ffn_dim": 256,
+        "expert_layers": [0, 5],
+    }
+    arch = _build_arch("shared_backbone_moe", cfg, num_layers=4)
+    arch.init_training_schedulers(1000)
+    actions = torch.randn(1, T_ACTION, ACTION_DIM)
+    inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
+
+    with pytest.raises(ValueError, match="expert_layers"):
+        arch.compute_loss(**inputs, actions=actions, current_step=0)
+
+
 def test_shared_backbone_moe_explicit_expert_layers():
-    """Explicit bridge_layers controls which video DiT layers carry an expert FFN."""
+    """Explicit expert_layers controls which video DiT layers carry an expert FFN."""
     expert_layers = (1, 4, 7, 10, 13, 16, 19, 22, 25, 28)
     cfg = {
         "framework": "shared_backbone",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 1024,
-        "bridge_layers": list(expert_layers),
+        "expert_layers": list(expert_layers),
     }
-    arch = _build_arch("shared_backbone_moe", cfg)
+    arch = _build_shared_moe_arch(cfg)
 
-    assert arch.action_backbone.bridge_layers == expert_layers
+    assert arch.action_backbone.expert_layers == expert_layers
     assert len(arch.action_backbone.expert_blocks) == len(expert_layers) == 10
 
     n_params = _count_params(arch.action_backbone)
@@ -349,7 +468,7 @@ def test_shared_backbone_moe_explicit_expert_layers():
 
 
 @pytest.mark.parametrize(
-    "registry_name,cfg,expected_bridge_count",
+    "registry_name,cfg,expected_selected_count",
     [
         (
             "dual_system_cross_attn",
@@ -392,21 +511,28 @@ def test_shared_backbone_moe_explicit_expert_layers():
                 "variant": "moe",
                 "action_dim": ACTION_DIM,
                 "expert_ffn_dim": 1024,
-                "bridge_layers": list(range(0, WAN_NUM_LAYERS, 2)),
+                "expert_layers": list(range(0, WAN_NUM_LAYERS, 2)),
             },
             15,
         ),
     ],
     ids=["dual_cross_attn", "dual_self_attn", "shared_vanilla", "shared_moe"],
 )
-def test_all_variants_load_and_run(registry_name, cfg, expected_bridge_count):
-    """Parametric smoke: every variant builds, has expected bridge count, runs loss."""
-    arch = _build_arch(registry_name, cfg)
+def test_all_variants_load_and_run(registry_name, cfg, expected_selected_count):
+    """Parametric smoke: every variant builds, has expected selected layer count, runs loss."""
+    if registry_name == "shared_backbone_moe":
+        arch = _build_shared_moe_arch(cfg)
+    else:
+        arch = _build_arch(registry_name, cfg)
 
-    assert len(arch.action_backbone.bridge_layers) == expected_bridge_count
+    if hasattr(arch.action_backbone, "expert_layers"):
+        selected_layers = arch.action_backbone.expert_layers
+    else:
+        selected_layers = arch.action_backbone.bridge_layers
+    assert len(selected_layers) == expected_selected_count
 
     n_params = _count_params(arch.action_backbone)
-    print(f"\n[{registry_name}] bridge_layers={len(arch.action_backbone.bridge_layers)}, params={n_params:,}")
+    print(f"\n[{registry_name}] selected_layers={len(selected_layers)}, params={n_params:,}")
 
     out = _run_compute_loss(arch)
     for k in ("loss", "loss_video", "loss_action"):

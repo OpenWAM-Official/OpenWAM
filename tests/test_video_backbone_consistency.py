@@ -27,6 +27,7 @@ from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 # not a hard failure.
 WAN21_VACE_1_3B = os.environ.get("WAN21_VACE_1_3B", "/path/to/Wan2.1-VACE-1.3B")
 WAN22_TI2V_5B = os.environ.get("WAN22_TI2V_5B", "/path/to/Wan2.2-TI2V-5B")
+CUDA_AVAILABLE = torch.cuda.is_available()
 
 
 def _load_dit_only(model_dir: str, device: str = "cuda:0"):
@@ -96,7 +97,10 @@ def _run_decomposed(pipe, inputs):
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not os.path.isdir(WAN21_VACE_1_3B), reason=f"checkpoint not mounted: {WAN21_VACE_1_3B}")
+@pytest.mark.skipif(
+    not CUDA_AVAILABLE or not os.path.isdir(WAN21_VACE_1_3B),
+    reason=f"CUDA unavailable or checkpoint not mounted: {WAN21_VACE_1_3B}",
+)
 def test_consistency_wan21_vace_1_3b():
     """Wan2.1-VACE-1.3B: standard timestep path (pure DiT, no VACE)."""
     device = "cuda:0"
@@ -131,7 +135,10 @@ def test_consistency_wan21_vace_1_3b():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not os.path.isdir(WAN22_TI2V_5B), reason=f"checkpoint not mounted: {WAN22_TI2V_5B}")
+@pytest.mark.skipif(
+    not CUDA_AVAILABLE or not os.path.isdir(WAN22_TI2V_5B),
+    reason=f"CUDA unavailable or checkpoint not mounted: {WAN22_TI2V_5B}",
+)
 def test_consistency_wan22_ti2v_5b():
     """Wan2.2-TI2V-5B: standard + per-token timestep paths."""
     device = "cuda:0"

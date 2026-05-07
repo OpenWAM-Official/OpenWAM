@@ -16,8 +16,66 @@ from torch import Tensor
 from openwam.model.action_backbone.shared_moe import SharedMoEActionBackbone
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
+from openwam.model.architectures.shared_backbone.mask import (
+    attach_shared_attention_mask,
+    set_video_attention_mask_mode,
+    validate_shared_attention_mask_mode,
+)
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
-from openwam.utils import resolve_bridge_layers
+
+
+def _cfg_get(cfg, key: str, default=None):
+    return cfg.get(key, default) if isinstance(cfg, dict) else getattr(cfg, key, default)
+
+
+def _cfg_has(cfg, key: str) -> bool:
+    return key in cfg if isinstance(cfg, dict) else hasattr(cfg, key)
+
+
+def resolve_expert_layers(cfg, *, num_layers: Optional[int]) -> tuple[int, ...]:
+    """Resolve MoE expert layer ids from ``expert_layers`` or ``expert_interval``."""
+    if _cfg_has(cfg, "bridge_layers") and not _cfg_has(cfg, "expert_layers"):
+        raise ValueError(
+            "SharedBackbone MoE renamed 'bridge_layers' to 'expert_layers'. "
+            "Update the config key to avoid silently changing the expert topology."
+        )
+    if _cfg_has(cfg, "bridge_interval") and not _cfg_has(cfg, "expert_interval"):
+        raise ValueError(
+            "SharedBackbone MoE renamed 'bridge_interval' to 'expert_interval'. "
+            "Update the config key to avoid silently changing the expert topology."
+        )
+
+    layers_raw = _cfg_get(cfg, "expert_layers", None)
+    if layers_raw is None:
+        interval_raw = _cfg_get(cfg, "expert_interval", None)
+        if interval_raw is None:
+            raise ValueError("expert_layers is null but expert_interval is not set")
+        if num_layers is None:
+            raise ValueError(
+                "expert_layers is null but video_backbone.num_layers is unavailable. "
+                "Build SharedBackbone MoE with a video_backbone so expert_interval can be resolved "
+                "from the actual backbone depth."
+            )
+        interval = int(interval_raw)
+        if interval < 1:
+            raise ValueError(f"expert_interval must be >= 1, got {interval}")
+        layers = tuple(range(0, int(num_layers), interval))
+    elif isinstance(layers_raw, str):
+        layers = tuple(int(x) for x in layers_raw.split(",") if x)
+    else:
+        layers = tuple(int(x) for x in layers_raw)
+
+    layers = tuple(sorted(layers))
+    if len(set(layers)) != len(layers):
+        raise ValueError(f"expert_layers must be unique, got {layers}")
+    invalid = [layer for layer in layers if layer < 0]
+    if num_layers is not None:
+        invalid.extend(layer for layer in layers if layer >= int(num_layers))
+    if invalid:
+        if num_layers is None:
+            raise ValueError(f"expert_layers must be non-negative, got invalid layers {invalid}")
+        raise ValueError(f"expert_layers must be in [0, {int(num_layers) - 1}], got invalid layers {invalid}")
+    return layers
 
 
 @register_architecture(
@@ -39,23 +97,21 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
             )
         vb = self.video_backbone
         video_dim = self._resolve_video_dim(cfg)
-        num_layers = vb.num_layers if vb is not None else int(cfg.get("num_dit_layers", 30))
+        num_layers = vb.num_layers if vb is not None else None
+        action_decoder_hidden_dim = cfg.get("action_decoder_hidden_dim")
+        self.attention_mask_mode = validate_shared_attention_mask_mode(str(cfg.get("attention_mask_mode", "joint")))
+        self.video_attention_mask_mode = str(cfg.get("video_attention_mask_mode", "first_frame_causal"))
+        if vb is not None:
+            set_video_attention_mask_mode(vb, self.video_attention_mask_mode)
 
-        # Accept ``expert_layers`` as the canonical cfg key for MoE, with
-        # ``bridge_layers`` kept as an alias for back-compat. resolve_bridge_layers
-        # only knows the latter, so route the alias through it.
-        cfg_for_resolve = cfg
-        expert_layers_raw = cfg.get("expert_layers") if isinstance(cfg, dict) else getattr(cfg, "expert_layers", None)
-        if expert_layers_raw is not None:
-            cfg_for_resolve = dict(cfg) if isinstance(cfg, dict) else {k: v for k, v in cfg.items()}
-            cfg_for_resolve["bridge_layers"] = expert_layers_raw
-        bl = resolve_bridge_layers(cfg_for_resolve, num_layers=num_layers)
+        expert_layers = resolve_expert_layers(cfg, num_layers=num_layers)
 
         self.action_backbone = SharedMoEActionBackbone(
             action_dim=int(cfg.get("action_dim", 20)),
             video_dim=video_dim,
-            expert_ffn_dim=int(cfg.get("expert_ffn_dim", 14336)),
-            expert_layers=tuple(int(i) for i in bl),
+            expert_ffn_dim=int(cfg.get("expert_ffn_dim", 4096)),
+            expert_layers=expert_layers,
+            action_decoder_hidden_dim=action_decoder_hidden_dim,
         )
 
     def forward(
@@ -75,6 +131,13 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
                 "video_backbone is None — pass pipe= to build_architecture or "
                 "architecture.__init__ to enable forward()."
             )
+        invalid_expert_layers = [layer for layer in ab.expert_layers if layer >= vb.num_layers]
+        if invalid_expert_layers:
+            raise ValueError(
+                f"expert_layers {invalid_expert_layers} exceed video_backbone.num_layers={vb.num_layers}. "
+                "SharedBackbone MoE expert layers must match the actual video backbone depth."
+            )
+        set_video_attention_mask_mode(vb, getattr(self, "video_attention_mask_mode", None))
 
         vstate = vb.prepare(
             use_gradient_checkpointing=use_gradient_checkpointing,
@@ -107,6 +170,12 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
             timestep=action_timestep,
             t_mod_bias=ab.modality_tmod_bias,
         )
+        attach_shared_attention_mask(
+            vb,
+            vstate,
+            n_action,
+            attention_mask_mode=getattr(self, "attention_mask_mode", "joint"),
+        )
 
         for block_id in range(vb.num_layers):
             vstate = vb.run_block(block_id, vstate)
@@ -125,4 +194,4 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         return vb.finalize(vstate), ab.decode(action_tail)
 
 
-__all__ = ["SharedBackboneMoEArchitecture"]
+__all__ = ["SharedBackboneMoEArchitecture", "resolve_expert_layers"]

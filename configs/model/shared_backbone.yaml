@@ -10,28 +10,47 @@ architecture:
   action_dim: 20
 
   # ------------------------------
-  # vanilla-only behavior
+  # shared behavior (vanilla + MoE)
   # ------------------------------
-  # variant=vanilla uses only the shared DiT path and ignores the MoE-only
-  # fields below.
+  # Both variants concatenate action tokens into the shared DiT sequence, so
+  # both use the same shared self-attention mask layout.
+  # Shared self-attention mask layout:
+  #   bidirectional: full video/action coupling (previous shared behavior).
+  #   joint        : [Sv+Sa, Sv+Sa] bool mask with v↔v from
+  #                  ``video_attention_mask_mode``, a↔a True, a→v True,
+  #                  v→a False (video doesn't see action).
+  attention_mask_mode: joint
+  # video_attention_mask_mode controls the v↔v block when
+  # attention_mask_mode=joint:
+  #   bidirectional       : full v↔v
+  #   per_frame_causal    : token-level frame-causal block-diagonal
+  #   first_frame_causal  : first-frame tokens only see themselves; rest see all
+  video_attention_mask_mode: first_frame_causal
+
+  # SharedBackbone action tokens always use DreamZero-like 1D action RoPE
+  # over the action horizon. Learned absolute action position embeddings and
+  # alternate action RoPE layouts are intentionally not exposed.
+  # Shared action decoder hidden width. null defaults to video_dim, matching
+  # DreamZero's wider decoder more closely than the previous fixed width 64.
+  action_decoder_hidden_dim: null
 
   # ------------------------------
   # moe-only behavior
   # ------------------------------
   # expert_ffn_dim is only used when variant=moe.
-  expert_ffn_dim: 14336
+  expert_ffn_dim: 4096
 
   # The following layer-selection fields are only used when variant=moe.
   # Two ways to choose which video DiT layers receive the expert FFN.
-  # len(bridge_layers) auto-determines num_experts either way.
-  #   (a) Explicit list:  bridge_layers: [0, 1, ..., 29]
-  #   (b) Interval mode:  set bridge_layers: null and use bridge_interval.
+  # len(expert_layers) auto-determines num_experts either way.
+  #   (a) Explicit list:  expert_layers: [0, 1, ..., 29]
+  #   (b) Interval mode:  set expert_layers: null and use expert_interval.
   #       - interval=1 → all inferred video DiT layers
   #       - interval=2 → every other inferred layer
   #       The total layer count is inferred from the loaded video backbone;
   #       users do not need to set it manually.
-  bridge_layers: null
-  bridge_interval: 1
+  expert_layers: null
+  expert_interval: 1
 
 # Video backbone
 # Resolution: any height/width where height % 32 == 0 and width % 32 == 0.

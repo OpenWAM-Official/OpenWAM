@@ -154,7 +154,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     @property
     def bridge_layers(self) -> tuple:
-        return self.action_backbone.bridge_layers if self.action_backbone is not None else ()
+        return getattr(self.action_backbone, "bridge_layers", ()) if self.action_backbone is not None else ()
+
+    @property
+    def expert_layers(self) -> tuple:
+        return getattr(self.action_backbone, "expert_layers", ()) if self.action_backbone is not None else ()
 
     @property
     def trainable_action_module(self) -> Optional[nn.Module]:

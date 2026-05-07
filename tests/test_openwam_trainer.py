@@ -161,6 +161,24 @@ class _MockVideoBackbone(VideoBackbone):
     def submodule_names(self) -> list:
         return ["dit", "vae", "text_encoder"]
 
+    @property
+    def video_attention_mask_mode(self) -> str:
+        return getattr(self, "_video_attention_mask_mode", "bidirectional")
+
+    @video_attention_mask_mode.setter
+    def video_attention_mask_mode(self, mode: str) -> None:
+        self._video_attention_mask_mode = mode
+
+    def build_video_to_video_mask(self, video_seq_len: int, video_tokens_per_frame: int, device: torch.device):
+        if self.video_attention_mask_mode == "bidirectional":
+            return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
+        if self.video_attention_mask_mode == "first_frame_causal":
+            mask = torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
+            first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
+            mask[:first_frame_tokens, first_frame_tokens:] = False
+            return mask
+        raise ValueError(f"Unsupported mock video_attention_mask_mode '{self.video_attention_mask_mode}'")
+
     def prepare(self, **inputs) -> BlockLoopState:
         latents = inputs["latents"]
         B = latents.shape[0]
@@ -176,7 +194,7 @@ class _MockVideoBackbone(VideoBackbone):
         freq_dim = self._dim // 2
         freqs = torch.polar(torch.ones(num_tokens, 1, freq_dim), torch.zeros(num_tokens, 1, freq_dim))
         context = torch.randn(B, 4, self._dim)
-        return BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, f=f, h=h, w=w)
+        return BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, f=f, h=h, w=w, extras={})
 
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
         return state
