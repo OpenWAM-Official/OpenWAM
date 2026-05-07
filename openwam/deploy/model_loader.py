@@ -98,22 +98,37 @@ def load_from_checkpoint_dir(
     resolved_arch = resolve_architecture_config(m)
     params = dict(resolved_arch.params)
 
+    # ``resolve_architecture_config`` may hand back ``params["video_backbone"]``
+    # as a ``DictConfig``. Subsequent ``vb_params["_source"] = <dict>``
+    # assignments would then be auto-promoted by OmegaConf to a ``DictConfig``,
+    # which causes ``WanVideoBackbone.from_pretrained`` to mis-dispatch the
+    # deploy source into the training path (``build_training_pipeline``
+    # requires ``cfg.training``, which is absent from a video_backbone-only
+    # subtree). Pinning to a plain ``dict`` here keeps the deploy dispatch
+    # honest.
+    vb_params = params.get("video_backbone")
+    if vb_params is None:
+        vb_params = {}
+    elif not isinstance(vb_params, dict) or isinstance(vb_params, DictConfig):
+        vb_params = OmegaConf.to_container(vb_params, resolve=True) or {}
+    params["video_backbone"] = vb_params
+
     # Provide video backbone source: config components (preferred), manifest, or model_path.
     vb_components = OmegaConf.select(cfg, "model.video_backbone.components", default=None)
     if vb_components is not None:
         logger.info("Using config-embedded component specs for video-backbone construction")
         vb_cfg_dict = OmegaConf.to_container(cfg.model.video_backbone, resolve=True)
-        params.setdefault("video_backbone", {})["_source"] = vb_cfg_dict
-        params["video_backbone"]["_ckpt_dir"] = ckpt_dir
+        vb_params["_source"] = vb_cfg_dict
+        vb_params["_ckpt_dir"] = ckpt_dir
     else:
         manifest_path = os.path.join(ckpt_dir, "video_backbone_manifest.json")
         if os.path.exists(manifest_path):
             logger.info("Using manifest-based video-backbone builder: %s", manifest_path)
-            params.setdefault("video_backbone", {})["_source"] = manifest_path
+            vb_params["_source"] = manifest_path
         else:
             model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
             if model_path is not None:
-                params.setdefault("video_backbone", {})["_source"] = str(model_path)
+                vb_params["_source"] = str(model_path)
             else:
                 logger.warning(
                     "No components, manifest, or model_path in config; "
@@ -140,7 +155,7 @@ def load_from_checkpoint_dir(
     architecture.set_dtype_device(model_dtype, torch.device(device))
 
     # 6. Attach denormalizer built from saved action_stats.npy + config.
-    architecture.action_denormalizer = _build_action_denormalizer(cfg, ckpt_dir)
+    architecture.attach_action_denormalizer(_build_action_denormalizer(cfg, ckpt_dir))
 
     logger.info("Model loaded successfully on %s", device)
     return cfg, architecture

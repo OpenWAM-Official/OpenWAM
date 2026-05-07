@@ -559,13 +559,38 @@ def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda", embodimen
     Aligns with ``scripts/deploy.py`` — uses ``load_from_checkpoint_dir`` so
     the CLI's ``--ckpt-dir`` means the same thing in both entrypoints: the
     directory that contains ``config.yaml`` + ``checkpoint_step_*.safetensors``.
+
+    The caller-provided ``cfg`` (deploy-side overrides like host/port and
+    inference settings) is merged on top of the training config restored from
+    the checkpoint, so deploy-time fields win on overlap.
     """
+    from omegaconf import OmegaConf
+
     from openwam.deploy import JointInferenceEngine
     from openwam.deploy.model_loader import load_from_checkpoint_dir
 
-    cfg, pipe, architecture = load_from_checkpoint_dir(ckpt_dir, device=device)
-    engine = JointInferenceEngine(cfg=cfg, pipeline=pipe, architecture=architecture)
-    return PolicyServer(engine=engine, cfg=cfg, embodiment=embodiment)
+    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device)
+
+    # Mirror scripts/deploy.py: let dataloader provide inference frame/resolution
+    # fallbacks before merging deploy overrides on top, so server.predict() goes
+    # through architecture.generate() with the resolution the checkpoint was
+    # trained at (otherwise it falls back to Wan's 480x832 default and the
+    # first_frame_latents ↔ noise_latents shapes diverge).
+    deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
+    dl = OmegaConf.select(training_cfg, "dataloader", default=None)
+    if dl is not None:
+        inf = OmegaConf.select(deploy_cfg, "inference", default=OmegaConf.create({}))
+        if OmegaConf.select(inf, "num_frames", default=None) is None:
+            OmegaConf.update(inf, "num_frames", OmegaConf.select(dl, "num_frames", default=33), merge=False)
+        if OmegaConf.select(inf, "height", default=None) is None:
+            OmegaConf.update(inf, "height", OmegaConf.select(dl, "height", default=480), merge=False)
+        if OmegaConf.select(inf, "width", default=None) is None:
+            OmegaConf.update(inf, "width", OmegaConf.select(dl, "width", default=832), merge=False)
+        OmegaConf.update(deploy_cfg, "inference", inf, merge=True)
+
+    merged = OmegaConf.merge(training_cfg, deploy_cfg)
+    engine = JointInferenceEngine(cfg=merged, architecture=architecture)
+    return PolicyServer(engine=engine, cfg=merged, embodiment=embodiment)
 
 
 def _build_argparser() -> argparse.ArgumentParser:
@@ -574,7 +599,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--config",
         type=str,
         default=None,
-        help="Path to a YAML config. Defaults to configs/config.yaml from the repo root.",
+        help="Path to a YAML config. Defaults to configs/deploy.yaml from the repo root.",
     )
     parser.add_argument(
         "--ckpt-dir",
@@ -637,8 +662,10 @@ def main(argv: Optional[list[str]] = None):
             latency_ms=args.mock_latency_ms,
         )
     else:
-        config_path = Path(args.config) if args.config else project_root / "configs" / "config.yaml"
+        config_path = Path(args.config) if args.config else project_root / "configs" / "deploy.yaml"
         cfg = OmegaConf.load(config_path)
+        if "defaults" in cfg:
+            OmegaConf.update(cfg, "defaults", OmegaConf.create([]), merge=False)
         if args.overrides:
             cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
         engine = None  # built inside build_server_from_config

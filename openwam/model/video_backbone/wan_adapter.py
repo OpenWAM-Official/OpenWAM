@@ -91,6 +91,7 @@ class WanVideoBackbone(VideoBackbone):
                     tokenizer=vb_cfg.get("tokenizer"),
                     device=kw.get("device", "cpu"),
                     ckpt_dir=kw.get("ckpt_dir"),
+                    model_path=vb_cfg.get("model_path"),
                 )
             else:
                 model_path = (
@@ -991,7 +992,7 @@ class WanVideoBackbone(VideoBackbone):
         return self._pipe.vae.batch_encode(video_tensor, device=video_tensor.device)
 
     def _decode_latents(self, latents: Tensor, *, tiled: bool = True) -> Tensor:
-        return self._pipe.vae.decode(latents.to(self.device))
+        return self._pipe.vae.decode(latents.to(self.device), device=self.device, tiled=tiled)
 
     def _latents_to_frames(self, video_tensor: Tensor) -> list:
         return self._pipe.vae_output_to_video(video_tensor)
@@ -1121,12 +1122,22 @@ class WanVideoBackbone(VideoBackbone):
         tokenizer: dict = None,
         device: str = "cpu",
         ckpt_dir: str = None,
+        model_path: str = None,
     ):
         """Build an empty WanVideoPipeline from component specs (config-driven).
 
         Same logic as ``build_video_backbone_from_manifest`` but reads from
         a config dict instead of a JSON file. Weights are NOT loaded here —
         ``architecture.load_checkpoint`` handles that separately.
+
+        Tokenizer resolution order:
+          1. ``ckpt_dir`` + ``tokenizer.subdir`` — self-contained manifest
+             layout; ``save_video_backbone_artifacts`` copies the tokenizer
+             into ``<ckpt_dir>/tokenizer/google/umt5-xxl/``.
+          2. ``model_path`` upstream layout — components-based persistence
+             writes specs into ``config.yaml`` but does NOT copy tokenizer
+             files, so we fall back to ``<model_path>/google/umt5-xxl/`` (no
+             ``tokenizer/`` prefix; that prefix is a manifest-only convention).
         """
         from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline
         from openwam.model.video_backbone.wan.pipeline_builder import _build_tokenizer, _import_class
@@ -1151,8 +1162,31 @@ class WanVideoBackbone(VideoBackbone):
             pipe.height_division_factor = pipe.vae.upsampling_factor * 2
             pipe.width_division_factor = pipe.vae.upsampling_factor * 2
 
-        if tokenizer and ckpt_dir:
-            tok = _build_tokenizer(tokenizer, ckpt_dir)
+        if tokenizer:
+            tok = None
+            subdir = tokenizer.get("subdir", "")
+            if ckpt_dir and subdir and os.path.isdir(os.path.join(ckpt_dir, subdir)):
+                tok = _build_tokenizer(tokenizer, ckpt_dir)
+            elif model_path and os.path.isdir(model_path):
+                # Strip the "tokenizer/" prefix used by self-contained manifest
+                # layouts; upstream model_path stores it as "google/umt5-xxl/".
+                fallback_subdir = subdir
+                if fallback_subdir.startswith("tokenizer/"):
+                    fallback_subdir = fallback_subdir[len("tokenizer/") :]
+                if fallback_subdir and os.path.isdir(os.path.join(model_path, fallback_subdir)):
+                    fallback_cfg = dict(tokenizer)
+                    fallback_cfg["subdir"] = fallback_subdir
+                    logger.info(
+                        "Tokenizer not found under ckpt_dir; falling back to model_path/%s",
+                        fallback_subdir,
+                    )
+                    tok = _build_tokenizer(fallback_cfg, model_path)
+            if tok is None:
+                raise FileNotFoundError(
+                    f"Tokenizer subdir {subdir!r} not found under ckpt_dir={ckpt_dir!r} "
+                    f"nor under model_path={model_path!r} (with 'tokenizer/' prefix stripped). "
+                    "Either copy the tokenizer into the checkpoint dir, or ensure model_path is reachable."
+                )
             setattr(pipe, tokenizer.get("attr", "tokenizer"), tok)
 
         return pipe

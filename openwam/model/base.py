@@ -84,6 +84,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         self._max_timestep_boundary = 1.0
         self._min_timestep_boundary = 0.0
 
+        # Optional action denormalizer for inference. Deployment paths inject
+        # this via ``attach_action_denormalizer``; ``generate`` consumes it to
+        # return real-scale actions. ``None`` means "actions returned as-is".
+        self.action_denormalizer = None
+
         if cfg is not None:
             self._init_video_backbone(cfg)
 
@@ -149,6 +154,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
         return self.action_backbone.scheduler
 
     @property
+    def video_scheduler(self):
+        """Flow-matching scheduler for the video stream (owned by video_backbone)."""
+        if self.video_backbone is None:
+            raise RuntimeError("video_backbone is not initialized")
+        return self.video_backbone.scheduler
+
+    @property
     def action_dim(self) -> int:
         return self.action_backbone.action_dim if self.action_backbone is not None else 0
 
@@ -197,6 +209,16 @@ class BaseWAMArchitecture(ABC, nn.Module):
         self._device = device
         for bb in self.backbones.values():
             bb.set_dtype_device(dtype, device)
+
+    def attach_action_denormalizer(self, denormalizer) -> None:
+        """Attach (or clear) an action denormalizer used by ``generate``.
+
+        Deployment paths build a denormalizer from ``action_stats.npy`` and
+        inject it via this setter so ``generate`` can return real-scale
+        actions without callers reaching into architecture internals. Pass
+        ``None`` to clear.
+        """
+        self.action_denormalizer = denormalizer
 
     # --- Checkpoint save / load ---
 
@@ -724,7 +746,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             generator=torch.Generator(device=device).manual_seed(seed),
         )
 
-        num_train_ts = float(self.action_scheduler.num_train_timesteps)
+        num_train_ts_v = float(self.video_scheduler.num_train_timesteps)
+        num_train_ts_a = float(self.action_scheduler.num_train_timesteps)
 
         t_loop = time.time()
 
@@ -732,10 +755,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
             t_v, t_a = schedule[i]
             t_v_next, t_a_next = schedule[i + 1]
 
-            sigma_v = t_v / num_train_ts
-            sigma_a = t_a / num_train_ts
-            sigma_v_next = t_v_next / num_train_ts
-            sigma_a_next = t_a_next / num_train_ts
+            sigma_v = t_v / num_train_ts_v
+            sigma_a = t_a / num_train_ts_a
+            sigma_v_next = t_v_next / num_train_ts_v
+            sigma_a_next = t_a_next / num_train_ts_a
 
             video_stepping = sigma_v != sigma_v_next
             action_stepping = sigma_a != sigma_a_next
@@ -793,9 +816,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         # VAE decode
         if decode_video:
-            if first_frame_image is not None:
-                ref_count = len(first_frame_image) if isinstance(first_frame_image, list) else 1
-                inputs_shared["latents"] = inputs_shared["latents"][:, :, ref_count:]
+            ref_latents = inputs_shared.get("first_frame_latents")
+            if ref_latents is not None:
+                inputs_shared["latents"] = inputs_shared["latents"][:, :, ref_latents.shape[2] :]
             video_frames = vb.decode_video(inputs_shared["latents"], tiled=tiled)
         else:
             video_frames = None

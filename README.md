@@ -181,7 +181,25 @@ Deploy a trained checkpoint as a policy server:
 bash scripts/deploy.sh /path/to/checkpoint_dir
 ```
 
-This reads `configs/deploy.yaml` for base settings (device, ports, inference parameters) and the `config.yaml` saved inside the checkpoint directory for model architecture. The latest checkpoint in the directory is loaded automatically.
+This reads `configs/deploy.yaml` for base settings (device, ports, inference parameters) and the `config.yaml` saved inside the checkpoint directory for model architecture. The latest `checkpoint_step_*.safetensors` file in the directory is loaded automatically; use `--ckpt-name` to pin a specific file.
+
+#### Self-contained checkpoints
+
+New checkpoints are intended to be deployable from the checkpoint directory alone. The copy happens at checkpoint creation time during training, not when `scripts/deploy.py` starts; deploy is read-only with respect to checkpoint artifacts. During training, rank 0 saves:
+
+- `config.yaml` — the full training config, including video-backbone component specs when `model.video_backbone.model_path` is readable.
+- `checkpoint_step_*.safetensors` — full model weights.
+- `action_stats.npy` — action normalization stats used by deploy to denormalize returned actions.
+- `video_backbone_manifest.json` — fallback manifest for rebuilding Wan video-backbone modules.
+- `tokenizer/google/umt5-xxl/` — copied automatically from `<model.video_backbone.model_path>/google/umt5-xxl` so deploy does not need the original Wan directory just to load the tokenizer.
+
+Deploy's video-backbone source resolution is:
+
+1. component specs embedded in `config.yaml` (preferred), with tokenizer loaded from `<ckpt_dir>/tokenizer/google/umt5-xxl/`;
+2. `<ckpt_dir>/video_backbone_manifest.json`;
+3. `model.video_backbone.model_path` from the saved config as a legacy fallback.
+
+For older or stripped component-only checkpoints that did not copy tokenizer files, deploy still tries `<model.video_backbone.model_path>/google/umt5-xxl/` before failing. The log line `Tokenizer not found under ckpt_dir; falling back to model_path/google/umt5-xxl` means the checkpoint directory is not fully self-contained and deploy is using that legacy fallback. Fully portable deployment should keep the copied `tokenizer/` directory alongside the checkpoint.
 
 #### Configuration
 
@@ -198,17 +216,19 @@ server:
 inference:
   denoise_steps: 20      # denoising steps
   schedule_type: sync    # sync | cascade | decoupled_flash | decoupled_asymmetric
-  cfg_scale: 1.0         # 1.0 = CFG disabled (recommended for robotics)
   shift: 5.0
 
 optimization:
   decode_video: false    # false = action-only mode (skip VAE decode, faster)
+  schedule:
+    type: null           # optional deploy-time override for inference.schedule_type
+    action_steps: 4      # action denoising steps for decoupled schedules
   compile:
     enabled: true        # torch.compile ActionDiT (~30s one-time JIT warmup)
-    video_dit: true      # torch.compile Video DiT blocks — default on; pay ~3-5 min
-                         # CUDA Graph capture on first inference. Set false for
-                         # short runs where warmup > per-step saving.
+    video_dit: true      # torch.compile Video DiT blocks — long warmup (~5 min)
     vae: false           # torch.compile VAE decoder (only effective when tiled=false)
+  prompt_embed_cache:
+    maxsize: 32          # LRU cache for prompt -> text embeddings
 ```
 
 CLI flags override the yaml values for their respective fields:
@@ -222,7 +242,9 @@ bash scripts/deploy.sh /path/to/checkpoint_dir \
   --ckpt-name checkpoint_step_10000.safetensors
 ```
 
-All inference overrides (`--denoise-steps`, `--schedule-type`, `--cfg-scale`, `--shift`) are optional; the yaml values are used when they are not provided.
+All inference overrides (`--denoise-steps`, `--schedule-type`, `--shift`) are optional; the yaml values are used when they are not provided.
+
+`scripts/deploy.py` and the package entrypoint (`openwam-serve` / `python -m openwam.deploy.policy_server`) both load checkpoints through the same package-native `load_from_checkpoint_dir` path. The package entrypoint defaults to `configs/deploy.yaml`, merges deploy overrides on top of the saved training config, and backfills `inference.height`, `inference.width`, and `inference.num_frames` from the checkpoint's dataloader config when they are not set explicitly.
 
 #### Mock mode (no GPU or model weights required)
 
@@ -266,7 +288,7 @@ python scripts/deploy.py --ckpt-dir /path/to/ckpt_dir \
     --debug --debug-dir ./server_debug
 ```
 
-Each request writes `server_debug/ep<N>/step_<N>/{image_processed.jpg, meta.json}` — useful when debugging client/server contract issues.
+Each request writes `server_debug/ep0000/step_0001/{image_processed.jpg, meta.json}` style directories. `image_processed.jpg` is the exact post-preprocessing image the model saw (single-view crop/resize or multi-view composition), and `meta.json` records the wrapped prompt, state, action, latency, server step, and episode index.
 
 ### 3. Testing the Server
 
@@ -302,11 +324,31 @@ This simulates 100 control steps, showing how the server handles action chunking
 
 ### 4. Benchmarks Support
 
-Evaluation adapters live under `benchmarks/`. Each adapter connects to an **already-running** OpenWAM policy server via HTTP — no model weights are needed on the evaluator machine.
+Evaluation adapters live under `benchmarks/`. The normal single-task and multi-task scripts connect to an **already-running** OpenWAM policy server via HTTP — no model weights are needed on the evaluator machine.
+
+For large RoboTwin runs, `benchmarks/robotwin/dlc_parallel_eval.sh` is the DLC/multi-node entrypoint: every node starts local OpenWAM policy servers, waits for `/health`, and runs RoboTwin clients against a shared filesystem queue. Rank 0 initializes `<log_dir>/.queue.txt`, `summary.tsv`, and `run.env`; workers use directory locks (`.queue.lock.d`, `summary.lock.d`) so this works on shared filesystems where `flock` may be unreliable. At the end, rank 0 verifies the summary row count and unique `task/mode` count match the expected total.
+
+```bash
+ROBOTWIN_PATH=/path/to/RoboTwin \
+ROBOTWIN_PYTHON=/path/to/robotwin/bin/python \
+ROBOTWIN_RUN_ID=run1 \
+bash benchmarks/robotwin/dlc_parallel_eval.sh \
+  -m all -n openwam -d /path/to/ckpt_dir \
+  --denoise-steps 10 \
+  all
+```
+
+Export DLC results with:
+
+```bash
+python benchmarks/robotwin/export_results_csv.py /path/to/log_dir --strict
+```
+
+The exporter reads `summary.tsv` when present, parses nested per-task logs recursively, strips ANSI color codes before matching `Success rate`, and validates duplicate/missing/extra `task/mode` rows against `run.env` in strict mode.
 
 | Benchmark | Status | Notes |
 |---|---|---|
-| [RoboTwin Benchmark](benchmarks/robotwin/README.md) | Supported | All 50 RoboTwin 2.0 tasks; single-task & multi-task eval scripts |
+| [RoboTwin Benchmark](benchmarks/robotwin/README.md) | Supported | All 50 RoboTwin 2.0 tasks; single-task, multi-task, DLC multi-node, and CSV export scripts |
 | SimplerEnv | Planned | Requires external environment setup |
 | LIBERO | Planned | Requires external environment setup |
 | RoboCasa | Planned | Requires external environment setup |
@@ -328,7 +370,10 @@ Key config groups:
 Checkpoint outputs include:
 
 - `checkpoint_step_*.safetensors` — full model weights
-- `config.yaml` — complete training config snapshot (self-contained for deployment)
+- `config.yaml` — complete training config snapshot, including video-backbone component specs when available
+- `action_stats.npy` — action normalization stats required by deploy for physical-unit actions
+- `video_backbone_manifest.json` — fallback manifest for package-native video-backbone reconstruction
+- `tokenizer/google/umt5-xxl/` — tokenizer copied automatically from the Wan model directory for self-contained deployment
 
 ## Core Features
 

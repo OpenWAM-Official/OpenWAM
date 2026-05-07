@@ -499,6 +499,12 @@ class OpenWAMTrainer(BaseTrainer):
             save_config(output_path, self.cfg)
             if self.dataset is not None:
                 save_action_stats(output_path, self.dataset)
+            # Copy tokenizer (and write a fallback manifest.json) so the
+            # checkpoint dir is self-contained — deploy then doesn't depend on
+            # ``model.video_backbone.model_path`` being reachable.
+            from openwam.model.video_backbone.wan.manifest import save_video_backbone_artifacts
+
+            save_video_backbone_artifacts(output_path, self.cfg)
         else:
             output_path = None
 

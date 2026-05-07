@@ -126,7 +126,7 @@ def make_schedule(
         strategy: ``"sync" | "video_leading" | "cascade" | "action_only" |
             "decoupled_flash" | "decoupled_asymmetric"``.
         video_scheduler: Video stream's scheduler (e.g.
-            ``architecture.video_backbone.scheduler``).
+            ``architecture.video_scheduler``).
         action_scheduler: Action stream's scheduler (e.g.
             ``architecture.action_scheduler``).
         num_steps: Default step count; per-strategy overrides via kwargs.

@@ -162,7 +162,7 @@ class JointInferenceEngine(BaseInferenceEngine):
 
         schedule = make_schedule(
             schedule_type,
-            video_scheduler=self.architecture.video_backbone.scheduler,
+            video_scheduler=self.architecture.video_scheduler,
             action_scheduler=self.architecture.action_scheduler,
             num_steps=denoise_steps,
             shift=shift,

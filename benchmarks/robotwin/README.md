@@ -20,6 +20,9 @@ These scripts assume the OpenWAM policy server is **already running**. They only
 | `policy_config.yml` | Config template; `host` / `http_port` are injected at runtime. |
 | `single_eval.sh` | Run evaluation on a single task. |
 | `multi_eval.sh` | Run evaluation on multiple tasks sequentially. |
+| `parallel_eval.sh` | Run a shared local queue against already-running local/remote OpenWAM servers. |
+| `dlc_parallel_eval.sh` | DLC multi-node entrypoint; starts local OpenWAM servers and RoboTwin clients on every node, then uses a shared queue for cross-node parallel evaluation. |
+| `export_results_csv.py` | Export `summary.tsv` plus per-task `Success rate` lines into a CSV file. |
 | `step_limits.yml` | Per-task `step_lim` overrides (see below). |
 
 ## Per-task step_lim overrides
@@ -126,6 +129,203 @@ bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir \
 
 # Read the task list from a file (one task per line, `#` comments supported)
 bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir tasks.txt
+```
+
+### DLC multi-node parallel evaluation
+
+`dlc_parallel_eval.sh` is the cluster entrypoint for large runs. Launch the same command on every DLC worker. Rank 0 creates a queue in the shared log directory; each node starts one OpenWAM server per local worker, waits for `/health`, then starts RoboTwin client workers that atomically pop `task|mode` jobs from the shared queue.
+
+This script does **not** require pre-starting OpenWAM servers with `scripts/deploy_multi.sh`; it starts and cleans up its own local servers on every node. It still requires a RoboTwin Python environment for the simulator/client process.
+
+By default, each local policy server is launched as:
+
+```bash
+python <repo>/scripts/deploy.py ...
+```
+
+Override `SERVER_PYTHON` / `--server-python` or `SERVER_SCRIPT` / `--server-script` if the server must run under a specific Python executable or a custom deploy script.
+
+**Required environment:**
+
+| Variable | Description |
+|---|---|
+| `ROBOTWIN_PATH` | RoboTwin repository root. Must be visible on every node. |
+| `ROBOTWIN_PYTHON` | Python executable inside the RoboTwin environment. If unset, the script searches for `ROBOTWIN_ENV` as a conda env. |
+| `ROBOTWIN_ENV` | Conda env name used only when `ROBOTWIN_PYTHON` is unset. Default: `robotwin`. |
+
+**DLC / multi-node environment:**
+
+The script prefers DLC variables when present:
+
+| Variable | Description |
+|---|---|
+| `MLP_WORKER_NUM` | Total node count. |
+| `MLP_ROLE_INDEX` | Current node rank. |
+
+It falls back to `NNODES` / `NODE_RANK`, then `WORLD_SIZE` / `RANK`, so local smoke tests can be run manually.
+
+**Invocation:**
+
+```bash
+ROBOTWIN_PATH=/path/to/RoboTwin \
+ROBOTWIN_PYTHON=/path/to/envs/RoboTwin/bin/python \
+ROBOTWIN_RUN_ID=test \
+bash benchmarks/robotwin/dlc_parallel_eval.sh \
+    -m all -n openwam -d /path/to/openwam_checkpoints/robotwin_dual_system_joint_self_attention \
+    --denoise-steps 10 \
+    all
+```
+
+**Required flags:**
+
+| Flag | Description |
+|---|---|
+| `-m`, `--mode` | `demo_clean`, `demo_randomized`, or `all`. `all` expands to both modes. |
+| `-n`, `--name` | Run label used in log directory names and RoboTwin result naming. |
+| `-d`, `--ckpt-dir` | OpenWAM checkpoint directory used by each local policy server. |
+
+Tasks are positional after flags. They can be task names, comma-separated task names, `all`, or a task-list file with one task per line.
+
+**Useful overrides:**
+
+| Variable / flag | Default | Description |
+|---|---|---|
+| `ROBOTWIN_RUN_ID` | `latest` | Shared run id used in the log path; change it for reruns. |
+| `ROBOTWIN_LOG_ROOT` | `<ckpt_dir>/robotwin_eval_logs` | Shared filesystem root for queue, sentinels, and logs. |
+| `-w`, `--num-workers` | GPU count | Number of local OpenWAM servers and RoboTwin clients per node. |
+| `--gpu-start` | `0` | First local GPU index. |
+| `SIM_GPU_STRIDE` | `1` | Stride between worker GPUs. |
+| `--http-port`, `--ws-port` | `8700`, `8800` | Per-node local port bases; worker `i` uses base `+ i`. |
+| `SERVER_PYTHON`, `--server-python` | `python` | Python executable used to launch each local policy server. |
+| `SERVER_SCRIPT`, `--server-script` | `<repo>/scripts/deploy.py` | Python script used to launch each local policy server. |
+| `--bind-host` | `127.0.0.1` | Host passed to `scripts/deploy.py --host`. |
+| `--client-host` | `127.0.0.1` | Host passed to RoboTwin clients. Keep this local unless clients must reach a non-local server. |
+| `--ckpt-name` | latest checkpoint | Specific checkpoint filename passed to `scripts/deploy.py`. |
+| `--denoise-steps` | config default | Denoising step count passed to `scripts/deploy.py`. |
+| `--schedule-type` | config default | Schedule type passed to `scripts/deploy.py`. |
+| `--shift` | config default | Flow-matching shift passed to `scripts/deploy.py`. |
+| `--mock` | off | Start mock OpenWAM servers instead of loading a checkpoint. |
+| `--fresh` | off | Remove stale queue/sentinel metadata for the same run id before rank 0 initializes the queue. |
+
+**Shared log directory:**
+
+By default:
+
+```text
+<ckpt_dir>/robotwin_eval_logs/<name>_<mode>_dlc_<run_id>
+```
+
+If `ROBOTWIN_LOG_ROOT` is set:
+
+```text
+<ROBOTWIN_LOG_ROOT>/<name>_<mode>_dlc_<run_id>
+```
+
+This directory must be on a shared filesystem visible to every node because it stores the queue, locks, sentinels, summary, and logs. Queue and summary locking use atomic `mkdir` lock directories (`.queue.lock.d/`, `summary.lock.d/`) instead of `flock`, which is safer on many DLC/NFS-style shared filesystems.
+
+Important files:
+
+```text
+<log_dir>/
+  run.env
+  summary.tsv
+  .queue.txt
+  .queue.lock.d/
+  summary.lock.d/
+  .queue_ready
+  node0/
+    servers/
+      server_worker0_gpu0.log
+      server_worker1_gpu1.log
+    worker0/
+      worker.log
+      adjust_bottle_demo_clean.log
+  node1/
+    ...
+```
+
+Useful commands:
+
+```bash
+# Server log for node0 worker0
+tail -f <log_dir>/node0/servers/server_worker0_gpu0.log
+
+# Client scheduling log for node0 worker0
+tail -f <log_dir>/node0/worker0/worker.log
+
+# Per-task RoboTwin eval log
+tail -f <log_dir>/node0/worker0/adjust_bottle_demo_clean.log
+
+# Task-level status table
+column -t -s $'\t' < <log_dir>/summary.tsv
+```
+
+**Single-node smoke example:**
+
+```bash
+ROBOTWIN_PATH=/path/to/RoboTwin \
+ROBOTWIN_PYTHON=/path/to/conda/envs/robotwin/bin/python \
+NNODES=1 NODE_RANK=0 ROBOTWIN_RUN_ID=smoke \
+bash benchmarks/robotwin/dlc_parallel_eval.sh \
+    -m demo_clean -n smoke -d /path/to/ckpt_dir \
+    -w 1 \
+    adjust_bottle
+```
+
+**Custom server Python/script example:**
+
+```bash
+ROBOTWIN_PATH=/path/to/RoboTwin \
+ROBOTWIN_PYTHON=/path/to/conda/envs/robotwin/bin/python \
+SERVER_PYTHON=/path/to/server/env/bin/python \
+SERVER_SCRIPT=/path/to/custom_deploy.py \
+NNODES=1 NODE_RANK=0 ROBOTWIN_RUN_ID=custom_server \
+bash benchmarks/robotwin/dlc_parallel_eval.sh \
+    -m demo_clean -n custom_server -d /path/to/ckpt_dir \
+    -w 1 \
+    adjust_bottle
+```
+
+### Export evaluation results to CSV
+
+Use `export_results_csv.py` after a DLC run to combine `<log_dir>/summary.tsv` and each per-task log's last `Success rate` line into a single CSV.
+
+**Invocation:**
+
+```bash
+python benchmarks/robotwin/export_results_csv.py \
+    /path/to/log_dir \
+    -o /path/to/log_dir/results.csv
+```
+
+If `-o` is omitted, the default output is:
+
+```text
+<log_dir>/results.csv
+```
+
+The CSV columns are:
+
+| Column | Description |
+|---|---|
+| `run_id` | `ROBOTWIN_RUN_ID` recorded by `dlc_parallel_eval.sh`. |
+| `policy_name` | Value passed with `-n`, `--name`. |
+| `requested_mode` | Original `-m`, `--mode` value. |
+| `task` | RoboTwin task name. |
+| `mode` | Concrete task config: `demo_clean` or `demo_randomized`. |
+| `node` | Node rank that ran the job. |
+| `worker` | Local worker index that ran the job. |
+| `status` | `ok` or `failed` from `summary.tsv`. |
+| `exit_code` | Task process exit code. |
+| `success_rate` | Parsed numeric success rate from the task log; blank if not found. |
+| `log_path` | Full path to the per-task log used for parsing. |
+
+The exporter also validates run completeness when `run.env` is available: duplicate `task/mode` rows, missing rows, unexpected rows, or a row-count mismatch are reported. It searches nested `node*/worker*/*.log` files when `summary.tsv` is absent and strips ANSI escape sequences before parsing `Success rate`.
+
+Strict parsing mode returns a non-zero exit code if any task log is missing, does not contain a parseable success rate, or fails the completeness checks above:
+
+```bash
+python benchmarks/robotwin/export_results_csv.py /path/to/log_dir --strict
 ```
 
 ## FAQ
