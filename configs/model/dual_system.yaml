@@ -10,9 +10,15 @@
 
 architecture:
   framework: dual_system
-  variant: joint_cross_attn   # joint_self_attn or joint_cross_attn or idm
+  variant: joint_self_attn   # joint_self_attn or joint_cross_attn or idm
   detach_bridge: false         # joint_cross_attn only; if true, no gradients flow from ActionDiT to video DiT (one-way bridge). Ignored under joint_self_attn.
   action_dim: 20
+  # Proprioceptive state conditioning.
+  # When enabled, dataloaders must provide sample["proprio"], and the dual-system
+  # architecture appends one FastWAM-style proprio token to text context.
+  use_proprioception: true
+  state_dim: 20                  # required when use_proprioception=true
+
   # bridge_layers / bridge_interval are used by joint_cross_attn to choose
   # which video DiT layers feed the bridge cross-attention. Under
   # joint_self_attn the MoT driver runs at every layer regardless; these
@@ -60,6 +66,8 @@ action_backbone:
   # joint_cross_attn accepts the same fields so the two variants can be
   # compared apples-to-apples — only the inter-modality coupling differs.
   #   - dim          : action residual hidden dim
+  #   - text_dim     : raw Wan/FastWAM text/proprio context dim before the
+  #                    action expert's own context embedding
   #   - ffn_dim      : action expert FFN intermediate dim
   #   - num_heads    : MUST match the video backbone's num_heads (24)
   #                    under joint_self_attn; free under joint_cross_attn.
@@ -69,15 +77,7 @@ action_backbone:
   #                    raise unless evenly divisible).
   # Action expert param count at this setup: ~1.0B (vs ~5.0B video expert).
   dim: 1024
+  text_dim: 4096
   ffn_dim: 4096
   num_heads: 24
   attn_head_dim: 128
-
-  # Proprioceptive state conditioning (TRAINING-ONLY in this PR — the
-  # deployment path has not been wired up yet, see docs/proprioception.md).
-  # When enabled, the start-of-window robot state is injected into the
-  # action token stream. See assets/modal_merging.png.
-  use_proprioception: false        # master switch; false = baseline behavior
-  proprio_fusion: channel_concat   # "sequence_concat" | "channel_concat" | "add"
-  num_state_tokens: 4              # only used when proprio_fusion == sequence_concat
-  state_dim: null                  # null → defaults to action_dim

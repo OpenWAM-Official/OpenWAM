@@ -280,13 +280,6 @@ class MoTJointDriver:
         q_v, k_v, v_v, vpost = vb.pre_attn_at_layer(layer_id, vstate)
         q_a, k_a, v_a, apost = ab.pre_attn_at_layer(layer_id, astate)
 
-        # Plumb the video backbone's text-conditioned context to the action
-        # post stage so it can run optional language-conditioning cross-attn
-        # on the action stream. The driver itself stays modality-agnostic —
-        # it just transports the tensor; the action backbone decides whether
-        # to use it. Skipped silently when vstate has no ``context`` (mocks).
-        apost["text_context"] = getattr(vstate, "context", None)
-
         if q_v.dtype != q_a.dtype:
             raise RuntimeError(
                 f"MoTJointDriver: dtype mismatch at layer {layer_id} "

@@ -1,7 +1,6 @@
 # Import architecture packages to trigger @register_architecture decorators
 from openwam.model import architectures  # noqa: F401
 from openwam.model.action_backbone.dualsystem_dit import ActionDiT, ActionDiTState
-from openwam.model.action_backbone.proprioceptive import ProprioceptiveEncoder
 from openwam.model.action_backbone.shared_moe import SharedMoEActionBackbone
 from openwam.model.architectures import (
     ARCHITECTURE_METADATA,
@@ -32,5 +31,4 @@ __all__ = [
     "normalize_architecture_spec",
     "resolve_architecture_config",
     "CanonicalArchitectureSpec",
-    "ProprioceptiveEncoder",
 ]

@@ -62,7 +62,6 @@ class WanVideoBackbone(VideoBackbone):
         Supported sources:
         - ``DictConfig``: full Hydra config → ``build_training_pipeline(cfg)``
         - ``str`` directory path: auto-discover model files → lightweight build
-        - ``str`` ending in ``.json``: manifest path → ``build_video_backbone_from_manifest``
         - ``dict`` with ``video_backbone.model_path``: lightweight build from model dir
         - anything else: treated as an already-built pipe object
         """
@@ -75,14 +74,8 @@ class WanVideoBackbone(VideoBackbone):
         elif isinstance(source, str):
             if os.path.isdir(source):
                 pipe = cls._build_pipe_from_model_path(source, device=kw.get("device", "cpu"))
-            elif source.endswith(".json"):
-                from openwam.model.video_backbone.wan.pipeline_builder import build_video_backbone_from_manifest
-
-                pipe = build_video_backbone_from_manifest(source, device=kw.get("device", "cpu"))
             else:
-                raise ValueError(
-                    f"from_pretrained(str) expects a directory path or manifest .json path, got: {source!r}."
-                )
+                raise ValueError(f"from_pretrained(str) expects a directory path, got: {source!r}.")
         elif isinstance(source, dict):
             vb_cfg = source.get("video_backbone", source)
             if isinstance(vb_cfg, dict) and "components" in vb_cfg:
@@ -246,6 +239,8 @@ class WanVideoBackbone(VideoBackbone):
         latents = kw["latents"]
         timestep = kw["timestep"]
         context = kw["context"]
+        context_mask = kw.get("context_mask")
+        seq_lens = kw.get("seq_lens")
         clip_feature = kw.get("clip_feature")
         y = kw.get("y")
         reference_latents = kw.get("reference_latents")
@@ -290,6 +285,21 @@ class WanVideoBackbone(VideoBackbone):
         if motion_bucket_id is not None and motion_controller is not None:
             t_mod = t_mod + motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))
         context = dit.text_embedding(context)
+        if context_mask is None:
+            if seq_lens is not None:
+                seq_lens = seq_lens.to(device=context.device)
+                positions = torch.arange(context.shape[1], device=context.device).unsqueeze(0)
+                context_mask = positions < seq_lens.unsqueeze(1)
+            else:
+                context_mask = None
+        else:
+            context_mask = context_mask.to(device=context.device, dtype=torch.bool)
+            if context_mask.ndim != 2:
+                raise ValueError(f"context_mask must be 2D [B, L], got shape {tuple(context_mask.shape)}")
+            if context_mask.shape[0] != context.shape[0] or context_mask.shape[1] != context.shape[1]:
+                raise ValueError(
+                    f"context_mask shape must match context [B, L], got {tuple(context_mask.shape)} vs {tuple(context.shape)}"
+                )
 
         x = latents
         if x.shape[0] != context.shape[0]:
@@ -302,6 +312,13 @@ class WanVideoBackbone(VideoBackbone):
         if clip_feature is not None and dit.require_clip_embedding:
             clip_embdding = dit.img_emb(clip_feature)
             context = torch.cat([clip_embdding, context], dim=1)
+            if context_mask is not None:
+                clip_mask = torch.ones(
+                    (context_mask.shape[0], clip_embdding.shape[1]),
+                    dtype=torch.bool,
+                    device=context_mask.device,
+                )
+                context_mask = torch.cat([clip_mask, context_mask], dim=1)
 
         x = dit.patchify(x, control_camera_latents_input)
 
@@ -364,6 +381,7 @@ class WanVideoBackbone(VideoBackbone):
             t_mod=t_mod,
             freqs=freqs,
             context=context,
+            context_mask=context_mask,
             f=f,
             h=h,
             w=w,
@@ -381,16 +399,24 @@ class WanVideoBackbone(VideoBackbone):
         dit = state.extras["dit"]
         block = dit.blocks[block_id]
         attn_mask = state.extras.get("shared_attention_mask")
+        context_mask = state.context_mask
 
         if attn_mask is not None:
+            if context_mask is None:
+                context_mask = torch.ones(
+                    (state.context.shape[0], state.context.shape[1]),
+                    dtype=torch.bool,
+                    device=state.context.device,
+                )
             state.x = gradient_checkpoint_forward(
-                lambda x, context, t_mod, freqs, mask, _block=block: self._run_masked_block(
-                    _block, x, context, t_mod, freqs, mask
+                lambda x, context, context_mask, t_mod, freqs, mask, _block=block: self._run_masked_block(
+                    _block, x, context, context_mask, t_mod, freqs, mask
                 ),
                 state.use_gradient_checkpointing,
                 state.use_gradient_checkpointing_offload,
                 state.x,
                 state.context,
+                context_mask,
                 state.t_mod,
                 state.freqs,
                 attn_mask,
@@ -406,13 +432,22 @@ class WanVideoBackbone(VideoBackbone):
             state.context,
             state.t_mod,
             state.freqs,
+            context_mask.unsqueeze(1).expand(-1, state.x.shape[1], -1) if context_mask is not None else None,
         )
 
         self._apply_post_block_residuals(block_id, state)
         return state
 
     @staticmethod
-    def _run_masked_block(block, x: Tensor, context: Tensor, t_mod: Tensor, freqs: Tensor, attn_mask: Tensor) -> Tensor:
+    def _run_masked_block(
+        block,
+        x: Tensor,
+        context: Tensor,
+        context_mask: Tensor,
+        t_mod: Tensor,
+        freqs: Tensor,
+        attn_mask: Tensor,
+    ) -> Tensor:
         """Wan DiT block forward with an explicit self-attention mask.
 
         This mirrors :meth:`openwam.model.video_backbone.wan.dit.DiTBlock.forward`
@@ -442,7 +477,8 @@ class WanVideoBackbone(VideoBackbone):
         attn_out = rearrange(attn_out, "b n s d -> b s (n d)", n=sa.num_heads)
 
         x = block.gate(x, gate_msa, sa.o(attn_out))
-        x = x + block.cross_attn(block.norm3(x), context)
+        cross_mask = context_mask.unsqueeze(1).expand(-1, x.shape[1], -1).unsqueeze(1)
+        x = x + block.cross_attn(block.norm3(x), context, ctx_mask=cross_mask)
         input_x = modulate(block.norm2(x), shift_mlp, scale_mlp)
         x = block.gate(x, gate_mlp, block.ffn(input_x))
         return x
@@ -527,7 +563,10 @@ class WanVideoBackbone(VideoBackbone):
         sa = block.self_attn
 
         x = block.gate(post_state["residual_x"], post_state["gate_msa"], sa.o(attn_out))
-        x = x + block.cross_attn(block.norm3(x), state.context)
+        context_mask = None
+        if state.context_mask is not None:
+            context_mask = state.context_mask.unsqueeze(1).expand(-1, x.shape[1], -1).unsqueeze(1)
+        x = x + block.cross_attn(block.norm3(x), state.context, ctx_mask=context_mask)
         mlp_input = modulate(block.norm2(x), post_state["shift_mlp"], post_state["scale_mlp"])
         x = block.gate(x, post_state["gate_mlp"], block.ffn(mlp_input))
         state.x = x
@@ -770,22 +809,17 @@ class WanVideoBackbone(VideoBackbone):
     def get_component_specs(self, model_path: str) -> dict:
         """Generate component specs from *model_path* for config persistence.
 
-        Uses MODEL_CONFIGS hash matching (same as manifest generation) to
-        discover sub-module classes and kwargs. The returned dict is meant
-        to be injected into ``cfg.model.video_backbone`` before saving
-        ``config.yaml``, so deploy can reconstruct the pipeline without
-        needing the original *model_path* or a separate manifest file.
+        Uses MODEL_CONFIGS hash matching to discover sub-module classes and
+        kwargs. The returned dict is injected into ``cfg.model.video_backbone``
+        before saving ``config.yaml``, so deploy can reconstruct the pipeline
+        without needing the original *model_path*.
 
         Returns a dict with keys ``components`` (list) and optionally
         ``tokenizer`` (dict).
         """
-        from openwam.model.video_backbone.wan.manifest import generate_video_backbone_manifest
+        from openwam.model.video_backbone.wan.component_specs import generate_video_backbone_component_specs
 
-        manifest = generate_video_backbone_manifest(model_path)
-        result = {"components": manifest["models"]}
-        if "tokenizer" in manifest:
-            result["tokenizer"] = manifest["tokenizer"]
-        return result
+        return generate_video_backbone_component_specs(model_path)
 
     # ================================================================
     # Deploy-facing public methods (not in ABC — Wan-specific)
@@ -1126,18 +1160,14 @@ class WanVideoBackbone(VideoBackbone):
     ):
         """Build an empty WanVideoPipeline from component specs (config-driven).
 
-        Same logic as ``build_video_backbone_from_manifest`` but reads from
-        a config dict instead of a JSON file. Weights are NOT loaded here —
-        ``architecture.load_checkpoint`` handles that separately.
+        Weights are NOT loaded here — ``architecture.load_checkpoint`` handles
+        that separately.
 
         Tokenizer resolution order:
-          1. ``ckpt_dir`` + ``tokenizer.subdir`` — self-contained manifest
-             layout; ``save_video_backbone_artifacts`` copies the tokenizer
-             into ``<ckpt_dir>/tokenizer/google/umt5-xxl/``.
+          1. ``ckpt_dir`` + ``tokenizer.subdir`` — checkpoint-local tokenizer
+             copied during training save.
           2. ``model_path`` upstream layout — components-based persistence
-             writes specs into ``config.yaml`` but does NOT copy tokenizer
-             files, so we fall back to ``<model_path>/google/umt5-xxl/`` (no
-             ``tokenizer/`` prefix; that prefix is a manifest-only convention).
+             falls back to ``<model_path>/google/umt5-xxl/``.
         """
         from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline
         from openwam.model.video_backbone.wan.pipeline_builder import _build_tokenizer, _import_class
@@ -1168,8 +1198,9 @@ class WanVideoBackbone(VideoBackbone):
             if ckpt_dir and subdir and os.path.isdir(os.path.join(ckpt_dir, subdir)):
                 tok = _build_tokenizer(tokenizer, ckpt_dir)
             elif model_path and os.path.isdir(model_path):
-                # Strip the "tokenizer/" prefix used by self-contained manifest
-                # layouts; upstream model_path stores it as "google/umt5-xxl/".
+                # Checkpoint-local specs store tokenizer paths under
+                # ``tokenizer/``; upstream Wan model dirs store
+                # ``google/umt5-xxl/`` directly.
                 fallback_subdir = subdir
                 if fallback_subdir.startswith("tokenizer/"):
                     fallback_subdir = fallback_subdir[len("tokenizer/") :]

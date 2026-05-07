@@ -8,9 +8,7 @@
         every parameter is sharded across ranks, so loading a flat
         safetensors needs `deepspeed.zero.GatheredParameters` (or a
         pre-`prepare()` load hook). See `openwam/train/openwam_trainer.py`.
-- [ ] **Video-Backbone Architecture Re-Built**
 - [ ] **LeRobot Dataset Combination**
-- [ ] **RoboTwin2 Benchmark Support**
 
 ## What is OpenWAM
 
@@ -42,7 +40,7 @@ OpenWAM/
 ├── openwam/
 │   ├── dataloader/    # Dataset adapters (RoboTwin), transforms, registry
 │   ├── model/         # WAM architecture families, action backbone, video backbone
-│   │   ├── action_backbone/   # ActionDiT, MoE DiT, components, proprioceptive encoder
+│   │   ├── action_backbone/   # ActionDiT, MoE DiT, shared components
 │   │   └── video_backbone/    # Vendored video pipeline (WanVideoPipeline, VAE, DiT)
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
 │   ├── deploy/        # Policy server, model loader, joint/mock inference engines, scheduler
@@ -189,17 +187,15 @@ New checkpoints are intended to be deployable from the checkpoint directory alon
 
 - `config.yaml` — the full training config, including video-backbone component specs when `model.video_backbone.model_path` is readable.
 - `checkpoint_step_*.safetensors` — full model weights.
-- `action_stats.npy` — action normalization stats used by deploy to denormalize returned actions.
-- `video_backbone_manifest.json` — fallback manifest for rebuilding Wan video-backbone modules.
-- `tokenizer/google/umt5-xxl/` — copied automatically from `<model.video_backbone.model_path>/google/umt5-xxl` so deploy does not need the original Wan directory just to load the tokenizer.
+- `action_stats.npy` — action normalization stats required by the current deploy loader. When `dataloader.normalize_mode` is enabled, deploy uses these stats to normalize incoming proprioceptive state and unnormalize returned actions.
+- `tokenizer/google/umt5-xxl/` — copied automatically from `<model.video_backbone.model_path>/google/umt5-xxl` when available, so deploy does not need the original Wan directory just to load the tokenizer.
 
 Deploy's video-backbone source resolution is:
 
 1. component specs embedded in `config.yaml` (preferred), with tokenizer loaded from `<ckpt_dir>/tokenizer/google/umt5-xxl/`;
-2. `<ckpt_dir>/video_backbone_manifest.json`;
-3. `model.video_backbone.model_path` from the saved config as a legacy fallback.
+2. `model.video_backbone.model_path` from the saved config, if it is still accessible.
 
-For older or stripped component-only checkpoints that did not copy tokenizer files, deploy still tries `<model.video_backbone.model_path>/google/umt5-xxl/` before failing. The log line `Tokenizer not found under ckpt_dir; falling back to model_path/google/umt5-xxl` means the checkpoint directory is not fully self-contained and deploy is using that legacy fallback. Fully portable deployment should keep the copied `tokenizer/` directory alongside the checkpoint.
+`video_backbone_manifest.json` is no longer a deploy fallback. A checkpoint that only carries the old manifest, without embedded `model.video_backbone.components` and without an accessible `model_path`, is not deployable by the current loader. Fully portable deployment should keep the embedded component specs plus the copied `tokenizer/` directory alongside the checkpoint.
 
 #### Configuration
 
@@ -214,8 +210,8 @@ server:
   http_port: 8848
 
 inference:
-  denoise_steps: 20      # denoising steps
-  schedule_type: sync    # sync | cascade | decoupled_flash | decoupled_asymmetric
+  denoise_steps: 10      # denoising steps (FastWAM-Joint deploy default)
+  schedule_type: sync    # sync | video_leading | cascade | action_only | decoupled_flash | decoupled_asymmetric
   shift: 5.0
 
 optimization:
@@ -223,6 +219,10 @@ optimization:
   schedule:
     type: null           # optional deploy-time override for inference.schedule_type
     action_steps: 4      # action denoising steps for decoupled schedules
+  dit_cache:
+    enabled: false       # skip video DiT recompute when velocity prediction is stable
+    cosine_threshold: 0.99
+    max_skips: 3
   compile:
     enabled: true        # torch.compile ActionDiT (~30s one-time JIT warmup)
     video_dit: true      # torch.compile Video DiT blocks — long warmup (~5 min)
@@ -231,24 +231,41 @@ optimization:
     maxsize: 32          # LRU cache for prompt -> text embeddings
 ```
 
-CLI flags override the yaml values for their respective fields:
+`scripts/deploy.py` / `scripts/deploy.sh` expose a small set of CLI overrides
+for the fields that are commonly changed per launch:
 
 ```bash
 bash scripts/deploy.sh /path/to/checkpoint_dir \
   --device cuda:1 \
+  --host 0.0.0.0 \
   --ws-port 9000 \
   --http-port 9001 \
   --denoise-steps 10 \
+  --schedule-type sync \
+  --shift 5.0 \
   --ckpt-name checkpoint_step_10000.safetensors
 ```
 
-All inference overrides (`--denoise-steps`, `--schedule-type`, `--shift`) are optional; the yaml values are used when they are not provided.
+These flags map to:
+
+- `--ckpt-dir` / positional checkpoint path → checkpoint directory (`checkpoint_path` is used only when `--ckpt-dir` is absent)
+- `--ckpt-name` → specific `checkpoint_step_*.safetensors` filename
+- `--device` → `device`
+- `--host` / `--ws-port` / `--http-port` → `server.*`
+- `--denoise-steps` / `--schedule-type` / `--shift` → `inference.*`
+
+All of these overrides are optional; yaml values are used when a flag is not
+provided. Other deploy settings, including `optimization.decode_video`,
+`optimization.schedule.*`, `optimization.dit_cache.*`,
+`optimization.compile.*`, and `optimization.prompt_embed_cache.*`, are read
+from `configs/deploy.yaml` in the `scripts/deploy.py` path. To change them,
+edit the yaml (or use the package entrypoint's OmegaConf dotlist overrides).
 
 `scripts/deploy.py` and the package entrypoint (`openwam-serve` / `python -m openwam.deploy.policy_server`) both load checkpoints through the same package-native `load_from_checkpoint_dir` path. The package entrypoint defaults to `configs/deploy.yaml`, merges deploy overrides on top of the saved training config, and backfills `inference.height`, `inference.width`, and `inference.num_frames` from the checkpoint's dataloader config when they are not set explicitly.
 
 #### Mock mode (no GPU or model weights required)
 
-`MockInferenceEngine` implements the same interface as `JointInferenceEngine` but returns random Gaussian actions immediately, making it suitable for integration testing, client benchmarking, and CI environments without a GPU.
+`MockInferenceEngine` implements the same interface as `JointInferenceEngine` but returns random Gaussian actions after a configurable simulated latency, making it suitable for integration testing, client benchmarking, and CI environments without a GPU.
 
 ```bash
 # Start a mock server (no checkpoint needed)
@@ -272,10 +289,10 @@ python scripts/inference_continuous_test.py --steps 100
 
 Server endpoints:
 
-- HTTP `POST /predict` — send 3-camera `images` dict + base prompt, receive action (already denormalized to physical units)
+- HTTP `POST /predict` — send 3-camera `images` dict, base prompt, and optional raw `state`; receive action in the checkpoint's deploy scale. For normalized checkpoints this is already unnormalized back to physical units.
 - HTTP `POST /reset` — reset policy state between episodes
 - HTTP `GET /health` — health check
-- HTTP `GET /info` — model info and config
+- HTTP `GET /info` — model info and policy runtime config
 
 See [benchmarks/README.md](benchmarks/README.md) for the full client payload contract.
 
@@ -292,7 +309,7 @@ Each request writes `server_debug/ep0000/step_0001/{image_processed.jpg, meta.js
 
 ### 3. Testing the Server
 
-Client always sends the same 3-camera payload (head required, wrists optional). Server reads the checkpoint's `config.yaml` and dispatches to single- or multi-view preprocessing automatically. See [benchmarks/README.md](benchmarks/README.md) for the full client integration guide.
+Client always sends the same 3-camera payload (head required, wrists optional). Server reads the checkpoint's `config.yaml` and dispatches to single- or multi-view preprocessing automatically. The bundled test scripts also send a zero raw `state` vector by default (`--state-dim 20`); pass real proprioception with `--state ...` or `--state-file state.json`, or use `--no-state` only for checkpoints that do not use proprioceptive conditioning. See [benchmarks/README.md](benchmarks/README.md) for the full client integration guide.
 
 **Single inference test** — verify the server returns a valid action:
 
@@ -371,13 +388,12 @@ Checkpoint outputs include:
 
 - `checkpoint_step_*.safetensors` — full model weights
 - `config.yaml` — complete training config snapshot, including video-backbone component specs when available
-- `action_stats.npy` — action normalization stats required by deploy for physical-unit actions
-- `video_backbone_manifest.json` — fallback manifest for package-native video-backbone reconstruction
+- `action_stats.npy` — action normalization stats required by deploy; active normalization uses them for raw-state normalization and physical-unit actions
 - `tokenizer/google/umt5-xxl/` — tokenizer copied automatically from the Wan model directory for self-contained deployment
 
 ## Core Features
 
-- Joint video-action denoising with configurable schedules (sync, cascade, video-leading, action-only, decoupled)
+- Joint video-action denoising with configurable schedules (`sync`, `video_leading`, `cascade`, `action_only`, `decoupled_flash`, `decoupled_asymmetric`)
 - Receding-horizon execution with temporal ensembling
 - Two WAM architecture families: dual-system and shared backbone variants
 - Package-native model loading for inference and serving (no dependency on training infrastructure at deploy time)

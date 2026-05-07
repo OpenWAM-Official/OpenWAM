@@ -113,7 +113,7 @@ def load_from_checkpoint_dir(
         vb_params = OmegaConf.to_container(vb_params, resolve=True) or {}
     params["video_backbone"] = vb_params
 
-    # Provide video backbone source: config components (preferred), manifest, or model_path.
+    # Provide video backbone source from config components or model_path.
     vb_components = OmegaConf.select(cfg, "model.video_backbone.components", default=None)
     if vb_components is not None:
         logger.info("Using config-embedded component specs for video-backbone construction")
@@ -121,19 +121,13 @@ def load_from_checkpoint_dir(
         vb_params["_source"] = vb_cfg_dict
         vb_params["_ckpt_dir"] = ckpt_dir
     else:
-        manifest_path = os.path.join(ckpt_dir, "video_backbone_manifest.json")
-        if os.path.exists(manifest_path):
-            logger.info("Using manifest-based video-backbone builder: %s", manifest_path)
-            vb_params["_source"] = manifest_path
+        model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
+        if model_path is not None:
+            vb_params["_source"] = str(model_path)
         else:
-            model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
-            if model_path is not None:
-                vb_params["_source"] = str(model_path)
-            else:
-                logger.warning(
-                    "No components, manifest, or model_path in config; "
-                    "architecture __init__ will attempt to build from config."
-                )
+            logger.warning(
+                "No components or model_path in config; architecture __init__ will attempt to build from config."
+            )
 
     architecture = build_architecture(resolved_arch.registry_name, params)
     logger.info(
@@ -154,36 +148,30 @@ def load_from_checkpoint_dir(
 
     architecture.set_dtype_device(model_dtype, torch.device(device))
 
-    # 6. Attach denormalizer built from saved action_stats.npy + config.
-    architecture.attach_action_denormalizer(_build_action_denormalizer(cfg, ckpt_dir))
+    # 6. Attach the action normalizer built from saved action_stats.npy + config.
+    architecture.attach_action_normalizer(_build_action_normalizer(cfg, ckpt_dir))
 
     logger.info("Model loaded successfully on %s", device)
     return cfg, architecture
 
 
-def _build_action_denormalizer(cfg: DictConfig, ckpt_dir: str):
-    """Load action_stats.npy from *ckpt_dir* and wrap in an ActionNormalizer.
+def _build_action_normalizer(cfg: DictConfig, ckpt_dir: str):
+    """Build the deploy action normalizer when checkpoint normalization is active.
 
     Reads ``dataloader.normalize_mode`` and ``dataloader.action_mode`` from the
-    saved config to decide which mode to apply and which sub-dict to pull out
-    of the nested stats schema.
+    saved config. When normalization is disabled, returns ``None`` without
+    requiring ``action_stats.npy``. When enabled, loads ``action_stats.npy``
+    and wraps the requested stats sub-dict in an ``ActionNormalizer``.
     """
-    logger.info("[normalizer] Resolving deployment denormalizer from checkpoint dir: %s", ckpt_dir)
-    stats_path = os.path.join(ckpt_dir, "action_stats.npy")
-    if not os.path.exists(stats_path):
-        raise FileNotFoundError(
-            f"Missing required action_stats.npy in checkpoint dir: {stats_path}. "
-            "Old checkpoints without action_stats.npy are no longer supported."
-        )
-    logger.info("[normalizer] Found pre-computed stats file: %s (exists ✓)", stats_path)
+    logger.info("[normalizer] Resolving deployment action normalizer from checkpoint dir: %s", ckpt_dir)
 
     dl = OmegaConf.select(cfg, "dataloader", default=None)
     norm_mode = OmegaConf.select(cfg, "dataloader.normalize_mode", default=None)
     action_mode = OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
     if dl is None or norm_mode in (None, "", "none", "null"):
         logger.info(
-            "[normalizer] normalize_mode=%r disabled in saved config; denormalizer INACTIVE "
-            "(actions will be returned as-is from the model).",
+            "[normalizer] normalize_mode=%r disabled in saved config; action normalizer INACTIVE "
+            "(actions and deploy proprio will be returned/used as-is).",
             norm_mode,
         )
         return None
@@ -193,6 +181,14 @@ def _build_action_denormalizer(cfg: DictConfig, ckpt_dir: str):
         action_mode,
     )
 
+    stats_path = os.path.join(ckpt_dir, "action_stats.npy")
+    if not os.path.exists(stats_path):
+        raise FileNotFoundError(
+            f"Missing required action_stats.npy in checkpoint dir: {stats_path}. "
+            "Checkpoints with active action normalization must include action_stats.npy."
+        )
+    logger.info("[normalizer] Found pre-computed stats file: %s (exists ✓)", stats_path)
+
     from openwam.dataloader.transforms.normalize import (
         YAML_TO_NORM_MODE,
         ActionNormalizer,
@@ -201,7 +197,7 @@ def _build_action_denormalizer(cfg: DictConfig, ckpt_dir: str):
 
     if norm_mode not in YAML_TO_NORM_MODE:
         logger.warning(
-            "[normalizer] Unknown normalize_mode %r in checkpoint config; denormalizer DISABLED.",
+            "[normalizer] Unknown normalize_mode %r in checkpoint config; action normalizer DISABLED.",
             norm_mode,
         )
         return None
@@ -209,13 +205,13 @@ def _build_action_denormalizer(cfg: DictConfig, ckpt_dir: str):
     mode_stats = load_mode_stats(stats_path, action_mode)
     if mode_stats is None:
         logger.warning(
-            "[normalizer] Stats file %s has no '%s' entry; denormalizer DISABLED.",
+            "[normalizer] Stats file %s has no '%s' entry; action normalizer DISABLED.",
             stats_path,
             action_mode,
         )
         return None
 
-    denorm = ActionNormalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=mode_stats)
+    normalizer = ActionNormalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=mode_stats)
     logger.info(
         "[normalizer] Active: mode=%s action_mode=%s dim=%d stats=%s",
         norm_mode,
@@ -223,4 +219,4 @@ def _build_action_denormalizer(cfg: DictConfig, ckpt_dir: str):
         len(mode_stats["mean"]),
         stats_path,
     )
-    return denorm
+    return normalizer

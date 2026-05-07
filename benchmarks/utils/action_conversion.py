@@ -17,6 +17,39 @@ so they can run in any benchmark client's Python environment.
 import numpy as np
 
 
+def quat_xyzw_to_rot6d(quat: np.ndarray) -> np.ndarray:
+    """Convert xyzw quaternion(s) to 6D rotation, matching RoboTwinDataset."""
+    q = np.asarray(quat, dtype=np.float64)
+    if q.shape[-1] != 4:
+        raise ValueError(f"quat must end with dimension 4, got shape {q.shape}")
+
+    norm = np.linalg.norm(q, axis=-1, keepdims=True)
+    q = q / np.maximum(norm, 1e-8)
+    x, y, z, w = np.moveaxis(q, -1, 0)
+
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+
+    col1 = np.stack(
+        [
+            1.0 - 2.0 * (yy + zz),
+            2.0 * (xy + wz),
+            2.0 * (xz - wy),
+        ],
+        axis=-1,
+    )
+    col2 = np.stack(
+        [
+            2.0 * (xy - wz),
+            1.0 - 2.0 * (xx + zz),
+            2.0 * (yz + wx),
+        ],
+        axis=-1,
+    )
+    return np.concatenate([col1, col2], axis=-1).astype(np.float32)
+
+
 def rot6d_to_quat_xyzw(r6d: np.ndarray) -> np.ndarray:
     """Convert 6D rotation (first two columns of R) to xyzw quaternion.
 
@@ -70,3 +103,32 @@ def eef20d_to_ee16d(action: np.ndarray) -> np.ndarray:
     l_quat = rot6d_to_quat_xyzw(l_r6d)
     r_quat = rot6d_to_quat_xyzw(r_r6d)
     return np.concatenate([l_xyz, l_quat, l_grip, r_xyz, r_quat, r_grip]).astype(np.float32)
+
+
+def robotwin_endpose_to_eef20d(
+    left_endpose: np.ndarray,
+    right_endpose: np.ndarray,
+    left_gripper: np.ndarray | float,
+    right_gripper: np.ndarray | float,
+) -> np.ndarray:
+    """Assemble 20D OpenWAM EEF proprio from RoboTwin endpose fields.
+
+    This mirrors ``RoboTwinDataset._read_eef_actions``:
+    ``[left_xyz, left_rot6d, left_grip, right_xyz, right_rot6d, right_grip]``.
+    RoboTwin endpose quaternions are xyzw.
+    """
+    left_ep = np.asarray(left_endpose, dtype=np.float32).reshape(-1)
+    right_ep = np.asarray(right_endpose, dtype=np.float32).reshape(-1)
+    if left_ep.shape[0] != 7 or right_ep.shape[0] != 7:
+        raise ValueError(
+            f"RoboTwin endpose fields must be 7D xyz+quat_xyzw; got left={left_ep.shape}, right={right_ep.shape}"
+        )
+
+    left_grip = np.asarray(left_gripper, dtype=np.float32).reshape(-1)
+    right_grip = np.asarray(right_gripper, dtype=np.float32).reshape(-1)
+    if left_grip.size < 1 or right_grip.size < 1:
+        raise ValueError("RoboTwin gripper fields must contain at least one scalar value.")
+
+    left = np.concatenate([left_ep[:3], quat_xyzw_to_rot6d(left_ep[3:]), left_grip[:1]], axis=-1)
+    right = np.concatenate([right_ep[:3], quat_xyzw_to_rot6d(right_ep[3:]), right_grip[:1]], axis=-1)
+    return np.concatenate([left, right], axis=-1).astype(np.float32)

@@ -142,7 +142,7 @@ def test_moe_architecture_no_video_dim_raises():
 
 
 # ---------------------------------------------------------------------------
-# Step 6: action decode path — action_repr then denormalizer (serial)
+# Step 6: action decode path — action_repr then action normalizer (serial)
 # ---------------------------------------------------------------------------
 
 
@@ -153,15 +153,15 @@ class _FakeActionRepr:
         return x * 2.0
 
 
-class _FakeDenormalizer:
-    """Fake denormalizer that adds 10."""
+class _FakeActionNormalizer:
+    """Fake action normalizer whose unnormalize adds 10."""
 
     def unnormalize(self, x):
         return x + 10.0
 
 
-def test_action_decode_repr_then_denorm():
-    """generate() action decode should apply action_repr.decode then denorm.unnormalize."""
+def test_action_decode_repr_then_normalizer():
+    """generate() action decode should apply action_repr.decode then normalizer.unnormalize."""
     from tests.test_openwam_trainer import _make_tiny_arch
 
     arch = _make_tiny_arch()
@@ -169,24 +169,24 @@ def test_action_decode_repr_then_denorm():
     # Simulate the decode logic from generate()
     action_latents = torch.ones(1, 5, 7)
     action_repr = _FakeActionRepr()
-    arch.action_denormalizer = _FakeDenormalizer()
+    arch.action_normalizer = _FakeActionNormalizer()
 
     # Replicate the logic from base.py generate()
     if action_repr is not None:
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
     else:
         actions = action_latents.squeeze(0).float().cpu().numpy()
-    denorm = getattr(arch, "action_denormalizer", None)
-    if denorm is not None:
-        actions = denorm.unnormalize(actions)
+    normalizer = getattr(arch, "action_normalizer", None)
+    if normalizer is not None:
+        actions = normalizer.unnormalize(actions)
 
-    # action_repr doubles (1→2), denorm adds 10 (2→12)
+    # action_repr doubles (1→2), normalizer.unnormalize adds 10 (2→12)
     expected = np.full((5, 7), 12.0)
     np.testing.assert_allclose(actions, expected)
 
 
 def test_action_decode_repr_only():
-    """With only action_repr, decode should work without denormalizer."""
+    """With only action_repr, decode should work without an action normalizer."""
     action_latents = torch.ones(1, 5, 7)
     action_repr = _FakeActionRepr()
 
@@ -194,42 +194,42 @@ def test_action_decode_repr_only():
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
     else:
         actions = action_latents.squeeze(0).float().cpu().numpy()
-    denorm = None
-    if denorm is not None:
-        actions = denorm.unnormalize(actions)
+    normalizer = None
+    if normalizer is not None:
+        actions = normalizer.unnormalize(actions)
 
     expected = np.full((5, 7), 2.0)
     np.testing.assert_allclose(actions, expected)
 
 
-def test_action_decode_denorm_only():
-    """With only denormalizer, decode should work without action_repr."""
+def test_action_decode_normalizer_only():
+    """With only an action normalizer, decode should work without action_repr."""
     action_latents = torch.ones(1, 5, 7)
     action_repr = None
-    denorm = _FakeDenormalizer()
+    normalizer = _FakeActionNormalizer()
 
     if action_repr is not None:
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
     else:
         actions = action_latents.squeeze(0).float().cpu().numpy()
-    if denorm is not None:
-        actions = denorm.unnormalize(actions)
+    if normalizer is not None:
+        actions = normalizer.unnormalize(actions)
 
     expected = np.full((5, 7), 11.0)
     np.testing.assert_allclose(actions, expected)
 
 
 def test_action_decode_neither():
-    """With neither action_repr nor denormalizer, raw latents are returned."""
+    """With neither action_repr nor action normalizer, raw latents are returned."""
     action_latents = torch.ones(1, 5, 7) * 3.0
     action_repr = None
-    denorm = None
+    normalizer = None
 
     actions = action_latents.squeeze(0).float().cpu().numpy()
     if action_repr is not None:
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
-    if denorm is not None:
-        actions = denorm.unnormalize(actions)
+    if normalizer is not None:
+        actions = normalizer.unnormalize(actions)
 
     expected = np.full((5, 7), 3.0)
     np.testing.assert_allclose(actions, expected)

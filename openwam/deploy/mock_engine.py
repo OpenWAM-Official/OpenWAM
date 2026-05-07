@@ -69,10 +69,9 @@ class MockInferenceEngine(BaseInferenceEngine):
             dict with:
                 - ``video``: ``None`` (no video generated)
                 - ``actions``: ``np.ndarray`` of shape ``(num_frames - 1, action_dim)``,
-                  aligned with the real engine's output (see
-                  ``joint_generation.generate_video_and_actions``: action latents
-                  carry ``num_frames - 1`` steps because frame 0 is the
-                  conditioning frame excluded from the loss).
+                  aligned with the real engine's output: action latents carry
+                  ``num_frames - 1`` steps because frame 0 is the conditioning
+                  frame excluded from the loss.
         """
         if self.latency_ms > 0.0:
             time.sleep(self.latency_ms / 1000.0)

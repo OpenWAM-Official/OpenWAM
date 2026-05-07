@@ -1,344 +1,93 @@
-"""Tests for proprioceptive state conditioning."""
+"""Tests for FastWAM-style proprio context conditioning."""
 
 import pytest
 import torch
 
-from openwam.model.action_backbone.proprioceptive import ProprioceptiveEncoder
+from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
 
 
-def test_import():
-    """ProprioceptiveEncoder should be importable from models package."""
-    from openwam.model import ProprioceptiveEncoder
+class _ContextProprioArch(DualSystemSelfAttnArchitecture):
+    """Tiny architecture shell that only exercises BaseWAMArchitecture helpers."""
 
-    assert callable(ProprioceptiveEncoder)
-
-
-def test_add_mode_shape():
-    """Add mode should preserve sequence length."""
-    enc = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="add")
-    action_embeds = torch.randn(2, 49, 64)
-    state = torch.randn(2, 14)
-    out = enc(action_embeds, state)
-
-    assert out.shape == (2, 49, 64)
-
-
-def test_sequence_concat_mode_shape():
-    """sequence_concat mode should add extra tokens."""
-    enc = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="sequence_concat", num_state_tokens=4)
-    action_embeds = torch.randn(2, 49, 64)
-    state = torch.randn(2, 14)
-    out = enc(action_embeds, state)
-
-    assert out.shape == (2, 53, 64)  # 49 + 4
+    def __init__(self, *, state_dim: int = 14, text_dim: int = 32):
+        super().__init__(None)
+        self._device = torch.device("cpu")
+        self._dtype = torch.float32
+        self._init_proprio_context(
+            {
+                "use_proprioception": True,
+                "state_dim": state_dim,
+                "text_dim": text_dim,
+            },
+            text_dim=text_dim,
+        )
 
 
-def test_extra_tokens_property():
-    """extra_tokens should match mode."""
-    enc_add = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="add")
-    enc_cat = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="sequence_concat", num_state_tokens=8)
-    assert enc_add.extra_tokens == 0
-    assert enc_cat.extra_tokens == 8
+def test_proprio_context_token_extends_context_and_mask():
+    arch = _ContextProprioArch(state_dim=7, text_dim=16)
+    inputs = {
+        "context": torch.randn(2, 4, 16),
+        "seq_lens": torch.tensor([2, 4]),
+    }
+    proprio = torch.randn(2, 7)
+
+    out = arch._append_proprio_context_token(inputs, proprio)
+
+    assert out["context"].shape == (2, 5, 16)
+    assert out["context_mask"].shape == (2, 5)
+    assert out["context_mask"][:, -1].all()
+    assert out["context_mask"][0].tolist() == [True, True, False, False, True]
+    assert out["seq_lens"].tolist() == [2, 4]
 
 
-def test_zero_init():
-    """Output should be near-zero at initialization (preserves pretrained behavior)."""
-    enc = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="add")
-    action_embeds = torch.randn(1, 10, 64)
-    state = torch.randn(1, 14)
-    out = enc(action_embeds, state)
-
-    # With zero-init, the state contribution should be ~0
-    diff = (out - action_embeds).abs().max().item()
-    assert diff < 1e-5, f"Expected near-zero init, got max diff {diff}"
+def test_proprio_context_requires_dataset_field():
+    arch = _ContextProprioArch(state_dim=7, text_dim=16)
+    with pytest.raises(ValueError, match="requires `proprio_state`"):
+        arch._append_proprio_context_token({"context": torch.randn(1, 4, 16)}, None)
 
 
-def test_zero_init_concat():
-    """Concat mode state tokens should also start near-zero."""
-    enc = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="sequence_concat", num_state_tokens=4)
-    state = torch.randn(1, 7)
-    action_embeds = torch.randn(1, 10, 32)
-    out = enc(action_embeds, state)
-
-    # State tokens (first 4) should be near-zero
-    state_tokens = out[:, :4, :]
-    assert state_tokens.abs().max().item() < 1e-5
+def test_proprio_context_validates_dim():
+    arch = _ContextProprioArch(state_dim=7, text_dim=16)
+    with pytest.raises(ValueError, match="last dim must be 7"):
+        arch._append_proprio_context_token({"context": torch.randn(1, 4, 16)}, torch.randn(1, 6))
 
 
-def test_gradient_flow():
-    """Gradients should flow through the encoder."""
-    enc = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="add")
-    action_embeds = torch.randn(1, 10, 32, requires_grad=True)
-    state = torch.randn(1, 7, requires_grad=True)
-
-    out = enc(action_embeds, state)
-    loss = out.sum()
-    loss.backward()
-
-    assert state.grad is not None
-    assert action_embeds.grad is not None
-
-
-def test_gradient_flow_concat():
-    """Concat mode should also propagate gradients."""
-    enc = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="sequence_concat", num_state_tokens=2)
-    state = torch.randn(1, 7, requires_grad=True)
-    action_embeds = torch.randn(1, 10, 32, requires_grad=True)
-
-    out = enc(action_embeds, state)
-    loss = out.sum()
-    loss.backward()
-
-    assert state.grad is not None
-
-
-def test_invalid_mode():
-    with pytest.raises(ValueError, match="mode must be"):
-        ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="invalid")
-
-
-def test_batch_independence():
-    """Different batch elements should produce different outputs."""
-    enc = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="add")
-    # Break zero-init for test
-    with torch.no_grad():
-        enc.encoder[-1].weight.fill_(0.1)
-
-    action_embeds = torch.randn(2, 10, 32)
-    state = torch.randn(2, 7)
-    state[0] = 0.0  # Different states
-    state[1] = 1.0
-
-    out = enc(action_embeds, state)
-    # Outputs should differ because states differ
-    assert not torch.allclose(out[0], out[1])
-
-
-def test_various_state_dims():
-    """Should work with common proprioceptive dims."""
-    for state_dim in [7, 13, 14, 20]:
-        enc = ProprioceptiveEncoder(state_dim=state_dim, hidden_dim=64, mode="add")
-        out = enc(torch.randn(1, 49, 64), torch.randn(1, state_dim))
-        assert out.shape == (1, 49, 64)
-
-
-def test_dropout():
-    """Dropout should be applied in training mode."""
-    enc = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="add", dropout=0.5)
-    # Break zero-init for test
-    with torch.no_grad():
-        enc.encoder[-1].weight.fill_(1.0)
-
-    enc.train()
-    action_embeds = torch.randn(1, 10, 32)
-    state = torch.ones(1, 7)
-
-    # Run multiple times — with dropout, outputs should vary
-    outs = [enc(action_embeds, state) for _ in range(10)]
-    # At least some should differ
-    all_same = all(torch.allclose(outs[0], o) for o in outs[1:])
-    assert not all_same, "Dropout should cause variation in training mode"
-
-
-# --- channel_concat mode (channel-wise concat per figure) ---
-
-
-def test_channel_concat_mode_preserves_seq_len():
-    """channel_concat should keep the sequence length unchanged."""
-    enc = ProprioceptiveEncoder(state_dim=14, hidden_dim=64, mode="channel_concat")
-    action_embeds = torch.randn(2, 49, 64)
-    state = torch.randn(2, 14)
-    out = enc(action_embeds, state)
-
-    assert out.shape == (2, 49, 64)
-    assert enc.extra_tokens == 0
-
-
-def test_channel_concat_zero_init_matches_baseline():
-    """At init the channel_concat encoder should be a no-op on action_embeds.
-
-    This matters because it guarantees that enabling proprioception on a
-    pretrained checkpoint starts training from identical behavior to the
-    baseline (no regression at step 0).
-    """
-    enc = ProprioceptiveEncoder(state_dim=14, hidden_dim=32, mode="channel_concat")
-    action_embeds = torch.randn(3, 16, 32)
-    # Use a non-zero state to make the test meaningful — the encoder's
-    # zero-init MUST make the state contribution vanish regardless of value.
-    state = torch.randn(3, 14) * 10.0
-
-    out = enc(action_embeds, state)
-
-    diff = (out - action_embeds).abs().max().item()
-    assert diff < 1e-5, f"Expected channel_concat identity at init, got max diff {diff}"
-
-
-def test_channel_concat_gradient_flow():
-    """Gradients should flow through both the action path and state path."""
-    enc = ProprioceptiveEncoder(state_dim=7, hidden_dim=32, mode="channel_concat")
-    # Break zero-init on both the encoder MLP AND the state half of
-    # channel_merge so the state path carries a non-zero gradient.
-    with torch.no_grad():
-        enc.encoder[-1].weight.fill_(0.1)
-        enc.channel_merge.weight[:, enc.hidden_dim :].fill_(0.05)
-
-    action_embeds = torch.randn(2, 10, 32, requires_grad=True)
-    state = torch.randn(2, 7, requires_grad=True)
-
-    out = enc(action_embeds, state)
-    out.sum().backward()
-
-    assert action_embeds.grad is not None
-    assert state.grad is not None
-    assert state.grad.abs().max().item() > 0
-
-
-def test_action_dit_end_to_end_channel_concat():
-    """ActionDiT with channel_concat proprio should produce correctly-shaped predictions."""
+def test_action_dit_rejects_per_token_timestep():
     from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
-    bridge_layers = (0, 1)
     dit = ActionDiT(
-        action_dim=14,
+        action_dim=7,
         dim=32,
         ffn_dim=64,
         num_heads=4,
-        num_layers=len(bridge_layers),
-        video_dim=48,
-        bridge_layers=bridge_layers,
-        variant="joint_cross_attn",
-        use_proprioception=True,
-        proprio_fusion="channel_concat",
-    )
-
-    B, T_a, T_v = 2, 8, 5
-    action_tokens = torch.randn(B, T_a, 14)
-    timestep = torch.randint(0, 1000, (B,)).float()
-    bridges = {bid: torch.randn(B, T_v, 48) for bid in bridge_layers}
-    proprio = torch.randn(B, 14)
-
-    out = dit(action_tokens, bridges, timestep, proprio_state=proprio)
-    assert out.shape == (B, T_a, 14)
-
-
-def test_action_dit_end_to_end_sequence_concat():
-    """ActionDiT with sequence_concat should slice state tokens off the output."""
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
-
-    bridge_layers = (0, 1)
-    num_state_tokens = 3
-    dit = ActionDiT(
-        action_dim=14,
-        dim=32,
-        ffn_dim=64,
-        num_heads=4,
-        num_layers=len(bridge_layers),
-        video_dim=48,
-        bridge_layers=bridge_layers,
-        variant="joint_cross_attn",
-        use_proprioception=True,
-        proprio_fusion="sequence_concat",
-        num_state_tokens=num_state_tokens,
-    )
-
-    B, T_a, T_v = 2, 8, 5
-    action_tokens = torch.randn(B, T_a, 14)
-    timestep = torch.randint(0, 1000, (B,)).float()
-    bridges = {bid: torch.randn(B, T_v, 48) for bid in bridge_layers}
-    proprio = torch.randn(B, 14)
-
-    out = dit(action_tokens, bridges, timestep, proprio_state=proprio)
-    # Output should be aligned with action seq length, not (T_a + num_state_tokens).
-    assert out.shape == (B, T_a, 14)
-    assert dit.num_proprio_tokens == num_state_tokens
-
-
-def test_action_dit_joint_self_attn_sequence_concat():
-    """joint_self_attn + sequence_concat: proprio prefix is stripped at extract_prediction.
-
-    Verifies the MoT path's prepare_state → pre/post_attn_at_layer →
-    extract_prediction round trip when proprio is fused via sequence_concat:
-    the proprio prefix is carried in the action stream during attention but
-    must be sliced off by ``extract_prediction`` so the output matches the
-    raw action sequence length.
-    """
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
-
-    bridge_layers = (0, 1)
-    num_state_tokens = 3
-    dit = ActionDiT(
-        action_dim=14,
-        dim=32,
-        ffn_dim=64,
-        num_heads=4,
-        num_layers=len(bridge_layers),
+        num_layers=1,
         video_dim=32,
-        bridge_layers=bridge_layers,
+        bridge_layers=(0,),
+        variant="joint_self_attn",
+    )
+    with pytest.raises(ValueError, match="action timestep must be 1D"):
+        context = torch.randn(2, 4, dit.text_dim)
+        context_mask = torch.ones(2, 4, dtype=torch.bool)
+        dit.prepare_state(torch.randn(2, 5, 7), torch.randn(2, 5), context=context, context_mask=context_mask)
+
+
+def test_action_dit_ignores_deprecated_proprio_constructor_flags():
+    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+
+    dit = ActionDiT(
+        action_dim=7,
+        dim=32,
+        ffn_dim=64,
+        num_heads=4,
+        num_layers=1,
+        video_dim=32,
+        bridge_layers=(0,),
         variant="joint_self_attn",
         use_proprioception=True,
-        proprio_fusion="sequence_concat",
-        num_state_tokens=num_state_tokens,
+        state_dim=7,
     )
-
-    B, T_a = 2, 8
-    action_tokens = torch.randn(B, T_a, 14)
-    timestep = torch.randint(0, 1000, (B,)).float()
-    proprio = torch.randn(B, 14)
-
-    # Drive the MoT half-step pair at every layer with a dummy mixed-attention
-    # output so the action stream traverses all layers; the driver itself is
-    # exercised in tests/test_mot_driver.py.
-    astate = dit.prepare_state(action_tokens, timestep, proprio_state=proprio)
-    payload = astate.payload
-    assert payload.action_prefix_tokens == num_state_tokens
-    for layer_id in range(dit.num_layers):
-        q, k, v, post = dit.pre_attn_at_layer(layer_id, astate)
-        assert q.shape[1] == T_a + num_state_tokens
-        astate = dit.post_attn_at_layer(layer_id, astate, torch.randn_like(q), post)
-
-    out = dit.extract_prediction(astate)
-    # extract_prediction must strip the proprio prefix back off.
-    assert out.shape == (B, T_a, 14)
-
-
-def test_action_dit_asserts_when_state_missing():
-    """Building with use_proprioception=True but forwarding None should fail loudly."""
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
-
-    bridge_layers = (0,)
-    dit = ActionDiT(
-        action_dim=14,
-        dim=32,
-        ffn_dim=64,
-        num_heads=4,
-        num_layers=1,
-        video_dim=32,
-        bridge_layers=bridge_layers,
-        variant="joint_cross_attn",
-        use_proprioception=True,
-        proprio_fusion="channel_concat",
-    )
-    action_tokens = torch.randn(1, 4, 14)
-    bridges = {0: torch.randn(1, 3, 32)}
-    timestep = torch.tensor([0.0])
-    with pytest.raises(AssertionError, match="proprio_state=None"):
-        dit(action_tokens, bridges, timestep, proprio_state=None)
-
-
-def test_action_dit_proprio_disabled_by_default():
-    """When use_proprioception=False the encoder should be None."""
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
-
-    bridge_layers = (0,)
-    dit = ActionDiT(
-        action_dim=14,
-        dim=32,
-        ffn_dim=64,
-        num_heads=4,
-        num_layers=1,
-        video_dim=32,
-        bridge_layers=bridge_layers,
-        variant="joint_cross_attn",
-    )
-    assert dit.proprio_encoder is None
-    assert dit.num_proprio_tokens == 0
+    context = torch.randn(2, 4, dit.text_dim)
+    context_mask = torch.ones(2, 4, dtype=torch.bool)
+    state = dit.prepare_state(torch.randn(2, 5, 7), torch.randn(2), context=context, context_mask=context_mask)
+    assert state.payload.x_action.shape[1] == 5
+    assert dit.uses_proprioception is False

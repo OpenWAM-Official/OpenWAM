@@ -200,4 +200,6 @@ class WAMPolicy:
             conditions["first_frame_image"] = [img]
         if obs.get("prompt"):
             conditions["prompt"] = obs["prompt"]
+        if "state" in obs and obs["state"] is not None:
+            conditions["proprio_state"] = obs["state"]
         return conditions

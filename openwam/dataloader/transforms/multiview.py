@@ -93,26 +93,13 @@ def assemble_multiview_layout(
     return canvas
 
 
-def format_prompt_for_inference(base_prompt: str, multiview: bool, camera_layout) -> str:
-    """Wrap a base task prompt with the multi-view layout description.
+def format_prompt_for_inference(base_prompt: str) -> str:
+    """Deploy prompt template.
 
     Must match :meth:`RoboTwinDataset._get_prompt` byte-for-byte so that the
     deployment-time prompt stays in-distribution with training.
-
-    - Single-view: returns ``base_prompt`` unchanged.
-    - Multi-view:  wraps with the 3-view layout description used at training.
     """
-    if not multiview:
-        return base_prompt
-    if base_prompt and base_prompt[-1] not in ".!?":
-        base_prompt = base_prompt + "."
-    return (
-        f"A multi-view video shows that {base_prompt} "
-        f"The video is composed of three views: "
-        f"{camera_layout[0].replace('_', ' ')} (top), "
-        f"{camera_layout[1].replace('_', ' ')} (bottom-left), "
-        f"{camera_layout[2].replace('_', ' ')} (bottom-right)."
-    )
+    return "A video recorded from a robot's point of view executing the following instruction: " + base_prompt
 
 
 __all__ = [

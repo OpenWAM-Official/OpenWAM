@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
+import torch
 from torch import Tensor
 
 from openwam.model.action_backbone.dualsystem_dit import ActionDiT
@@ -50,6 +51,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             cfg.setdefault("video_dim", self.video_backbone.dim)
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
+        self._init_proprio_context(cfg, text_dim=int(cfg.get("text_dim", 4096)))
         self._detach_bridge = bool(cfg.get("detach_bridge", False))
 
         # Mirror joint_self_attn's heterogeneous-hidden support: when
@@ -62,6 +64,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         attn_head_dim = cfg.get("attn_head_dim")
         if attn_head_dim is not None:
             attn_head_dim = int(attn_head_dim)
+        text_dim = int(cfg.get("text_dim", 4096))
 
         self.action_backbone = ActionDiT(
             action_dim=int(cfg.get("action_dim", 20)),
@@ -73,10 +76,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             bridge_layers=bl,
             variant="joint_cross_attn",
             attn_head_dim=attn_head_dim,
-            use_proprioception=bool(cfg.get("use_proprioception", False)),
-            state_dim=int(cfg.get("state_dim") or 0),
-            proprio_fusion=cfg.get("proprio_fusion", "channel_concat"),
-            num_state_tokens=int(cfg.get("num_state_tokens", 4)),
+            text_dim=text_dim,
         )
 
     @property
@@ -101,6 +101,13 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
                 "architecture.__init__ to enable forward()."
             )
 
+        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio_state)
+        action_context = pipeline_inputs.get("context")
+        action_context_mask = pipeline_inputs.get("context_mask")
+        if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:
+            seq_lens = pipeline_inputs["seq_lens"].to(device=action_context.device)
+            positions = torch.arange(action_context.shape[1], device=action_context.device)
+            action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
         vstate = vb.prepare(
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
@@ -129,7 +136,8 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             noisy_actions,
             bridges,
             action_timestep,
-            proprio_state=proprio_state,
+            context=action_context,
+            context_mask=action_context_mask,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )

@@ -32,7 +32,7 @@ def _make_dual_system(variant="joint_cross_attn", detach_bridge=True, dim=64, vi
 
 
 def test_dual_system_joint_cross_attn_flow():
-    """DualSystem joint_cross_attn: ActionDiT.forward(action_tokens, bridges, timestep)."""
+    """DualSystem joint_cross_attn: ActionDiT.forward can consume context."""
     arch = _make_dual_system("joint_cross_attn", detach_bridge=True, dim=64, video_dim=128)
     B, T_action, T_video = 2, 5, 10
     noisy_actions = torch.randn(B, T_action, 7)
@@ -40,7 +40,9 @@ def test_dual_system_joint_cross_attn_flow():
 
     ab = arch.action_backbone
     bridges = {bid: torch.randn(B, T_video, 128) for bid in ab.bridge_layers}
-    pred = ab(noisy_actions, bridges, timestep)
+    context = torch.randn(B, 4, ab.text_dim)
+    context_mask = torch.ones(B, 4, dtype=torch.bool)
+    pred = ab(noisy_actions, bridges, timestep, context=context, context_mask=context_mask)
     assert pred.shape == (B, T_action, 7)
 
 
@@ -54,7 +56,9 @@ def test_dual_system_joint_self_attn_flow():
     timestep = torch.tensor([0.5, 0.8])
 
     ab = arch.action_backbone
-    astate = ab.prepare_state(noisy_actions, timestep)
+    context = torch.randn(B, 4, ab.text_dim)
+    context_mask = torch.ones(B, 4, dtype=torch.bool)
+    astate = ab.prepare_state(noisy_actions, timestep, context=context, context_mask=context_mask)
 
     # Drive the action half-step at each layer with a fake mixed-attention
     # output. The driver's job (plumbing video Q/K/V, mixed attention, splitting)

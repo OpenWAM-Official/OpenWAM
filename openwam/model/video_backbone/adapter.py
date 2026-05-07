@@ -57,7 +57,8 @@ class BlockLoopState:
     x: Tensor  # (B, L, dim) current hidden state
     t_mod: Tensor  # timestep modulation — (B, 6, dim) or (B, L, 6, dim)
     freqs: Tensor  # RoPE freqs
-    context: Tensor  # text embedding
+    context: Tensor  # text/context embedding
+    context_mask: Optional[Tensor] = None  # (B, L_context) bool, True = attend
 
     # --- Spatial dims for unpatchify (backbone-internal) ---
     f: int = 0
@@ -193,8 +194,8 @@ class VideoBackbone(ABC, nn.Module):
         """Build a backbone instance from pretrained weights.
 
         Args:
-            source: Model path (str), Hydra config (DictConfig), manifest
-                path, or an already-built pipeline object.
+            source: Model path (str), Hydra config (DictConfig), component
+                specs dict, or an already-built pipeline object.
             **kw: Backend-specific options (device, dtype, etc.).
 
         Returns:

@@ -46,9 +46,8 @@ def precompute_freqs_cis_1d(head_dim: int, max_len: int = 1024, theta: float = 1
 def rope_apply_1d(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     """Apply 1D rotary position embedding to Q or K.
 
-    Temporarily promotes the head tensor to fp32 because ``view_as_complex``
-    requires float32/64 inputs; callers running bf16/fp16 get the original
-    dtype restored on return.
+    Mirrors FastWAM/Wan RoPE numerics by doing the complex multiply through a
+    float64 complex view, then restoring the caller's dtype.
 
     Args:
         x:     (B, H, S, D) head-split tensor.
@@ -57,8 +56,9 @@ def rope_apply_1d(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     Returns:
         Rotated tensor with the same dtype and shape as ``x``.
     """
-    x_c = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+    x_c = torch.view_as_complex(x.to(torch.float64).reshape(*x.shape[:-1], -1, 2))
     freqs = freqs.to(x_c.device).view(1, 1, x_c.shape[-2], x_c.shape[-1])
+    freqs = freqs.to(torch.complex64) if freqs.device.type == "npu" else freqs
     return torch.view_as_real(x_c * freqs).flatten(-2).to(x.dtype)
 
 

@@ -163,30 +163,23 @@ def test_multiview_true_short_camera_layout_errors():
 
 
 def test_prompt_passthrough_single_view():
-    assert format_prompt_for_inference("pick up the bottle", multiview=False, camera_layout=[]) == "pick up the bottle"
+    assert format_prompt_for_inference("pick up the bottle") == (
+        "A video recorded from a robot's point of view executing the following instruction: pick up the bottle"
+    )
 
 
 def test_prompt_wrap_multiview_with_period():
-    out = format_prompt_for_inference(
-        "pick up the bottle.",
-        multiview=True,
-        camera_layout=["head_camera", "left_camera", "right_camera"],
-    )
+    out = format_prompt_for_inference("pick up the bottle.")
     assert out == (
-        "A multi-view video shows that pick up the bottle. "
-        "The video is composed of three views: "
-        "head camera (top), left camera (bottom-left), right camera (bottom-right)."
+        "A video recorded from a robot's point of view executing the following instruction: pick up the bottle."
     )
 
 
 def test_prompt_wrap_multiview_auto_period():
-    out = format_prompt_for_inference(
-        "pick up the bottle",  # no trailing punctuation
-        multiview=True,
-        camera_layout=["head_camera", "left_camera", "right_camera"],
+    out = format_prompt_for_inference("pick up the bottle")
+    assert out == (
+        "A video recorded from a robot's point of view executing the following instruction: pick up the bottle"
     )
-    # Auto-added "." before " The video is composed"
-    assert "bottle. The video is composed" in out
 
 
 def test_prompt_wrap_matches_dataset_training_output():
@@ -200,28 +193,21 @@ def test_prompt_wrap_matches_dataset_training_output():
     from openwam.dataloader.robotwin_dataset import _resolve_prompt
 
     base = "pick up the red bottle"
-    layout = ["head_camera", "left_camera", "right_camera"]
 
     training_output = _resolve_prompt(
         instructions={"episode0.json": {"seen": [base]}},
         ep_file="episode0.hdf5",
         split="val",  # deterministic: picks pool[0]
         task_name="dummy",
-        multiview=True,
-        camera_layout=layout,
     )
-    helper_output = format_prompt_for_inference(base, multiview=True, camera_layout=layout)
+    helper_output = format_prompt_for_inference(base)
 
     assert training_output == helper_output
 
 
 def test_prompt_empty_multiview_fallback():
-    out = format_prompt_for_inference(
-        "",
-        multiview=True,
-        camera_layout=["head_camera", "left_camera", "right_camera"],
-    )
-    assert out.startswith("A multi-view video shows that ")
+    out = format_prompt_for_inference("")
+    assert out == "A video recorded from a robot's point of view executing the following instruction: "
 
 
 # --- End-to-end prompt-wrapping through _decode_obs ---
@@ -238,11 +224,15 @@ def test_decode_obs_wraps_prompt_for_multiview():
         "prompt": "pick up the bottle",
     }
     out = server._decode_obs(obs)
-    assert out["prompt"].startswith("A multi-view video shows that pick up the bottle.")
+    assert out["prompt"] == (
+        "A video recorded from a robot's point of view executing the following instruction: pick up the bottle"
+    )
 
 
 def test_decode_obs_passes_prompt_through_single_view():
     server = _bare_server(multiview=False)
     obs = {"images": {"head_camera": _make_bright_b64()}, "prompt": "pick up the bottle"}
     out = server._decode_obs(obs)
-    assert out["prompt"] == "pick up the bottle"
+    assert out["prompt"] == (
+        "A video recorded from a robot's point of view executing the following instruction: pick up the bottle"
+    )

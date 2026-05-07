@@ -5,7 +5,7 @@ These scripts assume the OpenWAM policy server is **already running**. They only
 ## README TODOs
 
 - [x] Update per-task `limit_steps` based on observed episode lengths.
-- [ ] Confirm that `state` is correctly forwarded to the server: check whether [`policy_config.yml`](policy_config.yml)'s `send_state` flag still works, and decide whether to keep the switch or always send `state`.
+- [x] Confirm that `state` is correctly forwarded to the server: [`policy_config.yml`](policy_config.yml)'s `send_state` flag is active, and the default is `true` for proprio-conditioned checkpoints.
 - [ ] Flesh out the debug-mode docs: spell out what gets saved, where, and under what names, so the user experience stays friendly.
 - [ ] Investigate the timestamp-folder mismatch in RoboTwin's built-in `eval_results/` directory and see whether it can be fixed.
 - [ ] Document `multi_eval.sh`'s `-n <name>` flag (what output path it produces); if `-n` is not strictly required, consider removing it.
@@ -103,7 +103,7 @@ bash multi_eval.sh -m <mode> -n <name> -d <ckpt_dir> [options] <tasks...>
 |---|---|
 | `-m`, `--mode` | `demo_clean` or `demo_randomized`. |
 | `-n`, `--name` | Label used for the log directory. |
-| `-d`, `--ckpt-dir` | OpenWAM checkpoint directory. |
+| `-d`, `--ckpt-dir` | OpenWAM checkpoint directory used for log placement and run labeling; the evaluator still talks to an already-running server and does not load weights. |
 
 **Optional flags:**
 

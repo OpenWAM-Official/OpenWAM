@@ -14,8 +14,8 @@ server:
 # CLI flags --denoise-steps / --schedule-type etc. override these values.
 # ---------------------------------------------------------------------------
 inference:
-  denoise_steps: 20           # Denoising steps (FastWAM uses 10; OpenWAM default was 20)
-  schedule_type: sync         # sync | video_leading | cascade | decoupled_flash | decoupled_asymmetric
+  denoise_steps: 10           # Denoising steps (FastWAM-Joint deploy default)
+  schedule_type: sync         # sync | video_leading | cascade | action_only | decoupled_flash | decoupled_asymmetric
   shift: 5.0                  # Flow-matching shift parameter
 
 # ---------------------------------------------------------------------------

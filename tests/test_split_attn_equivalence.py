@@ -57,6 +57,12 @@ def _wan_freqs(num_tokens: int, dim: int, num_heads: int) -> torch.Tensor:
     return freqs
 
 
+def _masked_action_context(dit: ActionDiT, batch_size: int):
+    context = torch.zeros(batch_size, 1, dit.text_dim)
+    context_mask = torch.zeros(batch_size, 1, dtype=torch.bool)
+    return context, context_mask
+
+
 # ---------------------------------------------------------------------------
 # Video DiTBlock equivalence — drives the WanVideoBackbone split-attention path
 # (without booting the full Wan pipeline).
@@ -155,19 +161,25 @@ def test_action_mot_block_split_equivalence():
 
     # Reference: drive the block manually
     with torch.no_grad():
-        astate = dit.prepare_state(actions, timestep)
+        context, context_mask = _masked_action_context(dit, B)
+        astate = dit.prepare_state(actions, timestep, context=context, context_mask=context_mask)
         payload = astate.payload
+        payload.context = None
+        payload.context_mask = None
         x_init = payload.x_action.clone()
         t_mod = payload.t_mod.clone()
         freqs = payload.action_freqs.clone()
 
         block: SelfAttnActionDiTBlock = dit.blocks[0]
-        # SelfAttnActionDiTBlock.forward with context=None: norm1 + self-attn (with RoPE) + FFN
+        # SelfAttnActionDiTBlock.forward with context=None: self-attn norm/proj + RoPE + FFN.
         out_ref = block(x_init, context=None, t_mod=t_mod, freqs=freqs)
 
     # Split: ActionDiT pre/post_attn_at_layer round-trip with single-stream attention
     with torch.no_grad():
-        astate2 = dit.prepare_state(actions, timestep)
+        context, context_mask = _masked_action_context(dit, B)
+        astate2 = dit.prepare_state(actions, timestep, context=context, context_mask=context_mask)
+        astate2.payload.context = None
+        astate2.payload.context_mask = None
         q, k, v, post = dit.pre_attn_at_layer(0, astate2)
         attn_out = _attention_action(q, k, v, num_heads)
         astate2 = dit.post_attn_at_layer(0, astate2, attn_out, post)
@@ -213,14 +225,20 @@ def test_action_mot_block_heterogeneous_hidden_dim():
     timestep = torch.randn(B)
 
     with torch.no_grad():
-        astate = dit.prepare_state(actions, timestep)
+        context, context_mask = _masked_action_context(dit, B)
+        astate = dit.prepare_state(actions, timestep, context=context, context_mask=context_mask)
         payload = astate.payload
+        payload.context = None
+        payload.context_mask = None
         x_init = payload.x_action.clone()
         t_mod = payload.t_mod.clone()
         freqs = payload.action_freqs.clone()
         out_ref = block(x_init, context=None, t_mod=t_mod, freqs=freqs)
 
-        astate2 = dit.prepare_state(actions, timestep)
+        context, context_mask = _masked_action_context(dit, B)
+        astate2 = dit.prepare_state(actions, timestep, context=context, context_mask=context_mask)
+        astate2.payload.context = None
+        astate2.payload.context_mask = None
         q, k, v, post = dit.pre_attn_at_layer(0, astate2)
         # Q/K/V are already in (B, S, num_heads*attn_head_dim) — driver-ready.
         assert q.shape == (B, S, num_heads * attn_head_dim)

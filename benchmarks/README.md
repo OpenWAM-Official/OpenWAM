@@ -28,8 +28,8 @@ Response:
 ## 2. Three things you don't need to handle
 
 - **Image sizing / aspect ratio.** Server reads the checkpoint's `config.yaml` and resizes for you. Send the native camera output.
-- **Prompt format.** Pass the base task prompt (`"pick up the red bottle"`). Server automatically wraps it with the multi-view description if the checkpoint was trained that way. Do **not** add `"A multi-view video shows..."` yourself.
-- **Action units.** The returned action is already denormalized to **physical units** (eef: xyz in meters, rot6d unitless, gripper 0-1; joint: radians). Feed it directly to your controller — do not multiply by any mean/std.
+- **Prompt format.** Pass the base task prompt (`"pick up the red bottle"`). Server wraps it with the training/deploy FastWAM template internally. Do **not** pre-wrap the prompt yourself.
+- **Action units.** For normalized checkpoints, the returned action is already denormalized to **physical units** (eef: xyz in meters, rot6d unitless, gripper 0-1; joint: radians). Feed it directly to your controller — do not multiply by any mean/std. If the checkpoint was trained with normalization disabled, deploy leaves actions and state in that raw training scale.
 
 ## 3. Camera field rules
 
@@ -85,12 +85,14 @@ reset(server)
 head_b64  = encode_path_b64("/path/to/head.jpg")
 left_b64  = encode_path_b64("/path/to/left.jpg")   # or None
 right_b64 = encode_path_b64("/path/to/right.jpg")  # or None
+current_state = [0.0] * 20                         # replace with your raw proprio vector
 
 payload = build_payload(
     head=head_b64,
     left_wrist=left_b64,
     right_wrist=right_b64,
     prompt="pick up the red bottle",
+    state=current_state,  # optional raw proprio; required for proprio-conditioned checkpoints
 )
 result = post(server, "/predict", payload)
 action = result["action"]   # already in physical units — feed to controller

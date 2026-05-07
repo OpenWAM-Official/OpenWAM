@@ -36,7 +36,14 @@ def _make_action_dit(*, dim: int = 32, num_heads: int = 4, num_layers: int = 2, 
         video_dim=dim,
         bridge_layers=tuple(range(num_layers)),
         variant="joint_self_attn",
+        text_dim=dim,
     )
+
+
+def _make_action_context(ab: ActionDiT, B: int, T_ctx: int = 4, *, generator: torch.Generator | None = None):
+    context = torch.randn(B, T_ctx, ab.text_dim, generator=generator)
+    context_mask = torch.ones(B, T_ctx, dtype=torch.bool)
+    return context, context_mask
 
 
 def _make_states(
@@ -60,7 +67,8 @@ def _make_states(
     )
     actions = torch.randn(B, s_action, ab.action_dim)
     timestep = torch.randn(B)
-    astate = ab.prepare_state(actions, timestep)
+    context, context_mask = _make_action_context(ab, B)
+    astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
     return vstate, astate
 
 
@@ -274,7 +282,8 @@ def test_driver_joint_mask_blocks_video_to_action():
     def _run(action_seed: int) -> torch.Tensor:
         actions = torch.randn(B, s_action, ab.action_dim, generator=torch.Generator().manual_seed(action_seed))
         timestep = torch.zeros(B)  # deterministic across runs
-        astate = ab.prepare_state(actions, timestep)
+        context, context_mask = _make_action_context(ab, B)
+        astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
         vstate = BlockLoopState(
             x=video_x.clone(),
             t_mod=torch.zeros(B, 6, vb.dim),
@@ -314,6 +323,7 @@ def test_driver_handles_heterogeneous_hidden_dim_end_to_end():
         bridge_layers=(0, 1),
         variant="joint_self_attn",
         attn_head_dim=16,
+        text_dim=32,
     )
     ab.eval()
     # vb head_dim is 64/4=16 — matches ab.attn_head_dim. Driver should accept.
@@ -322,7 +332,8 @@ def test_driver_handles_heterogeneous_hidden_dim_end_to_end():
     B, s_video, s_action = 1, 4, 3
     actions = torch.randn(B, s_action, ab.action_dim)
     timestep = torch.zeros(B)
-    astate = ab.prepare_state(actions, timestep)
+    context, context_mask = _make_action_context(ab, B)
+    astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
     vstate = BlockLoopState(
         x=torch.randn(B, s_video, vb.dim),
         t_mod=torch.zeros(B, 6, vb.dim),
@@ -357,7 +368,8 @@ def test_driver_bidirectional_mask_does_couple_video_to_action():
     def _run(action_seed: int) -> torch.Tensor:
         actions = torch.randn(B, s_action, ab.action_dim, generator=torch.Generator().manual_seed(action_seed))
         timestep = torch.zeros(B)
-        astate = ab.prepare_state(actions, timestep)
+        context, context_mask = _make_action_context(ab, B)
+        astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
         vstate = BlockLoopState(
             x=video_x.clone(),
             t_mod=torch.zeros(B, 6, vb.dim),
@@ -379,11 +391,12 @@ def test_driver_bidirectional_mask_does_couple_video_to_action():
     )
 
 
-def test_driver_passes_text_context_to_action():
-    """The driver must wire ``vstate.context`` through to the action stream's
-    cross-attention. Two runs sharing every input except ``vstate.context``
-    must produce *different* action outputs — otherwise the cross-attn
-    branch in ``post_attn_at_layer`` is dead.
+def test_action_uses_own_projected_text_context():
+    """ActionDiT must use its own projected raw context from prepare_state.
+
+    Two runs sharing every input except action raw context must produce
+    different action hidden states. ``vstate.context`` is intentionally not
+    used for action cross-attn anymore.
     """
     torch.manual_seed(0)
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
@@ -397,31 +410,28 @@ def test_driver_passes_text_context_to_action():
     video_x = torch.randn(B, s_video, vb.dim)
 
     def _run(context: torch.Tensor) -> torch.Tensor:
-        astate = ab.prepare_state(actions.clone(), timestep)
+        context_mask = torch.ones(B, context.shape[1], dtype=torch.bool)
+        astate = ab.prepare_state(actions.clone(), timestep, context=context, context_mask=context_mask)
         vstate = BlockLoopState(
             x=video_x.clone(),
             t_mod=torch.zeros(B, 6, vb.dim),
             freqs=torch.zeros(s_video, 1, 1),
-            context=context,
+            context=torch.zeros(B, T_ctx, vb.dim),
             f=s_video,
             h=1,
             w=1,
         )
         with torch.no_grad():
             _, astate2 = driver.run_joint_loop(vstate, astate)
-        # Check the action hidden state (not extract_prediction — the output
-        # head is zero-init at construction so its output is identically zero
-        # regardless of upstream activations; we want to see whether the
-        # cross-attn changes the *hidden state* feeding the head).
         return astate2.payload.x_action
 
-    ctx_a = torch.randn(B, T_ctx, vb.dim, generator=torch.Generator().manual_seed(11))
-    ctx_b = torch.randn(B, T_ctx, vb.dim, generator=torch.Generator().manual_seed(22))
+    ctx_a = torch.randn(B, T_ctx, ab.text_dim, generator=torch.Generator().manual_seed(11))
+    ctx_b = torch.randn(B, T_ctx, ab.text_dim, generator=torch.Generator().manual_seed(22))
     out_a = _run(ctx_a)
     out_b = _run(ctx_b)
     assert not torch.allclose(out_a, out_b, atol=1e-5), (
-        "Action output is invariant to vstate.context — the cross-attn "
-        "branch in ActionDiT.post_attn_at_layer is not being driven."
+        "Action hidden state is invariant to raw action context — the action-owned "
+        "context embedding/cross-attn branch is not being driven."
     )
 
 
@@ -435,7 +445,8 @@ def _build_run_inputs(vb, ab, *, B, s_video, s_action, seed):
     g = torch.Generator().manual_seed(seed)
     actions = torch.randn(B, s_action, ab.action_dim, generator=g)
     timestep = torch.zeros(B)
-    astate = ab.prepare_state(actions, timestep)
+    context, context_mask = _make_action_context(ab, B, generator=g)
+    astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
     vstate = BlockLoopState(
         x=torch.randn(B, s_video, vb.dim, generator=g, requires_grad=True),
         t_mod=torch.zeros(B, 6, vb.dim),

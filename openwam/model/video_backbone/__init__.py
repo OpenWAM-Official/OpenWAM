@@ -53,8 +53,8 @@ def build_video_backbone(
     Two call modes:
       - **Training (default)**: pass ``name`` and full ``cfg``; the backbone
         reads what it needs from ``cfg`` via ``cls.from_pretrained(cfg)``.
-      - **Deployment**: pass ``source`` (a checkpoint dir / manifest path /
-        components dict) plus optional ``device`` and ``ckpt_dir``; the call
+      - **Deployment**: pass ``source`` (a model directory or components dict)
+        plus optional ``device`` and ``ckpt_dir``; the call
         becomes ``cls.from_pretrained(source, device=..., ckpt_dir=...)``. This
         is used by :class:`BaseWAMArchitecture` when the saved config carries a
         ``video_backbone._source`` field.

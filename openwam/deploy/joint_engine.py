@@ -5,6 +5,7 @@ import os
 from collections import OrderedDict
 from typing import Any, Optional
 
+import numpy as np
 import torch
 
 from openwam.deploy.base import BaseInferenceEngine
@@ -174,6 +175,18 @@ class JointInferenceEngine(BaseInferenceEngine):
             self._dit_cache.reset()
 
         # Extract generation params
+        proprio_state = conditions.get("proprio_state", None)
+        if proprio_state is None:
+            observation = conditions.get("observation") or {}
+            proprio_state = observation.get("state") if isinstance(observation, dict) else None
+        if proprio_state is not None and not isinstance(proprio_state, torch.Tensor):
+            if isinstance(proprio_state, np.ndarray):
+                proprio_state = torch.from_numpy(proprio_state)
+            else:
+                proprio_state = torch.tensor(proprio_state, dtype=torch.float32)
+        if proprio_state is not None:
+            proprio_state = self.architecture.normalize_deploy_proprio(proprio_state)
+
         result = self.architecture.generate(
             schedule=schedule,
             prompt=conditions.get("prompt", ""),
@@ -192,6 +205,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             profile=self._profile,
             vace_cache=self._vace_cache,
             prompt_embed_cache=self._prompt_embed_cache,
+            proprio_state=proprio_state,
         )
 
         # Attach optimization stats if profiling

@@ -1,9 +1,8 @@
-"""Tests for deployment-related changes:
-- mixed_precision in train.yaml (save/load dtype enforcement)
-- deploy.yaml inference/optimization sections
-- deploy.py config loading, CLI override logic, and attention backend logging
-- joint_engine.py compile flags via cfg.optimization.compile
-- joint_generation.py cudagraph_mark_step_begin placement
+"""Tests for deployment-related changes.
+
+Covers mixed-precision save/load behavior, deploy.yaml inference/optimization
+sections, deploy.py config loading, CLI override logic, attention backend
+logging, and joint_engine compile flags.
 """
 
 import sys

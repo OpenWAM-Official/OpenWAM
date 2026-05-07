@@ -348,6 +348,30 @@ def reset_model(model: ModelClient) -> None:
     model.reset(task_description="")
 
 
+def _extract_eef_proprio(observation: dict) -> np.ndarray:
+    endpose = observation.get("endpose")
+    if not isinstance(endpose, dict):
+        available = ", ".join(sorted(observation.keys()))
+        raise KeyError(
+            "action_type='ee' requires RoboTwin endpose proprio matching training action_mode='eef'. "
+            "Expected observation['endpose'] with left_endpose, right_endpose, left_gripper, right_gripper. "
+            f"Available top-level observation keys: {available}"
+        )
+
+    return action_conversion.robotwin_endpose_to_eef20d(
+        endpose["left_endpose"],
+        endpose["right_endpose"],
+        endpose["left_gripper"],
+        endpose["right_gripper"],
+    )
+
+
+def _extract_proprio(model: ModelClient, observation: dict) -> np.ndarray:
+    if model._action_type == "ee":
+        return _extract_eef_proprio(observation)
+    return np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
+
+
 def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
     """Per-step callback invoked by RoboTwin's eval_policy.py.
 
@@ -368,7 +392,7 @@ def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
             "right": obs.get("right_camera", {}).get("rgb"),
         },
         "lang": str(instruction),
-        "state": observation["joint_action"]["vector"],
+        "state": _extract_proprio(model, observation),
     }
 
     action = model.step(example, step=TASK_ENV.take_action_cnt)

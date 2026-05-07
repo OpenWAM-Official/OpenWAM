@@ -20,6 +20,7 @@ Client contract (unified regardless of server multiview setting):
         "left_wrist_camera":  <base64 JPEG>|null,  # optional
         "right_wrist_camera": <base64 JPEG>|null   # optional
     }
+    payload["state"] = [float, ...]                # raw proprio, sent by default
 
 Usage:
     # Start the server first:
@@ -39,6 +40,7 @@ Usage:
 import argparse
 import base64
 import io
+import json
 import os
 import sys
 
@@ -66,6 +68,27 @@ def _make_random_image_b64(height: int, width: int) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+def _load_state_file(path: str) -> list[float]:
+    """Load a 1-D state vector from JSON."""
+    with open(path, "r") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        data = data.get("state")
+    if not isinstance(data, list):
+        raise ValueError("--state-file must contain a JSON list or an object with a 'state' list")
+    return [float(x) for x in data]
+
+
+def _resolve_state(args) -> list[float] | None:
+    if args.no_state:
+        return None
+    if args.state_file:
+        return _load_state_file(args.state_file)
+    if args.state is not None:
+        return [float(x) for x in args.state]
+    return [0.0] * int(args.state_dim)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Continuous inference test for OpenWAM policy server.")
     parser.add_argument("--server", type=str, default="http://127.0.0.1:8848")
@@ -73,6 +96,10 @@ def main():
     parser.add_argument("--height", type=int, default=480, help="Random-image height (ignored if --head-camera given).")
     parser.add_argument("--width", type=int, default=640, help="Random-image width (ignored if --head-camera given).")
     parser.add_argument("--prompt", type=str, default="robot picks up the red bottle from the table")
+    parser.add_argument("--state", type=float, nargs="*", default=None, help="Raw proprio state values to send.")
+    parser.add_argument("--state-file", type=str, default=None, help="JSON list, or object with a 'state' list.")
+    parser.add_argument("--state-dim", type=int, default=20, help="Dummy zero-state dimension when --state is omitted.")
+    parser.add_argument("--no-state", action="store_true", help="Do not include state in the /predict payload.")
     parser.add_argument(
         "--head-camera", type=str, default=None, help="Static path for head camera (reused every step)."
     )
@@ -84,6 +111,7 @@ def main():
     static_left = encode_path_b64(args.left_wrist_camera) if args.left_wrist_camera else None
     static_right = encode_path_b64(args.right_wrist_camera) if args.right_wrist_camera else None
     stream_random = args.head_camera is None
+    state = _resolve_state(args)
 
     print(f"Server:  {args.server}")
     print(f"Steps:   {args.steps}")
@@ -96,6 +124,7 @@ def main():
             f"right={args.right_wrist_camera or '(null)'}"
         )
     print(f"Prompt:  {args.prompt}")
+    print(f"State:   {'omitted' if state is None else f'{len(state)} dims'}")
     print("=" * 60)
 
     # Health check
@@ -129,6 +158,7 @@ def main():
             left_wrist=left_b64,
             right_wrist=right_b64,
             prompt=args.prompt,
+            state=state,
         )
         result = post(args.server, "/predict", payload)
 

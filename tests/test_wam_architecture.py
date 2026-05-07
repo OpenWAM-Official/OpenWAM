@@ -4,6 +4,10 @@ import pytest
 import torch
 
 
+def _action_context(ab, batch_size: int, seq_len: int = 4):
+    return torch.randn(batch_size, seq_len, ab.text_dim), torch.ones(batch_size, seq_len, dtype=torch.bool)
+
+
 def test_architecture_module_layout_imports():
     from openwam.model.architectures.dual_system import (
         DualSystemCrossAttnArchitecture,
@@ -98,7 +102,7 @@ def test_build_architecture_unknown():
 
 
 def test_dual_system_prepare_and_extract():
-    """Smoke test: cross_attn ActionDiT.forward(action, bridges, timestep)."""
+    """Smoke test: cross_attn ActionDiT.forward(action, bridges, timestep, context)."""
     from openwam.model import build_architecture
 
     cfg = {
@@ -121,9 +125,16 @@ def test_dual_system_prepare_and_extract():
     timestep = torch.tensor([500.0])
 
     bridges = {bid: torch.randn(B, 20, 128) for bid in arch.action_backbone.bridge_layers}
+    context, context_mask = _action_context(arch.action_backbone, B)
 
     with torch.no_grad():
-        action_pred = arch.action_backbone(noisy_actions, bridges, timestep)
+        action_pred = arch.action_backbone(
+            noisy_actions,
+            bridges,
+            timestep,
+            context=context,
+            context_mask=context_mask,
+        )
     assert action_pred.shape == (B, T_action, 7)
 
 
@@ -338,7 +349,10 @@ def test_action_dit_joint_self_attn_uses_only_rope():
     )
     assert not hasattr(dit, "pos_encoding")
 
-    astate = dit.prepare_state(torch.randn(2, 5, 7), torch.tensor([0.5, 0.8]))
+    context, context_mask = _action_context(dit, 2)
+    astate = dit.prepare_state(
+        torch.randn(2, 5, 7), torch.tensor([0.5, 0.8]), context=context, context_mask=context_mask
+    )
     payload = astate.payload
     # RoPE freqs on the action stream are pre-computed and stashed for
     # consumption by pre_attn_at_layer; their length equals the (proprio +
@@ -366,7 +380,8 @@ def test_dual_system_joint_self_attn_pre_post_attn_round_trip():
 
     noisy_actions = torch.randn(2, 5, 7)
     timestep = torch.tensor([0.5, 0.8])
-    astate = arch.action_backbone.prepare_state(noisy_actions, timestep)
+    context, context_mask = _action_context(arch.action_backbone, 2)
+    astate = arch.action_backbone.prepare_state(noisy_actions, timestep, context=context, context_mask=context_mask)
 
     q, k, v, post = arch.action_backbone.pre_attn_at_layer(0, astate)
     # Q/K go through RoPE (different from V even when the same input feeds q/k/v):
@@ -404,9 +419,68 @@ def test_dual_system_joint_cross_attn_no_per_layer_state():
     # cross_attn calls ab.forward(actions, bridges, timestep) directly —
     # no per-layer state machinery on the action backbone.
     bridges = {bid: torch.randn(1, 9, 128) for bid in arch.action_backbone.bridge_layers}
+    context, context_mask = _action_context(arch.action_backbone, 1)
     with torch.no_grad():
-        out = arch.action_backbone(torch.randn(1, 5, 7), bridges, torch.tensor([0.5]))
+        out = arch.action_backbone(
+            torch.randn(1, 5, 7),
+            bridges,
+            torch.tensor([0.5]),
+            context=context,
+            context_mask=context_mask,
+        )
     assert out.shape == (1, 5, 7)
+
+
+def test_dual_system_joint_cross_attn_passes_appended_proprio_context_to_action():
+    """cross_attn architecture should pass raw text+proprio context to ActionDiT."""
+    from openwam.model import build_architecture
+    from tests.test_openwam_trainer import _MockVideoBackbone
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "bridge_layers": (0,),
+        "use_proprioception": True,
+        "state_dim": 7,
+        "text_dim": 16,
+    }
+    arch = build_architecture("dual_system_cross_attn", cfg)
+    arch.video_backbone = _MockVideoBackbone(dim=32, num_layers=1, num_heads=4)
+    arch.eval()
+
+    seen = {}
+    orig_forward = arch.action_backbone.forward
+
+    def _capture(*args, **kwargs):
+        seen["context"] = kwargs.get("context")
+        seen["context_mask"] = kwargs.get("context_mask")
+        return orig_forward(*args, **kwargs)
+
+    arch.action_backbone.forward = _capture
+
+    B = 1
+    with torch.no_grad():
+        video_pred, action_pred = arch(
+            torch.randn(B, 5, 7),
+            torch.tensor([0.5]),
+            proprio_state=torch.randn(B, 7),
+            latents=torch.randn(B, 16, 1, 2, 2),
+            timestep=torch.tensor([0.5]),
+            context=torch.randn(B, 3, 16),
+            seq_lens=torch.tensor([2]),
+        )
+
+    assert video_pred.shape[0] == B
+    assert action_pred.shape == (B, 5, 7)
+    assert seen["context"].shape == (B, 4, 16)
+    assert seen["context_mask"].shape == (B, 4)
+    assert seen["context_mask"].tolist() == [[True, True, False, True]]
 
 
 def test_dual_system_detached_joint_cross_attn_blocks_grad_to_video():
@@ -446,7 +520,10 @@ def test_dual_system_joint_self_attn_creates_dit_state():
     }
     arch = build_architecture("dual_system_self_attn", cfg)
 
-    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    context, context_mask = _action_context(arch.action_backbone, 1)
+    state = arch.action_backbone.prepare_state(
+        torch.randn(1, 5, 7), torch.tensor([0.5]), context=context, context_mask=context_mask
+    )
     payload = state.payload
     assert payload is not None
     assert payload.x_action.shape == (1, 5, 32)
@@ -633,7 +710,10 @@ def test_dual_system_self_attn_payload_is_action_dit_state():
         "bridge_layers": (0, 1),
     }
     arch = build_architecture("dual_system_self_attn", cfg)
-    state = arch.action_backbone.prepare_state(torch.randn(1, 5, 7), torch.tensor([0.5]))
+    context, context_mask = _action_context(arch.action_backbone, 1)
+    state = arch.action_backbone.prepare_state(
+        torch.randn(1, 5, 7), torch.tensor([0.5]), context=context, context_mask=context_mask
+    )
     assert isinstance(state.payload, ActionDiTState)
 
 

@@ -223,8 +223,6 @@ def _resolve_prompt(
     ep_file: str,
     split: str,
     task_name: str,
-    multiview: bool,
-    camera_layout,
 ) -> str:
     """Pure function: build the training-time prompt from raw state.
 
@@ -232,8 +230,8 @@ def _resolve_prompt(
     downstream adapters can reproduce training-time prompts without having
     to instantiate a full dataset (no ``__new__`` + private-attr injection).
 
-    Must stay byte-compatible with what training sees — deployment relies
-    on it indirectly through ``format_prompt_for_inference``.
+    Must stay byte-compatible with what training sees — deployment uses the
+    same ``format_prompt_for_inference`` helper.
 
     Args:
         instructions: Mapping from ``episode<N>.json`` to a RoboTwin
@@ -244,10 +242,6 @@ def _resolve_prompt(
             anything else deterministically picks the first entry.
         task_name: Falls back to ``f"... performing a {task_name} task."``
             when instructions don't supply a prompt for this episode.
-        multiview: Whether to wrap the base prompt in the 3-view layout
-            description via :func:`format_prompt_for_inference`.
-        camera_layout: 3-element sequence of camera names used for the
-            L-shape layout wrapper (only read when ``multiview=True``).
 
     Returns:
         The final wrapped prompt string that the model sees.
@@ -277,7 +271,7 @@ def _resolve_prompt(
     if base_prompt is None:
         base_prompt = f"The bimanual robot is performing a {task_name} task."
 
-    return format_prompt_for_inference(base_prompt, multiview, camera_layout)
+    return format_prompt_for_inference(base_prompt)
 
 
 class RoboTwinDataset(BaseActionDataset):
@@ -729,8 +723,6 @@ class RoboTwinDataset(BaseActionDataset):
             ep_file=self._episode_files[ep_idx],
             split=self.split,
             task_name=self.task_name,
-            multiview=self.multiview,
-            camera_layout=self.camera_layout,
         )
 
     def _read_eef_actions(self, f, start: int, end: int) -> np.ndarray:

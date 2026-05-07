@@ -88,7 +88,7 @@ class OpenWAMTrainer(BaseTrainer):
             and str(accelerator.distributed_type).endswith("DEEPSPEED")
         )
         if not (_init_on_cpu and _use_deepspeed):
-            self.architecture.action_backbone.to(dtype=self.architecture.dtype, device=self.architecture.device)
+            self.architecture.set_dtype_device(self.architecture.dtype, self.architecture.device)
 
         # --- Freeze: apply after all models are built ---
         # Read from training_strategy config (e.g. joint.yaml / video_only.yaml)
@@ -106,11 +106,9 @@ class OpenWAMTrainer(BaseTrainer):
 
         self.action_timestep_per_token = bool(getattr(t, "action_timestep_per_token", False))
         if self.action_timestep_per_token:
-            logger.warning(
-                "action_timestep_per_token=True: training samples per-token diffusion "
-                "timesteps, but the inference path still broadcasts a per-sample "
-                "a_timestep. Train/inference sampling will diverge until the inference "
-                "side is updated — only use this flag for training-only ablations."
+            raise ValueError(
+                "action_timestep_per_token=True is not supported in the FastWAM-compatible "
+                "dual-system path. Use per-sample action timesteps."
             )
 
         # Decoupled training support
@@ -440,8 +438,8 @@ class OpenWAMTrainer(BaseTrainer):
         debug = bool(getattr(t, "debug", False))
         if debug:
             max_steps = 20
-            save_steps_override = 5
-            logger.info("DEBUG mode: max_steps=20, save@5, constant LR")
+            save_steps_override = 10
+            logger.info("DEBUG mode: max_steps=20, save@10, constant LR")
 
         # Build optimizer, dataloader, scheduler via overridable methods
         optimizer = self.build_optimizer()
@@ -479,8 +477,7 @@ class OpenWAMTrainer(BaseTrainer):
                 run_dir_name += "_debug"
             output_path = os.path.join(base_output_path, run_dir_name)
             os.makedirs(output_path, exist_ok=True)
-            # Inject video backbone component specs into config for
-            # self-contained deployment (no manifest.json needed).
+            # Inject video backbone component specs into config for deployment.
             model_path = None
             try:
                 model_path = str(self.cfg.model.video_backbone.model_path)
@@ -499,12 +496,11 @@ class OpenWAMTrainer(BaseTrainer):
             save_config(output_path, self.cfg)
             if self.dataset is not None:
                 save_action_stats(output_path, self.dataset)
-            # Copy tokenizer (and write a fallback manifest.json) so the
-            # checkpoint dir is self-contained — deploy then doesn't depend on
+            # Copy tokenizer so component-spec deployment does not depend on
             # ``model.video_backbone.model_path`` being reachable.
-            from openwam.model.video_backbone.wan.manifest import save_video_backbone_artifacts
+            from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
 
-            save_video_backbone_artifacts(output_path, self.cfg)
+            copy_video_backbone_tokenizer(output_path, self.cfg)
         else:
             output_path = None
 

@@ -3,7 +3,7 @@
 Usage:
     python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir
     python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir --device cuda:1 --ws-port 9000
-    python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir --num-steps 10 --schedule-type sync
+    python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir --denoise-steps 10 --schedule-type sync
     python scripts/deploy.py --mock --mock-action-dim 20   # no checkpoint or GPU needed
 
 Base configuration is read from configs/deploy.yaml.  CLI flags take precedence
@@ -11,7 +11,7 @@ over values in the yaml for the fields they cover.
 
 Inference overrides (all optional; yaml values used when absent):
   --denoise-steps N       Denoising step count
-  --schedule-type TYPE    Schedule type: sync | cascade | decoupled_flash | decoupled_asymmetric
+  --schedule-type TYPE    Schedule type: sync | video_leading | cascade | decoupled_flash | decoupled_asymmetric
   --shift SHIFT           Flow-matching shift parameter
 """
 

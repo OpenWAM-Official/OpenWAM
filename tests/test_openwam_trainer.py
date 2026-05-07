@@ -194,7 +194,10 @@ class _MockVideoBackbone(VideoBackbone):
         freq_dim = self._dim // 2
         freqs = torch.polar(torch.ones(num_tokens, 1, freq_dim), torch.zeros(num_tokens, 1, freq_dim))
         context = torch.randn(B, 4, self._dim)
-        return BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, f=f, h=h, w=w, extras={})
+        context_mask = torch.ones(B, 4, dtype=torch.bool)
+        return BlockLoopState(
+            x=x, t_mod=t_mod, freqs=freqs, context=context, context_mask=context_mask, f=f, h=h, w=w, extras={}
+        )
 
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
         return state
@@ -237,6 +240,7 @@ class _MockVideoBackbone(VideoBackbone):
         return {
             "input_latents": torch.randn(1, 16, 3, 8, 8),
             "context": torch.randn(1, 4, self._dim),
+            "context_mask": torch.ones(1, 4, dtype=torch.bool),
             "seq_lens": torch.ones(1, dtype=torch.long),
         }
 
@@ -295,6 +299,7 @@ _TINY_ARCH_CFG = {
     "num_heads": 2,
     "num_layers": 2,
     "video_dim": 64,
+    "text_dim": 64,
     "bridge_layers": (0, 1),
 }
 

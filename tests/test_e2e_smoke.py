@@ -124,7 +124,9 @@ def test_e2e_interleaved_forward_pass():
 
     with torch.no_grad():
         ab = arch.action_backbone
-        astate = ab.prepare_state(noisy_actions, timestep)
+        context = torch.randn(B, 4, ab.text_dim)
+        context_mask = torch.ones(B, 4, dtype=torch.bool)
+        astate = ab.prepare_state(noisy_actions, timestep, context=context, context_mask=context_mask)
         assert astate.payload is not None
 
         # MoT-style action half-step: pull q/k/v, simulate a mixed-attention

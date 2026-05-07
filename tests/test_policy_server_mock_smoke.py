@@ -102,7 +102,7 @@ def test_mock_engine_step_count_matches_real_engine():
     cfg = _minimal_cfg(num_frames=33)
     engine = MockInferenceEngine(cfg=cfg, action_dim=20, latency_ms=0.0)
     res = engine.generate({"num_frames": 33})
-    # Real engine (joint_generation.py) also produces num_frames - 1 steps.
+    # Real engine also produces num_frames - 1 steps.
     assert res["actions"].shape == (32, 20)
 
 

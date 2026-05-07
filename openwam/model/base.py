@@ -84,19 +84,27 @@ class BaseWAMArchitecture(ABC, nn.Module):
         self._max_timestep_boundary = 1.0
         self._min_timestep_boundary = 0.0
 
-        # Optional action denormalizer for inference. Deployment paths inject
-        # this via ``attach_action_denormalizer``; ``generate`` consumes it to
-        # return real-scale actions. ``None`` means "actions returned as-is".
-        self.action_denormalizer = None
+        # Optional action normalizer for deployment. ``generate`` uses it to
+        # return real-scale actions; deploy-side proprio preprocessing uses it
+        # to normalize raw robot state into the model's training space.
+        self.action_normalizer = None
 
         if cfg is not None:
             self._init_video_backbone(cfg)
+
+    @staticmethod
+    def _cfg_get(cfg, key, default=None):
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        return getattr(cfg, key, default)
 
     def _init_video_backbone(self, cfg):
         """Build video backbone from config.
 
         Supports two source types in ``cfg.video_backbone``:
-        - ``_source``: direct path (directory or manifest .json) or dict with components → deploy-time path
+        - ``_source``: direct model directory or dict with components → deploy-time path
         - ``name``: registry key → training-time path
 
         Both paths flow through the public :func:`build_video_backbone`.
@@ -179,7 +187,76 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     @property
     def uses_proprioception(self) -> bool:
-        return self.action_backbone is not None and self.action_backbone.uses_proprioception
+        return bool(getattr(self, "_use_proprioception_context", False)) or (
+            self.action_backbone is not None and self.action_backbone.uses_proprioception
+        )
+
+    def _init_proprio_context(self, cfg, *, text_dim: int = 4096) -> None:
+        """Initialize FastWAM-style proprio-as-context conditioning."""
+        enabled = bool(self._cfg_get(cfg, "use_proprioception", False))
+        self._use_proprioception_context = enabled
+        self.proprio_encoder: Optional[nn.Module] = None
+        self.proprio_dim = 0
+        self.context_dim = int(text_dim)
+        if not enabled:
+            return
+        state_dim = int(self._cfg_get(cfg, "state_dim", 0) or 0)
+        if state_dim <= 0:
+            raise ValueError("use_proprioception=True requires explicit state_dim for context-token proprio.")
+        self.proprio_dim = state_dim
+        self.proprio_encoder = nn.Linear(state_dim, self.context_dim)
+
+    def _append_proprio_context_token(self, pipeline_inputs: dict, proprio_state: Optional[Tensor]) -> dict:
+        """Append one proprio token to raw text context and extend context_mask."""
+        if not bool(getattr(self, "_use_proprioception_context", False)):
+            return pipeline_inputs
+        if self.proprio_encoder is None:
+            raise RuntimeError("proprio context is enabled but proprio_encoder is not initialized.")
+        if proprio_state is None:
+            raise ValueError("use_proprioception=True requires `proprio_state` from sample['proprio'] or obs['state'].")
+        if proprio_state.ndim == 1:
+            proprio_state = proprio_state.unsqueeze(0)
+        elif proprio_state.ndim == 3 and proprio_state.shape[1] == 1:
+            proprio_state = proprio_state[:, 0, :]
+        if proprio_state.ndim != 2:
+            raise ValueError(f"proprio_state must be [B, D] or [B, 1, D], got shape {tuple(proprio_state.shape)}")
+        if proprio_state.shape[1] != self.proprio_dim:
+            raise ValueError(f"proprio_state last dim must be {self.proprio_dim}, got {proprio_state.shape[1]}")
+
+        context = pipeline_inputs["context"]
+        if context.shape[0] != proprio_state.shape[0]:
+            if proprio_state.shape[0] == 1 and context.shape[0] > 1:
+                proprio_state = proprio_state.expand(context.shape[0], -1)
+            else:
+                raise ValueError(
+                    f"Batch mismatch between context and proprio_state: {context.shape[0]} vs {proprio_state.shape[0]}"
+                )
+        proprio_token = (
+            self.proprio_encoder(proprio_state.to(device=context.device, dtype=self.proprio_encoder.weight.dtype))
+            .to(dtype=context.dtype)
+            .unsqueeze(1)
+        )
+
+        context_mask = pipeline_inputs.get("context_mask")
+        if context_mask is None:
+            seq_lens = pipeline_inputs.get("seq_lens")
+            if seq_lens is not None:
+                seq_lens = seq_lens.to(device=context.device)
+                positions = torch.arange(context.shape[1], device=context.device).unsqueeze(0)
+                context_mask = positions < seq_lens.unsqueeze(1)
+            else:
+                context_mask = torch.ones((context.shape[0], context.shape[1]), dtype=torch.bool, device=context.device)
+        else:
+            context_mask = context_mask.to(device=context.device, dtype=torch.bool)
+
+        proprio_mask = torch.ones((context_mask.shape[0], 1), dtype=torch.bool, device=context_mask.device)
+        updated = dict(pipeline_inputs)
+        updated["context"] = torch.cat([context, proprio_token], dim=1)
+        updated["context_mask"] = torch.cat([context_mask, proprio_mask], dim=1)
+        # The appended proprio token can sit after padded text tokens, so the
+        # resulting valid tokens are not necessarily a contiguous prefix.
+        # Keep the original text seq_lens and make context_mask authoritative.
+        return updated
 
     @property
     def action_mean(self) -> Tensor:
@@ -207,18 +284,39 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """Dispatch to each backbone — they own their own dtype/device handling."""
         self._dtype = dtype
         self._device = device
+        proprio_encoder = getattr(self, "proprio_encoder", None)
+        if proprio_encoder is not None:
+            proprio_encoder.to(dtype=dtype, device=device)
         for bb in self.backbones.values():
             bb.set_dtype_device(dtype, device)
 
-    def attach_action_denormalizer(self, denormalizer) -> None:
-        """Attach (or clear) an action denormalizer used by ``generate``.
+    def attach_action_normalizer(self, normalizer) -> None:
+        """Attach (or clear) an action normalizer used by ``generate``.
 
-        Deployment paths build a denormalizer from ``action_stats.npy`` and
-        inject it via this setter so ``generate`` can return real-scale
-        actions without callers reaching into architecture internals. Pass
-        ``None`` to clear.
+        Deployment paths build the same normalizer used by training from
+        ``action_stats.npy``. ``generate`` uses it to return real-scale actions,
+        while server-side proprio preprocessing uses it to normalize raw robot
+        state into the model's training space. Pass ``None`` to clear.
         """
-        self.action_denormalizer = denormalizer
+        self.action_normalizer = normalizer
+
+    def normalize_deploy_proprio(self, proprio_state):
+        """Normalize raw deploy proprio with the training action normalizer."""
+        normalizer = getattr(self, "action_normalizer", None)
+        if normalizer is None or proprio_state is None:
+            return proprio_state
+
+        import numpy as np
+        import torch
+
+        was_tensor = isinstance(proprio_state, torch.Tensor)
+        device = proprio_state.device if was_tensor else None
+        dtype = proprio_state.dtype if was_tensor and proprio_state.is_floating_point() else None
+        arr = proprio_state.detach().cpu().numpy() if was_tensor else np.asarray(proprio_state, dtype=np.float32)
+        norm = normalizer.normalize(arr.astype(np.float32, copy=False))
+        if was_tensor:
+            return torch.from_numpy(norm).to(device=device, dtype=dtype or torch.float32)
+        return norm
 
     # --- Checkpoint save / load ---
 
@@ -376,6 +474,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         all_vace_videos: list = []
         all_ref_images: list = []
         all_actions: list = []
+        all_proprios: list = []
         all_action_masks: list = []
         all_video_masks: list = []
 
@@ -391,6 +490,23 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     action = torch.from_numpy(action)
                 action = action.to(dtype=_dtype, device=_device).unsqueeze(0)
             all_actions.append(action)
+
+            proprio = sample.get("proprio")
+            if self.uses_proprioception:
+                if proprio is None:
+                    raise ValueError(
+                        "use_proprioception=True requires sample['proprio']; action[0] fallback is disabled."
+                    )
+                if isinstance(proprio, np.ndarray):
+                    proprio = torch.from_numpy(proprio)
+                proprio = proprio.to(dtype=_dtype, device=_device)
+                if proprio.ndim == 1:
+                    pass
+                elif proprio.ndim == 2 and proprio.shape[0] == 1:
+                    proprio = proprio[0]
+                else:
+                    raise ValueError(f"sample['proprio'] must be [D] or [1, D], got shape {tuple(proprio.shape)}")
+            all_proprios.append(proprio)
 
             amask = sample.get("action_mask", None)
             vmask = sample.get("video_mask", None)
@@ -427,8 +543,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             "actions": action_data,
         }
 
-        if action_data is not None and self.uses_proprioception:
-            inputs["proprio_state"] = action_data[:, 0, :].contiguous()
+        if self.uses_proprioception:
+            inputs["proprio_state"] = torch.stack(all_proprios, dim=0).contiguous()
 
         if all_action_masks[0] is not None:
             inputs["action_is_pad"] = torch.stack([~m for m in all_action_masks], dim=0).to(device=_device)
@@ -489,6 +605,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         max_tb = int(inputs.pop("max_timestep_boundary", 1) * len(vb.scheduler.timesteps))
         min_tb = int(inputs.pop("min_timestep_boundary", 0) * len(vb.scheduler.timesteps))
         B = inputs["input_latents"].shape[0]
+        if action_timestep_per_token:
+            raise ValueError(
+                "action_timestep_per_token=True is not supported in the FastWAM-compatible path; "
+                "action timestep must be per-sample [B]."
+            )
 
         # --- Sample video timesteps ---
         if decoupled_sampler is not None:
@@ -529,9 +650,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     .long()
                     .clamp(0, num_ts_a - 1)
                 )
-            elif action_timestep_per_token:
-                T_action = actions.shape[-2]
-                action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B, T_action))
             else:
                 action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
 
@@ -640,10 +758,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         import torch.nn.functional as F
 
         tw = scheduler.training_weight(timestep_ids).to(dtype=torch.float32, device=device)
+        if tw.ndim != 1:
+            raise ValueError(f"action loss weights must be per-sample [B], got shape {tuple(tw.shape)}")
         per_element = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
         per_step = per_element.mean(dim=2)
 
-        per_token_weight = tw.dim() == 2
         action_is_pad = inputs.get("action_is_pad")
 
         if action_is_pad is not None:
@@ -651,14 +770,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
             valid_mask = ~action_is_pad
             per_step = per_step * valid_mask.float()
             valid_count = valid_mask.float().sum(dim=1).clamp(min=1)
-            if per_token_weight:
-                per_step = per_step * tw
-                return (per_step.sum(dim=1) / valid_count).mean()
             per_sample = per_step.sum(dim=1) / valid_count
             return (per_sample * tw).mean()
 
-        if per_token_weight:
-            return (per_step * tw).mean()
         per_sample = per_step.mean(dim=1)
         return (per_sample * tw).mean()
 
@@ -687,6 +801,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         profile: bool = False,
         vace_cache: Optional[dict] = None,
         prompt_embed_cache: Optional[dict] = None,
+        proprio_state: Optional[Tensor] = None,
     ) -> dict:
         """Execute joint video-action denoising driven by a schedule.
 
@@ -736,6 +851,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         if input_video_latents is not None:
             inputs_shared["latents"] = input_video_latents
+        if self.uses_proprioception:
+            if proprio_state is None:
+                raise ValueError("use_proprioception=True requires `proprio_state` during generation.")
+            inputs_shared["proprio_state"] = proprio_state.to(device=device, dtype=dtype)
 
         action_latents = torch.randn(
             1,
@@ -824,9 +943,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
             video_frames = None
 
         actions = action_latents.squeeze(0).float().cpu().numpy()
-        denorm = getattr(self, "action_denormalizer", None)
-        if denorm is not None:
-            actions = denorm.unnormalize(actions)
+        normalizer = getattr(self, "action_normalizer", None)
+        if normalizer is not None:
+            actions = normalizer.unnormalize(actions)
 
         return {"video": video_frames, "actions": actions}
 

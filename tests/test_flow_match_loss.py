@@ -5,6 +5,7 @@ architecture._compute_action_loss, which replaced the standalone
 FlowMatchVideoActionLoss class.
 """
 
+import pytest
 import torch
 
 
@@ -70,20 +71,19 @@ def test_action_loss_single_sample():
 
 
 def test_action_loss_per_token_timestep():
-    """_compute_action_loss accepts (B, T) timestep_ids (per-token mode)."""
+    """_compute_action_loss rejects (B, T) timestep_ids in FastWAM-compatible mode."""
     arch = _make_arch()
     B, T, action_dim = 2, 49, 14
     noise_pred = torch.randn(B, T, action_dim)
     target = torch.randn(B, T, action_dim)
     timestep_ids = torch.randint(0, 1000, (B, T))
 
-    loss = arch._compute_action_loss(noise_pred, target, timestep_ids, _MockScheduler(), inputs={}, device="cpu")
-    assert loss.shape == ()
-    assert loss.item() > 0
+    with pytest.raises(ValueError, match="per-sample"):
+        arch._compute_action_loss(noise_pred, target, timestep_ids, _MockScheduler(), inputs={}, device="cpu")
 
 
 def test_action_loss_per_token_timestep_with_pad():
-    """Per-token timestep + action_is_pad should respect the mask."""
+    """Per-token timestep is rejected even when action padding is present."""
     arch = _make_arch()
     B, T, action_dim = 2, 10, 4
     noise_pred = torch.randn(B, T, action_dim)
@@ -94,6 +94,5 @@ def test_action_loss_per_token_timestep_with_pad():
     action_is_pad[1, 4:] = True
 
     inputs = {"action_is_pad": action_is_pad}
-    loss = arch._compute_action_loss(noise_pred, target, timestep_ids, _MockScheduler(), inputs=inputs, device="cpu")
-    assert loss.shape == ()
-    assert loss.item() > 0
+    with pytest.raises(ValueError, match="per-sample"):
+        arch._compute_action_loss(noise_pred, target, timestep_ids, _MockScheduler(), inputs=inputs, device="cpu")

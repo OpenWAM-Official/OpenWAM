@@ -16,8 +16,7 @@ class FirstFrameConditioningTransform(ModalityTransform):
       on Wan2.2-TI2V backbones, or as VACE spatial reference on Wan2.1-VACE
       backbones. The OpenWAM layer stays backend-agnostic; the mapping to
       the Wan pipeline's ``vace_reference_image`` input happens at the pipeline
-      boundary (see openwam/deploy/joint_generation.py and
-      openwam/train/openwam_trainer.py).
+      boundary (see the video backbone adapter used by deploy and training).
     - ``vace_video``: Set to None (inactive conditioning by default).
 
     Args:

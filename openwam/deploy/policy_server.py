@@ -5,9 +5,10 @@ receding-horizon execution. Robot controllers connect via WebSocket for
 low-latency streaming or HTTP for request-response patterns.
 
 The client is thin on purpose: it always sends raw per-camera JPEGs plus a
-base task prompt. All image composition, resize, and prompt wrapping happen
-server-side, driven by the saved training config (``cfg.dataloader.multiview``
-/ ``camera_layout`` / ``height`` / ``width``).
+base task prompt. Image composition and resize happen server-side, driven by
+the saved training config (``cfg.dataloader.multiview`` / ``camera_layout`` /
+``height`` / ``width``); the prompt is wrapped with the FastWAM deploy
+template.
 
 Protocol (unified — same shape for single-view and multi-view checkpoints):
     Client → {
@@ -25,8 +26,7 @@ Server-side behavior:
 - ``multiview=False``: ignores wrist fields, crop+resize ``head_camera``.
 - ``multiview=True``:  black-fills missing/None wrists, then composes the
   L-shape layout defined by ``camera_layout``.
-- ``prompt`` is always re-wrapped via ``format_prompt_for_inference`` so that
-  multiview checkpoints see the same prompt template as at training time.
+- ``prompt`` is always re-wrapped via ``format_prompt_for_inference``.
 
 Responses:
     {"type": "action", "action": [floats], "step": int, "latency_ms": float}
@@ -76,24 +76,20 @@ class PolicyServer:
     Args:
         engine: Inference engine (BaseInferenceEngine).
         cfg: Config with policy and server settings.
-        embodiment: Optional embodiment name for action space conversion.
     """
 
     def __init__(
         self,
         engine,
         cfg,
-        embodiment: Optional[str] = None,
         debug: bool = False,
         debug_dir: str = "./server_debug",
     ):
         self.engine = engine
         self.cfg = cfg
-        self.embodiment = embodiment
 
         # Lazy imports at init time to validate availability
         self._policy = None
-        self._adapter = None
         self._request_count = 0
         self._total_latency = 0.0
 
@@ -111,7 +107,7 @@ class PolicyServer:
             logger.info("Debug mode enabled — saving to %s", debug_dir)
 
     def _init_policy(self):
-        """Initialize policy and optional embodiment adapter."""
+        """Initialize the receding-horizon policy."""
         if self._policy is not None:
             return
 
@@ -154,12 +150,6 @@ class PolicyServer:
             self._img_width,
         )
 
-        if self.embodiment:
-            # embodiment module moved to previous_codebase/; restore it to use this feature
-            from openwam.dataloader.embodiment import ActionSpaceAdapter  # noqa: F401
-
-            self._adapter = ActionSpaceAdapter(self.embodiment)
-
     def predict(self, obs: dict) -> dict:
         """Synchronous prediction for a single observation.
 
@@ -188,10 +178,6 @@ class PolicyServer:
         wrapped_prompt: str = obs.get("prompt", "")
 
         action = self._policy.predict_action(obs)
-
-        # Convert from canonical to native action space
-        if self._adapter is not None:
-            action = self._adapter.canonical_to_native(action.reshape(1, -1))[0]
 
         latency_ms = (time.monotonic() - t0) * 1000
         self._request_count += 1
@@ -300,7 +286,6 @@ class PolicyServer:
         avg_latency = self._total_latency / self._request_count if self._request_count > 0 else 0.0
         return {
             "model": "OpenWAM",
-            "embodiment": self.embodiment,
             "total_requests": self._request_count,
             "avg_latency_ms": round(avg_latency, 2),
             "policy_config": {
@@ -324,7 +309,7 @@ class PolicyServer:
 
         On success the returned obs always has:
             obs["image"]  -> PIL.Image sized (self._img_width, self._img_height)
-            obs["prompt"] -> str wrapped via ``format_prompt_for_inference``
+            obs["prompt"] -> str wrapped with the FastWAM deploy template
 
         Raises :class:`ObsValidationError` on malformed payload.
         """
@@ -412,11 +397,7 @@ class PolicyServer:
             )
 
         # --- Prompt wrapping (must match training-time _get_prompt byte-for-byte) ---
-        obs["prompt"] = format_prompt_for_inference(
-            obs.get("prompt", "") or "",
-            self._multiview,
-            self._camera_layout,
-        )
+        obs["prompt"] = format_prompt_for_inference(obs.get("prompt", "") or "")
 
         if "state" in obs and isinstance(obs["state"], list):
             obs["state"] = np.array(obs["state"], dtype=np.float32)
@@ -553,7 +534,7 @@ class PolicyServer:
         asyncio.run(start_servers())
 
 
-def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda", embodiment: Optional[str] = None):
+def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda"):
     """Build a PolicyServer from a self-contained checkpoint directory.
 
     Aligns with ``scripts/deploy.py`` — uses ``load_from_checkpoint_dir`` so
@@ -590,7 +571,7 @@ def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda", embodimen
 
     merged = OmegaConf.merge(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=merged, architecture=architecture)
-    return PolicyServer(engine=engine, cfg=merged, embodiment=embodiment)
+    return PolicyServer(engine=engine, cfg=merged)
 
 
 def _build_argparser() -> argparse.ArgumentParser:
@@ -612,7 +593,6 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--host", type=str, default=None, help="WebSocket/HTTP bind host override.")
     parser.add_argument("--ws-port", type=int, default=None, help="WebSocket port override.")
     parser.add_argument("--http-port", type=int, default=None, help="HTTP port override.")
-    parser.add_argument("--embodiment", type=str, default=None, help="Optional embodiment name.")
     # Mock mode
     parser.add_argument("--mock", action="store_true", help="Run in mock mode (random actions, no weights required).")
     parser.add_argument(
@@ -678,13 +658,10 @@ def main(argv: Optional[list[str]] = None):
     host = args.host or getattr(server_cfg, "host", "0.0.0.0")
     ws_port = args.ws_port or getattr(server_cfg, "ws_port", 8850)
     http_port = args.http_port or getattr(server_cfg, "http_port", 8848)
-    embodiment = args.embodiment if args.embodiment is not None else getattr(cfg, "embodiment", None)
-
     if args.mock:
         server = PolicyServer(
             engine=engine,
             cfg=cfg,
-            embodiment=embodiment,
             debug=args.debug,
             debug_dir=args.debug_dir,
         )
@@ -693,7 +670,6 @@ def main(argv: Optional[list[str]] = None):
             cfg=cfg,
             ckpt_dir=args.ckpt_dir,
             device=args.device,
-            embodiment=embodiment,
         )
         server._debug = args.debug
         server._debug_dir = args.debug_dir
