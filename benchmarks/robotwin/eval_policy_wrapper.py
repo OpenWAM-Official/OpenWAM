@@ -136,6 +136,27 @@ def _install_env_trace_hooks(module) -> None:
     module.class_decorator = traced_class_decorator
 
 
+def _install_test_num_override(module) -> None:
+    value = os.environ.get("ROBOTWIN_TEST_NUM", "").strip()
+    if not value:
+        return
+    try:
+        test_num = int(value)
+    except ValueError as exc:
+        raise ValueError(f"ROBOTWIN_TEST_NUM must be an integer, got {value!r}") from exc
+    if test_num <= 0:
+        raise ValueError(f"ROBOTWIN_TEST_NUM must be > 0, got {test_num}")
+
+    orig_eval_policy = module.eval_policy
+
+    def capped_eval_policy(*args, **kwargs):
+        kwargs["test_num"] = test_num
+        print(f"[eval_policy_wrapper] overriding RoboTwin eval test_num={test_num}")
+        return orig_eval_policy(*args, **kwargs)
+
+    module.eval_policy = capped_eval_policy
+
+
 def _load_module(module_name: str, file_path: str):
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
@@ -283,6 +304,7 @@ def main() -> int:
     if os.environ.get("ROBOTWIN_ENABLE_PLANNER_FALLBACK", "") == "1":
         _install_robot_planner_fallbacks(robotwin_path)
     _install_env_trace_hooks(module)
+    _install_test_num_override(module)
     usr_args = module.parse_args_and_config()
     module.main(usr_args)
     return 0

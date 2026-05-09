@@ -27,6 +27,22 @@ sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
 _DEPLOY_CFG_PATH = PROJECT_ROOT / "configs" / "deploy.yaml"
 
 
+def _infer_video_num_frames(dl) -> int:
+    """Return the video frame count seen by Wan after dataloader sub-sampling.
+
+    ``dataloader.num_frames`` is the raw state/action window length. RoboTwin
+    keeps actions at that raw rate but sub-samples video by ``video_stride``
+    before VAE encoding, so deploy must pass the sampled video length to Wan.
+    """
+    from omegaconf import OmegaConf
+
+    raw_frames = int(OmegaConf.select(dl, "num_frames", default=33))
+    video_stride = int(OmegaConf.select(dl, "video_stride", default=1) or 1)
+    if video_stride <= 0:
+        video_stride = 1
+    return (raw_frames - 1) // video_stride + 1
+
+
 def _load_deploy_config():
     """Load configs/deploy.yaml as a base deploy config."""
     from omegaconf import OmegaConf
@@ -75,11 +91,16 @@ def _merge_with_training_cfg(training_cfg, deploy_cfg):
     from omegaconf import OmegaConf
 
     # Let dataloader params provide fallback for inference frame/resolution dims.
+    # ``inference.num_frames`` remains the raw action/state horizon (actions
+    # returned = num_frames - 1). ``inference.video_num_frames`` is the Wan
+    # video length after dataloader.video_stride sub-sampling.
     dl = OmegaConf.select(training_cfg, "dataloader", default=None)
     if dl is not None:
         inf = OmegaConf.select(deploy_cfg, "inference", default=OmegaConf.create({}))
         if OmegaConf.select(inf, "num_frames", default=None) is None:
             OmegaConf.update(inf, "num_frames", OmegaConf.select(dl, "num_frames", default=33), merge=False)
+        if OmegaConf.select(inf, "video_num_frames", default=None) is None:
+            OmegaConf.update(inf, "video_num_frames", _infer_video_num_frames(dl), merge=False)
         if OmegaConf.select(inf, "height", default=None) is None:
             OmegaConf.update(inf, "height", OmegaConf.select(dl, "height", default=480), merge=False)
         if OmegaConf.select(inf, "width", default=None) is None:

@@ -147,6 +147,7 @@ def load_from_checkpoint_dir(
     logger.info("Loading all models with dtype=%s (mixed_precision=%s)", model_dtype, _mp)
 
     architecture.set_dtype_device(model_dtype, torch.device(device))
+    architecture.eval()
 
     # 6. Attach the action normalizer built from saved action_stats.npy + config.
     architecture.attach_action_normalizer(_build_action_normalizer(cfg, ckpt_dir))

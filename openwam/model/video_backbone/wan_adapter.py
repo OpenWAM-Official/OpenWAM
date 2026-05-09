@@ -913,13 +913,21 @@ class WanVideoBackbone(VideoBackbone):
             inputs_shared = vace_cache["inputs_shared"].copy()
             inputs_shared["seed"] = seed
             inputs_shared["vace_video"] = vace_video
+            inputs_shared["vace_reference_image"] = first_frame_image
+            inputs_shared["height"] = height
+            inputs_shared["width"] = width
             inputs_shared["num_frames"] = num_frames
+            inputs_shared["sigma_shift"] = shift
+            inputs_shared["tiled"] = tiled
+            inputs_shared["tile_size"] = tile_size
+            inputs_shared["tile_stride"] = tile_stride
 
             for unit in pipe.units:
                 if self._is_text_unit(unit):
                     continue
                 inputs_shared, _, _ = pipe.unit_runner(unit, pipe, inputs_shared, {}, {})
 
+            WanVideoBackbone._ensure_prompt_seq_lens(self, inputs_shared, prompt)
             self._finalize_ti2v_inputs(inputs_shared, first_frame_image)
             return inputs_shared
 
@@ -1018,6 +1026,7 @@ class WanVideoBackbone(VideoBackbone):
                 prompt_embed_cache[prompt_key] = inputs_posi.copy()
 
         inputs_shared.update(inputs_posi)
+        WanVideoBackbone._ensure_prompt_seq_lens(self, inputs_shared, prompt)
 
         if vace_cache is not None:
             vace_cache["inputs_shared"] = inputs_shared.copy()
@@ -1030,6 +1039,10 @@ class WanVideoBackbone(VideoBackbone):
     def _finalize_ti2v_inputs(self, inputs_shared: dict, first_frame_image) -> None:
         """Handle TI2V first-frame latent encoding and inject into inputs_shared."""
         if not self._is_ti2v or first_frame_image is None:
+            if first_frame_image is None:
+                inputs_shared.pop("first_frame_latents", None)
+                inputs_shared["fuse_vae_embedding_in_latents"] = False
+                inputs_shared["num_clean_prefix_frames"] = 0
             return
         device = self.device
         dtype = self.dtype
@@ -1049,6 +1062,39 @@ class WanVideoBackbone(VideoBackbone):
             return bool(flag)
         cls_name = getattr(unit, "__class__", type(unit)).__name__
         return cls_name in _TEXT_UNIT_CLASS_NAMES
+
+    def _ensure_prompt_seq_lens(self, inputs_shared: dict, prompt) -> None:
+        """Attach text ``seq_lens`` so deploy cross-attention masks padding.
+
+        The Wan pipeline prompt unit returns ``context`` but not the tokenizer
+        mask. Training uses :meth:`_encode_text`, which supplies ``seq_lens``;
+        without it, deploy treats all 512 padded text positions as attendable.
+        """
+        if inputs_shared.get("context") is None:
+            return
+        tokenizer = getattr(self._pipe, "tokenizer", None)
+        if tokenizer is None:
+            return
+        if inputs_shared.get("seq_lens") is not None or inputs_shared.get("context_mask") is not None:
+            return
+
+        _, mask = tokenizer(prompt, return_mask=True, add_special_tokens=True)
+        seq_lens = mask.gt(0).sum(dim=1).long().to(self.device)
+        context = inputs_shared["context"]
+        if seq_lens.shape[0] != context.shape[0]:
+            if seq_lens.shape[0] == 1:
+                seq_lens = seq_lens.expand(context.shape[0])
+            elif context.shape[0] % seq_lens.shape[0] == 0:
+                repeat = context.shape[0] // seq_lens.shape[0]
+                seq_lens = seq_lens.repeat_interleave(repeat)
+            else:
+                logger.warning(
+                    "Cannot align prompt seq_lens batch %d with context batch %d; deploy text padding remains unmasked.",
+                    seq_lens.shape[0],
+                    context.shape[0],
+                )
+                return
+        inputs_shared["seq_lens"] = seq_lens
 
     def _encode_text(self, prompts: list) -> Tuple[Tensor, Tensor]:
         device = self.device

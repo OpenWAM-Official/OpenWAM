@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # DLC multi-node RoboTwin evaluation.
 #
-# Each DLC worker runs this same script. Rank 0 creates a shared task queue;
-# every node starts local OpenWAM policy servers and local RoboTwin clients.
-# Clients across all nodes atomically pop jobs from the shared queue via flock,
-# so faster nodes keep taking work until the whole run is finished.
+# Each DLC worker runs this same script. Rank 0 creates one shared file per
+# task/mode job; every node starts local OpenWAM policy servers and local
+# RoboTwin clients. Clients across all nodes atomically claim jobs by moving a
+# pending job file into the claimed directory, so faster nodes keep taking work
+# until the whole run is finished without editing a shared queue file.
 #
 # Usage:
 #   bash benchmarks/robotwin/dlc_parallel_eval.sh -m <mode> -n <name> -d <ckpt_dir> [options] <tasks...>
@@ -287,7 +288,9 @@ LOG_ROOT="${ROBOTWIN_LOG_ROOT:-${CKPT_DIR}/robotwin_eval_logs}"
 LOG_DIR="${LOG_ROOT}/${POLICY_NAME}_${TASK_CONFIG}_dlc_${RUN_ID}"
 NODE_DIR="${LOG_DIR}/node${NODE_RANK}"
 QUEUE_FILE="${LOG_DIR}/.queue.txt"
-QUEUE_LOCK_DIR="${LOG_DIR}/.queue.lock.d"
+QUEUE_DIR="${LOG_DIR}/queue"
+QUEUE_PENDING_DIR="${QUEUE_DIR}/pending"
+QUEUE_CLAIMED_DIR="${QUEUE_DIR}/claimed"
 READY_FILE="${LOG_DIR}/.queue_ready"
 SUMMARY_FILE="${LOG_DIR}/summary.tsv"
 SUMMARY_LOCK_DIR="${LOG_DIR}/summary.lock.d"
@@ -328,8 +331,8 @@ mkdir -p "${NODE_DIR}" "${SERVER_LOG_DIR}"
 if [[ "${NODE_RANK}" == "0" ]]; then
     if (( FRESH_RUN )); then
         rm -f "${QUEUE_FILE}" "${READY_FILE}" "${SUMMARY_FILE}"
-        rm -rf "${QUEUE_LOCK_DIR}" "${SUMMARY_LOCK_DIR}"
-        rm -f "${LOG_DIR}"/.node*_done
+        rm -rf "${QUEUE_DIR}" "${LOG_DIR}/.queue.lock.d" "${SUMMARY_LOCK_DIR}"
+        find "${LOG_DIR}" -maxdepth 1 -name '.node*_done' -type f -delete 2>/dev/null || true
     elif [[ -f "${READY_FILE}" ]]; then
         echo "[rank0] ERROR: stale run metadata exists at ${LOG_DIR}" >&2
         echo "[rank0] Use ROBOTWIN_RUN_ID=<new_id> or pass --fresh." >&2
@@ -338,9 +341,15 @@ if [[ "${NODE_RANK}" == "0" ]]; then
 
     mkdir -p "${LOG_DIR}"
     : > "${QUEUE_FILE}"
+    rm -rf "${QUEUE_DIR}"
+    mkdir -p "${QUEUE_PENDING_DIR}" "${QUEUE_CLAIMED_DIR}"
+    job_id=0
     for task in "${TASKS[@]}"; do
         for mode in "${MODES[@]}"; do
             printf '%s|%s\n' "${task}" "${mode}" >> "${QUEUE_FILE}"
+            job_file="${QUEUE_PENDING_DIR}/$(printf '%06d' "${job_id}")_${task}_${mode}.job"
+            printf 'task=%s\nmode=%s\n' "${task}" "${mode}" > "${job_file}"
+            job_id=$((job_id + 1))
         done
     done
     printf 'task\tmode\tnode\tworker\tstatus\texit_code\tlog\n' > "${SUMMARY_FILE}"
@@ -354,10 +363,11 @@ if [[ "${NODE_RANK}" == "0" ]]; then
         echo "nnodes=${NNODES}"
         echo "num_workers_per_node=${NUM_WORKERS}"
         echo "total_jobs=${TOTAL_JOBS}"
+        echo "queue_backend=per-job-mv"
         printf 'tasks=%s\n' "${TASKS[*]}"
     } > "${LOG_DIR}/run.env"
     touch "${READY_FILE}"
-    echo "[rank0] queue initialized: ${TOTAL_JOBS} jobs at ${QUEUE_FILE}"
+    echo "[rank0] queue initialized: ${TOTAL_JOBS} per-job files at ${QUEUE_PENDING_DIR}"
 else
     echo "[rank${NODE_RANK}] waiting for queue ${READY_FILE} (timeout ${QUEUE_READY_TIMEOUT_SEC}s)"
     deadline=$((SECONDS + QUEUE_READY_TIMEOUT_SEC))
@@ -427,22 +437,31 @@ with_lock_dir() {
     return "${rc}"
 }
 
-pop_queue_item() {
+claim_queue_item() {
     local result_file="$1"
-    local item=""
-    if [[ -s "${QUEUE_FILE}" ]]; then
-        if ! IFS= read -r item < "${QUEUE_FILE}"; then
-            echo "[ERROR] queue read failed: ${QUEUE_FILE}" >&2
-            return 11
-        fi
-        if [[ -n "${item}" ]]; then
-            if ! sed -i '1d' "${QUEUE_FILE}"; then
-                echo "[ERROR] queue pop failed: could not remove first line from ${QUEUE_FILE}; aborting to avoid duplicate task execution" >&2
-                return 12
+    local worker_idx="$2"
+    local job_file claimed_file task mode
+    : > "${result_file}"
+
+    # Each job is a standalone file. `mv` within the shared queue directory is
+    # the atomic claim operation, so workers never edit the same queue file.
+    shopt -s nullglob
+    for job_file in "${QUEUE_PENDING_DIR}"/*.job; do
+        claimed_file="${QUEUE_CLAIMED_DIR}/$(basename "${job_file}").node${NODE_RANK}.worker${worker_idx}"
+        if mv "${job_file}" "${claimed_file}" 2>/dev/null; then
+            task="$(awk -F= '$1 == "task" {print $2; exit}' "${claimed_file}")"
+            mode="$(awk -F= '$1 == "mode" {print $2; exit}' "${claimed_file}")"
+            if [[ -z "${task}" || -z "${mode}" ]]; then
+                echo "[ERROR] malformed claimed job file: ${claimed_file}" >&2
+                return 13
             fi
+            printf '%s|%s|%s' "${task}" "${mode}" "${claimed_file}" > "${result_file}"
+            shopt -u nullglob
+            return 0
         fi
-    fi
-    printf '%s' "${item}" > "${result_file}"
+    done
+    shopt -u nullglob
+    return 0
 }
 
 append_summary_row() {
@@ -467,21 +486,24 @@ run_worker() {
     echo "${tag} started" | tee -a "${worker_log}"
 
     while :; do
-        local item task mode eval_exit task_log tmp_item_file tmp_summary_file
+        local item task mode claimed_job_file eval_exit task_log tmp_item_file tmp_summary_file
         tmp_item_file="${worker_dir}/.queue_pop.tmp"
-        with_lock_dir "${QUEUE_LOCK_DIR}" pop_queue_item "${tmp_item_file}" || exit $?
+        claim_queue_item "${tmp_item_file}" "${worker_idx}" || exit $?
         item="$(cat "${tmp_item_file}")"
 
         [[ -z "${item}" ]] && break
-        task="${item%%|*}"
-        mode="${item#*|}"
+        IFS='|' read -r task mode claimed_job_file <<< "${item}"
         if ! is_safe_task_name "${task}"; then
             echo "${tag} invalid task name from queue: ${task}" | tee -a "${worker_log}" >&2
             return 1
         fi
+        if [[ "${mode}" != "demo_clean" && "${mode}" != "demo_randomized" ]]; then
+            echo "${tag} invalid mode from queue: ${mode}" | tee -a "${worker_log}" >&2
+            return 1
+        fi
         task_log="${worker_dir}/${task}_${mode}.log"
 
-        echo "${tag} starting task=${task} mode=${mode}" | tee -a "${worker_log}"
+        echo "${tag} claimed $(basename "${claimed_job_file}") task=${task} mode=${mode}" | tee -a "${worker_log}"
         ROBOTWIN_HTTP_PORT="${http_port}" ROBOTWIN_POLICY_HOST="${SERVER_CLIENT_HOST}" \
         bash "${SCRIPT_DIR}/single_eval.sh" \
             "${task}" "${mode}" "${POLICY_NAME}" \

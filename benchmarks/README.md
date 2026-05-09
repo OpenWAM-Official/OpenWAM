@@ -4,7 +4,7 @@ For users wiring their own robot or benchmark to an OpenWAM policy server.
 
 ## 1. What the client sends
 
-One call per control step: three raw camera JPEGs + a base task prompt.
+One call per control step: three raw camera JPEGs + a base task prompt. Proprioceptive checkpoints also require a raw `state` vector whose length matches the checkpoint's `model.architecture.state_dim`.
 
 ```json
 POST /predict
@@ -15,7 +15,7 @@ POST /predict
     "right_wrist_camera": "<base64 JPEG>|null"  // optional
   },
   "prompt": "pick up the red bottle",
-  "state":  [float, ...]                       // optional proprio
+  "state":  [float, ...]                       // required when use_proprioception=true
 }
 ```
 
@@ -37,6 +37,7 @@ Response:
 - `left_wrist_camera`, `right_wrist_camera`: optional. If missing or `null`:
   - Server is single-view → the field is ignored.
   - Server is multi-view → the slot is filled with a black frame. The model still runs, but accuracy degrades since you're out of the training distribution for wrist-conditioned checkpoints.
+- `state`: required when the checkpoint has `model.architecture.use_proprioception: true`. The server validates the dimension before inference and returns HTTP 400 for missing or mismatched state instead of failing later inside the model.
 
 ## 4. Episode lifecycle and reset
 
@@ -107,6 +108,8 @@ Both bundled test scripts ([scripts/inference_single_test.py](../scripts/inferen
 | `head_camera is required` | Missing or `null` head_camera |
 | `client must send 'images' dict` | Legacy single-field `image` payload (no longer supported) |
 | `failed to decode base64 JPEG` | Corrupted base64 or bad JPEG bytes |
+| `requires obs['state']` | Checkpoint uses proprioception but the payload omitted `state` |
+| `state dimension mismatch` | Payload `state` length differs from checkpoint `state_dim` |
 | `camera_layout` | Server config has fewer than 3 entries in `camera_layout` while multi-view is enabled — check the checkpoint |
 
 ## 7. See also

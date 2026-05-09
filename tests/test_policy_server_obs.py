@@ -236,3 +236,67 @@ def test_decode_obs_passes_prompt_through_single_view():
     assert out["prompt"] == (
         "A video recorded from a robot's point of view executing the following instruction: pick up the bottle"
     )
+
+
+def test_decode_obs_requires_state_for_proprio_checkpoint():
+    server = _bare_server(multiview=False)
+    server.cfg = OmegaConf.create(
+        {
+            "model": {
+                "architecture": {
+                    "use_proprioception": True,
+                    "state_dim": 20,
+                }
+            }
+        }
+    )
+    obs = {"images": {"head_camera": _make_bright_b64()}, "prompt": "pick up the bottle"}
+
+    with pytest.raises(ObsValidationError, match="requires obs\\['state'\\] length 20"):
+        server._decode_obs(obs)
+
+
+def test_decode_obs_rejects_wrong_state_dim_for_proprio_checkpoint():
+    server = _bare_server(multiview=False)
+    server.cfg = OmegaConf.create(
+        {
+            "model": {
+                "architecture": {
+                    "use_proprioception": True,
+                    "state_dim": 20,
+                }
+            }
+        }
+    )
+    obs = {
+        "images": {"head_camera": _make_bright_b64()},
+        "prompt": "pick up the bottle",
+        "state": list(range(14)),
+    }
+
+    with pytest.raises(ObsValidationError, match="state dimension mismatch: expected 20, got 14"):
+        server._decode_obs(obs)
+
+
+def test_decode_obs_accepts_and_flattens_correct_state_dim():
+    server = _bare_server(multiview=False)
+    server.cfg = OmegaConf.create(
+        {
+            "model": {
+                "architecture": {
+                    "use_proprioception": True,
+                    "state_dim": 20,
+                }
+            }
+        }
+    )
+    obs = {
+        "images": {"head_camera": _make_bright_b64()},
+        "prompt": "pick up the bottle",
+        "state": np.arange(20, dtype=np.float32).reshape(1, 20).tolist(),
+    }
+
+    out = server._decode_obs(obs)
+
+    assert out["state"].shape == (20,)
+    assert out["state"].dtype == np.float32

@@ -119,7 +119,11 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - first_frame_image (list[PIL.Image], optional): first frame of the
                   observation window; used as TI2V first-frame condition on Wan2.2-TI2V
                   or as VACE spatial reference on Wan2.1-VACE
-                - num_frames (int, optional): defaults from cfg
+                - num_frames (int, optional): raw state/action window length;
+                  generated action chunk length is ``num_frames - 1``
+                - video_num_frames (int, optional): Wan video length after any
+                  training-time video_stride sub-sampling; defaults from cfg,
+                  then falls back to ``num_frames``
                 - height (int, optional): defaults from cfg
                 - width (int, optional): defaults from cfg
                 - seed (int, optional): random seed, default 42
@@ -187,12 +191,21 @@ class JointInferenceEngine(BaseInferenceEngine):
         if proprio_state is not None:
             proprio_state = self.architecture.normalize_deploy_proprio(proprio_state)
 
+        action_num_frames = int(conditions.get("num_frames", getattr(inf_cfg, "num_frames", 49)))
+        video_num_frames = int(
+            conditions.get(
+                "video_num_frames",
+                getattr(inf_cfg, "video_num_frames", action_num_frames),
+            )
+        )
+
         result = self.architecture.generate(
             schedule=schedule,
             prompt=conditions.get("prompt", ""),
             vace_video=conditions.get("vace_video", None),
             first_frame_image=conditions.get("first_frame_image", None),
-            num_frames=conditions.get("num_frames", getattr(inf_cfg, "num_frames", 49)),
+            num_frames=video_num_frames,
+            action_num_frames=action_num_frames,
             height=conditions.get("height", getattr(inf_cfg, "height", 480)),
             width=conditions.get("width", getattr(inf_cfg, "width", 832)),
             seed=conditions.get("seed", 42),

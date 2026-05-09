@@ -53,7 +53,7 @@ def quat_xyzw_to_rot6d(quat: np.ndarray) -> np.ndarray:
 def rot6d_to_quat_xyzw(r6d: np.ndarray) -> np.ndarray:
     """Convert 6D rotation (first two columns of R) to xyzw quaternion.
 
-    Uses Gram–Schmidt orthonormalization to recover the rotation matrix,
+    Uses Gram-Schmidt orthonormalization to recover the rotation matrix,
     then Shepperd's method to extract a unit quaternion.
     """
     a1, a2 = r6d[:3], r6d[3:6]

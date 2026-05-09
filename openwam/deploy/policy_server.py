@@ -62,6 +62,17 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _infer_video_num_frames(dl) -> int:
+    """Return the video frame count seen by Wan after dataloader sub-sampling."""
+    from omegaconf import OmegaConf
+
+    raw_frames = int(OmegaConf.select(dl, "num_frames", default=33))
+    video_stride = int(OmegaConf.select(dl, "video_stride", default=1) or 1)
+    if video_stride <= 0:
+        video_stride = 1
+    return (raw_frames - 1) // video_stride + 1
+
+
 class ObsValidationError(ValueError):
     """Raised when a client observation payload does not match the server's
     view configuration (single-view vs multi-view, missing cameras, bad image
@@ -339,6 +350,58 @@ class PolicyServer:
                 f"{ctx}: expected base64 JPEG string, raw bytes, or PIL.Image, got {type(x).__name__}"
             )
 
+        def _cfg_select(path: str, default=None):
+            cur = self.cfg
+            for part in path.split("."):
+                if cur is None:
+                    return default
+                if isinstance(cur, dict):
+                    if part not in cur:
+                        return default
+                    cur = cur[part]
+                    continue
+                try:
+                    cur = getattr(cur, part)
+                except (AttributeError, KeyError):
+                    return default
+            return cur
+
+        def _parse_bool(value) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "y", "on")
+            return bool(value)
+
+        def _requires_proprio() -> bool:
+            cfg_value = _cfg_select("model.architecture.use_proprioception", None)
+            if cfg_value is None:
+                cfg_value = _cfg_select("model.params.use_proprioception", None)
+            if cfg_value is not None:
+                return _parse_bool(cfg_value)
+
+            arch = getattr(self.engine, "architecture", None)
+            if arch is not None:
+                try:
+                    return bool(arch.uses_proprioception)
+                except Exception:
+                    return bool(getattr(arch, "uses_proprioception", False))
+            return False
+
+        def _expected_proprio_dim() -> Optional[int]:
+            for path in ("model.architecture.state_dim", "model.params.state_dim"):
+                value = _cfg_select(path, None)
+                if value not in (None, "", "none", "null"):
+                    dim = int(value)
+                    return dim if dim > 0 else None
+
+            arch = getattr(self.engine, "architecture", None)
+            value = getattr(arch, "proprio_dim", None) if arch is not None else None
+            if value not in (None, "", "none", "null"):
+                dim = int(value)
+                return dim if dim > 0 else None
+            return None
+
         # --- Payload shape validation ---
         if "images" not in obs or not isinstance(obs.get("images"), dict):
             raise ObsValidationError(
@@ -399,8 +462,24 @@ class PolicyServer:
         # --- Prompt wrapping (must match training-time _get_prompt byte-for-byte) ---
         obs["prompt"] = format_prompt_for_inference(obs.get("prompt", "") or "")
 
-        if "state" in obs and isinstance(obs["state"], list):
-            obs["state"] = np.array(obs["state"], dtype=np.float32)
+        expected_state_dim = _expected_proprio_dim()
+        if "state" in obs and obs["state"] is not None:
+            try:
+                state = np.asarray(obs["state"], dtype=np.float32).reshape(-1)
+            except (TypeError, ValueError) as exc:
+                raise ObsValidationError(f"state must be a flat numeric list/array ({exc})") from exc
+            if expected_state_dim is not None and state.size != expected_state_dim:
+                raise ObsValidationError(
+                    f"state dimension mismatch: expected {expected_state_dim}, got {state.size}. "
+                    "Check the client action_type/state_dim against the checkpoint config."
+                )
+            obs["state"] = state
+        elif _requires_proprio():
+            expected = f" length {expected_state_dim}" if expected_state_dim is not None else ""
+            raise ObsValidationError(
+                f"this checkpoint requires obs['state']{expected}; "
+                "send raw proprio state for proprio-conditioned checkpoints."
+            )
 
         return obs
 
@@ -554,15 +633,17 @@ def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda"):
 
     # Mirror scripts/deploy.py: let dataloader provide inference frame/resolution
     # fallbacks before merging deploy overrides on top, so server.predict() goes
-    # through architecture.generate() with the resolution the checkpoint was
-    # trained at (otherwise it falls back to Wan's 480x832 default and the
-    # first_frame_latents ↔ noise_latents shapes diverge).
+    # through architecture.generate() with the resolution and video length the
+    # checkpoint was trained at. ``num_frames`` is the raw action/state window;
+    # ``video_num_frames`` is the Wan video length after video_stride.
     deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
     dl = OmegaConf.select(training_cfg, "dataloader", default=None)
     if dl is not None:
         inf = OmegaConf.select(deploy_cfg, "inference", default=OmegaConf.create({}))
         if OmegaConf.select(inf, "num_frames", default=None) is None:
             OmegaConf.update(inf, "num_frames", OmegaConf.select(dl, "num_frames", default=33), merge=False)
+        if OmegaConf.select(inf, "video_num_frames", default=None) is None:
+            OmegaConf.update(inf, "video_num_frames", _infer_video_num_frames(dl), merge=False)
         if OmegaConf.select(inf, "height", default=None) is None:
             OmegaConf.update(inf, "height", OmegaConf.select(dl, "height", default=480), merge=False)
         if OmegaConf.select(inf, "width", default=None) is None:

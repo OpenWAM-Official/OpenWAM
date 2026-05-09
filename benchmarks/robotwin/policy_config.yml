@@ -17,7 +17,8 @@ http_port: 8848           # patched at runtime by single_eval.sh
 # applies the resize/crop and prompt wrapping used during training. No client
 # config is needed for that any more.
 
-send_state: true           # include joint state vector in /predict request; keep true for proprio-conditioned checkpoints
+send_state: true           # include proprio state vector in /predict request; required for proprio-conditioned checkpoints
+state_dim: 20              # expected state dimension; 20 for action_mode=eef, 14 for action_mode=joint
 request_timeout: 300      # HTTP timeout in seconds
 
 # --- Action settings ---

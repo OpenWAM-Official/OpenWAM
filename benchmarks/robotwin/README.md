@@ -6,6 +6,7 @@ These scripts assume the OpenWAM policy server is **already running**. They only
 
 - [x] Update per-task `limit_steps` based on observed episode lengths.
 - [x] Confirm that `state` is correctly forwarded to the server: [`policy_config.yml`](policy_config.yml)'s `send_state` flag is active, and the default is `true` for proprio-conditioned checkpoints.
+- [x] Add state-dimension fail-fast checks so RoboTwin eval errors immediately when `action_type` / `state_dim` do not match the checkpoint.
 - [ ] Flesh out the debug-mode docs: spell out what gets saved, where, and under what names, so the user experience stays friendly.
 - [ ] Investigate the timestamp-folder mismatch in RoboTwin's built-in `eval_results/` directory and see whether it can be fixed.
 - [ ] Document `multi_eval.sh`'s `-n <name>` flag (what output path it produces); if `-n` is not strictly required, consider removing it.
@@ -57,7 +58,15 @@ export ROBOTWIN_PATH=/path/to/RoboTwin      # RoboTwin repo root (required)
 export ROBOTWIN_ENV=robotwin                # RoboTwin Conda env name (default: robotwin)
 ```
 
-### 3. Start the OpenWAM server
+### 3. Match the checkpoint action/state mode
+
+`policy_config.yml` must match the checkpoint's saved `config.yaml`:
+
+- `dataloader.action_mode: eef` / `architecture.state_dim: 20` → keep `action_type: ee`, `state_dim: 20`.
+- `dataloader.action_mode: joint` / `architecture.state_dim: 14` → set `action_type: qpos`, `state_dim: 14`.
+- Keep `send_state: true` for any checkpoint with `architecture.use_proprioception: true`; the adapter will fail fast if the extracted RoboTwin state dimension is wrong.
+
+### 4. Start the OpenWAM server
 
 Start the server separately before running any evaluation (it can live on a remote machine — just make sure the host/IP and the HTTP port are reachable):
 
@@ -133,7 +142,7 @@ bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir tasks.txt
 
 ### DLC multi-node parallel evaluation
 
-`dlc_parallel_eval.sh` is the cluster entrypoint for large runs. Launch the same command on every DLC worker. Rank 0 creates a queue in the shared log directory; each node starts one OpenWAM server per local worker, waits for `/health`, then starts RoboTwin client workers that atomically pop `task|mode` jobs from the shared queue.
+`dlc_parallel_eval.sh` is the cluster entrypoint for large runs. Launch the same command on every DLC worker. Rank 0 creates one pending job file per `task|mode` in the shared log directory; each node starts one OpenWAM server per local worker, waits for `/health`, then starts RoboTwin client workers that atomically claim pending job files with `mv`.
 
 This script does **not** require pre-starting OpenWAM servers with `scripts/deploy_multi.sh`; it starts and cleans up its own local servers on every node. It still requires a RoboTwin Python environment for the simulator/client process.
 
@@ -143,7 +152,7 @@ By default, each local policy server is launched as:
 python <repo>/scripts/deploy.py ...
 ```
 
-Override `SERVER_PYTHON` / `--server-python` or `SERVER_SCRIPT` / `--server-script` if the server must run under a specific Python executable or a custom deploy script.
+Override `SERVER_PYTHON` / `--server-python` or `SERVER_SCRIPT` / `--server-script` if the server must run under a specific Python executable or a custom deploy script. `SERVER_PYTHON` must be an OpenWAM-capable environment with packages such as `torch`, `omegaconf`, `safetensors`, `aiohttp`, and `websockets`; it is separate from `ROBOTWIN_PYTHON`, which runs the simulator/client side.
 
 **Required environment:**
 
@@ -152,6 +161,7 @@ Override `SERVER_PYTHON` / `--server-python` or `SERVER_SCRIPT` / `--server-scri
 | `ROBOTWIN_PATH` | RoboTwin repository root. Must be visible on every node. |
 | `ROBOTWIN_PYTHON` | Python executable inside the RoboTwin environment. If unset, the script searches for `ROBOTWIN_ENV` as a conda env. |
 | `ROBOTWIN_ENV` | Conda env name used only when `ROBOTWIN_PYTHON` is unset. Default: `robotwin`. |
+| `SERVER_PYTHON` | Python executable for OpenWAM policy servers. Use the OpenWAM env unless the RoboTwin env also has the OpenWAM server dependencies. |
 
 **DLC / multi-node environment:**
 
@@ -169,6 +179,7 @@ It falls back to `NNODES` / `NODE_RANK`, then `WORLD_SIZE` / `RANK`, so local sm
 ```bash
 ROBOTWIN_PATH=/path/to/RoboTwin \
 ROBOTWIN_PYTHON=/path/to/envs/RoboTwin/bin/python \
+SERVER_PYTHON=/path/to/openwam/.venv/bin/python \
 ROBOTWIN_RUN_ID=test \
 bash benchmarks/robotwin/dlc_parallel_eval.sh \
     -m all -n openwam -d /path/to/openwam_checkpoints/robotwin_dual_system_joint_self_attention \
@@ -196,7 +207,7 @@ Tasks are positional after flags. They can be task names, comma-separated task n
 | `--gpu-start` | `0` | First local GPU index. |
 | `SIM_GPU_STRIDE` | `1` | Stride between worker GPUs. |
 | `--http-port`, `--ws-port` | `8700`, `8800` | Per-node local port bases; worker `i` uses base `+ i`. |
-| `SERVER_PYTHON`, `--server-python` | `python` | Python executable used to launch each local policy server. |
+| `SERVER_PYTHON`, `--server-python` | `python` | Python executable used to launch each local policy server; must have OpenWAM server dependencies installed. |
 | `SERVER_SCRIPT`, `--server-script` | `<repo>/scripts/deploy.py` | Python script used to launch each local policy server. |
 | `--bind-host` | `127.0.0.1` | Host passed to `scripts/deploy.py --host`. |
 | `--client-host` | `127.0.0.1` | Host passed to RoboTwin clients. Keep this local unless clients must reach a non-local server. |
@@ -221,7 +232,7 @@ If `ROBOTWIN_LOG_ROOT` is set:
 <ROBOTWIN_LOG_ROOT>/<name>_<mode>_dlc_<run_id>
 ```
 
-This directory must be on a shared filesystem visible to every node because it stores the queue, locks, sentinels, summary, and logs. Queue and summary locking use atomic `mkdir` lock directories (`.queue.lock.d/`, `summary.lock.d/`) instead of `flock`, which is safer on many DLC/NFS-style shared filesystems.
+This directory must be on a shared filesystem visible to every node because it stores the queue, sentinels, summary, and logs. The task queue is represented as per-job files under `queue/pending`; workers claim jobs with an atomic same-filesystem `mv` into `queue/claimed`, avoiding concurrent edits to a shared `.queue.txt`. Summary locking still uses an atomic `mkdir` lock directory (`summary.lock.d/`) instead of `flock`, which is safer on many DLC/NFS-style shared filesystems.
 
 Important files:
 
@@ -229,8 +240,10 @@ Important files:
 <log_dir>/
   run.env
   summary.tsv
-  .queue.txt
-  .queue.lock.d/
+  .queue.txt       # manifest/debug copy
+  queue/
+    pending/
+    claimed/
   summary.lock.d/
   .queue_ready
   node0/
@@ -358,7 +371,8 @@ xvfb-run -a bash single_eval.sh adjust_bottle demo_clean openwam 0 8848 127.0.0.
 #   - multiview=false → single-view preprocessing using head_camera only
 #   - multiview=true  → composed into the L-shape multi-view layout used at training time
 # The client no longer needs to configure camera selection or resolution.
-send_state: true          # Include the joint-state vector in the /predict request.
+send_state: true          # Include the proprio state vector in the /predict request.
+state_dim: 20             # Fail-fast expected dim. 20 for eef/ee, 14 for joint/qpos.
 request_timeout: 300      # HTTP timeout in seconds.
 
 # Action settings (must match the `action_mode` used at training time).

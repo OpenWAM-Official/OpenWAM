@@ -787,6 +787,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         vace_video=None,
         first_frame_image=None,
         num_frames: int = 49,
+        action_num_frames: Optional[int] = None,
         height: int = 480,
         width: int = 832,
         seed: int = 42,
@@ -808,6 +809,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
         This is the single entry point for inference. External code
         (engine) should call this instead of touching video_backbone directly.
 
+        Args:
+            num_frames: Video frame count passed to the video backbone. For
+                RoboTwin this is the post-``video_stride`` count seen during
+                training, not the raw action window length.
+            action_num_frames: Raw state/action window length. Generated
+                action chunk length is ``action_num_frames - 1``. Defaults to
+                ``num_frames`` for datasets whose video/action rates match.
+
         Returns:
             dict with ``video`` (list of PIL images or None) and
             ``actions`` ((T, action_dim) numpy array).
@@ -827,6 +836,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             prep_kwargs["tile_size"] = tile_size
         if tile_stride is not None:
             prep_kwargs["tile_stride"] = tile_stride
+
+        action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
         inputs_shared = vb.prepare_inputs_for_inference(
             prompt,
@@ -851,6 +862,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         if input_video_latents is not None:
             inputs_shared["latents"] = input_video_latents
+        ref_latents = inputs_shared.get("first_frame_latents")
+        if ref_latents is not None:
+            latents = inputs_shared["latents"].clone()
+            latents[:, :, : ref_latents.shape[2]] = ref_latents
+            inputs_shared["latents"] = latents
         if self.uses_proprioception:
             if proprio_state is None:
                 raise ValueError("use_proprioception=True requires `proprio_state` during generation.")
@@ -858,7 +874,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         action_latents = torch.randn(
             1,
-            num_frames - 1,
+            action_num_frames - 1,
             self.action_dim,
             device=device,
             dtype=dtype,
@@ -918,9 +934,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
             if video_stepping:
                 new_latents = inputs_shared["latents"] + noise_pred * (sigma_v_next - sigma_v)
-                if "first_frame_latents" in inputs_shared:
+                ref_latents = inputs_shared.get("first_frame_latents")
+                if ref_latents is not None:
                     new_latents = new_latents.clone()
-                    new_latents[:, :, 0:1] = inputs_shared["first_frame_latents"]
+                    new_latents[:, :, : ref_latents.shape[2]] = ref_latents
                 inputs_shared["latents"] = new_latents
 
             if action_stepping and action_noise_pred is not None:

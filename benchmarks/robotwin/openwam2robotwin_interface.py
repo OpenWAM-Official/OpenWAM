@@ -99,6 +99,34 @@ _MISSING_TASK_NAME_WARNED: bool = False
 _LOGGED_OVERRIDES: set = set()
 
 
+def _parse_bool(value, default: bool = False) -> bool:
+    """Parse YAML/CLI boolean values without treating "false" as truthy."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "y", "on"):
+            return True
+        if text in ("0", "false", "no", "n", "off", "none", "null", ""):
+            return False
+    raise ValueError(f"Cannot parse boolean value from {value!r}")
+
+
+def _parse_optional_int(value, field_name: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("", "none", "null"):
+        return None
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be a positive integer or null, got {value!r}")
+    return parsed
+
+
 def _apply_step_lim_override(task_env) -> None:
     # First step of each episode: apply per-task step_lim override (if any).
     # The RoboTwin eval loop re-checks ``task_env.step_lim`` on every iteration,
@@ -139,6 +167,7 @@ class ModelClient:
         host: str = "127.0.0.1",
         http_port: int = 8848,
         send_state: bool = True,
+        state_dim: Optional[int] = None,
         request_timeout: int = 300,
         action_indices: Optional[list] = None,
         action_type: str = "qpos",
@@ -152,14 +181,17 @@ class ModelClient:
             http_port:       OpenWAM HTTP port (default 8848).
             send_state:      Whether to include the robot proprioceptive state
                              vector in the ``/predict`` request.
+            state_dim:       Optional expected proprio dimension. When set, the
+                             client fails fast if the extracted state does not
+                             match the checkpoint's architecture.state_dim.
             request_timeout: HTTP timeout in seconds.
             action_indices:  Optional index list to reorder the returned action
                              vector before passing it to the environment.
                              None = no reordering.
-            action_type:     How the returned action is passed to ``take_action``:
-                             - ``'qpos'`` (default): 14D joint angles straight through.
-                             - ``'ee'``: the server's 20D EEF output is auto-converted
-                               to 16D (xyz+quat+grip)×2 before dispatch.
+            action_type:     How the returned action is passed to ``take_action``.
+                             ``'qpos'`` means 14D joint angles straight through;
+                             ``'ee'`` converts the server's 20D EEF output to
+                             the 16D end-effector action expected by RoboTwin.
             debug:           Save per-step images + JSON metadata under debug_dir.
             debug_dir:       Root directory for debug artifacts.
         """
@@ -172,6 +204,7 @@ class ModelClient:
             )
 
         self._send_state = send_state
+        self._state_dim = state_dim
         self._request_timeout = request_timeout
         self._action_indices = action_indices
         self._action_type = action_type
@@ -194,6 +227,7 @@ class ModelClient:
 
         print(
             f"[OpenWAMClient] server={self._server} send_state={send_state} "
+            f"state_dim={state_dim} "
             f"request_timeout={request_timeout}s action_type={action_type} "
             f"action_indices={action_indices} debug={debug} debug_dir={debug_dir}"
         )
@@ -301,8 +335,21 @@ class ModelClient:
 
         state_arr = example.get("state", None)
         state_list: Optional[list] = None
-        if self._send_state and state_arr is not None:
-            state_list = [float(v) for v in state_arr]
+        if self._send_state:
+            if state_arr is None:
+                raise ValueError(
+                    "[OpenWAMClient] send_state=True requires example['state']. "
+                    "New proprio-conditioned checkpoints need this field; set "
+                    "send_state=false only for checkpoints trained without state."
+                )
+            state_np = np.asarray(state_arr, dtype=np.float32).reshape(-1)
+            if self._state_dim is not None and state_np.size != self._state_dim:
+                raise ValueError(
+                    f"[OpenWAMClient] Extracted state_dim={state_np.size}, expected {self._state_dim}. "
+                    "Check policy_config.yml: action_type/state_dim must match the checkpoint's "
+                    "dataloader.action_mode and architecture.state_dim."
+                )
+            state_list = [float(v) for v in state_np]
 
         payload = client.build_payload(
             head=client.encode_numpy_b64(cams["head"]),
@@ -333,11 +380,12 @@ def get_model(usr_args: dict) -> ModelClient:
     return ModelClient(
         host=usr_args.get("host", "127.0.0.1"),
         http_port=int(usr_args.get("http_port", usr_args.get("port", 8848))),
-        send_state=bool(usr_args.get("send_state", True)),
+        send_state=_parse_bool(usr_args.get("send_state", True), default=True),
+        state_dim=_parse_optional_int(usr_args.get("state_dim", None), "state_dim"),
         request_timeout=int(usr_args.get("request_timeout", 300)),
         action_indices=usr_args.get("action_indices", None),
         action_type=usr_args.get("action_type", "qpos"),
-        debug=bool(usr_args.get("debug", False)),
+        debug=_parse_bool(usr_args.get("debug", False), default=False),
         debug_dir=usr_args.get("debug_dir", "./debug_images"),
         # Pass through everything else so legacy-field warnings can fire.
         **{k: v for k, v in usr_args.items() if k in _DEPRECATED_YAML_FIELDS},
@@ -369,7 +417,15 @@ def _extract_eef_proprio(observation: dict) -> np.ndarray:
 def _extract_proprio(model: ModelClient, observation: dict) -> np.ndarray:
     if model._action_type == "ee":
         return _extract_eef_proprio(observation)
-    return np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
+    try:
+        return np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
+    except KeyError as exc:
+        available = ", ".join(sorted(observation.keys()))
+        raise KeyError(
+            "action_type='qpos' requires RoboTwin joint proprio matching training action_mode='joint'. "
+            "Expected observation['joint_action']['vector']. "
+            f"Available top-level observation keys: {available}"
+        ) from exc
 
 
 def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
@@ -392,12 +448,12 @@ def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
             "right": obs.get("right_camera", {}).get("rgb"),
         },
         "lang": str(instruction),
-        "state": _extract_proprio(model, observation),
+        "state": _extract_proprio(model, observation) if model._send_state else None,
     }
 
     action = model.step(example, step=TASK_ENV.take_action_cnt)
 
-    # EEF mode: convert 20D (xyz+rot6d+grip)×2 → 16D (xyz+quat+grip)×2
+    # EEF mode: convert 20D (xyz+rot6d+grip)×2 → 16D (xyz+quat+grip)×2.
     if model._action_type == "ee" and len(action) == 20:
         action = action_conversion.eef20d_to_ee16d(action)
 

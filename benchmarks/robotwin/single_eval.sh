@@ -15,6 +15,8 @@
 # Required env vars:
 #   ROBOTWIN_PATH    — path to the RoboTwin repository
 #   ROBOTWIN_PYTHON  — Python interpreter for the RoboTwin env
+# Optional env vars:
+#   ROBOTWIN_TEST_NUM — cap RoboTwin eval episodes for smoke runs (default: upstream 100)
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
