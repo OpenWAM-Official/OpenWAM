@@ -24,7 +24,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
@@ -401,24 +400,29 @@ class WanVideoBackbone(VideoBackbone):
         attn_mask = state.extras.get("shared_attention_mask")
         context_mask = state.context_mask
 
+        block_context_mask = (
+            context_mask.unsqueeze(1).expand(-1, state.x.shape[1], -1) if context_mask is not None else None
+        )
         if attn_mask is not None:
-            if context_mask is None:
-                context_mask = torch.ones(
-                    (state.context.shape[0], state.context.shape[1]),
-                    dtype=torch.bool,
-                    device=state.context.device,
+            if block_context_mask is None:
+                block_context_mask = (
+                    torch.ones(
+                        (state.context.shape[0], state.context.shape[1]),
+                        dtype=torch.bool,
+                        device=state.context.device,
+                    )
+                    .unsqueeze(1)
+                    .expand(-1, state.x.shape[1], -1)
                 )
             state.x = gradient_checkpoint_forward(
-                lambda x, context, context_mask, t_mod, freqs, mask, _block=block: self._run_masked_block(
-                    _block, x, context, context_mask, t_mod, freqs, mask
-                ),
+                block,
                 state.use_gradient_checkpointing,
                 state.use_gradient_checkpointing_offload,
                 state.x,
                 state.context,
-                context_mask,
                 state.t_mod,
                 state.freqs,
+                block_context_mask,
                 attn_mask,
             )
             self._apply_post_block_residuals(block_id, state)
@@ -432,56 +436,11 @@ class WanVideoBackbone(VideoBackbone):
             state.context,
             state.t_mod,
             state.freqs,
-            context_mask.unsqueeze(1).expand(-1, state.x.shape[1], -1) if context_mask is not None else None,
+            block_context_mask,
         )
 
         self._apply_post_block_residuals(block_id, state)
         return state
-
-    @staticmethod
-    def _run_masked_block(
-        block,
-        x: Tensor,
-        context: Tensor,
-        context_mask: Tensor,
-        t_mod: Tensor,
-        freqs: Tensor,
-        attn_mask: Tensor,
-    ) -> Tensor:
-        """Wan DiT block forward with an explicit self-attention mask.
-
-        This mirrors :meth:`openwam.model.video_backbone.wan.dit.DiTBlock.forward`
-        and only swaps the self-attention call to SDPA so the bool mask can be
-        honored. Cross-attention and FFN stay byte-for-byte equivalent in
-        ordering to the standard block.
-        """
-        has_seq = t_mod.dim() == 4
-        chunk_dim = 2 if has_seq else 1
-        chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=chunk_dim)
-        if has_seq:
-            chunks = tuple(c.squeeze(2) for c in chunks)
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
-
-        input_x = modulate(block.norm1(x), shift_msa, scale_msa)
-        sa = block.self_attn
-        q = sa.norm_q(sa.q(input_x))
-        k = sa.norm_k(sa.k(input_x))
-        v = sa.v(input_x)
-        q = rope_apply(q, freqs, sa.num_heads)
-        k = rope_apply(k, freqs, sa.num_heads)
-
-        q = rearrange(q, "b s (n d) -> b n s d", n=sa.num_heads)
-        k = rearrange(k, "b s (n d) -> b n s d", n=sa.num_heads)
-        v = rearrange(v, "b s (n d) -> b n s d", n=sa.num_heads)
-        attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-        attn_out = rearrange(attn_out, "b n s d -> b s (n d)", n=sa.num_heads)
-
-        x = block.gate(x, gate_msa, sa.o(attn_out))
-        cross_mask = context_mask.unsqueeze(1).expand(-1, x.shape[1], -1).unsqueeze(1)
-        x = x + block.cross_attn(block.norm3(x), context, ctx_mask=cross_mask)
-        input_x = modulate(block.norm2(x), shift_mlp, scale_mlp)
-        x = block.gate(x, gate_mlp, block.ffn(input_x))
-        return x
 
     def _apply_post_block_residuals(self, block_id: int, state: BlockLoopState) -> None:
         """Apply post-block residuals (VACE hint) to ``state.x``.
@@ -616,13 +575,89 @@ class WanVideoBackbone(VideoBackbone):
         n_action: int,
         *,
         timestep: Optional[Tensor] = None,
-        t_mod_bias: Optional[Tensor] = None,
     ) -> BlockLoopState:
-        state.x = torch.cat([state.x, action_tokens.to(state.x.dtype)], dim=1)
-        state.freqs = self._extend_freqs_with_action_tokens(state.freqs, n_action)
-        if self._is_per_token_t_mod_active(state) and timestep is not None and t_mod_bias is not None:
-            a_tmod = self._build_action_t_mod(timestep, t_mod_bias, n_action, batch_size=state.x.shape[0])
-            state.t_mod = torch.cat([state.t_mod, a_tmod.to(state.t_mod.dtype)], dim=1)
+        return self.inject_shared_tokens(
+            state,
+            action_tokens,
+            n_action,
+            timestep=timestep,
+        )
+
+    def inject_shared_tokens(
+        self,
+        state: BlockLoopState,
+        action_tokens: Tensor,
+        n_action: int,
+        *,
+        state_tokens: Optional[Tensor] = None,
+        n_state: int = 0,
+        timestep: Optional[Tensor] = None,
+    ) -> BlockLoopState:
+        """Append action tokens followed by optional state tokens.
+
+        SharedBackbone layout is ``[video][action][state]``. State tokens use
+        independent 1D RoPE positions and the same sample-level action timestep
+        as the action tokens. Following DreamZero, action/state AdaLN t_mod is
+        generated from timestep only.
+        """
+        n_state = int(n_state or 0)
+        if n_state < 0:
+            raise ValueError(f"n_state must be non-negative, got {n_state}")
+        if n_action < 0:
+            raise ValueError(f"n_action must be non-negative, got {n_action}")
+        if n_action + n_state <= 0:
+            raise ValueError("inject_shared_tokens requires at least one action or state token.")
+        batch_size = state.x.shape[0]
+        appended_pieces = []
+        if n_action:
+            if action_tokens is None:
+                raise ValueError("n_action > 0 requires action_tokens.")
+            if action_tokens.shape[0] != batch_size:
+                raise ValueError(
+                    f"Batch mismatch in inject_shared_tokens: video batch={batch_size}, "
+                    f"action batch={action_tokens.shape[0]}."
+                )
+            if action_tokens.shape[1] != n_action:
+                raise ValueError(f"action_tokens length {action_tokens.shape[1]} does not match n_action={n_action}")
+            if action_tokens.shape[2] != state.x.shape[2]:
+                raise ValueError(
+                    f"action_tokens dim {action_tokens.shape[2]} does not match video dim {state.x.shape[2]}"
+                )
+            appended_pieces.append(action_tokens.to(state.x.dtype))
+        elif action_tokens is not None and action_tokens.shape[1] != 0:
+            raise ValueError("action_tokens were provided but n_action=0.")
+        if n_state:
+            if state_tokens is None:
+                raise ValueError("n_state > 0 requires state_tokens.")
+            if state_tokens.shape[0] != batch_size:
+                raise ValueError(
+                    f"Batch mismatch in inject_shared_tokens: video batch={batch_size}, "
+                    f"state batch={state_tokens.shape[0]}."
+                )
+            if state_tokens.shape[1] != n_state:
+                raise ValueError(f"state_tokens length {state_tokens.shape[1]} does not match n_state={n_state}")
+            if state_tokens.shape[2] != state.x.shape[2]:
+                raise ValueError(
+                    f"state_tokens dim {state_tokens.shape[2]} does not match video dim {state.x.shape[2]}"
+                )
+            appended_pieces.append(state_tokens.to(state.x.dtype))
+        else:
+            if state_tokens is not None and state_tokens.shape[1] != 0:
+                raise ValueError("state_tokens were provided but n_state=0.")
+        appended = torch.cat(appended_pieces, dim=1)
+
+        if self._is_per_token_t_mod_active(state) and timestep is None:
+            raise ValueError("inject_shared_tokens requires `timestep` when per-token t_mod is active.")
+
+        state.x = torch.cat([state.x, appended], dim=1)
+        state.freqs = self._extend_freqs_with_shared_tokens(state.freqs, n_action, n_state)
+        if self._is_per_token_t_mod_active(state):
+            tmod_pieces = []
+            if n_action:
+                tmod_pieces.append(self._build_action_t_mod(timestep, n_action, batch_size=batch_size))
+            if n_state:
+                tmod_pieces.append(self._build_sample_t_mod(timestep, n_state, batch_size=batch_size))
+            state.t_mod = torch.cat([state.t_mod, *[p.to(state.t_mod.dtype) for p in tmod_pieces]], dim=1)
         return state
 
     def extract_action_tokens(
@@ -630,15 +665,29 @@ class WanVideoBackbone(VideoBackbone):
         state: BlockLoopState,
         n_action: int,
     ) -> Tuple[BlockLoopState, Tensor]:
-        if n_action <= 0 or n_action >= state.x.shape[1]:
+        return self.extract_shared_tokens(state, n_action, n_state=0)
+
+    def extract_shared_tokens(
+        self,
+        state: BlockLoopState,
+        n_action: int,
+        *,
+        n_state: int = 0,
+    ) -> Tuple[BlockLoopState, Tensor]:
+        n_state = int(n_state or 0)
+        n_tail = int(n_action) + n_state
+        if n_action < 0 or n_tail <= 0 or n_tail >= state.x.shape[1]:
             raise ValueError(
-                f"extract_action_tokens called with n_action={n_action} but state.x has "
-                f"shape[1]={state.x.shape[1]}; expected 0 < n_action < state.x.shape[1] "
-                "(was inject_action_tokens called first with the same n_action?)."
+                f"extract_shared_tokens called with n_action={n_action}, n_state={n_state} but state.x has "
+                f"shape[1]={state.x.shape[1]}; expected n_action >= 0 and 0 < n_action + n_state < state.x.shape[1] "
+                "(was inject_shared_tokens called first with the same lengths?)."
             )
-        n_video = state.x.shape[1] - n_action
-        action_tokens = state.x[:, n_video:, :]
+        n_video = state.x.shape[1] - n_tail
+        action_tokens = state.x[:, n_video : n_video + n_action, :]
         state.x = state.x[:, :n_video, :]
+        state.freqs = state.freqs[:n_video]
+        if state.t_mod.dim() == 4:
+            state.t_mod = state.t_mod[:, :n_video, :, :]
         return state, action_tokens
 
     # ================================================================
@@ -1048,7 +1097,6 @@ class WanVideoBackbone(VideoBackbone):
     def _build_action_t_mod(
         self,
         action_timestep: Tensor,
-        modality_bias: Tensor,
         n_action_tokens: int,
         *,
         batch_size: int,
@@ -1063,7 +1111,8 @@ class WanVideoBackbone(VideoBackbone):
             B_t = action_timestep.shape[0]
             flat = action_timestep.reshape(B_t * n_action_tokens)
             t_emb = sinusoidal_embedding_1d(dit.freq_dim, flat)
-            t = dit.time_embedding(t_emb.to(modality_bias.dtype))
+            dtype = next(dit.time_embedding.parameters()).dtype
+            t = dit.time_embedding(t_emb.to(dtype=dtype, device=t_emb.device))
             t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
             t_mod = t_mod.view(B_t, n_action_tokens, 6, dit.dim)
         else:
@@ -1076,10 +1125,38 @@ class WanVideoBackbone(VideoBackbone):
                     f"(B={batch_size},), or (B={batch_size}, n_action_tokens={n_action_tokens})."
                 )
             t_emb = sinusoidal_embedding_1d(dit.freq_dim, timestep_flat)
-            t = dit.time_embedding(t_emb.to(modality_bias.dtype))
+            dtype = next(dit.time_embedding.parameters()).dtype
+            t = dit.time_embedding(t_emb.to(dtype=dtype, device=t_emb.device))
             t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
             t_mod = t_mod.unsqueeze(1).expand(-1, n_action_tokens, -1, -1)
-        return t_mod + modality_bias.to(dtype=t_mod.dtype, device=t_mod.device)
+        return t_mod
+
+    def _build_sample_t_mod(
+        self,
+        timestep: Tensor,
+        n_tokens: int,
+        *,
+        batch_size: int,
+    ) -> Tensor:
+        timestep_flat = timestep.flatten()
+        if timestep_flat.numel() == 1:
+            timestep_flat = timestep_flat.expand(batch_size)
+        elif timestep_flat.numel() == batch_size:
+            pass
+        elif timestep.dim() == 2 and timestep.shape[0] == batch_size:
+            timestep_flat = timestep[:, 0]
+        else:
+            raise ValueError(
+                f"timestep has shape {tuple(timestep.shape)}; expected scalar, (B={batch_size},), "
+                f"or (B={batch_size}, T) for sample-level state t_mod."
+            )
+        dit = self._dit
+        t_emb = sinusoidal_embedding_1d(dit.freq_dim, timestep_flat)
+        dtype = next(dit.time_embedding.parameters()).dtype
+        t = dit.time_embedding(t_emb.to(dtype=dtype, device=t_emb.device))
+        t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
+        t_mod = t_mod.unsqueeze(1).expand(-1, n_tokens, -1, -1)
+        return t_mod
 
     def _extend_freqs_with_action_tokens(self, freqs: Tensor, n_action_tokens: int) -> Tensor:
         """Append SharedBackbone 1D action RoPE frequencies to ``freqs``.
@@ -1097,6 +1174,14 @@ class WanVideoBackbone(VideoBackbone):
             return freqs
         return torch.cat([freqs, self._build_1d_action_freqs(freqs, n_action_tokens)], dim=0)
 
+    def _extend_freqs_with_shared_tokens(self, freqs: Tensor, n_action_tokens: int, n_state_tokens: int = 0) -> Tensor:
+        pieces = [freqs]
+        if n_action_tokens > 0:
+            pieces.append(self._build_1d_action_freqs(freqs, n_action_tokens))
+        if n_state_tokens > 0:
+            pieces.append(self._build_1d_state_freqs(freqs, n_state_tokens))
+        return torch.cat(pieces, dim=0)
+
     @staticmethod
     def _build_1d_action_freqs(freqs: Tensor, n_action_tokens: int, theta: float = 10000.0) -> Tensor:
         head_dim = int(freqs.shape[-1]) * 2
@@ -1105,6 +1190,15 @@ class WanVideoBackbone(VideoBackbone):
         angles = torch.outer(positions, inv_freq)
         action_freqs = torch.polar(torch.ones_like(angles), angles).view(n_action_tokens, 1, -1)
         return action_freqs.to(dtype=freqs.dtype)
+
+    @staticmethod
+    def _build_1d_state_freqs(freqs: Tensor, n_state_tokens: int, theta: float = 10000.0) -> Tensor:
+        head_dim = int(freqs.shape[-1]) * 2
+        positions = torch.arange(n_state_tokens, dtype=torch.float64, device=freqs.device)
+        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float64, device=freqs.device) / head_dim))
+        angles = torch.outer(positions, inv_freq)
+        state_freqs = torch.polar(torch.ones_like(angles), angles).view(n_state_tokens, 1, -1)
+        return state_freqs.to(dtype=freqs.dtype)
 
     def _compute_reference_prefix_len(self, reference_latents: Optional[Tensor]) -> int:
         if reference_latents is None:

@@ -19,7 +19,6 @@ API surface:
     apply_expert(layer_id, x_action, t_mod) -> x_action
     decode(action_tokens) -> action_prediction
     expert_layers_set                        (attribute)
-    modality_tmod_bias                       (parameter)
 
 References:
 - BAGEL (ByteDance Seed): Shared attention + expert FFN for multimodal
@@ -36,8 +35,10 @@ import torch.nn as nn
 
 from openwam.model.action_backbone.backbone import ActionBackbone
 from openwam.model.action_backbone.components import (
+    DEFAULT_ACTION_DECODER_HIDDEN_DIM,
     ActionEncoder,
     ActionOutputMLP,
+    StateEncoder,
     TimestepEmbedding,
     TimestepModulation,
 )
@@ -108,12 +109,6 @@ class SharedMoEActionBackbone(ActionBackbone):
         the expert-FFN AdaLN. Two separate routes is intentional —
         modality-specific modulation for the modality-specific FFN.
       - ``expert_blocks``: one ``ExpertFFNBlock`` per entry in ``expert_layers``.
-      - ``modality_tmod_bias``: per-modality bias added on top of the video
-        DiT's AdaLN signal for action tokens (zero-init, no weight decay).
-        Shape ``(1, 1, 6, video_dim)`` — the leading ``6`` mirrors the video
-        DiT block's 6-chunk AdaLN layout (shift_msa, scale_msa, gate_msa,
-        shift_mlp, scale_mlp, gate_mlp); if the video DiT changes that count
-        this bias must be resized in lockstep.
       - ``action_mean`` / ``action_std``: normalization stats.
 
     Unlike ActionDiT, this module has no self-attention or cross-attention
@@ -131,31 +126,41 @@ class SharedMoEActionBackbone(ActionBackbone):
         max_action_len: int = 512,
         action_decoder_hidden_dim: Optional[int] = None,
         eps: float = 1e-6,
+        use_proprioception: bool = False,
+        state_dim: int = 0,
     ):
         super().__init__()
         self._action_dim = int(action_dim)
         self._video_dim = int(video_dim)
         self._max_action_len = int(max_action_len)
-        self._action_decoder_hidden_dim = int(action_decoder_hidden_dim or video_dim)
+        self._action_decoder_hidden_dim = int(action_decoder_hidden_dim or DEFAULT_ACTION_DECODER_HIDDEN_DIM)
+        self._use_proprioception = bool(use_proprioception)
+        self.state_dim = int(state_dim or 0)
+        if self._use_proprioception and self.state_dim <= 0:
+            raise ValueError("use_proprioception=True requires state_dim > 0 for SharedBackbone state tokens.")
         self.expert_layers = tuple(int(i) for i in expert_layers)
         self.expert_layers_set = set(self.expert_layers)
         self.expert_layer_to_index = {layer_id: idx for idx, layer_id in enumerate(self.expert_layers)}
         self.num_experts = len(self.expert_layers)
 
         self.input_proj = ActionEncoder(self._action_dim, self._video_dim)
+        self.state_encoder = StateEncoder(self.state_dim, self._video_dim) if self._use_proprioception else None
         self.time_embedding = TimestepEmbedding(freq_dim, self._video_dim)
         self.time_projection = TimestepModulation(self._video_dim, 3)
         self.expert_blocks = nn.ModuleList(
             [ExpertFFNBlock(self._video_dim, expert_ffn_dim, eps) for _ in range(self.num_experts)]
         )
         self.action_output_head = ActionOutputMLP(self._video_dim, self._action_decoder_hidden_dim, self._action_dim)
-        self.modality_tmod_bias = nn.Parameter(torch.zeros(1, 1, 6, self._video_dim))
         self.register_buffer("action_mean", torch.zeros(self._action_dim), persistent=True)
         self.register_buffer("action_std", torch.ones(self._action_dim), persistent=True)
 
     @property
     def action_dim(self) -> int:
         return self._action_dim
+
+    @property
+    def uses_proprioception(self) -> bool:
+        return self._use_proprioception
 
     def encode(self, noisy_actions: torch.Tensor, timestep: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Project actions and build expert-FFN AdaLN modulation.
@@ -194,6 +199,14 @@ class SharedMoEActionBackbone(ActionBackbone):
             t_mod = self.time_projection(t_embed)
 
         return x, t_mod
+
+    def encode_state(self, proprio_state: torch.Tensor) -> Optional[torch.Tensor]:
+        if not self._use_proprioception:
+            return None
+        if proprio_state is None:
+            raise ValueError("SharedBackbone use_proprioception=True requires `proprio_state`.")
+        assert self.state_encoder is not None
+        return self.state_encoder(proprio_state)
 
     def apply_expert(self, layer_id: int, x_action: torch.Tensor, t_mod: torch.Tensor) -> torch.Tensor:
         """Apply the expert FFN at the given video DiT layer to action tokens.

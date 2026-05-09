@@ -372,6 +372,15 @@ def test_action_output_mlp_shape():
     assert out.shape == (2, 10, 14)
 
 
+def test_state_encoder_accepts_single_deploy_state():
+    """SharedBackbone state encoder should match dual-system's [D] deploy proprio input."""
+    from openwam.model.action_backbone.components import StateEncoder
+
+    enc = StateEncoder(state_dim=14, hidden_dim=64)
+    out = enc(torch.randn(14))
+    assert out.shape == (1, 1, 64)
+
+
 def test_action_output_mlp_small_random_init():
     """Weights should be small-random (std=0.02), biases zero on both layers."""
     from openwam.model.action_backbone.components import ActionOutputMLP
@@ -386,12 +395,12 @@ def test_action_output_mlp_small_random_init():
 
 def test_shared_backbone_uses_action_output_mlp():
     """SharedBackbone wires ActionOutputMLP as its output head."""
-    from openwam.model.action_backbone.components import ActionOutputMLP
+    from openwam.model.action_backbone.components import DEFAULT_ACTION_DECODER_HIDDEN_DIM, ActionOutputMLP
     from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
     arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
-    assert arch.action_backbone.action_output_head.layer1.out_features == 128
+    assert arch.action_backbone.action_output_head.layer1.out_features == DEFAULT_ACTION_DECODER_HIDDEN_DIM
 
     # Simulate the (B, T_action, video_dim) action tail extracted by
     # vb.extract_action_tokens after the DiT loop.
@@ -401,7 +410,7 @@ def test_shared_backbone_uses_action_output_mlp():
 
 
 def test_shared_backbone_action_decoder_hidden_dim_can_be_overridden():
-    """SharedBackbone decoder defaults wide but still supports explicit config."""
+    """SharedBackbone decoder default aligns with dual-system dim but still supports explicit config."""
     from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
     arch = SharedBackboneVanillaArchitecture(
@@ -418,7 +427,7 @@ def test_shared_backbone_action_decoder_hidden_dim_can_be_overridden():
 
 def test_moe_expert_uses_action_output_mlp():
     """MoE architecture wires ActionOutputMLP as its output head."""
-    from openwam.model.action_backbone.components import ActionOutputMLP
+    from openwam.model.action_backbone.components import DEFAULT_ACTION_DECODER_HIDDEN_DIM, ActionOutputMLP
     from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 
     arch = SharedBackboneMoEArchitecture(
@@ -430,7 +439,7 @@ def test_moe_expert_uses_action_output_mlp():
         }
     )
     assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
-    assert arch.action_backbone.action_output_head.layer1.out_features == 128
+    assert arch.action_backbone.action_output_head.layer1.out_features == DEFAULT_ACTION_DECODER_HIDDEN_DIM
 
     # encode → simulate per-block updates → decode roundtrip.
     actions = torch.randn(2, 16, 14)

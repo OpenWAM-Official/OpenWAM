@@ -98,6 +98,8 @@ def _run_compute_loss(arch):
     arch.init_training_schedulers(1000)
     actions = torch.randn(1, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
+    if arch.uses_proprioception:
+        inputs["proprio_state"] = torch.randn(1, int(arch.action_backbone.state_dim))
     if getattr(getattr(arch, "action_backbone", None), "variant", None) == "joint_self_attn":
         text_dim = arch.action_backbone.text_dim
         inputs["context"] = torch.randn(1, 4, text_dim)
@@ -319,6 +321,141 @@ def test_shared_backbone_vanilla_loads_and_runs():
     assert torch.isfinite(out["loss"])
 
 
+def test_shared_backbone_vanilla_with_proprio_loads_and_runs():
+    """Vanilla SharedBackbone can consume proprio as a trailing state token."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "vanilla",
+        "action_dim": ACTION_DIM,
+        "max_action_len": 64,
+        "use_proprioception": True,
+        "state_dim": ACTION_DIM,
+    }
+    arch = _build_arch("shared_backbone_vanilla", cfg)
+
+    assert arch.uses_proprioception
+    out = _run_compute_loss(arch)
+    assert torch.isfinite(out["loss"])
+
+
+def test_shared_backbone_vanilla_with_proprio_requires_state_dim():
+    """SharedBackbone state-token path fails loudly when state_dim is missing."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "vanilla",
+        "action_dim": ACTION_DIM,
+        "max_action_len": 64,
+        "use_proprioception": True,
+    }
+
+    with pytest.raises(ValueError, match="state_dim"):
+        _build_arch("shared_backbone_vanilla", cfg)
+
+
+def test_shared_backbone_vanilla_with_proprio_requires_proprio_state():
+    """When enabled, proprio must be provided explicitly to the forward path."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "vanilla",
+        "action_dim": ACTION_DIM,
+        "max_action_len": 64,
+        "use_proprioception": True,
+        "state_dim": ACTION_DIM,
+    }
+    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch.init_training_schedulers(1000)
+    actions = torch.randn(1, T_ACTION, ACTION_DIM)
+    inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
+
+    with pytest.raises(ValueError, match="proprio_state"):
+        arch.compute_loss(**inputs, actions=actions, current_step=0)
+
+
+def test_shared_backbone_vanilla_with_proprio_validates_state_shape():
+    """The shared state encoder accepts only [B, D] or [B, 1, D] with matching D."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "vanilla",
+        "action_dim": ACTION_DIM,
+        "max_action_len": 64,
+        "use_proprioception": True,
+        "state_dim": ACTION_DIM,
+    }
+    arch = _build_arch("shared_backbone_vanilla", cfg)
+
+    with pytest.raises(ValueError, match="last dim"):
+        arch.action_backbone.encode_state(torch.randn(1, ACTION_DIM + 1))
+    with pytest.raises(ValueError, match=r"\[B, D\] or \[B, 1, D\]"):
+        arch.action_backbone.encode_state(torch.randn(1, 2, ACTION_DIM))
+
+
+def test_shared_backbone_vanilla_with_proprio_broadcasts_single_state():
+    """A single deploy-style proprio state broadcasts to the action/video batch."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "vanilla",
+        "action_dim": ACTION_DIM,
+        "max_action_len": 64,
+        "use_proprioception": True,
+        "state_dim": ACTION_DIM,
+    }
+    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch.init_training_schedulers(1000)
+    actions = torch.randn(2, T_ACTION, ACTION_DIM)
+    inputs = _make_fake_loss_inputs(B=2, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
+    inputs["proprio_state"] = torch.randn(1, ACTION_DIM)
+
+    out = arch.compute_loss(**inputs, actions=actions, current_step=0)
+    assert torch.isfinite(out["loss"])
+
+
+def test_shared_backbone_vanilla_with_proprio_rejects_bad_batch_match():
+    """State-token batch size must match action/video batch unless it is a singleton."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "vanilla",
+        "action_dim": ACTION_DIM,
+        "max_action_len": 64,
+        "use_proprioception": True,
+        "state_dim": ACTION_DIM,
+    }
+    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch.init_training_schedulers(1000)
+    actions = torch.randn(2, T_ACTION, ACTION_DIM)
+    inputs = _make_fake_loss_inputs(B=2, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
+    inputs["proprio_state"] = torch.randn(3, ACTION_DIM)
+
+    with pytest.raises(ValueError, match="Batch mismatch"):
+        arch.compute_loss(**inputs, actions=actions, current_step=0)
+
+
+def test_shared_backbone_vanilla_with_proprio_conditions_video_only_path():
+    """State tokens should still condition video when no action stream is stepped."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "vanilla",
+        "action_dim": ACTION_DIM,
+        "max_action_len": 64,
+        "use_proprioception": True,
+        "state_dim": ACTION_DIM,
+    }
+    arch = _build_arch("shared_backbone_vanilla", cfg)
+    inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
+    inputs["latents"] = inputs["input_latents"]
+
+    _, action_pred = arch.forward(
+        None,
+        None,
+        proprio_state=torch.randn(1, ACTION_DIM),
+        **inputs,
+        timestep=torch.tensor([0.5]),
+    )
+
+    assert action_pred is None
+    assert arch.video_backbone.last_injected == {"n_action": 0, "n_state": 1}
+    assert arch.video_backbone.last_extracted == {"n_action": 0, "n_state": 1}
+
+
 # ---------------------------------------------------------------------------
 # 4. shared_backbone_moe
 # ---------------------------------------------------------------------------
@@ -343,6 +480,25 @@ def test_shared_backbone_moe_default_all_layers():
 
     n_params = _count_params(arch.action_backbone)
     print(f"\n[shared_backbone_moe / default-all-layers] action_backbone params: {n_params:,}")
+    out = _run_compute_loss(arch)
+    assert torch.isfinite(out["loss"])
+
+
+def test_shared_backbone_moe_with_proprio_loads_and_runs():
+    """MoE SharedBackbone can consume proprio without applying experts to state tokens."""
+    cfg = {
+        "framework": "shared_backbone",
+        "variant": "moe",
+        "action_dim": ACTION_DIM,
+        "expert_ffn_dim": 256,
+        "expert_layers": None,
+        "expert_interval": 1,
+        "use_proprioception": True,
+        "state_dim": ACTION_DIM,
+    }
+    arch = _build_shared_moe_arch(cfg, num_layers=4)
+
+    assert arch.uses_proprioception
     out = _run_compute_loss(arch)
     assert torch.isfinite(out["loss"])
 
@@ -393,39 +549,6 @@ def test_shared_backbone_moe_interval_requires_video_backbone():
 
     with pytest.raises(ValueError, match="video_backbone.num_layers"):
         build_architecture("shared_backbone_moe", cfg)
-
-
-def test_shared_backbone_moe_rejects_legacy_bridge_layers_key():
-    """Old shared_backbone MoE configs should fail loudly instead of changing topology silently."""
-    from openwam.model.architectures.shared_backbone.moe import resolve_expert_layers
-
-    with pytest.raises(ValueError, match="expert_layers"):
-        resolve_expert_layers({"bridge_layers": [0, 2]}, num_layers=4)
-
-
-def test_shared_backbone_moe_rejects_legacy_bridge_interval_key():
-    """Old interval configs must be renamed to expert_interval."""
-    from openwam.model.architectures.shared_backbone.moe import resolve_expert_layers
-
-    with pytest.raises(ValueError, match="expert_interval"):
-        resolve_expert_layers({"expert_layers": None, "bridge_interval": 2}, num_layers=4)
-
-
-def test_shared_backbone_moe_prefers_expert_keys_when_legacy_keys_are_also_present():
-    """Presence of old keys does not alias or override explicit expert_* keys."""
-    from openwam.model.architectures.shared_backbone.moe import resolve_expert_layers
-
-    layers = resolve_expert_layers(
-        {
-            "bridge_layers": [0, 1, 2],
-            "bridge_interval": 1,
-            "expert_layers": None,
-            "expert_interval": 2,
-        },
-        num_layers=5,
-    )
-
-    assert layers == (0, 2, 4)
 
 
 def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth():

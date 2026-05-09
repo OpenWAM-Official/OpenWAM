@@ -8,17 +8,28 @@ architecture:
   framework: shared_backbone
   variant: vanilla   # vanilla | moe
   action_dim: 20
+  # Optional proprio/state conditioning. When enabled, dataloaders must provide
+  # sample["proprio"] with shape [state_dim] or [1, state_dim]. SharedBackbone
+  # encodes it as one state token appended after action tokens:
+  #   [video tokens] [action tokens] [state token]
+  # The state token uses the same sample-level action timestep as the action
+  # chunk; DreamZero-style block/per-token state timesteps are intentionally not
+  # enabled in this first implementation.
+  use_proprioception: true
+  state_dim: 20
 
   # ------------------------------
   # shared behavior (vanilla + MoE)
   # ------------------------------
-  # Both variants concatenate action tokens into the shared DiT sequence, so
-  # both use the same shared self-attention mask layout.
+  # Both variants concatenate action/state tokens into the shared DiT sequence,
+  # so both use the same shared self-attention mask layout.
   # Shared self-attention mask layout:
-  #   bidirectional: full video/action coupling (previous shared behavior).
-  #   joint        : [Sv+Sa, Sv+Sa] bool mask with v↔v from
-  #                  ``video_attention_mask_mode``, a↔a True, a→v True,
-  #                  v→a False (video doesn't see action).
+  #   bidirectional: full video/action/state coupling.
+  #   joint        : [Sv+Sa+Ss, Sv+Sa+Ss] bool mask with:
+  #                  - v↔v from ``video_attention_mask_mode``
+  #                  - v→state True, v→action False
+  #                  - action→video/action/state True
+  #                  - state→state True, state→video/action False
   attention_mask_mode: joint
   # video_attention_mask_mode controls the v↔v block when
   # attention_mask_mode=joint:
@@ -27,12 +38,8 @@ architecture:
   #   first_frame_causal  : first-frame tokens only see themselves; rest see all
   video_attention_mask_mode: first_frame_causal
 
-  # SharedBackbone action tokens always use DreamZero-like 1D action RoPE
-  # over the action horizon. Learned absolute action position embeddings and
-  # alternate action RoPE layouts are intentionally not exposed.
-  # Shared action decoder hidden width. null defaults to video_dim, matching
-  # DreamZero's wider decoder more closely than the previous fixed width 64.
-  action_decoder_hidden_dim: null
+  # Shared action decoder MLP hidden width.
+  action_decoder_hidden_dim: 1024
 
   # ------------------------------
   # moe-only behavior

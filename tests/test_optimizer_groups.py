@@ -12,8 +12,6 @@ class _FakeActionBackbone(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.proj = torch.nn.Linear(4, 4)
-        # 触发 NO_WD_PARAM_SUFFIXES 路径，与真实 ActionDiT 对齐
-        self.modality_tmod_bias = torch.nn.Parameter(torch.zeros(4))
 
 
 class _FakePipe(torch.nn.Module):
@@ -81,16 +79,6 @@ def test_pipe_params_include_video_dit_and_lora():
     assert id(arch.video_backbone._pipe.lora_A.weight) in lora_param_ids
 
 
-def test_modality_tmod_bias_isolated_with_zero_wd():
-    from openwam.train.utils.optimizer_groups import build_trainable_parameters
-
-    trainer = _FakeTrainer()
-    groups = build_trainable_parameters(trainer, action_lr=1e-4, video_lr=5e-5)
-    no_wd_groups = [g for g in groups if g.get("weight_decay") == 0.0]
-    bias = trainer.architecture.action_backbone.modality_tmod_bias
-    assert any(any(p is bias for p in g["params"]) for g in no_wd_groups)
-
-
 def test_lambda_action_zero_freezes_action_branch():
     from openwam.train.utils.optimizer_groups import build_trainable_parameters
 
@@ -104,24 +92,20 @@ def test_lambda_action_zero_freezes_action_branch():
 
 
 def test_default_returns_groups_when_no_overrides():
-    """Without LR overrides but with no_wd params present, returns grouped form."""
+    """Without LR overrides or no-wd params, returns the flat parameter list."""
     from openwam.train.utils.optimizer_groups import build_trainable_parameters
 
     trainer = _FakeTrainer()
     result = build_trainable_parameters(trainer)
 
-    # _FakeActionBackbone has modality_tmod_bias → no_wd params present →
-    # function takes the grouped path (the flat-list shortcut needs *both*
-    # no LR override AND no no_wd params).
     assert isinstance(result, list)
-    assert all(isinstance(g, dict) and "params" in g for g in result)
+    assert all(isinstance(p, torch.nn.Parameter) for p in result)
 
     arch = trainer.architecture
-    surfaced = {id(p) for g in result for p in g["params"]}
-    # action: proj.weight, proj.bias, modality_tmod_bias
+    surfaced = {id(p) for p in result}
+    # action: proj.weight, proj.bias
     assert id(arch.action_backbone.proj.weight) in surfaced
     assert id(arch.action_backbone.proj.bias) in surfaced
-    assert id(arch.action_backbone.modality_tmod_bias) in surfaced
     # video: dit.weight, dit.bias, lora_A.weight, lora_A.bias
     assert id(arch.video_backbone._pipe.dit.weight) in surfaced
     assert id(arch.video_backbone._pipe.dit.bias) in surfaced

@@ -44,16 +44,20 @@ def build_shared_backbone_attention_mask(
     state,
     n_action: int,
     attention_mask_mode: str,
+    n_state: int = 0,
 ) -> Optional[torch.Tensor]:
     """Build the SharedBackbone self-attention mask.
 
-    Layout for ``joint`` mirrors the dual-system MoT mask after action tokens
-    have been appended to the video sequence:
+    Layout for ``joint`` after action/state tokens have been appended:
 
     - video -> video: delegated to ``video_backbone.build_video_to_video_mask``
     - video -> action: blocked
-    - action -> video: allowed
-    - action -> action: allowed
+    - video -> state: allowed
+    - action -> video: allowed, when action tokens are present
+    - action -> action: allowed, when action tokens are present
+    - action -> state: allowed, when action tokens are present
+    - state -> state: allowed
+    - state -> video/action: blocked
 
     ``bidirectional`` returns ``None`` so the standard fused Wan block path can
     be used unchanged.
@@ -62,15 +66,21 @@ def build_shared_backbone_attention_mask(
     if mode == "bidirectional":
         return None
 
-    if n_action <= 0:
-        raise ValueError(f"n_action must be positive, got {n_action}")
+    if n_action < 0:
+        raise ValueError(f"n_action must be non-negative, got {n_action}")
+
+    n_state = int(n_state or 0)
+    if n_state < 0:
+        raise ValueError(f"n_state must be non-negative, got {n_state}")
+    if n_action + n_state <= 0:
+        raise ValueError("SharedBackbone attention mask requires at least one action or state token.")
 
     total = int(state.x.shape[1])
-    s_video = total - int(n_action)
+    s_video = total - int(n_action) - n_state
     if s_video <= 0:
         raise ValueError(
-            f"SharedBackbone attention mask expected video tokens before the action tail, "
-            f"got total={total}, n_action={n_action}."
+            f"SharedBackbone attention mask expected video tokens before action/state tails, "
+            f"got total={total}, n_action={n_action}, n_state={n_state}."
         )
 
     h = int(getattr(state, "h", 0))
@@ -86,8 +96,21 @@ def build_shared_backbone_attention_mask(
         video_tokens_per_frame=video_tokens_per_frame,
         device=device,
     )
-    mask[s_video:, :s_video] = True
-    mask[s_video:, s_video:] = True
+    action_start = s_video
+    action_end = action_start + int(n_action)
+    state_start = action_end
+
+    # video queries: video sub-mask + state conditioning, but no action.
+    if n_state:
+        mask[:s_video, state_start:] = True
+
+    # action queries: video, action, and state are all visible.
+    if n_action:
+        mask[action_start:action_end, :] = True
+
+    # state queries: state tokens are conditioning anchors; they only see state.
+    if n_state:
+        mask[state_start:, state_start:] = True
     return mask
 
 
@@ -96,6 +119,7 @@ def attach_shared_attention_mask(
     state,
     n_action: int,
     *,
+    n_state: int = 0,
     attention_mask_mode: str,
 ) -> None:
     """Attach the computed mask to ``state.extras`` for WanVideoBackbone.run_block."""
@@ -112,7 +136,7 @@ def attach_shared_attention_mask(
         raise NotImplementedError(
             "SharedBackbone attention_mask_mode='joint' does not support unified sequence parallel yet."
         )
-    mask = build_shared_backbone_attention_mask(video_backbone, state, n_action, mode)
+    mask = build_shared_backbone_attention_mask(video_backbone, state, n_action, mode, n_state=n_state)
     if mask is None:
         extras.pop("shared_attention_mask", None)
     else:

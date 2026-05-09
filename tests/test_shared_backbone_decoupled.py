@@ -56,6 +56,7 @@ class _StubVideoBackbone(nn.Module):
         self.run_block_calls: list[int] = []
         self.seen_shared_attention_masks: list[torch.Tensor | None] = []
         self.injected_action_tokens = 0
+        self.injected_state_tokens = 0
 
     @property
     def num_layers(self) -> int:
@@ -85,14 +86,39 @@ class _StubVideoBackbone(nn.Module):
         # propagate during backward tests.
         return state.x.sum(dim=-1, keepdim=True)
 
-    def inject_action_tokens(self, state, action_tokens, n_action, *, timestep=None, t_mod_bias=None):  # noqa: ARG002
+    def inject_action_tokens(self, state, action_tokens, n_action, *, timestep=None):  # noqa: ARG002
         self.injected_action_tokens = n_action
         state.x = torch.cat([state.x, action_tokens], dim=1)
+        return state
+
+    def inject_shared_tokens(
+        self,
+        state,
+        action_tokens,
+        n_action,
+        *,
+        state_tokens=None,
+        n_state=0,
+        timestep=None,
+    ):  # noqa: ARG002
+        self.injected_action_tokens = n_action
+        self.injected_state_tokens = n_state
+        pieces = [action_tokens]
+        if n_state:
+            pieces.append(state_tokens)
+        state.x = torch.cat([state.x, *pieces], dim=1)
         return state
 
     def extract_action_tokens(self, state, n_action):
         action_tail = state.x[:, -n_action:, :]
         state.x = state.x[:, :-n_action, :]
+        return state, action_tail
+
+    def extract_shared_tokens(self, state, n_action, *, n_state=0):
+        n_tail = n_action + n_state
+        n_video = state.x.shape[1] - n_tail
+        action_tail = state.x[:, n_video : n_video + n_action, :]
+        state.x = state.x[:, :n_video, :]
         return state, action_tail
 
 

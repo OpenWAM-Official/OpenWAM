@@ -71,23 +71,19 @@ def test_action_dit_rejects_per_token_timestep():
         dit.prepare_state(torch.randn(2, 5, 7), torch.randn(2, 5), context=context, context_mask=context_mask)
 
 
-def test_action_dit_ignores_deprecated_proprio_constructor_flags():
+def test_action_dit_rejects_proprio_constructor_flags():
     from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 
-    dit = ActionDiT(
-        action_dim=7,
-        dim=32,
-        ffn_dim=64,
-        num_heads=4,
-        num_layers=1,
-        video_dim=32,
-        bridge_layers=(0,),
-        variant="joint_self_attn",
-        use_proprioception=True,
-        state_dim=7,
-    )
-    context = torch.randn(2, 4, dit.text_dim)
-    context_mask = torch.ones(2, 4, dtype=torch.bool)
-    state = dit.prepare_state(torch.randn(2, 5, 7), torch.randn(2), context=context, context_mask=context_mask)
-    assert state.payload.x_action.shape[1] == 5
-    assert dit.uses_proprioception is False
+    with pytest.raises(TypeError, match="use_proprioception"):
+        ActionDiT(
+            action_dim=7,
+            dim=32,
+            ffn_dim=64,
+            num_heads=4,
+            num_layers=1,
+            video_dim=32,
+            bridge_layers=(0,),
+            variant="joint_self_attn",
+            use_proprioception=True,
+            state_dim=7,
+        )

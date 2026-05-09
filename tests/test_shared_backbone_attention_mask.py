@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from einops import rearrange
 
 from openwam.model.architectures.shared_backbone.mask import (
     attach_shared_attention_mask,
@@ -14,7 +16,7 @@ from openwam.model.architectures.shared_backbone.mask import (
     set_video_attention_mask_mode,
 )
 from openwam.model.video_backbone.adapter import BlockLoopState
-from openwam.model.video_backbone.wan.dit import DiTBlock
+from openwam.model.video_backbone.wan.dit import DiTBlock, modulate, rope_apply
 from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 
 
@@ -55,6 +57,44 @@ def _make_state(vb: WanVideoBackbone, video: torch.Tensor, action: torch.Tensor,
         t=torch.zeros(x.shape[0], x.shape[1], x.shape[2]),
         extras=extras,
     )
+
+
+def _old_masked_block_reference(
+    block: DiTBlock,
+    x: torch.Tensor,
+    context: torch.Tensor,
+    context_mask: torch.Tensor,
+    t_mod: torch.Tensor,
+    freqs: torch.Tensor,
+    attn_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Reference copy of the old adapter-local masked block implementation."""
+    has_seq = t_mod.dim() == 4
+    chunk_dim = 2 if has_seq else 1
+    chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=chunk_dim)
+    if has_seq:
+        chunks = tuple(c.squeeze(2) for c in chunks)
+    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
+
+    input_x = modulate(block.norm1(x), shift_msa, scale_msa)
+    sa = block.self_attn
+    q = sa.norm_q(sa.q(input_x))
+    k = sa.norm_k(sa.k(input_x))
+    v = sa.v(input_x)
+    q = rope_apply(q, freqs, sa.num_heads)
+    k = rope_apply(k, freqs, sa.num_heads)
+
+    q = rearrange(q, "b s (n d) -> b n s d", n=sa.num_heads)
+    k = rearrange(k, "b s (n d) -> b n s d", n=sa.num_heads)
+    v = rearrange(v, "b s (n d) -> b n s d", n=sa.num_heads)
+    attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+    attn_out = rearrange(attn_out, "b n s d -> b s (n d)", n=sa.num_heads)
+
+    x = block.gate(x, gate_msa, sa.o(attn_out))
+    cross_mask = context_mask.unsqueeze(1).expand(-1, x.shape[1], -1).unsqueeze(1)
+    x = x + block.cross_attn(block.norm3(x), context, ctx_mask=cross_mask)
+    input_x = modulate(block.norm2(x), shift_mlp, scale_mlp)
+    return block.gate(x, gate_mlp, block.ffn(input_x))
 
 
 def test_shared_backbone_attention_mask_bidirectional_returns_none():
@@ -150,19 +190,17 @@ def test_shared_backbone_action_rope_defaults_to_1d():
 
 def test_wan_action_tmod_broadcasts_scalar_to_batch():
     vb = _make_wan_backbone(dim=24, num_heads=4)
-    bias = torch.zeros(1, 1, 6, vb.dim)
 
-    t_mod = vb._build_action_t_mod(torch.tensor([0.5]), bias, n_action_tokens=3, batch_size=2)
+    t_mod = vb._build_action_t_mod(torch.tensor([0.5]), n_action_tokens=3, batch_size=2)
 
     assert t_mod.shape == (2, 3, 6, vb.dim)
 
 
 def test_wan_action_tmod_accepts_per_sample_and_per_token():
     vb = _make_wan_backbone(dim=24, num_heads=4)
-    bias = torch.zeros(1, 1, 6, vb.dim)
 
-    per_sample = vb._build_action_t_mod(torch.tensor([0.5, 0.8]), bias, n_action_tokens=3, batch_size=2)
-    per_token = vb._build_action_t_mod(torch.rand(2, 3), bias, n_action_tokens=3, batch_size=2)
+    per_sample = vb._build_action_t_mod(torch.tensor([0.5, 0.8]), n_action_tokens=3, batch_size=2)
+    per_token = vb._build_action_t_mod(torch.rand(2, 3), n_action_tokens=3, batch_size=2)
 
     assert per_sample.shape == (2, 3, 6, vb.dim)
     assert per_token.shape == (2, 3, 6, vb.dim)
@@ -170,12 +208,11 @@ def test_wan_action_tmod_accepts_per_sample_and_per_token():
 
 def test_wan_action_tmod_rejects_mismatched_shapes():
     vb = _make_wan_backbone(dim=24, num_heads=4)
-    bias = torch.zeros(1, 1, 6, vb.dim)
 
     with pytest.raises(ValueError, match="action_timestep"):
-        vb._build_action_t_mod(torch.rand(3), bias, n_action_tokens=3, batch_size=2)
+        vb._build_action_t_mod(torch.rand(3), n_action_tokens=3, batch_size=2)
     with pytest.raises(ValueError, match="action_timestep"):
-        vb._build_action_t_mod(torch.rand(2, 2), bias, n_action_tokens=3, batch_size=2)
+        vb._build_action_t_mod(torch.rand(2, 2), n_action_tokens=3, batch_size=2)
 
 
 def test_shared_backbone_attention_mask_joint_layout():
@@ -198,6 +235,51 @@ def test_shared_backbone_attention_mask_joint_layout():
     assert not mask[:Sv, Sv:].any()
     assert mask[Sv:, :Sv].all()
     assert mask[Sv:, Sv:].all()
+
+
+def test_shared_backbone_attention_mask_joint_layout_with_state():
+    vb = _make_wan_backbone()
+    state = BlockLoopState(
+        x=torch.zeros(1, 10, vb.dim),
+        t_mod=torch.zeros(1, 10, 6, vb.dim),
+        freqs=_identity_freqs(10, vb.head_dim),
+        context=torch.zeros(1, 4, vb.dim),
+        f=5,
+        h=1,
+        w=1,
+    )
+
+    mask = build_shared_backbone_attention_mask(vb, state, n_action=3, n_state=2, attention_mask_mode="joint")
+    Sv, Sa, Ss = 5, 3, 2
+    v = slice(0, Sv)
+    a = slice(Sv, Sv + Sa)
+    s = slice(Sv + Sa, Sv + Sa + Ss)
+
+    assert mask.shape == (Sv + Sa + Ss, Sv + Sa + Ss)
+    assert mask[v, v].all()
+    assert not mask[v, a].any()
+    assert mask[v, s].all()
+    assert mask[a, :].all()
+    assert not mask[s, v].any()
+    assert not mask[s, a].any()
+    assert mask[s, s].all()
+
+
+def test_shared_backbone_attention_mask_bidirectional_with_state_returns_none():
+    vb = _make_wan_backbone()
+    state = BlockLoopState(
+        x=torch.zeros(1, 10, vb.dim),
+        t_mod=torch.zeros(1, 10, 6, vb.dim),
+        freqs=_identity_freqs(10, vb.head_dim),
+        context=torch.zeros(1, 4, vb.dim),
+        f=5,
+        h=1,
+        w=1,
+    )
+
+    mask = build_shared_backbone_attention_mask(vb, state, n_action=3, n_state=2, attention_mask_mode="bidirectional")
+
+    assert mask is None
 
 
 def test_shared_backbone_joint_mask_blocks_action_from_video_queries():
@@ -229,3 +311,186 @@ def test_shared_backbone_joint_mask_blocks_action_from_video_queries():
 
     assert torch.allclose(out_joint_a, out_joint_b, atol=0, rtol=0)
     assert not torch.allclose(out_bidir_a, out_bidir_b)
+
+
+def test_dit_block_masked_forward_matches_old_adapter_reference():
+    torch.manual_seed(0)
+    dim, num_heads, seq_len, context_len = 24, 4, 7, 5
+    block = DiTBlock(has_image_input=False, dim=dim, num_heads=num_heads, ffn_dim=48).eval()
+    x = torch.randn(2, seq_len, dim)
+    context = torch.randn(2, context_len, dim)
+    context_mask = torch.tensor(
+        [
+            [True, True, True, False, False],
+            [True, False, True, True, False],
+        ],
+        dtype=torch.bool,
+    )
+    t_mod = torch.randn(2, seq_len, 6, dim) * 0.01
+    freqs = _identity_freqs(seq_len, dim // num_heads)
+    self_attn_mask = torch.ones(seq_len, seq_len, dtype=torch.bool)
+    self_attn_mask[:3, 4:] = False
+
+    with torch.no_grad():
+        old = _old_masked_block_reference(block, x, context, context_mask, t_mod, freqs, self_attn_mask)
+        new = block(
+            x,
+            context,
+            t_mod,
+            freqs,
+            context_mask=context_mask.unsqueeze(1).expand(-1, seq_len, -1),
+            self_attn_mask=self_attn_mask,
+        )
+
+    assert torch.allclose(new, old, atol=1e-6, rtol=1e-5)
+
+
+def test_dit_block_masked_forward_shape():
+    torch.manual_seed(0)
+    dim, num_heads, seq_len = 24, 4, 7
+    block = DiTBlock(has_image_input=False, dim=dim, num_heads=num_heads, ffn_dim=48).eval()
+    x = torch.randn(2, seq_len, dim)
+    context = torch.randn(2, 5, dim)
+    t_mod = torch.randn(2, seq_len, 6, dim) * 0.01
+    freqs = _identity_freqs(seq_len, dim // num_heads)
+    self_attn_mask = torch.ones(seq_len, seq_len, dtype=torch.bool)
+
+    with torch.no_grad():
+        out = block(x, context, t_mod, freqs, self_attn_mask=self_attn_mask)
+
+    assert out.shape == x.shape
+
+
+def test_wan_shared_token_injection_extends_tmod_freqs_and_extracts_action_only():
+    vb = _make_wan_backbone(dim=24, num_heads=4)
+    B, Sv, Sa, Ss, D = 2, 4, 3, 1, vb.dim
+    state = BlockLoopState(
+        x=torch.zeros(B, Sv, D),
+        t_mod=torch.zeros(B, Sv, 6, D),
+        freqs=_identity_freqs(Sv, vb.head_dim),
+        context=torch.zeros(B, 4, D),
+        f=Sv,
+        h=1,
+        w=1,
+        t=torch.zeros(B, Sv, D),
+        extras={"dit": vb._dit, "vace": None, "use_usp": False},
+    )
+    action_tokens = torch.randn(B, Sa, D)
+    state_tokens = torch.randn(B, Ss, D)
+    timestep = torch.tensor([0.25, 0.75])
+
+    state = vb.inject_shared_tokens(
+        state,
+        action_tokens,
+        Sa,
+        state_tokens=state_tokens,
+        n_state=Ss,
+        timestep=timestep,
+    )
+
+    assert state.x.shape == (B, Sv + Sa + Ss, D)
+    assert state.t_mod.shape == (B, Sv + Sa + Ss, 6, D)
+    assert state.freqs.shape[0] == Sv + Sa + Ss
+
+    state, action_tail = vb.extract_shared_tokens(state, Sa, n_state=Ss)
+    assert action_tail.shape == (B, Sa, D)
+    assert torch.allclose(action_tail, action_tokens)
+    assert state.x.shape == (B, Sv, D)
+    assert state.t_mod.shape == (B, Sv, 6, D)
+    assert state.freqs.shape[0] == Sv
+
+
+def test_wan_shared_token_injection_supports_state_only_video_conditioning():
+    vb = _make_wan_backbone(dim=24, num_heads=4)
+    B, Sv, Ss, D = 2, 4, 1, vb.dim
+    state = BlockLoopState(
+        x=torch.zeros(B, Sv, D),
+        t_mod=torch.zeros(B, Sv, 6, D),
+        freqs=_identity_freqs(Sv, vb.head_dim),
+        context=torch.zeros(B, 4, D),
+        f=Sv,
+        h=1,
+        w=1,
+        extras={"dit": vb._dit, "vace": None, "use_usp": False},
+    )
+    state_tokens = torch.randn(B, Ss, D)
+
+    state = vb.inject_shared_tokens(
+        state,
+        None,
+        0,
+        state_tokens=state_tokens,
+        n_state=Ss,
+        timestep=torch.tensor([0.25, 0.75]),
+    )
+
+    assert state.x.shape == (B, Sv + Ss, D)
+    assert state.t_mod.shape == (B, Sv + Ss, 6, D)
+    assert state.freqs.shape[0] == Sv + Ss
+    state, action_tail = vb.extract_shared_tokens(state, 0, n_state=Ss)
+    assert action_tail.shape == (B, 0, D)
+    assert state.x.shape == (B, Sv, D)
+    assert state.t_mod.shape == (B, Sv, 6, D)
+    assert state.freqs.shape[0] == Sv
+
+
+def test_wan_shared_token_injection_rejects_batch_mismatch():
+    vb = _make_wan_backbone(dim=24, num_heads=4)
+    B, Sv, Sa, Ss, D = 2, 4, 3, 1, vb.dim
+    state = BlockLoopState(
+        x=torch.zeros(B, Sv, D),
+        t_mod=torch.zeros(B, Sv, 6, D),
+        freqs=_identity_freqs(Sv, vb.head_dim),
+        context=torch.zeros(B, 4, D),
+        f=Sv,
+        h=1,
+        w=1,
+    )
+
+    with pytest.raises(ValueError, match="video batch=2, action batch=3"):
+        vb.inject_shared_tokens(
+            state,
+            torch.randn(3, Sa, D),
+            Sa,
+            state_tokens=torch.randn(B, Ss, D),
+            n_state=Ss,
+            timestep=torch.tensor([0.25, 0.75]),
+        )
+
+    with pytest.raises(ValueError, match="video batch=2, state batch=3"):
+        vb.inject_shared_tokens(
+            state,
+            torch.randn(B, Sa, D),
+            Sa,
+            state_tokens=torch.randn(3, Ss, D),
+            n_state=Ss,
+            timestep=torch.tensor([0.25, 0.75]),
+        )
+
+
+def test_wan_shared_token_injection_requires_timestep_for_per_token_tmod():
+    vb = _make_wan_backbone(dim=24, num_heads=4)
+    B, Sv, Sa, D = 2, 4, 3, vb.dim
+    state = BlockLoopState(
+        x=torch.zeros(B, Sv, D),
+        t_mod=torch.zeros(B, Sv, 6, D),
+        freqs=_identity_freqs(Sv, vb.head_dim),
+        context=torch.zeros(B, 4, D),
+        f=Sv,
+        h=1,
+        w=1,
+    )
+
+    with pytest.raises(ValueError, match="requires `timestep`"):
+        vb.inject_shared_tokens(state, torch.randn(B, Sa, D), Sa)
+
+
+def test_wan_state_tmod_uses_sample_level_timestep_from_per_token_input():
+    vb = _make_wan_backbone(dim=24, num_heads=4)
+    per_token = torch.tensor([[0.1, 0.2, 0.3], [0.7, 0.8, 0.9]])
+
+    state_tmod = vb._build_sample_t_mod(per_token, n_tokens=2, batch_size=2)
+    first_tmod = vb._build_sample_t_mod(per_token[:, 0], n_tokens=2, batch_size=2)
+
+    assert state_tmod.shape == (2, 2, 6, vb.dim)
+    assert torch.allclose(state_tmod, first_tmod)

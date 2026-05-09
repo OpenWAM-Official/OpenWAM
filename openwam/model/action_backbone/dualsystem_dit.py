@@ -353,9 +353,6 @@ class ActionDiT(ActionBackbone):
             ``range(num_layers)`` — the driver runs joint attention at every
             layer regardless and this is informational only.
         variant: ``"joint_cross_attn"`` or ``"joint_self_attn"``.
-        use_proprioception / state_dim:
-            Deprecated on ActionDiT. Dual-system architectures append proprio
-            as a context token before video/action cross-attention.
     """
 
     def __init__(
@@ -373,8 +370,6 @@ class ActionDiT(ActionBackbone):
         freq_dim: int = 256,
         max_action_len: int = 1024,
         eps: float = 1e-6,
-        use_proprioception: bool = False,  # noqa: ARG002 - handled by architecture
-        state_dim: int = 0,  # noqa: ARG002 - handled by architecture
     ):
         super().__init__()
         if variant not in ("joint_cross_attn", "joint_self_attn"):

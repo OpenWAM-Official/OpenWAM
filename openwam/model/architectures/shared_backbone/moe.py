@@ -21,30 +21,25 @@ from openwam.model.architectures.shared_backbone.mask import (
     set_video_attention_mask_mode,
     validate_shared_attention_mask_mode,
 )
+from openwam.model.architectures.shared_backbone.state import align_state_tokens_to_action_batch
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
+
+
+def _validate_per_token_t_mod(vstate) -> None:
+    if vstate.t_mod.dim() != 4:
+        raise RuntimeError(
+            "SharedBackbone requires the video backbone to run in per-token t_mod mode "
+            "(e.g. dit.seperated_timestep=True with fuse_vae_embedding_in_latents=True). "
+            f"Got vstate.t_mod with dim={vstate.t_mod.dim()}; action/state timestep would be silently ignored otherwise."
+        )
 
 
 def _cfg_get(cfg, key: str, default=None):
     return cfg.get(key, default) if isinstance(cfg, dict) else getattr(cfg, key, default)
 
 
-def _cfg_has(cfg, key: str) -> bool:
-    return key in cfg if isinstance(cfg, dict) else hasattr(cfg, key)
-
-
 def resolve_expert_layers(cfg, *, num_layers: Optional[int]) -> tuple[int, ...]:
     """Resolve MoE expert layer ids from ``expert_layers`` or ``expert_interval``."""
-    if _cfg_has(cfg, "bridge_layers") and not _cfg_has(cfg, "expert_layers"):
-        raise ValueError(
-            "SharedBackbone MoE renamed 'bridge_layers' to 'expert_layers'. "
-            "Update the config key to avoid silently changing the expert topology."
-        )
-    if _cfg_has(cfg, "bridge_interval") and not _cfg_has(cfg, "expert_interval"):
-        raise ValueError(
-            "SharedBackbone MoE renamed 'bridge_interval' to 'expert_interval'. "
-            "Update the config key to avoid silently changing the expert topology."
-        )
-
     layers_raw = _cfg_get(cfg, "expert_layers", None)
     if layers_raw is None:
         interval_raw = _cfg_get(cfg, "expert_interval", None)
@@ -90,15 +85,12 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         super().__init__(cfg)
         if cfg is None:
             return
-        if bool(cfg.get("use_proprioception", False)):
-            raise NotImplementedError(
-                "SharedBackbone (MoE) does not support proprioception. "
-                "Use framework=dual_system or set use_proprioception=False."
-            )
         vb = self.video_backbone
         video_dim = self._resolve_video_dim(cfg)
         num_layers = vb.num_layers if vb is not None else None
         action_decoder_hidden_dim = cfg.get("action_decoder_hidden_dim")
+        use_proprioception = bool(cfg.get("use_proprioception", False))
+        state_dim = int(cfg.get("state_dim", 0) or 0)
         self.attention_mask_mode = validate_shared_attention_mask_mode(str(cfg.get("attention_mask_mode", "joint")))
         self.video_attention_mask_mode = str(cfg.get("video_attention_mask_mode", "first_frame_causal"))
         if vb is not None:
@@ -112,6 +104,8 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
             expert_ffn_dim=int(cfg.get("expert_ffn_dim", 4096)),
             expert_layers=expert_layers,
             action_decoder_hidden_dim=action_decoder_hidden_dim,
+            use_proprioception=use_proprioception,
+            state_dim=state_dim,
         )
 
     def forward(
@@ -119,7 +113,7 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         noisy_actions: Optional[Tensor],
         action_timestep: Optional[Tensor],
         *,
-        proprio_state: Optional[Tensor] = None,  # noqa: ARG002 — MoE doesn't consume proprio
+        proprio_state: Optional[Tensor] = None,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         **pipeline_inputs,
@@ -146,51 +140,67 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         )
 
         if noisy_actions is None or ab is None:
-            for block_id in range(vb.num_layers):
-                vstate = vb.run_block(block_id, vstate)
-            return vb.finalize(vstate), None
+            action_tokens = None
+            t_mod = None
+        else:
+            action_tokens, t_mod = ab.encode(noisy_actions, action_timestep)
+        state_tokens = None if ab is None else ab.encode_state(proprio_state)
+        if action_tokens is not None:
+            state_tokens = align_state_tokens_to_action_batch(state_tokens, action_tokens.shape[0])
+        elif state_tokens is not None and state_tokens.shape[0] == 1 and vstate.x.shape[0] > 1:
+            state_tokens = state_tokens.expand(vstate.x.shape[0], -1, -1)
 
-        # SharedBackbone relies on per-token t_mod so action tokens get their own
-        # AdaLN (action timestep + modality_tmod_bias) at every video DiT block.
-        # Wan2.2-TI2V-5B with fuse_vae_embedding_in_latents=True satisfies this.
-        if vstate.t_mod.dim() != 4:
-            raise RuntimeError(
-                "SharedBackbone requires the video backbone to run in per-token t_mod mode "
-                "(e.g. dit.seperated_timestep=True with fuse_vae_embedding_in_latents=True). "
-                f"Got vstate.t_mod with dim={vstate.t_mod.dim()}; modality_tmod_bias and "
-                "action timestep would be silently ignored otherwise."
+        n_action = 0 if action_tokens is None else action_tokens.shape[1]
+        n_state = 0 if state_tokens is None else state_tokens.shape[1]
+        has_shared_tokens = n_action + n_state > 0
+        if has_shared_tokens:
+            _validate_per_token_t_mod(vstate)
+            shared_timestep = action_timestep if action_timestep is not None else pipeline_inputs.get("timestep")
+            if shared_timestep is None:
+                raise ValueError(
+                    "SharedBackbone state-token conditioning requires `action_timestep` or video `timestep`."
+                )
+            vstate = vb.inject_shared_tokens(
+                vstate,
+                action_tokens,
+                n_action,
+                state_tokens=state_tokens,
+                n_state=n_state,
+                timestep=shared_timestep,
             )
-
-        action_tokens, t_mod = ab.encode(noisy_actions, action_timestep)
-        n_action = action_tokens.shape[1]
-        vstate = vb.inject_action_tokens(
-            vstate,
-            action_tokens,
-            n_action,
-            timestep=action_timestep,
-            t_mod_bias=ab.modality_tmod_bias,
-        )
-        attach_shared_attention_mask(
-            vb,
-            vstate,
-            n_action,
-            attention_mask_mode=getattr(self, "attention_mask_mode", "joint"),
-        )
+            attach_shared_attention_mask(
+                vb,
+                vstate,
+                n_action,
+                n_state=n_state,
+                attention_mask_mode=getattr(self, "attention_mask_mode", "joint"),
+            )
 
         for block_id in range(vb.num_layers):
             vstate = vb.run_block(block_id, vstate)
-            if block_id in ab.expert_layers_set:
-                n_video = vstate.x.shape[1] - n_action
+            if n_action and block_id in ab.expert_layers_set:
+                n_video = vstate.x.shape[1] - n_action - n_state
                 x_action = gradient_checkpoint_forward(
                     lambda x, t, _bid=block_id: ab.apply_expert(_bid, x, t),
                     use_gradient_checkpointing and self.training,
                     use_gradient_checkpointing_offload,
-                    vstate.x[:, n_video:, :],
+                    vstate.x[:, n_video : n_video + n_action, :],
                     t_mod,
                 )
-                vstate.x = torch.cat([vstate.x[:, :n_video, :], x_action], dim=1)
+                if n_state:
+                    vstate.x = torch.cat(
+                        [vstate.x[:, :n_video, :], x_action, vstate.x[:, n_video + n_action :, :]],
+                        dim=1,
+                    )
+                else:
+                    vstate.x = torch.cat([vstate.x[:, :n_video, :], x_action], dim=1)
 
-        vstate, action_tail = vb.extract_action_tokens(vstate, n_action)
+        if n_action == 0:
+            if n_state:
+                vstate, _ = vb.extract_shared_tokens(vstate, n_action, n_state=n_state)
+            return vb.finalize(vstate), None
+
+        vstate, action_tail = vb.extract_shared_tokens(vstate, n_action, n_state=n_state)
         return vb.finalize(vstate), ab.decode(action_tail)
 
 

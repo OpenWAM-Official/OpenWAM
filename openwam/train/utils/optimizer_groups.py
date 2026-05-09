@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import types
 
-NO_WD_PARAM_SUFFIXES: tuple[str, ...] = ("modality_tmod_bias",)
+NO_WD_PARAM_SUFFIXES: tuple[str, ...] = ()
 
 
 def _is_no_wd(name: str) -> bool:
-    """Return True for params that must bypass weight decay.
-
-    Zero-initialized additive biases like ``modality_tmod_bias`` have training
-    target = deviate from zero; applying AdamW weight_decay would actively pull
-    them back, effectively disabling the feature.
-    """
+    """Return True for params that must bypass weight decay."""
     return any(name.endswith(suffix) for suffix in NO_WD_PARAM_SUFFIXES)
 
 
@@ -60,9 +55,9 @@ def build_trainable_parameters(
 ):
     """Build optimizer param groups for OpenWAM training.
 
-    Returns optimizer param groups. Always isolates `modality_tmod_bias` (and
-    any other suffix in ``NO_WD_PARAM_SUFFIXES``) into a dedicated
-    ``weight_decay=0`` group, regardless of per-module LR overrides.
+    Returns optimizer param groups. Parameters with suffixes listed in
+    ``NO_WD_PARAM_SUFFIXES`` are isolated into dedicated ``weight_decay=0``
+    groups, regardless of per-module LR overrides.
     """
     if getattr(model, "lambda_action", 0) <= 0:
         model.architecture.action_backbone.requires_grad_(False)

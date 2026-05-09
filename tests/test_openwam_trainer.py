@@ -132,6 +132,8 @@ class _MockVideoBackbone(VideoBackbone):
         self._text_encoder = nn.Linear(4, 4)
         self._device = torch.device("cpu")
         self._dtype = torch.float32
+        self.last_injected = None
+        self.last_extracted = None
 
     @classmethod
     def from_pretrained(cls, source, **kw):
@@ -226,13 +228,40 @@ class _MockVideoBackbone(VideoBackbone):
         B = state.x.shape[0]
         return torch.randn(B, 16, 3, 8, 8)
 
-    def inject_action_tokens(self, state, action_tokens, n_action, *, timestep=None, t_mod_bias=None):
+    def inject_action_tokens(self, state, action_tokens, n_action, *, timestep=None):
         state.x = torch.cat([state.x, action_tokens.to(state.x.dtype)], dim=1)
+        return state
+
+    def inject_shared_tokens(
+        self,
+        state,
+        action_tokens,
+        n_action,
+        *,
+        state_tokens=None,
+        n_state=0,
+        timestep=None,
+    ):
+        self.last_injected = {"n_action": int(n_action), "n_state": int(n_state)}
+        pieces = []
+        if n_action:
+            pieces.append(action_tokens.to(state.x.dtype))
+        if n_state:
+            pieces.append(state_tokens.to(state.x.dtype))
+        state.x = torch.cat([state.x, *pieces], dim=1)
         return state
 
     def extract_action_tokens(self, state, n_action):
         n_video = state.x.shape[1] - n_action
         action_tokens = state.x[:, n_video:, :]
+        state.x = state.x[:, :n_video, :]
+        return state, action_tokens
+
+    def extract_shared_tokens(self, state, n_action, *, n_state=0):
+        self.last_extracted = {"n_action": int(n_action), "n_state": int(n_state)}
+        n_tail = n_action + n_state
+        n_video = state.x.shape[1] - n_tail
+        action_tokens = state.x[:, n_video : n_video + n_action, :]
         state.x = state.x[:, :n_video, :]
         return state, action_tokens
 

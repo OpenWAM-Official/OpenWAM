@@ -1,8 +1,8 @@
 """Shared-backbone vanilla action backbone.
 
 Used by ``SharedBackboneVanillaArchitecture``. Owns the action-specific
-parameters (input projection, output head, modality AdaLN bias,
-normalization stats, action scheduler) but does **not**
+parameters (input projection, output head, normalization stats, action
+scheduler) but does **not**
 implement any control flow — the architecture's ``forward`` runs the
 video DiT block loop with action tokens injected and calls these
 helpers at the right moments.
@@ -10,7 +10,6 @@ helpers at the right moments.
 API surface:
     encode(noisy_actions, timestep) -> tokens
     decode(final_hidden) -> action_prediction
-    modality_tmod_bias                          (parameter)
 """
 
 from __future__ import annotations
@@ -18,10 +17,14 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-import torch.nn as nn
 
 from openwam.model.action_backbone.backbone import ActionBackbone
-from openwam.model.action_backbone.components import ActionEncoder, ActionOutputMLP
+from openwam.model.action_backbone.components import (
+    DEFAULT_ACTION_DECODER_HIDDEN_DIM,
+    ActionEncoder,
+    ActionOutputMLP,
+    StateEncoder,
+)
 
 
 class SharedVanillaActionBackbone(ActionBackbone):
@@ -30,11 +33,6 @@ class SharedVanillaActionBackbone(ActionBackbone):
     Holds:
       - ``input_proj``: action_dim -> video_dim (fuses timestep)
       - ``action_output_head``: video_dim -> decoder_hidden_dim -> action_dim
-      - ``modality_tmod_bias``: per-modality bias added to the video DiT's
-        AdaLN modulation signal for action tokens. Shape ``(1, 1, 6, video_dim)``
-        — the leading ``6`` mirrors the video DiT block's 6-chunk AdaLN layout
-        (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp); if
-        the video DiT changes that count this bias must be resized in lockstep.
       - ``action_mean`` / ``action_std`` persistent buffers
       - ``scheduler``: ActionScheduler (from ActionBackbone.__init__)
     """
@@ -45,16 +43,22 @@ class SharedVanillaActionBackbone(ActionBackbone):
         video_dim: int,
         max_action_len: int = 512,
         action_decoder_hidden_dim: Optional[int] = None,
+        use_proprioception: bool = False,
+        state_dim: int = 0,
     ):
         super().__init__()
         self._action_dim = int(action_dim)
         self._video_dim = int(video_dim)
         self._max_action_len = int(max_action_len)
-        self._action_decoder_hidden_dim = int(action_decoder_hidden_dim or video_dim)
+        self._action_decoder_hidden_dim = int(action_decoder_hidden_dim or DEFAULT_ACTION_DECODER_HIDDEN_DIM)
+        self._use_proprioception = bool(use_proprioception)
+        self.state_dim = int(state_dim or 0)
+        if self._use_proprioception and self.state_dim <= 0:
+            raise ValueError("use_proprioception=True requires state_dim > 0 for SharedBackbone state tokens.")
 
         self.input_proj = ActionEncoder(self._action_dim, self._video_dim)
+        self.state_encoder = StateEncoder(self.state_dim, self._video_dim) if self._use_proprioception else None
         self.action_output_head = ActionOutputMLP(self._video_dim, self._action_decoder_hidden_dim, self._action_dim)
-        self.modality_tmod_bias = nn.Parameter(torch.zeros(1, 1, 6, self._video_dim))
         self.register_buffer("action_mean", torch.zeros(self._action_dim), persistent=True)
         self.register_buffer("action_std", torch.ones(self._action_dim), persistent=True)
 
@@ -65,6 +69,10 @@ class SharedVanillaActionBackbone(ActionBackbone):
     @property
     def expert_layers(self) -> tuple[int, ...]:
         return ()
+
+    @property
+    def uses_proprioception(self) -> bool:
+        return self._use_proprioception
 
     def encode(self, noisy_actions: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
         """Project noisy actions into video_dim space.
@@ -82,6 +90,14 @@ class SharedVanillaActionBackbone(ActionBackbone):
         if T > self._max_action_len:
             raise ValueError(f"Action sequence length {T} exceeds max_action_len {self._max_action_len}.")
         return self.input_proj(noisy_actions, timestep)
+
+    def encode_state(self, proprio_state: torch.Tensor) -> Optional[torch.Tensor]:
+        if not self._use_proprioception:
+            return None
+        if proprio_state is None:
+            raise ValueError("SharedBackbone use_proprioception=True requires `proprio_state`.")
+        assert self.state_encoder is not None
+        return self.state_encoder(proprio_state)
 
     def decode(self, action_tokens: torch.Tensor) -> torch.Tensor:
         """(B, T, video_dim) action tail -> (B, T, action_dim) prediction."""

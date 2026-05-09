@@ -165,6 +165,13 @@ Architecture configs in `configs/model/`:
 - `dual_system.yaml`
 - `shared_backbone.yaml`  # shared_backbone family; choose `variant: vanilla|moe`
 
+Shared-backbone notes:
+
+- `configs/model/shared_backbone.yaml` enables `architecture.use_proprioception: true` by default. Training and generation with this config require a proprioceptive state tensor from `sample["proprio"]` or the deployment observation state, with last dimension matching `architecture.state_dim`.
+- Shared-backbone state tokens are part of the shared DiT sequence. In joint attention mode, video tokens can attend to state tokens, so proprioception conditions both action prediction and video denoising steps.
+- `architecture.action_decoder_hidden_dim` is explicitly set to `1024` in the default config. If the field is omitted or set to `null`, shared vanilla and MoE backbones also resolve it to the code default `1024`.
+- This PR-era shared-backbone state-token config is not strict-load compatible with older shared-backbone checkpoints that used no state encoder, `action_decoder_hidden_dim = video_dim`, or `modality_tmod_bias`. Treat those checkpoints as requiring a matching old config/code path or an explicit manual state-dict migration.
+
 Accelerate/DeepSpeed configs in `configs/accelerate/`:
 
 - `deepspeed_zero1.yaml`
@@ -284,7 +291,7 @@ Once the mock server is running, all normal client scripts work against it witho
 
 ```bash
 python scripts/inference_single_test.py --test
-python scripts/inference_continuous_test.py --steps 100
+python scripts/inference_continuous_test.py --steps 128
 ```
 
 Server endpoints:
@@ -334,10 +341,10 @@ python scripts/inference_single_test.py \
 **Continuous inference test** — simulate a real robot control loop:
 
 ```bash
-python scripts/inference_continuous_test.py --steps 100
+python scripts/inference_continuous_test.py --steps 128
 ```
 
-This simulates 100 control steps, showing how the server handles action chunking internally: the first call triggers full inference (slow, generates an entire action chunk), subsequent calls pop cached actions from the buffer (fast, <10ms), and re-inference is triggered when the buffer is exhausted.
+This simulates 128 control steps, showing how the server handles action chunking internally: the first call triggers full inference (slow, generates an entire action chunk), subsequent calls pop cached actions from the buffer (fast, <10ms), and re-inference is triggered when the buffer is exhausted.
 
 ### 4. Benchmarks Support
 

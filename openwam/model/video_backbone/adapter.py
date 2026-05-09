@@ -41,13 +41,10 @@ class BlockLoopState:
     Inject / extract contract (SharedBackbone path):
         ``inject_action_tokens`` extends ``x`` (sequence dim) and, in
         per-token t_mod mode, also extends ``freqs`` and ``t_mod`` to match.
-        ``extract_action_tokens`` only undoes the ``x`` extension — ``freqs``
-        and ``t_mod`` keep the action-token tail. This is safe because the
-        block loop is over after extract and ``finalize`` only reads ``x`` /
-        ``t`` / spatial dims; nothing downstream depends on the post-extract
-        length of ``freqs`` / ``t_mod``. Architectures must therefore call
-        ``inject`` and ``extract`` in matched pairs and *not* re-use the
-        state for further block forwards after extract.
+        ``extract_action_tokens`` removes the shared-token tail from ``x`` and
+        keeps sequence-shaped ``freqs`` / per-token ``t_mod`` aligned with the
+        remaining video tokens. Architectures must call ``inject`` and
+        ``extract`` in matched pairs.
 
     Fields marked "backbone-internal" are managed by the backbone and should
     not be modified by architecture code.
@@ -285,7 +282,6 @@ class VideoBackbone(ABC, nn.Module):
         n_action: int,
         *,
         timestep: Optional[Tensor] = None,
-        t_mod_bias: Optional[Tensor] = None,
     ) -> BlockLoopState:
         """Append action tokens to the video sequence in ``state``.
 
@@ -297,7 +293,6 @@ class VideoBackbone(ABC, nn.Module):
             action_tokens: (B, n_action, dim) projected action tokens.
             n_action: Number of action tokens.
             timestep: Action diffusion timestep (for per-token t_mod backbones).
-            t_mod_bias: Learnable modality bias (for per-token t_mod backbones).
 
         Returns:
             Updated state with action tokens appended to ``state.x``.
@@ -320,6 +315,35 @@ class VideoBackbone(ABC, nn.Module):
             (updated_state, action_tokens) where action_tokens is (B, n_action, dim).
         """
         ...
+
+    def inject_shared_tokens(
+        self,
+        state: BlockLoopState,
+        action_tokens: Tensor,
+        n_action: int,
+        *,
+        state_tokens: Optional[Tensor] = None,
+        n_state: int = 0,
+        timestep: Optional[Tensor] = None,
+    ) -> BlockLoopState:
+        """Append action tokens plus optional state tokens.
+
+        Backbones that support SharedBackbone must override this explicitly.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement inject_shared_tokens.")
+
+    def extract_shared_tokens(
+        self,
+        state: BlockLoopState,
+        n_action: int,
+        *,
+        n_state: int = 0,
+    ) -> Tuple[BlockLoopState, Tensor]:
+        """Extract action tokens from an action/state tail.
+
+        Backbones that support SharedBackbone must override this explicitly.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement extract_shared_tokens.")
 
     # ================================================================
     # Unified preprocessing (1)

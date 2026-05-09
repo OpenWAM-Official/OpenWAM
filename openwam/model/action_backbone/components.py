@@ -239,6 +239,40 @@ class ActionEncoder(nn.Module):
         return x
 
 
+class StateEncoder(nn.Module):
+    """Project proprioceptive state into one shared-backbone state token.
+
+    The first shared-backbone proprio path uses a single current-state token:
+    input ``(D,)``, ``(B, D)`` or ``(B, 1, D)`` and output
+    ``(B, 1, hidden_dim)``.
+    """
+
+    def __init__(self, state_dim: int, hidden_dim: int):
+        super().__init__()
+        self.state_dim = int(state_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.proj = nn.Sequential(
+            nn.LayerNorm(self.state_dim),
+            nn.Linear(self.state_dim, self.hidden_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+        elif state.ndim == 3 and state.shape[1] == 1:
+            state = state[:, 0, :]
+        if state.ndim != 2:
+            raise ValueError(f"proprio_state must have shape [D], [B, D] or [B, 1, D], got {tuple(state.shape)}")
+        if state.shape[-1] != self.state_dim:
+            raise ValueError(f"proprio_state last dim must be {self.state_dim}, got {state.shape[-1]}")
+        return self.proj(state).unsqueeze(1)
+
+
+DEFAULT_ACTION_DECODER_HIDDEN_DIM = 1024
+
+
 class ActionOutputMLP(nn.Module):
     """2-layer MLP output projection for action prediction.
 
@@ -246,7 +280,7 @@ class ActionOutputMLP(nn.Module):
     for a stable start), this head is a plain Linear -> ReLU -> Linear stack
     with small-random weight initialization (N(0, 0.02), zero bias) on both
     layers. Used by SharedBackbone / MoE architectures; DualSystem's
-    ActionDiT keeps the AdaLN head.
+    ActionDiT decodes with a single ``Linear(dim, action_dim)``.
 
     Args:
         input_dim:  Hidden size of incoming action tokens (= video_dim).

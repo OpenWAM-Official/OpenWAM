@@ -151,13 +151,13 @@ class SelfAttention(nn.Module):
 
         self.attn = AttentionModule(self.num_heads)
 
-    def forward(self, x, freqs):
+    def forward(self, x, freqs, attn_mask: Optional[torch.Tensor] = None):
         q = self.norm_q(self.q(x))
         k = self.norm_k(self.k(x))
         v = self.v(x)
         q = rope_apply(q, freqs, self.num_heads)
         k = rope_apply(k, freqs, self.num_heads)
-        x = self.attn(q, k, v)
+        x = self.attn(q, k, v, attn_mask=attn_mask)
         return self.o(x)
 
 
@@ -228,7 +228,15 @@ class DiTBlock(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
         self.gate = GateModule()
 
-    def forward(self, x, context, t_mod, freqs, context_mask: Optional[torch.Tensor] = None):
+    def forward(
+        self,
+        x,
+        context,
+        t_mod,
+        freqs,
+        context_mask: Optional[torch.Tensor] = None,
+        self_attn_mask: Optional[torch.Tensor] = None,
+    ):
         if context_mask is not None and context_mask.dim() == 3:
             context_mask = context_mask.unsqueeze(1)
         has_seq = len(t_mod.shape) == 4
@@ -247,7 +255,7 @@ class DiTBlock(nn.Module):
                 gate_mlp.squeeze(2),
             )
         input_x = modulate(self.norm1(x), shift_msa, scale_msa)
-        x = self.gate(x, gate_msa, self.self_attn(input_x, freqs))
+        x = self.gate(x, gate_msa, self.self_attn(input_x, freqs, attn_mask=self_attn_mask))
         x = x + self.cross_attn(self.norm3(x), context, ctx_mask=context_mask)
         input_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = self.gate(x, gate_mlp, self.ffn(input_x))
