@@ -6,4 +6,10 @@ from openwam.train.utils.optimizer_groups import (
     build_trainable_parameters,
 )
 
-__all__ = ['BaseTrainer', 'OpenWAMTrainer', 'DecoupledFlowMatchLoss', 'attach_optimizer_groups', 'build_trainable_parameters']
+__all__ = [
+    "BaseTrainer",
+    "OpenWAMTrainer",
+    "DecoupledFlowMatchLoss",
+    "attach_optimizer_groups",
+    "build_trainable_parameters",
+]

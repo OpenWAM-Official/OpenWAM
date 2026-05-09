@@ -38,6 +38,7 @@ dependencies = [
     "omegaconf>=2.3,<3",
     "websockets>=11,<15",
     "aiohttp>=3.9,<4",
+    "av>=12,<18",
     "lerobot @ git+https://github.com/huggingface/lerobot.git@d656da8ccca5989ff0a2207e81fbfa2c2d5bafb1",
 ]
 classifiers = [
