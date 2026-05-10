@@ -170,6 +170,21 @@ def test_driver_dtype_mismatch_raises():
             driver.step(0, vstate, astate)
 
 
+def test_driver_compile_step_dtype_mismatch_raises():
+    """Compile-oriented step must preserve the eager dtype/device contract."""
+    vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
+    ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
+    ab.eval()
+    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False)
+
+    vstate, astate = _make_states(vb, ab, B=1, s_video=4, s_action=3)
+    vstate.x = vstate.x.to(torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match="dtype mismatch"):
+        with torch.no_grad():
+            driver._step_impl_for_compile(0, vstate, astate)
+
+
 def test_driver_attention_mask_bidirectional_returns_none():
     """bidirectional mode is a no-op mask — passes None to SDPA so it can pick
     the fastest fused kernel."""

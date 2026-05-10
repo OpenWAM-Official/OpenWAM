@@ -26,6 +26,8 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from openwam.model.compile_options import compile_mode, default_compile_cfg, section_enabled, torch_compile_kwargs
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -972,23 +974,27 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """Apply torch.compile to action module and all backbones.
 
         Args:
-            compile_cfg: Config object with optional bool flags.
-                ``enabled`` compiles the action module; backbone-specific
-                flags (``video_dit``, ``vae``, etc.) are forwarded to each
-                backbone's ``apply_compile`` method.
+            compile_cfg: Config object. The preferred shape is
+                ``compile.default`` for the broad module wrappers; direct
+                flat configs are also accepted for small tests.
         """
-        if getattr(compile_cfg, "enabled", False):
+        default_cfg = default_compile_cfg(compile_cfg)
+        if compile_mode(compile_cfg, default=None) in {"none", "mot_loop"}:
+            return
+
+        if section_enabled(default_cfg, default=False):
             action_module = self.trainable_action_module
             if action_module is not None and action_module is not self:
+                compile_kwargs = torch_compile_kwargs(default_cfg)
                 for name, child in self.named_children():
                     if child is action_module:
-                        setattr(self, name, torch.compile(action_module, dynamic=True))
-                        logger.info("torch.compile enabled for action module (%s)", name)
+                        setattr(self, name, torch.compile(action_module, **compile_kwargs))
+                        logger.info("torch.compile enabled for action module (%s, %s)", name, compile_kwargs)
                         break
 
         for bb_name, bb in self.backbones.items():
             if hasattr(bb, "apply_compile"):
-                bb.apply_compile(compile_cfg)
+                bb.apply_compile(default_cfg)
 
     @abstractmethod
     def forward(

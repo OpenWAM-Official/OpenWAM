@@ -216,9 +216,14 @@ class TestDeploymentYaml:
 
         cfg = self._load()
         assert OmegaConf.select(cfg, "optimization.compile") is not None
-        assert OmegaConf.select(cfg, "optimization.compile.enabled") is not None
-        assert OmegaConf.select(cfg, "optimization.compile.video_dit") is not None
-        assert OmegaConf.select(cfg, "optimization.compile.vae") is not None
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "default"
+        assert OmegaConf.select(cfg, "optimization.compile.default.enabled") is True
+        assert OmegaConf.select(cfg, "optimization.compile.default.video_dit") is True
+        assert OmegaConf.select(cfg, "optimization.compile.default.vae") is False
+        assert OmegaConf.select(cfg, "optimization.compile.default.torch_mode") is None
+        assert OmegaConf.select(cfg, "optimization.compile.default.dynamic") is True
+        assert OmegaConf.select(cfg, "optimization.compile.mot_loop.torch_mode") == "reduce-overhead"
+        assert OmegaConf.select(cfg, "optimization.compile.mot_loop.dynamic") is False
 
     def test_optimization_dit_cache_defaults_off(self):
         from omegaconf import OmegaConf
@@ -256,6 +261,31 @@ class TestDeployConfigLoading:
         spec.loader.exec_module(mod)
         return mod
 
+    def _compile_options(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "compile_options", PROJECT_ROOT / "openwam" / "model" / "compile_options.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _blank_args(self):
+        args = MagicMock()
+        for attr in (
+            "device",
+            "host",
+            "ws_port",
+            "http_port",
+            "denoise_steps",
+            "schedule_type",
+            "shift",
+            "compile_mode",
+        ):
+            setattr(args, attr, None)
+        return args
+
     def test_load_deploy_config_returns_omegaconf(self):
         deploy = self._import()
         cfg = deploy._load_deploy_config()
@@ -276,14 +306,8 @@ class TestDeployConfigLoading:
         deploy = self._import()
 
         cfg = deploy._load_deploy_config()
-        args = MagicMock()
+        args = self._blank_args()
         args.device = "cuda:3"
-        args.host = None
-        args.ws_port = None
-        args.http_port = None
-        args.denoise_steps = None
-        args.schedule_type = None
-        args.shift = None
 
         cfg = deploy._apply_cli_overrides(cfg, args)
         assert OmegaConf.select(cfg, "device") == "cuda:3"
@@ -294,17 +318,44 @@ class TestDeployConfigLoading:
         deploy = self._import()
 
         cfg = deploy._load_deploy_config()
-        args = MagicMock()
-        args.device = None
-        args.host = None
-        args.ws_port = None
-        args.http_port = None
+        args = self._blank_args()
         args.denoise_steps = 20
-        args.schedule_type = None
-        args.shift = None
 
         cfg = deploy._apply_cli_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.denoise_steps") == 20
+
+    def test_cli_compile_mode_none_disables_compile(self):
+        from omegaconf import OmegaConf
+
+        deploy = self._import()
+        compile_options = self._compile_options()
+
+        cfg = deploy._load_deploy_config()
+        args = self._blank_args()
+        args.compile_mode = "none"
+
+        cfg = deploy._apply_cli_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
+        compile_cfg = OmegaConf.select(cfg, "optimization.compile")
+        assert compile_options.section_enabled(compile_options.default_compile_cfg(compile_cfg), default=False) is False
+        assert compile_options.section_enabled(compile_options.mot_loop_compile_cfg(compile_cfg), default=False) is False
+        assert OmegaConf.select(cfg, "optimization.compile.default.video_dit") is True
+
+    def test_cli_compile_mode_mot_loop_enables_only_mot_loop(self):
+        from omegaconf import OmegaConf
+
+        deploy = self._import()
+        compile_options = self._compile_options()
+
+        cfg = deploy._load_deploy_config()
+        args = self._blank_args()
+        args.compile_mode = "mot_loop"
+
+        cfg = deploy._apply_cli_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "mot_loop"
+        compile_cfg = OmegaConf.select(cfg, "optimization.compile")
+        assert compile_options.section_enabled(compile_options.default_compile_cfg(compile_cfg), default=False) is False
+        assert compile_options.section_enabled(compile_options.mot_loop_compile_cfg(compile_cfg), default=False) is True
 
     def test_none_args_do_not_override(self):
         from omegaconf import OmegaConf
@@ -314,7 +365,7 @@ class TestDeployConfigLoading:
         cfg = deploy._load_deploy_config()
         original_steps = OmegaConf.select(cfg, "inference.denoise_steps")
 
-        args = MagicMock()
+        args = self._blank_args()
         # All None — nothing should change
         for attr in ("device", "host", "ws_port", "http_port", "denoise_steps", "schedule_type", "shift"):
             setattr(args, attr, None)
@@ -353,6 +404,51 @@ class TestDeployConfigLoading:
         assert OmegaConf.select(merged, "inference.denoise_steps") == 10
 
 
+class TestRobotwinOpenLoopEvalCompileMode:
+    """RobotWin open-loop eval must use the active nested compile schema."""
+
+    def _import(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "robotwin_open_loop_eval", PROJECT_ROOT / "scripts" / "robotwin_open_loop_eval.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_disable_compile_sets_mode_none(self):
+        from omegaconf import OmegaConf
+
+        robotwin_eval = self._import()
+        cfg = OmegaConf.create(
+            {
+                "optimization": {
+                    "compile": {
+                        "mode": "default",
+                        "default": {"video_dit": True, "vae": False},
+                        "mot_loop": {"torch_mode": "reduce-overhead", "dynamic": False},
+                    }
+                }
+            }
+        )
+
+        robotwin_eval._disable_compile_in_cfg(cfg)
+
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
+        assert OmegaConf.select(cfg, "optimization.compile.enabled", default=None) is None
+        assert OmegaConf.select(cfg, "optimization.compile.video_dit", default=None) is None
+        assert OmegaConf.select(cfg, "optimization.compile.vae", default=None) is None
+
+    def test_compile_mode_reporting_reads_nested_schema(self):
+        from omegaconf import OmegaConf
+
+        robotwin_eval = self._import()
+        cfg = OmegaConf.create({"optimization": {"compile": {"mode": "mot_loop"}}})
+
+        assert robotwin_eval._compile_mode_from_cfg(cfg) == "mot_loop"
+
+
 # ---------------------------------------------------------------------------
 # 5. joint_engine.py — compile flags parsed from cfg.optimization.compile
 # ---------------------------------------------------------------------------
@@ -378,7 +474,10 @@ class TestJointEngineCompileFlags:
                 },
                 "optimization": {
                     "decode_video": True,
-                    "compile": {"enabled": compile_enabled, "video_dit": video_dit, "vae": vae_compile},
+                    "compile": {
+                        "default": {"enabled": compile_enabled, "video_dit": video_dit, "vae": vae_compile},
+                        "mot_loop": {"enabled": False},
+                    },
                     "dit_cache": {"enabled": False},
                     "schedule": {"type": None, "action_steps": 4},
                 },
@@ -419,7 +518,7 @@ class TestJointEngineCompileFlags:
 
         from tests.test_openwam_trainer import _make_tiny_arch
 
-        cfg = OmegaConf.create({"enabled": True, "video_dit": False, "vae": False})
+        cfg = OmegaConf.create({"default": {"enabled": True, "video_dit": False, "vae": False}})
         arch = _make_tiny_arch()
 
         sentinel = nn.Identity()
@@ -432,7 +531,7 @@ class TestJointEngineCompileFlags:
         """compile.video_dit=True should compile each DiT block via backbone.apply_compile."""
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.create({"enabled": False, "video_dit": True, "vae": False})
+        cfg = OmegaConf.create({"default": {"enabled": True, "video_dit": True, "vae": False}})
 
         class FakeDiT(nn.Module):
             def __init__(self):
@@ -458,11 +557,72 @@ class TestJointEngineCompileFlags:
 
         assert all(b is sentinel for b in vb._pipe.dit.blocks)
 
+    def test_video_dit_compile_flag_works_when_action_compile_disabled(self):
+        """compile.enabled=False should not suppress independent backbone compile flags."""
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create(
+            {"mode": "default", "default": {"enabled": False, "video_dit": True, "vae": False}}
+        )
+
+        class FakeDiT(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.blocks = nn.ModuleList([_tiny_module(), _tiny_module()])
+
+        pipe = MagicMock()
+        pipe.dit = FakeDiT()
+        pipe.vae = _tiny_module()
+
+        from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+        from tests.test_openwam_trainer import _make_tiny_arch
+
+        vb = WanVideoBackbone(pipe)
+        arch = _make_tiny_arch()
+        arch.video_backbone = vb
+
+        sentinel = nn.Identity()
+        with patch("torch.compile", return_value=sentinel) as mock_compile:
+            arch.apply_compile_optimizations(cfg)
+
+        assert arch.action_backbone is not sentinel
+        assert all(b is sentinel for b in vb._pipe.dit.blocks)
+        assert mock_compile.call_count == 2
+
+    def test_compile_mode_none_suppresses_backbone_compile_flags(self):
+        """mode=none should disable all default compile work even when flags stay true."""
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create(
+            {"mode": "none", "default": {"enabled": True, "video_dit": True, "vae": True}}
+        )
+
+        class FakeDiT(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.blocks = nn.ModuleList([_tiny_module(), _tiny_module()])
+
+        pipe = MagicMock()
+        pipe.dit = FakeDiT()
+        pipe.vae = _tiny_module()
+
+        from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+        from tests.test_openwam_trainer import _make_tiny_arch
+
+        vb = WanVideoBackbone(pipe)
+        arch = _make_tiny_arch()
+        arch.video_backbone = vb
+
+        with patch("torch.compile") as mock_compile:
+            arch.apply_compile_optimizations(cfg)
+
+        mock_compile.assert_not_called()
+
     def test_vae_compile_flag(self):
         """compile.vae=True should torch.compile the VAE via backbone.apply_compile."""
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.create({"enabled": False, "video_dit": False, "vae": True})
+        cfg = OmegaConf.create({"default": {"enabled": True, "video_dit": False, "vae": True}})
 
         pipe = MagicMock()
         pipe.dit = _tiny_module()
@@ -477,7 +637,7 @@ class TestJointEngineCompileFlags:
         arch = _make_tiny_arch()
         arch.video_backbone = vb
 
-        sentinel = object()
+        sentinel = nn.Identity()
         with patch("torch.compile", return_value=sentinel):
             arch.apply_compile_optimizations(cfg)
 
@@ -502,7 +662,10 @@ class TestJointEngineCompileFlags:
                 },
                 "optimization": {
                     "decode_video": True,
-                    "compile": {"enabled": True, "video_dit": True, "vae": True},
+                    "compile": {
+                        "default": {"enabled": True, "video_dit": True, "vae": True},
+                        "mot_loop": {"enabled": False},
+                    },
                     "dit_cache": {"enabled": False},
                     "cfg": {"mode": None, "scale": 1.0},
                     "schedule": {"type": None, "action_steps": 4},
@@ -561,7 +724,7 @@ class TestCompileForward:
 
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.create({"enabled": True, "video_dit": False, "vae": False})
+        cfg = OmegaConf.create({"default": {"enabled": True, "video_dit": False, "vae": False}})
         arch.apply_compile_optimizations(cfg)
 
         with torch.no_grad():
@@ -595,10 +758,12 @@ class TestCompileForward:
 
         cfg = OmegaConf.create(
             {
-                "enabled": False,
-                "video_dit": True,
-                "vae": True,
-                "text_encoder": True,
+                "default": {
+                    "enabled": True,
+                    "video_dit": True,
+                    "vae": True,
+                    "text_encoder": True,
+                }
             }
         )
         arch.apply_compile_optimizations(cfg)
@@ -641,13 +806,7 @@ class TestCompileForward:
         # Compile everything
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.create(
-            {
-                "enabled": True,
-                "video_dit": True,
-                "vae": True,
-            }
-        )
+        cfg = OmegaConf.create({"default": {"enabled": True, "video_dit": True, "vae": True}})
         arch.apply_compile_optimizations(cfg)
 
         # Forward after compile

@@ -35,9 +35,16 @@ optimization:
     max_skips: 3              # Maximum consecutive skips before forcing recompute
 
   compile:
-    enabled: true             # torch.compile ActionDiT (safe, already validated)
-    video_dit: true           # torch.compile Video DiT (5B) — long warmup (~5 min)
-    vae: false                # torch.compile VAE decoder — only effective when tiled=false, not needed if decode_video is false
+    mode: default              # none | default | mot_loop
+    default:
+      enabled: true            # torch.compile ActionDiT in the default strategy
+      video_dit: true          # torch.compile Video DiT blocks (long warmup)
+      vae: false               # torch.compile VAE decoder; usually unnecessary when decode_video=false
+      torch_mode: null         # torch.compile mode for the default path
+      dynamic: true            # Preserve the previous broad-compile dynamic=True behavior
+    mot_loop:
+      torch_mode: reduce-overhead
+      dynamic: false           # Fixed-shape loop compile is the fast path
 
   prompt_embed_cache:
     maxsize: 32               # LRU cap for prompt -> text embeddings cache

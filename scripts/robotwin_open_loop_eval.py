@@ -35,6 +35,18 @@ EEF_GROUPS = {
 }
 
 
+def _disable_compile_in_cfg(deploy_cfg) -> None:
+    """Disable compile through the active nested compile-mode schema."""
+
+    OmegaConf.update(deploy_cfg, "optimization.compile.mode", "none", merge=True)
+
+
+def _compile_mode_from_cfg(cfg) -> str | None:
+    from openwam.model.compile_options import compile_mode
+
+    return compile_mode(OmegaConf.select(cfg, "optimization.compile", default=None), default=None)
+
+
 def _parse_indices(raw: str | None) -> list[int] | None:
     if not raw:
         return None
@@ -121,9 +133,7 @@ def _build_engine(
     if schedule_type is not None:
         OmegaConf.update(deploy_cfg, "inference.schedule_type", str(schedule_type), merge=False)
     if disable_compile:
-        OmegaConf.update(deploy_cfg, "optimization.compile.enabled", False, merge=True)
-        OmegaConf.update(deploy_cfg, "optimization.compile.video_dit", False, merge=True)
-        OmegaConf.update(deploy_cfg, "optimization.compile.vae", False, merge=True)
+        _disable_compile_in_cfg(deploy_cfg)
     cfg = _merge_with_training_cfg(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=cfg, architecture=architecture)
     return cfg, architecture, engine
@@ -188,7 +198,7 @@ def main() -> None:
         "[open-loop] engine ready: "
         f"denoise_steps={OmegaConf.select(cfg, 'inference.denoise_steps')} "
         f"schedule={OmegaConf.select(cfg, 'inference.schedule_type')} "
-        f"compile_enabled={OmegaConf.select(cfg, 'optimization.compile.enabled', default=None)}"
+        f"compile_mode={_compile_mode_from_cfg(cfg)}"
     )
 
     rows: list[dict[str, Any]] = []
@@ -280,7 +290,7 @@ def main() -> None:
         "inference_seed": args.inference_seed,
         "denoise_steps": int(OmegaConf.select(cfg, "inference.denoise_steps")),
         "schedule_type": str(OmegaConf.select(cfg, "inference.schedule_type")),
-        "compile_enabled": bool(OmegaConf.select(cfg, "optimization.compile.enabled", default=False)),
+        "compile_mode": _compile_mode_from_cfg(cfg),
         "summary": summary,
         "samples": rows,
     }

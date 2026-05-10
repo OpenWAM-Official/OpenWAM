@@ -27,6 +27,7 @@ import torch.nn as nn
 from einops import rearrange
 from torch import Tensor
 
+from openwam.model.compile_options import cfg_get, torch_compile_kwargs
 from openwam.model.video_backbone.adapter import BlockLoopState, VideoBackbone
 from openwam.model.video_backbone.wan.dit import modulate, rope_apply, sinusoidal_embedding_1d
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
@@ -478,6 +479,23 @@ class WanVideoBackbone(VideoBackbone):
         attention call. Used by :class:`MoTJointDriver` to pull video-side
         Q/K/V before the mixed attention. Pairs with :meth:`post_attn_at_layer`.
         """
+        q, k, v, post_tuple = self.pre_attn_at_layer_for_compile(layer_id, state)
+        residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_tuple
+        block = state.extras["dit"].blocks[layer_id]
+        post_state = {
+            "block": block,
+            "residual_x": residual_x,
+            "gate_msa": gate_msa,
+            "shift_mlp": shift_mlp,
+            "scale_mlp": scale_mlp,
+            "gate_mlp": gate_mlp,
+        }
+        return q, k, v, post_state
+
+    def pre_attn_at_layer_for_compile(
+        self, layer_id: int, state: BlockLoopState
+    ) -> Tuple[Tensor, Tensor, Tensor, tuple[Tensor, ...]]:
+        """Compile-friendly Wan pre-attention half using a tensor tuple post-state."""
         block = state.extras["dit"].blocks[layer_id]
 
         t_mod = state.t_mod
@@ -498,14 +516,7 @@ class WanVideoBackbone(VideoBackbone):
         q = rope_apply(q, state.freqs, sa.num_heads)
         k = rope_apply(k, state.freqs, sa.num_heads)
 
-        post_state = {
-            "block": block,
-            "residual_x": residual_x,
-            "gate_msa": gate_msa,
-            "shift_mlp": shift_mlp,
-            "scale_mlp": scale_mlp,
-            "gate_mlp": gate_mlp,
-        }
+        post_state = (residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         return q, k, v, post_state
 
     def post_attn_at_layer(
@@ -518,16 +529,31 @@ class WanVideoBackbone(VideoBackbone):
         for the *video* slice of the joint mixed attention; this method finishes
         applying the block and the standard post-block residuals.
         """
-        block = post_state["block"]
-        sa = block.self_attn
+        if isinstance(post_state, dict):
+            post_state = (
+                post_state["residual_x"],
+                post_state["gate_msa"],
+                post_state["shift_mlp"],
+                post_state["scale_mlp"],
+                post_state["gate_mlp"],
+            )
+        return self.post_attn_at_layer_for_compile(layer_id, state, attn_out, post_state)
 
-        x = block.gate(post_state["residual_x"], post_state["gate_msa"], sa.o(attn_out))
+    def post_attn_at_layer_for_compile(
+        self, layer_id: int, state: BlockLoopState, attn_out: Tensor, post_state: tuple[Tensor, ...]
+    ) -> BlockLoopState:
+        """Compile-friendly Wan post-attention half consuming a tensor tuple."""
+        block = state.extras["dit"].blocks[layer_id]
+        sa = block.self_attn
+        residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_state
+
+        x = block.gate(residual_x, gate_msa, sa.o(attn_out))
         context_mask = None
         if state.context_mask is not None:
             context_mask = state.context_mask.unsqueeze(1).expand(-1, x.shape[1], -1).unsqueeze(1)
         x = x + block.cross_attn(block.norm3(x), state.context, ctx_mask=context_mask)
-        mlp_input = modulate(block.norm2(x), post_state["shift_mlp"], post_state["scale_mlp"])
-        x = block.gate(x, post_state["gate_mlp"], block.ffn(mlp_input))
+        mlp_input = modulate(block.norm2(x), shift_mlp, scale_mlp)
+        x = block.gate(x, gate_mlp, block.ffn(mlp_input))
         state.x = x
 
         self._apply_post_block_residuals(layer_id, state)
@@ -1277,18 +1303,20 @@ class WanVideoBackbone(VideoBackbone):
             "image_encoder": "image_encoder",
         }
         for flag, submod_name in flag_to_submodule.items():
-            if not getattr(compile_cfg, flag, False):
+            if not cfg_get(compile_cfg, flag, False):
                 continue
             mod = getattr(self._pipe, submod_name, None)
             if mod is None:
                 continue
             if submod_name == "dit" and hasattr(mod, "blocks"):
+                compile_kwargs = torch_compile_kwargs(compile_cfg, default_mode="reduce-overhead")
                 for i, block in enumerate(mod.blocks):
-                    mod.blocks[i] = torch.compile(block, dynamic=True, mode="reduce-overhead")
-                logger.info("torch.compile enabled for %s blocks (%d)", submod_name, len(mod.blocks))
+                    mod.blocks[i] = torch.compile(block, **compile_kwargs)
+                logger.info("torch.compile enabled for %s blocks (%d, %s)", submod_name, len(mod.blocks), compile_kwargs)
             else:
-                setattr(self._pipe, submod_name, torch.compile(mod, dynamic=True))
-                logger.info("torch.compile enabled for %s", submod_name)
+                compile_kwargs = torch_compile_kwargs(compile_cfg)
+                setattr(self._pipe, submod_name, torch.compile(mod, **compile_kwargs))
+                logger.info("torch.compile enabled for %s (%s)", submod_name, compile_kwargs)
 
     @staticmethod
     def _build_pipe_from_components(

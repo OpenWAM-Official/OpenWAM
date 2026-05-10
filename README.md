@@ -231,9 +231,16 @@ optimization:
     cosine_threshold: 0.99
     max_skips: 3
   compile:
-    enabled: true        # torch.compile ActionDiT (~30s one-time JIT warmup)
-    video_dit: true      # torch.compile Video DiT blocks — long warmup (~5 min)
-    vae: false           # torch.compile VAE decoder (only effective when tiled=false)
+    mode: default        # none | default | mot_loop
+    default:
+      enabled: true      # torch.compile ActionDiT in the default strategy
+      video_dit: true    # torch.compile Video DiT blocks — long warmup (~5 min)
+      vae: false         # torch.compile VAE decoder (only effective when tiled=false)
+      torch_mode: null
+      dynamic: true
+    mot_loop:
+      torch_mode: reduce-overhead
+      dynamic: false     # fixed-shape MoT loop fast path
   prompt_embed_cache:
     maxsize: 32          # LRU cache for prompt -> text embeddings
 ```
@@ -250,6 +257,7 @@ bash scripts/deploy.sh /path/to/checkpoint_dir \
   --denoise-steps 10 \
   --schedule-type sync \
   --shift 5.0 \
+  --compile-mode mot_loop \
   --ckpt-name checkpoint_step_10000.safetensors
 ```
 
@@ -260,6 +268,7 @@ These flags map to:
 - `--device` → `device`
 - `--host` / `--ws-port` / `--http-port` → `server.*`
 - `--denoise-steps` / `--schedule-type` / `--shift` → `inference.*`
+- `--compile-mode` → `optimization.compile.mode` (`none`, `default`, or `mot_loop`)
 
 All of these overrides are optional; yaml values are used when a flag is not
 provided. Other deploy settings, including `optimization.decode_video`,

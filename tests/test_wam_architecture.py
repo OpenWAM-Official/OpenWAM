@@ -1,11 +1,61 @@
 """Tests for WAM Architecture registry and implementations."""
 
+import sys
+
 import pytest
 import torch
 
 
 def _action_context(ab, batch_size: int, seq_len: int = 4):
     return torch.randn(batch_size, seq_len, ab.text_dim), torch.ones(batch_size, seq_len, dtype=torch.bool)
+
+
+def _make_dual_system_self_attn_mot_fixture():
+    from openwam.model import build_architecture
+    from tests.test_openwam_trainer import _MockVideoBackbone
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "bridge_layers": (0, 1),
+    }
+    arch = build_architecture("dual_system_self_attn", cfg)
+    arch.video_backbone = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
+    driver = arch.build_mot_driver()
+    arch.eval()
+    return arch, driver
+
+
+def _dual_system_self_attn_mot_states(arch, seed: int):
+    from openwam.model.video_backbone.adapter import BlockLoopState
+
+    g = torch.Generator().manual_seed(seed)
+    actions = torch.randn(1, 3, 7, generator=g)
+    context = torch.randn(1, 4, arch.action_backbone.text_dim, generator=g)
+    context_mask = torch.ones(1, 4, dtype=torch.bool)
+    astate = arch.action_backbone.prepare_state(
+        actions,
+        torch.tensor([0.5]),
+        context=context,
+        context_mask=context_mask,
+    )
+    vstate = BlockLoopState(
+        x=torch.randn(1, 4, 32, generator=g),
+        t_mod=torch.zeros(1, 6, 32),
+        freqs=torch.zeros(4, 1, 1),
+        context=torch.randn(1, 4, 32, generator=g),
+        context_mask=torch.ones(1, 4, dtype=torch.bool),
+        f=4,
+        h=1,
+        w=1,
+        extras={},
+    )
+    return vstate, astate
 
 
 def test_architecture_module_layout_imports():
@@ -309,6 +359,31 @@ def test_action_self_attention_rope_breaks_permutation_equivariance():
     assert not torch.allclose(out_rope, out_plain, atol=1e-5)
 
 
+def test_action_flash_attention_backend_falls_back_to_sdpa_on_cpu(monkeypatch):
+    """Flash-style ActionDiT backends are CUDA-only; CPU unit tests need SDPA."""
+    import types
+
+    from openwam.model.action_backbone import components
+
+    def _cuda_only_flash_attn(*args, **kwargs):
+        raise AssertionError("flash_attn_func should not receive CPU tensors")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "flash_attn",
+        types.SimpleNamespace(flash_attn_func=_cuda_only_flash_attn),
+    )
+
+    fn = components._try_flash_attn_2()
+    assert fn is not None
+    q = torch.randn(1, 2, 3, 4)
+    k = torch.randn(1, 2, 3, 4)
+    v = torch.randn(1, 2, 3, 4)
+
+    out = fn(q, k, v)
+    assert out.shape == q.shape
+
+
 def test_action_dit_joint_cross_attn_uses_rope():
     """ActionDiT joint_cross_attn runs end-to-end with RoPE (no learned absolute PE)."""
     from openwam.model.action_backbone.dualsystem_dit import ActionDiT
@@ -359,6 +434,7 @@ def test_action_dit_joint_self_attn_uses_only_rope():
     # action) prefix that the attention sees.
     assert payload.action_freqs is not None
     assert payload.action_freqs.shape[0] == payload.x_action.shape[1]
+    assert payload.action_freqs.device == payload.x_action.device
 
 
 def test_dual_system_joint_self_attn_pre_post_attn_round_trip():
@@ -528,6 +604,226 @@ def test_dual_system_joint_self_attn_creates_dit_state():
     assert payload is not None
     assert payload.x_action.shape == (1, 5, 32)
     assert payload.action_freqs is not None
+
+
+def test_dual_system_mot_loop_compile_helper_matches_eager(monkeypatch):
+    """Feature-flagged MoT helper should preserve the eager joint-loop result."""
+    from omegaconf import OmegaConf
+
+    arch, driver = _make_dual_system_self_attn_mot_fixture()
+
+    compile_path_calls = []
+
+    def _v_pre_compile(layer_id, state):
+        q, k, v, post = arch.video_backbone.pre_attn_at_layer(layer_id, state)
+        compile_path_calls.append("v_pre")
+        return q, k, v, (post["residual"],)
+
+    def _v_post_compile(layer_id, state, attn_out, post_state):
+        compile_path_calls.append("v_post")
+        state.x = post_state[0] + attn_out
+        return state
+
+    arch.video_backbone.pre_attn_at_layer_for_compile = _v_pre_compile
+    arch.video_backbone.post_attn_at_layer_for_compile = _v_post_compile
+
+    vstate_eager, astate_eager = _dual_system_self_attn_mot_states(arch, 11)
+    with torch.no_grad():
+        vstate_eager, astate_eager = driver.run_joint_loop(vstate_eager, astate_eager)
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "default": {"enabled": False, "video_dit": False, "vae": False},
+                "mot_loop": {"enabled": True, "torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    assert arch._compiled_mot_loop is not None
+
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    vstate_compiled, astate_compiled = _dual_system_self_attn_mot_states(arch, 11)
+    with torch.no_grad():
+        vstate_compiled, astate_compiled = arch._compiled_mot_loop.run(vstate_compiled, astate_compiled)
+
+    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
+    assert compile_path_calls == ["v_pre", "v_post", "v_pre", "v_post"]
+    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
+
+
+def test_dual_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
+    """Runtime torch.compile failures should disable the MoT fast path and continue eager."""
+    from omegaconf import OmegaConf
+
+    arch, driver = _make_dual_system_self_attn_mot_fixture()
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "default": {"enabled": False, "video_dit": False, "vae": False},
+                "mot_loop": {"enabled": True, "torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_loop = arch._compiled_mot_loop
+    assert compiled_loop is not None
+
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+
+        def _broken(*args, **kwargs):
+            raise RuntimeError("inductor unavailable")
+
+        return _broken
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    vstate_eager, astate_eager = _dual_system_self_attn_mot_states(arch, 17)
+    with torch.no_grad():
+        vstate_eager, astate_eager = driver.run_joint_loop(vstate_eager, astate_eager)
+
+    vstate_fallback, astate_fallback = _dual_system_self_attn_mot_states(arch, 17)
+    with torch.no_grad():
+        vstate_fallback, astate_fallback = compiled_loop.run(vstate_fallback, astate_fallback)
+
+    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
+    assert compiled_loop._compile_disabled is True
+    assert torch.allclose(vstate_fallback.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(astate_fallback.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
+
+    vstate_eager2, astate_eager2 = _dual_system_self_attn_mot_states(arch, 23)
+    with torch.no_grad():
+        vstate_eager2, astate_eager2 = driver.run_joint_loop(vstate_eager2, astate_eager2)
+
+    vstate_fallback2, astate_fallback2 = _dual_system_self_attn_mot_states(arch, 23)
+    with torch.no_grad():
+        vstate_fallback2, astate_fallback2 = compiled_loop.run(vstate_fallback2, astate_fallback2)
+
+    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
+    assert torch.allclose(vstate_fallback2.x, vstate_eager2.x, atol=1e-6)
+    assert torch.allclose(astate_fallback2.payload.x_action, astate_eager2.payload.x_action, atol=1e-6)
+
+
+def test_dual_system_mot_loop_bad_request_does_not_disable_compile(monkeypatch):
+    """Input errors should preserve eager semantics without poisoning future compile calls."""
+    from omegaconf import OmegaConf
+
+    arch, driver = _make_dual_system_self_attn_mot_fixture()
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "default": {"enabled": False, "video_dit": False, "vae": False},
+                "mot_loop": {"enabled": True, "torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_loop = arch._compiled_mot_loop
+    assert compiled_loop is not None
+
+    compile_calls = []
+    compiled_invocations = 0
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+
+        def _wrapped(*args, **kwargs):
+            nonlocal compiled_invocations
+            compiled_invocations += 1
+            return fn(*args, **kwargs)
+
+        return _wrapped
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    vstate_ok, astate_ok = _dual_system_self_attn_mot_states(arch, 29)
+    with torch.no_grad():
+        compiled_loop.run(vstate_ok, astate_ok)
+
+    vstate_bad, astate_bad = _dual_system_self_attn_mot_states(arch, 31)
+    vstate_bad.x = vstate_bad.x.to(torch.bfloat16)
+    with pytest.raises(RuntimeError, match="dtype mismatch"):
+        with torch.no_grad():
+            compiled_loop.run(vstate_bad, astate_bad)
+
+    assert compiled_loop._compile_disabled is False
+
+    vstate_eager, astate_eager = _dual_system_self_attn_mot_states(arch, 37)
+    with torch.no_grad():
+        vstate_eager, astate_eager = driver.run_joint_loop(vstate_eager, astate_eager)
+
+    vstate_compiled, astate_compiled = _dual_system_self_attn_mot_states(arch, 37)
+    with torch.no_grad():
+        vstate_compiled, astate_compiled = compiled_loop.run(vstate_compiled, astate_compiled)
+
+    assert compile_calls == [
+        {"dynamic": False, "mode": "reduce-overhead"},
+        {"dynamic": False, "mode": "reduce-overhead"},
+    ]
+    assert compiled_invocations == 3
+    assert compiled_loop._compile_disabled is False
+    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
+
+
+def test_dual_system_mot_loop_compile_setup_bad_request_does_not_disable_compile(monkeypatch):
+    """Compile setup errors on invalid inputs should not poison later valid requests."""
+    from omegaconf import OmegaConf
+
+    arch, driver = _make_dual_system_self_attn_mot_fixture()
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "default": {"enabled": False, "video_dit": False, "vae": False},
+                "mot_loop": {"enabled": True, "torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_loop = arch._compiled_mot_loop
+    assert compiled_loop is not None
+
+    compile_calls = 0
+
+    def _fake_compile(fn, **kwargs):
+        nonlocal compile_calls
+        compile_calls += 1
+        if compile_calls == 1:
+            raise RuntimeError("compile setup unavailable")
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    vstate_bad, astate_bad = _dual_system_self_attn_mot_states(arch, 41)
+    vstate_bad.x = vstate_bad.x.to(torch.bfloat16)
+    with pytest.raises(RuntimeError, match="dtype mismatch"):
+        with torch.no_grad():
+            compiled_loop.run(vstate_bad, astate_bad)
+
+    assert compiled_loop._compile_disabled is False
+
+    vstate_eager, astate_eager = _dual_system_self_attn_mot_states(arch, 43)
+    with torch.no_grad():
+        vstate_eager, astate_eager = driver.run_joint_loop(vstate_eager, astate_eager)
+
+    vstate_compiled, astate_compiled = _dual_system_self_attn_mot_states(arch, 43)
+    with torch.no_grad():
+        vstate_compiled, astate_compiled = compiled_loop.run(vstate_compiled, astate_compiled)
+
+    assert compile_calls == 2
+    assert compiled_loop._compile_disabled is False
+    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
 
 
 def test_moe_uses_expert_layers():

@@ -642,7 +642,7 @@ class ActionDiT(ActionBackbone):
         timestep = self._prepare_timestep(timestep, noisy_actions.shape[0])
         t = self.time_embedding(timestep)
         t_mod = self.time_projection(t)
-        action_freqs = self._get_rope_freqs(x.shape[1])
+        action_freqs = self._get_rope_freqs(x.shape[1]).to(device=x.device)
 
         action_context = None
         action_context_mask = None
@@ -681,6 +681,23 @@ class ActionDiT(ActionBackbone):
         the layout produced by Wan ``self_attn.q/k/v`` after RMSNorm and RoPE
         — ready to concatenate with the video Q/K/V).
         """
+        q_out, k_out, v_out, post_tuple = self.pre_attn_at_layer_for_compile(layer_id, astate)
+        residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_tuple
+        block: SelfAttnActionDiTBlock = self.blocks[layer_id]
+        post_state = {
+            "block": block,
+            "residual_x": residual_x,
+            "gate_msa": gate_msa,
+            "shift_mlp": shift_mlp,
+            "scale_mlp": scale_mlp,
+            "gate_mlp": gate_mlp,
+        }
+        return q_out, k_out, v_out, post_state
+
+    def pre_attn_at_layer_for_compile(
+        self, layer_id: int, astate: "ActionState"
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
+        """Compile-friendly pre-attention half using a tensor tuple post-state."""
         payload: ActionDiTState = astate.payload
         block: SelfAttnActionDiTBlock = self.blocks[layer_id]
 
@@ -708,14 +725,7 @@ class ActionDiT(ActionBackbone):
         k_out = rearrange(k, "b n s d -> b s (n d)", n=self._num_heads)
         v_out = rearrange(v, "b n s d -> b s (n d)", n=self._num_heads)
 
-        post_state = {
-            "block": block,
-            "residual_x": residual_x,
-            "gate_msa": gate_msa,
-            "shift_mlp": shift_mlp,
-            "scale_mlp": scale_mlp,
-            "gate_mlp": gate_mlp,
-        }
+        post_state = (residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         return q_out, k_out, v_out, post_state
 
     def post_attn_at_layer(
@@ -733,10 +743,29 @@ class ActionDiT(ActionBackbone):
         Language/proprio conditioning uses the action expert's independent
         ``text_embedding`` stored in :class:`ActionDiTState`.
         """
-        payload: ActionDiTState = astate.payload
-        block: SelfAttnActionDiTBlock = post_state["block"]
+        if isinstance(post_state, dict):
+            post_state = (
+                post_state["residual_x"],
+                post_state["gate_msa"],
+                post_state["shift_mlp"],
+                post_state["scale_mlp"],
+                post_state["gate_mlp"],
+            )
+        return self.post_attn_at_layer_for_compile(layer_id, astate, attn_out, post_state)
 
-        x = block.gate(post_state["residual_x"], post_state["gate_msa"], block.self_attn.o(attn_out))
+    def post_attn_at_layer_for_compile(
+        self,
+        layer_id: int,
+        astate: "ActionState",
+        attn_out: torch.Tensor,
+        post_state: tuple[torch.Tensor, ...],
+    ) -> "ActionState":
+        """Compile-friendly post-attention half consuming a tensor tuple."""
+        payload: ActionDiTState = astate.payload
+        block: SelfAttnActionDiTBlock = self.blocks[layer_id]
+        residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_state
+
+        x = block.gate(residual_x, gate_msa, block.self_attn.o(attn_out))
         if payload.context is not None:
             text_mask = payload.context_mask
             if text_mask is not None:
@@ -748,8 +777,8 @@ class ActionDiT(ActionBackbone):
                         f"or broadcastable [B, heads, T_action, L], got {tuple(text_mask.shape)}"
                     )
             x = x + block.cross_attn(block.context_attn_norm(x), payload.context, ctx_mask=text_mask)
-        mlp_input = block.ffn_norm(x) * (1 + post_state["scale_mlp"]) + post_state["shift_mlp"]
-        x = block.gate(x, post_state["gate_mlp"], block.ffn(mlp_input))
+        mlp_input = block.ffn_norm(x) * (1 + scale_mlp) + shift_mlp
+        x = block.gate(x, gate_mlp, block.ffn(mlp_input))
 
         payload.x_action = x
         return astate

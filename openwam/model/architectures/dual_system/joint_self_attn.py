@@ -19,8 +19,10 @@ from torch import Tensor
 
 from openwam.model.action_backbone.dualsystem_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
+from openwam.model.architectures.dual_system.mot_compile import CompiledMoTLoop
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
+from openwam.model.compile_options import mot_loop_compile_cfg, section_enabled
 from openwam.utils import resolve_bridge_layers
 
 
@@ -38,6 +40,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         super().__init__(cfg)
         self._mot_driver: MoTJointDriver | None = None
         self._mot_driver_kwargs: dict = {}
+        self._compiled_mot_loop: CompiledMoTLoop | None = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -114,6 +117,18 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         """The MoT joint-attention driver (None if the architecture wasn't fully built)."""
         return self._mot_driver
 
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Apply default compile wrappers and optional MoT-loop compile."""
+        super().apply_compile_optimizations(compile_cfg)
+        mot_cfg = mot_loop_compile_cfg(compile_cfg)
+        if section_enabled(mot_cfg, default=False):
+            driver = self._mot_driver
+            if driver is None:
+                driver = self.build_mot_driver()
+            self._compiled_mot_loop = CompiledMoTLoop(driver, mot_cfg)
+        else:
+            self._compiled_mot_loop = None
+
     def forward(
         self,
         noisy_actions: Optional[Tensor],
@@ -162,12 +177,21 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
-        vstate, astate = driver.run_joint_loop(
+        compiled_loop = self._compiled_mot_loop
+        if compiled_loop is not None and compiled_loop.can_run(
             vstate,
             astate,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        )
+        ):
+            vstate, astate = compiled_loop.run(vstate, astate)
+        else:
+            vstate, astate = driver.run_joint_loop(
+                vstate,
+                astate,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            )
         return vb.finalize(vstate), ab.extract_prediction(astate)
 
 

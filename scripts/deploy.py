@@ -13,6 +13,7 @@ Inference overrides (all optional; yaml values used when absent):
   --denoise-steps N       Denoising step count
   --schedule-type TYPE    Schedule type: sync | video_leading | cascade | decoupled_flash | decoupled_asymmetric
   --shift SHIFT           Flow-matching shift parameter
+  --compile-mode MODE     Compile strategy: none | default | mot_loop
 """
 
 import argparse
@@ -25,6 +26,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
 
 _DEPLOY_CFG_PATH = PROJECT_ROOT / "configs" / "deploy.yaml"
+_COMPILE_MODES = ("none", "default", "mot_loop")
+
+
+def _normalize_compile_mode(value: str) -> str:
+    """Normalize the public compile-mode spelling."""
+    mode = str(value).strip().lower().replace("-", "_")
+    if mode not in _COMPILE_MODES:
+        raise ValueError(f"Unknown compile mode '{value}'. Choose from: {', '.join(_COMPILE_MODES)}")
+    return mode
 
 
 def _infer_video_num_frames(dl) -> int:
@@ -52,6 +62,9 @@ def _load_deploy_config():
         # Strip the Hydra defaults list — it is not resolved here.
         if "defaults" in cfg:
             OmegaConf.update(cfg, "defaults", OmegaConf.create([]), merge=False)
+        compile_mode = OmegaConf.select(cfg, "optimization.compile.mode", default=None)
+        if compile_mode is not None:
+            OmegaConf.update(cfg, "optimization.compile.mode", _normalize_compile_mode(compile_mode), merge=False)
         return cfg
     return OmegaConf.create({})
 
@@ -77,6 +90,10 @@ def _apply_cli_overrides(deploy_cfg, args):
         OmegaConf.update(deploy_cfg, "inference.schedule_type", args.schedule_type, merge=False)
     if args.shift is not None:
         OmegaConf.update(deploy_cfg, "inference.shift", args.shift, merge=False)
+
+    compile_mode = getattr(args, "compile_mode", None)
+    if compile_mode is not None:
+        OmegaConf.update(deploy_cfg, "optimization.compile.mode", _normalize_compile_mode(compile_mode), merge=False)
 
     return deploy_cfg
 
@@ -170,6 +187,12 @@ def main():
     )
     parser.add_argument("--schedule-type", type=str, default=None, dest="schedule_type", help="Override schedule type")
     parser.add_argument("--shift", type=float, default=None, help="Override flow-matching shift")
+    parser.add_argument(
+        "--compile-mode",
+        choices=_COMPILE_MODES,
+        default=None,
+        help="Override compile strategy: none, default, or mot_loop",
+    )
     # Mock mode: no weights or GPU needed
     parser.add_argument(
         "--mock", action="store_true", help="Run in mock mode (random actions, no model weights required)"
