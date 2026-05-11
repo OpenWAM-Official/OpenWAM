@@ -484,11 +484,26 @@ class RoboTwinDataset(BaseActionDataset):
         # ---- Exhaustive window enumeration ----
         self._window_index = []  # List of (episode_idx, start_frame)
         for ep_idx, ep_len in enumerate(self._episode_lengths):
-            max_start = max(0, ep_len - self._raw_window_len)
+            if ep_len < 2:
+                continue
+            if self.split == "val":
+                # Keep validation loss comparable to the historical full-window
+                # distribution.
+                max_start = max(0, ep_len - self._raw_window_len)
+            else:
+                # FastWAM-aligned tail semantics, constrained to starts with at
+                # least one valid future action label under OpenWAM's t+1 action
+                # alignment. Tail windows are padded and masked out in the loss.
+                max_start = max(0, ep_len - 2)
             for start in range(0, max_start + 1, self.window_stride):
                 self._window_index.append((ep_idx, start))
         if repeat > 1:
             self._window_index = self._window_index * repeat
+        if not self._window_index:
+            raise ValueError(
+                "No valid RoboTwin windows with at least one action label were selected "
+                f"for split='{split}'. Check episode lengths and val_ratio."
+            )
         print(
             f"  Exhaustive windows: {len(self._window_index)} "
             f"(window_stride={self.window_stride}, repeat={repeat}, "
@@ -605,8 +620,13 @@ class RoboTwinDataset(BaseActionDataset):
         if split == "val" and num_val_samples > 0:
             val_rng = random.Random(seed + 1)
             self._val_samples = []
+            eligible_ep_indices = [i for i, ep_len in enumerate(self._episode_lengths) if ep_len >= 2]
+            if not eligible_ep_indices:
+                raise ValueError(
+                    "No validation episodes have at least two frames, so no sample can contain a valid action label."
+                )
             for _ in range(num_val_samples):
-                ep_idx = val_rng.randint(0, len(self._episode_files) - 1)
+                ep_idx = eligible_ep_indices[val_rng.randint(0, len(eligible_ep_indices) - 1)]
                 ep_len = self._episode_lengths[ep_idx]
                 max_start = max(0, ep_len - self._raw_window_len)
                 start_idx = val_rng.randint(0, max_start)
@@ -781,6 +801,11 @@ class RoboTwinDataset(BaseActionDataset):
 
         if actual_raw_len <= 0:
             raise IndexError(f"Window [{start}, {raw_end}) has no frames (ep_len={ep_len}).")
+        if actual_raw_len < 2:
+            raise IndexError(
+                f"Window [{start}, {raw_end}) has no valid action label "
+                f"(actual_raw_len={actual_raw_len}, ep_len={ep_len})."
+            )
 
         with h5py.File(path, "r") as f:
             if self.multiview:
@@ -820,12 +845,13 @@ class RoboTwinDataset(BaseActionDataset):
         )
         proprio_mask = torch.tensor([0 < actual_raw_len], dtype=torch.bool)
 
-        # Step-0-only by design: drop "hasn't-started-yet" windows, not mid-episode pauses.
-        if self.num_action_steps > 0:
+        # Step-0-only by design: drop "hasn't-started-yet" windows, not
+        # tail windows where the first action label is padding.
+        if self.num_action_steps > 0 and bool(action_mask[0]):
             first_delta_max = float(np.max(np.abs(action_np[0] - proprio_np[0])))
+            is_static = first_delta_max < self._static_segment_threshold
         else:
-            first_delta_max = 0.0
-        is_static = first_delta_max < self._static_segment_threshold
+            is_static = False
 
         prompt = self._get_prompt(ep_idx)
 

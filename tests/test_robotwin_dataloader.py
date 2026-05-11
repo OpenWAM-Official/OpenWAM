@@ -153,8 +153,8 @@ def test_short_episode_pads_and_masks():
             normalize_mode=None,
         )
 
-        # One window starting at 0 (max_start = max(0, 10 - 17) = 0)
-        assert len(ds) == 1
+        # Every start must include at least one real future action label.
+        assert len(ds) == 9
         sample = ds[0]
 
         # Shapes are still the full horizon regardless of episode length
@@ -171,6 +171,251 @@ def test_short_episode_pads_and_masks():
         last_real = sample["action"][8]
         for t in range(9, 16):
             assert (sample["action"][t] == last_real).all(), f"padded step {t} does not equal last real action"
+
+
+def test_long_episode_tail_windows_are_included_and_padded():
+    """Long episodes must include tail starts, not only full windows.
+
+    For T=20, num_frames=17, every start in 0..18 is valid. A start near the
+    end should be padded while still containing at least one real action label.
+    """
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=17,
+            video_stride=4,
+            height=32,
+            width=32,
+            action_mode="joint",
+            val_ratio=0.0,
+            filter_static_segments=False,
+            normalize_mode=None,
+        )
+
+        assert len(ds) == 19
+        assert ds._window_index[:3] == [(0, 0), (0, 1), (0, 2)]
+        assert ds._window_index[-1] == (0, 18)
+
+        # start=15 leaves raw frames 15..19 available. Actions are frames
+        # 16..19 (4 valid steps), then the last action repeats.
+        sample = ds[15]
+        mask = sample["action_mask"].bool().tolist()
+        assert mask[:4] == [True] * 4
+        assert mask[4:] == [False] * 12
+
+        video_mask = sample["video_mask"].bool().tolist()
+        assert video_mask == [True, True, False, False, False]
+
+        last_real = sample["action"][3]
+        for t in range(4, 16):
+            assert (sample["action"][t] == last_real).all(), f"padded step {t} does not equal last real action"
+
+
+def test_tail_windows_always_have_at_least_one_valid_action():
+    """The loader must not enumerate samples with fully padded action labels."""
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=17,
+            video_stride=4,
+            height=32,
+            width=32,
+            action_mode="joint",
+            val_ratio=0.0,
+            normalize_mode=None,
+        )
+
+        assert ds._window_index[-1] == (0, 18)
+        sample = ds[len(ds) - 1]
+        assert sample["start_frame"] == 18
+        assert sample["action_mask"].tolist() == [True] + [False] * 15
+
+
+def test_single_frame_episode_has_no_valid_action_window():
+    """A sample must contain at least one future action label."""
+    import pytest
+
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=1, seed=0)
+
+        with pytest.raises(ValueError, match="at least one action label"):
+            RoboTwinDataset(
+                data_root=tmpdir,
+                num_frames=17,
+                video_stride=4,
+                height=32,
+                width=32,
+                action_mode="joint",
+                val_ratio=0.0,
+                normalize_mode=None,
+            )
+
+
+def test_build_sample_rejects_window_without_valid_action_label():
+    """Internal sample construction also enforces the action-label invariant."""
+    import pytest
+
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=17,
+            video_stride=4,
+            height=32,
+            width=32,
+            action_mode="joint",
+            val_ratio=0.0,
+            filter_static_segments=False,
+            normalize_mode=None,
+        )
+
+        with pytest.raises(IndexError, match="no valid action label"):
+            ds._build_sample(0, 19)
+
+
+def test_val_fixed_samples_use_full_window_start_range():
+    """Fixed val sampling keeps the historical full-window distribution."""
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=17,
+            video_stride=4,
+            height=32,
+            width=32,
+            split="val",
+            val_ratio=1.0,
+            num_val_samples=100,
+            action_mode="joint",
+            normalize_mode=None,
+        )
+
+        starts = [start for _ep_idx, start in ds._val_samples]
+        assert starts
+        assert max(starts) <= 3
+
+
+def test_val_exhaustive_windows_use_full_window_start_range():
+    """Uncapped val sampling should match the fixed-sample val semantics."""
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=17,
+            video_stride=4,
+            height=32,
+            width=32,
+            split="val",
+            val_ratio=1.0,
+            num_val_samples=0,
+            action_mode="joint",
+            normalize_mode=None,
+        )
+
+        assert ds._window_index == [(0, 0), (0, 1), (0, 2), (0, 3)]
+
+
+def test_tail_masks_flow_through_prepare_inputs_and_loss():
+    """Dataset tail masks must become loss masks and suppress padded errors."""
+    import torch
+
+    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from tests.test_openwam_trainer import _make_tiny_arch
+
+    class _UnitScheduler:
+        def training_weight(self, timestep_ids):
+            return torch.ones_like(timestep_ids, dtype=torch.float32)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
+
+        ds = RoboTwinDataset(
+            data_root=tmpdir,
+            num_frames=17,
+            video_stride=4,
+            height=32,
+            width=32,
+            action_mode="joint",
+            val_ratio=0.0,
+            filter_static_segments=False,
+            normalize_mode=None,
+        )
+        arch = _make_tiny_arch()
+
+        # start=15 has four real action labels (frames 16..19) followed by pad.
+        partial = ds[15]
+        inputs = arch.prepare_inputs(partial)
+        expected_action_is_pad = torch.tensor([[False] * 4 + [True] * 12])
+        assert torch.equal(inputs["action_is_pad"].cpu(), expected_action_is_pad)
+        # Video frames are [15,19,pad,pad,pad]. The single tail latent group
+        # contains frame 19, so it is not considered padded.
+        assert torch.equal(inputs["video_is_pad"].cpu(), torch.tensor([[False]]))
+
+        target_action = torch.zeros(1, 16, 2)
+        pred_action = torch.zeros_like(target_action)
+        pred_action[:, :4] = 0.5
+        pred_action[:, 4:] = 1000.0
+        action_loss = arch._compute_action_loss(
+            pred_action,
+            target_action,
+            torch.tensor([0]),
+            _UnitScheduler(),
+            inputs,
+            device="cpu",
+        )
+        assert abs(action_loss.item() - 0.25) < 1e-5
+
+        # Last valid start has one real action label and then padding. Padded
+        # action errors are ignored, while the one valid step still contributes.
+        last = ds[18]
+        last_inputs = arch.prepare_inputs(last)
+        assert torch.equal(last_inputs["action_is_pad"].cpu(), torch.tensor([[False] + [True] * 15]))
+        assert torch.equal(last_inputs["video_is_pad"].cpu(), torch.tensor([[True]]))
+
+        pred_action = torch.full((1, 16, 2), 1000.0)
+        pred_action[:, :1] = 0.5
+        target_action = torch.zeros_like(pred_action)
+        action_loss = arch._compute_action_loss(
+            pred_action,
+            target_action,
+            torch.tensor([0]),
+            _UnitScheduler(),
+            last_inputs,
+            device="cpu",
+        )
+        assert abs(action_loss.item() - 0.25) < 1e-5
+
+        video_inputs = dict(last_inputs)
+        video_inputs["first_frame_latents"] = torch.zeros(1, 2, 1, 1, 1)
+        pred_video = torch.full((1, 2, 2, 1, 1), 1000.0)
+        target_video = torch.zeros_like(pred_video)
+        video_loss = arch._compute_video_loss(
+            pred_video,
+            target_video,
+            torch.tensor([0]),
+            video_inputs,
+            device="cpu",
+        )
+        assert video_loss.item() == 0.0
 
 
 def test_video_stride_does_not_affect_action_length():
