@@ -25,10 +25,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
 
-from scripts.robotwin_open_loop_eval import (  # noqa: E402
-    _build_dataset_from_checkpoint_cfg,
-    _parse_indices,
-    _sample_indices,
+from scripts.robotwin_eval_utils import (  # noqa: E402
+    build_dataset_from_checkpoint_cfg,
+    parse_indices,
+    sample_indices,
 )
 
 
@@ -85,7 +85,7 @@ def main() -> None:
     )
 
     print("[teacher] building RoboTwin dataset from checkpoint config...")
-    dataset = _build_dataset_from_checkpoint_cfg(
+    dataset = build_dataset_from_checkpoint_cfg(
         ckpt_dir,
         ckpt_cfg,
         split=args.split,
@@ -93,7 +93,7 @@ def main() -> None:
         task_name=args.task_name,
         variant=args.variant,
     )
-    indices = _sample_indices(len(dataset), args.num_samples, args.sample_seed, _parse_indices(args.indices))
+    indices = sample_indices(len(dataset), args.num_samples, args.sample_seed, parse_indices(args.indices))
     print(f"[teacher] dataset_len={len(dataset)} selected_indices={indices}")
 
     print("[teacher] loading architecture...")

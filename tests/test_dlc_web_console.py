@@ -1,0 +1,287 @@
+import json
+from types import SimpleNamespace
+
+
+def load_console_module():
+    import benchmarks.web_control as module
+
+    return module
+
+
+def load_compat_module():
+    import benchmarks.robotwin.dlc_web_console as module
+
+    return module
+
+
+def make_builder(module, root):
+    return module.SnapshotBuilder(
+        root,
+        max_logs=100,
+        state_tail_bytes=100_000,
+        max_task_log_bytes=100_000,
+        max_error_snippets=10,
+    )
+
+
+def test_dlc_snapshot_merges_summary_queue_and_success_rates(tmp_path):
+    console = load_console_module()
+    root = tmp_path
+    (root / "queue" / "pending").mkdir(parents=True)
+    (root / "queue" / "claimed").mkdir(parents=True)
+    (root / "node0" / "worker0").mkdir(parents=True)
+    (root / "node0" / "servers").mkdir(parents=True)
+
+    (root / "run.env").write_text(
+        "run_id=smoke\n"
+        "policy_name=openwam\n"
+        "mode=all\n"
+        "nnodes=1\n"
+        "num_workers_per_node=1\n"
+        "total_jobs=3\n"
+        "tasks=adjust_bottle beat_block_hammer\n",
+        encoding="utf-8",
+    )
+    (root / ".queue_ready").touch()
+    (root / "queue" / "pending" / "000001_beat_block_hammer_demo_clean.job").write_text(
+        "task=beat_block_hammer\nmode=demo_clean\n",
+        encoding="utf-8",
+    )
+    (root / "queue" / "claimed" / "000002_beat_block_hammer_demo_randomized.job.node0.worker0").write_text(
+        "task=beat_block_hammer\nmode=demo_randomized\n",
+        encoding="utf-8",
+    )
+    task_log = root / "node0" / "worker0" / "adjust_bottle_demo_clean.log"
+    task_log.write_text("start\nSuccess rate: 13/20 => 65.00%\n", encoding="utf-8")
+    (root / "node0" / "worker0" / "beat_block_hammer_demo_randomized.log").write_text(
+        "running\n",
+        encoding="utf-8",
+    )
+    (root / "node0" / "worker0" / "worker.log").write_text("started\n", encoding="utf-8")
+    (root / "summary.tsv").write_text(
+        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
+        f"adjust_bottle\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
+        encoding="utf-8",
+    )
+
+    snapshot = make_builder(console, root).build()
+
+    assert snapshot["progress"]["total"] == 3
+    assert snapshot["progress"]["ok"] == 1
+    assert snapshot["progress"]["running"] == 1
+    assert snapshot["progress"]["pending"] == 1
+    assert snapshot["rates"]["weighted_success"] == 13
+    assert snapshot["rates"]["weighted_total"] == 20
+    assert snapshot["rates"]["weighted_success_rate"] == 65.0
+    assert len(snapshot["jobs"]) == 3
+    assert any(job["status"] == "running" and job["log"].endswith("beat_block_hammer_demo_randomized.log") for job in snapshot["jobs"])
+    assert snapshot["nodes"][0]["workers"][0]["running"] == 1
+
+
+def test_dlc_snapshot_falls_back_to_worker_files_without_summary(tmp_path):
+    console = load_console_module()
+    root = tmp_path
+    worker_dir = root / "worker0"
+    worker_dir.mkdir()
+    (root / ".queue.txt").write_text("task_b|demo_clean\n", encoding="utf-8")
+    (root / "run.env").write_text(
+        "run_id=legacy\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=2\ntasks=task_a task_b\n",
+        encoding="utf-8",
+    )
+    (worker_dir / "finished.txt").write_text("task_a|demo_clean\n", encoding="utf-8")
+    (worker_dir / "worker.log").write_text("done task_a\n", encoding="utf-8")
+    (worker_dir / "task_a_demo_clean.log").write_text(
+        "Success rate: 4/5 => 80.00%\n",
+        encoding="utf-8",
+    )
+
+    snapshot = make_builder(console, root).build()
+
+    assert snapshot["summary"]["exists"] is False
+    assert snapshot["progress"]["ok"] == 1
+    assert snapshot["progress"]["pending"] == 1
+    assert snapshot["queue"]["pending_count"] == 1
+    assert snapshot["rates"]["weighted_success_rate"] == 80.0
+    assert {job["status"] for job in snapshot["jobs"]} == {"ok", "pending"}
+
+
+def test_dlc_snapshot_collects_failure_snippets_and_csv_rows(tmp_path):
+    console = load_console_module()
+    root = tmp_path
+    worker_dir = root / "node0" / "worker0"
+    worker_dir.mkdir(parents=True)
+    (root / "run.env").write_text(
+        "run_id=fail\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=1\ntasks=bad_task\n",
+        encoding="utf-8",
+    )
+    task_log = worker_dir / "bad_task_demo_clean.log"
+    task_log.write_text(
+        "boot\nTraceback (most recent call last):\nRuntimeError: CUDA out of memory\n",
+        encoding="utf-8",
+    )
+    (root / "summary.tsv").write_text(
+        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
+        f"bad_task\tdemo_clean\t0\t0\tfailed\t137\t{task_log}\n",
+        encoding="utf-8",
+    )
+
+    builder = make_builder(console, root)
+    snapshot = builder.build()
+    rows = builder.build_results_rows()
+
+    assert snapshot["progress"]["failed"] == 1
+    assert "CUDA out of memory" in snapshot["failures"][0]["snippet"]
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["exit_code"] == "137"
+
+
+def test_dlc_snapshot_does_not_read_failure_snippet_outside_root(tmp_path):
+    console = load_console_module()
+    root = tmp_path / "logs"
+    root.mkdir()
+    outside = tmp_path / "outside.log"
+    outside.write_text("secret should not be exposed\n", encoding="utf-8")
+    (root / "run.env").write_text(
+        "run_id=fail\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=1\ntasks=bad_task\n",
+        encoding="utf-8",
+    )
+    (root / "summary.tsv").write_text(
+        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
+        f"bad_task\tdemo_clean\t0\t0\tfailed\t1\t{outside}\n",
+        encoding="utf-8",
+    )
+
+    snapshot = make_builder(console, root).build()
+
+    assert snapshot["failures"][0]["log"] == str(outside)
+    assert snapshot["failures"][0]["snippet"] == ""
+    assert "secret should not be exposed" not in json.dumps(snapshot)
+
+
+def test_web_control_auto_detects_robotwin_and_compat_exports_builder(tmp_path):
+    console = load_console_module()
+    compat = load_compat_module()
+    root = tmp_path
+    (root / "run.env").write_text(
+        "run_id=detect\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=0\ntasks=\n",
+        encoding="utf-8",
+    )
+
+    adapter = console.create_adapter(
+        root,
+        "auto",
+        max_logs=100,
+        state_tail_bytes=100_000,
+        max_task_log_bytes=100_000,
+        max_error_snippets=10,
+    )
+
+    assert console.detect_benchmark(root) == "robotwin"
+    assert isinstance(adapter, console.SnapshotBuilder)
+    assert compat.SnapshotBuilder is console.SnapshotBuilder
+    assert adapter.build_state()["benchmark"] == "robotwin"
+
+
+def test_generic_adapter_lists_logs_and_csv_rows(tmp_path):
+    console = load_console_module()
+    root = tmp_path
+    log_path = root / "plain.log"
+    log_path.write_text("hello\nworld\n", encoding="utf-8")
+
+    adapter = console.create_adapter(
+        root,
+        "generic",
+        max_logs=100,
+        state_tail_bytes=100_000,
+        max_task_log_bytes=100_000,
+        max_error_snippets=10,
+    )
+    state = adapter.build_state()
+    rows = adapter.build_results_rows()
+
+    assert state["benchmark"] == "generic"
+    assert state["progress"]["total"] == 1
+    assert state["logs"][0]["rel"] == "plain.log"
+    assert rows[0]["log_path"] == "plain.log"
+
+
+def test_resolve_requested_file_blocks_path_traversal(tmp_path):
+    console = load_console_module()
+    root = tmp_path / "logs"
+    root.mkdir()
+    (root / "safe.log").write_text("ok\n", encoding="utf-8")
+    outside = tmp_path / "outside.log"
+    outside.write_text("secret\n", encoding="utf-8")
+
+    assert console.resolve_requested_file(root, "safe.log").name == "safe.log"
+    try:
+        console.resolve_requested_file(root, "../outside.log")
+    except ValueError as exc:
+        assert "inside log_dir" in str(exc)
+    else:
+        raise AssertionError("path traversal should be rejected")
+
+
+def test_http_handler_serves_state_tail_and_csv(tmp_path):
+    console = load_console_module()
+    root = tmp_path
+    (root / "plain.log").write_text("alpha\nbeta\n", encoding="utf-8")
+    handler = console.build_handler(
+        root,
+        benchmark="generic",
+        tail_bytes=100,
+        state_tail_bytes=100_000,
+        max_logs=100,
+        max_task_log_bytes=100_000,
+        max_error_snippets=10,
+        refresh_sec=2.0,
+    )
+
+    class Harness(handler):
+        def __init__(self):
+            self.status = None
+            self.headers = {}
+            self.body = bytearray()
+            self.path = "/"
+            self.wfile = self
+            self.server = SimpleNamespace()
+            self.client_address = ("127.0.0.1", 0)
+
+        def send_response(self, code, message=None):
+            self.status = code
+
+        def send_header(self, key, value):
+            self.headers[key] = value
+
+        def end_headers(self):
+            pass
+
+        def write(self, data):
+            self.body.extend(data)
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def get(self, path):
+            self.status = None
+            self.headers = {}
+            self.body = bytearray()
+            self.path = path
+            self.do_GET()
+            return self.status, bytes(self.body), self.headers
+
+    client = Harness()
+    status, body, _ = client.get("/api/state")
+    state = json.loads(body)
+    assert status == 200
+    assert state["benchmark"] == "generic"
+
+    status, body, _ = client.get("/api/tail?file=plain.log&offset=-1&max_bytes=100")
+    tail = json.loads(body)
+    assert status == 200
+    assert "beta" in tail["data"]
+
+    status, body, _ = client.get("/api/results.csv")
+    csv_body = body.decode("utf-8")
+    assert status == 200
+    assert "plain.log" in csv_body

@@ -23,6 +23,7 @@ These scripts assume the OpenWAM policy server is **already running**. They only
 | `multi_eval.sh` | Run evaluation on multiple tasks sequentially. |
 | `parallel_eval.sh` | Run a shared local queue against already-running local/remote OpenWAM servers. |
 | `dlc_parallel_eval.sh` | DLC multi-node entrypoint; starts local OpenWAM servers and RoboTwin clients on every node, then uses a shared queue for cross-node parallel evaluation. |
+| `dlc_web_console.py` | Compatibility wrapper for the unified benchmark web control dashboard. |
 | `export_results_csv.py` | Export `summary.tsv` plus per-task `Success rate` lines into a CSV file. |
 | `step_limits.yml` | Per-task `step_lim` overrides (see below). |
 
@@ -272,6 +273,36 @@ tail -f <log_dir>/node0/worker0/adjust_bottle_demo_clean.log
 # Task-level status table
 column -t -s $'\t' < <log_dir>/summary.tsv
 ```
+
+**Real-time web control console:**
+
+Instead of tailing several files by hand, start the dependency-free benchmark
+dashboard against the shared log directory:
+
+```bash
+python benchmarks/web_control.py <log_dir> \
+    --benchmark robotwin \
+    --host 0.0.0.0 \
+    --port 8765
+```
+
+The legacy RoboTwin command, `python benchmarks/robotwin/dlc_web_console.py
+<log_dir>`, remains available and forwards to the same implementation.
+
+Open `http://<node-ip>:8765/` to watch queue progress, task status,
+success-rate parsing, consistency checks, failed-task snippets,
+node/worker/server logs, and a live tail pane. The dashboard also exposes
+`/api/state`, `/api/tail?file=<relative-log-path>`, raw log links, and a CSV
+download at `/api/results.csv`. Use `--host 127.0.0.1` for local-only access.
+
+Useful console knobs:
+
+| Option | Default | Description |
+|---|---:|---|
+| `--tail-bytes` | `200000` | Initial bytes returned by the tail pane. |
+| `--state-tail-bytes` | `256000` | Bytes scanned per task log for success-rate parsing. |
+| `--max-logs` | `2000` | Maximum log-like files shown in the log browser. |
+| `--max-task-log-bytes` | `4000000` | Bytes scanned per failed task for error snippets. |
 
 **Single-node smoke example:**
 

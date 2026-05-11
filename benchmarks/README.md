@@ -116,3 +116,59 @@ Both bundled test scripts ([scripts/inference_single_test.py](../scripts/inferen
 
 - Starting the server: [root README → Deployment](../README.md#deployment)
 - Reference clients: [scripts/inference_single_test.py](../scripts/inference_single_test.py), [scripts/inference_continuous_test.py](../scripts/inference_continuous_test.py)
+
+## 8. Web control dashboard
+
+Use `benchmarks/web_control.py` to inspect benchmark log directories from a
+browser without installing frontend dependencies. The dashboard is a single
+stdlib-only Python server with embedded HTML/CSS/JS.
+
+```bash
+python benchmarks/web_control.py <log_dir> \
+    --benchmark auto \
+    --host 0.0.0.0 \
+    --port 8765
+```
+
+Open `http://<node-ip>:8765/` to view run progress, task/job state, parsed
+metrics, failure snippets, log files, and a live tail pane. Use
+`--host 127.0.0.1` when the dashboard should only be reachable locally.
+
+Adapter choices:
+
+| Adapter | Use case |
+|---|---|
+| `auto` | Default. Detects RoboTwin layouts from `run.env`, `summary.tsv`, `queue/`, or `node*/worker*`; otherwise uses generic log browsing. |
+| `robotwin` | RoboTwin DLC/local evaluation logs with queue progress, success-rate parsing, node/worker/server logs, consistency checks, and CSV export. |
+| `generic` | Any directory containing `*.log`, `*.out`, `*.err`, `stdout*`, or `stderr*` files. |
+
+Useful options:
+
+| Option | Default | Description |
+|---|---:|---|
+| `--tail-bytes` | `200000` | Bytes returned for the first tail request. |
+| `--state-tail-bytes` | `256000` | Bytes scanned per task log for success-rate parsing. |
+| `--max-logs` | `2000` | Maximum log-like files shown in the log browser. |
+| `--max-task-log-bytes` | `4000000` | Bytes scanned per failed task for error snippets. |
+| `--max-error-snippets` | `200` | Maximum failed-task snippets retained in `/api/state`. |
+| `--refresh-sec` | `2.0` | Browser polling interval. |
+| `--open` | off | Open a local browser after startup. |
+
+HTTP endpoints:
+
+| Endpoint | Description |
+|---|---|
+| `/` | Dashboard page. |
+| `/api/state` | Unified JSON state for benchmark metadata, progress, metrics, jobs, nodes, logs, failures, and validation issues. |
+| `/api/tail?file=<relative-path>&offset=<n>&max_bytes=<n>` | Safe incremental log tail. Paths are restricted to `<log_dir>`. |
+| `/raw?file=<relative-path>` | Raw text view for one log file. |
+| `/api/results.csv` | Adapter-provided CSV export. |
+
+For RoboTwin, this compatibility command is equivalent to passing
+`--benchmark robotwin`:
+
+```bash
+python benchmarks/robotwin/dlc_web_console.py <log_dir> \
+    --host 0.0.0.0 \
+    --port 8765
+```

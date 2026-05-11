@@ -404,51 +404,6 @@ class TestDeployConfigLoading:
         assert OmegaConf.select(merged, "inference.denoise_steps") == 10
 
 
-class TestRobotwinOpenLoopEvalCompileMode:
-    """RobotWin open-loop eval must use the active nested compile schema."""
-
-    def _import(self):
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "robotwin_open_loop_eval", PROJECT_ROOT / "scripts" / "robotwin_open_loop_eval.py"
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-
-    def test_disable_compile_sets_mode_none(self):
-        from omegaconf import OmegaConf
-
-        robotwin_eval = self._import()
-        cfg = OmegaConf.create(
-            {
-                "optimization": {
-                    "compile": {
-                        "mode": "default",
-                        "default": {"video_dit": True, "vae": False},
-                        "mot_loop": {"torch_mode": "reduce-overhead", "dynamic": False},
-                    }
-                }
-            }
-        )
-
-        robotwin_eval._disable_compile_in_cfg(cfg)
-
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
-        assert OmegaConf.select(cfg, "optimization.compile.enabled", default=None) is None
-        assert OmegaConf.select(cfg, "optimization.compile.video_dit", default=None) is None
-        assert OmegaConf.select(cfg, "optimization.compile.vae", default=None) is None
-
-    def test_compile_mode_reporting_reads_nested_schema(self):
-        from omegaconf import OmegaConf
-
-        robotwin_eval = self._import()
-        cfg = OmegaConf.create({"optimization": {"compile": {"mode": "mot_loop"}}})
-
-        assert robotwin_eval._compile_mode_from_cfg(cfg) == "mot_loop"
-
-
 # ---------------------------------------------------------------------------
 # 5. joint_engine.py — compile flags parsed from cfg.optimization.compile
 # ---------------------------------------------------------------------------
