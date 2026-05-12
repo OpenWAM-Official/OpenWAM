@@ -31,6 +31,26 @@ def _make_dual_system_self_attn_mot_fixture():
     return arch, driver
 
 
+def _make_dual_system_cross_attn_fixture():
+    from openwam.model import build_architecture
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 48,
+        "bridge_layers": (0, 1),
+        "text_dim": 16,
+    }
+    arch = build_architecture("dual_system_cross_attn", cfg)
+    arch.eval()
+    return arch
+
+
 def _dual_system_self_attn_mot_states(arch, seed: int):
     from openwam.model.video_backbone.adapter import BlockLoopState
 
@@ -56,6 +76,16 @@ def _dual_system_self_attn_mot_states(arch, seed: int):
         extras={},
     )
     return vstate, astate
+
+
+def _dual_system_cross_attn_inputs(arch, seed: int):
+    g = torch.Generator().manual_seed(seed)
+    actions = torch.randn(1, 3, 7, generator=g)
+    timestep = torch.tensor([0.5])
+    bridges = {bid: torch.randn(1, 4, 48, generator=g) for bid in arch.action_backbone.bridge_layers}
+    context = torch.randn(1, 4, arch.action_backbone.text_dim, generator=g)
+    context_mask = torch.ones(1, 4, dtype=torch.bool)
+    return actions, bridges, timestep, context, context_mask
 
 
 def test_architecture_module_layout_imports():
@@ -580,6 +610,202 @@ def test_dual_system_detached_joint_cross_attn_blocks_grad_to_video():
     assert not hasattr(arch.action_backbone, "detach_bridge")
 
 
+def test_action_dit_cross_attn_bridge_tuple_matches_dict():
+    """Ordered bridge tuple path should preserve the existing dict-path result."""
+
+    arch = _make_dual_system_cross_attn_fixture()
+    ab = arch.action_backbone
+    actions, bridges, timestep, context, context_mask = _dual_system_cross_attn_inputs(arch, 7)
+    bridge_tuple = ab.bridge_tuple_from_dict(bridges)
+
+    with torch.no_grad():
+        dict_out = ab(actions, bridges, timestep, context=context, context_mask=context_mask)
+        tuple_out = ab.forward_with_bridge_tuple(
+            actions,
+            bridge_tuple,
+            timestep,
+            context=context,
+            context_mask=context_mask,
+        )
+
+    assert torch.allclose(tuple_out, dict_out, atol=1e-6)
+
+
+def test_dual_system_cross_attn_compile_helper_matches_eager(monkeypatch):
+    """cross_attn compile mode should compile only the action-side tuple path."""
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+    ab = arch.action_backbone
+    actions, bridges, timestep, context, context_mask = _dual_system_cross_attn_inputs(arch, 13)
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "cross_attn",
+                "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_action = arch._compiled_cross_attn_action
+    assert compiled_action is not None
+
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    with torch.no_grad():
+        eager_out = ab(actions, bridges, timestep, context=context, context_mask=context_mask)
+        compiled_out = compiled_action.run(actions, bridges, timestep, context=context, context_mask=context_mask)
+
+    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
+    assert torch.allclose(compiled_out, eager_out, atol=1e-6)
+
+
+def test_dual_system_cross_attn_other_modes_stay_eager(monkeypatch):
+    """none/self_attn modes must not activate the cross-attn action helper."""
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    arch.apply_compile_optimizations(OmegaConf.create({"mode": "none"}))
+    assert arch._compiled_cross_attn_action is None
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "self_attn",
+                "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    assert arch._compiled_cross_attn_action is None
+    assert compile_calls == []
+
+
+def test_dual_system_cross_attn_compile_failure_falls_back_to_eager(monkeypatch):
+    """Runtime compile failures should disable the cross-attn fast path and continue eager."""
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+    ab = arch.action_backbone
+    actions, bridges, timestep, context, context_mask = _dual_system_cross_attn_inputs(arch, 17)
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "cross_attn",
+                "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_action = arch._compiled_cross_attn_action
+    assert compiled_action is not None
+
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+
+        def _broken(*args, **kwargs):
+            raise RuntimeError("inductor unavailable")
+
+        return _broken
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    with torch.no_grad():
+        eager_out = ab(actions, bridges, timestep, context=context, context_mask=context_mask)
+        fallback_out = compiled_action.run(actions, bridges, timestep, context=context, context_mask=context_mask)
+
+    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
+    assert compiled_action._compile_disabled is True
+    assert torch.allclose(fallback_out, eager_out, atol=1e-6)
+
+
+def test_dual_system_cross_attn_bad_request_does_not_disable_compile(monkeypatch):
+    """Input errors should preserve eager semantics without poisoning later cross-attn compile calls."""
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+    ab = arch.action_backbone
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "cross_attn",
+                "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_action = arch._compiled_cross_attn_action
+    assert compiled_action is not None
+
+    compile_calls = []
+    compiled_invocations = 0
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+
+        def _wrapped(*args, **kwargs):
+            nonlocal compiled_invocations
+            compiled_invocations += 1
+            return fn(*args, **kwargs)
+
+        return _wrapped
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    actions_ok, bridges_ok, timestep_ok, context_ok, context_mask_ok = _dual_system_cross_attn_inputs(arch, 19)
+    with torch.no_grad():
+        compiled_action.run(actions_ok, bridges_ok, timestep_ok, context=context_ok, context_mask=context_mask_ok)
+
+    actions_bad, bridges_bad, timestep_bad, context_bad, context_mask_bad = _dual_system_cross_attn_inputs(arch, 23)
+    first_bridge = ab.bridge_layers[0]
+    bridges_bad[first_bridge] = bridges_bad[first_bridge].to(torch.bfloat16)
+    with pytest.raises(RuntimeError, match="bridge dtype mismatch"):
+        with torch.no_grad():
+            compiled_action.run(
+                actions_bad,
+                bridges_bad,
+                timestep_bad,
+                context=context_bad,
+                context_mask=context_mask_bad,
+            )
+
+    assert compiled_action._compile_disabled is False
+
+    actions_next, bridges_next, timestep_next, context_next, context_mask_next = _dual_system_cross_attn_inputs(arch, 29)
+    with torch.no_grad():
+        eager_out = ab(actions_next, bridges_next, timestep_next, context=context_next, context_mask=context_mask_next)
+        compiled_out = compiled_action.run(
+            actions_next,
+            bridges_next,
+            timestep_next,
+            context=context_next,
+            context_mask=context_mask_next,
+        )
+
+    assert compile_calls == [
+        {"dynamic": False, "mode": "reduce-overhead"},
+        {"dynamic": False, "mode": "reduce-overhead"},
+    ]
+    assert compiled_invocations == 3
+    assert compiled_action._compile_disabled is False
+    assert torch.allclose(compiled_out, eager_out, atol=1e-6)
+
+
 def test_dual_system_joint_self_attn_creates_dit_state():
     """joint_self_attn populates ActionDiTState payload via prepare_state."""
     from openwam.model import build_architecture
@@ -634,8 +860,8 @@ def test_dual_system_mot_loop_compile_helper_matches_eager(monkeypatch):
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "default": {"enabled": False, "video_dit": False, "vae": False},
-                "mot_loop": {"enabled": True, "torch_mode": "reduce-overhead", "dynamic": False},
+                "mode": "self_attn",
+                "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
     )
@@ -659,6 +885,50 @@ def test_dual_system_mot_loop_compile_helper_matches_eager(monkeypatch):
     assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
 
 
+def test_dual_system_self_attn_compile_mode_none_disables_mot_loop():
+    """mode=none should keep the self-attn architecture on the eager MoT loop."""
+    from omegaconf import OmegaConf
+
+    arch, _driver = _make_dual_system_self_attn_mot_fixture()
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "none",
+                "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+
+    assert arch._compiled_mot_loop is None
+
+
+def test_dual_system_self_attn_cross_attn_mode_stays_eager(monkeypatch):
+    """cross_attn mode must not accidentally enable the self-attn MoT helper."""
+    from omegaconf import OmegaConf
+
+    arch, _driver = _make_dual_system_self_attn_mot_fixture()
+
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "cross_attn",
+                "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+
+    assert arch._compiled_mot_loop is None
+    assert compile_calls == []
+
+
 def test_dual_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
     """Runtime torch.compile failures should disable the MoT fast path and continue eager."""
     from omegaconf import OmegaConf
@@ -668,8 +938,8 @@ def test_dual_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "default": {"enabled": False, "video_dit": False, "vae": False},
-                "mot_loop": {"enabled": True, "torch_mode": "reduce-overhead", "dynamic": False},
+                "mode": "self_attn",
+                "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
     )
@@ -723,8 +993,8 @@ def test_dual_system_mot_loop_bad_request_does_not_disable_compile(monkeypatch):
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "default": {"enabled": False, "video_dit": False, "vae": False},
-                "mot_loop": {"enabled": True, "torch_mode": "reduce-overhead", "dynamic": False},
+                "mode": "self_attn",
+                "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
     )
@@ -785,8 +1055,8 @@ def test_dual_system_mot_loop_compile_setup_bad_request_does_not_disable_compile
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "default": {"enabled": False, "video_dit": False, "vae": False},
-                "mot_loop": {"enabled": True, "torch_mode": "reduce-overhead", "dynamic": False},
+                "mode": "self_attn",
+                "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
     )

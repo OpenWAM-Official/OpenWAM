@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-COMPILE_MODES = ("none", "default", "mot_loop")
+COMPILE_MODES = ("none", "self_attn", "cross_attn")
 
 
 def cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
@@ -48,12 +48,21 @@ def cfg_namespace(cfg: Any, **overrides: Any) -> SimpleNamespace:
     elif hasattr(cfg, "items"):
         data = {str(k): v for k, v in cfg.items()}
     else:
-        for key in ("enabled", "video_dit", "vae", "mode", "torch_mode", "dynamic"):
+        for key in ("enabled", "mode", "torch_mode", "dynamic"):
             value = cfg_get(cfg, key, None)
             if value is not None:
                 data[key] = value
     data.update(overrides)
     return SimpleNamespace(**data)
+
+
+def normalize_compile_mode(value: Any) -> str:
+    """Normalize and validate the public compile mode spelling."""
+
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized not in COMPILE_MODES:
+        raise ValueError(f"Unknown compile mode '{value}'. Choose from: {', '.join(COMPILE_MODES)}")
+    return normalized
 
 
 def compile_mode(compile_cfg: Any, default: str | None = None, *, strict: bool = False) -> str | None:
@@ -62,53 +71,44 @@ def compile_mode(compile_cfg: Any, default: str | None = None, *, strict: bool =
     value = cfg_get(compile_cfg, "mode", default)
     if value is None:
         return None
-    normalized = str(value).strip().lower().replace("-", "_")
-    if normalized in COMPILE_MODES:
-        return normalized
-    if strict:
-        raise ValueError(f"Unknown compile mode '{value}'. Choose from: {', '.join(COMPILE_MODES)}")
+    try:
+        return normalize_compile_mode(value)
+    except ValueError:
+        if strict:
+            raise
     return default
 
 
-def default_compile_cfg(compile_cfg: Any) -> Any:
-    """Return the broad/default compile section.
+def _fast_path_compile_cfg(compile_cfg: Any, section_name: str, mode_name: str) -> SimpleNamespace:
+    """Resolve an architecture-specific fixed-shape compile section."""
 
-    ``optimization.compile.mode`` owns the user-facing strategy. ``default``
-    selects this section, while ``none`` and ``mot_loop`` disable it. An
-    explicit ``default.enabled`` still only controls ActionDiT compilation;
-    backbone flags such as ``video_dit`` and ``vae`` remain independent.
-    Falling back to the root keeps direct unit tests and older ad-hoc configs
-    readable.
+    mode = compile_mode(compile_cfg, default=None, strict=True)
+    section = cfg_namespace(cfg_get(compile_cfg, section_name, None))
+    section_enabled_value = cfg_get(section, "enabled", None)
+    if cfg_get(section, "torch_mode", None) is None:
+        section.torch_mode = "reduce-overhead"
+    if cfg_get(section, "dynamic", None) is None:
+        section.dynamic = False
+    section.enabled = (mode == mode_name) and as_bool(section_enabled_value, default=True)
+    return section
+
+
+def self_attn_compile_cfg(compile_cfg: Any) -> Any:
+    """Return the narrow self-attention compile section.
+
+    ``optimization.compile.mode=self_attn`` enables the existing MoT-loop
+    helper for ``dual_system_self_attn``. The section name is public-facing;
+    internal class/file names may still use MoT where that is the actual
+    mechanism.
     """
 
-    section = cfg_get(compile_cfg, "default", compile_cfg)
-    mode = compile_mode(compile_cfg, default=None)
-    if mode is None:
-        return section
-    if mode == "default":
-        return cfg_namespace(section, enabled=cfg_get(section, "enabled", True))
-    return cfg_namespace(section, enabled=False)
+    return _fast_path_compile_cfg(compile_cfg, "self_attn", "self_attn")
 
 
-def mot_loop_compile_cfg(compile_cfg: Any) -> Any:
-    """Return the narrow MoT-loop compile section.
+def cross_attn_compile_cfg(compile_cfg: Any) -> Any:
+    """Return the narrow cross-attention compile section."""
 
-    ``optimization.compile.mode=mot_loop`` enables this section. A small
-    legacy fallback accepts the earlier flat ``mot_loop`` / ``mot_loop_mode``
-    fields so local experiment configs do not fail mysteriously.
-    """
-
-    mode = compile_mode(compile_cfg, default=None)
-    section = cfg_get(compile_cfg, "mot_loop", None)
-    if mode is not None:
-        return cfg_namespace(section, enabled=(mode == "mot_loop"))
-    if section is not None and not isinstance(section, bool):
-        return section
-    return SimpleNamespace(
-        enabled=as_bool(section, default=False),
-        mode=cfg_get(compile_cfg, "mot_loop_mode", cfg_get(compile_cfg, "mode", "reduce-overhead")),
-        dynamic=cfg_get(compile_cfg, "mot_loop_dynamic", False),
-    )
+    return _fast_path_compile_cfg(compile_cfg, "cross_attn", "cross_attn")
 
 
 def section_enabled(cfg: Any, default: bool = False) -> bool:
@@ -135,10 +135,11 @@ __all__ = [
     "COMPILE_MODES",
     "as_bool",
     "compile_mode",
+    "cross_attn_compile_cfg",
     "cfg_get",
     "cfg_namespace",
-    "default_compile_cfg",
-    "mot_loop_compile_cfg",
+    "normalize_compile_mode",
     "section_enabled",
+    "self_attn_compile_cfg",
     "torch_compile_kwargs",
 ]

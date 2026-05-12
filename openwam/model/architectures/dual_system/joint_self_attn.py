@@ -22,7 +22,7 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_compile import CompiledMoTLoop
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
-from openwam.model.compile_options import mot_loop_compile_cfg, section_enabled
+from openwam.model.compile_options import compile_mode, section_enabled, self_attn_compile_cfg
 from openwam.utils import resolve_bridge_layers
 
 
@@ -118,14 +118,19 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         return self._mot_driver
 
     def apply_compile_optimizations(self, compile_cfg) -> None:
-        """Apply default compile wrappers and optional MoT-loop compile."""
-        super().apply_compile_optimizations(compile_cfg)
-        mot_cfg = mot_loop_compile_cfg(compile_cfg)
-        if section_enabled(mot_cfg, default=False):
+        """Apply the self-attention compile mode through the MoT-loop helper."""
+        mode = compile_mode(compile_cfg, default="none", strict=True)
+        if mode != "self_attn":
+            super().apply_compile_optimizations(compile_cfg)
+            self._compiled_mot_loop = None
+            return
+
+        self_attn_cfg = self_attn_compile_cfg(compile_cfg)
+        if section_enabled(self_attn_cfg, default=False):
             driver = self._mot_driver
             if driver is None:
                 driver = self.build_mot_driver()
-            self._compiled_mot_loop = CompiledMoTLoop(driver, mot_cfg)
+            self._compiled_mot_loop = CompiledMoTLoop(driver, self_attn_cfg)
         else:
             self._compiled_mot_loop = None
 

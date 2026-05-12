@@ -556,6 +556,93 @@ class ActionDiT(ActionBackbone):
     # joint_cross_attn variant: standalone forward with bridge features
     # ------------------------------------------------------------------
 
+    def bridge_tuple_from_dict(self, bridges: Dict[int, torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        """Return bridges ordered by ``self.bridge_layers`` for compile-friendly calls."""
+
+        missing = [bid for bid in self.bridge_layers if bid not in bridges]
+        if missing:
+            raise ValueError(
+                f"bridges dict missing video block ids {missing}; "
+                f"expected one entry per bridge_layers={self.bridge_layers}."
+            )
+        return tuple(bridges[bid] for bid in self.bridge_layers)
+
+    def _validate_bridge_tuple(self, x: torch.Tensor, bridge_tuple: tuple[torch.Tensor, ...]) -> None:
+        if len(bridge_tuple) != len(self.bridge_layers):
+            raise ValueError(
+                f"bridge_tuple length ({len(bridge_tuple)}) must match bridge_layers={self.bridge_layers}."
+            )
+
+        for i, bridge in enumerate(bridge_tuple):
+            if bridge.ndim != 3:
+                raise ValueError(
+                    f"bridge tensor for video block {self.bridge_layers[i]} must have shape [B, T_video, C], "
+                    f"got {tuple(bridge.shape)}."
+                )
+            if bridge.shape[0] != x.shape[0]:
+                raise ValueError(
+                    f"bridge tensor batch size ({bridge.shape[0]}) must match actions batch size ({x.shape[0]})."
+                )
+            if bridge.device != x.device:
+                raise RuntimeError(
+                    f"bridge device mismatch at action block {i}: bridge={bridge.device}, actions={x.device}."
+                )
+            if bridge.dtype != x.dtype:
+                raise RuntimeError(
+                    f"bridge dtype mismatch at action block {i}: bridge={bridge.dtype}, actions={x.dtype}."
+                )
+            expected_dim = getattr(self.video_projs[i], "in_features", self.dim)
+            if bridge.shape[-1] != expected_dim:
+                raise ValueError(
+                    f"bridge tensor last dim ({bridge.shape[-1]}) must match expected video_dim={expected_dim} "
+                    f"for action block {i}."
+                )
+
+    def forward_with_bridge_tuple(
+        self,
+        action_tokens: torch.Tensor,
+        bridge_tuple: tuple[torch.Tensor, ...],
+        timestep: torch.Tensor,
+        *,
+        context: Optional[torch.Tensor] = None,
+        context_mask: Optional[torch.Tensor] = None,
+        action_freqs: Optional[torch.Tensor] = None,
+        use_gradient_checkpointing: bool = False,
+        use_gradient_checkpointing_offload: bool = False,
+    ) -> torch.Tensor:
+        """Tuple-based cross-attn forward used by eager and compile paths."""
+
+        x = self._embed_actions(action_tokens)
+        self._validate_bridge_tuple(x, bridge_tuple)
+        timestep = self._prepare_timestep(timestep, action_tokens.shape[0])
+        t = self.time_embedding(timestep)
+        t_mod = self.time_projection(t)
+        freqs = action_freqs if action_freqs is not None else self._get_rope_freqs(x.shape[1]).to(device=x.device)
+        context_emb, context_attn_mask = self._prepare_context(
+            context,
+            context_mask,
+            batch_size=action_tokens.shape[0],
+            seq_len=x.shape[1],
+            dtype=x.dtype,
+            device=x.device,
+        )
+
+        for i, block in enumerate(self.blocks):
+            x_video_i = self.video_projs[i](bridge_tuple[i])
+            x = gradient_checkpoint_forward(
+                block,
+                self.training and use_gradient_checkpointing,
+                use_gradient_checkpointing_offload,
+                x,
+                x_video_i,
+                t_mod,
+                freqs,
+                context_emb,
+                context_attn_mask,
+            )
+
+        return self.action_decoder(x)
+
     def forward(
         self,
         action_tokens: torch.Tensor,
@@ -586,41 +673,16 @@ class ActionDiT(ActionBackbone):
         Returns:
             ``(B, T_action, action_dim)`` predicted action noise.
         """
-        missing = [bid for bid in self.bridge_layers if bid not in bridges]
-        if missing:
-            raise ValueError(
-                f"bridges dict missing video block ids {missing}; "
-                f"expected one entry per bridge_layers={self.bridge_layers}."
-            )
-        x = self._embed_actions(action_tokens)
-        timestep = self._prepare_timestep(timestep, action_tokens.shape[0])
-        t = self.time_embedding(timestep)
-        t_mod = self.time_projection(t)
-        freqs = self._get_rope_freqs(x.shape[1])
-        context_emb, context_attn_mask = self._prepare_context(
-            context,
-            context_mask,
-            batch_size=action_tokens.shape[0],
-            seq_len=x.shape[1],
-            dtype=x.dtype,
-            device=x.device,
+
+        return self.forward_with_bridge_tuple(
+            action_tokens,
+            self.bridge_tuple_from_dict(bridges),
+            timestep,
+            context=context,
+            context_mask=context_mask,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
-
-        for i, block in enumerate(self.blocks):
-            x_video_i = self.video_projs[i](bridges[self.bridge_layers[i]])
-            x = gradient_checkpoint_forward(
-                block,
-                self.training and use_gradient_checkpointing,
-                use_gradient_checkpointing_offload,
-                x,
-                x_video_i,
-                t_mod,
-                freqs,
-                context_emb,
-                context_attn_mask,
-            )
-
-        return self.action_decoder(x)
 
     # ------------------------------------------------------------------
     # joint_self_attn variant: MoT-driven entry points

@@ -26,7 +26,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from openwam.model.compile_options import compile_mode, default_compile_cfg, section_enabled, torch_compile_kwargs
+from openwam.model.compile_options import compile_mode
 
 logger = logging.getLogger(__name__)
 
@@ -971,30 +971,15 @@ class BaseWAMArchitecture(ABC, nn.Module):
     # --- Deploy helpers (combine action module + video backbone) ---
 
     def apply_compile_optimizations(self, compile_cfg) -> None:
-        """Apply torch.compile to action module and all backbones.
-
-        Args:
-            compile_cfg: Config object. The preferred shape is
-                ``compile.default`` for the broad module wrappers; direct
-                flat configs are also accepted for small tests.
-        """
-        default_cfg = default_compile_cfg(compile_cfg)
-        if compile_mode(compile_cfg, default=None) in {"none", "mot_loop"}:
+        """Apply architecture-specific deploy-time compile optimizations."""
+        mode = compile_mode(compile_cfg, default="none", strict=True)
+        if mode in (None, "none"):
             return
-
-        if section_enabled(default_cfg, default=False):
-            action_module = self.trainable_action_module
-            if action_module is not None and action_module is not self:
-                compile_kwargs = torch_compile_kwargs(default_cfg)
-                for name, child in self.named_children():
-                    if child is action_module:
-                        setattr(self, name, torch.compile(action_module, **compile_kwargs))
-                        logger.info("torch.compile enabled for action module (%s, %s)", name, compile_kwargs)
-                        break
-
-        for bb_name, bb in self.backbones.items():
-            if hasattr(bb, "apply_compile"):
-                bb.apply_compile(default_cfg)
+        logger.warning(
+            "torch.compile mode '%s' is not implemented for %s; running eager.",
+            mode,
+            type(self).__name__,
+        )
 
     @abstractmethod
     def forward(

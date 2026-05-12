@@ -13,7 +13,7 @@ Inference overrides (all optional; yaml values used when absent):
   --denoise-steps N       Denoising step count
   --schedule-type TYPE    Schedule type: sync | video_leading | cascade | decoupled_flash | decoupled_asymmetric
   --shift SHIFT           Flow-matching shift parameter
-  --compile-mode MODE     Compile strategy: none | default | mot_loop
+  --compile-mode MODE     Compile strategy: none | self_attn | cross_attn
 """
 
 import argparse
@@ -26,31 +26,23 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
 
 _DEPLOY_CFG_PATH = PROJECT_ROOT / "configs" / "deploy.yaml"
-_COMPILE_MODES = ("none", "default", "mot_loop")
+_COMPILE_MODES = ("none", "self_attn", "cross_attn")
 
 
 def _normalize_compile_mode(value: str) -> str:
     """Normalize the public compile-mode spelling."""
-    mode = str(value).strip().lower().replace("-", "_")
-    if mode not in _COMPILE_MODES:
+
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized not in _COMPILE_MODES:
         raise ValueError(f"Unknown compile mode '{value}'. Choose from: {', '.join(_COMPILE_MODES)}")
-    return mode
+    return normalized
 
 
-def _infer_video_num_frames(dl) -> int:
-    """Return the video frame count seen by Wan after dataloader sub-sampling.
-
-    ``dataloader.num_frames`` is the raw state/action window length. RoboTwin
-    keeps actions at that raw rate but sub-samples video by ``video_stride``
-    before VAE encoding, so deploy must pass the sampled video length to Wan.
-    """
-    from omegaconf import OmegaConf
-
-    raw_frames = int(OmegaConf.select(dl, "num_frames", default=33))
-    video_stride = int(OmegaConf.select(dl, "video_stride", default=1) or 1)
-    if video_stride <= 0:
-        video_stride = 1
-    return (raw_frames - 1) // video_stride + 1
+def _normalize_compile_mode_arg(value: str) -> str:
+    try:
+        return _normalize_compile_mode(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _infer_video_num_frames(dl) -> int:
@@ -205,9 +197,10 @@ def main():
     parser.add_argument("--shift", type=float, default=None, help="Override flow-matching shift")
     parser.add_argument(
         "--compile-mode",
+        type=_normalize_compile_mode_arg,
         choices=_COMPILE_MODES,
         default=None,
-        help="Override compile strategy: none, default, or mot_loop",
+        help="Override compile strategy: none, self_attn, or cross_attn",
     )
     # Mock mode: no weights or GPU needed
     parser.add_argument(

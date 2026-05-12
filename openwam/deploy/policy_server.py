@@ -60,6 +60,7 @@ from typing import Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+_COMPILE_MODES = ("none", "self_attn", "cross_attn")
 
 
 def _infer_video_num_frames(dl) -> int:
@@ -71,6 +72,39 @@ def _infer_video_num_frames(dl) -> int:
     if video_stride <= 0:
         video_stride = 1
     return (raw_frames - 1) // video_stride + 1
+
+
+def _normalize_compile_mode_in_cfg(cfg) -> None:
+    """Keep package and script entrypoints aligned on compile-mode validation."""
+    from omegaconf import OmegaConf
+
+    from openwam.model.compile_options import normalize_compile_mode
+
+    mode = OmegaConf.select(cfg, "optimization.compile.mode", default=None)
+    if mode is not None:
+        OmegaConf.update(cfg, "optimization.compile.mode", normalize_compile_mode(mode), merge=False)
+
+
+def _apply_compile_mode_override(cfg, compile_mode: Optional[str]) -> None:
+    """Apply a named CLI compile-mode override, then normalize the config."""
+    from omegaconf import OmegaConf
+
+    if compile_mode is not None:
+        OmegaConf.update(cfg, "optimization.compile.mode", compile_mode, merge=False)
+    _normalize_compile_mode_in_cfg(cfg)
+
+
+def _compile_mode_choices() -> tuple[str, ...]:
+    return _COMPILE_MODES
+
+
+def _normalize_compile_mode_arg(value: str) -> str:
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized not in _COMPILE_MODES:
+        raise argparse.ArgumentTypeError(
+            f"Unknown compile mode '{value}'. Choose from: {', '.join(_COMPILE_MODES)}"
+        )
+    return normalized
 
 
 class ObsValidationError(ValueError):
@@ -637,6 +671,7 @@ def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda"):
     # checkpoint was trained at. ``num_frames`` is the raw action/state window;
     # ``video_num_frames`` is the Wan video length after video_stride.
     deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
+    _normalize_compile_mode_in_cfg(deploy_cfg)
     dl = OmegaConf.select(training_cfg, "dataloader", default=None)
     if dl is not None:
         inf = OmegaConf.select(deploy_cfg, "inference", default=OmegaConf.create({}))
@@ -674,6 +709,13 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--host", type=str, default=None, help="WebSocket/HTTP bind host override.")
     parser.add_argument("--ws-port", type=int, default=None, help="WebSocket port override.")
     parser.add_argument("--http-port", type=int, default=None, help="HTTP port override.")
+    parser.add_argument(
+        "--compile-mode",
+        type=_normalize_compile_mode_arg,
+        choices=_compile_mode_choices(),
+        default=None,
+        help="Override compile strategy: none, self_attn, or cross_attn.",
+    )
     # Mock mode
     parser.add_argument("--mock", action="store_true", help="Run in mock mode (random actions, no weights required).")
     parser.add_argument(
@@ -717,6 +759,7 @@ def main(argv: Optional[list[str]] = None):
             cfg = OmegaConf.merge(OmegaConf.load(args.config), cfg)
         if args.overrides:
             cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+        _apply_compile_mode_override(cfg, args.compile_mode)
         engine = MockInferenceEngine(
             cfg=cfg,
             action_dim=args.mock_action_dim,
@@ -729,6 +772,7 @@ def main(argv: Optional[list[str]] = None):
             OmegaConf.update(cfg, "defaults", OmegaConf.create([]), merge=False)
         if args.overrides:
             cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+        _apply_compile_mode_override(cfg, args.compile_mode)
         engine = None  # built inside build_server_from_config
 
     server_cfg = getattr(cfg, "server", None)
