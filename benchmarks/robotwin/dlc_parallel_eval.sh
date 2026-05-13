@@ -35,6 +35,8 @@
 #   SERVER_SCRIPT        Python script used to launch local policy servers; default: <repo>/scripts/deploy.py
 #   SERVER_BIND_HOST     server bind host; default: 127.0.0.1
 #   SERVER_CLIENT_HOST   host passed to local RoboTwin clients; default: 127.0.0.1
+#   DRY_RUN_SLEEP_SEC    seconds to sleep for each claimed dry-run job; default: 1
+#   DRY_RUN_BARRIER_TIMEOUT_SEC  dry-run node rendezvous timeout; default: QUEUE_READY_TIMEOUT_SEC
 #
 # Example:
 #   ROBOTWIN_PATH=/path/to ROBOTWIN_RUN_ID=ckpt_100k \
@@ -86,6 +88,7 @@ Options:
       --schedule-type  schedule type passed to scripts/deploy.py
       --shift          flow-matching shift passed to scripts/deploy.py
       --mock           run mock OpenWAM servers
+      --dry-run        skip servers/eval and only test shared-queue assignment
       --fresh          remove this run's stale queue/sentinel/log metadata first
   -h, --help
 
@@ -222,7 +225,10 @@ SERVER_BIND_HOST="${SERVER_BIND_HOST:-127.0.0.1}"
 SERVER_CLIENT_HOST="${SERVER_CLIENT_HOST:-127.0.0.1}"
 SERVER_READY_TIMEOUT_SEC="${SERVER_READY_TIMEOUT_SEC:-900}"
 QUEUE_READY_TIMEOUT_SEC="${QUEUE_READY_TIMEOUT_SEC:-600}"
+DRY_RUN_SLEEP_SEC="${DRY_RUN_SLEEP_SEC:-1}"
+DRY_RUN_BARRIER_TIMEOUT_SEC="${DRY_RUN_BARRIER_TIMEOUT_SEC:-${QUEUE_READY_TIMEOUT_SEC}}"
 FRESH_RUN=0
+DRY_RUN=0
 
 DEPLOY_ARGS=()
 
@@ -244,6 +250,7 @@ while (( $# > 0 )); do
         --schedule-type)    DEPLOY_ARGS+=(--schedule-type "$2"); shift 2 ;;
         --shift)            DEPLOY_ARGS+=(--shift "$2"); shift 2 ;;
         --mock)             DEPLOY_ARGS+=(--mock); shift ;;
+        --dry-run|--dryrun) DRY_RUN=1; shift ;;
         --fresh)            FRESH_RUN=1; shift ;;
         -h|--help)          usage; exit 0 ;;
         -*)                 echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
@@ -255,21 +262,33 @@ done
     echo "[ERROR] Missing required flags: -m, -n, -d" >&2; usage; exit 1; }
 [[ "${TASK_CONFIG}" != "demo_clean" && "${TASK_CONFIG}" != "demo_randomized" && "${TASK_CONFIG}" != "all" ]] && {
     echo "[ERROR] Invalid mode: ${TASK_CONFIG}" >&2; exit 1; }
-if [[ ! " ${DEPLOY_ARGS[*]} " =~ " --mock " ]] && [[ ! -d "${CKPT_DIR}" ]]; then
+if (( DRY_RUN )) && ! [[ "${DRY_RUN_SLEEP_SEC}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "[ERROR] DRY_RUN_SLEEP_SEC must be a non-negative number: ${DRY_RUN_SLEEP_SEC}" >&2
+    exit 1
+fi
+if (( DRY_RUN )) && ! [[ "${DRY_RUN_BARRIER_TIMEOUT_SEC}" =~ ^[0-9]+$ ]]; then
+    echo "[ERROR] DRY_RUN_BARRIER_TIMEOUT_SEC must be a non-negative integer: ${DRY_RUN_BARRIER_TIMEOUT_SEC}" >&2
+    exit 1
+fi
+if [[ ! " ${DEPLOY_ARGS[*]} " =~ " --mock " ]] && (( ! DRY_RUN )) && [[ ! -d "${CKPT_DIR}" ]]; then
     echo "[ERROR] ckpt_dir not found: ${CKPT_DIR}" >&2
     exit 1
 fi
-[[ -f "${SERVER_SCRIPT}" ]] || { echo "[ERROR] server script not found: ${SERVER_SCRIPT}" >&2; exit 1; }
+if (( ! DRY_RUN )); then
+    [[ -f "${SERVER_SCRIPT}" ]] || { echo "[ERROR] server script not found: ${SERVER_SCRIPT}" >&2; exit 1; }
+fi
 (( NUM_WORKERS > 0 )) || { echo "[ERROR] --num-workers must be > 0" >&2; exit 1; }
 (( $# > 0 )) || { echo "[ERROR] No tasks specified." >&2; usage; exit 1; }
 
-if [[ -z "${ROBOTWIN_PYTHON:-}" ]]; then
-    ROBOTWIN_PYTHON="$(find_conda_python "${ROBOTWIN_ENV:-robotwin}")"
-fi
-export ROBOTWIN_PYTHON
+if (( ! DRY_RUN )); then
+    if [[ -z "${ROBOTWIN_PYTHON:-}" ]]; then
+        ROBOTWIN_PYTHON="$(find_conda_python "${ROBOTWIN_ENV:-robotwin}")"
+    fi
+    export ROBOTWIN_PYTHON
 
-ROBOTWIN_PATH="${ROBOTWIN_PATH:?ROBOTWIN_PATH must be set to the RoboTwin repository root}"
-[[ -d "${ROBOTWIN_PATH}" ]] || { echo "[ERROR] ROBOTWIN_PATH not found: ${ROBOTWIN_PATH}" >&2; exit 1; }
+    ROBOTWIN_PATH="${ROBOTWIN_PATH:?ROBOTWIN_PATH must be set to the RoboTwin repository root}"
+    [[ -d "${ROBOTWIN_PATH}" ]] || { echo "[ERROR] ROBOTWIN_PATH not found: ${ROBOTWIN_PATH}" >&2; exit 1; }
+fi
 
 NNODES="${MLP_WORKER_NUM:-${NNODES:-${WORLD_SIZE:-1}}}"
 NODE_RANK="${MLP_ROLE_INDEX:-${NODE_RANK:-${RANK:-0}}}"
@@ -294,6 +313,10 @@ QUEUE_CLAIMED_DIR="${QUEUE_DIR}/claimed"
 READY_FILE="${LOG_DIR}/.queue_ready"
 SUMMARY_FILE="${LOG_DIR}/summary.tsv"
 SUMMARY_LOCK_DIR="${LOG_DIR}/summary.lock.d"
+DRY_RUN_NODE_READY_DIR="${LOG_DIR}/dryrun_node_ready"
+DRY_RUN_START_FILE="${LOG_DIR}/.dryrun_start"
+DRY_RUN_WORKER_READY_DIR="${LOG_DIR}/dryrun_worker_ready"
+DRY_RUN_WORKER_START_FILE="${LOG_DIR}/.dryrun_workers_start"
 SERVER_LOG_DIR="${NODE_DIR}/servers"
 
 server_pids=()
@@ -331,7 +354,9 @@ mkdir -p "${NODE_DIR}" "${SERVER_LOG_DIR}"
 if [[ "${NODE_RANK}" == "0" ]]; then
     if (( FRESH_RUN )); then
         rm -f "${QUEUE_FILE}" "${READY_FILE}" "${SUMMARY_FILE}"
-        rm -rf "${QUEUE_DIR}" "${LOG_DIR}/.queue.lock.d" "${SUMMARY_LOCK_DIR}"
+        rm -f "${DRY_RUN_START_FILE}" "${DRY_RUN_WORKER_START_FILE}"
+        rm -rf "${QUEUE_DIR}" "${LOG_DIR}/.queue.lock.d" "${SUMMARY_LOCK_DIR}" \
+            "${DRY_RUN_NODE_READY_DIR}" "${DRY_RUN_WORKER_READY_DIR}"
         find "${LOG_DIR}" -maxdepth 1 -name '.node*_done' -type f -delete 2>/dev/null || true
     elif [[ -f "${READY_FILE}" ]]; then
         echo "[rank0] ERROR: stale run metadata exists at ${LOG_DIR}" >&2
@@ -364,6 +389,11 @@ if [[ "${NODE_RANK}" == "0" ]]; then
         echo "num_workers_per_node=${NUM_WORKERS}"
         echo "total_jobs=${TOTAL_JOBS}"
         echo "queue_backend=per-job-mv"
+        echo "dry_run=${DRY_RUN}"
+        if (( DRY_RUN )); then
+            echo "dry_run_sleep_sec=${DRY_RUN_SLEEP_SEC}"
+            echo "dry_run_barrier_timeout_sec=${DRY_RUN_BARRIER_TIMEOUT_SEC}"
+        fi
         printf 'tasks=%s\n' "${TASKS[*]}"
     } > "${LOG_DIR}/run.env"
     touch "${READY_FILE}"
@@ -380,44 +410,79 @@ else
     done
 fi
 
+if (( DRY_RUN )); then
+    mkdir -p "${DRY_RUN_NODE_READY_DIR}" "${DRY_RUN_WORKER_READY_DIR}"
+    touch "${DRY_RUN_NODE_READY_DIR}/node${NODE_RANK}"
+    if [[ "${NODE_RANK}" == "0" ]]; then
+        echo "[rank0] dry-run waiting for ${NNODES} node(s) before task claiming"
+        deadline=$((SECONDS + DRY_RUN_BARRIER_TIMEOUT_SEC))
+        for ((rank = 0; rank < NNODES; rank++)); do
+            ready_node="${DRY_RUN_NODE_READY_DIR}/node${rank}"
+            while [[ ! -f "${ready_node}" ]]; do
+                if (( SECONDS >= deadline )); then
+                    echo "[rank0] dry-run timeout waiting for ${ready_node}" >&2
+                    exit 1
+                fi
+                sleep 1
+            done
+        done
+        touch "${DRY_RUN_START_FILE}"
+    else
+        echo "[rank${NODE_RANK}] dry-run waiting for rank0 start signal"
+        deadline=$((SECONDS + DRY_RUN_BARRIER_TIMEOUT_SEC))
+        while [[ ! -f "${DRY_RUN_START_FILE}" ]]; do
+            if (( SECONDS >= deadline )); then
+                echo "[rank${NODE_RANK}] dry-run start timeout; aborting" >&2
+                exit 1
+            fi
+            sleep 1
+        done
+    fi
+fi
+
 cat <<BANNER
 ╔══════════════════════════════════════════════════════╗
 ║  OpenWAM RoboTwin DLC Eval                          ║
 ║  Nodes: ${NNODES}  Rank: ${NODE_RANK}  Workers/node: ${NUM_WORKERS}
 ║  Mode: ${TASK_CONFIG}  Jobs: ${TOTAL_JOBS}
+║  Dry-run: ${DRY_RUN}
 ║  CKPT: ${CKPT_DIR}
 ║  Server: ${SERVER_PYTHON} ${SERVER_SCRIPT}
 ║  LOGS: ${LOG_DIR}
 ╚══════════════════════════════════════════════════════╝
 BANNER
 
-echo "[node${NODE_RANK}] starting ${NUM_WORKERS} local policy servers"
-for ((i = 0; i < NUM_WORKERS; i++)); do
-    gpu=$((GPU_START + i * SIM_GPU_STRIDE))
-    ws_port=$((WS_PORT_BASE + i))
-    http_port=$((HTTP_PORT_BASE + i))
-    server_log="${SERVER_LOG_DIR}/server_worker${i}_gpu${gpu}.log"
+if (( DRY_RUN )); then
+    echo "[node${NODE_RANK}] dry-run: skipping local policy server startup and RoboTwin eval"
+else
+    echo "[node${NODE_RANK}] starting ${NUM_WORKERS} local policy servers"
+    for ((i = 0; i < NUM_WORKERS; i++)); do
+        gpu=$((GPU_START + i * SIM_GPU_STRIDE))
+        ws_port=$((WS_PORT_BASE + i))
+        http_port=$((HTTP_PORT_BASE + i))
+        server_log="${SERVER_LOG_DIR}/server_worker${i}_gpu${gpu}.log"
 
-    echo "[node${NODE_RANK}] server worker${i}: gpu=${gpu} ws=${ws_port} http=${http_port}"
-    "${SERVER_PYTHON}" "${SERVER_SCRIPT}" \
-        --ckpt-dir "${CKPT_DIR}" \
-        --device "cuda:${gpu}" \
-        --host "${SERVER_BIND_HOST}" \
-        --ws-port "${ws_port}" \
-        --http-port "${http_port}" \
-        "${DEPLOY_ARGS[@]}" \
-        > "${server_log}" 2>&1 &
-    server_pids+=($!)
-done
+        echo "[node${NODE_RANK}] server worker${i}: gpu=${gpu} ws=${ws_port} http=${http_port}"
+        "${SERVER_PYTHON}" "${SERVER_SCRIPT}" \
+            --ckpt-dir "${CKPT_DIR}" \
+            --device "cuda:${gpu}" \
+            --host "${SERVER_BIND_HOST}" \
+            --ws-port "${ws_port}" \
+            --http-port "${http_port}" \
+            "${DEPLOY_ARGS[@]}" \
+            > "${server_log}" 2>&1 &
+        server_pids+=($!)
+    done
 
-for ((i = 0; i < NUM_WORKERS; i++)); do
-    gpu=$((GPU_START + i * SIM_GPU_STRIDE))
-    http_port=$((HTTP_PORT_BASE + i))
-    server_log="${SERVER_LOG_DIR}/server_worker${i}_gpu${gpu}.log"
-    wait_for_server "http://${SERVER_CLIENT_HOST}:${http_port}/health" \
-        "${server_log}" "${SERVER_READY_TIMEOUT_SEC}"
-done
-echo "[node${NODE_RANK}] all local servers are healthy"
+    for ((i = 0; i < NUM_WORKERS; i++)); do
+        gpu=$((GPU_START + i * SIM_GPU_STRIDE))
+        http_port=$((HTTP_PORT_BASE + i))
+        server_log="${SERVER_LOG_DIR}/server_worker${i}_gpu${gpu}.log"
+        wait_for_server "http://${SERVER_CLIENT_HOST}:${http_port}/health" \
+            "${server_log}" "${SERVER_READY_TIMEOUT_SEC}"
+    done
+    echo "[node${NODE_RANK}] all local servers are healthy"
+fi
 
 with_lock_dir() {
     local lock_dir="$1"
@@ -485,6 +550,19 @@ run_worker() {
     local tag="[node${NODE_RANK}/worker${worker_idx}@gpu${sim_gpu}:${http_port}]"
     echo "${tag} started" | tee -a "${worker_log}"
 
+    if (( DRY_RUN )); then
+        touch "${DRY_RUN_WORKER_READY_DIR}/node${NODE_RANK}_worker${worker_idx}"
+        echo "${tag} dry-run ready for synchronized task claiming" | tee -a "${worker_log}"
+        local dryrun_deadline=$((SECONDS + DRY_RUN_BARRIER_TIMEOUT_SEC))
+        while [[ ! -f "${DRY_RUN_WORKER_START_FILE}" ]]; do
+            if (( SECONDS >= dryrun_deadline )); then
+                echo "${tag} dry-run worker start timeout" | tee -a "${worker_log}" >&2
+                return 1
+            fi
+            sleep 0.2
+        done
+    fi
+
     while :; do
         local item task mode claimed_job_file eval_exit task_log tmp_item_file tmp_summary_file
         tmp_item_file="${worker_dir}/.queue_pop.tmp"
@@ -504,16 +582,43 @@ run_worker() {
         task_log="${worker_dir}/${task}_${mode}.log"
 
         echo "${tag} claimed $(basename "${claimed_job_file}") task=${task} mode=${mode}" | tee -a "${worker_log}"
-        ROBOTWIN_HTTP_PORT="${http_port}" ROBOTWIN_POLICY_HOST="${SERVER_CLIENT_HOST}" \
-        bash "${SCRIPT_DIR}/single_eval.sh" \
-            "${task}" "${mode}" "${POLICY_NAME}" \
-            "${sim_gpu}" \
-            "${http_port}" "${SERVER_CLIENT_HOST}" \
-            > "${task_log}" 2>&1 \
-            && eval_exit=0 || eval_exit=$?
+        if (( DRY_RUN )); then
+            {
+                echo "dry_run=1"
+                echo "task=${task}"
+                echo "mode=${mode}"
+                echo "node=${NODE_RANK}"
+                echo "worker=${worker_idx}"
+                echo "sim_gpu=${sim_gpu}"
+                echo "http_port=${http_port}"
+                echo "claimed_job_file=${claimed_job_file}"
+                echo "sleep_sec=${DRY_RUN_SLEEP_SEC}"
+                echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } > "${task_log}"
+            echo "${tag} dry-run simulating task=${task} mode=${mode} for ${DRY_RUN_SLEEP_SEC}s" \
+                | tee -a "${worker_log}"
+            if sleep "${DRY_RUN_SLEEP_SEC}"; then
+                eval_exit=0
+                {
+                    echo "finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo "assignment_status=ok"
+                } >> "${task_log}"
+            else
+                eval_exit=$?
+                echo "assignment_status=failed" >> "${task_log}"
+            fi
+        else
+            ROBOTWIN_HTTP_PORT="${http_port}" ROBOTWIN_POLICY_HOST="${SERVER_CLIENT_HOST}" \
+            bash "${SCRIPT_DIR}/single_eval.sh" \
+                "${task}" "${mode}" "${POLICY_NAME}" \
+                "${sim_gpu}" \
+                "${http_port}" "${SERVER_CLIENT_HOST}" \
+                > "${task_log}" 2>&1 \
+                && eval_exit=0 || eval_exit=$?
 
-        grep --color=never "Success rate" "${task_log}" \
-            | sed "s|^|[RESULT] ${tag} ${task} (${mode}): |" || true
+            grep --color=never "Success rate" "${task_log}" \
+                | sed "s|^|[RESULT] ${tag} ${task} (${mode}): |" || true
+        fi
 
         tmp_summary_file="${worker_dir}/.summary_row.tmp"
         if (( eval_exit == 0 )); then
@@ -544,6 +649,23 @@ for ((i = 0; i < NUM_WORKERS; i++)); do
 done
 
 echo "[node${NODE_RANK}] launched client workers: ${worker_pids[*]}"
+if (( DRY_RUN )) && [[ "${NODE_RANK}" == "0" ]]; then
+    expected_worker_ready=$((NNODES * NUM_WORKERS))
+    echo "[rank0] dry-run waiting for ${expected_worker_ready} worker(s) before task claiming"
+    deadline=$((SECONDS + DRY_RUN_BARRIER_TIMEOUT_SEC))
+    while :; do
+        ready_count="$(find "${DRY_RUN_WORKER_READY_DIR}" -maxdepth 1 -name 'node*_worker*' -type f 2>/dev/null | awk 'END {print NR}')"
+        if (( ready_count >= expected_worker_ready )); then
+            break
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "[rank0] dry-run timeout waiting for workers: ready=${ready_count}, expected=${expected_worker_ready}" >&2
+            exit 1
+        fi
+        sleep 0.2
+    done
+    touch "${DRY_RUN_WORKER_START_FILE}"
+fi
 wait "${worker_pids[@]}"
 worker_pids=()
 
@@ -580,6 +702,9 @@ if [[ "${NODE_RANK}" == "0" ]]; then
     if (( failed_count > 0 )); then
         echo "[ERROR] Failed jobs are recorded in ${SUMMARY_FILE}" >&2
         exit 1
+    fi
+    if (( DRY_RUN )); then
+        echo "[DRYRUN] shared-queue assignment validated: ${finished_count}/${TOTAL_JOBS} jobs claimed exactly once"
     fi
 fi
 

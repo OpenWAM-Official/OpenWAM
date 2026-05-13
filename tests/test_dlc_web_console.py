@@ -24,6 +24,11 @@ def make_builder(module, root):
     )
 
 
+def metric_by_id(snapshot, metric_id):
+    metrics = {metric["id"]: metric for metric in snapshot.get("custom_metrics", [])}
+    return metrics[metric_id]
+
+
 def test_dlc_snapshot_merges_summary_queue_and_success_rates(tmp_path):
     console = load_console_module()
     root = tmp_path
@@ -73,9 +78,54 @@ def test_dlc_snapshot_merges_summary_queue_and_success_rates(tmp_path):
     assert snapshot["rates"]["weighted_success"] == 13
     assert snapshot["rates"]["weighted_total"] == 20
     assert snapshot["rates"]["weighted_success_rate"] == 65.0
+    assert metric_by_id(snapshot, "robotwin_demo_clean_success_rate")["raw_value"] == 65.0
+    assert metric_by_id(snapshot, "robotwin_demo_randomized_success_rate")["raw_value"] is None
     assert len(snapshot["jobs"]) == 3
     assert any(job["status"] == "running" and job["log"].endswith("beat_block_hammer_demo_randomized.log") for job in snapshot["jobs"])
     assert snapshot["nodes"][0]["workers"][0]["running"] == 1
+
+
+def test_dlc_snapshot_exposes_robotwin_mode_custom_metrics(tmp_path):
+    console = load_console_module()
+    root = tmp_path
+    worker_dir = root / "node0" / "worker0"
+    worker_dir.mkdir(parents=True)
+    (root / "run.env").write_text(
+        "run_id=modes\npolicy_name=openwam\nmode=all\ntotal_jobs=4\n"
+        "tasks=clean_a clean_b random_a random_b\n",
+        encoding="utf-8",
+    )
+    logs = {
+        "clean_a_demo_clean.log": "Success rate: 3/5 => 60.00%\n",
+        "clean_b_demo_clean.log": "Success rate: 4/5 => 80.00%\n",
+        "random_a_demo_randomized.log": "Success rate: 40.00%\n",
+        "random_b_demo_randomized.log": "Success rate: 80.00%\n",
+    }
+    for name, text in logs.items():
+        (worker_dir / name).write_text(text, encoding="utf-8")
+    (root / "summary.tsv").write_text(
+        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
+        f"clean_a\tdemo_clean\t0\t0\tok\t0\t{worker_dir / 'clean_a_demo_clean.log'}\n"
+        f"clean_b\tdemo_clean\t0\t0\tok\t0\t{worker_dir / 'clean_b_demo_clean.log'}\n"
+        f"random_a\tdemo_randomized\t0\t0\tok\t0\t{worker_dir / 'random_a_demo_randomized.log'}\n"
+        f"random_b\tdemo_randomized\t0\t0\tok\t0\t{worker_dir / 'random_b_demo_randomized.log'}\n",
+        encoding="utf-8",
+    )
+
+    snapshot = make_builder(console, root).build()
+    clean = metric_by_id(snapshot, "robotwin_demo_clean_success_rate")
+    randomized = metric_by_id(snapshot, "robotwin_demo_randomized_success_rate")
+
+    assert clean["value"] == "70.00%"
+    assert clean["raw_value"] == 70.0
+    assert clean["source"] == "weighted_success"
+    assert clean["weighted_success"] == 7
+    assert clean["weighted_total"] == 10
+    assert randomized["value"] == "60.00%"
+    assert randomized["raw_value"] == 60.0
+    assert randomized["source"] == "mean_success_rate"
+    assert randomized["weighted_total"] == 0
+    assert randomized["parsed_task_count"] == 2
 
 
 def test_dlc_snapshot_falls_back_to_worker_files_without_summary(tmp_path):
@@ -201,6 +251,7 @@ def test_generic_adapter_lists_logs_and_csv_rows(tmp_path):
 
     assert state["benchmark"] == "generic"
     assert state["progress"]["total"] == 1
+    assert state["custom_metrics"] == []
     assert state["logs"][0]["rel"] == "plain.log"
     assert rows[0]["log_path"] == "plain.log"
 
@@ -275,6 +326,7 @@ def test_http_handler_serves_state_tail_and_csv(tmp_path):
     state = json.loads(body)
     assert status == 200
     assert state["benchmark"] == "generic"
+    assert state["custom_metrics"] == []
 
     status, body, _ = client.get("/api/tail?file=plain.log&offset=-1&max_bytes=100")
     tail = json.loads(body)

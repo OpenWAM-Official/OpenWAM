@@ -475,6 +475,10 @@ class BenchmarkConsoleAdapter:
     def build_results_rows(self) -> list[dict[str, Any]]:
         return []
 
+    def build_custom_metrics(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return optional card-shaped metrics for benchmark-specific dashboards."""
+        return []
+
     def csv_fieldnames(self, rows: list[dict[str, Any]]) -> list[str]:
         fields: list[str] = []
         for row in rows:
@@ -607,6 +611,7 @@ class GenericLogAdapter(BenchmarkConsoleAdapter):
         }
         state["run"] = self._run_summary(state)
         state["metrics"] = self._metrics_summary(state)
+        state["custom_metrics"] = self.build_custom_metrics(state)
         return state
 
     def build_results_rows(self) -> list[dict[str, Any]]:
@@ -701,6 +706,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         }
         state["run"] = self._run_summary(state)
         state["metrics"] = self._metrics_summary(state)
+        state["custom_metrics"] = self.build_custom_metrics(state)
         return state
 
     def build_state(self) -> dict[str, Any]:
@@ -776,6 +782,96 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             "weighted_total": rates.get("weighted_total", 0),
             "parsed_task_count": rates.get("parsed_task_count", 0),
         }
+
+    def build_custom_metrics(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._mode_success_metrics(state.get("jobs", []))
+
+    @classmethod
+    def _mode_success_metrics(cls, jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        targets = (
+            ("demo_clean", "demo_clean Success"),
+            ("demo_randomized", "demo_randomized Success"),
+        )
+        stats: dict[str, dict[str, Any]] = {
+            mode: {"success": 0, "episodes": 0, "rates": []}
+            for mode, _label in targets
+        }
+        for job in jobs:
+            mode = str(job.get("mode", ""))
+            if mode not in stats or job.get("status") not in FINAL_JOB_STATUSES:
+                continue
+            success = cls._optional_int(job.get("success"))
+            episodes = cls._optional_int(job.get("episodes"))
+            if success is not None and episodes is not None and episodes > 0:
+                stats[mode]["success"] += success
+                stats[mode]["episodes"] += episodes
+            rate = cls._optional_float(job.get("success_rate"))
+            if rate is not None:
+                stats[mode]["rates"].append(rate)
+
+        metrics: list[dict[str, Any]] = []
+        for mode, label in targets:
+            mode_stats = stats[mode]
+            weighted_success = int(mode_stats["success"])
+            weighted_total = int(mode_stats["episodes"])
+            rates = mode_stats["rates"]
+            if weighted_total > 0:
+                raw_value = 100.0 * weighted_success / weighted_total
+                source = "weighted_success"
+                description = f"{weighted_success}/{weighted_total} successful episodes for {mode}."
+            elif rates:
+                raw_value = sum(rates) / len(rates)
+                source = "mean_success_rate"
+                description = f"Mean success rate over {len(rates)} completed {mode} task(s)."
+            else:
+                raw_value = None
+                source = "none"
+                description = f"No completed {mode} tasks with parsed success data yet."
+            metrics.append(
+                {
+                    "id": f"robotwin_{mode}_success_rate",
+                    "label": label,
+                    "value": "-" if raw_value is None else f"{raw_value:.2f}%",
+                    "raw_value": raw_value,
+                    "unit": "%",
+                    "kind": "percent",
+                    "class": cls._success_metric_class(raw_value),
+                    "description": description,
+                    "source": source,
+                    "weighted_success": weighted_success,
+                    "weighted_total": weighted_total,
+                    "parsed_task_count": len(rates),
+                }
+            )
+        return metrics
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_float(value: Any) -> float | None:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _success_metric_class(value: float | None) -> str:
+        if value is None:
+            return ""
+        if value >= 80:
+            return "success"
+        if value >= 50:
+            return "warning"
+        return "failed"
 
     def _collect_summary(self) -> dict[str, Any]:
         path = self.root / "summary.tsv"
@@ -1828,6 +1924,8 @@ INDEX_HTML = r"""<!doctype html>
       transform: rotate(-8deg);
       background: rgba(13, 116, 108, 0.10);
     }
+    .card.success::after { background: rgba(32, 122, 67, 0.14); }
+    .card.warning::after { background: rgba(185, 111, 34, 0.16); }
     .card.failed::after { background: rgba(180, 35, 24, 0.14); }
     .card.running::after { background: rgba(185, 111, 34, 0.16); }
     .card.progress::after { background: rgba(45, 94, 153, 0.14); }
@@ -2263,8 +2361,24 @@ INDEX_HTML = r"""<!doctype html>
       return episodes == null ? "-" : `${success ?? "?"}/${episodes}`;
     }
 
-    function card(label, value, cls = "") {
-      return `<div class="card ${cls}"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`;
+    function safeClassNames(value) {
+      return String(value || "").split(/\s+/)
+        .map((part) => part.toLowerCase().replace(/[^a-z0-9_-]/g, "-"))
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    function card(label, value, cls = "", title = "") {
+      const extra = safeClassNames(cls);
+      const titleAttr = title ? ` title="${esc(title)}"` : "";
+      return `<div class="card${extra ? ` ${esc(extra)}` : ""}"${titleAttr}><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`;
+    }
+
+    function metricValue(metric) {
+      if (metric.value != null && metric.value !== "") return metric.value;
+      if (metric.raw_value == null || metric.raw_value === "") return "-";
+      if (metric.kind === "percent") return fmtPercent(metric.raw_value);
+      return `${metric.raw_value}${metric.unit || ""}`;
     }
 
     function statusPill(status) {
@@ -2283,6 +2397,9 @@ INDEX_HTML = r"""<!doctype html>
       const rates = data.rates || {};
       const percent = Number(progress.percent || 0);
       const success = rates.weighted_success_rate ?? rates.mean_task_success_rate;
+      const customCards = (data.custom_metrics || []).map((metric) =>
+        card(metric.label || metric.id || "Metric", metricValue(metric), metric.class || "", metric.description || "")
+      );
       $("cards").innerHTML = [
         card("Total", progress.total ?? 0),
         card("Complete", progress.completed ?? 0),
@@ -2291,7 +2408,8 @@ INDEX_HTML = r"""<!doctype html>
         card("Running", progress.running ?? 0, "running"),
         card("Pending", progress.pending ?? 0),
         card("ETA", progress.eta || "-"),
-        `<div class="card progress"><div class="label">Progress</div><div class="value">${percent.toFixed(1)}%</div><div class="progress-wrap"><div class="progress-bar" style="width:${Math.min(100, percent)}%"></div></div></div>`
+        `<div class="card progress"><div class="label">Progress</div><div class="value">${percent.toFixed(1)}%</div><div class="progress-wrap"><div class="progress-bar" style="width:${Math.min(100, percent)}%"></div></div></div>`,
+        ...customCards
       ].join("");
     }
 

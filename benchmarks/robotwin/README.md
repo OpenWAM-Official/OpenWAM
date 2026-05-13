@@ -217,6 +217,7 @@ Tasks are positional after flags. They can be task names, comma-separated task n
 | `--schedule-type` | config default | Schedule type passed to `scripts/deploy.py`. |
 | `--shift` | config default | Flow-matching shift passed to `scripts/deploy.py`. |
 | `--mock` | off | Start mock OpenWAM servers instead of loading a checkpoint. |
+| `--dry-run` | off | Skip OpenWAM/RoboTwin startup and only exercise DLC/shared-filesystem task assignment. |
 | `--fresh` | off | Remove stale queue/sentinel metadata for the same run id before rank 0 initializes the queue. |
 
 **Shared log directory:**
@@ -234,6 +235,27 @@ If `ROBOTWIN_LOG_ROOT` is set:
 ```
 
 This directory must be on a shared filesystem visible to every node because it stores the queue, sentinels, summary, and logs. The task queue is represented as per-job files under `queue/pending`; workers claim jobs with an atomic same-filesystem `mv` into `queue/claimed`, avoiding concurrent edits to a shared `.queue.txt`. Summary locking still uses an atomic `mkdir` lock directory (`summary.lock.d/`) instead of `flock`, which is safer on many DLC/NFS-style shared filesystems.
+
+**Dry-run task assignment test:**
+
+Use `--dry-run` to validate that a DLC launch can coordinate all nodes and automatically distribute jobs before spending GPU time on policy servers or RoboTwin simulators. Dry-run mode still creates the shared queue, waits for all expected node ranks to rendezvous, starts the requested number of local worker loops per node, atomically claims jobs, writes `summary.tsv`, and runs rank-0 completeness checks; it does not require `ROBOTWIN_PATH`, `ROBOTWIN_PYTHON`, `SERVER_PYTHON`, or a real checkpoint directory.
+
+```bash
+ROBOTWIN_LOG_ROOT=/shared/path/robotwin_eval_logs \
+ROBOTWIN_RUN_ID=dryrun_$(date +%Y%m%d_%H%M%S) \
+bash benchmarks/robotwin/dlc_parallel_eval.sh \
+    --dry-run \
+    -m all -n dryrun -d /unused/ckpt_dir \
+    -w 8 \
+    adjust_bottle open_laptop
+```
+
+Useful dry-run knobs:
+
+| Variable | Default | Description |
+|---|---:|---|
+| `DRY_RUN_SLEEP_SEC` | `1` | Simulated duration for each claimed job, useful for observing load balancing. |
+| `DRY_RUN_BARRIER_TIMEOUT_SEC` | `QUEUE_READY_TIMEOUT_SEC` | Max time rank 0 waits for every DLC node before workers start claiming jobs. |
 
 Important files:
 

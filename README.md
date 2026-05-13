@@ -365,7 +365,7 @@ This simulates 128 control steps, showing how the server handles action chunking
 
 Evaluation adapters live under `benchmarks/`. The normal single-task and multi-task scripts connect to an **already-running** OpenWAM policy server via HTTP — no model weights are needed on the evaluator machine.
 
-For large RoboTwin runs, `benchmarks/robotwin/dlc_parallel_eval.sh` is the DLC/multi-node entrypoint: every node starts local OpenWAM policy servers, waits for `/health`, and runs RoboTwin clients against a shared filesystem queue. Rank 0 initializes `<log_dir>/.queue.txt`, `summary.tsv`, and `run.env`; workers use directory locks (`.queue.lock.d`, `summary.lock.d`) so this works on shared filesystems where `flock` may be unreliable. At the end, rank 0 verifies the summary row count and unique `task/mode` count match the expected total.
+For large RoboTwin runs, `benchmarks/robotwin/dlc_parallel_eval.sh` is the DLC/multi-node entrypoint: every node starts local OpenWAM policy servers, waits for `/health`, and runs RoboTwin clients against a shared filesystem queue. Rank 0 initializes `<log_dir>/.queue.txt`, `summary.tsv`, and `run.env`; workers use directory locks (`.queue.lock.d`, `summary.lock.d`) so this works on shared filesystems where `flock` may be unreliable. At the end, rank 0 verifies the summary row count and unique `task/mode` count match the expected total. Add `--dry-run` to skip servers/simulators and only test whether DLC nodes can automatically claim and distribute tasks from the shared queue.
 
 ```bash
 ROBOTWIN_PATH=/path/to/RoboTwin \
