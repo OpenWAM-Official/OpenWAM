@@ -1,9 +1,13 @@
 """Tests for async inference executor."""
 
+import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+from openwam.deploy.optimizations.async_config import normalize_async_inference_config
 from openwam.deploy.optimizations.async_executor import AsyncInferenceExecutor
 
 
@@ -19,13 +23,58 @@ class MockEngine:
     def generate(self, conditions):
         time.sleep(self.latency)
         self.call_count += 1
-        actions = np.ones((self.num_frames, self.action_dim)) * self.call_count
+        actions = np.ones((self.num_frames, self.action_dim), dtype=np.float32) * self.call_count
+        return {"video": None, "actions": actions}
+
+
+class BlockingSecondCallEngine(MockEngine):
+    """Mock engine whose second call blocks until released."""
+
+    def __init__(self):
+        super().__init__(num_frames=4, latency=0.0)
+        self.second_call_started = threading.Event()
+        self.release_second_call = threading.Event()
+
+    def generate(self, conditions):
+        self.call_count += 1
+        if self.call_count == 2:
+            self.second_call_started.set()
+            self.release_second_call.wait(timeout=2.0)
+        actions = np.ones((self.num_frames, self.action_dim), dtype=np.float32) * self.call_count
+        return {"video": None, "actions": actions}
+
+
+class FailingSecondCallEngine(MockEngine):
+    """Mock engine whose background call fails once and then recovers."""
+
+    def __init__(self):
+        super().__init__(num_frames=4, latency=0.0)
+
+    def generate(self, conditions):
+        self.call_count += 1
+        if self.call_count == 2:
+            raise RuntimeError("background failure")
+        actions = np.ones((self.num_frames, self.action_dim), dtype=np.float32) * self.call_count
+        return {"video": None, "actions": actions}
+
+
+class IndexedEngine(MockEngine):
+    """Mock engine whose actions encode call number and action index."""
+
+    def __init__(self, action_dim=1, num_frames=8, latency=0.0):
+        super().__init__(action_dim=action_dim, num_frames=num_frames, latency=latency)
+
+    def generate(self, conditions):
+        time.sleep(self.latency)
+        self.call_count += 1
+        values = self.call_count * 100 + np.arange(self.num_frames, dtype=np.float32)
+        actions = np.repeat(values[:, None], self.action_dim, axis=1)
         return {"video": None, "actions": actions}
 
 
 def test_async_executor_basic():
     engine = MockEngine(num_frames=5, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, chunk_size=5, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=5, inference_delay_steps=0)
 
     action = executor.predict_action({"obs": "dummy"})
     assert action.shape == (7,)
@@ -33,17 +82,15 @@ def test_async_executor_basic():
     executor.shutdown()
 
 
-def test_async_executor_buffer_exhaustion():
+def test_async_executor_buffer_exhaustion_without_background():
     engine = MockEngine(num_frames=3, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, chunk_size=3, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=3, inference_delay_steps=0, prefetch=False)
 
-    # First 3 actions from chunk 1
-    for i in range(3):
+    for _ in range(3):
         action = executor.predict_action({"obs": "dummy"})
         np.testing.assert_allclose(action, np.ones(7) * 1.0)
     assert engine.call_count == 1
 
-    # 4th action triggers new inference (chunk 2)
     action = executor.predict_action({"obs": "dummy"})
     np.testing.assert_allclose(action, np.ones(7) * 2.0)
     assert engine.call_count == 2
@@ -51,9 +98,45 @@ def test_async_executor_buffer_exhaustion():
     executor.shutdown()
 
 
+def test_async_executor_execution_horizon_discards_tail():
+    engine = MockEngine(num_frames=5, latency=0.0)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=2, inference_delay_steps=0, prefetch=False)
+
+    for _ in range(2):
+        action = executor.predict_action({"obs": "dummy"})
+        np.testing.assert_allclose(action, np.ones(7) * 1.0)
+
+    action = executor.predict_action({"obs": "dummy"})
+    np.testing.assert_allclose(action, np.ones(7) * 2.0)
+    assert engine.call_count == 2
+
+    executor.shutdown()
+
+
+def test_async_executor_starts_background_at_delay_threshold():
+    engine = MockEngine(num_frames=5, latency=0.01)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=4, inference_delay_steps=2)
+
+    executor.predict_action({"obs": "step0"})
+    assert executor.stats["num_background_inferences"] == 0
+
+    executor.predict_action({"obs": "step1"})
+    assert executor.stats["num_background_inferences"] == 0
+
+    executor.predict_action({"obs": "step2"})
+    time.sleep(0.05)
+
+    stats = executor.stats
+    assert stats["pending"]
+    assert stats["num_background_inferences"] == 1
+    assert engine.call_count == 2
+
+    executor.shutdown()
+
+
 def test_async_executor_reset():
     engine = MockEngine(num_frames=5, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, chunk_size=5, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=5, inference_delay_steps=0, prefetch=False)
 
     executor.predict_action({"obs": "dummy"})
     executor.reset()
@@ -62,32 +145,193 @@ def test_async_executor_reset():
     executor.shutdown()
 
 
+def test_async_executor_reset_drains_running_future_before_reuse():
+    engine = BlockingSecondCallEngine()
+    executor = AsyncInferenceExecutor(engine, execution_horizon=2, inference_delay_steps=1)
+
+    executor.predict_action({"obs": "first"})
+    executor.predict_action({"obs": "second"})
+    assert engine.second_call_started.wait(timeout=1.0)
+
+    timer = threading.Timer(0.05, engine.release_second_call.set)
+    timer.start()
+    t0 = time.monotonic()
+    executor.reset()
+    elapsed = time.monotonic() - t0
+    timer.join(timeout=1.0)
+
+    assert elapsed >= 0.03
+    assert executor.stats["pending"] is False
+    assert executor.stats["buffer_size"] == 0
+
+    action = executor.predict_action({"obs": "after-reset"})
+    np.testing.assert_allclose(action, np.ones(7) * 3.0)
+
+    executor.shutdown()
+
+
+def test_async_executor_clears_failed_pending_future_before_reuse():
+    engine = FailingSecondCallEngine()
+    executor = AsyncInferenceExecutor(engine, execution_horizon=2, inference_delay_steps=1)
+
+    np.testing.assert_allclose(executor.predict_action({"obs": "step0"}), np.ones(7) * 1.0)
+    np.testing.assert_allclose(executor.predict_action({"obs": "step1"}), np.ones(7) * 1.0)
+
+    with pytest.raises(RuntimeError, match="background failure"):
+        executor.predict_action({"obs": "step2"})
+
+    assert executor.stats["pending"] is False
+    action = executor.predict_action({"obs": "after-failure"})
+    np.testing.assert_allclose(action, np.ones(7) * 3.0)
+
+    executor.shutdown()
+
+
+def test_async_executor_switches_at_execution_horizon_and_skips_stale_prefix():
+    engine = IndexedEngine(num_frames=10, latency=0.0)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=6, inference_delay_steps=3)
+
+    np.testing.assert_allclose(executor.predict_action({"obs": "step0"}), [100.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step1"}), [101.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step2"}), [102.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step3"}), [103.0])
+    time.sleep(0.05)
+
+    np.testing.assert_allclose(executor.predict_action({"obs": "step4"}), [104.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step5"}), [105.0])
+
+    action = executor.predict_action({"obs": "step6"})
+    np.testing.assert_allclose(action, [203.0])
+    assert executor.stats["last_skip_steps"] == 3
+    assert executor.stats["current_step"] == 7
+    assert executor.stats["lead_time_steps"] == 3
+
+    executor.shutdown()
+
+
 def test_async_executor_stats():
     engine = MockEngine(num_frames=3, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, chunk_size=3, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=3, inference_delay_steps=0, prefetch=False)
 
     executor.predict_action({"obs": "dummy"})
     stats = executor.stats
     assert stats["num_inferences"] == 1
-    assert stats["buffer_size"] == 2  # 3 generated, 1 consumed
+    assert stats["num_sync_inferences"] == 1
+    assert stats["buffer_size"] == 2
+    assert stats["execution_horizon"] == 3
+    assert stats["resolved_inference_delay_steps"] == 0
 
     executor.shutdown()
 
 
-def test_async_executor_prefetch():
-    """With prefetch, next chunk should start computing before buffer empties."""
-    engine = MockEngine(num_frames=4, latency=0.01)
-    executor = AsyncInferenceExecutor(engine, chunk_size=4, prefetch=True)
+def test_async_executor_auto_delay_uses_half_execution_horizon():
+    engine = MockEngine(num_frames=8, latency=0.0)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=6, inference_delay_steps=None, prefetch=False)
 
-    # Consume first 3 actions (half buffer = 2, so prefetch triggers at action 3)
-    for _ in range(3):
+    executor.predict_action({"obs": "dummy"})
+    assert executor.stats["resolved_inference_delay_steps"] == 3
+
+    executor.shutdown()
+
+
+def test_async_executor_rejects_execution_horizon_larger_than_action_horizon():
+    engine = MockEngine(num_frames=3, latency=0.0)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=4, inference_delay_steps=0)
+
+    with pytest.raises(ValueError, match="execution_horizon"):
         executor.predict_action({"obs": "dummy"})
 
-    # Give prefetch thread time to start
-    time.sleep(0.05)
-
-    # Next action should come from buffer (possibly from prefetched chunk)
-    action = executor.predict_action({"obs": "dummy"})
-    assert action.shape == (7,)
-
     executor.shutdown()
+
+
+@pytest.mark.parametrize("delay_steps", [4, 5])
+def test_async_config_rejects_delay_at_or_larger_than_execution_horizon(delay_steps):
+    cfg = {
+        "mode": "vanilla",
+        "vanilla": {
+            "execution_horizon": 4,
+            "inference_delay_steps": delay_steps,
+        },
+    }
+
+    with pytest.raises(ValueError, match="inference_delay_steps"):
+        normalize_async_inference_config(cfg)
+
+
+@pytest.mark.parametrize("value", [1.2, "1.2"])
+def test_async_config_rejects_non_integral_step_values(value):
+    cfg = {
+        "mode": "vanilla",
+        "vanilla": {
+            "execution_horizon": value,
+            "inference_delay_steps": 0,
+        },
+    }
+
+    with pytest.raises(ValueError, match="execution_horizon must be an integer"):
+        normalize_async_inference_config(cfg)
+
+
+def test_async_config_ignores_legacy_deploy_async_execution_shape():
+    from openwam.deploy.optimizations.async_config import resolve_async_inference_config
+
+    cfg = {
+        "deploy": {
+            "async_execution": {
+                "enabled": True,
+                "chunk_size": 4,
+                "prefetch": True,
+            }
+        }
+    }
+
+    resolved = resolve_async_inference_config(cfg)
+    assert resolved.enabled is False
+    assert resolved.mode == "none"
+
+
+def test_async_config_dataclass_roundtrip_preserves_delay_settings():
+    cfg = normalize_async_inference_config(
+        {
+            "mode": "vanilla",
+            "vanilla": {
+                "execution_horizon": 8,
+                "inference_delay_steps": 4,
+            },
+        }
+    )
+
+    roundtrip = normalize_async_inference_config(cfg)
+    assert roundtrip.execution_horizon == 8
+    assert roundtrip.inference_delay_steps == 4
+
+
+def test_wam_policy_mode_none_keeps_sync_buffer_path():
+    from openwam.deploy.policy import WAMPolicy
+
+    engine = MockEngine(num_frames=3, latency=0.0)
+    cfg = SimpleNamespace(history_len=1, execute_horizon=None, temporal_ensemble=False)
+    policy = WAMPolicy(engine=engine, cfg=cfg, async_config={"mode": "none"})
+
+    assert policy._async is False
+    first = policy.predict_action({"prompt": "test"})
+    second = policy.predict_action({"prompt": "test"})
+
+    np.testing.assert_allclose(first, np.ones(7) * 1.0)
+    np.testing.assert_allclose(second, np.ones(7) * 1.0)
+    assert engine.call_count == 1
+    assert policy.async_info["enabled"] is False
+    assert policy.async_info["effective_temporal_ensemble"] is False
+
+
+def test_wam_policy_reports_temporal_ensemble_effective_only_with_receding_horizon():
+    from openwam.deploy.policy import WAMPolicy
+
+    engine = MockEngine(num_frames=3, latency=0.0)
+    greedy_cfg = SimpleNamespace(history_len=1, execute_horizon=None, temporal_ensemble=True)
+    greedy_policy = WAMPolicy(engine=engine, cfg=greedy_cfg, async_config={"mode": "none"})
+    assert greedy_policy.async_info["effective_temporal_ensemble"] is False
+
+    horizon_cfg = SimpleNamespace(history_len=1, execute_horizon=2, temporal_ensemble=True)
+    horizon_policy = WAMPolicy(engine=engine, cfg=horizon_cfg, async_config={"mode": "none"})
+    assert horizon_policy.async_info["effective_temporal_ensemble"] is True

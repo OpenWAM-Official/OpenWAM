@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-COMPILE_MODES = ("none", "self_attn", "cross_attn")
+COMPILE_MODES = ("auto", "none")
 
 
 def cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
@@ -79,36 +79,34 @@ def compile_mode(compile_cfg: Any, default: str | None = None, *, strict: bool =
     return default
 
 
-def _fast_path_compile_cfg(compile_cfg: Any, section_name: str, mode_name: str) -> SimpleNamespace:
+def _fast_path_compile_cfg(compile_cfg: Any, section_name: str) -> SimpleNamespace:
     """Resolve an architecture-specific fixed-shape compile section."""
 
-    mode = compile_mode(compile_cfg, default=None, strict=True)
     section = cfg_namespace(cfg_get(compile_cfg, section_name, None))
     section_enabled_value = cfg_get(section, "enabled", None)
     if cfg_get(section, "torch_mode", None) is None:
         section.torch_mode = "reduce-overhead"
     if cfg_get(section, "dynamic", None) is None:
         section.dynamic = False
-    section.enabled = (mode == mode_name) and as_bool(section_enabled_value, default=True)
+    section.enabled = as_bool(section_enabled_value, default=True)
     return section
 
 
 def self_attn_compile_cfg(compile_cfg: Any) -> Any:
     """Return the narrow self-attention compile section.
 
-    ``optimization.compile.mode=self_attn`` enables the existing MoT-loop
-    helper for ``dual_system_self_attn``. The section name is public-facing;
-    internal class/file names may still use MoT where that is the actual
-    mechanism.
+    ``optimization.compile.mode=auto`` lets ``dual_system_self_attn`` select
+    the existing MoT-loop helper. The section name remains explicit so the
+    helper can keep its own torch.compile options.
     """
 
-    return _fast_path_compile_cfg(compile_cfg, "self_attn", "self_attn")
+    return _fast_path_compile_cfg(compile_cfg, "self_attn")
 
 
 def cross_attn_compile_cfg(compile_cfg: Any) -> Any:
     """Return the narrow cross-attention compile section."""
 
-    return _fast_path_compile_cfg(compile_cfg, "cross_attn", "cross_attn")
+    return _fast_path_compile_cfg(compile_cfg, "cross_attn")
 
 
 def section_enabled(cfg: Any, default: bool = False) -> bool:

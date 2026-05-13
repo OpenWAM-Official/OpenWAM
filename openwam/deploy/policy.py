@@ -23,6 +23,39 @@ import numpy as np
 from openwam.deploy.base import BaseInferenceEngine
 
 
+def build_async_info(async_config, policy_cfg, async_executor=None) -> dict:
+    """Return a stable async inference info payload for /info and policies."""
+    info = async_config.as_dict()
+    resolved_delay = info["inference_delay_steps"]
+    if info["enabled"] and resolved_delay is None and info["execution_horizon"] is not None:
+        resolved_delay = max(0, info["execution_horizon"] // 2)
+    info["effective_temporal_ensemble"] = (
+        False
+        if info["enabled"]
+        else bool(getattr(policy_cfg, "temporal_ensemble", True) and getattr(policy_cfg, "execute_horizon", None) is not None)
+    )
+    info.update(
+        {
+            "num_inferences": 0,
+            "num_sync_inferences": 0,
+            "num_background_inferences": 0,
+            "buffer_size": 0,
+            "pending": False,
+            "pending_start_step": None,
+            "current_step": 0,
+            "action_horizon": None,
+            "execution_horizon": info["execution_horizon"],
+            "inference_delay_steps": info["inference_delay_steps"],
+            "resolved_inference_delay_steps": resolved_delay,
+            "lead_time_steps": resolved_delay,
+            "last_skip_steps": 0,
+        }
+    )
+    if async_executor is not None:
+        info.update(async_executor.stats)
+    return info
+
+
 class WAMPolicy:
     """WAM policy adapter with receding-horizon action execution.
 
@@ -39,28 +72,14 @@ class WAMPolicy:
         async_config: Optional config for async inference. When enabled,
             wraps the engine in AsyncInferenceExecutor for double-buffered
             closed-loop execution. Expected fields:
-            - ``enabled`` (bool): Enable async mode.
-            - ``chunk_size`` (int): Actions per chunk (default 49).
-            - ``prefetch`` (bool): Start next inference early (default True).
+            - ``mode``: ``none`` or ``vanilla``.
+            - ``execution_horizon``: actions executed from each generated chunk.
+            - ``inference_delay_steps``: expected latency in action steps.
     """
 
     def __init__(self, engine: BaseInferenceEngine, cfg, async_config=None):
         self.cfg = cfg
-        self._async = False
-        self._async_executor = None
-
-        if async_config is not None and getattr(async_config, "enabled", False):
-            from openwam.deploy.optimizations import AsyncInferenceExecutor
-
-            self._async_executor = AsyncInferenceExecutor(
-                engine=engine,
-                chunk_size=getattr(async_config, "chunk_size", 49),
-                prefetch=getattr(async_config, "prefetch", True),
-            )
-            self._async = True
-            self.engine = engine  # keep reference for stats
-        else:
-            self.engine = engine
+        self.engine = engine
 
         history_len = getattr(cfg, "history_len", 10)
         self.obs_history: deque = deque(maxlen=history_len)
@@ -77,6 +96,18 @@ class WAMPolicy:
         self._ensemble_buffer: dict = {}  # timestep -> list of (weight, action)
         self._current_step: int = 0
         self._steps_since_generate: int = 0
+
+        from openwam.deploy.optimizations import AsyncInferenceExecutor, normalize_async_inference_config
+
+        self._async_config = normalize_async_inference_config(async_config, policy_cfg=cfg)
+        self._async = self._async_config.enabled
+        self._async_executor = None
+        if self._async:
+            self._async_executor = AsyncInferenceExecutor(
+                engine=engine,
+                execution_horizon=self._async_config.execution_horizon,
+                inference_delay_steps=self._async_config.inference_delay_steps,
+            )
 
     def predict_action(self, obs: dict) -> np.ndarray:
         """Return the next action for the given observation.
@@ -182,6 +213,11 @@ class WAMPolicy:
         """Clean up async resources."""
         if self._async_executor is not None:
             self._async_executor.shutdown()
+
+    @property
+    def async_info(self) -> dict:
+        """Return normalized async mode and runtime stats."""
+        return build_async_info(self._async_config, self.cfg, self._async_executor)
 
     def _build_conditions(self, obs: dict) -> dict:
         """Assemble inference conditions from current observation + history.

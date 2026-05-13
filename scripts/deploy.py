@@ -13,7 +13,12 @@ Inference overrides (all optional; yaml values used when absent):
   --denoise-steps N       Denoising step count
   --schedule-type TYPE    Schedule type: sync | video_leading | cascade | decoupled_flash | decoupled_asymmetric
   --shift SHIFT           Flow-matching shift parameter
-  --compile-mode MODE     Compile strategy: none | self_attn | cross_attn
+  --compile-mode MODE     Compile strategy: auto | none
+  --async-mode MODE       Async inference mode: none | vanilla
+  --async-execution-horizon N
+                          Number of actions executed before switching chunks
+  --async-inference-delay-steps N
+                          Expected inference latency in controller steps
 """
 
 import argparse
@@ -26,7 +31,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
 
 _DEPLOY_CFG_PATH = PROJECT_ROOT / "configs" / "deploy.yaml"
-_COMPILE_MODES = ("none", "self_attn", "cross_attn")
+_COMPILE_MODES = ("auto", "none")
 
 
 def _normalize_compile_mode(value: str) -> str:
@@ -81,6 +86,8 @@ def _apply_cli_overrides(deploy_cfg, args):
     """Propagate argparse values into the deploy config (CLI wins over yaml)."""
     from omegaconf import OmegaConf
 
+    from openwam.deploy.optimizations import apply_async_cli_overrides
+
     # Server / device
     if args.device is not None:
         OmegaConf.update(deploy_cfg, "device", args.device, merge=False)
@@ -98,6 +105,7 @@ def _apply_cli_overrides(deploy_cfg, args):
         OmegaConf.update(deploy_cfg, "inference.schedule_type", args.schedule_type, merge=False)
     if args.shift is not None:
         OmegaConf.update(deploy_cfg, "inference.shift", args.shift, merge=False)
+    apply_async_cli_overrides(deploy_cfg, args)
 
     compile_mode = getattr(args, "compile_mode", None)
     if compile_mode is not None:
@@ -200,7 +208,27 @@ def main():
         type=_normalize_compile_mode_arg,
         choices=_COMPILE_MODES,
         default=None,
-        help="Override compile strategy: none, self_attn, or cross_attn",
+        help="Override compile strategy: auto or none",
+    )
+    parser.add_argument(
+        "--async-mode",
+        choices=("none", "vanilla"),
+        default=None,
+        help="Override optimization.async_inference.mode",
+    )
+    parser.add_argument(
+        "--async-execution-horizon",
+        type=int,
+        default=None,
+        dest="async_execution_horizon",
+        help="Override optimization.async_inference.vanilla.execution_horizon",
+    )
+    parser.add_argument(
+        "--async-inference-delay-steps",
+        type=int,
+        default=None,
+        dest="async_inference_delay_steps",
+        help="Override optimization.async_inference.vanilla.inference_delay_steps",
     )
     # Mock mode: no weights or GPU needed
     parser.add_argument(
@@ -233,7 +261,10 @@ def main():
 
     # Load base deploy config from yaml, then apply CLI overrides.
     deploy_cfg = _load_deploy_config()
-    deploy_cfg = _apply_cli_overrides(deploy_cfg, args)
+    try:
+        deploy_cfg = _apply_cli_overrides(deploy_cfg, args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Resolve checkpoint dir: CLI --ckpt-dir > checkpoint_path in yaml.
     if not args.mock and args.ckpt_dir is None:

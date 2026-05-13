@@ -15,6 +15,7 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 from omegaconf import OmegaConf
 from PIL import Image
 
@@ -33,6 +34,8 @@ def _minimal_cfg(
     multiview: bool = False,
     height: int = 32,
     width: int = 32,
+    async_mode: str = "none",
+    temporal_ensemble: bool = False,
 ) -> OmegaConf:
     """Smallest cfg that satisfies PolicyServer._init_policy + _decode_obs."""
     return OmegaConf.create(
@@ -46,8 +49,17 @@ def _minimal_cfg(
             },
             "policy": {
                 "execute_horizon": None,
-                "temporal_ensemble": False,
+                "temporal_ensemble": temporal_ensemble,
                 "history_len": 1,
+            },
+            "optimization": {
+                "async_inference": {
+                    "mode": async_mode,
+                    "vanilla": {
+                        "execution_horizon": 4,
+                        "inference_delay_steps": 1,
+                    },
+                }
             },
         }
     )
@@ -64,6 +76,20 @@ def _make_server(debug: bool = False, debug_dir: str | None = None, multiview: b
         cfg=cfg,
         debug=debug,
         debug_dir=debug_dir or tempfile.mkdtemp(prefix="pserver_smoke_"),
+    )
+
+
+def _make_async_server():
+    from openwam.deploy.mock_engine import MockInferenceEngine
+    from openwam.deploy.policy_server import PolicyServer
+
+    cfg = _minimal_cfg(async_mode="vanilla", temporal_ensemble=True)
+    engine = MockInferenceEngine(cfg=cfg, action_dim=14, latency_ms=0.0)
+    return PolicyServer(
+        engine=engine,
+        cfg=cfg,
+        debug=False,
+        debug_dir=tempfile.mkdtemp(prefix="pserver_smoke_"),
     )
 
 
@@ -93,6 +119,95 @@ def test_predict_returns_well_formed_response():
     assert result["step"] == 1
     assert isinstance(result["latency_ms"], float)
     assert result["latency_ms"] >= 0.0
+
+
+def test_info_reports_async_inference_state():
+    """Server info should expose async mode and executor stats."""
+    server = _make_async_server()
+    before_predict = server.get_info()["async_inference"]
+    assert before_predict["enabled"] is True
+    assert before_predict["mode"] == "vanilla"
+    assert before_predict["effective_temporal_ensemble"] is False
+    assert before_predict["num_inferences"] == 0
+    assert before_predict["pending"] is False
+
+    payload = _predict_payload(head=_jpeg_b64_frame(seed=4))
+    server.predict(payload)
+
+    info = server.get_info()
+    assert set(info["async_inference"]) == set(before_predict)
+    assert info["async_inference"]["enabled"] is True
+    assert info["async_inference"]["mode"] == "vanilla"
+    assert info["policy_config"]["temporal_ensemble"] is True
+    assert info["async_inference"]["effective_temporal_ensemble"] is False
+    assert info["async_inference"]["execution_horizon"] == 4
+    assert info["async_inference"]["resolved_inference_delay_steps"] == 1
+    assert info["async_inference"]["num_sync_inferences"] == 1
+
+
+def test_info_reports_auto_async_delay_before_first_predict():
+    """Auto delay should be visible before the executor sees the first action chunk."""
+    from openwam.deploy.mock_engine import MockInferenceEngine
+    from openwam.deploy.policy_server import PolicyServer
+
+    cfg = _minimal_cfg(async_mode="vanilla")
+    OmegaConf.update(cfg, "optimization.async_inference.vanilla.inference_delay_steps", None, merge=False)
+    engine = MockInferenceEngine(cfg=cfg, action_dim=14, latency_ms=0.0)
+    server = PolicyServer(engine=engine, cfg=cfg)
+
+    info = server.get_info()["async_inference"]
+    assert info["execution_horizon"] == 4
+    assert info["inference_delay_steps"] is None
+    assert info["resolved_inference_delay_steps"] == 2
+    assert info["lead_time_steps"] == 2
+
+
+def test_policy_server_cli_async_numeric_overrides():
+    """Direct policy_server CLI should expose the same async sweep knobs."""
+    from openwam.deploy.policy_server import _apply_async_cli_overrides, _build_argparser
+
+    parser = _build_argparser()
+    args = parser.parse_args(
+        [
+            "--mock",
+            "--async-mode",
+            "vanilla",
+            "--async-execution-horizon",
+            "24",
+            "--async-inference-delay-steps",
+            "6",
+        ]
+    )
+    cfg = _apply_async_cli_overrides(OmegaConf.create({}), args)
+
+    assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "vanilla"
+    assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.execution_horizon") == 24
+    assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.inference_delay_steps") == 6
+
+
+def test_policy_server_cli_async_numeric_overrides_require_vanilla():
+    from openwam.deploy.policy_server import _apply_async_cli_overrides, _build_argparser
+
+    parser = _build_argparser()
+    args = parser.parse_args(["--mock", "--async-execution-horizon", "24"])
+
+    with pytest.raises(ValueError, match="--async-mode vanilla"):
+        _apply_async_cli_overrides(OmegaConf.create({}), args)
+
+    legacy_cfg = OmegaConf.create({"optimization": {"async_inference": {"enabled": True}}})
+    cfg = _apply_async_cli_overrides(legacy_cfg, args)
+    assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.execution_horizon") == 24
+
+
+def test_policy_server_cli_async_numeric_overrides_fail_fast_on_invalid_ranges():
+    from openwam.deploy.policy_server import _apply_async_cli_overrides, _build_argparser
+
+    parser = _build_argparser()
+    args = parser.parse_args(["--mock", "--async-mode", "vanilla", "--async-execution-horizon", "4"])
+    args.async_inference_delay_steps = 4
+
+    with pytest.raises(ValueError, match="inference_delay_steps must be < execution_horizon"):
+        _apply_async_cli_overrides(OmegaConf.create({}), args)
 
 
 def test_mock_engine_step_count_matches_real_engine():

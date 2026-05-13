@@ -60,7 +60,7 @@ from typing import Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
-_COMPILE_MODES = ("none", "self_attn", "cross_attn")
+_COMPILE_MODES = ("auto", "none")
 
 
 def _infer_video_num_frames(dl) -> int:
@@ -156,11 +156,11 @@ class PolicyServer:
         if self._policy is not None:
             return
 
+        from openwam.deploy.optimizations import resolve_async_inference_config
         from openwam.deploy.policy import WAMPolicy
 
         policy_cfg = getattr(self.cfg, "policy", self.cfg)
-        deploy = getattr(self.cfg, "deploy", None)
-        async_config = getattr(deploy, "async_execution", None) if deploy else None
+        async_config = resolve_async_inference_config(self.cfg, policy_cfg=policy_cfg)
         self._policy = WAMPolicy(
             engine=self.engine,
             cfg=policy_cfg,
@@ -329,14 +329,24 @@ class PolicyServer:
     def get_info(self) -> dict:
         """Return server info and statistics."""
         avg_latency = self._total_latency / self._request_count if self._request_count > 0 else 0.0
+        policy_cfg = getattr(self.cfg, "policy", self.cfg)
+        if self._policy is not None:
+            async_info = self._policy.async_info
+        else:
+            from openwam.deploy.optimizations import resolve_async_inference_config
+            from openwam.deploy.policy import build_async_info
+
+            async_config = resolve_async_inference_config(self.cfg, policy_cfg=policy_cfg)
+            async_info = build_async_info(async_config, policy_cfg)
         return {
             "model": "OpenWAM",
             "total_requests": self._request_count,
             "avg_latency_ms": round(avg_latency, 2),
             "policy_config": {
-                "execute_horizon": getattr(getattr(self.cfg, "policy", self.cfg), "execute_horizon", None),
-                "temporal_ensemble": getattr(getattr(self.cfg, "policy", self.cfg), "temporal_ensemble", True),
+                "execute_horizon": getattr(policy_cfg, "execute_horizon", None),
+                "temporal_ensemble": getattr(policy_cfg, "temporal_ensemble", True),
             },
+            "async_inference": async_info,
         }
 
     def _decode_obs(self, obs: dict) -> dict:
@@ -714,7 +724,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         type=_normalize_compile_mode_arg,
         choices=_compile_mode_choices(),
         default=None,
-        help="Override compile strategy: none, self_attn, or cross_attn.",
+        help="Override compile strategy: auto or none.",
     )
     # Mock mode
     parser.add_argument("--mock", action="store_true", help="Run in mock mode (random actions, no weights required).")
@@ -723,6 +733,26 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mock-latency-ms", type=float, default=2000.0, help="Simulated inference latency in ms (default: 2000)."
+    )
+    parser.add_argument(
+        "--async-mode",
+        choices=("none", "vanilla"),
+        default=None,
+        help="Override optimization.async_inference.mode.",
+    )
+    parser.add_argument(
+        "--async-execution-horizon",
+        type=int,
+        default=None,
+        dest="async_execution_horizon",
+        help="Override optimization.async_inference.vanilla.execution_horizon.",
+    )
+    parser.add_argument(
+        "--async-inference-delay-steps",
+        type=int,
+        default=None,
+        dest="async_inference_delay_steps",
+        help="Override optimization.async_inference.vanilla.inference_delay_steps.",
     )
     # Debug mode
     parser.add_argument(
@@ -737,6 +767,13 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Additional OmegaConf dotlist overrides, e.g. model/backbone=ti2v_5b",
     )
     return parser
+
+
+def _apply_async_cli_overrides(cfg, args):
+    """Apply async inference CLI flags to the nested deploy config."""
+    from openwam.deploy.optimizations import apply_async_cli_overrides
+
+    return apply_async_cli_overrides(cfg, args)
 
 
 def main(argv: Optional[list[str]] = None):
@@ -760,6 +797,10 @@ def main(argv: Optional[list[str]] = None):
         if args.overrides:
             cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
         _apply_compile_mode_override(cfg, args.compile_mode)
+        try:
+            cfg = _apply_async_cli_overrides(cfg, args)
+        except ValueError as exc:
+            parser.error(str(exc))
         engine = MockInferenceEngine(
             cfg=cfg,
             action_dim=args.mock_action_dim,
@@ -773,6 +814,10 @@ def main(argv: Optional[list[str]] = None):
         if args.overrides:
             cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
         _apply_compile_mode_override(cfg, args.compile_mode)
+        try:
+            cfg = _apply_async_cli_overrides(cfg, args)
+        except ValueError as exc:
+            parser.error(str(exc))
         engine = None  # built inside build_server_from_config
 
     server_cfg = getattr(cfg, "server", None)

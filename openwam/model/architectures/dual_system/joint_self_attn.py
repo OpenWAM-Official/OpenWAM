@@ -120,7 +120,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
     def apply_compile_optimizations(self, compile_cfg) -> None:
         """Apply the self-attention compile mode through the MoT-loop helper."""
         mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode != "self_attn":
+        if mode != "auto":
             super().apply_compile_optimizations(compile_cfg)
             self._compiled_mot_loop = None
             return

@@ -231,7 +231,7 @@ optimization:
     cosine_threshold: 0.99
     max_skips: 3
   compile:
-    mode: none           # none | self_attn | cross_attn
+    mode: auto           # auto | none
     self_attn:
       torch_mode: reduce-overhead
       dynamic: false     # dual_system_self_attn MoT-loop fast path
@@ -242,12 +242,12 @@ optimization:
     maxsize: 32          # LRU cache for prompt -> text embeddings
 ```
 
-Compile mode is the single public selector. The per-mode `enabled` field is an
-optional section-level kill switch: `mode: self_attn` with
-`self_attn.enabled: false` stays eager. Legacy public modes are intentionally
-removed in v0.2; migrate `mot_loop` to `self_attn`, and replace `default` with
-an explicit `none`, `self_attn`, or `cross_attn` choice for the deployed
-architecture.
+Compile mode is the single public selector. `auto` reads the loaded checkpoint's
+architecture config: `joint_self_attn` selects `self_attn`,
+`joint_cross_attn` selects `cross_attn`, and unsupported architectures run
+eager. The per-section `enabled` field is an optional architecture-level kill
+switch. Legacy public modes are intentionally removed in v0.2; migrate
+`default` to `auto` or `none`.
 
 `scripts/deploy.py` / `scripts/deploy.sh` expose a small set of CLI overrides
 for the fields that are commonly changed per launch:
@@ -261,7 +261,7 @@ bash scripts/deploy.sh /path/to/checkpoint_dir \
   --denoise-steps 10 \
   --schedule-type sync \
   --shift 5.0 \
-  --compile-mode self_attn \
+  --compile-mode auto \
   --ckpt-name checkpoint_step_10000.safetensors
 ```
 
@@ -272,9 +272,16 @@ These flags map to:
 - `--device` → `device`
 - `--host` / `--ws-port` / `--http-port` → `server.*`
 - `--denoise-steps` / `--schedule-type` / `--shift` → `inference.*`
-- `--compile-mode` → `optimization.compile.mode` (`none`, `self_attn`, or `cross_attn`)
+- `--compile-mode` → `optimization.compile.mode` (`auto` or `none`)
+- `--async-mode` -> `optimization.async_inference.mode` (`none` or `vanilla`)
+- `--async-execution-horizon` / `--async-inference-delay-steps` require
+  async mode `vanilla` in either CLI or yaml
 
-Hyphen aliases (`self-attn`, `cross-attn`) are accepted and normalized.
+Architecture-specific compile paths are selected automatically from the
+checkpoint config when `mode: auto`.
+On dual-system architectures, the first real request may include lazy
+`torch.compile` warmup latency; use `--compile-mode none` when startup latency
+is more important than steady-state throughput.
 
 All of these overrides are optional; yaml values are used when a flag is not
 provided. Other deploy settings, including `optimization.decode_video`,

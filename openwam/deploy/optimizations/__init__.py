@@ -5,6 +5,13 @@
 - :class:`AsyncInferenceExecutor`: Overlap inference with execution
 """
 
+from openwam.deploy.optimizations.async_config import (
+    ASYNC_CLI_NUMERIC_OVERRIDES,
+    AsyncInferenceConfig,
+    apply_async_cli_overrides,
+    normalize_async_inference_config,
+    resolve_async_inference_config,
+)
 from openwam.deploy.optimizations.async_executor import AsyncInferenceExecutor
 from openwam.deploy.optimizations.decoupled_schedule import (
     schedule_decoupled_asymmetric,
@@ -17,4 +24,9 @@ __all__ = [
     "schedule_decoupled_flash",
     "schedule_decoupled_asymmetric",
     "AsyncInferenceExecutor",
+    "ASYNC_CLI_NUMERIC_OVERRIDES",
+    "AsyncInferenceConfig",
+    "apply_async_cli_overrides",
+    "normalize_async_inference_config",
+    "resolve_async_inference_config",
 ]

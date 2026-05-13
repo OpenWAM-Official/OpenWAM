@@ -632,7 +632,7 @@ def test_action_dit_cross_attn_bridge_tuple_matches_dict():
 
 
 def test_dual_system_cross_attn_compile_helper_matches_eager(monkeypatch):
-    """cross_attn compile mode should compile only the action-side tuple path."""
+    """auto compile mode should select the cross-attn action-side tuple path."""
     from omegaconf import OmegaConf
 
     arch = _make_dual_system_cross_attn_fixture()
@@ -642,7 +642,7 @@ def test_dual_system_cross_attn_compile_helper_matches_eager(monkeypatch):
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "mode": "cross_attn",
+                "mode": "auto",
                 "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
@@ -666,8 +666,8 @@ def test_dual_system_cross_attn_compile_helper_matches_eager(monkeypatch):
     assert torch.allclose(compiled_out, eager_out, atol=1e-6)
 
 
-def test_dual_system_cross_attn_other_modes_stay_eager(monkeypatch):
-    """none/self_attn modes must not activate the cross-attn action helper."""
+def test_dual_system_cross_attn_mode_none_stays_eager(monkeypatch):
+    """mode=none must not activate the cross-attn action helper."""
     from omegaconf import OmegaConf
 
     arch = _make_dual_system_cross_attn_fixture()
@@ -682,16 +682,25 @@ def test_dual_system_cross_attn_other_modes_stay_eager(monkeypatch):
     arch.apply_compile_optimizations(OmegaConf.create({"mode": "none"}))
     assert arch._compiled_cross_attn_action is None
 
+    assert compile_calls == []
+
+
+def test_dual_system_cross_attn_auto_mode_enables_helper():
+    """mode=auto should infer cross_attn for dual_system_cross_attn checkpoints."""
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "mode": "self_attn",
-                "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+                "mode": "auto",
+                "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
     )
-    assert arch._compiled_cross_attn_action is None
-    assert compile_calls == []
+
+    assert arch._compiled_cross_attn_action is not None
 
 
 def test_dual_system_cross_attn_compile_failure_falls_back_to_eager(monkeypatch):
@@ -705,7 +714,7 @@ def test_dual_system_cross_attn_compile_failure_falls_back_to_eager(monkeypatch)
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "mode": "cross_attn",
+                "mode": "auto",
                 "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
@@ -744,7 +753,7 @@ def test_dual_system_cross_attn_bad_request_does_not_disable_compile(monkeypatch
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "mode": "cross_attn",
+                "mode": "auto",
                 "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
@@ -833,7 +842,7 @@ def test_dual_system_joint_self_attn_creates_dit_state():
 
 
 def test_dual_system_mot_loop_compile_helper_matches_eager(monkeypatch):
-    """Feature-flagged MoT helper should preserve the eager joint-loop result."""
+    """auto compile mode should preserve the eager joint-loop result."""
     from omegaconf import OmegaConf
 
     arch, driver = _make_dual_system_self_attn_mot_fixture()
@@ -860,7 +869,7 @@ def test_dual_system_mot_loop_compile_helper_matches_eager(monkeypatch):
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "mode": "self_attn",
+                "mode": "auto",
                 "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
@@ -903,8 +912,26 @@ def test_dual_system_self_attn_compile_mode_none_disables_mot_loop():
     assert arch._compiled_mot_loop is None
 
 
-def test_dual_system_self_attn_cross_attn_mode_stays_eager(monkeypatch):
-    """cross_attn mode must not accidentally enable the self-attn MoT helper."""
+def test_dual_system_self_attn_auto_mode_enables_mot_loop():
+    """mode=auto should infer self_attn for dual_system_self_attn checkpoints."""
+    from omegaconf import OmegaConf
+
+    arch, _driver = _make_dual_system_self_attn_mot_fixture()
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+
+    assert arch._compiled_mot_loop is not None
+
+
+def test_dual_system_self_attn_legacy_cross_attn_mode_is_rejected(monkeypatch):
+    """Architecture-specific mode names are no longer public compile modes."""
     from omegaconf import OmegaConf
 
     arch, _driver = _make_dual_system_self_attn_mot_fixture()
@@ -916,14 +943,15 @@ def test_dual_system_self_attn_cross_attn_mode_stays_eager(monkeypatch):
         return fn
 
     monkeypatch.setattr(torch, "compile", _fake_compile)
-    arch.apply_compile_optimizations(
-        OmegaConf.create(
-            {
-                "mode": "cross_attn",
-                "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
-            }
+    with pytest.raises(ValueError, match="Unknown compile mode"):
+        arch.apply_compile_optimizations(
+            OmegaConf.create(
+                {
+                    "mode": "cross_attn",
+                    "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+                }
+            )
         )
-    )
 
     assert arch._compiled_mot_loop is None
     assert compile_calls == []
@@ -938,7 +966,7 @@ def test_dual_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "mode": "self_attn",
+                "mode": "auto",
                 "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
@@ -993,7 +1021,7 @@ def test_dual_system_mot_loop_bad_request_does_not_disable_compile(monkeypatch):
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "mode": "self_attn",
+                "mode": "auto",
                 "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
@@ -1055,7 +1083,7 @@ def test_dual_system_mot_loop_compile_setup_bad_request_does_not_disable_compile
     arch.apply_compile_optimizations(
         OmegaConf.create(
             {
-                "mode": "self_attn",
+                "mode": "auto",
                 "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )

@@ -90,7 +90,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         """Apply the cross-attention compile mode through an action-side helper."""
 
         mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode != "cross_attn":
+        if mode != "auto":
             super().apply_compile_optimizations(compile_cfg)
             self._compiled_cross_attn_action = None
             return

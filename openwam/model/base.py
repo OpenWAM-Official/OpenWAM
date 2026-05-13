@@ -973,7 +973,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
     def apply_compile_optimizations(self, compile_cfg) -> None:
         """Apply architecture-specific deploy-time compile optimizations."""
         mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode in (None, "none"):
+        if mode in (None, "auto", "none"):
             return
         logger.warning(
             "torch.compile mode '%s' is not implemented for %s; running eager.",

@@ -216,7 +216,7 @@ class TestDeploymentYaml:
 
         cfg = self._load()
         assert OmegaConf.select(cfg, "optimization.compile") is not None
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "auto"
         assert OmegaConf.select(cfg, "optimization.compile.self_attn.torch_mode") == "reduce-overhead"
         assert OmegaConf.select(cfg, "optimization.compile.self_attn.dynamic") is False
         assert OmegaConf.select(cfg, "optimization.compile.cross_attn.torch_mode") == "reduce-overhead"
@@ -227,6 +227,13 @@ class TestDeploymentYaml:
 
         cfg = self._load()
         assert not OmegaConf.select(cfg, "optimization.dit_cache.enabled")
+
+    def test_optimization_async_inference_defaults_off(self):
+        from omegaconf import OmegaConf
+
+        cfg = self._load()
+        assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "none"
+        assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.inference_delay_steps") is None
 
     def test_optimization_schedule_action_steps(self):
         from omegaconf import OmegaConf
@@ -289,6 +296,9 @@ class TestDeployConfigLoading:
             "schedule_type",
             "shift",
             "compile_mode",
+            "async_mode",
+            "async_execution_horizon",
+            "async_inference_delay_steps",
         ):
             setattr(args, attr, None)
         return args
@@ -344,10 +354,9 @@ class TestDeployConfigLoading:
         cfg = deploy._apply_cli_overrides(cfg, args)
         assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
         compile_cfg = OmegaConf.select(cfg, "optimization.compile")
-        assert compile_options.section_enabled(compile_options.self_attn_compile_cfg(compile_cfg), default=False) is False
-        assert compile_options.section_enabled(compile_options.cross_attn_compile_cfg(compile_cfg), default=False) is False
+        assert compile_options.compile_mode(compile_cfg, strict=True) == "none"
 
-    def test_cli_compile_mode_self_attn_enables_only_self_attn(self):
+    def test_cli_compile_mode_auto_keeps_architecture_selection(self):
         from omegaconf import OmegaConf
 
         deploy = self._import()
@@ -355,31 +364,14 @@ class TestDeployConfigLoading:
 
         cfg = deploy._load_deploy_config()
         args = self._blank_args()
-        args.compile_mode = "self_attn"
+        args.compile_mode = "auto"
 
         cfg = deploy._apply_cli_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "self_attn"
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "auto"
         compile_cfg = OmegaConf.select(cfg, "optimization.compile")
-        assert compile_options.section_enabled(compile_options.self_attn_compile_cfg(compile_cfg), default=False) is True
-        assert compile_options.section_enabled(compile_options.cross_attn_compile_cfg(compile_cfg), default=False) is False
+        assert compile_options.compile_mode(compile_cfg, strict=True) == "auto"
 
-    def test_cli_compile_mode_cross_attn_enables_only_cross_attn(self):
-        from omegaconf import OmegaConf
-
-        deploy = self._import()
-        compile_options = self._compile_options()
-
-        cfg = deploy._load_deploy_config()
-        args = self._blank_args()
-        args.compile_mode = "cross_attn"
-
-        cfg = deploy._apply_cli_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "cross_attn"
-        compile_cfg = OmegaConf.select(cfg, "optimization.compile")
-        assert compile_options.section_enabled(compile_options.self_attn_compile_cfg(compile_cfg), default=False) is False
-        assert compile_options.section_enabled(compile_options.cross_attn_compile_cfg(compile_cfg), default=False) is True
-
-    def test_cli_compile_mode_accepts_hyphen_aliases(self):
+    def test_cli_compile_mode_accepts_only_auto_and_none(self):
         import argparse
 
         deploy = self._import()
@@ -387,13 +379,17 @@ class TestDeployConfigLoading:
         parser = argparse.ArgumentParser()
         parser.add_argument("--compile-mode", type=deploy._normalize_compile_mode_arg, choices=deploy._COMPILE_MODES)
 
-        assert parser.parse_args(["--compile-mode", "self-attn"]).compile_mode == "self_attn"
-        assert parser.parse_args(["--compile-mode", "cross-attn"]).compile_mode == "cross_attn"
+        assert parser.parse_args(["--compile-mode", "auto"]).compile_mode == "auto"
+        assert parser.parse_args(["--compile-mode", "none"]).compile_mode == "none"
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--compile-mode", "self-attn"])
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--compile-mode", "cross-attn"])
 
     def test_mode_only_compile_sections_use_fast_path_defaults(self):
         compile_options = self._compile_options()
 
-        self_cfg = {"mode": "self_attn"}
+        self_cfg = {"self_attn": {}}
         self_section = compile_options.self_attn_compile_cfg(self_cfg)
         assert compile_options.section_enabled(self_section, default=False) is True
         assert compile_options.torch_compile_kwargs(self_section) == {
@@ -401,7 +397,7 @@ class TestDeployConfigLoading:
             "mode": "reduce-overhead",
         }
 
-        cross_cfg = {"mode": "cross_attn"}
+        cross_cfg = {"cross_attn": {}}
         cross_section = compile_options.cross_attn_compile_cfg(cross_cfg)
         assert compile_options.section_enabled(cross_section, default=False) is True
         assert compile_options.torch_compile_kwargs(cross_section) == {
@@ -412,30 +408,40 @@ class TestDeployConfigLoading:
     def test_compile_section_enabled_false_is_respected(self):
         compile_options = self._compile_options()
 
-        self_cfg = {"mode": "self_attn", "self_attn": {"enabled": False}}
+        self_cfg = {"self_attn": {"enabled": False}}
         self_section = compile_options.self_attn_compile_cfg(self_cfg)
         assert compile_options.section_enabled(self_section, default=True) is False
 
-        cross_cfg = {"mode": "cross_attn", "cross_attn": {"enabled": False}}
+        cross_cfg = {"cross_attn": {"enabled": False}}
         cross_section = compile_options.cross_attn_compile_cfg(cross_cfg)
         assert compile_options.section_enabled(cross_section, default=True) is False
 
-    def test_removed_compile_mode_default_is_rejected(self):
+    def test_removed_compile_modes_are_rejected(self):
         compile_options = self._compile_options()
 
+        assert compile_options.normalize_compile_mode("auto") == "auto"
+        assert compile_options.normalize_compile_mode("none") == "none"
         with pytest.raises(ValueError, match="Unknown compile mode"):
             compile_options.normalize_compile_mode("default")
         with pytest.raises(ValueError, match="Unknown compile mode"):
             compile_options.compile_mode({"mode": "default"}, strict=True)
+        with pytest.raises(ValueError, match="Unknown compile mode"):
+            compile_options.normalize_compile_mode("self_attn")
+        with pytest.raises(ValueError, match="Unknown compile mode"):
+            compile_options.normalize_compile_mode("cross-attn")
 
     def test_policy_server_entrypoint_validates_compile_mode(self):
         from omegaconf import OmegaConf
 
         policy_server = self._policy_server()
 
-        cfg = OmegaConf.create({"optimization": {"compile": {"mode": "self-attn"}}})
+        cfg = OmegaConf.create({"optimization": {"compile": {"mode": "none"}}})
         policy_server._normalize_compile_mode_in_cfg(cfg)
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "self_attn"
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
+
+        auto_cfg = OmegaConf.create({"optimization": {"compile": {"mode": "auto"}}})
+        policy_server._normalize_compile_mode_in_cfg(auto_cfg)
+        assert OmegaConf.select(auto_cfg, "optimization.compile.mode") == "auto"
 
         bad_cfg = OmegaConf.create({"optimization": {"compile": {"mode": "default"}}})
         with pytest.raises(ValueError, match="Unknown compile mode"):
@@ -446,12 +452,83 @@ class TestDeployConfigLoading:
 
         policy_server = self._policy_server()
 
-        args = policy_server._build_argparser().parse_args(["--mock", "--compile-mode", "cross-attn"])
-        assert args.compile_mode == "cross_attn"
+        args = policy_server._build_argparser().parse_args(["--mock", "--compile-mode", "none"])
+        assert args.compile_mode == "none"
 
         cfg = OmegaConf.create({})
         policy_server._apply_compile_mode_override(cfg, args.compile_mode)
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "cross_attn"
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
+
+        with pytest.raises(SystemExit):
+            policy_server._build_argparser().parse_args(["--mock", "--compile-mode", "self-attn"])
+
+    def test_cli_async_mode_override(self):
+        from omegaconf import OmegaConf
+
+        deploy = self._import()
+
+        cfg = deploy._load_deploy_config()
+        args = self._blank_args()
+        args.async_mode = "vanilla"
+
+        cfg = deploy._apply_cli_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "vanilla"
+
+    def test_cli_async_numeric_overrides(self):
+        from omegaconf import OmegaConf
+
+        deploy = self._import()
+
+        cfg = deploy._load_deploy_config()
+        args = self._blank_args()
+        args.async_mode = "vanilla"
+        args.async_execution_horizon = 24
+        args.async_inference_delay_steps = 6
+
+        cfg = deploy._apply_cli_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "vanilla"
+        assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.execution_horizon") == 24
+        assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.inference_delay_steps") == 6
+
+        legacy_cfg = deploy._load_deploy_config()
+        OmegaConf.update(legacy_cfg, "optimization.async_inference.mode", None, merge=False)
+        OmegaConf.update(legacy_cfg, "optimization.async_inference.enabled", True, merge=False)
+        legacy_args = self._blank_args()
+        legacy_args.async_execution_horizon = 16
+        legacy_cfg = deploy._apply_cli_overrides(legacy_cfg, legacy_args)
+        assert OmegaConf.select(legacy_cfg, "optimization.async_inference.vanilla.execution_horizon") == 16
+
+    def test_cli_async_numeric_overrides_require_vanilla(self):
+        deploy = self._import()
+
+        cfg = deploy._load_deploy_config()
+        args = self._blank_args()
+        args.async_execution_horizon = 24
+
+        with pytest.raises(ValueError, match="--async-mode vanilla"):
+            deploy._apply_cli_overrides(cfg, args)
+
+        args.async_mode = "none"
+        with pytest.raises(ValueError, match="--async-mode vanilla"):
+            deploy._apply_cli_overrides(cfg, args)
+
+    def test_cli_async_numeric_overrides_fail_fast_on_invalid_ranges(self):
+        deploy = self._import()
+
+        cfg = deploy._load_deploy_config()
+        args = self._blank_args()
+        args.async_mode = "vanilla"
+        args.async_execution_horizon = 0
+        with pytest.raises(ValueError, match="execution_horizon must be positive"):
+            deploy._apply_cli_overrides(cfg, args)
+
+        cfg = deploy._load_deploy_config()
+        args = self._blank_args()
+        args.async_mode = "vanilla"
+        args.async_execution_horizon = 4
+        args.async_inference_delay_steps = 4
+        with pytest.raises(ValueError, match="inference_delay_steps must be < execution_horizon"):
+            deploy._apply_cli_overrides(cfg, args)
 
     def test_none_args_do_not_override(self):
         from omegaconf import OmegaConf
@@ -463,7 +540,7 @@ class TestDeployConfigLoading:
 
         args = self._blank_args()
         # All None — nothing should change
-        for attr in ("device", "host", "ws_port", "http_port", "denoise_steps", "schedule_type", "shift"):
+        for attr in ("device", "host", "ws_port", "http_port", "denoise_steps", "schedule_type", "shift", "async_mode"):
             setattr(args, attr, None)
 
         cfg = deploy._apply_cli_overrides(cfg, args)
@@ -548,26 +625,18 @@ class TestJointEngineCompileFlags:
             return engine, mock_compile, arch
         return engine, mock_compile
 
-    def test_compile_disabled_by_default(self):
+    def test_compile_mode_none_does_not_broad_compile(self):
         _engine, mock_compile, arch = self._make_engine(return_arch=True)
         mock_compile.assert_not_called()
         arch.apply_compile_optimizations.assert_called_once()
 
-    def test_self_attn_mode_is_passed_to_architecture(self):
+    def test_auto_mode_is_passed_to_architecture(self):
         from omegaconf import OmegaConf
 
-        _engine, mock_compile, arch = self._make_engine("self_attn", return_arch=True)
+        _engine, mock_compile, arch = self._make_engine("auto", return_arch=True)
         mock_compile.assert_not_called()
         compile_cfg = arch.apply_compile_optimizations.call_args.args[0]
-        assert OmegaConf.select(compile_cfg, "mode") == "self_attn"
-
-    def test_cross_attn_mode_is_passed_to_architecture(self):
-        from omegaconf import OmegaConf
-
-        _engine, mock_compile, arch = self._make_engine("cross_attn", return_arch=True)
-        mock_compile.assert_not_called()
-        compile_cfg = arch.apply_compile_optimizations.call_args.args[0]
-        assert OmegaConf.select(compile_cfg, "mode") == "cross_attn"
+        assert OmegaConf.select(compile_cfg, "mode") == "auto"
 
     def test_base_architecture_does_not_broad_compile_backbones(self):
         from omegaconf import OmegaConf
@@ -577,10 +646,23 @@ class TestJointEngineCompileFlags:
         arch = _make_tiny_arch()
         cfg = OmegaConf.create(
             {
-                "mode": "cross_attn",
+                "mode": "none",
                 "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
+
+        with patch("torch.compile") as mock_compile:
+            arch.apply_compile_optimizations(cfg)
+
+        mock_compile.assert_not_called()
+
+    def test_base_architecture_auto_compile_is_eager(self):
+        from omegaconf import OmegaConf
+
+        from tests.test_openwam_trainer import _make_tiny_arch
+
+        arch = _make_tiny_arch()
+        cfg = OmegaConf.create({"mode": "auto"})
 
         with patch("torch.compile") as mock_compile:
             arch.apply_compile_optimizations(cfg)
