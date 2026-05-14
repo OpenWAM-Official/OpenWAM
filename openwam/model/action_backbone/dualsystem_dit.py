@@ -1,6 +1,6 @@
 """ActionDiT: Lightweight Diffusion Transformer for Action Generation.
 
-Two variants share this module:
+Three variants share this module:
 
 - ``variant='joint_cross_attn'``: a stack of :class:`CrossAttnActionDiTBlock`
   blocks (self-attn over action tokens + cross-attn to a per-layer video
@@ -15,6 +15,11 @@ Two variants share this module:
   :class:`MoTJointDriver` drives the per-layer loop via
   :meth:`pre_attn_at_layer` / :meth:`post_attn_at_layer`, concatenating
   Q/K/V across modalities and running a single mixed attention.
+
+- ``variant='idm'``: reuses the same MoT-driven block layout as
+  ``joint_self_attn``. The architecture changes the training/inference
+  orchestration into IDM's two-stage denoising, but the action expert's
+  per-layer computation is identical.
 
 Inspired by:
 - CoVAR: Bridge attention between video and action streams (cross_attn).
@@ -42,6 +47,9 @@ from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint i
 
 if TYPE_CHECKING:
     from openwam.model.base import ActionState
+
+
+_MOT_VARIANTS = ("joint_self_attn", "idm")
 
 
 @dataclass
@@ -321,8 +329,9 @@ class ActionDiT(ActionBackbone):
     decoder. They differ in how video features enter the action stream:
 
     - ``joint_cross_attn`` → :class:`CrossAttnActionDiTBlock` + :meth:`forward`.
-    - ``joint_self_attn``  → :class:`SelfAttnActionDiTBlock` + :meth:`pre_attn_at_layer`
-      / :meth:`post_attn_at_layer`, driven by :class:`MoTJointDriver`.
+    - ``joint_self_attn`` / ``idm`` → :class:`SelfAttnActionDiTBlock` +
+      :meth:`pre_attn_at_layer` / :meth:`post_attn_at_layer`, driven by
+      :class:`MoTJointDriver`.
 
     Args:
         action_dim: Dimension of raw action vectors (e.g. 20 for bimanual).
@@ -352,7 +361,10 @@ class ActionDiT(ActionBackbone):
             action block (1:1 mapping). Self-attn variant: typically the full
             ``range(num_layers)`` — the driver runs joint attention at every
             layer regardless and this is informational only.
-        variant: ``"joint_cross_attn"`` or ``"joint_self_attn"``.
+        variant: ``"joint_cross_attn"``, ``"joint_self_attn"``, or ``"idm"``.
+        use_proprioception / state_dim:
+            Deprecated on ActionDiT. Dual-system architectures append proprio
+            as a context token before video/action cross-attention.
     """
 
     def __init__(
@@ -372,8 +384,10 @@ class ActionDiT(ActionBackbone):
         eps: float = 1e-6,
     ):
         super().__init__()
-        if variant not in ("joint_cross_attn", "joint_self_attn"):
-            raise ValueError(f"Unknown variant '{variant}'. Choose from: joint_cross_attn, joint_self_attn")
+        if variant not in ("joint_cross_attn", *_MOT_VARIANTS):
+            raise ValueError(
+                f"Unknown variant '{variant}'. Choose from: joint_cross_attn, {', '.join(_MOT_VARIANTS)}"
+            )
         if len(bridge_layers) != num_layers:
             raise ValueError(
                 f"bridge_layers ({len(bridge_layers)}) must equal num_layers ({num_layers}). "
@@ -439,7 +453,7 @@ class ActionDiT(ActionBackbone):
         self.time_projection = TimestepModulation(dim, t_mod_params)
 
         # Transformer blocks
-        if variant == "joint_self_attn":
+        if variant in _MOT_VARIANTS:
             # SelfAttn variant: action owns an independent text/proprio
             # embedding, so cross-attn KV lives in the action residual width.
             self.blocks = nn.ModuleList(
@@ -685,7 +699,7 @@ class ActionDiT(ActionBackbone):
         )
 
     # ------------------------------------------------------------------
-    # joint_self_attn variant: MoT-driven entry points
+    # joint_self_attn / idm variants: MoT-driven entry points
     # ------------------------------------------------------------------
 
     def prepare_state(
@@ -708,9 +722,11 @@ class ActionDiT(ActionBackbone):
 
         action_context = None
         action_context_mask = None
-        if self.variant == "joint_self_attn":
+        if self.variant in _MOT_VARIANTS:
             if context is None:
-                raise ValueError("ActionDiT.prepare_state requires raw context for variant='joint_self_attn'.")
+                raise ValueError(
+                    "ActionDiT.prepare_state requires raw context for variant='joint_self_attn' or 'idm'."
+                )
             action_context, action_context_mask = self._prepare_context(
                 context,
                 context_mask,

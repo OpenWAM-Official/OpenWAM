@@ -136,6 +136,7 @@ def test_import_architecture_registry():
     supported = list_supported_architectures()
     assert "dual_system_cross_attn" in supported
     assert "dual_system_self_attn" in supported
+    assert "dual_system_idm" in supported
     assert "shared_backbone_vanilla" in supported
     assert "shared_backbone_moe" in supported
 
@@ -162,6 +163,17 @@ def test_import_architecture_registry():
             "ffn_dim": 256,
             "num_heads": 4,
             "video_dim": 128,
+        },
+        "dual_system_idm": {
+            "framework": "dual_system",
+            "variant": "idm",
+            "bridge_layers": (0, 1),
+            "action_dim": 7,
+            "dim": 128,
+            "ffn_dim": 256,
+            "num_heads": 4,
+            "video_dim": 128,
+            "idm_video_cond_noise_prob": 0.5,
         },
         "shared_backbone_moe": {
             "framework": "shared_backbone",

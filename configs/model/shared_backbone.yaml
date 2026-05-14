@@ -5,9 +5,11 @@
 #   - moe:     shared DiT path + expert FFN corrections on action tokens
 
 architecture:
+  # Common shared-backbone selector and data-shape knobs.
   framework: shared_backbone
   variant: vanilla   # vanilla | moe
   action_dim: 20
+
   # Optional proprio/state conditioning. When enabled, dataloaders must provide
   # sample["proprio"] with shape [state_dim] or [1, state_dim]. SharedBackbone
   # encodes it as one state token appended after action tokens:
@@ -19,8 +21,11 @@ architecture:
   state_dim: 20
 
   # ------------------------------
-  # shared behavior (vanilla + MoE)
+  # shared behavior (vanilla + moe)
   # ------------------------------
+  # Shared action decoder MLP hidden width.
+  action_decoder_hidden_dim: 1024
+
   # Both variants concatenate action/state tokens into the shared DiT sequence,
   # so both use the same shared self-attention mask layout.
   # Shared self-attention mask layout:
@@ -37,9 +42,6 @@ architecture:
   #   per_frame_causal    : token-level frame-causal block-diagonal
   #   first_frame_causal  : first-frame tokens only see themselves; rest see all
   video_attention_mask_mode: first_frame_causal
-
-  # Shared action decoder MLP hidden width.
-  action_decoder_hidden_dim: 1024
 
   # ------------------------------
   # moe-only behavior

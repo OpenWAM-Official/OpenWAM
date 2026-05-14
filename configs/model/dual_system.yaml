@@ -1,5 +1,5 @@
 # Dual-System WAM Architecture
-# Separate ActionDiT paired with the video DiT. Two variants:
+# Separate ActionDiT paired with the video DiT. Three variants:
 #   - joint_cross_attn: video runs to completion → bridge features captured
 #     at configured layers → ActionDiT runs once with cross-attention to those
 #     features. The two streams interact only through the bridge.
@@ -7,24 +7,28 @@
 #     every transformer layer (FastWAM MoT pattern). Q/K/V from each modality
 #     are concatenated, attention is computed once, then split back. Requires
 #     identical num_layers / num_heads / head_dim across the two backbones.
+#   - idm: FastWAM-IDM style teacher-forcing training, then two-stage inference:
+#     denoise video first and use frozen video K/V while denoising actions.
 
 architecture:
+  # Common dual-system selector and data-shape knobs.
   framework: dual_system
   variant: joint_self_attn   # joint_self_attn or joint_cross_attn or idm
-  detach_bridge: false         # joint_cross_attn only; if true, no gradients flow from ActionDiT to video DiT (one-way bridge). Ignored under joint_self_attn.
   action_dim: 20
+
   # Proprioceptive state conditioning.
-  # When enabled, dataloaders must provide sample["proprio"], and the dual-system
-  # architecture appends one FastWAM-style proprio token to text context.
+  # Used by all dual-system variants. When enabled, dataloaders must provide
+  # sample["proprio"], and the architecture appends one FastWAM-style proprio
+  # token to the raw text context before video/action backbones consume it.
   use_proprioception: true
   state_dim: 20                  # required when use_proprioception=true
 
-  # bridge_layers / bridge_interval are used by joint_cross_attn to choose
-  # which video DiT layers feed the bridge cross-attention. Under
-  # joint_self_attn the MoT driver runs at every layer regardless; these
-  # fields are accepted but only their length matters (it must equal the
-  # video backbone's num_layers — usually leave bridge_layers: null +
-  # bridge_interval: 1 to auto-fill).
+  # Common ActionDiT layer selection.
+  # joint_cross_attn: chooses which video DiT layers feed bridge cross-attention.
+  # joint_self_attn/idm: there is no bridge feature collection, but the resolved
+  # layer count is still used to size ActionDiT. It must match the video
+  # backbone's num_layers for MoT mixed attention. Usually leave
+  # bridge_layers: null + bridge_interval: 1.
   #   (a) Explicit list:  bridge_layers: [0, 1, ..., 29]
   #   (b) Interval mode:  set bridge_layers: null and use bridge_interval.
   #       - interval=1 → all inferred video DiT layers
@@ -32,22 +36,50 @@ architecture:
   bridge_layers: null
   bridge_interval: 1
 
-  # joint_self_attn (MoTJointDriver) options. Ignored when variant is
-  # joint_cross_attn.
+  # ------------------------------
+  # joint_self_attn + idm behavior
+  # ------------------------------
+  # MoTJointDriver options. Only used when variant is joint_self_attn or idm;
+  # ignored by joint_cross_attn.
   mot_checkpoint_mixed_attn: true       # gradient-checkpoint the mixed attention itself; trades VRAM for one extra recompute per layer
-  # Joint mask layout (mirrors FastWAM-Joint):
+  # OpenWAM MoT joint-mask mode. Only user-configurable for variant=joint_self_attn.
+  # variant=idm fixes this internally to ``joint``: IDM training uses its own
+  # teacher-forcing mask, and IDM inference must keep the matching FastWAM-style
+  # video/action joint mask. Do not override this field for idm.
+  #
+  # Available layouts:
   #   bidirectional: pass attn_mask=None (full v↔a). Useful for ablations.
   #   joint        : [Sv+Sa, Sv+Sa] bool mask with v↔v from
   #                  ``video_attention_mask_mode``, a↔a True, a→v True,
   #                  v→a False (video doesn't see action; required for
   #                  optional video-KV prefill).
   attention_mask_mode: joint
-  # video_attention_mask_mode controls the v↔v block of the joint mask:
+  # Video-to-video self-attention mask used by the video backbone.
+  # joint_self_attn: controls the v↔v block inside the joint mask.
+  # idm: controls the noisy-video and cond-video v↔v submasks inside the
+  #      teacher-forcing training mask, and the frozen-video cache prefill mask
+  #      during inference. This mirrors FastWAM's video_expert
+  #      build_video_to_video_mask() behavior.
   #   bidirectional       : full v↔v
   #   per_frame_causal    : token-level frame-causal block-diagonal
   #   first_frame_causal  : first-frame tokens only see themselves; rest see all
   # FastWAM-Joint uses ``first_frame_causal`` by default.
   video_attention_mask_mode: first_frame_causal
+
+  # ------------------------------
+  # joint_cross_attn-only behavior
+  # ------------------------------
+  # Only used when variant=joint_cross_attn; ignored under joint_self_attn/idm.
+  # IDM does not have a detach_bridge operation: its action path is coupled
+  # through MoT teacher-forcing during training and frozen-video KV cache during
+  # inference, not through detachable bridge features.
+  detach_bridge: false
+
+  # ------------------------------
+  # idm-only behavior
+  # ------------------------------
+  # Only used when variant is idm.
+  idm_video_cond_noise_prob: 0.5
 
 # Video backbone
 # Resolution: VACE only supports 480x832 or 720x1280; TI2V supports any height/width % 32 == 0.

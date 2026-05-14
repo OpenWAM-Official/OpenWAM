@@ -137,5 +137,6 @@ def test_all_architectures_registered():
     supported = list_supported_architectures()
     assert "dual_system_cross_attn" in supported
     assert "dual_system_self_attn" in supported
+    assert "dual_system_idm" in supported
     assert "shared_backbone_vanilla" in supported
     assert "shared_backbone_moe" in supported

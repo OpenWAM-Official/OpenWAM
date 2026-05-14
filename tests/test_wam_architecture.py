@@ -91,12 +91,14 @@ def _dual_system_cross_attn_inputs(arch, seed: int):
 def test_architecture_module_layout_imports():
     from openwam.model.architectures.dual_system import (
         DualSystemCrossAttnArchitecture,
+        DualSystemIDMArchitecture,
         DualSystemSelfAttnArchitecture,
     )
     from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
     from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
 
     assert DualSystemCrossAttnArchitecture is not None
+    assert DualSystemIDMArchitecture is not None
     assert DualSystemSelfAttnArchitecture is not None
     assert SharedBackboneMoEArchitecture is not None
     assert SharedBackboneVanillaArchitecture is not None
@@ -117,6 +119,7 @@ def test_architecture_support_lists():
     supported = list_supported_architectures()
     assert "dual_system_cross_attn" in supported
     assert "dual_system_self_attn" in supported
+    assert "dual_system_idm" in supported
     assert "shared_backbone_vanilla" in supported
     assert "shared_backbone_moe" in supported
     assert get_architecture_support("shared_backbone_moe").status == "supported"

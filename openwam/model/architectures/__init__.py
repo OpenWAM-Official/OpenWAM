@@ -4,6 +4,7 @@ from openwam.model.architectures import dual_system, shared_backbone  # noqa: F4
 from openwam.model.architectures.base import ActionState, BaseWAMArchitecture
 from openwam.model.architectures.dual_system import (
     DualSystemCrossAttnArchitecture,
+    DualSystemIDMArchitecture,
     DualSystemSelfAttnArchitecture,
 )
 from openwam.model.architectures.registry import (
@@ -37,6 +38,7 @@ __all__ = [
     "register_architecture",
     "resolve_architecture_config",
     "DualSystemCrossAttnArchitecture",
+    "DualSystemIDMArchitecture",
     "DualSystemSelfAttnArchitecture",
     "SharedBackboneMoEArchitecture",
     "SharedBackboneVanillaArchitecture",
