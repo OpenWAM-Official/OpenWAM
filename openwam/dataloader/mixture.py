@@ -53,6 +53,7 @@
 
 
 
+import copy
 import logging
 from typing import Dict, List, Optional, Sequence
 
@@ -236,12 +237,33 @@ class MixtureDataset(BaseActionDataset):
 
         def _get(cfg, key, default=None):
             v = getattr(cfg, key, None)
-            return v if v is not None else default
+            if v is not None:
+                return v
+            if hasattr(cfg, "get"):
+                return cfg.get(key, default)
+            return default
+
+        def _copy_with_default(cfg, key, value):
+            if value is None or _get(cfg, key) is not None:
+                return cfg
+            if hasattr(cfg, "items"):
+                copied = {k: v for k, v in cfg.items()}
+                copied[key] = value
+                return copied
+            copied = copy.copy(cfg)
+            setattr(copied, key, value)
+            return copied
 
         weight_strategy = _get(config, "weight_strategy", "manual")
+        split_manifest = _get(config, "split_manifest")
 
-        enabled_cfgs = [c for c in config.datasets if _get(c, "enabled", True)]
-        for skipped in (c for c in config.datasets if not _get(c, "enabled", True)):
+        dataset_cfgs = _get(config, "datasets", [])
+        enabled_cfgs = [
+            _copy_with_default(c, "split_manifest", split_manifest)
+            for c in dataset_cfgs
+            if _get(c, "enabled", True)
+        ]
+        for skipped in (c for c in dataset_cfgs if not _get(c, "enabled", True)):
             logger.info(
                 "MixtureDataset: skipping disabled sub-dataset (type=%s)",
                 _get(skipped, "type", "?"),

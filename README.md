@@ -48,6 +48,7 @@ OpenWAM/
 ├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests
 ├── configs/           # Hydra configs for model, dataloader, training_strategy, accelerate
 ├── tests/             # Unit tests
+├── docs/
 ├── assets_repo/       # Architecture diagrams
 ├── references/        # Reference implementations (FastWAM)
 └── benchmarks/
