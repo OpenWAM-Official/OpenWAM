@@ -586,6 +586,75 @@ def test_save_load_checkpoint():
             assert torch.equal(v1, v2), f"Weight mismatch for {k1}"
 
 
+def test_save_checkpoint_excludes_vlm_backbone():
+    """Architecture save_checkpoint must exclude vlm_backbone params (saved separately)."""
+    from openwam.model.base import BaseWAMArchitecture
+
+    class _VLMArch(BaseWAMArchitecture):
+        def __init__(self):
+            super().__init__(cfg=None)
+            self.action_head = nn.Linear(16, 8)
+            self.vlm_backbone = nn.Linear(16, 32)
+
+        def forward(self, *args, **kwargs):  # pragma: no cover
+            raise NotImplementedError
+
+    arch = _VLMArch()
+    with torch.no_grad():
+        arch.action_head.weight.copy_(torch.randn_like(arch.action_head.weight))
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = str(Path(tmpdir) / "vlm_ckpt.safetensors")
+        arch.save_checkpoint(ckpt_path)
+
+        from safetensors.torch import load_file
+
+        saved = load_file(ckpt_path)
+        assert not any(k.startswith("vlm_backbone.") for k in saved), "vlm_backbone params should be excluded"
+        assert any(k.startswith("action_head.") for k in saved), "non-VLM params should be saved"
+
+        reloaded = _VLMArch()
+        reloaded.load_checkpoint(ckpt_path)
+        assert torch.equal(reloaded.action_head.weight, arch.action_head.weight)
+
+
+def test_trainer_checkpoint_excludes_vlm_backbone():
+    """Trainer save_checkpoint must exclude vlm_backbone params (saved separately)."""
+    from openwam.model.base import BaseWAMArchitecture
+    from openwam.train.openwam_trainer import OpenWAMTrainer
+
+    class _VLMArch(BaseWAMArchitecture):
+        def __init__(self):
+            super().__init__(cfg=None)
+            self.action_head = nn.Linear(16, 8)
+            self.vlm_backbone = nn.Linear(16, 32)
+
+        def forward(self, *args, **kwargs):  # pragma: no cover
+            raise NotImplementedError
+
+    arch = _VLMArch()
+    with torch.no_grad():
+        arch.action_head.weight.copy_(torch.randn_like(arch.action_head.weight))
+
+    trainer = object.__new__(OpenWAMTrainer)
+    trainer.accelerator = None
+    trainer.architecture = arch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = str(Path(tmpdir) / "trainer_vlm_ckpt.safetensors")
+        trainer.save_checkpoint(ckpt_path)
+
+        from safetensors.torch import load_file
+
+        saved = load_file(ckpt_path)
+        assert not any(k.startswith("vlm_backbone.") for k in saved)
+        assert any(k.startswith("action_head.") for k in saved)
+
+        reloaded = _VLMArch()
+        reloaded.load_checkpoint(ckpt_path)
+        assert torch.equal(reloaded.action_head.weight, arch.action_head.weight)
+
+
 def test_manage_checkpoints():
     """manage_checkpoints should keep only the latest K files."""
     from openwam.train.utils.checkpointing import manage_checkpoints

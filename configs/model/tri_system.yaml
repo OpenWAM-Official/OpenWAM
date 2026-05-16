@@ -1,0 +1,93 @@
+# Tri-system architecture: video DiT + shared ActionDiT + Understanding Expert + Qwen3-VL.
+# OpenWAM-native trimodal MoT: reuse the dual-system joint_self_attn action
+# backbone and add understanding tokens as the third mixed-attention stream.
+
+# Note: vlm_backbone / understanding_expert MUST live under the architecture: block
+# for resolve_architecture_config to forward them to build-time cfg.
+# (action_backbone fields are flattened to the top level instead.)
+architecture:
+  framework: tri_system
+  variant: joint_self_attn
+  # action_dim / state_dim default to 20 to match the default dataloader
+  # (configs/dataloader/robotwin.yaml: action_mode=eef → 20D xyz+rot6d+grip).
+  # If you switch the dataloader to action_mode=joint (14D qpos), override
+  # these to 14 on the CLI, e.g.
+  #   bash scripts/train.sh model=tri_system \
+  #       dataloader.action_mode=joint \
+  #       model.architecture.action_dim=14 \
+  #       model.architecture.state_dim=14
+  action_dim: 20
+  use_proprioception: true
+  state_dim: 20
+
+  # Tri-system MoT joint-mask mode.
+  #
+  #   bidirectional : no explicit mask; fully connected [V+A+U] attention.
+  #   joint         : [Sv+Sa+Su, Sv+Sa+Su] bool mask with:
+  #                   - v->v from ``video_attention_mask_mode``
+  #                   - v->a disabled
+  #                   - v->u enabled
+  #                   - action query rows fully connected
+  #                   - understanding query rows see understanding only
+  attention_mask_mode: joint
+
+  # Controls the v->v block when attention_mask_mode=joint:
+  #   bidirectional      : all video tokens see all video tokens
+  #   per_frame_causal   : frame i sees frames <= i
+  #   first_frame_causal : first-frame tokens only see first-frame tokens;
+  #                        all later video tokens see all video tokens
+  video_attention_mask_mode: first_frame_causal
+
+  # Wrap the inner mixed self-attention call in torch.utils.checkpoint to trade compute
+  # for activation memory. Default True; set False only if you're memory-rich and want
+  # a small speed-up. The trimodal [V+A+U] attention sequence can be ≥ several thousand
+  # tokens at full resolution, so disabling this typically OOMs Wan22 + Qwen3-VL training.
+  mot_checkpoint_mixed_attn: true
+
+  # Bridge layers — which video DiT layers participate in trimodal joint attention.
+  # For the ``joint_self_attn`` variant the MoT driver enforces a 1:1 mapping with the
+  # video backbone's layer count, so the bridge_layers tuple must be exactly
+  # ``range(0, vb.num_layers)`` — i.e. ``bridge_interval=1``. The fields below are
+  # exposed for parity with dual_system; setting them to a sparse pattern will be
+  # caught by ``TriSystemMoTDriver.__init__`` with a clear error.
+  bridge_layers: null
+  bridge_interval: 1
+
+  vlm_backbone:
+    checkpoint_path: /path/to/Qwen3-VL-2B-Instruct  # [Required] Path to your own directory
+    # load_pretrained: true loads HF weights from checkpoint_path. Set false for
+    # random-init ablations or CPU smoke tests (e.g. tests/test_tri_system_smoke.py).
+    # The VLM is frozen during joint training (see configs/training_strategy/joint.yaml).
+    load_pretrained: true
+    # Maximum text token length for the VLM processor. Inputs longer than this
+    # are silently truncated. Increase for multi-image or long-prompt scenarios.
+    max_length: 512
+
+  # Motus-style understanding expert. The VLM hidden state is first projected
+  # into ``dim`` via ``vlm_projector_type``, then participates in trimodal joint
+  # attention at every video DiT layer (num_layers is auto-set to vb.num_layers).
+  understanding_expert:
+    dim: 512                        # Understanding stream hidden dim (Motus default)
+    ffn_dim: 2048                   # FFN intermediate dim
+    vlm_projector_type: mlp3x_silu  # linear | mlp{N}x_silu — N-layer SiLU MLP from VLM hidden_size to dim
+    eps: 1.0e-5                     # RMSNorm epsilon inside understanding blocks
+
+# Video backbone — same conventions as dual_system.yaml / shared_backbone.yaml.
+video_backbone:
+  name: wan22_ti2v_5b
+  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
+
+# ActionDiT transformer parameters. Tri-system only supports joint_self_attn,
+# which runs a single mixed attention across [video, action, understanding]:
+#   - num_heads     : MUST match video_backbone.num_heads (Wan22=24).
+#   - attn_head_dim : MUST match video_backbone.head_dim  (Wan22=128).
+#   - dim / ffn_dim / text_dim: free; action residual stream is narrower than
+#                     video (1024 vs 3072) but Q/K/V project up to the shared
+#                     num_heads * attn_head_dim attention space.
+# num_layers is auto-derived from len(bridge_layers); do not specify.
+action_backbone:
+  dim: 1024
+  text_dim: 4096
+  ffn_dim: 4096
+  num_heads: 24
+  attn_head_dim: 128

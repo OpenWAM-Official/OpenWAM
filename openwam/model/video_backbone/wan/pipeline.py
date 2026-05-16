@@ -431,9 +431,6 @@ class WanVideoUnit_NoiseInitializer(PipelineUnit):
 
     def process(self, pipe: WanVideoPipeline, height, width, num_frames, seed, rand_device, vace_reference_image):
         length = (num_frames - 1) // 4 + 1
-        if vace_reference_image is not None:
-            f = len(vace_reference_image) if isinstance(vace_reference_image, list) else 1
-            length += f
         shape = (
             1,
             pipe.vae.model.z_dim,
@@ -442,8 +439,6 @@ class WanVideoUnit_NoiseInitializer(PipelineUnit):
             width // pipe.vae.upsampling_factor,
         )
         noise = pipe.generate_noise(shape, seed=seed, rand_device=rand_device)
-        if vace_reference_image is not None:
-            noise = torch.concat((noise[:, :, -f:], noise[:, :, :-f]), dim=2)
         return {"noise": noise}
 
 
@@ -463,14 +458,6 @@ class WanVideoUnit_InputVideoEmbedder(PipelineUnit):
         input_latents = pipe.vae.encode(
             input_video, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride
         ).to(dtype=pipe.torch_dtype, device=pipe.device)
-        if vace_reference_image is not None:
-            if not isinstance(vace_reference_image, list):
-                vace_reference_image = [vace_reference_image]
-            vace_reference_image = pipe.preprocess_video(vace_reference_image)
-            vace_reference_latents = pipe.vae.encode(vace_reference_image, device=pipe.device).to(
-                dtype=pipe.torch_dtype, device=pipe.device
-            )
-            input_latents = torch.concat([vace_reference_latents, input_latents], dim=2)
         if pipe.scheduler.training:
             return {"latents": noise, "input_latents": input_latents}
         else:

@@ -1,6 +1,6 @@
 defaults:
   - accelerate: deepspeed_zero2   # [Optional]: deepspeed_zero1, deepspeed_zero2(default), deepspeed_zero3
-  - model: dual_system            # [Optional]: dual_system(default), shared_backbone
+  - model: dual_system            # [Optional]: dual_system(default), shared_backbone, tri_system
   - dataloader: robotwin          # [Optional]: robotwin(default)
   - training_strategy: joint      # [Optional]: joint(default) or video_only
   - _self_

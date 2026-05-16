@@ -92,7 +92,7 @@ def test_action_dit_small_instantiate():
     """ActionDiT should instantiate with small parameters."""
     import torch.nn as nn
 
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+    from openwam.model.action_backbone.joint_action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -122,7 +122,7 @@ def test_action_dit_small_instantiate():
 
 def test_action_dit_forward_shape():
     """ActionDiT forward should produce (B, T, action_dim)."""
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+    from openwam.model.action_backbone.joint_action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -144,7 +144,7 @@ def test_action_dit_forward_shape():
 
 def test_action_dit_joint_cross_attn_context_shape_and_effect():
     """joint_cross_attn should accept action-owned raw text/proprio context."""
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+    from openwam.model.action_backbone.joint_action_dit import ActionDiT
 
     torch.manual_seed(0)
     dit = ActionDiT(

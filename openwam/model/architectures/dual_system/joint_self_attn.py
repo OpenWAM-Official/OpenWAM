@@ -17,7 +17,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+from openwam.model.action_backbone.joint_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_compile import CompiledMoTLoop
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver

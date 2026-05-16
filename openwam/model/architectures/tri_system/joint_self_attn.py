@@ -1,0 +1,352 @@
+"""Tri-system joint self-attention architecture.
+
+OpenWAM-native trimodal MoT: Wan video DiT + shared ActionDiT + Understanding
+Expert + frozen Qwen3-VL. Loss = video + action only; understanding is trained
+through those supervised streams.
+"""
+
+from typing import Optional, Tuple
+
+import torch
+import torch.nn as nn
+from torch import Tensor
+
+from openwam.model.action_backbone.joint_action_dit import ActionDiT
+from openwam.model.architectures.base import BaseWAMArchitecture
+from openwam.model.architectures.registry import register_architecture
+from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
+from openwam.model.vlm_backbone.qwen3_vl import (
+    Qwen3VLBackbone,
+    UnderstandingExpert,
+    UnderstandingExpertConfig,
+)
+from openwam.utils import resolve_bridge_layers
+
+
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _cfg_has(cfg, key) -> bool:
+    if cfg is None:
+        return False
+    try:
+        return key in cfg
+    except TypeError:
+        return hasattr(cfg, key)
+
+
+@register_architecture(
+    "tri_system_joint_self_attn",
+    status="supported",
+    note="Tri-system OpenWAM-style: video + shared ActionDiT + understanding via "
+    "trimodal joint attention with frozen Qwen3-VL.",
+    framework="tri_system",
+    variant="joint_self_attn",
+)
+class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
+    """Three-stream architecture: video + shared action DiT + understanding via MoT.
+
+    ``understanding_expert`` is an architecture-level **trainable** expert, NOT
+    a backbone. It does not appear in ``backbones`` because it has no
+    independent scheduler or dtype/device lifecycle — the architecture manages
+    it directly via ``set_dtype_device`` override. This is intentional:
+    backbones own their own initialization and checkpoint loading, while the
+    understanding expert's weights are part of the architecture's flat
+    state_dict.
+
+    **Trainability contract**: ``understanding_expert`` MUST remain trainable.
+    It receives gradients indirectly through the trimodal joint attention
+    (video and action loss back-propagate through the shared Q/K/V
+    projection). ``freeze_modules`` will raise if asked to freeze it.
+    """
+
+    # Modules that must stay trainable — freeze_modules rejects these.
+    _NEVER_FREEZE = frozenset({"understanding_expert"})
+
+    def __init__(self, cfg=None):
+        vlm_cfg = _cfg_get(cfg, "vlm_backbone", {}) or {}
+        if _cfg_has(vlm_cfg, "freeze"):
+            raise ValueError(
+                "model.architecture.vlm_backbone.freeze has moved to training_strategy.freeze. "
+                "Remove it from configs/model/tri_system.yaml and add 'vlm_backbone.vlm_model' "
+                "to the training strategy freeze list instead."
+            )
+        super().__init__(cfg)
+        self.vlm_backbone = None
+        self.understanding_expert = None
+        self._mot_driver = None
+        if cfg is None:
+            return
+        if self.video_backbone is not None:
+            cfg = dict(cfg) if isinstance(cfg, dict) else {k: v for k, v in cfg.items()}
+            cfg.setdefault("num_dit_layers", self.video_backbone.num_layers)
+            cfg.setdefault("video_dim", self.video_backbone.dim)
+            cfg.setdefault("num_heads", self.video_backbone.num_heads)
+            cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
+            # Default to "every video layer participates" if neither bridge_layers nor
+            # bridge_interval is supplied. resolve_bridge_layers ignores bridge_interval
+            # when bridge_layers is non-null, so this is safe even if the user later
+            # passes an explicit bridge_layers list.
+            cfg.setdefault("bridge_interval", 1)
+
+        self.vlm_backbone = Qwen3VLBackbone(
+            checkpoint_path=_cfg_get(vlm_cfg, "checkpoint_path"),
+            dtype=self.dtype,
+            load_pretrained=bool(_cfg_get(vlm_cfg, "load_pretrained", True)),
+            max_length=int(_cfg_get(vlm_cfg, "max_length", 512)),
+        )
+
+        und_cfg_dict = _cfg_get(cfg, "understanding_expert", {}) or {}
+        und_dim = int(_cfg_get(und_cfg_dict, "dim", 512))
+        if _cfg_has(und_cfg_dict, "ffn_dim_multiplier"):
+            raise ValueError(
+                "model.architecture.understanding_expert.ffn_dim_multiplier has been removed. "
+                "Use model.architecture.understanding_expert.ffn_dim instead."
+            )
+        und_ffn_dim = int(_cfg_get(und_cfg_dict, "ffn_dim", 2048))
+        und_cfg = UnderstandingExpertConfig(
+            dim=und_dim,
+            ffn_dim=und_ffn_dim,
+            num_layers=self.video_backbone.num_layers,
+            vlm_input_dim=self.vlm_backbone.hidden_size,
+            vlm_projector_type=str(_cfg_get(und_cfg_dict, "vlm_projector_type", "mlp3x_silu")),
+            eps=float(_cfg_get(und_cfg_dict, "eps", 1e-5)),
+        )
+        self.understanding_expert = UnderstandingExpert(
+            und_cfg,
+            wan_dim=self.video_backbone.dim,
+            wan_num_heads=self.video_backbone.num_heads,
+        )
+
+        action_dim_hidden = int(_cfg_get(cfg, "dim", 1024))
+        num_heads = int(_cfg_get(cfg, "num_heads", self.video_backbone.num_heads))
+        attn_head_dim = int(_cfg_get(cfg, "attn_head_dim", self.video_backbone.head_dim))
+        text_dim = int(_cfg_get(cfg, "text_dim", 4096))
+
+        # Bridge layers — which video DiT layers participate in joint attention.
+        # For ``joint_self_attn`` variant the MoT driver requires
+        # ``len(bl) == vb.num_layers`` (1:1 mapping); ``TriSystemMoTDriver.__init__``
+        # validates this. If the cfg supplies a sparse pattern, the driver raises
+        # with a clear error. We accept dual_system's defaults (``bridge_layers`` or
+        # ``bridge_interval``) so existing yaml conventions transfer.
+        bl = resolve_bridge_layers(cfg, num_layers=self.video_backbone.num_layers)
+
+        self._init_proprio_context(cfg, text_dim=text_dim)
+        self.action_backbone = ActionDiT(
+            action_dim=int(_cfg_get(cfg, "action_dim", 20)),
+            dim=action_dim_hidden,
+            ffn_dim=int(_cfg_get(cfg, "ffn_dim", action_dim_hidden * int(_cfg_get(cfg, "ffn_dim_multiplier", 4)))),
+            num_heads=num_heads,
+            num_layers=len(bl),
+            video_dim=self.video_backbone.dim,
+            bridge_layers=bl,
+            variant="joint_self_attn",
+            attn_head_dim=attn_head_dim,
+            text_dim=text_dim,
+        )
+        self._mot_driver = TriSystemMoTDriver(
+            self.video_backbone,
+            self.action_backbone,
+            self.understanding_expert,
+            mot_checkpoint_mixed_attn=bool(_cfg_get(cfg, "mot_checkpoint_mixed_attn", True)),
+            attention_mask_mode=str(_cfg_get(cfg, "attention_mask_mode", "joint")),
+            video_attention_mask_mode=str(_cfg_get(cfg, "video_attention_mask_mode", "first_frame_causal")),
+        )
+
+    @property
+    def backbones(self) -> dict[str, nn.Module]:
+        result = super().backbones
+        if self.vlm_backbone is not None:
+            result["vlm_backbone"] = self.vlm_backbone
+        return result
+
+    def freeze_modules(self, names: list[str]) -> list[str]:
+        rejected = self._NEVER_FREEZE & set(names)
+        if rejected:
+            raise ValueError(
+                f"tri_system: refusing to freeze {rejected}. "
+                f"These modules must stay trainable — they receive gradients "
+                f"through trimodal joint attention. To freeze the VLM backbone, "
+                f"use 'vlm_backbone.vlm_model' instead."
+            )
+        return super().freeze_modules(names)
+
+    def set_dtype_device(self, dtype, device):
+        super().set_dtype_device(dtype, device)
+        if self.understanding_expert is not None:
+            self.understanding_expert.to(dtype=dtype, device=device)
+
+    def _extract_first_image(self, sample: dict):
+        first_frame_image = sample.get("first_frame_image")
+        if isinstance(first_frame_image, list) and first_frame_image:
+            return first_frame_image[0]
+        if first_frame_image is not None:
+            return first_frame_image
+        video = sample.get("video")
+        if video is not None and len(video) > 0:
+            return video[0]
+        return None
+
+    def _collate_vlm_inputs(self, items: list[dict]) -> dict[str, torch.Tensor]:
+        return self.vlm_backbone._batch_vlm_inputs(items)  # noqa: SLF001 - architecture owns this integration.
+
+    @torch.no_grad()
+    def prepare_inputs(self, batch: list[dict]) -> dict:
+        if isinstance(batch, dict):
+            batch = [batch]
+        if not batch:
+            raise ValueError("tri_system.prepare_inputs: empty batch")
+
+        # FirstFrameConditioningTransform is applied by super().prepare_inputs() in place
+        # via its own pipeline transform instance; we read sample['first_frame_image']
+        # afterward.
+        inputs = super().prepare_inputs(batch)
+        samples = batch  # super() mutates the dicts in place — same references.
+
+        provided = [sample.get("vlm_inputs") for sample in samples]
+        if all(item is not None for item in provided):
+            inputs["vlm_inputs"] = self._collate_vlm_inputs(provided)
+            return inputs
+        if any(item is not None for item in provided):
+            raise ValueError("Mixed vlm_inputs in tri-system batch: provide vlm_inputs for all samples or none.")
+
+        prompts = [sample["prompt"] for sample in samples]
+        images = [self._extract_first_image(sample) for sample in samples]
+        if any(image is None for image in images):
+            raise ValueError("tri_system requires sample['vlm_inputs'] or a first frame image/video[0].")
+        inputs["vlm_inputs"] = self.vlm_backbone.prepare_vlm_inputs(prompts, images)
+        return inputs
+
+    def _prepare_generation_vlm_inputs(self, prompt: str, first_frame_image):
+        if first_frame_image is None:
+            raise ValueError("tri_system generation requires first_frame_image to build Qwen3-VL inputs.")
+        image = first_frame_image[0] if isinstance(first_frame_image, list) else first_frame_image
+        return self.vlm_backbone.prepare_vlm_inputs([prompt], [image])
+
+    @torch.no_grad()
+    def generate(self, schedule, prompt: str, *, first_frame_image=None, **kwargs) -> dict:
+        """Run trimodal denoising with one-shot VLM forward shared across all steps.
+
+        Within one call: ``vlm_hidden`` is computed once from ``prompt`` +
+        ``first_frame_image`` and reused across every denoising step via
+        ``inputs_shared``. Across calls there is no implicit cache — each
+        invocation pops ``vlm_hidden`` from ``kwargs`` (starts ``None``) and
+        re-runs the VLM if absent. So changing ``prompt`` / ``first_frame_image``
+        between calls correctly recomputes the hidden state.
+
+        **Caller-managed cache contract**: if you bypass the recompute by passing
+        a pre-computed ``vlm_hidden=`` (and optionally ``vlm_attention_mask=``)
+        through ``kwargs``, YOU OWN invalidation when the underlying prompt /
+        image changes. This method does NOT cross-check the explicit
+        ``vlm_hidden`` against the supplied ``prompt`` / ``first_frame_image``.
+        Reusing a stale ``vlm_hidden`` across different inputs silently produces
+        wrong outputs — the trimodal joint attention will use the old VLM
+        context regardless of what ``prompt`` actually was.
+        """
+        vlm_inputs = kwargs.pop("vlm_inputs", None)
+        vlm_hidden = kwargs.pop("vlm_hidden", None)
+        vlm_attention_mask = kwargs.pop("vlm_attention_mask", None)
+        if vlm_inputs is None and self.action_backbone is not None:
+            vlm_inputs = self._prepare_generation_vlm_inputs(prompt, first_frame_image)
+        if vlm_attention_mask is None and isinstance(vlm_inputs, dict):
+            vlm_attention_mask = vlm_inputs.get("attention_mask")
+        if vlm_hidden is None and vlm_inputs is not None:
+            vlm_hidden = self.vlm_backbone.extract_features(vlm_inputs)
+        result = super().generate(
+            schedule,
+            prompt,
+            first_frame_image=first_frame_image,
+            vlm_hidden=vlm_hidden,
+            vlm_attention_mask=vlm_attention_mask,
+            **kwargs,
+        )
+        return result
+
+    def forward(
+        self,
+        noisy_actions: Optional[Tensor],
+        action_timestep: Optional[Tensor],
+        *,
+        proprio_state: Optional[Tensor] = None,
+        use_gradient_checkpointing: bool = False,
+        use_gradient_checkpointing_offload: bool = False,
+        **pipeline_inputs,
+    ) -> Tuple[Tensor, Optional[Tensor]]:
+        vb = self.video_backbone
+        ab = self.action_backbone
+        ub = self.understanding_expert
+        if vb is None:
+            raise RuntimeError(
+                "video_backbone is None — pass pipe= to build_architecture or "
+                "architecture.__init__ to enable forward()."
+            )
+        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio_state)
+        vlm_inputs = pipeline_inputs.pop("vlm_inputs", None)
+        vlm_hidden = pipeline_inputs.pop("vlm_hidden", None)
+        vlm_attention_mask = pipeline_inputs.pop("vlm_attention_mask", None)
+        if vlm_attention_mask is None and isinstance(vlm_inputs, dict):
+            vlm_attention_mask = vlm_inputs.get("attention_mask")
+        action_context = pipeline_inputs.get("context")
+        action_context_mask = pipeline_inputs.get("context_mask")
+        if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:
+            seq_lens = pipeline_inputs["seq_lens"].to(device=action_context.device)
+            positions = torch.arange(action_context.shape[1], device=action_context.device)
+            action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
+
+        vstate = vb.prepare(
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            **pipeline_inputs,
+        )
+
+        if noisy_actions is None or ab is None:
+            for block_id in range(vb.num_layers):
+                vstate = vb.run_block(block_id, vstate)
+            return vb.finalize(vstate), None
+
+        if vstate.extras.get("tea_cache") is not None:
+            raise NotImplementedError("tri_system + TeaCache not supported")
+        if vstate.extras.get("use_usp", False):
+            raise NotImplementedError("tri_system + sequence parallel not supported")
+        if vstate.vace_hints is not None:
+            raise NotImplementedError("tri_system + VACE not supported")
+        if vstate.extras.get("animate_adapter") is not None:
+            raise NotImplementedError("tri_system + Animate not supported")
+        if vlm_hidden is None and vlm_inputs is None:
+            raise ValueError("tri_system forward with actions requires `vlm_inputs` or cached `vlm_hidden`.")
+
+        astate = ab.prepare_state(
+            noisy_actions,
+            action_timestep,
+            context=action_context,
+            context_mask=action_context_mask,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+        )
+        if vlm_hidden is None:
+            vlm_hidden = self.vlm_backbone.extract_features(vlm_inputs)
+        vlm_hidden = vlm_hidden.to(device=self.device)
+        if vlm_hidden.shape[0] != vstate.x.shape[0]:
+            raise ValueError(
+                f"vlm_hidden batch size ({vlm_hidden.shape[0]}) does not match "
+                f"video state batch size ({vstate.x.shape[0]}). If using a cached "
+                f"vlm_hidden, ensure it was computed for the same batch."
+            )
+        ustate = ub.prepare_state(vlm_hidden, dtype=vstate.x.dtype, vlm_attention_mask=vlm_attention_mask)
+        vstate, astate, _ = self._mot_driver.run_joint_loop(
+            vstate,
+            astate,
+            ustate,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+        )
+
+        return vb.finalize(vstate), ab.extract_prediction(astate)
+
+
+__all__ = ["TriSystemJointSelfAttnArchitecture"]

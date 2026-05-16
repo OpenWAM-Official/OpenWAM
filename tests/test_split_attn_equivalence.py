@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from openwam.model.action_backbone.dualsystem_dit import ActionDiT, SelfAttnActionDiTBlock
+from openwam.model.action_backbone.joint_action_dit import ActionDiT, SelfAttnActionDiTBlock
 from openwam.model.video_backbone.adapter import BlockLoopState
 from openwam.model.video_backbone.wan.dit import DiTBlock, precompute_freqs_cis_3d
 

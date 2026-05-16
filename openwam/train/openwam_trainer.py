@@ -17,6 +17,7 @@ Usage:
 import logging
 import math
 import os
+import shutil
 
 import numpy as np
 import torch
@@ -107,8 +108,8 @@ class OpenWAMTrainer(BaseTrainer):
         self.action_timestep_per_token = bool(getattr(t, "action_timestep_per_token", False))
         if self.action_timestep_per_token:
             raise ValueError(
-                "action_timestep_per_token=True is not supported in the FastWAM-compatible "
-                "dual-system path. Use per-sample action timesteps."
+                "action_timestep_per_token=True is not supported by the current OpenWAM "
+                "training path. Use per-sample action timesteps."
             )
 
         # Decoupled training support
@@ -159,16 +160,25 @@ class OpenWAMTrainer(BaseTrainer):
                 trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
                 return total, trainable
 
-            vb_total, vb_train = _count(self.architecture.video_backbone)
-            ab_total, ab_train = _count(self.architecture.action_backbone)
+            bb_counts = {name: _count(module) for name, module in self.architecture.backbones.items()}
+            extra_counts = {}
+            for name, module in self.architecture.named_children():
+                if name in bb_counts:
+                    continue
+                total, trainable = _count(module)
+                if total:
+                    extra_counts[name] = (total, trainable)
+            arch_total = sum(total for total, _ in bb_counts.values()) + sum(
+                total for total, _ in extra_counts.values()
+            )
+            arch_train = sum(train for _, train in bb_counts.values()) + sum(
+                train for _, train in extra_counts.values()
+            )
             print("=" * 60)
             print("Parameter counts")
-            print(f"  VideoBackbone : total={vb_total / 1e6:7.1f}M  trainable={vb_train / 1e6:7.1f}M")
-            print(f"  ActionBackbone: total={ab_total / 1e6:7.1f}M  trainable={ab_train / 1e6:7.1f}M")
-            print(
-                f"  Architecture  : total={(vb_total + ab_total) / 1e6:7.1f}M  "
-                f"trainable={(vb_train + ab_train) / 1e6:7.1f}M"
-            )
+            for name, (total, trainable) in {**bb_counts, **extra_counts}.items():
+                print(f"  {name:<15}: total={total / 1e6:7.1f}M  trainable={trainable / 1e6:7.1f}M")
+            print(f"  Architecture  : total={arch_total / 1e6:7.1f}M  trainable={arch_train / 1e6:7.1f}M")
             print("=" * 60, flush=True)
 
     @staticmethod
@@ -501,6 +511,13 @@ class OpenWAMTrainer(BaseTrainer):
             from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
 
             copy_video_backbone_tokenizer(output_path, self.cfg)
+            # Copy VLM checkpoint so deploy is self-contained (tri_system).
+            vlm_bb = getattr(self.architecture, "vlm_backbone", None)
+            if vlm_bb is not None and getattr(vlm_bb, "_checkpoint_path", None):
+                vlm_dest = os.path.join(output_path, "vlm_backbone")
+                if not os.path.exists(vlm_dest):
+                    shutil.copytree(vlm_bb._checkpoint_path, vlm_dest)
+                    logger.info("Copied VLM checkpoint to %s", vlm_dest)
         else:
             output_path = None
 
@@ -699,29 +716,30 @@ class OpenWAMTrainer(BaseTrainer):
         self.on_train_end(global_step, output_path=output_path, wandb_run=wandb_run)
 
     def save_checkpoint(self, path: str):
-        """Export full architecture state to safetensors. Safe under ZeRO-1/2/3, DDP, and single-process.
+        """Export architecture state to safetensors. Safe under ZeRO-1/2/3, DDP, and single-process.
 
         ALL ranks must call this together. Under ZeRO-3 ``Accelerator.get_state_dict``
         issues a collective all-gather to consolidate sharded params on rank 0; under
         ZeRO-1/2 / DDP / single-process it falls back to a local ``unwrap(model).state_dict()``.
         Only rank 0 writes the file.
 
-        Note: ``self.architecture`` after ``accelerator.prepare()`` is a ``DeepSpeedEngine`` —
-        calling its ``.save_checkpoint(path)`` directly would dispatch to DeepSpeed's own
-        method (collective sharded checkpoint), so we route through ``get_state_dict`` and
-        write the safetensors file ourselves.
+        VLM backbone parameters (tri_system's Qwen3-VL) are excluded from the
+        safetensors file — the VLM checkpoint is saved as a separate directory
+        (see ``train()``). This avoids tied-weight deduplication complexity and
+        keeps the safetensors file small.
         """
         from safetensors.torch import save_file
 
+        from openwam.model.base import _exclude_vlm_from_state_dict
+
         if self.accelerator is not None:
-            # Collective path. Under ZeRO-3 this gathers sharded params; under ZeRO-1/2
-            # the params are already full on every rank and this is a local copy.
             state_dict = self.accelerator.get_state_dict(self.architecture)
             if not self.accelerator.is_main_process:
                 return
         else:
             state_dict = self.architecture.state_dict()
 
+        state_dict = _exclude_vlm_from_state_dict(state_dict)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         save_file(state_dict, path)
 
@@ -743,8 +761,6 @@ class OpenWAMTrainer(BaseTrainer):
         where ``moe_expert_dit.*`` became ``shared_moe.*``) raises explicitly
         rather than dropping weights silently.
         """
-        from safetensors.torch import load_file
-
         # ZeRO-3 guard. Raise before doing anything destructive to the in-memory
         # sharded params; the caller has to either load before prepare() or wrap
         # the load in ``deepspeed.zero.GatheredParameters``.
@@ -764,5 +780,7 @@ class OpenWAMTrainer(BaseTrainer):
         unwrapped = (
             self.accelerator.unwrap_model(self.architecture) if self.accelerator is not None else self.architecture
         )
-        sd = load_file(path)
-        unwrapped.load_state_dict(sd, strict=strict)
+        # Delegate to BaseWAMArchitecture.load_checkpoint which tolerates
+        # missing vlm_backbone.* keys (VLM is saved as a separate directory,
+        # not inside the safetensors file).
+        unwrapped.load_checkpoint(path, strict=strict)

@@ -1,17 +1,39 @@
-'Public implementation.'
+"""WAM Architecture registry.
+
+Provides a decorator-based registration pattern for discovering and
+instantiating architectures from configuration.
+
+WAM architectures implement BaseWAMArchitecture (3-hook interface for
+video DiT integration).
+
+Canonical registry names (one per concrete architecture class):
+    dual_system_cross_attn  / DualSystemCrossAttnArchitecture
+    dual_system_self_attn   / DualSystemSelfAttnArchitecture
+    shared_backbone_vanilla / SharedBackboneVanillaArchitecture
+    shared_backbone_moe     / SharedBackboneMoEArchitecture
+    tri_system_joint_self_attn / TriSystemJointSelfAttnArchitecture
+
+Usage:
+    @register_architecture(
+        "dual_system_cross_attn",
+        framework="dual_system",
+        variant="joint_cross_attn",
+    )
+    class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
+        ...
+
+    arch = build_architecture("dual_system_cross_attn", cfg)
+"""
 
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Type
-
-import torch.nn as nn
 
 from openwam.model.base import BaseWAMArchitecture
 
 ARCHITECTURE_REGISTRY: Dict[str, Type[BaseWAMArchitecture]] = {}
 ARCHITECTURE_SUPPORT: Dict[str, "ArchitectureSupport"] = {}
 ARCHITECTURE_METADATA: Dict[str, "ArchitectureMetadataEntry"] = {}
-
 
 _FRAMEWORK_VARIANT_INDEX: Dict[tuple, str] = {}
 
@@ -235,12 +257,3 @@ def build_architecture(name: str, cfg=None, *, allow_experimental: bool = False)
         for key, value in normalized.options.items():
             cfg_out.setdefault(key, value)
     return ARCHITECTURE_REGISTRY[canonical_name](cfg=cfg_out)
-
-
-# ---------------------------------------------------------------------------
-# Standalone model registry (non-WAM architectures, e.g. VLA models)
-# ---------------------------------------------------------------------------
-
-
-
-

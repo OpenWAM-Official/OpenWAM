@@ -1,6 +1,6 @@
 """Architecture package exports and side-effect registration."""
 
-from openwam.model.architectures import dual_system, shared_backbone  # noqa: F401
+from openwam.model.architectures import dual_system, shared_backbone, tri_system  # noqa: F401
 from openwam.model.architectures.base import ActionState, BaseWAMArchitecture
 from openwam.model.architectures.dual_system import (
     DualSystemCrossAttnArchitecture,
@@ -23,6 +23,7 @@ from openwam.model.architectures.shared_backbone import (
     SharedBackboneMoEArchitecture,
     SharedBackboneVanillaArchitecture,
 )
+from openwam.model.architectures.tri_system import TriSystemJointSelfAttnArchitecture
 
 __all__ = [
     "ActionState",
@@ -42,4 +43,5 @@ __all__ = [
     "DualSystemSelfAttnArchitecture",
     "SharedBackboneMoEArchitecture",
     "SharedBackboneVanillaArchitecture",
+    "TriSystemJointSelfAttnArchitecture",
 ]

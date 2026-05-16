@@ -24,6 +24,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from openwam.model.architectures._mot_utils import compute_video_tokens_per_frame
+
 if TYPE_CHECKING:
     from openwam.model.action_backbone.backbone import ActionBackbone
     from openwam.model.base import ActionState
@@ -208,14 +210,7 @@ class MoTJointDriver:
         ``vstate.h * vstate.w`` is therefore tokens-per-frame, which the
         FastWAM-style v↔v mask needs.
         """
-        h = int(getattr(vstate, "h", 0))
-        w = int(getattr(vstate, "w", 0))
-        if h <= 0 or w <= 0:
-            raise ValueError(
-                "MoTJointDriver: cannot derive video_tokens_per_frame from vstate "
-                f"(h={h}, w={w}). The video backbone's prepare() must populate h/w."
-            )
-        return h * w
+        return compute_video_tokens_per_frame(vstate, "MoTJointDriver")
 
     def step(
         self,
@@ -296,13 +291,11 @@ class MoTJointDriver:
         q_cat = torch.cat([q_v, q_a], dim=1)
         k_cat = torch.cat([k_v, k_a], dim=1)
         v_cat = torch.cat([v_v, v_a], dim=1)
-        if attn_mask is None:
-            attn_mask = self._build_attention_mask(
-                s_video=s_video,
-                s_action=s_action,
-                video_tokens_per_frame=self._video_tokens_per_frame(vstate),
-                device=q_cat.device,
-            )
+        # Contract: `run_joint_loop` pre-builds ``attn_mask`` once per forward and
+        # passes it in for every layer. ``attn_mask=None`` is the SDPA "no mask"
+        # signal — legitimate only when ``attention_mask_mode='bidirectional'``.
+        # _step_impl does NOT rebuild the mask itself; any direct caller must follow
+        # the same contract.
 
         if self.mot_checkpoint_mixed_attn and ab.training and not suppress_inner_attn_ckpt:
             mixed = torch.utils.checkpoint.checkpoint(
@@ -351,13 +344,7 @@ class MoTJointDriver:
         q_cat = torch.cat([q_v, q_a], dim=1)
         k_cat = torch.cat([k_v, k_a], dim=1)
         v_cat = torch.cat([v_v, v_a], dim=1)
-        if attn_mask is None:
-            attn_mask = self._build_attention_mask(
-                s_video=s_video,
-                s_action=s_action,
-                video_tokens_per_frame=self._video_tokens_per_frame(vstate),
-                device=q_cat.device,
-            )
+        # Contract: same as ``_step_impl`` — caller pre-builds ``attn_mask``.
 
         mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask)
         attn_v, attn_a = mixed.split([s_video, s_action], dim=1)

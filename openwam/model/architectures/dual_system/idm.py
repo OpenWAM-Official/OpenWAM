@@ -27,7 +27,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+from openwam.model.action_backbone.joint_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
@@ -915,11 +915,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
         # VAE decode
         if decode_video:
-            ref_latents = inputs_shared_with_proprio.get("first_frame_latents")
-            decode_latents = inputs_shared_with_proprio["latents"]
-            if ref_latents is not None:
-                decode_latents = decode_latents[:, :, ref_latents.shape[2] :]
-            video_frames = vb.decode_video(decode_latents, tiled=tiled)
+            video_frames = vb.decode_video(inputs_shared_with_proprio["latents"], tiled=tiled)
         else:
             video_frames = None
 

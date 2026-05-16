@@ -66,7 +66,7 @@ class BlockLoopState:
     t: Optional[Tensor] = None
 
     # --- Optional fields ---
-    reference_prefix_len: int = 0
+    reference_prefix_len: int = 0  # Deprecated: reference_latents path removed (23246ba). Kept for API compat.
     vace_hints: Optional[list] = None
     vace_scale: float = 1.0
     sp_pad_shape: int = 0

@@ -53,7 +53,7 @@ def test_proprio_context_validates_dim():
 
 
 def test_action_dit_rejects_per_token_timestep():
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+    from openwam.model.action_backbone.joint_action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -72,7 +72,7 @@ def test_action_dit_rejects_per_token_timestep():
 
 
 def test_action_dit_rejects_proprio_constructor_flags():
-    from openwam.model.action_backbone.dualsystem_dit import ActionDiT
+    from openwam.model.action_backbone.joint_action_dit import ActionDiT
 
     with pytest.raises(TypeError, match="use_proprioception"):
         ActionDiT(

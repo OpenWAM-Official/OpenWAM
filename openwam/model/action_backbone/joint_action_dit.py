@@ -1,4 +1,8 @@
-"""ActionDiT: Lightweight Diffusion Transformer for Action Generation.
+"""Shared ActionDiT for OpenWAM joint video-action architectures.
+
+Dual-system and tri-system architectures share this module. It owns the
+action-side parameters and exposes both a standalone cross-attention path and
+a split pre/post interface for mixed self-attention drivers.
 
 Three variants share this module:
 
@@ -385,9 +389,7 @@ class ActionDiT(ActionBackbone):
     ):
         super().__init__()
         if variant not in ("joint_cross_attn", *_MOT_VARIANTS):
-            raise ValueError(
-                f"Unknown variant '{variant}'. Choose from: joint_cross_attn, {', '.join(_MOT_VARIANTS)}"
-            )
+            raise ValueError(f"Unknown variant '{variant}'. Choose from: joint_cross_attn, {', '.join(_MOT_VARIANTS)}")
         if len(bridge_layers) != num_layers:
             raise ValueError(
                 f"bridge_layers ({len(bridge_layers)}) must equal num_layers ({num_layers}). "
@@ -724,9 +726,7 @@ class ActionDiT(ActionBackbone):
         action_context_mask = None
         if self.variant in _MOT_VARIANTS:
             if context is None:
-                raise ValueError(
-                    "ActionDiT.prepare_state requires raw context for variant='joint_self_attn' or 'idm'."
-                )
+                raise ValueError("ActionDiT.prepare_state requires raw context for variant='joint_self_attn' or 'idm'.")
             action_context, action_context_mask = self._prepare_context(
                 context,
                 context_mask,

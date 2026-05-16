@@ -129,6 +129,19 @@ def load_from_checkpoint_dir(
                 "No components or model_path in config; architecture __init__ will attempt to build from config."
             )
 
+    # tri_system: use VLM checkpoint saved in the checkpoint dir instead of
+    # the external training-time path. The trainer copies the VLM directory
+    # to ``<ckpt_dir>/vlm_backbone/`` so deploy is self-contained.
+    if resolved_arch.canonical.framework == "tri_system":
+        vlm_cfg = params.get("vlm_backbone", {})
+        if not isinstance(vlm_cfg, dict):
+            vlm_cfg = OmegaConf.to_container(vlm_cfg, resolve=True) or {}
+            params["vlm_backbone"] = vlm_cfg
+        vlm_dir = os.path.join(ckpt_dir, "vlm_backbone")
+        if os.path.isdir(vlm_dir):
+            vlm_cfg["checkpoint_path"] = vlm_dir
+            logger.info("Using self-contained VLM checkpoint from %s", vlm_dir)
+
     architecture = build_architecture(resolved_arch.registry_name, params)
     logger.info(
         "Architecture: %s (framework=%s variant=%s)",

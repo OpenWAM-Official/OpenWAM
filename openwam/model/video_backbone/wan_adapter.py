@@ -243,7 +243,6 @@ class WanVideoBackbone(VideoBackbone):
         seq_lens = kw.get("seq_lens")
         clip_feature = kw.get("clip_feature")
         y = kw.get("y")
-        reference_latents = kw.get("reference_latents")
         vace_context = kw.get("vace_context")
         vace_scale = kw.get("vace_scale", 1.0)
         use_usp = kw.get("use_unified_sequence_parallel", self._use_unified_sequence_parallel)
@@ -325,15 +324,6 @@ class WanVideoBackbone(VideoBackbone):
         f, h, w = x.shape[2:]
         x = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
 
-        ref_prefix_len = 0
-        if reference_latents is not None:
-            if len(reference_latents.shape) == 5:
-                reference_latents = reference_latents[:, :, 0]
-            reference_latents = dit.ref_conv(reference_latents).flatten(2).transpose(1, 2)
-            ref_prefix_len = reference_latents.shape[1]
-            x = torch.concat([reference_latents, x], dim=1)
-            f += 1
-
         freqs = (
             torch.cat(
                 [
@@ -351,8 +341,6 @@ class WanVideoBackbone(VideoBackbone):
         extras["dit"] = dit
         extras["vace"] = vace
         extras["use_usp"] = use_usp
-        extras["reference_latents_for_finalize"] = kw.get("reference_latents")
-
         vace_hints = None
         if vace_context is not None:
             vace_hints = vace(
@@ -386,7 +374,6 @@ class WanVideoBackbone(VideoBackbone):
             h=h,
             w=w,
             t=t,
-            reference_prefix_len=ref_prefix_len,
             vace_hints=vace_hints,
             vace_scale=vace_scale,
             sp_pad_shape=sp_pad_shape,
@@ -562,7 +549,6 @@ class WanVideoBackbone(VideoBackbone):
     def finalize(self, state: BlockLoopState) -> Tensor:
         dit = state.extras["dit"]
         use_usp = state.extras.get("use_usp", False)
-        reference_latents = state.extras.get("reference_latents_for_finalize")
 
         t_head = state.t if state.t.dim() == 3 else state.t.unsqueeze(1)
         x = dit.head(state.x, t_head)
@@ -576,18 +562,7 @@ class WanVideoBackbone(VideoBackbone):
                 if state.sp_pad_shape > 0:
                     x = x[:, : -state.sp_pad_shape]
 
-        f = state.f
-        if reference_latents is not None:
-            if len(reference_latents.shape) == 5:
-                ref_tokens = reference_latents.shape[3] * reference_latents.shape[4]
-            elif len(reference_latents.shape) == 4:
-                ref_tokens = reference_latents.shape[2] * reference_latents.shape[3]
-            else:
-                ref_tokens = state.reference_prefix_len
-            x = x[:, ref_tokens:]
-            f -= 1
-
-        x = dit.unpatchify(x, (f, state.h, state.w))
+        x = dit.unpatchify(x, (state.f, state.h, state.w))
         return x
 
     # ================================================================
@@ -754,16 +729,6 @@ class WanVideoBackbone(VideoBackbone):
         ref_images = kw.get("ref_images")
 
         has_ref = ref_images is not None and ref_images[0] is not None
-        ref_latents = None
-        if has_ref:
-            all_refs = []
-            for ref in ref_images:
-                if not isinstance(ref, list):
-                    ref = [ref]
-                all_refs.append(self._preprocess_video(ref))
-            stacked_refs = torch.cat(all_refs, dim=0)
-            ref_latents = self._encode_video(stacked_refs).to(dtype=dtype, device=device)
-            input_latents = torch.cat([ref_latents, input_latents], dim=2)
 
         vace_context = None
         if self._has_vace:
@@ -790,34 +755,15 @@ class WanVideoBackbone(VideoBackbone):
                 mode="nearest-exact",
             )
 
-            if has_ref:
-                ref_f = ref_latents.shape[2]
-                vace_ref_latents = torch.cat([ref_latents, torch.zeros_like(ref_latents)], dim=1)
-                vace_video_latents = torch.cat([vace_ref_latents, vace_video_latents], dim=2)
-                vace_mask_latents = torch.cat(
-                    [
-                        torch.zeros(
-                            B,
-                            vace_mask_latents.shape[1],
-                            ref_f,
-                            vace_mask_latents.shape[3],
-                            vace_mask_latents.shape[4],
-                            dtype=dtype,
-                            device=device,
-                        ),
-                        vace_mask_latents,
-                    ],
-                    dim=2,
-                )
-
             vace_context = torch.cat([vace_video_latents, vace_mask_latents], dim=1)
 
-        is_ti2v = self._is_ti2v
+        # TI2V first-frame conditioning: extract from position 0 of the
+        # already-encoded video latents (no separate VAE call, no prepend).
+        # Aligned with FastWAM's approach.
         first_frame_latents = None
         num_clean_prefix = 0
-        if is_ti2v and has_ref:
-            first_frame_latents = ref_latents[:, :, 0:1].clone()
-            num_clean_prefix += ref_latents.shape[2]
+        if self._is_ti2v and has_ref:
+            first_frame_latents = input_latents[:, :, 0:1].clone()
 
         return {
             "input_latents": input_latents,
@@ -828,7 +774,7 @@ class WanVideoBackbone(VideoBackbone):
             "num_frames": num_frames,
             "vace_context": vace_context,
             "vace_scale": 1.0,
-            "fuse_vae_embedding_in_latents": is_ti2v and has_ref,
+            "fuse_vae_embedding_in_latents": self._is_ti2v and has_ref,
             "num_clean_prefix_frames": num_clean_prefix,
             "first_frame_latents": first_frame_latents,
         }
@@ -1073,9 +1019,8 @@ class WanVideoBackbone(VideoBackbone):
         device = self.device
         dtype = self.dtype
         inputs_shared["fuse_vae_embedding_in_latents"] = True
+        inputs_shared["num_clean_prefix_frames"] = 0
         ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
-        num_clean_prefix = len(ref_frames)
-        inputs_shared["num_clean_prefix_frames"] = num_clean_prefix
         ref_tensor = self._preprocess_video(ref_frames)
         ref_image_latents = self._encode_video(ref_tensor.to(device)).to(dtype=dtype, device=device)
         inputs_shared["first_frame_latents"] = ref_image_latents
@@ -1272,17 +1217,6 @@ class WanVideoBackbone(VideoBackbone):
         state_freqs = torch.polar(torch.ones_like(angles), angles).view(n_state_tokens, 1, -1)
         return state_freqs.to(dtype=freqs.dtype)
 
-    def _compute_reference_prefix_len(self, reference_latents: Optional[Tensor]) -> int:
-        if reference_latents is None:
-            return 0
-        if reference_latents.dim() == 5:
-            _, _, _, h, w = reference_latents.shape
-        elif reference_latents.dim() == 4:
-            _, _, h, w = reference_latents.shape
-        else:
-            raise ValueError(f"reference_latents must be 4D or 5D, got shape {tuple(reference_latents.shape)}")
-        return int(h * w)
-
     def apply_compile(self, compile_cfg) -> None:
         """Apply torch.compile to backbone sub-modules based on config flags.
 
@@ -1312,7 +1246,9 @@ class WanVideoBackbone(VideoBackbone):
                 compile_kwargs = torch_compile_kwargs(compile_cfg, default_mode="reduce-overhead")
                 for i, block in enumerate(mod.blocks):
                     mod.blocks[i] = torch.compile(block, **compile_kwargs)
-                logger.info("torch.compile enabled for %s blocks (%d, %s)", submod_name, len(mod.blocks), compile_kwargs)
+                logger.info(
+                    "torch.compile enabled for %s blocks (%d, %s)", submod_name, len(mod.blocks), compile_kwargs
+                )
             else:
                 compile_kwargs = torch_compile_kwargs(compile_cfg)
                 setattr(self._pipe, submod_name, torch.compile(mod, **compile_kwargs))

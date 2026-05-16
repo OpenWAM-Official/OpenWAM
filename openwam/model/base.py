@@ -1,6 +1,6 @@
 """Abstract base class for WAM (World-Action Model) architectures.
 
-Two supported architecture families:
+Supported architecture families:
 
 1. **Shared Backbone** (`framework=shared_backbone`)
    Action tokens are concatenated to the video DiT sequence and ride
@@ -13,11 +13,18 @@ Two supported architecture families:
    / `joint_self_attn` (MMDiT-style mixed attention at every layer, driven
    by :class:`MoTJointDriver`).
 
-Each architecture composes a ``video_backbone`` and an ``action_backbone``
-and owns its own ``forward()``.
+3. **Tri-System** (`framework=tri_system`)
+   Motus-style mixture of transformers: Wan video DiT + action expert +
+   frozen VLM / understanding expert, with mixed attention implemented via
+   the video backbone adapter.
+
+Each architecture composes the backbones it owns and implements its own
+``forward()``.
 """
 
+import functools
 import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple
@@ -28,7 +35,74 @@ from torch import Tensor, nn
 
 from openwam.model.compile_options import compile_mode
 
+
+def _wrap_single_forward(module: nn.Module) -> None:
+    """Wrap a single module's ``forward`` in ``torch.no_grad``. Idempotent."""
+    if getattr(module, "_openwam_no_grad_wrapped", False):
+        return
+    original_forward = module.forward
+
+    @functools.wraps(original_forward)
+    def wrapped(*args, **kwargs):
+        with torch.no_grad():
+            return original_forward(*args, **kwargs)
+
+    module.forward = wrapped
+    module._openwam_no_grad_wrapped = True
+
+
+def _wrap_forward_in_no_grad(module: nn.Module) -> None:
+    """Wrap ``forward`` of ``module`` AND every submodule in its subtree in ``torch.no_grad``.
+
+    Recursion matters because callers commonly bypass the root forward and call a
+    nested submodule directly. The canonical case in OpenWAM is
+    ``Qwen3VLBackbone.extract_features`` which calls ``self.vlm_model.model(...)``
+    (the inner ``Qwen3VLModel``, skipping the LM head) — wrapping only
+    ``vlm_model.forward`` would leave that path grad-tracking. Recursively wrapping
+    every descendant makes the semantic complete: any entry point into the frozen
+    subtree is in ``no_grad``.
+
+    Idempotent — a marker attribute on each module prevents double-wrapping if
+    ``freeze_modules`` runs more than once. ``nn.Module.modules()`` deduplicates
+    via its internal memo, so cyclic registrations (e.g. test fakes with
+    ``self.model = self``) are visited once.
+
+    Safe to apply to any module: if the caller already wraps the call in a
+    ``no_grad`` context (e.g. ``prepare_inputs``), the inner ``no_grad`` is a
+    no-op; if the caller is inside a grad-tracking forward (the tri_system VLM
+    case this actually saves memory in), it short-circuits activation saving.
+
+    **Subtree-level semantic, not per-parameter**: a trainable child under a frozen
+    parent will NOT receive gradients, because every descendant ``forward`` is
+    wrapped in ``no_grad``. For partial-freeze setups (e.g. LoRA on a frozen base,
+    or training only the LM head of an otherwise frozen VLM), do NOT pass the
+    parent's dotted path to ``freeze_modules``; pass the specific leaves you want
+    frozen instead. The current freeze list in ``configs/training_strategy/*.yaml``
+    only names complete subtrees, so this limitation does not bite today.
+    """
+    for sub in module.modules():
+        _wrap_single_forward(sub)
+
+
 logger = logging.getLogger(__name__)
+
+# Prefix for VLM backbone parameters in the architecture state_dict.
+# VLM weights are saved as a separate checkpoint directory (not in safetensors)
+# to avoid tied-weight deduplication complexity.
+VLM_STATE_DICT_PREFIX = "vlm_backbone."
+
+
+def _exclude_vlm_from_state_dict(state_dict: dict[str, "Tensor"]) -> dict[str, "Tensor"]:
+    """Filter out VLM backbone parameters from a state dict.
+
+    Note: this exclusion is prefix-based (``vlm_backbone.*``).  Future
+    trainable modules on the VLM (e.g. LoRA adapters) must be registered at
+    the architecture top level (as siblings of ``vlm_backbone``), NOT as
+    children under ``vlm_backbone``, otherwise they will be silently excluded
+    from the checkpoint.
+    """
+    return {k: v for k, v in state_dict.items() if not k.startswith(VLM_STATE_DICT_PREFIX)}
+
 
 if TYPE_CHECKING:
     from openwam.model.action_backbone.backbone import ActionBackbone
@@ -60,11 +134,9 @@ class ActionState:
 class BaseWAMArchitecture(ABC, nn.Module):
     """Base class for WAM architecture variants.
 
-    Composes a ``video_backbone`` and an ``action_backbone``. Subclasses
-    instantiate the appropriate ActionBackbone subclass in ``__init__`` —
-    they do NOT implement any action processing logic themselves. The
-    unified ``forward()`` defined here drives both backbones through the
-    standard block-loop adapter interface.
+    Composes a ``video_backbone`` and an ``action_backbone`` plus optional
+    extra backbones. Subclasses instantiate the appropriate ActionBackbone
+    subclass in ``__init__`` and own the complete ``forward()`` control flow.
 
     Args:
         cfg: Architecture-specific configuration (OmegaConf DictConfig or dict).
@@ -323,23 +395,42 @@ class BaseWAMArchitecture(ABC, nn.Module):
     # --- Checkpoint save / load ---
 
     def save_checkpoint(self, path: str) -> None:
-        """Save full architecture state (video backbone + action module) to safetensors."""
+        """Save architecture state to safetensors.
+
+        VLM backbone parameters are excluded — the VLM checkpoint is saved
+        as a separate directory by the trainer. This avoids tied-weight
+        deduplication complexity and keeps the file small.
+        """
         from safetensors.torch import save_file
 
-        save_file(self.state_dict(), path)
+        state_dict = self.state_dict()
+        if getattr(self, "vlm_backbone", None) is not None:
+            state_dict = _exclude_vlm_from_state_dict(state_dict)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        save_file(state_dict, path)
 
     def load_checkpoint(self, path: str, strict: bool = True) -> None:
-        """Load full architecture state from a safetensors checkpoint.
+        """Load architecture state from a safetensors checkpoint.
 
-        ``strict`` defaults to ``True`` so a renamed state-dict (e.g. v1.0 → v1.1
-        where ``moe_expert_dit.*`` became ``shared_moe.*`` and ``action_dit.*``
-        moved into ``dualsystem_dit.*``) raises explicitly rather than dropping
-        weights silently. Pass ``strict=False`` only for deliberate partial loads.
+        VLM backbone weights are not stored in the safetensors file (they
+        are saved as a separate directory). When a VLM backbone is present,
+        missing ``vlm_backbone.*`` keys are tolerated; unexpected or missing
+        non-VLM keys still raise under ``strict=True``.
         """
         from safetensors.torch import load_file
 
-        sd = load_file(path)
-        self.load_state_dict(sd, strict=strict)
+        state_dict = load_file(path)
+        has_vlm = getattr(self, "vlm_backbone", None) is not None
+        missing, unexpected = self.load_state_dict(state_dict, strict=False)
+        if strict and not has_vlm:
+            if missing or unexpected:
+                raise RuntimeError(f"Strict load failed: missing={missing}, unexpected={unexpected}")
+        elif strict and has_vlm:
+            non_vlm_missing = [k for k in missing if not k.startswith(VLM_STATE_DICT_PREFIX)]
+            if non_vlm_missing or unexpected:
+                raise RuntimeError(
+                    f"Strict load failed (VLM keys excluded): missing={non_vlm_missing}, unexpected={unexpected}"
+                )
 
     # --- Training: module management ---
 
@@ -352,8 +443,25 @@ class BaseWAMArchitecture(ABC, nn.Module):
     def freeze_modules(self, names: list[str]) -> list[str]:
         """Freeze named sub-modules by dotted path. Returns actually frozen names.
 
-        Uses nn.Module.get_submodule() so dotted paths like
-        ``video_backbone._pipe.text_encoder`` work naturally.
+        Single-point freeze API. Two effects per frozen submodule:
+
+        1. ``module.requires_grad_(False)`` — optimizer cannot update its params.
+        2. ``module.forward`` is wrapped in ``torch.no_grad`` so the frozen
+           subtree never saves activations for backward. This is the full
+           semantic of "freeze" — neither the trainer nor any backbone needs to
+           inspect freeze status separately.
+
+        For text_encoder / vae, which are already called under the
+        ``@torch.no_grad()`` ``prepare_inputs`` decorator, the wrapper is a
+        no-op (nested ``no_grad``). For modules called inside the training
+        forward graph (e.g. tri_system's frozen Qwen3-VL backbone), the
+        wrapper is what actually saves activation memory.
+
+        Uses ``nn.Module.get_submodule()`` so dotted paths like
+        ``video_backbone._pipe.text_encoder`` work naturally; unknown names
+        are silently skipped, so a freeze list mentioning modules absent on a
+        given architecture (e.g. ``vlm_backbone.vlm_model`` on dual_system)
+        is harmless.
         """
         frozen = []
         for name in names:
@@ -363,6 +471,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 module = None
             if module is not None:
                 module.requires_grad_(False)
+                # Set eval mode on the frozen subtree. Use modules() instead
+                # of .eval() to avoid infinite recursion when a submodule has
+                # self-referential aliases (e.g. HF model.model = self).
+                for sub in module.modules():
+                    sub.training = False
+                _wrap_forward_in_no_grad(module)
                 frozen.append(name)
         return frozen
 
@@ -805,6 +919,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         vace_cache: Optional[dict] = None,
         prompt_embed_cache: Optional[dict] = None,
         proprio_state: Optional[Tensor] = None,
+        **extra_pipeline_inputs: Any,
     ) -> dict:
         """Execute joint video-action denoising driven by a schedule.
 
@@ -864,6 +979,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         if input_video_latents is not None:
             inputs_shared["latents"] = input_video_latents
+        # Architecture-specific pipeline inputs (e.g. tri_system's vlm_inputs /
+        # vlm_hidden / vlm_attention_mask) are forwarded as-is. Subclasses
+        # extract what they recognize in their forward(); unrelated architectures
+        # never see these keys because callers only pass them via super().generate.
+        for key, value in extra_pipeline_inputs.items():
+            if value is not None:
+                inputs_shared[key] = value
         ref_latents = inputs_shared.get("first_frame_latents")
         if ref_latents is not None:
             latents = inputs_shared["latents"].clone()
@@ -954,9 +1076,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         # VAE decode
         if decode_video:
-            ref_latents = inputs_shared.get("first_frame_latents")
-            if ref_latents is not None:
-                inputs_shared["latents"] = inputs_shared["latents"][:, :, ref_latents.shape[2] :]
             video_frames = vb.decode_video(inputs_shared["latents"], tiled=tiled)
         else:
             video_frames = None

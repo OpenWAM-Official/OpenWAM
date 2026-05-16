@@ -76,21 +76,6 @@ def test_wan_video_backbone_adapter_freq_helpers():
     assert adapter._extend_freqs_with_action_tokens(freqs, 0) is freqs
 
 
-def test_wan_video_backbone_adapter_reference_prefix_len():
-    """_compute_reference_prefix_len mirrors the ref_conv flatten path's prefix length."""
-    from types import SimpleNamespace
-
-    from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
-
-    adapter = WanVideoBackbone(SimpleNamespace(dit=None, use_unified_sequence_parallel=False))
-
-    assert adapter._compute_reference_prefix_len(None) == 0
-    # 5D (B, C, 1, H, W) — H*W tokens after ref_conv flatten.
-    assert adapter._compute_reference_prefix_len(torch.zeros(1, 4, 1, 6, 8)) == 48
-    # 4D (B, C, H, W).
-    assert adapter._compute_reference_prefix_len(torch.zeros(1, 4, 6, 8)) == 48
-
-
 def test_wan_video_backbone_is_ti2v():
     """_is_ti2v returns True when fuse_vae_embedding_in_latents is set."""
     from types import SimpleNamespace
@@ -131,7 +116,6 @@ if __name__ == "__main__":
     test_import_vae()
     test_import_text_encoder()
     test_wan_video_backbone_adapter_freq_helpers()
-    test_wan_video_backbone_adapter_reference_prefix_len()
     test_wan_video_backbone_is_ti2v()
     test_license_exists()
     print("All smoke tests passed.")
