@@ -252,6 +252,7 @@ class WanVideoBackbone(VideoBackbone):
         num_clean_prefix_frames = kw.get("num_clean_prefix_frames", 0)
         use_gradient_checkpointing = kw.get("use_gradient_checkpointing", False)
         use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
+        force_per_token_t_mod = bool(kw.get("force_per_token_t_mod", False))
 
         if use_usp:
             import torch.distributed as dist
@@ -269,6 +270,28 @@ class WanVideoBackbone(VideoBackbone):
             token_timesteps = token_timesteps.reshape(batch_size, -1)
             t_emb = sinusoidal_embedding_1d(dit.freq_dim, token_timesteps.reshape(-1))
             t = dit.time_embedding(t_emb.to(latents.dtype)).reshape(batch_size, -1, dit.dim)
+            if use_usp and dist.is_initialized() and dist.get_world_size() > 1:
+                t_chunks = torch.chunk(t, get_sequence_parallel_world_size(), dim=1)
+                t_chunks = [
+                    torch.nn.functional.pad(chunk, (0, 0, 0, t_chunks[0].shape[1] - chunk.shape[1]), value=0)
+                    for chunk in t_chunks
+                ]
+                t = t_chunks[get_sequence_parallel_rank()]
+            t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
+        elif force_per_token_t_mod:
+            # Non-TI2V backbones under shared_backbone need 4D t_mod so
+            # ``inject_shared_tokens`` can extend it with per-token action/state
+            # entries. There is no clean-prefix concept here: every video token
+            # shares the same global timestep, so compute the time embedding
+            # once on (B,) and broadcast to (B, L, dim) — running the MLP per
+            # token would repeat the same Linear/SiLU/Linear stack L times
+            # (L ≈ 4680 for VACE-1.3B, ≈18720 for I2V-14B-480P).
+            batch_size = latents.shape[0]
+            f_lat = latents.shape[2]
+            tokens_per_frame = latents.shape[3] * latents.shape[4] // 4
+            L = f_lat * tokens_per_frame
+            t_base = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype))  # (B, dim)
+            t = t_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
             if use_usp and dist.is_initialized() and dist.get_world_size() > 1:
                 t_chunks = torch.chunk(t, get_sequence_parallel_world_size(), dim=1)
                 t_chunks = [
@@ -457,7 +480,29 @@ class WanVideoBackbone(VideoBackbone):
                             (0, 0, 0, target_len - current_vace_hint.shape[1]),
                             value=0,
                         )
-            state.x = state.x + current_vace_hint * state.vace_scale
+            vace_len = current_vace_hint.shape[1]
+            if state.x.shape[1] == vace_len:
+                # dual_system / video-only path: hint length matches the full
+                # token sequence, apply the residual to everything.
+                state.x = state.x + current_vace_hint * state.vace_scale
+            elif state.x.shape[1] > vace_len:
+                # shared_backbone path: state.x has been extended with
+                # action/state tokens. VACE residuals only apply to the leading
+                # video slice; action/state tokens still get the VACE signal
+                # indirectly through self-attention (both 'joint' and
+                # 'bidirectional' modes route action→video).
+                video_slice = state.x[:, :vace_len] + current_vace_hint * state.vace_scale
+                state.x = torch.cat([video_slice, state.x[:, vace_len:]], dim=1)
+            else:
+                # Defensive: no legitimate path makes state.x shorter than the
+                # VACE hint. If we ever hit this, something upstream broke the
+                # video-token-count invariant — investigate before patching.
+                raise ValueError(
+                    f"_apply_post_block_residuals: state.x.shape[1]={state.x.shape[1]} "
+                    f"< vace_hint.shape[1]={vace_len} at block {block_id}; "
+                    "this is unreachable under dual_system or shared_backbone today—"
+                    "investigate the upstream caller before patching this branch."
+                )
 
     def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState) -> Tuple[Tensor, Tensor, Tensor, dict]:
         """First half of a Wan DiT block: norm1 + AdaLN modulate + Q/K/V + RoPE.
@@ -729,6 +774,19 @@ class WanVideoBackbone(VideoBackbone):
         ref_images = kw.get("ref_images")
 
         has_ref = ref_images is not None and ref_images[0] is not None
+        has_image_input = bool(getattr(self._dit, "has_image_input", False))
+
+        # Three-way ref-image handling, keyed off backbone identity:
+        #   - I2V  (has_image_input=True): first-frame rides on clip_feature + y
+        #     (channel-axis concat in prepare()); never prepends to input_latents.
+        #   - TI2V (_is_ti2v=True): first_frame_latents = input_latents[:, :, 0:1]
+        #     (FastWAM-style; no prepend, no second VAE encode).
+        #   - VACE: same shape contract as TI2V (no prepend, first_frame_latents =
+        #     input_latents[:, :, 0:1]). vace_context is built at T_lat (matching
+        #     input_latents) and its frame-0 carries the ref image: the inactive
+        #     channel slot at t=0 is overwritten with input_latents[:, :, 0:1]
+        #     and the mask at t=0 is zeroed (so the VACE module treats frame 0 as
+        #     a known reference, not a generation target). See ``_inject_vace_ref_frame``.
 
         vace_context = None
         if self._has_vace:
@@ -743,6 +801,8 @@ class WanVideoBackbone(VideoBackbone):
             reactive_latents = self._encode_video(stacked_vace).to(dtype=dtype, device=device)
             single_zero = torch.zeros(1, 3, num_frames, height, width, dtype=dtype, device=device)
             inactive_latent = self._encode_video(single_zero).to(dtype=dtype, device=device)
+            # expand returns a zero-stride view; the subsequent torch.cat
+            # allocates new storage and copies, so no aliasing escapes here.
             inactive_latents = inactive_latent.expand(B, -1, -1, -1, -1)
             vace_video_latents = torch.cat([inactive_latents, reactive_latents], dim=1)
 
@@ -756,13 +816,81 @@ class WanVideoBackbone(VideoBackbone):
             )
 
             vace_context = torch.cat([vace_video_latents, vace_mask_latents], dim=1)
+            if has_ref:
+                # Inject ref (= GT frame 0) into vace_context's frame 0. This keeps
+                # ``vace_context.shape[2] == input_latents.shape[2]`` while preserving
+                # the "ref-image conditions VACE" semantic that PR#19 dropped.
+                vace_context = self._inject_vace_ref_frame(vace_context, input_latents[:, :, 0:1])
 
-        # TI2V first-frame conditioning: extract from position 0 of the
+        # ---------------- I2V (clip_feature + y) ----------------
+        # Three-way mutually exclusive condition pipelines, keyed off
+        # has_image_input so VACE's require_vae_embedding=True does not
+        # accidentally trigger I2V y construction:
+        #   - TI2V (wan22_ti2v_5b):       _is_ti2v=True,  has_image_input=False
+        #   - VACE (wan21_vace_1_3b):     _has_vace=True, has_image_input=False
+        #   - I2V  (wan21_i2v_14b_480p):  has_image_input=True
+        needs_clip = (
+            has_image_input
+            and bool(getattr(self._dit, "require_clip_embedding", False))
+            and self._pipe.image_encoder is not None
+        )
+        needs_y = has_image_input and bool(getattr(self._dit, "require_vae_embedding", False))
+
+        clip_feature = None
+        y = None
+        if needs_clip or needs_y:
+            # I2V conditioning image source priority:
+            #   1. kw["first_frame_image"]: explicit override (deploy may pass).
+            #   2. kw["ref_images"]: training-time path — base.py:530 always
+            #      collects sample["first_frame_image"] into ref_images=...
+            #   3. frames[i][0]: fallback to first frame of the GT video clip.
+            first_frame_image = kw.get("first_frame_image")
+            if first_frame_image is not None and not isinstance(first_frame_image, list):
+                first_frame_image = [first_frame_image] * B
+            if first_frame_image is None and ref_images is not None:
+                first_frame_image = []
+                for ref in ref_images:
+                    if isinstance(ref, list):
+                        first_frame_image.append(ref[0])
+                    else:
+                        first_frame_image.append(ref)
+            if first_frame_image is None:
+                first_frame_image = [clip[0] for clip in frames]
+            if len(first_frame_image) != B:
+                raise ValueError(
+                    f"first_frame_image batch ({len(first_frame_image)}) != frames batch ({B})"
+                )
+
+            if needs_clip:
+                clip_pieces = []
+                for img in first_frame_image:
+                    img_t = self._pipe.preprocess_image(img.resize((width, height))).to(device)
+                    clip_pieces.append(self._pipe.image_encoder.encode_image([img_t]))
+                clip_feature = torch.cat(clip_pieces, dim=0).to(dtype=dtype, device=device)
+
+            if needs_y:
+                y = self._build_i2v_y(
+                    first_frame_image=first_frame_image,
+                    num_frames=num_frames,
+                    height=height,
+                    width=width,
+                    device=device,
+                    dtype=dtype,
+                )
+
+        # TI2V/VACE first-frame conditioning: extract from position 0 of the
         # already-encoded video latents (no separate VAE call, no prepend).
-        # Aligned with FastWAM's approach.
+        # Aligned with FastWAM / main PR#19. ``base._add_noise_and_pred`` will
+        # clean-replace ``latents[:, :, 0:1]`` with this on every step so the
+        # DiT sees [clean ref, noisy 1..T_lat-1] just like TI2V. ``n_skip`` in
+        # ``_compute_video_loss`` is then ``num_clean_prefix(0) + 1 = 1``,
+        # matching the ``T_lat - 1`` tail mask shape emitted by
+        # ``downsample_video_mask_to_latent``.
+        # ``fuse_vae_embedding_in_latents`` stays gated on ``_is_ti2v`` —
+        # only TI2V's DiT has the ``seperated_timestep`` path that consumes it.
         first_frame_latents = None
         num_clean_prefix = 0
-        if self._is_ti2v and has_ref:
+        if has_ref and not has_image_input and (self._is_ti2v or self._has_vace):
             first_frame_latents = input_latents[:, :, 0:1].clone()
 
         return {
@@ -777,6 +905,8 @@ class WanVideoBackbone(VideoBackbone):
             "fuse_vae_embedding_in_latents": self._is_ti2v and has_ref,
             "num_clean_prefix_frames": num_clean_prefix,
             "first_frame_latents": first_frame_latents,
+            "clip_feature": clip_feature,
+            "y": y,
         }
 
     # ================================================================
@@ -850,6 +980,35 @@ class WanVideoBackbone(VideoBackbone):
     def is_ti2v(self) -> bool:
         return self._is_ti2v
 
+    def _resolve_i2v_input_image(self, first_frame_image):
+        """Normalize ``first_frame_image`` into a single PIL (or None) for I2V deploy.
+
+        ``openwam/deploy/policy.py`` wraps a single PIL into ``[img]`` before
+        calling this method. Upstream I2V CLIP/VAE units (``wan/pipeline.py``)
+        call ``.resize`` on the value directly and would raise on a list,
+        whereas the TI2V finalize path handles a list itself. Always route the
+        I2V deploy path through this helper.
+        """
+        # ``_dit`` / ``_is_ti2v`` / ``_has_vace`` are properties on the real
+        # WanVideoBackbone; the defensive ``getattr`` is for lightweight test
+        # mocks (e.g. ``tests/test_cache_behavior.py::_MockWanVB``) that
+        # bypass the full Wan pipeline and set these as plain instance fields
+        # or omit them entirely.
+        is_i2v = (
+            bool(getattr(getattr(self, "_dit", None), "has_image_input", False))
+            and not getattr(self, "_is_ti2v", False)
+            and not getattr(self, "_has_vace", False)
+        )
+        if not is_i2v or first_frame_image is None:
+            return None
+        if isinstance(first_frame_image, (list, tuple)):
+            if len(first_frame_image) != 1:
+                raise ValueError(
+                    f"I2V deploy expects a single first-frame image; got list of {len(first_frame_image)}."
+                )
+            return first_frame_image[0]
+        return first_frame_image
+
     def prepare_inputs_for_inference(
         self,
         prompt: str,
@@ -885,7 +1044,6 @@ class WanVideoBackbone(VideoBackbone):
             inputs_shared = vace_cache["inputs_shared"].copy()
             inputs_shared["seed"] = seed
             inputs_shared["vace_video"] = vace_video
-            inputs_shared["vace_reference_image"] = first_frame_image
             inputs_shared["height"] = height
             inputs_shared["width"] = width
             inputs_shared["num_frames"] = num_frames
@@ -893,6 +1051,35 @@ class WanVideoBackbone(VideoBackbone):
             inputs_shared["tiled"] = tiled
             inputs_shared["tile_size"] = tile_size
             inputs_shared["tile_stride"] = tile_stride
+
+            # vace_reference_image: cache-miss path always settles this to None
+            # (I2V/VACE explicitly clear it; TI2V never has a vendored unit
+            # that consumes it — only ``WanVideoUnit_VACE`` reads the slot and
+            # it is not in the TI2V pipeline). The cached copy is therefore
+            # always None for this call's backbone; no refresh needed. If a
+            # future TI2V flow adds a consumer, add an explicit refresh here.
+
+            # cache-hit copies a prior inputs_shared dict — overwrite the I2V
+            # condition slot every call so a stale input_image / clip_feature /
+            # y does not survive into a non-I2V or no-first-frame invocation.
+            _i2v_img = self._resolve_i2v_input_image(first_frame_image)
+            inputs_shared["input_image"] = _i2v_img
+            if _i2v_img is not None:
+                # I2V routes the first-frame condition through input_image
+                # (CLIP) + y (channel-axis). vace_reference_image would make
+                # WanVideoUnit_{NoiseInitializer, InputVideoEmbedder} prepend
+                # an extra latent frame and break the channel-cat with y in
+                # prepare().
+                inputs_shared["vace_reference_image"] = None
+            else:
+                inputs_shared.pop("clip_feature", None)
+                inputs_shared.pop("y", None)
+                if self._has_vace:
+                    # VACE: the vendored ``WanVideoUnit_VACE`` would otherwise
+                    # encode this and prepend a ref frame onto vace_context.
+                    # We inject the ref into vace_context[..., 0:1] manually in
+                    # ``_finalize_ti2v_inputs`` after units run, matching training.
+                    inputs_shared["vace_reference_image"] = None
 
             for unit in pipe.units:
                 if self._is_text_unit(unit):
@@ -972,6 +1159,30 @@ class WanVideoBackbone(VideoBackbone):
             "motion_video": None,
         }
 
+        # I2V-only: unwrap the deploy-side single-PIL-list back to a single PIL
+        # before any unit runs (the upstream CLIP/VAE units call .resize() on
+        # this slot directly). For non-I2V backbones the helper returns None,
+        # keeping the default None set above and clearing any stale clip/y.
+        _i2v_img = self._resolve_i2v_input_image(first_frame_image)
+        inputs_shared["input_image"] = _i2v_img
+        if _i2v_img is not None:
+            # I2V routes the first-frame condition through input_image (CLIP)
+            # + y (channel-axis). vace_reference_image would make
+            # WanVideoUnit_{NoiseInitializer, InputVideoEmbedder} prepend an
+            # extra latent frame and break the channel-cat with y in prepare().
+            inputs_shared["vace_reference_image"] = None
+        else:
+            inputs_shared.pop("clip_feature", None)
+            inputs_shared.pop("y", None)
+            if self._has_vace:
+                # VACE: vendored ``WanVideoUnit_VACE`` would prepend a ref frame
+                # to vace_context if vace_reference_image is set. We construct
+                # the ref-frame injection ourselves in ``_finalize_ti2v_inputs``
+                # to mirror the no-prepend training contract (vace_context has
+                # T_lat frames; frame 0 carries the ref). Clear the slot so the
+                # vendored unit does not extend vace_context to T_lat + 1.
+                inputs_shared["vace_reference_image"] = None
+
         _t_text = time.time()
         inputs_nega = {}
 
@@ -1009,8 +1220,25 @@ class WanVideoBackbone(VideoBackbone):
         return inputs_shared
 
     def _finalize_ti2v_inputs(self, inputs_shared: dict, first_frame_image) -> None:
-        """Handle TI2V first-frame latent encoding and inject into inputs_shared."""
-        if not self._is_ti2v or first_frame_image is None:
+        """Handle first-frame latent encoding for TI2V and VACE.
+
+        After PR#19 (no ref-prefix prepend), both TI2V and VACE share the same
+        contract: ``first_frame_latents`` holds the encoded ref frame, and the
+        in-loop clean-replace in ``base.generate`` keeps ``latents[:, :, 0:1]``
+        clean across every denoising step (mirroring the training path where
+        ``_add_noise_and_pred`` overwrites the noisy frame 0 with the clean ref).
+
+        VACE additionally needs ``vace_context``'s frame 0 to carry the same
+        ref so the VACE module sees a consistent reference; the deploy
+        ``WanVideoUnit_VACE`` is told to skip its own prepend by clearing
+        ``vace_reference_image`` upstream, and we inject the ref here.
+
+        TI2V additionally enables ``fuse_vae_embedding_in_latents`` so its
+        ``seperated_timestep`` DiT zeroes the timestep on frame 0's tokens.
+        VACE keeps the flag False — its DiT does not have that path.
+        """
+        is_target = self._is_ti2v or self._has_vace
+        if not is_target or first_frame_image is None:
             if first_frame_image is None:
                 inputs_shared.pop("first_frame_latents", None)
                 inputs_shared["fuse_vae_embedding_in_latents"] = False
@@ -1018,12 +1246,18 @@ class WanVideoBackbone(VideoBackbone):
             return
         device = self.device
         dtype = self.dtype
-        inputs_shared["fuse_vae_embedding_in_latents"] = True
+        inputs_shared["fuse_vae_embedding_in_latents"] = bool(self._is_ti2v)
         inputs_shared["num_clean_prefix_frames"] = 0
         ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
         ref_tensor = self._preprocess_video(ref_frames)
         ref_image_latents = self._encode_video(ref_tensor.to(device)).to(dtype=dtype, device=device)
         inputs_shared["first_frame_latents"] = ref_image_latents
+        if self._has_vace:
+            vace_context = inputs_shared.get("vace_context")
+            if vace_context is not None:
+                inputs_shared["vace_context"] = self._inject_vace_ref_frame(
+                    vace_context, ref_image_latents
+                )
 
     @staticmethod
     def _is_text_unit(unit) -> bool:
@@ -1108,8 +1342,82 @@ class WanVideoBackbone(VideoBackbone):
             all_vace.append(vl)
         return torch.cat(all_vace, dim=0) if all_vace else None
 
+    @staticmethod
+    def _inject_vace_ref_frame(vace_context: Tensor, ref_latent: Tensor) -> Tensor:
+        """Overwrite frame 0 of ``vace_context`` with the reference latent.
+
+        Channel layout (matching ``preprocess_input`` / vendored
+        ``WanVideoUnit_VACE``):
+
+            vace_context = concat([inactive (C_v), reactive (C_v), mask (P*Q)], dim=1)
+
+        where ``C_v == ref_latent.shape[1]`` (Wan VAE z_dim, typically 16).
+
+        Frame 0 is overwritten so VACE treats it as a known reference:
+          * inactive[..., 0:1] = ref_latent  (the actual reference content)
+          * reactive[..., 0:1] = 0           (no "reactive" signal at the ref)
+          * mask[..., 0:1] = 0               (mask=0 -> frame is given, not generated)
+
+        ``ref_latent`` is expected to be ``(B, C_v, 1, H, W)``.
+        """
+        if ref_latent.dim() != 5 or ref_latent.shape[2] != 1:
+            raise ValueError(f"ref_latent must be (B, C, 1, H, W); got {tuple(ref_latent.shape)}")
+        c_v = ref_latent.shape[1]
+        if vace_context.shape[1] < 2 * c_v:
+            raise ValueError(
+                f"vace_context channels ({vace_context.shape[1]}) too small for ref_latent C={c_v}"
+            )
+        out = vace_context.clone()
+        out[:, :c_v, 0:1] = ref_latent.to(dtype=out.dtype, device=out.device)
+        out[:, c_v : 2 * c_v, 0:1] = 0
+        out[:, 2 * c_v :, 0:1] = 0
+        return out
+
     def _is_per_token_t_mod_active(self, state: BlockLoopState) -> bool:
         return state.t_mod.dim() == 4
+
+    def _build_i2v_y(
+        self,
+        *,
+        first_frame_image: list,
+        num_frames: int,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Build the Wan2.1-I2V ``y`` conditioning tensor batch-wise.
+
+        Output shape: ``(B, 20, T_lat, H_lat, W_lat) = concat([msk(4), vae_y(16)])``
+        on the channel dim. Mirrors ``WanVideoUnit_ImageEmbedderVAE.process``
+        in ``wan/pipeline.py`` (which assumes ``B=1`` at inference) but
+        encodes the whole batch in a single VAE forward via ``batch_encode``,
+        matching ``_encode_video`` (line ~1311). ``batch_encode`` supports
+        non-tiled only; training already runs the VAE non-tiled.
+        """
+        pipe = self._pipe
+        vae_inputs = []
+        msks = []
+        for img in first_frame_image:
+            image = pipe.preprocess_image(img.resize((width, height))).to(device)  # (1, 3, H, W)
+            vae_input = torch.cat(
+                [image.transpose(0, 1), torch.zeros(3, num_frames - 1, height, width, device=device)],
+                dim=1,
+            )  # (3, num_frames, H, W)
+            vae_inputs.append(vae_input)
+
+            msk = torch.ones(1, num_frames, height // 8, width // 8, device=device)
+            msk[:, 1:] = 0
+            msk = torch.cat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
+            msk = msk.view(1, msk.shape[1] // 4, 4, height // 8, width // 8)
+            msk = msk.transpose(1, 2)[0]  # (4, T_lat, H_lat, W_lat)
+            msks.append(msk)
+
+        vae_inputs_b = torch.stack(vae_inputs, dim=0).to(dtype=dtype, device=device)  # (B, 3, T, H, W)
+        msks_b = torch.stack(msks, dim=0).to(dtype=dtype, device=device)  # (B, 4, T_lat, H_lat, W_lat)
+        y_lat = pipe.vae.batch_encode(vae_inputs_b, device=device).to(dtype=dtype, device=device)
+        y = torch.cat([msks_b, y_lat], dim=1)  # (B, 20, T_lat, H_lat, W_lat)
+        return y
 
     def _build_action_t_mod(
         self,

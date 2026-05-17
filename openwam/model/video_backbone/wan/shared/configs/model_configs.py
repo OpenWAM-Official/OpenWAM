@@ -17,7 +17,7 @@ wan_series = [
             "num_layers": 40,
             "eps": 1e-06,
         },
-        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.dit.WanVideoDiTStateDictConverter",
+        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_dit.WanVideoDiTStateDictConverter",
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth")
@@ -50,7 +50,7 @@ wan_series = [
             "num_layers": 40,
             "eps": 1e-06,
         },
-        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.dit.WanVideoDiTFromDiffusers",
+        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_dit.WanVideoDiTFromDiffusers",
     },
     {
         # Example: ModelConfig(model_id="ByteDance/Video-As-Prompt-Wan2.1-14B", origin_file_pattern="transformer/diffusion_pytorch_model*.safetensors")
@@ -312,7 +312,7 @@ wan_series = [
             "num_layers": 30,
             "eps": 1e-06,
         },
-        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.dit.WanVideoDiTStateDictConverter",
+        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_dit.WanVideoDiTStateDictConverter",
     },
     {
         # Example: ModelConfig(model_id="iic/VACE-Wan2.1-1.3B-Preview", origin_file_pattern="diffusion_pytorch_model*.safetensors")
@@ -339,7 +339,7 @@ wan_series = [
             "num_layers": 40,
             "eps": 1e-06,
         },
-        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.dit.WanVideoDiTStateDictConverter",
+        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_dit.WanVideoDiTStateDictConverter",
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-VACE-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
@@ -376,7 +376,7 @@ wan_series = [
             "num_layers": 40,
             "eps": 1e-06,
         },
-        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.dit.WanVideoDiTStateDictConverter",
+        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_dit.WanVideoDiTStateDictConverter",
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors")

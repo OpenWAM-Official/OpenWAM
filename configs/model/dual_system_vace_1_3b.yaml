@@ -1,0 +1,37 @@
+# Dual-System WAM — Wan2.1-VACE-1.3B video backbone variant.
+# Separate ActionDiT paired with the VACE-1.3B video DiT.
+# Only joint_cross_attn is wired here: joint_self_attn × ZeRO-3 is blocked
+# upstream by the MoT driver's direct-param reads (see plan §7.3).
+
+architecture:
+  framework: dual_system
+  variant: joint_cross_attn
+  detach_bridge: false
+  action_dim: 20
+  use_proprioception: true
+  state_dim: 20
+
+  # Auto-fill bridge_layers from the video backbone's num_layers (=30 for VACE-1.3B).
+  bridge_layers: null
+  bridge_interval: 1
+
+  attention_mask_mode: joint
+  video_attention_mask_mode: first_frame_causal
+
+# Video backbone — VACE only supports 480x832 or 720x1280.
+# Actual training resolution is determined by dataloader config.
+video_backbone:
+  name: wan21_vace_1_3b
+  model_path: /path/to/Wan2.1-VACE-1.3B  # [Required] Path to your own directory
+
+# ActionDiT transformer parameters.
+# VACE-1.3B video DiT: dim=1536, num_heads=12, head_dim=128 (plan §3.4).
+# joint_cross_attn does not require num_heads/head_dim parity with the
+# video backbone (only joint_self_attn does), but we mirror them here for
+# apples-to-apples comparison across variants if the user switches later.
+action_backbone:
+  dim: 1024
+  text_dim: 4096
+  ffn_dim: 4096
+  num_heads: 12
+  attn_head_dim: 128

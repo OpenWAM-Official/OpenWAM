@@ -133,6 +133,13 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
             )
         set_video_attention_mask_mode(vb, getattr(self, "video_attention_mask_mode", None))
 
+        # SharedBackbone needs per-token (4D) t_mod so action/state tokens can
+        # extend it cleanly via inject_shared_tokens. TI2V-5B produces 4D
+        # natively (seperated_timestep + fuse_vae_embedding_in_latents); other
+        # Wan backbones broadcast a global timestep when this flag is set.
+        # setdefault so callers may still pass False explicitly.
+        pipeline_inputs = dict(pipeline_inputs)
+        pipeline_inputs.setdefault("force_per_token_t_mod", True)
         vstate = vb.prepare(
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,

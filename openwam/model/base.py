@@ -846,8 +846,22 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """Per-sample weighted video MSE loss."""
         import torch.nn.functional as F
 
-        if inputs.get("first_frame_latents") is not None:
-            n_skip = inputs.get("num_clean_prefix_frames", 0) + 1
+        num_clean_prefix = int(inputs.get("num_clean_prefix_frames", 0) or 0)
+        video_is_pad = inputs.get("video_is_pad")
+
+        n_skip = 0
+        if num_clean_prefix > 0 or inputs.get("first_frame_latents") is not None:
+            # Explicit signal from TI2V / VACE preprocess: trim ref-prefix
+            # plus the first VAE-conditioning latent that
+            # ``downsample_video_mask_to_latent`` also excludes from the mask.
+            n_skip = num_clean_prefix + 1
+        elif video_is_pad is not None and video_is_pad.shape[-1] < noise_pred.shape[2]:
+            # Production tail-mask convention (no ref-prefix backbone such as
+            # I2V): ``video_is_pad`` is sized to T_lat minus the leading
+            # conditioning latents. Trim noise_pred / target to match.
+            n_skip = noise_pred.shape[2] - video_is_pad.shape[-1]
+
+        if n_skip > 0:
             noise_pred = noise_pred[:, :, n_skip:]
             target = target[:, :, n_skip:]
 
@@ -857,8 +871,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
         per_element = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
         per_frame = per_element.mean(dim=(1, 3, 4))
 
-        video_is_pad = inputs.get("video_is_pad")
         if video_is_pad is not None:
+            if video_is_pad.shape[-1] != noise_pred.shape[2]:
+                raise ValueError(
+                    f"video_is_pad length {video_is_pad.shape[-1]} does not match "
+                    f"trimmed noise_pred T={noise_pred.shape[2]} (n_skip={n_skip}). "
+                    "Expected mask sized to T_lat minus leading conditioning latents."
+                )
             video_is_pad = video_is_pad.to(device=per_frame.device, dtype=torch.bool)
             valid_mask = ~video_is_pad
             per_frame = per_frame * valid_mask.float()

@@ -188,6 +188,41 @@ class TestLossMasking:
         loss = arch._compute_video_loss(pred, target, torch.tensor([0]), inputs, device="cpu")
         assert abs(loss.item() - 4.0) < 1e-5, f"got {loss.item()}"
 
+    def test_video_loss_i2v_conditioning_latent_without_prefix(self):
+        """I2V has no ref-prefix metadata, but its tail mask still excludes the
+        leading first-frame conditioning latent."""
+        arch = _make_arch()
+        target = torch.zeros(1, 1, 3, 1, 1)
+        pred = torch.zeros(1, 1, 3, 1, 1)
+        pred[0, 0, 0, 0, 0] = 999.0
+        pred[0, 0, 1, 0, 0] = 2.0
+        pred[0, 0, 2, 0, 0] = 888.0
+
+        inputs = {
+            "num_clean_prefix_frames": 0,
+            "first_frame_latents": None,
+            "clip_feature": torch.zeros(1, 257, 1280),
+            "y": torch.zeros(1, 20, 3, 1, 1),
+            "video_is_pad": torch.tensor([[False, True]]),
+        }
+
+        loss = arch._compute_video_loss(pred, target, torch.tensor([0]), inputs, device="cpu")
+        assert abs(loss.item() - 4.0) < 1e-5, f"got {loss.item()}"
+
+    def test_video_loss_raises_on_mask_overlong(self):
+        """Sanity guard: mask longer than noise_pred T must raise ValueError
+        at the loss boundary, not silently RuntimeError inside per_frame *
+        valid_mask. Covers the fallback gap reported in PR #48 review."""
+        import pytest
+
+        arch = _make_arch()
+        pred = torch.zeros(1, 1, 3, 1, 1)
+        target = torch.zeros(1, 1, 3, 1, 1)
+        # mask length 4 > noise_pred T=3; no n_skip path fixes this case.
+        inputs = {"video_is_pad": torch.tensor([[False, False, False, True]])}
+        with pytest.raises(ValueError, match="video_is_pad length"):
+            arch._compute_video_loss(pred, target, torch.tensor([0]), inputs, device="cpu")
+
     def test_action_loss_ignores_padded(self):
         arch = _make_arch()
         target = torch.zeros(1, 6, 2)

@@ -4,5 +4,8 @@ lambda_action: 1.0
 freeze:
   - video_backbone._pipe.text_encoder
   - video_backbone._pipe.vae
+  # I2V-only CLIP-H first-frame encoder (~4.7GB). On TI2V/VACE the attribute
+  # is None and freeze_modules() silently skips it (base.py:352).
+  - video_backbone._pipe.image_encoder
   # Tri-system only; ignored by architectures without a VLM backbone.
   - vlm_backbone.vlm_model

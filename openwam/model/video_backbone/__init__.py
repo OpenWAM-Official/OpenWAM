@@ -98,6 +98,7 @@ from openwam.model.video_backbone.wan_adapter import WanVideoBackbone  # noqa: E
 
 register_video_backbone("wan22_ti2v_5b")(WanVideoBackbone)
 register_video_backbone("wan21_vace_1_3b")(WanVideoBackbone)
+register_video_backbone("wan21_i2v_14b_480p")(WanVideoBackbone)
 
 __all__ = [
     "BlockLoopState",

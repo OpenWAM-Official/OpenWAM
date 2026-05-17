@@ -60,6 +60,7 @@ class _MockWanVB:
     def __init__(self, pipe):
         self._pipe = pipe
         self._is_ti2v = False
+        self._has_vace = False
         self._device = "cpu"
         self._dtype = None
 
@@ -80,6 +81,11 @@ class _MockWanVB:
         from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 
         return WanVideoBackbone._finalize_ti2v_inputs(self, inputs_shared, first_frame_image)
+
+    def _resolve_i2v_input_image(self, first_frame_image):
+        from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+
+        return WanVideoBackbone._resolve_i2v_input_image(self, first_frame_image)
 
     @staticmethod
     def _is_text_unit(unit):
@@ -217,3 +223,91 @@ def test_both_caches_none_does_not_crash():
         pipe.reset_calls()
         _prep(pipe, f"prompt_{i}")
         assert "text" in pipe._calls and "nontext" in pipe._calls
+
+
+def _make_i2v_mock():
+    """Mock that satisfies the helper's is_i2v predicate."""
+    from types import SimpleNamespace
+
+    mock_vb = _MockWanVB(_MockPipe())
+    mock_vb._dit = SimpleNamespace(has_image_input=True)
+    mock_vb._is_ti2v = False
+    mock_vb._has_vace = False
+    return mock_vb
+
+
+def test_i2v_deploy_list_unwrap_cold_start():
+    """Deploy passes first_frame_image=[PIL]; the cold-start branch must
+    (a) write a single PIL (not a list) into inputs_shared["input_image"] and
+    (b) null out vace_reference_image so the upstream NoiseInitializer /
+    InputVideoEmbedder do NOT prepend a phantom latent frame (which would
+    break the channel-cat with y inside prepare())."""
+    from PIL import Image
+
+    mock_vb = _make_i2v_mock()
+    img = Image.new("RGB", (832, 480))
+    inputs = mock_vb.prepare_inputs_for_inference(
+        "prompt_I2V",
+        first_frame_image=[img],
+        num_frames=17,
+        height=32,
+        width=32,
+        seed=0,
+        tiled=False,
+        num_inference_steps=2,
+        shift=5.0,
+    )
+    assert isinstance(inputs["input_image"], Image.Image), (
+        f"cold-start branch should unwrap list to single PIL, got {type(inputs['input_image'])}"
+    )
+    assert inputs["vace_reference_image"] is None, (
+        f"I2V deploy must null vace_reference_image to avoid extra prefix frame, "
+        f"got {type(inputs['vace_reference_image'])}"
+    )
+
+
+def test_i2v_deploy_list_unwrap_cache_hit():
+    """Same as above but on the vace_cache-hit branch: the cached
+    inputs_shared dict must be rewritten so a stale list/None does not
+    survive across calls."""
+    from PIL import Image
+
+    mock_vb = _make_i2v_mock()
+    img = Image.new("RGB", (832, 480))
+    vace_cache: dict = {}
+
+    # 1st call populates the cache.
+    mock_vb.prepare_inputs_for_inference(
+        "prompt_I2V",
+        first_frame_image=[img],
+        num_frames=17,
+        height=32,
+        width=32,
+        seed=0,
+        tiled=False,
+        num_inference_steps=2,
+        shift=5.0,
+        vace_cache=vace_cache,
+    )
+    assert vace_cache.get("populated"), "first call should populate vace_cache"
+
+    # 2nd call must hit the cache and still unwrap the list + null vace ref.
+    inputs = mock_vb.prepare_inputs_for_inference(
+        "prompt_I2V",
+        first_frame_image=[img],
+        num_frames=17,
+        height=32,
+        width=32,
+        seed=1,
+        tiled=False,
+        num_inference_steps=2,
+        shift=5.0,
+        vace_cache=vace_cache,
+    )
+    assert isinstance(inputs["input_image"], Image.Image), (
+        f"cache-hit branch should also unwrap to PIL, got {type(inputs['input_image'])}"
+    )
+    assert inputs["vace_reference_image"] is None, (
+        f"I2V deploy cache-hit must null vace_reference_image, "
+        f"got {type(inputs['vace_reference_image'])}"
+    )
