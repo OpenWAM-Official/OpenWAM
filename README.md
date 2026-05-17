@@ -79,6 +79,12 @@ OpenWAM/
 
 ### Base installation
 
+```bash
+conda create -n openwam python=3.12
+
+conda activate openwam
+```
+
 We recommend using PyTorch 2.7.1 with CUDA 12.8 （others may also work）:
 
 ```bash

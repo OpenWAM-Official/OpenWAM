@@ -408,14 +408,16 @@ class TriSystemMoTDriver:
             und_mask=getattr(ustate, "und_mask", None),
         )
 
+        last_layer = self.num_layers - 1
         for layer_id in range(self.num_layers):
+            use_ckpt = use_gradient_checkpointing and layer_id != last_layer
             vstate, astate, ustate = self.step(
                 layer_id,
                 vstate,
                 astate,
                 ustate,
                 attn_mask=attn_mask,
-                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing=use_ckpt,
                 use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             )
         return vstate, astate, ustate

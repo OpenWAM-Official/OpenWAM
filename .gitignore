@@ -5,6 +5,7 @@
 others/
 .chrome-tmp/
 .claude/
+.vscode/
 
 
 # Hydra outputs
