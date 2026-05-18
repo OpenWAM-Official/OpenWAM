@@ -195,10 +195,29 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if source is not None:
             ckpt_dir = vb_cfg.get("_ckpt_dir") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_ckpt_dir", None)
             self.video_backbone = build_video_backbone(vb_name, cfg, source=source, device="cpu", ckpt_dir=ckpt_dir)
-            return
-
-        if vb_name is not None:
+        elif vb_name is not None:
             self.video_backbone = build_video_backbone(vb_name, cfg)
+
+        # Optional from-scratch DiT: keep the Wan video backbone structure but
+        # discard the loaded DiT weights and re-randomize them in place. VAE
+        # and the text encoder stay pretrained and are frozen by the training
+        # strategy yaml. Reproducibility comes from ``cfg.project.seed`` which
+        # ``OpenWAMTrainer`` applies before architecture construction. Applies
+        # uniformly to every architecture that builds its video backbone via
+        # this method (dual_system / shared_backbone / tri_system).
+        if self.video_backbone is not None and self._cfg_get(vb_cfg, "from_scratch", False):
+            pipe = getattr(self.video_backbone, "_pipe", None)
+            if pipe is None:
+                logger.warning(
+                    "video_backbone.from_scratch=true but backbone has no '_pipe'; skipping. (Non-Wan backbone?)"
+                )
+            else:
+                from openwam.model.video_backbone.wan_adapter import reinit_dit_from_scratch
+
+                reinit_dit_from_scratch(pipe)
+                logger.info(
+                    "video_backbone.from_scratch=true: DiT re-initialized; VAE / text_encoder keep pretrained weights"
+                )
 
     def _resolve_video_dim(self, cfg) -> int:
         """Resolve video_dim from config or video_backbone; raise if neither provides it."""

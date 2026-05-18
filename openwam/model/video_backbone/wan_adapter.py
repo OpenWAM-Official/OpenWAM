@@ -1649,4 +1649,139 @@ class WanVideoBackbone(VideoBackbone):
         )
 
 
-__all__ = ["WanVideoBackbone"]
+def _probe_dit_stats(dit) -> dict:
+    """Snapshot a few representative tensors for before/after verification.
+
+    Picks tensors that exercise both code paths of ``reinit_dit_from_scratch``:
+      - ``blocks[0].self_attn.q.weight`` — covered by stdlib ``reset_parameters``
+      - ``blocks[0].modulation`` — directly-mounted nn.Parameter, hand-reset
+      - ``head.modulation`` — same category, separate code branch
+    """
+    return {
+        "q.weight_mean": float(dit.blocks[0].self_attn.q.weight.float().mean().item()),
+        "q.weight_std": float(dit.blocks[0].self_attn.q.weight.float().std().item()),
+        "blocks[0].modulation_mean": float(dit.blocks[0].modulation.float().mean().item()),
+        "blocks[0].modulation_std": float(dit.blocks[0].modulation.float().std().item()),
+        "head.modulation_mean": float(dit.head.modulation.float().mean().item()),
+        "head.modulation_std": float(dit.head.modulation.float().std().item()),
+    }
+
+
+def reinit_dit_from_scratch(pipe, *, verbose: bool = True) -> None:
+    """Re-initialize all learnable parameters in ``pipe.dit`` (and
+    ``pipe.dit2`` if present) using PyTorch standard initialization. Does
+    NOT touch ``pipe.vae`` / ``pipe.text_encoder`` / ``pipe.image_encoder`` /
+    ``pipe.vace`` — only the DiT(s).
+
+    Used by the ``video_backbone.from_scratch`` config switch to ablate
+    "pretrained DiT vs from-scratch DiT" while keeping VAE and the text
+    encoder loaded with their pretrained weights (these are typically
+    frozen by the training_strategy yaml).
+
+    Two-step strategy:
+
+    1. ``modules().reset_parameters()`` for stdlib layers
+       (``nn.Linear`` / ``Conv2d`` / ``Conv3d`` / ``Embedding`` /
+       ``LayerNorm``) — covers the vast majority of params.
+    2. Hand-reset four classes of directly-mounted ``nn.Parameter`` that
+       ``module.modules()`` does not yield. Without this, ~30
+       ``DiTBlock.modulation`` tensors and ~180 ``RMSNorm.weight`` tensors
+       per 30-layer Wan DiT would silently retain the loaded pretrained
+       values and the ablation would not be clean. See the audit in
+       ``plans/a-vectorized-crystal.md``.
+
+    Buffers and non-parameter tensors (e.g. ``WanModel.freqs`` RoPE cache)
+    are deterministic functions of the model hyperparams and are left
+    untouched.
+
+    Args:
+        pipe: A Wan pipeline with ``.dit`` (and optionally ``.dit2``) attached.
+        verbose: When True (default) and we're on rank 0, prints a
+            human-readable BEFORE/AFTER summary directly to stdout — this is
+            independent of the ``logging`` configuration so users see the
+            verification trace in the terminal regardless of whether their
+            launcher routes ``logger.info`` to stderr/stdout/a file.
+    """
+    import os
+
+    import torch.nn as nn
+
+    from openwam.model.video_backbone.wan.dit import MLP, DiTBlock, Head, RMSNorm
+
+    stdlib_resettable = (nn.Linear, nn.Conv2d, nn.Conv3d, nn.Embedding, nn.LayerNorm)
+
+    dits = [m for m in (getattr(pipe, "dit", None), getattr(pipe, "dit2", None)) if m is not None]
+    if not dits:
+        logger.warning("reinit_dit_from_scratch: pipe has no dit/dit2 to re-init")
+        return
+
+    rank = int(os.environ.get("RANK", 0))
+    is_main = rank == 0
+
+    # Snapshot a few representative tensors BEFORE the reset so the user can
+    # eyeball "yes, the loaded pretrained values were actually thrown away".
+    before_stats = [_probe_dit_stats(root) for root in dits] if verbose and is_main else None
+
+    for root in dits:
+        for sub in root.modules():
+            if isinstance(sub, stdlib_resettable):
+                sub.reset_parameters()
+        with torch.no_grad():
+            for sub in root.modules():
+                if isinstance(sub, RMSNorm):
+                    sub.weight.fill_(1.0)
+                elif isinstance(sub, DiTBlock):
+                    dim = sub.modulation.shape[-1]
+                    sub.modulation.normal_(mean=0.0, std=dim**-0.5)
+                elif isinstance(sub, Head):
+                    dim = sub.modulation.shape[-1]
+                    sub.modulation.normal_(mean=0.0, std=dim**-0.5)
+                elif isinstance(sub, MLP) and getattr(sub, "has_pos_emb", False):
+                    sub.emb_pos.zero_()
+
+    logger.info(
+        "reinit_dit_from_scratch: re-initialized %d DiT module(s); VAE/T5 untouched",
+        len(dits),
+    )
+
+    if verbose and is_main:
+        after_stats = [_probe_dit_stats(root) for root in dits]
+        # Use print(..., flush=True) so the verification line surfaces even
+        # under non-INFO logging configurations (e.g. plain torchrun without
+        # logging.basicConfig). Bounded output: 4 lines per DiT module.
+        bar = "=" * 78
+        print(bar, flush=True)
+        print(
+            "[reinit_dit_from_scratch] video DiT weights re-initialized from scratch. "
+            f"VAE / text_encoder kept pretrained. ({len(dits)} DiT module(s), rank=0 summary)",
+            flush=True,
+        )
+        for i, (before, after, root) in enumerate(zip(before_stats, after_stats, dits)):
+            label = "dit" if i == 0 else f"dit{i + 1}"
+            expected_mod_std = root.dim**-0.5
+            print(
+                f"  [{label}] q.weight                 BEFORE mean={before['q.weight_mean']:+.4e} std={before['q.weight_std']:.4e}  "
+                f"-> AFTER mean={after['q.weight_mean']:+.4e} std={after['q.weight_std']:.4e}",
+                flush=True,
+            )
+            print(
+                f"  [{label}] blocks[0].modulation     BEFORE mean={before['blocks[0].modulation_mean']:+.4e} std={before['blocks[0].modulation_std']:.4e}  "
+                f"-> AFTER mean={after['blocks[0].modulation_mean']:+.4e} std={after['blocks[0].modulation_std']:.4e}  "
+                f"(expected std≈{expected_mod_std:.4e})",
+                flush=True,
+            )
+            print(
+                f"  [{label}] head.modulation          BEFORE mean={before['head.modulation_mean']:+.4e} std={before['head.modulation_std']:.4e}  "
+                f"-> AFTER mean={after['head.modulation_mean']:+.4e} std={after['head.modulation_std']:.4e}  "
+                f"(expected std≈{expected_mod_std:.4e})",
+                flush=True,
+            )
+        print(
+            "  Reproducibility: with the same cfg.project.seed, these AFTER numbers "
+            "are bit-exact across runs (rank-0 broadcast covers other ranks).",
+            flush=True,
+        )
+        print(bar, flush=True)
+
+
+__all__ = ["WanVideoBackbone", "reinit_dit_from_scratch"]

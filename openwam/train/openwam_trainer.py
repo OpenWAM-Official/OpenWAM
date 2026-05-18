@@ -17,6 +17,7 @@ Usage:
 import logging
 import math
 import os
+import random
 import shutil
 
 import numpy as np
@@ -49,6 +50,39 @@ class OpenWAMTrainer(BaseTrainer):
 
     def __init__(self, cfg: DictConfig, accelerator=None, dataset=None):
         super().__init__(cfg, model=None, dataset=dataset, accelerator=accelerator)
+
+        # ---- Reproducible seed (FastWAM-style, yaml-driven) ----
+        # Reads seed from ``cfg.project.seed`` and seeds Python random, numpy,
+        # torch CPU and torch CUDA RNGs. Must run before ``build_architecture``
+        # so any randomness during model construction (DiT/ActionDiT weight
+        # init, including a future ``video_backbone.from_scratch`` reinit path)
+        # lands on deterministic RNG.
+        #
+        # Mirrors FastWAM's set_global_seed
+        # (references/FastWAM/src/fastwam/utils/pytorch_utils.py:17). We
+        # deliberately do NOT touch cudnn.deterministic, cudnn.benchmark,
+        # CUBLAS_WORKSPACE_CONFIG, or torch.use_deterministic_algorithms:
+        # they would gain bit-exact loss reproducibility at the cost of cuDNN
+        # autotuning and FSDP/fused-attention compatibility, and they are not
+        # needed for "same seed -> same initial DiT weights".
+        project_cfg = getattr(cfg, "project", None)
+        yaml_seed = getattr(project_cfg, "seed", None) if project_cfg is not None else None
+        self._rank = int(os.environ.get("RANK", 0))
+        self._run_seed = int(yaml_seed) if yaml_seed is not None else None
+        if self._run_seed is not None:
+            process_seed = self._run_seed + self._rank
+            random.seed(process_seed)
+            np.random.seed(process_seed)
+            torch.manual_seed(process_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(process_seed)
+            if self._rank == 0:
+                logger.info(
+                    "Reproducible mode: cfg.project.seed=%d (process_seed=%d, rank=%d)",
+                    self._run_seed,
+                    process_seed,
+                    self._rank,
+                )
 
         t = cfg.training
         m = cfg.model
@@ -182,6 +216,49 @@ class OpenWAMTrainer(BaseTrainer):
             print("=" * 60, flush=True)
 
     @staticmethod
+    def _wire_sampler_seed(dataloader, run_seed: int) -> None:
+        """Tie the (possibly wrapped) DistributedSampler's ``seed`` attribute to
+        ``run_seed`` so per-epoch shuffle order varies with ``cfg.project.seed``.
+
+        Without this, ``accelerator.prepare`` keeps the auto-wrapped
+        ``DistributedSampler`` at its upstream default ``seed=0`` and shuffle
+        order is identical regardless of ``cfg.project.seed``. The trainer's
+        per-epoch ``dataloader.set_epoch(epoch)`` call then combines this seed
+        with the epoch number so each epoch still gets its own permutation.
+
+        Walks both ``dataloader.sampler`` and ``dataloader.batch_sampler.sampler``
+        — accelerate's wrapping can place the underlying sampler in either spot.
+
+        If no sampler with a ``.seed`` attribute is reachable (e.g. unusual
+        accelerate wrapper, IterableDataset path, or shuffle=False loader),
+        logs a WARNING so the user doesn't silently get the upstream default
+        while expecting ``cfg.project.seed`` to control shuffle order.
+        """
+        sampler = getattr(dataloader, "sampler", None)
+        if sampler is None:
+            batch_sampler = getattr(dataloader, "batch_sampler", None)
+            sampler = getattr(batch_sampler, "sampler", None) if batch_sampler is not None else None
+        if sampler is not None and hasattr(sampler, "seed"):
+            old = sampler.seed
+            sampler.seed = int(run_seed)
+            logger.info(
+                "%s.seed wired to cfg.project.seed: %s -> %d",
+                type(sampler).__name__,
+                old,
+                run_seed,
+            )
+        else:
+            logger.warning(
+                "cfg.project.seed=%d is set but the prepared dataloader has no sampler with a "
+                "``.seed`` attribute (found %s). Per-epoch shuffle order will fall back to the "
+                "library default (typically seed=0) and will NOT vary with cfg.project.seed. "
+                "Other seeded paths (model init, worker_init_fn, training-loop noise) are "
+                "unaffected.",
+                run_seed,
+                type(sampler).__name__ if sampler is not None else "None",
+            )
+
+    @staticmethod
     def _zero3_init_disabled():
         """Context that disables DeepSpeed ZeRO-3 construction-time partitioning.
 
@@ -296,16 +373,39 @@ class OpenWAMTrainer(BaseTrainer):
         return torch.optim.AdamW(params, lr=lr, weight_decay=float(t.weight_decay), betas=betas)
 
     def build_dataloader(self, batch_size: int) -> torch.utils.data.DataLoader:
-        """Build the training DataLoader. Override for custom sampling."""
+        """Build the training DataLoader. Override for custom sampling.
+
+        When ``cfg.project.seed`` is configured, hooks in two seeding pieces
+        so dataset-side randomness becomes reproducible across runs while
+        retaining within-run diversity:
+
+        * ``generator`` — DataLoader's own RNG, used to derive each worker's
+          ``base_seed`` at every ``__iter__``. The generator's state advances
+          naturally per epoch (each epoch consumes one random draw), so
+          workers spawned in epoch N see a different ``base_seed`` from
+          workers spawned in epoch M.
+        * ``worker_init_fn`` — ``dataloader_worker_init_fn`` reads PyTorch's
+          auto-derived ``info.seed`` (which carries the per-epoch / per-worker
+          variation above) and seeds Python ``random`` + NumPy with it. This
+          makes the dataset transforms in
+          ``openwam/dataloader/transforms/video.py`` (random crop, brightness,
+          flip) reproducible across runs **without** repeating the same
+          augmentation in every epoch.
+        """
         t = self.cfg.training
-        return torch.utils.data.DataLoader(
-            self.dataset,
+        kwargs: dict = dict(
             batch_size=batch_size,
             shuffle=True,
             num_workers=int(t.dataset_num_workers),
             collate_fn=list,
             pin_memory=True,
         )
+        if self._run_seed is not None:
+            from openwam.train.utils.seeding import dataloader_worker_init_fn, make_dataloader_generator
+
+            kwargs["generator"] = make_dataloader_generator(self._run_seed, rank=self._rank)
+            kwargs["worker_init_fn"] = dataloader_worker_init_fn
+        return torch.utils.data.DataLoader(self.dataset, **kwargs)
 
     def build_lr_scheduler(self, optimizer, total_opt_steps: int, debug: bool = False):
         """Build the LR scheduler. Returns scheduler or None. Override for custom schedules."""
@@ -562,6 +662,15 @@ class OpenWAMTrainer(BaseTrainer):
             self.architecture, optimizer, dataloader = self.accelerator.prepare(
                 self.architecture, optimizer, dataloader
             )
+
+        # Wire the (possibly wrapped) DistributedSampler's ``seed`` to
+        # ``cfg.project.seed``. Without this, accelerator.prepare's auto-wrapped
+        # DistributedSampler keeps the default ``seed=0`` and the per-epoch
+        # shuffle order is identical regardless of cfg.project.seed.
+        # set_epoch (called every epoch in the training loop) combines this
+        # with the epoch number, so each epoch still gets its own permutation.
+        if self._run_seed is not None:
+            self._wire_sampler_seed(dataloader, int(self._run_seed))
 
         # Collect all trainable params for grad clipping
         all_params = [p for group in optimizer.param_groups for p in group["params"]]
