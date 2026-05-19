@@ -707,55 +707,79 @@ def test_all_variants_load_and_run(registry_name, cfg, expected_selected_count):
 # ---------------------------------------------------------------------------
 # 6. Hydra defaults composition smoke
 # ---------------------------------------------------------------------------
-# PR #58 moved video_backbone out of each framework yaml into the
-# ``configs/model/video_backbone/`` Hydra group. ``defaults:`` composition is
-# the only path that wires up ``cfg.model.video_backbone`` in production —
-# scripts/train.py runs under ``@hydra.main``. Existing tri_system smoke tests
-# (test_tri_system_smoke.py:307, :419) ``OmegaConf.load`` the yaml directly
-# and so cannot observe ``defaults:`` resolution; ``resolve_architecture_config``
-# silently skips a missing video_backbone block, so those tests would keep
-# passing even if the ``defaults:`` line were broken or removed.
-#
-# This block fills that gap: every framework × backbone combination must
-# Hydra-compose into a non-empty video_backbone with the expected name.
+# Each framework yaml inlines its `video_backbone:` block (with default
+# wan22_ti2v_5b). Production scripts/train.py runs under ``@hydra.main``, so
+# we verify the inline default composes and that the standard CLI override
+# pattern (``model.video_backbone.name=...``) still reshapes the cfg.
+# Existing tri_system smoke tests (test_tri_system_smoke.py:307, :419)
+# ``OmegaConf.load`` the yaml directly and don't exercise compose, so this
+# block fills that gap.
 
 _FRAMEWORKS = ("dual_system", "shared_backbone", "tri_system")
 _BACKBONES = ("wan22_ti2v_5b", "wan21_vace_1_3b", "wan21_i2v_14b_480p")
+# Backbone-specific dummy weights dir for the compose smoke test. Mirrors the
+# real on-disk directory names so the production cross-check in
+# build_training_pipeline (name vs model_path stem) does not flag the test
+# overrides as a mismatch. The directory is never actually read — compose
+# does not touch model_path.
+_BACKBONE_DUMMY_MODEL_PATH = {
+    "wan22_ti2v_5b": "/dummy/Wan2.2-TI2V-5B",
+    "wan21_vace_1_3b": "/dummy/Wan2.1-VACE-1.3B",
+    "wan21_i2v_14b_480p": "/dummy/Wan2.1-I2V-14B-480P",
+}
 
 
 @pytest.mark.parametrize("framework", _FRAMEWORKS)
 @pytest.mark.parametrize("backbone", _BACKBONES)
 def test_framework_backbone_hydra_compose(framework, backbone):
-    """All 9 framework × video_backbone pairs must Hydra-compose cleanly,
-    and the composed ``cfg.model.video_backbone.name`` must match the
-    requested backbone group.
+    """All 9 framework × video_backbone pairs must Hydra-compose cleanly via
+    the production CLI override pattern — both ``model.video_backbone.name``
+    AND ``model.video_backbone.model_path`` overridden together — and both
+    fields must reach the composed cfg unchanged.
+
+    The inline-block design (PR #59) drops the implicit name→model_path
+    coupling that the old Hydra group provided, so production users must
+    override both fields together (see README + each framework yaml). This
+    test pins that pattern instead of only overriding ``name``, which would
+    leave ``model_path`` pointing at the default wan22 entry and silently
+    load the wrong backbone at training time.
     """
     import os
 
     from hydra import compose, initialize_config_dir
 
     cfg_dir = os.path.abspath("configs")
-    overrides = [f"model={framework}", f"model/video_backbone={backbone}"]
+    dummy_model_path = _BACKBONE_DUMMY_MODEL_PATH[backbone]
+    overrides = [
+        f"model={framework}",
+        f"model.video_backbone.name={backbone}",
+        f"model.video_backbone.model_path={dummy_model_path}",
+    ]
     with initialize_config_dir(config_dir=cfg_dir, version_base=None):
         cfg = compose(config_name="train", overrides=overrides)
 
     vb = cfg.model.get("video_backbone")
     assert vb is not None, (
         f"{framework} × {backbone}: cfg.model.video_backbone missing after "
-        f"compose — `defaults:` composition is broken"
+        f"compose — inline `video_backbone:` block is broken"
     )
     assert vb.name == backbone, (
         f"{framework} × {backbone}: composed video_backbone.name={vb.name!r}, "
         f"expected {backbone!r}"
+    )
+    assert vb.model_path == dummy_model_path, (
+        f"{framework} × {backbone}: composed video_backbone.model_path="
+        f"{vb.model_path!r}, expected {dummy_model_path!r} — model_path CLI "
+        f"override did not reach the composed cfg"
     )
     assert cfg.model.architecture.framework == framework
 
 
 @pytest.mark.parametrize("framework", _FRAMEWORKS)
 def test_framework_default_backbone_is_wan22_ti2v_5b(framework):
-    """Without an explicit ``model/video_backbone=`` override, every framework
-    yaml's ``defaults:`` must compose to ``wan22_ti2v_5b`` — that's the
-    documented default backbone advertised in README + CHANGELOG.
+    """Without any explicit ``model.video_backbone.*`` override, every
+    framework yaml's inline ``video_backbone:`` block must default to
+    ``wan22_ti2v_5b`` — that's the documented default backbone.
     """
     import os
 
@@ -769,3 +793,77 @@ def test_framework_default_backbone_is_wan22_ti2v_5b(framework):
         f"{framework} default backbone is "
         f"{cfg.model.video_backbone.name!r}, expected 'wan22_ti2v_5b'"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. video_backbone.name vs model_path cross-check warning
+# ---------------------------------------------------------------------------
+# All Wan variants share one adapter, so ``video_backbone.name`` only drives
+# registry dispatch — actual weights are decided by ``model_path``. A half
+# override on the CLI (e.g. only ``name``) silently loads the wrong backbone.
+# ``build_training_pipeline._warn_on_name_path_mismatch`` is a soft cross-check
+# that WARNs but does not abort, so intentional name/path ablations are still
+# allowed. These tests pin the matcher behaviour so the cross-check survives
+# future renames.
+
+
+@pytest.mark.parametrize(
+    "name,model_path",
+    [
+        ("wan22_ti2v_5b", "/path/to/Wan2.2-TI2V-5B"),
+        ("wan21_vace_1_3b", "/path/to/Wan2.1-VACE-1.3B"),
+        ("wan21_i2v_14b_480p", "/path/to/weights/Wan2.1-I2V-14B-480P"),
+        # Trailing slashes / missing leading dir still normalize to the same stem.
+        ("wan22_ti2v_5b", "Wan2.2-TI2V-5B/"),
+    ],
+)
+def test_backbone_name_path_match_does_not_warn(name, model_path, caplog):
+    from openwam.model.video_backbone.wan.pipeline_builder import (
+        _warn_on_name_path_mismatch,
+    )
+
+    with caplog.at_level("WARNING", logger="openwam.model.video_backbone.wan.pipeline_builder"):
+        _warn_on_name_path_mismatch(name, model_path)
+    assert not any("looks inconsistent" in r.message for r in caplog.records), (
+        f"{name!r} ↔ {model_path!r} should be treated as matching, but a "
+        f"WARNING fired: {[r.message for r in caplog.records]!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,model_path",
+    [
+        # The classic silent-load failure mode: only `name` was overridden on
+        # the CLI; `model_path` is still pointing at the default wan22 entry.
+        ("wan21_vace_1_3b", "/path/to/Wan2.2-TI2V-5B"),
+        ("wan21_i2v_14b_480p", "/path/to/Wan2.2-TI2V-5B"),
+        # And the reverse: name still default, but model_path swapped.
+        ("wan22_ti2v_5b", "/path/to/weights/Wan2.1-I2V-14B-480P"),
+    ],
+)
+def test_backbone_name_path_mismatch_warns(name, model_path, caplog):
+    from openwam.model.video_backbone.wan.pipeline_builder import (
+        _warn_on_name_path_mismatch,
+    )
+
+    with caplog.at_level("WARNING", logger="openwam.model.video_backbone.wan.pipeline_builder"):
+        _warn_on_name_path_mismatch(name, model_path)
+    mismatches = [r for r in caplog.records if "looks inconsistent" in r.message]
+    assert mismatches, (
+        f"{name!r} ↔ {model_path!r} is a real mismatch but the cross-check "
+        f"did not WARN; current log records: {[r.message for r in caplog.records]!r}"
+    )
+
+
+def test_backbone_name_path_check_silent_when_name_missing(caplog):
+    """Deploy-time paths sometimes supply only model_path with no name field;
+    the cross-check must stay silent rather than fire a false-positive WARN.
+    """
+    from openwam.model.video_backbone.wan.pipeline_builder import (
+        _warn_on_name_path_mismatch,
+    )
+
+    with caplog.at_level("WARNING", logger="openwam.model.video_backbone.wan.pipeline_builder"):
+        _warn_on_name_path_mismatch(None, "/path/to/Wan2.2-TI2V-5B")
+        _warn_on_name_path_mismatch("", "/path/to/Wan2.2-TI2V-5B")
+    assert not any("looks inconsistent" in r.message for r in caplog.records)

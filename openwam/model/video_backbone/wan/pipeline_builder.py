@@ -76,6 +76,42 @@ def _import_class(dotted: str):
     return getattr(importlib.import_module(module_path), cls_name)
 
 
+def _normalize_backbone_token(s) -> str:
+    """Lowercase + strip non-alphanumeric, so ``Wan2.2-TI2V-5B`` and
+    ``wan22_ti2v_5b`` both collapse to ``wan22ti2v5b``."""
+    if s is None:
+        return ""
+    return "".join(c for c in str(s).lower() if c.isalnum())
+
+
+def _warn_on_name_path_mismatch(name, model_dir: str) -> None:
+    # All Wan variants share one adapter class, so video_backbone.name only
+    # drives registry dispatch — the loaded weights are decided entirely by
+    # model_path. A half-override on the CLI (only `name`, not `model_path`)
+    # silently loads the wrong backbone. Soft normalize-and-match cross-check;
+    # WARN but don't abort — intentional name/path ablations are allowed.
+    if not name:
+        return
+    path_stem = os.path.basename(os.path.normpath(model_dir))
+    norm_name = _normalize_backbone_token(name)
+    norm_path = _normalize_backbone_token(path_stem)
+    if not norm_name or not norm_path:
+        return
+    if norm_name in norm_path or norm_path in norm_name:
+        return
+    logger.warning(
+        "video_backbone.name=%r looks inconsistent with model_path=%r "
+        "(stem=%r). The actual backbone loaded is determined by model_path, "
+        "not name; if you intended to switch backbones on the CLI, override "
+        "BOTH model.video_backbone.name AND model.video_backbone.model_path. "
+        "Suppress this warning by aligning the two fields, or ignore it for "
+        "intentional name/path ablations.",
+        name,
+        model_dir,
+        path_stem,
+    )
+
+
 def _build_tokenizer(tok_cfg: dict, base_dir: str):
     """Instantiate a tokenizer described by a config ``tokenizer`` block.
 
@@ -123,6 +159,8 @@ def build_training_pipeline(cfg: DictConfig):
 
     device = "cpu" if bool(t.initialize_model_on_cpu) else "cuda"
     model_dir = str(backbone_cfg.model_path)
+
+    _warn_on_name_path_mismatch(backbone_cfg.get("name", None), model_dir)
 
     model_configs, tokenizer_config = discover_model_files(model_dir)
 

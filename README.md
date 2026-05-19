@@ -173,13 +173,17 @@ Architecture configs in `configs/model/`:
 - `shared_backbone.yaml` # shared_backbone family; choose `variant: vanilla|moe`
 - `tri_system.yaml`      # tri_system family; `variant: joint_self_attn`
 
-Video backbone presets in `configs/model/video_backbone/` (composed in via each framework yaml's `defaults:`). Switch backbones with a single CLI override:
+Video backbone is configured inline in each framework yaml under the `video_backbone:` block (default: `wan22_ti2v_5b`). Switch backbones by either editing the yaml or overriding the inline fields on CLI:
 
 ```bash
-bash scripts/train.sh model=dual_system model/video_backbone=wan21_vace_1_3b
+bash scripts/train.sh model=dual_system \
+    model.video_backbone.name=wan21_vace_1_3b \
+    model.video_backbone.model_path=/path/to/Wan2.1-VACE-1.3B
 ```
 
-Available backbones: `wan22_ti2v_5b` (default), `wan21_vace_1_3b`, `wan21_i2v_14b_480p`. ActionDiT geometry (`num_heads`, `attn_head_dim`, `video_dim`, `num_dit_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the framework yaml. The ActionDiT's own `num_layers` then follows `bridge_layers` / `bridge_interval` (default `bridge_interval=1` makes it equal to the backbone layer count).
+Tested backbones: `wan22_ti2v_5b` (default), `wan21_vace_1_3b`, `wan21_i2v_14b_480p`. The latter two are listed (commented out) in each framework yaml's `video_backbone:` block — uncomment in place to switch without retyping the model_path. ActionDiT geometry (`num_heads`, `attn_head_dim`, `video_dim`, `num_dit_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the framework yaml. The ActionDiT's own `num_layers` then follows `bridge_layers` / `bridge_interval` (default `bridge_interval=1` makes it equal to the backbone layer count).
+
+**name vs model_path are NOT auto-coupled.** All Wan variants share one adapter class, so `video_backbone.name` only drives registry dispatch; the loaded weights are decided entirely by `video_backbone.model_path`. CLI overrides must update BOTH fields together — overriding only `name` silently loads whatever `model_path` still points at. `build_training_pipeline` runs a soft normalize-and-match cross-check on `(name, model_path)` and logs a WARNING on mismatch (it does not abort, so intentional name/path ablations are still allowed).
 
 Shared-backbone notes:
 

@@ -1,18 +1,23 @@
-defaults:
-  - video_backbone: wan22_ti2v_5b
-  - _self_
-
 # Tri-system architecture: video DiT + shared ActionDiT + Understanding Expert + Qwen3-VL.
 # OpenWAM-native trimodal MoT: reuse the dual-system joint_self_attn action
 # backbone and add understanding tokens as the third mixed-attention stream.
 #
-# Video backbone is composed in via the `defaults:` block above. To switch:
-#   bash scripts/train.sh model=tri_system model/video_backbone=<name>
-# See configs/model/video_backbone/ for available choices. Note: tri_system
-# currently only exercises wan22_ti2v_5b end-to-end; pairing it with VACE
-# (e.g. `model/video_backbone=wan21_vace_1_3b`) composes at the Hydra layer
-# but raises NotImplementedError in the adapter at build time — no VACE
-# plumbing exists for the trimodal branch yet.
+# Video backbone is configured inline in the `video_backbone:` block at the
+# bottom of this file. Default is Wan 2.2 TI2V-5B. To switch, either edit
+# `video_backbone.name` / `video_backbone.model_path` here, or override on CLI:
+#   bash scripts/train.sh model=tri_system \
+#       model.video_backbone.name=<name> model.video_backbone.model_path=<path>
+# IMPORTANT: `name` is only used for registry dispatch (all wan variants share
+# one adapter); the actual backbone loaded is determined entirely by
+# `model_path`. CLI overrides must update BOTH fields together — overriding
+# only `name` silently loads whatever `model_path` still points at. A
+# normalize-and-match cross-check in `build_training_pipeline` logs a WARNING
+# on mismatch but does not abort.
+# Note: tri_system currently only exercises wan22_ti2v_5b end-to-end; pairing
+# it with VACE / I2V composes at the config layer but raises
+# NotImplementedError in the tri_system adapter at build time — no VACE / I2V
+# plumbing exists for the trimodal branch yet. The alternative blocks at the
+# bottom are kept for parity with dual_system / shared_backbone only.
 
 # Note: vlm_backbone / understanding_expert MUST live under the architecture: block
 # for resolve_architecture_config to forward them to build-time cfg.
@@ -103,3 +108,30 @@ action_backbone:
   dim: 1024
   text_dim: 4096
   ffn_dim: 4096
+
+# Video backbone. Default: Wan 2.2 TI2V-5B (the only backbone with end-to-end
+# tri_system plumbing today; VACE/I2V composition raises NotImplementedError
+# in the adapter — see the top-of-file note).
+#
+# DiT geometry per backbone (auto-consumed by the architecture):
+#   - wan22_ti2v_5b     : dim=3072, num_heads=24, head_dim=128, num_layers=30
+#   - wan21_vace_1_3b   : dim=1536, num_heads=12, head_dim=128, num_layers=30
+#   - wan21_i2v_14b_480p: dim=5120, num_heads=40, head_dim=128, num_layers=40
+#
+# `from_scratch: true` keeps the Wan DiT structure but re-initializes the DiT
+# weights from PyTorch defaults; VAE/text encoder still load pretrained
+# weights. Reproducibility is governed by `cfg.project.seed`.
+#
+# Tested alternatives (parity placeholders; DO NOT enable on tri_system —
+# the adapter raises NotImplementedError at build time, see top-of-file note):
+#   # ⚠️ tri_system adapter: NotImplementedError at build time
+#   # name: wan21_vace_1_3b
+#   # model_path: /path/to/Wan2.1-VACE-1.3B
+#
+#   # ⚠️ tri_system adapter: NotImplementedError at build time
+#   # name: wan21_i2v_14b_480p
+#   # model_path: /path/to/weights/Wan2.1-I2V-14B-480P
+video_backbone:
+  name: wan22_ti2v_5b
+  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
+  from_scratch: false

@@ -1,16 +1,21 @@
-defaults:
-  - video_backbone: wan22_ti2v_5b
-  - _self_
-
 # Shared Backbone Architecture Family
 # Action tokens are concatenated to the video token sequence and processed by
 # the same DiT. The family has two variants:
 #   - vanilla: plain shared DiT path, no extra expert FFN
 #   - moe:     shared DiT path + expert FFN corrections on action tokens
 #
-# Video backbone is composed in via the `defaults:` block above. To switch:
-#   bash scripts/train.sh model=shared_backbone model/video_backbone=wan21_vace_1_3b
-# See configs/model/video_backbone/ for available choices.
+# Video backbone is configured inline in the `video_backbone:` block at the
+# bottom of this file. Default is Wan 2.2 TI2V-5B. To switch, either edit
+# `video_backbone.name` / `video_backbone.model_path` here, or override on CLI:
+#   bash scripts/train.sh model=shared_backbone \
+#       model.video_backbone.name=wan21_vace_1_3b \
+#       model.video_backbone.model_path=/path/to/Wan2.1-VACE-1.3B
+# IMPORTANT: `name` is only used for registry dispatch (all wan variants share
+# one adapter); the actual backbone loaded is determined entirely by
+# `model_path`. CLI overrides must update BOTH fields together — overriding
+# only `name` silently loads whatever `model_path` still points at. A
+# normalize-and-match cross-check in `build_training_pipeline` logs a WARNING
+# on mismatch but does not abort.
 #
 # shared_backbone does not need an `action_backbone:` block: action tokens
 # project directly to ``video_backbone.dim``, so there is no separate action
@@ -73,3 +78,36 @@ architecture:
   #       users do not need to set it manually.
   expert_layers: null
   expert_interval: 1
+
+# Video backbone. Default: Wan 2.2 TI2V-5B.
+#
+# DiT geometry per backbone (auto-consumed by the architecture; no need to
+# mirror in this yaml):
+#   - wan22_ti2v_5b     : dim=3072, num_heads=24, head_dim=128, num_layers=30
+#   - wan21_vace_1_3b   : dim=1536, num_heads=12, head_dim=128, num_layers=30
+#   - wan21_i2v_14b_480p: dim=5120, num_heads=40, head_dim=128, num_layers=40
+#
+# Resolution: any height/width with height % 32 == 0 and width % 32 == 0 for
+# wan22_ti2v_5b; VACE-1.3B only supports 480x832 or 720x1280; I2V-14B-480P
+# expects 480x832 first-frame conditioning. Actual training resolution is set
+# by the dataloader config.
+#
+# `from_scratch: true` keeps the Wan DiT structure but discards the loaded DiT
+# weights and re-initializes them from PyTorch defaults. VAE and text encoder
+# still load pretrained weights and are frozen by the training_strategy yaml.
+# Reproducibility is governed by `cfg.project.seed`.
+#
+# To switch backbones, comment out the default `name` + `model_path` below and
+# uncomment ONE alternative pair below. Keep `name` and `model_path` paired —
+# overriding only one of them on the CLI silently loads the wrong backbone
+# (see "IMPORTANT" note at the top of this file).
+# Tested alternatives (uncomment as a pair):
+#   # name: wan21_vace_1_3b
+#   # model_path: /path/to/Wan2.1-VACE-1.3B
+#
+#   # name: wan21_i2v_14b_480p
+#   # model_path: /path/to/weights/Wan2.1-I2V-14B-480P
+video_backbone:
+  name: wan22_ti2v_5b
+  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
+  from_scratch: false
