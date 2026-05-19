@@ -240,6 +240,43 @@ def test_dual_system_cross_attn_heterogeneous_dim():
     assert torch.isfinite(out["loss_video"])
 
 
+def test_dual_system_cross_attn_inherits_geometry_from_video_backbone():
+    """cross_attn must auto-resolve num_heads / attn_head_dim from the loaded
+    video backbone when cfg omits them (mirrors joint_self_attn). Regression
+    guard for the vb-derived ``setdefault`` block in
+    ``DualSystemCrossAttnArchitecture.__init__`` — the default ``_build_arch``
+    attaches the mock backbone after init and so does not exercise this path.
+    """
+    from openwam.model.architectures.dual_system.joint_cross_attn import (
+        DualSystemCrossAttnArchitecture,
+    )
+
+    class _CrossAttnWithMockBackbone(DualSystemCrossAttnArchitecture):
+        def _init_video_backbone(self, _cfg):
+            # Attach mock BEFORE __init__'s vb-derived setdefault block runs.
+            self.video_backbone = _MockVideoBackbone(
+                dim=WAN_VIDEO_DIM, num_layers=WAN_NUM_LAYERS, num_heads=4
+            )
+
+    # Deliberately omit num_heads + attn_head_dim — must come from vb, not from
+    # the hard-coded fallback (num_heads=12 / attn_head_dim=dim//num_heads).
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "action_dim": ACTION_DIM,
+        "bridge_layers": None,
+        "bridge_interval": 1,
+        "dim": WAN_VIDEO_DIM,
+        "ffn_dim": 4 * WAN_VIDEO_DIM,
+    }
+    arch = _CrossAttnWithMockBackbone(cfg=cfg)
+
+    vb = arch.video_backbone
+    ab = arch.action_backbone
+    assert ab.num_heads == vb.num_heads == 4
+    assert ab.head_dim == vb.head_dim == WAN_VIDEO_DIM // 4
+
+
 # ---------------------------------------------------------------------------
 # 2. dual_system_self_attn
 # ---------------------------------------------------------------------------
@@ -665,3 +702,70 @@ def test_all_variants_load_and_run(registry_name, cfg, expected_selected_count):
     out = _run_compute_loss(arch)
     for k in ("loss", "loss_video", "loss_action"):
         assert torch.isfinite(out[k]), f"{registry_name} {k} is not finite: {out[k]}"
+
+
+# ---------------------------------------------------------------------------
+# 6. Hydra defaults composition smoke
+# ---------------------------------------------------------------------------
+# PR #58 moved video_backbone out of each framework yaml into the
+# ``configs/model/video_backbone/`` Hydra group. ``defaults:`` composition is
+# the only path that wires up ``cfg.model.video_backbone`` in production —
+# scripts/train.py runs under ``@hydra.main``. Existing tri_system smoke tests
+# (test_tri_system_smoke.py:307, :419) ``OmegaConf.load`` the yaml directly
+# and so cannot observe ``defaults:`` resolution; ``resolve_architecture_config``
+# silently skips a missing video_backbone block, so those tests would keep
+# passing even if the ``defaults:`` line were broken or removed.
+#
+# This block fills that gap: every framework × backbone combination must
+# Hydra-compose into a non-empty video_backbone with the expected name.
+
+_FRAMEWORKS = ("dual_system", "shared_backbone", "tri_system")
+_BACKBONES = ("wan22_ti2v_5b", "wan21_vace_1_3b", "wan21_i2v_14b_480p")
+
+
+@pytest.mark.parametrize("framework", _FRAMEWORKS)
+@pytest.mark.parametrize("backbone", _BACKBONES)
+def test_framework_backbone_hydra_compose(framework, backbone):
+    """All 9 framework × video_backbone pairs must Hydra-compose cleanly,
+    and the composed ``cfg.model.video_backbone.name`` must match the
+    requested backbone group.
+    """
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    cfg_dir = os.path.abspath("configs")
+    overrides = [f"model={framework}", f"model/video_backbone={backbone}"]
+    with initialize_config_dir(config_dir=cfg_dir, version_base=None):
+        cfg = compose(config_name="train", overrides=overrides)
+
+    vb = cfg.model.get("video_backbone")
+    assert vb is not None, (
+        f"{framework} × {backbone}: cfg.model.video_backbone missing after "
+        f"compose — `defaults:` composition is broken"
+    )
+    assert vb.name == backbone, (
+        f"{framework} × {backbone}: composed video_backbone.name={vb.name!r}, "
+        f"expected {backbone!r}"
+    )
+    assert cfg.model.architecture.framework == framework
+
+
+@pytest.mark.parametrize("framework", _FRAMEWORKS)
+def test_framework_default_backbone_is_wan22_ti2v_5b(framework):
+    """Without an explicit ``model/video_backbone=`` override, every framework
+    yaml's ``defaults:`` must compose to ``wan22_ti2v_5b`` — that's the
+    documented default backbone advertised in README + CHANGELOG.
+    """
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    cfg_dir = os.path.abspath("configs")
+    with initialize_config_dir(config_dir=cfg_dir, version_base=None):
+        cfg = compose(config_name="train", overrides=[f"model={framework}"])
+
+    assert cfg.model.video_backbone.name == "wan22_ti2v_5b", (
+        f"{framework} default backbone is "
+        f"{cfg.model.video_backbone.name!r}, expected 'wan22_ti2v_5b'"
+    )

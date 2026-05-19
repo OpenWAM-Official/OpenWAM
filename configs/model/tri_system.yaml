@@ -1,6 +1,18 @@
+defaults:
+  - video_backbone: wan22_ti2v_5b
+  - _self_
+
 # Tri-system architecture: video DiT + shared ActionDiT + Understanding Expert + Qwen3-VL.
 # OpenWAM-native trimodal MoT: reuse the dual-system joint_self_attn action
 # backbone and add understanding tokens as the third mixed-attention stream.
+#
+# Video backbone is composed in via the `defaults:` block above. To switch:
+#   bash scripts/train.sh model=tri_system model/video_backbone=<name>
+# See configs/model/video_backbone/ for available choices. Note: tri_system
+# currently only exercises wan22_ti2v_5b end-to-end; pairing it with VACE
+# (e.g. `model/video_backbone=wan21_vace_1_3b`) composes at the Hydra layer
+# but raises NotImplementedError in the adapter at build time — no VACE
+# plumbing exists for the trimodal branch yet.
 
 # Note: vlm_backbone / understanding_expert MUST live under the architecture: block
 # for resolve_architecture_config to forward them to build-time cfg.
@@ -72,30 +84,22 @@ architecture:
     vlm_projector_type: mlp3x_silu  # linear | mlp{N}x_silu — N-layer SiLU MLP from VLM hidden_size to dim
     eps: 1.0e-5                     # RMSNorm epsilon inside understanding blocks
 
-# Video backbone — same conventions as dual_system.yaml / shared_backbone.yaml.
-video_backbone:
-  name: wan22_ti2v_5b
-  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
-  # from_scratch: true keeps the Wan DiT *structure* but discards the loaded
-  # DiT weights and re-initializes them from PyTorch defaults. VAE and the
-  # text encoder still load their pretrained weights and are frozen by
-  # training_strategy yaml. Independent of vlm_backbone.load_pretrained above —
-  # you can mix and match (e.g. pretrained VLM + scratch DiT).
-  # Reproducibility is governed by cfg.project.seed (applied by OpenWAMTrainer
-  # before architecture construction).
-  from_scratch: false
-
 # ActionDiT transformer parameters. Tri-system only supports joint_self_attn,
-# which runs a single mixed attention across [video, action, understanding]:
-#   - num_heads     : MUST match video_backbone.num_heads (Wan22=24).
-#   - attn_head_dim : MUST match video_backbone.head_dim  (Wan22=128).
-#   - dim / ffn_dim / text_dim: free; action residual stream is narrower than
-#                     video (1024 vs 3072) but Q/K/V project up to the shared
-#                     num_heads * attn_head_dim attention space.
-# num_layers is auto-derived from len(bridge_layers); do not specify.
+# which runs a single mixed attention across [video, action, understanding].
+# Geometry fields are auto-resolved from the loaded video_backbone by the
+# architecture __init__ (see TriSystemJointSelfAttnArchitecture in
+# openwam/model/architectures/tri_system/joint_self_attn.py):
+#   - num_layers   : auto from len(bridge_layers) (== vb.num_layers under interval=1)
+#   - video_dim    : auto from video_backbone.dim
+#   - num_heads    : auto from video_backbone.num_heads (hard parity)
+#   - attn_head_dim: auto from video_backbone.head_dim  (hard parity)
+# As a result you no longer need to write these in the yaml — switching the
+# video_backbone alone reshapes the action head correctly.
+#
+# `dim / ffn_dim / text_dim` are free: action residual stream is narrower than
+# video (1024 vs 3072 on TI2V-5B) but Q/K/V project up to the shared
+# ``num_heads * attn_head_dim`` attention space.
 action_backbone:
   dim: 1024
   text_dim: 4096
   ffn_dim: 4096
-  num_heads: 24
-  attn_head_dim: 128

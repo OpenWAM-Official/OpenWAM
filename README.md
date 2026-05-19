@@ -169,8 +169,17 @@ Training strategy presets in `configs/training_strategy/`:
 
 Architecture configs in `configs/model/`:
 
-- `dual_system.yaml`
-- `shared_backbone.yaml`  # shared_backbone family; choose `variant: vanilla|moe`
+- `dual_system.yaml`     # dual_system family; choose `variant: joint_self_attn|joint_cross_attn|idm`
+- `shared_backbone.yaml` # shared_backbone family; choose `variant: vanilla|moe`
+- `tri_system.yaml`      # tri_system family; `variant: joint_self_attn`
+
+Video backbone presets in `configs/model/video_backbone/` (composed in via each framework yaml's `defaults:`). Switch backbones with a single CLI override:
+
+```bash
+bash scripts/train.sh model=dual_system model/video_backbone=wan21_vace_1_3b
+```
+
+Available backbones: `wan22_ti2v_5b` (default), `wan21_vace_1_3b`, `wan21_i2v_14b_480p`. ActionDiT geometry (`num_heads`, `attn_head_dim`, `video_dim`, `num_dit_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the framework yaml. The ActionDiT's own `num_layers` then follows `bridge_layers` / `bridge_interval` (default `bridge_interval=1` makes it equal to the backbone layer count).
 
 Shared-backbone notes:
 

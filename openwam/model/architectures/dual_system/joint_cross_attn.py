@@ -49,9 +49,18 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         if cfg is None:
             return
         if self.video_backbone is not None:
+            # Auto-fill action-side geometry from the loaded video backbone,
+            # mirroring ``joint_self_attn``. cross_attn does NOT require
+            # num_heads / head_dim parity with the video backbone, but
+            # defaulting to vb geometry keeps the two variants
+            # apples-to-apples and removes the YAML coupling where every
+            # backbone change had to be echoed in ``action_backbone``.
+            # YAML/CLI overrides still win for ablations.
             cfg = dict(cfg) if isinstance(cfg, dict) else {k: v for k, v in cfg.items()}
             cfg.setdefault("num_dit_layers", self.video_backbone.num_layers)
             cfg.setdefault("video_dim", self.video_backbone.dim)
+            cfg.setdefault("num_heads", self.video_backbone.num_heads)
+            cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
         self._init_proprio_context(cfg, text_dim=int(cfg.get("text_dim", 4096)))
@@ -63,6 +72,11 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         # — Q/K/V project across the gap. Falls back to ``dim // num_heads``
         # for back-compat with older same-width cross_attn configs.
         action_dim_hidden = int(cfg.get("dim", 768))
+        # Hard-coded fallback (num_heads=12) is only hit when video_backbone is
+        # None at __init__ AND cfg has no ``num_heads``. The setdefault block
+        # above fills cfg from vb when vb is attached, and current mock-backbone
+        # tests all pass num_heads explicitly, so this fallback is effectively
+        # unreachable today; it stays as a last-resort default.
         num_heads = int(cfg.get("num_heads", 12))
         attn_head_dim = cfg.get("attn_head_dim")
         if attn_head_dim is not None:

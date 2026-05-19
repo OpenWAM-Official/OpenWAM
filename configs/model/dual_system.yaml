@@ -1,3 +1,7 @@
+defaults:
+  - video_backbone: wan22_ti2v_5b
+  - _self_
+
 # Dual-System WAM Architecture
 # Separate ActionDiT paired with the video DiT. Three variants:
 #   - joint_cross_attn: video runs to completion → bridge features captured
@@ -9,6 +13,10 @@
 #     identical num_layers / num_heads / head_dim across the two backbones.
 #   - idm: FastWAM-IDM style teacher-forcing training, then two-stage inference:
 #     denoise video first and use frozen video K/V while denoising actions.
+#
+# Video backbone is composed in via the `defaults:` block above. To switch:
+#   bash scripts/train.sh model/video_backbone=wan21_vace_1_3b
+# See configs/model/video_backbone/ for available choices.
 
 architecture:
   # Common dual-system selector and data-shape knobs.
@@ -81,42 +89,35 @@ architecture:
   # Only used when variant is idm.
   idm_video_cond_noise_prob: 0.5
 
-# Video backbone
-# Resolution: VACE only supports 480x832 or 720x1280; TI2V supports any height/width % 32 == 0.
-# Actual training resolution is determined by dataloader config.
-video_backbone:
-  name: wan22_ti2v_5b
-  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
-  # from_scratch: true keeps the Wan DiT *structure* but discards the loaded
-  # DiT weights and re-initializes them from PyTorch defaults. VAE and the
-  # text encoder still load their pretrained weights and are frozen by
-  # training_strategy yaml. Use this for "pretrained DiT vs from-scratch DiT"
-  # ablations. Reproducibility is governed by cfg.project.seed (applied by
-  # OpenWAMTrainer before architecture construction).
-  from_scratch: false
-
-# ActionDiT transformer parameters
-# num_layers is auto-derived from len(bridge_layers) — do not specify here.
+# ActionDiT transformer parameters.
+# Geometry fields are auto-resolved from the loaded video_backbone by the
+# architecture __init__ (see openwam/model/architectures/dual_system/{joint_self_attn,joint_cross_attn,idm}.py):
+#   - num_layers   : auto from len(bridge_layers)
+#   - video_dim    : auto from video_backbone.dim
+#   - num_heads    : auto from video_backbone.num_heads
+#                    joint_self_attn / idm hard-require parity (MoT mixed
+#                    attention). joint_cross_attn does not require parity but
+#                    defaults to vb for apples-to-apples; CLI overrides accepted.
+#   - attn_head_dim: auto from video_backbone.head_dim, same parity rule.
+# As a result you no longer need to write these in the yaml — switching the
+# video_backbone alone reshapes the action head correctly. Override on the CLI
+# only for intentional ablations. Because these fields are no longer present in
+# the yaml, Hydra struct mode requires `+` (append) instead of plain assign:
+#   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
+#
+# FastWAM-Joint heterogeneous-hidden layout: action residual stream is narrower
+# than video (1024 vs 3072 on TI2V-5B) but Q/K/V project to the shared
+# ``num_heads * attn_head_dim`` attention space, so the MoT driver
+# (joint_self_attn) still runs a single mixed attention. joint_cross_attn
+# accepts the same fields so the two variants can be compared apples-to-apples
+# — only the inter-modality coupling differs.
+#   - dim     : action residual hidden dim
+#   - text_dim: raw Wan/FastWAM text/proprio context dim before the action
+#               expert's own context embedding
+#   - ffn_dim : action expert FFN intermediate dim
+# Action expert param count at the default setup: ~1.0B (vs ~5.0B video expert
+# on TI2V-5B).
 action_backbone:
-  # FastWAM-Joint heterogeneous-hidden layout: action residual stream is
-  # narrower than video (1024 vs 3072) but Q/K/V project to the shared
-  # ``num_heads * attn_head_dim`` attention space (24*128=3072), so the
-  # MoT driver (joint_self_attn) still runs a single mixed attention.
-  # joint_cross_attn accepts the same fields so the two variants can be
-  # compared apples-to-apples — only the inter-modality coupling differs.
-  #   - dim          : action residual hidden dim
-  #   - text_dim     : raw Wan/FastWAM text/proprio context dim before the
-  #                    action expert's own context embedding
-  #   - ffn_dim      : action expert FFN intermediate dim
-  #   - num_heads    : MUST match the video backbone's num_heads (24)
-  #                    under joint_self_attn; free under joint_cross_attn.
-  #   - attn_head_dim: MUST match the video backbone's head_dim (128)
-  #                    under joint_self_attn; free under joint_cross_attn.
-  #                    If omitted, falls back to ``dim // num_heads`` (will
-  #                    raise unless evenly divisible).
-  # Action expert param count at this setup: ~1.0B (vs ~5.0B video expert).
   dim: 1024
   text_dim: 4096
   ffn_dim: 4096
-  num_heads: 24
-  attn_head_dim: 128
