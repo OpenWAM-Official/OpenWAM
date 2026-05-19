@@ -100,6 +100,11 @@ def _train_openwam(cfg: DictConfig) -> None:
     from openwam.dataloader.registry import build_dataset
     from openwam.train.openwam_trainer import OpenWAMTrainer
 
+    # Seeding is handled inside ``OpenWAMTrainer.__init__`` when
+    # ``cfg.project.seed`` is set (per-rank offset, sampler / worker wiring),
+    # and is intentionally skipped when ``project.seed=null`` so production
+    # runs keep their stochasticity. Doing it in the launcher would either
+    # crash on null (``int(None)``) or override the opt-out path.
     accelerator = _build_accelerator(cfg)
 
     # Build dataset via registry

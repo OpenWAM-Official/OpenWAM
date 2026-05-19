@@ -279,20 +279,58 @@ class WanVideoBackbone(VideoBackbone):
                 t = t_chunks[get_sequence_parallel_rank()]
             t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
         elif force_per_token_t_mod:
-            # Non-TI2V backbones under shared_backbone need 4D t_mod so
-            # ``inject_shared_tokens`` can extend it with per-token action/state
-            # entries. There is no clean-prefix concept here: every video token
-            # shares the same global timestep, so compute the time embedding
-            # once on (B,) and broadcast to (B, L, dim) — running the MLP per
-            # token would repeat the same Linear/SiLU/Linear stack L times
-            # (L ≈ 4680 for VACE-1.3B, ≈18720 for I2V-14B-480P).
+            # Non-TI2V backbones under joint-attention / shared_backbone need 4D
+            # t_mod (one of: ``inject_shared_tokens`` extending the residual with
+            # per-token action/state entries; ``IDMMoTDriver`` concatenating
+            # noisy + cond video sequences with different timesteps). Compute the
+            # time embedding once on (B,) and broadcast to (B, L, dim) — running
+            # the MLP per token would repeat the same Linear/SiLU/Linear stack
+            # L times (L ≈ 4680 for VACE-1.3B, ≈18720 for I2V-14B-480P).
             batch_size = latents.shape[0]
             f_lat = latents.shape[2]
             tokens_per_frame = latents.shape[3] * latents.shape[4] // 4
             L = f_lat * tokens_per_frame
             t_base = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype))  # (B, dim)
             t = t_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
+
+            # Optional clean-prefix alignment. The TI2V branch above pins the
+            # first ``num_clean`` frames' timesteps to 0 so the model receives a
+            # "this frame is the clean ref" signal that matches the latent-side
+            # ``first_frame_latents`` replacement done in ``base.compute_loss``.
+            # Other Wan backbones (VACE, I2V) historically lacked this in the
+            # broadcast path — the residual data was clean but t_mod still
+            # carried the sampled timestep. When the caller opts in via
+            # ``zero_clean_prefix_t_mod=True`` AND a clean prefix is actually
+            # present, we mirror TI2V's behavior by overwriting the first
+            # ``num_clean`` frames' time embedding with ``time_embedding(0)``.
+            # Mathematically equivalent to TI2V's per-token path (the latter
+            # builds an (B*L,) timestep vector with prefix=0 before embedding);
+            # we do the same overwrite at the embedding layer instead so the
+            # per-token MLP stays a single (B, dim) call. ``num_clean`` mirrors
+            # the TI2V branch's ``max(num_clean_prefix_frames, 1)`` fallback so
+            # callers can rely on ``first_frame_latents`` alone (with
+            # ``num_clean_prefix_frames=0``) to trigger the prefix.
+            zero_clean_prefix = bool(kw.get("zero_clean_prefix_t_mod", False))
+            has_clean_ref = num_clean_prefix_frames > 0 or kw.get("first_frame_latents") is not None
+            if zero_clean_prefix and has_clean_ref:
+                num_clean = max(num_clean_prefix_frames, 1)
+                zero_ts = torch.zeros_like(timestep)
+                t_zero_base = dit.time_embedding(
+                    sinusoidal_embedding_1d(dit.freq_dim, zero_ts).to(latents.dtype)
+                )  # (B, dim)
+                t = t.view(batch_size, f_lat, tokens_per_frame, -1)
+                t[:, :num_clean] = t_zero_base.view(batch_size, 1, 1, -1)
+                t = t.reshape(batch_size, L, -1)
+
             if use_usp and dist.is_initialized() and dist.get_world_size() > 1:
+                # NOTE: known pre-existing limitation — when ``vace_context``
+                # is set (VACE backbone) and USP is enabled, the VACE hint
+                # generator below receives full-sequence ``x``/``vace_context``
+                # but the rank-local ``t_mod``, producing a shape mismatch.
+                # OpenWAM training does not enable USP today
+                # (``pipe.use_unified_sequence_parallel`` defaults to False),
+                # so this codepath is dormant; out of scope for PR#56. Same
+                # caveat applies to the TI2V branch above.
                 t_chunks = torch.chunk(t, get_sequence_parallel_world_size(), dim=1)
                 t_chunks = [
                     torch.nn.functional.pad(chunk, (0, 0, 0, t_chunks[0].shape[1] - chunk.shape[1]), value=0)
@@ -305,7 +343,16 @@ class WanVideoBackbone(VideoBackbone):
             t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
 
         if motion_bucket_id is not None and motion_controller is not None:
-            t_mod = t_mod + motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))
+            motion_term = motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))  # (B, 6, dim)
+            if t_mod.dim() == 4:
+                # Broadcast the (B, 6, dim) motion term across the L tokens of a
+                # 4D t_mod. Without the unsqueeze, ``(B, 6, dim) + (B, L, 6, dim)``
+                # right-aligns and aliases B onto L, which silently mis-broadcasts
+                # when B == L (per-batch motion id, per-token t_mod) and shape-errors
+                # when B != L. Latent bug exposed once non-TI2V archs opt into 4D
+                # t_mod via ``force_per_token_t_mod=True``.
+                motion_term = motion_term.unsqueeze(1)  # (B, 1, 6, dim)
+            t_mod = t_mod + motion_term
         context = dit.text_embedding(context)
         if context_mask is None:
             if seq_lens is not None:

@@ -689,6 +689,69 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         return inputs
 
+    # --- ZeRO-3 external-parameter protocol ---
+    #
+    # The MoT driver reads several leaf ``nn.Parameter`` (e.g. ``block.modulation``,
+    # ``block.wan_und_qkv``) directly inside the architecture forward, bypassing the
+    # owning submodule's ``__call__``. Under DeepSpeed ZeRO-3 those leaves are
+    # partitioned and the forward-pre-hook that would gather them never fires for
+    # the owner. The fix is the standard external-parameter protocol: register
+    # the leaves against ``self`` (the architecture) and call ``self(...)`` so the
+    # architecture-level forward-pre-hook gathers them before the raw read.
+
+    def _iter_zero3_external_params(self):
+        """Yield each raw-access leaf ``nn.Parameter`` that the MoT path reads.
+
+        Default: empty. Overridden by every architecture whose training
+        forward pulls partitioned leaves outside the owner submodule's
+        ``__call__`` — concretely, the MoT-driven variants:
+
+        - ``DualSystemSelfAttnArchitecture`` — video + action ``block.modulation``
+        - ``DualSystemIDMArchitecture`` — same as joint_self_attn; IDM's
+          ``compute_loss`` override routes its 3-branch forward through
+          ``self.__call__`` so the same protocol applies.
+        - ``TriSystemJointSelfAttnArchitecture`` — also understanding
+          ``block.wan_und_qkv``.
+
+        Cross-attn and shared variants go through standard ``block.__call__``
+        and don't need to override.
+        """
+        return ()
+
+    def _register_zero3_externals(self) -> None:
+        """Register raw-access leaves as DeepSpeed ZeRO-3 external params of ``self``.
+
+        Required because the MoT driver reads these leaves directly, bypassing
+        the owning submodule's ``__call__``. Registering them makes DeepSpeed
+        gather them on ``self.__call__``'s forward-pre-hook and hold through
+        backward — without this AccumulateGrad sees a size-0 leaf.
+
+        Idempotent + no-op when deepspeed isn't importable or params lack
+        ``ds_id`` (non-ZeRO-3 paths, CPU mock tests). The gate only seals after
+        at least one successful register so a pre-``accelerator.prepare`` call
+        (params still un-partitioned) can be retried post-prepare. Architectures
+        whose iterator is empty by design (cross-attn, shared variants) seal
+        immediately — they will never need to register anything.
+        """
+        if getattr(self, "_zero3_externals_registered", False):
+            return
+        leaves = list(self._iter_zero3_external_params())
+        if not leaves:
+            self._zero3_externals_registered = True
+            return
+        try:
+            from deepspeed.runtime.zero import register_external_parameter
+        except ImportError:
+            self._zero3_externals_registered = True
+            return
+        registered_any = False
+        for p in leaves:
+            if getattr(p, "ds_id", None) is not None:
+                register_external_parameter(self, p)
+                registered_any = True
+        if registered_any:
+            self._zero3_externals_registered = True
+
     # --- Training: loss computation ---
 
     def compute_loss(
@@ -814,7 +877,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
         forward_inputs.pop("action_is_pad", None)
         forward_inputs.pop("video_is_pad", None)
 
-        video_noise_pred, action_noise_pred = self.forward(
+        # Use ``self(...)`` (not ``self.forward(...)``) so ``nn.Module.__call__``
+        # is invoked and the architecture-level forward-pre-hook fires. Under
+        # DeepSpeed ZeRO-3 that hook gathers the leaves registered by
+        # ``_register_zero3_externals`` (raw-access params read by the MoT
+        # driver). On non-ZeRO-3 paths this is a no-op detour through the empty
+        # hook chain.
+        self._register_zero3_externals()
+        video_noise_pred, action_noise_pred = self(
             noisy_actions if lambda_action > 0 else None,
             action_timesteps if lambda_action > 0 else None,
             proprio_state=proprio_state,

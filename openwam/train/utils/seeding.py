@@ -1,4 +1,39 @@
-"Deterministic-seeding helpers used by the OpenWAM trainers.\n\nBoth trainers opt in to deterministic mode, but through different switches:\n\n- ``trainer`` (optional external model alternate path) reads the ``OPENWAM_SEED`` env var and\n  calls ``seed_everything`` at construction. That helper also sets\n  ``cudnn.deterministic=True`` and configures cuBLAS for deterministic\n  matmul kernels, trading off some throughput for bit-exact loss\n  reproducibility.\n- ``OpenWAMTrainer`` (dual_system / shared_backbone / tri_system path) reads\n  the ``cfg.project.seed`` yaml field and inlines a lighter FastWAM-style\n  seeding that intentionally does NOT touch cudnn or cuBLAS, so FSDP /\n  fused-attention kernels stay usable. It still reaches into the helpers\n  below for ``make_dataloader_generator`` and ``dataloader_worker_init_fn``\n  to make dataset-side randomness reproducible.\n\nDefault training behaviour (neither switch set) is unchanged so production\nruns keep their stochasticity.\n\nHelpers:\n\n- ``seed_everything`` seeds Python ``random``, NumPy and PyTorch (CPU + CUDA)\n  global RNGs and turns on cudnn-deterministic. Run once at trainer\n  construction *before* the model and dataset are built so DiT weight init\n  and any other module-construction-time randomness become deterministic.\n- ``dataloader_worker_init_fn`` is the ``worker_init_fn`` for\n  ``DataLoader``; it seeds Python ``random`` and NumPy inside each worker\n  process from PyTorch's auto-derived ``info.seed`` (which advances per\n  epoch), so dataset transforms become reproducible across runs without\n  replaying identical augmentations every epoch.\n- ``make_dataloader_generator`` returns a fresh ``torch.Generator`` seeded\n  for the local rank, intended to be passed to ``DataLoader(generator=...)``.\n- ``make_noise_generator`` returns a per-rank ``torch.Generator`` on the\n  requested device, intended for diffusion noise sampling.\n- ``per_step_seed`` derives a deterministic ``int`` seed from the run seed,\n  the rank and a step counter; useful for ``torch.manual_seed`` calls done\n  inside the forward pass when threading a generator all the way down to\n  ``q_sample`` would require invasive changes.\n- ``read_env_seed`` reads an integer seed from an environment variable\n  (default ``OPENWAM_SEED``), returning ``None`` when unset or empty.\n  Used by ``trainer``; ``OpenWAMTrainer`` reads ``cfg.project.seed``\n  directly instead.\n- ``RANK_OFFSET`` keeps each rank's RNG stream disjoint; export so callers\n  picking up state from other tools agree on the convention.\n"
+"""Deterministic-seeding helpers used by the OpenWAM trainer.
+
+``OpenWAMTrainer`` (dual_system / shared_backbone / tri_system path) reads
+the ``cfg.project.seed`` yaml field (or the ``OPENWAM_SEED`` env var) to opt
+in to deterministic mode. The FastWAM-style seeding intentionally does NOT
+touch cudnn or cuBLAS, so FSDP / fused-attention kernels stay usable. It
+reaches into the helpers below for ``make_dataloader_generator`` and
+``dataloader_worker_init_fn`` to make dataset-side randomness reproducible.
+
+Default training behaviour (neither switch set) is unchanged so production
+runs keep their stochasticity.
+
+Helpers:
+
+- ``seed_everything`` seeds Python ``random``, NumPy and PyTorch (CPU + CUDA)
+  global RNGs and turns on cudnn-deterministic. Run once at trainer
+  construction *before* the model and dataset are built so DiT weight init
+  and any other module-construction-time randomness become deterministic.
+- ``dataloader_worker_init_fn`` is the ``worker_init_fn`` for
+  ``DataLoader``; it seeds Python ``random`` and NumPy inside each worker
+  process from PyTorch's auto-derived ``info.seed`` (which advances per
+  epoch), so dataset transforms become reproducible across runs without
+  replaying identical augmentations every epoch.
+- ``make_dataloader_generator`` returns a fresh ``torch.Generator`` seeded
+  for the local rank, intended to be passed to ``DataLoader(generator=...)``.
+- ``make_noise_generator`` returns a per-rank ``torch.Generator`` on the
+  requested device, intended for diffusion noise sampling.
+- ``per_step_seed`` derives a deterministic ``int`` seed from the run seed,
+  the rank and a step counter; useful for ``torch.manual_seed`` calls done
+  inside the forward pass when threading a generator all the way down to
+  ``q_sample`` would require invasive changes.
+- ``read_env_seed`` reads an integer seed from an environment variable
+  (default ``OPENWAM_SEED``), returning ``None`` when unset or empty.
+- ``RANK_OFFSET`` keeps each rank's RNG stream disjoint; export so callers
+  picking up state from other tools agree on the convention.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +53,22 @@ RANK_OFFSET: int = 1_000_000
 
 
 def seed_everything(seed: int, *, rank: int = 0) -> None:
-    'Public implementation.'
+    """Seed Python random / numpy / torch (CPU + CUDA) for reproducible runs.
+
+    Sets ``torch.backends.cudnn.deterministic = True``, disables cudnn
+    benchmark, and (when CUDA is available) configures the cuBLAS workspace
+    so deterministic matmul kernels can be selected.  Must be invoked
+    *before* model construction so that DiT weight initialisation lands in
+    deterministic territory.
+
+    Note: we deliberately do *not* call ``torch.use_deterministic_algorithms``
+    because several FSDP / attention paths used in training fall back to
+    non-deterministic kernels and would crash with
+    ``RuntimeError: not implemented for deterministic``.  Loss reproducibility
+    therefore relies on cudnn-deterministic + a fixed cuBLAS workspace, which
+    bounds residual non-determinism to bf16 reduction noise (small across a
+    short validation run).
+    """
     rank_seed = int(seed) + RANK_OFFSET * int(rank)
     random.seed(rank_seed)
     np.random.seed(rank_seed % (2**32 - 1))
@@ -82,6 +132,13 @@ def per_step_seed(seed: int, *, rank: int = 0, step: int = 0) -> int:
     Combining seed, rank and step gives every (rank, step) pair its own RNG
     starting point, which is what we want when forward passes share the
     global RNG.
+
+    Caveat — additive collision domain: this returns
+    ``seed + RANK_OFFSET * rank + step``, so for two run seeds ``S`` and ``S+k``
+    on the same rank, step ``j`` of one run shares its RNG state with step
+    ``j+k`` of the other. For multi-seed ablation studies, prefer widely
+    spaced seeds (e.g. 0 / 1000 / 2000) over a dense grid (42, 43, 44) so the
+    overlap window is pushed past any step count you care about.
     """
     return int(seed) + RANK_OFFSET * int(rank) + int(step)
 

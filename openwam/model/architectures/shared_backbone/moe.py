@@ -137,9 +137,15 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         # extend it cleanly via inject_shared_tokens. TI2V-5B produces 4D
         # natively (seperated_timestep + fuse_vae_embedding_in_latents); other
         # Wan backbones broadcast a global timestep when this flag is set.
+        # ``zero_clean_prefix_t_mod`` mirrors the TI2V branch's first-frame
+        # zeroing inside the broadcast path so VACE (which has
+        # ``first_frame_latents`` but not the TI2V flags) gets the same
+        # "data clean ⇔ t_mod for t=0" alignment as TI2V. I2V has no
+        # ``first_frame_latents``, so the flag is inert there.
         # setdefault so callers may still pass False explicitly.
         pipeline_inputs = dict(pipeline_inputs)
         pipeline_inputs.setdefault("force_per_token_t_mod", True)
+        pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,

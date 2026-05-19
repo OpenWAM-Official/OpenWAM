@@ -318,12 +318,21 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             self.build_mot_driver()
 
     def build_mot_driver(self) -> IDMMoTDriver:
-        """Construct the IDM-extended MoT driver."""
+        """Construct the IDM-extended MoT driver.
+
+        IDM training needs token-wise (4D) video ``t_mod`` so the
+        noisy + cond branches can be concatenated along the sequence dim with
+        per-branch timesteps. TI2V provides that natively
+        (``seperated_timestep + fuse_vae_embedding_in_latents``); other Wan
+        backbones (VACE, I2V) get the same 4D shape via
+        ``force_per_token_t_mod=True`` + ``zero_clean_prefix_t_mod=True`` in
+        :meth:`_forward_idm_training`. ``IDMMoTDriver.run_idm_training_loop``
+        keeps a runtime ``t_mod.ndim == 4`` assertion as the safety net.
+        """
         if self.video_backbone is None:
             raise RuntimeError("DualSystemIDMArchitecture.build_mot_driver: video_backbone is not set.")
         if self.action_backbone is None:
             raise RuntimeError("DualSystemIDMArchitecture.build_mot_driver: action_backbone is not set.")
-        self._check_video_backbone_supports_idm_training(self.video_backbone)
         self._mot_driver = IDMMoTDriver(
             self.video_backbone,
             self.action_backbone,
@@ -331,45 +340,39 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         )
         return self._mot_driver
 
-    @staticmethod
-    def _check_video_backbone_supports_idm_training(video_backbone) -> None:
-        """Fail fast if the video backbone cannot represent noisy+cond timesteps in one sequence.
-
-        IDM training merges the noisy and cond video branches into a single
-        video-expert sequence with two distinct timesteps, which only works if
-        the backbone produces token-wise video ``t_mod`` (ndim == 4). For Wan
-        DiTs that requires ``seperated_timestep=True`` AND
-        ``fuse_vae_embedding_in_latents=True``; the TI2V/fused-first-frame
-        configurations satisfy this, others do not.
-
-        We probe Wan-style attributes when available. Unknown backbones (no
-        ``_dit`` exposed, e.g. mocks) are left to the runtime check in
-        ``IDMMoTDriver.run_idm_training_loop``.
-        """
-        dit = getattr(video_backbone, "_dit", None)
-        if dit is None:
-            return
-        seperated = getattr(dit, "seperated_timestep", None)
-        fused = getattr(dit, "fuse_vae_embedding_in_latents", None)
-        if seperated is None or fused is None:
-            return
-        if not (bool(seperated) and bool(fused)):
-            raise ValueError(
-                "DualSystem IDM training requires a video backbone with "
-                "seperated_timestep=True AND fuse_vae_embedding_in_latents=True "
-                "(token-wise video t_mod), e.g. a Wan2.2-TI2V-5B-style TI2V backbone. "
-                f"Got seperated_timestep={bool(seperated)}, "
-                f"fuse_vae_embedding_in_latents={bool(fused)}. "
-                "Either configure the backbone to the TI2V/fused-first-frame path, "
-                "or pick a different DualSystem variant for this backbone."
-            )
-
     @property
     def mot_driver(self) -> IDMMoTDriver | None:
         return self._mot_driver
 
+    def _iter_zero3_external_params(self):
+        """Raw-access leaves read by the IDM MoT driver outside owners' ``__call__``.
+
+        Same set as :class:`DualSystemSelfAttnArchitecture`: video + action
+        ``block.modulation``. The IDM training loop runs through
+        :class:`IDMMoTDriver` which inherits ``MoTJointDriver.step``, so the
+        partitioned-leaf raw reads happen at the same call sites
+        (``wan_adapter.py:536`` + ``joint_action_dit.py:782``).
+        """
+        vb = self.video_backbone
+        dit = getattr(vb, "_dit", None) if vb is not None else None
+        if dit is not None:
+            for block in getattr(dit, "blocks", ()):
+                p = getattr(block, "modulation", None)
+                if p is not None:
+                    yield p
+        ab = self.action_backbone
+        if ab is not None:
+            for block in getattr(ab, "blocks", ()):
+                p = getattr(block, "modulation", None)
+                if p is not None:
+                    yield p
+
     # ------------------------------------------------------------------
-    # Forward: standard joint forward (used by base generate)
+    # Forward: dispatches between standard joint (inference fallback) and
+    # the IDM 3-branch training path. Training goes through ``self(...)`` so
+    # the architecture-level forward-pre-hook fires (ZeRO-3 external-param
+    # gather) before :class:`IDMMoTDriver` does raw reads of partitioned
+    # ``block.modulation`` leaves.
     # ------------------------------------------------------------------
 
     def forward(
@@ -380,12 +383,43 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         proprio_state: Optional[Tensor] = None,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
+        cond_video_latents: Optional[Tensor] = None,
+        cond_video_timestep: Optional[Tensor] = None,
         **pipeline_inputs,
     ) -> Tuple[Tensor, Optional[Tensor]]:
-        """Standard joint forward — used during inference stage 1 (video only)
-        and as a fallback. For IDM training, use compute_loss which calls
-        _forward_idm_training instead.
+        """Forward dispatch.
+
+        - ``cond_video_latents is None``: standard joint forward (inference
+          stage 1 / fallback). Mirrors :class:`DualSystemSelfAttnArchitecture`.
+        - ``cond_video_latents is not None``: IDM 3-branch training forward
+          (noisy + cond video + optional action through the teacher-forcing
+          mask). This is the path :meth:`compute_loss` drives.
+
+        Hard contract: ``cond_video_latents`` and ``cond_video_timestep`` are
+        a paired unit — both must be passed (training branch) or both must
+        be ``None`` (joint inference branch). A half-passed pair would
+        otherwise propagate ``timestep=None`` into ``video_backbone.prepare``
+        and crash deep in the backbone with an opaque trace.
         """
+        if (cond_video_latents is None) != (cond_video_timestep is None):
+            raise ValueError(
+                "DualSystemIDMArchitecture.forward: cond_video_latents and "
+                "cond_video_timestep must be passed together (both or neither). "
+                f"Got cond_video_latents={'<tensor>' if cond_video_latents is not None else 'None'}, "
+                f"cond_video_timestep={'<tensor>' if cond_video_timestep is not None else 'None'}."
+            )
+        if cond_video_latents is not None:
+            return self._forward_idm_training(
+                noisy_actions=noisy_actions,
+                action_timestep=action_timestep,
+                cond_video_latents=cond_video_latents,
+                cond_video_timestep=cond_video_timestep,
+                proprio_state=proprio_state,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                **pipeline_inputs,
+            )
+
         vb = self.video_backbone
         ab = self.action_backbone
         if vb is None:
@@ -432,6 +466,109 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
         return vb.finalize(vstate), ab.extract_prediction(astate)
+
+    def _forward_idm_training(
+        self,
+        *,
+        noisy_actions: Optional[Tensor],
+        action_timestep: Optional[Tensor],
+        cond_video_latents: Tensor,
+        cond_video_timestep: Tensor,
+        proprio_state: Optional[Tensor] = None,
+        use_gradient_checkpointing: bool = False,
+        use_gradient_checkpointing_offload: bool = False,
+        **pipeline_inputs,
+    ) -> Tuple[Tensor, Optional[Tensor]]:
+        """Run the IDM 3-branch training pass.
+
+        Called only via :meth:`forward` (and hence ``self.__call__``) so the
+        ZeRO-3 forward-pre-hook fires on the architecture and the registered
+        external ``block.modulation`` leaves are gathered for the duration of
+        the MoT driver loop.
+
+        ``pipeline_inputs`` carries the noisy-branch ``latents`` and
+        ``timestep``; the cond branch overrides them with
+        ``cond_video_latents`` / ``cond_video_timestep`` while sharing the
+        rest of the pipeline state.
+        """
+        vb = self.video_backbone
+        ab = self.action_backbone
+        if vb is None:
+            raise RuntimeError("video_backbone is None")
+
+        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio_state)
+        action_context = pipeline_inputs.get("context")
+        action_context_mask = pipeline_inputs.get("context_mask")
+        if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:
+            seq_lens = pipeline_inputs["seq_lens"].to(device=action_context.device)
+            positions = torch.arange(action_context.shape[1], device=action_context.device)
+            action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
+
+        # IDM structurally requires 4D ``t_mod`` (the driver concatenates the
+        # noisy + cond branches along the sequence dim with per-branch
+        # timesteps). For TI2V this is native; for VACE / I2V we go through
+        # the broadcast path and use ``zero_clean_prefix_t_mod`` to align
+        # VACE's first frame with the data-side ``first_frame_latents``
+        # replacement done below. Forced assignment (not setdefault) — callers
+        # cannot disable: doing so would re-raise the
+        # ``IDMMoTDriver.run_idm_training_loop`` 4D-shape assertion.
+        pipeline_inputs["force_per_token_t_mod"] = True
+        pipeline_inputs["zero_clean_prefix_t_mod"] = True
+
+        # Noisy branch: ``latents`` and ``timestep`` already in pipeline_inputs.
+        vstate_noisy = vb.prepare(
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            **pipeline_inputs,
+        )
+
+        # Cond branch: same pipeline state, overridden latents + timestep.
+        cond_inputs = dict(pipeline_inputs)
+        cond_inputs["latents"] = cond_video_latents
+        cond_inputs["timestep"] = cond_video_timestep
+        vstate_cond = vb.prepare(
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            **cond_inputs,
+        )
+
+        driver = self._mot_driver
+        if driver is None:
+            driver = self.build_mot_driver()
+
+        if noisy_actions is not None and ab is not None:
+            astate = ab.prepare_state(
+                noisy_actions,
+                action_timestep,
+                context=action_context,
+                context_mask=action_context_mask,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            )
+            vstate_noisy, vstate_cond, astate = driver.run_idm_training_loop(
+                vstate_noisy,
+                vstate_cond,
+                astate,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            )
+            action_noise_pred = ab.extract_prediction(astate)
+        else:
+            # Video-only IDM (lambda_action == 0): run both branches independently.
+            # TODO(perf): the cond branch is computed but never read — only
+            # ``vstate_noisy`` feeds ``vb.finalize`` below. With no action
+            # backbone in play, cond exists solely as the teacher-forcing
+            # signal for the action loss; when that loss is disabled the
+            # cond forward is dead work. Safe to skip if a future caller
+            # actually runs lambda_action==0 (OpenWAM training does not today).
+            for block_id in range(vb.num_layers):
+                vstate_noisy = vb.run_block(block_id, vstate_noisy)
+            for block_id in range(vb.num_layers):
+                vstate_cond = vb.run_block(block_id, vstate_cond)
+            action_noise_pred = None
+
+        video_noise_pred = vb.finalize(vstate_noisy)
+        return video_noise_pred, action_noise_pred
 
     def _run_video_only_backbone(
         self,
@@ -575,72 +712,31 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         use_grad_ckpt_offload = forward_inputs.pop("use_gradient_checkpointing_offload", False)
         forward_inputs.pop("action_is_pad", None)
         forward_inputs.pop("video_is_pad", None)
+        # ``latents`` carries the noisy-branch video latents into the forward;
+        # the cond branch is passed alongside as ``cond_video_latents``.
+        forward_inputs["latents"] = latents_noisy
 
-        forward_inputs = self._append_proprio_context_token(forward_inputs, proprio_state)
-
-        action_context = forward_inputs.get("context")
-        action_context_mask = forward_inputs.get("context_mask")
-        if action_context is not None and action_context_mask is None and forward_inputs.get("seq_lens") is not None:
-            seq_lens = forward_inputs["seq_lens"].to(device=action_context.device)
-            positions = torch.arange(action_context.shape[1], device=action_context.device)
-            action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
-
-        # Prepare noisy video vstate
-        noisy_inputs = dict(forward_inputs)
-        noisy_inputs["latents"] = latents_noisy
-        vstate_noisy = vb.prepare(
+        # ---- Run forward through ``self.__call__`` ----
+        # Routing through ``self(...)`` (not ``self.forward(...)``) makes
+        # ``nn.Module.__call__`` invoke the architecture-level
+        # forward-pre-hook. Under DeepSpeed ZeRO-3 that hook gathers the
+        # ``block.modulation`` leaves registered by
+        # ``_register_zero3_externals`` — the raw-access leaves
+        # ``IDMMoTDriver`` reads inside ``run_idm_training_loop``. On
+        # non-ZeRO-3 paths this is a no-op detour through an empty hook
+        # chain. Mirrors the base ``compute_loss`` pattern.
+        self._register_zero3_externals()
+        video_noise_pred, action_noise_pred = self(
+            noisy_actions if lambda_action > 0 else None,
+            action_timesteps if lambda_action > 0 else None,
+            proprio_state=proprio_state,
             use_gradient_checkpointing=use_grad_ckpt,
             use_gradient_checkpointing_offload=use_grad_ckpt_offload,
+            cond_video_latents=latents_cond,
+            cond_video_timestep=cond_video_timesteps,
             timestep=video_timesteps,
-            **noisy_inputs,
+            **forward_inputs,
         )
-
-        # Prepare cond video vstate
-        cond_inputs = dict(forward_inputs)
-        cond_inputs["latents"] = latents_cond
-        vstate_cond = vb.prepare(
-            use_gradient_checkpointing=use_grad_ckpt,
-            use_gradient_checkpointing_offload=use_grad_ckpt_offload,
-            timestep=cond_video_timesteps,
-            **cond_inputs,
-        )
-
-        # Prepare action state
-        driver = self._mot_driver
-        if driver is None:
-            driver = self.build_mot_driver()
-
-        if noisy_actions is not None:
-            astate = ab.prepare_state(
-                noisy_actions,
-                action_timesteps,
-                context=action_context,
-                context_mask=action_context_mask,
-                use_gradient_checkpointing=use_grad_ckpt,
-                use_gradient_checkpointing_offload=use_grad_ckpt_offload,
-            )
-        else:
-            astate = None
-
-        # ---- Run IDM training loop ----
-        if astate is not None:
-            vstate_noisy, vstate_cond, astate = driver.run_idm_training_loop(
-                vstate_noisy,
-                vstate_cond,
-                astate,
-                use_gradient_checkpointing=use_grad_ckpt,
-                use_gradient_checkpointing_offload=use_grad_ckpt_offload,
-            )
-        else:
-            # Video-only training (lambda_action=0): just run video independently
-            for block_id in range(vb.num_layers):
-                vstate_noisy = vb.run_block(block_id, vstate_noisy)
-            for block_id in range(vb.num_layers):
-                vstate_cond = vb.run_block(block_id, vstate_cond)
-
-        # Only noisy video contributes to video loss
-        video_noise_pred = vb.finalize(vstate_noisy)
-        action_noise_pred = ab.extract_prediction(astate) if astate is not None else None
 
         # ---- Video loss (same as base) ----
         loss_video = self._compute_video_loss(

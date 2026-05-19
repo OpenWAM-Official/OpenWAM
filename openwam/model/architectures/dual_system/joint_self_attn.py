@@ -134,6 +134,28 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         else:
             self._compiled_mot_loop = None
 
+    def _iter_zero3_external_params(self):
+        """Raw-access leaves read by the MoT driver outside the owners' ``__call__``.
+
+        - ``vb._dit.blocks[i].modulation`` is read inside
+          ``pre_attn_at_layer_for_compile`` (``wan_adapter.py:536``)
+        - ``ab.blocks[i].modulation`` is read inside
+          ``ActionDiT.pre_attn_at_layer_for_compile`` (``joint_action_dit.py:782``)
+        """
+        vb = self.video_backbone
+        dit = getattr(vb, "_dit", None) if vb is not None else None
+        if dit is not None:
+            for block in getattr(dit, "blocks", ()):
+                p = getattr(block, "modulation", None)
+                if p is not None:
+                    yield p
+        ab = self.action_backbone
+        if ab is not None:
+            for block in getattr(ab, "blocks", ()):
+                p = getattr(block, "modulation", None)
+                if p is not None:
+                    yield p
+
     def forward(
         self,
         noisy_actions: Optional[Tensor],
@@ -159,6 +181,15 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             seq_lens = pipeline_inputs["seq_lens"].to(device=action_context.device)
             positions = torch.arange(action_context.shape[1], device=action_context.device)
             action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
+        # Opt every Wan backbone into 4D + clean-prefix-aligned t_mod (mirrors
+        # TI2V's native ``seperated_timestep + fuse_vae_embedding_in_latents``
+        # path; TI2V itself fires that path first so these kwargs are inert for
+        # it). For VACE this aligns the first-frame ``t_mod`` with the data-side
+        # ``first_frame_latents`` replacement done in ``base.compute_loss``. I2V
+        # has no ``first_frame_latents`` so ``zero_clean_prefix_t_mod`` is a
+        # no-op there. ``setdefault`` so explicit callers can still pass False.
+        pipeline_inputs.setdefault("force_per_token_t_mod", True)
+        pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,

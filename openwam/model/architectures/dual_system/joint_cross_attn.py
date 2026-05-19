@@ -140,6 +140,14 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             seq_lens = pipeline_inputs["seq_lens"].to(device=action_context.device)
             positions = torch.arange(action_context.shape[1], device=action_context.device)
             action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
+        # Same 4D + clean-prefix-aligned t_mod opt-in as the joint_self_attn /
+        # shared_backbone / IDM forwards. TI2V fires its own branch first so
+        # these kwargs are inert there. For VACE the broadcast path now zeros
+        # the first frame's t_mod to match the latent-side clean-ref
+        # replacement, removing an existing data/t_mod mismatch. I2V has no
+        # ``first_frame_latents`` so ``zero_clean_prefix_t_mod`` is a no-op.
+        pipeline_inputs.setdefault("force_per_token_t_mod", True)
+        pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,

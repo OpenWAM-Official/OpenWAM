@@ -267,6 +267,36 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         )
         return result
 
+    def _iter_zero3_external_params(self):
+        """Raw-access leaves read by the tri-system MoT driver outside owners' ``__call__``.
+
+        - ``vb._dit.blocks[i].modulation`` — read in ``pre_attn_at_layer_for_compile``
+          (``wan_adapter.py:536``)
+        - ``ab.blocks[i].modulation`` — read in
+          ``ActionDiT.pre_attn_at_layer_for_compile`` (``joint_action_dit.py:782``)
+        - ``ub.blocks[i].wan_und_qkv`` — read in
+          ``UnderstandingExpert.pre_attn_at_layer_for_compile`` (``und_expert.py:155``)
+        """
+        vb = self.video_backbone
+        dit = getattr(vb, "_dit", None) if vb is not None else None
+        if dit is not None:
+            for block in getattr(dit, "blocks", ()):
+                p = getattr(block, "modulation", None)
+                if p is not None:
+                    yield p
+        ab = self.action_backbone
+        if ab is not None:
+            for block in getattr(ab, "blocks", ()):
+                p = getattr(block, "modulation", None)
+                if p is not None:
+                    yield p
+        ub = self.understanding_expert
+        if ub is not None:
+            for block in getattr(ub, "blocks", ()):
+                p = getattr(block, "wan_und_qkv", None)
+                if p is not None:
+                    yield p
+
     def forward(
         self,
         noisy_actions: Optional[Tensor],
@@ -298,6 +328,14 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             positions = torch.arange(action_context.shape[1], device=action_context.device)
             action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
 
+        # Same 4D + clean-prefix-aligned t_mod opt-in as the dual_system /
+        # shared_backbone forwards. TI2V fires its own branch first so these
+        # kwargs are inert there; VACE is unsupported on tri_system already
+        # (raises in the joint loop), so the practical effect is the I2V case
+        # — broadcast to 4D, ``first_frame_latents`` absent so the clean-prefix
+        # zeroing is a no-op (mathematically equivalent to the prior 3D path).
+        pipeline_inputs.setdefault("force_per_token_t_mod", True)
+        pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,

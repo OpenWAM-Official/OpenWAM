@@ -91,17 +91,11 @@ class OpenWAMTrainer(BaseTrainer):
         # Wrap construction in a ZeRO-3 init-disable scope: when the Accelerator
         # was built with ``zero3_init_flag=True``, DeepSpeed enters a global
         # ``zero.Init(enabled=True)`` context that auto-partitions every
-        # nn.Parameter at allocation time. For OpenWAM that's actively harmful
-        # — frozen modules (text_encoder ~13 GiB umt5-xxl, VAE) get partitioned
-        # along with trainable DiT, and every forward then triggers a ~26 GiB
-        # all-gather spike to materialize them (guaranteed OOM on forward 2 of
-        # training). Wrapping construction in ``zero.Init(enabled=False)``
-        # skips DeepSpeed's per-Parameter tracking (no ``ds_id`` / ``ds_status``
-        # is attached). At ``initialize()`` time, untagged params stay
-        # replicated; only params constructed under the outer
-        # ``zero.Init(enabled=True)`` scope (the trainable DiT/VACE created
-        # by ``build_architecture`` below) get partitioned. So frozen modules
-        # never enter the shard table and never trigger an all-gather.
+        # nn.Parameter at allocation time. See ``_zero3_init_disabled`` below
+        # for the actual deepspeed 0.18.5 behavior — short version: the
+        # construction-time skip avoids OOM-prone overhead on huge frozen
+        # modules (text_encoder, VAE), but ``deepspeed.initialize`` still
+        # partitions every trainable param post-prepare.
         from openwam.model import build_architecture, resolve_architecture_config
 
         resolved_arch = resolve_architecture_config(m)
@@ -260,17 +254,27 @@ class OpenWAMTrainer(BaseTrainer):
 
     @staticmethod
     def _zero3_init_disabled():
-        """Context that disables DeepSpeed ZeRO-3 construction-time partitioning.
+        """Context that skips DeepSpeed ZeRO-3 *construction-time* partitioning.
 
-        ``deepspeed.zero.Init(enabled=False)`` is the official way to nest a
-        "do-not-partition" scope inside an outer ``zero.Init(enabled=True)``
-        (the same mechanism HuggingFace transformers uses to load frozen
-        adapters under ZeRO-3). Falls back to a no-op context when DeepSpeed
-        isn't importable, so the DDP / single-GPU paths are unaffected.
+        On deepspeed 0.18.5 ``zero.Init(enabled=False)`` is a no-op context
+        manager (``partition_parameters.py:344-358``) — it merely suppresses
+        the ``zero.Init`` constructor's per-Parameter hooks while the scope is
+        active, so newly-allocated params have no ``ds_id`` / ``ds_status``
+        attached at allocation time. It does **not** make the resulting params
+        "stay replicated": once ``deepspeed.initialize`` runs,
+        ``_convert_to_zero_parameters`` (``parameter_offload.py:205-226``) walks
+        the whole model and partitions every trainable param it finds — frozen
+        params included if they're still on the trainable graph.
 
-        See the ``__init__`` rationale for why we disable this — short version:
-        partitioning frozen modules (text_encoder, VAE) causes a ~26 GiB
-        all-gather spike on every forward and OOMs by step 2.
+        What this scope actually buys: avoiding the construction-time overhead
+        of running ``zero.Init`` hooks on every leaf as huge frozen modules
+        (text_encoder ~13 GiB umt5-xxl, VAE) are built. Frozen modules that
+        the trainer later marks ``requires_grad_(False)`` and removes from the
+        optimizer's parameter groups stay un-partitioned in practice because
+        DeepSpeed's prepare only partitions params it actually owns; that's a
+        separate concern from this context manager. The DDP / single-GPU path
+        is unaffected because deepspeed isn't importable there — the
+        ``ImportError`` branch returns a ``nullcontext``.
         """
         from contextlib import nullcontext
 
@@ -447,6 +451,57 @@ class OpenWAMTrainer(BaseTrainer):
 
     def on_train_begin(self, *, output_path: str, total_steps: int, **ctx):
         """Hook called before the training loop starts. Override for custom setup."""
+        # Run-level peak VRAM trackers. ``_record_step_memory`` updates these on
+        # every step and (when ``need_detail=True``) resets CUDA's internal
+        # peak so the next step is measured cleanly; the run-level max survives
+        # the reset and is logged in ``on_train_end``.
+        #
+        # The reset below runs AFTER ``accelerator.prepare(...)`` (called by
+        # ``train()`` before invoking this hook), so init-time allocations
+        # (DiT params, optimizer state, gradient buffers, sharded ZeRO state)
+        # are NOT counted in the run-level peak — the numbers reported in
+        # ``memory_summary.csv`` reflect training-loop peak only.
+        self._run_peak_alloc_gb = 0.0
+        self._run_peak_reserved_gb = 0.0
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+    def _record_step_memory(self, need_detail: bool = False) -> dict:
+        """Snapshot VRAM peaks, optionally returning per-step detail.
+
+        Always: reads ``max_memory_allocated`` / ``max_memory_reserved`` and
+        updates the Python-side run-level max so ``on_train_end``'s
+        ``memory_summary.csv`` is always populated.
+
+        ``need_detail=True``: additionally reads current live alloc + reserved,
+        resets CUDA's per-step peak counter, and returns a full dict for wandb
+        / debug-CSV consumption. ``reset_peak_memory_stats`` is gated behind
+        this flag because it is the only call here that could pollute
+        ``steps_per_sec`` measurements when the result is unused; the peak
+        reads themselves are host-side counter lookups on the CUDA caching
+        allocator and do not synchronize.
+
+        Returns an empty dict on CPU or when ``need_detail=False``.
+        """
+        if not torch.cuda.is_available():
+            return {}
+        peak_alloc_gb = float(torch.cuda.max_memory_allocated()) / 1e9
+        peak_reserved_gb = float(torch.cuda.max_memory_reserved()) / 1e9
+        self._run_peak_alloc_gb = max(getattr(self, "_run_peak_alloc_gb", 0.0), peak_alloc_gb)
+        self._run_peak_reserved_gb = max(getattr(self, "_run_peak_reserved_gb", 0.0), peak_reserved_gb)
+        if not need_detail:
+            return {}
+        alloc_gb = float(torch.cuda.memory_allocated()) / 1e9
+        reserved_gb = float(torch.cuda.memory_reserved()) / 1e9
+        torch.cuda.reset_peak_memory_stats()
+        return {
+            "mem_alloc_gb": alloc_gb,
+            "mem_reserved_gb": reserved_gb,
+            "step_peak_alloc_gb": peak_alloc_gb,
+            "step_peak_reserved_gb": peak_reserved_gb,
+            "run_peak_alloc_gb": self._run_peak_alloc_gb,
+            "run_peak_reserved_gb": self._run_peak_reserved_gb,
+        }
 
     def on_step_end(
         self,
@@ -478,6 +533,8 @@ class OpenWAMTrainer(BaseTrainer):
             )
             pbar.update(1)
 
+        mem_stats = ctx.get("mem_stats") or {}
+
         if wandb_run is not None:
             _num_procs = self.accelerator.num_processes if self.accelerator is not None else 1
             log_dict = {
@@ -489,6 +546,8 @@ class OpenWAMTrainer(BaseTrainer):
                 "performance/steps_per_sec": steps_per_sec,
                 "performance/samples_per_sec": steps_per_sec * batch_size * _num_procs,
             }
+            for k, v in mem_stats.items():
+                log_dict[f"memory/{k}"] = v
             wandb_run.log(log_dict, step=global_step)
 
         if bool(ctx.get("debug", False)):
@@ -496,11 +555,17 @@ class OpenWAMTrainer(BaseTrainer):
             if not is_main:
                 return
             opt_step = int(ctx.get("opt_step", global_step))
+            mem_suffix = ""
+            if mem_stats:
+                mem_suffix = (
+                    f" peak_alloc={mem_stats.get('step_peak_alloc_gb', 0):.2f}GB"
+                    f" peak_res={mem_stats.get('step_peak_reserved_gb', 0):.2f}GB"
+                )
             msg = (
                 f"[debug][step {global_step:04d} opt {opt_step:04d}] "
                 f"loss={loss_total:.6f} video={loss_video:.6f} action={loss_action:.6f} "
                 f"grad_norm={grad_norm:.6f} lr={lr:.3e} epoch={epoch} "
-                f"steps_per_sec={steps_per_sec:.3f}"
+                f"steps_per_sec={steps_per_sec:.3f}{mem_suffix}"
             )
             logger.info(msg)
             if pbar is not None:
@@ -514,14 +579,50 @@ class OpenWAMTrainer(BaseTrainer):
                 write_header = not os.path.exists(loss_log_path)
                 with open(loss_log_path, "a", encoding="utf-8") as f:
                     if write_header:
-                        f.write("step,opt_step,epoch,loss,loss_video,loss_action,grad_norm,lr,steps_per_sec\n")
+                        f.write(
+                            "step,opt_step,epoch,loss,loss_video,loss_action,grad_norm,lr,steps_per_sec,"
+                            "mem_alloc_gb,mem_reserved_gb,step_peak_alloc_gb,step_peak_reserved_gb,"
+                            "run_peak_alloc_gb,run_peak_reserved_gb\n"
+                        )
                     f.write(
                         f"{global_step},{opt_step},{epoch},{loss_total:.10g},{loss_video:.10g},"
-                        f"{loss_action:.10g},{grad_norm:.10g},{lr:.10g},{steps_per_sec:.10g}\n"
+                        f"{loss_action:.10g},{grad_norm:.10g},{lr:.10g},{steps_per_sec:.10g},"
+                        f"{mem_stats.get('mem_alloc_gb', float('nan')):.6g},"
+                        f"{mem_stats.get('mem_reserved_gb', float('nan')):.6g},"
+                        f"{mem_stats.get('step_peak_alloc_gb', float('nan')):.6g},"
+                        f"{mem_stats.get('step_peak_reserved_gb', float('nan')):.6g},"
+                        f"{mem_stats.get('run_peak_alloc_gb', float('nan')):.6g},"
+                        f"{mem_stats.get('run_peak_reserved_gb', float('nan')):.6g}\n"
                     )
 
     def on_train_end(self, global_step: int, *, output_path: str, wandb_run=None, **ctx):
         """Hook called after training completes. Override for custom teardown."""
+        run_peak_alloc = float(getattr(self, "_run_peak_alloc_gb", 0.0))
+        run_peak_reserved = float(getattr(self, "_run_peak_reserved_gb", 0.0))
+        if torch.cuda.is_available() and (run_peak_alloc > 0.0 or run_peak_reserved > 0.0):
+            is_main = self.accelerator is None or self.accelerator.is_main_process
+            if is_main:
+                summary = (
+                    f"[memory] run peak alloc={run_peak_alloc:.2f}GB "
+                    f"reserved={run_peak_reserved:.2f}GB (rank0)"
+                )
+                logger.info(summary)
+                print(summary, flush=True)
+                if output_path:
+                    summary_path = os.path.join(output_path, "memory_summary.csv")
+                    write_header = not os.path.exists(summary_path)
+                    with open(summary_path, "a", encoding="utf-8") as f:
+                        if write_header:
+                            f.write("global_step,run_peak_alloc_gb,run_peak_reserved_gb\n")
+                        f.write(f"{global_step},{run_peak_alloc:.6g},{run_peak_reserved:.6g}\n")
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "memory/run_peak_alloc_gb": run_peak_alloc,
+                        "memory/run_peak_reserved_gb": run_peak_reserved,
+                    },
+                    step=global_step,
+                )
         if wandb_run is not None:
             wandb_run.finish()
 
@@ -700,10 +801,35 @@ class OpenWAMTrainer(BaseTrainer):
         # gradient accumulation is delegated to the framework — no manual gating.
         assert self.accelerator is not None, "OpenWAMTrainer requires an Accelerator"
 
+        # Per-step manual_seed makes timestep + noise sampling in
+        # ``base.compute_loss`` reproducible across runs (and across ZeRO stages).
+        # Without this, the cumulative global-RNG state diverges between ds2/ds3
+        # because each forward consumes a slightly different amount of RNG (e.g.
+        # all-gather vs reduce-scatter ordering), so step-N timestep / noise
+        # drift apart even with identical ``set_seed`` at process start.
+        # Re-seeding before every step neutralizes that drift.
+        #
+        # Gated on ``self._run_seed`` (set by ``__init__`` from
+        # ``cfg.project.seed``) so production runs without a configured seed
+        # keep their full stochasticity — the per-step re-seed only kicks in
+        # under the same opt-in switch that controls model-init determinism.
+        #
+        # ``per_step_seed(seed, rank=R, step=S)`` makes the (rank, step) pair
+        # the full RNG identity. Same (rank, step) across ZeRO stages →
+        # identical timestep + noise, so parity-able. Different ranks at the
+        # same step → different timestep + noise, so the effective in-batch
+        # timestep diversity that production training relies on is preserved.
+        from openwam.train.utils.seeding import per_step_seed
+
         for epoch in range(num_epochs):
             if hasattr(dataloader, "set_epoch"):
                 dataloader.set_epoch(epoch)
             for batch in dataloader:
+                if self._run_seed is not None:
+                    step_seed = per_step_seed(self._run_seed, rank=self._rank, step=global_step)
+                    torch.manual_seed(step_seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(step_seed)
                 with self.accelerator.accumulate(self.architecture):
                     losses = self.compute_loss(batch)
                     loss = losses["total"]
@@ -764,6 +890,13 @@ class OpenWAMTrainer(BaseTrainer):
                 steps_per_sec = 1.0 / max(_now - _step_t0, 1e-9)
                 _step_t0 = _now
 
+                # Peak-VRAM snapshot: read after backward + step + zero_grad
+                # have all run for this iteration. ``need_detail`` is only set
+                # when there is a consumer for the per-step dict (wandb log or
+                # debug CSV) — see ``_record_step_memory`` for the gated reset.
+                need_mem_detail = (wandb_run is not None) or bool(debug)
+                mem_stats = self._record_step_memory(need_detail=need_mem_detail)
+
                 self.on_step_end(
                     global_step,
                     loss_total=loss_total,
@@ -779,6 +912,7 @@ class OpenWAMTrainer(BaseTrainer):
                     debug=debug,
                     output_path=output_path,
                     opt_step=opt_step,
+                    mem_stats=mem_stats,
                 )
 
                 # Periodic checkpoint saving. ALL ranks must enter
