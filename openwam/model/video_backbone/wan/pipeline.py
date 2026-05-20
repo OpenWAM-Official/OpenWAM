@@ -430,14 +430,24 @@ class WanVideoUnit_NoiseInitializer(PipelineUnit):
         )
 
     def process(self, pipe: WanVideoPipeline, height, width, num_frames, seed, rand_device, vace_reference_image):
-        length = (num_frames - 1) // 4 + 1
-        shape = (
-            1,
-            pipe.vae.model.z_dim,
-            length,
-            height // pipe.vae.upsampling_factor,
-            width // pipe.vae.upsampling_factor,
-        )
+        # ``pipe.latent_spec`` is attached by ``WanVideoBackbone.from_pretrained``
+        # whenever an external encoder replaces the native VAE (``pipe.vae`` is
+        # then None). The spec carries the same latent-geometry numbers
+        # ``pipe.vae`` would have exposed, plus ``temporal_compression`` /
+        # ``causal_temporal`` so non-Wan-VAE encoders (DINOv3 temporal=1
+        # causal=False, V-JEPA2 temporal=2 etc.) get the right length.
+        # Absent on the native VAE path (default training and old checkpoints)
+        # — fall back to the historical hardcoded formula reading pipe.vae.
+        spec = getattr(pipe, "latent_spec", None)
+        if spec is not None:
+            z_dim = spec.z_dim
+            upsample = spec.spatial_compression
+            length = (num_frames - 1) // spec.temporal_compression + (1 if spec.causal_temporal else 0)
+        else:
+            z_dim = pipe.vae.model.z_dim
+            upsample = pipe.vae.upsampling_factor
+            length = (num_frames - 1) // 4 + 1
+        shape = (1, z_dim, length, height // upsample, width // upsample)
         noise = pipe.generate_noise(shape, seed=seed, rand_device=rand_device)
         return {"noise": noise}
 

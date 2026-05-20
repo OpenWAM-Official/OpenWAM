@@ -104,6 +104,17 @@ def _exclude_vlm_from_state_dict(state_dict: dict[str, "Tensor"]) -> dict[str, "
     return {k: v for k, v in state_dict.items() if not k.startswith(VLM_STATE_DICT_PREFIX)}
 
 
+def _assert_decode_video_supported(vb) -> None:
+    'Public implementation.'
+    enc = getattr(vb, "_encoder", None)
+    if enc is not None and not enc.spec.is_reversible:
+        raise ValueError(
+            f"generate(decode_video=True) but the configured encoder "
+            f"({type(enc).__name__}) is irreversible (spec.is_reversible=False). "
+            "Pass decode_video=False to retrieve raw latents."
+        )
+
+
 if TYPE_CHECKING:
     from openwam.model.action_backbone.backbone import ActionBackbone
     from openwam.model.video_backbone.adapter import VideoBackbone
@@ -182,6 +193,16 @@ class BaseWAMArchitecture(ABC, nn.Module):
         - ``name``: registry key → training-time path
 
         Both paths flow through the public :func:`build_video_backbone`.
+
+        Optional ``video_backbone.encoder`` block (yaml-whitelisted to
+        ``{name, model_path}``) swaps the backbone's native VAE for an
+        external :class:`VideoEncoder`. The encoder block is **only** read
+        when ``video_backbone.from_scratch=true`` — the DiT must be
+        reinitialized when its latent space changes. When the block is set
+        but ``from_scratch=false`` we silently route through the native
+        ``pipe.vae`` (with an INFO log explaining what happened) so that the
+        default yaml's documentation-friendly ``encoder:`` block doesn't
+        break the default training command.
         """
         from openwam.model.video_backbone import build_video_backbone
 
@@ -191,21 +212,89 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         source = vb_cfg.get("_source") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_source", None)
         vb_name = vb_cfg.get("name") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "name", None)
+        from_scratch = bool(self._cfg_get(vb_cfg, "from_scratch", False))
+
+        # ------------------------------------------------------------------
+        # External encoder gate. Four cases, only one of which builds an
+        # encoder:
+        #   - encoder set + from_scratch=true  → build external encoder
+        #   - encoder set + from_scratch=false → INFO log + skip (silent
+        #     ignore is the right UX since the default yaml ships an
+        #     encoder: block for documentation discoverability, and we
+        #     don't want the default training command to fail)
+        #   - encoder unset + from_scratch=true → reset DiT weights only
+        #   - encoder unset + from_scratch=false → no-op (default path)
+        # ------------------------------------------------------------------
+        enc_cfg = vb_cfg.get("encoder") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "encoder", None)
+        external_encoder = None
+        # Single gate, identical for training and deploy: encoder block is
+        # honored ONLY when ``from_scratch=true``. The framework yamls ship
+        # an inline ``encoder:`` block for discoverability even at default
+        # ``from_scratch=false`` (see commit 6588044) — that block must be
+        # silently ignored on both paths so default training and deploy of
+        # ``from_scratch=false`` checkpoints (state_dict topology
+        # ``_pipe.vae.*``) keep working bit-exactly.
+        if enc_cfg is not None and from_scratch:
+            # Yaml whitelist applies to both paths so an in-tree typo /
+            # extra field never silently slips through deploy.
+            allowed = {"name", "model_path"}
+            extras = set(enc_cfg.keys()) - allowed
+            if extras:
+                raise ValueError(
+                    f"video_backbone.encoder allows only {sorted(allowed)} in yaml; got extra "
+                    f"fields {sorted(extras)}. Spec fields like z_dim are derived from the "
+                    "loaded weights — yaml cannot override them."
+                )
+
+            if source is None:
+                # Training: build the encoder from yaml + model_path.
+                from openwam.model.video_backbone.encoder import build_video_encoder
+
+                external_encoder = build_video_encoder(enc_cfg)
+            else:
+                # Deploy: reconstruct the encoder skeleton from the saved
+                # components entry; weights filled in by the architecture's
+                # subsequent ``load_checkpoint`` strict load. ``source`` is
+                # the dict produced by deploy/model_loader.py.
+                external_encoder = self._build_external_encoder_skeleton(enc_cfg, source)
+        elif enc_cfg is not None and source is None:
+            # Training with encoder block set but from_scratch=false: INFO
+            # log explaining the silent ignore (deploy path stays quiet
+            # since the same situation is expected for any default
+            # from_scratch=false checkpoint, not a user mistake).
+            logger.info(
+                "video_backbone.encoder is set but from_scratch=false; "
+                "encoder block IGNORED, using native pipe.vae. Set from_scratch=true "
+                "to activate the encoder swap. See docs/external_video_encoder.md."
+            )
 
         if source is not None:
             ckpt_dir = vb_cfg.get("_ckpt_dir") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_ckpt_dir", None)
-            self.video_backbone = build_video_backbone(vb_name, cfg, source=source, device="cpu", ckpt_dir=ckpt_dir)
+            self.video_backbone = build_video_backbone(
+                vb_name, cfg, source=source, device="cpu", ckpt_dir=ckpt_dir, external_encoder=external_encoder
+            )
         elif vb_name is not None:
-            self.video_backbone = build_video_backbone(vb_name, cfg)
+            self.video_backbone = build_video_backbone(vb_name, cfg, external_encoder=external_encoder)
 
-        # Optional from-scratch DiT: keep the Wan video backbone structure but
-        # discard the loaded DiT weights and re-randomize them in place. VAE
-        # and the text encoder stay pretrained and are frozen by the training
-        # strategy yaml. Reproducibility comes from ``cfg.project.seed`` which
-        # ``OpenWAMTrainer`` applies before architecture construction. Applies
-        # uniformly to every architecture that builds its video backbone via
-        # this method (dual_system / shared_backbone / tri_system).
-        if self.video_backbone is not None and self._cfg_get(vb_cfg, "from_scratch", False):
+        # Optional from-scratch DiT: keep the Wan video backbone structure
+        # but discard the loaded DiT weights and re-randomize them in place.
+        # VAE and the text encoder stay pretrained and are frozen by the
+        # training strategy yaml. Reproducibility comes from
+        # ``cfg.project.seed`` which ``OpenWAMTrainer`` applies before
+        # architecture construction. Applies uniformly to every architecture
+        # that builds its video backbone via this method (dual_system /
+        # shared_backbone / tri_system).
+        #
+        # IMPORTANT: gated on ``source is None`` (training path only). On
+        # deploy, ``cfg.video_backbone.from_scratch`` is True because the
+        # config was saved from a from-scratch training run, but DiT weights
+        # come from the checkpoint, NOT from a re-initialization. Calling
+        # reinit here would silently wipe the trained DiT weights and the
+        # subsequent ``load_checkpoint`` would overwrite them again — wasted
+        # work in the best case, but if the checkpoint had any missing keys
+        # the strict load would surface them against zeroed weights instead
+        # of the random init, masking the diagnostic.
+        if self.video_backbone is not None and from_scratch and source is None:
             pipe = getattr(self.video_backbone, "_pipe", None)
             if pipe is None:
                 logger.warning(
@@ -214,10 +303,58 @@ class BaseWAMArchitecture(ABC, nn.Module):
             else:
                 from openwam.model.video_backbone.wan_adapter import reinit_dit_from_scratch
 
-                reinit_dit_from_scratch(pipe)
+                reinit_dit_from_scratch(pipe, external_encoder=external_encoder)
                 logger.info(
                     "video_backbone.from_scratch=true: DiT re-initialized; VAE / text_encoder keep pretrained weights"
                 )
+
+    @staticmethod
+    def _build_external_encoder_skeleton(enc_cfg, source):
+        """Deploy-time external encoder constructor.
+
+        Reads the encoder ``name`` (subject to the same yaml whitelist as
+        the training path) and reaches into the saved ``source`` dict for
+        the ``components`` list to find the ``attr == "vae"`` entry. That
+        entry's ``model_class`` / ``extra_kwargs`` is handed to the
+        encoder class's :meth:`VideoEncoder.from_skeleton` classmethod,
+        which instantiates the underlying module with zero weights. The
+        architecture's :meth:`load_checkpoint` strict load fills in the
+        weights immediately after.
+
+        Refuses to silently fall back to the native VAE path here: if the
+        cfg has an encoder block but the components list is missing a vae
+        entry (e.g. corrupted save), raise so the operator sees the
+        mismatch up front.
+        """
+        from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
+
+        allowed = {"name", "model_path"}
+        extras = set(enc_cfg.keys()) - allowed
+        if extras:
+            raise ValueError(
+                f"video_backbone.encoder allows only {sorted(allowed)} in yaml; got extra fields {sorted(extras)}."
+            )
+        enc_name = enc_cfg["name"] if isinstance(enc_cfg, dict) else enc_cfg.name
+        if enc_name not in _VIDEO_ENCODER_REGISTRY:
+            available = ", ".join(sorted(_VIDEO_ENCODER_REGISTRY)) or "(none)"
+            raise KeyError(f"Unknown video encoder '{enc_name}'. Available: {available}")
+
+        components = (source or {}).get("components") if isinstance(source, dict) else None
+        if not components:
+            raise RuntimeError(
+                "Deploy with encoder block but saved config has no "
+                "video_backbone.components — cannot reconstruct encoder skeleton. "
+                "Re-save the checkpoint with the current code, or strip the "
+                "encoder block from config.yaml to fall back to native VAE."
+            )
+        vae_entry = next((e for e in components if e.get("attr") == "vae"), None)
+        if vae_entry is None:
+            raise RuntimeError(
+                "Deploy with encoder block but components list has no attr=vae "
+                "entry to construct the encoder skeleton from."
+            )
+        encoder_cls = _VIDEO_ENCODER_REGISTRY[enc_name]
+        return encoder_cls.from_skeleton(vae_entry)
 
     def _resolve_video_dim(self, cfg) -> int:
         """Resolve video_dim from config or video_backbone; raise if neither provides it."""
@@ -1329,8 +1466,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 torch.cuda.synchronize()
             logger.info("[WAM_PROFILE] denoising_loop: %.3fs", time.time() - t_loop)
 
-        # VAE decode
+        # VAE decode. Fail-fast when the backbone is wired to an irreversible
+        # external encoder — silently returning None would mask a config
+        # mismatch (caller asked for pixels but the encoder cannot produce them).
         if decode_video:
+            _assert_decode_video_supported(vb)
             video_frames = vb.decode_video(inputs_shared["latents"], tiled=tiled)
         else:
             video_frames = None

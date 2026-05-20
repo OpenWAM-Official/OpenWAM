@@ -79,6 +79,8 @@ def _build_loader(seed: int | None, num_workers: int = 2, dataset_size: int = 16
         shuffle=False,  # disable shuffle so idx order is fixed; isolate worker-RNG behaviour
         num_workers=num_workers,
         collate_fn=list,
+        # Python 3.12 deprecates fork on Linux; spawn is the forward-compatible default.
+        multiprocessing_context="spawn",
     )
     if seed is not None:
         kwargs["generator"] = make_dataloader_generator(seed, rank=0)

@@ -4,6 +4,11 @@ lambda_action: 1.0
 freeze:
   - video_backbone._pipe.text_encoder
   - video_backbone._pipe.vae
+  # External-encoder path (video_backbone.from_scratch=true with a yaml
+  # encoder block): pipe.vae is None and the line above is silently
+  # skipped, so we list the swap-in encoder directly. On the native path
+  # _encoder is None / unset and this line is the one silently skipped.
+  - video_backbone._encoder
   # I2V-only CLIP-H first-frame encoder (~4.7GB). On TI2V/VACE the attribute
   # is None and freeze_modules() silently skips it (base.py:352).
   - video_backbone._pipe.image_encoder

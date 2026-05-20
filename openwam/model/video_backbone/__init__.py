@@ -47,6 +47,7 @@ def build_video_backbone(
     source: Any = None,
     device: Optional[str] = None,
     ckpt_dir: Optional[str] = None,
+    external_encoder: Any = None,
 ) -> VideoBackbone:
     """Instantiate a VideoBackbone from the registry.
 
@@ -70,6 +71,12 @@ def build_video_backbone(
         source:   Optional explicit deploy-time source.
         device:   Forwarded to ``from_pretrained`` when ``source`` is set.
         ckpt_dir: Forwarded to ``from_pretrained`` when ``source`` is set.
+        external_encoder: Optional pre-built :class:`VideoEncoder` to swap in
+                  for the backbone's native VAE. Forwarded to
+                  ``cls.from_pretrained`` on BOTH paths — training (built
+                  from yaml + model_path) and deploy (built from the saved
+                  components entry via :meth:`VideoEncoder.from_skeleton`,
+                  weights filled in by the architecture's checkpoint load).
     """
     if name and name in _VIDEO_BACKBONE_REGISTRY:
         cls = _VIDEO_BACKBONE_REGISTRY[name]
@@ -86,7 +93,11 @@ def build_video_backbone(
             kw["device"] = device
         if ckpt_dir is not None:
             kw["ckpt_dir"] = ckpt_dir
+        if external_encoder is not None:
+            kw["external_encoder"] = external_encoder
         return cls.from_pretrained(source, **kw)
+    if external_encoder is not None:
+        return cls.from_pretrained(cfg, external_encoder=external_encoder)
     return cls.from_pretrained(cfg)
 
 

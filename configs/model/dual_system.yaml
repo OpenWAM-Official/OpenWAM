@@ -161,3 +161,13 @@ video_backbone:
   name: wan22_ti2v_5b
   model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
   from_scratch: false
+  # External encoder swap. Only consumed when from_scratch=true; when
+  # from_scratch=false the block is silently ignored (an INFO log is emitted
+  # so users debugging can find the answer). Default `wan_vae` reproduces
+  # the native pipe.vae path bit-for-bit (the default hooks on VideoEncoder
+  # produce Wan-original Conv3d/Linear shapes). To swap in a non-VAE
+  # encoder, change `name` to a registered alternative and update
+  # `model_path` to its weights directory — see docs/external_video_encoder.md.
+  encoder:
+    name: wan_vae
+    model_path: /path/to/Wan2.2-TI2V-5B

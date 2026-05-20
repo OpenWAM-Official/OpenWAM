@@ -443,6 +443,45 @@ class VideoBackbone(ABC, nn.Module):
         ...
 
     # ================================================================
+    # External encoder spec validation (1)
+    # ================================================================
+
+    # Fields that must match bit-for-bit between an external encoder's spec
+    # and the host backbone's expected spec. ``pixel_range`` is deliberately
+    # excluded — it is an encoder-internal normalization detail that the
+    # backbone never inspects.
+    _ENCODER_SPEC_REQUIRED_FIELDS: Tuple[str, ...] = (
+        "z_dim",
+        "spatial_compression",
+        "temporal_compression",
+        "causal_temporal",
+    )
+
+    @classmethod
+    def validate_encoder_spec(cls, got, want) -> None:
+        """Fail-fast when an external encoder's spec disagrees with what the
+        host backbone needs.
+
+        Args:
+            got: The encoder's actual :class:`VideoEncoderSpec` (from loaded weights).
+            want: The backbone's expected spec, OR ``None`` when the backbone
+                has no concrete contract to enforce (e.g. its native VAE has
+                already been released).
+
+        Raises:
+            ValueError: With a list of mismatching fields. Callers handle
+                ``is_reversible=False`` upstream by either skipping this call
+                or constructing a relaxed ``want`` — this method has no
+                special-case knowledge of reversibility.
+        """
+        if want is None:
+            return
+        mismatched = [f for f in cls._ENCODER_SPEC_REQUIRED_FIELDS if getattr(got, f) != getattr(want, f)]
+        if mismatched:
+            details = ", ".join(f"{f}: got={getattr(got, f)!r}, want={getattr(want, f)!r}" for f in mismatched)
+            raise ValueError(f"encoder spec mismatch on {mismatched}: {details}")
+
+    # ================================================================
     # Decoding (1)
     # ================================================================
 

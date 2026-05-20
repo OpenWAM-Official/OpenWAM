@@ -51,15 +51,24 @@ class WanVideoBackbone(VideoBackbone):
     # Construction
     # ================================================================
 
-    def __init__(self, pipe):
-        """Internal constructor. Use ``from_pretrained()`` instead."""
+    def __init__(self, pipe, *, external_encoder=None):
+        """Internal constructor. Use ``from_pretrained()`` instead.
+
+        ``external_encoder`` must be ``None`` on the default path so
+        ``state_dict()`` carries only ``_pipe.vae.*`` keys (not also
+        ``_encoder.*``). Setting it activates the external-encoder routing
+        in :meth:`_preprocess_video` / :meth:`_encode_video` /
+        :meth:`_decode_latents` / :meth:`_latents_to_frames` and aliases
+        the encoder under ``"vae"`` in :attr:`submodule_names`.
+        """
         super().__init__()
         self._pipe = pipe
+        self._encoder = external_encoder
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
 
     @classmethod
-    def from_pretrained(cls, source, **kw) -> WanVideoBackbone:
+    def from_pretrained(cls, source, *, external_encoder=None, **kw) -> WanVideoBackbone:
         """Build a WanVideoBackbone from various source types.
 
         Supported sources:
@@ -67,16 +76,49 @@ class WanVideoBackbone(VideoBackbone):
         - ``str`` directory path: auto-discover model files → lightweight build
         - ``dict`` with ``video_backbone.model_path``: lightweight build from model dir
         - anything else: treated as an already-built pipe object
+
+        When ``external_encoder`` is provided:
+          1. Fails fast for I2V backbones (their first conv hardcodes
+             ``in_dim = 4 + z_dim`` — see ``_build_i2v_y``).
+          2. Validates the encoder spec against the pipeline's native VAE.
+             ``is_reversible=True`` enforces strict z_dim equality;
+             ``is_reversible=False`` skips z_dim (patch_embedding will be
+             rebuilt by :func:`reinit_dit_from_scratch`) but still checks
+             spatial / temporal / causal — backbone-side code makes strong
+             assumptions about these.
+          3. Sets ``pipe.height/width_division_factor`` from
+             ``encoder.spec.spatial_compression * encoder.spec.dit_patch_size[1or2]``.
+          4. Releases ``pipe.vae`` so state_dict keys don't double-count
+             VAE params with the external encoder.
         """
         from omegaconf import DictConfig
+
+        # Skip native VAE materialization on:
+        #   - training, irreversible external encoder: validation is already
+        #     bypassed (encoder owns its latent geometry), so loading native
+        #     VAE only to release it is pure waste (~1.5GB Wan2.2).
+        #   - deploy with ANY external encoder: state_dict topology is
+        #     ``_encoder._m.*`` (was saved that way during training);
+        #     deploy must not also materialize ``_pipe.vae.*`` slot since
+        #     (a) the slot has no checkpoint weights to fill it, (b)
+        #     ``_build_pipe_from_components`` would otherwise duplicate the
+        #     VAE inside the encoder, and (c) ``cls(pipe, external_encoder)``
+        #     ends with ``pipe.vae = None`` anyway.
+        # Reversible-on-training is the one case that keeps loading native
+        # VAE — needed for the spec-equality cross-check at step (2) below
+        # against ``v.z_dim`` / ``v.upsampling_factor``.
+        is_deploy = not isinstance(source, DictConfig)
+        skip_native_vae = bool(external_encoder is not None and (is_deploy or not external_encoder.spec.is_reversible))
 
         if isinstance(source, DictConfig):
             from openwam.model.video_backbone.wan.pipeline_builder import build_training_pipeline
 
-            pipe = build_training_pipeline(source)
+            pipe = build_training_pipeline(source, skip_native_vae=skip_native_vae)
         elif isinstance(source, str):
             if os.path.isdir(source):
-                pipe = cls._build_pipe_from_model_path(source, device=kw.get("device", "cpu"))
+                pipe = cls._build_pipe_from_model_path(
+                    source, device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
+                )
             else:
                 raise ValueError(f"from_pretrained(str) expects a directory path, got: {source!r}.")
         elif isinstance(source, dict):
@@ -88,6 +130,7 @@ class WanVideoBackbone(VideoBackbone):
                     device=kw.get("device", "cpu"),
                     ckpt_dir=kw.get("ckpt_dir"),
                     model_path=vb_cfg.get("model_path"),
+                    skip_native_vae=skip_native_vae,
                 )
             else:
                 model_path = (
@@ -97,10 +140,108 @@ class WanVideoBackbone(VideoBackbone):
                     raise ValueError(
                         "dict source must contain 'video_backbone.components' or 'video_backbone.model_path'"
                     )
-                pipe = cls._build_pipe_from_model_path(str(model_path), device=kw.get("device", "cpu"))
+                pipe = cls._build_pipe_from_model_path(
+                    str(model_path), device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
+                )
         else:
             pipe = source
-        return cls(pipe)
+
+        if external_encoder is not None:
+            # (1) I2V fail-fast — the pretrained DiT's first conv is built with
+            # in_dim = 4 + z_dim (mask channels + VAE z_dim); an external
+            # encoder would silently break the channel-cat with ``y`` in
+            # prepare(). Surface this at construction rather than wait for
+            # the runtime AttributeError in ``_build_i2v_y``.
+            if bool(getattr(pipe.dit, "has_image_input", False)):
+                raise ValueError(
+                    "I2V backbones cannot use external encoders: DiT first "
+                    "conv in_dim = 4 + z_dim is hardcoded into the pretrained "
+                    "weights. See docs/external_video_encoder.md §6."
+                )
+
+            # (1b) VACE fail-fast — current PR scope is Wan2.2-TI2V-5B
+            # only. VACE backbones have two hard incompatibilities the
+            # adapter does not yet rebuild:
+            #
+            #   - ``VaceWanModel.vace_patch_embedding`` hardcodes
+            #     ``vace_in_dim = 2 * z_dim + 64 = 96`` (z_dim=16 of the
+            #     native Wan VAE); ``reinit_dit_from_scratch`` only rebuilds
+            #     ``dit.patch_embedding`` / ``dit.head.head``, not the VACE
+            #     embedding — any encoder with a different z_dim makes
+            #     ``_build_vace_context`` produce a tensor that does not
+            #     match the embedding's in_channels.
+            #
+            #   - The vendored ``WanVideoUnit_VACE.process`` inference path
+            #     calls ``pipe.vae.encode(...)`` directly (wan/pipeline.py).
+            #     On the external-encoder path ``pipe.vae`` is None, so
+            #     deploy raises AttributeError on the first ``vace_video``
+            #     input.
+            #
+            # Surface at construction so users do not discover this only
+            # at deploy time. See docs/external_video_encoder.md §6.
+            if getattr(pipe, "vace", None) is not None:
+                raise ValueError(
+                    "VACE backbones cannot use external encoders: this PR's scope is "
+                    "Wan2.2-TI2V-5B only. VaceWanModel.vace_patch_embedding's "
+                    "vace_in_dim=96 is baked into the pretrained weights, and the "
+                    "vendored WanVideoUnit_VACE inference path reads pipe.vae which "
+                    "is None on the external-encoder path. See "
+                    "docs/external_video_encoder.md §6."
+                )
+
+            from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
+
+            v = getattr(pipe, "vae", None)
+            if v is not None and external_encoder.spec.is_reversible:
+                want = VideoEncoderSpec(
+                    z_dim=int(v.z_dim),
+                    spatial_compression=int(v.upsampling_factor),
+                    temporal_compression=4,
+                    causal_temporal=True,
+                )
+                VideoBackbone.validate_encoder_spec(external_encoder.spec, want)
+
+            # (3) Spatial division factor derived from the encoder's declared
+            # ``dit_patch_size`` rather than a hardcoded ``* 2``. For Wan VAE
+            # (dit_patch_size=(1,2,2)) this is identical to the pre-existing
+            # constant; for ViT-style encoders that pre-patchify at 16x and
+            # declare dit_patch_size=(1,1,1), the DiT's first conv becomes a
+            # pure channel projection and the total spatial division factor
+            # equals the encoder's own spatial_compression.
+            ps = external_encoder.spec.dit_patch_size
+            pipe.height_division_factor = external_encoder.spec.spatial_compression * ps[1]
+            pipe.width_division_factor = external_encoder.spec.spatial_compression * ps[2]
+
+            # (4) Release the native VAE so state_dict keys don't double-count
+            # VAE params with the external encoder. Print rather than
+            # logger.info because architecture init runs before the trainer's
+            # logger is wired up and INFO would be swallowed; the user needs
+            # this visible to confirm the external_encoder path is active.
+            # Gated on rank=0 to avoid 4x duplicate lines under torchrun.
+            pipe.vae = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if int(os.environ.get("RANK", 0)) == 0:
+                print(
+                    f"[WanVideoBackbone] pipe.vae released; "
+                    f"external_encoder={type(external_encoder).__name__} "
+                    f"(z_dim={external_encoder.spec.z_dim}, "
+                    f"is_reversible={external_encoder.spec.is_reversible}, "
+                    f"dit_patch_size={external_encoder.spec.dit_patch_size})",
+                    flush=True,
+                )
+
+            # (5) Expose latent-shape metadata on ``pipe`` so vendored
+            # inference units (``WanVideoUnit_NoiseInitializer``) can read
+            # ``z_dim`` / ``spatial_compression`` / ``temporal_compression`` /
+            # ``causal_temporal`` without falling back to ``pipe.vae``
+            # (which is now None). The unit's fallback branch still hits
+            # ``pipe.vae`` on the native VAE path where ``pipe.latent_spec``
+            # is absent. Plain attribute (not nn.Module) — does not enter
+            # state_dict.
+            pipe.latent_spec = external_encoder.spec
+
+        return cls(pipe, external_encoder=external_encoder)
 
     # ================================================================
     # Internal properties
@@ -109,6 +250,12 @@ class WanVideoBackbone(VideoBackbone):
     @property
     def _dit(self):
         return self._pipe.dit
+
+    @property
+    def _uses_external_encoder(self) -> bool:
+        """True when this backbone is routing VAE IO through an external
+        :class:`VideoEncoder` rather than its native ``pipe.vae``."""
+        return self._encoder is not None
 
     @property
     def _has_vace(self) -> bool:
@@ -160,8 +307,15 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def submodule_names(self) -> list[str]:
+        # ``vae`` is reported under either path so training_strategy
+        # ``freeze_modules: [vae, ...]`` works without yaml changes when an
+        # external encoder is swapped in (pipe.vae is None on the external
+        # path; the alias resolves to ``self._encoder`` in get_submodule).
         names = []
         for name in ("dit", "vace", "text_encoder", "vae", "image_encoder"):
+            if name == "vae" and self._uses_external_encoder:
+                names.append(name)
+                continue
             if getattr(self._pipe, name, None) is not None:
                 names.append(name)
         return names
@@ -923,9 +1077,7 @@ class WanVideoBackbone(VideoBackbone):
             if first_frame_image is None:
                 first_frame_image = [clip[0] for clip in frames]
             if len(first_frame_image) != B:
-                raise ValueError(
-                    f"first_frame_image batch ({len(first_frame_image)}) != frames batch ({B})"
-                )
+                raise ValueError(f"first_frame_image batch ({len(first_frame_image)}) != frames batch ({B})")
 
             if needs_clip:
                 clip_pieces = []
@@ -980,9 +1132,14 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     def get_submodule(self, name: str) -> nn.Module | None:
+        if name == "vae" and self._uses_external_encoder:
+            return self._encoder
         return getattr(self._pipe, name, None)
 
     def set_submodule(self, name: str, module: nn.Module) -> None:
+        if name == "vae" and self._uses_external_encoder:
+            self._encoder = module
+            return
         setattr(self._pipe, name, module)
 
     # ================================================================
@@ -990,6 +1147,12 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:
+        if self._uses_external_encoder and not self._encoder.spec.is_reversible:
+            raise NotImplementedError(
+                f"decode_video on irreversible encoder ({type(self._encoder).__name__}; "
+                "spec.is_reversible=False). Pass decode_video=False to generate() to "
+                "retrieve raw latents, or train a separate pixel decoder."
+            )
         video_tensor = self._decode_latents(latents, tiled=tiled)
         return self._latents_to_frames(video_tensor)
 
@@ -1334,9 +1497,7 @@ class WanVideoBackbone(VideoBackbone):
         if self._has_vace:
             vace_context = inputs_shared.get("vace_context")
             if vace_context is not None:
-                inputs_shared["vace_context"] = self._inject_vace_ref_frame(
-                    vace_context, ref_image_latents
-                )
+                inputs_shared["vace_context"] = self._inject_vace_ref_frame(vace_context, ref_image_latents)
 
     @staticmethod
     def _is_text_unit(unit) -> bool:
@@ -1399,15 +1560,23 @@ class WanVideoBackbone(VideoBackbone):
         return context, seq_lens
 
     def _preprocess_video(self, frames) -> Tensor:
+        if self._uses_external_encoder:
+            return self._encoder.preprocess_video(frames)
         return self._pipe.preprocess_video(frames)
 
     def _encode_video(self, video_tensor: Tensor, *, tiled: bool = False) -> Tensor:
+        if self._uses_external_encoder:
+            return self._encoder.batch_encode(video_tensor)
         return self._pipe.vae.batch_encode(video_tensor, device=video_tensor.device)
 
     def _decode_latents(self, latents: Tensor, *, tiled: bool = True) -> Tensor:
+        if self._uses_external_encoder:
+            return self._encoder.decode(latents.to(self.device), tiled=tiled)
         return self._pipe.vae.decode(latents.to(self.device), device=self.device, tiled=tiled)
 
     def _latents_to_frames(self, video_tensor: Tensor) -> list:
+        if self._uses_external_encoder:
+            return self._encoder.to_frames(video_tensor)
         return self._pipe.vae_output_to_video(video_tensor)
 
     def _check_resize(self, h, w, num_frames):
@@ -1443,9 +1612,7 @@ class WanVideoBackbone(VideoBackbone):
             raise ValueError(f"ref_latent must be (B, C, 1, H, W); got {tuple(ref_latent.shape)}")
         c_v = ref_latent.shape[1]
         if vace_context.shape[1] < 2 * c_v:
-            raise ValueError(
-                f"vace_context channels ({vace_context.shape[1]}) too small for ref_latent C={c_v}"
-            )
+            raise ValueError(f"vace_context channels ({vace_context.shape[1]}) too small for ref_latent C={c_v}")
         out = vace_context.clone()
         out[:, :c_v, 0:1] = ref_latent.to(dtype=out.dtype, device=out.device)
         out[:, c_v : 2 * c_v, 0:1] = 0
@@ -1648,6 +1815,8 @@ class WanVideoBackbone(VideoBackbone):
         device: str = "cpu",
         ckpt_dir: str = None,
         model_path: str = None,
+        *,
+        skip_native_vae: bool = False,
     ):
         """Build an empty WanVideoPipeline from component specs (config-driven).
 
@@ -1659,6 +1828,11 @@ class WanVideoBackbone(VideoBackbone):
              copied during training save.
           2. ``model_path`` upstream layout — components-based persistence
              falls back to ``<model_path>/google/umt5-xxl/``.
+
+        Args:
+            skip_native_vae: When True, drop ``attr == "vae"`` entries before
+                instantiating, so the empty native VAE never allocates CPU
+                tensors. Used by the irreversible external-encoder path.
         """
         from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline
         from openwam.model.video_backbone.wan.pipeline_builder import _build_tokenizer, _import_class
@@ -1666,6 +1840,8 @@ class WanVideoBackbone(VideoBackbone):
         pipe = WanVideoPipeline(device=device, torch_dtype=torch.bfloat16)
 
         for entry in components:
+            if skip_native_vae and entry.get("attr") == "vae":
+                continue
             cls = _import_class(entry["model_class"])
             kwargs = entry.get("extra_kwargs", {}) or {}
             logger.info(
@@ -1714,12 +1890,24 @@ class WanVideoBackbone(VideoBackbone):
         return pipe
 
     @staticmethod
-    def _build_pipe_from_model_path(model_path: str, device: str = "cpu"):
-        """Build a WanVideoPipeline from a model directory without full Hydra config."""
+    def _build_pipe_from_model_path(model_path: str, device: str = "cpu", *, skip_native_vae: bool = False):
+        """Build a WanVideoPipeline from a model directory without full Hydra config.
+
+        Args:
+            skip_native_vae: When True, filter ``discover_model_files`` output
+                to drop the native VAE weight file before
+                :meth:`WanVideoPipeline.from_pretrained` materializes it.
+                Used by the irreversible external-encoder path.
+        """
         from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline
-        from openwam.model.video_backbone.wan.pipeline_builder import discover_model_files
+        from openwam.model.video_backbone.wan.pipeline_builder import (
+            _filter_native_vae_configs,
+            discover_model_files,
+        )
 
         model_configs, tokenizer_config = discover_model_files(model_path)
+        if skip_native_vae:
+            model_configs = _filter_native_vae_configs(model_configs)
         return WanVideoPipeline.from_pretrained(
             torch_dtype=torch.bfloat16,
             device=device,
@@ -1746,7 +1934,7 @@ def _probe_dit_stats(dit) -> dict:
     }
 
 
-def reinit_dit_from_scratch(pipe, *, verbose: bool = True) -> None:
+def reinit_dit_from_scratch(pipe, *, external_encoder=None, verbose: bool = True) -> None:
     """Re-initialize all learnable parameters in ``pipe.dit`` (and
     ``pipe.dit2`` if present) using PyTorch standard initialization. Does
     NOT touch ``pipe.vae`` / ``pipe.text_encoder`` / ``pipe.image_encoder`` /
@@ -1775,6 +1963,17 @@ def reinit_dit_from_scratch(pipe, *, verbose: bool = True) -> None:
 
     Args:
         pipe: A Wan pipeline with ``.dit`` (and optionally ``.dit2``) attached.
+        external_encoder: Optional :class:`VideoEncoder`. When provided, the
+            DiT's ``patch_embedding`` and (if present) ``head.head`` are
+            rebuilt via the encoder's :meth:`build_dit_input_proj` /
+            :meth:`build_dit_output_proj` hooks BEFORE the stdlib reset
+            loop runs. For ``wan_vae`` this is a no-op shape-wise (defaults
+            reproduce the original Wan layout); for non-VAE encoders this
+            adapts the first conv's ``in_channels`` to the encoder's
+            ``z_dim``. ``dit.in_dim`` metadata is synced afterwards so
+            downstream consumers (I2V's ``_build_i2v_y`` etc.) see the
+            updated value. None preserves the historical "reset weights
+            only, do not touch shapes" behavior.
         verbose: When True (default) and we're on rank 0, prints a
             human-readable BEFORE/AFTER summary directly to stdout — this is
             independent of the ``logging`` configuration so users see the
@@ -1796,6 +1995,38 @@ def reinit_dit_from_scratch(pipe, *, verbose: bool = True) -> None:
 
     rank = int(os.environ.get("RANK", 0))
     is_main = rank == 0
+
+    # Rebuild patch_embedding + head.head BEFORE reset_parameters. The
+    # encoder owns both hooks; defaults produce the Wan-original Conv3d/
+    # Linear pair, so wan_vae lands here as a no-op shape-wise. Non-VAE
+    # encoders adapt the first conv's in_channels and final Linear's
+    # out_features to the encoder's z_dim and dit_patch_size. We also sync
+    # the ``patch_size`` metadata on both ``WanModel`` and ``Head`` —
+    # ``WanModel.unpatchify`` uses ``self.patch_size`` for its einops
+    # rearrange (dit.py:372-381), so an encoder declaring
+    # ``dit_patch_size=(1,1,1)`` would otherwise feed a Linear-out of width
+    # ``z_dim`` into an unpatchify that still expects ``z_dim * 4`` and
+    # shape-mismatch on the first forward. ``dit.in_dim`` metadata is
+    # updated so downstream code that inspects it (e.g. I2V's _build_i2v_y)
+    # sees the new value (I2V itself is blocked at construction by
+    # WanVideoBackbone.from_pretrained's fail-fast). See
+    # docs/external_video_encoder.md §6 for the contract. The subsequent
+    # reset_parameters() loop re-initializes these new modules with the
+    # standard distribution again — harmless, just a duplicate random init
+    # in the same distribution.
+    if external_encoder is not None:
+        ps = external_encoder.spec.dit_patch_size
+        for dit in dits:
+            dit.patch_embedding = external_encoder.build_dit_input_proj(dit.dim)
+            dit.patch_size = ps
+            head_mod = getattr(dit, "head", None)
+            # MotWanModel-style DiTs may not own a head (they exit early into
+            # a control adapter); guard the assignment so the rebuild path
+            # remains generic across Wan variants.
+            if head_mod is not None and hasattr(head_mod, "head"):
+                head_mod.head = external_encoder.build_dit_output_proj(dit.dim)
+                head_mod.patch_size = ps
+            dit.in_dim = external_encoder.spec.z_dim
 
     # Snapshot a few representative tensors BEFORE the reset so the user can
     # eyeball "yes, the loaded pretrained values were actually thrown away".

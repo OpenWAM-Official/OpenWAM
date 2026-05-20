@@ -658,10 +658,7 @@ class OpenWAMTrainer(BaseTrainer):
         if torch.cuda.is_available() and (run_peak_alloc > 0.0 or run_peak_reserved > 0.0):
             is_main = self.accelerator is None or self.accelerator.is_main_process
             if is_main:
-                summary = (
-                    f"[memory] run peak alloc={run_peak_alloc:.2f}GB "
-                    f"reserved={run_peak_reserved:.2f}GB (rank0)"
-                )
+                summary = f"[memory] run peak alloc={run_peak_alloc:.2f}GB reserved={run_peak_reserved:.2f}GB (rank0)"
                 logger.info(summary)
                 print(summary, flush=True)
                 if output_path:
