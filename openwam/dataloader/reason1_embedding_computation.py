@@ -235,14 +235,20 @@ def _build_reason1(reason1_ckpt: Path, device: str, dtype):
     ).eval()
     for p in model.parameters():
         p.requires_grad_(False)
-    if model.config.hidden_size != _REASON1_HIDDEN_SIZE:
+    # transformers ≥5 ``Qwen2_5_VLConfig`` exposes the language-model geometry
+    # under ``config.text_config``. ``or model.config`` is a defensive fallback
+    # for the (unsupported) case where ``text_config`` is missing or ``None``.
+    text_cfg = getattr(model.config, "text_config", None) or model.config
+    hidden_size = getattr(text_cfg, "hidden_size", None)
+    num_layers = getattr(text_cfg, "num_hidden_layers", None)
+    if hidden_size != _REASON1_HIDDEN_SIZE:
         raise ValueError(
-            f"Reason1 hidden_size={model.config.hidden_size} != expected {_REASON1_HIDDEN_SIZE} "
+            f"Reason1 hidden_size={hidden_size} != expected {_REASON1_HIDDEN_SIZE} "
             "(this script targets the Cosmos-Reason1-7B / Qwen2.5-VL-7B geometry only)."
         )
-    if model.config.num_hidden_layers != _REASON1_NUM_TRANSFORMER_LAYERS:
+    if num_layers != _REASON1_NUM_TRANSFORMER_LAYERS:
         raise ValueError(
-            f"Reason1 num_hidden_layers={model.config.num_hidden_layers} "
+            f"Reason1 num_hidden_layers={num_layers} "
             f"!= expected {_REASON1_NUM_TRANSFORMER_LAYERS}"
         )
     return model, tokenizer

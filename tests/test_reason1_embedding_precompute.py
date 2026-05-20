@@ -255,6 +255,51 @@ def test_tokenize_with_chat_template_pads_to_512():
     assert all(t == 7 for t in ids)
 
 
+def test_build_reason1_accepts_nested_text_config(monkeypatch, tmp_path):
+    """``_build_reason1`` must read ``hidden_size`` / ``num_hidden_layers``
+    via ``config.text_config`` for transformers ≥5 ``Qwen2_5_VLConfig``,
+    which no longer exposes them on the top-level config. Regression for
+    the ``AttributeError: 'Qwen2_5_VLConfig' object has no attribute
+    'hidden_size'`` failure on real Reason1-7B loads."""
+    import types
+
+    import torch.nn as nn
+    import transformers
+
+    ckpt = tmp_path / "Cosmos-Reason1-7B"
+    ckpt.mkdir()
+
+    class _FakeModel:
+        def __init__(self):
+            self.config = types.SimpleNamespace(
+                text_config=types.SimpleNamespace(hidden_size=3584, num_hidden_layers=28)
+            )
+            self._p = nn.Parameter(torch.zeros(1), requires_grad=True)
+
+        def parameters(self):
+            yield self._p
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(
+        transformers,
+        "AutoTokenizer",
+        types.SimpleNamespace(from_pretrained=lambda *_a, **_kw: types.SimpleNamespace(
+            pad_token_id=None, eos_token_id=1
+        )),
+    )
+    monkeypatch.setattr(
+        transformers,
+        "Qwen2_5_VLForConditionalGeneration",
+        types.SimpleNamespace(from_pretrained=lambda *_a, **_kw: _FakeModel()),
+    )
+
+    model, _ = ript._build_reason1(reason1_ckpt=ckpt, device="cpu", dtype=torch.float32)
+    # Geometry probe didn't raise — the fix path threads through text_config.
+    assert getattr(model.config, "text_config").hidden_size == 3584
+
+
 # ----------------------------------------------------------------------
 # Reason1 real-load smoke — only runs when Reason1 weights AND CUDA exist.
 # ----------------------------------------------------------------------

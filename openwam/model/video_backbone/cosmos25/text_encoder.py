@@ -156,8 +156,13 @@ class Reason1LiveTextEncoder:
         end-to-end on shape (no silent corruption).
         """
         cfg = getattr(model, "config", None)
-        hidden = getattr(cfg, "hidden_size", None)
-        layers = getattr(cfg, "num_hidden_layers", None)
+        # transformers ≥5 ``Qwen2_5_VLConfig`` exposes the language-model
+        # geometry under ``config.text_config``. ``or cfg`` is a defensive
+        # fallback for the (unsupported) case where ``text_config`` is missing
+        # or ``None``.
+        text_cfg = getattr(cfg, "text_config", None) or cfg
+        hidden = getattr(text_cfg, "hidden_size", None)
+        layers = getattr(text_cfg, "num_hidden_layers", None)
         if hidden != cls.HIDDEN:
             raise ValueError(
                 f"Reason1 hidden_size={hidden} != expected {cls.HIDDEN}. "

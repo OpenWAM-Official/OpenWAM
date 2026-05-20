@@ -63,13 +63,26 @@ class _FakeReason1Model:
     Mimics enough of the surface (``config``, ``parameters``, ``eval``, ``to``,
     ``__call__``) for :class:`Reason1LiveTextEncoder` to drive it through one
     batched forward pass and return 29 hidden states.
+
+    ``nested_config=True`` puts ``hidden_size`` / ``num_hidden_layers`` under
+    ``config.text_config`` (no top-level attrs), matching real
+    transformers ≥5 ``Qwen2_5_VLConfig`` layout. ``nested_config=False`` keeps
+    them at the top level for the older transformers layout.
     """
 
     def __init__(self, *, dtype: torch.dtype, device: torch.device,
-                 hidden_size: int = _HIDDEN, num_hidden_layers: int = _NUM_LAYERS):
-        self.config = types.SimpleNamespace(
-            hidden_size=hidden_size, num_hidden_layers=num_hidden_layers
-        )
+                 hidden_size: int = _HIDDEN, num_hidden_layers: int = _NUM_LAYERS,
+                 nested_config: bool = False):
+        if nested_config:
+            self.config = types.SimpleNamespace(
+                text_config=types.SimpleNamespace(
+                    hidden_size=hidden_size, num_hidden_layers=num_hidden_layers
+                )
+            )
+        else:
+            self.config = types.SimpleNamespace(
+                hidden_size=hidden_size, num_hidden_layers=num_hidden_layers
+            )
         # A single trainable-then-frozen param so `.parameters()` is non-empty
         # and device/dtype probing works.
         self._param = nn.Parameter(torch.empty(1, dtype=dtype, device=device), requires_grad=True)
@@ -203,6 +216,31 @@ def test_reason1_live_encoder_geometry_validation(monkeypatch, patched_transform
     )
     with pytest.raises(ValueError, match="hidden_size"):
         Reason1LiveTextEncoder(patched_transformers, dtype=torch.float32, device="cpu")
+
+
+def test_reason1_live_encoder_accepts_nested_text_config(monkeypatch, patched_transformers):
+    """Real transformers ≥5 ``Qwen2_5_VLConfig`` exposes ``hidden_size`` only
+    on ``config.text_config`` (no top-level attr) — the geometry check must
+    follow that path. Regression for the previously-broken access pattern
+    that read directly from ``model.config.hidden_size``."""
+    from openwam.model.video_backbone.cosmos25.text_encoder import Reason1LiveTextEncoder
+
+    def _nested_from_pretrained(*_args, **kw):
+        dtype = kw.get("torch_dtype", torch.float32)
+        return _FakeReason1Model(
+            dtype=dtype, device=torch.device("cpu"), nested_config=True
+        )
+
+    monkeypatch.setattr(
+        transformers,
+        "Qwen2_5_VLForConditionalGeneration",
+        types.SimpleNamespace(from_pretrained=_nested_from_pretrained),
+    )
+    # Must construct without raising — regression for the AttributeError on
+    # real Reason1 loads under transformers ≥5.
+    te = Reason1LiveTextEncoder(patched_transformers, dtype=torch.float32, device="cpu")
+    out = te("pick up the block")
+    assert out.shape == (1, _L_PAD, _NUM_LAYERS * _HIDDEN)
 
 
 def test_reason1_live_encoder_missing_ckpt_raises(tmp_path):
