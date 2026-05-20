@@ -219,11 +219,7 @@ class Cosmos25PipelineWrapper(nn.Module):
         # equivalent of Wan TI2V's ``fuse_vae_embedding_in_latents`` per-token
         # AdaLN. T2V keeps the legacy ``(B, 1)`` broadcast shape so this branch
         # is a pure no-op for non-TI2V steps.
-        ti2v_active = (
-            timesteps_eff.ndim == 1
-            and condition_mask is not None
-            and bool(condition_mask.any())
-        )
+        ti2v_active = timesteps_eff.ndim == 1 and condition_mask is not None and bool(condition_mask.any())
         if timesteps_eff.ndim == 1:
             if ti2v_active:
                 timesteps_eff = timesteps_eff.unsqueeze(1).expand(-1, T_lat).clone()
@@ -345,7 +341,9 @@ class Cosmos25PipelineWrapper(nn.Module):
         if vace_videos is not None and any(v is not None for v in vace_videos):
             raise NotImplementedError(
                 "Cosmos25 MVP does not support VACE conditioning. "
-                "Drop `vace_video` from the dataset for `dual_system_cosmos25` runs."
+                "Drop `vace_video` from the dataset when training with the "
+                "Cosmos25 backbone (select via `model/backbone=cosmos25` — "
+                "see configs/model/backbone/cosmos25.yaml)."
             )
 
         if input_latents is None:

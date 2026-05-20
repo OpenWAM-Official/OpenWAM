@@ -1581,7 +1581,10 @@ def test_D7_training_strategy_yaml_freezes_encoder(yaml_path):
 @pytest.mark.parametrize(
     "yaml_path",
     [
-        "configs/model/dual_system.yaml",
+        # dual_system.yaml no longer ships an inline `video_backbone:` block —
+        # it composes from the Hydra `backbone` group instead (default
+        # `backbone/wan.yaml`). See test_E_dual_system_composed_encoder_block
+        # below for the composed-default verification.
         "configs/model/shared_backbone.yaml",
         "configs/model/tri_system.yaml",
     ],
@@ -1606,3 +1609,30 @@ def test_E_framework_yaml_has_inline_encoder_block(yaml_path):
     # have crept in.
     extras = set(enc.keys()) - {"name", "model_path"}
     assert extras == set(), f"{yaml_path} encoder block has extra fields {extras}, will trip the gate's whitelist"
+
+
+def test_E_dual_system_composed_encoder_block():
+    """dual_system.yaml composes its video_backbone from the Hydra `backbone`
+    group (default `backbone/wan.yaml`). The composed config must still expose
+    a `video_backbone.encoder: {name=wan_vae, model_path=...}` block so the
+    encoder-gate path stays identical to shared_backbone / tri_system."""
+    import os
+    import pathlib
+
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    config_dir = os.path.abspath(repo_root / "configs")
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="train", overrides=["model=dual_system"])
+
+    vb = cfg.model.video_backbone
+    enc = vb.get("encoder")
+    assert enc is not None, "dual_system + default backbone is missing video_backbone.encoder"
+    assert enc.name == "wan_vae"
+    assert "model_path" in enc
+    extras = set(enc.keys()) - {"name", "model_path"}
+    assert extras == set(), f"encoder block has extra fields {extras}, will trip the gate's whitelist"

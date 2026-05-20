@@ -12,9 +12,16 @@ Scope:
   (§17 — uses :class:`MoTJointDriver` with the block split helpers in
   ``block_split.py``). Shared-backbone variants are not supported (the
   ``inject_*`` / ``extract_*`` hooks raise :class:`NotImplementedError`).
-- Cosmos is treated as frozen by default; ``cfg.video_backbone.freeze=true``
-  flips all Cosmos parameters to ``requires_grad=False`` so the trainer
-  builds optimizer groups against the action branch + bridges only.
+- Freeze policy is owned by ``configs/training_strategy/*.yaml`` via
+  :func:`BaseWAMModel.freeze_modules` (Wan-aligned mechanism). The
+  ``freeze`` kwarg here is retained for tests / direct programmatic use,
+  defaults to ``False``, and is no longer driven by ``cfg.video_backbone``.
+  NOTE: this kwarg path is a partial freeze — it only flips
+  ``requires_grad_(False)`` on the wrapped pipeline (and its VAE inner),
+  whereas :func:`BaseWAMModel.freeze_modules` additionally wraps the forward
+  in ``no_grad`` and pins ``training=False``. The two paths are not
+  strictly equivalent; production freezing must go through the training
+  strategy yaml.
 """
 
 from __future__ import annotations
@@ -49,7 +56,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         context_dim: int,
         scheduler: Optional[CosmosFlowSchedulerAdapter] = None,
         submodule_names: Optional[list[str]] = None,
-        freeze: bool = True,
+        freeze: bool = False,
     ) -> None:
         super().__init__()
         self._pipe = pipeline
@@ -105,7 +112,6 @@ class Cosmos25VideoBackbone(VideoBackbone):
         from openwam.model.video_backbone.cosmos25.pipeline_builder import build_cosmos25_pipeline
 
         cfg_for_loader = _video_backbone_cfg(source)
-        freeze = bool(_cfg_get(cfg_for_loader, "freeze", True))
         flow_shift = float(_cfg_get(cfg_for_loader, "flow_shift", 5.0))
 
         pipeline = build_cosmos25_pipeline(source, device=device, ckpt_dir=ckpt_dir, **kw)
@@ -118,7 +124,6 @@ class Cosmos25VideoBackbone(VideoBackbone):
             head_dim=head_dim,
             context_dim=context_dim,
             scheduler=CosmosFlowSchedulerAdapter(flow_shift=flow_shift),
-            freeze=freeze,
         )
 
     # ------------------------------------------------------------------

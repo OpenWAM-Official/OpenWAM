@@ -45,8 +45,7 @@ pytestmark = pytest.mark.gpu
 
 ASSET_PATH = Path(os.environ.get("COSMOS25_ASSET_PATH", "/path/to/assets/Cosmos-Predict2.5-2B"))
 REPO_ROOT = Path(__file__).resolve().parents[1]
-COSMOS_CFG_PATH = REPO_ROOT / "configs" / "model" / "dual_system_cosmos25.yaml"
-COSMOS_SELF_ATTN_CFG_PATH = REPO_ROOT / "configs" / "model" / "dual_system_self_attn_cosmos25.yaml"
+CONFIGS_DIR = REPO_ROOT / "configs"
 
 
 def _skip_unless_runnable():
@@ -54,20 +53,45 @@ def _skip_unless_runnable():
         pytest.skip("CUDA is not available.")
     if not ASSET_PATH.exists():
         pytest.skip(f"Cosmos asset bundle missing at {ASSET_PATH}.")
-    if not COSMOS_CFG_PATH.exists():
-        pytest.skip(f"Cosmos config missing at {COSMOS_CFG_PATH}.")
+    if not CONFIGS_DIR.exists():
+        pytest.skip(f"configs dir missing at {CONFIGS_DIR}.")
     try:
         import cosmos_predict2  # noqa: F401
     except ImportError:
         pytest.skip("cosmos_predict2 not installed; run scripts/install_cosmos25.sh first.")
 
 
-def _load_cfg():
-    from omegaconf import OmegaConf
+def _load_cfg(*, variant: str = "joint_cross_attn"):
+    """Compose the model subtree of a Cosmos25 dual-system cfg via Hydra.
 
-    cfg = OmegaConf.load(str(COSMOS_CFG_PATH))
-    cfg.video_backbone.model_path = str(ASSET_PATH)
-    return cfg
+    Drives `model/backbone=cosmos25` the same way the CLI would, so the test
+    exercises the production composition path. Returns only `cfg.model`
+    because the per-test code below reaches into `cfg.video_backbone` /
+    `cfg.architecture` directly (legacy shape from when this helper loaded
+    the model yaml in isolation).
+    """
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
+    overrides = [
+        "model/backbone=cosmos25",
+        f"model.architecture.variant={variant}",
+        # Cosmos25 context_dim is 1024 — switch Wan's text_dim explicitly.
+        "model.action_backbone.text_dim=1024",
+        f"model.video_backbone.model_path={ASSET_PATH}",
+    ]
+    if variant == "joint_cross_attn":
+        # MVP cross-attn default: action self-attn 16×64 (≠ auto 16×128).
+        # joint_self_attn must auto-resolve to 16/128 for MoT parity.
+        overrides += [
+            "+model.action_backbone.num_heads=16",
+            "+model.action_backbone.attn_head_dim=64",
+        ]
+    with initialize_config_dir(version_base=None, config_dir=str(CONFIGS_DIR)):
+        cfg = compose(config_name="train", overrides=overrides)
+    return cfg.model
 
 
 def _make_stub_sample():
@@ -386,9 +410,10 @@ def test_cosmos25_train_smoke_ti2v_live_encoder_with_dropout(monkeypatch):
 
 
 def test_cosmos25_train_smoke_self_attn_ti2v(monkeypatch):
-    """§17 + §18 regression: ``dual_system_self_attn_cosmos25.yaml`` runs
-    one full forward+backward through ``MoTJointDriver`` against the real
-    28-block Cosmos25-2B network, with TI2V first-frame conditioning.
+    """§17 + §18 regression: dual_system + joint_self_attn on the Cosmos25
+    backbone runs one full forward+backward through ``MoTJointDriver``
+    against the real 28-block Cosmos25-2B network, with TI2V first-frame
+    conditioning.
 
     Locks in the contract that:
 
@@ -406,16 +431,11 @@ def test_cosmos25_train_smoke_self_attn_ti2v(monkeypatch):
       is called with ``skip_first=True``.
     """
     _skip_unless_runnable()
-    if not COSMOS_SELF_ATTN_CFG_PATH.exists():
-        pytest.skip(f"self-attn config missing at {COSMOS_SELF_ATTN_CFG_PATH}")
-
-    from omegaconf import OmegaConf
 
     import openwam.utils as _utils_mod
     from openwam.model import build_architecture, resolve_architecture_config
 
-    cfg = OmegaConf.load(str(COSMOS_SELF_ATTN_CFG_PATH))
-    cfg.video_backbone.model_path = str(ASSET_PATH)
+    cfg = _load_cfg(variant="joint_self_attn")
     resolved = resolve_architecture_config(cfg)
     arch = build_architecture(resolved.registry_name, resolved.params)
 

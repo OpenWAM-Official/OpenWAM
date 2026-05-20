@@ -39,7 +39,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from omegaconf import OmegaConf
+from hydra import compose, initialize_config_dir
+from hydra.core.global_hydra import GlobalHydra
 
 pytestmark = pytest.mark.gpu
 
@@ -47,7 +48,7 @@ pytestmark = pytest.mark.gpu
 ASSET_PATH = Path(os.environ.get("COSMOS25_ASSET_PATH", "/path/to/assets/Cosmos-Predict2.5-2B"))
 REASON1_PATH = Path(os.environ.get("COSMOS_REASON1_PATH", "/path/to/assets/Cosmos-Reason1-7B"))
 REPO_ROOT = Path(__file__).resolve().parents[1]
-COSMOS_CFG_PATH = REPO_ROOT / "configs" / "model" / "dual_system_cosmos25.yaml"
+CONFIGS_DIR = REPO_ROOT / "configs"
 
 
 def _skip_unless_runnable():
@@ -57,28 +58,43 @@ def _skip_unless_runnable():
         pytest.skip(f"Cosmos asset bundle missing at {ASSET_PATH}.")
     if not REASON1_PATH.exists():
         pytest.skip(f"Cosmos-Reason1-7B bundle missing at {REASON1_PATH}.")
-    if not COSMOS_CFG_PATH.exists():
-        pytest.skip(f"Cosmos config missing at {COSMOS_CFG_PATH}.")
+    if not CONFIGS_DIR.exists():
+        pytest.skip(f"configs dir missing at {CONFIGS_DIR}.")
     try:
         import cosmos_predict2  # noqa: F401
     except ImportError:
         pytest.skip("cosmos_predict2 not installed; run scripts/install_cosmos25.sh first.")
 
 
-def _build_train_cfg() -> "OmegaConf":
-    """Build a minimal Hydra-style config dict the deploy loader can rehydrate.
+def _build_train_cfg():
+    """Compose a Hydra cfg with the Cosmos25 backbone + reason1_live encoder.
 
-    The deploy loader (``load_from_checkpoint_dir``) reads
+    Drives the same `model/backbone=cosmos25` group switch the CLI uses, so
+    this test exercises the production composition path end-to-end. The
+    deploy loader (``load_from_checkpoint_dir``) reads
     ``cfg.model.video_backbone.*`` for the arch build and
-    ``cfg.accelerate.mixed_precision`` for the target dtype.
-    ``cfg.dataloader`` is read only for normalizer wiring — omitting it
-    is fine (``_build_action_normalizer`` returns None on absent config).
+    ``cfg.accelerate.mixed_precision`` for the target dtype — both of which
+    flow through Hydra defaults (model=dual_system + accelerate=deepspeed_zero2).
     """
-    model_cfg = OmegaConf.load(str(COSMOS_CFG_PATH))
-    model_cfg.video_backbone.model_path = str(ASSET_PATH)
-    model_cfg.video_backbone.text_encoder = "reason1_live"
-    model_cfg.video_backbone.text_encoder_path = str(REASON1_PATH)
-    cfg = OmegaConf.create({"model": model_cfg, "accelerate": {"mixed_precision": "bf16"}})
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
+    overrides = [
+        "model/backbone=cosmos25",
+        "model.architecture.variant=joint_cross_attn",
+        # Cosmos25 context_dim is 1024 — switch Wan's text_dim explicitly.
+        "model.action_backbone.text_dim=1024",
+        # MVP joint_cross_attn: action self-attn 16×64 (≠ auto 16×128).
+        "+model.action_backbone.num_heads=16",
+        "+model.action_backbone.attn_head_dim=64",
+        # Test-specific: point at real asset paths + flip live encoder on.
+        f"model.video_backbone.model_path={ASSET_PATH}",
+        "model.video_backbone.text_encoder=reason1_live",
+        f"model.video_backbone.text_encoder_path={REASON1_PATH}",
+        # Pin mixed_precision regardless of the accelerate default.
+        "accelerate.mixed_precision=bf16",
+    ]
+    with initialize_config_dir(version_base=None, config_dir=str(CONFIGS_DIR)):
+        cfg = compose(config_name="train", overrides=overrides)
     return cfg
 
 
@@ -86,7 +102,7 @@ def test_cosmos25_deploy_round_trip_reason1_in_safetensors(tmp_path, caplog):
     'Public implementation.'
     _skip_unless_runnable()
 
-    from omegaconf import open_dict
+    from omegaconf import OmegaConf, open_dict
 
     from openwam.deploy.model_loader import load_from_checkpoint_dir
     from openwam.model import build_architecture, resolve_architecture_config

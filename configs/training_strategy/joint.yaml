@@ -1,16 +1,31 @@
 # Joint video+action training — both streams active
 lambda_video: 1.0
 lambda_action: 1.0
+# freeze_modules() (openwam/model/base.py) walks each entry via
+# nn.Module.get_submodule(); unknown / missing dotted paths are silently
+# skipped, so backbone-specific entries cohabit harmlessly. Wan and Cosmos25
+# expose different submodule trees — annotations below mark which backbone
+# each path targets. The Cosmos25 inner-module registration trick lives in
+# Cosmos25PipelineWrapper (pipeline_wrapper.py:104, 118).
 freeze:
-  - video_backbone._pipe.text_encoder
-  - video_backbone._pipe.vae
+  # --- Wan backbones (wan22_ti2v_5b / wan21_*) ---
+  - video_backbone._pipe.text_encoder   # Wan text encoder (nn.Module). Cosmos25: plain object → no-op.
+  - video_backbone._pipe.vae            # Wan VAE (nn.Module). Cosmos25: plain object → no-op (see _vae_inner below).
   # External-encoder path (video_backbone.from_scratch=true with a yaml
   # encoder block): pipe.vae is None and the line above is silently
   # skipped, so we list the swap-in encoder directly. On the native path
   # _encoder is None / unset and this line is the one silently skipped.
   - video_backbone._encoder
-  # I2V-only CLIP-H first-frame encoder (~4.7GB). On TI2V/VACE the attribute
-  # is None and freeze_modules() silently skips it (base.py:352).
-  - video_backbone._pipe.image_encoder
-  # Tri-system only; ignored by architectures without a VLM backbone.
-  - vlm_backbone.vlm_model
+  - video_backbone._pipe.image_encoder  # Wan I2V CLIP-H (~4.7 GB); None on TI2V/VACE; absent on Cosmos25 → no-op.
+
+  # --- Cosmos25 backbone (cosmos25_predict_2b) ---
+  # These three are cosmos25-only. On Wan the attributes don't exist and
+  # freeze_modules() silently skips them (base.py:516-519). MVP scope: Cosmos
+  # is fully frozen (action branch + bridges train) — override this list in
+  # a separate training_strategy yaml if you ever want a trainable Cosmos DiT.
+  - video_backbone._pipe.net            # Cosmos25 DiT (nn.Module). Wan DiT lives at _pipe.dit and is intentionally TRAINED.
+  - video_backbone._pipe._vae_inner     # Cosmos25 WanVAE_ inner module (~485 MB); always present when vae=wan2pt1.
+  - video_backbone._pipe._reason1_inner # Cosmos25 Qwen2.5-VL inner (~16 GB); only present when text_encoder=reason1_live, else no-op.
+
+  # --- Tri-system only ---
+  - vlm_backbone.vlm_model              # Ignored by architectures without a VLM backbone.

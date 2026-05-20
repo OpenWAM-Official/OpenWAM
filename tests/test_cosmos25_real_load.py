@@ -51,7 +51,6 @@ def test_real_load_block_loop_preserves_shape(sac_mode):
             "model_path": str(ASSET_PATH),
             "model_variant": "base/post-trained",
             "text_encoder": "none",
-            "freeze": True,
             "sac_mode": sac_mode,
         }
     }
@@ -114,7 +113,6 @@ def _build_backbone_with_real_vae():
             "model_variant": "base/post-trained",
             "text_encoder": "none",
             "vae": "wan2pt1",
-            "freeze": True,
             "sac_mode": "none",
         }
     }

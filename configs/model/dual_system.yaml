@@ -1,5 +1,5 @@
 # Dual-System WAM Architecture
-# Separate ActionDiT paired with the video DiT. Three variants:
+# Separate ActionDiT paired with a video DiT. Three variants:
 #   - joint_cross_attn: video runs to completion → bridge features captured
 #     at configured layers → ActionDiT runs once with cross-attention to those
 #     features. The two streams interact only through the bridge.
@@ -9,24 +9,23 @@
 #     identical num_layers / num_heads / head_dim across the two backbones.
 #   - idm: FastWAM-IDM style teacher-forcing training, then two-stage inference:
 #     denoise video first and use frozen video K/V while denoising actions.
+#     COSMOS25-ONLY NOTE: idm is Wan-only — Cosmos25 supports joint_cross_attn
+#     and joint_self_attn (§17), but not idm.
 #
-# Video backbone is configured inline in the `video_backbone:` block at the
-# bottom of this file. Default is Wan 2.2 TI2V-5B. To switch, either edit
-# `video_backbone.name` / `video_backbone.model_path` here, or override on CLI:
-#   bash scripts/train.sh model=dual_system \
-#       model.video_backbone.name=wan21_vace_1_3b \
-#       model.video_backbone.model_path=/path/to/Wan2.1-VACE-1.3B
-# IMPORTANT: `name` is only used for registry dispatch (all wan variants share
-# one adapter); the actual backbone loaded is determined entirely by
-# `model_path`. CLI overrides must update BOTH fields together — overriding
-# only `name` silently loads whatever `model_path` still points at. A
-# normalize-and-match cross-check in `build_training_pipeline` logs a WARNING
-# on mismatch but does not abort.
+# Video backbone is composed from the Hydra `backbone` group at
+# `configs/model/backbone/`. Default is Wan (configs/model/backbone/wan.yaml,
+# wan22_ti2v_5b inside). Switch via CLI:
+#   bash scripts/train.sh model=dual_system model/backbone=cosmos25
+# Per-backbone fields and switching notes live inside each group yaml.
+
+defaults:
+  - backbone: wan        # default; CLI: model/backbone=cosmos25
+  - _self_               # framework-level fields below override group defaults if any clash
 
 architecture:
   # Common dual-system selector and data-shape knobs.
   framework: dual_system
-  variant: joint_self_attn   # joint_self_attn or joint_cross_attn or idm
+  variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm (idm = Wan only)
   action_dim: 20
 
   # Proprioceptive state conditioning.
@@ -46,6 +45,8 @@ architecture:
   #   (b) Interval mode:  set bridge_layers: null and use bridge_interval.
   #       - interval=1 → all inferred video DiT layers
   #       - interval=2 → every other inferred layer
+  # COSMOS25-ONLY NOTE: on Cosmos25 (28 blocks), interval=1 yields 28 ActionDiT
+  # layers — matches the MoT per-layer parity requirement for joint_self_attn.
   bridge_layers: null
   bridge_interval: 1
 
@@ -104,10 +105,19 @@ architecture:
 #                    attention). joint_cross_attn does not require parity but
 #                    defaults to vb for apples-to-apples; CLI overrides accepted.
 #   - attn_head_dim: auto from video_backbone.head_dim, same parity rule.
-# As a result you no longer need to write these in the yaml — switching the
-# video_backbone alone reshapes the action head correctly. Override on the CLI
-# only for intentional ablations. Because these fields are no longer present in
-# the yaml, Hydra struct mode requires `+` (append) instead of plain assign:
+#   - text_dim     : auto from video_backbone.context_dim (see
+#                    BaseWAMModel._resolve_text_dim). For Wan T5-XXL the
+#                    default 4096 below matches video_backbone.context_dim
+#                    exactly — kept explicit for legibility. COSMOS25-ONLY
+#                    NOTE: override on CLI when switching to cosmos25
+#                    (`model.action_backbone.text_dim=1024`). Cosmos25's
+#                    context_dim is 1024, not Wan's 4096 — leaving 4096 in
+#                    place silently overrides the auto-resolve and crashes
+#                    the action expert's context embedding with a shape
+#                    mismatch.
+# Because the auto-resolve fields are not present in the yaml, Hydra struct
+# mode requires `+` (append) instead of plain assign for cosmos25 cross-attn
+# overrides:
 #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
 #
 # FastWAM-Joint heterogeneous-hidden layout: action residual stream is narrower
@@ -117,57 +127,23 @@ architecture:
 # accepts the same fields so the two variants can be compared apples-to-apples
 # — only the inter-modality coupling differs.
 #   - dim     : action residual hidden dim
-#   - text_dim: raw Wan/FastWAM text/proprio context dim before the action
-#               expert's own context embedding
+#   - text_dim: raw text/proprio context dim before the action expert's own
+#               context embedding
 #   - ffn_dim : action expert FFN intermediate dim
 # Action expert param count at the default setup: ~1.0B (vs ~5.0B video expert
 # on TI2V-5B).
 action_backbone:
   dim: 1024
-  text_dim: 4096
+  text_dim: 4096       # Wan T5-XXL context dim. COSMOS25-ONLY: override to 1024 via CLI.
   ffn_dim: 4096
-
-# Video backbone. Default: Wan 2.2 TI2V-5B.
-#
-# DiT geometry per backbone (auto-consumed by the architecture; no need to
-# mirror in this yaml):
-#   - wan22_ti2v_5b     : dim=3072, num_heads=24, head_dim=128, num_layers=30
-#   - wan21_vace_1_3b   : dim=1536, num_heads=12, head_dim=128, num_layers=30
-#   - wan21_i2v_14b_480p: dim=5120, num_heads=40, head_dim=128, num_layers=40
-#
-# Resolution: any height/width with height % 32 == 0 and width % 32 == 0 for
-# wan22_ti2v_5b; VACE-1.3B only supports 480x832 or 720x1280; I2V-14B-480P
-# expects 480x832 first-frame conditioning. Actual training resolution is set
-# by the dataloader config.
-#
-# `from_scratch: true` keeps the Wan DiT structure but discards the loaded DiT
-# weights and re-initializes them from PyTorch defaults. VAE and text encoder
-# still load pretrained weights and are frozen by the training_strategy yaml.
-# Use this for "pretrained DiT vs from-scratch DiT" ablations. Reproducibility
-# is governed by `cfg.project.seed` (applied by OpenWAMTrainer before
-# architecture construction).
-#
-# To switch backbones, comment out the default `name` + `model_path` below and
-# uncomment ONE alternative pair below. Keep `name` and `model_path` paired —
-# overriding only one of them on the CLI silently loads the wrong backbone
-# (see "IMPORTANT" note at the top of this file).
-# Tested alternatives (uncomment as a pair):
-#   # name: wan21_vace_1_3b
-#   # model_path: /path/to/Wan2.1-VACE-1.3B
-#
-#   # name: wan21_i2v_14b_480p
-#   # model_path: /path/to/weights/Wan2.1-I2V-14B-480P
-video_backbone:
-  name: wan22_ti2v_5b
-  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
-  from_scratch: false
-  # External encoder swap. Only consumed when from_scratch=true; when
-  # from_scratch=false the block is silently ignored (an INFO log is emitted
-  # so users debugging can find the answer). Default `wan_vae` reproduces
-  # the native pipe.vae path bit-for-bit (the default hooks on VideoEncoder
-  # produce Wan-original Conv3d/Linear shapes). To swap in a non-VAE
-  # encoder, change `name` to a registered alternative and update
-  # `model_path` to its weights directory — see docs/external_video_encoder.md.
-  encoder:
-    name: wan_vae
-    model_path: /path/to/Wan2.2-TI2V-5B
+  # COSMOS25-ONLY default for variant=joint_cross_attn. Cosmos25 has
+  # num_heads=16, head_dim=128 — auto-resolve sizes the action self-attention
+  # space to 16×128=2048, but the action residual stream is only 1024 wide
+  # so a 2048-d attention wastes Q/K/V/output_proj compute. The MVP cross-attn
+  # default pins 16×64=1024 (matches residual hidden), halving action-side
+  # self-attention compute. Cross-attention to the 1024-d video context is
+  # unaffected. Append on CLI for joint_cross_attn on Cosmos25:
+  #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
+  # DO NOT append these for joint_self_attn — MoT mixed attention requires
+  # per-layer parity with cosmos25 (16/128), so the action side must
+  # auto-resolve to 16×128.
