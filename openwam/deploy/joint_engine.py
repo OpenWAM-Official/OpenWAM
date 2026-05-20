@@ -1,8 +1,10 @@
 """Joint video-action inference engine using package-native generation code."""
 
+import hashlib
 import logging
 import os
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -108,6 +110,129 @@ class JointInferenceEngine(BaseInferenceEngine):
                 cache_maxsize = int(getattr(cache_cfg, "maxsize", cache_maxsize))
         self._prompt_embed_cache = _BoundedPromptEmbedCache(maxsize=cache_maxsize)
 
+        # §15 — Classifier-Free Guidance (Cosmos25 only today; Wan keeps its
+        # own pipeline-internal CFG path). When `cfg_scale > 1.0` the engine
+        # resolves an uncond embedding once at init time (offline
+        # `empty.safetensors` if `text_embedding_cache_dir` is set; otherwise
+        # falls back to the backbone's live encoder via the adapter).
+        inf_cfg = getattr(self.cfg, "inference", None)
+        self._cfg_scale: float = float(getattr(inf_cfg, "cfg_scale", 1.0)) if inf_cfg else 1.0
+        self._cfg_merge: bool = bool(getattr(inf_cfg, "cfg_merge", False)) if inf_cfg else False
+        cache_dir_raw = getattr(inf_cfg, "text_embedding_cache_dir", None) if inf_cfg else None
+        self._text_embedding_cache_dir: Optional[Path] = Path(str(cache_dir_raw)) if cache_dir_raw is not None else None
+        self._uncond_pre_encoded_text: Optional[torch.Tensor] = None
+        if self._cfg_scale < 1.0:
+            raise ValueError(f"inference.cfg_scale must be >= 1.0; got {self._cfg_scale}.")
+        if self._cfg_scale > 1.0:
+            self._uncond_pre_encoded_text = self._resolve_uncond_pre_encoded_text()
+            logger.info(
+                "CFG enabled: cfg_scale=%.3f cfg_merge=%s uncond_source=%s",
+                self._cfg_scale,
+                self._cfg_merge,
+                "empty.safetensors" if self._uncond_pre_encoded_text is not None else "live encoder",
+            )
+
+    def _arch_dtype_device(self) -> tuple:
+        """Return (dtype, device) of the wrapped architecture, with sensible defaults."""
+        dtype = getattr(self.architecture, "dtype", torch.bfloat16)
+        device = getattr(self.architecture, "device", torch.device("cuda:0"))
+        if isinstance(device, str):
+            device = torch.device(device)
+        return dtype, device
+
+    def _load_pre_encoded_text_safetensors(self, path: Path) -> torch.Tensor:
+        """Load a single ``.safetensors`` cache file into a tensor on arch dtype/device.
+
+        Accepts either ``"pre_encoded_text"`` or the first stored tensor as the
+        payload (older precompute outputs used different key names; mirror that
+        tolerance so a re-run isn't required when keys drift).
+        """
+        from safetensors.torch import load_file
+
+        sf = load_file(str(path))
+        tensor = sf.get("pre_encoded_text")
+        if tensor is None and sf:
+            tensor = next(iter(sf.values()))
+        if tensor is None:
+            raise ValueError(f"{path} contains no readable tensor (expected key 'pre_encoded_text').")
+        # The precompute writer (`reason1_embedding_computation._project_to_postproj`)
+        # `.squeeze(0)`s a `(1, L, D)` tensor to 2D `(L, D)` before saving. Every
+        # downstream consumer (pipeline_wrapper preprocess, _build_uncond_context,
+        # _append_proprio_context_token) assumes 3D `(B, L, D)`. The training path
+        # `base.py:_compute_proprio_state_and_context` already normalises via a
+        # `ndim==2 → stack` step (base.py:687-706); deploy has no equivalent until
+        # here. Restore the batch axis at the cache/inference boundary so existing
+        # 2D safetensors caches stay readable without a rewrite.
+        if tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0)
+        dtype, device = self._arch_dtype_device()
+        return tensor.to(device=device, dtype=dtype)
+
+    def _backbone_has_live_text_encoder(self) -> bool:
+        vb = getattr(self.architecture, "video_backbone", None)
+        pipe = getattr(vb, "_pipe", None)
+        return getattr(pipe, "text_encoder", None) is not None
+
+    def _resolve_uncond_pre_encoded_text(self) -> Optional[torch.Tensor]:
+        """Find the unconditional embedding once at engine init.
+
+        Mirrors the cond precedence: ``empty.safetensors`` in
+        ``text_embedding_cache_dir`` wins; otherwise return ``None`` and rely
+        on the backbone's live encoder via the adapter (``_build_uncond_context``
+        in cosmos25 adapter falls through to ``text_encoder("")``).
+        """
+        if self._text_embedding_cache_dir is not None:
+            empty_path = self._text_embedding_cache_dir / "empty.safetensors"
+            if not empty_path.exists():
+                raise FileNotFoundError(
+                    f"inference.cfg_scale={self._cfg_scale} > 1.0 with "
+                    f"text_embedding_cache_dir={self._text_embedding_cache_dir} but "
+                    f"{empty_path} does not exist. Re-run precompute "
+                    f"(docs/cosmos25_backbone.md §10.4 step ②) so the empty embedding "
+                    f"lands alongside per-prompt caches, or unset "
+                    f"inference.text_embedding_cache_dir to fall back to the live encoder."
+                )
+            return self._load_pre_encoded_text_safetensors(empty_path)
+        if not self._backbone_has_live_text_encoder():
+            raise RuntimeError(
+                f"inference.cfg_scale={self._cfg_scale} > 1.0 but no uncond source available. "
+                "Either set `inference.text_embedding_cache_dir` to a directory containing "
+                "`empty.safetensors`, or build the checkpoint with "
+                "`video_backbone.text_encoder=reason1_live` so the adapter can use the live "
+                "encoder on the empty prompt."
+            )
+        return None
+
+    def _load_pre_encoded_text_for_prompt(self, prompt: str) -> Optional[torch.Tensor]:
+        """Resolve ``<sha256(prompt)>.safetensors`` in the configured cache dir.
+
+        Returns ``None`` when the cache dir is unset OR the prompt has no
+        per-prompt file (engine falls back to live encoder via adapter, if
+        configured). When the cache dir IS set but the file is missing, we
+        deliberately don't fall back silently — re-raise instead so the user
+        notices the mismatch before model output drift goes undetected.
+        """
+        if self._text_embedding_cache_dir is None:
+            return None
+        sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        cache_path = self._text_embedding_cache_dir / f"{sha}.safetensors"
+        if not cache_path.exists():
+            if self._backbone_has_live_text_encoder():
+                # cache_dir set but file missing AND live encoder available —
+                # treat as a hard miss so the user knows to extend their cache,
+                # rather than silently mixing cache+live sources per prompt
+                # (which would defeat the precompute determinism guarantee).
+                raise FileNotFoundError(
+                    f"text_embedding_cache_dir is set but no cache exists for prompt "
+                    f"sha256={sha[:12]}... ({cache_path}). Add this prompt to the "
+                    f"precompute set or unset text_embedding_cache_dir to use the "
+                    f"live encoder."
+                )
+            # No live fallback either; return None and let the backbone
+            # raise a clear error downstream.
+            return None
+        return self._load_pre_encoded_text_safetensors(cache_path)
+
     @torch.no_grad()
     def generate(self, conditions: dict) -> dict:
         """Generate video and/or actions from conditions.
@@ -199,9 +324,16 @@ class JointInferenceEngine(BaseInferenceEngine):
             )
         )
 
+        # §15 — Cosmos25 cache-mode pre_encoded_text resolution. Wan never
+        # reads this kwarg (its prepare_inputs_for_inference signature has no
+        # `pre_encoded_text`); the architecture-level `generate()` only forwards
+        # the kwarg to the backbone when it is non-None, so Wan stays untouched.
+        prompt = conditions.get("prompt", "")
+        cached_pre_encoded_text = self._load_pre_encoded_text_for_prompt(prompt)
+
         result = self.architecture.generate(
             schedule=schedule,
-            prompt=conditions.get("prompt", ""),
+            prompt=prompt,
             vace_video=conditions.get("vace_video", None),
             first_frame_image=conditions.get("first_frame_image", None),
             num_frames=video_num_frames,
@@ -219,6 +351,10 @@ class JointInferenceEngine(BaseInferenceEngine):
             vace_cache=self._vace_cache,
             prompt_embed_cache=self._prompt_embed_cache,
             proprio_state=proprio_state,
+            cfg_scale=self._cfg_scale,
+            cfg_merge=self._cfg_merge,
+            pre_encoded_text=cached_pre_encoded_text,
+            uncond_pre_encoded_text=self._uncond_pre_encoded_text,
         )
 
         # Attach optimization stats if profiling

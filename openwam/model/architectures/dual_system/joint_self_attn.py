@@ -51,7 +51,8 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
-        self._init_proprio_context(cfg, text_dim=int(cfg.get("text_dim", 4096)))
+        text_dim = self._resolve_text_dim(cfg)
+        self._init_proprio_context(cfg, text_dim=text_dim)
 
         # FastWAM-Joint compat: action residual hidden_dim may differ from
         # video_dim. The MoT driver only requires num_heads / attn_head_dim
@@ -59,7 +60,6 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         action_dim_hidden = int(cfg.get("dim", 1024))
         num_heads = int(cfg.get("num_heads", 24))
         attn_head_dim = int(cfg.get("attn_head_dim", video_dim // num_heads))
-        text_dim = int(cfg.get("text_dim", 4096))
 
         self.action_backbone = ActionDiT(
             action_dim=int(cfg.get("action_dim", 20)),

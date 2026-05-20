@@ -118,12 +118,40 @@ def load_from_checkpoint_dir(
     if vb_components is not None:
         logger.info("Using config-embedded component specs for video-backbone construction")
         vb_cfg_dict = OmegaConf.to_container(cfg.model.video_backbone, resolve=True)
+        # Cosmos25 Reason1 self-containment: when the ckpt was saved with the
+        # ``_reason1_inner`` registration enabled, its weights live in the
+        # unified safetensors and the small structural artifacts
+        # (config.json + tokenizer.json) live under ``<ckpt_dir>/reason1/``.
+        # Clearing ``text_encoder_path`` on that branch makes
+        # ``build_cosmos25_pipeline`` take its deploy/empty-shell path
+        # (``pipeline_builder.py`` Reason1 construction site). For old ckpts
+        # without the ``reason1/`` artifact dir we leave the original
+        # ``text_encoder_path`` intact so the live encoder still loads from
+        # the external Cosmos-Reason1 bundle (backward compat).
+        reason1_artifact_dir = os.path.join(ckpt_dir, "reason1")
+        if os.path.isdir(reason1_artifact_dir) and vb_cfg_dict.get("text_encoder") == "reason1_live":
+            prev_path = vb_cfg_dict.get("text_encoder_path")
+            vb_cfg_dict["text_encoder_path"] = None
+            logger.info(
+                "Using self-contained Reason1 artifacts from %s (clearing external text_encoder_path=%r)",
+                reason1_artifact_dir,
+                prev_path,
+            )
         vb_params["_source"] = vb_cfg_dict
         vb_params["_ckpt_dir"] = ckpt_dir
     else:
         model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
         if model_path is not None:
-            vb_params["_source"] = str(model_path)
+            vb_name = str(OmegaConf.select(cfg, "model.video_backbone.name", default=""))
+            if vb_name.startswith("cosmos25_"):
+                # Cosmos carries fields (`flow_shift`, `model_variant`,
+                # `text_encoder`) that the path-only string source would
+                # lose. Pass the full vb dict — Cosmos's
+                # `_video_backbone_cfg` handles dicts natively and Wan never
+                # hits this branch.
+                vb_params["_source"] = {k: v for k, v in vb_params.items() if not str(k).startswith("_")}
+            else:
+                vb_params["_source"] = str(model_path)
         else:
             logger.warning(
                 "No components or model_path in config; architecture __init__ will attempt to build from config."

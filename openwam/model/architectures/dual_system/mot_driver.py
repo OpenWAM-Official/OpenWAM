@@ -423,10 +423,13 @@ class MoTJointDriver:
         step-level activation checkpointing — see the class docstring of
         :meth:`step` for memory/compute trade-offs.
         """
-        # Resolve sequence shapes from one upfront pre_attn at layer 0 — the
-        # driver doesn't need to know each backbone's internal embedding
-        # layout, just the resulting Q seq lengths and tokens-per-frame.
-        s_video = vstate.x.shape[1]
+        # Resolve sequence shapes from the backbone-populated f/h/w fields.
+        # ``vstate.x.shape[1]`` is identical to ``f*h*w`` for backbones that
+        # carry a 3D ``(B, S, D)`` state (Wan), but for backbones whose
+        # ``state.x`` is natively 5D ``(B, T, H, W, D)`` (Cosmos25) ``shape[1]``
+        # is just ``T`` — wrong. Going through f/h/w is the only formulation
+        # that works for both layouts.
+        s_video = int(vstate.f) * int(vstate.h) * int(vstate.w)
         payload = astate.payload
         if payload is None or not hasattr(payload, "x_action"):
             raise RuntimeError(

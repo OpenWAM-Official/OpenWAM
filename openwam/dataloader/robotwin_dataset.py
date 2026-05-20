@@ -321,6 +321,8 @@ class RoboTwinDataset(BaseActionDataset):
         filter_static_segments: bool = True,
         static_segment_threshold: float = 1e-5,
         max_static_retry: int = 3,
+        text_embedding_cache_dir: Optional[str] = None,
+        text_embedding_dropout: float = 0.0,
     ):
         super().__init__()
         self.robot = robot
@@ -635,6 +637,26 @@ class RoboTwinDataset(BaseActionDataset):
         elif split == "val":
             print(f"  Val: exhaustive windows ({len(self._window_index)} samples)")
 
+        # ---- Optional pre-encoded text cache (e.g. Cosmos-Reason1 for the
+        # Cosmos25 backbone, pre-computed via
+        # ``openwam.dataloader.reason1_embedding_computation``). When the
+        # cache_dir is set, every sample dict will carry a
+        # ``pre_encoded_text`` (L, D) tensor that the architecture threads to
+        # ``vb.preprocess_input``. Wan backbones drop it silently via ``**kw``.
+        self._text_embedding_transform = None
+        if text_embedding_cache_dir:
+            from openwam.dataloader.transforms.text_embedding_cache import (
+                TextEmbeddingCacheTransform,
+            )
+
+            self._text_embedding_transform = TextEmbeddingCacheTransform(
+                cache_dir=text_embedding_cache_dir,
+                dropout_p=float(text_embedding_dropout),
+            )
+            # Eval split: deterministic (no dropout). Train: random per call.
+            if split != "train":
+                self._text_embedding_transform.eval()
+
     @property
     def action_dim(self) -> int:
         return self._action_dim_value
@@ -907,6 +929,8 @@ class RoboTwinDataset(BaseActionDataset):
                     break
 
         sample.pop("_is_static", None)
+        if self._text_embedding_transform is not None:
+            sample = self._text_embedding_transform.apply(sample)
         return sample
 
 
@@ -1000,6 +1024,8 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             filter_static_segments=bool(_get("filter_static_segments", True)),
             static_segment_threshold=float(_get("static_segment_threshold", 1e-5)),
             max_static_retry=int(_get("max_static_retry", 3)),
+            text_embedding_cache_dir=_get("text_embedding_cache_dir", None),
+            text_embedding_dropout=float(_get("text_embedding_dropout", 0.0)),
         )
 
     def __init__(

@@ -94,14 +94,18 @@ def build_video_backbone(
 # Built-in registrations
 # ---------------------------------------------------------------------------
 
+from openwam.model.video_backbone.cosmos25.adapter import Cosmos25VideoBackbone  # noqa: E402
 from openwam.model.video_backbone.wan_adapter import WanVideoBackbone  # noqa: E402
 
 register_video_backbone("wan22_ti2v_5b")(WanVideoBackbone)
 register_video_backbone("wan21_vace_1_3b")(WanVideoBackbone)
 register_video_backbone("wan21_i2v_14b_480p")(WanVideoBackbone)
+register_video_backbone("cosmos25_predict_2b")(Cosmos25VideoBackbone)
+register_video_backbone("cosmos25_predict_14b")(Cosmos25VideoBackbone)
 
 __all__ = [
     "BlockLoopState",
+    "Cosmos25VideoBackbone",
     "VideoBackbone",
     "WanVideoBackbone",
     "build_video_backbone",

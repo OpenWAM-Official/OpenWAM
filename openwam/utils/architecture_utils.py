@@ -11,40 +11,60 @@ VAE_TEMPORAL_FACTOR = 4
 
 
 def downsample_video_mask_to_latent(
-    video_is_pad: torch.Tensor, *, temporal_factor: int = VAE_TEMPORAL_FACTOR
+    video_is_pad: torch.Tensor,
+    *,
+    temporal_factor: int = VAE_TEMPORAL_FACTOR,
+    skip_first: bool = True,
 ) -> torch.Tensor:
     """Downsample frame-level padding mask to VAE latent temporal dimension.
 
-    Following FastWAM: separate frame 0 (conditioning, excluded from loss),
-    then group the tail frames by ``temporal_factor``. A latent step is
+    Wan2pt1-family causal VAEs encode frame 0 into latent[0] alone, then
+    group the remaining tail frames by ``temporal_factor``. A latent step is
     padded only if ALL frames in the group are padded.
 
-    The returned mask covers tail latent steps only (frame 0 excluded),
-    matching the loss which trims pred/target via ``[:, :, 1:]``.
+    Modes:
+      - ``skip_first=True`` (FastWAM / Wan TI2V): latent[0] is the conditioning
+        frame and excluded from loss; the returned mask covers tail latent
+        steps only (shape ``T_latent_tail = ceil((T_video - 1) / k)``). This
+        matches the Wan loss path which trims pred/target via ``[:, :, 1:]``.
+      - ``skip_first=False`` (Cosmos T2V, no first-frame conditioning): all
+        latents — including latent[0] — are predicted, so the mask must
+        include frame 0 too (shape ``T_latent = 1 + T_latent_tail``).
 
     Args:
-        video_is_pad: (..., T_video) bool, True=padded. The leading dims are
-            preserved (typically ``(B, T_video)``).
-        temporal_factor: VAE temporal compression factor.
+        video_is_pad: (..., T_video) bool, True=padded.
+        temporal_factor: VAE temporal compression factor for the tail.
+        skip_first: whether latent[0] is excluded from the loss (default True
+            for Wan compatibility).
 
     Returns:
-        (..., T_latent_tail) bool mask where
-        T_latent_tail = ceil((T_video - 1) / temporal_factor).
+        (..., T_latent_out) bool mask, where ``T_latent_out`` is either
+        ``T_latent_tail`` (skip_first=True) or ``1 + T_latent_tail``.
     """
     T = video_is_pad.shape[-1]
-    if T <= 1:
-        leading_shape = video_is_pad.shape[:-1]
-        return torch.zeros((*leading_shape, 0), dtype=torch.bool, device=video_is_pad.device)
+    leading_shape = video_is_pad.shape[:-1]
+    if T == 0:
+        return video_is_pad
+
+    first_latent_mask = video_is_pad[..., 0:1]  # (..., 1)
+
+    if T == 1:
+        if skip_first:
+            return torch.zeros((*leading_shape, 0), dtype=torch.bool, device=video_is_pad.device)
+        return first_latent_mask
 
     tail_is_pad = video_is_pad[..., 1:]
     T_tail = tail_is_pad.shape[-1]
     pad_len = (temporal_factor - T_tail % temporal_factor) % temporal_factor
     if pad_len > 0:
-        leading_shape = tail_is_pad.shape[:-1]
         pad_block = torch.ones((*leading_shape, pad_len), dtype=torch.bool, device=tail_is_pad.device)
         tail_is_pad = torch.cat([tail_is_pad, pad_block], dim=-1)
     grouped = tail_is_pad.view(*tail_is_pad.shape[:-1], -1, temporal_factor)
-    return grouped.all(dim=-1)
+    tail_latent_mask = grouped.all(dim=-1)
+
+    if skip_first:
+        return tail_latent_mask
+    return torch.cat([first_latent_mask, tail_latent_mask], dim=-1)
 
 
 def resolve_bridge_layers(cfg: Any, *, num_layers: Optional[int] = None) -> tuple:

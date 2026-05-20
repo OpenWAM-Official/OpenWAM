@@ -266,11 +266,14 @@ class _MockVideoBackbone(VideoBackbone):
         return state, action_tokens
 
     def preprocess_input(self, *, frames=None, text=None, **kw):
+        # ``first_frame_latents`` puts the test on the Wan TI2V path
+        # (latent[0] = conditioning, loss + mask both skip it).
         return {
             "input_latents": torch.randn(1, 16, 3, 8, 8),
             "context": torch.randn(1, 4, self._dim),
             "context_mask": torch.ones(1, 4, dtype=torch.bool),
             "seq_lens": torch.ones(1, dtype=torch.long),
+            "first_frame_latents": torch.zeros(1, 16, 1, 8, 8),
         }
 
     def get_submodule(self, name):

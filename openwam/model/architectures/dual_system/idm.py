@@ -822,27 +822,27 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
         t0 = time.time()
 
-        prep_kwargs = {}
-        if tile_size is not None:
-            prep_kwargs["tile_size"] = tile_size
-        if tile_stride is not None:
-            prep_kwargs["tile_stride"] = tile_stride
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
+        from openwam.model.inference_inputs import InferenceInputs
+
         inputs_shared = vb.prepare_inputs_for_inference(
-            prompt,
-            vace_video=vace_video,
-            first_frame_image=first_frame_image,
-            num_frames=num_frames,
-            height=height,
-            width=width,
-            seed=seed,
-            tiled=tiled,
-            num_inference_steps=num_inference_steps,
-            shift=shift,
-            vace_cache=vace_cache,
-            prompt_embed_cache=prompt_embed_cache,
-            **prep_kwargs,
+            InferenceInputs(
+                prompt=prompt,
+                vace_video=vace_video,
+                first_frame_image=first_frame_image,
+                num_frames=num_frames,
+                height=height,
+                width=width,
+                seed=seed,
+                num_inference_steps=num_inference_steps,
+                shift=shift,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+                vace_cache=vace_cache,
+                prompt_embed_cache=prompt_embed_cache,
+            )
         )
 
         if profile:

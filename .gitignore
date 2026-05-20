@@ -50,7 +50,13 @@ wheels/
 share/python-wheels/
 previous_codebase/
 references/
-third_party/
+# third_party/ holds submodules (currently cosmos-predict2.5). Build outputs
+# and bytecode that the submodule produces locally should not contaminate it.
+third_party/**/*.pyc
+third_party/**/__pycache__/
+third_party/**/build/
+third_party/**/dist/
+third_party/**/*.egg-info/
 *.egg-info/
 .installed.cfg
 *.egg

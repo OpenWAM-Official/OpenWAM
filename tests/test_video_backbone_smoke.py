@@ -97,6 +97,53 @@ def test_wan_video_backbone_is_ti2v():
     assert adapter_b._is_ti2v is False
 
 
+def test_wan_adapter_needs_first_frame_skip_truth_table():
+    """``needs_first_frame_skip`` is True for any Wan config where ``latent[0]``
+    is unconditionally a conditioning frame: TI2V (``fuse_vae_embedding_in_latents``),
+    VACE (``self._pipe.vace`` non-None), or I2V (``self._dit.has_image_input``).
+    Future T2V (none of the three) returns False so ``latent[0]`` enters the loss.
+    """
+    from types import SimpleNamespace
+
+    from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+
+    def _make_adapter(*, ti2v=False, vace=False, image_input=False):
+        pipe = SimpleNamespace(
+            dit=SimpleNamespace(
+                seperated_timestep=ti2v,
+                fuse_vae_embedding_in_latents=ti2v,
+                has_image_input=image_input,
+            ),
+            vace=object() if vace else None,
+            use_unified_sequence_parallel=False,
+        )
+        return WanVideoBackbone(pipe)
+
+    assert _make_adapter(ti2v=True).needs_first_frame_skip is True
+    assert _make_adapter(vace=True).needs_first_frame_skip is True
+    assert _make_adapter(image_input=True).needs_first_frame_skip is True
+    # Future Wan T2V: no TI2V / no VACE / no image input → skip stays off.
+    assert _make_adapter().needs_first_frame_skip is False
+
+
+def test_video_backbone_abc_needs_first_frame_skip_default_false():
+    """The ABC default keeps every backbone that doesn't opt in OFF, so cosmos25
+    T2V (no override) treats ``latent[0]`` as a predicted frame in the loss."""
+    from openwam.model.video_backbone.adapter import VideoBackbone
+
+    # Property is defined on the ABC so we can read it off the class without
+    # instantiating (constructor needs subclass-specific kwargs).
+    descriptor = vars(VideoBackbone).get("needs_first_frame_skip")
+    assert descriptor is not None, "needs_first_frame_skip must be defined on VideoBackbone"
+
+    class _FakeBackbone:
+        # Reuse the descriptor through a minimal stand-in to verify the default
+        # without paying the ABC ``__init_subclass__`` machinery.
+        needs_first_frame_skip = descriptor
+
+    assert _FakeBackbone().needs_first_frame_skip is False
+
+
 def _build_tiny_wan_backbone(*, ti2v: bool):
     """Construct a minimal real WanVideoBackbone wrapping a CPU WanModel.
 

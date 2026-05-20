@@ -1,0 +1,58 @@
+# Dual-System (joint self-attention) WAM on Cosmos-Predict2.5
+#
+# Pairs the joint_self_attn ActionDiT with the Cosmos-Predict2.5 2B world-DiT
+# (§17). Cosmos remains fully frozen; the MoT driver runs one mixed
+# self-attention per layer over the concatenated [video, action] sequence,
+# split through `Cosmos25VideoBackbone.{pre,post}_attn_at_layer`. ActionDiT
+# layer/head geometry is auto-resolved from `video_backbone` (28 layers,
+# 16 heads, head_dim=128, video_dim=2048).
+#
+# Same text-context contract as `dual_system_cosmos25.yaml`: either
+# `text_encoder=reason1_live` or an offline `pre_encoded_text` cache wired
+# via `dataloader.text_embedding_cache_dir`. Synthetic-input plumbing was
+# removed in §16.
+
+architecture:
+  framework: dual_system
+  variant: joint_self_attn
+  action_dim: 20
+  use_proprioception: true
+  state_dim: 20
+
+  # MoTJointDriver requires per-layer parity: ActionDiT auto-builds 28 layers
+  # against Cosmos25's 28 blocks (see DualSystemSelfAttnArchitecture.__init__
+  # — `cfg.setdefault("num_dit_layers", self.video_backbone.num_layers)`).
+  # resolve_bridge_layers is still called to size ActionDiT
+  # (num_layers=len(bridge_layers)); interval=1 yields one ActionDiT layer per
+  # Cosmos block, matching dual_system_cosmos25.yaml's schedule.
+  bridge_layers: null
+  bridge_interval: 1
+
+  # FastWAM-Joint mask defaults: `joint` attention + `first_frame_causal`
+  # v↔v block. Override to `bidirectional` for ablations.
+  mot_checkpoint_mixed_attn: true
+  attention_mask_mode: joint
+  video_attention_mask_mode: first_frame_causal
+
+  # text_dim is omitted — auto-resolved from video_backbone.context_dim=1024.
+
+video_backbone:
+  name: cosmos25_predict_2b
+  model_path: /path/to/assets/Cosmos-Predict2.5-2B
+  model_variant: base/post-trained
+  text_encoder: none
+  text_encoder_path: null
+  text_encoder_dropout: 0.0
+  text_encoder_dropout_seed: null
+  vae: wan2pt1
+  freeze: true
+  flow_shift: 5.0
+  sac_mode: none
+
+action_backbone:
+  # ActionDiT residual hidden_dim. MoTJointDriver only requires num_heads /
+  # head_dim parity with Cosmos25 (`16` and `128`) — the video_dim and
+  # action_dim_hidden are independent; the architecture auto-fills both from
+  # video_backbone geometry.
+  dim: 1024
+  ffn_dim: 4096

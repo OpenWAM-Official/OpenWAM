@@ -10,6 +10,8 @@ Tests verify:
 
 from __future__ import annotations
 
+from openwam.model.inference_inputs import InferenceInputs
+
 # ---------------------------------------------------------------------------
 # Minimal mock infrastructure
 # ---------------------------------------------------------------------------
@@ -72,10 +74,10 @@ class _MockWanVB:
     def dtype(self):
         return self._dtype
 
-    def prepare_inputs_for_inference(self, prompt, **kw):
+    def prepare_inputs_for_inference(self, inputs):
         from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 
-        return WanVideoBackbone.prepare_inputs_for_inference(self, prompt, **kw)
+        return WanVideoBackbone.prepare_inputs_for_inference(self, inputs)
 
     def _finalize_ti2v_inputs(self, inputs_shared, first_frame_image):
         from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
@@ -102,18 +104,20 @@ class _MockWanVB:
 def _prep(pipe, prompt, vace_cache=None, prompt_embed_cache=None, seed=0):
     vb = _MockWanVB(pipe)
     return vb.prepare_inputs_for_inference(
-        prompt,
-        vace_video=None,
-        first_frame_image=None,
-        num_frames=17,
-        height=32,
-        width=32,
-        seed=seed,
-        tiled=False,
-        num_inference_steps=2,
-        shift=5.0,
-        vace_cache=vace_cache,
-        prompt_embed_cache=prompt_embed_cache,
+        InferenceInputs(
+            prompt=prompt,
+            vace_video=None,
+            first_frame_image=None,
+            num_frames=17,
+            height=32,
+            width=32,
+            seed=seed,
+            tiled=False,
+            num_inference_steps=2,
+            shift=5.0,
+            vace_cache=vace_cache,
+            prompt_embed_cache=prompt_embed_cache,
+        )
     )
 
 
@@ -247,15 +251,17 @@ def test_i2v_deploy_list_unwrap_cold_start():
     mock_vb = _make_i2v_mock()
     img = Image.new("RGB", (832, 480))
     inputs = mock_vb.prepare_inputs_for_inference(
-        "prompt_I2V",
-        first_frame_image=[img],
-        num_frames=17,
-        height=32,
-        width=32,
-        seed=0,
-        tiled=False,
-        num_inference_steps=2,
-        shift=5.0,
+        InferenceInputs(
+            prompt="prompt_I2V",
+            first_frame_image=[img],
+            num_frames=17,
+            height=32,
+            width=32,
+            seed=0,
+            tiled=False,
+            num_inference_steps=2,
+            shift=5.0,
+        )
     )
     assert isinstance(inputs["input_image"], Image.Image), (
         f"cold-start branch should unwrap list to single PIL, got {type(inputs['input_image'])}"
@@ -278,31 +284,35 @@ def test_i2v_deploy_list_unwrap_cache_hit():
 
     # 1st call populates the cache.
     mock_vb.prepare_inputs_for_inference(
-        "prompt_I2V",
-        first_frame_image=[img],
-        num_frames=17,
-        height=32,
-        width=32,
-        seed=0,
-        tiled=False,
-        num_inference_steps=2,
-        shift=5.0,
-        vace_cache=vace_cache,
+        InferenceInputs(
+            prompt="prompt_I2V",
+            first_frame_image=[img],
+            num_frames=17,
+            height=32,
+            width=32,
+            seed=0,
+            tiled=False,
+            num_inference_steps=2,
+            shift=5.0,
+            vace_cache=vace_cache,
+        )
     )
     assert vace_cache.get("populated"), "first call should populate vace_cache"
 
     # 2nd call must hit the cache and still unwrap the list + null vace ref.
     inputs = mock_vb.prepare_inputs_for_inference(
-        "prompt_I2V",
-        first_frame_image=[img],
-        num_frames=17,
-        height=32,
-        width=32,
-        seed=1,
-        tiled=False,
-        num_inference_steps=2,
-        shift=5.0,
-        vace_cache=vace_cache,
+        InferenceInputs(
+            prompt="prompt_I2V",
+            first_frame_image=[img],
+            num_frames=17,
+            height=32,
+            width=32,
+            seed=1,
+            tiled=False,
+            num_inference_steps=2,
+            shift=5.0,
+            vace_cache=vace_cache,
+        )
     )
     assert isinstance(inputs["input_image"], Image.Image), (
         f"cache-hit branch should also unwrap to PIL, got {type(inputs['input_image'])}"

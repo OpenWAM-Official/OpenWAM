@@ -91,11 +91,23 @@ class OpenWAMTrainer(BaseTrainer):
         # Wrap construction in a ZeRO-3 init-disable scope: when the Accelerator
         # was built with ``zero3_init_flag=True``, DeepSpeed enters a global
         # ``zero.Init(enabled=True)`` context that auto-partitions every
-        # nn.Parameter at allocation time. See ``_zero3_init_disabled`` below
-        # for the actual deepspeed 0.18.5 behavior — short version: the
-        # construction-time skip avoids OOM-prone overhead on huge frozen
-        # modules (text_encoder, VAE), but ``deepspeed.initialize`` still
-        # partitions every trainable param post-prepare.
+        # nn.Parameter at allocation time. For OpenWAM that's actively harmful
+        # — frozen modules (Wan UMT5 ~13 GiB / Cosmos Reason1 ~16 GiB
+        # Qwen2.5-VL, VAE) get partitioned along with trainable DiT, and every
+        # forward then triggers a ~26 GiB all-gather spike to materialize them
+        # (guaranteed OOM on forward 2 of training). Wrapping construction in
+        # ``zero.Init(enabled=False)`` skips DeepSpeed's per-Parameter
+        # tracking (no ``ds_id`` / ``ds_status`` is attached). At
+        # ``initialize()`` time, untagged params stay replicated; only params
+        # constructed under the outer ``zero.Init(enabled=True)`` scope (the
+        # trainable DiT/VACE created by ``build_architecture`` below) get
+        # partitioned. So frozen modules never enter the shard table and
+        # never trigger an all-gather. See ``_zero3_init_disabled`` below for
+        # the actual deepspeed 0.18.5 behavior.
+        #
+        # Cosmos Reason1 also gets the defense-in-depth re-freeze pass below
+        # (``_refreeze_cosmos_reason1``) so a future trainable-text-encoder
+        # config can't accidentally leak Reason1 into the trainable graph.
         from openwam.model import build_architecture, resolve_architecture_config
 
         resolved_arch = resolve_architecture_config(m)
@@ -125,6 +137,18 @@ class OpenWAMTrainer(BaseTrainer):
         freeze_list = list(getattr(strategy, "freeze", []))
         for name in self.architecture.freeze_modules(freeze_list):
             logger.info("Frozen: %s", name)
+
+        # Defense-in-depth: even though ``Reason1LiveTextEncoder.__init__``
+        # already sets ``requires_grad_(False)`` on every Qwen2.5-VL param
+        # (see ``text_encoder.py:103-104``), re-walk the registered
+        # ``_reason1_inner`` and confirm it. Reason1 is now an ``nn.Module``
+        # child of the wrapper (so its weights ride into the unified
+        # safetensors), and a future training_strategy that opts to train
+        # Reason1 would need an explicit config entry — this guard keeps the
+        # current default safe from accidental flips and protects against
+        # ZeRO-3 partitioning the 16 GB encoder if the zero.Init guard above
+        # ever regresses.
+        self._refreeze_cosmos_reason1()
 
         # Initialize all schedulers (video + action) inside architecture
         self.architecture.init_training_schedulers(1000)
@@ -283,6 +307,38 @@ class OpenWAMTrainer(BaseTrainer):
         except ImportError:
             return nullcontext()
         return deepspeed.zero.Init(enabled=False)
+
+    def _refreeze_cosmos_reason1(self) -> None:
+        """Re-confirm ``requires_grad_(False)`` on the inner Reason1 Qwen module.
+
+        Reason1 is registered as ``_reason1_inner`` on
+        ``Cosmos25PipelineWrapper`` so its ~16 GB Qwen2.5-VL weights flow
+        into the unified safetensors. The wrapper's constructor already
+        freezes them (``text_encoder.py:103-104``), but training strategies
+        that ``freeze_modules`` against a *different* path may not reach this
+        sub-module by name. A redundant walk here is cheap insurance against
+        the encoder accidentally becoming trainable (which would also put
+        ZeRO-3 partitioning back on the critical path).
+
+        No-op on non-Cosmos25 backbones (Wan, etc.).
+        """
+        try:
+            pipe = self.architecture.video_backbone._pipe
+        except AttributeError:
+            return
+        inner = getattr(pipe, "_reason1_inner", None)
+        if inner is None:
+            return
+        flipped = 0
+        for p in inner.parameters():
+            if p.requires_grad:
+                p.requires_grad_(False)
+                flipped += 1
+        if flipped:
+            logger.info(
+                "Re-froze %d Reason1 parameter tensors that had requires_grad=True after freeze_modules.",
+                flipped,
+            )
 
     def _load_action_stats(self, dataset):
         """Load action normalization stats from dataset into architecture buffers."""
@@ -707,11 +763,10 @@ class OpenWAMTrainer(BaseTrainer):
             save_config(output_path, self.cfg)
             if self.dataset is not None:
                 save_action_stats(output_path, self.dataset)
-            # Copy tokenizer so component-spec deployment does not depend on
+            # Copy backbone-specific deploy artifacts (tokenizer / processor / ...)
+            # so component-spec deployment does not depend on the training-time
             # ``model.video_backbone.model_path`` being reachable.
-            from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
-
-            copy_video_backbone_tokenizer(output_path, self.cfg)
+            self.architecture.copy_deploy_artifacts(output_path, self.cfg)
             # Copy VLM checkpoint so deploy is self-contained (tri_system).
             vlm_bb = getattr(self.architecture, "vlm_backbone", None)
             if vlm_bb is not None and getattr(vlm_bb, "_checkpoint_path", None):

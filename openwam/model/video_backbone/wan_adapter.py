@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -29,6 +29,9 @@ from torch import Tensor
 
 from openwam.model.compile_options import cfg_get, torch_compile_kwargs
 from openwam.model.video_backbone.adapter import BlockLoopState, VideoBackbone
+
+if TYPE_CHECKING:
+    from openwam.model.inference_inputs import InferenceInputs
 from openwam.model.video_backbone.wan.dit import modulate, rope_apply, sinusoidal_embedding_1d
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
@@ -114,6 +117,22 @@ class WanVideoBackbone(VideoBackbone):
     @property
     def _is_ti2v(self) -> bool:
         return bool(getattr(self._dit, "fuse_vae_embedding_in_latents", False))
+
+    @property
+    def needs_first_frame_skip(self) -> bool:
+        """Wan TI2V / VACE / I2V all keep ``latent[0]`` as a clean conditioning frame.
+
+        TI2V / VACE additionally surface that as ``first_frame_latents`` in
+        the inputs dict, so the per-batch signal in
+        :meth:`BaseWAMArchitecture.preprocess` would already cover them.
+        I2V wires the image conditioning through the ``y`` channel and does
+        NOT set ``first_frame_latents``, so the property is the only signal
+        that lets the loss-side mask trim ``latent[0]`` for I2V. Future Wan
+        T2V configs (no TI2V / VACE / image input) correctly fall through
+        to ``False`` so ``latent[0]`` enters the loss as a predicted frame.
+        """
+        has_image_input = bool(getattr(self._dit, "has_image_input", False))
+        return self._is_ti2v or self._has_vace or has_image_input
 
     @property
     def _freq_dim(self) -> int:
@@ -1019,6 +1038,12 @@ class WanVideoBackbone(VideoBackbone):
 
         return generate_video_backbone_component_specs(model_path)
 
+    def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
+        """Copy the Wan tokenizer next to ``config.yaml`` so deploy is self-contained."""
+        from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
+
+        copy_video_backbone_tokenizer(output_dir, cfg)
+
     # ================================================================
     # Deploy-facing public methods (not in ABC — Wan-specific)
     # ================================================================
@@ -1056,31 +1081,38 @@ class WanVideoBackbone(VideoBackbone):
             return first_frame_image[0]
         return first_frame_image
 
-    def prepare_inputs_for_inference(
-        self,
-        prompt: str,
-        *,
-        vace_video=None,
-        first_frame_image=None,
-        num_frames: int = 49,
-        height: int = 480,
-        width: int = 832,
-        seed: int = 42,
-        tiled: bool = True,
-        num_inference_steps: int = 50,
-        shift: float = 5.0,
-        tile_size: tuple = (30, 52),
-        tile_stride: tuple = (15, 26),
-        vace_cache: Optional[dict] = None,
-        prompt_embed_cache: Optional[dict] = None,
-    ) -> dict:
+    def prepare_inputs_for_inference(self, inputs: "InferenceInputs") -> dict:
         """Prepare all inputs for the inference denoising loop.
 
         Encapsulates: scheduler setup, unit runner (text/image/VACE encoding),
         TI2V first-frame handling, and caching.
         Returns a single dict ready for the denoising loop.
+
+        Takes a typed :class:`openwam.model.inference_inputs.InferenceInputs`
+        instead of a long kwargs list. CFG fields are ignored — Wan adapters
+        do not implement classifier-free guidance at inference today; the
+        validator in ``BaseWAMArchitecture.generate`` rejects ``cfg_scale > 1``
+        before we get here, so any non-default CFG state is a caller bug.
         """
         import time
+
+        # Unpack with sensible Wan defaults for tile dims (the dataclass keeps
+        # them as ``None`` so Cosmos25 / other backbones can opt in to their
+        # own defaults — Wan has long-standing concrete defaults we preserve).
+        prompt = inputs.prompt
+        vace_video = inputs.vace_video
+        first_frame_image = inputs.first_frame_image
+        num_frames = inputs.num_frames
+        height = inputs.height
+        width = inputs.width
+        seed = inputs.seed
+        tiled = inputs.tiled
+        num_inference_steps = inputs.num_inference_steps
+        shift = inputs.shift
+        tile_size = inputs.tile_size if inputs.tile_size is not None else (30, 52)
+        tile_stride = inputs.tile_stride if inputs.tile_stride is not None else (15, 26)
+        vace_cache = inputs.vace_cache
+        prompt_embed_cache = inputs.prompt_embed_cache
 
         pipe = self._pipe
         pipe.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)

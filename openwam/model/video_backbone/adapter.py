@@ -153,6 +153,50 @@ class VideoBackbone(ABC, nn.Module):
         ...
 
     @property
+    def context_dim(self) -> Optional[int]:
+        """Per-token dim of the text/context embedding produced by ``preprocess_input``.
+
+        Returned by backbones whose text encoder output dim differs from Wan's
+        4096 (e.g. Cosmos). Architectures that need to size cross-attention
+        projections may consult this when ``cfg.text_dim`` is unset. Default
+        ``None`` keeps existing Wan configs unaffected — they still fall back
+        to the legacy 4096 default.
+        """
+        return None
+
+    @property
+    def needs_first_frame_skip(self) -> bool:
+        """Whether ``latent[0]`` is unconditionally a conditioning frame for this backbone.
+
+        When ``True``, :meth:`BaseWAMArchitecture.preprocess` passes
+        ``skip_first=True`` to ``downsample_video_mask_to_latent`` so the
+        ``video_is_pad`` mask is sized to ``T_lat - 1`` (the loss-side
+        shape-detect fallback in :meth:`_compute_video_loss` then trims
+        ``noise_pred`` to match).
+
+        Override this when the backbone's *configuration* (not the input
+        batch) guarantees ``latent[0]`` is conditioning. Wan I2V is the
+        canonical example: its image conditioning rides on the ``y`` channel
+        rather than the ``first_frame_latents`` input key, so the per-batch
+        signal ``inputs.get("first_frame_latents") is not None`` would miss it.
+
+        Backbones that condition on ``latent[0]`` only on *some* batches
+        (TI2V / VACE / cosmos25 TI2V — driven by ``first_frame_latents`` in
+        the inputs dict) should leave this at the default ``False``; the
+        per-batch signal in ``preprocess`` already covers them.
+        """
+        return False
+
+    def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
+        """Copy backbone-specific deploy artifacts (tokenizer, processor, ...) into ``output_dir``.
+
+        Called by ``BaseWAMArchitecture.copy_deploy_artifacts`` after the
+        checkpoint config has been written, so deploy-time loaders can be
+        fully self-contained. Default no-op; backbones with external tokenizer
+        or processor files override this.
+        """
+
+    @property
     def video_attention_mask_mode(self) -> str:
         """Video self-attention mask mode used by joint MoT mask construction.
 
@@ -362,8 +406,11 @@ class VideoBackbone(ABC, nn.Module):
         Args:
             frames: List of video clips, each a list of PIL Images.
             text: List of text prompts.
-            **kw: Backbone-specific inputs (vace_video, first_frame_image,
-                ref_images, etc.).
+            **kw: Backbone-specific inputs. Recognized optional kwargs include
+                ``vace_video``, ``first_frame_image``, ``ref_images`` and
+                ``pre_encoded_text`` (``(B, L, D)`` tensor of cached prompt
+                embeddings, e.g. Reason1 for Cosmos25 — backbones that don't
+                consume it drop it silently via ``**kw``).
 
         Returns:
             Dict with at least: ``input_latents``, ``context``, ``seq_lens``.
@@ -424,6 +471,17 @@ class VideoBackbone(ABC, nn.Module):
         target dtype/device in one shot.
         """
         ...
+
+    # ================================================================
+    # Optional training-time flow-matching hooks (used by BaseWAMArchitecture)
+    # ================================================================
+    # Subclasses may override the next two methods when their flow-matching
+    # convention differs from the Wan default (noisy = (1 - σ)·clean + σ·noise,
+    # target = noise − clean). Detected via ``hasattr`` at the call site so
+    # existing backbones do not need to opt in.
+
+    # def add_training_noise(self, clean: Tensor, noise: Tensor, timestep_ids: Tensor) -> Tensor: ...
+    # def training_target(self, clean: Tensor, noise: Tensor, timestep_ids: Tensor) -> Tensor: ...
 
     # ================================================================
     # Compilation (1)

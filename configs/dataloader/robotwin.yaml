@@ -72,3 +72,19 @@ holdout_tasks: null
 #   str   = use a different variant for OOD val, e.g. "randomized_500"
 #   Useful for testing generalization: train on clean_50, validate on randomized_500
 val_variant: null
+
+# --- Pre-computed text embedding cache (Cosmos-Reason1 for Cosmos25 backbone) ---
+# Pre-compute once per unique caption with:
+#   python -m openwam.dataloader.reason1_embedding_computation \
+#       --reason1-ckpt /path/to/Cosmos-Reason1-7B \
+#       --cosmos-ckpt  /path/to/Cosmos-Predict2.5-2B/base/post-trained/<uuid>_ema_bf16.pt \
+#       --dataset-config configs/dataloader/robotwin.yaml \
+#       --output-dir   <cache_dir>
+# Then set the cache dir below. Wan backbones ignore this field (silent
+# **kw drop in WanVideoBackbone.preprocess_input).
+#   null  = disabled (live encoding required)
+#   str   = path to directory containing <sha>.safetensors + empty.safetensors
+text_embedding_cache_dir: null
+# CFG dropout — probability of substituting the empty-prompt embedding
+# instead of the real one (train only). 0.0 disables dropout.
+text_embedding_dropout: 0.0
