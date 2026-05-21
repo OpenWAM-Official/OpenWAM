@@ -102,8 +102,8 @@ def _decode_video_frames(
 
         # Seek to near min_idx to skip decoding frames before the target window.
         # Only attempted when frame-count + duration metadata are available.
-        # Falls back to sequential decode from 0 if seek fails or PTS-based
-        # frame indexing misses any target frame (guards against rounding errors).
+        # Falls back to sequential decode from 0 if seek fails or post-seek
+        # indexing cannot reach all targets even after small-offset repair.
         # Corrupted-file exceptions in container.decode() are NOT caught here —
         # they propagate to the 1a/1b try-except in _decode_video_frames so the
         # existing fallback chain (decord → cv2) handles them unchanged.
@@ -118,16 +118,36 @@ def _decode_video_frames(
                 pass
 
         if seeked:
+            # Counter-based indexing: round PTS only for the first frame after
+            # seek (typically a keyframe with a clean PTS), then track every
+            # subsequent frame as +1. PyAV yields frames in display order, so
+            # this is exact and avoids the per-frame rounding errors that the
+            # previous round(pts/pts_per_frame) approach accumulated under
+            # VFR / NTSC / PTS-jitter conditions.
+            first_idx: Optional[int] = None
+            counter = 0
             for frame in container.decode(stream):
                 if frame.pts is None:
                     continue
-                frame_idx = round(frame.pts / pts_per_frame)
-                if frame_idx in target_set:
-                    idx_map[frame_idx] = frame.to_image()
-                if frame_idx >= max_idx:
+                if first_idx is None:
+                    first_idx = round(frame.pts / pts_per_frame)
+                abs_idx = first_idx + counter
+                counter += 1
+                if abs_idx in target_set:
+                    idx_map[abs_idx] = frame.to_image()
+                if abs_idx >= max_idx:
                     break
-            # PTS rounding can misplace a frame by ±1; fall back to sequential
-            # from 0 if any target frame is missing.
+
+            # If targets are still missing, the first-frame rounding may have
+            # shifted every index by a small constant. Try ±1/±2 offsets before
+            # paying for a full seek-to-0 rescan.
+            if idx_map and not all(i in idx_map for i in frame_indices):
+                for offset in (-1, 1, -2, 2):
+                    shifted = {k + offset: v for k, v in idx_map.items()}
+                    if all(i in shifted for i in frame_indices):
+                        idx_map = shifted
+                        break
+
             if not all(i in idx_map for i in frame_indices):
                 idx_map.clear()
                 container.seek(0, stream=stream)
@@ -328,6 +348,148 @@ def _get_video_frame_map(video_dir: str, camera: str) -> List[Tuple[str, int, in
 
 
 # ---------------------------------------------------------------------------
+# Generic LeRobot v3 root discovery
+# ---------------------------------------------------------------------------
+
+
+def _is_lerobot_v3_root(path: str) -> bool:
+    """A LeRobot v3 root is any directory that contains ``meta/info.json``."""
+    return os.path.isfile(os.path.join(path, "meta", "info.json"))
+
+
+def discover_lerobot_v3_roots(
+    dataset_dir: str,
+    max_depth: int = 1,
+    skip_incomplete: bool = True,
+) -> List[Tuple[str, str]]:
+    """Find LeRobot v3 roots under ``dataset_dir``.
+
+    A LeRobot v3 root = directory containing ``meta/info.json``.
+
+    Auto-detected modes:
+      - ``dataset_dir`` IS a root → returns one entry (single-root mode).
+      - ``dataset_dir`` is the parent of one or more roots → BFS up to
+        ``max_depth`` levels and returns each discovered root.
+
+    Args:
+        dataset_dir:     Either a LeRobot v3 root directly, or a parent
+                         directory containing one or more roots.
+        max_depth:       BFS depth when ``dataset_dir`` is a parent.
+                         ``1`` covers flat layouts (e.g. OXE
+                         ``/openx_lerobot/{droid, bridge}``); ``2`` covers
+                         AgiBot-style nesting (``{task}/{ep_range}``).
+                         Ignored when ``dataset_dir`` is itself a root.
+        skip_incomplete: When True (default), child directories that exist
+                         but lack ``meta/info.json`` are logged at INFO
+                         level and skipped instead of failing the scan.
+                         Lets a partially-populated parent (e.g. OXE while
+                         ``bridge`` is still being prepared) still load
+                         every complete subset.
+
+    Returns:
+        ``[(display_name, absolute_path), ...]``.  ``display_name`` is the
+        leaf directory name in single-root mode, or ``parent/leaf``-style
+        when multiple levels were traversed.
+
+    Raises:
+        FileNotFoundError: ``dataset_dir`` does not exist.
+        RuntimeError:      no LeRobot v3 root was found.
+    """
+    if not os.path.isdir(dataset_dir):
+        raise FileNotFoundError(f"dataset_dir does not exist: {dataset_dir}")
+
+    if _is_lerobot_v3_root(dataset_dir):
+        return [(os.path.basename(os.path.normpath(dataset_dir)), dataset_dir)]
+
+    results: List[Tuple[str, str]] = []
+    skipped: List[str] = []
+    # BFS: each frontier entry is (path, display_name, depth). The push guard
+    # below (`depth + 1 < max_depth`) keeps every popped depth strictly under
+    # max_depth, so the loop body needs no upper-bound check.
+    frontier: List[Tuple[str, str, int]] = [(dataset_dir, "", 0)]
+    while frontier:
+        path, prefix, depth = frontier.pop(0)
+        try:
+            entries = sorted(os.listdir(path))
+        except OSError as e:
+            logger.warning("Cannot list %s: %s", path, e)
+            continue
+        for entry in entries:
+            child = os.path.join(path, entry)
+            if not os.path.isdir(child):
+                continue
+            display = f"{prefix}/{entry}" if prefix else entry
+            if _is_lerobot_v3_root(child):
+                results.append((display, child))
+            elif depth + 1 < max_depth:
+                frontier.append((child, display, depth + 1))
+            else:
+                skipped.append(child)
+
+    if skipped:
+        if skip_incomplete:
+            logger.info(
+                "discover_lerobot_v3_roots: skipping %d incomplete entries under %s "
+                "(no meta/info.json): %s",
+                len(skipped),
+                dataset_dir,
+                ", ".join(os.path.basename(p) for p in skipped[:5])
+                + ("…" if len(skipped) > 5 else ""),
+            )
+        else:
+            raise RuntimeError(
+                f"discover_lerobot_v3_roots: {len(skipped)} entries under {dataset_dir} "
+                f"are missing meta/info.json: {[os.path.basename(p) for p in skipped]}"
+            )
+
+    if not results:
+        raise RuntimeError(
+            f"No LeRobot v3 roots found under {dataset_dir} (depth ≤ {max_depth})."
+        )
+    return results
+
+
+def filter_discovered_roots(
+    roots: List[Tuple[str, str]],
+    train_tasks: Optional[List[str]] = None,
+    holdout_tasks: Optional[List[str]] = None,
+    match_prefix: bool = False,
+) -> List[Tuple[str, str]]:
+    """Filter ``discover_lerobot_v3_roots`` output by allow/deny lists.
+
+    Args:
+        roots:         ``(display_name, path)`` pairs from discovery.
+        train_tasks:   Allowlist. ``None`` = no filter; ``[]`` keeps nothing.
+                       Each entry matches the full display_name or — when
+                       ``match_prefix=True`` — its top-level component.
+        holdout_tasks: Denylist with the same matching semantics.
+        match_prefix:  ``True`` enables prefix matching for nested layouts
+                       (AgiBot's ``task_folder/ep_range`` → ``task_folder``
+                       matches every ep_range under it). Single-level
+                       adapters (Galaxea, OXE) leave this ``False``.
+
+    Returns:
+        Filtered ``(display_name, path)`` list, in the original order.
+
+    The function does not raise on an empty result; callers attach their
+    own context (dataset directory, friendly error text) before failing.
+    """
+    holdout = set(holdout_tasks or [])
+    train_set = set(train_tasks) if train_tasks is not None else None
+    out: List[Tuple[str, str]] = []
+    for name, path in roots:
+        candidates = {name}
+        if match_prefix and "/" in name:
+            candidates.add(name.split("/", 1)[0])
+        if train_set is not None and candidates.isdisjoint(train_set):
+            continue
+        if not candidates.isdisjoint(holdout):
+            continue
+        out.append((name, path))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # ActionComposer
 # ---------------------------------------------------------------------------
 
@@ -406,6 +568,13 @@ class LeRobot3Dataset(BaseActionDataset):
                           Use for semantic remapping (e.g. quat → rotation6d).
         action_out_dim:   Output action dimension when ``action_transform`` is set.
                           Required for the ``action_dim`` property to return the correct value.
+        action_dim_mask:  Optional ``(action_dim,)`` bool array. ``True`` = real
+                          dim, ``False`` = zero-padded. Supplied by datasets that
+                          pad to a wider schema (e.g. OXE single-arm → 20-D dual-arm).
+                          When ``None``, ``__getitem__`` attaches an all-True mask
+                          of length ``self.action_dim`` so every sample carries the
+                          key uniformly. Loss-side consumption is owned by the
+                          trainer (not yet wired into ``_compute_action_loss``).
     """
 
     def __init__(
@@ -433,6 +602,7 @@ class LeRobot3Dataset(BaseActionDataset):
         action_dim_slice: Optional[int] = None,
         action_transform: Optional[Callable] = None,
         action_out_dim: Optional[int] = None,
+        action_dim_mask: Optional[np.ndarray] = None,
     ):
         import pandas as pd
 
@@ -454,6 +624,7 @@ class LeRobot3Dataset(BaseActionDataset):
         self.action_dim_slice = action_dim_slice
         self.action_transform = action_transform
         self._action_out_dim = action_out_dim
+        self._action_dim_mask = action_dim_mask
 
         # Camera config
         self.target_camera = target_camera
@@ -471,6 +642,18 @@ class LeRobot3Dataset(BaseActionDataset):
 
         # Action composer
         self._action_composer = ActionComposer(action_fields, self._info["features"])
+
+        # Validate action_dim_mask length against the dataset's actual action_dim
+        # (post-transform / post-slice). Catching this at __init__ surfaces the
+        # mismatch immediately rather than letting a wrongly-shaped mask flow
+        # through __getitem__ and produce semantically wrong mask-aware loss.
+        if action_dim_mask is not None:
+            if len(action_dim_mask) != self.action_dim:
+                raise ValueError(
+                    f"action_dim_mask length {len(action_dim_mask)} != action_dim "
+                    f"{self.action_dim} (action_out_dim={action_out_dim}, "
+                    f"action_dim_slice={action_dim_slice})"
+                )
 
         # StateComposer: prefer observation.state for proprio over action[0:1].
         # Only used when state_dim == action_dim (same space); otherwise falls back.
@@ -515,15 +698,22 @@ class LeRobot3Dataset(BaseActionDataset):
         self._action_stats: Optional[dict] = None
         native_stats_path = os.path.join(data_root, "meta", "stats.json")
         eef_stats_path = os.path.join(data_root, "meta", "eef_stats.json")
+        # Resolve which file backs the loaded stats so we can expose it as
+        # ``self.action_stats_path`` for ``save_action_stats`` to copy into the
+        # checkpoint dir (mirrors RoboTwin's contract — deploy expects to find
+        # a single stats file at ``<ckpt>/action_stats.npy``).
+        _resolved_stats_path: Optional[str] = None
         if action_transform is None:
             # Native stats.json covers the raw action space — safe to use directly.
             _sp = action_stats_path or native_stats_path
             if os.path.exists(_sp):
                 self._load_action_stats(_sp)
+                _resolved_stats_path = _sp
         elif action_stats_path is not None:
             # User provided explicit stats for the post-transform space.
             if os.path.exists(action_stats_path):
                 self._load_action_stats(action_stats_path)
+                _resolved_stats_path = action_stats_path
         else:
             # action_transform set, no explicit path — load from
             # meta/eef_stats.json written by lerobot_v3_stats_computation.py.
@@ -537,6 +727,8 @@ class LeRobot3Dataset(BaseActionDataset):
             #       --type agibot --dataset_dir <dir> [--quat_convention xyzw]
             if os.path.exists(eef_stats_path):
                 self._load_action_stats(eef_stats_path)
+                _resolved_stats_path = eef_stats_path
+        self.action_stats_path: Optional[str] = _resolved_stats_path
 
         # Index data parquet files: (chunk_idx, file_idx) → path
         self._data_file_paths: Dict[Tuple[int, int], str] = {}
@@ -584,8 +776,10 @@ class LeRobot3Dataset(BaseActionDataset):
                 f"the pre-transform space and cannot be used. Pre-compute EEF stats once before "
                 f"training (safe for DDP — no race condition):\n"
                 f"  python -m openwam.dataloader.lerobot_v3_stats_computation \\\n"
-                f"      --type agibot --dataset_dir <dir> [--quat_convention xyzw]\n"
-                f"Or set normalize_mode=null to skip normalization."
+                f"      --type {{agibot|galaxea|oxe}} --dataset_dir <dir>\n"
+                f"  # AgiBot also requires: --quat_convention xyzw\n"
+                f"See docs/dataloader.md for per-dataset examples, "
+                f"or set normalize_mode=null to skip normalization."
             )
 
         logger.info(
@@ -623,8 +817,61 @@ class LeRobot3Dataset(BaseActionDataset):
         return descriptions
 
     def _load_action_stats(self, stats_path: str) -> None:
+        # ``.npy`` files use the deploy-compatible nested schema
+        # ``{mode_key: {mean,std,min,max,...}, num_timesteps: ...}`` written
+        # by ``compute_multitask_lerobot_v3_stats`` (and read by deploy's
+        # ``load_mode_stats``). ``.json`` files use the older per-field /
+        # post-transform schema.
+        if stats_path.endswith(".npy"):
+            raw = np.load(stats_path, allow_pickle=True).item()
+            # Pick the mode key. Post-transform datasets (action_transform set)
+            # always use a single mode — accept whichever non-meta key is
+            # present so we don't need the cfg's action_mode here.
+            mode_key = None
+            for k in ("eef", "joint", "full", "action"):
+                if isinstance(raw.get(k), dict) and "mean" in raw[k]:
+                    mode_key = k
+                    break
+            if mode_key is None:
+                raise ValueError(
+                    f"{stats_path}: expected a dict with one of 'eef'/'joint'/'action' "
+                    f"holding the stats; got keys {list(raw)}"
+                )
+            s = raw[mode_key]
+            slc = self.action_dim_slice
+            self._action_stats = {
+                "mean": np.asarray(s["mean"], dtype=np.float32).flatten()[:slc],
+                "std": np.maximum(np.asarray(s["std"], dtype=np.float32).flatten(), 1e-3)[:slc],
+                "min": np.asarray(s["min"], dtype=np.float32).flatten()[:slc],
+                "max": np.asarray(s["max"], dtype=np.float32).flatten()[:slc],
+            }
+            return
+
         with open(stats_path) as f:
             raw = json.load(f)
+
+        # Post-transform format (lerobot_v3_stats_computation when
+        # action_transform is set): a single top-level "action" key holds the
+        # full post-transform stats vector. Used by OXE eef (7-D raw → 20-D)
+        # and AgiBot eef (40-D raw → 20-D). Detected by presence of an
+        # "action" dict alongside an action_transform on the dataset.
+        if (
+            self.action_transform is not None
+            and isinstance(raw.get("action"), dict)
+            and "mean" in raw["action"]
+        ):
+            s = raw["action"]
+            slc = self.action_dim_slice
+            self._action_stats = {
+                "mean": np.asarray(s["mean"], dtype=np.float32).flatten()[:slc],
+                "std": np.maximum(np.asarray(s["std"], dtype=np.float32).flatten(), 1e-3)[:slc],
+                "min": np.asarray(s["min"], dtype=np.float32).flatten()[:slc],
+                "max": np.asarray(s["max"], dtype=np.float32).flatten()[:slc],
+            }
+            return
+
+        # Native (pre-transform) format: keys are the raw action_fields, each
+        # with its own per-field dim. Concatenate in field order.
         means, stds, mins, maxs = [], [], [], []
         for field, dim in zip(self._action_composer.action_fields, self._action_composer.field_dims):
             s = raw.get(field, {})
@@ -881,7 +1128,7 @@ class LeRobot3Dataset(BaseActionDataset):
                 cam_names = [c.split(".")[-1] for c in _flatten_layout(self.camera_layout)]
                 prompt += f" Cameras: {', '.join(cam_names)}."
 
-            return {
+            sample = {
                 "video": video_strided,
                 "vace_video": None,
                 "first_frame_image": [video_strided[0]] if video_strided else [],
@@ -899,6 +1146,17 @@ class LeRobot3Dataset(BaseActionDataset):
                 "task_name": self.task_name,
                 "proprio_source": proprio_source,
             }
+            # action_dim_mask is always attached so downstream consumers (loss,
+            # collate) can apply it uniformly without "missing-key" branches.
+            # Subclasses that pad to a wider schema (e.g. OXE single-arm → 20-D)
+            # supply a real mask; everything else falls back to all-True (no
+            # padded dims), which is identity wrt mask-aware loss.
+            sample["action_dim_mask"] = (
+                torch.from_numpy(self._action_dim_mask).clone()
+                if self._action_dim_mask is not None
+                else torch.ones(self.action_dim, dtype=torch.bool)
+            )
+            return sample
         raise RuntimeError(
             f"No valid sample found after {_GETITEM_MAX_RETRIES} retries starting at idx={idx} in {self.task_name!r}"
         )
@@ -931,18 +1189,61 @@ class MultiTaskLeRobot3Dataset(BaseActionDataset):
     def __init__(self, datasets: List[LeRobot3Dataset]):
         if not datasets:
             raise ValueError("datasets list must not be empty")
+        # Heterogeneous action_dim would be silently masked by ``self.action_dim``
+        # (which returns ``self._datasets[0].action_dim``), so fail loudly here.
+        dims = {ds.action_dim for ds in datasets}
+        if len(dims) > 1:
+            summary = ", ".join(f"{ds.task_name}={ds.action_dim}" for ds in datasets)
+            raise ValueError(
+                f"{type(self).__name__}: subsets have heterogeneous action_dim "
+                f"({sorted(dims)}); concatenating them would silently use the first "
+                f"subset's dim. Subsets: {summary}"
+            )
+        # task_name must be unique across subsets: the _by_task map below
+        # is built with a dict comprehension which silently dedupes
+        # duplicate keys -> denormalize_action would route to the wrong
+        # subset. Mirror the action_dim guard above.
+        names = [ds.task_name for ds in datasets]
+        if len(set(names)) != len(names):
+            duplicates = sorted({n for n in names if names.count(n) > 1})
+            raise ValueError(
+                f"{type(self).__name__}: duplicate task_name(s) across subsets: "
+                f"{duplicates}. task_name must be unique because per-subset "
+                f"stats lookup (e.g. denormalize_action) routes by it; "
+                f"duplicates would silently overwrite earlier subsets."
+            )
         self._datasets = datasets
+        # task_name → sub-dataset.  Each LeRobot3Dataset already enforces a
+        # task_name (defaulting to its data_root basename) so this map is
+        # always populated.  Used for per-subset stats / denormalize lookup.
+        self._by_task: Dict[str, LeRobot3Dataset] = {ds.task_name: ds for ds in datasets}
         total = 0
         self._cumulative_lengths: List[int] = []
         for ds in datasets:
             total += len(ds)
             self._cumulative_lengths.append(total)
+
+        # Aggregate ``action_stats_path`` (RoboTwin pattern): when every
+        # sub-dataset shares the same stats file, expose it on the wrapper
+        # so ``save_action_stats`` can copy it into the checkpoint dir for
+        # deploy. When subsets have their own per-task stats files (legacy
+        # OXE per-subset mode), ``_stats_are_shared=False`` keeps
+        # ``denormalize_action`` strict so callers must pass ``task_name``.
+        _paths = {ds.action_stats_path for ds in datasets if ds.action_stats_path}
+        if len(_paths) == 1:
+            self.action_stats_path: Optional[str] = next(iter(_paths))
+            self._stats_are_shared: bool = True
+        else:
+            self.action_stats_path = None
+            self._stats_are_shared = False
+
         logger.info(
-            "%s: %d tasks, %d total windows, action_dim=%d",
+            "%s: %d tasks, %d total windows, action_dim=%d, stats_shared=%s",
             self.__class__.__name__,
             len(datasets),
             total,
             self.action_dim,
+            self._stats_are_shared,
         )
 
     def __len__(self) -> int:
@@ -960,7 +1261,64 @@ class MultiTaskLeRobot3Dataset(BaseActionDataset):
 
     @property
     def action_stats(self) -> Optional[dict]:
+        """First subset's stats. Heterogeneous mixes should use ``subset_stats``."""
         return self._datasets[0].action_stats
 
-    def denormalize_action(self, action: np.ndarray) -> np.ndarray:
+    @property
+    def subset_stats(self) -> Dict[str, Optional[dict]]:
+        """Per-subset stats keyed by ``task_name``.
+
+        Stats are read-only by convention. Do not mutate the returned
+        dict's values — the inner stats dicts (and their ndarrays) are
+        aliased to each sub-dataset's internal ``_action_stats``, so
+        in-place edits like ``subset_stats[name]["mean"][:] = 0`` would
+        silently corrupt the live normalization stats. Only the outer
+        dict is freshly constructed on each access (adding/removing
+        top-level keys is safe).
+        """
+        return {ds.task_name: ds.action_stats for ds in self._datasets}
+
+    def denormalize_action(
+        self,
+        action: np.ndarray,
+        task_name: Optional[str] = None,
+    ) -> np.ndarray:
+        """Denormalize ``action`` using subset stats.
+
+        Routing rules:
+          * ``task_name`` set → use that subset's stats. Raises ``KeyError``
+            for unknown names.
+          * ``task_name`` omitted, single subset → unambiguous, use that one.
+          * ``task_name`` omitted, multiple subsets with **shared** stats
+            (``_stats_are_shared=True``, every sub-dataset points at the
+            same stats file — RoboTwin / union-stats pattern) → any subset
+            yields the same answer, route through ``_datasets[0]``.
+          * ``task_name`` omitted, multiple subsets with **per-subset** stats
+            (legacy OXE mode) → raise. Per-subset stats can differ by an
+            order of magnitude (DROID xyz vs Bridge), and silently using the
+            wrong one would send wrong-magnitude actions to the robot.
+        """
+        if task_name is not None:
+            ds = self._by_task.get(task_name)
+            if ds is None:
+                raise KeyError(
+                    f"unknown task_name {task_name!r}; "
+                    f"available: {sorted(self._by_task)}"
+                )
+            return ds.denormalize_action(action)
+        if len(self._datasets) > 1 and not self._stats_are_shared:
+            raise ValueError(
+                "denormalize_action: task_name is required when the dataset "
+                f"contains multiple subsets with per-subset stats ({sorted(self._by_task)}). "
+                "Each subset has its own action_stats (e.g. OXE DROID vs Bridge "
+                "differ by an order of magnitude on xyz, with different "
+                "gripper conventions); using the wrong subset's stats sends "
+                "wrong-magnitude actions to the robot. Pass the task_name of "
+                "the subset the action was predicted for, e.g.:\n"
+                '    dataset.denormalize_action(action, task_name=sample["task_name"])\n'
+                "(every sample emitted by __getitem__ carries its source "
+                "subset's task_name in sample['task_name'].)\n"
+                "Or switch to a shared union stats file so every subset uses "
+                "the same normalizer (see resolve_and_compute_union_stats)."
+            )
         return self._datasets[0].denormalize_action(action)

@@ -113,12 +113,14 @@ def _register_builtins():
     from openwam.dataloader.agibot import AgibotDataset
     from openwam.dataloader.galaxea import GalaxeaDataset
     from openwam.dataloader.mixture import MixtureDataset
+    from openwam.dataloader.oxe import OXEDataset
     from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
     register_dataset("agibot")(AgibotDataset)
     register_dataset("galaxea")(GalaxeaDataset)
     register_dataset("mixture")(MixtureDataset)
+    register_dataset("oxe")(OXEDataset)
 
 
 _register_builtins()

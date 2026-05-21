@@ -1,0 +1,58 @@
+type: oxe
+
+# OXE family 多 subset 配置。每个 subset 独立声明 dataset_dir / fps / camera 等,
+# 解决了不同 OXE 子集相机命名/帧率不一致(DROID 用 exterior_*,fps=15;Bridge 用
+# image_*,fps=5)无法用同一份 camera 配置覆盖的问题。
+#
+# 合并规则: 每个 subset 的最终配置 = {**顶层共享字段, **subset},subset 字段优先。
+# 仅 enabled=true 的 subset 会被 build,enabled=false 用作"数据未就绪"占位。
+# 全部 disabled 直接报错(不沉默)。
+#
+# normalize_mode + eef stats:
+#   action_format=eef 把 7-D 原始 action(xyz+euler+gripper)转成 20-D
+#   (xyz+rot6d+gripper+zeros10)。meta/stats.json 是原始空间的统计,不能直接用。
+#   归一化激活时 OXEDataset.from_config 会**自动**对所有 enabled subset 聚合统计
+#   (经 7D→20D 变换后),写到 <first_subset_dir>/../oxe_eef_union_stats.npy,并
+#   强制每个 subset 都指向这一份 union npy。所以 deploy 端拿到的 ckpt 只有
+#   一份 action_stats.npy 即可覆盖所有 subset,推理时 denormalize_action(action)
+#   省略 task_name 也是安全的(所有 subset 共享同一份 stats,结果一致)。
+#
+#
+#   normalize_mode 取值:
+#     "min-max" → 每维 rescale 到 [-1, 1] 用 {min, max}
+#     "z-score" → (x - mean) / std,零均值单位方差
+#     null      → 不归一(stats 还没算时用)
+
+# --- 共享字段(每个 subset 的默认值,subset 里可单独 override) ---
+num_frames: 33
+height: 192
+width: 320
+val_ratio: 0.1
+seed: 42
+multiview: true
+action_format: eef            # OXE family 共享 7-D → 20-D EEF transform
+normalize_mode: min-max
+video_stride: 1               # video-only stride
+window_stride: 1              # 滑窗步长 (1 = 每帧都是起点)
+repeat: 1                     # window 列表每 epoch 重复 N 次
+fps: 15
+action_stats_path: null       # 显式覆写 stats 路径;null = 从 meta/eef_stats.json 自动解析
+
+# --- Subsets ---
+subsets:
+  # ── DROID 1.0.1 ──────────────────────────────────────────────────────────
+  - name: droid_1.0.1
+    enabled: true
+    dataset_dir: /path/to
+    fps: 15
+    target_camera: observation.images.exterior_1_left
+    camera_layout: [observation.images.exterior_1_left, observation.images.exterior_2_left, observation.images.wrist_left]
+
+
+  - name: bridge
+    enabled: false
+    dataset_dir: /path/to
+    fps: 5
+    target_camera: observation.images.image_0
+    camera_layout: [observation.images.image_0, observation.images.image_1, observation.images.image_2]
+
