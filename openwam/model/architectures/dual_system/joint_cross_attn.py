@@ -142,10 +142,11 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
         # Same 4D + clean-prefix-aligned t_mod opt-in as the joint_self_attn /
         # shared_backbone / IDM forwards. TI2V fires its own branch first so
-        # these kwargs are inert there. For VACE the broadcast path now zeros
-        # the first frame's t_mod to match the latent-side clean-ref
-        # replacement, removing an existing data/t_mod mismatch. I2V has no
-        # ``first_frame_latents`` so ``zero_clean_prefix_t_mod`` is a no-op.
+        # these kwargs are inert there. VACE and I2V do NOT emit
+        # ``first_frame_latents`` (VACE routes via ``vace_context``, I2V via
+        # the ``y`` channel), so ``zero_clean_prefix_t_mod`` is structurally
+        # inert for them — kept on for symmetry with joint_self_attn so the
+        # MoT driver gets a 4D ``t_mod``.
         pipeline_inputs.setdefault("force_per_token_t_mod", True)
         pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(

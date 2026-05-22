@@ -330,10 +330,11 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
 
         # Same 4D + clean-prefix-aligned t_mod opt-in as the dual_system /
         # shared_backbone forwards. TI2V fires its own branch first so these
-        # kwargs are inert there; VACE is unsupported on tri_system already
-        # (raises in the joint loop), so the practical effect is the I2V case
-        # — broadcast to 4D, ``first_frame_latents`` absent so the clean-prefix
-        # zeroing is a no-op (mathematically equivalent to the prior 3D path).
+        # kwargs are inert there; VACE is rejected later in the joint loop
+        # (``raise NotImplementedError("tri_system + VACE not supported")``),
+        # so the practical effect is the I2V case — broadcast to 4D,
+        # ``first_frame_latents`` absent so the clean-prefix zeroing is a
+        # no-op (mathematically equivalent to the prior 3D path).
         pipeline_inputs.setdefault("force_per_token_t_mod", True)
         pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(

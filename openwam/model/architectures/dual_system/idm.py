@@ -507,9 +507,12 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         # IDM structurally requires 4D ``t_mod`` (the driver concatenates the
         # noisy + cond branches along the sequence dim with per-branch
         # timesteps). For TI2V this is native; for VACE / I2V we go through
-        # the broadcast path and use ``zero_clean_prefix_t_mod`` to align
-        # VACE's first frame with the data-side ``first_frame_latents``
-        # replacement done below. Forced assignment (not setdefault) — callers
+        # the broadcast path. ``zero_clean_prefix_t_mod`` is kept on for
+        # symmetry — it only fires when ``first_frame_latents`` is set, which
+        # holds for TI2V but NOT VACE (post the native-VACE refactor VACE
+        # routes its first-frame condition through ``vace_context`` instead).
+        # So the flag is load-bearing only for TI2V here; for VACE and I2V it
+        # is structurally inert. Forced assignment (not setdefault) — callers
         # cannot disable: doing so would re-raise the
         # ``IDMMoTDriver.run_idm_training_loop`` 4D-shape assertion.
         pipeline_inputs["force_per_token_t_mod"] = True

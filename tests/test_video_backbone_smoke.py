@@ -98,10 +98,25 @@ def test_wan_video_backbone_is_ti2v():
 
 
 def test_wan_adapter_needs_first_frame_skip_truth_table():
-    """``needs_first_frame_skip`` is True for any Wan config where ``latent[0]``
-    is unconditionally a conditioning frame: TI2V (``fuse_vae_embedding_in_latents``),
-    VACE (``self._pipe.vace`` non-None), or I2V (``self._dit.has_image_input``).
-    Future T2V (none of the three) returns False so ``latent[0]`` enters the loss.
+    """``needs_first_frame_skip`` is True only for Wan configs where
+    ``latent[0]`` is unconditionally a clean conditioning frame the loss
+    must skip: TI2V (``fuse_vae_embedding_in_latents``) is the only such
+    variant today.
+
+    I2V is *not* on the skip list. Its first-frame reference rides on the
+    ``y`` side channel; ``latent[0]`` itself is fully noised on both train
+    and deploy, and deploy must denoise it from pure noise into the
+    predicted frame 0. Skipping it during training leaves frame 0
+    unsupervised → garbage at inference (train/deploy divergence). Same
+    rationale as VACE — both fully supervise ``latent[0]``.
+
+    VACE is *not* on the skip list: its first-frame condition flows
+    through the ``vace_context`` bypass while the video latent path stays
+    fully noised + fully supervised (matching native ``WanVideoUnit_VACE``
+    semantics).
+
+    Future T2V (none of the three) returns False so ``latent[0]`` enters
+    the loss as a predicted frame.
     """
     from types import SimpleNamespace
 
@@ -120,8 +135,11 @@ def test_wan_adapter_needs_first_frame_skip_truth_table():
         return WanVideoBackbone(pipe)
 
     assert _make_adapter(ti2v=True).needs_first_frame_skip is True
-    assert _make_adapter(vace=True).needs_first_frame_skip is True
-    assert _make_adapter(image_input=True).needs_first_frame_skip is True
+    # I2V: y side-channel conveys frame 0; latent[0] is fully noised on
+    # train and deploy and must be supervised — skip stays off.
+    assert _make_adapter(image_input=True).needs_first_frame_skip is False
+    # VACE: native convention noises every frame; loss covers latent[0].
+    assert _make_adapter(vace=True).needs_first_frame_skip is False
     # Future Wan T2V: no TI2V / no VACE / no image input → skip stays off.
     assert _make_adapter().needs_first_frame_skip is False
 

@@ -184,10 +184,12 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         # Opt every Wan backbone into 4D + clean-prefix-aligned t_mod (mirrors
         # TI2V's native ``seperated_timestep + fuse_vae_embedding_in_latents``
         # path; TI2V itself fires that path first so these kwargs are inert for
-        # it). For VACE this aligns the first-frame ``t_mod`` with the data-side
-        # ``first_frame_latents`` replacement done in ``base.compute_loss``. I2V
-        # has no ``first_frame_latents`` so ``zero_clean_prefix_t_mod`` is a
-        # no-op there. ``setdefault`` so explicit callers can still pass False.
+        # it). VACE and I2V do NOT emit ``first_frame_latents`` (VACE routes
+        # its first-frame condition through ``vace_context``; I2V uses the
+        # ``y`` channel), so for them ``zero_clean_prefix_t_mod`` is
+        # structurally inert — kept on only so the joint MoT driver gets the
+        # 4D ``t_mod`` it needs. ``setdefault`` so explicit callers can still
+        # pass False.
         pipeline_inputs.setdefault("force_per_token_t_mod", True)
         pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(

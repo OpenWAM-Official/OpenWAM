@@ -79,10 +79,24 @@ class _MockWanVB:
 
         return WanVideoBackbone.prepare_inputs_for_inference(self, inputs)
 
-    def _finalize_ti2v_inputs(self, inputs_shared, first_frame_image):
+    def _finalize_ti2v_first_frame_latents(self, inputs_shared, first_frame_image):
         from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 
-        return WanVideoBackbone._finalize_ti2v_inputs(self, inputs_shared, first_frame_image)
+        return WanVideoBackbone._finalize_ti2v_first_frame_latents(self, inputs_shared, first_frame_image)
+
+    def _build_vace_context_for_deploy(self, inputs_shared, first_frame_image, vace_video):
+        # _has_vace=False in the mock pipe → real method is a no-op fast path.
+        from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+
+        return WanVideoBackbone._build_vace_context_for_deploy(
+            self, inputs_shared, first_frame_image, vace_video
+        )
+
+    @staticmethod
+    def _is_vace_unit(unit):
+        from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+
+        return WanVideoBackbone._is_vace_unit(unit)
 
     def _resolve_i2v_input_image(self, first_frame_image):
         from openwam.model.video_backbone.wan_adapter import WanVideoBackbone

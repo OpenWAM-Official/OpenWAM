@@ -903,13 +903,22 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if all_video_masks[0] is not None:
             # ``latent[0]`` is a clean conditioning frame (and must be excluded
             # from the loss mask) when either:
-            #   (a) the input batch carries ``first_frame_latents``
-            #       (Wan TI2V / VACE / cosmos25 TI2V — per-batch signal); or
+            #   (a) the input batch carries ``first_frame_latents`` (Wan TI2V
+            #       / cosmos25 TI2V — per-batch signal), in which case
+            #       ``base.compute_loss`` will clean-replace ``latents[:, :, 0:1]``
+            #       on every step; or
             #   (b) the backbone's *configuration* always reserves ``latent[0]``
-            #       for conditioning (Wan I2V — image input rides on the ``y``
-            #       channel, so no ``first_frame_latents`` is emitted).
-            # Cosmos25 T2V leaves both signals off, so ``latent[0]`` is treated
-            # as a predicted frame and stays in the loss.
+            #       for conditioning (only TI2V via the
+            #       ``fuse_vae_embedding_in_latents`` / per-token-t=0 path
+            #       today).
+            # Wan I2V: side-channel ``y`` carries the first-frame reference;
+            # ``latent[0]`` itself is fully noised on both train and deploy
+            # and must be supervised — NOT in the skip list.
+            # Wan VACE: first-frame condition rides on ``vace_context``;
+            # video latents are fully noised, ``latent[0]`` enters the loss
+            # as a predicted frame. NOT in the skip list.
+            # Cosmos25 T2V: no first-frame conditioning at all — both
+            # signals off.
             skip_first = (
                 inputs.get("first_frame_latents") is not None
                 or self.video_backbone.needs_first_frame_skip
@@ -1178,11 +1187,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         n_skip = 0
         if inputs.get("first_frame_latents") is not None:
-            # TI2V / VACE: trim the leading clean conditioning latent(s) from
-            # the loss. Wan adapter emits ``num_clean_prefix_frames=0`` (one
-            # implicit conditioning latent at index 0); cosmos25 wrapper emits
-            # ``num_clean_prefix_frames=1`` (explicit count). Both should drop
-            # exactly the conditioning latent(s), so use ``max(prefix, 1)``.
+            # TI2V (Wan + cosmos25): trim the leading clean conditioning
+            # latent(s) from the loss. Wan adapter emits
+            # ``num_clean_prefix_frames=0`` (one implicit conditioning latent
+            # at index 0); cosmos25 wrapper emits ``num_clean_prefix_frames=1``
+            # (explicit count). Both should drop exactly the conditioning
+            # latent(s), so use ``max(prefix, 1)``. VACE never enters this
+            # branch — its conditioning rides on ``vace_context``, the video
+            # latent path is fully noised + fully supervised.
             n_skip = max(num_clean_prefix, 1)
         elif num_clean_prefix > 0:
             # Clean-prefix flagged without first_frame_latents: trim prefix
