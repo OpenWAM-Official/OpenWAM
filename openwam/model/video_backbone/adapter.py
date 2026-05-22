@@ -226,6 +226,104 @@ class VideoBackbone(ABC, nn.Module):
         return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
 
     # ================================================================
+    # DiT patch geometry (1 property + 1 classmethod)
+    # ================================================================
+
+    @property
+    def dit_patch_size(self) -> Tuple[int, int, int]:
+        """Spatio-temporal patch size the host DiT applies on its first layer.
+
+        Source of truth is :attr:`VideoEncoderSpec.dit_patch_size` when an
+        external encoder is plugged in; otherwise the subclass's
+        :meth:`get_native_dit_patch_size` value. Concrete backbones must store
+        the resolved tuple into ``self._dit_patch_size`` during ``__init__`` so
+        that all callers (token-count arithmetic, mask construction, DiT
+        rebuild) consult a single backbone-owned attribute instead of branching
+        on ``self._encoder is None``.
+        """
+        return self._dit_patch_size
+
+    @classmethod
+    @abstractmethod
+    def get_native_dit_patch_size(cls, pipe) -> Tuple[int, int, int]:
+        """Native ``(T, H, W)`` patch size when no external encoder is present.
+
+        Wan family returns ``(1, 2, 2)``. Subclasses that wrap a different
+        pretrained DiT family override here; the value must match what the
+        loaded ``pipe.dit`` actually expects at its first layer.
+        """
+        ...
+
+    # ================================================================
+    # Temporal contract (2 properties + 1 classmethod)
+    # ================================================================
+
+    @property
+    def temporal_compression(self) -> int:
+        """``T_pixel / T_lat`` exposed by this backbone's latent path.
+
+        Source of truth is :attr:`VideoEncoderSpec.temporal_compression` when
+        an external encoder is plugged in; otherwise the subclass's
+        :meth:`get_native_temporal_contract` value. Concrete backbones must
+        store the resolved value into ``self._temporal_compression`` during
+        ``__init__`` so downstream consumers (mask downsampling, dataloader
+        divisibility) all read a single backbone-owned attribute instead of
+        branching on ``self._encoder is None``.
+        """
+        return self._temporal_compression
+
+    @property
+    def causal_temporal(self) -> bool:
+        """Whether the first input frame is encoded into its own standalone
+        latent token (Wan-style causal VAE) vs uniform tubelet schedules.
+
+        Same source-of-truth contract as :attr:`temporal_compression`: read
+        from encoder spec on the external path, otherwise from
+        :meth:`get_native_temporal_contract`.
+        """
+        return self._causal_temporal
+
+    @classmethod
+    @abstractmethod
+    def get_native_temporal_contract(cls, pipe) -> Tuple[int, bool]:
+        """Native ``(temporal_compression, causal_temporal)`` when no external
+        encoder is present.
+
+        Wan family returns ``(4, True)`` (the causal Wan2pt1 VAE). Subclasses
+        wrapping a non-Wan native VAE override here; the values must match
+        what the loaded ``pipe.vae`` actually produces.
+        """
+        ...
+
+    # ================================================================
+    # Flow-matching α-shift (1 property)
+    # ================================================================
+
+    @property
+    def shift_video(self) -> Optional[float]:
+        """Optional Esser-et-al. α-shift applied to the video scheduler.
+
+        Single source of truth for the video-side shift: both
+        :meth:`BaseWAMArchitecture.init_training_schedulers` (training)
+        and ``openwam/deploy/joint_engine.py::generate`` (inference)
+        consult this property, so train/inference sigma grids cannot drift
+        apart regardless of which yaml file is loaded.
+
+        Returns ``None`` when the backbone has no explicit override (the
+        scheduler then falls back to its template default — Wan = 5.0).
+        Concrete backbones expose this by storing the resolved value into
+        ``self._shift_video`` during ``__init__``; subclasses without the
+        attribute inherit the ``None`` default.
+
+        The action scheduler is intentionally NOT split here — it always
+        consumes the global ``cfg.inference.shift``. This keeps the
+        Reconstruction-or-Semantics paper recipe (arXiv:2605.06388,
+        dim-dependent shift on non-VAE encoders only) bit-faithful without
+        forcing action callers to learn about a knob they never set.
+        """
+        return getattr(self, "_shift_video", None)
+
+    # ================================================================
     # Construction (1)
     # ================================================================
 

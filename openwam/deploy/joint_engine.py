@@ -290,12 +290,34 @@ class JointInferenceEngine(BaseInferenceEngine):
                 action_steps = getattr(optimization.schedule, "action_steps", denoise_steps)
             schedule_kwargs["action_steps"] = conditions.get("action_steps", action_steps)
 
+        # Single source of truth: ``arch.video_backbone.shift_video`` is the
+        # ONLY place the video α-shift is configured (set via
+        # ``cfg.model.video_backbone.shift_video`` at yaml time). Reading
+        # here — rather than from ``cfg.inference.*`` — guarantees that the
+        # discrete training sigma buffer (set by
+        # ``init_training_schedulers`` via the same property) and the
+        # inference denoising trajectory are sampled from the identical
+        # shifted schedule. ``conditions["shift_video"]`` lets callers
+        # override per-request (deploy smoke tests / ablations) without
+        # editing the cfg tree.
+        # Nested ``getattr`` — some lightweight test doubles
+        # (e.g. ``_CaptureDeployArchitecture`` in
+        # ``tests/test_action_normalization.py``) construct a stub
+        # architecture without a ``video_backbone`` attribute at all;
+        # production code always has it.
+        _vb = getattr(self.architecture, "video_backbone", None)
+        shift_video = conditions.get(
+            "shift_video",
+            getattr(_vb, "shift_video", None) if _vb is not None else None,
+        )
+
         schedule = make_schedule(
             schedule_type,
             video_scheduler=self.architecture.video_scheduler,
             action_scheduler=self.architecture.action_scheduler,
             num_steps=denoise_steps,
             shift=shift,
+            shift_video=shift_video,
             **schedule_kwargs,
         )
 

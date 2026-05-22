@@ -138,6 +138,30 @@ class OpenWAMTrainer(BaseTrainer):
         for name in self.architecture.freeze_modules(freeze_list):
             logger.info("Frozen: %s", name)
 
+        # External encoder freeze sanity-check: when the host backbone has
+        # swapped in an irreversible encoder (e.g. V-JEPA 2.1 / DINOv3 — no
+        # pixel ``decode``), it's almost always pretrained-and-frozen at the
+        # ViT level. If the training_strategy doesn't mention the encoder in
+        # its freeze list, warn so the user notices BEFORE consuming GPU on
+        # an unintentional ViT-trainable run. Stubs / alternate architectures
+        # without a ``video_backbone`` attribute fall through silently.
+        video_backbone = getattr(self.architecture, "video_backbone", None)
+        external_encoder = getattr(video_backbone, "_encoder", None) if video_backbone is not None else None
+        if (
+            external_encoder is not None
+            and not external_encoder.spec.is_reversible
+            and not any(
+                p == "video_backbone._encoder" or p.startswith("video_backbone._encoder.")
+                for p in freeze_list
+            )
+        ):
+            logger.warning(
+                "external encoder %s is not in freeze_modules; ViT is fully trainable. "
+                "Add 'video_backbone._encoder' to your training_strategy freeze list "
+                "if you intended to freeze the ViT backbone.",
+                type(external_encoder).__name__,
+            )
+
         # Defense-in-depth: even though ``Reason1LiveTextEncoder.__init__``
         # already sets ``requires_grad_(False)`` on every Qwen2.5-VL param
         # (see ``text_encoder.py:103-104``), re-walk the registered

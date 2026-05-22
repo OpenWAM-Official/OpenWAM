@@ -99,6 +99,7 @@ def _train_openwam(cfg: DictConfig) -> None:
     """Original OpenWAM training path."""
     from openwam.dataloader.registry import build_dataset
     from openwam.train.openwam_trainer import OpenWAMTrainer
+    from openwam.train.utils.temporal_contract import apply_temporal_contract_bridge
 
     # Seeding is handled inside ``OpenWAMTrainer.__init__`` when
     # ``cfg.project.seed`` is set (per-rank offset, sampler / worker wiring),
@@ -106,6 +107,12 @@ def _train_openwam(cfg: DictConfig) -> None:
     # runs keep their stochasticity. Doing it in the launcher would either
     # crash on null (``int(None)``) or override the opt-out path.
     accelerator = _build_accelerator(cfg)
+
+    # Bridge encoder temporal contract from model yaml to dataloader cfg before
+    # the dataset is built (Wan VAE = (4, True), V-JEPA 2.1 = (2, True),
+    # future non-causal encoders = (tc, False)). See
+    # openwam/train/utils/temporal_contract.py.
+    apply_temporal_contract_bridge(cfg)
 
     # Build dataset via registry
     dataset = build_dataset(cfg.dataloader, split="train")

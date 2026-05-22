@@ -258,10 +258,21 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 # the dict produced by deploy/model_loader.py.
                 external_encoder = self._build_external_encoder_skeleton(enc_cfg, source)
         elif enc_cfg is not None and source is None:
-            # Training with encoder block set but from_scratch=false: INFO
-            # log explaining the silent ignore (deploy path stays quiet
-            # since the same situation is expected for any default
-            # from_scratch=false checkpoint, not a user mistake).
+            enc_name = ""
+            if isinstance(enc_cfg, dict):
+                enc_name = str(enc_cfg.get("name", ""))
+            else:
+                enc_name = str(getattr(enc_cfg, "name", ""))
+            if enc_name and enc_name != "wan_vae":
+                raise ValueError(
+                    f"video_backbone.encoder.name='{enc_name}' is incompatible "
+                    "with from_scratch=false: the pre-trained DiT's first conv "
+                    "channels are bound to native Wan VAE's z_dim and cannot "
+                    "consume a different encoder's latent space. Set "
+                    "from_scratch=true to activate the encoder swap (and re-init "
+                    "the DiT), or remove the encoder block to keep the native "
+                    "Wan VAE path. See docs/external_video_encoder.md §1."
+                )
             logger.info(
                 "video_backbone.encoder is set but from_scratch=false; "
                 "encoder block IGNORED, using native pipe.vae. Set from_scratch=true "
@@ -275,6 +286,30 @@ class BaseWAMArchitecture(ABC, nn.Module):
             )
         elif vb_name is not None:
             self.video_backbone = build_video_backbone(vb_name, cfg, external_encoder=external_encoder)
+
+        # Cross-check: yaml-declared temporal contract must match what the
+        # backbone actually exposes (sourced from external encoder spec on the
+        # external path, native VAE defaults otherwise). Drift here would let
+        # the dataloader enforce the wrong divisibility rule and let the
+        # mask-downsampler produce a wrong-length tail, so we fail-fast at
+        # backbone init. We read from the backbone (not directly from the
+        # encoder spec) so the contract has a single owner — see A1's
+        # dit_patch_size ABC-property design.
+        if self.video_backbone is not None:
+            declared_tc = self._cfg_get(vb_cfg, "temporal_compression", 4)
+            declared_causal = self._cfg_get(vb_cfg, "causal_temporal", True)
+            actual_tc = self.video_backbone.temporal_compression
+            actual_causal = self.video_backbone.causal_temporal
+            if external_encoder is not None:
+                encoder_src = f"external encoder {type(external_encoder).__name__}"
+            else:
+                encoder_src = "native VAE"
+            if (declared_tc, declared_causal) != (actual_tc, actual_causal):
+                raise ValueError(
+                    f"video_backbone.temporal_compression / causal_temporal yaml "
+                    f"({declared_tc}, {declared_causal}) does not match {encoder_src} "
+                    f"({actual_tc}, {actual_causal}). Update the yaml fields to match."
+                )
 
         # Optional from-scratch DiT: keep the Wan video backbone structure
         # but discard the loaded DiT weights and re-randomize them in place.
@@ -303,7 +338,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
             else:
                 from openwam.model.video_backbone.wan_adapter import reinit_dit_from_scratch
 
-                reinit_dit_from_scratch(pipe, external_encoder=external_encoder)
+                reinit_dit_from_scratch(
+                    pipe,
+                    external_encoder=external_encoder,
+                    dit_patch_size=self.video_backbone.dit_patch_size,
+                )
                 logger.info(
                     "video_backbone.from_scratch=true: DiT re-initialized; VAE / text_encoder keep pretrained weights"
                 )
@@ -620,10 +659,42 @@ class BaseWAMArchitecture(ABC, nn.Module):
     # --- Training: module management ---
 
     def init_training_schedulers(self, num_timesteps: int = 1000) -> None:
-        """Initialize all backbone schedulers for training."""
-        for bb in self.backbones.values():
-            if hasattr(bb, "scheduler"):
-                bb.scheduler.set_timesteps(num_timesteps, training=True)
+        """Initialize all backbone schedulers for training.
+
+        Single source of truth for the video α-shift:
+        ``self.video_backbone.shift_video``. The same property is read by
+        ``openwam/deploy/joint_engine.py::generate`` at inference time, so
+        the discrete training sigma buffer and the inference denoising
+        trajectory are guaranteed to be sampled from the same shifted
+        schedule — train/inference cannot drift regardless of which yaml
+        file is loaded.
+
+        Action backbone is intentionally NOT split: its scheduler always
+        falls back to the template default, matching the
+        Reconstruction-or-Semantics paper recipe (arXiv:2605.06388) which
+        applies dim-dependent shift only on non-VAE video encoders.
+
+        ``shift_video=None`` (the default for backbones without an explicit
+        cfg override) yields bit-identical pre-PR behavior: each scheduler
+        falls back to its template default (Wan = 5.0).
+        """
+        # ``getattr`` (rather than direct attribute access) so test doubles
+        # / mocks that extend bare ``nn.Module`` instead of the
+        # :class:`VideoBackbone` ABC still work — they simply don't carry a
+        # ``shift_video`` attribute and we fall back to the scheduler's
+        # template default, matching the production no-override path.
+        video_shift = (
+            getattr(self.video_backbone, "shift_video", None)
+            if self.video_backbone is not None
+            else None
+        )
+        for name, bb in self.backbones.items():
+            if not hasattr(bb, "scheduler"):
+                continue
+            kwargs = {"training": True}
+            if name == "video_backbone" and video_shift is not None:
+                kwargs["shift"] = float(video_shift)
+            bb.scheduler.set_timesteps(num_timesteps, **kwargs)
 
     def freeze_modules(self, names: list[str]) -> list[str]:
         """Freeze named sub-modules by dotted path. Returns actually frozen names.
@@ -923,7 +994,17 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 inputs.get("first_frame_latents") is not None
                 or self.video_backbone.needs_first_frame_skip
             )
-            latent_masks = [downsample_video_mask_to_latent(~m, skip_first=skip_first) for m in all_video_masks]
+            # Pass the backbone's temporal_compression so the tail-grouping
+            # divisor matches the actual latent-T produced by the encoder.
+            # The default 4 in ``downsample_video_mask_to_latent`` is the Wan
+            # VAE legacy; for V-JEPA / other encoders it would silently emit
+            # a wrong-length mask. See VideoBackbone.temporal_compression for
+            # the source-of-truth contract.
+            temporal_factor = int(self.video_backbone.temporal_compression)
+            latent_masks = [
+                downsample_video_mask_to_latent(~m, temporal_factor=temporal_factor, skip_first=skip_first)
+                for m in all_video_masks
+            ]
             inputs["video_is_pad"] = torch.stack(latent_masks, dim=0).to(device=_device)
 
         return inputs

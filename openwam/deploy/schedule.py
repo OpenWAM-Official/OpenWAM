@@ -25,9 +25,22 @@ def schedule_sync(
     action_scheduler,
     num_steps: int = 50,
     shift: float = 5.0,
+    *,
+    shift_video: float = None,
 ) -> Schedule:
-    """Both streams advance in lockstep on the same timestep series."""
-    video_scheduler.set_timesteps(num_steps, shift=shift)
+    """Both streams advance in lockstep on their own timestep series.
+
+    ``shift_video`` (when set, typically from ``arch.video_backbone.shift_video``)
+    overrides the video scheduler's α-shift independently of the action
+    scheduler. Action always uses ``shift`` — by design, since the
+    Reconstruction-or-Semantics recipe (arXiv:2605.06388) applies
+    dim-dependent shift to non-VAE video encoders only. The model was
+    trained on independent ``(sigma_v, sigma_a)`` samples
+    (openwam/train/loss/decoupled_loss.py), so any per-stream shift
+    combination is in-distribution.
+    """
+    sv = shift if shift_video is None else shift_video
+    video_scheduler.set_timesteps(num_steps, shift=sv)
     action_scheduler.set_timesteps(num_steps, shift=shift)
     v_ts = video_scheduler.timesteps.tolist()
     a_ts = action_scheduler.timesteps.tolist()
@@ -40,9 +53,12 @@ def schedule_video_leading(
     num_steps: int = 50,
     lead_steps: int = 10,
     shift: float = 5.0,
+    *,
+    shift_video: float = None,
 ) -> Schedule:
     """Video denoises ``lead_steps`` steps before action joins."""
-    video_scheduler.set_timesteps(num_steps + lead_steps, shift=shift)
+    sv = shift if shift_video is None else shift_video
+    video_scheduler.set_timesteps(num_steps + lead_steps, shift=sv)
     action_scheduler.set_timesteps(num_steps, shift=shift)
     v_ts = video_scheduler.timesteps.tolist()
     a_ts = action_scheduler.timesteps.tolist()
@@ -64,9 +80,12 @@ def schedule_cascade(
     video_steps: int = 50,
     action_steps: int = 50,
     shift: float = 5.0,
+    *,
+    shift_video: float = None,
 ) -> Schedule:
     """Video fully denoises, then action denoises (fully serial)."""
-    video_scheduler.set_timesteps(video_steps, shift=shift)
+    sv = shift if shift_video is None else shift_video
+    video_scheduler.set_timesteps(video_steps, shift=sv)
     action_scheduler.set_timesteps(action_steps, shift=shift)
     v_ts = video_scheduler.timesteps.tolist()
     a_ts = action_scheduler.timesteps.tolist()
@@ -83,8 +102,15 @@ def schedule_action_only(
     action_scheduler,
     num_steps: int = 50,
     shift: float = 5.0,
+    *,
+    shift_video: float = None,  # noqa: ARG001 — accepted for dispatcher symmetry
 ) -> Schedule:
-    """Video stays clean (sigma=0); only action denoises."""
+    """Video stays clean (sigma=0); only action denoises.
+
+    ``shift_video`` is ignored — video stays clean by construction, so its
+    schedule discretization is irrelevant. Accepted for dispatcher
+    signature symmetry with the other ``schedule_*`` functions.
+    """
     action_scheduler.set_timesteps(num_steps, shift=shift)
     a_ts = action_scheduler.timesteps.tolist()
     return [(0.0, a_t) for a_t in a_ts] + [(0.0, 0.0)]
@@ -118,6 +144,8 @@ def make_schedule(
     action_scheduler,
     num_steps: int = 50,
     shift: float = 5.0,
+    *,
+    shift_video: float = None,
     **kwargs,
 ) -> Schedule:
     """Dispatcher: pick a schedule strategy and forward the two schedulers.
@@ -130,7 +158,15 @@ def make_schedule(
         action_scheduler: Action stream's scheduler (e.g.
             ``architecture.action_scheduler``).
         num_steps: Default step count; per-strategy overrides via kwargs.
-        shift: Shifted-sigmoid shape parameter.
+        shift: Global α-shift; used by the action scheduler always, and by
+            the video scheduler when ``shift_video`` is ``None``.
+        shift_video: Optional override of the video α-shift only (Esser SD3
+            dim-dependent shift). When set, video scheduler is discretized
+            with this value while action stays at ``shift``. Typically
+            sourced from ``arch.video_backbone.shift_video`` so train and
+            inference sigma grids match. ``None`` (default) falls back to
+            the global ``shift`` for both streams — bit-identical to
+            pre-PR behavior.
         **kwargs: Strategy-specific knobs:
             - ``video_leading``: ``lead_steps`` (default 10)
             - ``cascade`` / ``decoupled_asymmetric``: ``video_steps`` and
@@ -144,7 +180,7 @@ def make_schedule(
             f"{list(_SCHEDULE_REGISTRY.keys()) + ['decoupled_flash', 'decoupled_asymmetric']}"
         )
 
-    call_kwargs = {"shift": shift}
+    call_kwargs = {"shift": shift, "shift_video": shift_video}
     if strategy == "cascade":
         call_kwargs["video_steps"] = kwargs.get("video_steps", num_steps)
         call_kwargs["action_steps"] = kwargs.get("action_steps", num_steps)

@@ -51,7 +51,31 @@ class WanVideoBackbone(VideoBackbone):
     # Construction
     # ================================================================
 
-    def __init__(self, pipe, *, external_encoder=None):
+    @classmethod
+    def get_native_dit_patch_size(cls, pipe) -> Tuple[int, int, int]:
+        """Wan family's native DiT first-layer patch size.
+
+        All Wan2.x DiT variants (TI2V / I2V / VACE / Wan2.2) use ``(1, 2, 2)``
+        — the value is baked into ``WanModel.patch_embedding``'s ``Conv3d``
+        kernel and stride. We don't read it back from ``pipe.dit`` because
+        the value is invariant across the family and querying ``pipe.dit``
+        here would couple this classmethod to a non-trivial pipeline state.
+        """
+        return (1, 2, 2)
+
+    @classmethod
+    def get_native_temporal_contract(cls, pipe) -> Tuple[int, bool]:
+        """Wan family's native VAE temporal contract.
+
+        Hard-coded ``(4, True)`` across the Wan2.1 / Wan2.2 line — the causal
+        first-frame token plus 4-frame tail grouping is invariant. Same
+        rationale as :meth:`get_native_dit_patch_size`: probing ``pipe.vae``
+        here would couple the classmethod to a non-trivial pipeline state for
+        a value that is invariant by family.
+        """
+        return (4, True)
+
+    def __init__(self, pipe, *, external_encoder=None, shift_video=None):
         """Internal constructor. Use ``from_pretrained()`` instead.
 
         ``external_encoder`` must be ``None`` on the default path so
@@ -60,12 +84,36 @@ class WanVideoBackbone(VideoBackbone):
         in :meth:`_preprocess_video` / :meth:`_encode_video` /
         :meth:`_decode_latents` / :meth:`_latents_to_frames` and aliases
         the encoder under ``"vae"`` in :attr:`submodule_names`.
+
+        ``shift_video`` is the optional Esser-et-al. α-shift applied to
+        the video scheduler. Stored as ``self._shift_video`` so the ABC
+        :attr:`VideoBackbone.shift_video` property returns it — single
+        source of truth consumed by both
+        :meth:`BaseWAMArchitecture.init_training_schedulers` and
+        ``openwam/deploy/joint_engine.py::generate``. ``None`` keeps the
+        scheduler's template default (Wan = 5.0), which is bit-identical
+        to pre-PR behavior.
         """
         super().__init__()
         self._pipe = pipe
         self._encoder = external_encoder
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
+        self._shift_video = None if shift_video is None else float(shift_video)
+        # Resolve DiT patch size + temporal contract into backbone-owned
+        # instance attributes so the properties defined on the ABC
+        # (dit_patch_size / temporal_compression / causal_temporal) have
+        # a single value to return regardless of whether an external
+        # encoder is plugged in. Callers downstream (base.py mask
+        # downsampling, dataloader divisibility) consult the backbone
+        # attributes and never branch on ``self._encoder is None``.
+        if external_encoder is not None:
+            self._dit_patch_size = external_encoder.spec.dit_patch_size
+            self._temporal_compression = int(external_encoder.spec.temporal_compression)
+            self._causal_temporal = bool(external_encoder.spec.causal_temporal)
+        else:
+            self._dit_patch_size = self.get_native_dit_patch_size(pipe)
+            self._temporal_compression, self._causal_temporal = self.get_native_temporal_contract(pipe)
 
     @classmethod
     def from_pretrained(cls, source, *, external_encoder=None, **kw) -> WanVideoBackbone:
@@ -211,6 +259,17 @@ class WanVideoBackbone(VideoBackbone):
             ps = external_encoder.spec.dit_patch_size
             pipe.height_division_factor = external_encoder.spec.spatial_compression * ps[1]
             pipe.width_division_factor = external_encoder.spec.spatial_compression * ps[2]
+            # Time division must also follow the encoder spec, not the
+            # pipeline default (which is hardcoded to ``time_division_factor=4,
+            # time_division_remainder=1`` for native Wan VAE). Without this,
+            # the pipeline's ``check_resize_height_width`` would silently
+            # round V-JEPA-legal frame counts (e.g. 9, 11, 13 for
+            # temporal_compression=2 causal) up to Wan VAE's grid. The
+            # remainder is 1 iff the encoder is causal: that is the same
+            # "first frame separable, then groups of ``temporal_compression``"
+            # contract Wan VAE assumes and V-JEPA emulates.
+            pipe.time_division_factor = external_encoder.spec.temporal_compression * ps[0]
+            pipe.time_division_remainder = 1 if external_encoder.spec.causal_temporal else 0
 
             # (4) Release the native VAE so state_dict keys don't double-count
             # VAE params with the external encoder. Print rather than
@@ -241,7 +300,44 @@ class WanVideoBackbone(VideoBackbone):
             # state_dict.
             pipe.latent_spec = external_encoder.spec
 
-        return cls(pipe, external_encoder=external_encoder)
+        # Resolve optional cfg-side ``shift_video`` (Esser SD3 α-shift on the
+        # video scheduler) and pass it to the constructor. We read here
+        # rather than in ``__init__`` because the cfg shape depends on the
+        # ``source`` type (DictConfig from training, dict from deploy,
+        # plain pipe with no cfg context). ``None`` keeps the scheduler's
+        # template default (Wan = 5.0).
+        shift_video_cfg = cls._resolve_cfg_shift_video(source)
+
+        return cls(pipe, external_encoder=external_encoder, shift_video=shift_video_cfg)
+
+    @staticmethod
+    def _resolve_cfg_shift_video(source) -> Optional[float]:
+        """Extract ``cfg.model.video_backbone.shift_video`` from various
+        ``from_pretrained`` source shapes.
+
+        Returns ``None`` when the field is unset, the source has no cfg
+        context (plain pipe / model-path str), or the value is explicitly
+        null. Caller stores the result on ``self._shift_video`` for
+        downstream consumers (``init_training_schedulers`` /
+        ``joint_engine.generate``).
+        """
+        from omegaconf import DictConfig
+
+        vb_cfg = None
+        if isinstance(source, DictConfig):
+            # Training path: full Hydra cfg, video_backbone block lives under it.
+            vb_cfg = source.get("video_backbone") if "video_backbone" in source else None
+        elif isinstance(source, dict):
+            # Deploy path: model_loader hands us a dict that either IS the
+            # video_backbone block or contains it.
+            vb_cfg = source.get("video_backbone", source) if "video_backbone" in source else source
+        if vb_cfg is None:
+            return None
+        if isinstance(vb_cfg, dict):
+            raw = vb_cfg.get("shift_video")
+        else:
+            raw = getattr(vb_cfg, "shift_video", None)
+        return None if raw is None else float(raw)
 
     # ================================================================
     # Internal properties
@@ -444,7 +540,8 @@ class WanVideoBackbone(VideoBackbone):
             batch_size = latents.shape[0]
             num_clean = max(num_clean_prefix_frames, 1)
             f_lat = latents.shape[2]
-            tokens_per_frame = latents.shape[3] * latents.shape[4] // 4
+            ps = self._dit_patch_size
+            tokens_per_frame = latents.shape[3] * latents.shape[4] // (ps[1] * ps[2])
             token_timesteps = torch.ones(
                 batch_size, f_lat, tokens_per_frame, dtype=latents.dtype, device=latents.device
             ) * timestep.view(batch_size, 1, 1)
@@ -470,7 +567,8 @@ class WanVideoBackbone(VideoBackbone):
             # L times (L ≈ 4680 for VACE-1.3B, ≈18720 for I2V-14B-480P).
             batch_size = latents.shape[0]
             f_lat = latents.shape[2]
-            tokens_per_frame = latents.shape[3] * latents.shape[4] // 4
+            ps = self._dit_patch_size
+            tokens_per_frame = latents.shape[3] * latents.shape[4] // (ps[1] * ps[2])
             L = f_lat * tokens_per_frame
             t_base = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype))  # (B, dim)
             t = t_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
@@ -2261,7 +2359,13 @@ def _probe_dit_stats(dit) -> dict:
     }
 
 
-def reinit_dit_from_scratch(pipe, *, external_encoder=None, verbose: bool = True) -> None:
+def reinit_dit_from_scratch(
+    pipe,
+    *,
+    external_encoder=None,
+    dit_patch_size: Optional[Tuple[int, int, int]] = None,
+    verbose: bool = True,
+) -> None:
     """Re-initialize all learnable parameters in ``pipe.dit`` (and
     ``pipe.dit2`` if present) using PyTorch standard initialization. Does
     NOT touch ``pipe.vae`` / ``pipe.text_encoder`` / ``pipe.image_encoder`` /
@@ -2342,7 +2446,23 @@ def reinit_dit_from_scratch(pipe, *, external_encoder=None, verbose: bool = True
     # standard distribution again — harmless, just a duplicate random init
     # in the same distribution.
     if external_encoder is not None:
-        ps = external_encoder.spec.dit_patch_size
+        # ``dit_patch_size`` is sourced from the backbone (single source of
+        # truth — see VideoBackbone.dit_patch_size); callers in
+        # ``base.py._init_video_backbone`` forward
+        # ``self.video_backbone.dit_patch_size``. Required when an
+        # external_encoder is supplied — falling back to
+        # ``external_encoder.spec.dit_patch_size`` would silently re-introduce
+        # the encoder-spec read path the backbone abstraction was meant to
+        # eliminate.
+        if dit_patch_size is None:
+            raise ValueError(
+                "reinit_dit_from_scratch: dit_patch_size is required when "
+                "external_encoder is provided. Source it from the backbone "
+                "(e.g. self.video_backbone.dit_patch_size) — reading from "
+                "external_encoder.spec.dit_patch_size directly would bypass "
+                "the single-source-of-truth invariant on VideoBackbone."
+            )
+        ps = tuple(dit_patch_size)
         for dit in dits:
             dit.patch_embedding = external_encoder.build_dit_input_proj(dit.dim)
             dit.patch_size = ps
@@ -2355,26 +2475,59 @@ def reinit_dit_from_scratch(pipe, *, external_encoder=None, verbose: bool = True
                 head_mod.patch_size = ps
             dit.in_dim = external_encoder.spec.z_dim
 
-    # Snapshot a few representative tensors BEFORE the reset so the user can
-    # eyeball "yes, the loaded pretrained values were actually thrown away".
-    before_stats = [_probe_dit_stats(root) for root in dits] if verbose and is_main else None
+    # ZeRO-3 interaction: when the accelerator has ZeRO-3 enabled, each
+    # nn.Parameter in the loaded ``pipe.dit`` is already partitioned into a
+    # 1-D shard at this point (the ``_zero3_init_disabled`` scope in
+    # ``OpenWAMTrainer.__init__`` is a no-op on deepspeed 0.18.5; partitioning
+    # happens during ``deepspeed.zero.Init(enabled=True)`` which the
+    # Accelerator activates globally). ``Linear.reset_parameters`` then trips
+    # on ``_calculate_fan_in_and_fan_out`` because the weight is 1-D. Wrap
+    # the reset + hand-init in ``deepspeed.zero.GatheredParameters`` so each
+    # root's params are temporarily materialized to their full
+    # 2-D/5-D shape, reset, and re-partitioned on exit.
+    # ``modifier_rank=0`` broadcasts rank-0's values to the rest of the
+    # group, so the random reset is bit-identical across ranks regardless
+    # of pre-init torch RNG drift (cfg.project.seed already enforces this,
+    # but the broadcast is the deterministic floor). Newly-built modules
+    # from ``build_dit_input_proj`` / ``build_dit_output_proj`` lack
+    # ``ds_id`` and pass through the gather unchanged. Non-ZeRO-3 paths
+    # (DDP, ZeRO-2, single GPU) hit the ``nullcontext`` fast-path.
+    from contextlib import nullcontext
+
+    def _gather_zero3(root_mod):
+        try:
+            import deepspeed
+        except ImportError:
+            return nullcontext()
+        params = [p for p in root_mod.parameters() if hasattr(p, "ds_id")]
+        if not params:
+            return nullcontext()
+        return deepspeed.zero.GatheredParameters(params, modifier_rank=0)
+
+    before_stats = [] if (verbose and is_main) else None
+    after_stats = [] if (verbose and is_main) else None
 
     for root in dits:
-        for sub in root.modules():
-            if isinstance(sub, stdlib_resettable):
-                sub.reset_parameters()
-        with torch.no_grad():
+        with _gather_zero3(root):
+            if before_stats is not None:
+                before_stats.append(_probe_dit_stats(root))
             for sub in root.modules():
-                if isinstance(sub, RMSNorm):
-                    sub.weight.fill_(1.0)
-                elif isinstance(sub, DiTBlock):
-                    dim = sub.modulation.shape[-1]
-                    sub.modulation.normal_(mean=0.0, std=dim**-0.5)
-                elif isinstance(sub, Head):
-                    dim = sub.modulation.shape[-1]
-                    sub.modulation.normal_(mean=0.0, std=dim**-0.5)
-                elif isinstance(sub, MLP) and getattr(sub, "has_pos_emb", False):
-                    sub.emb_pos.zero_()
+                if isinstance(sub, stdlib_resettable):
+                    sub.reset_parameters()
+            with torch.no_grad():
+                for sub in root.modules():
+                    if isinstance(sub, RMSNorm):
+                        sub.weight.fill_(1.0)
+                    elif isinstance(sub, DiTBlock):
+                        dim = sub.modulation.shape[-1]
+                        sub.modulation.normal_(mean=0.0, std=dim**-0.5)
+                    elif isinstance(sub, Head):
+                        dim = sub.modulation.shape[-1]
+                        sub.modulation.normal_(mean=0.0, std=dim**-0.5)
+                    elif isinstance(sub, MLP) and getattr(sub, "has_pos_emb", False):
+                        sub.emb_pos.zero_()
+            if after_stats is not None:
+                after_stats.append(_probe_dit_stats(root))
 
     logger.info(
         "reinit_dit_from_scratch: re-initialized %d DiT module(s); VAE/T5 untouched",
@@ -2382,7 +2535,6 @@ def reinit_dit_from_scratch(pipe, *, external_encoder=None, verbose: bool = True
     )
 
     if verbose and is_main:
-        after_stats = [_probe_dit_stats(root) for root in dits]
         # Use print(..., flush=True) so the verification line surfaces even
         # under non-INFO logging configurations (e.g. plain torchrun without
         # logging.basicConfig). Bounded output: 4 lines per DiT module.

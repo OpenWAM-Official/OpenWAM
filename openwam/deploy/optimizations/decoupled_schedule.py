@@ -29,6 +29,8 @@ def schedule_decoupled_flash(
     action_scheduler,
     action_steps: int = 1,
     shift: float = 5.0,
+    *,
+    shift_video: float = None,  # noqa: ARG001 — video stays clean (σ=0); shift irrelevant
 ) -> Schedule:
     """DreamZero-Flash: video stays clean (σ=0); action denoises in 1-4 steps.
 
@@ -37,6 +39,9 @@ def schedule_decoupled_flash(
         action_scheduler: Action stream's scheduler.
         action_steps: Number of denoising steps for actions (1-4 typical).
         shift: Shifted-sigmoid shape parameter.
+        shift_video: Ignored — video stays clean by construction, so its
+            schedule discretization is irrelevant. Accepted for dispatcher
+            signature symmetry with the other ``schedule_*`` functions.
     """
     action_scheduler.set_timesteps(action_steps, shift=shift)
     a_ts = action_scheduler.timesteps.tolist()
@@ -49,15 +54,24 @@ def schedule_decoupled_asymmetric(
     video_steps: int = 10,
     action_steps: int = 2,
     shift: float = 5.0,
+    *,
+    shift_video: float = None,
 ) -> Schedule:
     """Asymmetric: video uses many steps, action uses few (action joins late).
 
     Action denoising happens during the last ``action_steps`` of the video
     schedule, so total iteration count is ``video_steps``.
+
+    ``shift_video`` (when set) overrides the video α-shift independently
+    of the action α-shift, matching the
+    :mod:`openwam.deploy.schedule` ``schedule_sync`` contract — the model
+    was trained on independent ``(sigma_v, sigma_a)`` pairs so per-stream
+    shift values are in-distribution.
     """
     assert action_steps <= video_steps, f"action_steps ({action_steps}) must be <= video_steps ({video_steps})"
 
-    video_scheduler.set_timesteps(video_steps, shift=shift)
+    sv = shift if shift_video is None else shift_video
+    video_scheduler.set_timesteps(video_steps, shift=sv)
     action_scheduler.set_timesteps(action_steps, shift=shift)
     v_ts = video_scheduler.timesteps.tolist()
     a_ts = action_scheduler.timesteps.tolist()

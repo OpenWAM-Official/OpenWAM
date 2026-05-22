@@ -45,6 +45,32 @@ logger = logging.getLogger(__name__)
 class Cosmos25VideoBackbone(VideoBackbone):
     """Wrap a Cosmos-Predict2.5 pipeline behind the :class:`VideoBackbone` ABC."""
 
+    @classmethod
+    def get_native_dit_patch_size(cls, pipe) -> Tuple[int, int, int]:
+        """Cosmos-Predict2.5 native DiT first-layer patch size.
+
+        Mirrors the 2B-720p ``MiniTrainDIT`` config in
+        ``pipeline_builder._COSMOS25_2B_NET_KWARGS``: ``patch_temporal=1`` and
+        ``patch_spatial=2``, i.e. ``(T, H, W) = (1, 2, 2)`` — identical to
+        the Wan2.x family. Kept invariant across the Cosmos25 size family;
+        new 14B / 720p variants override only if their checkpoint geometry
+        actually differs.
+        """
+        return (1, 2, 2)
+
+    @classmethod
+    def get_native_temporal_contract(cls, pipe) -> Tuple[int, bool]:
+        """Cosmos-Predict2.5 native VAE temporal contract.
+
+        Cosmos25 wraps the Wan2pt1 VAE (``Wan2pt1VAEInterface``), which keeps
+        the same causal first-frame plus 4-frame tail grouping as the Wan
+        family — so ``(4, True)`` matches what the pipeline actually emits.
+        External-encoder swap is not supported on Cosmos25 (constructor
+        intentionally omits the kwarg), so the native value is the only
+        value this backbone ever exposes.
+        """
+        return (4, True)
+
     def __init__(
         self,
         pipeline: Any,
@@ -68,6 +94,14 @@ class Cosmos25VideoBackbone(VideoBackbone):
         self._scheduler = scheduler if scheduler is not None else CosmosFlowSchedulerAdapter()
         self._submodule_names = list(submodule_names) if submodule_names is not None else ["dit", "vae", "text_encoder"]
         self._freeze = bool(freeze)
+        # External encoder injection is not yet supported on Cosmos25 (the
+        # __init__ above intentionally omits `external_encoder=` to keep the
+        # PR #52 surface untouched); resolve native patch size + temporal
+        # contract only. Storing them on `self` makes the ABC properties
+        # (dit_patch_size / temporal_compression / causal_temporal) work
+        # without any branching.
+        self._dit_patch_size = self.get_native_dit_patch_size(pipeline)
+        self._temporal_compression, self._causal_temporal = self.get_native_temporal_contract(pipeline)
 
         # NOTE: `nn.Module.__setattr__` already registers `self._pipe` in
         # `self._modules['_pipe']` when `pipeline` is itself an nn.Module —

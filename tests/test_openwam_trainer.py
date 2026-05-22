@@ -132,12 +132,29 @@ class _MockVideoBackbone(VideoBackbone):
         self._text_encoder = nn.Linear(4, 4)
         self._device = torch.device("cpu")
         self._dtype = torch.float32
+        # ABC-property backings (mirror Wan native so legacy mask code stays
+        # bit-for-bit identical).
+        self._dit_patch_size = self.get_native_dit_patch_size(None)
+        self._temporal_compression, self._causal_temporal = self.get_native_temporal_contract(None)
         self.last_injected = None
         self.last_extracted = None
 
     @classmethod
     def from_pretrained(cls, source, **kw):
         return cls()
+
+    @classmethod
+    def get_native_dit_patch_size(cls, pipe):
+        # Test stubs don't care about patch geometry; return the Wan native
+        # ``(T, H, W) = (1, 2, 2)`` so behaviour matches WanVideoBackbone /
+        # Cosmos25VideoBackbone defaults.
+        return (1, 2, 2)
+
+    @classmethod
+    def get_native_temporal_contract(cls, pipe):
+        # Mirror Wan native ``(4, True)`` so legacy mask/divisibility tests
+        # built on this stub keep their previous behaviour.
+        return (4, True)
 
     @property
     def dim(self) -> int:

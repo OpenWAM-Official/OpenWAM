@@ -274,6 +274,30 @@ def _resolve_prompt(
     return format_prompt_for_inference(base_prompt)
 
 
+def _check_temporal_divisibility(num_video_frames: int, temporal_compression: int, causal_temporal: bool) -> None:
+    """Validate ``num_video_frames`` against the encoder's temporal contract.
+
+    Threaded from ``configs/model/*.yaml`` →
+    ``openwam.train.utils.temporal_contract.apply_temporal_contract_bridge``
+    (invoked by ``scripts/train.py``) → dataset cfg. Kept
+    as a free function so tests can exercise the branching rule without
+    instantiating the full dataset (which requires real episode HDF5 files).
+    """
+    tc = int(temporal_compression)
+    if causal_temporal:
+        if (num_video_frames - 1) % tc != 0:
+            raise ValueError(
+                f"num_video_frames={num_video_frames} violates "
+                f"(N-1) % {tc} == 0 (required by causal encoder)."
+            )
+    else:
+        if num_video_frames % tc != 0:
+            raise ValueError(
+                f"num_video_frames={num_video_frames} violates "
+                f"N % {tc} == 0 (required by non-causal encoder)."
+            )
+
+
 class RoboTwinDataset(BaseActionDataset):
     """RoboTwin 2.0 HDF5 dataset for bimanual robot video-action training.
 
@@ -323,11 +347,15 @@ class RoboTwinDataset(BaseActionDataset):
         max_static_retry: int = 3,
         text_embedding_cache_dir: Optional[str] = None,
         text_embedding_dropout: float = 0.0,
+        temporal_compression: int = 4,
+        causal_temporal: bool = True,
     ):
         super().__init__()
         self.robot = robot
         self.variant = variant
         self.action_mode = action_mode
+        self.temporal_compression = int(temporal_compression)
+        self.causal_temporal = bool(causal_temporal)
         self.normalize_mode = normalize_mode if normalize_mode not in ("", "none", "null") else None
         self._filter_static_segments = bool(filter_static_segments)
         self._static_segment_threshold = float(static_segment_threshold)
@@ -372,17 +400,19 @@ class RoboTwinDataset(BaseActionDataset):
         self._raw_window_len = self.num_frames
         self._video_sample_indices = list(range(0, self.num_frames, self.video_stride))
         self.num_video_frames = len(self._video_sample_indices)
-        # Wan VAE temporal downsampling requires (num_video_frames - 1) % 4 == 0.
-        # Otherwise the pipeline silently rounds up num_frames (see base_pipeline.
-        # check_resize_height_width) and vace_video/video tensors end up at
-        # mismatched temporal lengths.
-        if (self.num_video_frames - 1) % 4 != 0:
-            raise ValueError(
-                f"After video_stride sub-sampling, num_video_frames={self.num_video_frames} "
-                f"violates (num_video_frames - 1) % 4 == 0 (required by Wan VAE). "
-                f"Pick num_frames/video_stride so that (num_frames-1)//video_stride is a "
-                f"multiple of 4. Example: num_frames=33, video_stride=4 → 8 (= 4×2)."
-            )
+        # Encoder temporal downsampling divisibility check. The contract is
+        # threaded from the encoder spec via ``configs/model/*.yaml`` →
+        # ``openwam.train.utils.temporal_contract.apply_temporal_contract_bridge``
+        # (invoked by ``scripts/train.py``) → dataloader cfg. Defaults preserve
+        # the historical Wan VAE rule.
+        #   causal_temporal=True : first frame is its own latent token, so the
+        #     remaining ``num_video_frames - 1`` frames must be divisible by
+        #     ``temporal_compression`` (Wan VAE = 4, V-JEPA 2.1 = 2).
+        #   causal_temporal=False: uniform tubelets, so ``num_video_frames``
+        #     itself must be divisible by ``temporal_compression``.
+        _check_temporal_divisibility(
+            self.num_video_frames, self.temporal_compression, self.causal_temporal
+        )
         self.multiview = bool(multiview)
         if self.multiview:
             if camera_layout is None:
@@ -1026,6 +1056,8 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             max_static_retry=int(_get("max_static_retry", 3)),
             text_embedding_cache_dir=_get("text_embedding_cache_dir", None),
             text_embedding_dropout=float(_get("text_embedding_dropout", 0.0)),
+            temporal_compression=int(_get("temporal_compression", 4)),
+            causal_temporal=bool(_get("causal_temporal", True)),
         )
 
     def __init__(

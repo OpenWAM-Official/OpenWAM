@@ -19,6 +19,7 @@ import math
 import pytest
 import torch
 import torch.nn as nn
+from PIL import Image
 from torch import Tensor
 
 from openwam.model.video_backbone.adapter import VideoBackbone
@@ -596,7 +597,12 @@ def test_C13a_reinit_with_external_encoder_rebuilds_modules():
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
-    reinit_dit_from_scratch(pipe, external_encoder=enc, verbose=False)
+    reinit_dit_from_scratch(
+        pipe,
+        external_encoder=enc,
+        dit_patch_size=enc.spec.dit_patch_size,
+        verbose=False,
+    )
     assert pipe.dit.patch_embedding.in_channels == 1024
     assert pipe.dit.head.head.out_features == 1024 * 4  # z_dim * prod((1,2,2))
     assert pipe.dit.in_dim == 1024
@@ -629,7 +635,12 @@ def test_C13c_reinit_syncs_patch_size_for_non_default_encoder():
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False, dit_patch_size=(1, 1, 1))
-    reinit_dit_from_scratch(pipe, external_encoder=enc, verbose=False)
+    reinit_dit_from_scratch(
+        pipe,
+        external_encoder=enc,
+        dit_patch_size=enc.spec.dit_patch_size,
+        verbose=False,
+    )
 
     # Hooks rebuilt the in/out projections at the new geometry.
     assert pipe.dit.patch_embedding.in_channels == 1024
@@ -656,6 +667,21 @@ def test_C13c_reinit_syncs_patch_size_for_non_default_encoder():
     flat = torch.zeros(1, 8, pipe.dit.dim)
     out = pipe.dit.head.head(flat)
     assert out.shape[-1] == enc.spec.z_dim * math.prod(enc.spec.dit_patch_size)
+
+
+def test_C13d_reinit_with_external_encoder_requires_dit_patch_size():
+    """Single-source-of-truth guard: ``reinit_dit_from_scratch`` must refuse
+    to silently fall back to ``external_encoder.spec.dit_patch_size`` when
+    ``dit_patch_size`` is omitted. The backbone owns this geometry — callers
+    must source it from ``self.video_backbone.dit_patch_size`` so the DiT
+    rebuild reads the same value as the dataloader bridge and the cross-check
+    in :meth:`BaseWAMArchitecture._init_video_backbone`."""
+    from openwam.model.video_backbone.wan_adapter import reinit_dit_from_scratch
+
+    pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    with pytest.raises(ValueError, match=r"dit_patch_size is required"):
+        reinit_dit_from_scratch(pipe, external_encoder=enc, verbose=False)
 
 
 # Tiny helper for C9-C13 — declares a custom spec without going through Wan VAE loading.
@@ -761,6 +787,8 @@ def test_D2_encoder_block_with_from_scratch_false_silently_ignored(monkeypatch, 
         fake_kw.update(kw)
         bb = nn.Module()
         bb._pipe = None
+        bb.temporal_compression = 4
+        bb.causal_temporal = True
         return bb
 
     import openwam.model.video_backbone as vb_pkg
@@ -814,6 +842,8 @@ def test_D2b_deploy_with_encoder_block_and_from_scratch_false_keeps_native_vae(m
         backbone_kwargs.update(kw)
         bb = nn.Module()
         bb._pipe = None
+        bb.temporal_compression = 4
+        bb.causal_temporal = True
         return bb
 
     import openwam.model.video_backbone as vb_pkg
@@ -860,6 +890,8 @@ def test_D3_encoder_built_when_from_scratch_true_and_encoder_set(monkeypatch):
         backbone_kwargs.update(kw)
         bb = nn.Module()
         bb._pipe = None  # triggers the "skipping" warning branch
+        bb.temporal_compression = 4
+        bb.causal_temporal = True
         return bb
 
     # _init_video_backbone re-imports both symbols inside the function body,
@@ -899,6 +931,8 @@ def test_D4_encoder_not_built_when_no_encoder_block(monkeypatch):
         fake_kw.update(kw)
         bb = nn.Module()
         bb._pipe = None
+        bb.temporal_compression = 4
+        bb.causal_temporal = True
         return bb
 
     import openwam.model.video_backbone as vb_pkg
@@ -1253,6 +1287,9 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
         bb = nn.Module()
         bb._pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
         bb._uses_external_encoder = False
+        bb.temporal_compression = 4
+        bb.causal_temporal = True
+        bb.dit_patch_size = (1, 2, 2)
         return bb
 
     vb_pkg.build_video_backbone = _stub_build
@@ -1636,3 +1673,166 @@ def test_E_dual_system_composed_encoder_block():
     assert "model_path" in enc
     extras = set(enc.keys()) - {"name", "model_path"}
     assert extras == set(), f"encoder block has extra fields {extras}, will trip the gate's whitelist"
+
+
+# ======================================================================
+# A3: V-JEPA 2.1 encoder (V1-V8)
+# ======================================================================
+
+
+class _MockVJEPAViT(nn.Module):
+    """Tiny CPU stand-in for the V-JEPA 2.1 ViT.
+
+    Reproduces only what ``VJEPA21VideoEncoder._encode_image`` /
+    ``_encode_video_tubelet`` consume: ``(B, C, T, H, W) -> (B, L, D)`` with
+    ``L`` matching the post-patchify token count for tubelet=1 (T==1 branch)
+    and tubelet=2 (T>1 branch). Has at least one parameter so ``next(
+    self.parameters())`` yields a device/dtype anchor.
+    """
+
+    def __init__(self, embed_dim: int = 8, patch: int = 16, tubelet: int = 2):
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.patch = int(patch)
+        self.tubelet = int(tubelet)
+        self.img_temporal_dim_size = 1
+        self._proj = nn.Linear(1, embed_dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, _C, T, H, W = x.shape
+        h = H // self.patch
+        w = W // self.patch
+        if T == 1:
+            L = h * w
+        else:
+            assert T % self.tubelet == 0
+            L = (T // self.tubelet) * h * w
+        # Use the parameter so requires_grad propagates and the dtype is real.
+        seed = torch.zeros(B, L, 1, device=x.device, dtype=x.dtype)
+        return self._proj(seed)
+
+
+def _build_vjepa_encoder(embed_dim: int = 8):
+    """Construct a ``VJEPA21VideoEncoder`` around the mock ViT, no weights load."""
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    vit = _MockVJEPAViT(embed_dim=embed_dim)
+    return VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="mock")
+
+
+def test_V1_vjepa21_registration_round_trip():
+    """``register_video_encoder("vjepa2_1")`` exposes the class via the registry."""
+    from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: F401
+
+    assert "vjepa2_1" in _VIDEO_ENCODER_REGISTRY
+    assert _VIDEO_ENCODER_REGISTRY["vjepa2_1"] is VJEPA21VideoEncoder
+
+
+def test_V2_vjepa21_from_pretrained_missing_manifest(tmp_path):
+    """``from_pretrained`` on a dir without ``manifest.json`` raises FileNotFoundError."""
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    with pytest.raises(FileNotFoundError, match="manifest.json"):
+        VJEPA21VideoEncoder.from_pretrained(str(tmp_path))
+
+
+def test_V3_vjepa21_spec_invariants():
+    """spec fields are nailed down: irreversible, causal, (1,2,2) DiT patch, z_dim wired."""
+    enc = _build_vjepa_encoder(embed_dim=1408)
+    spec = enc.spec
+    assert spec.is_reversible is False
+    assert spec.causal_temporal is True
+    assert spec.dit_patch_size == (1, 2, 2)
+    assert spec.z_dim == 1408
+    assert spec.spatial_compression == 16
+    assert spec.temporal_compression == 2
+    assert spec.pixel_range == (-1.0, 1.0)
+
+
+def test_V4_vjepa21_preprocess_imagenet_normalize():
+    """preprocess_video ImageNet-normalizes — uniform 0.5-gray frames land near zero."""
+    enc = _build_vjepa_encoder()
+    frames = [Image.new("RGB", (32, 32), color=(128, 128, 128)) for _ in range(3)]
+    video = enc.preprocess_video(frames)
+    assert video.shape == (1, 3, 3, 32, 32)
+    # 0.5 input - ImageNet mean (~0.45) / std (~0.22) ≈ small non-zero;
+    # the std is what matters: properly normalized data has unit-ish channel std.
+    flat = video.reshape(3, -1)
+    assert flat.mean(dim=1).abs().max() < 1.0  # not absurdly far from 0
+    assert flat.std(dim=1).max() < 1.0  # constant input -> per-channel std == 0
+
+
+def test_V5_vjepa21_batch_encode_t_lat_shapes():
+    """batch_encode T_pixel-to-T_lat dispatch:
+    T_pixel == 1 -> T_lat == 1; T_pixel == 9 -> T_lat == 1 + (9-1)/2 == 5.
+    """
+    enc = _build_vjepa_encoder(embed_dim=8)
+    # T_pixel == 1: image branch only
+    v1 = torch.randn(1, 3, 1, 32, 32)
+    z1 = enc.batch_encode(v1)
+    assert z1.shape == (1, 8, 1, 2, 2)  # (B, D, T_lat=1, H/16, W/16)
+
+    # T_pixel == 9: 1 (image) + 4 (tubelet=2 over 8 frames) == 5 latent frames
+    v9 = torch.randn(1, 3, 9, 32, 32)
+    z9 = enc.batch_encode(v9)
+    assert z9.shape == (1, 8, 5, 2, 2)
+
+
+def test_V6_vjepa21_decode_raises():
+    """Irreversible encoder: decode/to_frames raise NotImplementedError."""
+    enc = _build_vjepa_encoder()
+    with pytest.raises(NotImplementedError, match="irreversible"):
+        enc.decode(torch.zeros(1, 8, 1, 2, 2))
+    with pytest.raises(NotImplementedError, match="irreversible"):
+        enc.to_frames(torch.zeros(1, 3, 1, 32, 32))
+
+
+def test_V7_vjepa21_default_dit_input_proj_shape():
+    """The PR #60 default ``build_dit_input_proj`` at dit_patch_size=(1,2,2)
+    produces a Conv3d(z_dim, dit_dim, (1,2,2), (1,2,2)) — the exact channel-
+    projection-then-2x spatial reduce we need for the Wan TI2V-5B host DiT.
+    """
+    enc = _build_vjepa_encoder(embed_dim=1408)
+    conv = enc.build_dit_input_proj(dit_dim=1024)
+    assert isinstance(conv, nn.Conv3d)
+    assert conv.in_channels == 1408
+    assert conv.out_channels == 1024
+    assert tuple(conv.kernel_size) == (1, 2, 2)
+    assert tuple(conv.stride) == (1, 2, 2)
+
+
+@pytest.mark.parametrize(
+    "patch, tubelet",
+    [(14, 2), (16, 1), (8, 4)],
+)
+def test_V8_vjepa21_from_pretrained_rejects_manifest_geometry_mismatch(tmp_path, patch, tubelet):
+    """``from_pretrained`` fails fast when ``manifest.patch`` / ``manifest.tubelet``
+    differ from the (16, 2) values the spec + reshape paths are hard-wired against.
+
+    Without this guard, a (patch=14) manifest would build a ViT with the wrong
+    grid and only fail later inside ``batch_encode`` at the ``H // 16`` reshape
+    with a generic shape-mismatch RuntimeError. We want the load-time error to
+    name the offending fields instead.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-rope-256",
+        "patch": patch,
+        "img_size": 256,
+        "training_num_frames": 64,
+        "tubelet": tubelet,
+        "use_rope": True,
+        "img_temporal_dim_size": 1,
+        "interpolate_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+    with pytest.raises(ValueError, match="patch/tubelet must be"):
+        VJEPA21VideoEncoder.from_pretrained(str(tmp_path))
