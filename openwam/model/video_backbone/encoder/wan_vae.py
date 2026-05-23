@@ -153,7 +153,13 @@ class WanVideoVAEEncoder(VideoEncoder):
         return cls(vae)
 
     @classmethod
-    def from_skeleton(cls, components_entry: dict, *, device: str = "cpu") -> "WanVideoVAEEncoder":
+    def from_skeleton(
+        cls,
+        components_entry: dict,
+        *,
+        device: str = "cpu",
+        encoder_cfg: Any = None,
+    ) -> "WanVideoVAEEncoder":
         """Deploy-time constructor — instantiate the underlying ``WanVideoVAE``
         / ``WanVideoVAE38`` class with empty weights using the saved
         ``components`` entry's ``model_class`` + ``extra_kwargs``. The

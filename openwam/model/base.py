@@ -347,6 +347,40 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     "video_backbone.from_scratch=true: DiT re-initialized; VAE / text_encoder keep pretrained weights"
                 )
 
+        # Deploy path with an external encoder: DiT was just constructed
+        # from the saved Wan ``components[dit].extra_kwargs`` (in/out_dim
+        # = native Wan VAE z_dim, e.g. 48), but the saved checkpoint
+        # stores the external-encoder-adapted shapes (in/out_dim =
+        # encoder.spec.z_dim, e.g. 1408 for V-JEPA 2.1 ViT-g). The
+        # training-side ``reinit_dit_from_scratch`` performs this
+        # reshape before the random-init reset; on deploy we want the
+        # reshape WITHOUT the reset so the subsequent strict
+        # ``load_checkpoint`` can populate ``patch_embedding`` /
+        # ``head.head`` from the safetensors. Gated on
+        # ``external_encoder is not None`` so the native-VAE deploy
+        # path (where Wan's saved components already match the
+        # checkpoint) stays untouched.
+        if (
+            self.video_backbone is not None
+            and source is not None
+            and external_encoder is not None
+        ):
+            pipe = getattr(self.video_backbone, "_pipe", None)
+            if pipe is not None:
+                from openwam.model.video_backbone.wan_adapter import adapt_dit_to_external_encoder
+
+                adapt_dit_to_external_encoder(
+                    pipe,
+                    external_encoder,
+                    self.video_backbone.dit_patch_size,
+                )
+                logger.info(
+                    "Deploy with external encoder %s: DiT patch_embedding / "
+                    "head.head reshaped to z_dim=%d before strict load",
+                    type(external_encoder).__name__,
+                    external_encoder.spec.z_dim,
+                )
+
     @staticmethod
     def _build_external_encoder_skeleton(enc_cfg, source):
         """Deploy-time external encoder constructor.
@@ -393,7 +427,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 "entry to construct the encoder skeleton from."
             )
         encoder_cls = _VIDEO_ENCODER_REGISTRY[enc_name]
-        return encoder_cls.from_skeleton(vae_entry)
+        return encoder_cls.from_skeleton(vae_entry, encoder_cfg=enc_cfg)
 
     def _resolve_video_dim(self, cfg) -> int:
         """Resolve video_dim from config or video_backbone; raise if neither provides it."""

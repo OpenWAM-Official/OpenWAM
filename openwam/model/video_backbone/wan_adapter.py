@@ -2359,6 +2359,67 @@ def _probe_dit_stats(dit) -> dict:
     }
 
 
+def adapt_dit_to_external_encoder(
+    pipe,
+    external_encoder,
+    dit_patch_size: Optional[Tuple[int, int, int]],
+) -> None:
+    """Rebuild ``pipe.dit.patch_embedding`` / ``head.head`` / ``patch_size`` /
+    ``in_dim`` to match an external :class:`VideoEncoder`'s latent shape.
+
+    The encoder owns both projection hooks; defaults produce the
+    Wan-original Conv3d / Linear pair, so ``wan_vae`` lands here as a
+    no-op shape-wise. Non-VAE encoders (V-JEPA, DINOv3, ...) adapt the
+    first conv's ``in_channels`` to the encoder's ``z_dim`` and the
+    final Linear's ``out_features`` to ``z_dim * prod(dit_patch_size)``.
+
+    ``WanModel.unpatchify`` uses ``self.patch_size`` for its einops
+    rearrange (dit.py:372-381), so an encoder declaring a different
+    ``dit_patch_size`` would otherwise feed a Linear-out of width
+    ``z_dim`` into an unpatchify that still expects ``z_dim * 4`` and
+    shape-mismatch on the first forward. ``dit.in_dim`` is also
+    synced so downstream code that inspects it (e.g. I2V's
+    ``_build_i2v_y``) sees the new value.
+
+    Called from two sites:
+
+    * :func:`reinit_dit_from_scratch` (training path) — runs before the
+      stdlib ``reset_parameters`` loop; the duplicate random init is
+      harmless.
+    * ``base.py:_init_video_backbone`` deploy path — runs once when an
+      external encoder is in play and a saved checkpoint will populate
+      the rebuilt modules via strict ``load_checkpoint``.
+
+    ``dit_patch_size`` MUST come from the backbone (single source of
+    truth — see :attr:`VideoBackbone.dit_patch_size`). Reading
+    ``external_encoder.spec.dit_patch_size`` directly here would bypass
+    the abstraction.
+    """
+    dits = [m for m in (getattr(pipe, "dit", None), getattr(pipe, "dit2", None)) if m is not None]
+    if not dits:
+        logger.warning("adapt_dit_to_external_encoder: pipe has no dit/dit2")
+        return
+    if dit_patch_size is None:
+        raise ValueError(
+            "adapt_dit_to_external_encoder: dit_patch_size is required. "
+            "Source it from the backbone (e.g. "
+            "self.video_backbone.dit_patch_size) rather than reading "
+            "external_encoder.spec.dit_patch_size directly."
+        )
+    ps = tuple(dit_patch_size)
+    for dit in dits:
+        dit.patch_embedding = external_encoder.build_dit_input_proj(dit.dim)
+        dit.patch_size = ps
+        head_mod = getattr(dit, "head", None)
+        # MotWanModel-style DiTs may not own a head (they exit early into a
+        # control adapter); guard the assignment so the rebuild path remains
+        # generic across Wan variants.
+        if head_mod is not None and hasattr(head_mod, "head"):
+            head_mod.head = external_encoder.build_dit_output_proj(dit.dim)
+            head_mod.patch_size = ps
+        dit.in_dim = external_encoder.spec.z_dim
+
+
 def reinit_dit_from_scratch(
     pipe,
     *,
@@ -2431,49 +2492,12 @@ def reinit_dit_from_scratch(
     # encoder owns both hooks; defaults produce the Wan-original Conv3d/
     # Linear pair, so wan_vae lands here as a no-op shape-wise. Non-VAE
     # encoders adapt the first conv's in_channels and final Linear's
-    # out_features to the encoder's z_dim and dit_patch_size. We also sync
-    # the ``patch_size`` metadata on both ``WanModel`` and ``Head`` —
-    # ``WanModel.unpatchify`` uses ``self.patch_size`` for its einops
-    # rearrange (dit.py:372-381), so an encoder declaring
-    # ``dit_patch_size=(1,1,1)`` would otherwise feed a Linear-out of width
-    # ``z_dim`` into an unpatchify that still expects ``z_dim * 4`` and
-    # shape-mismatch on the first forward. ``dit.in_dim`` metadata is
-    # updated so downstream code that inspects it (e.g. I2V's _build_i2v_y)
-    # sees the new value (I2V itself is blocked at construction by
-    # WanVideoBackbone.from_pretrained's fail-fast). See
-    # docs/external_video_encoder.md §6 for the contract. The subsequent
-    # reset_parameters() loop re-initializes these new modules with the
-    # standard distribution again — harmless, just a duplicate random init
-    # in the same distribution.
+    # out_features to the encoder's z_dim and dit_patch_size. The
+    # subsequent reset_parameters() loop re-initializes these new
+    # modules with the standard distribution again — harmless, just a
+    # duplicate random init in the same distribution.
     if external_encoder is not None:
-        # ``dit_patch_size`` is sourced from the backbone (single source of
-        # truth — see VideoBackbone.dit_patch_size); callers in
-        # ``base.py._init_video_backbone`` forward
-        # ``self.video_backbone.dit_patch_size``. Required when an
-        # external_encoder is supplied — falling back to
-        # ``external_encoder.spec.dit_patch_size`` would silently re-introduce
-        # the encoder-spec read path the backbone abstraction was meant to
-        # eliminate.
-        if dit_patch_size is None:
-            raise ValueError(
-                "reinit_dit_from_scratch: dit_patch_size is required when "
-                "external_encoder is provided. Source it from the backbone "
-                "(e.g. self.video_backbone.dit_patch_size) — reading from "
-                "external_encoder.spec.dit_patch_size directly would bypass "
-                "the single-source-of-truth invariant on VideoBackbone."
-            )
-        ps = tuple(dit_patch_size)
-        for dit in dits:
-            dit.patch_embedding = external_encoder.build_dit_input_proj(dit.dim)
-            dit.patch_size = ps
-            head_mod = getattr(dit, "head", None)
-            # MotWanModel-style DiTs may not own a head (they exit early into
-            # a control adapter); guard the assignment so the rebuild path
-            # remains generic across Wan variants.
-            if head_mod is not None and hasattr(head_mod, "head"):
-                head_mod.head = external_encoder.build_dit_output_proj(dit.dim)
-                head_mod.patch_size = ps
-            dit.in_dim = external_encoder.spec.z_dim
+        adapt_dit_to_external_encoder(pipe, external_encoder, dit_patch_size)
 
     # ZeRO-3 interaction: when the accelerator has ZeRO-3 enabled, each
     # nn.Parameter in the loaded ``pipe.dit`` is already partitioned into a

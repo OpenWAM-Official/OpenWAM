@@ -184,6 +184,85 @@ class VJEPA21VideoEncoder(VideoEncoder):
 
     @classmethod
     def from_pretrained(cls, model_path: str, **kw: Any) -> "VJEPA21VideoEncoder":
+        manifest = cls._read_and_validate_manifest(model_path)
+        vit_encoder = cls._prepare_vjepa_imports_and_patch()
+        vit = cls._build_vit_from_manifest(vit_encoder, manifest)
+        cls._load_vit_weights(vit, model_path, manifest)
+        return cls(
+            vit,
+            embed_dim=int(manifest["embed_dim"]),
+            variant=str(manifest["variant"]),
+        )
+
+    @classmethod
+    def from_skeleton(
+        cls,
+        components_entry: dict,
+        *,
+        device: str = "cpu",
+        encoder_cfg: Any = None,
+    ) -> "VJEPA21VideoEncoder":
+        """Deploy-time zero-weight ViT shell, sized by manifest.
+
+        Unlike :class:`WanVideoVAEEncoder` (which reconstructs from the saved
+        ``components_entry``), V-JEPA's training-time component-spec
+        generator did not persist ViT geometry into ``config.yaml`` for
+        PR #67-era runs — ``components[vae]`` actually carries the Wan
+        ``WanVideoVAE38`` class (an artifact of ``get_component_specs``
+        scanning the Wan ``model_path``). We therefore ignore
+        ``components_entry`` and reconstruct from the yaml-preserved
+        ``encoder.model_path``'s ``manifest.json``.
+
+        Trade-off: the deploy host must be able to read
+        ``encoder.model_path``. This is acceptable as a short-term
+        unblock for already-trained checkpoints; a future training-side
+        patch can drop the dependency by copying ``manifest.json`` into
+        the checkpoint dir and overriding ``components[vae]`` with the
+        V-JEPA ViT spec.
+
+        ViT weights are NOT loaded here — the architecture's strict
+        ``load_checkpoint`` populates ``_encoder._m.*`` from the saved
+        safetensors immediately after this call returns.
+        """
+        if encoder_cfg is None:
+            raise RuntimeError(
+                "VJEPA21VideoEncoder.from_skeleton requires encoder_cfg "
+                "(the yaml ``model.video_backbone.encoder`` block) to "
+                "locate manifest.json — ``components_entry`` does not "
+                "carry ViT geometry. Confirm "
+                "base.py:_build_external_encoder_skeleton is passing "
+                "enc_cfg through."
+            )
+        if isinstance(encoder_cfg, dict):
+            model_path = encoder_cfg.get("model_path")
+        else:
+            model_path = getattr(encoder_cfg, "model_path", None)
+        if not model_path:
+            raise RuntimeError(
+                "VJEPA21VideoEncoder.from_skeleton: encoder_cfg.model_path "
+                "is required to read manifest.json on the deploy host. "
+                f"Got encoder_cfg={encoder_cfg!r}."
+            )
+        manifest = cls._read_and_validate_manifest(str(model_path))
+        vit_encoder = cls._prepare_vjepa_imports_and_patch()
+        with torch.device(device):
+            vit = cls._build_vit_from_manifest(vit_encoder, manifest)
+        logger.info(
+            "VJEPA21VideoEncoder.from_skeleton: %s instantiated from %s "
+            "(embed_dim=%d, variant=%s) — weights pending checkpoint load",
+            manifest["arch_name"],
+            model_path,
+            int(manifest["embed_dim"]),
+            str(manifest["variant"]),
+        )
+        return cls(
+            vit,
+            embed_dim=int(manifest["embed_dim"]),
+            variant=str(manifest["variant"]),
+        )
+
+    @classmethod
+    def _read_and_validate_manifest(cls, model_path: str) -> dict:
         manifest_path = os.path.join(model_path, "manifest.json")
         if not os.path.exists(manifest_path):
             raise FileNotFoundError(
@@ -202,16 +281,14 @@ class VJEPA21VideoEncoder(VideoEncoder):
                 f"hard-wired against these values. Use a different manifest or extend "
                 "the encoder to honor the manifest geometry."
             )
-        vit = cls._load_vit(model_path, manifest)
-        return cls(
-            vit,
-            embed_dim=int(manifest["embed_dim"]),
-            variant=str(manifest["variant"]),
-        )
+        cls._check_arch_use_rope_consistency(manifest)
+        return manifest
 
     @staticmethod
-    def _load_vit(model_path: str, manifest: dict) -> nn.Module:
-        """Construct V-JEPA 2.1 ViT via direct constructor + ``torch.load``.
+    def _prepare_vjepa_imports_and_patch():
+        """Bootstrap ``third_party/vjepa2`` import path + install the RoPE
+        dtype monkey-patch. Idempotent. Returns the imported
+        ``vision_transformer`` module.
 
         Avoids ``torch.hub.load(...)``: upstream ``VJEPA_BASE_URL`` currently
         points to a localhost test endpoint and is not pullable. The
@@ -226,22 +303,21 @@ class VJEPA21VideoEncoder(VideoEncoder):
         layout. No-op if the submodule isn't checked out — the import below
         then raises with a clear ``ModuleNotFoundError`` telling the user
         to run ``git submodule update --init third_party/vjepa2``.
-        """
-        # Manifest-internal contradiction check runs BEFORE any vjepa2 import
-        # so the error stays correct in CI/dev environments where the
-        # ``third_party/vjepa2`` submodule isn't initialized. Otherwise the
-        # ``app.vjepa_2_1.*`` import below short-circuits with
-        # ``ModuleNotFoundError`` and the user never sees the real
-        # arch_name / use_rope conflict.
-        arch_name = manifest["arch_name"]  # e.g. "vit_giant_xformers"
-        manifest_use_rope = manifest.get("use_rope", True)
-        if arch_name.endswith("_rope") and not manifest_use_rope:
-            raise ValueError(
-                f"Manifest arch_name={arch_name!r} hardcodes use_rope=True "
-                "but the manifest sets use_rope=False. Pick a non-_rope "
-                "arch (e.g. 'vit_giant_xformers') or set use_rope=True."
-            )
 
+        The RoPE dtype monkey-patch root-cause-fixes a V-JEPA / SDPA
+        dtype mismatch under mixed-precision: upstream
+        ``rotate_queries_or_keys`` builds its sin/cos table from a fp32
+        mask (``1.0 * frame_ids``) and einsums it against an fp32
+        ``omega``, so the rotated Q/K leave the function in fp32 even
+        when ``x`` is bf16. The host backbone keeps V in bf16, and
+        PyTorch SDPA refuses ``query.dtype != value.dtype``. The patch
+        casts the output back to ``x.dtype`` on exit — covers all six
+        call sites in ``AttentionRoPE.forward`` (qd/kd, qh/kh, qw/kw)
+        without editing the vendored submodule. Idempotent via the
+        ``_openwam_dtype_safe`` sentinel so repeated calls (training
+        reload, deploy skeleton + later weight load, EMA replicas) do
+        not re-wrap.
+        """
         import sys
         from pathlib import Path
 
@@ -253,18 +329,6 @@ class VJEPA21VideoEncoder(VideoEncoder):
         from app.vjepa_2_1.models import vision_transformer as vit_encoder
         from app.vjepa_2_1.models.utils import modules as vjepa_modules
 
-        # Root-cause fix for the V-JEPA RoPE / SDPA dtype mismatch under
-        # mixed-precision training. Upstream ``rotate_queries_or_keys``
-        # builds its sin/cos table from a fp32 mask (``1.0 * frame_ids``)
-        # and einsums it against an fp32 ``omega``, so the rotated Q/K
-        # leave the function in fp32 even when ``x`` is bf16. The host
-        # backbone keeps V in bf16, and PyTorch SDPA refuses
-        # ``query.dtype != value.dtype``. We monkey-patch the function in
-        # place to cast back to ``x.dtype`` on exit — covers all six call
-        # sites in ``AttentionRoPE.forward`` (qd/kd, qh/kh, qw/kw) without
-        # editing the vendored submodule. Idempotent via the
-        # ``_openwam_dtype_safe`` sentinel so repeated ``from_pretrained``
-        # calls (e.g. constructing an EMA replica) don't re-wrap.
         if not getattr(vjepa_modules.rotate_queries_or_keys, "_openwam_dtype_safe", False):
             _orig_rotate = vjepa_modules.rotate_queries_or_keys
 
@@ -275,14 +339,45 @@ class VJEPA21VideoEncoder(VideoEncoder):
             _safe_rotate._openwam_dtype_safe = True
             vjepa_modules.rotate_queries_or_keys = _safe_rotate
 
-        # Upstream wrappers ending in ``_rope`` (e.g. ``vit_giant_xformers_rope``)
-        # hardcode ``use_rope=True`` in their ``VisionTransformer(...)`` call and
-        # forward ``**kwargs`` to the same constructor — passing ``use_rope`` again
-        # from here raises ``TypeError: got multiple values for keyword argument
-        # 'use_rope'``. For non-``_rope`` arches the wrapper does not set it, so
-        # we forward the manifest value; we default to ``True`` (opt-out) because
-        # every V-JEPA 2.1 manifest we ship uses RoPE — ``VisionTransformer``'s
-        # own ``use_rope=False`` default is the wrong choice for this encoder.
+        return vit_encoder
+
+    @staticmethod
+    def _check_arch_use_rope_consistency(manifest: dict) -> None:
+        """Manifest-internal contradiction check, isolated from vjepa2 imports.
+
+        Runs without touching ``third_party/vjepa2`` so the error stays
+        correct in CI/dev environments where the submodule isn't
+        initialized. Called by ``_read_and_validate_manifest`` (the
+        ``from_pretrained`` / ``from_skeleton`` path) and by the
+        ``_load_vit`` back-compat shim (PR #83 V9/V10 regression
+        tests), so all paths get the same fail-fast.
+        """
+        arch_name = manifest["arch_name"]
+        manifest_use_rope = manifest.get("use_rope", True)
+        if arch_name.endswith("_rope") and not manifest_use_rope:
+            raise ValueError(
+                f"Manifest arch_name={arch_name!r} hardcodes use_rope=True "
+                "but the manifest sets use_rope=False. Pick a non-_rope "
+                "arch (e.g. 'vit_giant_xformers') or set use_rope=True."
+            )
+
+    @staticmethod
+    def _build_vit_from_manifest(vit_encoder, manifest: dict) -> nn.Module:
+        """Construct a zero-weight ViT per the manifest. No weight load.
+
+        Upstream wrappers ending in ``_rope`` (e.g.
+        ``vit_giant_xformers_rope``) hardcode ``use_rope=True`` in their
+        ``VisionTransformer(...)`` call and forward ``**kwargs`` to the
+        same constructor — passing ``use_rope`` again from here raises
+        ``TypeError: got multiple values for keyword argument 'use_rope'``.
+        For non-``_rope`` arches the wrapper does not set it, so we
+        forward the manifest value; we default to ``True`` (opt-out)
+        because every V-JEPA 2.1 manifest we ship uses RoPE —
+        ``VisionTransformer``'s own ``use_rope=False`` default is the
+        wrong choice for this encoder.
+        """
+        arch_name = manifest["arch_name"]  # e.g. "vit_giant_xformers"
+        manifest_use_rope = manifest.get("use_rope", True)
         vit_kwargs: dict[str, Any] = dict(
             patch_size=manifest["patch"],
             img_size=(manifest["img_size"], manifest["img_size"]),
@@ -294,7 +389,28 @@ class VJEPA21VideoEncoder(VideoEncoder):
         )
         if not arch_name.endswith("_rope"):
             vit_kwargs["use_rope"] = manifest_use_rope
-        encoder = vit_encoder.__dict__[arch_name](**vit_kwargs)
+        return vit_encoder.__dict__[arch_name](**vit_kwargs)
+
+    @classmethod
+    def _load_vit(cls, model_path: str, manifest: dict) -> nn.Module:
+        """Back-compat shim — chains the new helpers so PR #83 V9/V10
+        regression tests (which call ``_load_vit`` directly) keep working.
+
+        ``_check_arch_use_rope_consistency`` runs BEFORE
+        ``_prepare_vjepa_imports_and_patch`` so the manifest-internal
+        ValueError stays correct in environments where the
+        ``third_party/vjepa2`` submodule isn't initialized — matches the
+        PR #83 review invariant.
+        """
+        cls._check_arch_use_rope_consistency(manifest)
+        vit_encoder = cls._prepare_vjepa_imports_and_patch()
+        vit = cls._build_vit_from_manifest(vit_encoder, manifest)
+        cls._load_vit_weights(vit, model_path, manifest)
+        return vit
+
+    @staticmethod
+    def _load_vit_weights(vit: nn.Module, model_path: str, manifest: dict) -> None:
+        """Populate a constructed ViT with pretrained weights from disk."""
         ckpt = torch.load(
             os.path.join(model_path, manifest["checkpoint_file"]),
             map_location="cpu",
@@ -308,12 +424,12 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # learned ``pos_embed`` for the absolute-pos-embedding variants, and
         # we always load the RoPE variants whose forward does not consume it
         # (and so the buffer/parameter does not exist on the constructed
-        # ``encoder`` either). Anything else missing or unexpected is a
+        # ``vit`` either). Anything else missing or unexpected is a
         # manifest / checkpoint mismatch that would silently leave the frozen
         # ViT partially randomly initialized — fail fast instead. The
         # tolerated unexpected set is exactly ``{"pos_embed"}``; missing keys
         # must always be empty.
-        load_result = encoder.load_state_dict(state_dict, strict=False)
+        load_result = vit.load_state_dict(state_dict, strict=False)
         unexpected = set(load_result.unexpected_keys) - {"pos_embed"}
         if unexpected or load_result.missing_keys:
             raise RuntimeError(
@@ -324,7 +440,6 @@ class VJEPA21VideoEncoder(VideoEncoder):
                 f"missing_keys={sorted(load_result.missing_keys)[:8]} "
                 f"unexpected_keys={sorted(unexpected)[:8]}."
             )
-        return encoder
 
     # Intentionally NOT overriding build_dit_input_proj / build_dit_output_proj:
     # the PR #60 defaults at dit_patch_size=(1,2,2) produce Conv3d((1,2,2),(1,2,2))

@@ -117,14 +117,33 @@ class VideoEncoder(ABC, nn.Module):
     # workflow.
 
     @classmethod
-    def from_skeleton(cls, components_entry: dict, *, device: str = "cpu") -> "VideoEncoder":
-        """Build a zero-weight encoder skeleton from a saved ``components``
-        entry. The host architecture's checkpoint strict-load fills in
-        weights immediately after this call.
+    def from_skeleton(
+        cls,
+        components_entry: dict,
+        *,
+        device: str = "cpu",
+        encoder_cfg: Any = None,
+    ) -> "VideoEncoder":
+        """Build a zero-weight encoder skeleton. The host architecture's
+        checkpoint strict-load fills in weights immediately after this call.
 
-        ``components_entry`` is the dict shape produced by
-        :func:`generate_video_backbone_component_specs`:
-        ``{"attr": str, "model_class": str, "extra_kwargs": dict}``.
+        Two data sources are exposed to subclasses; an implementation picks
+        whichever fits its persistence story:
+
+        * ``components_entry`` — the dict shape produced by
+          :func:`generate_video_backbone_component_specs`:
+          ``{"attr": str, "model_class": str, "extra_kwargs": dict}``.
+          Use this when the encoder's structural geometry is fully captured
+          by the saved Wan ``components`` entry (e.g. :class:`WanVideoVAEEncoder`).
+        * ``encoder_cfg`` — the yaml ``model.video_backbone.encoder`` block
+          (a dict / DictConfig with ``name`` and ``model_path``). Use this
+          when the encoder's training-time component-spec generator did NOT
+          persist the encoder geometry into ``components_entry`` (e.g.
+          :class:`VJEPA21VideoEncoder`, whose ``components[vae]`` actually
+          carries the Wan ``WanVideoVAE38`` class as an artifact of
+          scanning the Wan ``model_path``). The subclass then reads the
+          encoder's manifest from ``encoder_cfg.model_path``. Trade-off:
+          the deploy host must be able to read that path.
 
         Default implementation raises so non-supporting encoders fail
         loudly at deploy time rather than silently mismatch state_dict

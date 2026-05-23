@@ -671,6 +671,58 @@ def test_C13c_reinit_syncs_patch_size_for_non_default_encoder():
     assert out.shape[-1] == enc.spec.z_dim * math.prod(enc.spec.dit_patch_size)
 
 
+def test_C13e_adapt_dit_to_external_encoder_no_reset():
+    """``adapt_dit_to_external_encoder`` (deploy path) reshapes
+    ``patch_embedding`` / ``head.head`` / ``patch_size`` / ``in_dim``
+    without touching the rest of the DiT.
+
+    This is the deploy-only variant: training calls
+    ``reinit_dit_from_scratch`` (which internally reshapes AND resets
+    every learnable param); deploy must reshape only so the subsequent
+    strict ``load_checkpoint`` can populate the rebuilt modules.
+
+    Regression: pre-fix, deploy was stuck with Wan-native
+    ``patch_embedding.in_channels == 48`` because the reshape lived
+    inside the reset path which is gated on training (source is None).
+    """
+    from openwam.model.video_backbone.wan_adapter import adapt_dit_to_external_encoder
+
+    pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
+    # Attach a sentinel sub-module that the adapt path must NOT touch.
+    # After adapt, its weight must remain the stamped value — proof that
+    # adapt did not run a global reset_parameters like reinit does.
+    sentinel = nn.Linear(4, 4)
+    sentinel.weight.data.fill_(0.1234)
+    sentinel_snapshot = sentinel.weight.detach().clone()
+    pipe.dit.add_module("sentinel_check", sentinel)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+
+    adapt_dit_to_external_encoder(pipe, enc, enc.spec.dit_patch_size)
+
+    # Shapes adapted to the encoder.
+    assert pipe.dit.patch_embedding.in_channels == 1024
+    assert pipe.dit.head.head.out_features == 1024 * 4
+    assert pipe.dit.in_dim == 1024
+    assert pipe.dit.patch_size == (1, 2, 2)
+    assert pipe.dit.head.patch_size == (1, 2, 2)
+    # Sentinel preserved — adapt did not reset non-rebuilt sub-modules.
+    assert torch.equal(pipe.dit.sentinel_check.weight, sentinel_snapshot)
+
+
+def test_C13f_adapt_dit_to_external_encoder_requires_patch_size():
+    """``adapt_dit_to_external_encoder`` mirrors
+    ``reinit_dit_from_scratch``'s single-source-of-truth invariant —
+    refuses ``dit_patch_size=None`` so callers source it from the
+    backbone rather than the encoder spec.
+    """
+    from openwam.model.video_backbone.wan_adapter import adapt_dit_to_external_encoder
+
+    pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    with pytest.raises(ValueError, match=r"dit_patch_size is required"):
+        adapt_dit_to_external_encoder(pipe, enc, None)
+
+
 def test_C13d_reinit_with_external_encoder_requires_dit_patch_size():
     """Single-source-of-truth guard: ``reinit_dit_from_scratch`` must refuse
     to silently fall back to ``external_encoder.spec.dit_patch_size`` when
@@ -1934,3 +1986,139 @@ def test_V10_vjepa21_load_vit_rope_arch_with_use_rope_false_fails_fast():
     }
     with pytest.raises(ValueError, match="hardcodes use_rope=True"):
         VJEPA21VideoEncoder._load_vit("/unused", manifest)
+
+
+# ----------------------------------------------------------------------
+# V11-V14: VJEPA21VideoEncoder.from_skeleton (deploy path)
+# ----------------------------------------------------------------------
+
+
+def _install_fake_vjepa_modules(monkeypatch, wrapper_factory):
+    """Wire fake ``app.vjepa_2_1.*`` modules so VJEPA imports resolve to test
+    fixtures. ``wrapper_factory`` is a callable used for every arch lookup —
+    the test decides what to inspect / what to return.
+    """
+
+    class _Module:
+        def __init__(self, **attrs):
+            self.__dict__.update(attrs)
+
+    vision_transformer = _Module()
+    # The encoder code does ``vit_encoder.__dict__[arch_name](**kwargs)``.
+    # Make every arch name route to ``wrapper_factory``.
+    for arch in (
+        "vit_giant_xformers",
+        "vit_giant_xformers_rope",
+    ):
+        setattr(vision_transformer, arch, wrapper_factory)
+    fake_vjepa_modules = types.SimpleNamespace(
+        rotate_queries_or_keys=lambda x, pos, n_registers, has_cls_first: x,
+    )
+    fake_app = types.ModuleType("app")
+    fake_app_vjepa = types.ModuleType("app.vjepa_2_1")
+    fake_app_vjepa_models = types.ModuleType("app.vjepa_2_1.models")
+    fake_app_vjepa_models.vision_transformer = vision_transformer
+    fake_app_vjepa_models_utils = types.ModuleType("app.vjepa_2_1.models.utils")
+    fake_app_vjepa_models_utils.modules = fake_vjepa_modules
+    monkeypatch.setitem(sys.modules, "app", fake_app)
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1", fake_app_vjepa)
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models", fake_app_vjepa_models)
+    monkeypatch.setitem(
+        sys.modules, "app.vjepa_2_1.models.vision_transformer", vision_transformer
+    )
+    monkeypatch.setitem(
+        sys.modules, "app.vjepa_2_1.models.utils", fake_app_vjepa_models_utils
+    )
+    monkeypatch.setitem(
+        sys.modules, "app.vjepa_2_1.models.utils.modules", fake_vjepa_modules
+    )
+
+
+def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
+    """``from_skeleton`` reads manifest from encoder_cfg.model_path, builds a
+    zero-weight ViT shell, and skips torch.load entirely — even though
+    ``manifest['checkpoint_file']`` would point at a non-existent file.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-rope-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "img_temporal_dim_size": 1,
+        "interpolate_rope": True,
+        "checkpoint_file": "DOES-NOT-EXIST.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+
+    captured: dict = {}
+
+    def _fake_wrapper(**kwargs):
+        captured.update(kwargs)
+        if "use_rope" in kwargs:
+            raise TypeError(
+                "got multiple values for keyword argument 'use_rope'"
+            )
+        return _MockVJEPAViT(embed_dim=1408)
+
+    _install_fake_vjepa_modules(monkeypatch, _fake_wrapper)
+
+    enc = VJEPA21VideoEncoder.from_skeleton(
+        components_entry={"attr": "vae", "model_class": "ignored", "extra_kwargs": {}},
+        encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
+    )
+    assert isinstance(enc, VJEPA21VideoEncoder)
+    assert enc.spec.z_dim == 1408
+    assert enc.variant == "vitg-rope-384"
+    # _rope wrapper must NOT receive use_rope (PR #83 invariant)
+    assert "use_rope" not in captured
+    assert captured["patch_size"] == 16
+    assert captured["img_size"] == (384, 384)
+    assert captured["tubelet_size"] == 2
+
+
+def test_V12_vjepa21_from_skeleton_requires_encoder_cfg():
+    """``from_skeleton`` without ``encoder_cfg`` raises with a base.py hint —
+    components_entry alone doesn't carry ViT geometry (it's Wan VAE class).
+    """
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    with pytest.raises(RuntimeError, match="encoder_cfg"):
+        VJEPA21VideoEncoder.from_skeleton(
+            components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
+        )
+
+
+def test_V13_vjepa21_from_skeleton_requires_model_path(tmp_path):
+    """``encoder_cfg`` without ``model_path`` (or with empty string) fails fast."""
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    with pytest.raises(RuntimeError, match="model_path"):
+        VJEPA21VideoEncoder.from_skeleton(
+            components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
+            encoder_cfg={"name": "vjepa2_1"},
+        )
+    with pytest.raises(RuntimeError, match="model_path"):
+        VJEPA21VideoEncoder.from_skeleton(
+            components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
+            encoder_cfg={"name": "vjepa2_1", "model_path": ""},
+        )
+
+
+def test_V14_vjepa21_from_skeleton_missing_manifest(tmp_path):
+    """``encoder_cfg.model_path`` that has no ``manifest.json`` → FileNotFoundError."""
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    with pytest.raises(FileNotFoundError, match="manifest.json"):
+        VJEPA21VideoEncoder.from_skeleton(
+            components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
+            encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
+        )
