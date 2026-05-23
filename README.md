@@ -97,6 +97,29 @@ Then install OpenWAM:
 pip install -e .
 ```
 
+### Optional extras
+
+The `pyproject.toml` exposes a few optional dependency sets. Pick the ones you need:
+
+```bash
+pip install -e ".[sana]"          # SANA video backbone (pulls timm; see docs/sana_vendor.md)
+pip install -e ".[dev]"           # pytest + ruff (needed for `make test` / `make lint`)
+pip install -e ".[npu]"           # Huawei Ascend NPU (x86_64)
+pip install -e ".[npu_aarch64]"   # Huawei Ascend NPU (aarch64)
+```
+
+Extras combine — e.g. `pip install -e ".[sana,dev]"` for SANA + tests.
+
+Tip: **do not** run `pip install --reinstall` (or `uv pip install --reinstall`) on a
+single package after the base install — both resolvers will re-pin the entire
+dependency graph and silently swap your `torch==2.7.1+cu128` wheel for a
+different CUDA build. If you need to repair one package (e.g. the timm
+`version.py` missing-file bug from upstream wheels), use `--no-deps`:
+
+```bash
+pip install --no-deps --force-reinstall 'timm>=1.0.20,<1.1'
+```
+
 ### Scale-oriented training controls
 
 The training configs support separate optimizer knobs for the action

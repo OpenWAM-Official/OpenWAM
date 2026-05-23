@@ -49,6 +49,11 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             cfg.setdefault("video_dim", self.video_backbone.dim)
             cfg.setdefault("num_heads", self.video_backbone.num_heads)
             cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
+            # Propagate the video backbone's attention kernel down to the
+            # action backbone so the SDPA / linear-relu choice is made in one
+            # place. SanaMoTJointDriver requires both sides to match; this
+            # avoids the user having to set the kernel twice.
+            cfg.setdefault("attn_kernel", getattr(self.video_backbone, "attn_kernel", "softmax"))
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
         text_dim = self._resolve_text_dim(cfg)
@@ -72,6 +77,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             variant="joint_self_attn",
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
+            attn_kernel=str(cfg.get("attn_kernel", "softmax")),
         )
 
         # MoT driver is built once both backbones are available. The video
@@ -93,6 +99,16 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         Re-callable; raises if either backbone is missing. Tests that swap in
         a mock video backbone after ``__init__`` should call this method to
         wire up the driver afterwards.
+
+        Dispatches on ``video_backbone.attn_kernel``:
+
+        - ``"softmax"`` (default for Wan/Cosmos25): plain
+          :class:`MoTJointDriver` with SDPA.
+        - ``"linear_relu"`` (SANA): :class:`SanaMoTJointDriver` with cumsum
+          linear-attention. The action backbone must also be configured for
+          ``linear_relu`` — that's enforced inside the driver's constructor.
+        - Anything else: :class:`ValueError`. Silent fallback would hide a
+          config typo behind correct-looking but mathematically wrong output.
         """
         if self.video_backbone is None:
             raise RuntimeError(
@@ -105,11 +121,28 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
                 "DualSystemSelfAttnArchitecture.build_mot_driver: action_backbone is not "
                 "set. Architecture must be built from a non-None cfg."
             )
-        self._mot_driver = MoTJointDriver(
-            self.video_backbone,
-            self.action_backbone,
-            **self._mot_driver_kwargs,
-        )
+
+        kernel = getattr(self.video_backbone, "attn_kernel", "softmax")
+        if kernel == "linear_relu":
+            from openwam.model.architectures.dual_system.sana_mot_driver import (
+                SanaMoTJointDriver,
+            )
+            self._mot_driver = SanaMoTJointDriver(
+                self.video_backbone,
+                self.action_backbone,
+                **self._mot_driver_kwargs,
+            )
+        elif kernel == "softmax":
+            self._mot_driver = MoTJointDriver(
+                self.video_backbone,
+                self.action_backbone,
+                **self._mot_driver_kwargs,
+            )
+        else:
+            raise ValueError(
+                f"DualSystemSelfAttnArchitecture: unsupported video_backbone.attn_kernel='{kernel}'. "
+                "Expected 'softmax' or 'linear_relu'."
+            )
         return self._mot_driver
 
     @property
@@ -137,8 +170,12 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
     def _iter_zero3_external_params(self):
         """Raw-access leaves read by the MoT driver outside the owners' ``__call__``.
 
-        - ``vb._dit.blocks[i].modulation`` is read inside
+        - ``vb._dit.blocks[i].modulation`` (Wan / Cosmos25) is read inside
           ``pre_attn_at_layer_for_compile`` (``wan_adapter.py:536``)
+        - ``vb._dit.blocks[i].scale_shift_table`` (SANA) is read inside
+          ``SanaMSVideoSplit.block_pre_attn`` (``blocks_split.py:271``) — the
+          AdaLN parameter on SANA blocks (analog of Wan ``modulation``); under
+          ZeRO-3 this would otherwise be partitioned at read time.
         - ``ab.blocks[i].modulation`` is read inside
           ``ActionDiT.pre_attn_at_layer_for_compile`` (``joint_action_dit.py:782``)
         """
@@ -146,9 +183,10 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         dit = getattr(vb, "_dit", None) if vb is not None else None
         if dit is not None:
             for block in getattr(dit, "blocks", ()):
-                p = getattr(block, "modulation", None)
-                if p is not None:
-                    yield p
+                for attr in ("modulation", "scale_shift_table"):
+                    p = getattr(block, attr, None)
+                    if p is not None:
+                        yield p
         ab = self.action_backbone
         if ab is not None:
             for block in getattr(ab, "blocks", ()):

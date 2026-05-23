@@ -1,6 +1,9 @@
 [submodule "third_party/cosmos-predict2.5"]
 	path = third_party/cosmos-predict2.5
 	url = https://github.com/nvidia-cosmos/cosmos-predict2.5.git
+[submodule "third_party/Sana"]
+	path = third_party/Sana
+	url = https://github.com/NVlabs/Sana.git
 [submodule "third_party/vjepa2"]
 	path = third_party/vjepa2
 	url = https://github.com/facebookresearch/vjepa2.git

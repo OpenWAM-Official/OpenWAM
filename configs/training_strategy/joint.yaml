@@ -19,11 +19,11 @@ freeze:
   - video_backbone._pipe.image_encoder  # Wan I2V CLIP-H (~4.7 GB); None on TI2V/VACE; absent on Cosmos25 → no-op.
 
   # --- Cosmos25 backbone (cosmos25_predict_2b) ---
-  # These three are cosmos25-only. On Wan the attributes don't exist and
-  # freeze_modules() silently skips them (base.py:516-519). MVP scope: Cosmos
-  # is fully frozen (action branch + bridges train) — override this list in
-  # a separate training_strategy yaml if you ever want a trainable Cosmos DiT.
-  - video_backbone._pipe.net            # Cosmos25 DiT (nn.Module). Wan DiT lives at _pipe.dit and is intentionally TRAINED.
+  # These are cosmos25-only. On Wan the attributes don't exist and
+  # freeze_modules() silently skips them (base.py:516-519). If you don't
+  # want a trainable Cosmos DiT (action branch + bridges only), uncomment
+  # the `_pipe.net` line below in an override training_strategy yaml.
+  # - video_backbone._pipe.net          # Cosmos25 DiT (nn.Module). Wan DiT lives at _pipe.dit and is intentionally TRAINED — Cosmos25 is now aligned (trainable by default).
   - video_backbone._pipe._vae_inner     # Cosmos25 WanVAE_ inner module (~485 MB); always present when vae=wan2pt1.
   - video_backbone._pipe._reason1_inner # Cosmos25 Qwen2.5-VL inner (~16 GB); only present when text_encoder=reason1_live, else no-op.
 

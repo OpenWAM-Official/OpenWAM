@@ -28,7 +28,12 @@ training:
 
   # --- Per-module LR (null = use base learning_rate) ---
   action_lr: null                 # Override LR for action model parameters
-  video_lr: null                  # Override LR for video DiT parameters
+  # video_lr defaults to the active backbone's `recommended_video_lr` if it
+  # declares one (Cosmos25: 2e-5, see configs/model/backbone/cosmos25.yaml);
+  # backbones without that field (e.g. Wan) resolve to null → falls back to
+  # `learning_rate`. Override on CLI to force a specific value:
+  #   bash scripts/train.sh ... training.video_lr=5e-5
+  video_lr: ${oc.select:model.video_backbone.recommended_video_lr,null}
   lora_lr: null                   # Override LR for LoRA parameters
 
   # --- Memory optimization ---

@@ -21,11 +21,12 @@
 # `architecture.variant` in `configs/model/dual_system.yaml` accordingly.
 #
 # Freeze policy lives in `configs/training_strategy/joint.yaml`'s `freeze:`
-# list (Wan-aligned mechanism). For Cosmos25 the list pins `_pipe.net` (DiT),
-# `_pipe._vae_inner`, and `_pipe._reason1_inner`, so the MVP "Cosmos fully
-# frozen; action branch + bridges train" contract is enforced there. Override
-# the training_strategy freeze list to run with a trainable Cosmos DiT —
-# do NOT re-add a `freeze:` knob here.
+# list (Wan-aligned mechanism). For Cosmos25 the list pins `_pipe._vae_inner`
+# and `_pipe._reason1_inner`; the DiT (`_pipe.net`) is TRAINABLE by default
+# (Wan-aligned: Wan DiT at `_pipe.dit` is also trainable). If you don't want
+# a trainable Cosmos DiT (action branch + bridges only), uncomment the
+# `_pipe.net` entry in an override training_strategy yaml — do NOT re-add a
+# `freeze:` knob here.
 #
 # Text-context contract: either `text_encoder=reason1_live` (inline ~14 GB
 # Qwen2.5-VL — §14) or an offline `pre_encoded_text` cache referenced via
@@ -91,3 +92,14 @@ vae: wan2pt1                                        # wan2pt1 (real Cosmos-Predi
 flow_shift: 5.0
 
 sac_mode: none
+
+# Recommended video-DiT learning rate for Cosmos25, read by
+# `configs/train.yaml` via `${oc.select:model.video_backbone.recommended_video_lr,null}`.
+# Cosmos25 uses uniform timestep weighting (see
+# openwam/model/video_backbone/cosmos25/scheduler.py:73-88) vs Wan's
+# bell-shape, so the same `training.learning_rate=1e-4` is more aggressive
+# on the Cosmos video stream. 2e-5 is a conservative starting point for
+# fine-tuning the pretrained Cosmos DiT; set to null to fall back to the
+# base learning_rate (Wan-equivalent behavior). Action backbone is
+# unaffected — it has its own `training.action_lr` knob.
+recommended_video_lr: 2.0e-5

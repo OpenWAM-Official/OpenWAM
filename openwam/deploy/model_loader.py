@@ -143,12 +143,15 @@ def load_from_checkpoint_dir(
         model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
         if model_path is not None:
             vb_name = str(OmegaConf.select(cfg, "model.video_backbone.name", default=""))
-            if vb_name.startswith("cosmos25_"):
-                # Cosmos carries fields (`flow_shift`, `model_variant`,
-                # `text_encoder`) that the path-only string source would
-                # lose. Pass the full vb dict — Cosmos's
-                # `_video_backbone_cfg` handles dicts natively and Wan never
-                # hits this branch.
+            if vb_name.startswith("cosmos25_") or vb_name.startswith("sana_video_"):
+                # Cosmos / SANA carry fields the path-only string source
+                # would lose:
+                # - Cosmos: `flow_shift`, `model_variant`, `text_encoder`
+                # - SANA: `text_encoder_name`, `attn_kernel`, `flow_shift`,
+                #   `model_kwargs`
+                # Both backbones' `from_pretrained` accepts a dict natively
+                # (Cosmos via `_video_backbone_cfg`, SANA via
+                # `_spec_from_dict`). Wan never hits this branch.
                 vb_params["_source"] = {k: v for k, v in vb_params.items() if not str(k).startswith("_")}
             else:
                 vb_params["_source"] = str(model_path)

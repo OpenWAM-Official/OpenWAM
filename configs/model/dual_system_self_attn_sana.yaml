@@ -1,0 +1,69 @@
+# Dual-System (joint self-attention) WAM on SANA-Video 2B.
+#
+# Pairs the joint_self_attn ActionDiT with the SANA-Video 2B world-DiT. The
+# MoT driver runs one mixed linear-attention (ReLU-kernel cumsum) pass per
+# layer over the concatenated [video, action] sequence, via SanaMoTJointDriver
+# — selected by the `attn_kernel: linear_relu` dispatch hook in
+# `openwam/model/architectures/dual_system/joint_self_attn.py:125-143`.
+#
+# ActionDiT geometry (num_dit_layers / num_heads / attn_head_dim / video_dim /
+# attn_kernel) is auto-resolved from `video_backbone` in
+# `DualSystemSelfAttnArchitecture.__init__` (joint_self_attn.py:46-56). Only
+# ActionDiT-specific fields (dim, ffn_dim, action_dim) need explicit values.
+#
+# Phase 4 status (plans/sana_mot_integration_plan.md): config + CPU dispatch
+# smoke landed in this commit. Train smoke + 3 numerical ablations + the
+# 81-frame H100 E2E gate remain GPU-pending.
+
+architecture:
+  framework: dual_system
+  variant: joint_self_attn
+  action_dim: 20
+  use_proprioception: true
+  state_dim: 20
+
+  # Per-layer parity: ActionDiT auto-builds one layer per SANA DiT block
+  # (`num_dit_layers` setdefault from `video_backbone.num_layers`).
+  bridge_layers: null
+  bridge_interval: 1
+
+  # FastWAM-Joint mask defaults — match `dual_system_self_attn_cosmos25.yaml`.
+  # SANA's `video_attention_mask_mode` property also returns
+  # `first_frame_causal`; setting it explicitly here keeps the config readable.
+  mot_checkpoint_mixed_attn: true
+  attention_mask_mode: joint
+  video_attention_mask_mode: first_frame_causal
+
+video_backbone:
+  name: sana_video_2b
+  # Local SANA-Video 2B 480p bundle. The path must be the unpacked HF
+  # snapshot directory (containing ``config.json``, ``checkpoints/*.pth``,
+  # and ``vae/Wan2.1_VAE.pth``) — _spec_from_model_dir auto-applies the
+  # published preset so the architecture matches the ckpt. See
+  # docs/sana_vendor.md for the one-liner that downloads the bundle.
+  # Override at the CLI: ``+model.video_backbone.model_path=/abs/path/to/dir``.
+  #
+  # NOT a HF URL (``hf://…``): without a local bundle dir the auto-preset
+  # never fires, the factory falls back to bare defaults (attn=flash /
+  # ffn=mlp / in_channels=4 / pred_sigma=True), and ``strict=False`` would
+  # silently drop most of the ckpt weights. ``_spec_from_dictconfig``
+  # raises in that case so the misconfiguration is loud, not silent.
+  model_path: /path/to/SANA-Video_2B_480p
+  freeze: false
+  # Routes `build_mot_driver()` to SanaMoTJointDriver (the SDPA-based
+  # MoTJointDriver would silently produce numerical garbage against
+  # SANA's pretrained ReLU-kernel weights).
+  attn_kernel: linear_relu
+
+action_backbone:
+  # ActionDiT residual hidden_dim. The MoT driver only requires num_heads /
+  # attn_head_dim parity with the video backbone — these are auto-resolved
+  # from `video_backbone.{num_heads,head_dim}`. `dim` here matches SANA's
+  # hidden_size (1152) so the AdaLN modulation aligns naturally; the value
+  # is independent of the MoT contract.
+  dim: 1152
+  ffn_dim: 4608
+  # Auto-propagated from `video_backbone.attn_kernel` by joint_self_attn.py:56,
+  # but pinned here so the kernel pairing is visible in the config and a
+  # mis-pair fails at SanaMoTJointDriver.__init__ rather than at first forward.
+  attn_kernel: linear_relu
