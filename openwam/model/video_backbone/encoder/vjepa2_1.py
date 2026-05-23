@@ -227,6 +227,21 @@ class VJEPA21VideoEncoder(VideoEncoder):
         then raises with a clear ``ModuleNotFoundError`` telling the user
         to run ``git submodule update --init third_party/vjepa2``.
         """
+        # Manifest-internal contradiction check runs BEFORE any vjepa2 import
+        # so the error stays correct in CI/dev environments where the
+        # ``third_party/vjepa2`` submodule isn't initialized. Otherwise the
+        # ``app.vjepa_2_1.*`` import below short-circuits with
+        # ``ModuleNotFoundError`` and the user never sees the real
+        # arch_name / use_rope conflict.
+        arch_name = manifest["arch_name"]  # e.g. "vit_giant_xformers"
+        manifest_use_rope = manifest.get("use_rope", True)
+        if arch_name.endswith("_rope") and not manifest_use_rope:
+            raise ValueError(
+                f"Manifest arch_name={arch_name!r} hardcodes use_rope=True "
+                "but the manifest sets use_rope=False. Pick a non-_rope "
+                "arch (e.g. 'vit_giant_xformers') or set use_rope=True."
+            )
+
         import sys
         from pathlib import Path
 
@@ -260,17 +275,26 @@ class VJEPA21VideoEncoder(VideoEncoder):
             _safe_rotate._openwam_dtype_safe = True
             vjepa_modules.rotate_queries_or_keys = _safe_rotate
 
-        arch_name = manifest["arch_name"]  # e.g. "vit_giant_xformers"
-        encoder = vit_encoder.__dict__[arch_name](
+        # Upstream wrappers ending in ``_rope`` (e.g. ``vit_giant_xformers_rope``)
+        # hardcode ``use_rope=True`` in their ``VisionTransformer(...)`` call and
+        # forward ``**kwargs`` to the same constructor — passing ``use_rope`` again
+        # from here raises ``TypeError: got multiple values for keyword argument
+        # 'use_rope'``. For non-``_rope`` arches the wrapper does not set it, so
+        # we forward the manifest value; we default to ``True`` (opt-out) because
+        # every V-JEPA 2.1 manifest we ship uses RoPE — ``VisionTransformer``'s
+        # own ``use_rope=False`` default is the wrong choice for this encoder.
+        vit_kwargs: dict[str, Any] = dict(
             patch_size=manifest["patch"],
             img_size=(manifest["img_size"], manifest["img_size"]),
             num_frames=manifest["training_num_frames"],
             tubelet_size=manifest["tubelet"],
             use_sdpa=True,
-            use_rope=manifest.get("use_rope", True),
             img_temporal_dim_size=manifest.get("img_temporal_dim_size", 1),
             interpolate_rope=manifest.get("interpolate_rope", True),
         )
+        if not arch_name.endswith("_rope"):
+            vit_kwargs["use_rope"] = manifest_use_rope
+        encoder = vit_encoder.__dict__[arch_name](**vit_kwargs)
         ckpt = torch.load(
             os.path.join(model_path, manifest["checkpoint_file"]),
             map_location="cpu",

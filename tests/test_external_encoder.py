@@ -15,6 +15,8 @@ fixtures grow as later commits land — early cases reuse them.
 from __future__ import annotations
 
 import math
+import sys
+import types
 
 import pytest
 import torch
@@ -1836,3 +1838,99 @@ def test_V8_vjepa21_from_pretrained_rejects_manifest_geometry_mismatch(tmp_path,
     (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
     with pytest.raises(ValueError, match="patch/tubelet must be"):
         VJEPA21VideoEncoder.from_pretrained(str(tmp_path))
+
+
+def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
+    """``_load_vit`` must not pass ``use_rope`` to ``*_rope`` arch wrappers.
+
+    Upstream ``vit_giant_xformers_rope`` (and its siblings) hardcode
+    ``use_rope=True`` inside the wrapper and forward ``**kwargs`` to
+    ``VisionTransformer`` — handing them a second ``use_rope=...`` from the
+    OpenWAM call site raises ``TypeError: got multiple values for keyword
+    argument 'use_rope'`` at train start. Regression guard for that exact
+    crash, exercised against the canonical manifest the production checkpoint
+    ships with.
+    """
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    captured_kwargs: dict = {}
+
+    class _StopAfterConstruct(Exception):
+        pass
+
+    def _fake_wrapper(**kwargs):
+        if "use_rope" in kwargs:
+            raise TypeError(
+                "got multiple values for keyword argument 'use_rope'"
+            )
+        captured_kwargs.update(kwargs)
+        raise _StopAfterConstruct()
+
+    fake_module = types.SimpleNamespace(
+        __dict__={"vit_giant_xformers_rope": _fake_wrapper},
+        vit_giant_xformers_rope=_fake_wrapper,
+    )
+    fake_vjepa_modules = types.SimpleNamespace(
+        rotate_queries_or_keys=lambda x, pos, n_registers, has_cls_first: x,
+    )
+    fake_app = types.ModuleType("app")
+    fake_app_vjepa = types.ModuleType("app.vjepa_2_1")
+    fake_app_vjepa_models = types.ModuleType("app.vjepa_2_1.models")
+    fake_app_vjepa_models.vision_transformer = fake_module
+    fake_app_vjepa_models_utils = types.ModuleType("app.vjepa_2_1.models.utils")
+    fake_app_vjepa_models_utils.modules = fake_vjepa_modules
+    monkeypatch.setitem(sys.modules, "app", fake_app)
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1", fake_app_vjepa)
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models", fake_app_vjepa_models)
+    monkeypatch.setitem(
+        sys.modules, "app.vjepa_2_1.models.vision_transformer", fake_module
+    )
+    monkeypatch.setitem(
+        sys.modules, "app.vjepa_2_1.models.utils", fake_app_vjepa_models_utils
+    )
+    monkeypatch.setitem(
+        sys.modules, "app.vjepa_2_1.models.utils.modules", fake_vjepa_modules
+    )
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-rope-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "img_temporal_dim_size": 1,
+        "interpolate_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    with pytest.raises(_StopAfterConstruct):
+        VJEPA21VideoEncoder._load_vit("/unused", manifest)
+    assert "use_rope" not in captured_kwargs
+    assert captured_kwargs["patch_size"] == 16
+    assert captured_kwargs["interpolate_rope"] is True
+
+
+def test_V10_vjepa21_load_vit_rope_arch_with_use_rope_false_fails_fast():
+    """Manifest with ``arch_name=*_rope`` and ``use_rope=False`` is contradictory —
+    we raise a ``ValueError`` at load time instead of silently overriding."""
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-rope-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": False,
+        "img_temporal_dim_size": 1,
+        "interpolate_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    with pytest.raises(ValueError, match="hardcodes use_rope=True"):
+        VJEPA21VideoEncoder._load_vit("/unused", manifest)
