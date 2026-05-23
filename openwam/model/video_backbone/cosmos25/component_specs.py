@@ -60,6 +60,56 @@ _REASON1_ARTIFACT_FILES = (
 )
 
 
+def _normalize_optional_path(path: Optional[str]) -> Optional[str]:
+    if path in (None, "", "None", "null"):
+        return None
+    return path
+
+
+def _resolve_text_encoder_path(model_path_or_cfg: Any) -> Optional[str]:
+    if isinstance(model_path_or_cfg, str):
+        te_path: Optional[str] = model_path_or_cfg
+    else:
+        te_path = None
+        try:
+            te_path = str(model_path_or_cfg.model.video_backbone.text_encoder_path)
+        except Exception:
+            pass
+    return _normalize_optional_path(te_path)
+
+
+def _resolve_model_path(model_path_or_cfg: Any) -> Optional[str]:
+    if isinstance(model_path_or_cfg, str):
+        # A raw string for this module is interpreted as a Reason1 source path,
+        # not the Cosmos DiT model_path.
+        return None
+    try:
+        model_path = str(model_path_or_cfg.model.video_backbone.model_path)
+    except Exception:
+        return None
+    return _normalize_optional_path(model_path)
+
+
+def validate_reason1_artifact_source(model_path_or_cfg: Any) -> str:
+    """Return a readable Reason1 artifact source or raise a clear error."""
+    te_path = _resolve_text_encoder_path(model_path_or_cfg)
+    if te_path and os.path.isdir(te_path):
+        return te_path
+    if _resolve_model_path(model_path_or_cfg):
+        raise RuntimeError(
+            "[component_specs] video_backbone.text_encoder_path not readable (%s); "
+            "Cosmos25 checkpoints must copy Reason1 structural artifacts into "
+            "<ckpt_dir>/reason1/ so the safetensors-saved encoder can be "
+            "rebuilt at deploy time. Set model.video_backbone.text_encoder_path "
+            "to a readable Cosmos-Reason1-7B bundle." % te_path
+        )
+    raise RuntimeError(
+        "[component_specs] Reason1 artifact source not readable (%s). Pass a "
+        "Cosmos-Reason1-7B directory, or a config with "
+        "model.video_backbone.text_encoder_path set." % te_path
+    )
+
+
 def generate_cosmos25_component_specs(model_path: str) -> Optional[dict]:
     """Return component specs for the deploy loader's ``_ckpt_dir`` threading.
 
@@ -106,23 +156,7 @@ def copy_cosmos25_artifacts(output_dir: str, model_path_or_cfg: Any) -> None:
             DictConfig from which we read
             ``model.video_backbone.text_encoder_path``.
     """
-    if isinstance(model_path_or_cfg, str):
-        te_path: Optional[str] = model_path_or_cfg
-    else:
-        te_path = None
-        try:
-            te_path = str(model_path_or_cfg.model.video_backbone.text_encoder_path)
-        except Exception:
-            pass
-
-    if not te_path or not os.path.isdir(te_path):
-        logger.info(
-            "[component_specs] video_backbone.text_encoder_path not readable (%s); "
-            "skipping Reason1 artifact copy. Deploy will need an external "
-            "text_encoder_path pointing at a Cosmos-Reason1 bundle.",
-            te_path,
-        )
-        return
+    te_path = validate_reason1_artifact_source(model_path_or_cfg)
 
     dst_dir = os.path.join(output_dir, "reason1")
     if os.path.isdir(dst_dir) and any(
@@ -155,4 +189,9 @@ def copy_cosmos25_artifacts(output_dir: str, model_path_or_cfg: Any) -> None:
         )
 
 
-__all__ = ["generate_cosmos25_component_specs", "copy_cosmos25_artifacts"]
+__all__ = [
+    "generate_cosmos25_component_specs",
+    "copy_cosmos25_artifacts",
+    "validate_reason1_artifact_source",
+    "_resolve_text_encoder_path",
+]

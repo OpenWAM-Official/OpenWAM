@@ -13,8 +13,10 @@ import os
 
 import pytest
 import torch
+from safetensors.torch import load_file, save_file
 
 from openwam.dataloader import reason1_embedding_computation as ript
+from openwam.dataloader.transforms.text_embedding_cache import bucketed_cache_path_for_sha
 
 
 def test_constants_match_upstream_geometry():
@@ -130,6 +132,79 @@ def test_project_to_postproj_returns_bf16_cpu(tmp_path):
     assert out.shape == (512, 1024)
     assert out.dtype == torch.bfloat16
     assert out.device.type == "cpu"
+
+
+def test_save_embedding_writes_bucketed_path(tmp_path):
+    prompt = "pick up the block"
+    sha = ript._sha256_text(prompt)
+    tensor = torch.randn(4, 8, dtype=torch.bfloat16)
+    rel = f"{sha[:2]}/{sha}.safetensors"
+
+    ript._save_embedding(tmp_path, rel, tensor, prompt)
+
+    path = bucketed_cache_path_for_sha(str(tmp_path), sha)
+    loaded = load_file(path)
+    assert "pre_encoded_text" in loaded
+    assert torch.equal(loaded["pre_encoded_text"], tensor)
+
+
+def test_existing_flat_prompt_is_moved_to_bucketed(tmp_path):
+    """Migration uses ``shutil.move`` so the legacy flat file is gone after
+    the bucketed copy lands — otherwise the cache dir accumulates duplicate
+    flat+bucketed entries (one per migrated prompt × ~1MB)."""
+    prompt = "pick up the block"
+    sha = ript._sha256_text(prompt)
+    tensor = torch.randn(4, 8, dtype=torch.bfloat16)
+    legacy_path = tmp_path / f"{sha}.safetensors"
+    save_file({"pre_encoded_text": tensor}, str(legacy_path), metadata={"prompt": prompt})
+
+    path = ript._cache_path_for_sha(tmp_path, sha)
+    assert path == tmp_path / sha[:2] / f"{sha}.safetensors"
+    assert not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ript.shutil.move(str(legacy_path), str(path))
+
+    loaded = load_file(bucketed_cache_path_for_sha(str(tmp_path), sha))
+    assert torch.equal(loaded["pre_encoded_text"], tensor)
+    assert not legacy_path.exists(), (
+        "Legacy flat cache must be removed after migration to avoid duplicate "
+        "flat+bucketed files in the same cache dir."
+    )
+
+
+def test_stale_output_dir_guard_raises(tmp_path):
+    out = tmp_path / "cache"
+    out.mkdir()
+    (out / "manifest.json").write_text("{}")
+    for i in range(6):
+        (out / f"{i:064x}.safetensors").write_text("x")
+
+    with pytest.raises(RuntimeError, match="stale Reason1 cache"):
+        ript._guard_against_stale_output_dir(out, prompt_count=0, allow_stale_output_dir=False)
+
+
+def test_stale_output_dir_guard_can_be_overridden(tmp_path):
+    out = tmp_path / "cache"
+    out.mkdir()
+    (out / "manifest.json").write_text("{}")
+    for i in range(6):
+        (out / f"{i:064x}.safetensors").write_text("x")
+
+    ript._guard_against_stale_output_dir(out, prompt_count=0, allow_stale_output_dir=True)
+
+
+def test_find_unmanaged_flat_cache_files(tmp_path):
+    out = tmp_path / "cache"
+    out.mkdir()
+    keep_sha = "a" * 64
+    stale_sha = "b" * 64
+    (out / f"{keep_sha}.safetensors").write_text("x")
+    (out / f"{stale_sha}.safetensors").write_text("x")
+    (out / "empty.safetensors").write_text("x")
+
+    unmanaged = ript._find_unmanaged_flat_cache_files(out, {keep_sha})
+
+    assert unmanaged == [out / f"{stale_sha}.safetensors"]
 
 
 def _write_episode_instructions(root: str, episode_idx: int, payload):

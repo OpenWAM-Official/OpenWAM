@@ -25,7 +25,7 @@ freeze:
   # the `_pipe.net` line below in an override training_strategy yaml.
   # - video_backbone._pipe.net          # Cosmos25 DiT (nn.Module). Wan DiT lives at _pipe.dit and is intentionally TRAINED — Cosmos25 is now aligned (trainable by default).
   - video_backbone._pipe._vae_inner     # Cosmos25 WanVAE_ inner module (~485 MB); always present when vae=wan2pt1.
-  - video_backbone._pipe._reason1_inner # Cosmos25 Qwen2.5-VL inner (~16 GB); only present when text_encoder=reason1_live, else no-op.
+  - video_backbone._pipe._reason1_inner # Cosmos25 Qwen2.5-VL inner (~16 GB); present when text_encoder_path is set for cache or live training.
 
   # --- Tri-system only ---
   - vlm_backbone.vlm_model              # Ignored by architectures without a VLM backbone.

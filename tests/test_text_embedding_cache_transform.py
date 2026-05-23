@@ -16,13 +16,19 @@ from safetensors.torch import save_file
 
 from openwam.dataloader.transforms.text_embedding_cache import (
     TextEmbeddingCacheTransform,
+    bucketed_cache_path_for_sha,
     sha256_for_prompt,
 )
 
 
-def _write_cache_file(cache_dir: str, prompt: str, tensor: torch.Tensor) -> str:
-    fname = "empty.safetensors" if prompt == "" else f"{sha256_for_prompt(prompt)}.safetensors"
-    path = os.path.join(cache_dir, fname)
+def _write_cache_file(cache_dir: str, prompt: str, tensor: torch.Tensor, *, bucketed: bool = False) -> str:
+    if prompt == "":
+        path = os.path.join(cache_dir, "empty.safetensors")
+    elif bucketed:
+        path = bucketed_cache_path_for_sha(cache_dir, sha256_for_prompt(prompt))
+    else:
+        path = os.path.join(cache_dir, f"{sha256_for_prompt(prompt)}.safetensors")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     save_file({"pre_encoded_text": tensor.contiguous()}, path, metadata={"prompt": prompt})
     return path
 
@@ -52,6 +58,23 @@ def test_load_real_prompt(populated_cache):
     tx = TextEmbeddingCacheTransform(cache_dir=cache_dir, dropout_p=0.0)
     out = tx.apply({"prompt": "pick up the block"})
     assert "pre_encoded_text" in out
+    assert torch.equal(out["pre_encoded_text"], real)
+
+
+def test_load_bucketed_prompt(tmp_path):
+    cache_dir = str(tmp_path / "text_cache")
+    os.makedirs(cache_dir)
+    real = torch.randn(8, 1024)
+    empty = torch.full((8, 1024), -1.0)
+    bucketed_path = _write_cache_file(cache_dir, "pick up the block", real, bucketed=True)
+    _write_cache_file(cache_dir, "", empty)
+
+    tx = TextEmbeddingCacheTransform(cache_dir=cache_dir, dropout_p=0.0)
+    out = tx.apply({"prompt": "pick up the block"})
+
+    assert bucketed_path.endswith(
+        "98/98fffccbfa71a725c80a9f6370854ba0345582b4e1c6b0459dc306ea63b93f3b.safetensors"
+    )
     assert torch.equal(out["pre_encoded_text"], real)
 
 

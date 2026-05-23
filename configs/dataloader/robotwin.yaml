@@ -83,7 +83,9 @@ val_variant: null
 # Then set the cache dir below. Wan backbones ignore this field (silent
 # **kw drop in WanVideoBackbone.preprocess_input).
 #   null  = disabled (live encoding required)
-#   str   = path to directory containing <sha>.safetensors + empty.safetensors
+#   str   = path to directory containing bucketed <sha[:2]>/<sha>.safetensors
+#           files + empty.safetensors. Legacy flat <sha>.safetensors caches are
+#           still readable, but new precompute runs write bucketed files.
 text_embedding_cache_dir: null
 # CFG dropout — probability of substituting the empty-prompt embedding
 # instead of the real one (train only). 0.0 disables dropout.

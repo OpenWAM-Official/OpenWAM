@@ -471,9 +471,16 @@ else
         server_log="${SERVER_LOG_DIR}/server_worker${i}_gpu${gpu}.log"
 
         echo "[node${NODE_RANK}] server worker${i}: gpu=${gpu} ws=${ws_port} http=${http_port}"
-        "${SERVER_PYTHON}" "${SERVER_SCRIPT}" \
+        # Pin each worker to exactly one physical GPU via CUDA_VISIBLE_DEVICES.
+        # `--device cuda:0` then refers to that single visible device. Without
+        # this, `torch.cuda.current_device()` defaults to 0 in every worker and
+        # any default-cuda allocation (e.g. lazy buffer init that bypasses the
+        # explicit --device plumbing) lands on physical GPU 0 regardless of
+        # what we passed — which caused the cuda:0 vs cuda:N mismatch crash at
+        # `block.adaln_modulation_self_attn` on workers 1-7.
+        CUDA_VISIBLE_DEVICES="${gpu}" "${SERVER_PYTHON}" "${SERVER_SCRIPT}" \
             --ckpt-dir "${CKPT_DIR}" \
-            --device "cuda:${gpu}" \
+            --device "cuda:0" \
             --host "${SERVER_BIND_HOST}" \
             --ws-port "${ws_port}" \
             --http-port "${http_port}" \

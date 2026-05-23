@@ -198,6 +198,43 @@ def test_reason1_live_encoder_to_updates_state(patched_transformers):
     assert next(te.model.parameters()).dtype == torch.bfloat16
 
 
+def test_reason1_live_encoder_from_empty_registers_meta_shell(monkeypatch, tmp_path):
+    from openwam.model.video_backbone.cosmos25.text_encoder import Reason1LiveTextEncoder
+
+    ckpt = tmp_path / "reason1"
+    ckpt.mkdir()
+
+    monkeypatch.setattr(
+        transformers,
+        "AutoTokenizer",
+        types.SimpleNamespace(from_pretrained=lambda *_args, **_kw: _FakeTokenizer()),
+    )
+    monkeypatch.setattr(
+        transformers,
+        "AutoConfig",
+        types.SimpleNamespace(
+            from_pretrained=lambda *_args, **_kw: types.SimpleNamespace(
+                text_config=types.SimpleNamespace(hidden_size=_HIDDEN, num_hidden_layers=_NUM_LAYERS)
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        transformers,
+        "Qwen2_5_VLForConditionalGeneration",
+        types.SimpleNamespace(
+            _from_config=lambda *_args, **_kw: _FakeReason1Model(
+                dtype=torch.float32, device=torch.device("meta"), nested_config=True
+            )
+        ),
+    )
+
+    te = Reason1LiveTextEncoder.from_empty(ckpt, dtype=torch.float32)
+
+    assert te.device == torch.device("meta")
+    assert next(te.model.parameters()).device.type == "meta"
+    assert te.tokenizer is not None
+
+
 def test_reason1_live_encoder_geometry_validation(monkeypatch, patched_transformers):
     """A Reason1 variant with wrong `hidden_size` must be rejected at load
     time, mirroring the offline path's `_build_reason1` geometry check."""

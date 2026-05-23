@@ -1,6 +1,5 @@
 """Joint video-action inference engine using package-native generation code."""
 
-import hashlib
 import logging
 import os
 from collections import OrderedDict
@@ -10,6 +9,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
+from openwam.dataloader.transforms.text_embedding_cache import resolve_cache_path_for_sha, sha256_for_prompt
 from openwam.deploy.base import BaseInferenceEngine
 from openwam.deploy.schedule import make_schedule
 from openwam.model.architectures.base import BaseWAMArchitecture
@@ -204,7 +204,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         return None
 
     def _load_pre_encoded_text_for_prompt(self, prompt: str) -> Optional[torch.Tensor]:
-        """Resolve ``<sha256(prompt)>.safetensors`` in the configured cache dir.
+        """Resolve a bucketed or legacy flat cache file for ``prompt``.
 
         Returns ``None`` when the cache dir is unset OR the prompt has no
         per-prompt file (engine falls back to live encoder via adapter, if
@@ -214,8 +214,8 @@ class JointInferenceEngine(BaseInferenceEngine):
         """
         if self._text_embedding_cache_dir is None:
             return None
-        sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        cache_path = self._text_embedding_cache_dir / f"{sha}.safetensors"
+        sha = sha256_for_prompt(prompt)
+        cache_path = Path(resolve_cache_path_for_sha(str(self._text_embedding_cache_dir), sha))
         if not cache_path.exists():
             if self._backbone_has_live_text_encoder():
                 # cache_dir set but file missing AND live encoder available —

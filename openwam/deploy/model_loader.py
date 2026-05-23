@@ -129,8 +129,19 @@ def load_from_checkpoint_dir(
         # ``text_encoder_path`` intact so the live encoder still loads from
         # the external Cosmos-Reason1 bundle (backward compat).
         reason1_artifact_dir = os.path.join(ckpt_dir, "reason1")
-        if os.path.isdir(reason1_artifact_dir) and vb_cfg_dict.get("text_encoder") == "reason1_live":
+        # Iterate the plain-dict copy. ``vb_components`` is an OmegaConf
+        # ``ListConfig`` whose entries are ``DictConfig`` (NOT a ``dict``
+        # subclass) — so ``isinstance(c, dict)`` would always be False
+        # against the real saved config, silently skipping the marker.
+        has_reason1_state_component = any(
+            isinstance(c, dict) and c.get("attr") == "text_encoder"
+            for c in (vb_cfg_dict.get("components") or [])
+        )
+        if os.path.isdir(reason1_artifact_dir) and (
+            vb_cfg_dict.get("text_encoder") == "reason1_live" or has_reason1_state_component
+        ):
             prev_path = vb_cfg_dict.get("text_encoder_path")
+            vb_cfg_dict["text_encoder"] = "reason1_live"
             vb_cfg_dict["text_encoder_path"] = None
             logger.info(
                 "Using self-contained Reason1 artifacts from %s (clearing external text_encoder_path=%r)",

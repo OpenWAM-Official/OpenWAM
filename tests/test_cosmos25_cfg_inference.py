@@ -16,10 +16,13 @@ The GPU smoke for end-to-end deploy round-trip lives in
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn as nn
 
+from openwam.dataloader.transforms.text_embedding_cache import bucketed_cache_path_for_sha, sha256_for_prompt
 from openwam.model.base import _combine_cfg, _expand_inputs_for_cfg
 from openwam.model.inference_inputs import InferenceInputs
 from openwam.model.video_backbone.cosmos25 import Cosmos25VideoBackbone, CosmosFlowSchedulerAdapter
@@ -622,3 +625,21 @@ def test_load_pre_encoded_text_safetensors_passthrough_3d(tmp_path):
 
     assert loaded.shape == (1, 16, 8)
     assert torch.equal(loaded, tensor_3d)
+
+
+def test_load_pre_encoded_text_for_prompt_reads_bucketed_cache(tmp_path):
+    from safetensors.torch import save_file
+
+    prompt = "pick up the block"
+    sha = sha256_for_prompt(prompt)
+    cache_path = Path(bucketed_cache_path_for_sha(str(tmp_path), sha))
+    tensor_2d = torch.arange(16 * 8, dtype=torch.float32).reshape(16, 8)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    save_file({"pre_encoded_text": tensor_2d}, str(cache_path))
+
+    engine = _make_engine_for_loader_test()
+    engine._text_embedding_cache_dir = tmp_path
+    loaded = engine._load_pre_encoded_text_for_prompt(prompt)
+
+    assert loaded.shape == (1, 16, 8)
+    assert torch.equal(loaded[0], tensor_2d)

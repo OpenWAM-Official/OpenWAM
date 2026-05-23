@@ -18,20 +18,21 @@ These tests pin three guarantees:
    shell (mimicking the deploy path where `tokenizer.pth` is absent).
 3. `generate_cosmos25_component_specs` emits a non-empty marker (gating
    ``deploy/model_loader.py:117-122``'s ``_ckpt_dir`` injection) and
-   ``copy_cosmos25_artifacts`` is a no-op (kept for dispatcher parity).
+   ``copy_cosmos25_artifacts`` copies Reason1 structural JSONs.
 
-The Reason1 text encoder (~16 GB) is deliberately NOT under test here —
-it stays a plain Python class, weights external. That is the documented
-exception to the "all params in one safetensors" rule, mirroring
-tri_system's und_expert.
+The Reason1 text encoder (~16 GB) is also registered under
+``_reason1_inner`` so cache-mode and live-mode checkpoints both carry it in
+the unified safetensors.
 """
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 
 from openwam.model.video_backbone.cosmos25.component_specs import (
+    _resolve_text_encoder_path,
     copy_cosmos25_artifacts,
     generate_cosmos25_component_specs,
 )
@@ -88,6 +89,11 @@ def _make_wrapper(vae) -> Cosmos25PipelineWrapper:
         context_dim=1024,
         flow_shift=5.0,
     )
+
+
+class _FakeReason1:
+    def __init__(self) -> None:
+        self.model = nn.Linear(3, 3)
 
 
 # ----------------------------------------------------------------------
@@ -203,6 +209,27 @@ def test_generate_cosmos25_component_specs_emits_marker_when_model_path_valid(tm
     vae_entry = next((c for c in spec["components"] if c.get("attr") == "vae"), None)
     assert vae_entry is not None
     assert vae_entry["source"] == "state_dict"
+    text_entry = next((c for c in spec["components"] if c.get("attr") == "text_encoder"), None)
+    assert text_entry is not None
+    assert text_entry["source"] == "state_dict"
+
+
+def test_pipeline_wrapper_state_dict_contains_reason1_even_when_cache_wins():
+    """Cache training still needs Reason1 registered so saves are deploy self-contained."""
+    wrapper = Cosmos25PipelineWrapper(
+        net=_ParamNet(),
+        vae=None,
+        text_encoder=_FakeReason1(),
+        dim=2048,
+        num_layers=28,
+        num_heads=16,
+        head_dim=128,
+        context_dim=1024,
+        flow_shift=5.0,
+    )
+
+    state_keys = list(wrapper.state_dict().keys())
+    assert any(k.startswith("_reason1_inner.") for k in state_keys)
 
 
 def test_generate_cosmos25_component_specs_returns_none_for_missing_path():
@@ -213,10 +240,123 @@ def test_generate_cosmos25_component_specs_returns_none_for_missing_path():
     assert generate_cosmos25_component_specs(None) is None  # type: ignore[arg-type]
 
 
-def test_copy_cosmos25_artifacts_is_noop(tmp_path):
-    """Cosmos25 has nothing to copy — DiT + VAE live in the unified
-    safetensors. The function exists only for dispatcher parity with Wan."""
+def test_resolve_text_encoder_path_keeps_empty_string_missing():
+    assert _resolve_text_encoder_path("") is None
+
+
+def test_copy_cosmos25_artifacts_requires_reason1_path(tmp_path):
+    """Reason1 weights are in safetensors, but structural JSONs must be copied."""
     dst = tmp_path / "ckpt"
     dst.mkdir()
-    copy_cosmos25_artifacts(str(dst), "/anything/at/all")
-    assert not list(dst.iterdir()), "copy_cosmos25_artifacts must not write any files"
+    with pytest.raises(RuntimeError, match="Reason1 artifact source"):
+        copy_cosmos25_artifacts(str(dst), "/anything/at/all")
+
+
+def test_copy_cosmos25_artifacts_copies_reason1_structural_files(tmp_path):
+    src = tmp_path / "reason1_src"
+    src.mkdir()
+    (src / "config.json").write_text("{}")
+    (src / "tokenizer.json").write_text("{}")
+    dst = tmp_path / "ckpt"
+    dst.mkdir()
+
+    copy_cosmos25_artifacts(str(dst), str(src))
+
+    assert (dst / "reason1" / "config.json").is_file()
+    assert (dst / "reason1" / "tokenizer.json").is_file()
+
+
+# ----------------------------------------------------------------------
+# (4) deploy/model_loader.py — components-marker detection survives the
+# OmegaConf ListConfig/DictConfig wrapping that a real saved config has.
+# ----------------------------------------------------------------------
+
+
+def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path, monkeypatch):
+    """Saved ``config.yaml``s come back as ``ListConfig`` of ``DictConfig``;
+    iterating with ``isinstance(c, dict)`` against ``DictConfig`` would
+    silently fail (``DictConfig`` is not a ``dict`` subclass). This test
+    pins that the self-contained Reason1 fallback fires when
+
+      - ``text_encoder`` is **not** ``reason1_live`` in the saved config
+        (e.g. cache-mode training left it as ``none``), AND
+      - ``components`` contains the ``attr: text_encoder, source: state_dict``
+        marker that ``generate_cosmos25_component_specs`` emits, AND
+      - ``<ckpt_dir>/reason1/`` artifact dir exists.
+
+    Under those conditions deploy must clear ``text_encoder_path`` and
+    flip ``text_encoder=reason1_live`` so the empty-shell deploy path
+    picks up the in-state-dict Reason1 weights.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from omegaconf import OmegaConf
+
+    # Build a real saved-style config (ListConfig of DictConfigs).
+    saved_cfg = OmegaConf.create(
+        {
+            "model": {
+                "framework": "wam",
+                "variant": "shared_backbone_vanilla",
+                "video_backbone": {
+                    "name": "cosmos25_5b",
+                    "text_encoder": "none",
+                    "text_encoder_path": "/path/to/model",
+                    "components": [
+                        {"attr": "text_encoder", "source": "state_dict"},
+                        {"attr": "vae", "source": "state_dict"},
+                    ],
+                },
+            },
+        }
+    )
+    ckpt_dir = tmp_path / "ckpt"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "config.yaml").write_text(OmegaConf.to_yaml(saved_cfg))
+    # The fallback only fires when the reason1 artifact dir exists.
+    (ckpt_dir / "reason1").mkdir()
+    (ckpt_dir / "checkpoint_step_1.safetensors").write_bytes(b"")
+
+    captured: dict = {}
+
+    def _fake_build_architecture(registry_name, params):
+        captured["params"] = params
+        arch = MagicMock()
+        arch.load_checkpoint = MagicMock()
+        arch.set_dtype_device = MagicMock()
+        arch.eval = MagicMock()
+        arch.attach_action_normalizer = MagicMock()
+        return arch
+
+    resolved = MagicMock()
+    resolved.registry_name = "shared_backbone_vanilla"
+    resolved.canonical.framework = "wam"
+    resolved.canonical.variant = "shared_backbone_vanilla"
+    resolved.params = {"video_backbone": dict(saved_cfg.model.video_backbone)}
+
+    from openwam.deploy import model_loader
+
+    with (
+        patch.object(model_loader, "build_architecture", _fake_build_architecture, create=True),
+        patch.object(model_loader, "resolve_architecture_config", lambda _m: resolved, create=True),
+        patch.object(model_loader, "_build_action_normalizer", lambda *_a, **_kw: None),
+    ):
+        # Patch the deferred imports inside load_from_checkpoint_dir.
+        import openwam.model as _openwam_model
+
+        monkeypatch.setattr(_openwam_model, "build_architecture", _fake_build_architecture, raising=True)
+        monkeypatch.setattr(
+            _openwam_model, "resolve_architecture_config", lambda _m: resolved, raising=True
+        )
+        model_loader.load_from_checkpoint_dir(str(ckpt_dir), device="cpu")
+
+    source = captured["params"]["video_backbone"]["_source"]
+    assert isinstance(source, dict), f"Expected plain dict source, got {type(source).__name__}"
+    assert source["text_encoder"] == "reason1_live", (
+        "Reason1 self-contained marker (components entry with attr=text_encoder) was not "
+        "detected — deploy will leave text_encoder=none and the empty-shell branch never fires. "
+        "Likely a DictConfig vs dict regression in model_loader.py:132."
+    )
+    assert source["text_encoder_path"] is None, (
+        "External text_encoder_path must be cleared once self-contained Reason1 weights are detected."
+    )

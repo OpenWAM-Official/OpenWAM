@@ -753,6 +753,11 @@ class OpenWAMTrainer(BaseTrainer):
         keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
         base_output_path = getattr(t, "output_path", "./models")
 
+        # Validate on every rank before rank-0-only artifact copying. If this
+        # failed only on rank 0, distributed jobs could hang at the subsequent
+        # output-path broadcast.
+        self._validate_cosmos25_reason1_artifact_source()
+
         # Create output directory on rank 0 only, then broadcast the path
         # so all ranks share the same directory (avoids duplicate dirs from
         # slightly different timestamps across processes).
@@ -772,15 +777,10 @@ class OpenWAMTrainer(BaseTrainer):
             except Exception:
                 pass
             if model_path and os.path.isdir(model_path):
-                from omegaconf import OmegaConf
-
                 specs = self.architecture.get_component_specs(model_path)
                 if specs is not None:
                     with open_dict(self.cfg):
-                        if "components" not in self.cfg.model.video_backbone:
-                            OmegaConf.update(self.cfg, "model.video_backbone.components", specs["components"])
-                        if "tokenizer" in specs and "tokenizer" not in self.cfg.model.video_backbone:
-                            OmegaConf.update(self.cfg, "model.video_backbone.tokenizer", specs["tokenizer"])
+                        self._prepare_video_backbone_config_for_checkpoint(self.cfg, specs)
             save_config(output_path, self.cfg)
             if self.dataset is not None:
                 save_action_stats(output_path, self.dataset)
@@ -1034,6 +1034,38 @@ class OpenWAMTrainer(BaseTrainer):
 
         self.on_train_end(global_step, output_path=output_path, wandb_run=wandb_run)
 
+    @staticmethod
+    def _is_cosmos25_cfg(cfg) -> bool:
+        try:
+            return str(getattr(cfg.model.video_backbone, "name", "")).startswith("cosmos25_")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _prepare_video_backbone_config_for_checkpoint(cfg, specs: dict) -> None:
+        """Mutate saved config so component-backed checkpoints reload portably."""
+        from omegaconf import OmegaConf
+
+        vb_cfg = cfg.model.video_backbone
+        if OpenWAMTrainer._is_cosmos25_cfg(cfg) and getattr(vb_cfg, "text_encoder_path", None):
+            # Cache-mode training (`text_encoder: none`) still registers the
+            # Reason1 inner module for safetensors; record that in the saved
+            # config so deploy builds the matching empty shell.
+            OmegaConf.update(cfg, "model.video_backbone.text_encoder", "reason1_live")
+        if "components" not in vb_cfg:
+            OmegaConf.update(cfg, "model.video_backbone.components", specs["components"])
+        if "tokenizer" in specs and "tokenizer" not in vb_cfg:
+            OmegaConf.update(cfg, "model.video_backbone.tokenizer", specs["tokenizer"])
+
+    def _validate_cosmos25_reason1_artifact_source(self) -> None:
+        if not self._is_cosmos25_cfg(getattr(self, "cfg", None)):
+            return
+        try:
+            from openwam.model.video_backbone.cosmos25.component_specs import validate_reason1_artifact_source
+        except ImportError:
+            return
+        validate_reason1_artifact_source(self.cfg)
+
     def save_checkpoint(self, path: str):
         """Export architecture state to safetensors. Safe under ZeRO-1/2/3, DDP, and single-process.
 
@@ -1049,7 +1081,13 @@ class OpenWAMTrainer(BaseTrainer):
         """
         from safetensors.torch import save_file
 
-        from openwam.model.base import _exclude_vlm_from_state_dict
+        from openwam.model.base import _ensure_cosmos25_reason1_self_contained, _exclude_vlm_from_state_dict
+
+        unwrapped = (
+            self.accelerator.unwrap_model(self.architecture) if self.accelerator is not None else self.architecture
+        )
+        self._validate_cosmos25_reason1_artifact_source()
+        _ensure_cosmos25_reason1_self_contained(unwrapped)
 
         if self.accelerator is not None:
             state_dict = self.accelerator.get_state_dict(self.architecture)

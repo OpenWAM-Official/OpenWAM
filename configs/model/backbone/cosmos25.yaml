@@ -65,11 +65,14 @@ model_variant: base/post-trained                    # base/{pre,post}-trained | 
 
 # text_encoder choices:
 #   none          - caller supplies `pre_encoded_text` (offline cache path, §10).
-#   reason1_live  - inline Cosmos-Reason1-7B (§14); requires `text_encoder_path`.
+#   reason1_live  - inline Cosmos-Reason1-7B (§14).
+# `text_encoder_path` should point at Cosmos-Reason1-7B for both live mode and
+# cache-mode training so checkpoints can save Reason1 weights into safetensors
+# and copy the small structural files under <ckpt_dir>/reason1/.
 # When BOTH `text_encoder=reason1_live` AND `dataloader.text_embedding_cache_dir`
 # are set, the cache wins per-sample (the live encoder is silently skipped).
 text_encoder: none
-text_encoder_path: null                             # required when text_encoder=reason1_live; e.g. /path/to/assets/Cosmos-Reason1-7B
+text_encoder_path: null                             # e.g. /path/to/assets/Cosmos-Reason1-7B
 
 # CFG dropout for the live encoder path (§14.7). With probability p,
 # `Cosmos25PipelineWrapper.preprocess_input` substitutes `""` for each

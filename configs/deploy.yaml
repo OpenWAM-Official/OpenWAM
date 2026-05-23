@@ -28,9 +28,15 @@ inference:
   cfg_merge: false            # false (default): 2 sequential forwards per step. true: stack [uncond, cond] as B=2 in 1 forward (~1.5× faster, ~2× memory peak).
   # Path to the precomputed Reason1 cache produced by
   # `openwam.dataloader.reason1_embedding_computation`. Must contain
-  # `empty.safetensors` AND a `<sha256(prompt)>.safetensors` for every prompt
-  # the deployed model receives at inference time (cache miss with cache_dir
-  # set is a hard error — re-run precompute or unset this field).
+  # `empty.safetensors` AND a bucketed `<sha[:2]>/<sha256(prompt)>.safetensors`
+  # for every prompt the deployed model receives at inference time. Legacy flat
+  # `<sha>.safetensors` caches remain readable. A cache miss with cache_dir set
+  # is a hard error — re-run precompute or unset this field.
+  # Null = fall through to the live Reason1 encoder configured under
+  # `video_backbone.text_encoder` in the checkpoint config. Use this when the
+  # deployed model receives prompts the precompute set does not enumerate
+  # (e.g. RoboTwin eval, which fills instruction templates against runtime
+  # SAPIEN params per episode).
   text_embedding_cache_dir: null
 
 # ---------------------------------------------------------------------------
@@ -52,10 +58,10 @@ optimization:
   compile:
     mode: auto                 # auto | none
     self_attn:
-      torch_mode: reduce-overhead
+      torch_mode: default
       dynamic: false           # Fixed-shape MoT-loop compile for dual_system_self_attn
     cross_attn:
-      torch_mode: reduce-overhead
+      torch_mode: default
       dynamic: false           # Action-side fast path for dual_system_cross_attn
 
   async_inference:

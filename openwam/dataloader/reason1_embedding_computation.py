@@ -18,7 +18,7 @@ plus the task-name fallback used by ``_resolve_prompt``), this tool:
    from the Cosmos ``<uuid>_ema_bf16.pt`` checkpoint, builds the upstream
    ``Sequential(Linear(100352,1024), GELU())``, and applies it to the
    100352 tensor to land at ``(L=512, 1024)`` bf16.
-4. Saves each result as ``<output_dir>/<sha256(prompt)>.safetensors``
+4. Saves each result as ``<output_dir>/<sha[:2]>/<sha256(prompt)>.safetensors``
    (tensor key ``"pre_encoded_text"``; safetensors metadata carries the
    raw caption for debug). Also caches ``empty.safetensors`` for the
    classifier-free guidance dropout target consumed by
@@ -45,11 +45,21 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from openwam.dataloader.transforms.text_embedding_cache import (
+    BUCKET_PREFIX_LEN,
+    CACHE_LAYOUT,
+    bucketed_cache_path_for_sha,
+    flat_cache_path_for_sha,
+)
+
 logger = logging.getLogger("reason1_precompute")
+
+_STALE_FILE_MULTIPLIER = 100
 
 # Copied verbatim from upstream
 # cosmos_predict2/_src/predict2/text_encoders/text_encoder.py:145-150
@@ -80,6 +90,18 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _cache_path_for_sha(output_dir: Path, sha: str) -> Path:
+    return Path(bucketed_cache_path_for_sha(str(output_dir), sha))
+
+
+def _relative_cache_path_for_sha(sha: str) -> Path:
+    return Path(sha[:BUCKET_PREFIX_LEN]) / f"{sha}.safetensors"
+
+
+def _legacy_cache_path_for_sha(output_dir: Path, sha: str) -> Path:
+    return Path(flat_cache_path_for_sha(str(output_dir), sha))
 
 
 def _load_dataset_config(path: str) -> dict:
@@ -340,11 +362,61 @@ def _project_to_postproj(reason1_emb, crossattn_proj):
     return out.squeeze(0).to(dtype=torch.bfloat16).contiguous().cpu()
 
 
-def _save_embedding(out_dir: Path, fname: str, tensor, prompt: str):
+def _save_embedding(out_dir: Path, rel_path: Path | str, tensor, prompt: str):
     from safetensors.torch import save_file
 
     metadata = {"prompt": prompt[:512]}  # safetensors metadata caps at 1MB total
-    save_file({"pre_encoded_text": tensor}, str(out_dir / fname), metadata=metadata)
+    path = out_dir / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file({"pre_encoded_text": tensor}, str(path), metadata=metadata)
+
+
+def _count_safetensors_files(root: Path, *, limit: int) -> int:
+    """Count safetensors up to *limit* for stale-output-dir detection."""
+    count = 0
+    for _path in root.rglob("*.safetensors"):
+        count += 1
+        if count >= limit:
+            return count
+    return count
+
+
+def _guard_against_stale_output_dir(output_dir: Path, prompt_count: int, *, allow_stale_output_dir: bool) -> None:
+    """Refuse obviously stale cache dirs unless the operator opts in.
+
+    A correct Reason1 cache is one ~1 MiB file per unique prompt plus
+    ``empty.safetensors``. The observed RoboTwin blow-up was a directory with
+    a manifest for 1593 prompts but >1.2M files. This bounded guard catches
+    that class without fully scanning huge directories.
+    """
+    manifest_path = output_dir / "manifest.json"
+    if allow_stale_output_dir or not output_dir.exists() or not manifest_path.exists():
+        return
+    threshold = max(prompt_count + 1, prompt_count * _STALE_FILE_MULTIPLIER, 5)
+    seen = _count_safetensors_files(output_dir, limit=threshold + 1)
+    if seen > threshold:
+        raise RuntimeError(
+            f"Refusing to write into likely stale Reason1 cache dir: {output_dir}\n"
+            f"Current prompt_count={prompt_count}, but found more than {threshold} existing "
+            ".safetensors files while scanning. A healthy cache should be close to "
+            "prompt_count + 1 (empty.safetensors). Use a fresh --output-dir, clean the "
+            "old directory manually, or pass --allow-stale-output-dir if you intentionally "
+            "want to append to it."
+        )
+
+
+def _find_unmanaged_flat_cache_files(output_dir: Path, prompt_shas: set[str]) -> list[Path]:
+    """Return flat prompt cache files that are not part of this precompute set."""
+    unmanaged: list[Path] = []
+    if not output_dir.exists():
+        return unmanaged
+    for path in output_dir.glob("*.safetensors"):
+        if path.name == "empty.safetensors":
+            continue
+        stem = path.stem
+        if len(stem) == 64 and stem not in prompt_shas:
+            unmanaged.append(path)
+    return unmanaged
 
 
 def precompute(
@@ -355,14 +427,31 @@ def precompute(
     output_dir: Path,
     device: str = "cuda:0",
     overwrite: bool = False,
+    allow_stale_output_dir: bool = False,
 ):
     """High-level entry — exposed for tests that mock the heavy imports."""
     import torch
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     dataset_cfg = _load_dataset_config(str(dataset_config))
     prompts = _enumerate_prompts(dataset_cfg)
     logger.info("Enumerated %d unique formatted prompts from dataset", len(prompts))
+    prompt_shas = {_sha256_text(prompt) for prompt in prompts}
+    _guard_against_stale_output_dir(
+        output_dir,
+        len(prompts),
+        allow_stale_output_dir=allow_stale_output_dir,
+    )
+    if not allow_stale_output_dir:
+        unmanaged_flat = _find_unmanaged_flat_cache_files(output_dir, prompt_shas)
+        if unmanaged_flat:
+            examples = ", ".join(p.name for p in unmanaged_flat[:3])
+            raise RuntimeError(
+                f"Refusing to write into cache dir with {len(unmanaged_flat)} unmanaged flat "
+                f".safetensors files (examples: {examples}). New caches are bucketed under "
+                f"<sha[:{BUCKET_PREFIX_LEN}]>/<sha>.safetensors. Use a fresh --output-dir, "
+                "clean the stale flat files manually, or pass --allow-stale-output-dir."
+            )
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     dtype = torch.bfloat16
     crossattn_proj = _build_crossattn_proj(cosmos_ckpt, device=device, dtype=dtype)
@@ -376,13 +465,28 @@ def precompute(
         prompt_iter = prompts
 
     saved = 0
+    migrated = 0
     skipped = 0
     for prompt in prompt_iter:
         sha = _sha256_text(prompt)
-        path = output_dir / f"{sha}.safetensors"
+        path = _cache_path_for_sha(output_dir, sha)
+        legacy_path = _legacy_cache_path_for_sha(output_dir, sha)
         if path.exists() and not overwrite:
             skipped += 1
             continue
+        if legacy_path.exists() and not overwrite:
+            # Migrate readable legacy flat caches to the canonical bucketed
+            # layout without paying another 7B encoder forward. ``shutil.move``
+            # is atomic rename on same-fs and degrades to copy2+remove
+            # across fs — either way the legacy file is gone after migration
+            # so the dir doesn't accumulate flat+bucketed duplicates.
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy_path), str(path))
+            migrated += 1
+            continue
+        if legacy_path.exists() and overwrite:
+            # Avoid leaving duplicate flat+bucketed files after a rewrite.
+            legacy_path.unlink()
         emb = _encode_reason1(model, tokenizer, prompt, device=device)
         proj = _project_to_postproj(emb, crossattn_proj)
         if proj.shape != (_NUM_EMBEDDING_PADDING_TOKENS, _COSMOS_POSTPROJ_DIM):
@@ -390,7 +494,7 @@ def precompute(
                 f"projected embedding shape {tuple(proj.shape)} != "
                 f"({_NUM_EMBEDDING_PADDING_TOKENS}, {_COSMOS_POSTPROJ_DIM})"
             )
-        _save_embedding(output_dir, f"{sha}.safetensors", proj, prompt)
+        _save_embedding(output_dir, _relative_cache_path_for_sha(sha), proj, prompt)
         saved += 1
 
     # Always (re)compute empty.safetensors for CFG dropout target.
@@ -405,10 +509,13 @@ def precompute(
         "cosmos_ckpt": str(cosmos_ckpt),
         "cosmos_ckpt_sha256": _sha256_file(cosmos_ckpt),
         "dtype": "bf16",
+        "layout": CACHE_LAYOUT,
+        "bucket_prefix_len": BUCKET_PREFIX_LEN,
         "seq_len": _NUM_EMBEDDING_PADDING_TOKENS,
         "dim": _COSMOS_POSTPROJ_DIM,
         "prompt_count": len(prompts),
         "newly_saved": saved,
+        "migrated_from_legacy_flat": migrated,
         "skipped_existing": skipped,
         "system_prompt": _COSMOS_REASON1_SYSTEM_PROMPT,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -416,7 +523,7 @@ def precompute(
     with open(output_dir / "manifest.json", "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
 
-    logger.info("Precompute complete — saved=%d, skipped=%d, output=%s", saved, skipped, output_dir)
+    logger.info("Precompute complete — saved=%d, migrated=%d, skipped=%d, output=%s", saved, migrated, skipped, output_dir)
     return manifest
 
 
@@ -435,6 +542,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Rewrite cache files that already exist (default: skip and keep them).",
     )
+    parser.add_argument(
+        "--allow-stale-output-dir",
+        action="store_true",
+        help=(
+            "Allow writing into a manifest-bearing output dir with far more existing "
+            ".safetensors files than the current prompt set. Prefer a fresh output dir."
+        ),
+    )
     return parser
 
 
@@ -451,6 +566,7 @@ def main(argv: Optional[list[str]] = None) -> dict:
         output_dir=args.output_dir,
         device=args.device,
         overwrite=args.overwrite,
+        allow_stale_output_dir=args.allow_stale_output_dir,
     )
 
 

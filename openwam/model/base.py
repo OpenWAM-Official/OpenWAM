@@ -91,6 +91,17 @@ logger = logging.getLogger(__name__)
 # to avoid tied-weight deduplication complexity.
 VLM_STATE_DICT_PREFIX = "vlm_backbone."
 
+# Substring marker for the Cosmos25 Reason1 text-encoder inner module.
+# Pre-self-containment checkpoints (saved with `text_encoder: none`) lack any
+# `_reason1_inner.*` keys, but a deploy run that resurrects the encoder by
+# setting `text_encoder: reason1_live` + `text_encoder_path: ...` will eager-
+# load real weights into a registered `_reason1_inner` submodule on the
+# pipeline wrapper. The strict safetensors load then surfaces those eager-
+# loaded params as `missing`; tolerating them is safe so long as the wrapper
+# has no meta tensors (the self-contained `from_empty` path uses meta and
+# MUST receive its weights from the safetensors — see `load_checkpoint`).
+REASON1_INNER_KEY_MARKER = "._reason1_inner."
+
 
 def _exclude_vlm_from_state_dict(state_dict: dict[str, "Tensor"]) -> dict[str, "Tensor"]:
     """Filter out VLM backbone parameters from a state dict.
@@ -102,6 +113,45 @@ def _exclude_vlm_from_state_dict(state_dict: dict[str, "Tensor"]) -> dict[str, "
     from the checkpoint.
     """
     return {k: v for k, v in state_dict.items() if not k.startswith(VLM_STATE_DICT_PREFIX)}
+
+
+def _looks_like_cosmos25_video_backbone(vb: Any) -> bool:
+    """Best-effort Cosmos25 check that avoids importing the heavy adapter."""
+    pipe = getattr(vb, "_pipe", None)
+    if pipe is None:
+        return False
+    vb_name = f"{type(vb).__module__}.{type(vb).__name__}"
+    if "cosmos25" in vb_name.lower():
+        return True
+    # Fallback for tests / wrappers: Cosmos25 exposes a DiT ``net`` plus the
+    # 2B text context dimension. This intentionally stays conservative.
+    return bool(hasattr(pipe, "net") and getattr(pipe, "context_dim", None) == 1024)
+
+
+def _ensure_cosmos25_reason1_self_contained(arch: "BaseWAMArchitecture") -> None:
+    """Fail fast before saving a non-self-contained Cosmos25 checkpoint."""
+    vb = getattr(arch, "video_backbone", None)
+    if not _looks_like_cosmos25_video_backbone(vb):
+        return
+    pipe = getattr(vb, "_pipe", None)
+    if getattr(pipe, "_reason1_inner", None) is not None:
+        return
+    cfg = getattr(arch, "cfg", None)
+    vb_cfg = arch._cfg_get(cfg, "video_backbone", None)
+    te_path = arch._cfg_get(vb_cfg, "text_encoder_path", None)
+    if te_path:
+        raise RuntimeError(
+            "Cosmos25 checkpoint save is missing `_pipe._reason1_inner` even though "
+            f"video_backbone.text_encoder_path={te_path!r} is set. Rebuild the model with "
+            "the current Cosmos25 pipeline_builder so Reason1 is loaded and registered "
+            "before saving."
+        )
+    raise RuntimeError(
+        "Cosmos25 checkpoint save requires the Reason1 encoder in safetensors for both "
+        "cache and live-encoder training modes, but `_pipe._reason1_inner` is absent and "
+        "`model.video_backbone.text_encoder_path` is unset. Set text_encoder_path to the "
+        "Cosmos-Reason1-7B bundle when constructing the training model."
+    )
 
 
 def _assert_decode_video_supported(vb) -> None:
@@ -650,6 +700,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """
         from safetensors.torch import save_file
 
+        _ensure_cosmos25_reason1_self_contained(self)
         state_dict = self.state_dict()
         if getattr(self, "vlm_backbone", None) is not None:
             state_dict = _exclude_vlm_from_state_dict(state_dict)
@@ -680,6 +731,24 @@ class BaseWAMArchitecture(ABC, nn.Module):
         has_vlm = getattr(self, "vlm_backbone", None) is not None
         has_meta = any(p.device.type == "meta" for p in self.parameters())
         missing, unexpected = self.load_state_dict(state_dict, strict=False, assign=has_meta)
+        # Backward compat for pre-self-containment Cosmos25 checkpoints: those
+        # were saved with `text_encoder: none`, so the safetensors has no
+        # `_reason1_inner.*` keys. If the deploy config now resurrects the
+        # encoder via `text_encoder_path`, the eager-loaded weights are
+        # already valid and the strict-load "missing" entries for that subtree
+        # are noise. Skip the exemption when the model has meta tensors —
+        # that branch (`from_empty` self-contained deploy) genuinely needs
+        # those keys from the safetensors and silent tolerance would leave
+        # uninitialized weights.
+        if missing and not has_meta:
+            tolerated = [k for k in missing if REASON1_INNER_KEY_MARKER in k]
+            if tolerated:
+                logger.info(
+                    "Tolerated %d missing %s* keys (encoder loaded externally from text_encoder_path)",
+                    len(tolerated),
+                    REASON1_INNER_KEY_MARKER.lstrip("."),
+                )
+                missing = [k for k in missing if REASON1_INNER_KEY_MARKER not in k]
         if strict and not has_vlm:
             if missing or unexpected:
                 raise RuntimeError(f"Strict load failed: missing={missing}, unexpected={unexpected}")

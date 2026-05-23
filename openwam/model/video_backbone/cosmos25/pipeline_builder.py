@@ -209,6 +209,16 @@ def _cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
     return getattr(cfg, key, default)
 
 
+def _cfg_set(cfg: Any, key: str, value: Any) -> None:
+    if isinstance(cfg, dict):
+        cfg[key] = value
+        return
+    try:
+        setattr(cfg, key, value)
+    except Exception:
+        pass
+
+
 def _video_backbone_cfg(source: Any) -> Any:
     """Extract the ``video_backbone`` sub-config from a Hydra cfg / path / dict."""
     if source is None:
@@ -299,6 +309,7 @@ def build_cosmos25_pipeline(
     model_path = Path(model_path_raw) if model_path_raw is not None else None
     variant = str(_cfg_get(vb_cfg, "model_variant", "base/post-trained"))
     text_encoder_choice = str(_cfg_get(vb_cfg, "text_encoder", "none")).lower()
+    requested_text_encoder_choice = text_encoder_choice
     flow_shift = float(_cfg_get(vb_cfg, "flow_shift", 5.0))
     sac_mode_raw = str(_cfg_get(vb_cfg, "sac_mode", "none")).lower()
     _valid_sac_modes = {"none", "mm_only", "block_wise"}
@@ -325,21 +336,27 @@ def build_cosmos25_pipeline(
     # so a missing path fails fast — without this, a typo in the config would
     # only surface after `_resolve_checkpoint_path` and the 5 GB DiT load.
     text_encoder_path_raw = _cfg_get(vb_cfg, "text_encoder_path", None)
-    # On the training path (``ckpt_dir is None``) we require an explicit
-    # ``text_encoder_path`` so the live encoder can load its 16 GB of Qwen
-    # weights. On the deploy path (``ckpt_dir`` non-None), weights flow from
-    # the unified safetensors via ``_reason1_inner``, so leaving
-    # ``text_encoder_path`` unset is allowed — the deploy loader will look
-    # under ``<ckpt_dir>/reason1/`` for the small structural artifacts
-    # (config.json + tokenizer.json) instead.
-    if (
-        text_encoder_choice == "reason1_live"
-        and text_encoder_path_raw is None
-        and ckpt_dir is None
-    ):
+    # On the training path (``ckpt_dir is None``), ``text_encoder_path`` tells
+    # the builder where to load Reason1 so it can be registered under
+    # ``_reason1_inner`` and saved into the unified safetensors. This applies
+    # even when the run consumes offline ``pre_encoded_text`` caches. On the
+    # deploy path (``ckpt_dir`` non-None), weights flow from safetensors and
+    # the loader points ``from_empty`` at ``<ckpt_dir>/reason1/`` structural
+    # artifacts instead.
+    if ckpt_dir is None and text_encoder_path_raw is not None and text_encoder_choice == "none":
+        text_encoder_choice = "reason1_live"
+        _cfg_set(vb_cfg, "text_encoder", text_encoder_choice)
+        logger.info(
+            "Cosmos Reason1: text_encoder=none but text_encoder_path is set; "
+            "loading/registering Reason1 so checkpoints are self-contained. "
+            "Cache-supplied pre_encoded_text still wins at preprocessing time."
+        )
+    if text_encoder_choice == "reason1_live" and text_encoder_path_raw is None and ckpt_dir is None:
         raise ValueError(
             "video_backbone.text_encoder_path is required when "
-            "text_encoder=reason1_live on the training path. Point it at the "
+            "text_encoder=reason1_live on the training path, and Cosmos25 "
+            "checkpoints now save Reason1 into safetensors whenever a "
+            "text_encoder_path is available. Point text_encoder_path at the "
             "Cosmos-Reason1-7B bundle root, e.g. /path/to/assets/Cosmos-Reason1-7B."
         )
     # §14.7 — CFG dropout for the live encoder path. The actual substitution
@@ -358,7 +375,7 @@ def build_cosmos25_pipeline(
         ) from exc
     if not 0.0 <= text_dropout_p <= 1.0:
         raise ValueError(f"video_backbone.text_encoder_dropout={text_dropout_p} is out of range; must be in [0, 1].")
-    if text_dropout_p > 0.0 and text_encoder_choice == "none":
+    if text_dropout_p > 0.0 and requested_text_encoder_choice == "none":
         raise ValueError(
             "video_backbone.text_encoder_dropout > 0 requires "
             "text_encoder=reason1_live (dead config otherwise). For the "
