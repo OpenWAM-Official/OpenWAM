@@ -201,6 +201,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         *,
         device: str = "cpu",
         encoder_cfg: Any = None,
+        ckpt_dir: str | None = None,
     ) -> "VJEPA21VideoEncoder":
         """Deploy-time zero-weight ViT shell, sized by manifest.
 
@@ -210,40 +211,31 @@ class VJEPA21VideoEncoder(VideoEncoder):
         PR #67-era runs — ``components[vae]`` actually carries the Wan
         ``WanVideoVAE38`` class (an artifact of ``get_component_specs``
         scanning the Wan ``model_path``). We therefore ignore
-        ``components_entry`` and reconstruct from the yaml-preserved
-        ``encoder.model_path``'s ``manifest.json``.
+        ``components_entry`` and reconstruct from a ``manifest.json``.
 
-        Trade-off: the deploy host must be able to read
-        ``encoder.model_path``. This is acceptable as a short-term
-        unblock for already-trained checkpoints; a future training-side
-        patch can drop the dependency by copying ``manifest.json`` into
-        the checkpoint dir and overriding ``components[vae]`` with the
-        V-JEPA ViT spec.
+        Manifest source priority (and the rationale for each branch):
+
+        1. ``<ckpt_dir>/manifest.json`` — written by
+           :meth:`copy_deploy_artifacts` at checkpoint save time. The
+           preferred branch for self-contained deploy: the deploy host
+           needs to read the checkpoint dir anyway, and the manifest is
+           a small (<1 KB) JSON.
+        2. ``<encoder_cfg.model_path>/manifest.json`` — backward-compat
+           fallback for PR #85-era checkpoints saved before this self-
+           containment patch. The deploy host must reach
+           ``encoder.model_path`` for these.
+
+        Existing checkpoints can be migrated by hand-copying the manifest
+        into the checkpoint dir (see issue #86 for the recipe). After this
+        change is merged, all new checkpoints land on branch (1)
+        automatically.
 
         ViT weights are NOT loaded here — the architecture's strict
         ``load_checkpoint`` populates ``_encoder._m.*`` from the saved
         safetensors immediately after this call returns.
         """
-        if encoder_cfg is None:
-            raise RuntimeError(
-                "VJEPA21VideoEncoder.from_skeleton requires encoder_cfg "
-                "(the yaml ``model.video_backbone.encoder`` block) to "
-                "locate manifest.json — ``components_entry`` does not "
-                "carry ViT geometry. Confirm "
-                "base.py:_build_external_encoder_skeleton is passing "
-                "enc_cfg through."
-            )
-        if isinstance(encoder_cfg, dict):
-            model_path = encoder_cfg.get("model_path")
-        else:
-            model_path = getattr(encoder_cfg, "model_path", None)
-        if not model_path:
-            raise RuntimeError(
-                "VJEPA21VideoEncoder.from_skeleton: encoder_cfg.model_path "
-                "is required to read manifest.json on the deploy host. "
-                f"Got encoder_cfg={encoder_cfg!r}."
-            )
-        manifest = cls._read_and_validate_manifest(str(model_path))
+        manifest_dir = cls._resolve_manifest_dir(ckpt_dir, encoder_cfg)
+        manifest = cls._read_and_validate_manifest(manifest_dir)
         vit_encoder = cls._prepare_vjepa_imports_and_patch()
         with torch.device(device):
             vit = cls._build_vit_from_manifest(vit_encoder, manifest)
@@ -251,7 +243,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             "VJEPA21VideoEncoder.from_skeleton: %s instantiated from %s "
             "(embed_dim=%d, variant=%s) — weights pending checkpoint load",
             manifest["arch_name"],
-            model_path,
+            manifest_dir,
             int(manifest["embed_dim"]),
             str(manifest["variant"]),
         )
@@ -259,6 +251,118 @@ class VJEPA21VideoEncoder(VideoEncoder):
             vit,
             embed_dim=int(manifest["embed_dim"]),
             variant=str(manifest["variant"]),
+        )
+
+    @staticmethod
+    def _resolve_manifest_dir(ckpt_dir: str | None, encoder_cfg: Any) -> str:
+        """Pick which directory holds a readable ``manifest.json`` at deploy time.
+
+        See :meth:`from_skeleton` for the priority rationale. The returned
+        directory is guaranteed to contain a regular ``manifest.json`` file
+        (``os.path.isfile`` — directories with that name are NOT accepted;
+        keeps the check consistent with the training-side copy below and
+        avoids a confusing ``json.load`` error if the path somehow exists as
+        a directory). When neither source yields one, the raised
+        ``FileNotFoundError`` names BOTH attempted paths so the operator can
+        see exactly where we looked without having to read the source.
+        """
+        ckpt_manifest = os.path.join(ckpt_dir, "manifest.json") if ckpt_dir else None
+        if ckpt_manifest and os.path.isfile(ckpt_manifest):
+            return str(ckpt_dir)
+
+        fallback_dir: str | None = None
+        if encoder_cfg is not None:
+            if isinstance(encoder_cfg, dict):
+                fallback_dir = encoder_cfg.get("model_path")
+            else:
+                fallback_dir = getattr(encoder_cfg, "model_path", None)
+        fallback_manifest = (
+            os.path.join(str(fallback_dir), "manifest.json") if fallback_dir else None
+        )
+        if fallback_manifest and os.path.isfile(fallback_manifest):
+            return str(fallback_dir)
+
+        raise FileNotFoundError(
+            "VJEPA21VideoEncoder.from_skeleton: no readable manifest.json. "
+            f"Tried ckpt_dir={ckpt_manifest!r} and "
+            f"encoder.model_path={fallback_manifest!r}. The checkpoint was "
+            "saved before the self-containment patch and the fallback is "
+            "unreachable or has no manifest. Either re-save with the current "
+            "code, or hand-copy manifest.json into the checkpoint dir "
+            "(see issue #86)."
+        )
+
+    def copy_deploy_artifacts(self, output_dir: str, cfg: Any) -> None:
+        """Copy ``manifest.json`` from ``encoder.model_path`` into
+        ``<output_dir>/manifest.json`` so deploy is self-contained.
+
+        Resolves the manifest source via
+        ``cfg.model.video_backbone.encoder.model_path`` — the same yaml
+        field training read at construction time. We re-read the cfg (vs.
+        caching the path on ``self``) so the call doesn't break if a
+        future refactor moves things; missing/empty config and IO errors
+        log a warning and skip the copy rather than raising (a copy
+        failure must never crash an otherwise-good training run; deploy
+        then falls back to the legacy ``encoder.model_path`` branch in
+        :meth:`from_skeleton`).
+
+        IO failure handling matters because :meth:`copy_deploy_artifacts`
+        runs inside the trainer's checkpoint save flow — losing the
+        safetensors save over a manifest-copy ``PermissionError`` /
+        ``ENOSPC`` / disappearing-mount ``OSError`` would be a strict
+        regression vs. the pre-self-containment behavior.
+        """
+        import shutil
+
+        model_path = None
+        try:
+            enc_cfg = cfg.model.video_backbone.encoder
+            if isinstance(enc_cfg, dict):
+                model_path = enc_cfg.get("model_path")
+            else:
+                model_path = getattr(enc_cfg, "model_path", None)
+        except Exception:
+            # Intentionally broad: cfg shape (dict / DictConfig / mock)
+            # varies across call sites, and the contract above forbids
+            # raising. Anything that prevents us from reading model_path
+            # collapses to "skip the copy, deploy falls back".
+            pass
+
+        if not model_path:
+            logger.warning(
+                "VJEPA21VideoEncoder.copy_deploy_artifacts: cannot resolve "
+                "model.video_backbone.encoder.model_path from cfg; skipping "
+                "manifest copy. Deploy will fall back to encoder.model_path."
+            )
+            return
+        src = os.path.join(str(model_path), "manifest.json")
+        dst = os.path.join(output_dir, "manifest.json")
+        if not os.path.isfile(src):
+            logger.warning(
+                "VJEPA21VideoEncoder.copy_deploy_artifacts: manifest.json "
+                "not found at %s; skipping copy. Deploy will fall back to "
+                "encoder.model_path.",
+                src,
+            )
+            return
+        if os.path.abspath(src) == os.path.abspath(dst):
+            return
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            shutil.copyfile(src, dst)
+        except OSError as e:
+            logger.warning(
+                "VJEPA21VideoEncoder.copy_deploy_artifacts: copying %s -> %s "
+                "failed (%s); skipping. Deploy will fall back to encoder.model_path.",
+                src,
+                dst,
+                e,
+            )
+            return
+        logger.info(
+            "VJEPA21VideoEncoder.copy_deploy_artifacts: copied %s -> %s",
+            src,
+            dst,
         )
 
     @classmethod

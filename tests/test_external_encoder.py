@@ -738,6 +738,54 @@ def test_C13d_reinit_with_external_encoder_requires_dit_patch_size():
         reinit_dit_from_scratch(pipe, external_encoder=enc, verbose=False)
 
 
+def test_C14_wan_copy_deploy_artifacts_forwards_to_external_encoder(tmp_path):
+    """``WanVideoBackbone.copy_deploy_artifacts`` must call the external
+    encoder's hook so V-JEPA's ``manifest.json`` lands in the checkpoint dir.
+
+    The Wan tokenizer copy step inside the same method is a no-op here
+    because we pass a plain ``dict`` cfg — ``copy_video_backbone_tokenizer``
+    reaches into ``cfg.model.video_backbone.model_path`` via attribute access
+    (DictConfig-style), so a dict cfg raises AttributeError which the
+    helper catches and logs. That keeps this test isolated to the
+    encoder-forwarding behavior we actually want to verify, without us
+    having to stand up a real Wan model directory on disk.
+    """
+    from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+
+    class _RecordingEncoder(_MockEncoderBase):
+        def __init__(self):
+            super().__init__()
+            self.calls: list = []
+
+        def copy_deploy_artifacts(self, output_dir, cfg):
+            self.calls.append((output_dir, cfg))
+
+    pipe = _FakePipe()
+    enc = _RecordingEncoder()
+    backbone = WanVideoBackbone.from_pretrained(pipe, external_encoder=enc)
+    cfg = {"model": {"video_backbone": {"model_path": "/nonexistent"}}}
+    backbone.copy_deploy_artifacts(str(tmp_path), cfg)
+
+    assert enc.calls == [(str(tmp_path), cfg)]
+
+
+def test_C15_wan_copy_deploy_artifacts_no_op_without_external_encoder(tmp_path):
+    """Without an external encoder, ``WanVideoBackbone.copy_deploy_artifacts``
+    only invokes the tokenizer copy — no encoder hook call, no crash on the
+    default path. Regression guard against accidentally routing the encoder
+    branch into the default path.
+    """
+    from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+
+    pipe = _FakePipe()
+    backbone = WanVideoBackbone(pipe)
+    assert backbone._encoder is None
+    backbone.copy_deploy_artifacts(str(tmp_path), {"model": {"video_backbone": {"model_path": str(tmp_path)}}})
+    # No exception, no spurious files.
+    # (Tokenizer copy is itself a warning-on-missing path; we don't assert
+    # its side effects here — they are covered by Wan-side unit tests.)
+
+
 # Tiny helper for C9-C13 — declares a custom spec without going through Wan VAE loading.
 
 
@@ -2085,28 +2133,32 @@ def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
     assert captured["tubelet_size"] == 2
 
 
-def test_V12_vjepa21_from_skeleton_requires_encoder_cfg():
-    """``from_skeleton`` without ``encoder_cfg`` raises with a base.py hint —
+def test_V12_vjepa21_from_skeleton_requires_some_manifest_source():
+    """``from_skeleton`` without ``encoder_cfg`` AND without ``ckpt_dir`` raises
+    a single FileNotFoundError naming both attempted paths (None / None).
     components_entry alone doesn't carry ViT geometry (it's Wan VAE class).
     """
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
-    with pytest.raises(RuntimeError, match="encoder_cfg"):
+    with pytest.raises(FileNotFoundError, match=r"ckpt_dir.*encoder\.model_path"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
         )
 
 
 def test_V13_vjepa21_from_skeleton_requires_model_path(tmp_path):
-    """``encoder_cfg`` without ``model_path`` (or with empty string) fails fast."""
+    """``encoder_cfg`` without ``model_path`` (or with empty string) fails fast
+    via the same dual-path FileNotFoundError so the operator sees we tried
+    both sources before giving up.
+    """
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
-    with pytest.raises(RuntimeError, match="model_path"):
+    with pytest.raises(FileNotFoundError, match=r"ckpt_dir.*encoder\.model_path"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
             encoder_cfg={"name": "vjepa2_1"},
         )
-    with pytest.raises(RuntimeError, match="model_path"):
+    with pytest.raises(FileNotFoundError, match=r"ckpt_dir.*encoder\.model_path"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
             encoder_cfg={"name": "vjepa2_1", "model_path": ""},
@@ -2122,3 +2174,218 @@ def test_V14_vjepa21_from_skeleton_missing_manifest(tmp_path):
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
             encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
         )
+
+
+# ----------------------------------------------------------------------
+# V15-V19: deploy self-containment — ckpt_dir manifest takes priority
+# ----------------------------------------------------------------------
+
+
+def _build_vjepa_manifest_payload() -> dict:
+    """Manifest dict matching what V-JEPA 2.1 vit_giant_xformers_rope writes."""
+    return {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-rope-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "img_temporal_dim_size": 1,
+        "interpolate_rope": True,
+        "checkpoint_file": "DOES-NOT-EXIST.pt",
+        "checkpoint_key": "target_encoder",
+    }
+
+
+def test_V15_vjepa21_from_skeleton_prefers_ckpt_dir_manifest(tmp_path, monkeypatch):
+    """When ``<ckpt_dir>/manifest.json`` exists, ``from_skeleton`` reads it
+    and does NOT touch ``encoder_cfg.model_path`` — proving deploy is self-
+    contained on machines where the training-time encoder path is unmounted.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    ckpt_dir = tmp_path / "ckpt"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "manifest.json").write_text(_json.dumps(_build_vjepa_manifest_payload()))
+
+    def _fake_wrapper(**kwargs):
+        return _MockVJEPAViT(embed_dim=1408)
+
+    _install_fake_vjepa_modules(monkeypatch, _fake_wrapper)
+
+    # Deliberately point encoder_cfg.model_path at a NON-EXISTENT directory.
+    # If from_skeleton's priority order is wrong it'll try this path and
+    # raise FileNotFoundError; the test verifies it never gets there.
+    enc = VJEPA21VideoEncoder.from_skeleton(
+        components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
+        encoder_cfg={"name": "vjepa2_1", "model_path": "/nonexistent/unmounted/path"},
+        ckpt_dir=str(ckpt_dir),
+    )
+    assert isinstance(enc, VJEPA21VideoEncoder)
+    assert enc.spec.z_dim == 1408
+    assert enc.variant == "vitg-rope-384"
+
+
+def test_V16_vjepa21_from_skeleton_falls_back_to_encoder_cfg_when_ckpt_dir_lacks_manifest(
+    tmp_path, monkeypatch
+):
+    """Old checkpoints saved before self-containment have no
+    ``<ckpt_dir>/manifest.json`` — ``from_skeleton`` must fall back to the
+    yaml's ``encoder.model_path`` so those checkpoints keep deploying.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    ckpt_dir = tmp_path / "ckpt"
+    ckpt_dir.mkdir()  # no manifest.json here
+    encoder_src = tmp_path / "vjepa-weights"
+    encoder_src.mkdir()
+    (encoder_src / "manifest.json").write_text(_json.dumps(_build_vjepa_manifest_payload()))
+
+    def _fake_wrapper(**kwargs):
+        return _MockVJEPAViT(embed_dim=1408)
+
+    _install_fake_vjepa_modules(monkeypatch, _fake_wrapper)
+
+    enc = VJEPA21VideoEncoder.from_skeleton(
+        components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
+        encoder_cfg={"name": "vjepa2_1", "model_path": str(encoder_src)},
+        ckpt_dir=str(ckpt_dir),
+    )
+    assert isinstance(enc, VJEPA21VideoEncoder)
+    assert enc.spec.z_dim == 1408
+
+
+def test_V17_vjepa21_from_skeleton_no_manifest_anywhere(tmp_path):
+    """Neither ``<ckpt_dir>/manifest.json`` nor ``encoder.model_path`` works:
+    fail with a single error that names BOTH paths verbatim so the operator
+    can see both locations without reading the source.
+    """
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    ckpt_dir = tmp_path / "ckpt"
+    ckpt_dir.mkdir()  # empty
+    encoder_src = tmp_path / "vjepa-weights"
+    encoder_src.mkdir()  # empty too
+
+    with pytest.raises(FileNotFoundError) as exc:
+        VJEPA21VideoEncoder.from_skeleton(
+            components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
+            encoder_cfg={"name": "vjepa2_1", "model_path": str(encoder_src)},
+            ckpt_dir=str(ckpt_dir),
+        )
+    # Lock the operator-facing UX: both attempted paths appear in the message.
+    msg = str(exc.value)
+    assert str(ckpt_dir) in msg, f"ckpt_dir missing from error: {msg}"
+    assert str(encoder_src) in msg, f"encoder.model_path missing from error: {msg}"
+
+
+def test_V18_vjepa21_copy_deploy_artifacts_copies_manifest(tmp_path, monkeypatch):
+    """Training-side hook copies ``<encoder.model_path>/manifest.json`` into
+    ``<output_dir>/manifest.json``. New checkpoints saved after this change
+    are self-contained.
+    """
+    import json as _json
+
+    from omegaconf import OmegaConf
+
+    encoder_src = tmp_path / "vjepa-weights"
+    encoder_src.mkdir()
+    manifest_payload = _build_vjepa_manifest_payload()
+    (encoder_src / "manifest.json").write_text(_json.dumps(manifest_payload))
+
+    output_dir = tmp_path / "ckpt-out"
+    output_dir.mkdir()
+
+    # Build an encoder instance without going through from_pretrained
+    # (the test doesn't need real ViT weights — we only exercise the
+    # copy hook, which is a method on the encoder *instance*).
+    enc = _build_vjepa_encoder(embed_dim=1408)
+    cfg = OmegaConf.create(
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(encoder_src)}}}}
+    )
+    enc.copy_deploy_artifacts(str(output_dir), cfg)
+
+    dst = output_dir / "manifest.json"
+    assert dst.exists()
+    assert _json.loads(dst.read_text()) == manifest_payload
+
+
+def test_V19_vjepa21_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_path, caplog):
+    """The hook must NEVER raise on missing source — a copy failure must
+    not crash an otherwise-good training run. Missing cfg / missing source
+    file log a warning and return; deploy then falls back to
+    ``encoder.model_path``.
+    """
+    import logging
+
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: F401
+
+    enc = _build_vjepa_encoder(embed_dim=1408)
+
+    output_dir = tmp_path / "ckpt-out"
+    output_dir.mkdir()
+
+    # cfg without model.video_backbone.encoder → warning + no-op.
+    with caplog.at_level(logging.WARNING):
+        enc.copy_deploy_artifacts(str(output_dir), cfg={})
+    assert not (output_dir / "manifest.json").exists()
+    assert any("model_path" in r.message for r in caplog.records)
+
+    caplog.clear()
+    # cfg points at a directory with no manifest.json → warning + no-op.
+    from omegaconf import OmegaConf
+
+    empty_src = tmp_path / "empty"
+    empty_src.mkdir()
+    cfg = OmegaConf.create(
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(empty_src)}}}}
+    )
+    with caplog.at_level(logging.WARNING):
+        enc.copy_deploy_artifacts(str(output_dir), cfg)
+    assert not (output_dir / "manifest.json").exists()
+    assert any("manifest.json" in r.message for r in caplog.records)
+
+
+def test_V20_vjepa21_copy_deploy_artifacts_io_error_does_not_crash(
+    tmp_path, caplog, monkeypatch
+):
+    """``copy_deploy_artifacts`` must NEVER raise on IO failure either —
+    permission denied / disk full / disappearing mount must collapse to a
+    warning + return so the trainer's safetensors save isn't lost.
+
+    Reproduces wayrise #1: read-only fs / PermissionError / ENOSPC.
+    """
+    import json as _json
+    import logging
+    import shutil
+
+    from omegaconf import OmegaConf
+
+    encoder_src = tmp_path / "vjepa-weights"
+    encoder_src.mkdir()
+    (encoder_src / "manifest.json").write_text(_json.dumps(_build_vjepa_manifest_payload()))
+    output_dir = tmp_path / "ckpt-out"
+    output_dir.mkdir()
+    enc = _build_vjepa_encoder(embed_dim=1408)
+    cfg = OmegaConf.create(
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(encoder_src)}}}}
+    )
+
+    def _boom(*args, **kwargs):
+        raise PermissionError("simulated read-only filesystem")
+
+    monkeypatch.setattr(shutil, "copyfile", _boom)
+    with caplog.at_level(logging.WARNING):
+        # Must NOT raise — assertion is "we got here".
+        enc.copy_deploy_artifacts(str(output_dir), cfg)
+    assert not (output_dir / "manifest.json").exists()
+    formatted = [r.getMessage() for r in caplog.records]
+    assert any("failed" in m and "simulated" in m for m in formatted), (
+        f"expected warning naming the copy failure; got: {formatted}"
+    )

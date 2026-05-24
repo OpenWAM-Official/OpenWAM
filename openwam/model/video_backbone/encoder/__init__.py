@@ -123,27 +123,41 @@ class VideoEncoder(ABC, nn.Module):
         *,
         device: str = "cpu",
         encoder_cfg: Any = None,
+        ckpt_dir: str | None = None,
     ) -> "VideoEncoder":
         """Build a zero-weight encoder skeleton. The host architecture's
         checkpoint strict-load fills in weights immediately after this call.
 
-        Two data sources are exposed to subclasses; an implementation picks
-        whichever fits its persistence story:
+        Subclasses that override **must** keep all three kwargs in their
+        signature — ``base.py:_build_external_encoder_skeleton`` always
+        forwards ``encoder_cfg=...`` and ``ckpt_dir=...``, so an override
+        that drops either will raise ``TypeError: unexpected keyword
+        argument`` at deploy time. Unused kwargs may be accepted and
+        ignored (see :class:`WanVideoVAEEncoder.from_skeleton`).
+
+        The three kwargs are a **menu of data sources**, not a single
+        priority chain. Each encoder picks one primary source per its
+        persistence story; some encoders also pick a secondary source as
+        a fallback for older checkpoints (see
+        :class:`VJEPA21VideoEncoder`).
 
         * ``components_entry`` — the dict shape produced by
           :func:`generate_video_backbone_component_specs`:
           ``{"attr": str, "model_class": str, "extra_kwargs": dict}``.
           Use this when the encoder's structural geometry is fully captured
           by the saved Wan ``components`` entry (e.g. :class:`WanVideoVAEEncoder`).
+        * ``ckpt_dir`` — the deploy-side checkpoint directory. Use this for
+          per-encoder structural artifacts (e.g. a ``manifest.json``) that
+          the training-side :meth:`copy_deploy_artifacts` hook has copied
+          into the checkpoint dir for deploy self-containment. Preferred
+          source when present; the deploy host needs to read the checkpoint
+          dir anyway.
         * ``encoder_cfg`` — the yaml ``model.video_backbone.encoder`` block
           (a dict / DictConfig with ``name`` and ``model_path``). Use this
-          when the encoder's training-time component-spec generator did NOT
-          persist the encoder geometry into ``components_entry`` (e.g.
-          :class:`VJEPA21VideoEncoder`, whose ``components[vae]`` actually
-          carries the Wan ``WanVideoVAE38`` class as an artifact of
-          scanning the Wan ``model_path``). The subclass then reads the
-          encoder's manifest from ``encoder_cfg.model_path``. Trade-off:
-          the deploy host must be able to read that path.
+          as a fallback for older checkpoints saved before
+          :meth:`copy_deploy_artifacts` started writing the artifact into
+          ``ckpt_dir``. Trade-off: the deploy host must be able to read
+          ``encoder.model_path``.
 
         Default implementation raises so non-supporting encoders fail
         loudly at deploy time rather than silently mismatch state_dict
@@ -154,6 +168,29 @@ class VideoEncoder(ABC, nn.Module):
             "encoder is not supported. Either implement from_skeleton or train "
             "without an external encoder."
         )
+
+    # ------------------------------------------------------------------
+    # Training-side deploy-artifact copy
+    # ------------------------------------------------------------------
+
+    def copy_deploy_artifacts(self, output_dir: str, cfg: Any) -> None:
+        """Copy per-encoder deploy artifacts into the checkpoint directory.
+
+        Called by the host backbone's ``copy_deploy_artifacts`` after each
+        checkpoint save so deploy is self-contained — the deploy host no
+        longer needs ``encoder.model_path`` to be reachable. The default is
+        a no-op for encoders whose structural state is fully captured by
+        the safetensors weights plus the saved ``components`` entry (e.g.
+        :class:`WanVideoVAEEncoder`); encoders that depend on side files
+        like ``manifest.json`` override this to copy them next to the
+        ``checkpoint_step_*.safetensors``.
+
+        Subclasses MUST NOT raise on missing source files — failing here
+        would crash an otherwise-good training run. Log a warning instead;
+        :meth:`from_skeleton` will then fall back to ``encoder.model_path``
+        at deploy time (matching the pre-self-containment behavior).
+        """
+        return None
 
     # ------------------------------------------------------------------
     # DiT-side adapter hooks (modular extension point)

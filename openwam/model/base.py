@@ -305,8 +305,17 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 # Deploy: reconstruct the encoder skeleton from the saved
                 # components entry; weights filled in by the architecture's
                 # subsequent ``load_checkpoint`` strict load. ``source`` is
-                # the dict produced by deploy/model_loader.py.
-                external_encoder = self._build_external_encoder_skeleton(enc_cfg, source)
+                # the dict produced by deploy/model_loader.py. ``_ckpt_dir``
+                # is plumbed onto ``vb_cfg`` by model_loader so the encoder
+                # can prefer ``<ckpt_dir>/manifest.json`` (written by
+                # :meth:`VideoEncoder.copy_deploy_artifacts` at save time)
+                # over the legacy ``encoder.model_path`` branch.
+                ckpt_dir_for_encoder = (
+                    vb_cfg.get("_ckpt_dir") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_ckpt_dir", None)
+                )
+                external_encoder = self._build_external_encoder_skeleton(
+                    enc_cfg, source, ckpt_dir=ckpt_dir_for_encoder
+                )
         elif enc_cfg is not None and source is None:
             enc_name = ""
             if isinstance(enc_cfg, dict):
@@ -432,7 +441,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 )
 
     @staticmethod
-    def _build_external_encoder_skeleton(enc_cfg, source):
+    def _build_external_encoder_skeleton(enc_cfg, source, *, ckpt_dir=None):
         """Deploy-time external encoder constructor.
 
         Reads the encoder ``name`` (subject to the same yaml whitelist as
@@ -443,6 +452,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
         which instantiates the underlying module with zero weights. The
         architecture's :meth:`load_checkpoint` strict load fills in the
         weights immediately after.
+
+        ``ckpt_dir`` is forwarded to ``from_skeleton`` so encoders that
+        depend on side files (e.g. V-JEPA's ``manifest.json``) can prefer
+        the self-contained ``<ckpt_dir>/<artifact>`` copy written by
+        :meth:`VideoEncoder.copy_deploy_artifacts` over the legacy
+        ``encoder.model_path`` branch.
 
         Refuses to silently fall back to the native VAE path here: if the
         cfg has an encoder block but the components list is missing a vae
@@ -477,7 +492,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 "entry to construct the encoder skeleton from."
             )
         encoder_cls = _VIDEO_ENCODER_REGISTRY[enc_name]
-        return encoder_cls.from_skeleton(vae_entry, encoder_cfg=enc_cfg)
+        return encoder_cls.from_skeleton(vae_entry, encoder_cfg=enc_cfg, ckpt_dir=ckpt_dir)
 
     def _resolve_video_dim(self, cfg) -> int:
         """Resolve video_dim from config or video_backbone; raise if neither provides it."""

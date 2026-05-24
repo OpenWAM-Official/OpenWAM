@@ -159,12 +159,18 @@ class WanVideoVAEEncoder(VideoEncoder):
         *,
         device: str = "cpu",
         encoder_cfg: Any = None,
+        ckpt_dir: str | None = None,
     ) -> "WanVideoVAEEncoder":
         """Deploy-time constructor — instantiate the underlying ``WanVideoVAE``
         / ``WanVideoVAE38`` class with empty weights using the saved
         ``components`` entry's ``model_class`` + ``extra_kwargs``. The
         architecture's checkpoint ``load_checkpoint`` strict load fills
         in the weights immediately after.
+
+        ``encoder_cfg`` / ``ckpt_dir`` are accepted (and ignored) for ABC
+        signature compatibility — Wan VAE's structural geometry is fully
+        captured by ``components_entry``, so no side files / yaml fallback
+        is needed.
 
         Mirrors :meth:`WanVideoBackbone._build_pipe_from_components`'s
         instantiation pattern so the resulting module has bit-identical

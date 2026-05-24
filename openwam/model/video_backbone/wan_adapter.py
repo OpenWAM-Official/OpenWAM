@@ -1298,10 +1298,22 @@ class WanVideoBackbone(VideoBackbone):
         return generate_video_backbone_component_specs(model_path)
 
     def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
-        """Copy the Wan tokenizer next to ``config.yaml`` so deploy is self-contained."""
+        """Copy backbone-side deploy artifacts next to ``config.yaml``.
+
+        Two artifact families:
+
+        * Wan tokenizer — always copied, source is ``model.video_backbone.model_path``.
+        * External encoder side files (e.g. V-JEPA ``manifest.json``) —
+          forwarded to ``self._encoder.copy_deploy_artifacts`` when an
+          external encoder is plugged in. Encoders whose structural state
+          is fully captured by safetensors + ``components`` (e.g. Wan VAE)
+          inherit the ABC's no-op default.
+        """
         from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
 
         copy_video_backbone_tokenizer(output_dir, cfg)
+        if self._encoder is not None:
+            self._encoder.copy_deploy_artifacts(output_dir, cfg)
 
     # ================================================================
     # Deploy-facing public methods (not in ABC — Wan-specific)
