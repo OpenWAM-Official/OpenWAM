@@ -205,10 +205,8 @@ class MoTJointDriver:
     def _video_tokens_per_frame(self, vstate: "BlockLoopState") -> int:
         """Tokens per video frame, derived from the spatial dims in vstate.
 
-        ``vstate.x.shape[1] == vstate.f * vstate.h * vstate.w`` after the
-        backbone's ``prepare()`` (and after any reference-prefix extension).
-        ``vstate.h * vstate.w`` is therefore tokens-per-frame, which the
-        FastWAM-style v↔v mask needs.
+        Delegates to :func:`compute_video_tokens_per_frame`, which returns
+        ``h * w`` from the spatial dims populated on ``vstate``.
         """
         return compute_video_tokens_per_frame(vstate, "MoTJointDriver")
 
@@ -424,12 +422,13 @@ class MoTJointDriver:
         :meth:`step` for memory/compute trade-offs.
         """
         # Resolve sequence shapes from the backbone-populated f/h/w fields.
-        # ``vstate.x.shape[1]`` is identical to ``f*h*w`` for backbones that
-        # carry a 3D ``(B, S, D)`` state (Wan), but for backbones whose
-        # ``state.x`` is natively 5D ``(B, T, H, W, D)`` (Cosmos25) ``shape[1]``
-        # is just ``T`` — wrong. Going through f/h/w is the only formulation
-        # that works for both layouts.
-        s_video = int(vstate.f) * int(vstate.h) * int(vstate.w)
+        # ``vstate.x.shape[1]`` is identical to ``f*tokens_per_frame`` for
+        # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
+        # backbones whose ``state.x`` is natively 5D ``(B, T, H, W, D)``
+        # (Cosmos25) ``shape[1]`` is just ``T`` — wrong. Going through f and
+        # the shared ``compute_video_tokens_per_frame`` helper is the only
+        # formulation that works for both layouts.
+        s_video = int(vstate.f) * self._video_tokens_per_frame(vstate)
         payload = astate.payload
         if payload is None or not hasattr(payload, "x_action"):
             raise RuntimeError(

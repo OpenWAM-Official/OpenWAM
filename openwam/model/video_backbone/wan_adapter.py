@@ -241,12 +241,7 @@ class WanVideoBackbone(VideoBackbone):
 
             v = getattr(pipe, "vae", None)
             if v is not None and external_encoder.spec.is_reversible:
-                want = VideoEncoderSpec(
-                    z_dim=int(v.z_dim),
-                    spatial_compression=int(v.upsampling_factor),
-                    temporal_compression=4,
-                    causal_temporal=True,
-                )
+                want = VideoEncoderSpec(z_dim=int(v.z_dim), spatial_compression=int(v.upsampling_factor), temporal_compression=4, causal_temporal=True)
                 VideoBackbone.validate_encoder_spec(external_encoder.spec, want)
 
             # (3) Spatial division factor derived from the encoder's declared
@@ -532,6 +527,7 @@ class WanVideoBackbone(VideoBackbone):
         use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
         force_per_token_t_mod = bool(kw.get("force_per_token_t_mod", False))
 
+
         if use_usp:
             import torch.distributed as dist
             from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size
@@ -541,7 +537,8 @@ class WanVideoBackbone(VideoBackbone):
             num_clean = max(num_clean_prefix_frames, 1)
             f_lat = latents.shape[2]
             ps = self._dit_patch_size
-            tokens_per_frame = latents.shape[3] * latents.shape[4] // (ps[1] * ps[2])
+            tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (ps[1] * ps[2])
+            tokens_per_frame = tokens_per_frame_patch
             token_timesteps = torch.ones(
                 batch_size, f_lat, tokens_per_frame, dtype=latents.dtype, device=latents.device
             ) * timestep.view(batch_size, 1, 1)
@@ -568,7 +565,8 @@ class WanVideoBackbone(VideoBackbone):
             batch_size = latents.shape[0]
             f_lat = latents.shape[2]
             ps = self._dit_patch_size
-            tokens_per_frame = latents.shape[3] * latents.shape[4] // (ps[1] * ps[2])
+            tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (ps[1] * ps[2])
+            tokens_per_frame = tokens_per_frame_patch
             L = f_lat * tokens_per_frame
             t_base = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype))  # (B, dim)
             t = t_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
@@ -672,8 +670,8 @@ class WanVideoBackbone(VideoBackbone):
         x = dit.patchify(x, control_camera_latents_input)
 
         f, h, w = x.shape[2:]
+        tokens_per_frame_patch = h * w
         x = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
-
         freqs = (
             torch.cat(
                 [
@@ -714,23 +712,10 @@ class WanVideoBackbone(VideoBackbone):
                 ]
                 x = chunks[get_sequence_parallel_rank()]
 
-        return BlockLoopState(
-            x=x,
-            t_mod=t_mod,
-            freqs=freqs,
-            context=context,
-            context_mask=context_mask,
-            f=f,
-            h=h,
-            w=w,
-            t=t,
-            vace_hints=vace_hints,
-            vace_scale=vace_scale,
-            sp_pad_shape=sp_pad_shape,
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            extras=extras,
-        )
+        return BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, context_mask=context_mask, f=f, h=h, w=w, tokens_per_frame_patch=tokens_per_frame_patch, t=t, vace_hints=vace_hints, vace_scale=vace_scale, sp_pad_shape=sp_pad_shape, use_gradient_checkpointing=use_gradient_checkpointing, use_gradient_checkpointing_offload=use_gradient_checkpointing_offload, extras=extras)
+
+
+
 
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
         dit = state.extras["dit"]
@@ -918,12 +903,16 @@ class WanVideoBackbone(VideoBackbone):
         self._apply_post_block_residuals(layer_id, state)
         return state
 
-    def finalize(self, state: BlockLoopState) -> Tensor:
+    def finalize(self, state: BlockLoopState):
+        'Public implementation.'
         dit = state.extras["dit"]
         use_usp = state.extras.get("use_usp", False)
-
+        head = dit.head
         t_head = state.t if state.t.dim() == 3 else state.t.unsqueeze(1)
-        x = dit.head(state.x, t_head)
+
+
+        # Non-special path: original v1 / Wan default.
+        x = head(state.x, t_head)
 
         if use_usp:
             import torch.distributed as dist
@@ -936,6 +925,7 @@ class WanVideoBackbone(VideoBackbone):
 
         x = dit.unpatchify(x, (state.f, state.h, state.w))
         return x
+
 
     # ================================================================
     # ABC: Action token injection (2)
@@ -1093,7 +1083,8 @@ class WanVideoBackbone(VideoBackbone):
         for clip_frames in frames:
             all_input_videos.append(self._preprocess_video(clip_frames))
         stacked_inputs = torch.cat(all_input_videos, dim=0)
-        input_latents = self._encode_video(stacked_inputs).to(dtype=dtype, device=device)
+        input_latents = self._encode_video(stacked_inputs)
+        input_latents = input_latents.to(dtype=dtype, device=device)
 
         vace_videos = kw.get("vace_videos")
         ref_images = kw.get("ref_images")
@@ -1207,21 +1198,7 @@ class WanVideoBackbone(VideoBackbone):
         if has_ref and not has_image_input and self._is_ti2v:
             first_frame_latents = input_latents[:, :, 0:1].clone()
 
-        return {
-            "input_latents": input_latents,
-            "context": context,
-            "seq_lens": seq_lens,
-            "height": height,
-            "width": width,
-            "num_frames": num_frames,
-            "vace_context": vace_context,
-            "vace_scale": 1.0,
-            "fuse_vae_embedding_in_latents": self._is_ti2v and has_ref,
-            "num_clean_prefix_frames": num_clean_prefix,
-            "first_frame_latents": first_frame_latents,
-            "clip_feature": clip_feature,
-            "y": y,
-        }
+        return {'input_latents': input_latents, 'context': context, 'seq_lens': seq_lens, 'height': height, 'width': width, 'num_frames': num_frames, 'vace_context': vace_context, 'vace_scale': 1.0, 'fuse_vae_embedding_in_latents': self._is_ti2v and has_ref, 'num_clean_prefix_frames': num_clean_prefix, 'first_frame_latents': first_frame_latents, 'clip_feature': clip_feature, 'y': y}
 
     # ================================================================
     # ABC: Sub-module access (2)
@@ -1298,17 +1275,7 @@ class WanVideoBackbone(VideoBackbone):
         return generate_video_backbone_component_specs(model_path)
 
     def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
-        """Copy backbone-side deploy artifacts next to ``config.yaml``.
-
-        Two artifact families:
-
-        * Wan tokenizer — always copied, source is ``model.video_backbone.model_path``.
-        * External encoder side files (e.g. V-JEPA ``manifest.json``) —
-          forwarded to ``self._encoder.copy_deploy_artifacts`` when an
-          external encoder is plugged in. Encoders whose structural state
-          is fully captured by safetensors + ``components`` (e.g. Wan VAE)
-          inherit the ABC's no-op default.
-        """
+        'Public implementation.'
         from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
 
         copy_video_backbone_tokenizer(output_dir, cfg)
@@ -1576,22 +1543,7 @@ class WanVideoBackbone(VideoBackbone):
         return inputs_shared
 
     def _finalize_ti2v_first_frame_latents(self, inputs_shared: dict, first_frame_image) -> None:
-        """Emit ``first_frame_latents`` for TI2V deploy.
-
-        TI2V's ``seperated_timestep`` DiT requires both
-        ``fuse_vae_embedding_in_latents=True`` AND ``first_frame_latents`` so
-        the per-token timestep path can zero the timestep on frame-0 tokens
-        and ``base.generate`` can clean-replace ``latents[:, :, 0:1]`` on every
-        denoising step.
-
-        VACE intentionally has no branch here: its first-frame condition flows
-        through ``vace_context`` (built by ``_build_vace_context_for_deploy``),
-        and ``video`` itself stays fully noised — matching the native
-        ``WanVideoUnit_VACE`` "predict everything via the bypass" semantic.
-
-        I2V also skips this path: its conditioning rides on the ``y`` channel,
-        ``first_frame_latents`` is never used.
-        """
+        'Public implementation.'
         if not self._is_ti2v or first_frame_image is None:
             if first_frame_image is None:
                 inputs_shared.pop("first_frame_latents", None)
@@ -1604,6 +1556,8 @@ class WanVideoBackbone(VideoBackbone):
         inputs_shared["num_clean_prefix_frames"] = 0
         ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
         ref_tensor = self._preprocess_video(ref_frames)
+
+
         ref_image_latents = self._encode_video(ref_tensor.to(device)).to(dtype=dtype, device=device)
         inputs_shared["first_frame_latents"] = ref_image_latents
 
@@ -1676,6 +1630,7 @@ class WanVideoBackbone(VideoBackbone):
         if self._uses_external_encoder:
             return self._encoder.batch_encode(video_tensor)
         return self._pipe.vae.batch_encode(video_tensor, device=video_tensor.device)
+
 
     def _encode_video_for_vace(
         self,
@@ -1836,12 +1791,8 @@ class WanVideoBackbone(VideoBackbone):
         # ``image * (2/255) + (-1) = -1``). NOT torch.zeros — that would be
         # preprocessed-0 = "gray", which is the bug the old latent-space
         # construction effectively committed.
-        vace_video_pixels = torch.full(
-            (B, 3, num_frames, height, width), fill_value=-1.0, dtype=dtype, device=device
-        )
-        vace_mask_pixels = torch.ones(
-            (B, 1, num_frames, height, width), dtype=dtype, device=device
-        )
+        vace_video_pixels = torch.full((B, 3, num_frames, height, width), fill_value=-1.0, dtype=dtype, device=device)
+        vace_mask_pixels = torch.ones((B, 1, num_frames, height, width), dtype=dtype, device=device)
 
         has_ref = first_frame_image is not None
         user_provided_any = vace_videos is not None and any(vv is not None for vv in vace_videos)
@@ -1882,18 +1833,13 @@ class WanVideoBackbone(VideoBackbone):
                 # first_frame_image = [video[0]] and video[0] is what got
                 # preprocessed into ``preprocessed_video[:, :, 0:1]`` — same
                 # bits, no PIL roundtrip.
-                vace_video_pixels[:, :, 0:1] = preprocessed_video[:, :, 0:1].to(
-                    dtype=dtype, device=device
-                )
+                vace_video_pixels[:, :, 0:1] = preprocessed_video[:, :, 0:1].to(dtype=dtype, device=device)
             else:
                 for i in range(B):
                     ref = first_frame_image[i] if isinstance(first_frame_image, list) else first_frame_image
                     if isinstance(ref, list):
                         ref = ref[0]
-                    pp = (
-                        self._pipe.preprocess_image(ref.resize((width, height)))
-                        .to(device=device, dtype=dtype)
-                    )
+                    pp = self._pipe.preprocess_image(ref.resize((width, height))).to(device=device, dtype=dtype)
                     if pp.dim() == 4 and pp.shape[0] == 1:
                         pp = pp[0]
                     vace_video_pixels[i, :, 0] = pp
@@ -1970,12 +1916,8 @@ class WanVideoBackbone(VideoBackbone):
         # identical to the vendored unit at B=1.
         inactive = vace_video_pixels * (1 - vace_mask_pixels)
         reactive = vace_video_pixels * vace_mask_pixels
-        inactive_lat = self._encode_video_for_vace(
-            inactive, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride
-        )
-        reactive_lat = self._encode_video_for_vace(
-            reactive, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride
-        )
+        inactive_lat = self._encode_video_for_vace(inactive, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        reactive_lat = self._encode_video_for_vace(reactive, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         vace_video_latents = torch.cat([inactive_lat, reactive_lat], dim=1)
 
         P, Q = 8, 8
@@ -1989,9 +1931,7 @@ class WanVideoBackbone(VideoBackbone):
         # Native (B=1):
         #   rearrange(vace_video_mask[0, 0], "T (H P) (W Q) -> 1 (P Q) T H W", ...)
         # Batched:
-        vace_mask_latents = rearrange(
-            vace_mask_pixels[:, 0], "B T (H P) (W Q) -> B (P Q) T H W", P=P, Q=Q
-        )
+        vace_mask_latents = rearrange(vace_mask_pixels[:, 0], "B T (H P) (W Q) -> B (P Q) T H W", P=P, Q=Q)
         T_pix = vace_mask_latents.shape[2]
         T_lat = (T_pix + 3) // 4
         vace_mask_latents = F.interpolate(

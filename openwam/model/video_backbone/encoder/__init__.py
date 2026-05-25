@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import torch.nn as nn
 from torch import Tensor
@@ -125,44 +125,7 @@ class VideoEncoder(ABC, nn.Module):
         encoder_cfg: Any = None,
         ckpt_dir: str | None = None,
     ) -> "VideoEncoder":
-        """Build a zero-weight encoder skeleton. The host architecture's
-        checkpoint strict-load fills in weights immediately after this call.
-
-        Subclasses that override **must** keep all three kwargs in their
-        signature — ``base.py:_build_external_encoder_skeleton`` always
-        forwards ``encoder_cfg=...`` and ``ckpt_dir=...``, so an override
-        that drops either will raise ``TypeError: unexpected keyword
-        argument`` at deploy time. Unused kwargs may be accepted and
-        ignored (see :class:`WanVideoVAEEncoder.from_skeleton`).
-
-        The three kwargs are a **menu of data sources**, not a single
-        priority chain. Each encoder picks one primary source per its
-        persistence story; some encoders also pick a secondary source as
-        a fallback for older checkpoints (see
-        :class:`VJEPA21VideoEncoder`).
-
-        * ``components_entry`` — the dict shape produced by
-          :func:`generate_video_backbone_component_specs`:
-          ``{"attr": str, "model_class": str, "extra_kwargs": dict}``.
-          Use this when the encoder's structural geometry is fully captured
-          by the saved Wan ``components`` entry (e.g. :class:`WanVideoVAEEncoder`).
-        * ``ckpt_dir`` — the deploy-side checkpoint directory. Use this for
-          per-encoder structural artifacts (e.g. a ``manifest.json``) that
-          the training-side :meth:`copy_deploy_artifacts` hook has copied
-          into the checkpoint dir for deploy self-containment. Preferred
-          source when present; the deploy host needs to read the checkpoint
-          dir anyway.
-        * ``encoder_cfg`` — the yaml ``model.video_backbone.encoder`` block
-          (a dict / DictConfig with ``name`` and ``model_path``). Use this
-          as a fallback for older checkpoints saved before
-          :meth:`copy_deploy_artifacts` started writing the artifact into
-          ``ckpt_dir``. Trade-off: the deploy host must be able to read
-          ``encoder.model_path``.
-
-        Default implementation raises so non-supporting encoders fail
-        loudly at deploy time rather than silently mismatch state_dict
-        keys later.
-        """
+        'Public implementation.'
         raise NotImplementedError(
             f"{cls.__name__}.from_skeleton not implemented; deploy with this "
             "encoder is not supported. Either implement from_skeleton or train "
@@ -174,22 +137,7 @@ class VideoEncoder(ABC, nn.Module):
     # ------------------------------------------------------------------
 
     def copy_deploy_artifacts(self, output_dir: str, cfg: Any) -> None:
-        """Copy per-encoder deploy artifacts into the checkpoint directory.
-
-        Called by the host backbone's ``copy_deploy_artifacts`` after each
-        checkpoint save so deploy is self-contained — the deploy host no
-        longer needs ``encoder.model_path`` to be reachable. The default is
-        a no-op for encoders whose structural state is fully captured by
-        the safetensors weights plus the saved ``components`` entry (e.g.
-        :class:`WanVideoVAEEncoder`); encoders that depend on side files
-        like ``manifest.json`` override this to copy them next to the
-        ``checkpoint_step_*.safetensors``.
-
-        Subclasses MUST NOT raise on missing source files — failing here
-        would crash an otherwise-good training run. Log a warning instead;
-        :meth:`from_skeleton` will then fall back to ``encoder.model_path``
-        at deploy time (matching the pre-self-containment behavior).
-        """
+        'Public implementation.'
         return None
 
     # ------------------------------------------------------------------
@@ -232,6 +180,13 @@ class VideoEncoder(ABC, nn.Module):
         """
         ps = self.spec.dit_patch_size
         return nn.Linear(dit_dim, self.spec.z_dim * math.prod(ps))
+
+
+
+
+
+
+
 
 
 # ----------------------------------------------------------------------
@@ -292,14 +247,7 @@ def build_video_encoder(cfg) -> VideoEncoder:
     return _VIDEO_ENCODER_REGISTRY[name].from_pretrained(str(model_path))
 
 
-__all__ = [
-    "VideoEncoder",
-    "VideoEncoderSpec",
-    "VJEPA21VideoEncoder",
-    "WanVideoVAEEncoder",
-    "build_video_encoder",
-    "register_video_encoder",
-]
+__all__ = ['VideoEncoder', 'VideoEncoderSpec', 'VJEPA21VideoEncoder', 'WanVideoVAEEncoder', 'build_video_encoder', 'register_video_encoder']
 
 # Built-in registrations (kept at the bottom so subclasses can import names
 # from this module without circular issues). Adding a new encoder = adding

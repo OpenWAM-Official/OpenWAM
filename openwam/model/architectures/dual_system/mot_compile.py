@@ -56,12 +56,13 @@ class CompiledMoTLoop:
 
         payload = astate.payload
         # Resolve sequence shapes from the backbone-populated f/h/w fields.
-        # ``vstate.x.shape[1]`` is identical to ``f*h*w`` for backbones that
-        # carry a 3D ``(B, S, D)`` state (Wan), but for backbones whose
-        # ``state.x`` is natively 5D ``(B, T, H, W, D)`` (Cosmos25) ``shape[1]``
-        # is just ``T`` — wrong. Going through f/h/w is the only formulation
-        # that works for both layouts (matches mot_driver.py:432).
-        s_video = int(vstate.f) * int(vstate.h) * int(vstate.w)
+        # ``vstate.x.shape[1]`` is identical to ``f*tokens_per_frame`` for
+        # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
+        # backbones whose ``state.x`` is natively 5D ``(B, T, H, W, D)``
+        # (Cosmos25) ``shape[1]`` is just ``T`` — wrong. Going through f and
+        # the shared ``compute_video_tokens_per_frame`` helper is the only
+        # formulation that works for both layouts (matches mot_driver.py).
+        s_video = int(vstate.f) * self.driver._video_tokens_per_frame(vstate)
         s_action = payload.x_action.shape[1]
         attn_mask = self.driver._build_attention_mask(
             s_video=s_video,

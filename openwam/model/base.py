@@ -192,6 +192,8 @@ class ActionState:
     payload: Optional[Any] = None
 
 
+
+
 class BaseWAMArchitecture(ABC, nn.Module):
     """Base class for WAM architecture variants.
 
@@ -302,14 +304,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
                 external_encoder = build_video_encoder(enc_cfg)
             else:
-                # Deploy: reconstruct the encoder skeleton from the saved
-                # components entry; weights filled in by the architecture's
-                # subsequent ``load_checkpoint`` strict load. ``source`` is
-                # the dict produced by deploy/model_loader.py. ``_ckpt_dir``
-                # is plumbed onto ``vb_cfg`` by model_loader so the encoder
-                # can prefer ``<ckpt_dir>/manifest.json`` (written by
-                # :meth:`VideoEncoder.copy_deploy_artifacts` at save time)
-                # over the legacy ``encoder.model_path`` branch.
                 ckpt_dir_for_encoder = (
                     vb_cfg.get("_ckpt_dir") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_ckpt_dir", None)
                 )
@@ -419,11 +413,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # ``external_encoder is not None`` so the native-VAE deploy
         # path (where Wan's saved components already match the
         # checkpoint) stays untouched.
-        if (
-            self.video_backbone is not None
-            and source is not None
-            and external_encoder is not None
-        ):
+        if self.video_backbone is not None and source is not None and external_encoder is not None:
             pipe = getattr(self.video_backbone, "_pipe", None)
             if pipe is not None:
                 from openwam.model.video_backbone.wan_adapter import adapt_dit_to_external_encoder
@@ -442,28 +432,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     @staticmethod
     def _build_external_encoder_skeleton(enc_cfg, source, *, ckpt_dir=None):
-        """Deploy-time external encoder constructor.
-
-        Reads the encoder ``name`` (subject to the same yaml whitelist as
-        the training path) and reaches into the saved ``source`` dict for
-        the ``components`` list to find the ``attr == "vae"`` entry. That
-        entry's ``model_class`` / ``extra_kwargs`` is handed to the
-        encoder class's :meth:`VideoEncoder.from_skeleton` classmethod,
-        which instantiates the underlying module with zero weights. The
-        architecture's :meth:`load_checkpoint` strict load fills in the
-        weights immediately after.
-
-        ``ckpt_dir`` is forwarded to ``from_skeleton`` so encoders that
-        depend on side files (e.g. V-JEPA's ``manifest.json``) can prefer
-        the self-contained ``<ckpt_dir>/<artifact>`` copy written by
-        :meth:`VideoEncoder.copy_deploy_artifacts` over the legacy
-        ``encoder.model_path`` branch.
-
-        Refuses to silently fall back to the native VAE path here: if the
-        cfg has an encoder block but the components list is missing a vae
-        entry (e.g. corrupted save), raise so the operator sees the
-        mismatch up front.
-        """
+        'Public implementation.'
         from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
 
         allowed = {"name", "model_path"}
@@ -801,11 +770,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # :class:`VideoBackbone` ABC still work — they simply don't carry a
         # ``shift_video`` attribute and we fall back to the scheduler's
         # template default, matching the production no-override path.
-        video_shift = (
-            getattr(self.video_backbone, "shift_video", None)
-            if self.video_backbone is not None
-            else None
-        )
+        video_shift = getattr(self.video_backbone, "shift_video", None) if self.video_backbone is not None else None
         for name, bb in self.backbones.items():
             if not hasattr(bb, "scheduler"):
                 continue
@@ -1046,9 +1011,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 if t.ndim == 3 and t.shape[0] == 1:
                     t = t[0]
                 if t.ndim != 2:
-                    raise ValueError(
-                        f"pre_encoded_text must be (L, D) or (1, L, D); got {tuple(t.shape)}"
-                    )
+                    raise ValueError(f"pre_encoded_text must be (L, D) or (1, L, D); got {tuple(t.shape)}")
                 tensors.append(t)
             lens = {t.shape[0] for t in tensors}
             if len(lens) > 1:
@@ -1108,10 +1071,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             # as a predicted frame. NOT in the skip list.
             # Cosmos25 T2V: no first-frame conditioning at all — both
             # signals off.
-            skip_first = (
-                inputs.get("first_frame_latents") is not None
-                or self.video_backbone.needs_first_frame_skip
-            )
+            skip_first = inputs.get("first_frame_latents") is not None or self.video_backbone.needs_first_frame_skip
             # Pass the backbone's temporal_compression so the tail-grouping
             # divisor matches the actual latent-T produced by the encoder.
             # The default 4 in ``downsample_video_mask_to_latent`` is the Wan
@@ -1264,9 +1224,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # --- Add video noise ---
         video_noise = torch.randn_like(inputs["input_latents"])
         if hasattr(vb, "add_training_noise"):
-            inputs["latents"] = vb.add_training_noise(
-                inputs["input_latents"], video_noise, video_timestep_ids
-            )
+            inputs["latents"] = vb.add_training_noise(inputs["input_latents"], video_noise, video_timestep_ids)
         else:
             sigma_bc = video_sigmas.view(B, 1, 1, 1, 1)
             inputs["latents"] = (1 - sigma_bc) * inputs["input_latents"] + sigma_bc * video_noise
@@ -1277,6 +1235,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         if inputs.get("first_frame_latents") is not None:
             inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
+
 
         # --- Prepare action noise ---
         noisy_actions, action_target, action_timesteps, action_timestep_ids, action_sigmas = (
@@ -1340,7 +1299,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             timestep=video_timesteps,
         )
 
-        # --- Video loss ---
         loss_video = self._compute_video_loss(
             video_noise_pred,
             video_target,
@@ -1432,6 +1390,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             per_sample = per_frame.mean(dim=1)
 
         return (per_sample * tw).mean()
+
 
     def _compute_action_loss(self, noise_pred, target, timestep_ids, scheduler, inputs, device):
         """Per-sample weighted action MSE loss."""
@@ -1586,6 +1545,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 raise ValueError("use_proprioception=True requires `proprio_state` during generation.")
             inputs_shared["proprio_state"] = proprio_state.to(device=device, dtype=dtype)
 
+        encoder = getattr(vb, "_encoder", None)
+
         action_latents = torch.randn(
             1,
             action_num_frames - 1,
@@ -1659,6 +1620,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 if dit_cache is not None and video_stepping:
                     dit_cache.update(noise_pred, sigma_v)
 
+
             if video_stepping:
                 new_latents = inputs_shared["latents"] + noise_pred * (sigma_v_next - sigma_v)
                 ref_latents = inputs_shared.get("first_frame_latents")
@@ -1666,6 +1628,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     new_latents = new_latents.clone()
                     new_latents[:, :, : ref_latents.shape[2]] = ref_latents
                 inputs_shared["latents"] = new_latents
+
 
             if action_stepping and action_noise_pred is not None:
                 action_latents = self.action_scheduler.flow_step(
@@ -1738,9 +1701,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 a_timestep=a_timestep,
             )
             torch.compiler.cudagraph_mark_step_begin()
-            merged_noise, merged_action = self.forward(
-                exp_al, exp_at, **expanded, timestep=exp_vt
-            )
+            merged_noise, merged_action = self.forward(exp_al, exp_at, **expanded, timestep=exp_vt)
             uncond_noise, cond_noise = merged_noise.chunk(2, dim=0)
             noise_pred = _combine_cfg(uncond_noise, cond_noise, cfg_scale)
             if isinstance(merged_action, Tensor):
@@ -1753,16 +1714,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # Sequential path: cond → uncond → combine. Mark before each forward
         # so CUDA Graph tree sees both as distinct dispatch sites.
         torch.compiler.cudagraph_mark_step_begin()
-        cond_noise, cond_action = self.forward(
-            action_latents, a_timestep, **inputs_shared, timestep=v_timestep
-        )
+        cond_noise, cond_action = self.forward(action_latents, a_timestep, **inputs_shared, timestep=v_timestep)
         saved_context = inputs_shared["context"]
         inputs_shared["context"] = uncond_context
         try:
             torch.compiler.cudagraph_mark_step_begin()
-            uncond_noise, uncond_action = self.forward(
-                action_latents, a_timestep, **inputs_shared, timestep=v_timestep
-            )
+            uncond_noise, uncond_action = self.forward(action_latents, a_timestep, **inputs_shared, timestep=v_timestep)
         finally:
             inputs_shared["context"] = saved_context
 
@@ -1827,18 +1784,7 @@ def _combine_cfg(uncond: Tensor, cond: Tensor, scale: float) -> Tensor:
 
 # Keys in ``inputs_shared`` that carry a leading batch axis and therefore
 # need duplication when stacking ``[uncond, cond]`` for cfg_merge=True.
-_CFG_BATCH_AXIS_KEYS: tuple = (
-    "latents",
-    "input_latents",
-    "proprio_state",
-    "first_frame_latents",
-    "seq_lens",
-    "context_mask",
-    # cosmos25 TI2V emits ``condition_mask`` of shape (B, 1, T_lat, H_lat, W_lat)
-    # in ``_finalize_ti2v_inputs`` and the wrapper cats it to ``x_in`` along
-    # dim=1; cfg_merge=True must double B here or that cat shape-mismatches.
-    "condition_mask",
-)
+_CFG_BATCH_AXIS_KEYS: tuple = ('latents', 'input_latents', 'proprio_state', 'first_frame_latents', 'seq_lens', 'context_mask', 'condition_mask')
 
 
 def _expand_inputs_for_cfg(
@@ -1882,19 +1828,7 @@ def _expand_inputs_for_cfg(
         v = expanded.get(key)
         if isinstance(v, Tensor):
             expanded[key] = torch.cat([v, v], dim=0)
-    al = (
-        torch.cat([action_latents, action_latents], dim=0)
-        if isinstance(action_latents, Tensor)
-        else None
-    )
-    vt = (
-        torch.cat([v_timestep, v_timestep], dim=0)
-        if isinstance(v_timestep, Tensor)
-        else v_timestep
-    )
-    at = (
-        torch.cat([a_timestep, a_timestep], dim=0)
-        if isinstance(a_timestep, Tensor)
-        else None
-    )
+    al = torch.cat([action_latents, action_latents], dim=0) if isinstance(action_latents, Tensor) else None
+    vt = torch.cat([v_timestep, v_timestep], dim=0) if isinstance(v_timestep, Tensor) else v_timestep
+    at = torch.cat([a_timestep, a_timestep], dim=0) if isinstance(a_timestep, Tensor) else None
     return expanded, al, vt, at

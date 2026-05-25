@@ -52,21 +52,9 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # ``all_gather_into_tensor`` because its output buffer is bf16).
         self._m = vit
         self._variant = variant
-        self._spec = VideoEncoderSpec(
-            z_dim=int(embed_dim),
-            spatial_compression=16,
-            temporal_compression=2,
-            causal_temporal=True,
-            pixel_range=(-1.0, 1.0),
-            is_reversible=False,
-            dit_patch_size=(1, 2, 2),
-        )
-        self.register_buffer(
-            "_mean", torch.tensor(_IMAGENET_MEAN).view(1, 3, 1, 1, 1), persistent=False
-        )
-        self.register_buffer(
-            "_std", torch.tensor(_IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False
-        )
+        self._spec = VideoEncoderSpec(z_dim=int(embed_dim), spatial_compression=16, temporal_compression=2, causal_temporal=True, pixel_range=(-1.0, 1.0), is_reversible=False, dit_patch_size=(1, 2, 2))
+        self.register_buffer("_mean", torch.tensor(_IMAGENET_MEAN).view(1, 3, 1, 1, 1), persistent=False)
+        self.register_buffer("_std", torch.tensor(_IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False)
         # Post-norm: a plain LayerNorm at init (weight=1, bias=0) acts as
         # per-token standardization that pulls V-JEPA's O(30)-scale features
         # down to Wan-latent O(1). It is structurally trainable, but in the
@@ -125,10 +113,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             z = self._encode_image(video[:, :, 0])
         else:
             if (Tp - 1) % 2 != 0:
-                raise ValueError(
-                    "V-JEPA 2.1 causal emulation needs (T_pixel - 1) % 2 == 0, "
-                    f"got T_pixel={Tp}."
-                )
+                raise ValueError(f"V-JEPA 2.1 causal emulation needs (T_pixel - 1) % 2 == 0, got T_pixel={Tp}.")
             z0 = self._encode_image(video[:, :, 0])
             zR = self._encode_video_tubelet(video[:, :, 1:])
             z = torch.cat([z0, zR], dim=2)
@@ -169,9 +154,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         )
 
     def to_frames(self, video: torch.Tensor) -> list:
-        raise NotImplementedError(
-            "VJEPA21VideoEncoder is irreversible; to_frames has no meaning."
-        )
+        raise NotImplementedError("VJEPA21VideoEncoder is irreversible; to_frames has no meaning.")
 
     # Geometry constants the encoder's reshape paths and spec are hard-wired
     # against. The manifest can carry different ``patch`` / ``tubelet`` values
@@ -369,9 +352,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
     def _read_and_validate_manifest(cls, model_path: str) -> dict:
         manifest_path = os.path.join(model_path, "manifest.json")
         if not os.path.exists(manifest_path):
-            raise FileNotFoundError(
-                f"VJEPA21 encoder requires manifest.json in {model_path}."
-            )
+            raise FileNotFoundError(f"VJEPA21 encoder requires manifest.json in {model_path}.")
         with open(manifest_path, "r") as f:
             manifest = json.load(f)
         patch = int(manifest["patch"])
@@ -520,10 +501,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             map_location="cpu",
         )
         state_dict = ckpt[manifest.get("checkpoint_key", "target_encoder")]
-        state_dict = {
-            k.replace("module.", "").replace("backbone.", ""): v
-            for k, v in state_dict.items()
-        }
+        state_dict = {k.replace("module.", "").replace("backbone.", ""): v for k, v in state_dict.items()}
         # ``strict=False`` is intentional but narrow: the checkpoint ships a
         # learned ``pos_embed`` for the absolute-pos-embedding variants, and
         # we always load the RoPE variants whose forward does not consume it

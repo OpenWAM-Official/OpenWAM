@@ -45,12 +45,7 @@ class _MockEncoderBase(VideoEncoder):
     per-class — frozen dataclass forbids per-instance mutation anyway.
     """
 
-    _SPEC_KWARGS: dict = {
-        "z_dim": 16,
-        "spatial_compression": 8,
-        "temporal_compression": 4,
-        "causal_temporal": True,
-    }
+    _SPEC_KWARGS: dict = {'z_dim': 16, 'spatial_compression': 8, 'temporal_compression': 4, 'causal_temporal': True}
 
     def __init__(self):
         super().__init__()
@@ -171,15 +166,7 @@ def test_A8_validate_encoder_spec_field_by_field():
 
     # pixel_range / is_reversible / dit_patch_size are NOT in the required set
     # (excluded by VideoBackbone._ENCODER_SPEC_REQUIRED_FIELDS).
-    relaxed = VideoEncoderSpec(
-        z_dim=16,
-        spatial_compression=8,
-        temporal_compression=4,
-        causal_temporal=True,
-        pixel_range=(0.0, 1.0),
-        is_reversible=False,
-        dit_patch_size=(1, 1, 1),
-    )
+    relaxed = VideoEncoderSpec(z_dim=16, spatial_compression=8, temporal_compression=4, causal_temporal=True, pixel_range=(0.0, 1.0), is_reversible=False, dit_patch_size=(1, 1, 1))
     VideoBackbone.validate_encoder_spec(relaxed, want)
 
     # z_dim mismatch raises with a readable message.
@@ -526,14 +513,7 @@ def test_C10b_spec_validation_skipped_when_spatial_temporal_differ_for_irreversi
         def __init__(self):
             super().__init__()
             self._proj = nn.Conv3d(1024, 1024, kernel_size=1)
-            self._spec = VideoEncoderSpec(
-                z_dim=1024,
-                spatial_compression=16,
-                temporal_compression=1,
-                causal_temporal=False,
-                is_reversible=False,
-                dit_patch_size=(1, 1, 1),
-            )
+            self._spec = VideoEncoderSpec(z_dim=1024, spatial_compression=16, temporal_compression=1, causal_temporal=False, is_reversible=False, dit_patch_size=(1, 1, 1))
 
         @property
         def spec(self):
@@ -797,14 +777,7 @@ class WanVideoVAEEncoderStub(VideoEncoder):
         super().__init__()
         # A tiny conv so state_dict has something to enumerate (test C4).
         self._proj = nn.Conv3d(spec_z_dim, spec_z_dim, kernel_size=1)
-        self._spec = VideoEncoderSpec(
-            z_dim=spec_z_dim,
-            spatial_compression=8,
-            temporal_compression=4,
-            causal_temporal=True,
-            is_reversible=is_reversible,
-            dit_patch_size=dit_patch_size,
-        )
+        self._spec = VideoEncoderSpec(z_dim=spec_z_dim, spatial_compression=8, temporal_compression=4, causal_temporal=True, is_reversible=is_reversible, dit_patch_size=dit_patch_size)
 
     @property
     def spec(self) -> VideoEncoderSpec:
@@ -1484,14 +1457,7 @@ def test_M3h_noise_initializer_reads_latent_spec_when_present():
 
     # --- Path 1: external encoder spec (DINOv3-style) ---
     pipe = _StubPipe()
-    pipe.latent_spec = VideoEncoderSpec(
-        z_dim=1024,
-        spatial_compression=16,
-        temporal_compression=1,
-        causal_temporal=False,
-        is_reversible=False,
-        dit_patch_size=(1, 1, 1),
-    )
+    pipe.latent_spec = VideoEncoderSpec(z_dim=1024, spatial_compression=16, temporal_compression=1, causal_temporal=False, is_reversible=False, dit_patch_size=(1, 1, 1))
     out = unit.process(
         pipe, height=256, width=256, num_frames=49, seed=42, rand_device="cpu", vace_reference_image=None
     )
@@ -1501,12 +1467,7 @@ def test_M3h_noise_initializer_reads_latent_spec_when_present():
 
     # --- Path 2: external encoder spec (Wan VAE-style, causal) ---
     pipe = _StubPipe()
-    pipe.latent_spec = VideoEncoderSpec(
-        z_dim=48,
-        spatial_compression=16,
-        temporal_compression=4,
-        causal_temporal=True,
-    )
+    pipe.latent_spec = VideoEncoderSpec(z_dim=48, spatial_compression=16, temporal_compression=4, causal_temporal=True)
     out = unit.process(
         pipe, height=480, width=832, num_frames=49, seed=42, rand_device="cpu", vace_reference_image=None
     )
@@ -1960,9 +1921,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
 
     def _fake_wrapper(**kwargs):
         if "use_rope" in kwargs:
-            raise TypeError(
-                "got multiple values for keyword argument 'use_rope'"
-            )
+            raise TypeError("got multiple values for keyword argument 'use_rope'")
         captured_kwargs.update(kwargs)
         raise _StopAfterConstruct()
 
@@ -1982,15 +1941,9 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
     monkeypatch.setitem(sys.modules, "app", fake_app)
     monkeypatch.setitem(sys.modules, "app.vjepa_2_1", fake_app_vjepa)
     monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models", fake_app_vjepa_models)
-    monkeypatch.setitem(
-        sys.modules, "app.vjepa_2_1.models.vision_transformer", fake_module
-    )
-    monkeypatch.setitem(
-        sys.modules, "app.vjepa_2_1.models.utils", fake_app_vjepa_models_utils
-    )
-    monkeypatch.setitem(
-        sys.modules, "app.vjepa_2_1.models.utils.modules", fake_vjepa_modules
-    )
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.vision_transformer", fake_module)
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.utils", fake_app_vjepa_models_utils)
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.utils.modules", fake_vjepa_modules)
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2071,15 +2024,9 @@ def _install_fake_vjepa_modules(monkeypatch, wrapper_factory):
     monkeypatch.setitem(sys.modules, "app", fake_app)
     monkeypatch.setitem(sys.modules, "app.vjepa_2_1", fake_app_vjepa)
     monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models", fake_app_vjepa_models)
-    monkeypatch.setitem(
-        sys.modules, "app.vjepa_2_1.models.vision_transformer", vision_transformer
-    )
-    monkeypatch.setitem(
-        sys.modules, "app.vjepa_2_1.models.utils", fake_app_vjepa_models_utils
-    )
-    monkeypatch.setitem(
-        sys.modules, "app.vjepa_2_1.models.utils.modules", fake_vjepa_modules
-    )
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.vision_transformer", vision_transformer)
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.utils", fake_app_vjepa_models_utils)
+    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.utils.modules", fake_vjepa_modules)
 
 
 def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
@@ -2112,9 +2059,7 @@ def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
     def _fake_wrapper(**kwargs):
         captured.update(kwargs)
         if "use_rope" in kwargs:
-            raise TypeError(
-                "got multiple values for keyword argument 'use_rope'"
-            )
+            raise TypeError("got multiple values for keyword argument 'use_rope'")
         return _MockVJEPAViT(embed_dim=1408)
 
     _install_fake_vjepa_modules(monkeypatch, _fake_wrapper)

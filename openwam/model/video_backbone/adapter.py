@@ -62,6 +62,8 @@ class BlockLoopState:
     h: int = 0
     w: int = 0
 
+    tokens_per_frame_patch: int = 0
+
     # --- Time embedding for head (backbone-internal) ---
     t: Optional[Tensor] = None
 

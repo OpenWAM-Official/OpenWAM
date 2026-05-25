@@ -38,12 +38,7 @@ from openwam.model.video_backbone.encoder import VideoEncoder, VideoEncoderSpec
 
 
 class _MockEncoderBase(VideoEncoder):
-    _SPEC_KWARGS: dict = {
-        "z_dim": 16,
-        "spatial_compression": 8,
-        "temporal_compression": 4,
-        "causal_temporal": True,
-    }
+    _SPEC_KWARGS: dict = {'z_dim': 16, 'spatial_compression': 8, 'temporal_compression': 4, 'causal_temporal': True}
 
     def __init__(self):
         super().__init__()
@@ -254,9 +249,9 @@ def test_C4_bridge_mismatch_emits_warning(caplog):
     )
     caplog.set_level(logging.WARNING, logger=tc_mod.__name__)
     apply_temporal_contract_bridge(cfg)
-    assert any(
-        "Overriding cfg.dataloader.temporal_compression" in rec.message for rec in caplog.records
-    ), "expected an override warning when dataloader-side value disagrees with model-side"
+    assert any("Overriding cfg.dataloader.temporal_compression" in rec.message for rec in caplog.records), (
+        "expected an override warning when dataloader-side value disagrees with model-side"
+    )
     # Model wins.
     assert cfg.dataloader.temporal_compression == 2
 
@@ -292,9 +287,9 @@ def test_C4b_bridge_causal_mismatch_emits_warning(caplog):
     )
     caplog.set_level(logging.WARNING, logger=tc_mod.__name__)
     apply_temporal_contract_bridge(cfg)
-    assert any(
-        "Overriding cfg.dataloader.causal_temporal" in rec.message for rec in caplog.records
-    ), "expected an override warning when dataloader-side causal_temporal disagrees with model-side"
+    assert any("Overriding cfg.dataloader.causal_temporal" in rec.message for rec in caplog.records), (
+        "expected an override warning when dataloader-side causal_temporal disagrees with model-side"
+    )
     # Model wins.
     assert cfg.dataloader.causal_temporal is False
 
@@ -428,6 +423,7 @@ def test_C9_prepare_inputs_passes_backbone_temporal_factor(monkeypatch):
     monkeypatch.setattr(base_mod, "downsample_video_mask_to_latent", fake_downsample, raising=False)
     # Also patch the import-from-openwam.utils alias used inside prepare_inputs.
     import openwam.utils as utils_mod
+
     monkeypatch.setattr(utils_mod, "downsample_video_mask_to_latent", fake_downsample)
 
     class _FakeBackbone:

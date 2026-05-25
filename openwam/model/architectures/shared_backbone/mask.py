@@ -83,11 +83,11 @@ def build_shared_backbone_attention_mask(
             f"got total={total}, n_action={n_action}, n_state={n_state}."
         )
 
-    h = int(getattr(state, "h", 0))
-    w = int(getattr(state, "w", 0))
-    video_tokens_per_frame = h * w
-    if video_tokens_per_frame <= 0:
-        raise ValueError(f"SharedBackbone cannot derive video_tokens_per_frame from BlockLoopState (h={h}, w={w}).")
+    # Reuse the MoT helper so the v↔v mask uses the same tokens_per_frame
+    # value across SharedBackbone and DualSystem paths.
+    from openwam.model.architectures._mot_utils import compute_video_tokens_per_frame
+
+    video_tokens_per_frame = compute_video_tokens_per_frame(state, "SharedBackbone")
 
     device = state.x.device
     mask = torch.zeros((total, total), dtype=torch.bool, device=device)

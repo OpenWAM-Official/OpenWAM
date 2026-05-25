@@ -396,13 +396,7 @@ class TriSystemMoTDriver:
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
     ) -> Tuple["BlockLoopState", "ActionState", "UnderstandingState"]:
-        # Resolve sequence shapes from the backbone-populated f/h/w fields.
-        # ``vstate.x.shape[1]`` is identical to ``f*h*w`` for backbones that
-        # carry a 3D ``(B, S, D)`` state (Wan), but for backbones whose
-        # ``state.x`` is natively 5D ``(B, T, H, W, D)`` (Cosmos25) ``shape[1]``
-        # is just ``T`` — wrong. Going through f/h/w is the only formulation
-        # that works for both layouts.
-        s_video = int(vstate.f) * int(vstate.h) * int(vstate.w)
+        s_video = int(vstate.f) * self._video_tokens_per_frame(vstate)
         s_action = self._get_action_tokens(astate).shape[1]
         s_understanding = ustate.und_tokens.shape[1]
         attn_mask = self._build_attention_mask(
