@@ -2334,3 +2334,14 @@ def test_V20_vjepa21_copy_deploy_artifacts_io_error_does_not_crash(
     assert any("failed" in m and "simulated" in m for m in formatted), (
         f"expected warning naming the copy failure; got: {formatted}"
     )
+
+
+def test_V21_vjepa21_feature_norm_keys_present_in_state_dict():
+    'Public implementation.'
+    enc = _build_vjepa_encoder(embed_dim=8)
+    keys = set(enc.state_dict().keys())
+    assert "feature_norm.weight" in keys, (
+        "feature_norm.weight is missing from V-JEPA encoder state_dict. "
+        "It must live on the encoder (``self.feature_norm``), not inside ``self._m``."
+    )
+    assert "feature_norm.bias" in keys, "feature_norm.bias is missing from V-JEPA encoder state_dict."
