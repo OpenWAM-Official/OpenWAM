@@ -1734,7 +1734,7 @@ def test_E_dual_system_composed_encoder_block():
     assert enc is not None, "dual_system + default backbone is missing video_backbone.encoder"
     assert enc.name == "wan_vae"
     assert "model_path" in enc
-    extras = set(enc.keys()) - {"name", "model_path"}
+    extras = set(enc.keys()) - {'name', 'model_path'}
     assert extras == set(), f"encoder block has extra fields {extras}, will trip the gate's whitelist"
 
 

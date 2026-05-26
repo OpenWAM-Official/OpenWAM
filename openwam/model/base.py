@@ -287,9 +287,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # ``from_scratch=false`` checkpoints (state_dict topology
         # ``_pipe.vae.*``) keep working bit-exactly.
         if enc_cfg is not None and from_scratch:
-            # Yaml whitelist applies to both paths so an in-tree typo /
-            # extra field never silently slips through deploy.
-            allowed = {"name", "model_path"}
+            allowed = {'name', 'model_path'}
             extras = set(enc_cfg.keys()) - allowed
             if extras:
                 raise ValueError(
@@ -435,7 +433,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         'Public implementation.'
         from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
 
-        allowed = {"name", "model_path"}
+        allowed = {'name', 'model_path'}
         extras = set(enc_cfg.keys()) - allowed
         if extras:
             raise ValueError(

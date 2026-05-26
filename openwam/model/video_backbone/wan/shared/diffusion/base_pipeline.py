@@ -115,7 +115,19 @@ class BasePipeline(torch.nn.Module):
         if num_frames is None:
             return height, width
         else:
-            if num_frames % self.time_division_factor != self.time_division_remainder:
+            # ``time_division_factor == 1`` means the latent layout does NOT
+            # compress time (per-frame encoders, e.g. DINOv3 or any future
+            # ViT that emits one latent frame per video frame with
+            # ``dit_patch_size[0]=1``). ``time_division_factor`` is set in
+            # ``WanVideoBackbone.from_pretrained`` as ``temporal_compression *
+            # dit_patch_size[0]``; see
+            # ``openwam/model/video_backbone/wan_adapter.py`` ~L283-L284 for
+            # the source-of-truth assignment. With factor=1, any
+            # ``N % 1 == 0`` so the ``!= remainder`` check would always fire and
+            # silently bump num_frames by 1 every call — guard against it.
+            if self.time_division_factor > 1 and (
+                num_frames % self.time_division_factor != self.time_division_remainder
+            ):
                 num_frames = (
                     num_frames + self.time_division_factor - 1
                 ) // self.time_division_factor * self.time_division_factor + self.time_division_remainder

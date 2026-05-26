@@ -244,7 +244,8 @@ def build_video_encoder(cfg) -> VideoEncoder:
     if name not in _VIDEO_ENCODER_REGISTRY:
         available = ", ".join(sorted(_VIDEO_ENCODER_REGISTRY)) or "(none)"
         raise KeyError(f"Unknown video encoder '{name}'. Available: {available}")
-    return _VIDEO_ENCODER_REGISTRY[name].from_pretrained(str(model_path))
+    extra_kwargs: dict[str, Any] = {}
+    return _VIDEO_ENCODER_REGISTRY[name].from_pretrained(str(model_path), **extra_kwargs)
 
 
 __all__ = ['VideoEncoder', 'VideoEncoderSpec', 'VJEPA21VideoEncoder', 'WanVideoVAEEncoder', 'build_video_encoder', 'register_video_encoder']
