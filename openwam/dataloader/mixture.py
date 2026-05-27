@@ -256,12 +256,37 @@ class MixtureDataset(BaseActionDataset):
 
         weight_strategy = _get(config, "weight_strategy", "manual")
         split_manifest = _get(config, "split_manifest")
+        expose_bridging_meta = _get(config, "expose_bridging_meta")
+        normalization = _get(config, "normalization")
+        statistics_path = _get(config, "statistics_path")
+        image_resize_mode = _get(config, "image_resize_mode")
+        image_short_side = _get(config, "image_short_side")
 
         dataset_cfgs = _get(config, "datasets", [])
         enabled_cfgs = [
-            _copy_with_default(c, "split_manifest", split_manifest)
+            _copy_with_default(
+                _copy_with_default(c, "split_manifest", split_manifest),
+                "expose_bridging_meta",
+                expose_bridging_meta,
+            )
             for c in dataset_cfgs
             if _get(c, "enabled", True)
+        ]
+        enabled_cfgs = [
+            _copy_with_default(
+                _copy_with_default(
+                    _copy_with_default(
+                        _copy_with_default(c, "normalization", normalization),
+                        "statistics_path",
+                        statistics_path,
+                    ),
+                    "image_resize_mode",
+                    image_resize_mode,
+                ),
+                "image_short_side",
+                image_short_side,
+            )
+            for c in enabled_cfgs
         ]
         for skipped in (c for c in dataset_cfgs if not _get(c, "enabled", True)):
             logger.info(
