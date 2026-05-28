@@ -63,6 +63,16 @@ optimization:
     cross_attn:
       torch_mode: default
       dynamic: false           # Action-side fast path for dual_system_cross_attn
+    idm:
+      torch_mode: reduce-overhead
+      dynamic: false           # Fixed-shape IDM video/action fast paths
+      video_loop:
+        enabled: true
+      action_cache:
+        enabled: true
+    tri_system:
+      torch_mode: reduce-overhead
+      dynamic: false           # Fixed-shape trimodal MoT-loop compile for tri_system_joint_self_attn
 
   async_inference:
     mode: none                # none | vanilla

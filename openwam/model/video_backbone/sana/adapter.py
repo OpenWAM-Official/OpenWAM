@@ -70,6 +70,9 @@ class SanaVideoBackbone(VideoBackbone):
     capabilities through the VideoBackbone ABC.
     """
 
+    supports_generic_mot_compile = False
+    generic_mot_compile_skip_reason = "SANA uses linear-ReLU MoT attention and needs a dedicated compile helper"
+
     @classmethod
     def get_native_dit_patch_size(cls, pipe) -> Tuple[int, int, int]:
         """SANA-Video native DiT first-layer patch size.

@@ -343,6 +343,43 @@ class TriSystemMoTDriver:
         ustate = self.ub.post_attn_at_layer(layer_id, ustate, attn_u.contiguous(), upost)
         return vstate, astate, ustate
 
+    def _step_impl_for_compile(
+        self,
+        layer_id: int,
+        vstate: "BlockLoopState",
+        astate: "ActionState",
+        ustate: "UnderstandingState",
+        attn_mask: Optional[Tensor] = None,
+    ) -> Tuple["BlockLoopState", "ActionState", "UnderstandingState"]:
+        """Compile-oriented per-layer body with tuple post-attention state."""
+        v_pre = getattr(self.vb, "pre_attn_at_layer_for_compile", self.vb.pre_attn_at_layer)
+        a_pre = getattr(self.ab, "pre_attn_at_layer_for_compile", self.ab.pre_attn_at_layer)
+        u_pre = getattr(self.ub, "pre_attn_at_layer_for_compile", self.ub.pre_attn_at_layer)
+        v_post = getattr(self.vb, "post_attn_at_layer_for_compile", self.vb.post_attn_at_layer)
+        a_post = getattr(self.ab, "post_attn_at_layer_for_compile", self.ab.post_attn_at_layer)
+        u_post = getattr(self.ub, "post_attn_at_layer_for_compile", self.ub.post_attn_at_layer)
+
+        q_v, k_v, v_v, vpost = v_pre(layer_id, vstate)
+        q_a, k_a, v_a, apost = a_pre(layer_id, astate)
+        q_u, k_u, v_u, upost = u_pre(layer_id, ustate)
+
+        self._check_compatible(layer_id, q_v, k_v, v_v, q_a, k_a, v_a, q_u, k_u, v_u)
+
+        s_video = q_v.shape[1]
+        s_action = q_a.shape[1]
+        s_understanding = q_u.shape[1]
+
+        q_cat = torch.cat([q_v, q_a, q_u], dim=1)
+        k_cat = torch.cat([k_v, k_a, k_u], dim=1)
+        v_cat = torch.cat([v_v, v_a, v_u], dim=1)
+
+        mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask)
+        attn_v, attn_a, attn_u = mixed.split([s_video, s_action, s_understanding], dim=1)
+        vstate = v_post(layer_id, vstate, attn_v.contiguous(), vpost)
+        astate = a_post(layer_id, astate, attn_a.contiguous(), apost)
+        ustate = u_post(layer_id, ustate, attn_u.contiguous(), upost)
+        return vstate, astate, ustate
+
     def _step_checkpointed(
         self,
         layer_id: int,
@@ -396,6 +433,13 @@ class TriSystemMoTDriver:
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
     ) -> Tuple["BlockLoopState", "ActionState", "UnderstandingState"]:
+        # Resolve sequence shapes from the backbone-populated f/h/w fields.
+        # ``vstate.x.shape[1]`` is identical to ``f*tokens_per_frame`` for
+        # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
+        # backbones whose ``state.x`` is natively 5D ``(B, T, H, W, D)``
+        # (Cosmos25) ``shape[1]`` is just ``T`` — wrong. Going through f and
+        # the shared ``compute_video_tokens_per_frame`` helper is the only
+        # formulation that works for both layouts.
         s_video = int(vstate.f) * self._video_tokens_per_frame(vstate)
         s_action = self._get_action_tokens(astate).shape[1]
         s_understanding = ustate.und_tokens.shape[1]

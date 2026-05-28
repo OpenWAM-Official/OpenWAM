@@ -12,6 +12,7 @@ no parameters; ``forward`` delegates the per-layer loop to it.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional, Tuple
 
 import torch
@@ -24,6 +25,24 @@ from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.compile_options import compile_mode, section_enabled, self_attn_compile_cfg
 from openwam.utils import resolve_bridge_layers
+
+logger = logging.getLogger(__name__)
+
+
+def _mot_loop_compile_skip_reason(video_backbone) -> str | None:
+    """Return why the generic MoT compile helper is unsafe for this backbone."""
+
+    if not getattr(video_backbone, "supports_generic_mot_compile", True):
+        return str(
+            getattr(
+                video_backbone,
+                "generic_mot_compile_skip_reason",
+                "video backbone opted out of generic MoT compile",
+            )
+        )
+    if getattr(video_backbone, "attn_kernel", "softmax") != "softmax":
+        return "non-softmax MoT attention needs a dedicated compile helper"
+    return None
 
 
 @register_architecture(
@@ -163,6 +182,15 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             driver = self._mot_driver
             if driver is None:
                 driver = self.build_mot_driver()
+            skip_reason = _mot_loop_compile_skip_reason(self.video_backbone)
+            if skip_reason is not None:
+                logger.info(
+                    "MoT loop torch.compile disabled for %s: %s",
+                    type(self.video_backbone).__name__,
+                    skip_reason,
+                )
+                self._compiled_mot_loop = None
+                return
             self._compiled_mot_loop = CompiledMoTLoop(driver, self_attn_cfg)
         else:
             self._compiled_mot_loop = None

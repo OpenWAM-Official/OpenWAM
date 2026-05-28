@@ -109,6 +109,41 @@ def cross_attn_compile_cfg(compile_cfg: Any) -> Any:
     return _fast_path_compile_cfg(compile_cfg, "cross_attn")
 
 
+def _inherit_fast_path_defaults(parent: Any, section_name: str) -> SimpleNamespace:
+    """Return a child compile section inheriting IDM-level defaults."""
+
+    section = cfg_namespace(cfg_get(parent, section_name, None))
+    enabled = cfg_get(section, "enabled", None)
+    if enabled is None:
+        section.enabled = as_bool(cfg_get(parent, "enabled", True), default=True)
+    else:
+        section.enabled = as_bool(enabled, default=True)
+    if cfg_get(section, "torch_mode", None) is None:
+        section.torch_mode = cfg_get(parent, "torch_mode", "reduce-overhead")
+    if cfg_get(section, "dynamic", None) is None:
+        section.dynamic = cfg_get(parent, "dynamic", False)
+    return section
+
+
+def idm_compile_cfg(compile_cfg: Any) -> Any:
+    """Return the narrow IDM compile section.
+
+    IDM has two inference hot loops, so the top-level section controls both
+    helpers while optional children can disable or tune each one independently.
+    """
+
+    section = _fast_path_compile_cfg(compile_cfg, "idm")
+    section.video_loop = _inherit_fast_path_defaults(section, "video_loop")
+    section.action_cache = _inherit_fast_path_defaults(section, "action_cache")
+    return section
+
+
+def tri_system_compile_cfg(compile_cfg: Any) -> Any:
+    """Return the narrow tri-system trimodal MoT compile section."""
+
+    return _fast_path_compile_cfg(compile_cfg, "tri_system")
+
+
 def section_enabled(cfg: Any, default: bool = False) -> bool:
     """Return whether a compile section is enabled."""
 
@@ -136,8 +171,10 @@ __all__ = [
     "cross_attn_compile_cfg",
     "cfg_get",
     "cfg_namespace",
+    "idm_compile_cfg",
     "normalize_compile_mode",
     "section_enabled",
     "self_attn_compile_cfg",
     "torch_compile_kwargs",
+    "tri_system_compile_cfg",
 ]

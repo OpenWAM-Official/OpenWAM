@@ -415,6 +415,24 @@ class TestDeployConfigLoading:
             "mode": "reduce-overhead",
         }
 
+        idm_cfg = {"idm": {}}
+        idm_section = compile_options.idm_compile_cfg(idm_cfg)
+        assert compile_options.section_enabled(idm_section, default=False) is True
+        assert compile_options.torch_compile_kwargs(idm_section) == {
+            "dynamic": False,
+            "mode": "reduce-overhead",
+        }
+        assert compile_options.section_enabled(idm_section.video_loop, default=False) is True
+        assert compile_options.section_enabled(idm_section.action_cache, default=False) is True
+
+        tri_cfg = {"tri_system": {}}
+        tri_section = compile_options.tri_system_compile_cfg(tri_cfg)
+        assert compile_options.section_enabled(tri_section, default=False) is True
+        assert compile_options.torch_compile_kwargs(tri_section) == {
+            "dynamic": False,
+            "mode": "reduce-overhead",
+        }
+
     def test_compile_section_enabled_false_is_respected(self):
         compile_options = self._compile_options()
 
@@ -425,6 +443,32 @@ class TestDeployConfigLoading:
         cross_cfg = {"cross_attn": {"enabled": False}}
         cross_section = compile_options.cross_attn_compile_cfg(cross_cfg)
         assert compile_options.section_enabled(cross_section, default=True) is False
+
+        idm_cfg = {"idm": {"enabled": False}}
+        idm_section = compile_options.idm_compile_cfg(idm_cfg)
+        assert compile_options.section_enabled(idm_section, default=True) is False
+        assert compile_options.section_enabled(idm_section.video_loop, default=True) is False
+        assert compile_options.section_enabled(idm_section.action_cache, default=True) is False
+
+        tri_cfg = {"tri_system": {"enabled": False}}
+        tri_section = compile_options.tri_system_compile_cfg(tri_cfg)
+        assert compile_options.section_enabled(tri_section, default=True) is False
+
+    def test_idm_compile_subsections_can_be_disabled_independently(self):
+        compile_options = self._compile_options()
+
+        idm_section = compile_options.idm_compile_cfg(
+            {
+                "idm": {
+                    "video_loop": {"enabled": False},
+                    "action_cache": {"enabled": True},
+                }
+            }
+        )
+
+        assert compile_options.section_enabled(idm_section, default=True) is True
+        assert compile_options.section_enabled(idm_section.video_loop, default=True) is False
+        assert compile_options.section_enabled(idm_section.action_cache, default=False) is True
 
     def test_removed_compile_modes_are_rejected(self):
         compile_options = self._compile_options()
@@ -595,6 +639,16 @@ class TestDeployConfigLoading:
 class TestJointEngineCompileFlags:
     """Verify compile mode routing without broad default compile side effects."""
 
+    def _make_filter_engine(self, architecture):
+        from openwam.deploy.joint_engine import JointInferenceEngine
+
+        engine = JointInferenceEngine.__new__(JointInferenceEngine)
+        engine.architecture = architecture
+        engine._architecture_generate_accepts_extra_kwargs = None
+        engine._architecture_generate_kwarg_names = None
+        engine._architecture_generate_warned_dropped_kwargs = set()
+        return engine
+
     def _make_engine(self, compile_mode="none", return_arch=False):
         from omegaconf import OmegaConf
 
@@ -616,6 +670,7 @@ class TestJointEngineCompileFlags:
                         "mode": compile_mode,
                         "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
                         "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+                        "tri_system": {"torch_mode": "reduce-overhead", "dynamic": False},
                     },
                     "dit_cache": {"enabled": False},
                     "schedule": {"type": None, "action_steps": 4},
@@ -647,6 +702,92 @@ class TestJointEngineCompileFlags:
         mock_compile.assert_not_called()
         compile_cfg = arch.apply_compile_optimizations.call_args.args[0]
         assert OmegaConf.select(compile_cfg, "mode") == "auto"
+
+    def test_generate_kwarg_filter_warns_once_for_meaningful_drops(self, caplog):
+        class _StrictArchitecture:
+            def generate(self, *, schedule, prompt):
+                return {"schedule": schedule, "prompt": prompt}
+
+        engine = self._make_filter_engine(_StrictArchitecture())
+
+        caplog.set_level("WARNING", logger="openwam.deploy.joint_engine")
+        kwargs = {
+            "schedule": object(),
+            "prompt": "pick up the cube",
+            "cfg_scale": 1.5,
+            "cfg_merge": False,
+            "pre_encoded_text": None,
+            "prompt_embed_cache": object(),
+        }
+
+        filtered = engine._filter_architecture_generate_kwargs(kwargs)
+        engine._filter_architecture_generate_kwargs(kwargs)
+
+        assert set(filtered) == {"schedule", "prompt"}
+        warning_messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "does not accept deploy kwarg" in record.getMessage()
+        ]
+        assert len(warning_messages) == 1
+        assert "cfg_scale" in warning_messages[0]
+        assert "prompt_embed_cache" in warning_messages[0]
+
+    def test_generate_kwarg_filter_keeps_default_noop_drops_quiet(self, caplog):
+        from openwam.deploy.joint_engine import _BoundedPromptEmbedCache
+
+        class _StrictArchitecture:
+            def generate(self, *, schedule, prompt):
+                return {"schedule": schedule, "prompt": prompt}
+
+        engine = self._make_filter_engine(_StrictArchitecture())
+
+        caplog.set_level("WARNING", logger="openwam.deploy.joint_engine")
+        kwargs = {
+            "schedule": object(),
+            "prompt": "pick up the cube",
+            "cfg_scale": 1.0,
+            "cfg_merge": False,
+            "pre_encoded_text": None,
+            "prompt_embed_cache": _BoundedPromptEmbedCache(),
+        }
+
+        filtered = engine._filter_architecture_generate_kwargs(kwargs)
+
+        assert set(filtered) == {"schedule", "prompt"}
+        assert not [
+            record
+            for record in caplog.records
+            if "does not accept deploy kwarg" in record.getMessage()
+        ]
+
+    def test_generate_kwarg_filter_warns_for_configured_prompt_cache_drop(self, caplog):
+        from openwam.deploy.joint_engine import _BoundedPromptEmbedCache
+
+        class _StrictArchitecture:
+            def generate(self, *, schedule, prompt):
+                return {"schedule": schedule, "prompt": prompt}
+
+        engine = self._make_filter_engine(_StrictArchitecture())
+
+        caplog.set_level("WARNING", logger="openwam.deploy.joint_engine")
+        filtered = engine._filter_architecture_generate_kwargs(
+            {
+                "schedule": object(),
+                "prompt": "pick up the cube",
+                "cfg_scale": 1.0,
+                "prompt_embed_cache": _BoundedPromptEmbedCache(maxsize=64),
+            }
+        )
+
+        assert set(filtered) == {"schedule", "prompt"}
+        warning_messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "does not accept deploy kwarg" in record.getMessage()
+        ]
+        assert len(warning_messages) == 1
+        assert "prompt_embed_cache" in warning_messages[0]
 
     def test_base_architecture_does_not_broad_compile_backbones(self):
         from omegaconf import OmegaConf

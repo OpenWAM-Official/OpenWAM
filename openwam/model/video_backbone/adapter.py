@@ -62,6 +62,10 @@ class BlockLoopState:
     h: int = 0
     w: int = 0
 
+    # --- Per-frame token layout (backbone-internal) ---
+    # ``tokens_per_frame_patch == h*w``. Stored explicitly so video-slice
+    # arithmetic in ``inject_shared_tokens`` / ``finalize`` / mask construction
+    # does not have to re-infer it from the latent tensor shape.
     tokens_per_frame_patch: int = 0
 
     # --- Time embedding for head (backbone-internal) ---
@@ -96,6 +100,11 @@ class VideoBackbone(ABC, nn.Module):
     for each DiT block (inserting their own logic between calls), and
     finally call ``finalize()`` to get the video noise prediction.
     """
+
+    # The generic dual-system MoT compile helper assumes a Wan-style softmax
+    # split block loop without backbone-specific tensors hidden in extras.
+    supports_generic_mot_compile: bool = True
+    generic_mot_compile_skip_reason: Optional[str] = None
 
     # ================================================================
     # Properties (6)

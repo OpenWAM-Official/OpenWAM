@@ -337,6 +337,165 @@ def test_tri_system_mot_driver_trimodal_cpu():
     assert torch.isfinite(ustate.und_tokens).all()
 
 
+def _tri_system_mot_states(vb, ab, ub, seed: int, *, und_mask: torch.Tensor | None = None):
+    torch.manual_seed(seed)
+    batch = 2
+    vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, f=1, h=2, w=3)
+    noisy_actions = torch.randn(batch, 4, ab.action_dim)
+    timestep = torch.tensor([10.0, 20.0])
+    context = torch.randn(batch, 3, ab.text_dim)
+    context_mask = torch.ones(batch, 3, dtype=torch.bool)
+    astate = ab.prepare_state(noisy_actions, timestep, context=context, context_mask=context_mask)
+    vlm_hidden = torch.randn(batch, 5, ub.cfg.vlm_input_dim)
+    ustate = ub.prepare_state(vlm_hidden, vlm_attention_mask=und_mask)
+    return vstate, astate, ustate
+
+
+def _patch_wan_flash_attention_to_sdpa(monkeypatch):
+    """Keep CPU-only tests off CUDA-only flash-attn kernels when installed."""
+    from openwam.model.video_backbone.wan import dit as wan_dit
+
+    def _sdpa(q, k, v, num_heads: int, compatibility_mode=False, attn_mask=None):  # noqa: ARG001
+        q = wan_dit.rearrange(q, "b s (n d) -> b n s d", n=num_heads)
+        k = wan_dit.rearrange(k, "b s (n d) -> b n s d", n=num_heads)
+        v = wan_dit.rearrange(v, "b s (n d) -> b n s d", n=num_heads)
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        return wan_dit.rearrange(out, "b n s d -> b s (n d)", n=num_heads)
+
+    monkeypatch.setattr(wan_dit, "flash_attention", _sdpa)
+
+
+@pytest.fixture(autouse=True)
+def _wan_attention_cpu_fallback(monkeypatch):
+    _patch_wan_flash_attention_to_sdpa(monkeypatch)
+
+
+def test_tri_system_mot_loop_compile_helper_matches_eager(monkeypatch):
+    from openwam.model.architectures.tri_system.mot_compile import CompiledTriSystemMoTLoop
+
+    torch.manual_seed(0)
+    vb, ab, ub = _make_tiny_trimodal_components()
+    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
+
+    und_mask = torch.tensor(
+        [[True, True, True, True, True], [True, True, True, False, False]],
+        dtype=torch.bool,
+    )
+    vstate_eager, astate_eager, ustate_eager = _tri_system_mot_states(vb, ab, ub, 11, und_mask=und_mask)
+    with torch.no_grad():
+        vstate_eager, astate_eager, ustate_eager = driver.run_joint_loop(vstate_eager, astate_eager, ustate_eager)
+
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    compiled_loop = CompiledTriSystemMoTLoop(
+        driver,
+        OmegaConf.create({"torch_mode": "reduce-overhead", "dynamic": False}),
+    )
+
+    vstate_compiled, astate_compiled, ustate_compiled = _tri_system_mot_states(
+        vb, ab, ub, 11, und_mask=und_mask
+    )
+    with torch.no_grad():
+        vstate_compiled, astate_compiled, ustate_compiled = compiled_loop.run(
+            vstate_compiled, astate_compiled, ustate_compiled
+        )
+
+    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
+    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
+    assert torch.allclose(ustate_compiled.und_tokens, ustate_eager.und_tokens, atol=1e-6)
+
+
+def test_tri_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
+    from openwam.model.architectures.tri_system.mot_compile import CompiledTriSystemMoTLoop
+
+    torch.manual_seed(0)
+    vb, ab, ub = _make_tiny_trimodal_components()
+    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
+    compiled_loop = CompiledTriSystemMoTLoop(
+        driver,
+        OmegaConf.create({"torch_mode": "reduce-overhead", "dynamic": False}),
+    )
+
+    def _fake_compile(fn, **kwargs):  # noqa: ARG001
+        def _broken(*args, **kwargs):
+            raise RuntimeError("inductor unavailable")
+
+        return _broken
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    vstate_eager, astate_eager, ustate_eager = _tri_system_mot_states(vb, ab, ub, 17)
+    with torch.no_grad():
+        vstate_eager, astate_eager, ustate_eager = driver.run_joint_loop(vstate_eager, astate_eager, ustate_eager)
+
+    vstate_fallback, astate_fallback, ustate_fallback = _tri_system_mot_states(vb, ab, ub, 17)
+    with torch.no_grad():
+        vstate_fallback, astate_fallback, ustate_fallback = compiled_loop.run(
+            vstate_fallback, astate_fallback, ustate_fallback
+        )
+
+    assert compiled_loop._compile_disabled is True
+    assert torch.allclose(vstate_fallback.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(astate_fallback.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
+    assert torch.allclose(ustate_fallback.und_tokens, ustate_eager.und_tokens, atol=1e-6)
+
+
+def test_tri_system_compile_mode_none_disables_mot_loop(monkeypatch):
+    _Arch = _make_stub_tri_arch(monkeypatch, num_video_layers=2)
+    arch = _Arch(_tri_arch_min_cfg())
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "none",
+                "tri_system": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+
+    assert arch._compiled_mot_loop is None
+
+
+def test_tri_system_auto_mode_enables_mot_loop(monkeypatch):
+    _Arch = _make_stub_tri_arch(monkeypatch, num_video_layers=2)
+    arch = _Arch(_tri_arch_min_cfg())
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "tri_system": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+
+    assert arch._compiled_mot_loop is not None
+
+
+def test_tri_system_auto_mode_rebuilds_missing_mot_driver(monkeypatch):
+    _Arch = _make_stub_tri_arch(monkeypatch, num_video_layers=2)
+    arch = _Arch(_tri_arch_min_cfg())
+    arch._mot_driver = None
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "tri_system": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+
+    assert arch._mot_driver is not None
+    assert arch._compiled_mot_loop is not None
+
+
 def test_tri_system_joint_mask_layout():
     torch.manual_seed(0)
     vb, ab, ub = _make_tiny_trimodal_components()

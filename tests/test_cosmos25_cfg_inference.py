@@ -595,6 +595,57 @@ def _make_engine_for_loader_test():
     return engine
 
 
+def test_joint_engine_filters_deploy_kwargs_for_strict_architecture():
+    """Specialized architectures like IDM should not receive Cosmos-only kwargs."""
+    from openwam.deploy.joint_engine import JointInferenceEngine
+
+    class StrictArch:
+        def generate(self, *, schedule, prompt, profile=False):
+            return {"schedule": schedule, "prompt": prompt, "profile": profile}
+
+    engine = JointInferenceEngine.__new__(JointInferenceEngine)
+    engine.architecture = StrictArch()
+    engine._architecture_generate_accepts_extra_kwargs = None
+    engine._architecture_generate_kwarg_names = None
+    engine._architecture_generate_warned_dropped_kwargs = set()
+
+    filtered = engine._filter_architecture_generate_kwargs(
+        {
+            "schedule": "s",
+            "prompt": "p",
+            "profile": True,
+            "cfg_scale": 1.5,
+            "pre_encoded_text": object(),
+        }
+    )
+
+    assert filtered == {"schedule": "s", "prompt": "p", "profile": True}
+
+
+def test_joint_engine_preserves_deploy_kwargs_for_flexible_architecture():
+    """Base/Cosmos-style architectures with **kwargs keep deploy-side CFG inputs."""
+    from openwam.deploy.joint_engine import JointInferenceEngine
+
+    class FlexibleArch:
+        def generate(self, **kwargs):
+            return kwargs
+
+    engine = JointInferenceEngine.__new__(JointInferenceEngine)
+    engine.architecture = FlexibleArch()
+    engine._architecture_generate_accepts_extra_kwargs = None
+    engine._architecture_generate_kwarg_names = None
+    engine._architecture_generate_warned_dropped_kwargs = set()
+
+    kwargs = {
+        "schedule": "s",
+        "prompt": "p",
+        "cfg_scale": 1.5,
+        "pre_encoded_text": object(),
+    }
+
+    assert engine._filter_architecture_generate_kwargs(kwargs) is kwargs
+
+
 def test_load_pre_encoded_text_safetensors_normalizes_2d(tmp_path):
     """2D `(L, D)` cache files (precompute writer's `.squeeze(0)` output)
     are restored to 3D `(1, L, D)` at the cache → inference boundary."""

@@ -507,6 +507,219 @@ def test_idm_video_cache_matches_joint_loop():
     assert torch.allclose(pred_joint, pred_cache, atol=1e-5, rtol=1e-5)
 
 
+def test_idm_compile_auto_enables_helpers():
+    """mode=auto should enable both IDM stage-specific helpers."""
+    from omegaconf import OmegaConf
+
+    vb = _CapturePrepareVideoBackbone()
+    arch = _make_idm_with_video(vb)
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "idm": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+
+    assert arch._compiled_idm_video_loop is not None
+    assert arch._compiled_idm_action_cache is not None
+
+
+def test_idm_compile_auto_skips_helpers_when_video_backbone_opts_out():
+    """IDM compile should honor backbone capability flags before creating helpers."""
+    from omegaconf import OmegaConf
+
+    vb = _CapturePrepareVideoBackbone()
+    vb.supports_generic_mot_compile = False
+    vb.generic_mot_compile_skip_reason = "test backbone keeps unsupported extras"
+    arch = _make_idm_with_video(vb)
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "idm": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+
+    assert arch._compiled_idm_video_loop is None
+    assert arch._compiled_idm_action_cache is None
+
+
+def test_idm_compile_mode_none_disables_helpers():
+    """mode=none should keep IDM on the eager two-stage path."""
+    from omegaconf import OmegaConf
+
+    vb = _GenerateVideoBackbone()
+    arch = _make_idm_with_video(vb)
+
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "idm": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    arch.apply_compile_optimizations(OmegaConf.create({"mode": "none"}))
+
+    assert arch._compiled_idm_video_loop is None
+    assert arch._compiled_idm_action_cache is None
+
+
+def test_idm_video_loop_compile_helper_matches_eager(monkeypatch):
+    """The compiled stage-1 video loop should preserve eager video loop output."""
+    from omegaconf import OmegaConf
+
+    vb = _CapturePrepareVideoBackbone()
+    arch = _make_idm_with_video(vb)
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "idm": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_loop = arch._compiled_idm_video_loop
+    assert compiled_loop is not None
+
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    latents = torch.randn(1, 1, 1, 1, 1)
+    timestep = torch.tensor([0.5])
+    vstate_eager = vb.prepare(latents=latents, timestep=timestep)
+    with torch.no_grad():
+        for block_id in range(vb.num_layers):
+            vstate_eager = vb.run_block(block_id, vstate_eager)
+
+    vstate_compiled = vb.prepare(latents=latents, timestep=timestep)
+    with torch.no_grad():
+        vstate_compiled = compiled_loop.run(vstate_compiled)
+
+    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
+    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+
+
+def test_idm_video_loop_compile_helper_rejects_snapshot_sensitive_extras():
+    """Extras captured in the compile closure should force the eager path."""
+    from omegaconf import OmegaConf
+
+    vb = _CapturePrepareVideoBackbone()
+    arch = _make_idm_with_video(vb)
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "idm": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_loop = arch._compiled_idm_video_loop
+    assert compiled_loop is not None
+
+    latents = torch.randn(1, 1, 1, 1, 1)
+    vstate = vb.prepare(latents=latents, timestep=torch.zeros(1))
+
+    with torch.no_grad():
+        assert compiled_loop.can_run(
+            vstate,
+            use_gradient_checkpointing=False,
+            use_gradient_checkpointing_offload=False,
+        )
+
+        vstate.extras["tea_cache"] = object()
+        assert not compiled_loop.can_run(
+            vstate,
+            use_gradient_checkpointing=False,
+            use_gradient_checkpointing_offload=False,
+        )
+
+        vstate.extras.pop("tea_cache")
+        vstate.extras["animate_adapter"] = object()
+        assert not compiled_loop.can_run(
+            vstate,
+            use_gradient_checkpointing=False,
+            use_gradient_checkpointing_offload=False,
+        )
+
+
+def test_idm_action_cache_compile_helper_matches_eager(monkeypatch):
+    """The compiled stage-2 action loop should preserve cached eager output."""
+    import copy as _copy
+
+    from omegaconf import OmegaConf
+
+    torch.manual_seed(0)
+    vb = _CapturePrepareVideoBackbone()
+    arch = _make_idm_with_video(vb)
+    arch.eval()
+    driver = arch._mot_driver
+    arch.apply_compile_optimizations(
+        OmegaConf.create(
+            {
+                "mode": "auto",
+                "idm": {"torch_mode": "reduce-overhead", "dynamic": False},
+            }
+        )
+    )
+    compiled_action = arch._compiled_idm_action_cache
+    assert compiled_action is not None
+
+    compile_calls = []
+
+    def _fake_compile(fn, **kwargs):
+        compile_calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    latents = torch.randn(1, 1, 1, 1, 1)
+    vstate = vb.prepare(latents=latents, timestep=torch.zeros(1))
+    video_seq_len = int(vstate.x.shape[1])
+    video_tokens_per_frame = driver._video_tokens_per_frame(vstate)
+    video_kv_cache, _ = driver.prefill_video_cache(_copy.copy(vstate))
+
+    action_latents = torch.randn(1, 3, arch.action_backbone.action_dim)
+    a_timestep = torch.tensor([0.5])
+    context = torch.randn(1, 2, arch.action_backbone.text_dim)
+    context_mask = torch.ones(1, 2, dtype=torch.bool)
+    astate_eager = arch.action_backbone.prepare_state(
+        action_latents, a_timestep, context=context, context_mask=context_mask
+    )
+    astate_compiled = arch.action_backbone.prepare_state(
+        action_latents, a_timestep, context=context, context_mask=context_mask
+    )
+
+    with torch.no_grad():
+        astate_eager = driver.run_action_with_video_cache(
+            astate_eager,
+            video_kv_cache=video_kv_cache,
+            video_seq_len=video_seq_len,
+            video_tokens_per_frame=video_tokens_per_frame,
+        )
+        astate_compiled = compiled_action.run(
+            astate_compiled,
+            video_kv_cache=video_kv_cache,
+            video_seq_len=video_seq_len,
+            video_tokens_per_frame=video_tokens_per_frame,
+        )
+
+    pred_eager = arch.action_backbone.extract_prediction(astate_eager)
+    pred_compiled = arch.action_backbone.extract_prediction(astate_compiled)
+    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
+    assert torch.allclose(pred_compiled, pred_eager, atol=1e-6)
+
+
 def test_idm_generate_rejects_no_video_step_without_input_latents(monkeypatch):
     """action_only / decoupled_flash schedules without precomputed video must fail loudly."""
     import pytest

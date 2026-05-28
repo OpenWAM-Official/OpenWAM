@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 class Cosmos25VideoBackbone(VideoBackbone):
     """Wrap a Cosmos-Predict2.5 pipeline behind the :class:`VideoBackbone` ABC."""
 
+    supports_generic_mot_compile = False
+    generic_mot_compile_skip_reason = "Cosmos25 keeps timestep/RoPE/position tensors in BlockLoopState.extras"
+
     @classmethod
     def get_native_dit_patch_size(cls, pipe) -> Tuple[int, int, int]:
         """Cosmos-Predict2.5 native DiT first-layer patch size.

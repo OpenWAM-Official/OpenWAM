@@ -269,6 +269,16 @@ def test_driver_accepts_aligned_linear_relu_pair():
     assert driver.head_dim == driver.vb.head_dim == driver.ab.head_dim
 
 
+def test_generic_mot_compile_skips_linear_relu_backbone():
+    """The Wan/Cosmos SDPA compile helper must not wrap SANA's linear-attn driver."""
+
+    from openwam.model.architectures.dual_system.joint_self_attn import _mot_loop_compile_skip_reason
+
+    driver = _build_driver()
+
+    assert "non-softmax" in _mot_loop_compile_skip_reason(driver.vb)
+
+
 def test_mixed_attention_requires_phi_qk():
     """The 4-arg base signature is rejected — the SANA path is not a silent SDPA fallback."""
     driver = _build_driver()

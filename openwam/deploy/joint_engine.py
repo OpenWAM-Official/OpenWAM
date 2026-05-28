@@ -1,5 +1,6 @@
 """Joint video-action inference engine using package-native generation code."""
 
+import inspect
 import logging
 import os
 from collections import OrderedDict
@@ -65,7 +66,75 @@ class JointInferenceEngine(BaseInferenceEngine):
     ):
         super().__init__(cfg, architecture=architecture, action_backbone=action_backbone)
 
+        self._architecture_generate_accepts_extra_kwargs: Optional[bool] = None
+        self._architecture_generate_kwarg_names: Optional[set[str]] = None
+        self._architecture_generate_warned_dropped_kwargs: set[tuple[str, tuple[str, ...]]] = set()
         self._init_optimizations()
+
+    def _filter_architecture_generate_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Drop deploy-only kwargs that a legacy/specialized architecture cannot consume."""
+
+        if getattr(self, "_architecture_generate_kwarg_names", None) is None:
+            params = inspect.signature(self.architecture.generate).parameters
+            self._architecture_generate_accepts_extra_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+            )
+            self._architecture_generate_kwarg_names = {
+                name
+                for name, param in params.items()
+                if param.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            }
+        if self._architecture_generate_accepts_extra_kwargs:
+            return kwargs
+        accepted = self._architecture_generate_kwarg_names
+        dropped = {name: value for name, value in kwargs.items() if name not in accepted}
+        meaningful_dropped = tuple(
+            sorted(name for name, value in dropped.items() if not self._is_noop_dropped_generate_kwarg(name, value))
+        )
+        if meaningful_dropped:
+            warned = getattr(self, "_architecture_generate_warned_dropped_kwargs", set())
+            architecture_name = type(self.architecture).__name__
+            warning_key = (architecture_name, meaningful_dropped)
+            if warning_key not in warned:
+                warned.add(warning_key)
+                self._architecture_generate_warned_dropped_kwargs = warned
+                logger.warning(
+                    "%s.generate does not accept deploy kwarg(s) %s; dropping them for this request. "
+                    "Check deploy config for unsupported features such as CFG on specialized architectures.",
+                    architecture_name,
+                    ", ".join(meaningful_dropped),
+                )
+        return {name: value for name, value in kwargs.items() if name in accepted}
+
+    @staticmethod
+    def _is_noop_dropped_generate_kwarg(name: str, value: Any) -> bool:
+        """Return whether dropping an unsupported deploy kwarg preserves default behavior."""
+
+        if name == "cfg_scale":
+            try:
+                return float(value) == 1.0
+            except (TypeError, ValueError):
+                return False
+        if name == "cfg_merge":
+            return value is False
+        if name == "decode_video":
+            return value is True
+        if name == "profile":
+            return value is False
+        if name == "vace_cache":
+            return not bool(value)
+        if name == "prompt_embed_cache":
+            return (
+                isinstance(value, _BoundedPromptEmbedCache)
+                and len(value) == 0
+                and value._maxsize == DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE
+            )
+        return value is None
 
     def _init_optimizations(self):
         """Read cfg.optimization and instantiate optimization components."""
@@ -353,31 +422,34 @@ class JointInferenceEngine(BaseInferenceEngine):
         prompt = conditions.get("prompt", "")
         cached_pre_encoded_text = self._load_pre_encoded_text_for_prompt(prompt)
 
-        result = self.architecture.generate(
-            schedule=schedule,
-            prompt=prompt,
-            vace_video=conditions.get("vace_video", None),
-            first_frame_image=conditions.get("first_frame_image", None),
-            num_frames=video_num_frames,
-            action_num_frames=action_num_frames,
-            height=conditions.get("height", getattr(inf_cfg, "height", 480)),
-            width=conditions.get("width", getattr(inf_cfg, "width", 832)),
-            seed=conditions.get("seed", 42),
-            tiled=conditions.get("tiled", True),
-            input_video_latents=conditions.get("input_video_latents", None),
-            num_inference_steps=denoise_steps,
-            shift=shift,
-            dit_cache=self._dit_cache,
-            decode_video=self._decode_video,
-            profile=self._profile,
-            vace_cache=self._vace_cache,
-            prompt_embed_cache=self._prompt_embed_cache,
-            proprio_state=proprio_state,
-            cfg_scale=self._cfg_scale,
-            cfg_merge=self._cfg_merge,
-            pre_encoded_text=cached_pre_encoded_text,
-            uncond_pre_encoded_text=self._uncond_pre_encoded_text,
+        generate_kwargs = self._filter_architecture_generate_kwargs(
+            {
+                "schedule": schedule,
+                "prompt": prompt,
+                "vace_video": conditions.get("vace_video", None),
+                "first_frame_image": conditions.get("first_frame_image", None),
+                "num_frames": video_num_frames,
+                "action_num_frames": action_num_frames,
+                "height": conditions.get("height", getattr(inf_cfg, "height", 480)),
+                "width": conditions.get("width", getattr(inf_cfg, "width", 832)),
+                "seed": conditions.get("seed", 42),
+                "tiled": conditions.get("tiled", True),
+                "input_video_latents": conditions.get("input_video_latents", None),
+                "num_inference_steps": denoise_steps,
+                "shift": shift,
+                "dit_cache": self._dit_cache,
+                "decode_video": self._decode_video,
+                "profile": self._profile,
+                "vace_cache": self._vace_cache,
+                "prompt_embed_cache": self._prompt_embed_cache,
+                "proprio_state": proprio_state,
+                "cfg_scale": self._cfg_scale,
+                "cfg_merge": self._cfg_merge,
+                "pre_encoded_text": cached_pre_encoded_text,
+                "uncond_pre_encoded_text": self._uncond_pre_encoded_text,
+            }
         )
+        result = self.architecture.generate(**generate_kwargs)
 
         # Attach optimization stats if profiling
         if self._profile and self._dit_cache is not None:
