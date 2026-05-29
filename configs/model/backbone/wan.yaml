@@ -50,6 +50,14 @@
 name: wan22_ti2v_5b
 model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
 from_scratch: false
+# MUST match encoder.spec.temporal_compression / causal_temporal.
+# Wan VAE         = (4, True)   ← default
+# V-JEPA 2 / 2.1  = (4, True)   ← ViT tubelet=2 + encoder-side time-pool stride=2 (Wan VAE 同构)
+# DINOv3          = (1, False)  ← per-frame, no tubelet
+# Together with dataset.num_frames / video_stride must satisfy:
+#   if causal_temporal:  (num_video_frames - 1) % temporal_compression == 0
+#   else:                 num_video_frames      % temporal_compression == 0
+# base.py asserts these against the constructed encoder; mismatch = fail-fast.
 temporal_compression: 4
 causal_temporal: true
 shift_video: null

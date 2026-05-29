@@ -98,8 +98,30 @@ class VideoEncoder(ABC, nn.Module):
     @abstractmethod
     def from_pretrained(cls, model_path: str, **kw: Any) -> "VideoEncoder":
         """Construct from a weights directory. ``model_path`` is the only
-        user-facing argument (read from yaml); ``**kw`` is reserved for
-        internal callers and MUST NOT be exposed via yaml."""
+        always-required user-facing argument (read from yaml). Additional
+        kwargs may be forwarded from yaml fields whose names are returned
+        by :meth:`optional_yaml_keys` — those names are part of the yaml
+        whitelist applied in ``BaseWAMArchitecture._init_video_backbone``
+        and pass through ``build_video_encoder`` to this constructor."""
+
+    # ------------------------------------------------------------------
+    # Optional yaml field whitelist
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def optional_yaml_keys(cls) -> set[str]:
+        """Optional yaml fields this encoder accepts beyond ``{name, model_path}``.
+
+        Default: empty set. Override per-encoder to expose runtime knobs
+        (not structural weights properties — those belong in ``manifest.json``).
+        Returned names are added to the whitelist enforced in
+        :meth:`BaseWAMArchitecture._init_video_backbone` and forwarded into
+        :meth:`from_pretrained` / :meth:`from_skeleton` as kwargs. Adding a
+        key here is the single edit needed to expose it through yaml — the
+        forwarding plumbing in ``build_video_encoder`` reads this method
+        and packs the kwargs accordingly.
+        """
+        return set()
 
     # ------------------------------------------------------------------
     # Deploy-time skeleton constructor
@@ -218,10 +240,13 @@ def register_video_encoder(name: str):
 def build_video_encoder(cfg) -> VideoEncoder:
     """Build a :class:`VideoEncoder` from a config dict / DictConfig.
 
-    Accepts only the two whitelisted fields ``name`` and ``model_path``.
+    Accepts the two required fields ``name`` / ``model_path`` plus any
+    optional fields the picked encoder class exposes through
+    :meth:`VideoEncoder.optional_yaml_keys` (e.g. ``vjepa2_1_forward``).
     The base-side gate in :meth:`BaseWAMArchitecture._init_video_backbone`
-    enforces the whitelist; this function adds friendly errors for the
-    "field present but empty" case (which the whitelist wouldn't catch).
+    enforces the same whitelist; this function adds friendly errors for the
+    "field present but empty" case (which the whitelist wouldn't catch) and
+    forwards the optional fields into :meth:`from_pretrained` as kwargs.
     """
 
     def _read(key: str):
@@ -239,19 +264,30 @@ def build_video_encoder(cfg) -> VideoEncoder:
             )
         return value
 
+    def _read_optional(key: str):
+        if isinstance(cfg, dict):
+            return cfg.get(key)
+        return getattr(cfg, key, None)
+
     name = _read("name")
     model_path = _read("model_path")
     if name not in _VIDEO_ENCODER_REGISTRY:
         available = ", ".join(sorted(_VIDEO_ENCODER_REGISTRY)) or "(none)"
         raise KeyError(f"Unknown video encoder '{name}'. Available: {available}")
-    extra_kwargs: dict[str, Any] = {}
-    return _VIDEO_ENCODER_REGISTRY[name].from_pretrained(str(model_path), **extra_kwargs)
+    encoder_cls = _VIDEO_ENCODER_REGISTRY[name]
+    optional_kwargs: dict[str, Any] = {}
+    for k in encoder_cls.optional_yaml_keys():
+        v = _read_optional(k)
+        if v is not None:
+            optional_kwargs[k] = v
+    return encoder_cls.from_pretrained(str(model_path), **optional_kwargs)
 
 
-__all__ = ['VideoEncoder', 'VideoEncoderSpec', 'VJEPA21VideoEncoder', 'WanVideoVAEEncoder', 'build_video_encoder', 'register_video_encoder']
+__all__ = ['VideoEncoder', 'VideoEncoderSpec', 'VJEPA2VideoEncoder', 'VJEPA21VideoEncoder', 'WanVideoVAEEncoder', 'build_video_encoder', 'register_video_encoder']
 
 # Built-in registrations (kept at the bottom so subclasses can import names
 # from this module without circular issues). Adding a new encoder = adding
 # a new line here and a new file alongside.
+from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.wan_vae import WanVideoVAEEncoder  # noqa: E402, F401

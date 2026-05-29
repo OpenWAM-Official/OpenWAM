@@ -38,7 +38,12 @@ from openwam.model.video_backbone.encoder import VideoEncoder, VideoEncoderSpec
 
 
 class _MockEncoderBase(VideoEncoder):
-    _SPEC_KWARGS: dict = {'z_dim': 16, 'spatial_compression': 8, 'temporal_compression': 4, 'causal_temporal': True}
+    _SPEC_KWARGS: dict = {
+        "z_dim": 16,
+        "spatial_compression": 8,
+        "temporal_compression": 4,
+        "causal_temporal": True,
+    }
 
     def __init__(self):
         super().__init__()
@@ -362,17 +367,22 @@ def test_C7_causal_divisibility():
 
 
 # ===========================================================================
-# C8 — mask downsampler honors temporal_factor=2 for a V-JEPA-style contract
+# C8 — mask downsampler honors temporal_factor=2 (parametric contract test)
 # ===========================================================================
 
 
-def test_C8_mask_downsampler_vjepa_temporal_factor():
-    """V-JEPA-style ``(tc=2, causal=True)``: a 9-frame video collapses into
-    ``1 + 8/2 = 5`` latent frames; with ``skip_first=True`` the loss-side
-    tail mask must be length ``4`` (not the default-4 Wan tail length ``2``).
+def test_C8_mask_downsampler_temporal_factor_2():
+    """A 9-frame video with ``temporal_factor=2 / causal=True`` collapses
+    into ``1 + 8/2 = 5`` latent frames; with ``skip_first=True`` the
+    loss-side tail mask must be length ``4`` (not the default-tc=4 Wan
+    tail length ``2``).
 
     Locks the contract that A4's ``base.py`` now plumbs through:
-    ``downsample_video_mask_to_latent(..., temporal_factor=2)``.
+    ``downsample_video_mask_to_latent(..., temporal_factor=2)``. The
+    factor is exercised parametrically rather than tied to any specific
+    encoder's effective tc; the actual V-JEPA 2 / 2.1 path now emulates
+    tc=4 via ViT tubelet=2 + a post-tubelet pool, but the mask plumbing
+    must still support non-default factors for other downstream encoders.
     """
     import torch
 
@@ -381,13 +391,14 @@ def test_C8_mask_downsampler_vjepa_temporal_factor():
     # All-False = "no padding"; the shape change is the point of the test.
     video_is_pad = torch.zeros((1, 9), dtype=torch.bool)
 
-    # Old default (tc=4): produces length 2 — the Wan VAE legacy.
+    # Wan VAE default (tc=4): produces length 2.
     out_legacy = downsample_video_mask_to_latent(video_is_pad, temporal_factor=4, skip_first=True)
     assert out_legacy.shape == (1, 2), f"Wan-legacy default expects length 2, got {tuple(out_legacy.shape)}"
 
-    # V-JEPA contract (tc=2): must produce length 4.
-    out_vjepa = downsample_video_mask_to_latent(video_is_pad, temporal_factor=2, skip_first=True)
-    assert out_vjepa.shape == (1, 4), f"V-JEPA tc=2 expects length 4, got {tuple(out_vjepa.shape)}"
+    # Non-default factor (tc=2): must produce length 4 — proves the
+    # plumbing carries the spec value verbatim.
+    out_tc2 = downsample_video_mask_to_latent(video_is_pad, temporal_factor=2, skip_first=True)
+    assert out_tc2.shape == (1, 4), f"temporal_factor=2 expects length 4, got {tuple(out_tc2.shape)}"
 
 
 # ===========================================================================

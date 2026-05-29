@@ -237,11 +237,27 @@ class WanVideoBackbone(VideoBackbone):
                     "docs/external_video_encoder.md §6."
                 )
 
+            # (2) Spec validation. Strict equality only when the encoder claims
+            # to be a drop-in VAE replacement (is_reversible=True). For
+            # irreversible encoders (DINOv3 / V-JEPA2 etc.) the entire
+            # point is to introduce a different latent geometry — z_dim,
+            # spatial_compression, temporal_compression, causal_temporal will
+            # all typically differ from the backbone's native VAE. The encoder
+            # owns this geometry via spec.dit_patch_size and the
+            # build_dit_input_proj / build_dit_output_proj hooks (called from
+            # reinit_dit_from_scratch); height/width_division_factor are
+            # derived from the encoder side as well. So we skip the validation
+            # entirely for irreversible encoders.
             from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
 
             v = getattr(pipe, "vae", None)
             if v is not None and external_encoder.spec.is_reversible:
-                want = VideoEncoderSpec(z_dim=int(v.z_dim), spatial_compression=int(v.upsampling_factor), temporal_compression=4, causal_temporal=True)
+                want = VideoEncoderSpec(
+                    z_dim=int(v.z_dim),
+                    spatial_compression=int(v.upsampling_factor),
+                    temporal_compression=4,
+                    causal_temporal=True,
+                )
                 VideoBackbone.validate_encoder_spec(external_encoder.spec, want)
 
             # (3) Spatial division factor derived from the encoder's declared
@@ -258,11 +274,13 @@ class WanVideoBackbone(VideoBackbone):
             # pipeline default (which is hardcoded to ``time_division_factor=4,
             # time_division_remainder=1`` for native Wan VAE). Without this,
             # the pipeline's ``check_resize_height_width`` would silently
-            # round V-JEPA-legal frame counts (e.g. 9, 11, 13 for
-            # temporal_compression=2 causal) up to Wan VAE's grid. The
-            # remainder is 1 iff the encoder is causal: that is the same
-            # "first frame separable, then groups of ``temporal_compression``"
-            # contract Wan VAE assumes and V-JEPA emulates.
+            # round encoder-legal frame counts to Wan VAE's grid. For
+            # ``temporal_compression=4 causal`` (V-JEPA's emulated grouping
+            # after ViT tubelet=2 + extra time-pool stride=2; identical to
+            # Wan VAE's own causal grid), the legal T_pixel values are
+            # 9, 13, 17, ... — i.e. ``(T_pixel - 1) % 4 == 0``. The
+            # remainder is 1 iff the encoder is causal: same "first frame
+            # separable, then groups of ``temporal_compression``" contract.
             pipe.time_division_factor = external_encoder.spec.temporal_compression * ps[0]
             pipe.time_division_remainder = 1 if external_encoder.spec.causal_temporal else 0
 
@@ -527,7 +545,6 @@ class WanVideoBackbone(VideoBackbone):
         use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
         force_per_token_t_mod = bool(kw.get("force_per_token_t_mod", False))
 
-
         if use_usp:
             import torch.distributed as dist
             from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size
@@ -712,10 +729,24 @@ class WanVideoBackbone(VideoBackbone):
                 ]
                 x = chunks[get_sequence_parallel_rank()]
 
-        return BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, context_mask=context_mask, f=f, h=h, w=w, tokens_per_frame_patch=tokens_per_frame_patch, t=t, vace_hints=vace_hints, vace_scale=vace_scale, sp_pad_shape=sp_pad_shape, use_gradient_checkpointing=use_gradient_checkpointing, use_gradient_checkpointing_offload=use_gradient_checkpointing_offload, extras=extras)
-
-
-
+        return BlockLoopState(
+            x=x,
+            t_mod=t_mod,
+            freqs=freqs,
+            context=context,
+            context_mask=context_mask,
+            f=f,
+            h=h,
+            w=w,
+            tokens_per_frame_patch=tokens_per_frame_patch,
+            t=t,
+            vace_hints=vace_hints,
+            vace_scale=vace_scale,
+            sp_pad_shape=sp_pad_shape,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            extras=extras,
+        )
 
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
         dit = state.extras["dit"]
@@ -904,14 +935,12 @@ class WanVideoBackbone(VideoBackbone):
         return state
 
     def finalize(self, state: BlockLoopState):
-        'Public implementation.'
+        """Wan DiT head + unpatchify. Returns ``(B, z_dim, F, H, W)``."""
         dit = state.extras["dit"]
         use_usp = state.extras.get("use_usp", False)
         head = dit.head
         t_head = state.t if state.t.dim() == 3 else state.t.unsqueeze(1)
 
-
-        # Non-special path: original v1 / Wan default.
         x = head(state.x, t_head)
 
         if use_usp:
@@ -925,7 +954,6 @@ class WanVideoBackbone(VideoBackbone):
 
         x = dit.unpatchify(x, (state.f, state.h, state.w))
         return x
-
 
     # ================================================================
     # ABC: Action token injection (2)
@@ -1198,7 +1226,21 @@ class WanVideoBackbone(VideoBackbone):
         if has_ref and not has_image_input and self._is_ti2v:
             first_frame_latents = input_latents[:, :, 0:1].clone()
 
-        return {'input_latents': input_latents, 'context': context, 'seq_lens': seq_lens, 'height': height, 'width': width, 'num_frames': num_frames, 'vace_context': vace_context, 'vace_scale': 1.0, 'fuse_vae_embedding_in_latents': self._is_ti2v and has_ref, 'num_clean_prefix_frames': num_clean_prefix, 'first_frame_latents': first_frame_latents, 'clip_feature': clip_feature, 'y': y}
+        return {
+            "input_latents": input_latents,
+            "context": context,
+            "seq_lens": seq_lens,
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            "vace_context": vace_context,
+            "vace_scale": 1.0,
+            "fuse_vae_embedding_in_latents": self._is_ti2v and has_ref,
+            "num_clean_prefix_frames": num_clean_prefix,
+            "first_frame_latents": first_frame_latents,
+            "clip_feature": clip_feature,
+            "y": y,
+        }
 
     # ================================================================
     # ABC: Sub-module access (2)
@@ -1275,7 +1317,28 @@ class WanVideoBackbone(VideoBackbone):
         return generate_video_backbone_component_specs(model_path)
 
     def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
-        'Public implementation.'
+        """Copy backbone-side deploy artifacts next to ``config.yaml``.
+
+        Two artifact families:
+
+        * Wan tokenizer — always copied, source is ``model.video_backbone.model_path``.
+        * External encoder side files — forwarded to
+          ``self._encoder.copy_deploy_artifacts`` when an external encoder is
+          plugged in. Two policies are in use today:
+
+          - **Copy-or-skip** (V-JEPA 2.1): copies ``manifest.json`` and
+            logs+returns on ``OSError`` so a permission / ENOSPC failure
+            does not crash the otherwise-good training save. ``from_skeleton``
+            then falls back to ``encoder.model_path``.
+          - **Strict self-contained**: writes
+            ``encoder_meta/{encoder_name.txt, encoder_config.json,
+            manifest.json}`` and re-raises any failure so deploy can rely on
+            the metadata being present.
+
+          Encoders whose structural state is fully captured by
+          safetensors + ``components`` (e.g. Wan VAE) inherit the ABC's
+          no-op default.
+        """
         from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
 
         copy_video_backbone_tokenizer(output_dir, cfg)
@@ -1543,7 +1606,22 @@ class WanVideoBackbone(VideoBackbone):
         return inputs_shared
 
     def _finalize_ti2v_first_frame_latents(self, inputs_shared: dict, first_frame_image) -> None:
-        'Public implementation.'
+        """Emit ``first_frame_latents`` for TI2V deploy.
+
+        TI2V's ``seperated_timestep`` DiT requires both
+        ``fuse_vae_embedding_in_latents=True`` AND ``first_frame_latents`` so
+        the per-token timestep path can zero the timestep on frame-0 tokens
+        and ``base.generate`` can clean-replace ``latents[:, :, 0:1]`` on every
+        denoising step.
+
+        VACE intentionally has no branch here: its first-frame condition flows
+        through ``vace_context`` (built by ``_build_vace_context_for_deploy``),
+        and ``video`` itself stays fully noised — matching the native
+        ``WanVideoUnit_VACE`` "predict everything via the bypass" semantic.
+
+        I2V also skips this path: its conditioning rides on the ``y`` channel,
+        ``first_frame_latents`` is never used.
+        """
         if not self._is_ti2v or first_frame_image is None:
             if first_frame_image is None:
                 inputs_shared.pop("first_frame_latents", None)
@@ -1556,7 +1634,6 @@ class WanVideoBackbone(VideoBackbone):
         inputs_shared["num_clean_prefix_frames"] = 0
         ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
         ref_tensor = self._preprocess_video(ref_frames)
-
 
         ref_image_latents = self._encode_video(ref_tensor.to(device)).to(dtype=dtype, device=device)
         inputs_shared["first_frame_latents"] = ref_image_latents
@@ -1630,7 +1707,6 @@ class WanVideoBackbone(VideoBackbone):
         if self._uses_external_encoder:
             return self._encoder.batch_encode(video_tensor)
         return self._pipe.vae.batch_encode(video_tensor, device=video_tensor.device)
-
 
     def _encode_video_for_vace(
         self,

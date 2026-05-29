@@ -4,9 +4,11 @@ Plugs into the :class:`VideoBackbone` external-encoder path introduced in
 PR #60. ``spec.is_reversible=False`` — the host backbone must rebuild its
 DiT first conv via the default ``build_dit_input_proj`` hook and skip the
 strict native-VAE spec validation. ``spec.causal_temporal=True`` and
-``spec.temporal_compression=2`` emulate the Wan VAE's first-frame
-separability with V-JEPA 2.1's image branch (tubelet=1) on frame 0 and the
-video branch (tubelet=2) on the remainder.
+``spec.temporal_compression=4`` (ViT tubelet=2 + an encoder-side avg-pool
+over time with stride=2) emulate the Wan VAE's causal grouping (1 cond
+latent from frame 0 + 1 latent per 4 target pixel frames), so the host
+DiT receives the same latent token-count whether the encoder is V-JEPA
+or the native Wan VAE.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, List
+from typing import Any, List, Literal, get_args
 
 import torch
 import torch.nn as nn
@@ -29,6 +31,12 @@ logger = logging.getLogger(__name__)
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
 
+_VJEPA21Forward = Literal["video", "mixed"]
+_VJEPA21_FORWARD_DEFAULT: _VJEPA21Forward = "video"
+# Derive ALLOWED from the Literal so adding a mode in one place can't drift
+# from the runtime whitelist used by ``__init__`` / cfg parsing.
+_VJEPA21_FORWARD_ALLOWED: tuple[_VJEPA21Forward, ...] = get_args(_VJEPA21Forward)
+
 
 @register_video_encoder("vjepa2_1")
 class VJEPA21VideoEncoder(VideoEncoder):
@@ -39,7 +47,14 @@ class VJEPA21VideoEncoder(VideoEncoder):
     ``app.vjepa_2_1`` package and a local checkpoint file).
     """
 
-    def __init__(self, vit: nn.Module, *, embed_dim: int, variant: str):
+    def __init__(
+        self,
+        vit: nn.Module,
+        *,
+        embed_dim: int,
+        variant: str,
+        vjepa2_1_forward: _VJEPA21Forward = _VJEPA21_FORWARD_DEFAULT,
+    ):
         super().__init__()
         # V-JEPA follows the host dtype set by ``set_dtype_device`` (bf16 in
         # production). The upstream ``rotate_queries_or_keys`` would naturally
@@ -52,7 +67,13 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # ``all_gather_into_tensor`` because its output buffer is bf16).
         self._m = vit
         self._variant = variant
-        self._spec = VideoEncoderSpec(z_dim=int(embed_dim), spatial_compression=16, temporal_compression=2, causal_temporal=True, pixel_range=(-1.0, 1.0), is_reversible=False, dit_patch_size=(1, 2, 2))
+        if vjepa2_1_forward not in _VJEPA21_FORWARD_ALLOWED:
+            raise ValueError(
+                f"vjepa2_1_forward must be one of {_VJEPA21_FORWARD_ALLOWED}, "
+                f"got {vjepa2_1_forward!r}."
+            )
+        self._vjepa2_1_forward: _VJEPA21Forward = vjepa2_1_forward
+        self._spec = VideoEncoderSpec(z_dim=int(embed_dim), spatial_compression=16, temporal_compression=4, causal_temporal=True, pixel_range=(-1.0, 1.0), is_reversible=False, dit_patch_size=(1, 2, 2))
         self.register_buffer("_mean", torch.tensor(_IMAGENET_MEAN).view(1, 3, 1, 1, 1), persistent=False)
         self.register_buffer("_std", torch.tensor(_IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False)
         # Post-norm: a plain LayerNorm at init (weight=1, bias=0) acts as
@@ -79,6 +100,25 @@ class VJEPA21VideoEncoder(VideoEncoder):
     def variant(self) -> str:
         return self._variant
 
+    @property
+    def vjepa2_1_forward(self) -> _VJEPA21Forward:
+        """How the condition (frame 0) latent is computed in ``batch_encode``.
+
+        ``"video"`` (default) — dup frame 0 to a 2-frame clip and route it
+        through the V-JEPA 2.1 video branch (tubelet=2).
+        ``"mixed"`` — route frame 0 through the V-JEPA 2.1 image branch
+        (tubelet=1).
+        """
+        return self._vjepa2_1_forward
+
+    @classmethod
+    def optional_yaml_keys(cls) -> set[str]:
+        # The condition-frame forward mode is a runtime config (selects
+        # which encoder branch produces the cond latent); ViT weights are
+        # identical across modes, so this belongs in yaml — not the
+        # manifest. Default applied in ``__init__`` if absent from yaml.
+        return {"vjepa2_1_forward"}
+
     def preprocess_video(self, frames: List[Image.Image]) -> torch.Tensor:
         """List[PIL] -> (1, 3, T, H, W) in ImageNet-normalized space."""
         device = next(self._m.parameters()).device
@@ -90,14 +130,44 @@ class VJEPA21VideoEncoder(VideoEncoder):
         video = (video - self._mean.to(dtype)) / self._std.to(dtype)
         return video
 
+    # ViT tubelet=2 collapses every 2 pixel frames into 1 latent frame; an
+    # extra avg-pool over time with stride 2 halves the target stream again
+    # so the total effective temporal compression matches Wan VAE's causal
+    # grouping (1 cond + 1 latent per 4 target pixel frames). The stride is
+    # locked to 2: V-JEPA's tubelet and Wan VAE's temporal_compression are
+    # both production-fixed (tubelet=2 / tc=4), so the ratio between them is
+    # fixed. The constant is exposed at class level so a reader can locate
+    # the only place this "extra 2x" assumption lives.
+    _TARGET_TEMPORAL_POOL_STRIDE = 2
+
     def batch_encode(self, video: torch.Tensor) -> torch.Tensor:
         """(B, 3, T_pixel, H, W) -> (B, embed_dim, T_lat, H/16, W/16).
 
-        ``T_lat == 1`` when ``T_pixel == 1`` (TI2V ref-frame fast path);
-        otherwise ``T_lat == 1 + (T_pixel - 1) // 2`` — frame 0 goes through
-        the V-JEPA 2.1 image branch (tubelet=1) and frames 1.. through the
-        tubelet=2 video branch, emulating the Wan VAE first-frame
-        separability the host backbone assumes.
+        Output ``T_lat == 1`` when ``T_pixel == 1`` (TI2V ref-frame fast
+        path); otherwise ``T_lat == 1 + (T_pixel - 1) // 4`` — a frame-0
+        condition latent plus ``(T_pixel - 1) / 4`` target latents — which
+        emulates the Wan VAE causal grouping (1 + group-of-4) the host
+        backbone's first-conv / unpatchify expect. Output shape is the SAME
+        under both ``vjepa2_1_forward`` modes; the modes differ only in how
+        the condition slice is obtained:
+
+        Condition pass (frame 0 → one latent slice, no target leakage):
+          - ``vjepa2_1_forward="video"`` (default): cat([f0, f0], dim=T) →
+            video branch (tubelet=2) → 1 latent.
+          - ``vjepa2_1_forward="mixed"``: f0 → image branch (tubelet=1) →
+            1 latent.
+
+        Target pass (both modes): cat([f0, f0, t1..tN], dim=T) → video branch
+        → ``1 + N/2`` latents → discard the first temporal slice (the
+        prepended frame-0 pair's latent) → ``N/2`` raw target latents → an
+        avg-pool over time with stride ``_TARGET_TEMPORAL_POOL_STRIDE = 2``
+        → ``N/4`` target latents. The two prepended frame-0 copies let the
+        ViT's temporal attention condition target representations on the
+        reference frame; the dropped slice is exactly the one that would
+        otherwise leak back into the cond lane, so independence between
+        condition and target is preserved and deploy/train see the same
+        condition latent. The avg-pool brings the target token-count to
+        Wan VAE parity (see ``_TARGET_TEMPORAL_POOL_STRIDE``).
         """
         B, C, Tp, H, W = video.shape
         if C != 3:
@@ -109,16 +179,61 @@ class VJEPA21VideoEncoder(VideoEncoder):
         m_dtype = next(self._m.parameters()).dtype
         if video.dtype != m_dtype:
             video = video.to(m_dtype)
+        f0 = video[:, :, 0:1]
         if Tp == 1:
-            z = self._encode_image(video[:, :, 0])
+            z = self._encode_condition(f0)
         else:
-            if (Tp - 1) % 2 != 0:
-                raise ValueError(f"V-JEPA 2.1 causal emulation needs (T_pixel - 1) % 2 == 0, got T_pixel={Tp}.")
-            z0 = self._encode_image(video[:, :, 0])
-            zR = self._encode_video_tubelet(video[:, :, 1:])
-            z = torch.cat([z0, zR], dim=2)
+            # ViT tubelet=2 needs (T_pixel - 1) even (target frames make a
+            # whole number of tubes); the extra time-pool needs that count
+            # of latent target frames itself even — combined,
+            # ``(T_pixel - 1) % 4 == 0``. For RoBoTwin (num_frames=33,
+            # video_stride=4 → T_pixel=9), (9-1) % 4 == 0. ✓
+            divisor = 2 * self._TARGET_TEMPORAL_POOL_STRIDE
+            if (Tp - 1) % divisor != 0:
+                raise ValueError(
+                    f"V-JEPA 2.1 causal emulation needs (T_pixel - 1) % {divisor} == 0, "
+                    f"got T_pixel={Tp}."
+                )
+            z_cond = self._encode_condition(f0)
+            z_target_raw = self._encode_target_with_prepend(f0, video[:, :, 1:])
+            z_target = self._pool_target_temporal(z_target_raw)
+            z = torch.cat([z_cond, z_target], dim=2)
         z = self._apply_feature_norm(z)
         return z
+
+    def _pool_target_temporal(self, z_target: torch.Tensor) -> torch.Tensor:
+        """(B, D, T_target_raw, h, w) -> (B, D, T_target_raw/2, h, w) via
+        avg-pool over time with stride ``_TARGET_TEMPORAL_POOL_STRIDE``.
+
+        ``batch_encode`` guarantees ``T_target_raw`` is divisible by the
+        stride before calling here. Done BEFORE ``_apply_feature_norm`` so
+        the LayerNorm re-standardizes the (slightly-attenuated) post-pool
+        feature distribution and the final per-token output stays
+        comparable to V-JEPA-native scale.
+        """
+        s = self._TARGET_TEMPORAL_POOL_STRIDE
+        B, D, T, h, w = z_target.shape
+        return z_target.reshape(B, D, T // s, s, h, w).mean(dim=3)
+
+    def _encode_condition(self, f0: torch.Tensor) -> torch.Tensor:
+        """(B, 3, 1, H, W) -> (B, D, 1, H/16, W/16). See ``batch_encode`` docstring."""
+        if self._vjepa2_1_forward == "mixed":
+            return self._encode_image(f0[:, :, 0])
+        return self._encode_video_tubelet(torch.cat([f0, f0], dim=2))
+
+    def _encode_target_with_prepend(self, f0: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """(B, 3, 1, H, W) + (B, 3, N_even, H, W) -> (B, D, N/2, H/16, W/16).
+
+        Runs ``video_branch(cat([f0, f0, targets]))`` and drops the first
+        temporal latent (which encodes the prepended frame-0 pair). The
+        kept slices are the target latents whose temporal attention has
+        already seen the reference frame — exactly the supervision signal
+        we want for the target stream, without leaking target information
+        back into the condition lane (which uses its own forward).
+        """
+        clip = torch.cat([f0, f0, targets], dim=2)
+        z_full = self._encode_video_tubelet(clip)
+        return z_full[:, :, 1:]
 
     # V-JEPA 2.1 vision_transformer.forward contract:
     #   input (B, C, T, H, W); T==1 ∧ self._m.img_temporal_dim_size==1 hits
@@ -159,14 +274,26 @@ class VJEPA21VideoEncoder(VideoEncoder):
     # Geometry constants the encoder's reshape paths and spec are hard-wired
     # against. The manifest can carry different ``patch`` / ``tubelet`` values
     # only if a future PR also generalizes the (h = H // 16) / (Tp // 2)
-    # reshape and the (spatial=16, temporal=2) ``spec`` block. Today the
-    # encoder is locked to ViT-g/16 tubelet=2 — manifests that disagree get
-    # a fail-fast at load time instead of a confusing reshape error later.
+    # reshape and the ``spec`` block (spatial_compression=16 from ViT patch=16,
+    # plus a post-tubelet avg-pool stride=2 to reach temporal_compression=4).
+    # Today the encoder is locked to ViT-g/16 tubelet=2 — manifests that
+    # disagree get a fail-fast at load time instead of a confusing reshape
+    # error later.
     _REQUIRED_MANIFEST_PATCH = 16
     _REQUIRED_MANIFEST_TUBELET = 2
 
     @classmethod
-    def from_pretrained(cls, model_path: str, **kw: Any) -> "VJEPA21VideoEncoder":
+    def from_pretrained(
+        cls,
+        model_path: str,
+        *,
+        vjepa2_1_forward: _VJEPA21Forward = _VJEPA21_FORWARD_DEFAULT,
+    ) -> "VJEPA21VideoEncoder":
+        # Explicit signature (no ``**kw``) so a programmatic typo like
+        # ``from_pretrained(path, vjepa_2_1_forward="video")`` raises
+        # ``TypeError`` at the call site instead of silently falling back
+        # to the default forward mode. The yaml path is already filtered
+        # by ``build_video_encoder`` via ``optional_yaml_keys()``.
         manifest = cls._read_and_validate_manifest(model_path)
         vit_encoder = cls._prepare_vjepa_imports_and_patch()
         vit = cls._build_vit_from_manifest(vit_encoder, manifest)
@@ -175,6 +302,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             vit,
             embed_dim=int(manifest["embed_dim"]),
             variant=str(manifest["variant"]),
+            vjepa2_1_forward=vjepa2_1_forward,
         )
 
     @classmethod
@@ -222,19 +350,113 @@ class VJEPA21VideoEncoder(VideoEncoder):
         vit_encoder = cls._prepare_vjepa_imports_and_patch()
         with torch.device(device):
             vit = cls._build_vit_from_manifest(vit_encoder, manifest)
+        # ``vjepa2_1_forward`` is a runtime knob (selects the cond-frame
+        # branch); it is plumbed through the yaml ``encoder`` block at
+        # deploy time so a checkpoint+yaml pair deployed together always
+        # rebuilds the same encoder the training run used.
+        #
+        # Pre-PR-#92 checkpoint caveat: those ckpts are NOT forward-
+        # compatible with the current code and must be retrained. Two
+        # unrelated changes broke bit-equivalence and ``vjepa2_1_forward``
+        # only covers one of them:
+        #
+        # 1. ``spec.temporal_compression`` is now 4 (was 2 under the legacy
+        #    single-forward path). The cross-check in
+        #    ``BaseWAMArchitecture._init_video_backbone`` fails-fast when
+        #    the saved yaml still declares
+        #    ``video_backbone.temporal_compression: 2``, so a pre-PR ckpt
+        #    will not even reach this method without a yaml edit.
+        # 2. The target pass now prepends two copies of frame 0, discards
+        #    the first latent, and mean-pools the remaining latents over
+        #    time with stride 2 — the legacy single-pass path did none of
+        #    this. Setting ``vjepa2_1_forward: mixed`` only restores the
+        #    cond-frame branch (image branch, tubelet=1); the target
+        #    stream content cannot be reproduced.
+        #
+        # We still warn when the field is absent so operators see a
+        # noisy signal rather than a silently-degraded run. New training
+        # runs that compose the canonical ``model/encoder=vjepa2_1``
+        # group config always pick up the explicit value and do not trip
+        # this warning.
+        vjepa2_1_forward = cls._read_vjepa2_1_forward_from_cfg(encoder_cfg)
+        # ``encoder_cfg is None`` is intentionally NOT warned here: that
+        # path is exercised by direct programmatic callers (unit tests,
+        # raw ``from_skeleton(components_entry=...)``) where there is no
+        # saved yaml to edit and the operator's expectation is "use the
+        # current default" — a warning would just be noise. The warning
+        # targets the pre-PR-#92-deploy path specifically, where a
+        # saved-yaml object exists but the field is absent from it.
+        if encoder_cfg is not None and not cls._cfg_has_vjepa2_1_forward(encoder_cfg):
+            logger.warning(
+                "VJEPA21VideoEncoder.from_skeleton: saved encoder yaml has no "
+                "``vjepa2_1_forward`` field; defaulting to %r. If this is a "
+                "pre-PR-#92 checkpoint (trained before the 2-pass batch_encode "
+                "rewrite), it is NOT forward-compatible with this code and "
+                "should be retrained: the target pass has changed (prepend-"
+                "and-discard + temporal mean-pool stride=2, ``temporal_"
+                "compression`` 2 → 4), so target latents will not match "
+                "training regardless of ``vjepa2_1_forward``. Setting "
+                "``vjepa2_1_forward: mixed`` in the saved config.yaml's "
+                "``model.video_backbone.encoder`` block only restores the "
+                "cond-frame bit-equivalence (image branch, tubelet=1).",
+                vjepa2_1_forward,
+            )
         logger.info(
             "VJEPA21VideoEncoder.from_skeleton: %s instantiated from %s "
-            "(embed_dim=%d, variant=%s) — weights pending checkpoint load",
+            "(embed_dim=%d, variant=%s, vjepa2_1_forward=%s) — weights pending checkpoint load",
             manifest["arch_name"],
             manifest_dir,
             int(manifest["embed_dim"]),
             str(manifest["variant"]),
+            vjepa2_1_forward,
         )
         return cls(
             vit,
             embed_dim=int(manifest["embed_dim"]),
             variant=str(manifest["variant"]),
+            vjepa2_1_forward=vjepa2_1_forward,
         )
+
+    @staticmethod
+    def _cfg_has_vjepa2_1_forward(encoder_cfg: Any) -> bool:
+        """Report whether the saved encoder yaml carries the key at all.
+
+        ``_read_vjepa2_1_forward_from_cfg`` collapses absent / yaml-null /
+        ``None`` into "use default", which is what callers want for the
+        actual lookup. ``from_skeleton`` separately needs to know whether
+        the operator omitted the key (the pre-PR-checkpoint signature)
+        to drive a one-time migration warning, so this helper returns a
+        boolean for that question — yaml-``null`` counts as present.
+        """
+        if encoder_cfg is None:
+            return False
+        if isinstance(encoder_cfg, dict):
+            return "vjepa2_1_forward" in encoder_cfg
+        _MISSING = object()
+        return getattr(encoder_cfg, "vjepa2_1_forward", _MISSING) is not _MISSING
+
+    @staticmethod
+    def _read_vjepa2_1_forward_from_cfg(encoder_cfg: Any) -> _VJEPA21Forward:
+        """Pick ``vjepa2_1_forward`` from the saved yaml at deploy time.
+
+        ``yaml: null`` is treated as "use default" (collapses with absent
+        via ``.get(...)`` / ``getattr(..., None)``). This intentionally
+        differs from the V-JEPA 2 sibling, which rejects a *present*
+        ``vjepa2_1_forward`` key regardless of value — because there the
+        field is the wrong-encoder signature (operator copy-paste from a
+        vjepa2_1 yaml), while here null is just an explicit "no value,
+        please default". A note in the user's yaml (``vjepa2_1_forward:``)
+        therefore behaves like omission, which is the least-surprise
+        reading for the V-JEPA 2.1 path."""
+        if encoder_cfg is None:
+            return _VJEPA21_FORWARD_DEFAULT
+        if isinstance(encoder_cfg, dict):
+            value = encoder_cfg.get("vjepa2_1_forward")
+        else:
+            value = getattr(encoder_cfg, "vjepa2_1_forward", None)
+        if value is None:
+            return _VJEPA21_FORWARD_DEFAULT
+        return str(value)  # type: ignore[return-value]  # __init__ validates
 
     @staticmethod
     def _resolve_manifest_dir(ckpt_dir: str | None, encoder_cfg: Any) -> str:
@@ -268,11 +490,10 @@ class VJEPA21VideoEncoder(VideoEncoder):
         raise FileNotFoundError(
             "VJEPA21VideoEncoder.from_skeleton: no readable manifest.json. "
             f"Tried ckpt_dir={ckpt_manifest!r} and "
-            f"encoder.model_path={fallback_manifest!r}. The checkpoint was "
-            "saved before the self-containment patch and the fallback is "
-            "unreachable or has no manifest. Either re-save with the current "
-            "code, or hand-copy manifest.json into the checkpoint dir "
-            "(see issue #86)."
+            f"encoder.model_path={fallback_manifest!r}. Neither source is "
+            "reachable / has a manifest. Either re-save the checkpoint with "
+            "the current code (which writes manifest.json into ckpt_dir), or "
+            "hand-copy manifest.json into the checkpoint dir."
         )
 
     def copy_deploy_artifacts(self, output_dir: str, cfg: Any) -> None:
@@ -362,9 +583,9 @@ class VJEPA21VideoEncoder(VideoEncoder):
                 f"VJEPA21 manifest patch/tubelet must be "
                 f"({cls._REQUIRED_MANIFEST_PATCH}, {cls._REQUIRED_MANIFEST_TUBELET}); "
                 f"got ({patch}, {tubelet}). The encoder's spec (spatial_compression=16, "
-                f"temporal_compression=2) and reshape logic (H//16, W//16, Tp//2) are "
-                f"hard-wired against these values. Use a different manifest or extend "
-                "the encoder to honor the manifest geometry."
+                f"temporal_compression=4 = ViT tubelet=2 × encoder pool stride=2) and "
+                f"reshape logic (H//16, W//16, Tp//2) are hard-wired against these values. "
+                "Use a different manifest or extend the encoder to honor the manifest geometry."
             )
         cls._check_arch_use_rope_consistency(manifest)
         return manifest
@@ -417,9 +638,18 @@ class VJEPA21VideoEncoder(VideoEncoder):
         if not getattr(vjepa_modules.rotate_queries_or_keys, "_openwam_dtype_safe", False):
             _orig_rotate = vjepa_modules.rotate_queries_or_keys
 
-            def _safe_rotate(x, pos, n_registers, has_cls_first):
-                out = _orig_rotate(x, pos, n_registers=n_registers, has_cls_first=has_cls_first)
-                return out.to(x.dtype)
+            # Forward through any signature change in upstream
+            # ``rotate_queries_or_keys`` (V-JEPA 2.1 added ``n_registers`` /
+            # ``has_cls_first`` over V-JEPA 2; future kwargs would propagate
+            # the same way). The cast-back-to-input-dtype only needs the
+            # input tensor reference, so we read it from positional args
+            # (or the ``x=`` kwarg as a fallback).
+            def _safe_rotate(*args, **kwargs):
+                out = _orig_rotate(*args, **kwargs)
+                ref = args[0] if args else kwargs.get("x", None)
+                if isinstance(ref, torch.Tensor) and isinstance(out, torch.Tensor):
+                    return out.to(ref.dtype)
+                return out
 
             _safe_rotate._openwam_dtype_safe = True
             vjepa_modules.rotate_queries_or_keys = _safe_rotate
@@ -524,8 +754,10 @@ class VJEPA21VideoEncoder(VideoEncoder):
             )
 
     # Intentionally NOT overriding build_dit_input_proj / build_dit_output_proj:
-    # the PR #60 defaults at dit_patch_size=(1,2,2) produce Conv3d((1,2,2),(1,2,2))
-    # and Linear(dit_dim, z_dim * 4) — exactly what we need.
+    # spec.dit_patch_size=(1,2,2) makes the default Conv3d/Linear pair produce
+    # Conv3d(z_dim, dit_dim, (1,2,2), (1,2,2)) and Linear(dit_dim, z_dim * 4)
+    # — a 2x2 spatial pool per DiT token that mirrors Wan VAE's DiT-side
+    # patch layout (token-count parity; see PR description).
 
 
 __all__ = ["VJEPA21VideoEncoder"]

@@ -845,6 +845,136 @@ def test_D1_encoder_yaml_rejects_extra_fields(monkeypatch):
         _run_init_video_backbone(cfg)
 
 
+def test_D1a_encoder_yaml_whitelist_extends_per_optional_yaml_keys(monkeypatch):
+    """An optional yaml field is allowed only on encoders that opt in via
+    :meth:`VideoEncoder.optional_yaml_keys`. The same field on a different
+    encoder (which did NOT opt in) is rejected.
+
+    Concretely: ``vjepa2_1_forward`` is in V-JEPA 2.1's optional set, so it
+    is accepted on the vjepa2_1 encoder block; the same field is NOT in
+    wan_vae's optional set, so it is rejected on a wan_vae encoder block.
+    Guards against a yaml typo (``vjepa2_1_forward`` on wan_vae) silently
+    being ignored.
+    """
+    # vjepa2_1 + vjepa2_1_forward: build_video_encoder is the only thing
+    # the gate actually invokes after the whitelist passes; patch it to a
+    # no-op stub so the test does not need real weights.
+    from openwam.model.video_backbone import encoder as encoder_mod
+
+    monkeypatch.setattr(encoder_mod, "build_video_encoder", lambda cfg: object())
+    monkeypatch.setattr(
+        "openwam.model.video_backbone.build_video_backbone",
+        lambda *a, **kw: nn.Module(),
+    )
+
+    ok_cfg = {
+        "video_backbone": {
+            "name": "wan22_ti2v_5b",
+            "model_path": "/dummy",
+            "from_scratch": True,
+            "temporal_compression": 4,
+            "causal_temporal": True,
+            "encoder": {
+                "name": "vjepa2_1",
+                "model_path": "/dummy",
+                "vjepa2_1_forward": "video",
+            },
+        }
+    }
+    # Whitelist must allow vjepa2_1_forward on the vjepa2_1 encoder. The
+    # temporal_compression cross-check would fire AFTER the whitelist;
+    # since build_video_backbone is stubbed to a bare Module (no
+    # temporal_compression attribute), that read raises AttributeError —
+    # which the try/except below catches. We only care that the whitelist
+    # ValueError did NOT fire.
+    try:
+        _run_init_video_backbone(ok_cfg)
+    except ValueError as e:
+        if "allows only" in str(e):
+            raise AssertionError(
+                f"vjepa2_1_forward should be allowed on vjepa2_1 encoder; got whitelist error: {e}"
+            ) from e
+    except AttributeError:
+        pass  # downstream temporal_compression read fails — fine, whitelist already passed
+
+    # Same field on wan_vae must trip the whitelist.
+    bad_cfg = {
+        "video_backbone": {
+            "name": "wan22_ti2v_5b",
+            "model_path": "/dummy",
+            "from_scratch": True,
+            "encoder": {
+                "name": "wan_vae",
+                "model_path": "/dummy",
+                "vjepa2_1_forward": "video",
+            },
+        }
+    }
+    with pytest.raises(ValueError, match=r"allows only"):
+        _run_init_video_backbone(bad_cfg)
+
+
+
+
+def test_D1c_encoder_yaml_whitelist_ignores_yaml_null_fields(monkeypatch):
+    'Public implementation.'
+    from openwam.model.video_backbone import encoder as encoder_mod
+
+    monkeypatch.setattr(encoder_mod, "build_video_encoder", lambda cfg: object())
+    monkeypatch.setattr(
+        "openwam.model.video_backbone.build_video_backbone",
+        lambda *a, **kw: nn.Module(),
+    )
+
+    cfg = {
+        "video_backbone": {
+            "name": "wan22_ti2v_5b",
+            "model_path": "/dummy",
+            "from_scratch": True,
+            "temporal_compression": 4,
+            "causal_temporal": True,
+            "encoder": {
+                "name": "vjepa2_1",
+                "model_path": "/dummy",
+                "vjepa2_1_forward": "video",
+                # The wan.yaml inline-block leftover — must NOT trip the whitelist.
+                "unknown_encoder_knob": None,
+            },
+        }
+    }
+    # Whitelist must pass. The downstream backbone build may then fail on
+    # the temporal_compression / build_video_backbone stub (see test_D1a's
+    # comment) — we tolerate that because the assertion here is "no
+    # ValueError about extra fields was raised".
+    try:
+        _run_init_video_backbone(cfg)
+    except ValueError as e:
+        if "allows only" in str(e):
+            raise AssertionError(
+                f"yaml-null unknown_encoder_knob on vjepa2_1 encoder must not "
+                f"trip the whitelist; got: {e}"
+            ) from e
+    except AttributeError:
+        pass  # downstream temporal_compression read on stubbed backbone — fine
+
+    # Sibling guard: explicit non-null unknown_encoder_knob on vjepa2_1 must
+    # STILL fail (the field is wrong-encoder, not just an inline leftover).
+    cfg_explicit = {
+        "video_backbone": {
+            "name": "wan22_ti2v_5b",
+            "model_path": "/dummy",
+            "from_scratch": True,
+            "encoder": {
+                "name": "vjepa2_1",
+                "model_path": "/dummy",
+                "unknown_encoder_knob": True,  # explicit → operator mistake
+            },
+        }
+    }
+    with pytest.raises(ValueError, match=r"allows only"):
+        _run_init_video_backbone(cfg_explicit)
+
+
 def test_D2_encoder_block_with_from_scratch_false_silently_ignored(monkeypatch, caplog):
     """The encoder block is silently ignored (no error, encoder NOT built)
     when from_scratch=false. The default yaml ships with an encoder: block
@@ -1801,7 +1931,9 @@ def test_V2_vjepa21_from_pretrained_missing_manifest(tmp_path):
 
 
 def test_V3_vjepa21_spec_invariants():
-    """spec fields are nailed down: irreversible, causal, (1,2,2) DiT patch, z_dim wired."""
+    """spec fields are nailed down: irreversible, causal, (1,2,2) DiT patch,
+    temporal_compression=4 (ViT tubelet=2 + extra avg-pool stride=2, Wan VAE
+    parity), z_dim wired from manifest."""
     enc = _build_vjepa_encoder(embed_dim=1408)
     spec = enc.spec
     assert spec.is_reversible is False
@@ -1809,7 +1941,7 @@ def test_V3_vjepa21_spec_invariants():
     assert spec.dit_patch_size == (1, 2, 2)
     assert spec.z_dim == 1408
     assert spec.spatial_compression == 16
-    assert spec.temporal_compression == 2
+    assert spec.temporal_compression == 4
     assert spec.pixel_range == (-1.0, 1.0)
 
 
@@ -1828,18 +1960,53 @@ def test_V4_vjepa21_preprocess_imagenet_normalize():
 
 def test_V5_vjepa21_batch_encode_t_lat_shapes():
     """batch_encode T_pixel-to-T_lat dispatch:
-    T_pixel == 1 -> T_lat == 1; T_pixel == 9 -> T_lat == 1 + (9-1)/2 == 5.
+    T_pixel == 1 -> T_lat == 1; T_pixel == 5 -> T_lat == 2; T_pixel == 9
+    -> T_lat == 3 (== 1 + (T_pixel - 1) / 4).
+
+    Independent of ``vjepa2_1_forward`` — both modes preserve the
+    (1 cond + N_target/4 target) layout the host backbone consumes. The
+    /4 factor comes from ViT tubelet=2 followed by the encoder-side
+    avg-pool over time with stride=2 (Wan VAE parity). T_pixel=5 is the
+    smallest non-trivial pool case: T_target_raw=2 -> 1 pooled target,
+    exercising the pool reshape's boundary (B, D, 1, 2, h, w).
     """
     enc = _build_vjepa_encoder(embed_dim=8)
-    # T_pixel == 1: image branch only
+    # T_pixel == 1: cond pass only, no target stream → no pooling needed.
     v1 = torch.randn(1, 3, 1, 32, 32)
     z1 = enc.batch_encode(v1)
     assert z1.shape == (1, 8, 1, 2, 2)  # (B, D, T_lat=1, H/16, W/16)
 
-    # T_pixel == 9: 1 (image) + 4 (tubelet=2 over 8 frames) == 5 latent frames
+    # T_pixel == 5: 1 cond + 2 raw target (tubelet=2 over (2 dup + 4
+    # target), first slice dropped) → 1 pooled target == 2 latent frames.
+    v5 = torch.randn(1, 3, 5, 32, 32)
+    z5 = enc.batch_encode(v5)
+    assert z5.shape == (1, 8, 2, 2, 2)
+
+    # T_pixel == 9: 1 cond + 4 raw target (tubelet=2 over the (2 dup + 8
+    # target) prepended clip, first slice dropped) → 2 pooled target
+    # (avg-pool over time stride=2) == 3 latent frames total.
     v9 = torch.randn(1, 3, 9, 32, 32)
     z9 = enc.batch_encode(v9)
-    assert z9.shape == (1, 8, 5, 2, 2)
+    assert z9.shape == (1, 8, 3, 2, 2)
+
+
+def test_V5b_vjepa21_pool_target_temporal_is_mean():
+    """``_pool_target_temporal`` is an arithmetic mean over consecutive
+    pairs — NOT slice-keep-first ([:, :, ::2]) or slice-keep-second
+    ([:, :, 1::2]). A 1, 2, 3, 4 sequence per channel must average to
+    1.5, 3.5. Guards against a future "optimization" that silently
+    swaps mean for stride-2 indexing — every other test in this file
+    would still pass because shapes match.
+    """
+    enc = _build_vjepa_encoder(embed_dim=2)
+    # Build a controlled target latent: B=1, D=2, T=4, h=w=1 so the
+    # per-channel values are easy to eyeball.
+    z_target = torch.tensor([1.0, 2.0, 3.0, 4.0]).view(1, 1, 4, 1, 1).expand(1, 2, 4, 1, 1).contiguous()
+    pooled = enc._pool_target_temporal(z_target)
+    assert pooled.shape == (1, 2, 2, 1, 1)
+    # Expected: mean(1, 2) = 1.5; mean(3, 4) = 3.5.
+    assert torch.allclose(pooled[0, 0, 0, 0, 0], torch.tensor(1.5))
+    assert torch.allclose(pooled[0, 0, 1, 0, 0], torch.tensor(3.5))
 
 
 def test_V6_vjepa21_decode_raises():
@@ -1851,10 +2018,296 @@ def test_V6_vjepa21_decode_raises():
         enc.to_frames(torch.zeros(1, 3, 1, 32, 32))
 
 
+class _SpyVJEPAViT(nn.Module):
+    """Like ``_MockVJEPAViT`` but records every forward-call shape so tests
+    can verify which V-JEPA branch (image vs video) was hit and what the
+    target-pass prepend produced.
+    """
+
+    def __init__(self, embed_dim: int = 8, patch: int = 16, tubelet: int = 2):
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.patch = int(patch)
+        self.tubelet = int(tubelet)
+        self.img_temporal_dim_size = 1
+        self.call_log: list[dict] = []
+        self._proj = nn.Linear(1, embed_dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, _C, T, H, W = x.shape
+        self.call_log.append({"T": int(T), "H": int(H), "W": int(W)})
+        h = H // self.patch
+        w = W // self.patch
+        if T == 1:
+            L = h * w
+        else:
+            assert T % self.tubelet == 0
+            L = (T // self.tubelet) * h * w
+        seed = torch.zeros(B, L, 1, device=x.device, dtype=x.dtype)
+        return self._proj(seed)
+
+
+def _build_vjepa_spy_encoder(*, embed_dim: int = 8, vjepa2_1_forward: str = "video"):
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    vit = _SpyVJEPAViT(embed_dim=embed_dim)
+    enc = VJEPA21VideoEncoder(
+        vit, embed_dim=embed_dim, variant="spy", vjepa2_1_forward=vjepa2_1_forward
+    )
+    return enc, vit
+
+
+def test_V6a_vjepa21_optional_yaml_keys_exposes_forward_knob():
+    """``optional_yaml_keys`` returns exactly ``{"vjepa2_1_forward"}`` —
+    the single yaml field this encoder consumes beyond ``{name, model_path}``.
+    The base-side whitelist (``BaseWAMArchitecture._compute_encoder_yaml_whitelist``)
+    reads this method, so an empty / wrong set here is what gates a typo
+    being silently accepted from yaml.
+    """
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    assert VJEPA21VideoEncoder.optional_yaml_keys() == {"vjepa2_1_forward"}
+
+
+def test_V6b_vjepa21_forward_default_is_video():
+    """No-kwarg construction picks ``vjepa2_1_forward="video"`` — the
+    intended default after this PR (so cond and target both come from the
+    V-JEPA video branch).
+    """
+    enc = _build_vjepa_encoder()
+    assert enc.vjepa2_1_forward == "video"
+
+
+def test_V6c_vjepa21_invalid_forward_raises():
+    """Constructing with an unknown ``vjepa2_1_forward`` value fails fast
+    at __init__ rather than producing a confusing branch-routing error
+    inside ``batch_encode``.
+    """
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    with pytest.raises(ValueError, match="vjepa2_1_forward must be one of"):
+        VJEPA21VideoEncoder(
+            _MockVJEPAViT(embed_dim=8),
+            embed_dim=8,
+            variant="mock",
+            vjepa2_1_forward="image",  # type: ignore[arg-type]
+        )
+
+
+def test_V6d_vjepa21_video_mode_cond_dups_frame_zero():
+    """``vjepa2_1_forward="video"``: cond pass dups frame 0 and routes the
+    2-frame clip through the video branch (T=2). Target pass prepends the
+    same dup'd pair to N target frames (T=2+N). Two video-branch forwards
+    total — no image-branch call. The encoder-side avg-pool is invisible
+    in the call_log (it happens after the forwards complete).
+    """
+    enc, vit = _build_vjepa_spy_encoder(vjepa2_1_forward="video")
+    # T_pixel=9 → N_target=8, so target-pass clip has T=2+8=10.
+    z = enc.batch_encode(torch.randn(1, 3, 9, 32, 32))
+    assert z.shape == (1, 8, 3, 2, 2)  # 1 cond + 2 pooled target = 3 latent slices
+    ts = [c["T"] for c in vit.call_log]
+    assert ts == [2, 10], f"expected [2, 10] for video mode, got {ts}"
+
+
+def test_V6e_vjepa21_mixed_mode_cond_uses_image_branch():
+    """``vjepa2_1_forward="mixed"``: cond pass routes frame 0 through the
+    image branch (T=1). Target pass is unchanged — still the prepend-and-
+    drop-then-avg-pool path (T=2+N). One image-branch + one video-branch
+    forward.
+    """
+    enc, vit = _build_vjepa_spy_encoder(vjepa2_1_forward="mixed")
+    z = enc.batch_encode(torch.randn(1, 3, 9, 32, 32))
+    assert z.shape == (1, 8, 3, 2, 2)
+    ts = [c["T"] for c in vit.call_log]
+    assert ts == [1, 10], f"expected [1, 10] for mixed mode, got {ts}"
+
+
+def test_V6f_vjepa21_target_pass_drops_prepended_slice():
+    """Verify the target-pass output drops exactly the FIRST temporal slice
+    of the video-branch forward — the one produced by the prepended
+    ``[f0, f0]`` pair under tubelet=2 — AND then halves the remaining
+    target latents via avg-pool stride=2.
+
+    The shape check (``T_lat == 1 + N/4``) verifies both steps: without
+    the drop we'd have ``1 + 1 + N/2 = 2 + N/2`` raw latents, then ``(2 +
+    N/2) / 2`` after pool. With the drop, ``1 + N/4`` (N=8 → 1 + 2 = 3).
+    """
+    enc, vit = _build_vjepa_spy_encoder(vjepa2_1_forward="video")
+    z = enc.batch_encode(torch.randn(1, 3, 9, 32, 32))
+    assert z.shape[2] == 3  # 1 cond + 2 pooled target; both steps verified
+    # Second call is the target pass with 2 prepended + 8 targets.
+    assert vit.call_log[1]["T"] == 10
+
+
+def test_V6g_vjepa21_t_pixel_1_honours_forward_mode():
+    """TI2V single-frame fast path (T_pixel==1) routes through the cond
+    pass only. The forward mode still selects the branch: ``video`` dups,
+    ``mixed`` goes single-frame.
+    """
+    enc_v, vit_v = _build_vjepa_spy_encoder(vjepa2_1_forward="video")
+    enc_m, vit_m = _build_vjepa_spy_encoder(vjepa2_1_forward="mixed")
+    z_v = enc_v.batch_encode(torch.randn(1, 3, 1, 32, 32))
+    z_m = enc_m.batch_encode(torch.randn(1, 3, 1, 32, 32))
+    assert z_v.shape == z_m.shape == (1, 8, 1, 2, 2)
+    assert [c["T"] for c in vit_v.call_log] == [2]
+    assert [c["T"] for c in vit_m.call_log] == [1]
+
+
+@pytest.mark.parametrize("Tp", [8, 3, 7])
+def test_V6h_vjepa21_t_pixel_not_div4_minus1_rejected(Tp):
+    """``(T_pixel - 1)`` must be divisible by ``2 * pool_stride = 4`` (ViT
+    tubelet=2 needs an even target count; the post-tubelet avg-pool needs
+    that count even too). Rejected values include:
+
+    - ``T_pixel=8``: (8-1)=7 — odd target count → tubelet=2 already fails.
+    - ``T_pixel=3``: (3-1)=2 — divisible by 2 (old check passed) but NOT
+      by 4 (new check fails) → guards the new constraint.
+    - ``T_pixel=7``: (7-1)=6 — same case as T_pixel=3 (passes %2, fails %4).
+
+    Fail-fast happens before any encoder forward runs. The regex uses
+    ``\\d+`` instead of hardcoded ``4`` so the assertion tracks the
+    encoder's ``_TARGET_TEMPORAL_POOL_STRIDE`` constant if it's ever bumped.
+    """
+    enc = _build_vjepa_encoder()
+    with pytest.raises(ValueError, match=r"\(T_pixel - 1\) % \d+ == 0"):
+        enc.batch_encode(torch.randn(1, 3, Tp, 32, 32))
+
+
+class _NaNPropagatingVJEPAViT(nn.Module):
+    """Mock ViT whose per-token output is a function of the corresponding
+    input region — any NaN in the input region propagates to the output
+    token. Lets tests verify that the cond pass does NOT see target frames
+    by poisoning the target inputs with NaN and checking the cond latent
+    stays finite while target latents become NaN.
+
+    Mirrors the (B, C, T, H, W) → (B, L, D) shape contract of the real
+    V-JEPA ViT, with avg_pool3d standing in for patch_embed + tubelet.
+    """
+
+    def __init__(self, embed_dim: int = 8, patch: int = 16, tubelet: int = 2):
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.patch = int(patch)
+        self.tubelet = int(tubelet)
+        self.img_temporal_dim_size = 1
+        self._proj = nn.Linear(1, embed_dim, bias=False)
+        # Identity-ish init so the projection preserves NaN propagation.
+        with torch.no_grad():
+            self._proj.weight.fill_(1.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _B, _C, T, _H, _W = x.shape
+        if T == 1:
+            kernel = (1, self.patch, self.patch)
+        else:
+            assert T % self.tubelet == 0
+            kernel = (self.tubelet, self.patch, self.patch)
+        pooled = nn.functional.avg_pool3d(x, kernel_size=kernel)  # (B, C, T_lat, h, w)
+        scalar = pooled.mean(dim=1, keepdim=False)  # (B, T_lat, h, w)
+        flat = scalar.flatten(1).unsqueeze(-1)  # (B, T_lat*h*w, 1)
+        return self._proj(flat)
+
+
+def _build_vjepa_nan_propagating_encoder(*, embed_dim: int = 8, vjepa2_1_forward: str = "video"):
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    vit = _NaNPropagatingVJEPAViT(embed_dim=embed_dim)
+    return VJEPA21VideoEncoder(
+        vit, embed_dim=embed_dim, variant="nan-prop", vjepa2_1_forward=vjepa2_1_forward
+    )
+
+
+@pytest.mark.parametrize("mode", ["video", "mixed"])
+def test_V6j_vjepa21_cond_does_not_leak_target_pixels(mode):
+    """Stronger independence proof than the spy log: poison the target
+    pixel frames with NaN, run ``batch_encode``, and verify the cond
+    latent slice (output[:, :, 0:1]) is NaN-free while the target slices
+    (output[:, :, 1:]) carry the poisoned signal. Tightens the contract
+    the spy test only proves at the call-shape level — a NaN reaching
+    the cond latent would mean some target pixel was read by the cond
+    forward, which would break the deploy/train identity for the cond
+    latent. NaN propagates through the avg-pool (mean of any NaN-tainted
+    group is NaN), so the post-pool target slices stay NaN-tainted too.
+    """
+    enc = _build_vjepa_nan_propagating_encoder(vjepa2_1_forward=mode)
+    video = torch.zeros(1, 3, 9, 32, 32)
+    video[:, :, 1:] = float("nan")  # target frames poisoned; frame 0 still clean
+    z = enc.batch_encode(video)
+    assert z.shape == (1, 8, 3, 2, 2)
+    assert not torch.isnan(z[:, :, 0:1]).any(), (
+        f"cond latent contains NaN under vjepa2_1_forward={mode!r} — target frames "
+        "are leaking into the cond pass"
+    )
+    # ``.all()`` is the right strength here: every target pixel frame is
+    # NaN, the tubelet=2 pool groups each contain at least one NaN frame
+    # (hence NaN out), the prepend-drop discards the one clean tubelet
+    # group, the avg-pool stride=2 over NaN-tainted raw target latents
+    # stays NaN, and LayerNorm propagates NaN through mean/var. Anything
+    # weaker than ``.all()`` would let a regression where pooling reads
+    # only ``[::2]`` (skipping poisoned frames) silently slip through.
+    assert torch.isnan(z[:, :, 1:]).all(), (
+        "every target latent slice should be NaN under fully-poisoned target "
+        "inputs; a partially-finite target slice means the target pass is "
+        "reading clean frames it shouldn't be (e.g. stride-2 indexing instead "
+        "of mean pooling)."
+    )
+
+
+def test_V6i_vjepa21_from_pretrained_forwards_yaml_field(tmp_path, monkeypatch):
+    """End-to-end yaml plumbing: ``build_video_encoder`` packs
+    ``vjepa2_1_forward`` from cfg into ``from_pretrained(...)`` kwargs, and
+    the constructed encoder reflects the chosen mode. Uses the fake-imports
+    helper so no actual V-JEPA weights are needed.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder import build_video_encoder
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    # Wire fake vjepa2 modules; route the arch wrapper to our spy ViT.
+    # ``vit_kwargs`` from ``_build_vit_from_manifest`` does NOT include
+    # ``embed_dim`` (it's used by the encoder wrapper, not the upstream
+    # ViT factory) — so we hardcode the spy's embed_dim to match the
+    # manifest's value (8) the encoder will read.
+    def _wrapper(**kwargs):
+        return _SpyVJEPAViT(embed_dim=8)
+
+    _install_fake_vjepa_modules(monkeypatch, _wrapper)
+    # Patch the weight loader; the ViT is zero-weight already and the
+    # spy doesn't have the matching state_dict shape, so we skip load.
+    monkeypatch.setattr(VJEPA21VideoEncoder, "_load_vit_weights", lambda *a, **kw: None)
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 8,
+        "variant": "mock-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "img_temporal_dim_size": 1,
+        "interpolate_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+
+    enc = build_video_encoder({
+        "name": "vjepa2_1",
+        "model_path": str(tmp_path),
+        "vjepa2_1_forward": "mixed",
+    })
+    assert isinstance(enc, VJEPA21VideoEncoder)
+    assert enc.vjepa2_1_forward == "mixed"
+
+
 def test_V7_vjepa21_default_dit_input_proj_shape():
-    """The PR #60 default ``build_dit_input_proj`` at dit_patch_size=(1,2,2)
-    produces a Conv3d(z_dim, dit_dim, (1,2,2), (1,2,2)) — the exact channel-
-    projection-then-2x spatial reduce we need for the Wan TI2V-5B host DiT.
+    """The default ``build_dit_input_proj`` at dit_patch_size=(1,2,2) produces
+    a Conv3d(z_dim, dit_dim, (1,2,2), (1,2,2)) — matches Wan VAE's DiT-side
+    patch layout so the per-frame token grid lines up with the native VAE
+    path. Tokens-per-frame is (H/16/2) × (W/16/2) — 4× fewer than the prior
+    lossless (1,1,1) layout, in exchange for Wan VAE token-count parity.
     """
     enc = _build_vjepa_encoder(embed_dim=1408)
     conv = enc.build_dit_input_proj(dit_dim=1024)
@@ -2076,6 +2529,77 @@ def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
     assert captured["patch_size"] == 16
     assert captured["img_size"] == (384, 384)
     assert captured["tubelet_size"] == 2
+
+
+def test_V11b_vjepa21_from_skeleton_propagates_vjepa2_1_forward(tmp_path, monkeypatch, caplog):
+    """Deploy-side knob plumbing — positive path. Pair to ``test_V11`` which
+    omits the field (default branch) and ``test_W9`` / ``test_W9b`` which
+    cover the rejection side on V-JEPA 2:
+
+    - ``encoder_cfg={"vjepa2_1_forward": "mixed", ...}`` → the built
+      encoder reports ``vjepa2_1_forward == "mixed"`` and the migration
+      warning is silent (the field is present, so this is NOT a pre-PR
+      checkpoint).
+    - ``encoder_cfg`` without the field → resolved mode is the default
+      AND the migration warning fires once, so an operator who deploys
+      a pre-PR checkpoint without hand-adding ``vjepa2_1_forward: mixed``
+      sees a noisy signal instead of a silently-divergent cond latent.
+    """
+    import json as _json
+    import logging
+
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-rope-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "img_temporal_dim_size": 1,
+        "interpolate_rope": True,
+        "checkpoint_file": "DOES-NOT-EXIST.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+
+    def _fake_wrapper(**kwargs):
+        return _MockVJEPAViT(embed_dim=1408)
+
+    _install_fake_vjepa_modules(monkeypatch, _fake_wrapper)
+
+    # --- Path A: field explicit → no warning ---
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.encoder.vjepa2_1"):
+        enc_mixed = VJEPA21VideoEncoder.from_skeleton(
+            components_entry={"attr": "vae", "model_class": "ignored", "extra_kwargs": {}},
+            encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path), "vjepa2_1_forward": "mixed"},
+        )
+    assert enc_mixed.vjepa2_1_forward == "mixed"
+    # Render via ``getMessage()`` (not ``r.message``) so the assertion compares
+    # against the formatted log line — robust to %-substitutions and parity
+    # with ``test_W17``'s path B style.
+    assert not any(
+        "vjepa2_1_forward" in r.getMessage() and r.levelno == logging.WARNING
+        for r in caplog.records
+    ), "explicit vjepa2_1_forward must NOT trip the pre-PR-checkpoint warning"
+
+    # --- Path B: field absent → default + warning ---
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.encoder.vjepa2_1"):
+        enc_default = VJEPA21VideoEncoder.from_skeleton(
+            components_entry={"attr": "vae", "model_class": "ignored", "extra_kwargs": {}},
+            encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
+        )
+    assert enc_default.vjepa2_1_forward == "video"  # current _VJEPA21_FORWARD_DEFAULT
+    warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("vjepa2_1_forward" in m and "mixed" in m for m in warning_msgs), (
+        f"expected migration warning naming the field and the legacy ``mixed`` "
+        f"value; got: {warning_msgs}"
+    )
 
 
 def test_V12_vjepa21_from_skeleton_requires_some_manifest_source():
@@ -2345,3 +2869,557 @@ def test_V21_vjepa21_feature_norm_keys_present_in_state_dict():
         "It must live on the encoder (``self.feature_norm``), not inside ``self._m``."
     )
     assert "feature_norm.bias" in keys, "feature_norm.bias is missing from V-JEPA encoder state_dict."
+
+
+# ======================================================================
+# W1-W12: V-JEPA 2 encoder (vjepa2). The upstream ViT (``src.models``) has
+# no image branch — every forward routes through the tubelet=2 video
+# branch. No ``vjepa2_1_forward`` knob.
+# ======================================================================
+
+
+def _build_vjepa2_encoder(embed_dim: int = 8):
+    """Construct a ``VJEPA2VideoEncoder`` around the shared mock ViT."""
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    vit = _MockVJEPAViT(embed_dim=embed_dim)
+    return VJEPA2VideoEncoder(vit, embed_dim=embed_dim, variant="mock-v2")
+
+
+def _build_vjepa2_spy_encoder(*, embed_dim: int = 8):
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    vit = _SpyVJEPAViT(embed_dim=embed_dim)
+    return VJEPA2VideoEncoder(vit, embed_dim=embed_dim, variant="spy-v2"), vit
+
+
+def _install_fake_vjepa2_modules(monkeypatch, wrapper_factory):
+    """Wire fake ``src.models.*`` modules so V-JEPA 2 imports resolve to test
+    fixtures. Counterpart to ``_install_fake_vjepa_modules`` (which targets
+    ``app.vjepa_2_1.models.*`` for V-JEPA 2.1).
+    """
+
+    class _Module:
+        def __init__(self, **attrs):
+            self.__dict__.update(attrs)
+
+    vision_transformer = _Module()
+    for arch in ("vit_giant_xformers", "vit_giant_xformers_rope"):
+        setattr(vision_transformer, arch, wrapper_factory)
+    # Match V-JEPA 2 upstream signature: ``rotate_queries_or_keys(x, pos)``.
+    # V-JEPA 2.1 added ``n_registers`` / ``has_cls_first`` (see
+    # ``third_party/vjepa2/app/vjepa_2_1/models/utils/modules.py``); the
+    # V-JEPA 2 fake must mirror its own upstream to avoid suggesting the
+    # signatures are interchangeable.
+    fake_vjepa_modules = types.SimpleNamespace(
+        rotate_queries_or_keys=lambda x, pos: x,
+    )
+    fake_src = types.ModuleType("src")
+    fake_src_models = types.ModuleType("src.models")
+    fake_src_models.vision_transformer = vision_transformer
+    fake_src_models_utils = types.ModuleType("src.models.utils")
+    fake_src_models_utils.modules = fake_vjepa_modules
+    monkeypatch.setitem(sys.modules, "src", fake_src)
+    monkeypatch.setitem(sys.modules, "src.models", fake_src_models)
+    monkeypatch.setitem(sys.modules, "src.models.vision_transformer", vision_transformer)
+    monkeypatch.setitem(sys.modules, "src.models.utils", fake_src_models_utils)
+    monkeypatch.setitem(sys.modules, "src.models.utils.modules", fake_vjepa_modules)
+
+
+def test_W1_vjepa2_registration_round_trip():
+    """``register_video_encoder("vjepa2")`` exposes the class via the registry."""
+    from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder  # noqa: F401
+
+    assert "vjepa2" in _VIDEO_ENCODER_REGISTRY
+    assert _VIDEO_ENCODER_REGISTRY["vjepa2"] is VJEPA2VideoEncoder
+
+
+def test_W2_vjepa2_optional_yaml_keys_is_empty():
+    """V-JEPA 2 exposes no yaml knobs beyond ``{name, model_path}``.
+
+    The ``vjepa2_1_forward`` field is V-JEPA 2.1-only; the V-JEPA 2 ViT
+    has no image branch, so the field has no meaning here. Returning an
+    empty set means the base-side whitelist rejects ``vjepa2_1_forward``
+    on a vjepa2 encoder block — that's the contract that lets a yaml
+    typo (carrying the 2.1 knob over) fail fast.
+    """
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    assert VJEPA2VideoEncoder.optional_yaml_keys() == set()
+
+
+def test_W3_vjepa2_spec_invariants():
+    """Spec is identical to V-JEPA 2.1: irreversible, causal, (1,2,2) DiT
+    patch, temporal_compression=4, z_dim from manifest. Locks the contract
+    so a future refactor of either encoder cannot silently drift them apart.
+    """
+    enc = _build_vjepa2_encoder(embed_dim=1408)
+    spec = enc.spec
+    assert spec.is_reversible is False
+    assert spec.causal_temporal is True
+    assert spec.dit_patch_size == (1, 2, 2)
+    assert spec.z_dim == 1408
+    assert spec.spatial_compression == 16
+    assert spec.temporal_compression == 4
+    assert spec.pixel_range == (-1.0, 1.0)
+
+
+def test_W4_vjepa2_batch_encode_t_lat_shapes():
+    """batch_encode T_pixel-to-T_lat dispatch matches V-JEPA 2.1's contract:
+    T_pixel == 1 -> T_lat == 1; T_pixel == 5 -> T_lat == 2; T_pixel == 9
+    -> T_lat == 3. Same downstream shapes so the host backbone consumes
+    either encoder interchangeably.
+    """
+    enc = _build_vjepa2_encoder(embed_dim=8)
+    v1 = torch.randn(1, 3, 1, 32, 32)
+    z1 = enc.batch_encode(v1)
+    assert z1.shape == (1, 8, 1, 2, 2)
+
+    # T_pixel=5 — smallest non-trivial pool case (T_target_raw=2 → 1).
+    v5 = torch.randn(1, 3, 5, 32, 32)
+    z5 = enc.batch_encode(v5)
+    assert z5.shape == (1, 8, 2, 2, 2)
+
+    v9 = torch.randn(1, 3, 9, 32, 32)
+    z9 = enc.batch_encode(v9)
+    assert z9.shape == (1, 8, 3, 2, 2)
+
+
+def test_W4b_vjepa2_pool_target_temporal_is_mean():
+    """V-JEPA 2 mirror of test_V5b: ``_pool_target_temporal`` must be an
+    actual mean, not stride-2 indexing. Guards against silent regression.
+    """
+    enc = _build_vjepa2_encoder(embed_dim=2)
+    z_target = torch.tensor([1.0, 2.0, 3.0, 4.0]).view(1, 1, 4, 1, 1).expand(1, 2, 4, 1, 1).contiguous()
+    pooled = enc._pool_target_temporal(z_target)
+    assert pooled.shape == (1, 2, 2, 1, 1)
+    assert torch.allclose(pooled[0, 0, 0, 0, 0], torch.tensor(1.5))
+    assert torch.allclose(pooled[0, 0, 1, 0, 0], torch.tensor(3.5))
+
+
+def test_W5_vjepa2_routes_every_forward_through_video_branch():
+    """``vjepa2`` always uses the dup+video forward for the cond pass (no
+    image branch exists upstream), so the spy log shows T=2 for the cond
+    and T=2+N for the target. Never T=1 — the image-branch fast path
+    that V-JEPA 2.1 supports is not available here.
+    """
+    enc, vit = _build_vjepa2_spy_encoder()
+    # T_pixel=9 → cond pass T=2, target pass T=2+8=10.
+    z = enc.batch_encode(torch.randn(1, 3, 9, 32, 32))
+    assert z.shape == (1, 8, 3, 2, 2)  # 1 cond + 2 pooled target
+    ts = [c["T"] for c in vit.call_log]
+    assert ts == [2, 10], f"vjepa2 should never call image branch (T=1); got {ts}"
+
+    vit.call_log.clear()
+    # Single-frame fast path: dup → T=2 video forward, still no T=1.
+    z1 = enc.batch_encode(torch.randn(1, 3, 1, 32, 32))
+    assert z1.shape == (1, 8, 1, 2, 2)
+    ts1 = [c["T"] for c in vit.call_log]
+    assert ts1 == [2], f"single-frame should dup to T=2; got {ts1}"
+
+
+def test_W6_vjepa2_target_pass_drops_prepended_slice():
+    """Verify the target-pass drops exactly the first temporal slice AND
+    halves the remaining latents via avg-pool stride=2. Shape check:
+    T_lat == 1 + N/4 (without the drop+pool we'd have 2 + N/2 raw or
+    1 + N/2 drop-only).
+    """
+    enc, vit = _build_vjepa2_spy_encoder()
+    z = enc.batch_encode(torch.randn(1, 3, 9, 32, 32))
+    assert z.shape[2] == 3  # 1 cond + 2 pooled target; drop+pool verified
+    assert vit.call_log[1]["T"] == 10
+
+
+@pytest.mark.parametrize("Tp", [8, 3, 7])
+def test_W7_vjepa2_t_pixel_not_div4_minus1_rejected(Tp):
+    """``(T_pixel - 1) % 4 == 0`` is needed (ViT tubelet=2 + post-tubelet
+    avg-pool stride=2). T_pixel ∈ {8, 3, 7} all fail; fail-fast happens
+    before any encoder forward runs. T_pixel=3 / T_pixel=7 specifically
+    guard against a regression that only checks %2 (they pass the old
+    constraint but fail the new one). Loose ``\\d+`` regex tracks the
+    encoder's pool-stride constant.
+    """
+    enc = _build_vjepa2_encoder()
+    with pytest.raises(ValueError, match=r"\(T_pixel - 1\) % \d+ == 0"):
+        enc.batch_encode(torch.randn(1, 3, Tp, 32, 32))
+
+
+def test_W8_vjepa2_from_pretrained_rejects_vjepa2_1_forward(tmp_path):
+    """``vjepa2_1_forward`` is V-JEPA 2.1-only; passing it to
+    ``vjepa2.from_pretrained`` must raise rather than silently
+    ignore (which would let a yaml typo go unflagged).
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+    with pytest.raises(ValueError, match="vjepa2_1_forward is V-JEPA 2.1-only"):
+        VJEPA2VideoEncoder.from_pretrained(str(tmp_path), vjepa2_1_forward="video")
+
+
+def test_W9_vjepa2_from_skeleton_rejects_vjepa2_1_forward(tmp_path, monkeypatch):
+    """Same rejection at deploy time: ``from_skeleton`` reads encoder_cfg;
+    if ``vjepa2_1_forward`` is present in the saved yaml encoder block,
+    raise rather than silently ignore.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+    encoder_cfg = {"name": "vjepa2", "model_path": str(tmp_path), "vjepa2_1_forward": "mixed"}
+    with pytest.raises(ValueError, match="vjepa2_1_forward is V-JEPA 2.1-only"):
+        VJEPA2VideoEncoder.from_skeleton(
+            {"attr": "vae", "model_class": "X", "extra_kwargs": {}},
+            ckpt_dir=str(tmp_path),
+            encoder_cfg=encoder_cfg,
+        )
+
+
+def test_W9b_vjepa2_from_skeleton_rejects_vjepa2_1_forward_null(tmp_path):
+    """Tighter version of W9: ``vjepa2_1_forward: null`` (yaml null) on a
+    vjepa2 encoder block must also raise — silently accepting null
+    diverges from the training-side semantic where the kwarg being
+    present at all is the rejection trigger. Same operator-mistake
+    pattern as W9, just with the yaml-null spelling instead of a value.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+    encoder_cfg = {"name": "vjepa2", "model_path": str(tmp_path), "vjepa2_1_forward": None}
+    with pytest.raises(ValueError, match="vjepa2_1_forward is V-JEPA 2.1-only"):
+        VJEPA2VideoEncoder.from_skeleton(
+            {"attr": "vae", "model_class": "X", "extra_kwargs": {}},
+            ckpt_dir=str(tmp_path),
+            encoder_cfg=encoder_cfg,
+        )
+
+
+def test_W10_vjepa2_decode_raises():
+    """Irreversible encoder: decode/to_frames raise NotImplementedError."""
+    enc = _build_vjepa2_encoder()
+    with pytest.raises(NotImplementedError, match="irreversible"):
+        enc.decode(torch.zeros(1, 8, 1, 2, 2))
+    with pytest.raises(NotImplementedError, match="irreversible"):
+        enc.to_frames(torch.zeros(1, 3, 1, 32, 32))
+
+
+def test_W11_vjepa2_default_dit_input_proj_shape():
+    """V-JEPA 2 uses ``dit_patch_size=(1,2,2)`` (Wan VAE parity) — the
+    default ``build_dit_input_proj`` produces Conv3d(z_dim, dit_dim,
+    (1,2,2), (1,2,2)). Mirrors V-JEPA 2.1 (test_V7).
+    """
+    enc = _build_vjepa2_encoder(embed_dim=1408)
+    conv = enc.build_dit_input_proj(dit_dim=1024)
+    assert isinstance(conv, nn.Conv3d)
+    assert conv.in_channels == 1408
+    assert conv.out_channels == 1024
+    assert tuple(conv.kernel_size) == (1, 2, 2)
+    assert tuple(conv.stride) == (1, 2, 2)
+
+
+def test_W12_vjepa2_from_pretrained_end_to_end(tmp_path, monkeypatch):
+    """End-to-end yaml plumbing: ``build_video_encoder({"name": "vjepa2",
+    "model_path": ...})`` constructs the encoder via ``from_pretrained``,
+    routing through the V-JEPA 2 src.models imports.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder import build_video_encoder
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    def _wrapper(**kwargs):
+        # vit_kwargs do not include embed_dim — hardcode to match manifest.
+        return _SpyVJEPAViT(embed_dim=8)
+
+    _install_fake_vjepa2_modules(monkeypatch, _wrapper)
+    monkeypatch.setattr(VJEPA2VideoEncoder, "_load_vit_weights", lambda *a, **kw: None)
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 8,
+        "variant": "mock-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+    enc = build_video_encoder({"name": "vjepa2", "model_path": str(tmp_path)})
+    assert isinstance(enc, VJEPA2VideoEncoder)
+    # Sanity: a forward goes through the dup+video path (T=2).
+    z = enc.batch_encode(torch.randn(1, 3, 1, 32, 32))
+    assert z.shape == (1, 8, 1, 2, 2)
+
+
+def test_W12b_vjepa2_cond_does_not_leak_target_pixels():
+    """V-JEPA 2 mirror of test_V6j: poison target inputs with NaN and verify
+    cond latent stays finite (target frames must not leak into the cond
+    pass). NaN propagates through the avg-pool, so the post-pool target
+    slices stay NaN-tainted.
+    """
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    vit = _NaNPropagatingVJEPAViT(embed_dim=8)
+    enc = VJEPA2VideoEncoder(vit, embed_dim=8, variant="nan-prop-v2")
+    video = torch.zeros(1, 3, 9, 32, 32)
+    video[:, :, 1:] = float("nan")
+    z = enc.batch_encode(video)
+    assert z.shape == (1, 8, 3, 2, 2)
+    assert not torch.isnan(z[:, :, 0:1]).any(), (
+        "vjepa2 cond latent contains NaN — target frames are leaking into the cond pass"
+    )
+    # ``.all()`` mirrors test_V6j — see that test for the propagation
+    # argument; the V-JEPA 2 path runs the exact same prepend-drop + pool
+    # pipeline so the same all-NaN-target invariant holds here.
+    assert torch.isnan(z[:, :, 1:]).all(), (
+        "every vjepa2 target latent slice should be NaN under fully-poisoned "
+        "target inputs; partial finiteness implies the pool reads clean "
+        "frames it shouldn't be."
+    )
+
+
+@pytest.mark.parametrize("field", ["img_temporal_dim_size", "interpolate_rope"])
+def test_W12c_vjepa2_rejects_vjepa2_1_manifest_fields(tmp_path, field):
+    """V-JEPA 2 manifest validation rejects V-JEPA 2.1-only fields
+    (``img_temporal_dim_size`` / ``interpolate_rope``). These come from
+    the V-JEPA 2.1 ViT wrapper (image branch + RoPE interpolation) and
+    have no analog in the upstream V-JEPA 2 ViT. Without this guard, a
+    copy-pasted V-JEPA 2.1 manifest in a vjepa2 weight dir would slip
+    past and surface later as an opaque state_dict mismatch.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+        field: 1 if field == "img_temporal_dim_size" else True,
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+    with pytest.raises(ValueError, match="V-JEPA 2.1-only fields"):
+        VJEPA2VideoEncoder.from_pretrained(str(tmp_path))
+
+
+def test_W13_vjepa2_manifest_patch_tubelet_mismatch_rejected(tmp_path):
+    """Manifest with patch/tubelet != (16, 2) is rejected at load time —
+    the reshape paths and spec block are hard-wired against those values.
+    """
+    import json as _json
+
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+
+    manifest = {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-384",
+        "patch": 14,  # wrong
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "checkpoint_file": "fake.pt",
+        "checkpoint_key": "target_encoder",
+    }
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
+    with pytest.raises(ValueError, match="patch/tubelet must be"):
+        VJEPA2VideoEncoder.from_pretrained(str(tmp_path))
+
+
+def test_W14_vjepa2_feature_norm_keys_present_in_state_dict():
+    """Mirror of test_V21 for V-JEPA 2: ``self.feature_norm`` must live
+    directly on the encoder (NOT inside ``self._m``) so the freeze yaml's
+    ``video_backbone._encoder`` line recursively covers it AND the
+    safetensors carries it under ``video_backbone._encoder.feature_norm.*``.
+    Without an explicit pin here, a future refactor moving the LN into
+    ``self._m`` would still round-trip fine but silently change the freeze
+    granularity for V-JEPA 2 (deploy round-trip is invariant, but a
+    user's freeze yaml that targets ``_encoder.feature_norm`` no longer
+    matches). The V-JEPA 2.1 counterpart is ``test_V21``."""
+    enc = _build_vjepa2_encoder(embed_dim=8)
+    keys = set(enc.state_dict().keys())
+    assert "feature_norm.weight" in keys, (
+        "feature_norm.weight is missing from V-JEPA 2 encoder state_dict. "
+        "It must live on the encoder (``self.feature_norm``), not inside ``self._m``."
+    )
+    assert "feature_norm.bias" in keys, "feature_norm.bias is missing from V-JEPA 2 encoder state_dict."
+
+
+def _build_vjepa2_manifest_payload() -> dict:
+    """V-JEPA 2 manifest dict (no V-JEPA 2.1-only fields)."""
+    return {
+        "arch_name": "vit_giant_xformers_rope",
+        "embed_dim": 1408,
+        "variant": "vitg-384",
+        "patch": 16,
+        "img_size": 384,
+        "training_num_frames": 64,
+        "tubelet": 2,
+        "use_rope": True,
+        "checkpoint_file": "DOES-NOT-EXIST.pt",
+        "checkpoint_key": "target_encoder",
+    }
+
+
+def test_W15_vjepa2_copy_deploy_artifacts_copies_manifest(tmp_path):
+    """V-JEPA 2 mirror of test_V18: training-side hook copies
+    ``<encoder.model_path>/manifest.json`` into ``<output_dir>/manifest.json``
+    so new checkpoints are self-contained on deploy."""
+    import json as _json
+
+    from omegaconf import OmegaConf
+
+    encoder_src = tmp_path / "vjepa2-weights"
+    encoder_src.mkdir()
+    manifest_payload = _build_vjepa2_manifest_payload()
+    (encoder_src / "manifest.json").write_text(_json.dumps(manifest_payload))
+
+    output_dir = tmp_path / "ckpt-out"
+    output_dir.mkdir()
+
+    enc = _build_vjepa2_encoder(embed_dim=1408)
+    cfg = OmegaConf.create(
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(encoder_src)}}}}
+    )
+    enc.copy_deploy_artifacts(str(output_dir), cfg)
+
+    dst = output_dir / "manifest.json"
+    assert dst.exists()
+    assert _json.loads(dst.read_text()) == manifest_payload
+
+
+def test_W16_vjepa2_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_path, caplog):
+    """V-JEPA 2 mirror of test_V19: missing cfg / missing source file must
+    log a warning and skip the copy rather than raising. A copy hiccup
+    cannot crash an otherwise-good training run; deploy then falls back
+    to ``encoder.model_path``."""
+    import logging
+
+    from omegaconf import OmegaConf
+
+    enc = _build_vjepa2_encoder(embed_dim=1408)
+    output_dir = tmp_path / "ckpt-out"
+    output_dir.mkdir()
+
+    # cfg without model.video_backbone.encoder → warning + no-op.
+    with caplog.at_level(logging.WARNING):
+        enc.copy_deploy_artifacts(str(output_dir), cfg={})
+    assert not (output_dir / "manifest.json").exists()
+    assert any("model_path" in r.message for r in caplog.records)
+
+    caplog.clear()
+    # cfg points at a directory with no manifest.json → warning + no-op.
+    empty_src = tmp_path / "empty"
+    empty_src.mkdir()
+    cfg = OmegaConf.create(
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(empty_src)}}}}
+    )
+    with caplog.at_level(logging.WARNING):
+        enc.copy_deploy_artifacts(str(output_dir), cfg)
+    assert not (output_dir / "manifest.json").exists()
+    assert any("manifest.json" in r.message for r in caplog.records)
+
+
+def test_W17_vjepa2_copy_deploy_artifacts_io_error_does_not_crash(
+    tmp_path, caplog, monkeypatch
+):
+    """V-JEPA 2 mirror of test_V20: PermissionError / ENOSPC / disappearing-
+    mount OSError during the manifest copy must collapse to a warning +
+    return so the trainer's safetensors save isn't lost."""
+    import json as _json
+    import logging
+    import shutil
+
+    from omegaconf import OmegaConf
+
+    encoder_src = tmp_path / "vjepa2-weights"
+    encoder_src.mkdir()
+    (encoder_src / "manifest.json").write_text(_json.dumps(_build_vjepa2_manifest_payload()))
+    output_dir = tmp_path / "ckpt-out"
+    output_dir.mkdir()
+    enc = _build_vjepa2_encoder(embed_dim=1408)
+    cfg = OmegaConf.create(
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(encoder_src)}}}}
+    )
+
+    def _boom(*args, **kwargs):
+        raise PermissionError("simulated read-only filesystem")
+
+    monkeypatch.setattr(shutil, "copyfile", _boom)
+    with caplog.at_level(logging.WARNING):
+        # Must NOT raise — assertion is "we got here".
+        enc.copy_deploy_artifacts(str(output_dir), cfg)
+    assert not (output_dir / "manifest.json").exists()
+    formatted = [r.getMessage() for r in caplog.records]
+    assert any("failed" in m and "simulated" in m for m in formatted), (
+        f"expected warning naming the copy failure; got: {formatted}"
+    )
+
+
+def test_W18_vjepa_target_temporal_pool_stride_constant_pinned():
+    """The encoder's ``_TARGET_TEMPORAL_POOL_STRIDE = 2`` is what makes
+    ``temporal_compression == 4`` (ViT tubelet=2 × encoder pool stride=2)
+    and gives Wan VAE causal-group token-count parity. Tests
+    ``test_V6h`` / ``test_W7`` deliberately use a loose ``\\d+`` regex in
+    the rejection message so they keep working if the constant is bumped
+    — but a silent bump would still break production token-count parity.
+    Pinning the value here surfaces an undocumented constant change as a
+    noisy test failure without disturbing the loose-regex design.
+    """
+    from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    assert VJEPA21VideoEncoder._TARGET_TEMPORAL_POOL_STRIDE == 2
+    assert VJEPA2VideoEncoder._TARGET_TEMPORAL_POOL_STRIDE == 2
