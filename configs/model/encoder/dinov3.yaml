@@ -1,0 +1,64 @@
+# @package model.video_backbone.encoder
+#
+# Hydra group config for the DINOv3 ViT external video encoder
+# (Meta DINOv3 release on Hugging Face). Activated by overriding the
+# inline ``encoder:`` block in ``configs/model/backbone/wan.yaml`` on
+# the CLI:
+#
+#   bash scripts/train.sh \
+#     model=dual_system \
+#     'model.video_backbone.from_scratch=true' \
+#     'model.video_backbone.shift_video=12.0' \
+#     'model/encoder=dinov3'
+#
+# ``temporal_compression`` / ``causal_temporal`` no longer need a CLI
+# override — the encoder spec exposes ``(4, true)`` which already matches
+# the wan.yaml default (Wan2.2-TI2V-5B native VAE has the same shape).
+# The cross-check in ``BaseWAMArchitecture._init_video_backbone`` passes
+# without intervention.
+#
+# This yaml is the canonical reference for the encoder block fields and
+# the notes that go with them. Structural fields (z_dim / spatial_compression /
+# num_register_tokens) come from the HF ``config.json`` at ``model_path`` —
+# NOT from yaml. ``DinoV3VideoEncoder._extract_structural_fields`` reads
+# ``hidden_size`` (canonical) with a fallback to ``embed_dim`` and pulls
+# ``patch_size`` / ``num_register_tokens`` straight off the HF config.
+#
+# Spec (derived from the HF config, ViT-B/16 example):
+#   z_dim                            = 768  (hidden_size of ViT-B; 1024 for L,
+#                                            1280 for H, 1536 for g/14, etc.)
+#   spatial_compression              = 16   (patch_size; 14 for /14 variants)
+#   temporal_compression             = 4    (parameter-free causal mean pool
+#                                            mirroring Wan VAE's 1 + 4 + 4 + ...
+#                                            grouping; per-frame ViT has no
+#                                            tubelet)
+#   causal_temporal                  = true (frame 0 kept as-is, rest pooled)
+#   dit_patch_size                   = (1, 2, 2)   (Wan VAE parity)
+#   is_reversible                    = false (no pixel decoder)
+#
+# Token-count parity with Wan VAE on RoBoTwin (num_frames=33, video_stride=4,
+# H=384, W=320, Wan2.2-TI2V-5B VAE upsample=16, DINOv3 patch_size=16):
+#   wan.vae:  3 latent frames × (384/16/2)×(320/16/2) = 3 × 12 × 10 = 360
+#   dinov3:   3 latent frames × (384/16/2)×(320/16/2) = 3 × 12 × 10 = 360
+#   (1 frame-0 cond + 2 mean-pooled target latents from causal pool)
+#
+# Why ``from_scratch=true`` is required: the pre-trained Wan TI2V DiT's
+# first conv channels are bound to native Wan VAE z_dim=48, but DINOv3
+# emits ``hidden_size`` (768/1024/1280/...). ``reinit_dit_from_scratch``
+# rebuilds patch_embedding and head.head against the new spec.
+#
+# SECURITY NOTE: ``from_pretrained`` / ``from_skeleton`` both pass
+# ``trust_remote_code=True`` so the snapshot's bundled ``modeling_*.py``
+# files run at load time. Only point ``model_path`` at directories you
+# trust (your own download / a vendor mirror you've reviewed); do NOT
+# treat this as a freeform string in operator-controlled configs.
+
+name: dinov3
+# [Required] Directory holding the HF DINOv3 snapshot — must contain
+# ``config.json`` and the bundled ``modeling_*.py`` (referenced via
+# ``trust_remote_code=True``) plus the safetensors weights. The deploy
+# host must be able to read this directory too (see
+# ``docs/external_video_encoder.md`` §6 — DINOv3 is the only encoder
+# that re-reads the HF config at deploy instead of going through a
+# sidecar manifest).
+model_path: /path/to/vit-base-16

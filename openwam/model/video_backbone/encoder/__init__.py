@@ -283,11 +283,12 @@ def build_video_encoder(cfg) -> VideoEncoder:
     return encoder_cls.from_pretrained(str(model_path), **optional_kwargs)
 
 
-__all__ = ['VideoEncoder', 'VideoEncoderSpec', 'VJEPA2VideoEncoder', 'VJEPA21VideoEncoder', 'WanVideoVAEEncoder', 'build_video_encoder', 'register_video_encoder']
+__all__ = ['VideoEncoder', 'VideoEncoderSpec', 'DinoV3VideoEncoder', 'VJEPA2VideoEncoder', 'VJEPA21VideoEncoder', 'WanVideoVAEEncoder', 'build_video_encoder', 'register_video_encoder']
 
 # Built-in registrations (kept at the bottom so subclasses can import names
 # from this module without circular issues). Adding a new encoder = adding
 # a new line here and a new file alongside.
+from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.wan_vae import WanVideoVAEEncoder  # noqa: E402, F401
