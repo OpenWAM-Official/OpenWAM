@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import random
+import time
 from typing import Optional
 
 import cv2
@@ -287,14 +288,12 @@ def _check_temporal_divisibility(num_video_frames: int, temporal_compression: in
     if causal_temporal:
         if (num_video_frames - 1) % tc != 0:
             raise ValueError(
-                f"num_video_frames={num_video_frames} violates "
-                f"(N-1) % {tc} == 0 (required by causal encoder)."
+                f"num_video_frames={num_video_frames} violates (N-1) % {tc} == 0 (required by causal encoder)."
             )
     else:
         if num_video_frames % tc != 0:
             raise ValueError(
-                f"num_video_frames={num_video_frames} violates "
-                f"N % {tc} == 0 (required by non-causal encoder)."
+                f"num_video_frames={num_video_frames} violates N % {tc} == 0 (required by non-causal encoder)."
             )
 
 
@@ -410,9 +409,7 @@ class RoboTwinDataset(BaseActionDataset):
         #     ``temporal_compression`` (Wan VAE = 4, V-JEPA 2.1 = 2).
         #   causal_temporal=False: uniform tubelets, so ``num_video_frames``
         #     itself must be divisible by ``temporal_compression``.
-        _check_temporal_divisibility(
-            self.num_video_frames, self.temporal_compression, self.causal_temporal
-        )
+        _check_temporal_divisibility(self.num_video_frames, self.temporal_compression, self.causal_temporal)
         self.multiview = bool(multiview)
         if self.multiview:
             if camera_layout is None:
@@ -594,7 +591,10 @@ class RoboTwinDataset(BaseActionDataset):
                         f"  [normalizer] Found pre-computed single-task stats file: {stats_path} (exists ✓, will load)"
                     )
                 else:
-                    from openwam.dataloader.robotwin_stats_computation import compute_action_stats
+                    from openwam.dataloader.robotwin_stats_computation import (
+                        atomic_save_stats_npy,
+                        compute_action_stats,
+                    )
 
                     print(
                         f"  [normalizer] No pre-computed stats at default location: {stats_path}\n"
@@ -602,7 +602,7 @@ class RoboTwinDataset(BaseActionDataset):
                         f"and will save to: {stats_path}"
                     )
                     stats = compute_action_stats(data_root)
-                    np.save(stats_path, stats, allow_pickle=True)
+                    atomic_save_stats_npy(stats_path, stats)
                     print(f"  [normalizer] Saved newly-computed single-task stats → {stats_path}")
 
             if stats_path is not None:
@@ -1148,8 +1148,50 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
                     )
                 else:
                     from openwam.dataloader.robotwin_stats_computation import (
+                        atomic_save_stats_npy,
+                        cleanup_partial_stats_checkpoint,
                         compute_multitask_robotwin_stats,
                     )
+
+                    try:
+                        import torch.distributed as dist
+                    except Exception:
+                        dist = None
+
+                    dist_ready = dist is not None and dist.is_available() and dist.is_initialized()
+                    rank = dist.get_rank() if dist_ready else 0
+                    is_rank0 = rank == 0
+
+                    # Poll-based cross-rank synchronization: rank 0 owns the
+                    # full computation (which can run for hours on large
+                    # datasets) and other ranks wait on the resulting file.
+                    # Going through ``dist.barrier()`` on a single CPU rank
+                    # would either block the NCCL collective or trip its
+                    # internal timeout; explicit polling keeps the wait
+                    # transport-agnostic.
+                    #
+                    # Defaults are tuned for "real" multi-task RoboTwin runs
+                    # (~hours of stats compute) but are overridable via env
+                    # so CI / smoke runs can tighten the wait and oncall can
+                    # extend it on bigger datasets without a code change.
+                    def _env_positive_float(name: str, default: float) -> float:
+                        raw = os.environ.get(name)
+                        if not raw:
+                            return default
+                        try:
+                            value = float(raw)
+                        except ValueError:
+                            print(f"[normalizer] WARNING: invalid {name}={raw!r}, falling back to default {default}")
+                            return default
+                        if value <= 0:
+                            print(
+                                f"[normalizer] WARNING: non-positive {name}={raw!r}, falling back to default {default}"
+                            )
+                            return default
+                        return value
+
+                    wait_timeout_s = _env_positive_float("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60)
+                    poll_interval_s = _env_positive_float("OPENWAM_STATS_POLL_INTERVAL_S", 10)
 
                     print(
                         f"[normalizer] No pre-computed {_scope_label} stats at default location: "
@@ -1158,14 +1200,34 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
                         f"and will save to: {action_stats_path}\n"
                         f"[normalizer]   (this may take a while for large datasets)"
                     )
-                    stats = compute_multitask_robotwin_stats(
-                        dataset_dir=dataset_dir,
-                        robot=robot,
-                        variant=variant,
-                        tasks=tasks,
-                    )
-                    np.save(action_stats_path, stats, allow_pickle=True)
-                    print(f"[normalizer] Saved newly-computed {_scope_label} stats → {action_stats_path}")
+                    if is_rank0:
+                        stats = compute_multitask_robotwin_stats(
+                            dataset_dir=dataset_dir,
+                            robot=robot,
+                            variant=variant,
+                            tasks=tasks,
+                            checkpoint_path=action_stats_path,
+                        )
+                        atomic_save_stats_npy(action_stats_path, stats)
+                        cleanup_partial_stats_checkpoint(action_stats_path)
+                        print(f"[normalizer] Saved newly-computed {_scope_label} stats → {action_stats_path}")
+                    elif dist_ready:
+                        print(
+                            f"[normalizer] Rank {rank} waiting for rank 0 to finish shared stats at {action_stats_path}"
+                        )
+                        deadline = time.monotonic() + wait_timeout_s
+                        while not os.path.exists(action_stats_path):
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError(
+                                    f"Timed out while waiting for rank 0 to produce shared stats: {action_stats_path}"
+                                )
+                            time.sleep(poll_interval_s)
+
+                    if not os.path.exists(action_stats_path):
+                        raise FileNotFoundError(
+                            f"Expected shared stats file to exist after computation, but it was not found: "
+                            f"{action_stats_path}"
+                        )
         self.action_stats_path: Optional[str] = action_stats_path
 
         self._sub_datasets = []

@@ -30,7 +30,9 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import os
+import shutil
 from typing import Optional
 
 import h5py
@@ -40,6 +42,77 @@ import numpy as np
 _JOINT_ACTION_DIM = 14  # aloha-agilex qpos vector
 _EEF_ACTION_DIM = 20  # [xyz(3) + rot6d(6) + grip(1)] x 2 arms
 _MODES = ("joint", "eef")
+
+_SHARD_DIR_NAME = "shards_v1"
+
+
+# ---------------------------------------------------------------------------
+# Atomic IO helpers (used both for shards and the final stats .npy)
+# ---------------------------------------------------------------------------
+
+
+def _atomic_save_npz(path: str, **arrays) -> None:
+    """Write a compressed NPZ via tmp + os.replace (atomic on POSIX)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            np.savez_compressed(f, **arrays)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def atomic_save_stats_npy(path: str, stats: dict) -> None:
+    """Write the final stats .npy atomically.
+
+    ``np.save`` is *not* atomic — the destination file is created at
+    ``open(..., "wb")`` time but only filled in afterwards, so a polling
+    consumer (e.g. another distributed rank) can observe a half-written
+    file via ``os.path.exists``. We instead serialize to a sibling tmp path
+    and ``os.replace`` it into place.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    np.save(tmp_path, stats, allow_pickle=True)
+    # ``np.save`` may append a ``.npy`` extension if the target path doesn't
+    # already end with one; move the actually-produced file.
+    actual_tmp = tmp_path if os.path.exists(tmp_path) else f"{tmp_path}.npy"
+    os.replace(actual_tmp, path)
+
+
+# ---------------------------------------------------------------------------
+# Partial checkpoint directory + shard helpers
+# ---------------------------------------------------------------------------
+
+
+def _partial_stats_dir(checkpoint_path: str) -> str:
+    return f"{checkpoint_path}.partial"
+
+
+def cleanup_partial_stats_checkpoint(checkpoint_path: Optional[str]) -> None:
+    if not checkpoint_path:
+        return
+    partial_dir = _partial_stats_dir(checkpoint_path)
+    if os.path.isdir(partial_dir):
+        shutil.rmtree(partial_dir)
+
+
+def _shard_path_for_root(checkpoint_path: str, data_root: str) -> str:
+    """Deterministic shard path for one task ``data_root``.
+
+    The absolute ``data_root`` is the whole cache key: expanding/shrinking the
+    task list naturally reuses or ignores shards by recomputing this path for
+    the *current* task_roots. ``shards_v1`` is the shard-format namespace; bump
+    it if the NPZ payload schema ever changes.
+    """
+    canonical = os.path.abspath(data_root)
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(_partial_stats_dir(checkpoint_path), _SHARD_DIR_NAME, f"{digest}.npz")
 
 
 def _read_joint_actions(f) -> Optional[np.ndarray]:
@@ -153,6 +226,89 @@ def _accumulate_from_files(
     return total
 
 
+def _collect_actions_from_files(
+    files: list[str],
+    label: str = "",
+    prior_total: int = 0,
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray], int]:
+    """Collect one task-root's actions into raw arrays for shard persistence.
+
+    Mirrors :func:`_accumulate_from_files` but returns the concatenated joint
+    and eef arrays so the caller can persist them to a per-task NPZ shard
+    (vs. folding them straight into a global accumulator). ``prior_total`` is
+    purely cosmetic — it makes the running progress log reflect already-
+    persisted task-roots when resuming.
+    """
+    joint_chunks: list[np.ndarray] = []
+    eef_chunks: list[np.ndarray] = []
+    joint_total = 0
+    eef_total = 0
+
+    for i, path in enumerate(files):
+        try:
+            with h5py.File(path, "r") as f:
+                joint_actions = _read_joint_actions(f)
+                eef_actions = _read_eef_actions(f)
+        except Exception as e:
+            print(f"  [{label}][{i + 1}/{len(files)}] {os.path.basename(path)}: error {e}, skipping")
+            continue
+
+        if joint_actions is not None:
+            joint_chunks.append(joint_actions)
+            joint_total += joint_actions.shape[0]
+        if eef_actions is not None:
+            eef_chunks.append(eef_actions)
+            eef_total += eef_actions.shape[0]
+
+        if (i + 1) % 100 == 0 or (i + 1) == len(files):
+            total = prior_total + max(joint_total, eef_total)
+            print(f"  [{label}][{i + 1}/{len(files)}] processed; total timesteps so far: {total}")
+
+    joint = np.concatenate(joint_chunks, axis=0) if joint_chunks else None
+    eef = np.concatenate(eef_chunks, axis=0) if eef_chunks else None
+    return joint, eef, max(joint_total, eef_total)
+
+
+def _rebuild_stats_from_shards(
+    *,
+    task_roots: list[tuple[str, str]],
+    checkpoint_path: str,
+) -> dict:
+    """Aggregate the current task_roots' deterministic shards into stats."""
+    partial_dir = _partial_stats_dir(checkpoint_path)
+    joint_acc = _ModeAccumulator(_JOINT_ACTION_DIM)
+    eef_acc = _ModeAccumulator(_EEF_ACTION_DIM)
+
+    for _, data_root in task_roots:
+        shard_path = _shard_path_for_root(checkpoint_path, data_root)
+        if not os.path.exists(shard_path):
+            continue
+        with np.load(shard_path, allow_pickle=False) as payload:
+            joint = payload["joint"]
+            eef = payload["eef"]
+        if joint.size > 0:
+            joint_acc.update(joint.astype(np.float64, copy=False))
+        if eef.size > 0:
+            eef_acc.update(eef.astype(np.float64, copy=False))
+
+    result: dict = {
+        "num_timesteps": int(max(joint_acc.total_count, eef_acc.total_count)),
+    }
+    if joint_acc.total_count == 0 and eef_acc.total_count == 0:
+        raise FileNotFoundError(
+            f"Cannot rebuild stats from partial checkpoint at {partial_dir}: no shards matched the current task_roots."
+        )
+    if joint_acc.total_count > 0:
+        result["joint"] = joint_acc.finalize()
+    else:
+        print("  WARNING: joint stats are empty; no joint_action/vector seen.")
+    if eef_acc.total_count > 0:
+        result["eef"] = eef_acc.finalize()
+    else:
+        print("  WARNING: eef stats are empty; no endpose/* seen.")
+    return result
+
+
 def compute_action_stats(data_root: str) -> dict:
     """Compute stats for a single-task directory, covering joint + eef.
 
@@ -188,6 +344,7 @@ def compute_multitask_robotwin_stats(
     robot: str,
     variant: str = "clean_50",
     tasks: Optional[list] = None,
+    checkpoint_path: Optional[str] = None,
 ) -> dict:
     """Compute joint+eef stats aggregated across many task/variant roots.
 
@@ -196,6 +353,11 @@ def compute_multitask_robotwin_stats(
         robot: Robot embodiment name.
         variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``.
         tasks: Optional list of task names. Defaults to all training tasks.
+        checkpoint_path: When set, the function persists a per-task NPZ
+            shard into ``<checkpoint_path>.partial/shards_v1/`` after each
+            task-root is processed. A subsequent call recomputes the shard
+            path from the current ``data_root`` and skips it when the shard
+            already exists.
 
     Returns:
         Nested dict identical in shape to :func:`compute_action_stats`.
@@ -212,6 +374,12 @@ def compute_multitask_robotwin_stats(
         raise FileNotFoundError(f"No task data found in {dataset_dir} for robot={robot}, variant={variant}")
 
     print(f"Computing joint+eef stats across {len(task_roots)} task-variant pairs for robot={robot}")
+
+    if checkpoint_path is not None:
+        return _compute_multitask_with_checkpoint(
+            task_roots=task_roots,
+            checkpoint_path=checkpoint_path,
+        )
 
     joint_acc = _ModeAccumulator(_JOINT_ACTION_DIM)
     eef_acc = _ModeAccumulator(_EEF_ACTION_DIM)
@@ -238,6 +406,56 @@ def compute_multitask_robotwin_stats(
         print("  WARNING: eef stats are empty; no endpose/* seen.")
 
     return result
+
+
+def _compute_multitask_with_checkpoint(
+    *,
+    task_roots: list[tuple[str, str]],
+    checkpoint_path: str,
+) -> dict:
+    """Resumable variant: deterministic shard-per-task, then rebuild stats.
+
+    Split out from :func:`compute_multitask_robotwin_stats` so the
+    non-checkpoint path stays a clean linear accumulation and the resumable
+    path can isolate its shard IO.
+    """
+    partial_dir = _partial_stats_dir(checkpoint_path)
+    os.makedirs(partial_dir, exist_ok=True)
+    processed_total = 0
+    existing_shards = {
+        os.path.abspath(data_root): _shard_path_for_root(checkpoint_path, data_root)
+        for _, data_root in task_roots
+        if os.path.exists(_shard_path_for_root(checkpoint_path, data_root))
+    }
+    if existing_shards:
+        print(
+            f"Resuming multi-task stats from partial checkpoint: "
+            f"{len(existing_shards)}/{len(task_roots)} task-variant pairs already "
+            f"persisted at {partial_dir}"
+        )
+
+    for task_idx, (task_name, data_root) in enumerate(task_roots):
+        label = f"{task_idx + 1}/{len(task_roots)} {task_name}"
+        shard_path = _shard_path_for_root(checkpoint_path, data_root)
+        if os.path.exists(shard_path):
+            print(f"  [{label}] already checkpointed, skipping")
+            continue
+        try:
+            files = _iter_episode_files(data_root)
+        except FileNotFoundError:
+            print(f"  [{label}] no episodes, skipping")
+            continue
+
+        joint, eef, local_total = _collect_actions_from_files(files, label=label, prior_total=processed_total)
+        processed_total += local_total
+
+        _atomic_save_npz(
+            shard_path,
+            joint=joint if joint is not None else np.empty((0, _JOINT_ACTION_DIM), dtype=np.float64),
+            eef=eef if eef is not None else np.empty((0, _EEF_ACTION_DIM), dtype=np.float64),
+        )
+
+    return _rebuild_stats_from_shards(task_roots=task_roots, checkpoint_path=checkpoint_path)
 
 
 def parse_tasks_file(tasks_file: str) -> list:
@@ -354,11 +572,12 @@ def main():
             robot=robot,
             variant=variant,
             tasks=tasks,
+            checkpoint_path=resolved_output,
         )
 
     _print_summary(stats)
-    os.makedirs(os.path.dirname(os.path.abspath(resolved_output)) or ".", exist_ok=True)
-    np.save(resolved_output, stats, allow_pickle=True)
+    atomic_save_stats_npy(resolved_output, stats)
+    cleanup_partial_stats_checkpoint(resolved_output)
     print(f"\nSaved stats ({stats.get('num_timesteps', 0)} timesteps) to {resolved_output}")
 
 

@@ -3,6 +3,8 @@
 import io
 import os
 import tempfile
+import threading
+import time
 
 import h5py
 import numpy as np
@@ -917,6 +919,255 @@ def test_multitask_action_stats_nested_schema():
         assert "joint" in stats and "eef" in stats
         assert stats["joint"]["mean"].shape == (14,)
         assert stats["eef"]["mean"].shape == (20,)
+
+
+# ---------------------------------------------------------------------------
+# Resumable multi-task stats checkpointing
+# ---------------------------------------------------------------------------
+
+
+def _make_multitask_layout(root, tasks, robot="test-robot", variant="clean_50", T=10):
+    """Lay down a minimal RoboTwin multi-task tree under ``root``."""
+    for task in tasks:
+        data_dir = os.path.join(root, task, f"{robot}_{variant}", "data")
+        os.makedirs(data_dir, exist_ok=True)
+        _create_mock_episode(
+            os.path.join(data_dir, "episode0.hdf5"),
+            T=T,
+            seed=hash(task) % 1000,
+        )
+
+
+def test_multitask_action_stats_can_resume_from_partial_checkpoint():
+    """Second run reuses already-persisted task shards instead of starting over."""
+    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _make_multitask_layout(tmpdir, ["task_a", "task_b"])
+        checkpoint_path = os.path.join(tmpdir, "test-robot_clean_50_stats.npy")
+
+        partial_stats = compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a"],
+            checkpoint_path=checkpoint_path,
+        )
+        assert partial_stats["num_timesteps"] > 0
+        assert os.path.isdir(f"{checkpoint_path}.partial/shards_v1")
+
+        resumed_stats = compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a", "task_b"],
+            checkpoint_path=checkpoint_path,
+        )
+        full_stats = compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a", "task_b"],
+        )
+
+        assert resumed_stats["num_timesteps"] == full_stats["num_timesteps"]
+        for mode in ["joint", "eef"]:
+            for key in ["mean", "std", "min", "max", "q01", "q99"]:
+                assert np.allclose(resumed_stats[mode][key], full_stats[mode][key])
+
+
+def test_resume_does_not_recompute_already_checkpointed_shards():
+    """task_a's shard mtime must be unchanged after a resume that adds task_b.
+
+    Without this, the resume path could silently rerun every task on every
+    invocation and the prior test would still pass. Pins the actual contract
+    PR #77 review flagged: already-persisted task-roots are *skipped*.
+    """
+    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _make_multitask_layout(tmpdir, ["task_a", "task_b"])
+        checkpoint_path = os.path.join(tmpdir, "test-robot_clean_50_stats.npy")
+
+        compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a"],
+            checkpoint_path=checkpoint_path,
+        )
+
+        shards_dir = f"{checkpoint_path}.partial/shards_v1"
+        shards_before = {name: os.stat(os.path.join(shards_dir, name)).st_mtime_ns for name in os.listdir(shards_dir)}
+        assert len(shards_before) == 1
+
+        # Force a discernible mtime delta even on filesystems with low resolution.
+        time.sleep(0.05)
+
+        compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a", "task_b"],
+            checkpoint_path=checkpoint_path,
+        )
+
+        shards_after = {name: os.stat(os.path.join(shards_dir, name)).st_mtime_ns for name in os.listdir(shards_dir)}
+        assert len(shards_after) == 2
+        # task_a's shard must not have been rewritten.
+        for name, mtime in shards_before.items():
+            assert shards_after[name] == mtime, f"{name} was rewritten on resume"
+
+
+def test_resume_ignores_shards_dropped_from_tasks_list():
+    """Shrinking tasks only rebuilds from the current task_roots' shards."""
+    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _make_multitask_layout(tmpdir, ["task_a", "task_b"])
+        checkpoint_path = os.path.join(tmpdir, "test-robot_clean_50_stats.npy")
+
+        # Initial run creates both task shards.
+        compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a", "task_b"],
+            checkpoint_path=checkpoint_path,
+        )
+        # Re-run with a shrunk tasks list. Extra shards remain on disk but are
+        # ignored because rebuild only looks up shards for current task_roots.
+        narrowed = compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a"],
+            checkpoint_path=checkpoint_path,
+        )
+        ground_truth = compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a"],
+        )
+
+        # Counts and stats must match the from-scratch single-task run.
+        assert narrowed["num_timesteps"] == ground_truth["num_timesteps"]
+        for mode in ["joint", "eef"]:
+            for key in ["mean", "std", "min", "max", "q01", "q99"]:
+                assert np.allclose(narrowed[mode][key], ground_truth[mode][key])
+
+
+def test_resume_shards_are_keyed_by_data_root():
+    """Reusing checkpoint_path across robots does not mix incompatible shards."""
+    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _make_multitask_layout(tmpdir, ["task_a"], robot="robot-x", variant="clean_50")
+        _make_multitask_layout(tmpdir, ["task_a"], robot="robot-y", variant="clean_50")
+        checkpoint_path = os.path.join(tmpdir, "shared_stats.npy")
+
+        compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="robot-x",
+            variant="clean_50",
+            tasks=["task_a"],
+            checkpoint_path=checkpoint_path,
+        )
+        # The robot-y data_root maps to a different deterministic shard, so the
+        # robot-x shard is not reused even with the same checkpoint_path.
+        stats_y = compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="robot-y",
+            variant="clean_50",
+            tasks=["task_a"],
+            checkpoint_path=checkpoint_path,
+        )
+        ground_truth_y = compute_multitask_robotwin_stats(
+            dataset_dir=tmpdir,
+            robot="robot-y",
+            variant="clean_50",
+            tasks=["task_a"],
+        )
+        for mode in ["joint", "eef"]:
+            for key in ["mean", "std", "min", "max"]:
+                assert np.allclose(stats_y[mode][key], ground_truth_y[mode][key])
+
+
+def test_atomic_save_stats_npy_roundtrip(tmp_path):
+    """atomic_save_stats_npy should produce a fully-formed .npy at the target path."""
+    from openwam.dataloader.robotwin_stats_computation import atomic_save_stats_npy
+
+    target = str(tmp_path / "stats.npy")
+    payload = {"joint": {"mean": np.zeros(14, dtype=np.float32)}, "num_timesteps": 7}
+    atomic_save_stats_npy(target, payload)
+    loaded = np.load(target, allow_pickle=True).item()
+    assert loaded["num_timesteps"] == 7
+    assert loaded["joint"]["mean"].shape == (14,)
+    # The tmp file must not linger.
+    assert not os.path.exists(f"{target}.tmp")
+    assert not os.path.exists(f"{target}.tmp.npy")
+
+
+def test_multitask_peer_rank_waits_for_shared_stats(monkeypatch, tmp_path):
+    """Peer ranks should wait for rank 0's final .npy instead of computing stats."""
+    import openwam.dataloader.robotwin_dataset as ds_mod
+    from openwam.dataloader.robotwin_stats_computation import atomic_save_stats_npy
+
+    dataset_dir = str(tmp_path)
+    stats_path = os.path.join(dataset_dir, "test-robot_clean_50_stats.npy")
+
+    class _FakeSubDataset:
+        def __init__(self, **kwargs):
+            self.action_dim = 14
+            self.action_stats = {"mean": np.zeros(14, dtype=np.float32)}
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            return idx
+
+        def denormalize_action(self, action):
+            return action
+
+    def _publish_stats_later():
+        time.sleep(0.02)
+        atomic_save_stats_npy(
+            stats_path,
+            {"joint": _flat_stats(14), "eef": _flat_stats(20), "num_timesteps": 1},
+        )
+
+    worker = threading.Thread(target=_publish_stats_later)
+    worker.start()
+
+    monkeypatch.setenv("OPENWAM_STATS_POLL_INTERVAL_S", "0.005")
+    monkeypatch.setenv("OPENWAM_STATS_WAIT_TIMEOUT_S", "1")
+    monkeypatch.setattr(ds_mod, "discover_robotwin_roots", lambda *args, **kwargs: [("task_a", dataset_dir)])
+    monkeypatch.setattr(ds_mod, "RoboTwinDataset", _FakeSubDataset)
+    monkeypatch.setattr("torch.distributed.is_available", lambda: True)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("torch.distributed.get_rank", lambda: 1)
+
+    try:
+        ds = ds_mod.MultiTaskRoboTwinDataset(
+            dataset_dir=dataset_dir,
+            robot="test-robot",
+            variant="clean_50",
+            tasks=["task_a"],
+            action_mode="joint",
+            num_frames=5,
+            height=32,
+            width=32,
+            val_ratio=0.0,
+            video_stride=1,
+            filter_static_segments=False,
+        )
+    finally:
+        worker.join(timeout=1)
+
+    assert len(ds) == 1
+    assert os.path.exists(stats_path)
 
 
 # ---------------------------------------------------------------------------
