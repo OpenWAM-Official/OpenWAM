@@ -661,8 +661,8 @@ class TestJointEngineCompileFlags:
                     "schedule_type": "sync",
                     "shift": 5.0,
                     "num_frames": 33,
-                    "height": 480,
-                    "width": 832,
+                    "height": 384,
+                    "width": 320,
                 },
                 "optimization": {
                     "decode_video": True,
@@ -725,9 +725,7 @@ class TestJointEngineCompileFlags:
 
         assert set(filtered) == {"schedule", "prompt"}
         warning_messages = [
-            record.getMessage()
-            for record in caplog.records
-            if "does not accept deploy kwarg" in record.getMessage()
+            record.getMessage() for record in caplog.records if "does not accept deploy kwarg" in record.getMessage()
         ]
         assert len(warning_messages) == 1
         assert "cfg_scale" in warning_messages[0]
@@ -755,11 +753,7 @@ class TestJointEngineCompileFlags:
         filtered = engine._filter_architecture_generate_kwargs(kwargs)
 
         assert set(filtered) == {"schedule", "prompt"}
-        assert not [
-            record
-            for record in caplog.records
-            if "does not accept deploy kwarg" in record.getMessage()
-        ]
+        assert not [record for record in caplog.records if "does not accept deploy kwarg" in record.getMessage()]
 
     def test_generate_kwarg_filter_warns_for_configured_prompt_cache_drop(self, caplog):
         from openwam.deploy.joint_engine import _BoundedPromptEmbedCache
@@ -782,9 +776,7 @@ class TestJointEngineCompileFlags:
 
         assert set(filtered) == {"schedule", "prompt"}
         warning_messages = [
-            record.getMessage()
-            for record in caplog.records
-            if "does not accept deploy kwarg" in record.getMessage()
+            record.getMessage() for record in caplog.records if "does not accept deploy kwarg" in record.getMessage()
         ]
         assert len(warning_messages) == 1
         assert "prompt_embed_cache" in warning_messages[0]

@@ -15,9 +15,10 @@ Usage:
 
 from typing import Dict, Type
 
-from openwam.dataloader.base_dataset import BaseActionDataset
+from openwam.dataloader.bases import BaseDataset
+from openwam.dataloader.utils import get_cfg
 
-DATASET_REGISTRY: Dict[str, Type[BaseActionDataset]] = {}
+DATASET_REGISTRY: Dict[str, Type[BaseDataset]] = {}
 
 
 def register_dataset(name: str):
@@ -34,12 +35,13 @@ def register_dataset(name: str):
     return wrapper
 
 
-def build_dataset(config, split: str = "train") -> BaseActionDataset:
+def build_dataset(config, split: str = "train") -> BaseDataset:
     """Build a dataset from a config dict or DictConfig.
 
-    Looks up the dataset class from DATASET_REGISTRY using ``config.type``
-    and calls ``cls.from_config(config, split)`` if available, otherwise
-    falls back to direct construction.
+    Looks up the dataset class from ``DATASET_REGISTRY`` using ``config.type``
+    and dispatches to ``cls.from_config(config, split)``. Every registered
+    class is required to implement ``from_config`` — there is no fallback
+    generic-kwargs path.
 
     Args:
         config: Dict-like config with at least a ``type`` field.
@@ -48,60 +50,22 @@ def build_dataset(config, split: str = "train") -> BaseActionDataset:
     Returns:
         Instantiated dataset.
     """
-    dtype = _get(config, "type")
+    dtype = get_cfg(config, "type")
     if dtype not in DATASET_REGISTRY:
         raise ValueError(f"Unknown dataset type '{dtype}'. Available: {list(DATASET_REGISTRY.keys())}")
 
     cls = DATASET_REGISTRY[dtype]
-
-    # Prefer from_config classmethod if available
-    if hasattr(cls, "from_config"):
-        return cls.from_config(config, split=split)
-
-    # Fallback: extract kwargs from config
-    return _build_from_config(cls, config, split)
+    if not hasattr(cls, "from_config"):
+        raise TypeError(
+            f"Registered dataset class {cls.__name__} (type={dtype!r}) lacks a "
+            f"from_config classmethod. All registered datasets must implement it."
+        )
+    return cls.from_config(config, split=split)
 
 
 def list_registered_datasets():
     """Return list of registered dataset type names."""
     return sorted(DATASET_REGISTRY.keys())
-
-
-def _get(config, key, default=None):
-    """Get a value from dict or DictConfig."""
-    if hasattr(config, key):
-        return getattr(config, key)
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return default
-
-
-def _build_from_config(cls, config, split: str):
-    """Generic construction from config — extracts common parameters."""
-    kwargs = {"split": split}
-
-    for param in [
-        "dataset_dir",
-        "num_frames",
-        "height",
-        "width",
-        "action_stats_path",
-        "val_ratio",
-        "seed",
-        "robot",
-        "variant",
-        "multiview",
-        "target_camera",
-        "window_stride",
-        "video_stride",
-        "action_mode",
-        "tasks",
-    ]:
-        val = _get(config, param)
-        if val is not None:
-            kwargs[param] = val
-
-    return cls(**kwargs)
 
 
 # ---- Auto-registration of built-in datasets ----
@@ -110,17 +74,23 @@ def _build_from_config(cls, config, split: str):
 
 def _register_builtins():
     """Register all built-in dataset classes."""
-    from openwam.dataloader.agibot import AgibotDataset
-    from openwam.dataloader.galaxea import GalaxeaDataset
+    from openwam.dataloader.egodex import EgoDexDataset
     from openwam.dataloader.mixture import MixtureDataset
-    from openwam.dataloader.oxe import OXEDataset
+    from openwam.dataloader.oxe_bcz import OxeBczDataset
+    from openwam.dataloader.oxe_bridge import OxeBridgeDataset
+    from openwam.dataloader.oxe_droid import OxeDroidDataset
+    from openwam.dataloader.oxe_rt1 import OxeRt1Dataset
+    from openwam.dataloader.robocoin import MultiRobotCOINDataset
     from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
-    register_dataset("agibot")(AgibotDataset)
-    register_dataset("galaxea")(GalaxeaDataset)
     register_dataset("mixture")(MixtureDataset)
-    register_dataset("oxe")(OXEDataset)
+    register_dataset("robocoin")(MultiRobotCOINDataset)
+    register_dataset("egodex")(EgoDexDataset)
+    register_dataset("oxe_bcz")(OxeBczDataset)
+    register_dataset("oxe_bridge")(OxeBridgeDataset)
+    register_dataset("oxe_rt1")(OxeRt1Dataset)
+    register_dataset("oxe_droid")(OxeDroidDataset)
 
 
 _register_builtins()

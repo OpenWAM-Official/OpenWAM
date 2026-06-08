@@ -4,18 +4,21 @@ import torch
 
 
 def test_dataset_base_class_interface():
-    """Verify BaseActionDataset has required abstract methods."""
+    """Verify BaseDataset's minimal abstract contract.
+
+    Per Plan A, BaseDataset only requires __getitem__ and __len__.
+    Per-source metadata like action_dim or normalization_stats is
+    discovered by consumers (MixtureDataset, trainer) via duck-typed
+    getattr, not enforced on the base.
+    """
     import inspect
 
-    from openwam.dataloader.base_dataset import BaseActionDataset
+    from openwam.dataloader.bases import BaseDataset
 
     abstracts = {
-        name for name, method in inspect.getmembers(BaseActionDataset) if getattr(method, "__isabstractmethod__", False)
+        name for name, method in inspect.getmembers(BaseDataset) if getattr(method, "__isabstractmethod__", False)
     }
-    assert "action_dim" in abstracts
-    assert "action_stats" in abstracts
-    assert "__getitem__" in abstracts
-    assert "__len__" in abstracts
+    assert abstracts == {"__getitem__", "__len__"}
 
 
 def test_robotwin_dataset_imports():
@@ -27,12 +30,12 @@ def test_robotwin_dataset_imports():
 
 
 def test_all_datasets_inherit_base():
-    """All concrete datasets must inherit from BaseActionDataset."""
+    """All concrete datasets must inherit from BaseDataset."""
     from openwam.dataloader import (
         MultiTaskRoboTwinDataset,
         RoboTwinDataset,
     )
-    from openwam.dataloader.base_dataset import BaseActionDataset
+    from openwam.dataloader.bases import BaseDataset
 
     for cls in [RoboTwinDataset, MultiTaskRoboTwinDataset]:
-        assert issubclass(cls, BaseActionDataset), f"{cls.__name__} missing BaseActionDataset"
+        assert issubclass(cls, BaseDataset), f"{cls.__name__} missing BaseDataset"

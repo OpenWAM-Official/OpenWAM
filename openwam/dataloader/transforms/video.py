@@ -28,7 +28,7 @@ class VideoResize(ModalityTransform):
         "nearest": Image.NEAREST,
     }
 
-    def __init__(self, height: int = 480, width: int = 832, mode: str = "lanczos"):
+    def __init__(self, height: int = 384, width: int = 320, mode: str = "lanczos"):
         super().__init__(apply_to=["video"])
         self.height = height
         self.width = width
@@ -55,8 +55,8 @@ class VideoRandomCrop(ModalityTransform):
 
     def __init__(
         self,
-        height: int = 480,
-        width: int = 832,
+        height: int = 384,
+        width: int = 320,
         scale: Tuple[float, float] = (0.8, 1.0),
         ratio: Optional[Tuple[float, float]] = None,
     ):

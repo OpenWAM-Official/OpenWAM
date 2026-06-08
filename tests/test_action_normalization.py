@@ -1,6 +1,6 @@
 """Unit tests for action normalization on the deployment path.
 
-Covers _build_action_normalizer (reads action_stats.npy + cfg) and the
+Covers _build_action_normalizer (reads normalization_stats.npy + cfg) and the
 ActionNormalizer normalize/unnormalize invariants used by deploy.
 
 Pure CPU, no GPU, no network. Uses pytest's tmp_path fixture so there's no
@@ -22,7 +22,7 @@ from openwam.model.base import BaseWAMArchitecture
 
 
 def _eef_stats_min_max():
-    """Build action_stats in the nested schema with eef range simulating real robot."""
+    """Build normalization_stats in the nested schema with eef range simulating real robot."""
     # Simulate a physical workspace roughly ±0.8 m for xyz, [-1, 1] for rot6d,
     # [0, 1] for gripper. 20D = [lxyz(3), lrot(6), lgrip(1), rxyz(3), rrot(6), rgrip(1)]
     lo = np.array([-0.8, -0.8, -0.2] + [-1.0] * 6 + [0.0] + [-0.8, -0.8, -0.2] + [-1.0] * 6 + [0.0], dtype=np.float32)
@@ -40,9 +40,9 @@ def _eef_stats_min_max():
 
 
 def _write_stats_file(tmp_path, mode_key: str = "eef"):
-    """Write a nested-schema action_stats.npy into tmp_path and return its path."""
+    """Write a nested-schema normalization_stats.npy into tmp_path and return its path."""
     stats = {mode_key: _eef_stats_min_max(), "num_timesteps": 1000}
-    p = tmp_path / "action_stats.npy"
+    p = tmp_path / "normalization_stats.npy"
     np.save(str(p), stats, allow_pickle=True)
     return str(p)
 
@@ -90,9 +90,9 @@ def test_build_action_normalizer_happy_path(tmp_path):
 
 
 def test_build_action_normalizer_missing_stats_raises(tmp_path):
-    # tmp_path is empty — no action_stats.npy
+    # tmp_path is empty — no normalization_stats.npy
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef"}})
-    with pytest.raises(FileNotFoundError, match="Missing required action_stats.npy"):
+    with pytest.raises(FileNotFoundError, match="Missing required normalization_stats.npy"):
         _build_action_normalizer(cfg, str(tmp_path))
 
 

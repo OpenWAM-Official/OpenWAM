@@ -88,9 +88,7 @@ class _MockWanVB:
         # _has_vace=False in the mock pipe → real method is a no-op fast path.
         from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 
-        return WanVideoBackbone._build_vace_context_for_deploy(
-            self, inputs_shared, first_frame_image, vace_video
-        )
+        return WanVideoBackbone._build_vace_context_for_deploy(self, inputs_shared, first_frame_image, vace_video)
 
     @staticmethod
     def _is_vace_unit(unit):
@@ -263,7 +261,7 @@ def test_i2v_deploy_list_unwrap_cold_start():
     from PIL import Image
 
     mock_vb = _make_i2v_mock()
-    img = Image.new("RGB", (832, 480))
+    img = Image.new("RGB", (320, 384))
     inputs = mock_vb.prepare_inputs_for_inference(
         InferenceInputs(
             prompt="prompt_I2V",
@@ -293,7 +291,7 @@ def test_i2v_deploy_list_unwrap_cache_hit():
     from PIL import Image
 
     mock_vb = _make_i2v_mock()
-    img = Image.new("RGB", (832, 480))
+    img = Image.new("RGB", (320, 384))
     vace_cache: dict = {}
 
     # 1st call populates the cache.
@@ -332,6 +330,5 @@ def test_i2v_deploy_list_unwrap_cache_hit():
         f"cache-hit branch should also unwrap to PIL, got {type(inputs['input_image'])}"
     )
     assert inputs["vace_reference_image"] is None, (
-        f"I2V deploy cache-hit must null vace_reference_image, "
-        f"got {type(inputs['vace_reference_image'])}"
+        f"I2V deploy cache-hit must null vace_reference_image, got {type(inputs['vace_reference_image'])}"
     )

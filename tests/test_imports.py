@@ -8,11 +8,10 @@ def test_import_openwam():
 
 
 def test_import_data_base():
-    from openwam.dataloader.base_dataset import BaseActionDataset  # noqa: F401
+    from openwam.dataloader.bases import BaseDataset  # noqa: F401
 
-    assert hasattr(BaseActionDataset, "__getitem__")
-    assert hasattr(BaseActionDataset, "action_dim")
-    assert hasattr(BaseActionDataset, "action_stats")
+    assert hasattr(BaseDataset, "__getitem__")
+    assert hasattr(BaseDataset, "__len__")
 
 
 def test_import_data_robotwin():
@@ -31,17 +30,17 @@ def test_import_data_transforms():
     from openwam.dataloader.transforms import RotationTransform, build_transforms  # noqa: F401
 
 
-def test_import_data_action_stats():
+def test_import_data_normalization_stats():
     from openwam.dataloader.robotwin_stats_computation import (  # noqa: F401
-        compute_action_stats,
         compute_multitask_robotwin_stats,
+        compute_normalization_stats,
         parse_tasks_file,
     )
 
 
 def test_import_data_init():
     from openwam.dataloader import (  # noqa: F401
-        BaseActionDataset,
+        BaseDataset,
         MultiTaskRoboTwinDataset,
         RoboTwinDataset,
     )

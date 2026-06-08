@@ -259,8 +259,8 @@ class WanVideoPipeline(BasePipeline):
         seed: Optional[int] = None,
         rand_device: Optional[str] = "cpu",
         # Shape
-        height: Optional[int] = 480,
-        width: Optional[int] = 832,
+        height: Optional[int] = 384,
+        width: Optional[int] = 320,
         num_frames=81,
         # Classifier-free guidance
         cfg_scale: Optional[float] = 5.0,

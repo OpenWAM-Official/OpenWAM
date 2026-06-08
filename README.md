@@ -237,7 +237,7 @@ New checkpoints are intended to be deployable from the checkpoint directory alon
 
 - `config.yaml` — the full training config, including video-backbone component specs when `model.video_backbone.model_path` is readable.
 - `checkpoint_step_*.safetensors` — full model weights.
-- `action_stats.npy` — action normalization stats required by the current deploy loader. When `dataloader.normalize_mode` is enabled, deploy uses these stats to normalize incoming proprioceptive state and unnormalize returned actions.
+- `normalization_stats.npy` — action normalization stats required by the current deploy loader. When `dataloader.normalize_mode` is enabled, deploy uses these stats to normalize incoming proprioceptive state and unnormalize returned actions.
 - `tokenizer/google/umt5-xxl/` — copied automatically from `<model.video_backbone.model_path>/google/umt5-xxl` when available, so deploy does not need the original Wan directory just to load the tokenizer.
 
 Deploy's video-backbone source resolution is:
@@ -460,7 +460,7 @@ Checkpoint outputs include:
 
 - `checkpoint_step_*.safetensors` — full model weights
 - `config.yaml` — complete training config snapshot, including video-backbone component specs when available
-- `action_stats.npy` — action normalization stats required by deploy; active normalization uses them for raw-state normalization and physical-unit actions
+- `normalization_stats.npy` — action normalization stats required by deploy; active normalization uses them for raw-state normalization and physical-unit actions
 - `tokenizer/google/umt5-xxl/` — tokenizer copied automatically from the Wan model directory for self-contained deployment
 
 ## Core Features

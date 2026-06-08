@@ -29,10 +29,10 @@ def save_config(output_dir: str, cfg):
     logger.info("Saved config to %s", config_path)
 
 
-def save_action_stats(output_dir: str, dataset) -> None:
+def save_normalization_stats(output_dir: str, dataset) -> None:
     """Copy the dataset's resolved action-stats .npy into the checkpoint dir.
 
-    Written once (skipped if ``action_stats.npy`` already exists in
+    Written once (skipped if ``normalization_stats.npy`` already exists in
     *output_dir*).  Silently no-ops when the dataset has no stats path
     (e.g. normalization disabled or unsupported dataset type).
 
@@ -42,23 +42,23 @@ def save_action_stats(output_dir: str, dataset) -> None:
     """
     import shutil
 
-    dst = os.path.join(output_dir, "action_stats.npy")
+    dst = os.path.join(output_dir, "normalization_stats.npy")
     if os.path.exists(dst):
         logger.info(
-            "[normalizer] action_stats.npy already present in checkpoint dir: %s (skip copy)",
+            "[normalizer] normalization_stats.npy already present in checkpoint dir: %s (skip copy)",
             dst,
         )
         return
-    src = getattr(dataset, "action_stats_path", None)
+    src = getattr(dataset, "normalization_stats_path", None)
     if not src:
         logger.info(
-            "[normalizer] Dataset has no action_stats_path (normalization likely disabled); "
+            "[normalizer] Dataset has no normalization_stats_path (normalization likely disabled); "
             "nothing copied into checkpoint dir."
         )
         return
     if not os.path.exists(src):
         logger.warning(
-            "[normalizer] Dataset reports action_stats_path=%s but file does not exist; "
+            "[normalizer] Dataset reports normalization_stats_path=%s but file does not exist; "
             "nothing copied into checkpoint dir.",
             src,
         )

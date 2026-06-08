@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from openwam.dataloader.base_dataset import BaseActionDataset
+from openwam.dataloader.bases import BaseDataset
 from openwam.dataloader.transforms.multiview import (
     DEFAULT_MULTIVIEW_CAMERA_LAYOUT,
     assemble_multiview_layout,
@@ -297,7 +297,7 @@ def _check_temporal_divisibility(num_video_frames: int, temporal_compression: in
             )
 
 
-class RoboTwinDataset(BaseActionDataset):
+class RoboTwinDataset(BaseDataset):
     """RoboTwin 2.0 HDF5 dataset for bimanual robot video-action training.
 
     Reads episode HDF5 files with JPEG-encoded camera observations and
@@ -322,14 +322,14 @@ class RoboTwinDataset(BaseActionDataset):
         self,
         data_root: str,
         num_frames: int = 33,
-        height: int = 480,
-        width: int = 832,
+        height: int = 384,
+        width: int = 320,
         split: str = "train",
         val_ratio: float = 0.1,
         repeat: int = 1,
         task_name: Optional[str] = None,
         seed: int = 42,
-        action_stats_path: Optional[str] = None,
+        normalization_stats_path: Optional[str] = None,
         normalize_mode: Optional[str] = "min-max",
         num_val_samples: int = 4,
         target_camera: str = "head_camera",
@@ -559,7 +559,7 @@ class RoboTwinDataset(BaseActionDataset):
         )
         self._action_normalizer = None  # ActionNormalizer or None if disabled / stats missing
         self._mode_stats: Optional[dict] = None  # raw stats dict for the active mode
-        self.action_stats_path: Optional[str] = None  # resolved path to the stats .npy file
+        self.normalization_stats_path: Optional[str] = None  # resolved path to the stats .npy file
 
         if self.normalize_mode is not None:
             if self.normalize_mode not in YAML_TO_NORM_MODE:
@@ -571,13 +571,13 @@ class RoboTwinDataset(BaseActionDataset):
                 f"(normalize_mode={self.normalize_mode}, action_mode={self.action_mode})"
             )
             # Resolve stats path: explicit > default under data_root
-            if action_stats_path is not None:
-                stats_path = action_stats_path
+            if normalization_stats_path is not None:
+                stats_path = normalization_stats_path
                 if os.path.exists(stats_path):
                     print(f"  [normalizer] Using explicit stats file: {stats_path} (exists ✓)")
                 else:
                     print(
-                        f"  [normalizer] WARNING: explicit action_stats_path does not exist: {stats_path}\n"
+                        f"  [normalizer] WARNING: explicit normalization_stats_path does not exist: {stats_path}\n"
                         f"  [normalizer]          '{self.normalize_mode}' normalization DISABLED."
                     )
                     stats_path = None
@@ -593,7 +593,7 @@ class RoboTwinDataset(BaseActionDataset):
                 else:
                     from openwam.dataloader.robotwin_stats_computation import (
                         atomic_save_stats_npy,
-                        compute_action_stats,
+                        compute_normalization_stats,
                     )
 
                     print(
@@ -601,7 +601,7 @@ class RoboTwinDataset(BaseActionDataset):
                         f"  [normalizer]   → computing now from {data_root} "
                         f"and will save to: {stats_path}"
                     )
-                    stats = compute_action_stats(data_root)
+                    stats = compute_normalization_stats(data_root)
                     atomic_save_stats_npy(stats_path, stats)
                     print(f"  [normalizer] Saved newly-computed single-task stats → {stats_path}")
 
@@ -625,7 +625,7 @@ class RoboTwinDataset(BaseActionDataset):
                         mode=YAML_TO_NORM_MODE[self.normalize_mode],
                         stats=mode_stats,
                     )
-                    self.action_stats_path = stats_path
+                    self.normalization_stats_path = stats_path
                     print(
                         f"  [normalizer] Active: mode={self.normalize_mode}, "
                         f"action_mode={self.action_mode}, dim={got_dim}, stats={stats_path}"
@@ -692,7 +692,7 @@ class RoboTwinDataset(BaseActionDataset):
         return self._action_dim_value
 
     @property
-    def action_stats(self) -> Optional[dict]:
+    def normalization_stats(self) -> Optional[dict]:
         """Return the raw stats dict for the active action_mode (or None)."""
         return dict(self._mode_stats) if self._mode_stats is not None else None
 
@@ -891,15 +891,26 @@ class RoboTwinDataset(BaseActionDataset):
             [idx < actual_raw_len for idx in self._video_sample_indices],
             dtype=torch.bool,
         )
-        action_mask = torch.tensor(
+        # 2-D action_mask (num_action_steps, action_dim): time × dim validity.
+        # RoboTwin is bimanual / joint-space single-tensor, every valid timestep
+        # has all dims real — dim_mask=None broadcasts True across action_dim.
+        time_validity = torch.tensor(
             [(t + 1) < actual_raw_len for t in range(self.num_action_steps)],
             dtype=torch.bool,
         )
-        proprio_mask = torch.tensor([0 < actual_raw_len], dtype=torch.bool)
+        action_mask = time_validity.unsqueeze(-1).expand(-1, self._action_dim_value).contiguous()
+        # 2-D proprio_mask (1, action_dim): all True when proprio is present.
+        proprio_mask = torch.full(
+            (1, self._action_dim_value),
+            fill_value=bool(0 < actual_raw_len),
+            dtype=torch.bool,
+        )
 
         # Step-0-only by design: drop "hasn't-started-yet" windows, not
         # tail windows where the first action label is padding.
-        if self.num_action_steps > 0 and bool(action_mask[0]):
+        # action_mask is now (T, D); collapse to per-timestep validity via
+        # time_validity (the source 1-D bool used to build the 2-D mask).
+        if self.num_action_steps > 0 and bool(time_validity[0]):
             first_delta_max = float(np.max(np.abs(action_np[0] - proprio_np[0])))
             is_static = first_delta_max < self._static_segment_threshold
         else:
@@ -964,7 +975,7 @@ class RoboTwinDataset(BaseActionDataset):
         return sample
 
 
-class MultiTaskRoboTwinDataset(BaseActionDataset):
+class MultiTaskRoboTwinDataset(BaseDataset):
     """Multi-task wrapper over multiple RoboTwinDatasets.
 
     Concatenates per-task RoboTwinDatasets so one epoch covers all tasks.
@@ -979,7 +990,7 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``
             (merges clean_50 + randomized_500 into a single dataset).
         tasks: List of task names.  Defaults to ``ROBOTWIN_TRAIN_TASKS``.
-        action_stats_path: Path to shared action stats (.npy).
+        normalization_stats_path: Path to shared action stats (.npy).
         action_mode: ``"joint"`` (14D) or ``"eef"`` (20D).
         **kwargs: Forwarded to each ``RoboTwinDataset`` (num_frames, height,
             width, split, val_ratio, repeat, seed, target_camera,
@@ -1036,12 +1047,12 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             variant=_get("variant", "both"),
             tasks=tasks,
             task_name=task_name,  # drives single- vs multi-task stats filename
-            action_stats_path=_get("action_stats_path", None),
+            normalization_stats_path=_get("normalization_stats_path", None),
             normalize_mode=_norm_mode,
             action_mode=_get("action_mode", "eef"),
             num_frames=int(_get("num_frames", 33)),
-            height=int(_get("height", 480)),
-            width=int(_get("width", 832)),
+            height=int(_get("height", 384)),
+            width=int(_get("width", 320)),
             split=split,
             val_ratio=float(_get("val_ratio", 0.0)),
             repeat=int(_get("repeat", 1)),
@@ -1067,7 +1078,7 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         variant: str = "clean_50",
         tasks: Optional[list] = None,
         task_name: Optional[str] = None,
-        action_stats_path: Optional[str] = None,
+        normalization_stats_path: Optional[str] = None,
         action_mode: str = "joint",
         **kwargs,
     ):
@@ -1127,23 +1138,23 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
                 f"(normalize_mode={_norm_mode_kw}, action_mode={action_mode}, "
                 f"robot={robot}, variant={variant})"
             )
-            if action_stats_path is not None:
-                if os.path.exists(action_stats_path):
+            if normalization_stats_path is not None:
+                if os.path.exists(normalization_stats_path):
                     print(
-                        f"[normalizer] Using explicit shared stats file: {action_stats_path} "
+                        f"[normalizer] Using explicit shared stats file: {normalization_stats_path} "
                         f"(exists ✓, will be forwarded to every sub-dataset)"
                     )
                 else:
                     print(
-                        f"[normalizer] WARNING: explicit action_stats_path does not exist: "
-                        f"{action_stats_path}\n"
+                        f"[normalizer] WARNING: explicit normalization_stats_path does not exist: "
+                        f"{normalization_stats_path}\n"
                         f"[normalizer]          sub-datasets will fall back to their own auto-resolution."
                     )
             else:
-                action_stats_path = os.path.join(dataset_dir, _default_stats_name)
-                if os.path.exists(action_stats_path):
+                normalization_stats_path = os.path.join(dataset_dir, _default_stats_name)
+                if os.path.exists(normalization_stats_path):
                     print(
-                        f"[normalizer] Found pre-computed {_scope_label} stats file: {action_stats_path} "
+                        f"[normalizer] Found pre-computed {_scope_label} stats file: {normalization_stats_path} "
                         f"(exists ✓, will load)"
                     )
                 else:
@@ -1195,9 +1206,9 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
 
                     print(
                         f"[normalizer] No pre-computed {_scope_label} stats at default location: "
-                        f"{action_stats_path}\n"
+                        f"{normalization_stats_path}\n"
                         f"[normalizer]   → computing now across {len(all_roots)} task-variant pairs "
-                        f"and will save to: {action_stats_path}\n"
+                        f"and will save to: {normalization_stats_path}\n"
                         f"[normalizer]   (this may take a while for large datasets)"
                     )
                     if is_rank0:
@@ -1206,29 +1217,29 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
                             robot=robot,
                             variant=variant,
                             tasks=tasks,
-                            checkpoint_path=action_stats_path,
+                            checkpoint_path=normalization_stats_path,
                         )
-                        atomic_save_stats_npy(action_stats_path, stats)
-                        cleanup_partial_stats_checkpoint(action_stats_path)
-                        print(f"[normalizer] Saved newly-computed {_scope_label} stats → {action_stats_path}")
+                        atomic_save_stats_npy(normalization_stats_path, stats)
+                        cleanup_partial_stats_checkpoint(normalization_stats_path)
+                        print(f"[normalizer] Saved newly-computed {_scope_label} stats → {normalization_stats_path}")
                     elif dist_ready:
                         print(
-                            f"[normalizer] Rank {rank} waiting for rank 0 to finish shared stats at {action_stats_path}"
+                            f"[normalizer] Rank {rank} waiting for rank 0 to finish shared stats at {normalization_stats_path}"
                         )
                         deadline = time.monotonic() + wait_timeout_s
-                        while not os.path.exists(action_stats_path):
+                        while not os.path.exists(normalization_stats_path):
                             if time.monotonic() >= deadline:
                                 raise TimeoutError(
-                                    f"Timed out while waiting for rank 0 to produce shared stats: {action_stats_path}"
+                                    f"Timed out while waiting for rank 0 to produce shared stats: {normalization_stats_path}"
                                 )
                             time.sleep(poll_interval_s)
 
-                    if not os.path.exists(action_stats_path):
+                    if not os.path.exists(normalization_stats_path):
                         raise FileNotFoundError(
                             f"Expected shared stats file to exist after computation, but it was not found: "
-                            f"{action_stats_path}"
+                            f"{normalization_stats_path}"
                         )
-        self.action_stats_path: Optional[str] = action_stats_path
+        self.normalization_stats_path: Optional[str] = normalization_stats_path
 
         self._sub_datasets = []
         self._cumulative_lengths = []
@@ -1259,7 +1270,7 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
                 ds = RoboTwinDataset(
                     data_root=data_root,
                     task_name=display_name.split("/")[0].replace("_", " "),
-                    action_stats_path=action_stats_path,
+                    normalization_stats_path=normalization_stats_path,
                     robot=robot,
                     variant=v,
                     action_mode=action_mode,
@@ -1270,7 +1281,7 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
             self._cumulative_lengths.append(cumulative)
 
         self._total_length = cumulative
-        self._action_stats_shared = self._sub_datasets[0].action_stats if self._sub_datasets else None
+        self._normalization_stats_shared = self._sub_datasets[0].normalization_stats if self._sub_datasets else None
         self._action_dim_value = self._sub_datasets[0].action_dim if self._sub_datasets else 14
 
         print(f"  Total samples: {self._total_length} (across {len(self._sub_datasets)} sub-datasets)")
@@ -1280,8 +1291,8 @@ class MultiTaskRoboTwinDataset(BaseActionDataset):
         return self._action_dim_value
 
     @property
-    def action_stats(self) -> dict:
-        return self._action_stats_shared
+    def normalization_stats(self) -> dict:
+        return self._normalization_stats_shared
 
     def denormalize_action(self, action: np.ndarray) -> np.ndarray:
         if not self._sub_datasets:

@@ -39,16 +39,16 @@ from openwam.dataloader.transforms.video import (
 
 def build_transforms(
     transform_cfg,
-    action_stats: Optional[dict] = None,
-    height: int = 480,
-    width: int = 832,
+    normalization_stats: Optional[dict] = None,
+    height: int = 384,
+    width: int = 320,
 ) -> Optional[ComposedTransform]:
     """Build a transform pipeline from config.
 
     Args:
         transform_cfg: Config dict/DictConfig with transform definitions.
             If None, returns None (no transforms).
-        action_stats: Precomputed action statistics for normalization.
+        normalization_stats: Precomputed action statistics for normalization.
         height: Video target height (for augmentation).
         width: Video target width (for augmentation).
 
@@ -87,7 +87,7 @@ def build_transforms(
 
         normalizer = ActionNormalizer(
             mode=mode,
-            stats=action_stats,
+            stats=normalization_stats,
             gripper_mode=gripper_mode,
             gripper_indices=gripper_indices,
         )

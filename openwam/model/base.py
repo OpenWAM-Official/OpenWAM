@@ -307,9 +307,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 ckpt_dir_for_encoder = (
                     vb_cfg.get("_ckpt_dir") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_ckpt_dir", None)
                 )
-                external_encoder = self._build_external_encoder_skeleton(
-                    enc_cfg, source, ckpt_dir=ckpt_dir_for_encoder
-                )
+                external_encoder = self._build_external_encoder_skeleton(enc_cfg, source, ckpt_dir=ckpt_dir_for_encoder)
         elif enc_cfg is not None and source is None:
             enc_name = ""
             if isinstance(enc_cfg, dict):
@@ -605,7 +603,18 @@ class BaseWAMArchitecture(ABC, nn.Module):
         self.proprio_encoder = nn.Linear(state_dim, self.context_dim)
 
     def _append_proprio_context_token(self, pipeline_inputs: dict, proprio_state: Optional[Tensor]) -> dict:
-        """Append one proprio token to raw text context and extend context_mask."""
+        """Append one proprio token to raw text context and extend context_mask.
+
+        If the caller passed a per-sample mask via ``pipeline_inputs['_proprio_sample_mask']``
+        (shape (B,) or (B, 1) bool), masked samples get a zero token and a False
+        attention mask entry. This isolates proprio_encoder gradients on those
+        samples (input * 0 -> weight grad = 0; attention mask cuts the forward path).
+        """
+        # Always strip the internal routing key so it doesn't leak into downstream forwards,
+        # even when proprio context is globally disabled.
+        pipeline_inputs = dict(pipeline_inputs)
+        sample_mask = pipeline_inputs.pop("_proprio_sample_mask", None)
+
         if not bool(getattr(self, "_use_proprioception_context", False)):
             return pipeline_inputs
         if self.proprio_encoder is None:
@@ -629,11 +638,42 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 raise ValueError(
                     f"Batch mismatch between context and proprio_state: {context.shape[0]} vs {proprio_state.shape[0]}"
                 )
+
+        # Normalize sample_mask to (B, 1) bool on context's device.
+        # Accepted incoming shapes (after stacking in _collect_inputs):
+        #   * (B,)         — legacy 1D enable-per-sample
+        #   * (B, 1)       — legacy "rank-2 enable"
+        #   * (B, 1, D)    — 2D per-dim mask emitted by the post-migration
+        #                    RoboCOIN/EgoDex/RoboTwin/OXE readers; the
+        #                    sample-level enable is ``mask.any(dim=-1)`` so any
+        #                    real dim still gates the token in.
+        if sample_mask is None:
+            sample_mask = torch.ones(
+                (proprio_state.shape[0], 1),
+                dtype=torch.bool,
+                device=context.device,
+            )
+        else:
+            sample_mask = sample_mask.to(device=context.device, dtype=torch.bool)
+            if sample_mask.ndim == 3:
+                # (B, 1, D) -> (B, 1): True if any per-dim slot is real
+                sample_mask = sample_mask.any(dim=-1)
+            elif sample_mask.ndim == 1:
+                sample_mask = sample_mask.unsqueeze(-1)
+            if sample_mask.shape != (proprio_state.shape[0], 1):
+                raise ValueError(
+                    f"_proprio_sample_mask shape {tuple(sample_mask.shape)} must be ({proprio_state.shape[0]}, 1)"
+                )
+
         proprio_token = (
             self.proprio_encoder(proprio_state.to(device=context.device, dtype=self.proprio_encoder.weight.dtype))
             .to(dtype=context.dtype)
             .unsqueeze(1)
         )
+        # Token * mask cuts the weight grad for mask=False samples
+        # (input goes to zero so the encoder weight gradient contribution is zero).
+        sample_mask_f = sample_mask.to(proprio_token.dtype).unsqueeze(-1)  # (B, 1, 1)
+        proprio_token = proprio_token * sample_mask_f
 
         context_mask = pipeline_inputs.get("context_mask")
         if context_mask is None:
@@ -647,10 +687,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
         else:
             context_mask = context_mask.to(device=context.device, dtype=torch.bool)
 
-        proprio_mask = torch.ones((context_mask.shape[0], 1), dtype=torch.bool, device=context_mask.device)
         updated = dict(pipeline_inputs)
         updated["context"] = torch.cat([context, proprio_token], dim=1)
-        updated["context_mask"] = torch.cat([context_mask, proprio_mask], dim=1)
+        updated["context_mask"] = torch.cat([context_mask, sample_mask], dim=1)
         # The appended proprio token can sit after padded text tokens, so the
         # resulting valid tokens are not necessarily a contiguous prefix.
         # Keep the original text seq_lens and make context_mask authoritative.
@@ -692,7 +731,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """Attach (or clear) an action normalizer used by ``generate``.
 
         Deployment paths build the same normalizer used by training from
-        ``action_stats.npy``. ``generate`` uses it to return real-scale actions,
+        ``normalization_stats.npy``. ``generate`` uses it to return real-scale actions,
         while server-side proprio preprocessing uses it to normalize raw robot
         state into the model's training space. Pass ``None`` to clear.
         """
@@ -988,6 +1027,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         all_pre_encoded_text: list = []
         all_actions: list = []
         all_proprios: list = []
+        all_proprio_masks: list = []
         all_action_masks: list = []
         all_video_masks: list = []
 
@@ -1021,6 +1061,25 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 else:
                     raise ValueError(f"sample['proprio'] must be [D] or [1, D], got shape {tuple(proprio.shape)}")
             all_proprios.append(proprio)
+
+            # Collect per-sample proprio_mask. Two accepted shapes:
+            #   * 1D ``(1,) bool`` — legacy "is the proprio token enabled".
+            #   * 2D ``(1, D) bool`` — per-dim mask; sample-level enable is
+            #     ``pmask.any(dim=-1)``. Used by RoboCOIN/EgoDex/RoboTwin/OXE
+            #     after the 2D mask migration.
+            # Default for readers that don't emit the field: all True (1,).
+            # (Mixed 1-D / 2-D ranks across a batch are reconciled just before
+            # the stack below, so the bare (1,) default is safe.)
+            pmask = sample.get("proprio_mask")
+            if pmask is None:
+                pmask = torch.ones(1, dtype=torch.bool)
+            else:
+                if isinstance(pmask, np.ndarray):
+                    pmask = torch.from_numpy(pmask)
+                pmask = pmask.to(dtype=torch.bool)
+                if pmask.ndim == 0:
+                    pmask = pmask.unsqueeze(0)
+            all_proprio_masks.append(pmask)
 
             amask = sample.get("action_mask", None)
             vmask = sample.get("video_mask", None)
@@ -1092,6 +1151,17 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         if self.uses_proprioception:
             inputs["proprio_state"] = torch.stack(all_proprios, dim=0).contiguous()
+            # Reconcile mixed 1-D (1,) / 2-D (1, D) proprio_masks before stacking:
+            # promote any 1-D enable-flag to (1, D) (broadcasts the sample-level
+            # flag across all dims) so a batch mixing a 2-D reader mask with a
+            # 1-D default/external mask doesn't raise on rank mismatch. All-1-D
+            # and all-2-D batches are left untouched.
+            if len({m.ndim for m in all_proprio_masks}) > 1:
+                pdim = max((m.shape[-1] for m in all_proprio_masks if m.ndim == 2), default=1)
+                all_proprio_masks = [
+                    m if m.ndim == 2 else m.reshape(m.shape[0], 1).expand(m.shape[0], pdim) for m in all_proprio_masks
+                ]
+            inputs["proprio_mask"] = torch.stack(all_proprio_masks, dim=0).contiguous()
 
         if all_action_masks[0] is not None:
             inputs["action_is_pad"] = torch.stack([~m for m in all_action_masks], dim=0).to(device=_device)
@@ -1317,6 +1387,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # --- Joint forward pass ---
         forward_inputs = dict(inputs)
         proprio_state = forward_inputs.pop("proprio_state", None)
+        proprio_mask = forward_inputs.pop("proprio_mask", None)
         use_grad_ckpt = forward_inputs.pop("use_gradient_checkpointing", False)
         use_grad_ckpt_offload = forward_inputs.pop("use_gradient_checkpointing_offload", False)
         # Padding masks are kept in `inputs` for loss-side masking but dropped
@@ -1324,6 +1395,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # MoT design, attention itself does not consume sample-level padding.
         forward_inputs.pop("action_is_pad", None)
         forward_inputs.pop("video_is_pad", None)
+
+        # Route per-sample proprio_mask through pipeline_inputs to
+        # ``_append_proprio_context_token``. Internal-only key; pop'd there.
+        if proprio_mask is not None:
+            forward_inputs["_proprio_sample_mask"] = proprio_mask
 
         # Use ``self(...)`` (not ``self.forward(...)``) so ``nn.Module.__call__``
         # is invoked and the architecture-level forward-pre-hook fires. Under
@@ -1436,26 +1512,37 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
 
     def _compute_action_loss(self, noise_pred, target, timestep_ids, scheduler, inputs, device):
-        """Per-sample weighted action MSE loss."""
+        'Public implementation.'
         import torch.nn.functional as F
 
         tw = scheduler.training_weight(timestep_ids).to(dtype=torch.float32, device=device)
         if tw.ndim != 1:
             raise ValueError(f"action loss weights must be per-sample [B], got shape {tuple(tw.shape)}")
         per_element = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
-        per_step = per_element.mean(dim=2)
 
         action_is_pad = inputs.get("action_is_pad")
 
-        if action_is_pad is not None:
-            action_is_pad = action_is_pad.to(device=per_step.device, dtype=torch.bool)
-            valid_mask = ~action_is_pad
-            per_step = per_step * valid_mask.float()
-            valid_count = valid_mask.float().sum(dim=1).clamp(min=1)
-            per_sample = per_step.sum(dim=1) / valid_count
+        if action_is_pad is None:
+            per_sample = per_element.mean(dim=(1, 2))
             return (per_sample * tw).mean()
 
-        per_sample = per_step.mean(dim=1)
+        action_is_pad = action_is_pad.to(device=per_element.device, dtype=torch.bool)
+        valid_mask_f = (~action_is_pad).float()
+
+        # New default path: (B, T, D) per-element mask that exactly matches
+        # per_element's shape. Used by RoboCOIN/EgoDex/RoboTwin/OXE after the
+        # 2D mask migration.
+        if valid_mask_f.shape == per_element.shape:
+            weighted = per_element * valid_mask_f
+            per_sample = weighted.sum(dim=(1, 2)) / valid_mask_f.sum(dim=(1, 2)).clamp(min=1)
+            return (per_sample * tw).mean()
+
+        if valid_mask_f.ndim == 3:
+            valid_mask_f = (valid_mask_f > 0).any(dim=-1).float()
+        per_step = per_element.mean(dim=2)
+        per_step = per_step * valid_mask_f
+        valid_count = valid_mask_f.sum(dim=1).clamp(min=1)
+        per_sample = per_step.sum(dim=1) / valid_count
         return (per_sample * tw).mean()
 
     # --- Inference: generation ---
@@ -1470,8 +1557,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         first_frame_image=None,
         num_frames: int = 49,
         action_num_frames: Optional[int] = None,
-        height: int = 480,
-        width: int = 832,
+        height: int = 384,
+        width: int = 320,
         seed: int = 42,
         tiled: bool = True,
         input_video_latents: Optional[Tensor] = None,

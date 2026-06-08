@@ -134,8 +134,7 @@ def load_from_checkpoint_dir(
         # subclass) — so ``isinstance(c, dict)`` would always be False
         # against the real saved config, silently skipping the marker.
         has_reason1_state_component = any(
-            isinstance(c, dict) and c.get("attr") == "text_encoder"
-            for c in (vb_cfg_dict.get("components") or [])
+            isinstance(c, dict) and c.get("attr") == "text_encoder" for c in (vb_cfg_dict.get("components") or [])
         )
         if os.path.isdir(reason1_artifact_dir) and (
             vb_cfg_dict.get("text_encoder") == "reason1_live" or has_reason1_state_component
@@ -204,7 +203,7 @@ def load_from_checkpoint_dir(
     architecture.set_dtype_device(model_dtype, torch.device(device))
     architecture.eval()
 
-    # 6. Attach the action normalizer built from saved action_stats.npy + config.
+    # 6. Attach the action normalizer built from saved normalization_stats.npy + config.
     architecture.attach_action_normalizer(_build_action_normalizer(cfg, ckpt_dir))
 
     logger.info("Model loaded successfully on %s", device)
@@ -216,7 +215,7 @@ def _build_action_normalizer(cfg: DictConfig, ckpt_dir: str):
 
     Reads ``dataloader.normalize_mode`` and ``dataloader.action_mode`` from the
     saved config. When normalization is disabled, returns ``None`` without
-    requiring ``action_stats.npy``. When enabled, loads ``action_stats.npy``
+    requiring ``normalization_stats.npy``. When enabled, loads ``normalization_stats.npy``
     and wraps the requested stats sub-dict in an ``ActionNormalizer``.
     """
     logger.info("[normalizer] Resolving deployment action normalizer from checkpoint dir: %s", ckpt_dir)
@@ -237,12 +236,25 @@ def _build_action_normalizer(cfg: DictConfig, ckpt_dir: str):
         action_mode,
     )
 
-    stats_path = os.path.join(ckpt_dir, "action_stats.npy")
+    stats_path = os.path.join(ckpt_dir, "normalization_stats.npy")
     if not os.path.exists(stats_path):
-        raise FileNotFoundError(
-            f"Missing required action_stats.npy in checkpoint dir: {stats_path}. "
-            "Checkpoints with active action normalization must include action_stats.npy."
-        )
+        # Backward-compat: checkpoints trained before the action_stats ->
+        # normalization_stats rename ship action_stats.npy. Fall back to it
+        # (same schema) with a deprecation warning rather than hard-failing.
+        legacy_path = os.path.join(ckpt_dir, "action_stats.npy")
+        if os.path.exists(legacy_path):
+            logger.warning(
+                "[normalizer] normalization_stats.npy missing; falling back to legacy "
+                "action_stats.npy (%s). Re-save the checkpoint to migrate.",
+                legacy_path,
+            )
+            stats_path = legacy_path
+        else:
+            raise FileNotFoundError(
+                f"Missing required normalization_stats.npy in checkpoint dir: {stats_path} "
+                f"(and no legacy action_stats.npy fallback). Checkpoints with active action "
+                "normalization must include normalization_stats.npy."
+            )
     logger.info("[normalizer] Found pre-computed stats file: %s (exists ✓)", stats_path)
 
     from openwam.dataloader.transforms.normalize import (

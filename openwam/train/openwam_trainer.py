@@ -27,8 +27,8 @@ from omegaconf import DictConfig, open_dict
 from openwam.train.base import BaseTrainer
 from openwam.train.utils.checkpointing import (
     manage_checkpoints,
-    save_action_stats,
     save_config,
+    save_normalization_stats,
 )
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 
@@ -150,10 +150,7 @@ class OpenWAMTrainer(BaseTrainer):
         if (
             external_encoder is not None
             and not external_encoder.spec.is_reversible
-            and not any(
-                p == "video_backbone._encoder" or p.startswith("video_backbone._encoder.")
-                for p in freeze_list
-            )
+            and not any(p == "video_backbone._encoder" or p.startswith("video_backbone._encoder.") for p in freeze_list)
         ):
             logger.warning(
                 "external encoder %s is not in freeze_modules; ViT is fully trainable. "
@@ -202,7 +199,7 @@ class OpenWAMTrainer(BaseTrainer):
 
         # Load action stats
         if dataset is not None and self.lambda_action > 0:
-            self._load_action_stats(dataset)
+            self._load_normalization_stats(dataset)
 
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.
@@ -364,9 +361,9 @@ class OpenWAMTrainer(BaseTrainer):
                 flipped,
             )
 
-    def _load_action_stats(self, dataset):
+    def _load_normalization_stats(self, dataset):
         """Load action normalization stats from dataset into architecture buffers."""
-        stats = getattr(dataset, "action_stats", None)
+        stats = getattr(dataset, "normalization_stats", None)
         if callable(stats):
             stats = stats()
 
@@ -783,7 +780,7 @@ class OpenWAMTrainer(BaseTrainer):
                         self._prepare_video_backbone_config_for_checkpoint(self.cfg, specs)
             save_config(output_path, self.cfg)
             if self.dataset is not None:
-                save_action_stats(output_path, self.dataset)
+                save_normalization_stats(output_path, self.dataset)
             # Copy backbone-specific deploy artifacts (tokenizer / processor / ...)
             # so component-spec deployment does not depend on the training-time
             # ``model.video_backbone.model_path`` being reachable.
@@ -900,6 +897,11 @@ class OpenWAMTrainer(BaseTrainer):
         for epoch in range(num_epochs):
             if hasattr(dataloader, "set_epoch"):
                 dataloader.set_epoch(epoch)
+            # Some Datasets (e.g. MixtureDataset) carry their own per-epoch
+            # state (virtual index_map). Propagate epoch to them too so the
+            # shuffle order varies across epochs. Idempotent / safe to skip.
+            if hasattr(self.dataset, "set_epoch"):
+                self.dataset.set_epoch(epoch)
             for batch in dataloader:
                 if self._run_seed is not None:
                     step_seed = per_step_seed(self._run_seed, rank=self._rank, step=global_step)

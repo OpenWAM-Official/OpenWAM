@@ -192,6 +192,7 @@ cython_debug/
 # Claude Code
 .claude/
 CLAUDE.md
+AGENTS.md
 
 # Policy-server / client per-step debug artifacts
 server_debug/

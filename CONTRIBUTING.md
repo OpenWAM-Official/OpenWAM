@@ -60,7 +60,7 @@ reference**，别人换机器要 fork。`sandbox/` 不是 production training en
 
 | 必须 | 禁止 |
 |---|---|
-| 走 `scripts/train.sh`（或对应统一 entry），享受 wandb 协议 / git SHA / run-name 自动注入 | 直接 `torchrun` 绕过协议层 |
+| 走 `scripts/train.sh`（统一 entry），享受 wandb 协议 / git SHA / run-name 自动注入 | 直接 `torchrun` 绕过协议层 |
 | 环境特定值通过 env var + Hydra CLI override 传入 | 修改 `configs/**/*.yaml` 来塞本机路径 |
 | 头部注释里写清楚跑过的机器 / OSS layout / W&B run | token / 密钥写脚本里 |
 | 一个目录 = 一个 smoke 主题，入口固定叫 `run_smoke.sh` | 把 `sandbox/` 设成 CI / production entry |
@@ -197,7 +197,7 @@ CHANGELOG 本身**不是** spec —— 它说"哪天改了什么、为什么"，
 ## Adding a New Component
 
 ### New dataset
-1. Create `open_wam/data/my_dataset.py` inheriting from `BaseActionDataset`
+1. Create a reader inheriting from `openwam.dataloader.bases.BaseDataset` (single-bucket LeRobot v3 readers subclass `LeRobotV3Reader`)
 2. Register it in `open_wam/data/registry.py`
 3. Add a config in `configs/data/my_dataset.yaml`
 

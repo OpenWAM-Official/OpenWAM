@@ -50,8 +50,8 @@ class InferenceInputs:
     pre_encoded_text: Optional[Tensor] = None
     uncond_pre_encoded_text: Optional[Tensor] = None
     num_frames: int = 49
-    height: int = 480
-    width: int = 832
+    height: int = 384
+    width: int = 320
     seed: int = 42
     num_inference_steps: int = 50
     shift: float = 5.0

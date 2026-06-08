@@ -77,8 +77,8 @@ def _flat_stats(action_dim: int, mean: float = 0.0, std: float = 1.0, low: float
     }
 
 
-def _create_action_stats(path, joint_dim: int = 14, eef_dim: int = 20) -> None:
-    """Create a mock nested-schema action_stats.npy with both joint and eef sub-dicts."""
+def _create_normalization_stats(path, joint_dim: int = 14, eef_dim: int = 20) -> None:
+    """Create a mock nested-schema normalization_stats.npy with both joint and eef sub-dicts."""
     nested = {
         "joint": _flat_stats(joint_dim),
         "eef": _flat_stats(eef_dim),
@@ -121,10 +121,12 @@ def test_joint_mode_basic():
         sample = ds[0]
         # action horizon = num_frames - 1
         assert sample["action"].shape == (4, 14)
-        assert sample["action_mask"].shape == (4,)
+        # 2-D mask: (T_action, action_dim)
+        assert sample["action_mask"].shape == (4, 14)
         # proprio is a single frame with time dim kept (shape (1, D))
         assert sample["proprio"].shape == (1, 14)
-        assert sample["proprio_mask"].shape == (1,)
+        # 2-D mask: (1, action_dim)
+        assert sample["proprio_mask"].shape == (1, 14)
         # video_mask length matches sampled frames
         assert sample["video_mask"].shape == (5,)
 
@@ -164,10 +166,12 @@ def test_short_episode_pads_and_masks():
         assert len(sample["video"]) == 5
 
         # Only steps whose source raw frame exists are unmasked.
-        # action_mask[t] is (t + 1) < actual_raw_len = 10 → True for t in 0..8
-        mask = sample["action_mask"].bool().tolist()
-        assert mask[:9] == [True] * 9
-        assert mask[9:] == [False] * 7
+        # action_mask[t] is (t + 1) < actual_raw_len = 10 → True for t in 0..8.
+        # Post 2-D mask migration: mask is (T, D). Collapse to per-step validity
+        # via .any(dim=-1) — RoboTwin bimanual sets all D dims uniformly per step.
+        mask_per_step = sample["action_mask"].any(dim=-1).bool().tolist()
+        assert mask_per_step[:9] == [True] * 9
+        assert mask_per_step[9:] == [False] * 7
 
         # The padded tail actions should exactly repeat the last real action.
         last_real = sample["action"][8]
@@ -205,7 +209,8 @@ def test_long_episode_tail_windows_are_included_and_padded():
         # start=15 leaves raw frames 15..19 available. Actions are frames
         # 16..19 (4 valid steps), then the last action repeats.
         sample = ds[15]
-        mask = sample["action_mask"].bool().tolist()
+        # 2-D mask (T, D); collapse to per-step via any(dim=-1).
+        mask = sample["action_mask"].any(dim=-1).bool().tolist()
         assert mask[:4] == [True] * 4
         assert mask[4:] == [False] * 12
 
@@ -238,7 +243,8 @@ def test_tail_windows_always_have_at_least_one_valid_action():
         assert ds._window_index[-1] == (0, 18)
         sample = ds[len(ds) - 1]
         assert sample["start_frame"] == 18
-        assert sample["action_mask"].tolist() == [True] + [False] * 15
+        # 2-D mask (T, D); collapse to per-step via any(dim=-1).
+        assert sample["action_mask"].any(dim=-1).bool().tolist() == [True] + [False] * 15
 
 
 def test_single_frame_episode_has_no_valid_action_window():
@@ -366,8 +372,11 @@ def test_tail_masks_flow_through_prepare_inputs_and_loss():
         # start=15 has four real action labels (frames 16..19) followed by pad.
         partial = ds[15]
         inputs = arch.prepare_inputs(partial)
+        # Post 2-D mask migration: action_is_pad is (B, T, action_dim). Collapse
+        # to per-step via any(dim=-1) to recover the legacy time-mask comparison.
         expected_action_is_pad = torch.tensor([[False] * 4 + [True] * 12])
-        assert torch.equal(inputs["action_is_pad"].cpu(), expected_action_is_pad)
+        assert inputs["action_is_pad"].shape == (1, 16, ds.action_dim)
+        assert torch.equal(inputs["action_is_pad"].cpu().any(dim=-1), expected_action_is_pad)
         # Video frames are [15,19,pad,pad,pad]. The single tail latent group
         # contains frame 19, so it is not considered padded.
         assert torch.equal(inputs["video_is_pad"].cpu(), torch.tensor([[False]]))
@@ -390,7 +399,12 @@ def test_tail_masks_flow_through_prepare_inputs_and_loss():
         # action errors are ignored, while the one valid step still contributes.
         last = ds[18]
         last_inputs = arch.prepare_inputs(last)
-        assert torch.equal(last_inputs["action_is_pad"].cpu(), torch.tensor([[False] + [True] * 15]))
+        # 2-D action_is_pad collapsed to per-step.
+        assert last_inputs["action_is_pad"].shape == (1, 16, ds.action_dim)
+        assert torch.equal(
+            last_inputs["action_is_pad"].cpu().any(dim=-1),
+            torch.tensor([[False] + [True] * 15]),
+        )
         assert torch.equal(last_inputs["video_is_pad"].cpu(), torch.tensor([[True]]))
 
         pred_action = torch.full((1, 16, 2), 1000.0)
@@ -448,11 +462,13 @@ def test_video_stride_does_not_affect_action_length():
 
         sample = ds[0]
         assert sample["action"].shape == (16, 14)
-        assert sample["action_mask"].shape == (16,)
+        # 2-D mask: (T_action, action_dim)
+        assert sample["action_mask"].shape == (16, 14)
         assert len(sample["video"]) == 5
         assert sample["video_mask"].shape == (5,)
         assert sample["proprio"].shape == (1, 14)
-        assert sample["proprio_mask"].shape == (1,)
+        # 2-D mask: (1, action_dim)
+        assert sample["proprio_mask"].shape == (1, 14)
 
 
 def test_invalid_video_stride_rejected():
@@ -484,8 +500,8 @@ def test_joint_mode_minmax_normalization():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=42)
-        stats_path = os.path.join(tmpdir, "action_stats.npy")
-        _create_action_stats(stats_path)
+        stats_path = os.path.join(tmpdir, "normalization_stats.npy")
+        _create_normalization_stats(stats_path)
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
@@ -493,7 +509,7 @@ def test_joint_mode_minmax_normalization():
             height=32,
             width=32,
             action_mode="joint",
-            action_stats_path=stats_path,
+            normalization_stats_path=stats_path,
             val_ratio=0.0,
             video_stride=1,
             filter_static_segments=False,
@@ -517,8 +533,8 @@ def test_joint_mode_gripper_continuous():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
-        stats_path = os.path.join(tmpdir, "action_stats.npy")
-        _create_action_stats(stats_path)
+        stats_path = os.path.join(tmpdir, "normalization_stats.npy")
+        _create_normalization_stats(stats_path)
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
@@ -526,7 +542,7 @@ def test_joint_mode_gripper_continuous():
             height=32,
             width=32,
             action_mode="joint",
-            action_stats_path=stats_path,
+            normalization_stats_path=stats_path,
             val_ratio=0.0,
             video_stride=1,  # num_video_frames=5 → (5-1)%4=0 ✓
             filter_static_segments=False,
@@ -547,7 +563,7 @@ def test_joint_mode_denormalize_roundtrip():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
-        stats_path = os.path.join(tmpdir, "action_stats.npy")
+        stats_path = os.path.join(tmpdir, "normalization_stats.npy")
 
         # Joint stats: min=0, max=2 for all dims; eef filler
         stats = {
@@ -562,7 +578,7 @@ def test_joint_mode_denormalize_roundtrip():
             height=32,
             width=32,
             action_mode="joint",
-            action_stats_path=stats_path,
+            normalization_stats_path=stats_path,
             val_ratio=0.0,
             video_stride=1,
             filter_static_segments=False,
@@ -600,7 +616,7 @@ def test_eef_mode_basic():
         )
         assert ds.action_dim == 20
         assert ds.action_mode == "eef"
-        assert ds.action_stats is None  # no stats loaded when normalize_mode=None
+        assert ds.normalization_stats is None  # no stats loaded when normalize_mode=None
 
         sample = ds[0]
         # action horizon = num_frames - 1
@@ -614,8 +630,8 @@ def test_eef_mode_minmax_normalization():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
-        stats_path = os.path.join(tmpdir, "action_stats.npy")
-        _create_action_stats(stats_path)  # nested {joint, eef}
+        stats_path = os.path.join(tmpdir, "normalization_stats.npy")
+        _create_normalization_stats(stats_path)  # nested {joint, eef}
 
         ds = RoboTwinDataset(
             data_root=tmpdir,
@@ -623,13 +639,13 @@ def test_eef_mode_minmax_normalization():
             height=32,
             width=32,
             action_mode="eef",
-            action_stats_path=stats_path,
+            normalization_stats_path=stats_path,
             normalize_mode="min-max",
             val_ratio=0.0,
             video_stride=1,
             filter_static_segments=False,
         )
-        assert ds.action_stats is not None and "min" in ds.action_stats
+        assert ds.normalization_stats is not None and "min" in ds.normalization_stats
 
         sample = ds[0]
         actions = sample["action"].numpy()
@@ -648,7 +664,7 @@ def test_eef_mode_zscore_normalization():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=40, seed=0)
-        stats_path = os.path.join(tmpdir, "action_stats.npy")
+        stats_path = os.path.join(tmpdir, "normalization_stats.npy")
         # Deliberately small std so normalized magnitudes are large — makes it
         # easy to tell the mapping actually applied.
         nested = {
@@ -663,7 +679,7 @@ def test_eef_mode_zscore_normalization():
             height=32,
             width=32,
             action_mode="eef",
-            action_stats_path=stats_path,
+            normalization_stats_path=stats_path,
             normalize_mode="z-score",
             val_ratio=0.0,
             video_stride=1,
@@ -688,8 +704,8 @@ def test_eef_roundtrip_denormalize():
     for mode in ("min-max", "z-score"):
         with tempfile.TemporaryDirectory() as tmpdir:
             _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
-            stats_path = os.path.join(tmpdir, "action_stats.npy")
-            _create_action_stats(stats_path)
+            stats_path = os.path.join(tmpdir, "normalization_stats.npy")
+            _create_normalization_stats(stats_path)
 
             ds = RoboTwinDataset(
                 data_root=tmpdir,
@@ -697,7 +713,7 @@ def test_eef_roundtrip_denormalize():
                 height=32,
                 width=32,
                 action_mode="eef",
-                action_stats_path=stats_path,
+                normalization_stats_path=stats_path,
                 normalize_mode=mode,
                 val_ratio=0.0,
                 video_stride=1,
@@ -875,15 +891,15 @@ def test_rotation_conversion_roundtrip():
 # ---------------------------------------------------------------------------
 
 
-def test_action_stats_nested_schema_contains_both_modes():
-    """compute_action_stats returns a nested dict with both 'joint' and 'eef'."""
-    from openwam.dataloader.robotwin_stats_computation import compute_action_stats
+def test_normalization_stats_nested_schema_contains_both_modes():
+    """compute_normalization_stats returns a nested dict with both 'joint' and 'eef'."""
+    from openwam.dataloader.robotwin_stats_computation import compute_normalization_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
             _create_mock_episode(os.path.join(tmpdir, f"episode{i}.hdf5"), T=10, seed=i)
 
-        stats = compute_action_stats(tmpdir)
+        stats = compute_normalization_stats(tmpdir)
         assert "joint" in stats and "eef" in stats
         assert stats["joint"]["mean"].shape == (14,)
         assert stats["joint"]["std"].shape == (14,)
@@ -895,7 +911,7 @@ def test_action_stats_nested_schema_contains_both_modes():
         assert stats["num_timesteps"] > 0
 
 
-def test_multitask_action_stats_nested_schema():
+def test_multitask_normalization_stats_nested_schema():
     """compute_multitask_robotwin_stats also returns both modes."""
     from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
 
@@ -1120,7 +1136,7 @@ def test_multitask_peer_rank_waits_for_shared_stats(monkeypatch, tmp_path):
     class _FakeSubDataset:
         def __init__(self, **kwargs):
             self.action_dim = 14
-            self.action_stats = {"mean": np.zeros(14, dtype=np.float32)}
+            self.normalization_stats = {"mean": np.zeros(14, dtype=np.float32)}
 
         def __len__(self):
             return 1

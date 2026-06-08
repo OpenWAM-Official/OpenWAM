@@ -1,0 +1,41 @@
+type: oxe_rt1
+
+# ── Dataset root ────────────────────────────────────────────────────────────
+# RT-1 LeRobot v3 bucket. 87,212 episodes, ~351h at 3 fps. 1 camera.
+# Notable: state uses **quaternion (xyzw)** for orientation (whereas
+# BC-Z/Bridge/DROID use Euler XYZ). Reader runtime-asserts ‖q‖₂ ≈ 1 at
+# __init__ to catch a wrongly-routed wxyz before training starts.
+dataset_dir: /path/to/OXE/RT-1-Dataset
+
+# ── Window / stride ─────────────────────────────────────────────────────────
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+# ── Image size ──────────────────────────────────────────────────────────────
+# multiview=true → L-shape canvas (384H×320W):
+#   top    256H × 320W → image (NATIVELY 256×320 — no aspect change)
+#   bot-L / bot-R     → BLACK (RT-1 has only 1 camera)
+# multiview=false → single image at (height, width).
+height: 384
+width: 320
+
+multiview: true
+
+# ── Train / val split ───────────────────────────────────────────────────────
+split: train
+
+# ── Action / proprio normalization ──────────────────────────────────────────
+# Reads {dataset_dir}/meta/eef_stats.json (state + action stacked). All three
+# modes are supported; quantile is the default. RT-1 in particular has action
+# range outliers (action_y reaches 22.09 in eef_stats.json) — under min-max
+# 98% of action_y compresses into a ~1.6%-wide band (post-norm std ≈ 0.008 vs
+# ≈ 0.43 under quantile), so quantile is strongly recommended for RT-1.
+# See plans/oxe_dataloaders.md §3.4 + §1.2 and scripts/oxe_verify_normalization.py.
+#   null / "none" → no normalization
+#   "min-max"     → ((x - min) / (max - min) * 2 - 1)
+#   "z-score"     → ((x - mean) / std)
+#   "quantile"    → clip((x - q01) / (q99 - q01) * 2 - 1, -1, 1)  [default]
+normalize_mode: quantile
+
+enable_action_supervision: true

@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from openwam.dataloader.transforms.base import InvertibleModalityTransform
+from openwam.dataloader.utils.normalization import NORM_EPS
 
 
 class NormMode(str, Enum):
@@ -47,7 +48,7 @@ class Normalizer(InvertibleModalityTransform):
         mode: str = "q99",
         stats: Optional[Dict[str, np.ndarray]] = None,
         binary_threshold: float = 0.5,
-        eps: float = 1e-6,
+        eps: float = NORM_EPS,
     ):
         super().__init__(apply_to=["action"])
         self.mode = NormMode(mode)
@@ -156,7 +157,7 @@ class ActionNormalizer(Normalizer):
         gripper_mode: Optional[str] = None,
         gripper_indices: Optional[list] = None,
         binary_threshold: float = 0.5,
-        eps: float = 1e-6,
+        eps: float = NORM_EPS,
     ):
         super().__init__(mode=mode, stats=stats, binary_threshold=binary_threshold, eps=eps)
         self.apply_to = ["action"]
@@ -204,7 +205,7 @@ YAML_TO_NORM_MODE = {
 
 
 def load_mode_stats(stats_path: str, action_mode: str) -> Optional[dict]:
-    """Load ``action_stats.npy`` and return the sub-dict for the requested mode.
+    """Load ``normalization_stats.npy`` and return the sub-dict for the requested mode.
 
     Expected schema: ``{"joint": {...}, "eef": {...}, "num_timesteps": ...}``.
     Returns the per-mode stats dict, or ``None`` if the file does not contain

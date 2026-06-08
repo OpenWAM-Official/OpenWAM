@@ -1,0 +1,226 @@
+"""Compute per-dataset EEF stats for the 4 OXE datasets.
+
+For each dataset, scan all data parquet shards, extract state + action,
+convert to 10-D EEF (``pos(3) + rot6d(6) + grip(1)``), and write a
+merged ``min / max / mean / std / q01 / q99`` summary to
+``{dataset_dir}/meta/eef_stats.json``.
+
+The output single-share stats file is consumed by the OXE readers via
+:func:`openwam.dataloader.utils.normalization.apply_normalization` when
+``normalize_mode`` is set to ``"min-max"`` or ``"quantile"`` (the
+yaml default). state and action are stacked into a single ``(N, 10)``
+matrix so the resulting stats apply uniformly to both streams.
+
+Usage:
+    python scripts/oxe_compute_stats.py --dataset BC-Z
+    python scripts/oxe_compute_stats.py --all
+    python scripts/oxe_compute_stats.py --all --root /path/to/OXE
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pyarrow.parquet as pq
+
+from openwam.dataloader.utils.eef import assert_unit_quaternion
+from openwam.dataloader.utils.oxe_schema import (
+    bcz_state_to_arm10,
+    droid_state_to_arm10,
+    euler7_action_to_arm10,
+    rt1_state_to_arm10,
+)
+
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
+logger = logging.getLogger("oxe_compute_stats")
+
+# Schema spec: which parquet columns to read for state/action per dataset, and
+# how to convert them to 10-D EEF.
+SCHEMA: Dict[str, Dict] = {
+    "BC-Z": {
+        "state_cols": ["observation.state"],
+        "action_cols": ["action"],
+        "state_fn": "bcz_state",
+        "action_fn": "euler7_action",
+    },
+    "Bridge": {
+        "state_cols": ["observation.state"],
+        "action_cols": ["action"],
+        "state_fn": "bcz_state",  # Same 8-D layout as BC-Z
+        "action_fn": "euler7_action",
+    },
+    "RT-1": {
+        "state_cols": ["observation.state"],
+        "action_cols": ["action"],
+        "state_fn": "rt1_state",  # quat-based
+        "action_fn": "euler7_action",
+    },
+    "DROID": {
+        # DROID state = cartesian (6) + gripper (1)
+        "state_cols": [
+            "observation.state.cartesian_position",
+            "observation.state.gripper_position",
+        ],
+        # Action.original is the Euler EEF column we want (not the default
+        # joint-space action).
+        "action_cols": ["action.original"],
+        "state_fn": "droid_state",
+        "action_fn": "euler7_action",
+    },
+}
+
+
+def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
+    if state_fn == "bcz_state":
+        return bcz_state_to_arm10(rows["observation.state"])
+    if state_fn == "rt1_state":
+        quat = rows["observation.state"][:, 3:7]
+        assert_unit_quaternion(quat, tol=0.05, sample_n=min(64, len(quat)))
+        return rt1_state_to_arm10(rows["observation.state"])
+    if state_fn == "droid_state":
+        return droid_state_to_arm10(
+            rows["observation.state.cartesian_position"],
+            rows["observation.state.gripper_position"],
+        )
+    raise ValueError(f"unknown state_fn={state_fn}")
+
+
+def _convert_action(rows: Dict[str, np.ndarray], action_fn: str) -> np.ndarray:
+    if action_fn == "euler7_action":
+        # find the action column key (only one for OXE datasets)
+        return euler7_action_to_arm10(rows[list(rows.keys())[0]])
+    raise ValueError(f"unknown action_fn={action_fn}")
+
+
+def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
+    """Load one parquet shard, returning a dict {col: ndarray-of-stacked-rows}."""
+    table = pq.read_table(path, memory_map=True, columns=cols)
+    out: Dict[str, np.ndarray] = {}
+    for c in cols:
+        col_data = table.column(c).to_pylist()
+        # Handle scalar columns (e.g. DROID gripper_position is float).
+        if col_data and not isinstance(col_data[0], (list, np.ndarray)):
+            out[c] = np.asarray(col_data, dtype=np.float32).reshape(-1, 1)
+        else:
+            out[c] = np.asarray(col_data, dtype=np.float32)
+    return out
+
+
+def compute_dataset_stats(dataset_dir: Path, dataset_name: str) -> Tuple[dict, int, int]:
+    """Walk a dataset's data parquets, convert to 10-D EEF, aggregate stats.
+
+    Returns:
+        (stats_dict, n_state_samples, n_action_samples)
+    """
+    spec = SCHEMA[dataset_name]
+    parquet_paths = sorted((dataset_dir / "data").rglob("*.parquet"))
+    if not parquet_paths:
+        raise FileNotFoundError(f"No parquet shards under {dataset_dir}/data")
+    logger.info("%s: scanning %d parquet shards under %s/data", dataset_name, len(parquet_paths), dataset_dir)
+
+    state_arrs: List[np.ndarray] = []
+    action_arrs: List[np.ndarray] = []
+    for i, p in enumerate(parquet_paths, start=1):
+        state_rows = _load_shard(p, spec["state_cols"])
+        action_rows = _load_shard(p, spec["action_cols"])
+        state10 = _convert_state(state_rows, spec["state_fn"])
+        action10 = _convert_action(action_rows, spec["action_fn"])
+        state_arrs.append(state10)
+        action_arrs.append(action10)
+        if i % 50 == 0 or i == len(parquet_paths):
+            logger.info("  %s: processed %d/%d shards", dataset_name, i, len(parquet_paths))
+
+    state_all = np.concatenate(state_arrs, axis=0)
+    action_all = np.concatenate(action_arrs, axis=0)
+    n_state = int(len(state_all))
+    n_action = int(len(action_all))
+    # Merged stats: stack state and action so a single set of params governs both.
+    merged = np.concatenate([state_all, action_all], axis=0)
+    logger.info(
+        "%s: merged %d state + %d action rows = %d total samples for stats",
+        dataset_name,
+        n_state,
+        n_action,
+        len(merged),
+    )
+
+    stats = {
+        "n_samples": int(len(merged)),
+        "n_state_samples": n_state,
+        "n_action_samples": n_action,
+        "min": merged.min(axis=0).astype(np.float64).tolist(),
+        "max": merged.max(axis=0).astype(np.float64).tolist(),
+        "mean": merged.mean(axis=0).astype(np.float64).tolist(),
+        "std": merged.std(axis=0).astype(np.float64).tolist(),
+        "q01": np.quantile(merged, 0.01, axis=0).astype(np.float64).tolist(),
+        "q99": np.quantile(merged, 0.99, axis=0).astype(np.float64).tolist(),
+    }
+    return stats, n_state, n_action
+
+
+def _print_stats_table(stats: dict, name: str) -> None:
+    """Per-dim summary for human eyeballing."""
+    dim_names = ["x", "y", "z", "r6_0", "r6_1", "r6_2", "r6_3", "r6_4", "r6_5", "grip"]
+    print(f"\n  {name}  (n_samples={stats['n_samples']:,})")
+    print(f"  {'dim':<6} {'min':>10} {'max':>10} {'q01':>10} {'q99':>10} {'mean':>10} {'std':>10}")
+    for i, dn in enumerate(dim_names):
+        print(
+            f"  {dn:<6} "
+            f"{stats['min'][i]:>10.3f} "
+            f"{stats['max'][i]:>10.3f} "
+            f"{stats['q01'][i]:>10.3f} "
+            f"{stats['q99'][i]:>10.3f} "
+            f"{stats['mean'][i]:>10.3f} "
+            f"{stats['std'][i]:>10.3f}"
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--root",
+        type=str,
+        default="/path/to/OXE",
+        help="OXE dataset root (each dataset is in {root}/<name>-Dataset/)",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=list(SCHEMA.keys()),
+        help="Single dataset to process (mutually exclusive with --all)",
+    )
+    parser.add_argument("--all", action="store_true", help="Process all 4 OXE datasets")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute and print stats but do not write meta/eef_stats.json",
+    )
+    args = parser.parse_args()
+
+    if not args.dataset and not args.all:
+        parser.error("must specify either --dataset NAME or --all")
+    targets = list(SCHEMA.keys()) if args.all else [args.dataset]
+    root = Path(args.root)
+    for name in targets:
+        ds_dir = root / f"{name}-Dataset"
+        if not ds_dir.is_dir():
+            logger.warning("%s: directory %s missing, skipping", name, ds_dir)
+            continue
+        stats, n_state, n_action = compute_dataset_stats(ds_dir, name)
+        _print_stats_table(stats, name)
+        if not args.dry_run:
+            out_path = ds_dir / "meta" / "eef_stats.json"
+            with open(out_path, "w") as f:
+                json.dump(stats, f, indent=2)
+            logger.info("%s: wrote %s", name, out_path)
+        else:
+            logger.info("%s: --dry-run, no file written", name)
+
+
+if __name__ == "__main__":
+    main()

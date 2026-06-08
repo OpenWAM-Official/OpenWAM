@@ -45,7 +45,7 @@ def build_dataset_from_checkpoint_cfg(
     from openwam.dataloader.registry import build_dataset
 
     dl_cfg = OmegaConf.create(OmegaConf.to_container(cfg.dataloader, resolve=True))
-    OmegaConf.update(dl_cfg, "action_stats_path", str(ckpt_dir / "action_stats.npy"), merge=False)
+    OmegaConf.update(dl_cfg, "normalization_stats_path", str(ckpt_dir / "normalization_stats.npy"), merge=False)
     if dataset_dir is not None:
         OmegaConf.update(dl_cfg, "dataset_dir", dataset_dir, merge=False)
     if task_name is not None:

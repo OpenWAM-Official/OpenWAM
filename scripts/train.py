@@ -24,7 +24,12 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
+# Force tracebacks to flush even when an exception fires inside DataLoader
+# workers / Hydra's own try-except wrapper. Without this, a silent failure
+# on rank 0 leaves the other ranks deadlocked at FSDP all-gather with no
+# clue what went wrong (observed during a mixture smoke run).
 faulthandler.enable(file=sys.stderr, all_threads=True)
+
 
 def _force_flush_excepthook(exc_type, exc_value, exc_tb):
     rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
@@ -32,6 +37,7 @@ def _force_flush_excepthook(exc_type, exc_value, exc_tb):
     traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
     sys.stderr.flush()
     sys.stdout.flush()
+
 
 sys.excepthook = _force_flush_excepthook
 
@@ -88,10 +94,26 @@ def _build_accelerator(cfg: DictConfig):
     )
 
 
+def _inject_project_seed(cfg: DictConfig) -> None:
+    """Propagate ``cfg.project.seed`` down to ``cfg.dataloader.seed``.
+
+    Dataloader yamls no longer carry their own ``seed`` field; the
+    authoritative source is ``project.seed`` in train.yaml. When
+    ``project.seed`` is null (production stochastic runs), the dataset
+    ctor's ``seed=42`` default kicks in.
+    """
+    project_seed = OmegaConf.select(cfg, "project.seed", default=None)
+    if project_seed is None:
+        return
+    dl = cfg.get("dataloader", None)
+    if dl is None:
+        return
+    OmegaConf.update(dl, "seed", int(project_seed), force_add=True)
+
+
 def _train(cfg: DictConfig) -> None:
     """Package-native training path."""
-    training_mode = cfg.get("training_mode", "openwam")
-
+    _inject_project_seed(cfg)
     _train_openwam(cfg)
 
 
@@ -99,13 +121,20 @@ def _train_openwam(cfg: DictConfig) -> None:
     """Original OpenWAM training path."""
     from openwam.dataloader.registry import build_dataset
     from openwam.train.openwam_trainer import OpenWAMTrainer
+    from openwam.train.utils.seeding import seed_everything
     from openwam.train.utils.temporal_contract import apply_temporal_contract_bridge
 
-    # Seeding is handled inside ``OpenWAMTrainer.__init__`` when
-    # ``cfg.project.seed`` is set (per-rank offset, sampler / worker wiring),
-    # and is intentionally skipped when ``project.seed=null`` so production
-    # runs keep their stochasticity. Doing it in the launcher would either
-    # crash on null (``int(None)``) or override the opt-out path.
+    # Seed Python random / numpy / torch BEFORE dataset construction so that
+    # any reader-time randomness (e.g. MixtureDataset index_map shuffle when
+    # seed isn't explicitly set, lerobot splits, etc.) is reproducible.
+    # OpenWAMTrainer.__init__ also calls seed_everything later for model
+    # init, which is idempotent. Null cfg.project.seed = production
+    # stochastic run, so we skip seeding entirely in that case.
+    project_seed = OmegaConf.select(cfg, "project.seed", default=None)
+    if project_seed is not None:
+        rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+        seed_everything(int(project_seed), rank=rank)
+
     accelerator = _build_accelerator(cfg)
 
     # Bridge encoder temporal contract from model yaml to dataloader cfg before
@@ -120,8 +149,6 @@ def _train_openwam(cfg: DictConfig) -> None:
     # Build trainer and run
     trainer = OpenWAMTrainer(cfg, accelerator=accelerator, dataset=dataset)
     trainer.train()
-
-
 
 
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")

@@ -1,0 +1,18 @@
+type: oxe_droid
+
+dataset_dir: /path/to/OXE/DROID-Dataset
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+height: 384
+width: 320
+
+multiview: true
+
+split: train
+
+normalize_mode: quantile
+
+enable_action_supervision: true

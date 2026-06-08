@@ -225,16 +225,16 @@ def main():
     action_mode = OmegaConf.select(cfg, "action_mode", default="joint")
     print(f"  normalize_mode = {norm_mode!r}")
     print(f"  action_mode    = {action_mode!r}")
-    stats = getattr(dataset, "action_stats", None)
+    stats = getattr(dataset, "normalization_stats", None)
     if stats is None:
-        print("  action_stats   = None (normalization disabled or stats not loaded)")
+        print("  normalization_stats   = None (normalization disabled or stats not loaded)")
         expected_bounds = None
     else:
         stats_mean = np.asarray(stats["mean"])
         stats_std = np.asarray(stats["std"])
         stats_min = np.asarray(stats["min"])
         stats_max = np.asarray(stats["max"])
-        print(f"  action_stats[{action_mode}]:")
+        print(f"  normalization_stats[{action_mode}]:")
         print(f"    mean[{stats_mean.shape}] range=[{stats_mean.min():.4f}, {stats_mean.max():.4f}]")
         print(f"    std[{stats_std.shape}]  range=[{stats_std.min():.4f}, {stats_std.max():.4f}]")
         print(f"    min[{stats_min.shape}]  range=[{stats_min.min():.4f}, {stats_min.max():.4f}]")

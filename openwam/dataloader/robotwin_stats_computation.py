@@ -309,7 +309,7 @@ def _rebuild_stats_from_shards(
     return result
 
 
-def compute_action_stats(data_root: str) -> dict:
+def compute_normalization_stats(data_root: str) -> dict:
     """Compute stats for a single-task directory, covering joint + eef.
 
     Args:
@@ -360,7 +360,7 @@ def compute_multitask_robotwin_stats(
             already exists.
 
     Returns:
-        Nested dict identical in shape to :func:`compute_action_stats`.
+        Nested dict identical in shape to :func:`compute_normalization_stats`.
     """
     from openwam.dataloader.robotwin_dataset import discover_robotwin_roots
 
@@ -561,7 +561,7 @@ def main():
             stats_name = f"{robot}_{variant}_stats.npy"
         resolved_output = output or os.path.join(data_root, stats_name)
         print(f"Single-task stats from: {data_root}")
-        stats = compute_action_stats(data_root)
+        stats = compute_normalization_stats(data_root)
     else:
         if not dataset_dir:
             parser.error("either --data_root or --dataset_dir / --config providing one is required")

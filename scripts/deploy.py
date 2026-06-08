@@ -135,9 +135,9 @@ def _merge_with_training_cfg(training_cfg, deploy_cfg):
         if OmegaConf.select(inf, "video_num_frames", default=None) is None:
             OmegaConf.update(inf, "video_num_frames", _infer_video_num_frames(dl), merge=False)
         if OmegaConf.select(inf, "height", default=None) is None:
-            OmegaConf.update(inf, "height", OmegaConf.select(dl, "height", default=480), merge=False)
+            OmegaConf.update(inf, "height", OmegaConf.select(dl, "height", default=384), merge=False)
         if OmegaConf.select(inf, "width", default=None) is None:
-            OmegaConf.update(inf, "width", OmegaConf.select(dl, "width", default=832), merge=False)
+            OmegaConf.update(inf, "width", OmegaConf.select(dl, "width", default=320), merge=False)
 
     return OmegaConf.merge(training_cfg, deploy_cfg)
 

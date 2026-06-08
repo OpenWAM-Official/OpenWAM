@@ -1,0 +1,50 @@
+type: oxe_bcz
+
+# ── Dataset root ────────────────────────────────────────────────────────────
+# BC-Z LeRobot v3 bucket. 39,350 episodes, ~152h video at 10 fps, 1 camera.
+dataset_dir: /path/to/OXE/BC-Z-Dataset
+
+# ── Window / stride (aligned with RoboCOIN / EgoDex / RoboTwin) ─────────────
+# 33 frames, stride 4 → 9 video frames per sample.
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+# ── Image size ───────────────────────────────────────────────────────────���──
+# multiview=true → L-shape canvas (384H×320W):
+#   top    256H × 320W → head camera (BILINEAR-stretched, 171×213 source
+#                         → 256×320 target; aspect ratio changes noticeably,
+#                         see plans/oxe_dataloaders.md §1.1)
+#   bot-L  128H × 160W → BLACK (BC-Z has no left wrist camera)
+#   bot-R  128H × 160W → BLACK (BC-Z has no right wrist camera)
+# multiview=false → single head camera at (height, width).
+# When multiview=true, height MUST be 384 and width MUST be 320.
+height: 384
+width: 320
+
+# ── Multiview ───────────────────────────────────────────────────────────────
+# true → L-shape; false → single head camera at (height, width).
+multiview: true
+
+# ── Train / val split ───────────────────────────────────────────────────────
+# info.json declares "train": "0:39350"; reader honours it. No val split.
+split: train
+
+# ── Action / proprio normalization ──────────────────────────────────────────
+# Reads {dataset_dir}/meta/eef_stats.json (state + action stacked into a single
+# stats dict). Run scripts/oxe_compute_stats.py --dataset BC-Z to generate it.
+# Default is quantile (q01/q99 + clip) — robust to outliers across all 4 OXE
+# datasets, see plans/oxe_dataloaders.md §3.4.
+#   null / "none" → no normalization
+#   "min-max"     → ((x - min) / (max - min) * 2 - 1)
+#   "z-score"     → ((x - mean) / std)
+#   "quantile"    → clip((x - q01) / (q99 - q01) * 2 - 1, -1, 1)  [default]
+normalize_mode: quantile
+
+# ── Action / proprio supervision toggle ─────────────────────────────────────
+# true  → normal action + proprio supervision (default).
+# false → action_mask / proprio_mask integer-zero everywhere; the front-10
+#         "left arm dim valid" portion is also flipped off so the model
+#         receives 0 supervision signal from this source. Use as a video-only
+#         auxiliary source in a mixture.
+enable_action_supervision: true

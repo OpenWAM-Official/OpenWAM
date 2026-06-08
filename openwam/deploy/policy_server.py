@@ -101,9 +101,7 @@ def _compile_mode_choices() -> tuple[str, ...]:
 def _normalize_compile_mode_arg(value: str) -> str:
     normalized = str(value).strip().lower().replace("-", "_")
     if normalized not in _COMPILE_MODES:
-        raise argparse.ArgumentTypeError(
-            f"Unknown compile mode '{value}'. Choose from: {', '.join(_COMPILE_MODES)}"
-        )
+        raise argparse.ArgumentTypeError(f"Unknown compile mode '{value}'. Choose from: {', '.join(_COMPILE_MODES)}")
     return normalized
 
 
@@ -690,9 +688,9 @@ def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda"):
         if OmegaConf.select(inf, "video_num_frames", default=None) is None:
             OmegaConf.update(inf, "video_num_frames", _infer_video_num_frames(dl), merge=False)
         if OmegaConf.select(inf, "height", default=None) is None:
-            OmegaConf.update(inf, "height", OmegaConf.select(dl, "height", default=480), merge=False)
+            OmegaConf.update(inf, "height", OmegaConf.select(dl, "height", default=384), merge=False)
         if OmegaConf.select(inf, "width", default=None) is None:
-            OmegaConf.update(inf, "width", OmegaConf.select(dl, "width", default=832), merge=False)
+            OmegaConf.update(inf, "width", OmegaConf.select(dl, "width", default=320), merge=False)
         OmegaConf.update(deploy_cfg, "inference", inf, merge=True)
 
     merged = OmegaConf.merge(training_cfg, deploy_cfg)
