@@ -102,7 +102,8 @@ pip install -e .
 The `pyproject.toml` exposes a few optional dependency sets. Pick the ones you need:
 
 ```bash
-pip install -e ".[sana]"          # SANA video backbone (pulls timm; see docs/sana_vendor.md)
+pip install -e ".[sana]"          # SANA video backbone (see docs/sana_vendor.md)
+pip install -e ".[vjepa2]"        # V-JEPA 2/2.1 video encoder (timm; run scripts/install_vjepa2.sh for the submodule)
 pip install -e ".[dev]"           # pytest + ruff (needed for `make test` / `make lint`)
 pip install -e ".[npu]"           # Huawei Ascend NPU (x86_64)
 pip install -e ".[npu_aarch64]"   # Huawei Ascend NPU (aarch64)

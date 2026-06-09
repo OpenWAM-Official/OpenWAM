@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# Install the V-JEPA 2.1 extra:
-#   1. Initialize the third_party/vjepa2 submodule (branch ``vjepa2_1``).
-#   2. ``pip install timm`` — the only V-JEPA runtime dep openwam doesn't
-#      already ship (vision_transformer.py imports timm.models.layers.drop_path).
+# Initialize the third_party/vjepa2 submodule (branch ``vjepa2_1``) — the one
+# piece of V-JEPA 2 / 2.1 setup that pip cannot do for you.
 #
-# Why not a pip extra? Same reason as install_cosmos25.sh: pip cannot resolve
-# the submodule via a relative file:// path in [project.optional-dependencies],
-# and we don't want every user to pull V-JEPA-only deps just to install
-# openwam. This script replaces what `pip install -e '.[vjepa2]'` would do
-# if pip supported it.
+# The Python runtime dep (``timm``, which the submodule's vision_transformer.py
+# imports as ``timm.models.layers.drop_path``) is declared in the ``[vjepa2]``
+# extra, so ``pip install -e .[vjepa2]`` installs it — this script no longer needs
+# a separate ``pip install``. What pip still cannot do is resolve the submodule via
+# a relative file:// path in [project.optional-dependencies], so fetching the
+# upstream code stays here.
 #
 # Prerequisites:
 #   - git checked-out repo (the script does the submodule init for you)
-#   - active venv / conda env with torch already installed
+#   - openwam installed with the vjepa2 extra (``pip install -e .[vjepa2]``) — brings timm + torch
 #
 # Usage:
 #   PYBIN=/path/to/python bash scripts/install_vjepa2.sh
@@ -50,7 +49,7 @@ if [ -z "${PYBIN:-}" ] || [ ! -x "${PYBIN}" ]; then
 fi
 echo "Using python: ${PYBIN}"
 
-echo "[1/2] git submodule update --init --recursive third_party/vjepa2"
+echo "[1/1] git submodule update --init --recursive third_party/vjepa2"
 git -C "${REPO_ROOT}" submodule update --init --recursive third_party/vjepa2
 
 if [ ! -d "${VJEPA_ROOT}/app/vjepa_2_1" ]; then
@@ -59,8 +58,9 @@ if [ ! -d "${VJEPA_ROOT}/app/vjepa_2_1" ]; then
     exit 1
 fi
 
-echo "[2/2] pip install timm  (the only runtime dep openwam doesn't ship)"
-"${PYBIN}" -m pip install --no-input timm
+# timm (the submodule's only extra Python dep) ships in the ``[vjepa2]`` extra, so
+# there is no separate ``pip install`` step here. If the smoke check below fails
+# with ModuleNotFoundError: timm, run ``pip install -e .[vjepa2]`` to install it.
 
 echo
 echo "✓ V-JEPA 2.1 ready. Smoke check:"
