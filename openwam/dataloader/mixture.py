@@ -418,11 +418,21 @@ class MixtureDataset(BaseDataset):
 
 
 
+
+
+
+
+        mixture_seed = int(_get(config, "seed", 42))
+
+
+
         all_entries = _normalize_entries(_get(config, "datasets"))
         enabled_entries = []
         for name, c in all_entries:
             if _get(c, "enabled", True):
-                enabled_entries.append((name, _copy_with_default(c, "split_manifest", split_manifest)))
+                c = _copy_with_default(c, "split_manifest", split_manifest)
+                c = _copy_with_default(c, "seed", mixture_seed)
+                enabled_entries.append((name, c))
             else:
                 logger.info(
                     "MixtureDataset: skipping disabled sub-dataset '%s' (type=%s)",
