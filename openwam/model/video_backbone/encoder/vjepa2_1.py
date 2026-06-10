@@ -25,6 +25,7 @@ from torchvision import transforms as T
 
 from openwam.model.video_backbone.encoder import VideoEncoder, register_video_encoder
 from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
+from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION, SVAE, build_svae, load_svae
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,9 @@ class VJEPA21VideoEncoder(VideoEncoder):
         embed_dim: int,
         variant: str,
         vjepa2_1_forward: _VJEPA21Forward = _VJEPA21_FORWARD_DEFAULT,
+        svae_path: str | None = None,
+        svae_target_dim: int | None = None,
+        svae_config: dict | None = None,
     ):
         super().__init__()
         # V-JEPA follows the host dtype set by ``set_dtype_device`` (bf16 in
@@ -68,12 +72,43 @@ class VJEPA21VideoEncoder(VideoEncoder):
         self._m = vit
         self._variant = variant
         if vjepa2_1_forward not in _VJEPA21_FORWARD_ALLOWED:
-            raise ValueError(
-                f"vjepa2_1_forward must be one of {_VJEPA21_FORWARD_ALLOWED}, "
-                f"got {vjepa2_1_forward!r}."
-            )
+            raise ValueError(f"vjepa2_1_forward must be one of {_VJEPA21_FORWARD_ALLOWED}, got {vjepa2_1_forward!r}.")
         self._vjepa2_1_forward: _VJEPA21Forward = vjepa2_1_forward
-        self._spec = VideoEncoderSpec(z_dim=int(embed_dim), spatial_compression=16, temporal_compression=4, causal_temporal=True, pixel_range=(-1.0, 1.0), is_reversible=False, dit_patch_size=(1, 2, 2))
+        self._raw_embed_dim = int(embed_dim)
+        # Optional S-VAE feature reducer. Unlike a linear PCA projection (which
+        # commutes with the temporal mean-pool and may sit pre-pool), the S-VAE
+        # is non-linear and is applied AFTER the cond+target cat (see
+        # ``batch_encode``), so the compact latent that becomes the prediction
+        # target is trained on exactly the post-pool distribution. When enabled
+        # the encoder advertises the reducer's ``latent_dim`` as ``z_dim`` so the
+        # DiT first conv / unpatchify head / freeze yaml / feature_norm all
+        # rebuild against the smaller dim.
+        self._svae: SVAE | None = self._build_svae(svae_path, svae_target_dim, svae_config)
+        effective_z_dim = self._svae.latent_dim if self._svae is not None else self._raw_embed_dim
+        self._spec = VideoEncoderSpec(
+            z_dim=int(effective_z_dim),
+            spatial_compression=16,
+            # Effective temporal compression of the encoder is 4 (matching
+            # Wan VAE causal grouping): 1 cond latent from frame 0 + 1 latent
+            # per 4 target pixel frames. Internally this is two steps —
+            # ViT tubelet=2 produces 1 latent per 2 frames, then the
+            # ``_TARGET_TEMPORAL_POOL_STRIDE`` avg-pool over time halves the
+            # target stream again. With this value the noise-init formula
+            # ``(T_pix - 1) // tc + 1`` lands on the same T_lat as Wan VAE.
+            temporal_compression=4,
+            causal_temporal=True,
+            pixel_range=(-1.0, 1.0),
+            is_reversible=False,
+            # (1, 2, 2) — matches Wan VAE's DiT-side patch layout so the
+            # per-frame token grid (H/16/2 × W/16/2) lines up with the
+            # native VAE path (H/8/2 × W/8/2 is the same product when the
+            # encoder's spatial_compression equals the native VAE's
+            # ``upsampling_factor * 2``; for Wan2.2 TI2V-5B both are 16).
+            # The default ``build_dit_input_proj`` Conv3d((1,2,2),(1,2,2))
+            # head pools 4 V-JEPA spatial neighbors per DiT token; the
+            # unpatchify head mirrors with Linear(dit_dim, z_dim * 4).
+            dit_patch_size=(1, 2, 2),
+        )
         self.register_buffer("_mean", torch.tensor(_IMAGENET_MEAN).view(1, 3, 1, 1, 1), persistent=False)
         self.register_buffer("_std", torch.tensor(_IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False)
         # Post-norm: a plain LayerNorm at init (weight=1, bias=0) acts as
@@ -90,7 +125,49 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # scope for the V-JEPA 2.1 integration PR. The module still lives
         # OUTSIDE ``self._m`` so a future PR can carve out a grad-enabled
         # path here without restructuring the ViT freeze granularity.
-        self.feature_norm = nn.LayerNorm(int(embed_dim))
+        #
+        # When the S-VAE reducer is enabled this LayerNorm operates on the
+        # already-near-whitened 48-d posterior mean; it is kept mainly for
+        # structural symmetry with the raw 1408-d path (a no-op affine at init).
+        self.feature_norm = nn.LayerNorm(int(effective_z_dim))
+
+    @staticmethod
+    def _build_svae(
+        svae_path: str | None,
+        svae_target_dim: int | None,
+        svae_config: dict | None,
+    ) -> SVAE | None:
+        """Construct the optional frozen S-VAE reducer from one of three sources.
+
+        Mirrors the PCA plumbing's three branches but stores an ``nn.Module``
+        (trainable encoder+decoder weights) rather than two static buffers:
+
+        * ``svae_path``   — training: load a standalone-trained checkpoint.
+        * ``svae_config`` — deploy skeleton: rebuild a zero-weight shell from the
+          sidecar config dict; the architecture's strict ``load_checkpoint``
+          fills the weights immediately after construction.
+        * neither — disabled (raw passthrough; ``z_dim`` stays ``embed_dim``).
+
+        The reducer is always returned frozen and in eval mode; the world-model
+        data path runs it inside ``@torch.no_grad`` preprocessing, and
+        ``batch_encode`` calls :meth:`SVAE.encode_mean` (deterministic) so a
+        recursive ``host.train()`` cannot flip it into a stochastic path.
+        """
+        if svae_path is not None and svae_config is not None:
+            raise ValueError("Pass only one of svae_path / svae_config, not both.")
+        if svae_path is not None:
+            svae = load_svae(svae_path)
+        elif svae_config is not None:
+            svae = build_svae(dict(svae_config))
+        else:
+            return None
+        if svae_target_dim is not None and int(svae_target_dim) != svae.latent_dim:
+            raise ValueError(
+                f"svae_target_dim ({svae_target_dim}) does not match the S-VAE latent_dim ({svae.latent_dim})."
+            )
+        svae.eval()
+        svae.requires_grad_(False)
+        return svae
 
     @property
     def spec(self) -> VideoEncoderSpec:
@@ -113,11 +190,13 @@ class VJEPA21VideoEncoder(VideoEncoder):
 
     @classmethod
     def optional_yaml_keys(cls) -> set[str]:
-        # The condition-frame forward mode is a runtime config (selects
-        # which encoder branch produces the cond latent); ViT weights are
-        # identical across modes, so this belongs in yaml — not the
-        # manifest. Default applied in ``__init__`` if absent from yaml.
-        return {"vjepa2_1_forward"}
+        # ``vjepa2_1_forward``: condition-frame forward mode (runtime config;
+        # ViT weights identical across modes).
+        # ``svae_path`` / ``svae_target_dim``: optional S-VAE feature reducer
+        # (see ``openwam/model/video_backbone/encoder/svae.py``). All are
+        # yaml-level (not in the manifest) — they describe consumer wiring, not
+        # weight properties. Defaults applied in ``__init__`` if absent.
+        return {"vjepa2_1_forward", "svae_path", "svae_target_dim"}
 
     def preprocess_video(self, frames: List[Image.Image]) -> torch.Tensor:
         """List[PIL] -> (1, 3, T, H, W) in ImageNet-normalized space."""
@@ -169,6 +248,21 @@ class VJEPA21VideoEncoder(VideoEncoder):
         condition latent. The avg-pool brings the target token-count to
         Wan VAE parity (see ``_TARGET_TEMPORAL_POOL_STRIDE``).
         """
+        z = self._batch_encode_pooled_raw(video)
+        z = self._apply_svae_if_enabled(z)
+        z = self._apply_feature_norm(z)
+        return z
+
+    def _batch_encode_pooled_raw(self, video: torch.Tensor) -> torch.Tensor:
+        """Encoder forward + temporal mean-pool, BEFORE the S-VAE / feature_norm.
+
+        Returns the channel-first ``(B, raw_embed_dim, T_lat, H/16, W/16)`` cat
+        of the (un-pooled) cond latent and the mean-pooled target latents — the
+        exact tensor the optional S-VAE reducer consumes. Split out from
+        :meth:`batch_encode` so offline S-VAE training / statistics collection
+        (:meth:`batch_encode_pooled_for_svae_training`) sees byte-for-byte the
+        same post-pool distribution the main path produces.
+        """
         B, C, Tp, H, W = video.shape
         if C != 3:
             raise ValueError(f"V-JEPA 2.1 expects 3-channel input; got C={C}.")
@@ -181,25 +275,57 @@ class VJEPA21VideoEncoder(VideoEncoder):
             video = video.to(m_dtype)
         f0 = video[:, :, 0:1]
         if Tp == 1:
-            z = self._encode_condition(f0)
-        else:
-            # ViT tubelet=2 needs (T_pixel - 1) even (target frames make a
-            # whole number of tubes); the extra time-pool needs that count
-            # of latent target frames itself even — combined,
-            # ``(T_pixel - 1) % 4 == 0``. For RoBoTwin (num_frames=33,
-            # video_stride=4 → T_pixel=9), (9-1) % 4 == 0. ✓
-            divisor = 2 * self._TARGET_TEMPORAL_POOL_STRIDE
-            if (Tp - 1) % divisor != 0:
-                raise ValueError(
-                    f"V-JEPA 2.1 causal emulation needs (T_pixel - 1) % {divisor} == 0, "
-                    f"got T_pixel={Tp}."
-                )
-            z_cond = self._encode_condition(f0)
-            z_target_raw = self._encode_target_with_prepend(f0, video[:, :, 1:])
-            z_target = self._pool_target_temporal(z_target_raw)
-            z = torch.cat([z_cond, z_target], dim=2)
-        z = self._apply_feature_norm(z)
-        return z
+            return self._encode_condition(f0)
+        # ViT tubelet=2 needs (T_pixel - 1) even (target frames make a
+        # whole number of tubes); the extra time-pool needs that count
+        # of latent target frames itself even — combined,
+        # ``(T_pixel - 1) % 4 == 0``. For RoBoTwin (num_frames=33,
+        # video_stride=4 → T_pixel=9), (9-1) % 4 == 0. ✓
+        divisor = 2 * self._TARGET_TEMPORAL_POOL_STRIDE
+        if (Tp - 1) % divisor != 0:
+            raise ValueError(f"V-JEPA 2.1 causal emulation needs (T_pixel - 1) % {divisor} == 0, got T_pixel={Tp}.")
+        z_cond = self._encode_condition(f0)
+        z_target_raw = self._encode_target_with_prepend(f0, video[:, :, 1:])
+        z_target = self._pool_target_temporal(z_target_raw)
+        return torch.cat([z_cond, z_target], dim=2)
+
+    def _apply_svae_if_enabled(self, z: torch.Tensor) -> torch.Tensor:
+        """Reduce raw post-pool features with the frozen S-VAE (deterministic
+        posterior mean), or pass them through unchanged when none is attached.
+
+        Under DeepSpeed ZeRO-3 the reducer's frozen parameters are partitioned,
+        and the forward-pre-hook that would gather them does not fire on this
+        preprocessing path (preprocess runs before the architecture forward, so
+        no module ``__call__`` on ``self`` has triggered a gather). We therefore
+        gather them read-only for the duration of the reduce. No-op off ZeRO-3 —
+        the parameters then carry no ``ds_id`` and the gather list is empty.
+        """
+        if self._svae is None:
+            return z
+        ds_params = [p for p in self._svae.parameters() if getattr(p, "ds_id", None) is not None]
+        if ds_params:
+            import deepspeed
+
+            with deepspeed.zero.GatheredParameters(ds_params, modifier_rank=None):
+                return self._svae.encode_mean(z)
+        return self._svae.encode_mean(z)
+
+    def batch_encode_pooled_for_svae_training(self, video: torch.Tensor) -> torch.Tensor:
+        """Raw post-pool features for offline S-VAE training / stats collection.
+
+        Returns the ``(B, raw_embed_dim, T_lat, H/16, W/16)`` cat the S-VAE
+        consumes — 1 un-pooled cond latent + the mean-pooled target latents —
+        BEFORE any reduction or ``feature_norm``. Both sub-populations (cond and
+        target) are included so the reducer's prior covers what it sees at
+        inference. Fails fast if an S-VAE is already attached: statistics must be
+        collected on a raw encoder, never on an already-reduced one.
+        """
+        if self._svae is not None:
+            raise RuntimeError(
+                "batch_encode_pooled_for_svae_training requires a raw encoder; "
+                "svae_path / svae_config / svae_target_dim must be unset."
+            )
+        return self._batch_encode_pooled_raw(video)
 
     def _pool_target_temporal(self, z_target: torch.Tensor) -> torch.Tensor:
         """(B, D, T_target_raw, h, w) -> (B, D, T_target_raw/2, h, w) via
@@ -288,6 +414,8 @@ class VJEPA21VideoEncoder(VideoEncoder):
         model_path: str,
         *,
         vjepa2_1_forward: _VJEPA21Forward = _VJEPA21_FORWARD_DEFAULT,
+        svae_path: str | None = None,
+        svae_target_dim: int | None = None,
     ) -> "VJEPA21VideoEncoder":
         # Explicit signature (no ``**kw``) so a programmatic typo like
         # ``from_pretrained(path, vjepa_2_1_forward="video")`` raises
@@ -303,6 +431,8 @@ class VJEPA21VideoEncoder(VideoEncoder):
             embed_dim=int(manifest["embed_dim"]),
             variant=str(manifest["variant"]),
             vjepa2_1_forward=vjepa2_1_forward,
+            svae_path=svae_path,
+            svae_target_dim=svae_target_dim,
         )
 
     @classmethod
@@ -401,20 +531,29 @@ class VJEPA21VideoEncoder(VideoEncoder):
                 "cond-frame bit-equivalence (image branch, tubelet=1).",
                 vjepa2_1_forward,
             )
+        # Reducer rebuild: the sidecar config (if the training ckpt carried an
+        # S-VAE) sizes a zero-weight shell here; strict ``load_checkpoint``
+        # fills ``_svae.*`` right after. ``svae_target_dim`` from the saved yaml
+        # is an optional cross-check against the sidecar's ``latent_dim``.
+        svae_config = cls._read_svae_sidecar(ckpt_dir)
+        svae_target_dim = cls._read_svae_target_dim_from_cfg(encoder_cfg)
         logger.info(
             "VJEPA21VideoEncoder.from_skeleton: %s instantiated from %s "
-            "(embed_dim=%d, variant=%s, vjepa2_1_forward=%s) — weights pending checkpoint load",
+            "(embed_dim=%d, variant=%s, vjepa2_1_forward=%s, svae=%s) — weights pending checkpoint load",
             manifest["arch_name"],
             manifest_dir,
             int(manifest["embed_dim"]),
             str(manifest["variant"]),
             vjepa2_1_forward,
+            "on" if svae_config is not None else "off",
         )
         return cls(
             vit,
             embed_dim=int(manifest["embed_dim"]),
             variant=str(manifest["variant"]),
             vjepa2_1_forward=vjepa2_1_forward,
+            svae_config=svae_config,
+            svae_target_dim=svae_target_dim,
         )
 
     @staticmethod
@@ -481,9 +620,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
                 fallback_dir = encoder_cfg.get("model_path")
             else:
                 fallback_dir = getattr(encoder_cfg, "model_path", None)
-        fallback_manifest = (
-            os.path.join(str(fallback_dir), "manifest.json") if fallback_dir else None
-        )
+        fallback_manifest = os.path.join(str(fallback_dir), "manifest.json") if fallback_dir else None
         if fallback_manifest and os.path.isfile(fallback_manifest):
             return str(fallback_dir)
 
@@ -517,6 +654,17 @@ class VJEPA21VideoEncoder(VideoEncoder):
         regression vs. the pre-self-containment behavior.
         """
         import shutil
+
+        # The S-VAE sidecar has NO deploy-time fallback (unlike the manifest,
+        # which can fall back to ``encoder.model_path``): without it
+        # ``from_skeleton`` cannot size the reducer and the strict checkpoint
+        # load fails. ``copy_deploy_artifacts`` runs once at run start-up, before
+        # any weights are saved, so letting a write failure raise here fails the
+        # run fast rather than silently producing checkpoints that cannot be
+        # deployed. (It is a rank-0-only start-up step, so the raise surfaces on
+        # rank 0 — operators should treat it as a setup failure.)
+        if self._svae is not None:
+            self._write_svae_sidecar(output_dir)
 
         model_path = None
         try:
@@ -568,6 +716,66 @@ class VJEPA21VideoEncoder(VideoEncoder):
             src,
             dst,
         )
+
+    def _write_svae_sidecar(self, output_dir: str) -> None:
+        """Write the attached S-VAE's structural config to
+        ``<output_dir>/svae_config.json`` so deploy can rebuild a same-shape
+        shell. Raises on IO failure — see :meth:`copy_deploy_artifacts` for why
+        this one must abort rather than warn-and-skip.
+
+        The payload is versioned with the same ``_CHECKPOINT_FORMAT_VERSION`` as
+        the standalone ``svae.pt`` so a stale sidecar (e.g. one written by a
+        build whose ``config_dict`` schema differs) is rejected with a clear
+        message on read instead of crashing ``SVAE.__init__`` with an unexpected
+        keyword.
+        """
+        dst = os.path.join(output_dir, "svae_config.json")
+        os.makedirs(output_dir, exist_ok=True)
+        with open(dst, "w") as f:
+            json.dump({"format_version": _CHECKPOINT_FORMAT_VERSION, "model_config": self._svae.config_dict()}, f)
+        logger.info("VJEPA21VideoEncoder.copy_deploy_artifacts: wrote S-VAE sidecar %s", dst)
+
+    @staticmethod
+    def _read_svae_sidecar(ckpt_dir: str | None) -> dict | None:
+        """Read ``<ckpt_dir>/svae_config.json`` (written by
+        :meth:`copy_deploy_artifacts`). Returns the structural ``model_config``
+        dict when the checkpoint carried an S-VAE reducer, else ``None`` (reducer
+        disabled). There is intentionally no ``encoder.model_path`` fallback:
+        the sidecar is checkpoint-local and self-contained by construction.
+
+        Validates the sidecar ``format_version`` (matching the standalone
+        checkpoint), so a legacy unversioned / mismatched sidecar fails fast here
+        with a clear message rather than deeper in ``build_svae``.
+        """
+        if not ckpt_dir:
+            return None
+        path = os.path.join(ckpt_dir, "svae_config.json")
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r") as f:
+            payload = json.load(f)
+        fmt = payload.get("format_version") if isinstance(payload, dict) else None
+        if fmt != _CHECKPOINT_FORMAT_VERSION or "model_config" not in payload:
+            raise ValueError(
+                f"{path!r} has unsupported S-VAE sidecar format_version={fmt!r} "
+                f"(this build writes/reads version {_CHECKPOINT_FORMAT_VERSION}). "
+                f"Re-export the deploy checkpoint with the current build."
+            )
+        return payload["model_config"]
+
+    @staticmethod
+    def _read_svae_target_dim_from_cfg(encoder_cfg: Any) -> int | None:
+        """Pick ``svae_target_dim`` from the saved encoder yaml if present —
+        used only as a cross-check against the sidecar's ``latent_dim`` in
+        ``__init__``. Absent / null collapses to ``None`` (no cross-check).
+        """
+        if encoder_cfg is None:
+            return None
+        if isinstance(encoder_cfg, dict):
+            value = encoder_cfg.get("svae_target_dim")
+        else:
+            value = getattr(encoder_cfg, "svae_target_dim", None)
+        return int(value) if value is not None else None
 
     @classmethod
     def _read_and_validate_manifest(cls, model_path: str) -> dict:

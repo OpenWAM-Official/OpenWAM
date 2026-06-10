@@ -2058,15 +2058,16 @@ def _build_vjepa_spy_encoder(*, embed_dim: int = 8, vjepa2_1_forward: str = "vid
 
 
 def test_V6a_vjepa21_optional_yaml_keys_exposes_forward_knob():
-    """``optional_yaml_keys`` returns exactly ``{"vjepa2_1_forward"}`` —
-    the single yaml field this encoder consumes beyond ``{name, model_path}``.
+    """``optional_yaml_keys`` returns exactly the yaml fields this encoder
+    consumes beyond ``{name, model_path}``: the ``vjepa2_1_forward`` knob plus
+    the optional S-VAE reducer wiring (``svae_path`` / ``svae_target_dim``).
     The base-side whitelist (``BaseWAMArchitecture._compute_encoder_yaml_whitelist``)
     reads this method, so an empty / wrong set here is what gates a typo
     being silently accepted from yaml.
     """
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
-    assert VJEPA21VideoEncoder.optional_yaml_keys() == {"vjepa2_1_forward"}
+    assert VJEPA21VideoEncoder.optional_yaml_keys() == {"vjepa2_1_forward", "svae_path", "svae_target_dim"}
 
 
 def test_V6b_vjepa21_forward_default_is_video():

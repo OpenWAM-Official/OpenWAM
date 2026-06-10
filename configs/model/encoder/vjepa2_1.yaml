@@ -21,6 +21,15 @@
 # the notes that go with them. Structural fields (z_dim / spatial_compression /
 # etc.) come from the loaded weights' ``manifest.json`` — NOT from yaml.
 #
+# Spec (derived from the manifest):
+#   z_dim                            = 1408 (ViT-g embed_dim)
+#   spatial_compression              = 16   (ViT-g/16 patch_embed)
+#   temporal_compression             = 4    (ViT tubelet=2 + extra time-pool
+#                                            stride=2; matches Wan VAE
+#                                            causal grouping 1 + 4 + 4 + ...)
+#   causal_temporal                  = true (cond pass is independent of targets)
+#   dit_patch_size                   = (1, 2, 2)   (Wan VAE parity)
+#   is_reversible                    = false (no pixel decoder)
 #
 # Token-count parity with Wan VAE on RoBoTwin (num_frames=33, video_stride=4,
 # H=384, W=320, Wan2.2-TI2V-5B VAE upsample=16):
@@ -52,3 +61,17 @@ model_path: /path/to/weights/vjepa2_1
 # Target latents always come from the prepend-and-drop video forward
 # regardless of this setting — this knob ONLY controls the cond pass.
 vjepa2_1_forward: video
+
+# Optional S-VAE feature reducer (raw embed_dim -> svae_target_dim). When set,
+# the raw POST-POOL features are compressed by a separately-trained, frozen
+# S-VAE and the encoder advertises ``svae_target_dim`` as its DiT-facing
+# ``z_dim`` (e.g. 48 to match the Wan VAE). Leave both null to keep the raw
+# 1408-d path. See ``openwam/model/video_backbone/encoder/svae.py`` and
+# ``scripts/train_svae.py``.
+#   - svae_path: path to the trained ``svae.pt`` file
+#     ({format_version, model_config, state_dict, ...}). Loaded at training-time
+#     construction; the weights then travel inside the main checkpoint, and
+#     deploy rebuilds the shell from a ``svae_config.json`` sidecar.
+#   - svae_target_dim: optional cross-check against the S-VAE's latent_dim.
+svae_path: null
+svae_target_dim: null

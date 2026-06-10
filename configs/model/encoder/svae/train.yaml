@@ -1,0 +1,69 @@
+# @package _global_
+#
+# Standalone S-VAE trainer config. It consumes the feature shards written by
+# scripts/collect_svae_features.py — no model/dataloader chain to inherit, so
+# (unlike collect.yaml) this does not pull in train.yaml. Entry point:
+# scripts/train_svae.py.
+#
+# Defaults follow the reference PS-VAE adapter recipe (semantic VAE on frozen
+# encoder features); the only structural deviation is latent_dim, set to the
+# Wan VAE channel count for downstream parity. See the PR description for the
+# per-hyperparameter meaning + reference-alignment table.
+
+# ── S-VAE structural hyper-parameters ──
+# input_dim is NOT set here — the trainer reads it from the collected stats
+# (the encoder's raw dim, e.g. 1408 for V-JEPA 2.1 ViT-g).
+svae:
+  latent_dim: 48 # compact latent channels (d_l). 48 = Wan VAE z_dim — the one
+                 # deliberate deviation from the reference default (96), for a
+                 # ~29x compression of the 1408-d features instead of ~10x.
+  num_heads: 16 # attention heads in every Transformer block; must divide input_dim.
+  num_layers: 3 # pre-LN Transformer blocks per side (encoder / decoder), at input_dim.
+  intermediate_size: 2048 # absolute FFN hidden width inside each Transformer block.
+  dropout: 0.0 # block dropout; 0 = deterministic features (reference default).
+
+train:
+  # Directory produced by collect_svae_features.py (holds features_rank*_part*.pt +
+  # stats.pt). REQUIRED — override on the CLI.
+  features_dir: ???
+  output_dir: /path/to/workspace/openwam/svae
+
+  batch_size: 8 # clips per step — matches the reference adapter's batch of 8 clips.
+  num_epochs: 50 # full passes over the cached features (reference: 50).
+  max_steps: null # optional hard cap (GPU-mock pre-flight); null = full num_epochs.
+  num_workers: 4 # DataLoader workers for the mmap'd feature shards (I/O overlap).
+
+  lr: 1.0e-4 # AdamW peak learning rate.
+  betas: [0.9, 0.99] # AdamW moment decays (reference uses 0.9 / 0.99, not the 0.999 default).
+  weight_decay: 1.0e-4
+  grad_clip: 1.0 # max grad-norm.
+  # LR schedule: linear warmup over warmup_epochs (from lr*1e-3), then cosine
+  # decay to lr*min_lr_ratio. min_lr_ratio=0.9 is the reference's near-flat decay
+  # (LR only drops ~10% by the end).
+  warmup_epochs: 1
+  min_lr_ratio: 0.9
+
+  # KL term: beta * KL(q(z|x) || N(0,I)), with beta linearly warmed up over the
+  # first kl_warmup_ratio of training (0 -> beta). beta is intentionally tiny so
+  # reconstruction dominates and the latent stays informative.
+  beta: 1.0e-4
+  kl_warmup_ratio: 0.2
+  # Per-dim KL floor (free bits). 0.0 = reference plain KL. A positive value is an
+  # off-by-default rescue knob against posterior collapse, not the aligned default.
+  free_bits_per_dim: 0.0
+  cos_weight: 1.0 # weight on the (1 - cosine) reconstruction term (added to MSE).
+
+  seed: 42
+  mixed_precision: bf16
+  log_every: 20
+
+  # ── wandb logging (rank-0 only) ──
+  # Mirrors the main trainer's ``project.wandb`` idiom. Logged every ``log_every``
+  # steps: train/loss, train/mse, recon/{cos_loss,cos_sim}, kl/{value,active_units},
+  # latent/{mu_abs_mean,logvar_mean}, opt/{lr,beta,grad_norm}, perf/clips_per_s.
+  # Set ``project: null`` to disable; entity / run_name overridable on the CLI or
+  # via WANDB_* env vars. No-op (with a warning) if wandb isn't installed.
+  wandb:
+    project: open-wam-svae
+    run_name: null
+    entity: null
