@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import torch.nn as nn
 from torch import Tensor
@@ -147,7 +147,54 @@ class VideoEncoder(ABC, nn.Module):
         encoder_cfg: Any = None,
         ckpt_dir: str | None = None,
     ) -> "VideoEncoder":
-        'Public implementation.'
+        """Build a zero-weight encoder skeleton. The host architecture's
+        checkpoint strict-load fills in weights immediately after this call.
+
+        Subclasses that override **must** keep all three kwargs in their
+        signature — ``base.py:_build_external_encoder_skeleton`` always
+        forwards ``encoder_cfg=...`` and ``ckpt_dir=...``, so an override
+        that drops either will raise ``TypeError: unexpected keyword
+        argument`` at deploy time. Unused kwargs may be accepted and
+        ignored (see :class:`WanVideoVAEEncoder.from_skeleton`).
+
+        The three kwargs are a **menu of data sources**, not a single
+        priority chain. Each encoder picks one primary source per its
+        persistence story; some encoders also pick a secondary source as
+        a fallback for older checkpoints (see
+        :class:`VJEPA21VideoEncoder`), and some encoders adopt a strict
+        self-contained policy with no fallback at all.
+
+        * ``components_entry`` — the dict shape produced by
+          :func:`generate_video_backbone_component_specs`:
+          ``{"attr": str, "model_class": str, "extra_kwargs": dict}``.
+          Use this when the encoder's structural geometry is fully captured
+          by the saved Wan ``components`` entry (e.g. :class:`WanVideoVAEEncoder`).
+        * ``ckpt_dir`` — the deploy-side checkpoint directory. Use this for
+          per-encoder structural artifacts that the training-side
+          :meth:`copy_deploy_artifacts` hook wrote next to the safetensors.
+          Two flavors are in use today:
+
+            - **Preferred-with-fallback** (V-JEPA 2.1): the encoder reads
+              ``<ckpt_dir>/manifest.json`` first and falls back to
+              ``<encoder_cfg.model_path>/manifest.json`` for older
+              checkpoints saved before the self-containment patch.
+            - **Strict self-contained**: the encoder reads
+              ``<ckpt_dir>/encoder_meta/encoder_config.json`` and
+              ``encoder.model_path`` is *never* consulted at deploy time.
+              Missing ckpt_dir or encoder_meta raises immediately.
+
+        * ``encoder_cfg`` — the yaml ``model.video_backbone.encoder`` block
+          (a dict / DictConfig with ``name`` and ``model_path``). Use this
+          as a fallback source for encoders that adopted the
+          preferred-with-fallback policy above, OR as the primary source for
+          legacy paths that have not yet migrated to ``ckpt_dir``. Trade-off:
+          the deploy host must be able to read ``encoder.model_path`` for
+          those paths.
+
+        Default implementation raises so non-supporting encoders fail
+        loudly at deploy time rather than silently mismatch state_dict
+        keys later.
+        """
         raise NotImplementedError(
             f"{cls.__name__}.from_skeleton not implemented; deploy with this "
             "encoder is not supported. Either implement from_skeleton or train "
@@ -159,7 +206,32 @@ class VideoEncoder(ABC, nn.Module):
     # ------------------------------------------------------------------
 
     def copy_deploy_artifacts(self, output_dir: str, cfg: Any) -> None:
-        'Public implementation.'
+        """Copy per-encoder deploy artifacts into the checkpoint directory.
+
+        Called by the host backbone's ``copy_deploy_artifacts`` after each
+        checkpoint save so deploy is self-contained — the deploy host no
+        longer needs ``encoder.model_path`` to be reachable. The default is
+        a no-op for encoders whose structural state is fully captured by
+        the safetensors weights plus the saved ``components`` entry (e.g.
+        :class:`WanVideoVAEEncoder`); encoders that depend on side files
+        like ``manifest.json`` override this to copy them next to the
+        ``checkpoint_step_*.safetensors``.
+
+        Two policies coexist under this ABC; both are documented as
+        supported in :meth:`from_skeleton`:
+
+        - **Preferred-with-fallback** (V-JEPA 2.1): a missing source file
+          here is logged as a warning and treated as best-effort —
+          :meth:`from_skeleton` will fall back to ``encoder.model_path``
+          at deploy time. Subclasses that pick this policy MUST NOT raise.
+        - **Strict self-contained**: a missing
+          source file here is a hard error — re-raise so the checkpoint
+          save aborts rather than silently producing a deploy-unloadable
+          artifact. Subclasses that pick this policy MUST document their
+          re-raise behavior in their own class docstring so external
+          callers do not ``try/except`` this method assuming the V-JEPA
+          contract.
+        """
         return None
 
     # ------------------------------------------------------------------
@@ -202,13 +274,6 @@ class VideoEncoder(ABC, nn.Module):
         """
         ps = self.spec.dit_patch_size
         return nn.Linear(dit_dim, self.spec.z_dim * math.prod(ps))
-
-
-
-
-
-
-
 
 
 # ----------------------------------------------------------------------
@@ -275,6 +340,12 @@ def build_video_encoder(cfg) -> VideoEncoder:
         available = ", ".join(sorted(_VIDEO_ENCODER_REGISTRY)) or "(none)"
         raise KeyError(f"Unknown video encoder '{name}'. Available: {available}")
     encoder_cls = _VIDEO_ENCODER_REGISTRY[name]
+    # Optional fields propagated as keyword arguments to ``from_pretrained``
+    # so each encoder can pick up the ones it cares about and ignore the
+    # rest. The picked encoder declares which optional keys it accepts via
+    # :meth:`VideoEncoder.optional_yaml_keys` (e.g. ``vjepa2_1_forward`` on
+    # V-JEPA 2.1). Absent / ``None`` values are treated as "use the encoder
+    # default".
     optional_kwargs: dict[str, Any] = {}
     for k in encoder_cls.optional_yaml_keys():
         v = _read_optional(k)
@@ -283,12 +354,23 @@ def build_video_encoder(cfg) -> VideoEncoder:
     return encoder_cls.from_pretrained(str(model_path), **optional_kwargs)
 
 
-__all__ = ['VideoEncoder', 'VideoEncoderSpec', 'DinoV3VideoEncoder', 'VJEPA2VideoEncoder', 'VJEPA21VideoEncoder', 'WanVideoVAEEncoder', 'build_video_encoder', 'register_video_encoder']
+__all__ = [
+    "VideoEncoder",
+    "VideoEncoderSpec",
+    "DinoV3VideoEncoder",
+    "FluxVAEVideoEncoder",
+    "VJEPA2VideoEncoder",
+    "VJEPA21VideoEncoder",
+    "WanVideoVAEEncoder",
+    "build_video_encoder",
+    "register_video_encoder",
+]
 
 # Built-in registrations (kept at the bottom so subclasses can import names
 # from this module without circular issues). Adding a new encoder = adding
 # a new line here and a new file alongside.
 from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder  # noqa: E402, F401
+from openwam.model.video_backbone.encoder.flux_vae import FluxVAEVideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.wan_vae import WanVideoVAEEncoder  # noqa: E402, F401
