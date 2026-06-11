@@ -97,6 +97,8 @@ def _apply_cli_overrides(deploy_cfg, args):
         OmegaConf.update(deploy_cfg, "server.ws_port", args.ws_port, merge=False)
     if args.http_port is not None:
         OmegaConf.update(deploy_cfg, "server.http_port", args.http_port, merge=False)
+    if args.protocol is not None:
+        OmegaConf.update(deploy_cfg, "server.protocol", args.protocol, merge=False)
 
     # Inference
     if args.denoise_steps is not None:
@@ -197,6 +199,12 @@ def main():
     parser.add_argument("--host", type=str, default=None, help="Bind host (default: from deployment.yaml)")
     parser.add_argument("--ws-port", type=int, default=None, dest="ws_port", help="WebSocket port")
     parser.add_argument("--http-port", type=int, default=None, dest="http_port", help="HTTP port")
+    parser.add_argument(
+        "--protocol",
+        choices=("http", "ws", "both"),
+        default=None,
+        help="Which listener(s) to start: http | ws | both (default: both)",
+    )
     # Inference overrides
     parser.add_argument(
         "--denoise-steps", type=int, default=None, dest="denoise_steps", help="Override denoising steps"
@@ -281,6 +289,7 @@ def main():
     host = str(OmegaConf.select(server_cfg, "host", default="0.0.0.0"))
     ws_port = int(OmegaConf.select(server_cfg, "ws_port", default=8850))
     http_port = int(OmegaConf.select(server_cfg, "http_port", default=8848))
+    protocol = str(OmegaConf.select(server_cfg, "protocol", default="both"))
 
     if args.mock:
         # Mock mode: skip model loading entirely
@@ -323,8 +332,8 @@ def main():
     from openwam.deploy.policy_server import PolicyServer
 
     server = PolicyServer(engine=engine, cfg=cfg, debug=args.debug, debug_dir=args.debug_dir)
-    logger.info("Starting server: ws://%s:%d  http://%s:%d", host, ws_port, host, http_port)
-    server.run(host=host, port=ws_port, http_port=http_port)
+    logger.info("Starting server (protocol=%s): ws://%s:%d  http://%s:%d", protocol, host, ws_port, host, http_port)
+    server.run(host=host, port=ws_port, http_port=http_port, protocol=protocol)
 
 
 if __name__ == "__main__":

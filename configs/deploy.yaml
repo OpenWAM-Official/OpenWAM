@@ -7,6 +7,7 @@ server:
   host: "0.0.0.0"
   ws_port: 8850
   http_port: 8848
+  protocol: both               # http | ws | both — which listener(s) to start
 
 # ---------------------------------------------------------------------------
 # Inference parameters

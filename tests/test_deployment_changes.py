@@ -302,6 +302,7 @@ class TestDeployConfigLoading:
             "host",
             "ws_port",
             "http_port",
+            "protocol",
             "denoise_steps",
             "schedule_type",
             "shift",

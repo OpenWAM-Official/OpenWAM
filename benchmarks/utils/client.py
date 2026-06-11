@@ -46,12 +46,26 @@ class ServerError(RuntimeError):
         self.raw_body = raw_body
 
 
+def server_error_from_body(status: int, body: dict, raw_body: str = "") -> "ServerError":
+    """Build a ``ServerError`` from a parsed server error body.
+
+    Single source for the ``{"type":"error","code","message"}`` / 4xx-5xx
+    shape every transport (urllib, keep-alive HTTP, WebSocket) shares.
+    """
+    info = body if isinstance(body, dict) else {}
+    return ServerError(
+        status=status,
+        code=info.get("code", ""),
+        message=info.get("message", ""),
+        raw_body=raw_body,
+    )
+
+
 def _read_http_error(exc: _urlerror.HTTPError) -> "ServerError":
     """Decode a ``urllib.error.HTTPError`` into a ``ServerError``.
 
-    The server's error responses follow
-    ``{"type": "error", "code": ..., "message": ...}``. If the body isn't
-    valid JSON we still preserve the raw text so the caller sees *something*.
+    Preserves the raw body when it isn't valid JSON so the caller still
+    sees *something*, then delegates to :func:`server_error_from_body`.
     """
     try:
         raw = exc.read().decode("utf-8", errors="replace")
@@ -61,12 +75,7 @@ def _read_http_error(exc: _urlerror.HTTPError) -> "ServerError":
         body = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
         body = {}
-    return ServerError(
-        status=exc.code,
-        code=body.get("code", "") if isinstance(body, dict) else "",
-        message=body.get("message", "") if isinstance(body, dict) else "",
-        raw_body=raw,
-    )
+    return server_error_from_body(exc.code, body, raw)
 
 
 def encode_path_b64(path: str) -> str:

@@ -62,6 +62,11 @@ import numpy as np
 logger = logging.getLogger(__name__)
 _COMPILE_MODES = ("auto", "none")
 
+# Cap for a single obs message on both transports. A multi-camera base64 frame
+# can exceed the 1 MB library defaults (websockets.serve / aiohttp), so lift
+# both together to keep HTTP and WebSocket on equal footing.
+MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+
 
 def _infer_video_num_frames(dl) -> int:
     """Return the video frame count seen by Wan after dataloader sub-sampling."""
@@ -525,10 +530,19 @@ class PolicyServer:
 
         return obs
 
-    def run(self, host: str = "0.0.0.0", port: int = 8850, http_port: Optional[int] = None):
-        """Start the WebSocket + HTTP server.
+    def run(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8850,
+        http_port: Optional[int] = None,
+        protocol: str = "both",
+    ):
+        """Start the policy server.
 
-        Requires ``websockets`` and ``aiohttp`` packages.
+        ``protocol`` selects which listeners to start: ``http``, ``ws``, or
+        ``both`` (default). Requires ``websockets`` and ``aiohttp``. Both
+        transports accept messages up to ``MAX_MESSAGE_BYTES`` so multi-camera
+        payloads above the 1 MB library defaults don't get rejected.
         """
         try:
             import aiohttp  # noqa: F401
@@ -624,34 +638,42 @@ class PolicyServer:
             """HTTP GET /info endpoint."""
             return web.json_response(self.get_info())
 
-        async def start_servers():
-            # HTTP server
-            app = web.Application()
-            app.router.add_post("/predict", http_predict)
-            app.router.add_post("/reset", http_reset)
-            app.router.add_get("/health", http_health)
-            app.router.add_get("/info", http_info)
-
-            runner = web.AppRunner(app)
-            await runner.setup()
-            resolved_http_port = 8848 if http_port is None else http_port
-            site = web.TCPSite(runner, host, resolved_http_port)
-            await site.start()
-            logger.info("HTTP server started on %s:%d", host, resolved_http_port)
-
-            # WebSocket server
-            async with websockets.serve(ws_handler, host, port):
-                logger.info("WebSocket server started on ws://%s:%d", host, port)
-                await asyncio.Future()  # Run forever
-
+        serve_http = protocol in ("http", "both")
+        serve_ws = protocol in ("ws", "both")
+        if not serve_http and not serve_ws:
+            raise ValueError(f"Unknown protocol '{protocol}'. Choose from: http, ws, both")
         resolved_http_port = 8848 if http_port is None else http_port
-        logger.info(
-            "Starting PolicyServer on %s:%d (WS) and %s:%d (HTTP)",
-            host,
-            port,
-            host,
-            resolved_http_port,
-        )
+
+        async def start_servers():
+            runner = None
+            if serve_http:
+                app = web.Application(client_max_size=MAX_MESSAGE_BYTES)
+                app.router.add_post("/predict", http_predict)
+                app.router.add_post("/reset", http_reset)
+                app.router.add_get("/health", http_health)
+                app.router.add_get("/info", http_info)
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, host, resolved_http_port)
+                await site.start()
+                logger.info("HTTP server started on %s:%d", host, resolved_http_port)
+            try:
+                if serve_ws:
+                    async with websockets.serve(ws_handler, host, port, max_size=MAX_MESSAGE_BYTES):
+                        logger.info("WebSocket server started on ws://%s:%d", host, port)
+                        await asyncio.Future()  # run forever
+                else:
+                    await asyncio.Future()  # http-only: keep the HTTP runner alive
+            finally:
+                if runner is not None:
+                    await runner.cleanup()
+
+        endpoints = []
+        if serve_ws:
+            endpoints.append(f"ws://{host}:{port}")
+        if serve_http:
+            endpoints.append(f"http://{host}:{resolved_http_port}")
+        logger.info("Starting PolicyServer (protocol=%s): %s", protocol, ", ".join(endpoints))
         asyncio.run(start_servers())
 
 
@@ -717,6 +739,12 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--host", type=str, default=None, help="WebSocket/HTTP bind host override.")
     parser.add_argument("--ws-port", type=int, default=None, help="WebSocket port override.")
     parser.add_argument("--http-port", type=int, default=None, help="HTTP port override.")
+    parser.add_argument(
+        "--protocol",
+        choices=("http", "ws", "both"),
+        default=None,
+        help="Which listener(s) to start: http | ws | both (default: both).",
+    )
     parser.add_argument(
         "--compile-mode",
         type=_normalize_compile_mode_arg,
@@ -826,6 +854,7 @@ def main(argv: Optional[list[str]] = None):
     host = args.host or getattr(server_cfg, "host", "0.0.0.0")
     ws_port = args.ws_port or getattr(server_cfg, "ws_port", 8850)
     http_port = args.http_port or getattr(server_cfg, "http_port", 8848)
+    protocol = args.protocol or getattr(server_cfg, "protocol", "both")
     if args.mock:
         server = PolicyServer(
             engine=engine,
@@ -844,7 +873,7 @@ def main(argv: Optional[list[str]] = None):
         if args.debug:
             os.makedirs(args.debug_dir, exist_ok=True)
             logger.info("Debug mode enabled — saving to %s", args.debug_dir)
-    server.run(host=host, port=ws_port, http_port=http_port)
+    server.run(host=host, port=ws_port, http_port=http_port, protocol=protocol)
 
 
 if __name__ == "__main__":
