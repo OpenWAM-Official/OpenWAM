@@ -1,0 +1,67 @@
+type: robomind
+# ── Dataset root ────────────────────────────────────────────────────────────
+# `dataset_dir` can point at either:
+#   1. A single bucket (a directory that directly contains `meta/info.json`), or
+#   2. A root directory whose immediate subdirs are the per-embodiment×benchmark
+#      buckets (each with their own `meta/info.json`).
+# Mode (2) is the production path: `RoboMINDDataset.from_config` discovers all
+# sub-buckets and wraps them in a `MultiBucketRoboMINDDataset`. Each bucket
+# resolves its own cameras / EEF layout / per-dim mask from its info.json —
+# no per-bucket yaml entries needed.
+#
+dataset_dir: /path/to/robomind
+
+# ── Window / stride ─────────────────────────────────────────────────────────
+# num_frames + video_stride match RoboCOIN / EgoDex / OXE so mixture batches
+# collate without per-source resize. (33 frames, stride 4 → 9 video frames.)
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+# ── Image size ──────────────────────────────────────────────────────────────
+# multiview=true REQUIRES height=384, width=320 — the L-shape canvas is split
+# top 256H + bottom 128H, bottom row halved 160W + 160W. Keep aligned with the
+# other sub-datasets in mixture.yaml.
+height: 384
+width: 320
+
+# ── Multiview ──────────────────────────────────────────────────────────────
+# multiview: true → L-shape canvas at (384, 320):
+#     top    256H × 320W → main view (camera_top / camera_front / front_external)
+#     bot-L  128H × 160W → left wrist (agilex camera_left_wrist / sim camera_handeye), else BLACK
+#     bot-R  128H × 160W → right wrist (agilex camera_right_wrist), else BLACK
+#
+# camera_layout is INTENTIONALLY UNSET: RoboMIND mixes several embodiments with
+# different camera sets in one root, so each bucket must resolve its own layout
+# in RoboMINDDataset._resolve_cameras. (Setting camera_layout here would force
+# every bucket to use the same keys — wrong for a heterogeneous root.)
+multiview: true
+
+# ── Supervision (decision B1) ────────────────────────────────────────────────
+# RoboMIND is real-robot data: supervise real EEF action + proprio.
+#   single-arm (franka / ur / sim) → left 10 dims supervised (LEFT_ARM_DIM_MASK)
+#   agilex (dual-arm)              → all 20 dims supervised
+# false → action_mask / proprio_mask all-False (video-only auxiliary source).
+enable_action_supervision: true
+
+# ── Normalization (decision A2) ──────────────────────────────────────────────
+# quantile (per-robot_type 20-D EEF stats) — aligns with OXE / RoboCOIN-quantile.
+# REQUIRES stats files at {root}/meta/stats_<robot_type>.json; generate first:
+#   python scripts/robomind_compute_stats.py --dataset_dir <root>
+# Set to null to disable in-reader normalization (passthrough).
+normalize_mode: quantile
+
+# ── Train / val split ───────────────────────────────────────────────────────
+# info.json carries an explicit `splits` field (the conversion writes train/val);
+# the reader honours it. seed comes from project.seed (falls back to 42).
+split: train
+
+# ── Identifier ──────────────────────────────────────────────────────────────
+# null → defaults to basename(dataset_dir).
+dataset_id: null
+
+# ── Data budget (optional) ──────────────────────────────────────────────────
+# total_hours: cap raw video footage (hours). null → use the full dataset
+# (byte-identical to the pre-budget path). positive float → water-filling
+# subsample across buckets, seeded by project.seed.
+total_hours: null
