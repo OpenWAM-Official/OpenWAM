@@ -8,14 +8,16 @@ server:
   port: 8848                   # WebSocket port
 
 # ---------------------------------------------------------------------------
-# Inference parameters
-# These populate cfg.inference and are used by JointInferenceEngine.generate().
-# CLI flags --denoise-steps / --schedule-type etc. override these values.
+# Inference parameters (cfg.inference)
+# Consumed by JointInferenceEngine.generate() and the executor selection.
+# Every field has a CLI override of the same name (--denoise-steps,
+# --execution-mode, ...) in openwam-serve / scripts/deploy.py.
 # ---------------------------------------------------------------------------
 inference:
   denoise_steps: 10           # Denoising steps (FastWAM-Joint deploy default)
   schedule_type: sync         # only "sync" is supported (removed strategies live in git history)
-  shift: 5.0                  # Flow-matching shift parameter
+  shift: 5.0                  # Flow-matching shift; also discretizes the video stream unless the
+                              # backbone sets shift_video (Cosmos flow_shift != 5.0 ckpts: align manually)
   execution_mode: sync        # sync | async — selects SyncInferenceExecutor / AsyncInferenceExecutor
   execution_horizon: null     # async only: actions executed per chunk before switching; null = policy.execute_horizon, else full chunk
   inference_delay_steps: null # async only: expected inference latency in steps; null = half of resolved horizon
@@ -28,7 +30,7 @@ inference:
 # Read by JointInferenceEngine._init_optimizations() via cfg.optimization.
 # ---------------------------------------------------------------------------
 optimization:
-  decode_video: false         # Set false to skip VAE decode (action-only mode)
+  decode_video: false         # false = skip VAE decode and return video=null (actions-only serving)
 
   dit_cache:
     enabled: false            # DiT velocity cache: skip video DiT when prediction is stable
@@ -36,7 +38,7 @@ optimization:
     max_skips: 3              # Maximum consecutive skips before forcing recompute
 
   compile:
-    mode: auto                 # auto | none
+    mode: auto                 # auto | none; backbones may opt out per section (e.g. Cosmos25 skips the MoT-loop compile)
     self_attn:
       torch_mode: default
       dynamic: false           # Fixed-shape MoT-loop compile for dual_system_self_attn
