@@ -49,12 +49,6 @@ import yaml  # noqa: E402
 
 from benchmarks.utils import WSPolicyClient, action_conversion, client, transport  # noqa: E402
 
-# Fields that earlier versions of policy_config.yml used. They are ignored by
-# the current client contract (server decides multiview/single-view and camera
-# layout from the checkpoint's config.yaml), but we log them once so users can
-# clean up their YAML.
-_DEPRECATED_YAML_FIELDS = ("image_key", "image_size", "multiview", "multiview_image_size")
-
 # --- Per-task step_lim overrides ---
 # A single YAML file of {task_name: int} lets users override RoboTwin's
 # upstream task_config/_eval_step_limit.yml without touching the RoboTwin
@@ -173,7 +167,6 @@ class ModelClient:
         action_type: str = "qpos",
         debug: bool = False,
         debug_dir: str = "./debug_images",
-        **kwargs,  # absorb unused YAML fields for backwards compatibility
     ) -> None:
         """
         Args:
@@ -216,15 +209,6 @@ class ModelClient:
 
         self._ws_url = f"ws://{host}:{port}"
         self._client = WSPolicyClient(self._ws_url, timeout=request_timeout)
-
-        # Warn about legacy YAML fields once so users know they're no-ops now.
-        for field in _DEPRECATED_YAML_FIELDS:
-            if field in kwargs:
-                print(
-                    f"[OpenWAMClient] Ignored legacy config field '{field}'={kwargs[field]!r}. "
-                    f"Server decides multi-view and camera layout from the checkpoint's "
-                    f"config.yaml — drop this field from policy_config.yml."
-                )
 
         print(
             f"[OpenWAMClient] server={self._ws_url} send_state={send_state} "
@@ -309,7 +293,7 @@ class ModelClient:
         with open(os.path.join(step_dir, "meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
 
-    def step(self, example: dict, step: int = 0) -> np.ndarray:
+    def step(self, example: dict) -> np.ndarray:
         """
         Submit one observation to the server and return the next action.
 
@@ -323,7 +307,6 @@ class ModelClient:
                 "lang":  str,                 # task instruction
                 "state": np.ndarray,          # proprioceptive state (optional)
             }
-            step: current episode timestep (unused; server manages chunking).
 
         Returns:
             action: np.ndarray, shape (action_dim,)
@@ -389,8 +372,6 @@ def get_model(usr_args: dict) -> ModelClient:
         action_type=usr_args.get("action_type", "qpos"),
         debug=_parse_bool(usr_args.get("debug", False), default=False),
         debug_dir=usr_args.get("debug_dir", "./debug_images"),
-        # Pass through everything else so legacy-field warnings can fire.
-        **{k: v for k, v in usr_args.items() if k in _DEPRECATED_YAML_FIELDS},
     )
 
 
@@ -453,7 +434,7 @@ def eval(TASK_ENV, model: ModelClient, observation: dict) -> None:
         "state": _extract_proprio(model, observation) if model._send_state else None,
     }
 
-    action = model.step(example, step=TASK_ENV.take_action_cnt)
+    action = model.step(example)
 
     # EEF mode: convert 20D (xyz+rot6d+grip)×2 → 16D (xyz+quat+grip)×2.
     if model._action_type == "ee" and len(action) == 20:

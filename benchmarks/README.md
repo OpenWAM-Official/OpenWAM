@@ -32,11 +32,12 @@ Response (action message, Server → Client):
 {"type": "action", "action": [float × 20 or 14], "step": int, "latency_ms": float}
 ```
 
-## 2. Three things you don't need to handle
+## 2. Four things you don't need to handle
 
 - **Image sizing / aspect ratio.** Server reads the checkpoint's `config.yaml` and resizes for you. Send the native camera output.
 - **Prompt format.** Pass the base task prompt (`"pick up the red bottle"`). Server wraps it with the training/deploy FastWAM template internally. Do **not** pre-wrap the prompt yourself.
 - **Action units.** For normalized checkpoints, the returned action is already denormalized to **physical units** (eef: xyz in meters, rot6d unitless, gripper 0-1; joint: radians). Feed it directly to your controller — do not multiply by any mean/std. If the checkpoint was trained with normalization disabled, deploy leaves actions and state in that raw training scale.
+- **Execution mode / chunking.** Whether the server runs the sync executor (buffer-and-replan) or the async one (background prefetch, `inference.execution_mode: async`) is invisible on the wire: the protocol is always one obs in, one action out.
 
 ## 3. Camera field rules
 
@@ -50,12 +51,11 @@ Response (action message, Server → Client):
 
 Within one episode, just keep calling `client.predict(payload)`. The server caches an action chunk internally: the first call runs full inference (~seconds), the next N-1 are buffer pops (<10 ms). It re-infers automatically when the buffer empties.
 
-**You must call `client.reset()` between episodes.** The server keeps per-episode state that leaks across episode boundaries otherwise:
+**You must call `client.reset()` between episodes.** The server keeps per-episode executor state that leaks across episode boundaries otherwise:
 
-- `obs_history` — the rolling observation buffer used for temporal conditioning
 - the action chunk buffer — pending actions from the last inference
 - the ensemble buffer — overlapping predictions used in receding-horizon mode
-- the step counter
+- the step counter (and, in async mode, any in-flight background inference)
 
 Reset drops all of this and returns `{"type": "reset_ack"}`. It does **not** touch model weights or server-level config, so it's cheap (<1 ms) and safe to call defensively at the start of every episode.
 

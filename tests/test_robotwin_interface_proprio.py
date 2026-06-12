@@ -175,8 +175,7 @@ def test_eval_does_not_require_proprio_when_send_state_false(monkeypatch):
 
     task_env = _TaskEnv()
 
-    def _step(example, step=0):
-        assert step == 0
+    def _step(example):
         assert example["state"] is None
         return np.zeros(20, dtype=np.float32)
 

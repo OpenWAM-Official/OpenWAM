@@ -5,7 +5,7 @@ integrations should import. The wire transport lives in
 ``benchmarks.utils.transport`` (WebSocket); this module owns only payload
 construction and the structured ``ServerError`` both ends share.
 
-Client → server obs message (must match ``PolicyServer._decode_obs``):
+Client → server obs message (validated server-side by ``ObsPreprocessor.preprocess``):
 
     {
       "images": {
