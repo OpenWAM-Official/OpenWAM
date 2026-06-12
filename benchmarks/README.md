@@ -6,7 +6,7 @@ For users wiring their own robot or benchmark to an OpenWAM policy server.
 multi-view composition, prompt wrapping, or checkpoint. Just speak the WebSocket
 protocol below. Minimal client dependencies: `numpy`, `Pillow`, `websockets`
 (plus `opencv-python` if you decode camera frames yourself). The wire contract
-(message types) lives in [`openwam/ws_protocol.py`](../openwam/ws_protocol.py).
+(message types) is mirrored on both sides: server constants in [`openwam/deploy/server.py`](../openwam/deploy/server.py), client constants in [`benchmarks/utils/transport.py`](utils/transport.py).
 
 ## 1. What the client sends
 

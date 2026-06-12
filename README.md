@@ -332,7 +332,7 @@ provided. Other deploy settings, including `optimization.decode_video`,
 from `configs/deploy.yaml` in the `scripts/deploy.py` path. To change them,
 edit the yaml (or use the package entrypoint's OmegaConf dotlist overrides).
 
-`scripts/deploy.py` and the package entrypoint (`openwam-serve` / `python -m openwam.deploy.policy_server`) both load checkpoints through the same package-native `load_from_checkpoint_dir` path. The package entrypoint defaults to `configs/deploy.yaml`, merges deploy overrides on top of the saved training config, and backfills `inference.height`, `inference.width`, and `inference.num_frames` from the checkpoint's dataloader config when they are not set explicitly.
+`scripts/deploy.py` and the package entrypoint (`openwam-serve` / `python -m openwam.deploy.server`) both load checkpoints through the same package-native `load_from_checkpoint_dir` path. The package entrypoint defaults to `configs/deploy.yaml`, merges deploy overrides on top of the saved training config, and backfills `inference.height`, `inference.width`, and `inference.num_frames` from the checkpoint's dataloader config when they are not set explicitly.
 
 #### WebSocket messages
 
