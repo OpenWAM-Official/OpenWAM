@@ -190,29 +190,6 @@ class PolicyServer:
         if self._policy is not None:
             self._policy.shutdown()
 
-    def get_info(self) -> dict:
-        """Return server info and statistics."""
-        avg_latency = self._total_latency / self._request_count if self._request_count > 0 else 0.0
-        policy_cfg = getattr(self.cfg, "policy", self.cfg)
-        if self._policy is not None:
-            async_info = self._policy.async_info
-        else:
-            from openwam.deploy.optimizations import resolve_async_inference_config
-            from openwam.deploy.policy import build_async_info
-
-            async_config = resolve_async_inference_config(self.cfg, policy_cfg=policy_cfg)
-            async_info = build_async_info(async_config, policy_cfg)
-        return {
-            "model": "OpenWAM",
-            "total_requests": self._request_count,
-            "avg_latency_ms": round(avg_latency, 2),
-            "policy_config": {
-                "execute_horizon": getattr(policy_cfg, "execute_horizon", None),
-                "temporal_ensemble": getattr(policy_cfg, "temporal_ensemble", True),
-            },
-            "async_inference": async_info,
-        }
-
     def run(self, host: str = "0.0.0.0", port: int = 8848):
         """Start the WebSocket policy server.
 

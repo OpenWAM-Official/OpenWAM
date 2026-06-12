@@ -23,41 +23,6 @@ import numpy as np
 from openwam.deploy.base import BaseInferenceEngine
 
 
-def build_async_info(async_config, policy_cfg, async_executor=None) -> dict:
-    """Return a stable async inference info payload for get_info() and policies."""
-    info = async_config.as_dict()
-    resolved_delay = info["inference_delay_steps"]
-    if info["enabled"] and resolved_delay is None and info["execution_horizon"] is not None:
-        resolved_delay = max(0, info["execution_horizon"] // 2)
-    info["effective_temporal_ensemble"] = (
-        False
-        if info["enabled"]
-        else bool(
-            getattr(policy_cfg, "temporal_ensemble", True) and getattr(policy_cfg, "execute_horizon", None) is not None
-        )
-    )
-    info.update(
-        {
-            "num_inferences": 0,
-            "num_sync_inferences": 0,
-            "num_background_inferences": 0,
-            "buffer_size": 0,
-            "pending": False,
-            "pending_start_step": None,
-            "current_step": 0,
-            "action_horizon": None,
-            "execution_horizon": info["execution_horizon"],
-            "inference_delay_steps": info["inference_delay_steps"],
-            "resolved_inference_delay_steps": resolved_delay,
-            "lead_time_steps": resolved_delay,
-            "last_skip_steps": 0,
-        }
-    )
-    if async_executor is not None:
-        info.update(async_executor.stats)
-    return info
-
-
 class WAMPolicy:
     """WAM policy adapter with receding-horizon action execution.
 
@@ -208,11 +173,6 @@ class WAMPolicy:
         """Clean up async resources."""
         if self._async_executor is not None:
             self._async_executor.shutdown()
-
-    @property
-    def async_info(self) -> dict:
-        """Return normalized async mode and runtime stats."""
-        return build_async_info(self._async_config, self.cfg, self._async_executor)
 
     def _build_conditions(self, obs: dict) -> dict:
         """Assemble inference conditions from the current observation.

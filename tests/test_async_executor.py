@@ -310,7 +310,7 @@ def test_wam_policy_mode_none_keeps_sync_buffer_path():
     from openwam.deploy.policy import WAMPolicy
 
     engine = MockEngine(num_frames=3, latency=0.0)
-    cfg = SimpleNamespace(history_len=1, execute_horizon=None, temporal_ensemble=False)
+    cfg = SimpleNamespace(execute_horizon=None, temporal_ensemble=False)
     policy = WAMPolicy(engine=engine, cfg=cfg, async_config={"mode": "none"})
 
     assert policy._async is False
@@ -320,18 +320,3 @@ def test_wam_policy_mode_none_keeps_sync_buffer_path():
     np.testing.assert_allclose(first, np.ones(7) * 1.0)
     np.testing.assert_allclose(second, np.ones(7) * 1.0)
     assert engine.call_count == 1
-    assert policy.async_info["enabled"] is False
-    assert policy.async_info["effective_temporal_ensemble"] is False
-
-
-def test_wam_policy_reports_temporal_ensemble_effective_only_with_receding_horizon():
-    from openwam.deploy.policy import WAMPolicy
-
-    engine = MockEngine(num_frames=3, latency=0.0)
-    greedy_cfg = SimpleNamespace(history_len=1, execute_horizon=None, temporal_ensemble=True)
-    greedy_policy = WAMPolicy(engine=engine, cfg=greedy_cfg, async_config={"mode": "none"})
-    assert greedy_policy.async_info["effective_temporal_ensemble"] is False
-
-    horizon_cfg = SimpleNamespace(history_len=1, execute_horizon=2, temporal_ensemble=True)
-    horizon_policy = WAMPolicy(engine=engine, cfg=horizon_cfg, async_config={"mode": "none"})
-    assert horizon_policy.async_info["effective_temporal_ensemble"] is True
