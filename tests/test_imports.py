@@ -53,7 +53,7 @@ def test_import_inference_base():
 
 
 def test_import_inference_schedule():
-    from openwam.deploy.schedule import (  # noqa: F401
+    from openwam.deploy.denoise_schedule import (  # noqa: F401
         Schedule,
         make_schedule,
         schedule_sync,
@@ -61,7 +61,7 @@ def test_import_inference_schedule():
 
 
 def test_import_inference_joint_engine():
-    from openwam.deploy.joint_engine import JointInferenceEngine  # noqa: F401
+    from openwam.deploy.engine import JointInferenceEngine  # noqa: F401
 
 
 def test_import_inference_init():

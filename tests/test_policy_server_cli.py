@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 def test_policy_server_cli_async_numeric_overrides():
     """Direct policy_server CLI should expose the async sweep knobs."""
-    from openwam.deploy.policy_server import _apply_async_cli_overrides, _build_argparser
+    from openwam.deploy.server import _apply_async_cli_overrides, _build_argparser
 
     parser = _build_argparser()
     args = parser.parse_args(
@@ -33,7 +33,7 @@ def test_policy_server_cli_async_numeric_overrides():
 
 
 def test_policy_server_cli_async_numeric_overrides_require_vanilla():
-    from openwam.deploy.policy_server import _apply_async_cli_overrides, _build_argparser
+    from openwam.deploy.server import _apply_async_cli_overrides, _build_argparser
 
     parser = _build_argparser()
     args = parser.parse_args(["--async-execution-horizon", "24"])
@@ -47,7 +47,7 @@ def test_policy_server_cli_async_numeric_overrides_require_vanilla():
 
 
 def test_policy_server_cli_async_numeric_overrides_fail_fast_on_invalid_ranges():
-    from openwam.deploy.policy_server import _apply_async_cli_overrides, _build_argparser
+    from openwam.deploy.server import _apply_async_cli_overrides, _build_argparser
 
     parser = _build_argparser()
     args = parser.parse_args(["--async-mode", "vanilla", "--async-execution-horizon", "4"])

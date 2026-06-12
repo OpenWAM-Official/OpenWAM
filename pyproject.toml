@@ -109,7 +109,8 @@ sana = [
 # ``timm.models.layers.drop_path``. The submodule itself can't be a pip dependency
 # (relative path), so scripts/install_vjepa2.sh fetches it; this extra carries the
 # Python side. Mirrors the [sana] split. Kept out of core: the default dual_system
-# backbone (action_backbone/ActionDiT) never imports timm — only V-JEPA / SANA do.
+# backbone (action_backbone/ActionDiT) never imports timm — only V-JEPA / SANA
+# do.
 vjepa2 = ["timm>=1.0.20,<1.1"]
 # Dev / test toolchain — pytest is referenced by Makefile (`make test`) and tests/conftest.py; ruff drives `make lint` / `make format`.
 # Kept out of the base dependencies so non-dev installs stay slim.
@@ -122,7 +123,7 @@ dev = [
 include-package-data = true
 
 [project.scripts]
-openwam-serve = "openwam.deploy.policy_server:main"
+openwam-serve = "openwam.deploy.server:main"
 
 [tool.ruff]
 line-length = 120

@@ -281,9 +281,7 @@ class TestDeployConfigLoading:
     def _policy_server(self):
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location(
-            "policy_server", PROJECT_ROOT / "openwam" / "deploy" / "policy_server.py"
-        )
+        spec = importlib.util.spec_from_file_location("server", PROJECT_ROOT / "openwam" / "deploy" / "server.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod
@@ -634,7 +632,7 @@ class TestJointEngineCompileFlags:
     """Verify compile mode routing without broad default compile side effects."""
 
     def _make_filter_engine(self, architecture):
-        from openwam.deploy.joint_engine import JointInferenceEngine
+        from openwam.deploy.engine import JointInferenceEngine
 
         engine = JointInferenceEngine.__new__(JointInferenceEngine)
         engine.architecture = architecture
@@ -646,7 +644,7 @@ class TestJointEngineCompileFlags:
     def _make_engine(self, compile_mode="none", return_arch=False):
         from omegaconf import OmegaConf
 
-        from openwam.deploy.joint_engine import JointInferenceEngine
+        from openwam.deploy.engine import JointInferenceEngine
 
         cfg = OmegaConf.create(
             {
@@ -704,7 +702,7 @@ class TestJointEngineCompileFlags:
 
         engine = self._make_filter_engine(_StrictArchitecture())
 
-        caplog.set_level("WARNING", logger="openwam.deploy.joint_engine")
+        caplog.set_level("WARNING", logger="openwam.deploy.engine")
         kwargs = {
             "schedule": object(),
             "prompt": "pick up the cube",
@@ -726,7 +724,7 @@ class TestJointEngineCompileFlags:
         assert "prompt_embed_cache" in warning_messages[0]
 
     def test_generate_kwarg_filter_keeps_default_noop_drops_quiet(self, caplog):
-        from openwam.deploy.joint_engine import _BoundedPromptEmbedCache
+        from openwam.deploy.engine import _BoundedPromptEmbedCache
 
         class _StrictArchitecture:
             def generate(self, *, schedule, prompt):
@@ -734,7 +732,7 @@ class TestJointEngineCompileFlags:
 
         engine = self._make_filter_engine(_StrictArchitecture())
 
-        caplog.set_level("WARNING", logger="openwam.deploy.joint_engine")
+        caplog.set_level("WARNING", logger="openwam.deploy.engine")
         kwargs = {
             "schedule": object(),
             "prompt": "pick up the cube",
@@ -750,7 +748,7 @@ class TestJointEngineCompileFlags:
         assert not [record for record in caplog.records if "does not accept deploy kwarg" in record.getMessage()]
 
     def test_generate_kwarg_filter_warns_for_configured_prompt_cache_drop(self, caplog):
-        from openwam.deploy.joint_engine import _BoundedPromptEmbedCache
+        from openwam.deploy.engine import _BoundedPromptEmbedCache
 
         class _StrictArchitecture:
             def generate(self, *, schedule, prompt):
@@ -758,7 +756,7 @@ class TestJointEngineCompileFlags:
 
         engine = self._make_filter_engine(_StrictArchitecture())
 
-        caplog.set_level("WARNING", logger="openwam.deploy.joint_engine")
+        caplog.set_level("WARNING", logger="openwam.deploy.engine")
         filtered = engine._filter_architecture_generate_kwargs(
             {
                 "schedule": object(),

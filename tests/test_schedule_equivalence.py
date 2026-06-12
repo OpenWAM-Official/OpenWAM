@@ -17,7 +17,7 @@ def _two_schedulers():
 
 
 def test_schedule_sync():
-    from openwam.deploy.schedule import schedule_sync
+    from openwam.deploy.denoise_schedule import schedule_sync
 
     v, a = _two_schedulers()
     result = schedule_sync(v, a, num_steps=20, shift=5.0)
@@ -26,7 +26,7 @@ def test_schedule_sync():
 
 
 def test_make_schedule_sync():
-    from openwam.deploy.schedule import make_schedule
+    from openwam.deploy.denoise_schedule import make_schedule
 
     v, a = _two_schedulers()
     result = make_schedule("sync", v, a, num_steps=20, shift=5.0)
@@ -39,7 +39,7 @@ def test_make_schedule_sync():
     ["video_leading", "cascade", "action_only", "decoupled_flash", "decoupled_asymmetric", "bogus"],
 )
 def test_make_schedule_rejects_removed_strategies(removed):
-    from openwam.deploy.schedule import make_schedule
+    from openwam.deploy.denoise_schedule import make_schedule
 
     v, a = _two_schedulers()
     with pytest.raises(NotImplementedError, match="only 'sync' is supported"):

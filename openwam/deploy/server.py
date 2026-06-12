@@ -50,7 +50,7 @@ from typing import Optional
 import numpy as np
 
 from openwam import ws_protocol as wsp
-from openwam.deploy.obs_decoder import ObsDecoder, ObsValidationError
+from openwam.deploy.obs_preprocess import ObsDecoder, ObsValidationError
 
 logger = logging.getLogger(__name__)
 _COMPILE_MODES = ("auto", "none")

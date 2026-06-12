@@ -5,7 +5,7 @@ shifted-sigmoid schedule (conceptually equivalent to the Wan video
 scheduler), but this class deliberately does not expose any "template"
 abstraction — action_backbone owns its own scheduler.
 
-Self-contained: users may bypass ``openwam.deploy.schedule`` and use
+Self-contained: users may bypass ``openwam.deploy.denoise_schedule`` and use
 this class directly (e.g. in receding-horizon control loops):
 
     from openwam.model.action_backbone.scheduler import ActionScheduler

@@ -16,7 +16,7 @@ from openwam.dataloader.transforms.multiview import (
     DEFAULT_MULTIVIEW_CAMERA_LAYOUT,
     format_prompt_for_inference,
 )
-from openwam.deploy.obs_decoder import ObsDecoder, ObsValidationError
+from openwam.deploy.obs_preprocess import ObsDecoder, ObsValidationError
 
 
 def _jpeg_b64(h: int = 48, w: int = 64, seed: int = 0) -> str:

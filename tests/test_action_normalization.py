@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from openwam.dataloader.transforms.normalize import ActionNormalizer
-from openwam.deploy.joint_engine import JointInferenceEngine
+from openwam.deploy.engine import JointInferenceEngine
 from openwam.deploy.model_loader import _build_action_normalizer
 from openwam.model.base import BaseWAMArchitecture
 

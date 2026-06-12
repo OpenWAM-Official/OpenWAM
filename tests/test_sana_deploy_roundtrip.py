@@ -160,9 +160,7 @@ def test_sana_deploy_load_from_checkpoint_dir(fabricated_ckpt_dir):
 
     ckpt_dir = fabricated_ckpt_dir["ckpt_dir"]
 
-    training_cfg, architecture = load_from_checkpoint_dir(
-        ckpt_dir=str(ckpt_dir), device="cuda:0"
-    )
+    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir=str(ckpt_dir), device="cuda:0")
 
     # 1. Returned cfg carries the training snapshot.
     assert OmegaConf.select(training_cfg, "model.video_backbone.name") == "sana_video_2b"
@@ -204,13 +202,11 @@ def test_sana_deploy_engine_construction(fabricated_ckpt_dir):
     do verify the engine builds, the architecture is bound, and the
     deploy cfg merge respects the training snapshot's mask/kernel settings.
     """
-    from openwam.deploy.joint_engine import JointInferenceEngine
+    from openwam.deploy.engine import JointInferenceEngine
     from openwam.deploy.model_loader import load_from_checkpoint_dir
 
     ckpt_dir = fabricated_ckpt_dir["ckpt_dir"]
-    training_cfg, architecture = load_from_checkpoint_dir(
-        ckpt_dir=str(ckpt_dir), device="cuda:0"
-    )
+    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir=str(ckpt_dir), device="cuda:0")
 
     if not DEPLOY_CFG_PATH.exists():
         pytest.skip(f"deploy config missing at {DEPLOY_CFG_PATH}")

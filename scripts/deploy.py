@@ -223,7 +223,7 @@ def main():
     port = int(OmegaConf.select(server_cfg, "port", default=8848))
 
     # Build the server: load checkpoint → merge deploy cfg → engine → PolicyServer.
-    from openwam.deploy.policy_server import build_server_from_config
+    from openwam.deploy.server import build_server_from_config
 
     server = build_server_from_config(
         cfg=deploy_cfg,

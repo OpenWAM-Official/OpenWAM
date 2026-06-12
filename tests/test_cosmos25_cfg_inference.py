@@ -444,9 +444,7 @@ def test_cosmos25_adapter_rejects_cfg_scale_below_one():
     vb = _build_cache_only_backbone()
     cond_cache = torch.randn(1, 16, 1024)
     with pytest.raises(ValueError, match="cfg_scale must be >= 1.0"):
-        vb.prepare_inputs_for_inference(
-            InferenceInputs(prompt="smoke", cfg_scale=0.5, pre_encoded_text=cond_cache)
-        )
+        vb.prepare_inputs_for_inference(InferenceInputs(prompt="smoke", cfg_scale=0.5, pre_encoded_text=cond_cache))
 
 
 def test_cosmos25_adapter_uncond_pre_encoded_text_2d_broadcast():
@@ -585,7 +583,7 @@ def _make_engine_for_loader_test():
     """Bypass __init__ so we can exercise the loader without a real arch / cfg."""
     from unittest.mock import MagicMock
 
-    from openwam.deploy.joint_engine import JointInferenceEngine
+    from openwam.deploy.engine import JointInferenceEngine
 
     arch = MagicMock()
     arch.dtype = torch.float32
@@ -597,7 +595,7 @@ def _make_engine_for_loader_test():
 
 def test_joint_engine_filters_deploy_kwargs_for_strict_architecture():
     """Specialized architectures like IDM should not receive Cosmos-only kwargs."""
-    from openwam.deploy.joint_engine import JointInferenceEngine
+    from openwam.deploy.engine import JointInferenceEngine
 
     class StrictArch:
         def generate(self, *, schedule, prompt, profile=False):
@@ -624,7 +622,7 @@ def test_joint_engine_filters_deploy_kwargs_for_strict_architecture():
 
 def test_joint_engine_preserves_deploy_kwargs_for_flexible_architecture():
     """Base/Cosmos-style architectures with **kwargs keep deploy-side CFG inputs."""
-    from openwam.deploy.joint_engine import JointInferenceEngine
+    from openwam.deploy.engine import JointInferenceEngine
 
     class FlexibleArch:
         def generate(self, **kwargs):
