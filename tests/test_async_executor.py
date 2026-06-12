@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from openwam.deploy.executors.async_executor import AsyncInferenceExecutor, normalize_async_inference_config
+from openwam.deploy.executors.async_executor import AsyncInferenceExecutor, normalize_execution_config
 
 
 class MockEngine:
@@ -245,62 +245,32 @@ def test_async_executor_rejects_execution_horizon_larger_than_action_horizon():
 
 @pytest.mark.parametrize("delay_steps", [4, 5])
 def test_async_config_rejects_delay_at_or_larger_than_execution_horizon(delay_steps):
-    cfg = {
-        "mode": "vanilla",
-        "vanilla": {
-            "execution_horizon": 4,
-            "inference_delay_steps": delay_steps,
-        },
-    }
+    cfg = {"mode": "async", "execution_horizon": 4, "inference_delay_steps": delay_steps}
 
     with pytest.raises(ValueError, match="inference_delay_steps"):
-        normalize_async_inference_config(cfg)
+        normalize_execution_config(cfg)
 
 
 @pytest.mark.parametrize("value", [1.2, "1.2"])
 def test_async_config_rejects_non_integral_step_values(value):
-    cfg = {
-        "mode": "vanilla",
-        "vanilla": {
-            "execution_horizon": value,
-            "inference_delay_steps": 0,
-        },
-    }
+    cfg = {"mode": "async", "execution_horizon": value, "inference_delay_steps": 0}
 
     with pytest.raises(ValueError, match="execution_horizon must be an integer"):
-        normalize_async_inference_config(cfg)
+        normalize_execution_config(cfg)
 
 
-def test_async_config_ignores_legacy_deploy_async_execution_shape():
-    from openwam.deploy.executors.async_executor import resolve_async_inference_config
+def test_unrelated_config_resolves_to_sync():
+    from openwam.deploy.executors.async_executor import resolve_execution_config
 
-    cfg = {
-        "deploy": {
-            "async_execution": {
-                "enabled": True,
-                "chunk_size": 4,
-                "prefetch": True,
-            }
-        }
-    }
-
-    resolved = resolve_async_inference_config(cfg)
+    resolved = resolve_execution_config({"deploy": {"async_execution": {"enabled": True}}})
     assert resolved.enabled is False
-    assert resolved.mode == "none"
+    assert resolved.mode == "sync"
 
 
 def test_async_config_dataclass_roundtrip_preserves_delay_settings():
-    cfg = normalize_async_inference_config(
-        {
-            "mode": "vanilla",
-            "vanilla": {
-                "execution_horizon": 8,
-                "inference_delay_steps": 4,
-            },
-        }
-    )
+    cfg = normalize_execution_config({"mode": "async", "execution_horizon": 8, "inference_delay_steps": 4})
 
-    roundtrip = normalize_async_inference_config(cfg)
+    roundtrip = normalize_execution_config(cfg)
     assert roundtrip.execution_horizon == 8
     assert roundtrip.inference_delay_steps == 4
 
@@ -310,7 +280,7 @@ def test_wam_policy_mode_none_keeps_sync_buffer_path():
 
     engine = MockEngine(num_frames=3, latency=0.0)
     cfg = SimpleNamespace(execute_horizon=None, temporal_ensemble=False)
-    policy = WAMPolicy(engine=engine, cfg=cfg, async_config={"mode": "none"})
+    policy = WAMPolicy(engine=engine, cfg=cfg, execution_config={"mode": "sync"})
 
     assert policy._async is False
     first = policy.predict_action({"prompt": "test"})

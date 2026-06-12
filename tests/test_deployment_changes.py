@@ -238,12 +238,13 @@ class TestDeploymentYaml:
         cfg = self._load()
         assert not OmegaConf.select(cfg, "optimization.dit_cache.enabled")
 
-    def test_optimization_async_inference_defaults_off(self):
+    def test_execution_mode_defaults_sync(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "none"
-        assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.inference_delay_steps") is None
+        assert OmegaConf.select(cfg, "inference.execution_mode") == "sync"
+        assert OmegaConf.select(cfg, "inference.inference_delay_steps") is None
+        assert OmegaConf.select(cfg, "optimization.async_inference") is None
 
     def test_server_defaults_present(self):
         from omegaconf import OmegaConf
@@ -288,9 +289,9 @@ class TestDeployConfigLoading:
             "schedule_type",
             "shift",
             "compile_mode",
-            "async_mode",
-            "async_execution_horizon",
-            "async_inference_delay_steps",
+            "execution_mode",
+            "execution_horizon",
+            "inference_delay_steps",
         ):
             setattr(args, attr, None)
         return args
@@ -486,73 +487,61 @@ class TestDeployConfigLoading:
         with pytest.raises(SystemExit):
             policy_server._build_argparser().parse_args(["--compile-mode", "self-attn"])
 
-    def test_cli_async_mode_override(self):
+    def test_cli_execution_mode_override(self):
         from omegaconf import OmegaConf
 
         deploy = self._policy_server()
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.async_mode = "vanilla"
+        args.execution_mode = "async"
 
-        cfg = deploy._apply_async_cli_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "vanilla"
+        cfg = deploy._apply_execution_cli_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "inference.execution_mode") == "async"
 
-    def test_cli_async_numeric_overrides(self):
+    def test_cli_execution_numeric_overrides(self):
         from omegaconf import OmegaConf
 
         deploy = self._policy_server()
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.async_mode = "vanilla"
-        args.async_execution_horizon = 24
-        args.async_inference_delay_steps = 6
+        args.execution_mode = "async"
+        args.execution_horizon = 24
+        args.inference_delay_steps = 6
 
-        cfg = deploy._apply_async_cli_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "vanilla"
-        assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.execution_horizon") == 24
-        assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.inference_delay_steps") == 6
+        cfg = deploy._apply_execution_cli_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "inference.execution_mode") == "async"
+        assert OmegaConf.select(cfg, "inference.execution_horizon") == 24
+        assert OmegaConf.select(cfg, "inference.inference_delay_steps") == 6
 
-        legacy_cfg = deploy._load_deploy_yaml()
-        OmegaConf.update(legacy_cfg, "optimization.async_inference.mode", None, merge=False)
-        OmegaConf.update(legacy_cfg, "optimization.async_inference.enabled", True, merge=False)
-        legacy_args = self._blank_args()
-        legacy_args.async_execution_horizon = 16
-        legacy_cfg = deploy._apply_async_cli_overrides(legacy_cfg, legacy_args)
-        assert OmegaConf.select(legacy_cfg, "optimization.async_inference.vanilla.execution_horizon") == 16
-
-    def test_cli_async_numeric_overrides_require_vanilla(self):
+    def test_cli_execution_numeric_overrides_require_async(self):
         deploy = self._policy_server()
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.async_execution_horizon = 24
+        args.execution_horizon = 24
 
-        with pytest.raises(ValueError, match="--async-mode vanilla"):
-            deploy._apply_async_cli_overrides(cfg, args)
-
-        args.async_mode = "none"
-        with pytest.raises(ValueError, match="--async-mode vanilla"):
-            deploy._apply_async_cli_overrides(cfg, args)
+        with pytest.raises(ValueError, match="--execution-mode async"):
+            deploy._apply_execution_cli_overrides(cfg, args)
 
     def test_cli_async_numeric_overrides_fail_fast_on_invalid_ranges(self):
         deploy = self._policy_server()
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.async_mode = "vanilla"
-        args.async_execution_horizon = 0
+        args.execution_mode = "async"
+        args.execution_horizon = 0
         with pytest.raises(ValueError, match="execution_horizon must be positive"):
-            deploy._apply_async_cli_overrides(cfg, args)
+            deploy._apply_execution_cli_overrides(cfg, args)
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.async_mode = "vanilla"
-        args.async_execution_horizon = 4
-        args.async_inference_delay_steps = 4
+        args.execution_mode = "async"
+        args.execution_horizon = 4
+        args.inference_delay_steps = 4
         with pytest.raises(ValueError, match="inference_delay_steps must be < execution_horizon"):
-            deploy._apply_async_cli_overrides(cfg, args)
+            deploy._apply_execution_cli_overrides(cfg, args)
 
     def test_none_args_do_not_override(self):
         from omegaconf import OmegaConf
@@ -564,10 +553,20 @@ class TestDeployConfigLoading:
 
         args = self._blank_args()
         # All None — nothing should change
-        for attr in ("device", "host", "port", "denoise_steps", "schedule_type", "shift", "async_mode"):
+        for attr in (
+            "device",
+            "host",
+            "port",
+            "denoise_steps",
+            "schedule_type",
+            "shift",
+            "execution_mode",
+            "execution_horizon",
+            "inference_delay_steps",
+        ):
             setattr(args, attr, None)
 
-        cfg = deploy._apply_async_cli_overrides(cfg, args)
+        cfg = deploy._apply_execution_cli_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.denoise_steps") == original_steps
 
     def test_merge_with_training_cfg_uses_dataloader_dims(self):

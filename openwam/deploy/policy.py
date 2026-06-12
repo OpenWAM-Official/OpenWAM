@@ -18,7 +18,7 @@ from openwam.deploy.engine import BaseInferenceEngine
 from openwam.deploy.executors import (
     AsyncInferenceExecutor,
     SyncInferenceExecutor,
-    normalize_async_inference_config,
+    normalize_execution_config,
 )
 
 
@@ -34,25 +34,21 @@ class WAMPolicy:
               overlapping predictions (default True when receding-horizon).
             - ``ensemble_decay``: Exponential decay weight for older
               predictions.  Lower = trust newer predictions more (default 0.5).
-        async_config: Optional config for async inference. When enabled,
-            the engine runs inside an AsyncInferenceExecutor for
-            double-buffered closed-loop execution. Expected fields:
-            - ``mode``: ``none`` or ``vanilla``.
-            - ``execution_horizon``: actions executed from each generated chunk.
-            - ``inference_delay_steps``: expected latency in action steps.
+        execution_config: ExecutionConfig-like (mode sync|async +
+            execution_horizon / inference_delay_steps, async-only).
     """
 
-    def __init__(self, engine: BaseInferenceEngine, cfg, async_config=None):
+    def __init__(self, engine: BaseInferenceEngine, cfg, execution_config=None):
         self.cfg = cfg
         self.engine = engine
 
-        self._async_config = normalize_async_inference_config(async_config, policy_cfg=cfg)
-        self._async = self._async_config.enabled
+        self._execution_config = normalize_execution_config(execution_config, policy_cfg=cfg)
+        self._async = self._execution_config.enabled
         if self._async:
             self._executor = AsyncInferenceExecutor(
                 engine=engine,
-                execution_horizon=self._async_config.execution_horizon,
-                inference_delay_steps=self._async_config.inference_delay_steps,
+                execution_horizon=self._execution_config.execution_horizon,
+                inference_delay_steps=self._execution_config.inference_delay_steps,
             )
         else:
             self._executor = SyncInferenceExecutor(

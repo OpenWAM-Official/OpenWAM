@@ -1,6 +1,6 @@
 """CLI tests for the OpenWAM policy server — async inference override wiring.
 
-Exercises ``_apply_async_cli_overrides`` / ``_build_argparser`` without an
+Exercises ``_apply_execution_cli_overrides`` / ``_build_argparser`` without an
 engine, GPU, or weights: the async sweep knobs are pure config logic.
 """
 
@@ -10,51 +10,53 @@ import pytest
 from omegaconf import OmegaConf
 
 
-def test_policy_server_cli_async_numeric_overrides():
-    """Direct policy_server CLI should expose the async sweep knobs."""
-    from openwam.deploy.server import _apply_async_cli_overrides, _build_argparser
+def test_cli_execution_overrides_write_inference_section():
+    from openwam.deploy.server import _apply_execution_cli_overrides, _build_argparser
 
     parser = _build_argparser()
-    args = parser.parse_args(
-        [
-            "--async-mode",
-            "vanilla",
-            "--async-execution-horizon",
-            "24",
-            "--async-inference-delay-steps",
-            "6",
-        ]
-    )
-    cfg = _apply_async_cli_overrides(OmegaConf.create({}), args)
+    args = parser.parse_args(["--execution-mode", "async", "--execution-horizon", "24", "--inference-delay-steps", "6"])
+    cfg = _apply_execution_cli_overrides(OmegaConf.create({}), args)
 
-    assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "vanilla"
-    assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.execution_horizon") == 24
-    assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.inference_delay_steps") == 6
+    assert OmegaConf.select(cfg, "inference.execution_mode") == "async"
+    assert OmegaConf.select(cfg, "inference.execution_horizon") == 24
+    assert OmegaConf.select(cfg, "inference.inference_delay_steps") == 6
 
 
-def test_policy_server_cli_async_numeric_overrides_require_vanilla():
-    from openwam.deploy.server import _apply_async_cli_overrides, _build_argparser
+def test_cli_execution_timing_flags_require_async():
+    from openwam.deploy.server import _apply_execution_cli_overrides, _build_argparser
 
     parser = _build_argparser()
-    args = parser.parse_args(["--async-execution-horizon", "24"])
+    args = parser.parse_args(["--execution-horizon", "24"])
 
-    with pytest.raises(ValueError, match="--async-mode vanilla"):
-        _apply_async_cli_overrides(OmegaConf.create({}), args)
-
-    legacy_cfg = OmegaConf.create({"optimization": {"async_inference": {"enabled": True}}})
-    cfg = _apply_async_cli_overrides(legacy_cfg, args)
-    assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.execution_horizon") == 24
+    with pytest.raises(ValueError, match="--execution-mode async"):
+        _apply_execution_cli_overrides(OmegaConf.create({}), args)
 
 
-def test_policy_server_cli_async_numeric_overrides_fail_fast_on_invalid_ranges():
-    from openwam.deploy.server import _apply_async_cli_overrides, _build_argparser
+def test_cli_execution_overrides_fail_fast_on_invalid_ranges():
+    from openwam.deploy.server import _apply_execution_cli_overrides, _build_argparser
 
     parser = _build_argparser()
-    args = parser.parse_args(["--async-mode", "vanilla", "--async-execution-horizon", "4"])
-    args.async_inference_delay_steps = 4
+    args = parser.parse_args(["--execution-mode", "async", "--execution-horizon", "4"])
+    args.inference_delay_steps = 4
 
     with pytest.raises(ValueError, match="inference_delay_steps must be < execution_horizon"):
-        _apply_async_cli_overrides(OmegaConf.create({}), args)
+        _apply_execution_cli_overrides(OmegaConf.create({}), args)
+
+
+def test_legacy_async_inference_section_rejected():
+    from openwam.deploy.executors import resolve_execution_config
+
+    legacy = OmegaConf.create({"optimization": {"async_inference": {"mode": "vanilla"}}})
+    with pytest.raises(ValueError, match="has been removed"):
+        resolve_execution_config(legacy)
+
+
+@pytest.mark.parametrize("legacy_value", ["none", "vanilla"])
+def test_cli_execution_mode_rejects_legacy_values(legacy_value):
+    from openwam.deploy.server import _build_argparser
+
+    with pytest.raises(SystemExit):
+        _build_argparser().parse_args(["--execution-mode", legacy_value])
 
 
 # --- Unified CLI: the package entrypoint is a strict superset of scripts/deploy.py ---

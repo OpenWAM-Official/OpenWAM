@@ -1,13 +1,10 @@
-"""Asynchronous inference executor for closed-loop robot control.
+"""Asynchronous inference executor: threaded prefetch overlapping inference with execution.
 
-The executor overlaps generation of the next action chunk with execution of
-the current executable horizon. This is a runtime scheduling optimization
-only; it does not change the model API or the denoising algorithm.
-
-Also hosts the async-inference configuration surface
-(:class:`AsyncInferenceConfig` + normalize / resolve / CLI-override helpers):
-the config describes exactly this executor's constructor knobs, so they live
-together.
+"Async" is the DreamZero sense (depth-1 background prefetch), not asyncio —
+``predict_action`` is synchronous and blocking, same interface as
+:class:`SyncInferenceExecutor`. Also hosts :class:`ExecutionConfig` and its
+normalize / resolve / CLI helpers (executor-selection config lives next to
+its consumer).
 """
 
 import logging
@@ -25,29 +22,22 @@ from openwam.deploy.engine import BaseInferenceEngine
 
 logger = logging.getLogger(__name__)
 
-VALID_ASYNC_MODES = ("none", "vanilla")
-ASYNC_CLI_NUMERIC_OVERRIDES = ("async_execution_horizon", "async_inference_delay_steps")
+VALID_EXECUTION_MODES = ("sync", "async")
+EXECUTION_CLI_NUMERIC_OVERRIDES = ("execution_horizon", "inference_delay_steps")
 
 
 @dataclass(frozen=True)
-class AsyncInferenceConfig:
-    """Normalized async inference config used by deployment policy code."""
+class ExecutionConfig:
+    """Normalized execution-mode config; horizon/delay fields apply to async mode only."""
 
-    mode: str = "none"
+    mode: str = "sync"
     execution_horizon: Optional[int] = None
     inference_delay_steps: Optional[int] = None
 
     @property
     def enabled(self) -> bool:
-        return self.mode != "none"
-
-    def as_dict(self) -> dict:
-        return {
-            "enabled": self.enabled,
-            "mode": self.mode,
-            "execution_horizon": self.execution_horizon,
-            "inference_delay_steps": self.inference_delay_steps,
-        }
+        """True when the async executor is selected."""
+        return self.mode == "async"
 
 
 def _select(cfg, path: str, default=None):
@@ -86,33 +76,26 @@ def _coerce_optional_int(value, name: str) -> Optional[int]:
     raise ValueError(f"{name} must be an integer, got {value!r}")
 
 
-def normalize_async_inference_config(async_cfg=None, policy_cfg=None) -> AsyncInferenceConfig:
-    """Normalize async inference config into a stable dataclass."""
-    if async_cfg is None:
-        return AsyncInferenceConfig()
+def normalize_execution_config(exec_cfg=None, policy_cfg=None) -> ExecutionConfig:
+    """Normalize into :class:`ExecutionConfig`; only "sync"/"async" are accepted."""
+    if exec_cfg is None:
+        return ExecutionConfig()
 
-    mode = _select(async_cfg, "mode", default=None)
-    if mode is None:
-        mode = "vanilla" if bool(_select(async_cfg, "enabled", default=False)) else "none"
-    mode = str(mode).strip().lower()
-    if mode not in VALID_ASYNC_MODES:
-        raise ValueError(f"Unsupported async inference mode {mode!r}; expected one of {VALID_ASYNC_MODES}")
+    mode = _select(exec_cfg, "mode", default=None)
+    mode = "sync" if mode is None else str(mode).strip().lower()
+    if mode not in VALID_EXECUTION_MODES:
+        raise ValueError(f"Unsupported execution mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
 
-    vanilla_cfg = _select(async_cfg, "vanilla", default=None)
-    execution_horizon = _select(vanilla_cfg, "execution_horizon", default=None)
-    if execution_horizon is None:
-        execution_horizon = _select(async_cfg, "execution_horizon", default=None)
+    execution_horizon = _select(exec_cfg, "execution_horizon", default=None)
     if execution_horizon is None:
         execution_horizon = _select(policy_cfg, "execute_horizon", default=None)
 
-    inference_delay_steps = _select(vanilla_cfg, "inference_delay_steps", default=None)
-    if inference_delay_steps is None:
-        inference_delay_steps = _select(async_cfg, "inference_delay_steps", default=None)
+    inference_delay_steps = _select(exec_cfg, "inference_delay_steps", default=None)
 
     execution_horizon = _coerce_optional_int(execution_horizon, "execution_horizon")
     inference_delay_steps = _coerce_optional_int(inference_delay_steps, "inference_delay_steps")
 
-    if mode == "vanilla":
+    if mode == "async":
         if execution_horizon is not None and execution_horizon <= 0:
             raise ValueError("execution_horizon must be positive")
         if inference_delay_steps is not None and inference_delay_steps < 0:
@@ -124,7 +107,7 @@ def normalize_async_inference_config(async_cfg=None, policy_cfg=None) -> AsyncIn
         ):
             raise ValueError("inference_delay_steps must be < execution_horizon")
 
-    return AsyncInferenceConfig(
+    return ExecutionConfig(
         mode=mode,
         execution_horizon=execution_horizon,
         inference_delay_steps=inference_delay_steps,
@@ -137,57 +120,53 @@ def _arg_value(args, name: str, default=None):
     return getattr(args, name, default)
 
 
-def apply_async_cli_overrides(root_cfg, args):
-    """Apply async CLI overrides and validate the resulting nested config."""
+def apply_execution_cli_overrides(root_cfg, args):
+    """Apply execution-mode CLI flags to ``cfg.inference`` and validate."""
     from omegaconf import OmegaConf
 
-    async_mode = _arg_value(args, "async_mode")
-    if async_mode is not None:
-        mode = str(async_mode).strip().lower()
-        if mode not in VALID_ASYNC_MODES:
-            raise ValueError(f"Unsupported async inference mode {mode!r}; expected one of {VALID_ASYNC_MODES}")
-        OmegaConf.update(root_cfg, "optimization.async_inference.mode", mode, merge=False)
+    execution_mode = _arg_value(args, "execution_mode")
+    if execution_mode is not None:
+        mode = str(execution_mode).strip().lower()
+        if mode not in VALID_EXECUTION_MODES:
+            raise ValueError(f"Unsupported execution mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
+        OmegaConf.update(root_cfg, "inference.execution_mode", mode, merge=False)
 
-    has_timing_override = any(_arg_value(args, name) is not None for name in ASYNC_CLI_NUMERIC_OVERRIDES)
+    has_timing_override = any(_arg_value(args, name) is not None for name in EXECUTION_CLI_NUMERIC_OVERRIDES)
     if has_timing_override:
-        resolved = resolve_async_inference_config(root_cfg)
-        if resolved.mode != "vanilla":
+        resolved = resolve_execution_config(root_cfg)
+        if resolved.mode != "async":
             raise ValueError(
-                "--async-execution-horizon and --async-inference-delay-steps require "
-                "--async-mode vanilla or optimization.async_inference.mode=vanilla"
+                "--execution-horizon and --inference-delay-steps require "
+                "--execution-mode async or inference.execution_mode=async"
             )
 
-    execution_horizon = _arg_value(args, "async_execution_horizon")
+    execution_horizon = _arg_value(args, "execution_horizon")
     if execution_horizon is not None:
-        OmegaConf.update(
-            root_cfg,
-            "optimization.async_inference.vanilla.execution_horizon",
-            execution_horizon,
-            merge=False,
-        )
+        OmegaConf.update(root_cfg, "inference.execution_horizon", execution_horizon, merge=False)
 
-    inference_delay_steps = _arg_value(args, "async_inference_delay_steps")
+    inference_delay_steps = _arg_value(args, "inference_delay_steps")
     if inference_delay_steps is not None:
-        OmegaConf.update(
-            root_cfg,
-            "optimization.async_inference.vanilla.inference_delay_steps",
-            inference_delay_steps,
-            merge=False,
-        )
+        OmegaConf.update(root_cfg, "inference.inference_delay_steps", inference_delay_steps, merge=False)
 
-    if async_mode is not None or has_timing_override:
-        resolve_async_inference_config(root_cfg)
+    if execution_mode is not None or has_timing_override:
+        resolve_execution_config(root_cfg)
 
     return root_cfg
 
 
-def resolve_async_inference_config(root_cfg, policy_cfg=None) -> AsyncInferenceConfig:
-    """Resolve async inference config from the deploy config tree.
-
-    Async inference is configured through ``optimization.async_inference``.
-    """
-    async_cfg = _select(root_cfg, "optimization.async_inference", default=None)
-    return normalize_async_inference_config(async_cfg, policy_cfg=policy_cfg)
+def resolve_execution_config(root_cfg, policy_cfg=None) -> ExecutionConfig:
+    """Resolve ``inference.execution_*`` from the config tree; reject the removed legacy section."""
+    if _select(root_cfg, "optimization.async_inference", default=None) is not None:
+        raise ValueError(
+            "optimization.async_inference has been removed; use inference.execution_mode "
+            "(sync|async) + inference.execution_horizon / inference.inference_delay_steps."
+        )
+    exec_cfg = {
+        "mode": _select(root_cfg, "inference.execution_mode", default=None),
+        "execution_horizon": _select(root_cfg, "inference.execution_horizon", default=None),
+        "inference_delay_steps": _select(root_cfg, "inference.inference_delay_steps", default=None),
+    }
+    return normalize_execution_config(exec_cfg, policy_cfg=policy_cfg)
 
 
 class AsyncInferenceExecutor:

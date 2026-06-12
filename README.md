@@ -315,9 +315,9 @@ These flags map to:
 - `--host` / `--port` → `server.*`
 - `--denoise-steps` / `--schedule-type` / `--shift` → `inference.*`
 - `--compile-mode` → `optimization.compile.mode` (`auto` or `none`)
-- `--async-mode` -> `optimization.async_inference.mode` (`none` or `vanilla`)
-- `--async-execution-horizon` / `--async-inference-delay-steps` require
-  async mode `vanilla` in either CLI or yaml
+- `--execution-mode` -> `inference.execution_mode` (`sync` or `async`)
+- `--execution-horizon` / `--inference-delay-steps` require execution mode
+  `async` in either CLI or yaml
 
 Architecture-specific compile paths are selected automatically from the
 checkpoint config when `mode: auto`.

@@ -16,6 +16,9 @@ inference:
   denoise_steps: 10           # Denoising steps (FastWAM-Joint deploy default)
   schedule_type: sync         # only "sync" is supported (removed strategies live in git history)
   shift: 5.0                  # Flow-matching shift parameter
+  execution_mode: sync        # sync | async — selects SyncInferenceExecutor / AsyncInferenceExecutor
+  execution_horizon: null     # async only: actions executed per chunk before switching; null = policy.execute_horizon, else full chunk
+  inference_delay_steps: null # async only: expected inference latency in steps; null = half of resolved horizon
   # §15 — Classifier-Free Guidance (Cosmos25 only today; Wan keeps its own
   # pipeline-internal CFG). When cfg_scale > 1.0 the engine resolves an
   # uncond embedding once at init (offline `empty.safetensors` if
@@ -68,12 +71,6 @@ optimization:
     tri_system:
       torch_mode: reduce-overhead
       dynamic: false           # Fixed-shape trimodal MoT-loop compile for tri_system_joint_self_attn
-
-  async_inference:
-    mode: none                # none | vanilla
-    vanilla:
-      execution_horizon: null       # null = policy.execute_horizon, or generated action horizon
-      inference_delay_steps: null   # null = auto, half of the resolved execution horizon
 
   prompt_embed_cache:
     maxsize: 32               # LRU cap for prompt -> text embeddings cache

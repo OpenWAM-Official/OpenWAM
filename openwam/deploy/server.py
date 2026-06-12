@@ -137,15 +137,15 @@ class PolicyServer:
         if self._policy is not None:
             return
 
-        from openwam.deploy.executors import resolve_async_inference_config
+        from openwam.deploy.executors import resolve_execution_config
         from openwam.deploy.policy import WAMPolicy
 
         policy_cfg = getattr(self.cfg, "policy", self.cfg)
-        async_config = resolve_async_inference_config(self.cfg, policy_cfg=policy_cfg)
+        execution_config = resolve_execution_config(self.cfg, policy_cfg=policy_cfg)
         self._policy = WAMPolicy(
             engine=self.engine,
             cfg=policy_cfg,
-            async_config=async_config,
+            execution_config=execution_config,
         )
 
         # Resolve obs preprocessing config from the saved checkpoint cfg so every
@@ -437,24 +437,25 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Override compile strategy: auto or none.",
     )
     parser.add_argument(
-        "--async-mode",
-        choices=("none", "vanilla"),
+        "--execution-mode",
+        choices=("sync", "async"),
         default=None,
-        help="Override optimization.async_inference.mode.",
+        dest="execution_mode",
+        help="Override inference.execution_mode.",
     )
     parser.add_argument(
-        "--async-execution-horizon",
+        "--execution-horizon",
         type=int,
         default=None,
-        dest="async_execution_horizon",
-        help="Override optimization.async_inference.vanilla.execution_horizon.",
+        dest="execution_horizon",
+        help="Override inference.execution_horizon (async only).",
     )
     parser.add_argument(
-        "--async-inference-delay-steps",
+        "--inference-delay-steps",
         type=int,
         default=None,
-        dest="async_inference_delay_steps",
-        help="Override optimization.async_inference.vanilla.inference_delay_steps.",
+        dest="inference_delay_steps",
+        help="Override inference.inference_delay_steps (async only).",
     )
     parser.add_argument(
         "overrides",
@@ -464,11 +465,11 @@ def _build_argparser() -> argparse.ArgumentParser:
     return parser
 
 
-def _apply_async_cli_overrides(cfg, args):
-    """Apply async inference CLI flags to the nested deploy config."""
-    from openwam.deploy.executors import apply_async_cli_overrides
+def _apply_execution_cli_overrides(cfg, args):
+    """Apply execution-mode CLI flags to the deploy config."""
+    from openwam.deploy.executors import apply_execution_cli_overrides
 
-    return apply_async_cli_overrides(cfg, args)
+    return apply_execution_cli_overrides(cfg, args)
 
 
 def _load_deploy_yaml(config_path: Optional[str] = None):
@@ -516,7 +517,7 @@ def main(argv: Optional[list[str]] = None):
     cfg = _apply_inference_overrides(cfg, args)
     _apply_compile_mode_override(cfg, args.compile_mode)
     try:
-        cfg = _apply_async_cli_overrides(cfg, args)
+        cfg = _apply_execution_cli_overrides(cfg, args)
     except ValueError as exc:
         parser.error(str(exc))
 

@@ -84,10 +84,10 @@ Options:
       --ckpt-name      checkpoint filename passed to scripts/deploy.py
       --denoise-steps  denoising step count passed to scripts/deploy.py
       --schedule-type  schedule type passed to scripts/deploy.py
-      --async-mode     async inference mode passed to scripts/deploy.py
-      --async-execution-horizon N
+      --execution-mode execution mode (sync|async) passed to scripts/deploy.py
+      --execution-horizon N
                        async execution horizon passed to scripts/deploy.py
-      --async-inference-delay-steps N
+      --inference-delay-steps N
                        async inference delay passed to scripts/deploy.py
       --shift          flow-matching shift passed to scripts/deploy.py
       --dry-run        skip servers/eval and only test shared-queue assignment
@@ -241,9 +241,9 @@ while (( $# > 0 )); do
         --ckpt-name)        DEPLOY_ARGS+=(--ckpt-name "$2"); shift 2 ;;
         --denoise-steps)    DEPLOY_ARGS+=(--denoise-steps "$2"); shift 2 ;;
         --schedule-type)    DEPLOY_ARGS+=(--schedule-type "$2"); shift 2 ;;
-        --async-mode)       DEPLOY_ARGS+=(--async-mode "$2"); shift 2 ;;
-        --async-execution-horizon) DEPLOY_ARGS+=(--async-execution-horizon "$2"); shift 2 ;;
-        --async-inference-delay-steps) DEPLOY_ARGS+=(--async-inference-delay-steps "$2"); shift 2 ;;
+        --execution-mode)   DEPLOY_ARGS+=(--execution-mode "$2"); shift 2 ;;
+        --execution-horizon) DEPLOY_ARGS+=(--execution-horizon "$2"); shift 2 ;;
+        --inference-delay-steps) DEPLOY_ARGS+=(--inference-delay-steps "$2"); shift 2 ;;
         --shift)            DEPLOY_ARGS+=(--shift "$2"); shift 2 ;;
         --dry-run|--dryrun) DRY_RUN=1; shift ;;
         --fresh)            FRESH_RUN=1; shift ;;
