@@ -98,7 +98,6 @@ class ObsDecoder:
         *,
         multiview: bool,
         camera_layout,
-        target_camera: str,
         img_height: int,
         img_width: int,
         requires_proprio: bool = False,
@@ -106,7 +105,6 @@ class ObsDecoder:
     ):
         self.multiview = bool(multiview)
         self.camera_layout = list(camera_layout)
-        self.target_camera = target_camera
         self.img_height = int(img_height)
         self.img_width = int(img_width)
         self.requires_proprio = bool(requires_proprio)
@@ -121,7 +119,6 @@ class ObsDecoder:
         multiview = bool(getattr(dl, "multiview", False)) if dl is not None else False
         _layout = getattr(dl, "camera_layout", None) if dl is not None else None
         camera_layout = list(_layout) if _layout is not None else list(DEFAULT_MULTIVIEW_CAMERA_LAYOUT)
-        target_camera = getattr(dl, "target_camera", "head_camera") if dl is not None else "head_camera"
         # Output canvas size: prefer inference.{height,width}, fall back to dataloader.
         _inf = getattr(cfg, "inference", None)
         _h = getattr(_inf, "height", None) if _inf is not None else None
@@ -133,7 +130,6 @@ class ObsDecoder:
         return cls(
             multiview=multiview,
             camera_layout=camera_layout,
-            target_camera=target_camera,
             img_height=int(_h if _h is not None else 384),
             img_width=int(_w if _w is not None else 320),
             requires_proprio=_resolve_requires_proprio(cfg, engine),
@@ -196,10 +192,7 @@ class ObsDecoder:
         # --- Dispatch by server's configured view mode ---
         if not self.multiview:
             if imgs.get("left_wrist_camera") is not None or imgs.get("right_wrist_camera") is not None:
-                logger.info(
-                    "[obs] single-view mode (target_camera=%s); ignoring wrist camera inputs.",
-                    self.target_camera,
-                )
+                logger.info("[obs] single-view mode; ignoring wrist camera inputs.")
             obs["image"] = crop_and_resize(head_pil, self.img_height, self.img_width)
         else:
             if len(self.camera_layout) < 3:

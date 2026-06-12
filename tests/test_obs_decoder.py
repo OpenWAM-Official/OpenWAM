@@ -31,7 +31,6 @@ def _single_view(*, state_dim=None, requires_proprio=False) -> ObsDecoder:
     return ObsDecoder(
         multiview=False,
         camera_layout=["head_camera"],
-        target_camera="head_camera",
         img_height=32,
         img_width=32,
         requires_proprio=requires_proprio,
@@ -43,7 +42,6 @@ def _multi_view(*, state_dim=None, requires_proprio=False) -> ObsDecoder:
     return ObsDecoder(
         multiview=True,
         camera_layout=list(DEFAULT_MULTIVIEW_CAMERA_LAYOUT),
-        target_camera="head_camera",
         img_height=32,
         img_width=32,
         requires_proprio=requires_proprio,
@@ -87,9 +85,7 @@ def test_bad_base64_raises():
 
 
 def test_multiview_requires_three_camera_layout():
-    dec = ObsDecoder(
-        multiview=True, camera_layout=["only_one"], target_camera="head_camera", img_height=32, img_width=32
-    )
+    dec = ObsDecoder(multiview=True, camera_layout=["only_one"], img_height=32, img_width=32)
     with pytest.raises(ObsValidationError, match="camera_layout"):
         dec.decode({"images": {"head_camera": _jpeg_b64()}, "prompt": "x"})
 
@@ -120,7 +116,7 @@ def test_from_cfg_resolves_view_config():
 
     cfg = OmegaConf.create(
         {
-            "dataloader": {"multiview": True, "camera_layout": ["a", "b", "c"], "target_camera": "head_camera"},
+            "dataloader": {"multiview": True, "camera_layout": ["a", "b", "c"]},
             "inference": {"height": 384, "width": 320},
             "model": {"architecture": {"use_proprioception": True, "state_dim": 20}},
         }
@@ -146,7 +142,6 @@ def _multi_view_canvas(h: int = 384, w: int = 320) -> ObsDecoder:
     return ObsDecoder(
         multiview=True,
         camera_layout=list(DEFAULT_MULTIVIEW_CAMERA_LAYOUT),
-        target_camera="head_camera",
         img_height=h,
         img_width=w,
     )

@@ -140,10 +140,9 @@ class PolicyServer:
         self._obs_decoder = ObsDecoder.from_cfg(self.cfg, self.engine)
         d = self._obs_decoder
         logger.info(
-            "[obs] View config: multiview=%s, camera_layout=%s, target_camera=%s, canvas=%dx%d",
+            "[obs] View config: multiview=%s, camera_layout=%s, canvas=%dx%d",
             d.multiview,
             d.camera_layout if d.multiview else "[unused]",
-            d.target_camera if not d.multiview else "[unused]",
             d.img_height,
             d.img_width,
         )
