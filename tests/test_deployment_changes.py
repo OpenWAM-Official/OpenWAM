@@ -258,15 +258,7 @@ class TestDeploymentYaml:
 
 
 class TestDeployConfigLoading:
-    """Test _load_deploy_config and _apply_cli_overrides without running a server."""
-
-    def _import(self):
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("deploy", PROJECT_ROOT / "scripts" / "deploy.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
+    """Config loading + CLI override logic of the unified server CLI (no server run)."""
 
     def _compile_options(self):
         import importlib.util
@@ -304,8 +296,8 @@ class TestDeployConfigLoading:
         return args
 
     def test_load_deploy_config_returns_omegaconf(self):
-        deploy = self._import()
-        cfg = deploy._load_deploy_config()
+        deploy = self._policy_server()
+        cfg = deploy._load_deploy_yaml()
         from omegaconf import DictConfig
 
         assert isinstance(cfg, DictConfig)
@@ -313,45 +305,33 @@ class TestDeployConfigLoading:
     def test_load_deploy_config_has_inference(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
-        cfg = deploy._load_deploy_config()
+        deploy = self._policy_server()
+        cfg = deploy._load_deploy_yaml()
         assert OmegaConf.select(cfg, "inference.denoise_steps") is not None
-
-    def test_cli_device_override(self):
-        from omegaconf import OmegaConf
-
-        deploy = self._import()
-
-        cfg = deploy._load_deploy_config()
-        args = self._blank_args()
-        args.device = "cuda:3"
-
-        cfg = deploy._apply_cli_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "device") == "cuda:3"
 
     def test_cli_denoise_steps_override(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
+        deploy = self._policy_server()
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
         args.denoise_steps = 20
 
-        cfg = deploy._apply_cli_overrides(cfg, args)
+        cfg = deploy._apply_inference_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.denoise_steps") == 20
 
     def test_cli_compile_mode_none_disables_compile(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
+        deploy = self._policy_server()
         compile_options = self._compile_options()
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
         args.compile_mode = "none"
 
-        cfg = deploy._apply_cli_overrides(cfg, args)
+        deploy._apply_compile_mode_override(cfg, args.compile_mode)
         assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
         compile_cfg = OmegaConf.select(cfg, "optimization.compile")
         assert compile_options.compile_mode(compile_cfg, strict=True) == "none"
@@ -359,14 +339,14 @@ class TestDeployConfigLoading:
     def test_cli_compile_mode_auto_keeps_architecture_selection(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
+        deploy = self._policy_server()
         compile_options = self._compile_options()
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
         args.compile_mode = "auto"
 
-        cfg = deploy._apply_cli_overrides(cfg, args)
+        deploy._apply_compile_mode_override(cfg, args.compile_mode)
         assert OmegaConf.select(cfg, "optimization.compile.mode") == "auto"
         compile_cfg = OmegaConf.select(cfg, "optimization.compile")
         assert compile_options.compile_mode(compile_cfg, strict=True) == "auto"
@@ -374,7 +354,7 @@ class TestDeployConfigLoading:
     def test_cli_compile_mode_accepts_only_auto_and_none(self):
         import argparse
 
-        deploy = self._import()
+        deploy = self._policy_server()
 
         parser = argparse.ArgumentParser()
         parser.add_argument("--compile-mode", type=deploy._normalize_compile_mode_arg, choices=deploy._COMPILE_MODES)
@@ -509,77 +489,77 @@ class TestDeployConfigLoading:
     def test_cli_async_mode_override(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
+        deploy = self._policy_server()
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
         args.async_mode = "vanilla"
 
-        cfg = deploy._apply_cli_overrides(cfg, args)
+        cfg = deploy._apply_async_cli_overrides(cfg, args)
         assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "vanilla"
 
     def test_cli_async_numeric_overrides(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
+        deploy = self._policy_server()
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
         args.async_mode = "vanilla"
         args.async_execution_horizon = 24
         args.async_inference_delay_steps = 6
 
-        cfg = deploy._apply_cli_overrides(cfg, args)
+        cfg = deploy._apply_async_cli_overrides(cfg, args)
         assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "vanilla"
         assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.execution_horizon") == 24
         assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.inference_delay_steps") == 6
 
-        legacy_cfg = deploy._load_deploy_config()
+        legacy_cfg = deploy._load_deploy_yaml()
         OmegaConf.update(legacy_cfg, "optimization.async_inference.mode", None, merge=False)
         OmegaConf.update(legacy_cfg, "optimization.async_inference.enabled", True, merge=False)
         legacy_args = self._blank_args()
         legacy_args.async_execution_horizon = 16
-        legacy_cfg = deploy._apply_cli_overrides(legacy_cfg, legacy_args)
+        legacy_cfg = deploy._apply_async_cli_overrides(legacy_cfg, legacy_args)
         assert OmegaConf.select(legacy_cfg, "optimization.async_inference.vanilla.execution_horizon") == 16
 
     def test_cli_async_numeric_overrides_require_vanilla(self):
-        deploy = self._import()
+        deploy = self._policy_server()
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
         args.async_execution_horizon = 24
 
         with pytest.raises(ValueError, match="--async-mode vanilla"):
-            deploy._apply_cli_overrides(cfg, args)
+            deploy._apply_async_cli_overrides(cfg, args)
 
         args.async_mode = "none"
         with pytest.raises(ValueError, match="--async-mode vanilla"):
-            deploy._apply_cli_overrides(cfg, args)
+            deploy._apply_async_cli_overrides(cfg, args)
 
     def test_cli_async_numeric_overrides_fail_fast_on_invalid_ranges(self):
-        deploy = self._import()
+        deploy = self._policy_server()
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
         args.async_mode = "vanilla"
         args.async_execution_horizon = 0
         with pytest.raises(ValueError, match="execution_horizon must be positive"):
-            deploy._apply_cli_overrides(cfg, args)
+            deploy._apply_async_cli_overrides(cfg, args)
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
         args.async_mode = "vanilla"
         args.async_execution_horizon = 4
         args.async_inference_delay_steps = 4
         with pytest.raises(ValueError, match="inference_delay_steps must be < execution_horizon"):
-            deploy._apply_cli_overrides(cfg, args)
+            deploy._apply_async_cli_overrides(cfg, args)
 
     def test_none_args_do_not_override(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
+        deploy = self._policy_server()
 
-        cfg = deploy._load_deploy_config()
+        cfg = deploy._load_deploy_yaml()
         original_steps = OmegaConf.select(cfg, "inference.denoise_steps")
 
         args = self._blank_args()
@@ -587,17 +567,17 @@ class TestDeployConfigLoading:
         for attr in ("device", "host", "port", "denoise_steps", "schedule_type", "shift", "async_mode"):
             setattr(args, attr, None)
 
-        cfg = deploy._apply_cli_overrides(cfg, args)
+        cfg = deploy._apply_async_cli_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.denoise_steps") == original_steps
 
     def test_merge_with_training_cfg_uses_dataloader_dims(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
+        deploy = self._policy_server()
 
         policy_server = self._policy_server()
         training_cfg = OmegaConf.create({"dataloader": {"num_frames": 49, "height": 720, "width": 1280}})
-        deploy_cfg = deploy._load_deploy_config()
+        deploy_cfg = deploy._load_deploy_yaml()
 
         # Remove inference dims so they should be filled from dataloader
         OmegaConf.update(deploy_cfg, "inference.num_frames", None, merge=False)
@@ -612,11 +592,11 @@ class TestDeployConfigLoading:
     def test_deploy_cfg_wins_over_training_cfg_on_overlap(self):
         from omegaconf import OmegaConf
 
-        deploy = self._import()
+        deploy = self._policy_server()
 
         policy_server = self._policy_server()
         training_cfg = OmegaConf.create({"inference": {"denoise_steps": 99}})
-        deploy_cfg = deploy._load_deploy_config()
+        deploy_cfg = deploy._load_deploy_yaml()
         OmegaConf.update(deploy_cfg, "inference.denoise_steps", 10, merge=False)
 
         merged = policy_server.merge_deploy_cfg(training_cfg, deploy_cfg)
@@ -854,7 +834,7 @@ class TestModelLoaderDtype:
 
 
 # ---------------------------------------------------------------------------
-# 7. deploy.py — _log_attention_backends output format
+# 7. server CLI — _log_attention_backends output format
 # ---------------------------------------------------------------------------
 
 
@@ -864,7 +844,7 @@ class TestLogAttentionBackends:
     def _import_deploy(self):
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location("deploy", PROJECT_ROOT / "scripts" / "deploy.py")
+        spec = importlib.util.spec_from_file_location("server", PROJECT_ROOT / "openwam" / "deploy" / "server.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod

@@ -108,10 +108,6 @@ def _apply_compile_mode_override(cfg, compile_mode: Optional[str]) -> None:
     _normalize_compile_mode_in_cfg(cfg)
 
 
-def _compile_mode_choices() -> tuple[str, ...]:
-    return _COMPILE_MODES
-
-
 def _normalize_compile_mode_arg(value: str) -> str:
     normalized = str(value).strip().lower().replace("-", "_")
     if normalized not in _COMPILE_MODES:
@@ -436,7 +432,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compile-mode",
         type=_normalize_compile_mode_arg,
-        choices=_compile_mode_choices(),
+        choices=_COMPILE_MODES,
         default=None,
         help="Override compile strategy: auto or none.",
     )
@@ -475,6 +471,31 @@ def _apply_async_cli_overrides(cfg, args):
     return apply_async_cli_overrides(cfg, args)
 
 
+def _load_deploy_yaml(config_path: Optional[str] = None):
+    """Load the deploy yaml (Hydra defaults list stripped) as the base config."""
+    from omegaconf import OmegaConf
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    path = Path(config_path) if config_path else project_root / "configs" / "deploy.yaml"
+    cfg = OmegaConf.load(path)
+    if "defaults" in cfg:
+        OmegaConf.update(cfg, "defaults", OmegaConf.create([]), merge=False)
+    return cfg
+
+
+def _apply_inference_overrides(cfg, args):
+    """Write the inference CLI flags into cfg.inference (CLI wins over yaml)."""
+    from omegaconf import OmegaConf
+
+    if args.denoise_steps is not None:
+        OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
+    if args.schedule_type is not None:
+        OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
+    if args.shift is not None:
+        OmegaConf.update(cfg, "inference.shift", args.shift, merge=False)
+    return cfg
+
+
 def main(argv: Optional[list[str]] = None):
     """CLI entrypoint for running the OpenWAM policy server."""
     from omegaconf import OmegaConf
@@ -488,23 +509,11 @@ def main(argv: Optional[list[str]] = None):
     )
     _log_attention_backends(logging.getLogger("deploy"))
 
-    project_root = Path(__file__).resolve().parent.parent.parent
-
-    config_path = Path(args.config) if args.config else project_root / "configs" / "deploy.yaml"
-    cfg = OmegaConf.load(config_path)
-    if "defaults" in cfg:
-        OmegaConf.update(cfg, "defaults", OmegaConf.create([]), merge=False)
+    cfg = _load_deploy_yaml(args.config)
     if args.overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
 
-    # Inference overrides (CLI wins over yaml)
-    if args.denoise_steps is not None:
-        OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
-    if args.schedule_type is not None:
-        OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
-    if args.shift is not None:
-        OmegaConf.update(cfg, "inference.shift", args.shift, merge=False)
-
+    cfg = _apply_inference_overrides(cfg, args)
     _apply_compile_mode_override(cfg, args.compile_mode)
     try:
         cfg = _apply_async_cli_overrides(cfg, args)
