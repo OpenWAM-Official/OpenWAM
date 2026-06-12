@@ -141,7 +141,7 @@ class PolicyServer:
         if self._policy is not None:
             return
 
-        from openwam.deploy.optimizations import resolve_async_inference_config
+        from openwam.deploy.executors import resolve_async_inference_config
         from openwam.deploy.policy import WAMPolicy
 
         policy_cfg = getattr(self.cfg, "policy", self.cfg)
@@ -391,7 +391,7 @@ def _build_argparser() -> argparse.ArgumentParser:
 
 def _apply_async_cli_overrides(cfg, args):
     """Apply async inference CLI flags to the nested deploy config."""
-    from openwam.deploy.optimizations import apply_async_cli_overrides
+    from openwam.deploy.executors import apply_async_cli_overrides
 
     return apply_async_cli_overrides(cfg, args)
 

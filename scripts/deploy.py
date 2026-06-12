@@ -69,7 +69,7 @@ def _apply_cli_overrides(deploy_cfg, args):
     """Propagate argparse values into the deploy config (CLI wins over yaml)."""
     from omegaconf import OmegaConf
 
-    from openwam.deploy.optimizations import apply_async_cli_overrides
+    from openwam.deploy.executors import apply_async_cli_overrides
 
     # Server / device
     if args.device is not None:

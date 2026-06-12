@@ -7,8 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from openwam.deploy.optimizations.async_config import normalize_async_inference_config
-from openwam.deploy.optimizations.async_executor import AsyncInferenceExecutor
+from openwam.deploy.executors.async_executor import AsyncInferenceExecutor, normalize_async_inference_config
 
 
 class MockEngine:
@@ -273,7 +272,7 @@ def test_async_config_rejects_non_integral_step_values(value):
 
 
 def test_async_config_ignores_legacy_deploy_async_execution_shape():
-    from openwam.deploy.optimizations.async_config import resolve_async_inference_config
+    from openwam.deploy.executors.async_executor import resolve_async_inference_config
 
     cfg = {
         "deploy": {
