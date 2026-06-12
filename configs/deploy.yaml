@@ -18,12 +18,11 @@ inference:
   schedule_type: sync         # only "sync" is supported (removed strategies live in git history)
   shift: 5.0                  # Flow-matching shift; also discretizes the video stream unless the
                               # backbone sets shift_video (Cosmos flow_shift != 5.0 ckpts: align manually)
+
   execution_mode: sync        # sync | async — selects SyncInferenceExecutor / AsyncInferenceExecutor
   execution_horizon: null     # async only: actions executed per chunk before switching; null = policy.execute_horizon, else full chunk
   inference_delay_steps: null # async only: expected inference latency in steps; null = half of resolved horizon
-  # Cosmos25 CFG knobs (cfg_scale / cfg_merge / text_embedding_cache_dir) are
-  # intentionally absent: engine defaults (1.0 / false / null) disable CFG.
-  # Add them here only when deploying a Cosmos25 checkpoint with CFG.
+
 
 # ---------------------------------------------------------------------------
 # Deploy-time optimizations
