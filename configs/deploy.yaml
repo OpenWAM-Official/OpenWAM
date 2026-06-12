@@ -14,7 +14,7 @@ server:
 # ---------------------------------------------------------------------------
 inference:
   denoise_steps: 10           # Denoising steps (FastWAM-Joint deploy default)
-  schedule_type: sync         # sync | video_leading | cascade | action_only | decoupled_flash | decoupled_asymmetric
+  schedule_type: sync         # only "sync" is supported (removed strategies live in git history)
   shift: 5.0                  # Flow-matching shift parameter
   # §15 — Classifier-Free Guidance (Cosmos25 only today; Wan keeps its own
   # pipeline-internal CFG). When cfg_scale > 1.0 the engine resolves an
@@ -44,10 +44,6 @@ inference:
 # ---------------------------------------------------------------------------
 optimization:
   decode_video: false         # Set false to skip VAE decode (action-only mode)
-
-  schedule:
-    type: null                # Override inference.schedule_type at deploy time (null = use inference.schedule_type)
-    action_steps: 4           # Action denoising steps for decoupled_flash / decoupled_asymmetric schedules
 
   dit_cache:
     enabled: false            # DiT velocity cache: skip video DiT when prediction is stable

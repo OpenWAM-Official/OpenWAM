@@ -330,34 +330,11 @@ class JointInferenceEngine(BaseInferenceEngine):
             dict with ``video`` (list of PIL images or None) and ``actions`` (numpy array).
         """
         inf_cfg = self.cfg.inference
-        optimization = getattr(self.cfg, "optimization", None)
 
-        # Build schedule
+        # Build schedule (only "sync" is supported; make_schedule raises on anything else)
         schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
-        # Optimization config can override schedule type; null means "use inference.schedule_type"
-        if optimization and getattr(optimization, "schedule", None):
-            _optimization_type = getattr(optimization.schedule, "type", None)
-            schedule_type = conditions.get("schedule_type", _optimization_type or schedule_type)
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
         shift = conditions.get("shift", getattr(inf_cfg, "shift", 5.0))
-
-        schedule_kwargs = {}
-        if schedule_type == "video_leading":
-            schedule_kwargs["lead_steps"] = getattr(inf_cfg, "lead_steps", 10)
-        elif schedule_type == "cascade":
-            schedule_kwargs["video_steps"] = getattr(inf_cfg, "video_steps", denoise_steps)
-            schedule_kwargs["action_steps"] = getattr(inf_cfg, "action_steps", denoise_steps)
-        elif schedule_type == "decoupled_flash":
-            action_steps = denoise_steps
-            if optimization and getattr(optimization, "schedule", None):
-                action_steps = getattr(optimization.schedule, "action_steps", denoise_steps)
-            schedule_kwargs["action_steps"] = conditions.get("action_steps", action_steps)
-        elif schedule_type == "decoupled_asymmetric":
-            schedule_kwargs["video_steps"] = getattr(inf_cfg, "video_steps", denoise_steps)
-            action_steps = denoise_steps
-            if optimization and getattr(optimization, "schedule", None):
-                action_steps = getattr(optimization.schedule, "action_steps", denoise_steps)
-            schedule_kwargs["action_steps"] = conditions.get("action_steps", action_steps)
 
         # Single source of truth: ``arch.video_backbone.shift_video`` is the
         # ONLY place the video α-shift is configured (set via
@@ -387,7 +364,6 @@ class JointInferenceEngine(BaseInferenceEngine):
             num_steps=denoise_steps,
             shift=shift,
             shift_video=shift_video,
-            **schedule_kwargs,
         )
 
         # Reset dit cache for each generation

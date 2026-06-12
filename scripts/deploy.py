@@ -10,7 +10,7 @@ over values in the yaml for the fields they cover.
 
 Inference overrides (all optional; yaml values used when absent):
   --denoise-steps N       Denoising step count
-  --schedule-type TYPE    Schedule type: sync | video_leading | cascade | decoupled_flash | decoupled_asymmetric
+  --schedule-type TYPE    Schedule type (only "sync" is supported)
   --shift SHIFT           Flow-matching shift parameter
   --compile-mode MODE     Compile strategy: auto | none
   --async-mode MODE       Async inference mode: none | vanilla
@@ -153,7 +153,14 @@ def main():
     parser.add_argument(
         "--denoise-steps", type=int, default=None, dest="denoise_steps", help="Override denoising steps"
     )
-    parser.add_argument("--schedule-type", type=str, default=None, dest="schedule_type", help="Override schedule type")
+    parser.add_argument(
+        "--schedule-type",
+        type=str,
+        choices=["sync"],
+        default=None,
+        dest="schedule_type",
+        help="Override schedule type (only 'sync' is supported)",
+    )
     parser.add_argument("--shift", type=float, default=None, help="Override flow-matching shift")
     parser.add_argument(
         "--compile-mode",

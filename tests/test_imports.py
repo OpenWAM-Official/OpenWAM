@@ -56,10 +56,7 @@ def test_import_inference_schedule():
     from openwam.deploy.schedule import (  # noqa: F401
         Schedule,
         make_schedule,
-        schedule_action_only,
-        schedule_cascade,
         schedule_sync,
-        schedule_video_leading,
     )
 
 

@@ -245,12 +245,6 @@ class TestDeploymentYaml:
         assert OmegaConf.select(cfg, "optimization.async_inference.mode") == "none"
         assert OmegaConf.select(cfg, "optimization.async_inference.vanilla.inference_delay_steps") is None
 
-    def test_optimization_schedule_action_steps(self):
-        from omegaconf import OmegaConf
-
-        cfg = self._load()
-        assert OmegaConf.select(cfg, "optimization.schedule.action_steps") is not None
-
     def test_server_defaults_present(self):
         from omegaconf import OmegaConf
 

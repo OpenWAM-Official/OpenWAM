@@ -23,13 +23,7 @@ from __future__ import annotations
 
 import torch
 
-from openwam.deploy.schedule import (
-    make_schedule,
-    schedule_action_only,
-    schedule_cascade,
-    schedule_sync,
-    schedule_video_leading,
-)
+from openwam.deploy.schedule import make_schedule, schedule_sync
 from openwam.model.action_backbone.scheduler import ActionScheduler
 from openwam.model.video_backbone.wan.shared.diffusion import FlowMatchScheduler
 
@@ -72,37 +66,6 @@ def test_schedule_sync_shift_video_none_falls_back_to_shift():
 
 
 # ----------------------------------------------------------------------------
-# B. Other schedule_* fns: all honor shift_video (or document the exception)
-# ----------------------------------------------------------------------------
-
-
-def test_schedule_video_leading_honors_shift_video():
-    v, a = _make_pair()
-    schedule_video_leading(v, a, num_steps=20, lead_steps=5, shift=5.0, shift_video=12.0)
-    v_only, a_only = _make_pair()
-    schedule_video_leading(v_only, a_only, num_steps=20, lead_steps=5, shift=5.0)
-    assert not torch.allclose(v.sigmas, v_only.sigmas, atol=1e-3)
-    assert torch.allclose(a.sigmas, a_only.sigmas, atol=1e-7)
-
-
-def test_schedule_cascade_honors_shift_video():
-    v, a = _make_pair()
-    schedule_cascade(v, a, video_steps=20, action_steps=10, shift=5.0, shift_video=12.0)
-    v_only, a_only = _make_pair()
-    schedule_cascade(v_only, a_only, video_steps=20, action_steps=10, shift=5.0)
-    assert not torch.allclose(v.sigmas, v_only.sigmas, atol=1e-3)
-    assert torch.allclose(a.sigmas, a_only.sigmas, atol=1e-7)
-
-
-def test_schedule_action_only_ignores_shift_video():
-    """``schedule_action_only`` keeps video at σ=0; shift_video is meaningless."""
-    v, a = _make_pair()
-    # Just verify it accepts the kwarg without raising — symmetry guarantee.
-    schedule = schedule_action_only(v, a, num_steps=20, shift=5.0, shift_video=12.0)
-    assert all(v_t == 0.0 for v_t, _ in schedule)
-
-
-# ----------------------------------------------------------------------------
 # C. make_schedule dispatcher: shift_video round-trip
 # ----------------------------------------------------------------------------
 
@@ -110,7 +73,12 @@ def test_schedule_action_only_ignores_shift_video():
 def test_make_schedule_threads_shift_video_into_sync():
     v, a = _make_pair()
     make_schedule(
-        "sync", v, a, num_steps=50, shift=5.0, shift_video=12.0,
+        "sync",
+        v,
+        a,
+        num_steps=50,
+        shift=5.0,
+        shift_video=12.0,
     )
     v_baseline, a_baseline = _make_pair()
     make_schedule("sync", v_baseline, a_baseline, num_steps=50, shift=5.0)
@@ -127,23 +95,6 @@ def test_make_schedule_no_shift_video_is_legacy_path():
     schedule_sync(v_legacy, a_legacy, num_steps=50, shift=5.0)
     assert torch.allclose(v.sigmas, v_legacy.sigmas, atol=1e-7)
     assert torch.allclose(a.sigmas, a_legacy.sigmas, atol=1e-7)
-
-
-def test_make_schedule_decoupled_asymmetric_honors_shift_video():
-    """The decoupled asymmetric strategy is dispatched through make_schedule;
-    verify shift_video reaches the underlying schedule_decoupled_asymmetric."""
-    v, a = _make_pair()
-    make_schedule(
-        "decoupled_asymmetric", v, a, num_steps=20, shift=5.0, shift_video=12.0,
-        video_steps=20, action_steps=4,
-    )
-    v_baseline, a_baseline = _make_pair()
-    make_schedule(
-        "decoupled_asymmetric", v_baseline, a_baseline, num_steps=20, shift=5.0,
-        video_steps=20, action_steps=4,
-    )
-    assert not torch.allclose(v.sigmas, v_baseline.sigmas, atol=1e-3)
-    assert torch.allclose(a.sigmas, a_baseline.sigmas, atol=1e-7)
 
 
 # ----------------------------------------------------------------------------
@@ -176,9 +127,9 @@ def test_train_inference_video_sigma_alignment():
     schedule_sync(infer_v_scheduler, infer_a_scheduler, num_steps=N, shift=5.0, shift_video=SHIFT)
     infer_sigmas = infer_v_scheduler.sigmas
 
-    assert torch.allclose(
-        train_sigmas, infer_sigmas, atol=1e-7
-    ), "Train and inference video sigma buffers must match bit-for-bit when shift_video flows from one source."
+    assert torch.allclose(train_sigmas, infer_sigmas, atol=1e-7), (
+        "Train and inference video sigma buffers must match bit-for-bit when shift_video flows from one source."
+    )
 
 
 def test_action_sigma_unchanged_regardless_of_video_shift():
@@ -206,33 +157,70 @@ def test_video_backbone_shift_video_property_default_none():
     class _StubBackbone(VideoBackbone):  # noqa: D401 — minimal stub for property test
         # Required-abstract members; values irrelevant.
         @property
-        def dim(self): return 1
+        def dim(self):
+            return 1
+
         @property
-        def num_layers(self): return 1
+        def num_layers(self):
+            return 1
+
         @property
-        def scheduler(self): return None
+        def scheduler(self):
+            return None
+
         @property
-        def submodule_names(self): return []
+        def submodule_names(self):
+            return []
+
         @property
-        def num_heads(self): return 1
+        def num_heads(self):
+            return 1
+
         @property
-        def head_dim(self): return 1
+        def head_dim(self):
+            return 1
+
         @classmethod
-        def get_native_dit_patch_size(cls, pipe): return (1, 2, 2)
+        def get_native_dit_patch_size(cls, pipe):
+            return (1, 2, 2)
+
         @classmethod
-        def get_native_temporal_contract(cls, pipe): return (4, True)
+        def get_native_temporal_contract(cls, pipe):
+            return (4, True)
+
         @classmethod
-        def from_pretrained(cls, source, **kw): return cls()
-        def prepare(self, **kw): raise NotImplementedError
-        def run_block(self, block_id, state): raise NotImplementedError
-        def finalize(self, state): raise NotImplementedError
-        def inject_action_tokens(self, *a, **k): raise NotImplementedError
-        def extract_action_tokens(self, *a, **k): raise NotImplementedError
-        def preprocess_input(self, **kw): raise NotImplementedError
-        def get_submodule(self, name): return None
-        def set_submodule(self, name, module): pass
-        def decode_video(self, latents, **kw): raise NotImplementedError
-        def set_dtype_device(self, dtype, device): pass
+        def from_pretrained(cls, source, **kw):
+            return cls()
+
+        def prepare(self, **kw):
+            raise NotImplementedError
+
+        def run_block(self, block_id, state):
+            raise NotImplementedError
+
+        def finalize(self, state):
+            raise NotImplementedError
+
+        def inject_action_tokens(self, *a, **k):
+            raise NotImplementedError
+
+        def extract_action_tokens(self, *a, **k):
+            raise NotImplementedError
+
+        def preprocess_input(self, **kw):
+            raise NotImplementedError
+
+        def get_submodule(self, name):
+            return None
+
+        def set_submodule(self, name, module):
+            pass
+
+        def decode_video(self, latents, **kw):
+            raise NotImplementedError
+
+        def set_dtype_device(self, dtype, device):
+            pass
 
     bb = _StubBackbone()
     assert bb.shift_video is None
@@ -244,33 +232,70 @@ def test_video_backbone_shift_video_property_returns_stored_value():
 
     class _StubBackbone(VideoBackbone):
         @property
-        def dim(self): return 1
+        def dim(self):
+            return 1
+
         @property
-        def num_layers(self): return 1
+        def num_layers(self):
+            return 1
+
         @property
-        def scheduler(self): return None
+        def scheduler(self):
+            return None
+
         @property
-        def submodule_names(self): return []
+        def submodule_names(self):
+            return []
+
         @property
-        def num_heads(self): return 1
+        def num_heads(self):
+            return 1
+
         @property
-        def head_dim(self): return 1
+        def head_dim(self):
+            return 1
+
         @classmethod
-        def get_native_dit_patch_size(cls, pipe): return (1, 2, 2)
+        def get_native_dit_patch_size(cls, pipe):
+            return (1, 2, 2)
+
         @classmethod
-        def get_native_temporal_contract(cls, pipe): return (4, True)
+        def get_native_temporal_contract(cls, pipe):
+            return (4, True)
+
         @classmethod
-        def from_pretrained(cls, source, **kw): return cls()
-        def prepare(self, **kw): raise NotImplementedError
-        def run_block(self, block_id, state): raise NotImplementedError
-        def finalize(self, state): raise NotImplementedError
-        def inject_action_tokens(self, *a, **k): raise NotImplementedError
-        def extract_action_tokens(self, *a, **k): raise NotImplementedError
-        def preprocess_input(self, **kw): raise NotImplementedError
-        def get_submodule(self, name): return None
-        def set_submodule(self, name, module): pass
-        def decode_video(self, latents, **kw): raise NotImplementedError
-        def set_dtype_device(self, dtype, device): pass
+        def from_pretrained(cls, source, **kw):
+            return cls()
+
+        def prepare(self, **kw):
+            raise NotImplementedError
+
+        def run_block(self, block_id, state):
+            raise NotImplementedError
+
+        def finalize(self, state):
+            raise NotImplementedError
+
+        def inject_action_tokens(self, *a, **k):
+            raise NotImplementedError
+
+        def extract_action_tokens(self, *a, **k):
+            raise NotImplementedError
+
+        def preprocess_input(self, **kw):
+            raise NotImplementedError
+
+        def get_submodule(self, name):
+            return None
+
+        def set_submodule(self, name, module):
+            pass
+
+        def decode_video(self, latents, **kw):
+            raise NotImplementedError
+
+        def set_dtype_device(self, dtype, device):
+            pass
 
     bb = _StubBackbone()
     bb._shift_video = 12.0
