@@ -92,48 +92,6 @@ def move_masked_to_left(tensor, mask, pad_zero=True):
     return result, new_mask
 
 
-def get_mask_of_last_masked_index_brute_force(mask, length):
-    """
-    Produce a boolean mask marking, per row, the final `length` True entries in the input mask.
-
-    Parameters:
-        mask (torch.BoolTensor): 2-D boolean tensor of shape [B, N] where True indicates masked positions.
-        length (int or torch.Tensor): Either a single integer applied to all rows or a 1-D tensor of shape [B] providing a per-row count of how many masked positions (counting from the end) to mark.
-
-    Returns:
-        torch.BoolTensor: A 2-D boolean tensor of shape [B, N] with `True` at the positions corresponding to the last `length` True values in each row (counting from right to left) and `False` elsewhere.
-    """
-    results = []
-    for i in range(mask.shape[0]):
-        len = length if isinstance(length, int) else length[i].item()
-        l = [False] * mask.shape[1]
-        for j in range(mask.shape[1] - 1, -1, -1):
-            if mask[i][j] and len > 0:
-                l[j] = True
-                len -= 1
-            else:
-                l[j] = False
-        results.append(l)
-    return torch.tensor(results, dtype=torch.bool)
-
-
-def get_mask_of_last_masked_index(mask, length):
-    """
-    Return a boolean mask marking, for each row, the last `length` true entries in `mask`.
-
-    Parameters:
-        mask (torch.BoolTensor): 2-D boolean tensor of shape [B, N] indicating masked positions.
-        length (int or torch.Tensor): Integer or 1-D tensor of shape [B] specifying how many masked entries at the end to include per row.
-
-    Returns:
-        torch.BoolTensor: Boolean tensor of shape [B, N] where `True` denotes positions corresponding to the last `length` masked `True` values in each row.
-    """
-    cumsum = mask.cumsum(dim=1)
-    new_length = mask.sum(dim=1) - length
-    last_masked_index = (cumsum > new_length.unsqueeze(1)) & mask
-    return last_masked_index
-
-
 def test_move_masked_to_left():
     b = 10
     n = 20
@@ -151,22 +109,5 @@ def test_move_masked_to_left():
         assert not mask_1[i][l:].any()
 
 
-def test_get_mask_of_last_masked_index():
-    """
-    Validates that the vectorized and brute-force implementations produce identical masks for the last masked indices.
-
-    Generates random boolean masks and per-batch lengths, computes masks with both `get_mask_of_last_masked_index`
-    and `get_mask_of_last_masked_index_brute_force`, and asserts the results are equal.
-    """
-    b = 10
-    n = 20
-    mask = torch.randint(0, 2, (b, n)).bool()
-    length = torch.randint(0, n // 2, (b,))
-    last_masked_index_1 = get_mask_of_last_masked_index(mask, length)
-    last_masked_index_2 = get_mask_of_last_masked_index_brute_force(mask, length)
-    assert (last_masked_index_1 == last_masked_index_2).all()
-
-
 if __name__ == "__main__":
     test_move_masked_to_left()
-    test_get_mask_of_last_masked_index()
