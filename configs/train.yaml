@@ -64,7 +64,7 @@ training:
   keep_last_k_ckpts: 1           # Rolling window: keep only the last K checkpoints
 
   # --- Data loading ---
-  dataset_num_workers: 4          # DataLoader num_workers (0 = main process)
+  dataset_num_workers: 8          # DataLoader num_workers (0 = main process)
 
   # --- Decoupled training (DreamZero-Flash style) ---
   decoupled:
