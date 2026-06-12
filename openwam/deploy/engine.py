@@ -115,7 +115,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         self._init_optimizations()
 
     def _filter_architecture_generate_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Drop deploy-only kwargs that a legacy/specialized architecture cannot consume."""
+        """Drop deploy-only kwargs the architecture's generate() cannot consume."""
 
         if getattr(self, "_architecture_generate_kwarg_names", None) is None:
             params = inspect.signature(self.architecture.generate).parameters
@@ -253,20 +253,13 @@ class JointInferenceEngine(BaseInferenceEngine):
         return dtype, device
 
     def _load_pre_encoded_text_safetensors(self, path: Path) -> torch.Tensor:
-        """Load a single ``.safetensors`` cache file into a tensor on arch dtype/device.
-
-        Accepts either ``"pre_encoded_text"`` or the first stored tensor as the
-        payload (older precompute outputs used different key names; mirror that
-        tolerance so a re-run isn't required when keys drift).
-        """
+        """Load a ``.safetensors`` cache file into a tensor on arch dtype/device."""
         from safetensors.torch import load_file
 
         sf = load_file(str(path))
         tensor = sf.get("pre_encoded_text")
-        if tensor is None and sf:
-            tensor = next(iter(sf.values()))
         if tensor is None:
-            raise ValueError(f"{path} contains no readable tensor (expected key 'pre_encoded_text').")
+            raise ValueError(f"{path} has no 'pre_encoded_text' tensor.")
         # The precompute writer (`reason1_embedding_computation._project_to_postproj`)
         # `.squeeze(0)`s a `(1, L, D)` tensor to 2D `(L, D)` before saving. Every
         # downstream consumer (pipeline_wrapper preprocess, _build_uncond_context,
@@ -316,7 +309,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         return None
 
     def _load_pre_encoded_text_for_prompt(self, prompt: str) -> Optional[torch.Tensor]:
-        """Resolve a bucketed or legacy flat cache file for ``prompt``.
+        """Resolve the bucketed cache file for ``prompt``.
 
         Returns ``None`` when the cache dir is unset OR the prompt has no
         per-prompt file (engine falls back to live encoder via adapter, if

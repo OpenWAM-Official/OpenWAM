@@ -83,7 +83,8 @@ def test_async_executor_basic():
 
 def test_async_executor_buffer_exhaustion_without_background():
     engine = MockEngine(num_frames=3, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=3, inference_delay_steps=0, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=3, inference_delay_steps=0)
+    executor._background_enabled = False  # deterministic: no background generation
 
     for _ in range(3):
         action = executor.predict_action({"obs": "dummy"})
@@ -99,7 +100,8 @@ def test_async_executor_buffer_exhaustion_without_background():
 
 def test_async_executor_execution_horizon_discards_tail():
     engine = MockEngine(num_frames=5, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=2, inference_delay_steps=0, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=2, inference_delay_steps=0)
+    executor._background_enabled = False  # deterministic: no background generation
 
     for _ in range(2):
         action = executor.predict_action({"obs": "dummy"})
@@ -135,7 +137,8 @@ def test_async_executor_starts_background_at_delay_threshold():
 
 def test_async_executor_reset():
     engine = MockEngine(num_frames=5, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=5, inference_delay_steps=0, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=5, inference_delay_steps=0)
+    executor._background_enabled = False  # deterministic: no background generation
 
     executor.predict_action({"obs": "dummy"})
     executor.reset()
@@ -210,7 +213,8 @@ def test_async_executor_switches_at_execution_horizon_and_skips_stale_prefix():
 
 def test_async_executor_stats():
     engine = MockEngine(num_frames=3, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=3, inference_delay_steps=0, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=3, inference_delay_steps=0)
+    executor._background_enabled = False  # deterministic: no background generation
 
     executor.predict_action({"obs": "dummy"})
     stats = executor.stats
@@ -225,7 +229,8 @@ def test_async_executor_stats():
 
 def test_async_executor_auto_delay_uses_half_execution_horizon():
     engine = MockEngine(num_frames=8, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=6, inference_delay_steps=None, prefetch=False)
+    executor = AsyncInferenceExecutor(engine, execution_horizon=6, inference_delay_steps=None)
+    executor._background_enabled = False  # deterministic: no background generation
 
     executor.predict_action({"obs": "dummy"})
     assert executor.stats["resolved_inference_delay_steps"] == 3

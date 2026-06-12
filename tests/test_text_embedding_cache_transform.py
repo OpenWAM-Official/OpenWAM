@@ -21,13 +21,11 @@ from openwam.dataloader.transforms.text_embedding_cache import (
 )
 
 
-def _write_cache_file(cache_dir: str, prompt: str, tensor: torch.Tensor, *, bucketed: bool = False) -> str:
+def _write_cache_file(cache_dir: str, prompt: str, tensor: torch.Tensor) -> str:
     if prompt == "":
         path = os.path.join(cache_dir, "empty.safetensors")
-    elif bucketed:
-        path = bucketed_cache_path_for_sha(cache_dir, sha256_for_prompt(prompt))
     else:
-        path = os.path.join(cache_dir, f"{sha256_for_prompt(prompt)}.safetensors")
+        path = bucketed_cache_path_for_sha(cache_dir, sha256_for_prompt(prompt))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     save_file({"pre_encoded_text": tensor.contiguous()}, path, metadata={"prompt": prompt})
     return path
@@ -47,10 +45,7 @@ def populated_cache(tmp_path):
 def test_sha256_stability():
     # UTF-8 hash; a fixed prompt → a fixed sha. Hard-coded value pins the
     # hash for cross-version stability (collisions across precompute runs).
-    assert (
-        sha256_for_prompt("pick up the block")
-        == "98fffccbfa71a725c80a9f6370854ba0345582b4e1c6b0459dc306ea63b93f3b"
-    )
+    assert sha256_for_prompt("pick up the block") == "98fffccbfa71a725c80a9f6370854ba0345582b4e1c6b0459dc306ea63b93f3b"
 
 
 def test_load_real_prompt(populated_cache):
@@ -66,15 +61,13 @@ def test_load_bucketed_prompt(tmp_path):
     os.makedirs(cache_dir)
     real = torch.randn(8, 1024)
     empty = torch.full((8, 1024), -1.0)
-    bucketed_path = _write_cache_file(cache_dir, "pick up the block", real, bucketed=True)
+    bucketed_path = _write_cache_file(cache_dir, "pick up the block", real)
     _write_cache_file(cache_dir, "", empty)
 
     tx = TextEmbeddingCacheTransform(cache_dir=cache_dir, dropout_p=0.0)
     out = tx.apply({"prompt": "pick up the block"})
 
-    assert bucketed_path.endswith(
-        "98/98fffccbfa71a725c80a9f6370854ba0345582b4e1c6b0459dc306ea63b93f3b.safetensors"
-    )
+    assert bucketed_path.endswith("98/98fffccbfa71a725c80a9f6370854ba0345582b4e1c6b0459dc306ea63b93f3b.safetensors")
     assert torch.equal(out["pre_encoded_text"], real)
 
 
@@ -175,7 +168,8 @@ def test_wrong_safetensors_key_raises(populated_cache):
     cache_dir, _, _ = populated_cache
     # Write a cache file with a wrong key — should raise on read, not silently
     # accept whatever key happens to be in the file.
-    path = os.path.join(cache_dir, f"{sha256_for_prompt('weird')}.safetensors")
+    path = bucketed_cache_path_for_sha(cache_dir, sha256_for_prompt("weird"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     save_file({"wrong_key": torch.zeros(4, 1024)}, path)
     tx = TextEmbeddingCacheTransform(cache_dir=cache_dir, dropout_p=0.0)
     with pytest.raises(KeyError, match="pre_encoded_text"):

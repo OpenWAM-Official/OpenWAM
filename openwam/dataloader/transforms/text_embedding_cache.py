@@ -12,12 +12,11 @@ Cache layout (``<cache_dir>/``):
     empty.safetensors       # cached embedding of the empty string (CFG dropout target)
     <sha[:2]>/<sha256-of-prompt>.safetensors  # one per unique caption, key="pre_encoded_text"
 
-Legacy flat caches (``<cache_dir>/<sha>.safetensors``) are still readable.
 
 This transform:
 
 * Looks up the sample's ``prompt`` string, takes the SHA-256 of its UTF-8
-  bytes, loads ``<cache_dir>/<sha[:2]>/<sha>.safetensors`` (or legacy flat path).
+  bytes, loads ``<cache_dir>/<sha[:2]>/<sha>.safetensors``.
 * During training, with probability ``dropout_p`` replaces the load target
   with ``empty.safetensors`` (classifier-free guidance dropout).
 * Attaches the result as ``sample["pre_encoded_text"]`` so the architecture
@@ -63,24 +62,9 @@ def bucketed_cache_path_for_sha(cache_dir: str, sha: str) -> str:
     return os.path.join(cache_dir, sha[:BUCKET_PREFIX_LEN], f"{sha}.safetensors")
 
 
-def flat_cache_path_for_sha(cache_dir: str, sha: str) -> str:
-    """Return the legacy flat cache path for a prompt SHA-256."""
-    return os.path.join(cache_dir, f"{sha}.safetensors")
-
-
 def resolve_cache_path_for_sha(cache_dir: str, sha: str) -> str:
-    """Resolve a cache path, preferring the bucketed layout over legacy flat.
-
-    If neither exists, return the canonical bucketed path so error messages
-    guide users toward the current layout.
-    """
-    bucketed = bucketed_cache_path_for_sha(cache_dir, sha)
-    if os.path.exists(bucketed):
-        return bucketed
-    flat = flat_cache_path_for_sha(cache_dir, sha)
-    if os.path.exists(flat):
-        return flat
-    return bucketed
+    """Return the bucketed cache path for a prompt SHA-256."""
+    return bucketed_cache_path_for_sha(cache_dir, sha)
 
 
 class TextEmbeddingCacheTransform(ModalityTransform):
@@ -88,8 +72,7 @@ class TextEmbeddingCacheTransform(ModalityTransform):
 
     Args:
         cache_dir: Directory containing bucketed ``<sha[:2]>/<sha>.safetensors``
-            files plus ``empty.safetensors``. Legacy flat ``<sha>.safetensors``
-            files are still accepted. Must exist at construction time.
+            files plus ``empty.safetensors``. Must exist at construction time.
         dropout_p: Probability of replacing the real prompt embedding with
             the empty-prompt embedding during training (CFG dropout).
             Ignored when ``training=False``. Must be in ``[0, 1]``.
@@ -107,9 +90,7 @@ class TextEmbeddingCacheTransform(ModalityTransform):
     ):
         super().__init__(apply_to=["prompt"], training=True)
         if not os.path.isdir(cache_dir):
-            raise FileNotFoundError(
-                f"text_embedding_cache_dir={cache_dir!r} is not a directory.\n{_PRECOMPUTE_HINT}"
-            )
+            raise FileNotFoundError(f"text_embedding_cache_dir={cache_dir!r} is not a directory.\n{_PRECOMPUTE_HINT}")
         if not 0.0 <= dropout_p <= 1.0:
             raise ValueError(f"dropout_p must be in [0, 1]; got {dropout_p}")
 
@@ -137,12 +118,7 @@ class TextEmbeddingCacheTransform(ModalityTransform):
             path = resolve_cache_path_for_sha(self.cache_dir, sha256_for_prompt(prompt))
 
         if not os.path.exists(path):
-            legacy = flat_cache_path_for_sha(self.cache_dir, sha256_for_prompt(prompt)) if prompt != "" else path
-            raise FileNotFoundError(
-                f"Missing cached text embedding: {path}\n"
-                f"legacy_flat_path={legacy}\n"
-                f"prompt={prompt!r}\n{_PRECOMPUTE_HINT}"
-            )
+            raise FileNotFoundError(f"Missing cached text embedding: {path}\nprompt={prompt!r}\n{_PRECOMPUTE_HINT}")
 
         # Lazy import: keep CPU CI's import surface small. safetensors is a
         # cheap dep (already pulled in by transformers / accelerate), but

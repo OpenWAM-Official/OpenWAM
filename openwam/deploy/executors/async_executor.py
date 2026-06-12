@@ -180,8 +180,6 @@ class AsyncInferenceExecutor:
         inference_delay_steps: Expected inference latency expressed in action
             steps. ``None`` chooses a conservative auto threshold of half the
             resolved execution horizon.
-        chunk_size: Legacy alias for ``execution_horizon``.
-        prefetch: Legacy switch. ``False`` disables background generation.
     """
 
     def __init__(
@@ -189,12 +187,8 @@ class AsyncInferenceExecutor:
         engine: BaseInferenceEngine,
         execution_horizon: Optional[int] = None,
         inference_delay_steps: Optional[int] = None,
-        chunk_size: Optional[int] = None,
-        prefetch: Optional[bool] = None,
     ):
         self.engine = engine
-        if execution_horizon is None and chunk_size is not None:
-            execution_horizon = chunk_size
         if execution_horizon is not None and execution_horizon <= 0:
             raise ValueError("execution_horizon must be positive")
         if inference_delay_steps is not None and inference_delay_steps < 0:
@@ -202,7 +196,7 @@ class AsyncInferenceExecutor:
 
         self.execution_horizon = execution_horizon
         self.inference_delay_steps = inference_delay_steps
-        self._background_enabled = prefetch is not False
+        self._background_enabled = True
 
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._action_buffer: deque = deque()

@@ -13,7 +13,7 @@ import os
 
 import pytest
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 
 from openwam.dataloader import reason1_embedding_computation as ript
 from openwam.dataloader.transforms.text_embedding_cache import bucketed_cache_path_for_sha
@@ -30,10 +30,7 @@ def test_constants_match_upstream_geometry():
 
 def test_sha256_text_is_utf8_stable():
     sha = ript._sha256_text("pick up the block")
-    assert (
-        sha
-        == "98fffccbfa71a725c80a9f6370854ba0345582b4e1c6b0459dc306ea63b93f3b"
-    )
+    assert sha == "98fffccbfa71a725c80a9f6370854ba0345582b4e1c6b0459dc306ea63b93f3b"
     # Unicode / emoji content must hash too (utf-8 byte stream).
     sha_unicode = ript._sha256_text("拿起方块")
     assert len(sha_unicode) == 64
@@ -148,30 +145,6 @@ def test_save_embedding_writes_bucketed_path(tmp_path):
     assert torch.equal(loaded["pre_encoded_text"], tensor)
 
 
-def test_existing_flat_prompt_is_moved_to_bucketed(tmp_path):
-    """Migration uses ``shutil.move`` so the legacy flat file is gone after
-    the bucketed copy lands — otherwise the cache dir accumulates duplicate
-    flat+bucketed entries (one per migrated prompt × ~1MB)."""
-    prompt = "pick up the block"
-    sha = ript._sha256_text(prompt)
-    tensor = torch.randn(4, 8, dtype=torch.bfloat16)
-    legacy_path = tmp_path / f"{sha}.safetensors"
-    save_file({"pre_encoded_text": tensor}, str(legacy_path), metadata={"prompt": prompt})
-
-    path = ript._cache_path_for_sha(tmp_path, sha)
-    assert path == tmp_path / sha[:2] / f"{sha}.safetensors"
-    assert not path.exists()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ript.shutil.move(str(legacy_path), str(path))
-
-    loaded = load_file(bucketed_cache_path_for_sha(str(tmp_path), sha))
-    assert torch.equal(loaded["pre_encoded_text"], tensor)
-    assert not legacy_path.exists(), (
-        "Legacy flat cache must be removed after migration to avoid duplicate "
-        "flat+bucketed files in the same cache dir."
-    )
-
-
 def test_stale_output_dir_guard_raises(tmp_path):
     out = tmp_path / "cache"
     out.mkdir()
@@ -239,9 +212,7 @@ def test_enumerate_prompts_walks_seen_unseen_and_dedups(tmp_path, monkeypatch):
     def fake_discover(_dataset_dir, _robot, _variant, tasks):
         return [("fold_towel", str(data_root))]
 
-    monkeypatch.setattr(
-        "openwam.dataloader.robotwin_dataset.discover_robotwin_roots", fake_discover
-    )
+    monkeypatch.setattr("openwam.dataloader.robotwin_dataset.discover_robotwin_roots", fake_discover)
 
     cfg = {
         "dataset_dir": str(dataset_dir),
@@ -276,9 +247,7 @@ def test_enumerate_prompts_includes_task_fallback_even_without_instructions(tmp_
     def fake_discover(_dataset_dir, _robot, _variant, tasks):
         return [("open_laptop", str(data_root))]
 
-    monkeypatch.setattr(
-        "openwam.dataloader.robotwin_dataset.discover_robotwin_roots", fake_discover
-    )
+    monkeypatch.setattr("openwam.dataloader.robotwin_dataset.discover_robotwin_roots", fake_discover)
 
     cfg = {
         "dataset_dir": str(dataset_dir),
@@ -290,9 +259,7 @@ def test_enumerate_prompts_includes_task_fallback_even_without_instructions(tmp_
 
     from openwam.dataloader.transforms.multiview import format_prompt_for_inference
 
-    assert format_prompt_for_inference(
-        "The bimanual robot is performing a open_laptop task."
-    ) in prompts
+    assert format_prompt_for_inference("The bimanual robot is performing a open_laptop task.") in prompts
 
 
 def test_tokenize_with_chat_template_pads_to_512():
@@ -360,9 +327,9 @@ def test_build_reason1_accepts_nested_text_config(monkeypatch, tmp_path):
     monkeypatch.setattr(
         transformers,
         "AutoTokenizer",
-        types.SimpleNamespace(from_pretrained=lambda *_a, **_kw: types.SimpleNamespace(
-            pad_token_id=None, eos_token_id=1
-        )),
+        types.SimpleNamespace(
+            from_pretrained=lambda *_a, **_kw: types.SimpleNamespace(pad_token_id=None, eos_token_id=1)
+        ),
     )
     monkeypatch.setattr(
         transformers,
@@ -382,10 +349,7 @@ def test_build_reason1_accepts_nested_text_config(monkeypatch, tmp_path):
 
 @pytest.mark.gpu
 @pytest.mark.skipif(
-    not (
-        os.path.isdir("/path/to/assets/Cosmos-Reason1-7B")
-        and torch.cuda.is_available()
-    ),
+    not (os.path.isdir("/path/to/assets/Cosmos-Reason1-7B") and torch.cuda.is_available()),
     reason="needs Cosmos-Reason1-7B weights + CUDA",
 )
 def test_real_reason1_encode_smoke():

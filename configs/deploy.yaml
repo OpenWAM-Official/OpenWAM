@@ -19,27 +19,9 @@ inference:
   execution_mode: sync        # sync | async — selects SyncInferenceExecutor / AsyncInferenceExecutor
   execution_horizon: null     # async only: actions executed per chunk before switching; null = policy.execute_horizon, else full chunk
   inference_delay_steps: null # async only: expected inference latency in steps; null = half of resolved horizon
-  # §15 — Classifier-Free Guidance (Cosmos25 only today; Wan keeps its own
-  # pipeline-internal CFG). When cfg_scale > 1.0 the engine resolves an
-  # uncond embedding once at init (offline `empty.safetensors` if
-  # `text_embedding_cache_dir` is set, otherwise the backbone's live encoder
-  # via `text_encoder('')`). cfg_scale=1.0 is a strict no-op for backward
-  # compatibility — Wan's existing CFG and existing Cosmos25 smoke paths are
-  # both unaffected.
-  cfg_scale: 1.0              # >=1.0; 1.0 disables CFG entirely. Cosmos uses 1.5 default in its upstream training callbacks.
-  cfg_merge: false            # false (default): 2 sequential forwards per step. true: stack [uncond, cond] as B=2 in 1 forward (~1.5× faster, ~2× memory peak).
-  # Path to the precomputed Reason1 cache produced by
-  # `openwam.dataloader.reason1_embedding_computation`. Must contain
-  # `empty.safetensors` AND a bucketed `<sha[:2]>/<sha256(prompt)>.safetensors`
-  # for every prompt the deployed model receives at inference time. Legacy flat
-  # `<sha>.safetensors` caches remain readable. A cache miss with cache_dir set
-  # is a hard error — re-run precompute or unset this field.
-  # Null = fall through to the live Reason1 encoder configured under
-  # `video_backbone.text_encoder` in the checkpoint config. Use this when the
-  # deployed model receives prompts the precompute set does not enumerate
-  # (e.g. RoboTwin eval, which fills instruction templates against runtime
-  # SAPIEN params per episode).
-  text_embedding_cache_dir: null
+  # Cosmos25 CFG knobs (cfg_scale / cfg_merge / text_embedding_cache_dir) are
+  # intentionally absent: engine defaults (1.0 / false / null) disable CFG.
+  # Add them here only when deploying a Cosmos25 checkpoint with CFG.
 
 # ---------------------------------------------------------------------------
 # Deploy-time optimizations

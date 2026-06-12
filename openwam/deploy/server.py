@@ -535,10 +535,6 @@ def main(argv: Optional[list[str]] = None):
     device = args.device or str(OmegaConf.select(cfg, "device", default="cuda"))
 
     server_cfg = getattr(cfg, "server", None)
-    if server_cfg is None:
-        deploy_cfg = getattr(cfg, "deploy", None)
-        server_cfg = getattr(deploy_cfg, "server", None) if deploy_cfg is not None else None
-
     host = args.host or getattr(server_cfg, "host", "0.0.0.0")
     port = args.port or getattr(server_cfg, "port", 8848)
     server = build_server_from_config(

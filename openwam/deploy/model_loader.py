@@ -238,23 +238,11 @@ def _build_action_normalizer(cfg: DictConfig, ckpt_dir: str):
 
     stats_path = os.path.join(ckpt_dir, "normalization_stats.npy")
     if not os.path.exists(stats_path):
-        # Backward-compat: checkpoints trained before the action_stats ->
-        # normalization_stats rename ship action_stats.npy. Fall back to it
-        # (same schema) with a deprecation warning rather than hard-failing.
-        legacy_path = os.path.join(ckpt_dir, "action_stats.npy")
-        if os.path.exists(legacy_path):
-            logger.warning(
-                "[normalizer] normalization_stats.npy missing; falling back to legacy "
-                "action_stats.npy (%s). Re-save the checkpoint to migrate.",
-                legacy_path,
-            )
-            stats_path = legacy_path
-        else:
-            raise FileNotFoundError(
-                f"Missing required normalization_stats.npy in checkpoint dir: {stats_path} "
-                f"(and no legacy action_stats.npy fallback). Checkpoints with active action "
-                "normalization must include normalization_stats.npy."
-            )
+        raise FileNotFoundError(
+            f"Missing required normalization_stats.npy in checkpoint dir: {stats_path}. "
+            "Checkpoints with active action normalization must include it "
+            "(older action_stats.npy checkpoints: rename the file)."
+        )
     logger.info("[normalizer] Found pre-computed stats file: %s (exists ✓)", stats_path)
 
     from openwam.dataloader.transforms.normalize import (

@@ -193,20 +193,13 @@ class TestDeploymentYaml:
         cfg = self._load()
         assert OmegaConf.select(cfg, "inference.denoise_steps") is not None
 
-    def test_inference_cfg_fields_default_noop(self):
-        """§15 — `cfg_scale` is back in deploy.yaml as a Cosmos25 CFG knob.
-
-        The default MUST be the no-op (`cfg_scale=1.0` / `cfg_merge=false` /
-        `text_embedding_cache_dir=null`) so that existing Wan deployments and
-        Cosmos25 synthetic smoke paths keep their behavior unchanged. CFG only
-        activates when a user explicitly overrides ``inference.cfg_scale`` to
-        a value greater than 1.0.
-        """
+    def test_inference_cfg_fields_absent(self):
+        """CFG knobs stay out of deploy.yaml; engine defaults (1.0/false/null) disable CFG."""
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "inference.cfg_scale") == 1.0
-        assert OmegaConf.select(cfg, "inference.cfg_merge") is False
+        assert OmegaConf.select(cfg, "inference.cfg_scale") is None
+        assert OmegaConf.select(cfg, "inference.cfg_merge") is None
         assert OmegaConf.select(cfg, "inference.text_embedding_cache_dir") is None
 
     def test_inference_schedule_type(self):

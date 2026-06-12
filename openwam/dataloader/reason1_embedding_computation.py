@@ -45,7 +45,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -54,7 +53,6 @@ from openwam.dataloader.transforms.text_embedding_cache import (
     BUCKET_PREFIX_LEN,
     CACHE_LAYOUT,
     bucketed_cache_path_for_sha,
-    flat_cache_path_for_sha,
 )
 
 logger = logging.getLogger("reason1_precompute")
@@ -98,10 +96,6 @@ def _cache_path_for_sha(output_dir: Path, sha: str) -> Path:
 
 def _relative_cache_path_for_sha(sha: str) -> Path:
     return Path(sha[:BUCKET_PREFIX_LEN]) / f"{sha}.safetensors"
-
-
-def _legacy_cache_path_for_sha(output_dir: Path, sha: str) -> Path:
-    return Path(flat_cache_path_for_sha(str(output_dir), sha))
 
 
 def _load_dataset_config(path: str) -> dict:
@@ -156,11 +150,7 @@ def _enumerate_prompts(dataset_cfg: dict) -> list[str]:
             # back to it when an episode has no instruction entry, so the
             # cache must contain it regardless of whether instructions/ exists.
             local_task = task_label.split("/")[0]
-            prompts.add(
-                format_prompt_for_inference(
-                    f"The bimanual robot is performing a {local_task} task."
-                )
-            )
+            prompts.add(format_prompt_for_inference(f"The bimanual robot is performing a {local_task} task."))
 
             instr_dir = os.path.join(os.path.dirname(data_root), "instructions")
             if not os.path.isdir(instr_dir):
@@ -212,10 +202,7 @@ def _build_crossattn_proj(cosmos_ckpt: Path, device: str, dtype):
     b_key = "net.crossattn_proj.0.bias"
     if w_key not in sd or b_key not in sd:
         peek = sorted(k for k in sd if "crossattn_proj" in k)
-        raise KeyError(
-            f"Expected {w_key!r} and {b_key!r} in {cosmos_ckpt}; "
-            f"found crossattn_proj keys: {peek}"
-        )
+        raise KeyError(f"Expected {w_key!r} and {b_key!r} in {cosmos_ckpt}; found crossattn_proj keys: {peek}")
     w = sd[w_key]
     b = sd[b_key]
     out_dim, in_dim = w.shape
@@ -269,10 +256,7 @@ def _build_reason1(reason1_ckpt: Path, device: str, dtype):
             "(this script targets the Cosmos-Reason1-7B / Qwen2.5-VL-7B geometry only)."
         )
     if num_layers != _REASON1_NUM_TRANSFORMER_LAYERS:
-        raise ValueError(
-            f"Reason1 num_hidden_layers={num_layers} "
-            f"!= expected {_REASON1_NUM_TRANSFORMER_LAYERS}"
-        )
+        raise ValueError(f"Reason1 num_hidden_layers={num_layers} != expected {_REASON1_NUM_TRANSFORMER_LAYERS}")
     return model, tokenizer
 
 
@@ -347,8 +331,7 @@ def _encode_reason1(model, tokenizer, prompt: str, device: str):
     full_concat = torch.cat(normalized, dim=-1)  # (1, L, 100352)
     if full_concat.shape[-1] != _REASON1_FULL_CONCAT_DIM:
         raise RuntimeError(
-            f"full_concat dim mismatch: got {full_concat.shape[-1]}, "
-            f"expected {_REASON1_FULL_CONCAT_DIM}."
+            f"full_concat dim mismatch: got {full_concat.shape[-1]}, expected {_REASON1_FULL_CONCAT_DIM}."
         )
     return full_concat
 
@@ -465,28 +448,13 @@ def precompute(
         prompt_iter = prompts
 
     saved = 0
-    migrated = 0
     skipped = 0
     for prompt in prompt_iter:
         sha = _sha256_text(prompt)
         path = _cache_path_for_sha(output_dir, sha)
-        legacy_path = _legacy_cache_path_for_sha(output_dir, sha)
         if path.exists() and not overwrite:
             skipped += 1
             continue
-        if legacy_path.exists() and not overwrite:
-            # Migrate readable legacy flat caches to the canonical bucketed
-            # layout without paying another 7B encoder forward. ``shutil.move``
-            # is atomic rename on same-fs and degrades to copy2+remove
-            # across fs — either way the legacy file is gone after migration
-            # so the dir doesn't accumulate flat+bucketed duplicates.
-            path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(legacy_path), str(path))
-            migrated += 1
-            continue
-        if legacy_path.exists() and overwrite:
-            # Avoid leaving duplicate flat+bucketed files after a rewrite.
-            legacy_path.unlink()
         emb = _encode_reason1(model, tokenizer, prompt, device=device)
         proj = _project_to_postproj(emb, crossattn_proj)
         if proj.shape != (_NUM_EMBEDDING_PADDING_TOKENS, _COSMOS_POSTPROJ_DIM):
@@ -515,7 +483,6 @@ def precompute(
         "dim": _COSMOS_POSTPROJ_DIM,
         "prompt_count": len(prompts),
         "newly_saved": saved,
-        "migrated_from_legacy_flat": migrated,
         "skipped_existing": skipped,
         "system_prompt": _COSMOS_REASON1_SYSTEM_PROMPT,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -523,7 +490,7 @@ def precompute(
     with open(output_dir / "manifest.json", "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
 
-    logger.info("Precompute complete — saved=%d, migrated=%d, skipped=%d, output=%s", saved, migrated, skipped, output_dir)
+    logger.info("Precompute complete — saved=%d, skipped=%d, output=%s", saved, skipped, output_dir)
     return manifest
 
 
