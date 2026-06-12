@@ -55,3 +55,43 @@ def test_policy_server_cli_async_numeric_overrides_fail_fast_on_invalid_ranges()
 
     with pytest.raises(ValueError, match="inference_delay_steps must be < execution_horizon"):
         _apply_async_cli_overrides(OmegaConf.create({}), args)
+
+
+# --- Unified CLI: the package entrypoint is a strict superset of scripts/deploy.py ---
+
+
+def test_cli_exposes_ckpt_name_and_inference_overrides():
+    """Flags absorbed from scripts/deploy.py parse with the documented defaults."""
+    from openwam.deploy.server import _build_argparser
+
+    args = _build_argparser().parse_args([])
+    assert args.ckpt_name is None
+    assert args.denoise_steps is None
+    assert args.schedule_type is None
+    assert args.shift is None
+    assert args.device is None  # fallback chain resolves later: CLI > yaml > cuda
+
+    args = _build_argparser().parse_args(
+        ["--ckpt-name", "checkpoint_step_42.safetensors", "--denoise-steps", "7", "--shift", "3.5"]
+    )
+    assert args.ckpt_name == "checkpoint_step_42.safetensors"
+    assert args.denoise_steps == 7
+    assert args.shift == 3.5
+
+
+def test_cli_schedule_type_only_accepts_sync():
+    from openwam.deploy.server import _build_argparser
+
+    parser = _build_argparser()
+    assert parser.parse_args(["--schedule-type", "sync"]).schedule_type == "sync"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--schedule-type", "cascade"])
+
+
+def test_cli_dotlist_overrides_coexist_with_value_flags():
+    """Positional dotlist overrides must not swallow values of the new flags."""
+    from openwam.deploy.server import _build_argparser
+
+    args = _build_argparser().parse_args(["--denoise-steps", "7", "foo.bar=1", "inference.shift=9.0"])
+    assert args.denoise_steps == 7
+    assert args.overrides == ["foo.bar=1", "inference.shift=9.0"]

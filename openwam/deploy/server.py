@@ -336,8 +336,55 @@ def build_server_from_config(
     return PolicyServer(engine=engine, cfg=merged)
 
 
+def _log_attention_backends(logger):
+    """Log which attention backend is active for each subsystem.
+
+    Not a pure logger call: imports below trigger flash/sage availability
+    probes; invoke only after the heavy imports have already been paid for.
+    """
+    lines = ["Attention backend diagnostics:"]
+
+    # --- ActionDiT backend (components.py, lazy, env: WAM_ATTENTION_IMPL) ---
+    try:
+        from openwam.model.action_backbone.components import get_attention_fn
+
+        fn = get_attention_fn()
+        name = fn.__name__ if hasattr(fn, "__name__") else repr(fn)
+        lines.append(f"  ActionDiT          : {name}")
+    except Exception as e:
+        lines.append(f"  ActionDiT          : ERROR ({e})")
+
+    # --- Video DiT backend (Wan first-class path, checked at import time, no env var) ---
+    try:
+        import openwam.model.video_backbone.wan.dit as _vdit
+
+        if getattr(_vdit, "FLASH_ATTN_3_AVAILABLE", False):
+            vdit_backend = "flash_attention_3"
+        elif getattr(_vdit, "FLASH_ATTN_2_AVAILABLE", False):
+            vdit_backend = "flash_attention_2"
+        elif getattr(_vdit, "SAGE_ATTN_AVAILABLE", False):
+            vdit_backend = "sage_attention"
+        else:
+            vdit_backend = "torch_sdpa"
+        lines.append(f"  Video DiT          : {vdit_backend}")
+    except Exception as e:
+        lines.append(f"  Video DiT          : ERROR ({e})")
+
+    # --- Wan shared core backend (attention.py, env: DIFFSYNTH_ATTENTION_IMPLEMENTATION) ---
+    try:
+        from openwam.model.video_backbone.wan.shared.core.attention.attention import ATTENTION_IMPLEMENTATION
+
+        lines.append(f"  Wan shared core    : {ATTENTION_IMPLEMENTATION}")
+    except Exception as e:
+        lines.append(f"  Wan shared core    : ERROR ({e})")
+
+    logger.info("\n".join(lines))
+
+
 def _build_argparser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Start the OpenWAM policy server.")
+    parser = argparse.ArgumentParser(
+        description="Start the OpenWAM policy server. Base config from configs/deploy.yaml; CLI overrides it."
+    )
     parser.add_argument(
         "--config",
         type=str,
@@ -349,11 +396,43 @@ def _build_argparser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Checkpoint directory (config.yaml + checkpoint_step_*.safetensors). "
-        "Same meaning as scripts/deploy.py --ckpt-dir.",
+        "Falls back to checkpoint_path in the deploy yaml.",
     )
-    parser.add_argument("--device", type=str, default="cuda", help="Inference device.")
+    parser.add_argument(
+        "--ckpt-name",
+        type=str,
+        default=None,
+        help="Specific checkpoint filename (default: latest checkpoint_step_*.safetensors)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Inference device (default: device from the deploy yaml, else cuda).",
+    )
     parser.add_argument("--host", type=str, default=None, help="WebSocket bind host override.")
     parser.add_argument("--port", type=int, default=None, help="WebSocket port override.")
+    parser.add_argument(
+        "--denoise-steps",
+        type=int,
+        default=None,
+        dest="denoise_steps",
+        help="Override inference.denoise_steps",
+    )
+    parser.add_argument(
+        "--schedule-type",
+        type=str,
+        choices=["sync"],
+        default=None,
+        dest="schedule_type",
+        help="Override schedule type (only 'sync' is supported)",
+    )
+    parser.add_argument(
+        "--shift",
+        type=float,
+        default=None,
+        help="Override inference.shift (flow-matching shift)",
+    )
     parser.add_argument(
         "--compile-mode",
         type=_normalize_compile_mode_arg,
@@ -403,8 +482,11 @@ def main(argv: Optional[list[str]] = None):
     parser = _build_argparser()
     args = parser.parse_args(argv)
 
-    if args.ckpt_dir is None:
-        parser.error("--ckpt-dir is required")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    _log_attention_backends(logging.getLogger("deploy"))
 
     project_root = Path(__file__).resolve().parent.parent.parent
 
@@ -414,11 +496,33 @@ def main(argv: Optional[list[str]] = None):
         OmegaConf.update(cfg, "defaults", OmegaConf.create([]), merge=False)
     if args.overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+
+    # Inference overrides (CLI wins over yaml)
+    if args.denoise_steps is not None:
+        OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
+    if args.schedule_type is not None:
+        OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
+    if args.shift is not None:
+        OmegaConf.update(cfg, "inference.shift", args.shift, merge=False)
+
     _apply_compile_mode_override(cfg, args.compile_mode)
     try:
         cfg = _apply_async_cli_overrides(cfg, args)
     except ValueError as exc:
         parser.error(str(exc))
+
+    # Checkpoint dir: CLI --ckpt-dir > checkpoint_path in the deploy yaml.
+    ckpt_dir = args.ckpt_dir
+    if ckpt_dir is None:
+        yaml_ckpt = OmegaConf.select(cfg, "checkpoint_path", default=None)
+        if yaml_ckpt:
+            ckpt_dir = str(yaml_ckpt)
+            logging.getLogger("deploy").info("Using checkpoint from deploy yaml: %s", ckpt_dir)
+        else:
+            parser.error("--ckpt-dir is required (or set checkpoint_path in the deploy yaml)")
+
+    # Device: CLI --device > yaml device > cuda.
+    device = args.device or str(OmegaConf.select(cfg, "device", default="cuda"))
 
     server_cfg = getattr(cfg, "server", None)
     if server_cfg is None:
@@ -429,12 +533,17 @@ def main(argv: Optional[list[str]] = None):
     port = args.port or getattr(server_cfg, "port", 8848)
     server = build_server_from_config(
         cfg=cfg,
-        ckpt_dir=args.ckpt_dir,
-        device=args.device,
+        ckpt_dir=ckpt_dir,
+        device=device,
+        ckpt_name=args.ckpt_name,
+    )
+    logging.getLogger("deploy").info(
+        "Inference engine ready — steps=%d schedule=%s",
+        OmegaConf.select(server.cfg, "inference.denoise_steps", default=20),
+        OmegaConf.select(server.cfg, "inference.schedule_type", default="sync"),
     )
     server.run(host=host, port=port)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     main()
