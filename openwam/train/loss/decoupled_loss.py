@@ -17,7 +17,7 @@ Usage:
 
 This module owns the entire training-side decoupled sampling logic.
 The matching deployment-side schedules live in
-``openwam.deploy.optimizations.decoupled_schedule``.
+the removed ``decoupled_schedule`` deploy module (see git history).
 """
 
 import torch

@@ -10,7 +10,24 @@ import json
 from typing import Optional
 
 from benchmarks.utils.client import server_error_from_body
-from openwam import ws_protocol as wsp
+
+# --- WebSocket message protocol (client-side mirror) ---
+# The server-side source of truth lives in openwam/deploy/server.py; both
+# sides hard-code the same frozen wire contract so the thin client env never
+# needs to import the torch-heavy openwam package.
+# Client -> server
+OBS = "obs"
+RESET = "reset"
+PING = "ping"
+# Server -> client
+ACTION = "action"
+RESET_ACK = "reset_ack"
+PONG = "pong"
+ERROR = "error"
+# Error codes (the "code" field of an ERROR message)
+ERR_UNKNOWN_TYPE = "unknown_message_type"
+ERR_OBS_VALIDATION = "obs_validation_error"
+ERR_INTERNAL = "internal_error"
 
 # Errors that mean "the socket dropped" — reconnect once and retry. A live
 # ``ServerError`` is raised later from the parsed body, never from here.
@@ -79,20 +96,20 @@ class WSPolicyClient:
                 if attempt == attempts[-1]:
                     raise
         data = json.loads(raw)
-        if isinstance(data, dict) and data.get("type") == wsp.ERROR:
+        if isinstance(data, dict) and data.get("type") == ERROR:
             # Mirror the server's status split: internal_error -> 500, else 400.
-            status = 500 if data.get("code") == wsp.ERR_INTERNAL else 400
+            status = 500 if data.get("code") == ERR_INTERNAL else 400
             raise server_error_from_body(status, data, raw)
         return data
 
     def predict(self, payload: dict) -> dict:
-        return self._roundtrip({**payload, "type": wsp.OBS})
+        return self._roundtrip({**payload, "type": OBS})
 
     def reset(self) -> dict:
-        return self._roundtrip({"type": wsp.RESET})
+        return self._roundtrip({"type": RESET})
 
     def ping(self) -> dict:
-        return self._roundtrip({"type": wsp.PING}, reconnect=False)
+        return self._roundtrip({"type": PING}, reconnect=False)
 
     def close(self) -> None:
         if self._ws is not None:

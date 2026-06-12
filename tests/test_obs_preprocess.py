@@ -1,6 +1,6 @@
-"""Unit tests for ObsDecoder — obs payload validation + preprocessing.
+"""Unit tests for ObsPreprocessor — obs payload validation + preprocessing.
 
-Engine-free / GPU-free: ObsDecoder is constructed from an explicit view config,
+Engine-free / GPU-free: ObsPreprocessor is constructed from an explicit view config,
 so every obs-contract branch (single/multi view, missing cameras, bad base64,
 proprio dim) is covered without a checkpoint or a live server.
 """
@@ -16,7 +16,7 @@ from openwam.dataloader.transforms.multiview import (
     DEFAULT_MULTIVIEW_CAMERA_LAYOUT,
     format_prompt_for_inference,
 )
-from openwam.deploy.obs_preprocess import ObsDecoder, ObsValidationError
+from openwam.deploy.obs_preprocess import ObsPreprocessor, ObsValidationError
 
 
 def _jpeg_b64(h: int = 48, w: int = 64, seed: int = 0) -> str:
@@ -27,8 +27,8 @@ def _jpeg_b64(h: int = 48, w: int = 64, seed: int = 0) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _single_view(*, state_dim=None, requires_proprio=False) -> ObsDecoder:
-    return ObsDecoder(
+def _single_view(*, state_dim=None, requires_proprio=False) -> ObsPreprocessor:
+    return ObsPreprocessor(
         multiview=False,
         camera_layout=["head_camera"],
         img_height=32,
@@ -38,8 +38,8 @@ def _single_view(*, state_dim=None, requires_proprio=False) -> ObsDecoder:
     )
 
 
-def _multi_view(*, state_dim=None, requires_proprio=False) -> ObsDecoder:
-    return ObsDecoder(
+def _multi_view(*, state_dim=None, requires_proprio=False) -> ObsPreprocessor:
+    return ObsPreprocessor(
         multiview=True,
         camera_layout=list(DEFAULT_MULTIVIEW_CAMERA_LAYOUT),
         img_height=32,
@@ -50,20 +50,20 @@ def _multi_view(*, state_dim=None, requires_proprio=False) -> ObsDecoder:
 
 
 def test_single_view_head_only_resizes_and_wraps_prompt():
-    obs = _single_view().decode({"images": {"head_camera": _jpeg_b64()}, "prompt": "pick up the bottle"})
+    obs = _single_view().preprocess({"images": {"head_camera": _jpeg_b64()}, "prompt": "pick up the bottle"})
     assert obs["image"].size == (32, 32)
     assert isinstance(obs["prompt"], str) and obs["prompt"]  # wrapped, non-empty
 
 
 def test_single_view_ignores_wrist_inputs():
-    obs = _single_view().decode(
+    obs = _single_view().preprocess(
         {"images": {"head_camera": _jpeg_b64(), "left_wrist_camera": _jpeg_b64(seed=1)}, "prompt": "x"}
     )
     assert obs["image"].size == (32, 32)
 
 
 def test_multiview_black_fills_missing_wrists():
-    obs = _multi_view().decode(
+    obs = _multi_view().preprocess(
         {"images": {"head_camera": _jpeg_b64(), "left_wrist_camera": None, "right_wrist_camera": None}, "prompt": "x"}
     )
     assert obs["image"].size == (32, 32)
@@ -71,34 +71,34 @@ def test_multiview_black_fills_missing_wrists():
 
 def test_missing_images_dict_raises():
     with pytest.raises(ObsValidationError, match="images"):
-        _single_view().decode({"prompt": "x"})
+        _single_view().preprocess({"prompt": "x"})
 
 
 def test_missing_head_camera_raises():
     with pytest.raises(ObsValidationError, match="head_camera"):
-        _single_view().decode({"images": {"head_camera": None}, "prompt": "x"})
+        _single_view().preprocess({"images": {"head_camera": None}, "prompt": "x"})
 
 
 def test_bad_base64_raises():
     with pytest.raises(ObsValidationError, match="head_camera"):
-        _single_view().decode({"images": {"head_camera": "!!!not-a-jpeg!!!"}, "prompt": "x"})
+        _single_view().preprocess({"images": {"head_camera": "!!!not-a-jpeg!!!"}, "prompt": "x"})
 
 
 def test_multiview_requires_three_camera_layout():
-    dec = ObsDecoder(multiview=True, camera_layout=["only_one"], img_height=32, img_width=32)
+    dec = ObsPreprocessor(multiview=True, camera_layout=["only_one"], img_height=32, img_width=32)
     with pytest.raises(ObsValidationError, match="camera_layout"):
-        dec.decode({"images": {"head_camera": _jpeg_b64()}, "prompt": "x"})
+        dec.preprocess({"images": {"head_camera": _jpeg_b64()}, "prompt": "x"})
 
 
 def test_state_dim_mismatch_raises():
     with pytest.raises(ObsValidationError, match="state dimension mismatch"):
-        _single_view(state_dim=20).decode(
+        _single_view(state_dim=20).preprocess(
             {"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(14))}
         )
 
 
 def test_state_passthrough_when_dim_matches():
-    obs = _single_view(state_dim=20).decode(
+    obs = _single_view(state_dim=20).preprocess(
         {"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(20))}
     )
     assert isinstance(obs["state"], np.ndarray) and obs["state"].shape == (20,)
@@ -106,7 +106,7 @@ def test_state_passthrough_when_dim_matches():
 
 def test_requires_proprio_but_no_state_raises():
     with pytest.raises(ObsValidationError, match="requires obs"):
-        _single_view(requires_proprio=True, state_dim=20).decode(
+        _single_view(requires_proprio=True, state_dim=20).preprocess(
             {"images": {"head_camera": _jpeg_b64()}, "prompt": "x"}
         )
 
@@ -121,7 +121,7 @@ def test_from_cfg_resolves_view_config():
             "model": {"architecture": {"use_proprioception": True, "state_dim": 20}},
         }
     )
-    dec = ObsDecoder.from_cfg(cfg, engine=None)
+    dec = ObsPreprocessor.from_cfg(cfg, engine=None)
     assert dec.multiview is True
     assert dec.camera_layout == ["a", "b", "c"]
     assert (dec.img_height, dec.img_width) == (384, 320)
@@ -138,8 +138,8 @@ def _solid_b64(color=(240, 240, 240), w: int = 640, h: int = 480) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _multi_view_canvas(h: int = 384, w: int = 320) -> ObsDecoder:
-    return ObsDecoder(
+def _multi_view_canvas(h: int = 384, w: int = 320) -> ObsPreprocessor:
+    return ObsPreprocessor(
         multiview=True,
         camera_layout=list(DEFAULT_MULTIVIEW_CAMERA_LAYOUT),
         img_height=h,
@@ -148,7 +148,7 @@ def _multi_view_canvas(h: int = 384, w: int = 320) -> ObsDecoder:
 
 
 def test_multiview_all_three_bright_canvas():
-    obs = _multi_view_canvas().decode(
+    obs = _multi_view_canvas().preprocess(
         {
             "images": {
                 "head_camera": _solid_b64(),
@@ -163,7 +163,7 @@ def test_multiview_all_three_bright_canvas():
 
 
 def test_multiview_black_fill_pixels_when_wrists_none():
-    obs = _multi_view_canvas().decode(
+    obs = _multi_view_canvas().preprocess(
         {
             "images": {"head_camera": _solid_b64(), "left_wrist_camera": None, "right_wrist_camera": None},
             "prompt": "go",
@@ -176,7 +176,7 @@ def test_multiview_black_fill_pixels_when_wrists_none():
 
 
 def test_multiview_black_fill_one_wrist_missing():
-    obs = _multi_view_canvas().decode(
+    obs = _multi_view_canvas().preprocess(
         {
             "images": {"head_camera": _solid_b64(), "left_wrist_camera": _solid_b64()},
             "prompt": "go",
@@ -224,14 +224,14 @@ def test_prompt_wrap_matches_dataset_training_output():
 
 
 def test_decode_wraps_prompt():
-    obs = _single_view().decode({"images": {"head_camera": _jpeg_b64()}, "prompt": "pick up the bottle"})
+    obs = _single_view().preprocess({"images": {"head_camera": _jpeg_b64()}, "prompt": "pick up the bottle"})
     assert obs["prompt"] == (
         "A video recorded from a robot's point of view executing the following instruction: pick up the bottle"
     )
 
 
 def test_state_accepts_nested_list_and_flattens():
-    obs = _single_view(state_dim=20).decode(
+    obs = _single_view(state_dim=20).preprocess(
         {
             "images": {"head_camera": _jpeg_b64()},
             "prompt": "x",

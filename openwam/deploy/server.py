@@ -14,7 +14,8 @@ Protocol (unified — same shape for single-view and multi-view checkpoints):
     Client → {
         "type": "obs",
         "images": {
-            "head_camera":        <base64_jpeg>,       # required
+            "head_camera":        <base64_jpeg>,       # required; carries the view
+                                                       # training's target_camera referred to
             "left_wrist_camera":  <base64_jpeg>|null,  # optional
             "right_wrist_camera": <base64_jpeg>|null   # optional
         },
@@ -49,11 +50,27 @@ from typing import Optional
 
 import numpy as np
 
-from openwam import ws_protocol as wsp
-from openwam.deploy.obs_preprocess import ObsDecoder, ObsValidationError
+from openwam.deploy.obs_preprocess import ObsPreprocessor, ObsValidationError
 
 logger = logging.getLogger(__name__)
 _COMPILE_MODES = ("auto", "none")
+
+# --- WebSocket message protocol (single source of truth for the server) ---
+# Benchmark clients keep their own mirror in benchmarks/utils/transport.py;
+# these string values are a frozen wire contract and must never change.
+# Client -> server
+OBS = "obs"
+RESET = "reset"
+PING = "ping"
+# Server -> client
+ACTION = "action"
+RESET_ACK = "reset_ack"
+PONG = "pong"
+ERROR = "error"
+# Error codes (the "code" field of an ERROR message)
+ERR_UNKNOWN_TYPE = "unknown_message_type"
+ERR_OBS_VALIDATION = "obs_validation_error"
+ERR_INTERNAL = "internal_error"
 
 # Cap for a single obs message. A multi-camera base64 frame can exceed the
 # 1 MB websockets default, so lift it for the obs stream.
@@ -137,8 +154,8 @@ class PolicyServer:
 
         # Resolve obs preprocessing config from the saved checkpoint cfg so every
         # predict() validates + preprocesses without re-reading it per request.
-        self._obs_decoder = ObsDecoder.from_cfg(self.cfg, self.engine)
-        d = self._obs_decoder
+        self._obs_preprocessor = ObsPreprocessor.from_cfg(self.cfg, self.engine)
+        d = self._obs_preprocessor
         logger.info(
             "[obs] View config: multiview=%s, camera_layout=%s, canvas=%dx%d",
             d.multiview,
@@ -164,7 +181,7 @@ class PolicyServer:
         self._init_policy()
         t0 = time.monotonic()
 
-        obs = self._obs_decoder.decode(obs)
+        obs = self._obs_preprocessor.preprocess(obs)
         action = self._policy.predict_action(obs)
 
         latency_ms = (time.monotonic() - t0) * 1000
@@ -210,23 +227,23 @@ class PolicyServer:
                 async for message in websocket:
                     try:
                         data = json.loads(message)
-                        msg_type = data.get("type", wsp.OBS)
+                        msg_type = data.get("type", OBS)
 
-                        if msg_type == wsp.RESET:
+                        if msg_type == RESET:
                             self.reset()
-                            await websocket.send(json.dumps({"type": wsp.RESET_ACK}))
-                        elif msg_type == wsp.OBS:
+                            await websocket.send(json.dumps({"type": RESET_ACK}))
+                        elif msg_type == OBS:
                             result = self.predict(data)
-                            result["type"] = wsp.ACTION
+                            result["type"] = ACTION
                             await websocket.send(json.dumps(result))
-                        elif msg_type == wsp.PING:
-                            await websocket.send(json.dumps({"type": wsp.PONG}))
+                        elif msg_type == PING:
+                            await websocket.send(json.dumps({"type": PONG}))
                         else:
                             await websocket.send(
                                 json.dumps(
                                     {
-                                        "type": wsp.ERROR,
-                                        "code": wsp.ERR_UNKNOWN_TYPE,
+                                        "type": ERROR,
+                                        "code": ERR_UNKNOWN_TYPE,
                                         "message": f"Unknown message type: {msg_type}",
                                     }
                                 )
@@ -238,8 +255,8 @@ class PolicyServer:
                         await websocket.send(
                             json.dumps(
                                 {
-                                    "type": wsp.ERROR,
-                                    "code": wsp.ERR_OBS_VALIDATION,
+                                    "type": ERROR,
+                                    "code": ERR_OBS_VALIDATION,
                                     "message": str(e),
                                 }
                             )
@@ -249,8 +266,8 @@ class PolicyServer:
                         await websocket.send(
                             json.dumps(
                                 {
-                                    "type": wsp.ERROR,
-                                    "code": wsp.ERR_INTERNAL,
+                                    "type": ERROR,
+                                    "code": ERR_INTERNAL,
                                     "message": str(e),
                                 }
                             )

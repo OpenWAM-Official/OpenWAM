@@ -20,7 +20,7 @@ from typing import Optional
 
 import numpy as np
 
-from openwam.deploy.base import BaseInferenceEngine
+from openwam.deploy.engine import BaseInferenceEngine
 
 
 class WAMPolicy:

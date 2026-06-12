@@ -1,4 +1,4 @@
-from openwam.deploy.base import BaseInferenceEngine
+from openwam.deploy.engine import BaseInferenceEngine
 
 try:
     from openwam.deploy.server import PolicyServer

@@ -80,7 +80,7 @@ def _resolve_expected_state_dim(cfg, engine) -> Optional[int]:
     return None
 
 
-class ObsDecoder:
+class ObsPreprocessor:
     """Validate + preprocess a client obs payload against a fixed view config.
 
     Unified payload contract across single- and multi-view checkpoints: the
@@ -111,7 +111,7 @@ class ObsDecoder:
         self.expected_state_dim = expected_state_dim
 
     @classmethod
-    def from_cfg(cls, cfg, engine=None) -> "ObsDecoder":
+    def from_cfg(cls, cfg, engine=None) -> "ObsPreprocessor":
         """Resolve the view config from the saved checkpoint cfg (+ engine fallback)."""
         from openwam.dataloader.transforms.multiview import DEFAULT_MULTIVIEW_CAMERA_LAYOUT
 
@@ -136,7 +136,7 @@ class ObsDecoder:
             expected_state_dim=_resolve_expected_state_dim(cfg, engine),
         )
 
-    def decode(self, obs: dict) -> dict:
+    def preprocess(self, obs: dict) -> dict:
         """Validate + preprocess ``obs`` in place.
 
         On success the returned obs always has:

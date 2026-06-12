@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from openwam.deploy.base import BaseInferenceEngine
+from openwam.deploy.engine import BaseInferenceEngine
 
 logger = logging.getLogger(__name__)
 
@@ -133,18 +133,14 @@ class AsyncInferenceExecutor:
         start = int(skip_steps)
         end = min(action_horizon, start + execution_horizon)
         if start >= end:
-            raise RuntimeError(
-                f"Async inference result is stale: skip_steps={start}, action_horizon={action_horizon}"
-            )
+            raise RuntimeError(f"Async inference result is stale: skip_steps={start}, action_horizon={action_horizon}")
         for action in actions[start:end]:
             self._action_buffer.append(action)
 
     def _resolve_execution_horizon(self, action_horizon: int) -> int:
         execution_horizon = self.execution_horizon if self.execution_horizon is not None else action_horizon
         if execution_horizon > action_horizon:
-            raise ValueError(
-                f"execution_horizon ({execution_horizon}) must be <= action horizon ({action_horizon})"
-            )
+            raise ValueError(f"execution_horizon ({execution_horizon}) must be <= action horizon ({action_horizon})")
         return execution_horizon
 
     def _resolve_inference_delay_steps(self, execution_horizon: int) -> int:

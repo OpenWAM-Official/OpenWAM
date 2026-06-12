@@ -47,8 +47,7 @@ import cv2 as cv  # noqa: E402
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
-from benchmarks.utils import WSPolicyClient, action_conversion, client  # noqa: E402
-from openwam import ws_protocol as wsp  # noqa: E402
+from benchmarks.utils import WSPolicyClient, action_conversion, client, transport  # noqa: E402
 
 # Fields that earlier versions of policy_config.yml used. They are ignored by
 # the current client contract (server decides multiview/single-view and camera
@@ -241,7 +240,7 @@ class ModelClient:
         last_exc: Optional[Exception] = None
         while time.monotonic() < deadline:
             try:
-                if self._client.ping().get("type") == wsp.PONG:
+                if self._client.ping().get("type") == transport.PONG:
                     print(f"[OpenWAMClient] Server healthy at {self._ws_url}")
                     return
             except Exception as exc:
@@ -269,7 +268,7 @@ class ModelClient:
                 print(f"[OpenWAMClient] debug images → {ep_dir}")
         self._task_description = task_description
         result = self._client.reset()
-        if result.get("type") != wsp.RESET_ACK:
+        if result.get("type") != transport.RESET_ACK:
             raise RuntimeError(f"[OpenWAMClient] Server reset failed: {result}")
 
     def _save_debug_step(

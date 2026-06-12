@@ -1,8 +1,17 @@
-"""Joint video-action inference engine using package-native generation code."""
+"""Deploy-side inference engine: the deployment adapter around ``architecture.generate``.
+
+``BaseInferenceEngine`` declares the engine interface; ``JointInferenceEngine``
+is the production implementation. The engine translates deploy config +
+per-request conditions into ``architecture.generate(...)`` arguments, builds
+the denoise schedule, and owns server-lifetime caches (prompt embeddings,
+VACE context, CFG uncond embedding). The actual denoising loop lives on the
+model side (``BaseWAMArchitecture.generate``).
+"""
 
 import inspect
 import logging
 import os
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
@@ -11,13 +20,47 @@ import numpy as np
 import torch
 
 from openwam.dataloader.transforms.text_embedding_cache import resolve_cache_path_for_sha, sha256_for_prompt
-from openwam.deploy.base import BaseInferenceEngine
 from openwam.deploy.denoise_schedule import make_schedule
 from openwam.model.architectures.base import BaseWAMArchitecture
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE = 32
+
+
+class BaseInferenceEngine(ABC):
+    """Inference engine base class.
+
+    Concrete engines implement ``generate`` which accepts observation
+    conditions and produces video frames and/or action trajectories.
+
+    Args:
+        cfg: Hydra config.
+        architecture: WAM architecture wrapping the action backbone.
+        action_backbone: Optional action backbone reference for implementations that still expose one.
+    """
+
+    require_architecture = False
+
+    def __init__(self, cfg, architecture: Optional[BaseWAMArchitecture] = None, action_backbone=None):
+        if self.require_architecture and architecture is None:
+            raise ValueError("architecture is required")
+        self.cfg = cfg
+        self.architecture = architecture
+        self.action_backbone = action_backbone
+
+    @abstractmethod
+    def generate(self, conditions: dict) -> dict:
+        """Generate video and/or actions from conditions.
+
+        Args:
+            conditions: dict with keys like ``prompt``, ``reference_image``,
+                ``context_video``, ``seed``, etc.
+
+        Returns:
+            dict with ``video`` (Tensor) and ``actions`` (Tensor).
+        """
+        ...
 
 
 class _BoundedPromptEmbedCache(OrderedDict):

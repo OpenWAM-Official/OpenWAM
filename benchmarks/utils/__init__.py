@@ -34,7 +34,8 @@ Public surface — the only names you need:
 
 Minimal deps: ``numpy``, ``Pillow``, ``websockets`` (``opencv-python`` only if you
 decode camera frames yourself). Full step-by-step guide: ``benchmarks/README.md``.
-The wire contract (message types) lives in ``openwam/ws_protocol.py``.
+The wire contract (message types) lives in ``benchmarks/utils/transport.py``
+(client mirror; the server-side source of truth is ``openwam/deploy/server.py``).
 """
 
 from benchmarks.utils.action_conversion import (

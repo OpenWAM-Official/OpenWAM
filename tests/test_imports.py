@@ -47,7 +47,7 @@ def test_import_data_init():
 
 
 def test_import_inference_base():
-    from openwam.deploy.base import BaseInferenceEngine  # noqa: F401
+    from openwam.deploy.engine import BaseInferenceEngine  # noqa: F401
 
     assert hasattr(BaseInferenceEngine, "generate")
 
