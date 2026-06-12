@@ -64,7 +64,6 @@ class WAMPolicy:
     Args:
         engine: Inference engine that generates action chunks.
         cfg: Config object with optional fields:
-            - ``history_len``: Observation history length (default 10).
             - ``execute_horizon``: Number of actions to execute before
               re-generating.  ``None`` means use the full chunk (greedy).
             - ``temporal_ensemble``: Enable temporal ensembling of
@@ -82,9 +81,6 @@ class WAMPolicy:
     def __init__(self, engine: BaseInferenceEngine, cfg, async_config=None):
         self.cfg = cfg
         self.engine = engine
-
-        history_len = getattr(cfg, "history_len", 10)
-        self.obs_history: deque = deque(maxlen=history_len)
 
         # Receding-horizon config
         self.execute_horizon: Optional[int] = getattr(cfg, "execute_horizon", None)
@@ -117,8 +113,6 @@ class WAMPolicy:
         In async mode, delegates to the AsyncInferenceExecutor's buffer
         management. Otherwise uses receding-horizon or greedy mode.
         """
-        self.obs_history.append(obs)
-
         if self._async:
             conditions = self._build_conditions(obs)
             action = self._async_executor.predict_action(conditions)
@@ -205,7 +199,6 @@ class WAMPolicy:
         """Clear state between episodes."""
         self._action_buffer.clear()
         self._ensemble_buffer.clear()
-        self.obs_history.clear()
         self._current_step = 0
         self._steps_since_generate = 0
         if self._async_executor is not None:
@@ -222,7 +215,7 @@ class WAMPolicy:
         return build_async_info(self._async_config, self.cfg, self._async_executor)
 
     def _build_conditions(self, obs: dict) -> dict:
-        """Assemble inference conditions from current observation + history.
+        """Assemble inference conditions from the current observation.
 
         Populates the engine-facing fields (``first_frame_image``,
         ``prompt``) from the server-preprocessed observation so the
@@ -230,7 +223,6 @@ class WAMPolicy:
         """
         conditions = {
             "observation": obs,
-            "obs_history": list(self.obs_history),
         }
         img = obs.get("image")
         if img is not None:
