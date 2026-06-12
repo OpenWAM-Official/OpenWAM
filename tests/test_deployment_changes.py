@@ -255,8 +255,7 @@ class TestDeploymentYaml:
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "server.ws_port") is not None
-        assert OmegaConf.select(cfg, "server.http_port") is not None
+        assert OmegaConf.select(cfg, "server.port") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -300,9 +299,7 @@ class TestDeployConfigLoading:
         for attr in (
             "device",
             "host",
-            "ws_port",
-            "http_port",
-            "protocol",
+            "port",
             "denoise_steps",
             "schedule_type",
             "shift",
@@ -507,7 +504,7 @@ class TestDeployConfigLoading:
 
         policy_server = self._policy_server()
 
-        args = policy_server._build_argparser().parse_args(["--mock", "--compile-mode", "none"])
+        args = policy_server._build_argparser().parse_args(["--compile-mode", "none"])
         assert args.compile_mode == "none"
 
         cfg = OmegaConf.create({})
@@ -515,7 +512,7 @@ class TestDeployConfigLoading:
         assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
 
         with pytest.raises(SystemExit):
-            policy_server._build_argparser().parse_args(["--mock", "--compile-mode", "self-attn"])
+            policy_server._build_argparser().parse_args(["--compile-mode", "self-attn"])
 
     def test_cli_async_mode_override(self):
         from omegaconf import OmegaConf
@@ -595,7 +592,7 @@ class TestDeployConfigLoading:
 
         args = self._blank_args()
         # All None — nothing should change
-        for attr in ("device", "host", "ws_port", "http_port", "denoise_steps", "schedule_type", "shift", "async_mode"):
+        for attr in ("device", "host", "port", "denoise_steps", "schedule_type", "shift", "async_mode"):
             setattr(args, attr, None)
 
         cfg = deploy._apply_cli_overrides(cfg, args)
@@ -606,6 +603,7 @@ class TestDeployConfigLoading:
 
         deploy = self._import()
 
+        policy_server = self._policy_server()
         training_cfg = OmegaConf.create({"dataloader": {"num_frames": 49, "height": 720, "width": 1280}})
         deploy_cfg = deploy._load_deploy_config()
 
@@ -614,7 +612,7 @@ class TestDeployConfigLoading:
         OmegaConf.update(deploy_cfg, "inference.height", None, merge=False)
         OmegaConf.update(deploy_cfg, "inference.width", None, merge=False)
 
-        merged = deploy._merge_with_training_cfg(training_cfg, deploy_cfg)
+        merged = policy_server.merge_deploy_cfg(training_cfg, deploy_cfg)
         assert OmegaConf.select(merged, "inference.num_frames") == 49
         assert OmegaConf.select(merged, "inference.height") == 720
         assert OmegaConf.select(merged, "inference.width") == 1280
@@ -624,11 +622,12 @@ class TestDeployConfigLoading:
 
         deploy = self._import()
 
+        policy_server = self._policy_server()
         training_cfg = OmegaConf.create({"inference": {"denoise_steps": 99}})
         deploy_cfg = deploy._load_deploy_config()
         OmegaConf.update(deploy_cfg, "inference.denoise_steps", 10, merge=False)
 
-        merged = deploy._merge_with_training_cfg(training_cfg, deploy_cfg)
+        merged = policy_server.merge_deploy_cfg(training_cfg, deploy_cfg)
         assert OmegaConf.select(merged, "inference.denoise_steps") == 10
 
 

@@ -1,5 +1,4 @@
 from openwam.deploy.base import BaseInferenceEngine
-from openwam.deploy.mock_engine import MockInferenceEngine
 
 try:
     from openwam.deploy.policy_server import PolicyServer
@@ -22,7 +21,6 @@ from openwam.deploy.schedule import (
 
 __all__ = [
     "BaseInferenceEngine",
-    "MockInferenceEngine",
     "JointInferenceEngine",
     "load_from_checkpoint_dir",
     "Schedule",

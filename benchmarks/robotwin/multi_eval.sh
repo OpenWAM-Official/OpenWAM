@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Evaluate OpenWAM on a list of RoboTwin tasks against an already-running server.
 #
-# Tasks run sequentially; each call to single_eval.sh starts fresh (the client calls
-# POST /reset at the beginning of every episode via ModelClient.reset()).
+# Tasks run sequentially; each call to single_eval.sh starts fresh (the client
+# resets server state at the beginning of every episode via ModelClient.reset()).
 #
 # Usage:
 #   bash multi_eval.sh -m <mode> -n <name> -d <ckpt_dir> [options] <tasks...>
@@ -18,8 +18,8 @@
 #   path to a task-list file (one task per line, # comments supported)
 #
 # Options:
-#       --host       OpenWAM server host  (default: 127.0.0.1, env: ROBOTWIN_POLICY_HOST)
-#       --http-port  OpenWAM HTTP port    (default: 8848,      env: ROBOTWIN_HTTP_PORT)
+#       --host       OpenWAM server host    (default: 127.0.0.1, env: ROBOTWIN_POLICY_HOST)
+#       --port       OpenWAM WebSocket port (default: 8848,      env: ROBOTWIN_PORT)
 #   -g, --gpu        CUDA device for RoboTwin simulator (default: 0)
 #   -h, --help
 #
@@ -59,15 +59,15 @@ Tasks (positional):
   task names, "all", or a task-list file (one per line)
 
 Options:
-      --host       server host      (default: 127.0.0.1)
-      --http-port  server HTTP port (default: 8848)
+      --host       server host           (default: 127.0.0.1)
+      --port       server WebSocket port (default: 8848)
   -g, --gpu        CUDA device for RoboTwin simulator (default: 0)
   -h, --help
 
 Examples:
   bash multi_eval.sh -m demo_clean -n run1 -d /ckpt/openwam adjust_bottle open_laptop
   bash multi_eval.sh -m demo_clean -n run1 -d /ckpt/openwam all
-  bash multi_eval.sh -m demo_randomized -n run1 -d /ckpt/openwam --http-port 8768 all
+  bash multi_eval.sh -m demo_randomized -n run1 -d /ckpt/openwam --port 8768 all
 EOF
 }
 
@@ -121,7 +121,7 @@ find_conda_python() {
 
 TASK_CONFIG="" POLICY_NAME="" CKPT_DIR=""
 SERVER_HOST="${ROBOTWIN_POLICY_HOST:-127.0.0.1}"
-HTTP_PORT="${ROBOTWIN_HTTP_PORT:-8848}"
+PORT="${ROBOTWIN_PORT:-8848}"
 GPU_ID="0"
 
 while (( $# > 0 )); do
@@ -130,7 +130,7 @@ while (( $# > 0 )); do
         -n|--name)       POLICY_NAME="$2"; shift 2 ;;
         -d|--ckpt-dir)   CKPT_DIR="$2";    shift 2 ;;
         --host)          SERVER_HOST="$2"; shift 2 ;;
-        --http-port)     HTTP_PORT="$2";   shift 2 ;;
+        --port)          PORT="$2";        shift 2 ;;
         -g|--gpu)        GPU_ID="$2";      shift 2 ;;
         -h|--help)       usage; exit 0 ;;
         -*)              echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
@@ -159,7 +159,7 @@ LOG_DIR="${ROBOTWIN_LOG_ROOT:-${CKPT_DIR}/robotwin_eval_logs/${POLICY_NAME}_${TA
 mkdir -p "${LOG_DIR}"
 
 echo "[INFO] mode=${TASK_CONFIG}  name=${POLICY_NAME}"
-echo "[INFO] server=http://${SERVER_HOST}:${HTTP_PORT}  gpu=${GPU_ID}"
+echo "[INFO] server=ws://${SERVER_HOST}:${PORT}  gpu=${GPU_ID}"
 echo "[INFO] ckpt_dir=${CKPT_DIR}"
 echo "[INFO] logs=${LOG_DIR}"
 echo "[INFO] tasks (${#TASKS[@]}): ${TASKS[*]}"
@@ -177,11 +177,11 @@ for task_name in "${TASKS[@]}"; do
     # Pipe to tee so the full output is saved; capture single_eval.sh's own exit code
     # via PIPESTATUS[0] rather than grep's exit code.  grep is display-only and
     # must not affect the success/failure decision.
-    ROBOTWIN_HTTP_PORT="${HTTP_PORT}" ROBOTWIN_POLICY_HOST="${SERVER_HOST}" \
+    ROBOTWIN_PORT="${PORT}" ROBOTWIN_POLICY_HOST="${SERVER_HOST}" \
     bash "${SCRIPT_DIR}/single_eval.sh" \
         "${task_name}" "${TASK_CONFIG}" "${POLICY_NAME}" \
         "${GPU_ID}" \
-        "${HTTP_PORT}" "${SERVER_HOST}" \
+        "${PORT}" "${SERVER_HOST}" \
         2>&1 | tee "${log_file}" || true
     eval_exit="${PIPESTATUS[0]}"
 

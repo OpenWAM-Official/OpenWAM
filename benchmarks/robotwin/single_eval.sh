@@ -2,14 +2,14 @@
 # Run a single RoboTwin task evaluation against an already-running OpenWAM server.
 #
 # Usage:
-#   bash single_eval.sh <task_name> <task_config> <ckpt_setting> <gpu_id> [http_port] [host]
+#   bash single_eval.sh <task_name> <task_config> <ckpt_setting> <gpu_id> [port] [host]
 #
 # Args:
 #   task_name    — RoboTwin task (e.g. adjust_bottle)
 #   task_config  — demo_clean | demo_randomized
 #   ckpt_setting — label used in result filenames (e.g. openwam)
 #   gpu_id       — CUDA device for the RoboTwin simulator process
-#   http_port    — OpenWAM HTTP port  (default: 8848, env: ROBOTWIN_HTTP_PORT)
+#   port         — OpenWAM WebSocket port (default: 8848, env: ROBOTWIN_PORT)
 #   host         — OpenWAM server host (default: 127.0.0.1, env: ROBOTWIN_POLICY_HOST)
 #
 # Required env vars:
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-    echo "Usage: bash single_eval.sh <task_name> <task_config> <ckpt_setting> <gpu_id> [http_port] [host]" >&2
+    echo "Usage: bash single_eval.sh <task_name> <task_config> <ckpt_setting> <gpu_id> [port] [host]" >&2
     exit 1
 fi
 
@@ -36,7 +36,7 @@ task_name="$1"
 task_config="$2"
 ckpt_setting="${3:-openwam}"
 gpu_id="${4:-0}"
-http_port="${5:-${ROBOTWIN_HTTP_PORT:-8848}}"
+port="${5:-${ROBOTWIN_PORT:-8848}}"
 host="${6:-${ROBOTWIN_POLICY_HOST:-127.0.0.1}}"
 seed="0"
 
@@ -54,8 +54,8 @@ if [[ "${task_config}" != "demo_clean" && "${task_config}" != "demo_randomized" 
     echo "[ERROR] Invalid task_config '${task_config}'." >&2
     exit 1
 fi
-if ! [[ "${http_port}" =~ ^[0-9]+$ ]] || (( http_port < 1 || http_port > 65535 )); then
-    echo "[ERROR] Invalid http_port '${http_port}'. Expected 1..65535." >&2
+if ! [[ "${port}" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+    echo "[ERROR] Invalid port '${port}'. Expected 1..65535." >&2
     exit 1
 fi
 if ! [[ "${host}" =~ ^[A-Za-z0-9_.:-]+$ ]]; then
@@ -76,13 +76,13 @@ maybe_configure_sapien_egl() {
     echo "[INFO] SAPIEN EGL ICD: ${__EGL_VENDOR_LIBRARY_FILENAMES}"
 }
 
-# Inject runtime host and http_port into a temp config
+# Inject runtime host and port into a temp config
 runtime_config="$(mktemp "${TMPDIR:-/tmp}/openwam_policy_config.XXXXXX.yml")"
 trap 'rm -f "${runtime_config}"' EXIT
 
 sed \
     -e "s/^host:.*/host: \"${host}\"/" \
-    -e "s/^http_port:.*/http_port: ${http_port}/" \
+    -e "s/^port:.*/port: ${port}/" \
     "${policy_config_template}" > "${runtime_config}"
 
 export CUDA_VISIBLE_DEVICES="${gpu_id}"
@@ -96,7 +96,7 @@ cd "${ROBOTWIN_PATH}"
 echo "task_name    : ${task_name}"
 echo "task_config  : ${task_config}"
 echo "ckpt_setting : ${ckpt_setting}"
-echo "server       : http://${host}:${http_port}"
+echo "server       : ws://${host}:${port}"
 echo "gpu          : ${gpu_id}"
 echo "seed         : ${seed}"
 

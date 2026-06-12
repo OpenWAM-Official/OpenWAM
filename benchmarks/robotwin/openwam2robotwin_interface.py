@@ -1,18 +1,18 @@
 """RoboTwin eval adapter for the OpenWAM Policy Server.
 
 Loaded by RoboTwin's ``eval_policy.py`` via ``--policy_name``. It
-communicates with a running OpenWAM HTTP server instead of loading model
+communicates with a running OpenWAM WebSocket server instead of loading model
 weights directly, so the RoboTwin client environment only needs::
 
     numpy, opencv-python, Pillow   (see requirements.txt)
 
-Protocol overview:
+Protocol overview (WebSocket):
 
-    POST /predict  — send 3 camera JPEGs + task prompt, get action vector
-    POST /reset    — clear server episode state before a new rollout
-    GET  /health   — liveness probe
+    obs   — send 3 camera JPEGs + task prompt, get action vector
+    reset — clear server episode state before a new rollout
+    ping  — liveness probe
 
-Server default ports: WS=8850, HTTP=8848.
+Server default port: 8848.
 
 Camera mapping from RoboTwin to the OpenWAM server's fixed client API names:
 
@@ -29,7 +29,7 @@ wrapping happen server-side, driven by the checkpoint's saved
 
 # benchmarks.utils lives one level up. single_eval.sh only puts benchmarks/robotwin/
 # on PYTHONPATH, so add the project root here to make the shared helpers
-# (payload assembly, HTTP wrappers, action conversions) importable from the
+# (payload assembly, WebSocket client, action conversions) importable from the
 # RoboTwin eval process too.
 import os as _os
 import sys as _sys
@@ -47,7 +47,8 @@ import cv2 as cv  # noqa: E402
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
-from benchmarks.utils import action_conversion, client  # noqa: E402
+from benchmarks.utils import WSPolicyClient, action_conversion, client  # noqa: E402
+from openwam import ws_protocol as wsp  # noqa: E402
 
 # Fields that earlier versions of policy_config.yml used. They are ignored by
 # the current client contract (server decides multiview/single-view and camera
@@ -157,15 +158,15 @@ def _apply_step_lim_override(task_env) -> None:
 class ModelClient:
     """RoboTwin ``ModelClient`` backed by the OpenWAM Policy Server.
 
-    The server manages action chunking internally, so this client calls
-    ``POST /predict`` every step and lets the server decide whether to run
-    full diffusion inference or pop a cached action from its buffer.
+    The server manages action chunking internally, so this client sends an obs
+    message every step and lets the server decide whether to run full diffusion
+    inference or pop a cached action from its buffer.
     """
 
     def __init__(
         self,
         host: str = "127.0.0.1",
-        http_port: int = 8848,
+        port: int = 8848,
         send_state: bool = True,
         state_dim: Optional[int] = None,
         request_timeout: int = 300,
@@ -178,13 +179,13 @@ class ModelClient:
         """
         Args:
             host:            OpenWAM server hostname / IP.
-            http_port:       OpenWAM HTTP port (default 8848).
+            port:            OpenWAM WebSocket port (default 8848).
             send_state:      Whether to include the robot proprioceptive state
-                             vector in the ``/predict`` request.
+                             vector in the obs message.
             state_dim:       Optional expected proprio dimension. When set, the
                              client fails fast if the extracted state does not
                              match the checkpoint's architecture.state_dim.
-            request_timeout: HTTP timeout in seconds.
+            request_timeout: WebSocket timeout in seconds.
             action_indices:  Optional index list to reorder the returned action
                              vector before passing it to the environment.
                              None = no reordering.
@@ -214,7 +215,8 @@ class ModelClient:
         self._episode = -1  # incremented to 0 on the first reset_model() call
         self._step = 0
 
-        self._server = f"http://{host}:{http_port}"
+        self._ws_url = f"ws://{host}:{port}"
+        self._client = WSPolicyClient(self._ws_url, timeout=request_timeout)
 
         # Warn about legacy YAML fields once so users know they're no-ops now.
         for field in _DEPRECATED_YAML_FIELDS:
@@ -226,7 +228,7 @@ class ModelClient:
                 )
 
         print(
-            f"[OpenWAMClient] server={self._server} send_state={send_state} "
+            f"[OpenWAMClient] server={self._ws_url} send_state={send_state} "
             f"state_dim={state_dim} "
             f"request_timeout={request_timeout}s action_type={action_type} "
             f"action_indices={action_indices} debug={debug} debug_dir={debug_dir}"
@@ -239,14 +241,15 @@ class ModelClient:
         last_exc: Optional[Exception] = None
         while time.monotonic() < deadline:
             try:
-                if client.get(self._server, "/health").get("status") == "healthy":
-                    print(f"[OpenWAMClient] Server healthy at {self._server}")
+                if self._client.ping().get("type") == wsp.PONG:
+                    print(f"[OpenWAMClient] Server healthy at {self._ws_url}")
                     return
             except Exception as exc:
                 last_exc = exc
+                self._client.close()  # drop the half-open socket before retrying
             time.sleep(poll_interval)
         raise RuntimeError(
-            f"OpenWAM server did not become healthy within {timeout_s}s at {self._server}. Last error: {last_exc}"
+            f"OpenWAM server did not become healthy within {timeout_s}s at {self._ws_url}. Last error: {last_exc}"
         )
 
     def reset(self, task_description: str = "") -> None:
@@ -265,8 +268,8 @@ class ModelClient:
                 os.makedirs(ep_dir, exist_ok=True)
                 print(f"[OpenWAMClient] debug images → {ep_dir}")
         self._task_description = task_description
-        result = client.reset(self._server, timeout=30)
-        if result.get("status") != "ok":
+        result = self._client.reset()
+        if result.get("type") != wsp.RESET_ACK:
             raise RuntimeError(f"[OpenWAMClient] Server reset failed: {result}")
 
     def _save_debug_step(
@@ -358,7 +361,7 @@ class ModelClient:
             prompt=prompt,
             state=state_list,
         )
-        response = client.post(self._server, "/predict", payload, timeout=self._request_timeout)
+        response = self._client.predict(payload)
         action = np.array(response["action"], dtype=np.float32)
 
         self._step += 1
@@ -379,7 +382,7 @@ class ModelClient:
 def get_model(usr_args: dict) -> ModelClient:
     return ModelClient(
         host=usr_args.get("host", "127.0.0.1"),
-        http_port=int(usr_args.get("http_port", usr_args.get("port", 8848))),
+        port=int(usr_args.get("port", 8848)),
         send_state=_parse_bool(usr_args.get("send_state", True), default=True),
         state_dim=_parse_optional_int(usr_args.get("state_dim", None), "state_dim"),
         request_timeout=int(usr_args.get("request_timeout", 300)),

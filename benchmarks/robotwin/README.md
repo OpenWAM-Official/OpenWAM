@@ -17,8 +17,8 @@ These scripts assume the OpenWAM policy server is **already running**. They only
 
 | File | Description |
 |---|---|
-| `openwam2robotwin_interface.py` | RoboTwin client — calls the HTTP server's `/predict` and `/reset` endpoints. |
-| `policy_config.yml` | Config template; `host` / `http_port` are injected at runtime. |
+| `openwam2robotwin_interface.py` | RoboTwin client — talks to the WebSocket server. |
+| `policy_config.yml` | Config template; `host` / `port` are injected at runtime. |
 | `single_eval.sh` | Run evaluation on a single task. |
 | `multi_eval.sh` | Run evaluation on multiple tasks sequentially. |
 | `parallel_eval.sh` | Run a shared local queue against already-running local/remote OpenWAM servers. |
@@ -69,10 +69,10 @@ export ROBOTWIN_ENV=robotwin                # RoboTwin Conda env name (default: 
 
 ### 4. Start the OpenWAM server
 
-Start the server separately before running any evaluation (it can live on a remote machine — just make sure the host/IP and the HTTP port are reachable):
+Start the server separately before running any evaluation (it can live on a remote machine — just make sure the host/IP and the port are reachable):
 
 ```bash
-bash scripts/deploy.sh --ckpt-dir /path/to/ckpt_dir --http-port XXXX
+bash scripts/deploy.sh --ckpt-dir /path/to/ckpt_dir --port XXXX
 ```
 
 ## Usage
@@ -82,7 +82,7 @@ bash scripts/deploy.sh --ckpt-dir /path/to/ckpt_dir --http-port XXXX
 **Invocation:**
 
 ```bash
-bash single_eval.sh <task_name> <task_config> <ckpt_setting> <gpu_id> [http_port] [host]
+bash single_eval.sh <task_name> <task_config> <ckpt_setting> <gpu_id> [port] [host]
 ```
 
 | Argument | Description |
@@ -91,7 +91,7 @@ bash single_eval.sh <task_name> <task_config> <ckpt_setting> <gpu_id> [http_port
 | `task_config` | `demo_clean` or `demo_randomized`. |
 | `ckpt_setting` | Label written into result filenames (e.g. `openwam`). |
 | `gpu_id` | CUDA device for the RoboTwin simulator. |
-| `http_port` | OpenWAM HTTP port (default: `8848`). |
+| `port` | OpenWAM server port (default: `8848`). |
 | `host` | OpenWAM server address (default: `127.0.0.1`). |
 
 **Example:**
@@ -120,7 +120,7 @@ bash multi_eval.sh -m <mode> -n <name> -d <ckpt_dir> [options] <tasks...>
 | Flag | Default | Description |
 |---|---|---|
 | `--host` | `127.0.0.1` | OpenWAM server address. |
-| `--http-port` | `8848` | OpenWAM HTTP port. |
+| `--port` | `8848` | OpenWAM server port. |
 | `-g`, `--gpu` | `0` | CUDA device for the RoboTwin simulator. |
 
 **Examples:**
@@ -135,7 +135,7 @@ bash multi_eval.sh -m demo_randomized -n run1 -d /path/to/ckpt_dir all
 
 # Point at a remote server
 bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir \
-    --host 192.0.2.1 --http-port 8768 all
+    --host 192.0.2.1 --port 8768 all
 
 # Read the task list from a file (one task per line, `#` comments supported)
 bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir tasks.txt
@@ -143,7 +143,7 @@ bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir tasks.txt
 
 ### DLC multi-node parallel evaluation
 
-`dlc_parallel_eval.sh` is the cluster entrypoint for large runs. Launch the same command on every DLC worker. Rank 0 creates one pending job file per `task|mode` in the shared log directory; each node starts one OpenWAM server per local worker, waits for `/health`, then starts RoboTwin client workers that atomically claim pending job files with `mv`.
+`dlc_parallel_eval.sh` is the cluster entrypoint for large runs. Launch the same command on every DLC worker. Rank 0 creates one pending job file per `task|mode` in the shared log directory; each node starts one OpenWAM server per local worker, waits for the server to accept connections, then starts RoboTwin client workers that atomically claim pending job files with `mv`.
 
 This script does **not** require pre-starting OpenWAM servers with `scripts/deploy_multi.sh`; it starts and cleans up its own local servers on every node. It still requires a RoboTwin Python environment for the simulator/client process.
 
@@ -153,7 +153,7 @@ By default, each local policy server is launched as:
 python <repo>/scripts/deploy.py ...
 ```
 
-Override `SERVER_PYTHON` / `--server-python` or `SERVER_SCRIPT` / `--server-script` if the server must run under a specific Python executable or a custom deploy script. `SERVER_PYTHON` must be an OpenWAM-capable environment with packages such as `torch`, `omegaconf`, `safetensors`, `aiohttp`, and `websockets`; it is separate from `ROBOTWIN_PYTHON`, which runs the simulator/client side.
+Override `SERVER_PYTHON` / `--server-python` or `SERVER_SCRIPT` / `--server-script` if the server must run under a specific Python executable or a custom deploy script. `SERVER_PYTHON` must be an OpenWAM-capable environment with packages such as `torch`, `omegaconf`, `safetensors`, and `websockets`; it is separate from `ROBOTWIN_PYTHON`, which runs the simulator/client side.
 
 **Required environment:**
 
@@ -207,7 +207,7 @@ Tasks are positional after flags. They can be task names, comma-separated task n
 | `-w`, `--num-workers` | GPU count | Number of local OpenWAM servers and RoboTwin clients per node. |
 | `--gpu-start` | `0` | First local GPU index. |
 | `SIM_GPU_STRIDE` | `1` | Stride between worker GPUs. |
-| `--http-port`, `--ws-port` | `8700`, `8800` | Per-node local port bases; worker `i` uses base `+ i`. |
+| `PORT_BASE`, `--port` | `8848` | Per-node local port base; worker `i` uses base `+ i`. |
 | `SERVER_PYTHON`, `--server-python` | `python` | Python executable used to launch each local policy server; must have OpenWAM server dependencies installed. |
 | `SERVER_SCRIPT`, `--server-script` | `<repo>/scripts/deploy.py` | Python script used to launch each local policy server. |
 | `--bind-host` | `127.0.0.1` | Host passed to `scripts/deploy.py --host`. |
@@ -216,7 +216,6 @@ Tasks are positional after flags. They can be task names, comma-separated task n
 | `--denoise-steps` | config default | Denoising step count passed to `scripts/deploy.py`. |
 | `--schedule-type` | config default | Schedule type passed to `scripts/deploy.py`. |
 | `--shift` | config default | Flow-matching shift passed to `scripts/deploy.py`. |
-| `--mock` | off | Start mock OpenWAM servers instead of loading a checkpoint. |
 | `--dry-run` | off | Skip OpenWAM/RoboTwin startup and only exercise DLC/shared-filesystem task assignment. |
 | `--fresh` | off | Remove stale queue/sentinel metadata for the same run id before rank 0 initializes the queue. |
 
@@ -424,9 +423,9 @@ xvfb-run -a bash single_eval.sh adjust_bottle demo_clean openwam 0 8848 127.0.0.
 #   - multiview=false → single-view preprocessing using head_camera only
 #   - multiview=true  → composed into the L-shape multi-view layout used at training time
 # The client no longer needs to configure camera selection or resolution.
-send_state: true          # Include the proprio state vector in the /predict request.
+send_state: true          # Include the proprio state vector in the obs message.
 state_dim: 20             # Fail-fast expected dim. 20 for eef/ee, 14 for joint/qpos.
-request_timeout: 300      # HTTP timeout in seconds.
+request_timeout: 300      # WebSocket timeout in seconds.
 
 # Action settings (must match the `action_mode` used at training time).
 action_type: ee           # ee   — EEF mode (action_mode: eef at train time, default).

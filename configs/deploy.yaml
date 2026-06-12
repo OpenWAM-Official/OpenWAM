@@ -5,9 +5,7 @@ checkpoint_path: null          # Default checkpoint directory; --ckpt-dir on the
 device: cuda:0
 server:
   host: "0.0.0.0"
-  ws_port: 8850
-  http_port: 8848
-  protocol: both               # http | ws | both — which listener(s) to start
+  port: 8848                   # WebSocket port
 
 # ---------------------------------------------------------------------------
 # Inference parameters

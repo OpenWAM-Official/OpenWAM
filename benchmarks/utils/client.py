@@ -1,9 +1,11 @@
-"""Client-side payload helpers and HTTP wrappers for the OpenWAM policy server.
+"""Payload helpers and the shared error model for the OpenWAM policy server.
 
 Canonical location for code that downstream benchmark adapters / real-robot
-integrations should import.
+integrations should import. The wire transport lives in
+``benchmarks.utils.transport`` (WebSocket); this module owns only payload
+construction and the structured ``ServerError`` both ends share.
 
-Client → server contract (must match ``PolicyServer._decode_obs``):
+Client → server obs message (must match ``PolicyServer._decode_obs``):
 
     {
       "images": {
@@ -21,20 +23,15 @@ returns actions already denormalized to physical units.
 """
 
 import base64
-import json
 from pathlib import Path
 from typing import Optional
-from urllib import error as _urlerror
-from urllib import request
 
 
 class ServerError(RuntimeError):
     """Structured 4xx / 5xx response from the OpenWAM policy server.
 
-    Raised by ``post`` / ``get`` / ``reset`` when the server returns a
-    non-2xx status. Carries the parsed error body so call-site logs and
-    rollout harnesses can show the actual server-side message instead of
-    a bare ``HTTPError: HTTP Error 400: Bad Request``.
+    Carries the parsed error body so call-site logs and rollout harnesses can
+    show the actual server-side message instead of a bare transport error.
     """
 
     def __init__(self, status: int, code: str = "", message: str = "", raw_body: str = ""):
@@ -49,8 +46,8 @@ class ServerError(RuntimeError):
 def server_error_from_body(status: int, body: dict, raw_body: str = "") -> "ServerError":
     """Build a ``ServerError`` from a parsed server error body.
 
-    Single source for the ``{"type":"error","code","message"}`` / 4xx-5xx
-    shape every transport (urllib, keep-alive HTTP, WebSocket) shares.
+    Single source for the ``{"type":"error","code","message"}`` shape the
+    WebSocket transport maps to a status before raising.
     """
     info = body if isinstance(body, dict) else {}
     return ServerError(
@@ -59,23 +56,6 @@ def server_error_from_body(status: int, body: dict, raw_body: str = "") -> "Serv
         message=info.get("message", ""),
         raw_body=raw_body,
     )
-
-
-def _read_http_error(exc: _urlerror.HTTPError) -> "ServerError":
-    """Decode a ``urllib.error.HTTPError`` into a ``ServerError``.
-
-    Preserves the raw body when it isn't valid JSON so the caller still
-    sees *something*, then delegates to :func:`server_error_from_body`.
-    """
-    try:
-        raw = exc.read().decode("utf-8", errors="replace")
-    except Exception:
-        raw = ""
-    try:
-        body = json.loads(raw) if raw else {}
-    except json.JSONDecodeError:
-        body = {}
-    return server_error_from_body(exc.code, body, raw)
 
 
 def encode_path_b64(path: str) -> str:
@@ -112,7 +92,7 @@ def build_payload(
     prompt: str = "",
     state: Optional[list] = None,
 ) -> dict:
-    """Assemble a /predict payload from base64-encoded images.
+    """Assemble an obs payload from base64-encoded images.
 
     ``head`` is the base64 string for ``head_camera`` (required).
     ``left_wrist`` / ``right_wrist`` may be None → server black-fills when
@@ -129,42 +109,3 @@ def build_payload(
     if state is not None:
         payload["state"] = list(state)
     return payload
-
-
-def post(server: str, endpoint: str, payload: Optional[dict] = None, timeout: float = 300) -> dict:
-    """POST JSON to server and return parsed response.
-
-    Raises :class:`ServerError` on 4xx / 5xx so callers can log the server's
-    own ``{code, message}`` instead of a bare ``HTTPError``. On success the
-    behaviour is identical to the previous version (returns the parsed dict).
-    """
-    url = f"{server.rstrip('/')}{endpoint}"
-    data = json.dumps(payload or {}).encode("utf-8")
-    req = request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except _urlerror.HTTPError as exc:
-        raise _read_http_error(exc) from exc
-
-
-def get(server: str, endpoint: str, timeout: float = 10) -> dict:
-    """GET from server and return parsed response.
-
-    Raises :class:`ServerError` on 4xx / 5xx (same contract as :func:`post`).
-    """
-    url = f"{server.rstrip('/')}{endpoint}"
-    try:
-        with request.urlopen(url, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except _urlerror.HTTPError as exc:
-        raise _read_http_error(exc) from exc
-
-
-def reset(server: str, timeout: float = 10) -> dict:
-    """Clear the server's episode state.
-
-    Drops ``obs_history``, the action buffer, and the ensemble buffer. Call
-    this between episodes so the next ``predict`` starts from a clean slate.
-    """
-    return post(server, "/reset", {}, timeout=timeout)

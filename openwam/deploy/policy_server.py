@@ -1,8 +1,8 @@
-"""WebSocket + HTTP policy server for real-time robot deployment.
+"""WebSocket policy server for real-time robot deployment.
 
 Provides a network-accessible policy server that wraps WAMPolicy with
-receding-horizon execution. Robot controllers connect via WebSocket for
-low-latency streaming or HTTP for request-response patterns.
+receding-horizon execution. Robot controllers connect over a single
+persistent WebSocket.
 
 The client is thin on purpose: it always sends raw per-camera JPEGs plus a
 base task prompt. Image composition and resize happen server-side, driven by
@@ -28,43 +28,35 @@ Server-side behavior:
   L-shape layout defined by ``camera_layout``.
 - ``prompt`` is always re-wrapped via ``format_prompt_for_inference``.
 
-Responses:
-    {"type": "action", "action": [floats], "step": int, "latency_ms": float}
-    {"type": "error",  "code": str, "message": "<what went wrong>"}
-
-    Client sends: {"type": "reset"}
-    Server responds: {"type": "reset_ack"}
-
-HTTP endpoints:
-    POST /predict  — same JSON as WebSocket obs message (400 on bad payload)
-    POST /reset    — reset policy state
-    GET  /health   — server health check
-    GET  /info     — model info and config
+Messages:
+    obs   → {"type": "action", "action": [floats], "step": int, "latency_ms": float}
+    reset → {"type": "reset_ack"}
+    ping  → {"type": "pong"}
+    error → {"type": "error", "code": str, "message": "<what went wrong>"}
 
 Usage:
     server = PolicyServer(engine, cfg)
-    server.run(host="0.0.0.0", port=8850)
+    server.run(host="0.0.0.0", port=8848)
 """
 
 import argparse
 import asyncio
-import base64
-import io
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
+from openwam import ws_protocol as wsp
+from openwam.deploy.obs_decoder import ObsDecoder, ObsValidationError
+
 logger = logging.getLogger(__name__)
 _COMPILE_MODES = ("auto", "none")
 
-# Cap for a single obs message on both transports. A multi-camera base64 frame
-# can exceed the 1 MB library defaults (websockets.serve / aiohttp), so lift
-# both together to keep HTTP and WebSocket on equal footing.
+# Cap for a single obs message. A multi-camera base64 frame can exceed the
+# 1 MB websockets default, so lift it for the obs stream.
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
@@ -110,29 +102,15 @@ def _normalize_compile_mode_arg(value: str) -> str:
     return normalized
 
 
-class ObsValidationError(ValueError):
-    """Raised when a client observation payload does not match the server's
-    view configuration (single-view vs multi-view, missing cameras, bad image
-    encoding, etc.).  Server turns it into a structured error response to the
-    client (HTTP 400 / WebSocket ``{"type":"error"}``).
-    """
-
-
 class PolicyServer:
-    """WebSocket + HTTP policy server for WAM deployment.
+    """WebSocket policy server for WAM deployment.
 
     Args:
         engine: Inference engine (BaseInferenceEngine).
         cfg: Config with policy and server settings.
     """
 
-    def __init__(
-        self,
-        engine,
-        cfg,
-        debug: bool = False,
-        debug_dir: str = "./server_debug",
-    ):
+    def __init__(self, engine, cfg):
         self.engine = engine
         self.cfg = cfg
 
@@ -140,19 +118,6 @@ class PolicyServer:
         self._policy = None
         self._request_count = 0
         self._total_latency = 0.0
-
-        # Debug mode: save received images + actions + metadata per step.
-        # ``_debug_episode`` is lazily initialized the first time reset() or
-        # predict() is called (see ``_ensure_debug_episode``). This prevents
-        # the stray ``ep-001/`` directory that used to appear when /predict was
-        # called before any /reset.
-        self._debug = debug
-        self._debug_dir = debug_dir
-        self._debug_episode: Optional[int] = None
-        self._debug_step = 0
-        if debug:
-            os.makedirs(debug_dir, exist_ok=True)
-            logger.info("Debug mode enabled — saving to %s", debug_dir)
 
     def _init_policy(self):
         """Initialize the receding-horizon policy."""
@@ -170,32 +135,17 @@ class PolicyServer:
             async_config=async_config,
         )
 
-        # Resolve view mode from saved config so every predict() can validate
-        # + preprocess the client payload without re-reading it per-request.
-        from openwam.dataloader.transforms.multiview import DEFAULT_MULTIVIEW_CAMERA_LAYOUT
-
-        dl = getattr(self.cfg, "dataloader", None)
-        self._multiview = bool(getattr(dl, "multiview", False)) if dl is not None else False
-        _layout = getattr(dl, "camera_layout", None) if dl is not None else None
-        self._camera_layout = list(_layout) if _layout is not None else list(DEFAULT_MULTIVIEW_CAMERA_LAYOUT)
-        self._target_camera = getattr(dl, "target_camera", "head_camera") if dl is not None else "head_camera"
-        # Output canvas size: prefer inference.{height,width}, fall back to dataloader
-        _inf = getattr(self.cfg, "inference", None)
-        _h = getattr(_inf, "height", None) if _inf is not None else None
-        _w = getattr(_inf, "width", None) if _inf is not None else None
-        if _h is None and dl is not None:
-            _h = getattr(dl, "height", 384)
-        if _w is None and dl is not None:
-            _w = getattr(dl, "width", 320)
-        self._img_height = int(_h if _h is not None else 384)
-        self._img_width = int(_w if _w is not None else 320)
+        # Resolve obs preprocessing config from the saved checkpoint cfg so every
+        # predict() validates + preprocesses without re-reading it per request.
+        self._obs_decoder = ObsDecoder.from_cfg(self.cfg, self.engine)
+        d = self._obs_decoder
         logger.info(
             "[obs] View config: multiview=%s, camera_layout=%s, target_camera=%s, canvas=%dx%d",
-            self._multiview,
-            self._camera_layout if self._multiview else "[unused]",
-            self._target_camera if not self._multiview else "[unused]",
-            self._img_height,
-            self._img_width,
+            d.multiview,
+            d.camera_layout if d.multiview else "[unused]",
+            d.target_camera if not d.multiview else "[unused]",
+            d.img_height,
+            d.img_width,
         )
 
     def predict(self, obs: dict) -> dict:
@@ -215,100 +165,18 @@ class PolicyServer:
         self._init_policy()
         t0 = time.monotonic()
 
-        state_raw = obs.get("state")
-
-        # _decode_obs populates obs["image"] with a composite PIL image (post
-        # crop/resize for single-view, post L-shape composition for multi-view)
-        # and obs["prompt"] with the wrapped string. Capture them after decode
-        # so debug artifacts match what the model actually saw.
-        obs = self._decode_obs(obs)
-        image_pil = obs.get("image")
-        wrapped_prompt: str = obs.get("prompt", "")
-
+        obs = self._obs_decoder.decode(obs)
         action = self._policy.predict_action(obs)
 
         latency_ms = (time.monotonic() - t0) * 1000
         self._request_count += 1
         self._total_latency += latency_ms
 
-        result = {
+        return {
             "action": action.tolist() if isinstance(action, np.ndarray) else list(action),
             "step": self._request_count,
             "latency_ms": round(latency_ms, 2),
         }
-
-        if self._debug:
-            self._ensure_debug_episode()  # lazy-open episode 0 on first predict without reset
-            self._debug_step += 1
-            self._save_debug_step(
-                image_pil=image_pil,
-                prompt=wrapped_prompt,
-                state_raw=state_raw,
-                result=result,
-            )
-
-        return result
-
-    def _ensure_debug_episode(self) -> None:
-        """Lazily open the current debug episode directory.
-
-        On first call (``_debug_episode is None``) this sets episode index to
-        0 and creates ``<debug_dir>/ep0000/``. Subsequent calls are no-ops —
-        incrementing is the responsibility of ``reset()``.
-        """
-        if not self._debug or self._debug_episode is not None:
-            return
-        self._debug_episode = 0
-        self._debug_step = 0
-        ep_dir = os.path.join(self._debug_dir, f"ep{self._debug_episode:04d}")
-        os.makedirs(ep_dir, exist_ok=True)
-        logger.info("Debug episode %d (lazy-start) → %s", self._debug_episode, ep_dir)
-
-    def _save_debug_step(
-        self,
-        image_pil,
-        prompt: str,
-        state_raw,
-        result: dict,
-    ) -> None:
-        """Save per-step debug data: processed image + metadata JSON.
-
-        Directory structure:
-          debug_dir/ep{N:04d}/step_{N:04d}/
-            image_processed.jpg  — the PIL image the pipeline actually saw
-                                   (post crop/resize or multi-view composition)
-            meta.json            — wrapped prompt, state, action, latency, step, episode
-        """
-        ep_dir = os.path.join(self._debug_dir, f"ep{self._debug_episode:04d}")
-        step_dir = os.path.join(ep_dir, f"step_{self._debug_step:04d}")
-        os.makedirs(step_dir, exist_ok=True)
-
-        # Save the post-preprocessing image that went into the pipeline.
-        if image_pil is not None:
-            try:
-                image_pil.save(os.path.join(step_dir, "image_processed.jpg"), format="JPEG", quality=95)
-            except Exception as exc:
-                logger.warning("Debug: failed to save processed image: %s", exc)
-
-        # Normalise state to a plain list for JSON serialisation
-        if isinstance(state_raw, np.ndarray):
-            state_list = state_raw.tolist()
-        elif state_raw is not None:
-            state_list = list(state_raw)
-        else:
-            state_list = None
-
-        meta = {
-            "episode": self._debug_episode,
-            "step": self._debug_step,
-            "server_request_count": result["step"],
-            "prompt": prompt,
-            "state": state_list,
-            "action": result["action"],
-            "latency_ms": result["latency_ms"],
-        }
-        with open(os.path.join(step_dir, "meta.json"), "w") as f:
-            json.dump(meta, f, indent=2)
 
     def reset(self):
         """Reset policy state."""
@@ -316,13 +184,6 @@ class PolicyServer:
             self._policy.reset()
         self._request_count = 0
         self._total_latency = 0.0
-        if self._debug:
-            # Lazy-init on first reset (-> episode 0); otherwise advance by 1.
-            self._debug_episode = 0 if self._debug_episode is None else self._debug_episode + 1
-            self._debug_step = 0
-            ep_dir = os.path.join(self._debug_dir, f"ep{self._debug_episode:04d}")
-            os.makedirs(ep_dir, exist_ok=True)
-            logger.info("Debug episode %d → %s", self._debug_episode, ep_dir)
 
     def shutdown(self):
         """Clean up async resources."""
@@ -352,204 +213,17 @@ class PolicyServer:
             "async_inference": async_info,
         }
 
-    def _decode_obs(self, obs: dict) -> dict:
-        """Validate and preprocess a client observation payload.
+    def run(self, host: str = "0.0.0.0", port: int = 8848):
+        """Start the WebSocket policy server.
 
-        Unified payload contract across single- and multi-view checkpoints:
-        client sends ``obs["images"]`` as a dict with fixed keys (``head_camera``
-        required, ``left_wrist_camera`` / ``right_wrist_camera`` optional and
-        may be ``None``). Server dispatches by ``cfg.dataloader.multiview``:
-
-        - ``multiview=False``: use ``head_camera`` only, ``crop_and_resize`` to
-          (W, H). Wrist fields are ignored.
-        - ``multiview=True``: black-fill missing/None wrists, then compose the
-          L-shape layout keyed by ``cfg.dataloader.camera_layout``.
-
-        On success the returned obs always has:
-            obs["image"]  -> PIL.Image sized (self._img_width, self._img_height)
-            obs["prompt"] -> str wrapped with the FastWAM deploy template
-
-        Raises :class:`ObsValidationError` on malformed payload.
-        """
-        from PIL import Image
-
-        from openwam.dataloader.transforms.multiview import (
-            assemble_multiview_layout,
-            crop_and_resize,
-            format_prompt_for_inference,
-        )
-
-        def _as_pil(x, *, ctx: str) -> Image.Image:
-            if isinstance(x, Image.Image):
-                return x if x.mode == "RGB" else x.convert("RGB")
-            if isinstance(x, (bytes, bytearray)):
-                try:
-                    return Image.open(io.BytesIO(bytes(x))).convert("RGB")
-                except Exception as e:
-                    raise ObsValidationError(f"{ctx}: failed to decode raw image bytes ({e})")
-            if isinstance(x, str):
-                try:
-                    raw = base64.b64decode(x)
-                    return Image.open(io.BytesIO(raw)).convert("RGB")
-                except Exception as e:
-                    raise ObsValidationError(f"{ctx}: failed to decode base64 JPEG ({e})")
-            raise ObsValidationError(
-                f"{ctx}: expected base64 JPEG string, raw bytes, or PIL.Image, got {type(x).__name__}"
-            )
-
-        def _cfg_select(path: str, default=None):
-            cur = self.cfg
-            for part in path.split("."):
-                if cur is None:
-                    return default
-                if isinstance(cur, dict):
-                    if part not in cur:
-                        return default
-                    cur = cur[part]
-                    continue
-                try:
-                    cur = getattr(cur, part)
-                except (AttributeError, KeyError):
-                    return default
-            return cur
-
-        def _parse_bool(value) -> bool:
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return value.strip().lower() in ("1", "true", "yes", "y", "on")
-            return bool(value)
-
-        def _requires_proprio() -> bool:
-            cfg_value = _cfg_select("model.architecture.use_proprioception", None)
-            if cfg_value is None:
-                cfg_value = _cfg_select("model.params.use_proprioception", None)
-            if cfg_value is not None:
-                return _parse_bool(cfg_value)
-
-            arch = getattr(self.engine, "architecture", None)
-            if arch is not None:
-                try:
-                    return bool(arch.uses_proprioception)
-                except Exception:
-                    return bool(getattr(arch, "uses_proprioception", False))
-            return False
-
-        def _expected_proprio_dim() -> Optional[int]:
-            for path in ("model.architecture.state_dim", "model.params.state_dim"):
-                value = _cfg_select(path, None)
-                if value not in (None, "", "none", "null"):
-                    dim = int(value)
-                    return dim if dim > 0 else None
-
-            arch = getattr(self.engine, "architecture", None)
-            value = getattr(arch, "proprio_dim", None) if arch is not None else None
-            if value not in (None, "", "none", "null"):
-                dim = int(value)
-                return dim if dim > 0 else None
-            return None
-
-        # --- Payload shape validation ---
-        if "images" not in obs or not isinstance(obs.get("images"), dict):
-            raise ObsValidationError(
-                "client must send 'images' dict with head_camera key "
-                "(left_wrist_camera / right_wrist_camera optional, may be null). "
-                "The legacy single-field 'image' payload is no longer supported."
-            )
-
-        imgs = obs["images"]
-        head_raw = imgs.get("head_camera")
-        if head_raw is None:
-            raise ObsValidationError(
-                "head_camera is required in obs['images'] (got None or missing). "
-                "The head camera feed is never optional on either single-view or multi-view servers."
-            )
-        head_pil = _as_pil(head_raw, ctx="images['head_camera']")
-
-        # --- Dispatch by server's configured view mode ---
-        if not self._multiview:
-            if imgs.get("left_wrist_camera") is not None or imgs.get("right_wrist_camera") is not None:
-                logger.info(
-                    "[obs] single-view mode (target_camera=%s); ignoring wrist camera inputs.",
-                    self._target_camera,
-                )
-            obs["image"] = crop_and_resize(head_pil, self._img_height, self._img_width)
-        else:
-            # Multi-view: assemble via camera_layout with black-fill for missing wrists.
-            if len(self._camera_layout) < 3:
-                raise ObsValidationError(
-                    f"multi-view server requires camera_layout with >= 3 entries; "
-                    f"got {self._camera_layout}. Check the checkpoint's config.yaml."
-                )
-
-            def _decode_or_black(raw, ctx: str) -> Image.Image:
-                if raw is None:
-                    return Image.new("RGB", (self._img_width, self._img_height), (0, 0, 0))
-                return _as_pil(raw, ctx=ctx)
-
-            left_pil = _decode_or_black(imgs.get("left_wrist_camera"), ctx="images['left_wrist_camera']")
-            right_pil = _decode_or_black(imgs.get("right_wrist_camera"), ctx="images['right_wrist_camera']")
-
-            # Map the fixed client-side keys to camera_layout positions:
-            #   head_camera        -> layout[0]  (top)
-            #   left_wrist_camera  -> layout[1]  (bottom-left)
-            #   right_wrist_camera -> layout[2]  (bottom-right)
-            frames = {
-                self._camera_layout[0]: head_pil,
-                self._camera_layout[1]: left_pil,
-                self._camera_layout[2]: right_pil,
-            }
-            obs["image"] = assemble_multiview_layout(
-                frames,
-                camera_layout=self._camera_layout,
-                out_h=self._img_height,
-                out_w=self._img_width,
-            )
-
-        # --- Prompt wrapping (must match training-time _get_prompt byte-for-byte) ---
-        obs["prompt"] = format_prompt_for_inference(obs.get("prompt", "") or "")
-
-        expected_state_dim = _expected_proprio_dim()
-        if "state" in obs and obs["state"] is not None:
-            try:
-                state = np.asarray(obs["state"], dtype=np.float32).reshape(-1)
-            except (TypeError, ValueError) as exc:
-                raise ObsValidationError(f"state must be a flat numeric list/array ({exc})") from exc
-            if expected_state_dim is not None and state.size != expected_state_dim:
-                raise ObsValidationError(
-                    f"state dimension mismatch: expected {expected_state_dim}, got {state.size}. "
-                    "Check the client action_type/state_dim against the checkpoint config."
-                )
-            obs["state"] = state
-        elif _requires_proprio():
-            expected = f" length {expected_state_dim}" if expected_state_dim is not None else ""
-            raise ObsValidationError(
-                f"this checkpoint requires obs['state']{expected}; "
-                "send raw proprio state for proprio-conditioned checkpoints."
-            )
-
-        return obs
-
-    def run(
-        self,
-        host: str = "0.0.0.0",
-        port: int = 8850,
-        http_port: Optional[int] = None,
-        protocol: str = "both",
-    ):
-        """Start the policy server.
-
-        ``protocol`` selects which listeners to start: ``http``, ``ws``, or
-        ``both`` (default). Requires ``websockets`` and ``aiohttp``. Both
-        transports accept messages up to ``MAX_MESSAGE_BYTES`` so multi-camera
-        payloads above the 1 MB library defaults don't get rejected.
+        One persistent listener accepts obs / reset / ping messages up to
+        ``MAX_MESSAGE_BYTES`` so multi-camera payloads above the 1 MB default
+        aren't rejected.
         """
         try:
-            import aiohttp  # noqa: F401
             import websockets
-            from aiohttp import web
         except ImportError:
-            raise ImportError("Server dependencies required. Install with:\n  pip install websockets aiohttp")
+            raise ImportError("Server dependency required. Install with:\n  pip install websockets")
 
         self._init_policy()
 
@@ -560,21 +234,23 @@ class PolicyServer:
                 async for message in websocket:
                     try:
                         data = json.loads(message)
-                        msg_type = data.get("type", "obs")
+                        msg_type = data.get("type", wsp.OBS)
 
-                        if msg_type == "reset":
+                        if msg_type == wsp.RESET:
                             self.reset()
-                            await websocket.send(json.dumps({"type": "reset_ack"}))
-                        elif msg_type == "obs":
+                            await websocket.send(json.dumps({"type": wsp.RESET_ACK}))
+                        elif msg_type == wsp.OBS:
                             result = self.predict(data)
-                            result["type"] = "action"
+                            result["type"] = wsp.ACTION
                             await websocket.send(json.dumps(result))
+                        elif msg_type == wsp.PING:
+                            await websocket.send(json.dumps({"type": wsp.PONG}))
                         else:
                             await websocket.send(
                                 json.dumps(
                                     {
-                                        "type": "error",
-                                        "code": "unknown_message_type",
+                                        "type": wsp.ERROR,
+                                        "code": wsp.ERR_UNKNOWN_TYPE,
                                         "message": f"Unknown message type: {msg_type}",
                                     }
                                 )
@@ -586,8 +262,8 @@ class PolicyServer:
                         await websocket.send(
                             json.dumps(
                                 {
-                                    "type": "error",
-                                    "code": "obs_validation_error",
+                                    "type": wsp.ERROR,
+                                    "code": wsp.ERR_OBS_VALIDATION,
                                     "message": str(e),
                                 }
                             )
@@ -597,8 +273,8 @@ class PolicyServer:
                         await websocket.send(
                             json.dumps(
                                 {
-                                    "type": "error",
-                                    "code": "internal_error",
+                                    "type": wsp.ERROR,
+                                    "code": wsp.ERR_INTERNAL,
                                     "message": str(e),
                                 }
                             )
@@ -606,102 +282,26 @@ class PolicyServer:
             except websockets.exceptions.ConnectionClosed:
                 logger.info("Client disconnected")
 
-        async def http_predict(request):
-            """HTTP POST /predict endpoint."""
-            try:
-                data = await request.json()
-                result = self.predict(data)
-                return web.json_response(result)
-            except ObsValidationError as e:
-                logger.info("[obs] validation failed: %s", e)
-                return web.json_response(
-                    {"type": "error", "code": "obs_validation_error", "message": str(e)},
-                    status=400,
-                )
-            except Exception as e:
-                logger.exception("/predict failed")
-                return web.json_response(
-                    {"type": "error", "code": "internal_error", "message": str(e)},
-                    status=500,
-                )
+        async def serve():
+            async with websockets.serve(ws_handler, host, port, max_size=MAX_MESSAGE_BYTES):
+                logger.info("WebSocket server started on ws://%s:%d", host, port)
+                await asyncio.Future()  # run forever
 
-        async def http_reset(request):
-            """HTTP POST /reset endpoint."""
-            self.reset()
-            return web.json_response({"status": "ok"})
-
-        async def http_health(request):
-            """HTTP GET /health endpoint."""
-            return web.json_response({"status": "healthy"})
-
-        async def http_info(request):
-            """HTTP GET /info endpoint."""
-            return web.json_response(self.get_info())
-
-        serve_http = protocol in ("http", "both")
-        serve_ws = protocol in ("ws", "both")
-        if not serve_http and not serve_ws:
-            raise ValueError(f"Unknown protocol '{protocol}'. Choose from: http, ws, both")
-        resolved_http_port = 8848 if http_port is None else http_port
-
-        async def start_servers():
-            runner = None
-            if serve_http:
-                app = web.Application(client_max_size=MAX_MESSAGE_BYTES)
-                app.router.add_post("/predict", http_predict)
-                app.router.add_post("/reset", http_reset)
-                app.router.add_get("/health", http_health)
-                app.router.add_get("/info", http_info)
-                runner = web.AppRunner(app)
-                await runner.setup()
-                site = web.TCPSite(runner, host, resolved_http_port)
-                await site.start()
-                logger.info("HTTP server started on %s:%d", host, resolved_http_port)
-            try:
-                if serve_ws:
-                    async with websockets.serve(ws_handler, host, port, max_size=MAX_MESSAGE_BYTES):
-                        logger.info("WebSocket server started on ws://%s:%d", host, port)
-                        await asyncio.Future()  # run forever
-                else:
-                    await asyncio.Future()  # http-only: keep the HTTP runner alive
-            finally:
-                if runner is not None:
-                    await runner.cleanup()
-
-        endpoints = []
-        if serve_ws:
-            endpoints.append(f"ws://{host}:{port}")
-        if serve_http:
-            endpoints.append(f"http://{host}:{resolved_http_port}")
-        logger.info("Starting PolicyServer (protocol=%s): %s", protocol, ", ".join(endpoints))
-        asyncio.run(start_servers())
+        logger.info("Starting PolicyServer: ws://%s:%d", host, port)
+        asyncio.run(serve())
 
 
-def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda"):
-    """Build a PolicyServer from a self-contained checkpoint directory.
+def merge_deploy_cfg(training_cfg, deploy_cfg):
+    """Fill inference frame/resolution fallbacks from the training dataloader,
+    then merge deploy overrides on top of the training config (deploy wins).
 
-    Aligns with ``scripts/deploy.py`` — uses ``load_from_checkpoint_dir`` so
-    the CLI's ``--ckpt-dir`` means the same thing in both entrypoints: the
-    directory that contains ``config.yaml`` + ``checkpoint_step_*.safetensors``.
-
-    The caller-provided ``cfg`` (deploy-side overrides like host/port and
-    inference settings) is merged on top of the training config restored from
-    the checkpoint, so deploy-time fields win on overlap.
+    ``inference.num_frames`` stays the raw action/state window (actions returned
+    = num_frames - 1); ``inference.video_num_frames`` is the Wan video length
+    after ``dataloader.video_stride`` sub-sampling.
     """
     from omegaconf import OmegaConf
 
-    from openwam.deploy import JointInferenceEngine
-    from openwam.deploy.model_loader import load_from_checkpoint_dir
-
-    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device)
-
-    # Mirror scripts/deploy.py: let dataloader provide inference frame/resolution
-    # fallbacks before merging deploy overrides on top, so server.predict() goes
-    # through architecture.generate() with the resolution and video length the
-    # checkpoint was trained at. ``num_frames`` is the raw action/state window;
-    # ``video_num_frames`` is the Wan video length after video_stride.
-    deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
-    _normalize_compile_mode_in_cfg(deploy_cfg)
+    deploy_cfg = deploy_cfg if deploy_cfg is not None else OmegaConf.create({})
     dl = OmegaConf.select(training_cfg, "dataloader", default=None)
     if dl is not None:
         inf = OmegaConf.select(deploy_cfg, "inference", default=OmegaConf.create({}))
@@ -714,8 +314,31 @@ def build_server_from_config(cfg, ckpt_dir: str, device: str = "cuda"):
         if OmegaConf.select(inf, "width", default=None) is None:
             OmegaConf.update(inf, "width", OmegaConf.select(dl, "width", default=320), merge=False)
         OmegaConf.update(deploy_cfg, "inference", inf, merge=True)
+    return OmegaConf.merge(training_cfg, deploy_cfg)
 
-    merged = OmegaConf.merge(training_cfg, deploy_cfg)
+
+def build_server_from_config(
+    cfg,
+    ckpt_dir: str,
+    device: str = "cuda",
+    ckpt_name: Optional[str] = None,
+):
+    """Build a PolicyServer from a self-contained checkpoint directory.
+
+    Single construction path shared by both entrypoints (``scripts/deploy.py``
+    and ``openwam-serve``): load the checkpoint (``config.yaml`` +
+    ``checkpoint_step_*.safetensors``), merge deploy-side overrides on top via
+    :func:`merge_deploy_cfg`, build the engine, and wrap it in a PolicyServer.
+    """
+    from omegaconf import OmegaConf
+
+    from openwam.deploy import JointInferenceEngine
+    from openwam.deploy.model_loader import load_from_checkpoint_dir
+
+    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name)
+    deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
+    _normalize_compile_mode_in_cfg(deploy_cfg)
+    merged = merge_deploy_cfg(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=merged, architecture=architecture)
     return PolicyServer(engine=engine, cfg=merged)
 
@@ -736,29 +359,14 @@ def _build_argparser() -> argparse.ArgumentParser:
         "Same meaning as scripts/deploy.py --ckpt-dir.",
     )
     parser.add_argument("--device", type=str, default="cuda", help="Inference device.")
-    parser.add_argument("--host", type=str, default=None, help="WebSocket/HTTP bind host override.")
-    parser.add_argument("--ws-port", type=int, default=None, help="WebSocket port override.")
-    parser.add_argument("--http-port", type=int, default=None, help="HTTP port override.")
-    parser.add_argument(
-        "--protocol",
-        choices=("http", "ws", "both"),
-        default=None,
-        help="Which listener(s) to start: http | ws | both (default: both).",
-    )
+    parser.add_argument("--host", type=str, default=None, help="WebSocket bind host override.")
+    parser.add_argument("--port", type=int, default=None, help="WebSocket port override.")
     parser.add_argument(
         "--compile-mode",
         type=_normalize_compile_mode_arg,
         choices=_compile_mode_choices(),
         default=None,
         help="Override compile strategy: auto or none.",
-    )
-    # Mock mode
-    parser.add_argument("--mock", action="store_true", help="Run in mock mode (random actions, no weights required).")
-    parser.add_argument(
-        "--mock-action-dim", type=int, default=20, help="Action dimension for mock engine (default: 20)."
-    )
-    parser.add_argument(
-        "--mock-latency-ms", type=float, default=2000.0, help="Simulated inference latency in ms (default: 2000)."
     )
     parser.add_argument(
         "--async-mode",
@@ -779,13 +387,6 @@ def _build_argparser() -> argparse.ArgumentParser:
         default=None,
         dest="async_inference_delay_steps",
         help="Override optimization.async_inference.vanilla.inference_delay_steps.",
-    )
-    # Debug mode
-    parser.add_argument(
-        "--debug", action="store_true", help="Enable debug mode: save received images + actions + metadata per step."
-    )
-    parser.add_argument(
-        "--debug-dir", type=str, default="./server_debug", help="Directory for debug output (default: ./server_debug)."
     )
     parser.add_argument(
         "overrides",
@@ -809,42 +410,22 @@ def main(argv: Optional[list[str]] = None):
     parser = _build_argparser()
     args = parser.parse_args(argv)
 
-    if not args.mock and args.ckpt_dir is None:
-        parser.error("--ckpt-dir is required unless --mock is set")
+    if args.ckpt_dir is None:
+        parser.error("--ckpt-dir is required")
 
     project_root = Path(__file__).resolve().parent.parent.parent
 
-    if args.mock:
-        from openwam.deploy.mock_engine import MockInferenceEngine
-
-        cfg = OmegaConf.create({})
-        if args.config:
-            cfg = OmegaConf.merge(OmegaConf.load(args.config), cfg)
-        if args.overrides:
-            cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
-        _apply_compile_mode_override(cfg, args.compile_mode)
-        try:
-            cfg = _apply_async_cli_overrides(cfg, args)
-        except ValueError as exc:
-            parser.error(str(exc))
-        engine = MockInferenceEngine(
-            cfg=cfg,
-            action_dim=args.mock_action_dim,
-            latency_ms=args.mock_latency_ms,
-        )
-    else:
-        config_path = Path(args.config) if args.config else project_root / "configs" / "deploy.yaml"
-        cfg = OmegaConf.load(config_path)
-        if "defaults" in cfg:
-            OmegaConf.update(cfg, "defaults", OmegaConf.create([]), merge=False)
-        if args.overrides:
-            cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
-        _apply_compile_mode_override(cfg, args.compile_mode)
-        try:
-            cfg = _apply_async_cli_overrides(cfg, args)
-        except ValueError as exc:
-            parser.error(str(exc))
-        engine = None  # built inside build_server_from_config
+    config_path = Path(args.config) if args.config else project_root / "configs" / "deploy.yaml"
+    cfg = OmegaConf.load(config_path)
+    if "defaults" in cfg:
+        OmegaConf.update(cfg, "defaults", OmegaConf.create([]), merge=False)
+    if args.overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+    _apply_compile_mode_override(cfg, args.compile_mode)
+    try:
+        cfg = _apply_async_cli_overrides(cfg, args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     server_cfg = getattr(cfg, "server", None)
     if server_cfg is None:
@@ -852,28 +433,13 @@ def main(argv: Optional[list[str]] = None):
         server_cfg = getattr(deploy_cfg, "server", None) if deploy_cfg is not None else None
 
     host = args.host or getattr(server_cfg, "host", "0.0.0.0")
-    ws_port = args.ws_port or getattr(server_cfg, "ws_port", 8850)
-    http_port = args.http_port or getattr(server_cfg, "http_port", 8848)
-    protocol = args.protocol or getattr(server_cfg, "protocol", "both")
-    if args.mock:
-        server = PolicyServer(
-            engine=engine,
-            cfg=cfg,
-            debug=args.debug,
-            debug_dir=args.debug_dir,
-        )
-    else:
-        server = build_server_from_config(
-            cfg=cfg,
-            ckpt_dir=args.ckpt_dir,
-            device=args.device,
-        )
-        server._debug = args.debug
-        server._debug_dir = args.debug_dir
-        if args.debug:
-            os.makedirs(args.debug_dir, exist_ok=True)
-            logger.info("Debug mode enabled — saving to %s", args.debug_dir)
-    server.run(host=host, port=ws_port, http_port=http_port, protocol=protocol)
+    port = args.port or getattr(server_cfg, "port", 8848)
+    server = build_server_from_config(
+        cfg=cfg,
+        ckpt_dir=args.ckpt_dir,
+        device=args.device,
+    )
+    server.run(host=host, port=port)
 
 
 if __name__ == "__main__":

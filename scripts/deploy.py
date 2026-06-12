@@ -2,9 +2,8 @@
 
 Usage:
     python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir
-    python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir --device cuda:1 --ws-port 9000
+    python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir --device cuda:1 --port 9000
     python scripts/deploy.py --ckpt-dir /path/to/checkpoint_dir --denoise-steps 10 --schedule-type sync
-    python scripts/deploy.py --mock --mock-action-dim 20   # no checkpoint or GPU needed
 
 Base configuration is read from configs/deploy.yaml.  CLI flags take precedence
 over values in the yaml for the fields they cover.
@@ -50,22 +49,6 @@ def _normalize_compile_mode_arg(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
-def _infer_video_num_frames(dl) -> int:
-    """Return the video frame count seen by Wan after dataloader sub-sampling.
-
-    ``dataloader.num_frames`` is the raw state/action window length. RoboTwin
-    keeps actions at that raw rate but sub-samples video by ``video_stride``
-    before VAE encoding, so deploy must pass the sampled video length to Wan.
-    """
-    from omegaconf import OmegaConf
-
-    raw_frames = int(OmegaConf.select(dl, "num_frames", default=33))
-    video_stride = int(OmegaConf.select(dl, "video_stride", default=1) or 1)
-    if video_stride <= 0:
-        video_stride = 1
-    return (raw_frames - 1) // video_stride + 1
-
-
 def _load_deploy_config():
     """Load configs/deploy.yaml as a base deploy config."""
     from omegaconf import OmegaConf
@@ -93,12 +76,8 @@ def _apply_cli_overrides(deploy_cfg, args):
         OmegaConf.update(deploy_cfg, "device", args.device, merge=False)
     if args.host is not None:
         OmegaConf.update(deploy_cfg, "server.host", args.host, merge=False)
-    if args.ws_port is not None:
-        OmegaConf.update(deploy_cfg, "server.ws_port", args.ws_port, merge=False)
-    if args.http_port is not None:
-        OmegaConf.update(deploy_cfg, "server.http_port", args.http_port, merge=False)
-    if args.protocol is not None:
-        OmegaConf.update(deploy_cfg, "server.protocol", args.protocol, merge=False)
+    if args.port is not None:
+        OmegaConf.update(deploy_cfg, "server.port", args.port, merge=False)
 
     # Inference
     if args.denoise_steps is not None:
@@ -114,34 +93,6 @@ def _apply_cli_overrides(deploy_cfg, args):
         OmegaConf.update(deploy_cfg, "optimization.compile.mode", _normalize_compile_mode(compile_mode), merge=False)
 
     return deploy_cfg
-
-
-def _merge_with_training_cfg(training_cfg, deploy_cfg):
-    """Merge deploy config on top of training config (deploy wins on overlap).
-
-    Not pure: ``OmegaConf.select(deploy_cfg, "inference")`` returns a live
-    view, so the ``OmegaConf.update`` calls below also mutate the caller's
-    ``deploy_cfg``.
-    """
-    from omegaconf import OmegaConf
-
-    # Let dataloader params provide fallback for inference frame/resolution dims.
-    # ``inference.num_frames`` remains the raw action/state horizon (actions
-    # returned = num_frames - 1). ``inference.video_num_frames`` is the Wan
-    # video length after dataloader.video_stride sub-sampling.
-    dl = OmegaConf.select(training_cfg, "dataloader", default=None)
-    if dl is not None:
-        inf = OmegaConf.select(deploy_cfg, "inference", default=OmegaConf.create({}))
-        if OmegaConf.select(inf, "num_frames", default=None) is None:
-            OmegaConf.update(inf, "num_frames", OmegaConf.select(dl, "num_frames", default=33), merge=False)
-        if OmegaConf.select(inf, "video_num_frames", default=None) is None:
-            OmegaConf.update(inf, "video_num_frames", _infer_video_num_frames(dl), merge=False)
-        if OmegaConf.select(inf, "height", default=None) is None:
-            OmegaConf.update(inf, "height", OmegaConf.select(dl, "height", default=384), merge=False)
-        if OmegaConf.select(inf, "width", default=None) is None:
-            OmegaConf.update(inf, "width", OmegaConf.select(dl, "width", default=320), merge=False)
-
-    return OmegaConf.merge(training_cfg, deploy_cfg)
 
 
 def _log_attention_backends(logger):
@@ -197,14 +148,7 @@ def main():
     parser.add_argument("--ckpt-name", type=str, default=None, help="Specific checkpoint filename (default: latest)")
     parser.add_argument("--device", type=str, default=None, help="Inference device (default: from deployment.yaml)")
     parser.add_argument("--host", type=str, default=None, help="Bind host (default: from deployment.yaml)")
-    parser.add_argument("--ws-port", type=int, default=None, dest="ws_port", help="WebSocket port")
-    parser.add_argument("--http-port", type=int, default=None, dest="http_port", help="HTTP port")
-    parser.add_argument(
-        "--protocol",
-        choices=("http", "ws", "both"),
-        default=None,
-        help="Which listener(s) to start: http | ws | both (default: both)",
-    )
+    parser.add_argument("--port", type=int, default=None, dest="port", help="WebSocket port")
     # Inference overrides
     parser.add_argument(
         "--denoise-steps", type=int, default=None, dest="denoise_steps", help="Override denoising steps"
@@ -238,24 +182,6 @@ def main():
         dest="async_inference_delay_steps",
         help="Override optimization.async_inference.vanilla.inference_delay_steps",
     )
-    # Mock mode: no weights or GPU needed
-    parser.add_argument(
-        "--mock", action="store_true", help="Run in mock mode (random actions, no model weights required)"
-    )
-    parser.add_argument(
-        "--mock-action-dim", type=int, default=20, help="Action dimension for mock engine (default: 20)"
-    )
-    parser.add_argument(
-        "--mock-latency-ms",
-        type=float,
-        default=2000.0,
-        help="Simulated inference latency in ms for mock engine (default: 2000)",
-    )
-    # Debug mode
-    parser.add_argument("--debug", action="store_true", help="Save received images + actions + metadata per step")
-    parser.add_argument(
-        "--debug-dir", type=str, default="./server_debug", help="Directory for debug output (default: ./server_debug)"
-    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -275,7 +201,7 @@ def main():
         parser.error(str(exc))
 
     # Resolve checkpoint dir: CLI --ckpt-dir > checkpoint_path in yaml.
-    if not args.mock and args.ckpt_dir is None:
+    if args.ckpt_dir is None:
         yaml_ckpt = OmegaConf.select(deploy_cfg, "checkpoint_path", default=None)
         if yaml_ckpt:
             args.ckpt_dir = str(yaml_ckpt)
@@ -287,53 +213,24 @@ def main():
     server_cfg = OmegaConf.select(deploy_cfg, "server", default=OmegaConf.create({}))
     device = str(OmegaConf.select(deploy_cfg, "device", default="cuda"))
     host = str(OmegaConf.select(server_cfg, "host", default="0.0.0.0"))
-    ws_port = int(OmegaConf.select(server_cfg, "ws_port", default=8850))
-    http_port = int(OmegaConf.select(server_cfg, "http_port", default=8848))
-    protocol = str(OmegaConf.select(server_cfg, "protocol", default="both"))
+    port = int(OmegaConf.select(server_cfg, "port", default=8848))
 
-    if args.mock:
-        # Mock mode: skip model loading entirely
-        from openwam.deploy.mock_engine import MockInferenceEngine
+    # Build the server: load checkpoint → merge deploy cfg → engine → PolicyServer.
+    from openwam.deploy.policy_server import build_server_from_config
 
-        cfg = OmegaConf.merge(OmegaConf.create({}), deploy_cfg)
-        engine = MockInferenceEngine(
-            cfg=cfg,
-            action_dim=args.mock_action_dim,
-            latency_ms=args.mock_latency_ms,
-        )
-        logger.info(
-            "Mock engine ready (action_dim=%d, latency=%.0fms)",
-            args.mock_action_dim,
-            args.mock_latency_ms,
-        )
-    else:
-        # Real mode: load weights from checkpoint directory
-        from openwam.deploy.model_loader import load_from_checkpoint_dir
-
-        training_cfg, architecture = load_from_checkpoint_dir(
-            ckpt_dir=args.ckpt_dir,
-            device=device,
-            ckpt_name=args.ckpt_name,
-        )
-
-        # Merge: training config + deploy config (deploy wins on overlap)
-        cfg = _merge_with_training_cfg(training_cfg, deploy_cfg)
-
-        from openwam.deploy.joint_engine import JointInferenceEngine
-
-        engine = JointInferenceEngine(cfg=cfg, architecture=architecture)
-        logger.info(
-            "Inference engine ready — steps=%d schedule=%s",
-            OmegaConf.select(cfg, "inference.denoise_steps", default=20),
-            OmegaConf.select(cfg, "inference.schedule_type", default="sync"),
-        )
-
-    # Start server
-    from openwam.deploy.policy_server import PolicyServer
-
-    server = PolicyServer(engine=engine, cfg=cfg, debug=args.debug, debug_dir=args.debug_dir)
-    logger.info("Starting server (protocol=%s): ws://%s:%d  http://%s:%d", protocol, host, ws_port, host, http_port)
-    server.run(host=host, port=ws_port, http_port=http_port, protocol=protocol)
+    server = build_server_from_config(
+        cfg=deploy_cfg,
+        ckpt_dir=args.ckpt_dir,
+        device=device,
+        ckpt_name=args.ckpt_name,
+    )
+    logger.info(
+        "Inference engine ready — steps=%d schedule=%s",
+        OmegaConf.select(server.cfg, "inference.denoise_steps", default=20),
+        OmegaConf.select(server.cfg, "inference.schedule_type", default="sync"),
+    )
+    logger.info("Starting server: ws://%s:%d", host, port)
+    server.run(host=host, port=port)
 
 
 if __name__ == "__main__":

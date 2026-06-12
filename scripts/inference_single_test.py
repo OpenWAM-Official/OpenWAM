@@ -1,4 +1,4 @@
-"""Single inference test for the OpenWAM policy server.
+"""Single inference test for the OpenWAM policy server (WebSocket).
 
 Client contract (unified, regardless of server multiview setting):
     payload["images"] = {
@@ -38,13 +38,8 @@ import sys
 # Canonical client helpers live under benchmarks.utils — add project root so import works.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from benchmarks.utils.client import (  # noqa: E402
-    build_payload,
-    encode_path_b64,
-    get,
-    post,
-    reset,
-)
+from benchmarks.utils.client import build_payload, encode_path_b64  # noqa: E402
+from benchmarks.utils.transport import WSPolicyClient  # noqa: E402
 
 
 def _make_random_image_b64(height: int = 480, width: int = 640) -> str:
@@ -81,8 +76,8 @@ def _resolve_state(args) -> list[float] | None:
 
 
 def _build_argparser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Call the OpenWAM HTTP policy server.")
-    parser.add_argument("--server", type=str, default="http://127.0.0.1:8848")
+    parser = argparse.ArgumentParser(description="Call the OpenWAM WebSocket policy server.")
+    parser.add_argument("--server", type=str, default="ws://127.0.0.1:8848")
     parser.add_argument(
         "--head-camera", type=str, default=None, help="Path to head camera JPEG/PNG (required in run mode)."
     )
@@ -94,40 +89,40 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--state", type=float, nargs="*", default=None, help="Raw proprio state values to send.")
     parser.add_argument("--state-file", type=str, default=None, help="JSON list, or object with a 'state' list.")
     parser.add_argument("--state-dim", type=int, default=20, help="Dummy zero-state dimension when --state is omitted.")
-    parser.add_argument("--no-state", action="store_true", help="Do not include state in the /predict payload.")
+    parser.add_argument("--no-state", action="store_true", help="Do not include state in the obs payload.")
     parser.add_argument("--test", action="store_true", help="Smoke test with 3 random images and dummy prompt.")
     return parser
 
 
 def run_smoke_test(server: str, state: list[float] | None):
-    """Run a full smoke test: health check, predict, reset."""
+    """Run a full smoke test: ping, predict, reset."""
     print(f"Server: {server}")
     print("-" * 60)
 
-    # 1. Health check
-    print("[1/3] Health check ...", end=" ")
-    health = get(server, "/health")
-    print(f"OK — {health}")
+    with WSPolicyClient(server) as client:
+        # 1. Liveness
+        print("[1/3] Ping ...", end=" ")
+        print(f"OK — {client.ping()}")
 
-    # 2. Predict with 3 random images
-    print("[2/3] Predict (3 random images, dummy prompt) ...", end=" ", flush=True)
-    payload = build_payload(
-        head=_make_random_image_b64(480, 640),
-        left_wrist=_make_random_image_b64(480, 640),
-        right_wrist=_make_random_image_b64(480, 640),
-        prompt="robot picks up the red bottle from the table",
-        state=state,
-    )
-    result = post(server, "/predict", payload)
-    action = result.get("action", [])
-    latency = result.get("latency_ms", "?")
-    print(f"OK — action dim={len(action)}, latency={latency}ms")
-    print(f"       action[:5] = {[round(a, 4) for a in action[:5]]}")
+        # 2. Predict with 3 random images
+        print("[2/3] Predict (3 random images, dummy prompt) ...", end=" ", flush=True)
+        payload = build_payload(
+            head=_make_random_image_b64(480, 640),
+            left_wrist=_make_random_image_b64(480, 640),
+            right_wrist=_make_random_image_b64(480, 640),
+            prompt="robot picks up the red bottle from the table",
+            state=state,
+        )
+        result = client.predict(payload)
+        action = result.get("action", [])
+        latency = result.get("latency_ms", "?")
+        print(f"OK — action dim={len(action)}, latency={latency}ms")
+        print(f"       action[:5] = {[round(a, 4) for a in action[:5]]}")
 
-    # 3. Reset
-    print("[3/3] Reset ...", end=" ")
-    ack = reset(server)
-    print(f"OK — {ack}")
+        # 3. Reset
+        print("[3/3] Reset ...", end=" ")
+        ack = client.reset()
+        print(f"OK — {ack}")
 
     print("-" * 60)
     print("Smoke test passed.")
@@ -152,7 +147,8 @@ def main() -> None:
         prompt=args.prompt,
         state=state,
     )
-    result = post(args.server, "/predict", payload)
+    with WSPolicyClient(args.server) as client:
+        result = client.predict(payload)
     print(json.dumps(result, indent=2))
 
 

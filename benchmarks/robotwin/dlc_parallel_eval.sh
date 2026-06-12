@@ -29,8 +29,7 @@
 #   NUM_WORKERS          local servers/clients per node; default: GPU count
 #   GPU_START            first local GPU index; default: 0
 #   SIM_GPU_STRIDE       stride between worker GPUs; default: 1
-#   WS_PORT_BASE         local WebSocket port base; default: 8800
-#   HTTP_PORT_BASE       local HTTP port base; default: 8700
+#   PORT_BASE            local WebSocket port base; default: 8848
 #   SERVER_PYTHON        Python used to launch local policy servers; default: python
 #   SERVER_SCRIPT        Python script used to launch local policy servers; default: <repo>/scripts/deploy.py
 #   SERVER_BIND_HOST     server bind host; default: 127.0.0.1
@@ -77,8 +76,7 @@ Tasks (positional): task names, "all", or a task-list file (one per line).
 Options:
   -w, --num-workers    local servers/clients per node (default: GPU count)
       --gpu-start      first local GPU index (default: 0)
-      --http-port      local HTTP port base (default: 8700)
-      --ws-port        local WebSocket port base (default: 8800)
+      --port           local WebSocket port base (default: 8848)
       --server-python  Python used to launch local policy servers (default: python)
       --server-script  Python script used to launch local policy servers
       --bind-host      OpenWAM server bind host (default: 127.0.0.1)
@@ -92,7 +90,6 @@ Options:
       --async-inference-delay-steps N
                        async inference delay passed to scripts/deploy.py
       --shift          flow-matching shift passed to scripts/deploy.py
-      --mock           run mock OpenWAM servers
       --dry-run        skip servers/eval and only test shared-queue assignment
       --fresh          remove this run's stale queue/sentinel/log metadata first
   -h, --help
@@ -189,28 +186,21 @@ kill_tree() {
     kill -"${sig}" "${pid}" 2>/dev/null || true
 }
 
+# Readiness probe: the server binds its WebSocket port only after the model is
+# loaded (deploy.py builds the engine, then run() opens the listener), so a
+# successful TCP connect means it is ready. Bash /dev/tcp keeps each poll cheap
+# — no per-attempt Python interpreter startup.
 health_check() {
-    local url="$1"
-    python -c '
-import json
-import sys
-import urllib.request
-
-try:
-    with urllib.request.urlopen(sys.argv[1], timeout=2) as r:
-        data = json.loads(r.read().decode("utf-8"))
-    raise SystemExit(0 if data.get("status") == "healthy" else 1)
-except Exception:
-    raise SystemExit(1)
-' "${url}"
+    local host="$1" port="$2"
+    timeout 2 bash -c ">/dev/tcp/${host}/${port}" 2>/dev/null
 }
 
 wait_for_server() {
-    local url="$1" log_file="$2" timeout_sec="$3"
+    local host="$1" port="$2" log_file="$3" timeout_sec="$4"
     local deadline=$((SECONDS + timeout_sec))
-    until health_check "${url}"; do
+    until health_check "${host}" "${port}"; do
         if (( SECONDS >= deadline )); then
-            echo "[ERROR] Server did not become healthy: ${url}" >&2
+            echo "[ERROR] Server did not become ready: ws://${host}:${port}" >&2
             echo "[ERROR] See ${log_file}" >&2
             return 1
         fi
@@ -222,8 +212,7 @@ TASK_CONFIG="" POLICY_NAME="" CKPT_DIR=""
 NUM_WORKERS="${NUM_WORKERS:-$(detect_gpu_count)}"
 GPU_START="${GPU_START:-0}"
 SIM_GPU_STRIDE="${SIM_GPU_STRIDE:-1}"
-WS_PORT_BASE="${WS_PORT_BASE:-8800}"
-HTTP_PORT_BASE="${HTTP_PORT_BASE:-8700}"
+PORT_BASE="${PORT_BASE:-8848}"
 SERVER_PYTHON="${SERVER_PYTHON:-python}"
 SERVER_SCRIPT="${SERVER_SCRIPT:-${REPO_ROOT}/scripts/deploy.py}"
 SERVER_BIND_HOST="${SERVER_BIND_HOST:-127.0.0.1}"
@@ -244,8 +233,7 @@ while (( $# > 0 )); do
         -d|--ckpt-dir)      CKPT_DIR="$2"; shift 2 ;;
         -w|--num-workers)   NUM_WORKERS="$2"; shift 2 ;;
         --gpu-start)        GPU_START="$2"; shift 2 ;;
-        --http-port)        HTTP_PORT_BASE="$2"; shift 2 ;;
-        --ws-port)          WS_PORT_BASE="$2"; shift 2 ;;
+        --port)             PORT_BASE="$2"; shift 2 ;;
         --server-python)    SERVER_PYTHON="$2"; shift 2 ;;
         --server-script)    SERVER_SCRIPT="$2"; shift 2 ;;
         --bind-host)        SERVER_BIND_HOST="$2"; shift 2 ;;
@@ -257,7 +245,6 @@ while (( $# > 0 )); do
         --async-execution-horizon) DEPLOY_ARGS+=(--async-execution-horizon "$2"); shift 2 ;;
         --async-inference-delay-steps) DEPLOY_ARGS+=(--async-inference-delay-steps "$2"); shift 2 ;;
         --shift)            DEPLOY_ARGS+=(--shift "$2"); shift 2 ;;
-        --mock)             DEPLOY_ARGS+=(--mock); shift ;;
         --dry-run|--dryrun) DRY_RUN=1; shift ;;
         --fresh)            FRESH_RUN=1; shift ;;
         -h|--help)          usage; exit 0 ;;
@@ -278,7 +265,7 @@ if (( DRY_RUN )) && ! [[ "${DRY_RUN_BARRIER_TIMEOUT_SEC}" =~ ^[0-9]+$ ]]; then
     echo "[ERROR] DRY_RUN_BARRIER_TIMEOUT_SEC must be a non-negative integer: ${DRY_RUN_BARRIER_TIMEOUT_SEC}" >&2
     exit 1
 fi
-if [[ ! " ${DEPLOY_ARGS[*]} " =~ " --mock " ]] && (( ! DRY_RUN )) && [[ ! -d "${CKPT_DIR}" ]]; then
+if (( ! DRY_RUN )) && [[ ! -d "${CKPT_DIR}" ]]; then
     echo "[ERROR] ckpt_dir not found: ${CKPT_DIR}" >&2
     exit 1
 fi
@@ -466,11 +453,10 @@ else
     echo "[node${NODE_RANK}] starting ${NUM_WORKERS} local policy servers"
     for ((i = 0; i < NUM_WORKERS; i++)); do
         gpu=$((GPU_START + i * SIM_GPU_STRIDE))
-        ws_port=$((WS_PORT_BASE + i))
-        http_port=$((HTTP_PORT_BASE + i))
+        port=$((PORT_BASE + i))
         server_log="${SERVER_LOG_DIR}/server_worker${i}_gpu${gpu}.log"
 
-        echo "[node${NODE_RANK}] server worker${i}: gpu=${gpu} ws=${ws_port} http=${http_port}"
+        echo "[node${NODE_RANK}] server worker${i}: gpu=${gpu} ws=${port}"
         # Pin each worker to exactly one physical GPU via CUDA_VISIBLE_DEVICES.
         # `--device cuda:0` then refers to that single visible device. Without
         # this, `torch.cuda.current_device()` defaults to 0 in every worker and
@@ -482,8 +468,7 @@ else
             --ckpt-dir "${CKPT_DIR}" \
             --device "cuda:0" \
             --host "${SERVER_BIND_HOST}" \
-            --ws-port "${ws_port}" \
-            --http-port "${http_port}" \
+            --port "${port}" \
             "${DEPLOY_ARGS[@]}" \
             > "${server_log}" 2>&1 &
         server_pids+=($!)
@@ -491,9 +476,9 @@ else
 
     for ((i = 0; i < NUM_WORKERS; i++)); do
         gpu=$((GPU_START + i * SIM_GPU_STRIDE))
-        http_port=$((HTTP_PORT_BASE + i))
+        port=$((PORT_BASE + i))
         server_log="${SERVER_LOG_DIR}/server_worker${i}_gpu${gpu}.log"
-        wait_for_server "http://${SERVER_CLIENT_HOST}:${http_port}/health" \
+        wait_for_server "${SERVER_CLIENT_HOST}" "${port}" \
             "${server_log}" "${SERVER_READY_TIMEOUT_SEC}"
     done
     echo "[node${NODE_RANK}] all local servers are healthy"
@@ -552,7 +537,7 @@ append_summary_row() {
 run_worker() {
     local worker_idx="$1"
     local sim_gpu=$((GPU_START + worker_idx * SIM_GPU_STRIDE))
-    local http_port=$((HTTP_PORT_BASE + worker_idx))
+    local port=$((PORT_BASE + worker_idx))
     local worker_dir="${NODE_DIR}/worker${worker_idx}"
     local worker_log="${worker_dir}/worker.log"
     local finished_file="${worker_dir}/finished.txt"
@@ -562,7 +547,7 @@ run_worker() {
     : > "${finished_file}"
     : > "${failed_file}"
 
-    local tag="[node${NODE_RANK}/worker${worker_idx}@gpu${sim_gpu}:${http_port}]"
+    local tag="[node${NODE_RANK}/worker${worker_idx}@gpu${sim_gpu}:${port}]"
     echo "${tag} started" | tee -a "${worker_log}"
 
     if (( DRY_RUN )); then
@@ -605,7 +590,7 @@ run_worker() {
                 echo "node=${NODE_RANK}"
                 echo "worker=${worker_idx}"
                 echo "sim_gpu=${sim_gpu}"
-                echo "http_port=${http_port}"
+                echo "port=${port}"
                 echo "claimed_job_file=${claimed_job_file}"
                 echo "sleep_sec=${DRY_RUN_SLEEP_SEC}"
                 echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -623,11 +608,11 @@ run_worker() {
                 echo "assignment_status=failed" >> "${task_log}"
             fi
         else
-            ROBOTWIN_HTTP_PORT="${http_port}" ROBOTWIN_POLICY_HOST="${SERVER_CLIENT_HOST}" \
+            ROBOTWIN_PORT="${port}" ROBOTWIN_POLICY_HOST="${SERVER_CLIENT_HOST}" \
             bash "${SCRIPT_DIR}/single_eval.sh" \
                 "${task}" "${mode}" "${POLICY_NAME}" \
                 "${sim_gpu}" \
-                "${http_port}" "${SERVER_CLIENT_HOST}" \
+                "${port}" "${SERVER_CLIENT_HOST}" \
                 > "${task_log}" 2>&1 \
                 && eval_exit=0 || eval_exit=$?
 

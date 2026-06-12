@@ -24,7 +24,7 @@ from openwam.deploy.base import BaseInferenceEngine
 
 
 def build_async_info(async_config, policy_cfg, async_executor=None) -> dict:
-    """Return a stable async inference info payload for /info and policies."""
+    """Return a stable async inference info payload for get_info() and policies."""
     info = async_config.as_dict()
     resolved_delay = info["inference_delay_steps"]
     if info["enabled"] and resolved_delay is None and info["execution_horizon"] is not None:
@@ -32,7 +32,9 @@ def build_async_info(async_config, policy_cfg, async_executor=None) -> dict:
     info["effective_temporal_ensemble"] = (
         False
         if info["enabled"]
-        else bool(getattr(policy_cfg, "temporal_ensemble", True) and getattr(policy_cfg, "execute_horizon", None) is not None)
+        else bool(
+            getattr(policy_cfg, "temporal_ensemble", True) and getattr(policy_cfg, "execute_horizon", None) is not None
+        )
     )
     info.update(
         {

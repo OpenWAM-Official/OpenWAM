@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Parallel RoboTwin evaluation across N OpenWAM servers with dynamic task distribution.
 #
-# Pairs with scripts/deploy_multi.sh: worker i -> http_port = HTTP_PORT_BASE + i.
+# Pairs with scripts/deploy_multi.sh: worker i -> port = PORT_BASE + i.
 # Tasks are pulled from a shared queue guarded by flock, so faster workers pick
 # up remaining tasks automatically — no static partitioning or idle workers.
 #
@@ -17,7 +17,7 @@
 # Options:
 #   -w, --num-workers    number of parallel workers (default: 8)
 #       --host           server host (default: 127.0.0.1)
-#       --http-port      base HTTP port; worker i uses http_port+i (default: 8700)
+#       --port           base WebSocket port; worker i uses port+i (default: 8848)
 #       --gpu-start      first simulator GPU index (default: 0)
 #   -h, --help
 #
@@ -60,7 +60,7 @@ Tasks (positional): task names, "all", or a task-list file (one per line).
 Options:
   -w, --num-workers    parallel workers (default: 8)
       --host           server host (default: 127.0.0.1)
-      --http-port      base HTTP port; worker i uses http_port+i (default: 8700)
+      --port           base WebSocket port; worker i uses port+i (default: 8848)
       --gpu-start      first simulator GPU index (default: 0)
   -h, --help
 
@@ -68,7 +68,7 @@ Logs are written to ./robotwin_eval_logs/<name>_<mode>_parallel_<ts>/ by default
 override with ROBOTWIN_LOG_ROOT.
 
 Example:
-  # Launch 8 servers first (on cuda:0..7, http 8700..8707):
+  # Launch 8 servers first (on cuda:0..7, ws 8848..8855):
   bash scripts/deploy_multi.sh /ckpt/openwam
   # Then run the full task list in parallel, dynamically distributed:
   bash benchmarks/robotwin/parallel_eval.sh -m demo_clean -n run1 all
@@ -126,7 +126,7 @@ find_conda_python() {
 TASK_CONFIG="" POLICY_NAME=""
 NUM_WORKERS=8
 SERVER_HOST="${ROBOTWIN_POLICY_HOST:-127.0.0.1}"
-HTTP_PORT_BASE="${ROBOTWIN_HTTP_PORT:-8700}"
+PORT_BASE="${ROBOTWIN_PORT:-8848}"
 GPU_START=0
 SIM_GPU_STRIDE="${SIM_GPU_STRIDE:-1}"
 
@@ -136,7 +136,7 @@ while (( $# > 0 )); do
         -n|--name)          POLICY_NAME="$2";     shift 2 ;;
         -w|--num-workers)   NUM_WORKERS="$2";     shift 2 ;;
         --host)             SERVER_HOST="$2";     shift 2 ;;
-        --http-port)        HTTP_PORT_BASE="$2";  shift 2 ;;
+        --port)             PORT_BASE="$2";       shift 2 ;;
         --gpu-start)        GPU_START="$2";       shift 2 ;;
         -h|--help)          usage; exit 0 ;;
         -*)                 echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
@@ -182,7 +182,7 @@ done
 TOTAL_JOBS=$(( ${#TASKS[@]} * ${#MODES[@]} ))
 
 echo "[INFO] mode=${TASK_CONFIG}  name=${POLICY_NAME}"
-echo "[INFO] workers=${NUM_WORKERS}  host=${SERVER_HOST}  http_port_base=${HTTP_PORT_BASE}"
+echo "[INFO] workers=${NUM_WORKERS}  host=${SERVER_HOST}  port_base=${PORT_BASE}"
 echo "[INFO] logs=${LOG_DIR}"
 echo "[INFO] tasks (${#TASKS[@]}): ${TASKS[*]}"
 echo "[INFO] modes (${#MODES[@]}): ${MODES[*]}  total_jobs=${TOTAL_JOBS}"
@@ -195,7 +195,7 @@ echo ""
 run_worker() {
     local worker_idx="$1"
     local sim_gpu=$((GPU_START + worker_idx * SIM_GPU_STRIDE))
-    local http_port=$((HTTP_PORT_BASE + worker_idx))
+    local port=$((PORT_BASE + worker_idx))
     local worker_dir="${LOG_DIR}/worker${worker_idx}"
     local worker_log="${worker_dir}/worker.log"
     local finished_file="${worker_dir}/finished.txt"
@@ -205,7 +205,7 @@ run_worker() {
     : > "${finished_file}"
     : > "${failed_file}"
 
-    local tag="[worker${worker_idx}@gpu${sim_gpu}:${http_port}]"
+    local tag="[worker${worker_idx}@gpu${sim_gpu}:${port}]"
     echo "${tag} started" | tee -a "${worker_log}"
 
     while :; do
@@ -228,11 +228,11 @@ run_worker() {
         local task_log="${LOG_DIR}/${task/\//_}_${mode}.log"
         echo "${tag} starting task=${task} mode=${mode}" | tee -a "${worker_log}"
 
-        ROBOTWIN_HTTP_PORT="${http_port}" ROBOTWIN_POLICY_HOST="${SERVER_HOST}" \
+        ROBOTWIN_PORT="${port}" ROBOTWIN_POLICY_HOST="${SERVER_HOST}" \
         bash "${SCRIPT_DIR}/single_eval.sh" \
             "${task}" "${mode}" "${POLICY_NAME}" \
             "${sim_gpu}" \
-            "${http_port}" "${SERVER_HOST}" \
+            "${port}" "${SERVER_HOST}" \
             >"${task_log}" 2>&1 \
             && eval_exit=0 || eval_exit=$?
 

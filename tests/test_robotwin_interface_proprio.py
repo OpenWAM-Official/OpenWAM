@@ -72,6 +72,18 @@ def test_ee_action_type_rejects_joint_only_observation():
         raise AssertionError("expected ee action_type to require EEF proprio")
 
 
+class _StubClient:
+    """Captures the obs payload and returns a canned action, no real socket."""
+
+    def __init__(self, response):
+        self._response = response
+        self.captured = {}
+
+    def predict(self, payload):
+        self.captured["payload"] = payload
+        return self._response
+
+
 def _make_bypassed_client(*, send_state=True, state_dim=20):
     model = iface.ModelClient.__new__(iface.ModelClient)
     model._send_state = send_state
@@ -84,21 +96,14 @@ def _make_bypassed_client(*, send_state=True, state_dim=20):
     model._debug_dir = ""
     model._episode = 0
     model._step = 0
-    model._server = "http://mock"
+    model._client = None
     return model
 
 
 def test_step_forwards_state_payload_and_checks_dim(monkeypatch):
     model = _make_bypassed_client(send_state=True, state_dim=20)
-    captured = {}
-
     monkeypatch.setattr(iface.client, "encode_numpy_b64", lambda img: "jpeg")
-
-    def _post(server, endpoint, payload, timeout):
-        captured.update(server=server, endpoint=endpoint, payload=payload, timeout=timeout)
-        return {"action": [0.0] * 20}
-
-    monkeypatch.setattr(iface.client, "post", _post)
+    model._client = _StubClient({"action": [0.0] * 20})
 
     action = model.step(
         {
@@ -109,18 +114,18 @@ def test_step_forwards_state_payload_and_checks_dim(monkeypatch):
     )
 
     assert action.shape == (20,)
-    assert captured["endpoint"] == "/predict"
-    assert captured["payload"]["state"] == [float(v) for v in range(20)]
+    assert model._client.captured["payload"]["state"] == [float(v) for v in range(20)]
 
 
-def test_step_rejects_wrong_state_dim_before_post(monkeypatch):
+def test_step_rejects_wrong_state_dim_before_predict(monkeypatch):
     model = _make_bypassed_client(send_state=True, state_dim=20)
     monkeypatch.setattr(iface.client, "encode_numpy_b64", lambda img: "jpeg")
-    monkeypatch.setattr(
-        iface.client,
-        "post",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("post called")),
-    )
+
+    class _NoPredict:
+        def predict(self, payload):
+            raise AssertionError("predict called")
+
+    model._client = _NoPredict()
 
     with pytest.raises(ValueError, match="Extracted state_dim=14, expected 20"):
         model.step(
@@ -135,16 +140,8 @@ def test_step_rejects_wrong_state_dim_before_post(monkeypatch):
 def test_string_bool_false_disables_state_payload(monkeypatch):
     assert iface._parse_bool("false", default=True) is False
     model = _make_bypassed_client(send_state=False, state_dim=20)
-    captured = {}
-
     monkeypatch.setattr(iface.client, "encode_numpy_b64", lambda img: "jpeg")
-
-    def _post(server, endpoint, payload, timeout):
-        del server, endpoint, timeout
-        captured["payload"] = payload
-        return {"action": [0.0] * 20}
-
-    monkeypatch.setattr(iface.client, "post", _post)
+    model._client = _StubClient({"action": [0.0] * 20})
 
     model.step(
         {
@@ -154,7 +151,7 @@ def test_string_bool_false_disables_state_payload(monkeypatch):
         }
     )
 
-    assert "state" not in captured["payload"]
+    assert "state" not in model._client.captured["payload"]
 
 
 def test_eval_does_not_require_proprio_when_send_state_false(monkeypatch):

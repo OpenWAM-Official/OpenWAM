@@ -2,13 +2,20 @@
 
 For users wiring their own robot or benchmark to an OpenWAM policy server.
 
+**You don't need to know anything about the server** — its model, preprocessing,
+multi-view composition, prompt wrapping, or checkpoint. Just speak the WebSocket
+protocol below. Minimal client dependencies: `numpy`, `Pillow`, `websockets`
+(plus `opencv-python` if you decode camera frames yourself). The wire contract
+(message types) lives in [`openwam/ws_protocol.py`](../openwam/ws_protocol.py).
+
 ## 1. What the client sends
 
 One call per control step: three raw camera JPEGs + a base task prompt. Proprioceptive checkpoints also require a raw `state` vector whose length matches the checkpoint's `model.architecture.state_dim`.
 
 ```json
-POST /predict
+// obs message (Client → Server)
 {
+  "type": "obs",
   "images": {
     "head_camera":        "<base64 JPEG>",    // required
     "left_wrist_camera":  "<base64 JPEG>|null", // optional
@@ -19,10 +26,10 @@ POST /predict
 }
 ```
 
-Response:
+Response (action message, Server → Client):
 
 ```json
-{"action": [float × 20 or 14], "step": int, "latency_ms": float}
+{"type": "action", "action": [float × 20 or 14], "step": int, "latency_ms": float}
 ```
 
 ## 2. Three things you don't need to handle
@@ -37,32 +44,31 @@ Response:
 - `left_wrist_camera`, `right_wrist_camera`: optional. If missing or `null`:
   - Server is single-view → the field is ignored.
   - Server is multi-view → the slot is filled with a black frame. The model still runs, but accuracy degrades since you're out of the training distribution for wrist-conditioned checkpoints.
-- `state`: required when the checkpoint has `model.architecture.use_proprioception: true`. The server validates the dimension before inference and returns HTTP 400 for missing or mismatched state instead of failing later inside the model.
+- `state`: required when the checkpoint has `model.architecture.use_proprioception: true`. The server validates the dimension before inference and returns a `ServerError` (status 400) for missing or mismatched state instead of failing later inside the model.
 
 ## 4. Episode lifecycle and reset
 
-Within one episode, just keep calling `POST /predict`. The server caches an action chunk internally: the first call runs full inference (~seconds), the next N-1 are buffer pops (<10 ms). It re-infers automatically when the buffer empties.
+Within one episode, just keep calling `client.predict(payload)`. The server caches an action chunk internally: the first call runs full inference (~seconds), the next N-1 are buffer pops (<10 ms). It re-infers automatically when the buffer empties.
 
-**You must call `POST /reset` between episodes.** The server keeps per-episode state that leaks across episode boundaries otherwise:
+**You must call `client.reset()` between episodes.** The server keeps per-episode state that leaks across episode boundaries otherwise:
 
 - `obs_history` — the rolling observation buffer used for temporal conditioning
 - the action chunk buffer — pending actions from the last inference
 - the ensemble buffer — overlapping predictions used in receding-horizon mode
 - the step counter
 
-Reset drops all of this and returns `{"status": "ok"}`. It does **not** touch model weights or server-level config, so it's cheap (<1 ms) and safe to call defensively at the start of every episode.
+Reset drops all of this and returns `{"type": "reset_ack"}`. It does **not** touch model weights or server-level config, so it's cheap (<1 ms) and safe to call defensively at the start of every episode.
 
 When to call it:
 - At the **start** of each new task / episode / rollout — including the very first one.
 - After any hard failure (client timeout, controller fault) where you're not sure the action buffer is still valid.
-- **Not** during normal step-to-step control. Calling `/reset` mid-episode forces the next `/predict` to pay full inference latency and throws away temporal ensembling.
+- **Not** during normal step-to-step control. Calling `reset()` mid-episode forces the next `predict()` to pay full inference latency and throws away temporal ensembling.
 
-Endpoint shape:
+Message shape:
 ```
-POST /reset
-{}                        # empty body
+reset message  → {"type": "reset"}
 
-→ {"status": "ok"}
+reset_ack      → {"type": "reset_ack"}
 ```
 
 ## 5. Using `benchmarks.utils`
@@ -73,37 +79,45 @@ Client helpers live under `benchmarks/utils/client.py` and can be imported direc
 from benchmarks.utils import (
     build_payload,      # assemble the {"images": {...}, "prompt": ...} dict
     encode_path_b64,    # JPEG path -> base64 str
-    post, get,          # thin HTTP wrappers over urllib
-    reset,              # POST /reset — call between episodes
+    WSPolicyClient,     # WebSocket transport — predict() / reset() / ping()
+    ServerError,        # structured server error: .status / .code / .message
 )
 
-server = "http://127.0.0.1:8848"
+ws_url = "ws://127.0.0.1:8848"
 
-# --- start of episode ---
-reset(server)
+# One persistent connection; obs/reset auto-reconnect once on a dropped socket,
+# ping fails fast. open_timeout caps connection setup; timeout caps a round-trip.
+with WSPolicyClient(ws_url, timeout=300.0, open_timeout=10.0) as client:
+    client.ping()        # verify / wait for the server to be up (raises if unreachable)
 
-# --- per-step ---
-head_b64  = encode_path_b64("/path/to/head.jpg")
-left_b64  = encode_path_b64("/path/to/left.jpg")   # or None
-right_b64 = encode_path_b64("/path/to/right.jpg")  # or None
-current_state = [0.0] * 20                         # replace with your raw proprio vector
+    # --- start of episode ---
+    client.reset()
 
-payload = build_payload(
-    head=head_b64,
-    left_wrist=left_b64,
-    right_wrist=right_b64,
-    prompt="pick up the red bottle",
-    state=current_state,  # optional raw proprio; required for proprio-conditioned checkpoints
-)
-result = post(server, "/predict", payload)
-action = result["action"]   # already in physical units — feed to controller
+    # --- per-step ---
+    head_b64  = encode_path_b64("/path/to/head.jpg")
+    left_b64  = encode_path_b64("/path/to/left.jpg")   # or None
+    right_b64 = encode_path_b64("/path/to/right.jpg")  # or None
+    current_state = [0.0] * 20                         # replace with your raw proprio vector
+
+    payload = build_payload(
+        head=head_b64,
+        left_wrist=left_b64,
+        right_wrist=right_b64,
+        prompt="pick up the red bottle",
+        state=current_state,  # optional raw proprio; required for proprio-conditioned checkpoints
+    )
+    try:
+        action = client.predict(payload)["action"]   # already in physical units — feed to controller
+    except ServerError as e:
+        print(f"server rejected the request [{e.status} {e.code}]: {e.message}")
+        raise
 ```
 
-Both bundled test scripts ([scripts/inference_single_test.py](../scripts/inference_single_test.py), [scripts/inference_continuous_test.py](../scripts/inference_continuous_test.py)) import from here, so they double as reference integrations.
+The bundled test script ([scripts/inference_single_test.py](../scripts/inference_single_test.py)) imports from here, so it doubles as a reference integration. For a full real-robot adapter, see [benchmarks/robotwin/openwam2robotwin_interface.py](robotwin/openwam2robotwin_interface.py).
 
 ## 6. Error cheatsheet
 
-| HTTP 400 message contains | Cause |
+| ServerError (status 400) message contains | Cause |
 |---|---|
 | `head_camera is required` | Missing or `null` head_camera |
 | `client must send 'images' dict` | Legacy single-field `image` payload (no longer supported) |
@@ -115,7 +129,7 @@ Both bundled test scripts ([scripts/inference_single_test.py](../scripts/inferen
 ## 7. See also
 
 - Starting the server: [root README → Deployment](../README.md#deployment)
-- Reference clients: [scripts/inference_single_test.py](../scripts/inference_single_test.py), [scripts/inference_continuous_test.py](../scripts/inference_continuous_test.py)
+- Reference client: [scripts/inference_single_test.py](../scripts/inference_single_test.py)
 
 ## 8. Web control dashboard
 

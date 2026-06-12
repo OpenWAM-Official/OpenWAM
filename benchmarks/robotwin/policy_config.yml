@@ -7,7 +7,7 @@ instruction_type: unseen
 
 # --- OpenWAM Policy Server connection ---
 host: "127.0.0.1"
-http_port: 8848           # patched at runtime by single_eval.sh
+port: 8848                # patched at runtime by single_eval.sh
 
 # --- Observation settings ---
 # The client always sends the 3 cameras RoboTwin exposes (head / left / right)
@@ -17,9 +17,9 @@ http_port: 8848           # patched at runtime by single_eval.sh
 # applies the resize/crop and prompt wrapping used during training. No client
 # config is needed for that any more.
 
-send_state: true           # include proprio state vector in /predict request; required for proprio-conditioned checkpoints
+send_state: true           # include proprio state vector in obs message; required for proprio-conditioned checkpoints
 state_dim: 20              # expected state dimension; 20 for action_mode=eef, 14 for action_mode=joint
-request_timeout: 300      # HTTP timeout in seconds
+request_timeout: 300      # WebSocket timeout in seconds
 
 # --- Action settings ---
 # Must match the action_mode used at training time.

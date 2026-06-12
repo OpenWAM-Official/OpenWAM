@@ -3,10 +3,8 @@
 #
 # Usage:
 #   bash scripts/deploy.sh /path/to/checkpoint_dir
-#   bash scripts/deploy.sh /path/to/checkpoint_dir --device cuda:1 --ws-port 9000
+#   bash scripts/deploy.sh /path/to/checkpoint_dir --device cuda:1 --port 9000
 #   bash scripts/deploy.sh --ckpt-dir /path/to/checkpoint_dir --ckpt-name checkpoint_step_1000.safetensors
-#   bash scripts/deploy.sh --mock
-#   bash scripts/deploy.sh --mock --mock-action-dim 20 --mock-latency-ms 2000
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

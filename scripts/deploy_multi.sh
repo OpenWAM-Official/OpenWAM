@@ -1,36 +1,30 @@
 #!/usr/bin/env bash
 # Launch N OpenWAM policy servers across N GPUs with incrementing ports.
 #
-# Port mapping (defaults): GPU i -> ws_port = 8800 + i, http_port = 8700 + i
-# (Disjoint ranges — with the old 8850/8848 pair the ws and http ranges
-# overlapped for NUM_GPUS >= 3, causing later processes to fail bind.)
+# Port mapping (default): GPU i -> port = 8848 + i.
 # Logs: logs/deploy_gpu${i}.log (override with LOG_DIR).
 #
 # Usage:
 #   bash scripts/deploy_multi.sh /path/to/checkpoint_dir
 #   bash scripts/deploy_multi.sh /path/to/checkpoint_dir --denoise-steps 10
-#   NUM_GPUS=4 WS_PORT_BASE=9000 HTTP_PORT_BASE=9100 \
-#       bash scripts/deploy_multi.sh /path/to/checkpoint_dir
-#   bash scripts/deploy_multi.sh --mock
+#   NUM_GPUS=4 PORT_BASE=9000 bash scripts/deploy_multi.sh /path/to/checkpoint_dir
 #
 # Environment overrides:
 #   NUM_GPUS         Number of GPUs / servers to launch (default: 8)
-#   WS_PORT_BASE     Base WebSocket port (default: 8800)
-#   HTTP_PORT_BASE   Base HTTP port (default: 8700)
+#   PORT_BASE        Base WebSocket port (default: 8848)
 #   LOG_DIR          Log directory (default: ./logs)
 #   GPU_START        First GPU index (default: 0)
 #
 # Ctrl+C terminates all launched servers.
-# 
-# Example: NUM_GPUS=8 WS_PORT_BASE=9000 HTTP_PORT_BASE=9100 bash scripts/deploy_multi.sh <ckpt>
+#
+# Example: NUM_GPUS=8 PORT_BASE=9000 bash scripts/deploy_multi.sh <ckpt>
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 NUM_GPUS="${NUM_GPUS:-8}"
-WS_PORT_BASE="${WS_PORT_BASE:-8800}"
-HTTP_PORT_BASE="${HTTP_PORT_BASE:-8700}"
+PORT_BASE="${PORT_BASE:-8848}"
 GPU_START="${GPU_START:-0}"
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs}"
 
@@ -81,24 +75,21 @@ cleanup() {
 trap cleanup INT TERM
 
 echo "[deploy_multi] Launching ${NUM_GPUS} servers (GPU ${GPU_START}..$((GPU_START + NUM_GPUS - 1)))"
-echo "[deploy_multi] ws_port: ${WS_PORT_BASE}..$((WS_PORT_BASE + NUM_GPUS - 1))"
-echo "[deploy_multi] http_port: ${HTTP_PORT_BASE}..$((HTTP_PORT_BASE + NUM_GPUS - 1))"
+echo "[deploy_multi] port: ${PORT_BASE}..$((PORT_BASE + NUM_GPUS - 1))"
 echo "[deploy_multi] Logs: ${LOG_DIR}/deploy_gpu*.log"
 echo ""
 
 for ((i = 0; i < NUM_GPUS; i++)); do
     gpu=$((GPU_START + i))
-    ws_port=$((WS_PORT_BASE + i))
-    http_port=$((HTTP_PORT_BASE + i))
+    port=$((PORT_BASE + i))
     log_file="${LOG_DIR}/deploy_gpu${gpu}.log"
 
-    echo "[deploy_multi] GPU ${gpu} -> ws=${ws_port} http=${http_port} log=${log_file}"
+    echo "[deploy_multi] GPU ${gpu} -> ws=${port} log=${log_file}"
 
     python "$SCRIPT_DIR/deploy.py" \
         "${ckpt_args[@]}" \
         --device "cuda:${gpu}" \
-        --ws-port "$ws_port" \
-        --http-port "$http_port" \
+        --port "$port" \
         "$@" \
         >"$log_file" 2>&1 &
 
