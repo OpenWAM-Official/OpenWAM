@@ -43,7 +43,7 @@ OpenWAM/
 │   │   ├── action_backbone/   # ActionDiT, MoE DiT, shared components
 │   │   └── video_backbone/    # Vendored video pipeline (WanVideoPipeline, VAE, DiT)
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
-│   ├── deploy/        # Policy server, model loader, joint/mock inference engines, scheduler
+│   ├── deploy/        # Policy server, model loader, joint inference engine, scheduler
 │   └── utils/         # Shared utilities
 ├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests
 ├── configs/           # Hydra configs for model, dataloader, training_strategy, accelerate
@@ -257,8 +257,7 @@ checkpoint_path: /path/to/checkpoint_dir  # used when --ckpt-dir is not passed
 device: cuda:0
 server:
   host: "0.0.0.0"
-  ws_port: 8850
-  http_port: 8848
+  port: 8848
 
 inference:
   denoise_steps: 10      # denoising steps (FastWAM-Joint deploy default)
@@ -300,8 +299,7 @@ for the fields that are commonly changed per launch:
 bash scripts/deploy.sh /path/to/checkpoint_dir \
   --device cuda:1 \
   --host 0.0.0.0 \
-  --ws-port 9000 \
-  --http-port 9001 \
+  --port 9000 \
   --denoise-steps 10 \
   --schedule-type sync \
   --shift 5.0 \
@@ -314,7 +312,7 @@ These flags map to:
 - `--ckpt-dir` / positional checkpoint path → checkpoint directory (`checkpoint_path` is used only when `--ckpt-dir` is absent)
 - `--ckpt-name` → specific `checkpoint_step_*.safetensors` filename
 - `--device` → `device`
-- `--host` / `--ws-port` / `--http-port` → `server.*`
+- `--host` / `--port` → `server.*`
 - `--denoise-steps` / `--schedule-type` / `--shift` → `inference.*`
 - `--compile-mode` → `optimization.compile.mode` (`auto` or `none`)
 - `--async-mode` -> `optimization.async_inference.mode` (`none` or `vanilla`)
@@ -336,49 +334,13 @@ edit the yaml (or use the package entrypoint's OmegaConf dotlist overrides).
 
 `scripts/deploy.py` and the package entrypoint (`openwam-serve` / `python -m openwam.deploy.policy_server`) both load checkpoints through the same package-native `load_from_checkpoint_dir` path. The package entrypoint defaults to `configs/deploy.yaml`, merges deploy overrides on top of the saved training config, and backfills `inference.height`, `inference.width`, and `inference.num_frames` from the checkpoint's dataloader config when they are not set explicitly.
 
-#### Mock mode (no GPU or model weights required)
+#### WebSocket messages
 
-`MockInferenceEngine` implements the same interface as `JointInferenceEngine` but returns random Gaussian actions after a configurable simulated latency, making it suitable for integration testing, client benchmarking, and CI environments without a GPU.
-
-```bash
-# Start a mock server (no checkpoint needed)
-python scripts/deploy.py --mock --mock-action-dim 20 --mock-latency-ms 2000
-```
-
-Mock-mode options:
-
-| Flag | Default | Description |
-|---|---|---|
-| `--mock` | — | Enable mock mode (skips model loading) |
-| `--mock-action-dim N` | `20` | Dimensionality of the returned action vector |
-| `--mock-latency-ms T` | `2000` | Simulated inference latency in milliseconds |
-
-Once the mock server is running, all normal client scripts work against it without modification:
-
-```bash
-python scripts/inference_single_test.py --test
-python scripts/inference_continuous_test.py --steps 128
-```
-
-Server endpoints:
-
-- HTTP `POST /predict` — send 3-camera `images` dict, base prompt, and optional raw `state`; receive action in the checkpoint's deploy scale. For normalized checkpoints this is already unnormalized back to physical units.
-- HTTP `POST /reset` — reset policy state between episodes
-- HTTP `GET /health` — health check
-- HTTP `GET /info` — model info and policy runtime config
+- obs message (`{"type": "obs", ...}`) — send 3-camera `images` dict, base prompt, and optional raw `state`; receive an action message in the checkpoint's deploy scale. For normalized checkpoints this is already unnormalized back to physical units.
+- reset message (`{"type": "reset"}`) — reset policy state between episodes
+- ping message (`{"type": "ping"}`) — liveness check, server replies `{"type": "pong"}`
 
 See [benchmarks/README.md](benchmarks/README.md) for the full client payload contract.
-
-#### Debug mode (capture server-side requests)
-
-Pass `--debug` to `scripts/deploy.py` (or the `deploy.sh` wrapper) to save the post-preprocessing image and per-step metadata under `--debug-dir` (default `./server_debug`):
-
-```bash
-python scripts/deploy.py --ckpt-dir /path/to/ckpt_dir \
-    --debug --debug-dir ./server_debug
-```
-
-Each request writes `server_debug/ep0000/step_0001/{image_processed.jpg, meta.json}` style directories. `image_processed.jpg` is the exact post-preprocessing image the model saw (single-view crop/resize or multi-view composition), and `meta.json` records the wrapped prompt, state, action, latency, server step, and episode index.
 
 ### 3. Testing the Server
 
@@ -392,7 +354,7 @@ python scripts/inference_single_test.py --test
 
 # With real images
 python scripts/inference_single_test.py \
-  --server http://127.0.0.1:8848 \
+  --server ws://127.0.0.1:8848 \
   --head-camera /path/to/head.jpg \
   --left-wrist-camera /path/to/left.jpg \
   --right-wrist-camera /path/to/right.jpg \
@@ -404,19 +366,13 @@ python scripts/inference_single_test.py \
   --prompt "pick up the bottle"
 ```
 
-**Continuous inference test** — simulate a real robot control loop:
-
-```bash
-python scripts/inference_continuous_test.py --steps 128
-```
-
-This simulates 128 control steps, showing how the server handles action chunking internally: the first call triggers full inference (slow, generates an entire action chunk), subsequent calls pop cached actions from the buffer (fast, <10ms), and re-inference is triggered when the buffer is exhausted.
+The server handles action chunking internally: the first call triggers full inference (slow, generates an entire action chunk), subsequent calls pop cached actions from the buffer (fast, <10ms), and re-inference is triggered when the buffer is exhausted.
 
 ### 4. Benchmarks Support
 
-Evaluation adapters live under `benchmarks/`. The normal single-task and multi-task scripts connect to an **already-running** OpenWAM policy server via HTTP — no model weights are needed on the evaluator machine.
+Evaluation adapters live under `benchmarks/`. The normal single-task and multi-task scripts connect to an **already-running** OpenWAM policy server over WebSocket — no model weights are needed on the evaluator machine.
 
-For large RoboTwin runs, `benchmarks/robotwin/dlc_parallel_eval.sh` is the DLC/multi-node entrypoint: every node starts local OpenWAM policy servers, waits for `/health`, and runs RoboTwin clients against a shared filesystem queue. Rank 0 initializes `<log_dir>/.queue.txt`, `summary.tsv`, and `run.env`; workers use directory locks (`.queue.lock.d`, `summary.lock.d`) so this works on shared filesystems where `flock` may be unreliable. At the end, rank 0 verifies the summary row count and unique `task/mode` count match the expected total. Add `--dry-run` to skip servers/simulators and only test whether DLC nodes can automatically claim and distribute tasks from the shared queue.
+For large RoboTwin runs, `benchmarks/robotwin/dlc_parallel_eval.sh` is the DLC/multi-node entrypoint: every node starts local OpenWAM policy servers, waits for the server to accept connections, and runs RoboTwin clients against a shared filesystem queue. Rank 0 initializes `<log_dir>/.queue.txt`, `summary.tsv`, and `run.env`; workers use directory locks (`.queue.lock.d`, `summary.lock.d`) so this works on shared filesystems where `flock` may be unreliable. At the end, rank 0 verifies the summary row count and unique `task/mode` count match the expected total. Add `--dry-run` to skip servers/simulators and only test whether DLC nodes can automatically claim and distribute tasks from the shared queue.
 
 ```bash
 ROBOTWIN_PATH=/path/to/RoboTwin \
@@ -472,8 +428,7 @@ Checkpoint outputs include:
 - Package-native model loading for inference and serving (no dependency on training infrastructure at deploy time)
 - Proprioceptive conditioning module for robot state input
 - RoboTwin benchmark adapter (see `benchmarks/robotwin/`)
-- WebSocket + HTTP policy server with unified 3-camera client contract; server handles all preprocessing and prompt wrapping from the checkpoint's saved config
-- Mock inference engine for GPU-free integration testing and CI
+- WebSocket policy server with unified 3-camera client contract; server handles all preprocessing and prompt wrapping from the checkpoint's saved config
 
 ## Development
 
