@@ -113,6 +113,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         self._architecture_generate_kwarg_names: Optional[set[str]] = None
         self._architecture_generate_warned_dropped_kwargs: set[tuple[str, tuple[str, ...]]] = set()
         self._init_optimizations()
+        self._init_cfg()
 
     def _filter_architecture_generate_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         """Drop deploy-only kwargs the architecture's generate() cannot consume."""
@@ -222,11 +223,13 @@ class JointInferenceEngine(BaseInferenceEngine):
                 cache_maxsize = int(getattr(cache_cfg, "maxsize", cache_maxsize))
         self._prompt_embed_cache = _BoundedPromptEmbedCache(maxsize=cache_maxsize)
 
-        # §15 — Classifier-Free Guidance (Cosmos25 only today; Wan keeps its
-        # own pipeline-internal CFG path). When `cfg_scale > 1.0` the engine
-        # resolves an uncond embedding once at init time (offline
-        # `empty.safetensors` if `text_embedding_cache_dir` is set; otherwise
-        # falls back to the backbone's live encoder via the adapter).
+    def _init_cfg(self):
+        """Resolve Classifier-Free Guidance from cfg.inference (Cosmos25 only; cfg_scale=1.0 is a no-op).
+
+        When cfg_scale > 1.0 the uncond embedding is resolved once here:
+        offline ``empty.safetensors`` if ``text_embedding_cache_dir`` is set,
+        else the backbone's live encoder via the adapter.
+        """
         inf_cfg = getattr(self.cfg, "inference", None)
         self._cfg_scale: float = float(getattr(inf_cfg, "cfg_scale", 1.0)) if inf_cfg else 1.0
         self._cfg_merge: bool = bool(getattr(inf_cfg, "cfg_merge", False)) if inf_cfg else False
