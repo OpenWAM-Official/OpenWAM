@@ -720,7 +720,7 @@ def test_eef_roundtrip_denormalize():
                 filter_static_segments=False,
             )
             raw = np.random.RandomState(0).uniform(-1, 1, size=(7, 20)).astype(np.float32)
-            normed = ds._action_normalizer.normalize(raw)
+            normed = ds._normalizer.normalize(raw)
             recovered = ds.denormalize_action(normed)
             np.testing.assert_allclose(recovered, raw, atol=1e-4, err_msg=f"mode={mode}")
 

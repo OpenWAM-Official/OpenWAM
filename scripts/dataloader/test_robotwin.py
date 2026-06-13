@@ -338,11 +338,11 @@ def main():
     # so we reach through to the active Normalizer to run normalize(denorm(x))
     # and confirm it recovers the original normalized tensor.
     denorm_fn = getattr(dataset, "denormalize_action", None)
-    normalizer = getattr(dataset, "_action_normalizer", None)
+    normalizer = getattr(dataset, "_normalizer", None)
     if normalizer is None:
         subs = getattr(dataset, "_sub_datasets", None)
         if subs:
-            normalizer = getattr(subs[0], "_action_normalizer", None)
+            normalizer = getattr(subs[0], "_normalizer", None)
     if denorm_fn is not None and normalizer is not None:
         last_sample = dataset[indices[-1]]
         normalized = last_sample["action"].numpy()

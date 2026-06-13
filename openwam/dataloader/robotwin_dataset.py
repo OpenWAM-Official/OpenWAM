@@ -557,7 +557,7 @@ class RoboTwinDataset(BaseDataset):
         self._action_dim_value = (
             EEF_ACTION_DIM if self.action_mode == "eef" else (self._action_dim_detected or _JOINT_ACTION_DIM)
         )
-        self._action_normalizer = None  # Normalizer or None if disabled / stats missing
+        self._normalizer = None  # Normalizer or None if disabled / stats missing
         self._mode_stats: Optional[dict] = None  # raw stats dict for the active mode
         self.normalization_stats_path: Optional[str] = None  # resolved path to the stats .npy file
 
@@ -621,7 +621,7 @@ class RoboTwinDataset(BaseDataset):
                             f"expected {expected_dim}, got {got_dim} from {stats_path}."
                         )
                     self._mode_stats = mode_stats
-                    self._action_normalizer = Normalizer(
+                    self._normalizer = Normalizer(
                         mode=YAML_TO_NORM_MODE[self.normalize_mode],
                         stats=mode_stats,
                     )
@@ -703,9 +703,9 @@ class RoboTwinDataset(BaseDataset):
         the input unchanged.
         """
         arr = np.asarray(action) if not isinstance(action, np.ndarray) else action
-        if self._action_normalizer is None:
+        if self._normalizer is None:
             return arr.copy()
-        return self._action_normalizer.unnormalize(arr)
+        return self._normalizer.unnormalize(arr)
 
     def __len__(self):
         if self._val_samples is not None:
@@ -876,8 +876,8 @@ class RoboTwinDataset(BaseDataset):
             )
 
         # Normalize before splitting so proprio and action share the same space
-        if self._action_normalizer is not None:
-            raw_actions = self._action_normalizer.normalize(raw_actions)
+        if self._normalizer is not None:
+            raw_actions = self._normalizer.normalize(raw_actions)
 
         # Video: subsampled. State/action: raw rate.
         sampled_video = [raw_frames[i] for i in self._video_sample_indices]
