@@ -139,60 +139,6 @@ class Normalizer(InvertibleModalityTransform):
         return data
 
 
-class ActionNormalizer(Normalizer):
-    """Convenience wrapper that normalizes the ``action`` field.
-
-    Args:
-        mode: Normalization strategy.
-        stats: Action statistics dict.
-        gripper_mode: Separate normalization for gripper dimension(s).
-            Set to "binary" to binarize gripper, None to normalize uniformly.
-        gripper_indices: Indices of gripper dimensions in the action vector.
-    """
-
-    def __init__(
-        self,
-        mode: str = "q99",
-        stats: Optional[Dict[str, np.ndarray]] = None,
-        gripper_mode: Optional[str] = None,
-        gripper_indices: Optional[list] = None,
-        binary_threshold: float = 0.5,
-        eps: float = NORM_EPS,
-    ):
-        super().__init__(mode=mode, stats=stats, binary_threshold=binary_threshold, eps=eps)
-        self.apply_to = ["action"]
-        self.gripper_mode = gripper_mode
-        self.gripper_indices = gripper_indices or []
-
-        # Build a separate normalizer for gripper dims if needed
-        self._gripper_normalizer = None
-        if gripper_mode and gripper_indices:
-            self._gripper_normalizer = Normalizer(
-                mode=gripper_mode,
-                binary_threshold=binary_threshold,
-            )
-
-    def normalize(self, x: np.ndarray) -> np.ndarray:
-        result = super().normalize(x)
-
-        if self._gripper_normalizer and self.gripper_indices:
-            for gi in self.gripper_indices:
-                if gi < x.shape[-1]:
-                    result[..., gi] = self._gripper_normalizer.normalize(x[..., gi])
-
-        return result
-
-    def unnormalize(self, x: np.ndarray) -> np.ndarray:
-        result = super().unnormalize(x)
-
-        if self._gripper_normalizer and self.gripper_indices:
-            for gi in self.gripper_indices:
-                if gi < x.shape[-1]:
-                    result[..., gi] = self._gripper_normalizer.unnormalize(x[..., gi])
-
-        return result
-
-
 # ---------------------------------------------------------------------------
 # YAML-config-facing helpers shared by training datasets and deployment.
 # ---------------------------------------------------------------------------

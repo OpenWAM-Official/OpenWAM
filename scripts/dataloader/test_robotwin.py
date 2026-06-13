@@ -335,7 +335,7 @@ def main():
 
     # --- Denormalize roundtrip ------------------------------------------------
     # MultiTaskRoboTwinDataset delegates denormalize_action to its first sub-dataset,
-    # so we reach through to the active ActionNormalizer to run normalize(denorm(x))
+    # so we reach through to the active Normalizer to run normalize(denorm(x))
     # and confirm it recovers the original normalized tensor.
     denorm_fn = getattr(dataset, "denormalize_action", None)
     normalizer = getattr(dataset, "_action_normalizer", None)

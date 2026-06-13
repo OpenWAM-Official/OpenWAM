@@ -228,9 +228,7 @@ def main() -> None:
                 x0_hat_norm = noisy_actions - sigma_f * pred_velocity
                 x0_err_norm = x0_hat_norm - actions
 
-                x0_hat_raw = architecture.action_normalizer.unnormalize(
-                    x0_hat_norm.squeeze(0).detach().float().cpu().numpy()
-                )
+                x0_hat_raw = architecture.normalizer.unnormalize(x0_hat_norm.squeeze(0).detach().float().cpu().numpy())
                 gt_raw = dataset.denormalize_action(actions.squeeze(0).detach().float().cpu().numpy())
                 x0_err_raw = torch.from_numpy((x0_hat_raw - gt_raw).astype(np.float32)).unsqueeze(0)
 

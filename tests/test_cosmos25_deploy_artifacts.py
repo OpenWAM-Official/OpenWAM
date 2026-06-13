@@ -129,9 +129,7 @@ def test_pipeline_wrapper_state_dict_contains_vae_inner_params():
 
     keys = list(wrapper.state_dict().keys())
     vae_keys = [k for k in keys if k.startswith("_vae_inner.")]
-    assert vae_keys, (
-        f"_vae_inner.* keys missing from state_dict. All keys: {keys}"
-    )
+    assert vae_keys, f"_vae_inner.* keys missing from state_dict. All keys: {keys}"
     # The fake VAE is `nn.Linear(4, 4)` → weight + bias.
     assert "_vae_inner.weight" in vae_keys
     assert "_vae_inner.bias" in vae_keys
@@ -325,7 +323,7 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
         arch.load_checkpoint = MagicMock()
         arch.set_dtype_device = MagicMock()
         arch.eval = MagicMock()
-        arch.attach_action_normalizer = MagicMock()
+        arch.attach_normalizer = MagicMock()
         return arch
 
     resolved = MagicMock()
@@ -339,15 +337,13 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
     with (
         patch.object(model_loader, "build_architecture", _fake_build_architecture, create=True),
         patch.object(model_loader, "resolve_architecture_config", lambda _m: resolved, create=True),
-        patch.object(model_loader, "_build_action_normalizer", lambda *_a, **_kw: None),
+        patch.object(model_loader, "_build_normalizer", lambda *_a, **_kw: None),
     ):
         # Patch the deferred imports inside load_from_checkpoint_dir.
         import openwam.model as _openwam_model
 
         monkeypatch.setattr(_openwam_model, "build_architecture", _fake_build_architecture, raising=True)
-        monkeypatch.setattr(
-            _openwam_model, "resolve_architecture_config", lambda _m: resolved, raising=True
-        )
+        monkeypatch.setattr(_openwam_model, "resolve_architecture_config", lambda _m: resolved, raising=True)
         model_loader.load_from_checkpoint_dir(str(ckpt_dir), device="cpu")
 
     source = captured["params"]["video_backbone"]["_source"]

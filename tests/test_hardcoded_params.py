@@ -153,7 +153,7 @@ class _FakeActionRepr:
         return x * 2.0
 
 
-class _FakeActionNormalizer:
+class _FakeNormalizer:
     """Fake action normalizer whose unnormalize adds 10."""
 
     def unnormalize(self, x):
@@ -169,14 +169,14 @@ def test_action_decode_repr_then_normalizer():
     # Simulate the decode logic from generate()
     action_latents = torch.ones(1, 5, 7)
     action_repr = _FakeActionRepr()
-    arch.action_normalizer = _FakeActionNormalizer()
+    arch.normalizer = _FakeNormalizer()
 
     # Replicate the logic from base.py generate()
     if action_repr is not None:
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()
     else:
         actions = action_latents.squeeze(0).float().cpu().numpy()
-    normalizer = getattr(arch, "action_normalizer", None)
+    normalizer = getattr(arch, "normalizer", None)
     if normalizer is not None:
         actions = normalizer.unnormalize(actions)
 
@@ -206,7 +206,7 @@ def test_action_decode_normalizer_only():
     """With only an action normalizer, decode should work without action_repr."""
     action_latents = torch.ones(1, 5, 7)
     action_repr = None
-    normalizer = _FakeActionNormalizer()
+    normalizer = _FakeNormalizer()
 
     if action_repr is not None:
         actions = action_repr.decode(action_latents.float()).squeeze(0).cpu().numpy()

@@ -204,18 +204,18 @@ def load_from_checkpoint_dir(
     architecture.eval()
 
     # 6. Attach the action normalizer built from saved normalization_stats.npy + config.
-    architecture.attach_action_normalizer(_build_action_normalizer(cfg, ckpt_dir))
+    architecture.attach_normalizer(_build_normalizer(cfg, ckpt_dir))
 
     logger.info("Model loaded successfully on %s", device)
     return cfg, architecture
 
 
-def _build_action_normalizer(cfg: DictConfig, ckpt_dir: str):
+def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
     """Build the normalizer for both deploy directions, or ``None`` if disabled.
 
-    Despite the ``ActionNormalizer`` name it serves both: ``normalize`` maps the
-    input proprio state into training space, ``unnormalize`` maps the output
-    action back to physical units. proprio is a single-frame action
+    The returned ``Normalizer`` serves both: ``normalize`` maps the input
+    proprio state into training space, ``unnormalize`` maps the output action
+    back to physical units. proprio is a single-frame action
     (``raw_actions[0:1]``), so both share one set of stats.
 
     Reads ``dataloader.normalize_mode`` / ``action_mode`` from the saved config;
@@ -251,7 +251,7 @@ def _build_action_normalizer(cfg: DictConfig, ckpt_dir: str):
 
     from openwam.dataloader.transforms.normalize import (
         YAML_TO_NORM_MODE,
-        ActionNormalizer,
+        Normalizer,
         load_mode_stats,
     )
 
@@ -271,7 +271,7 @@ def _build_action_normalizer(cfg: DictConfig, ckpt_dir: str):
         )
         return None
 
-    normalizer = ActionNormalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=mode_stats)
+    normalizer = Normalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=mode_stats)
     logger.info(
         "[normalizer] Active: mode=%s action_mode=%s dim=%d stats=%s",
         norm_mode,

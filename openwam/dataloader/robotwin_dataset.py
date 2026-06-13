@@ -31,7 +31,7 @@ from openwam.dataloader.transforms.multiview import (
 )
 from openwam.dataloader.transforms.normalize import (
     YAML_TO_NORM_MODE,
-    ActionNormalizer,
+    Normalizer,
     load_mode_stats,
 )
 from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
@@ -553,11 +553,11 @@ class RoboTwinDataset(BaseDataset):
         else:
             print("  No scene_info.json found, active_arm will default to 'both'")
 
-        # ---- Action normalization (unified for joint & eef via ActionNormalizer) ----
+        # ---- Action normalization (unified for joint & eef via Normalizer) ----
         self._action_dim_value = (
             EEF_ACTION_DIM if self.action_mode == "eef" else (self._action_dim_detected or _JOINT_ACTION_DIM)
         )
-        self._action_normalizer = None  # ActionNormalizer or None if disabled / stats missing
+        self._action_normalizer = None  # Normalizer or None if disabled / stats missing
         self._mode_stats: Optional[dict] = None  # raw stats dict for the active mode
         self.normalization_stats_path: Optional[str] = None  # resolved path to the stats .npy file
 
@@ -621,7 +621,7 @@ class RoboTwinDataset(BaseDataset):
                             f"expected {expected_dim}, got {got_dim} from {stats_path}."
                         )
                     self._mode_stats = mode_stats
-                    self._action_normalizer = ActionNormalizer(
+                    self._action_normalizer = Normalizer(
                         mode=YAML_TO_NORM_MODE[self.normalize_mode],
                         stats=mode_stats,
                     )

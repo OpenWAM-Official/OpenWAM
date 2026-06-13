@@ -8,8 +8,6 @@ Config example::
     transforms:
       normalize:
         mode: q99          # q99 | min_max | mean_std | binary | scale
-        gripper_mode: binary
-        gripper_indices: [6]
       rotation:
         source: axis_angle
         target: rotation_6d
@@ -28,7 +26,7 @@ Config example::
 from typing import Optional
 
 from openwam.dataloader.transforms.base import ComposedTransform
-from openwam.dataloader.transforms.normalize import ActionNormalizer
+from openwam.dataloader.transforms.normalize import Normalizer
 from openwam.dataloader.transforms.rotation import RotationTransform
 from openwam.dataloader.transforms.video import (
     VideoColorJitter,
@@ -80,17 +78,7 @@ def build_transforms(
     norm_cfg = _get(transform_cfg, "normalize")
     if norm_cfg is not None:
         mode = _get(norm_cfg, "mode", "q99")
-        gripper_mode = _get(norm_cfg, "gripper_mode", None)
-        gripper_indices = _get(norm_cfg, "gripper_indices", None)
-        if gripper_indices is not None:
-            gripper_indices = list(gripper_indices)
-
-        normalizer = ActionNormalizer(
-            mode=mode,
-            stats=normalization_stats,
-            gripper_mode=gripper_mode,
-            gripper_indices=gripper_indices,
-        )
+        normalizer = Normalizer(mode=mode, stats=normalization_stats)
         transforms.append(normalizer)
 
     # 3. Video augmentation (applied last, only to video frames)

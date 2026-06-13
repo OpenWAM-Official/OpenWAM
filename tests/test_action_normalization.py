@@ -1,7 +1,7 @@
 """Unit tests for action normalization on the deployment path.
 
-Covers _build_action_normalizer (reads normalization_stats.npy + cfg) and the
-ActionNormalizer normalize/unnormalize invariants used by deploy.
+Covers _build_normalizer (reads normalization_stats.npy + cfg) and the
+Normalizer normalize/unnormalize invariants used by deploy.
 
 Pure CPU, no GPU, no network. Uses pytest's tmp_path fixture so there's no
 dependency on any real checkpoint directory.
@@ -13,9 +13,9 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
-from openwam.dataloader.transforms.normalize import ActionNormalizer
+from openwam.dataloader.transforms.normalize import Normalizer
 from openwam.deploy.engine import JointInferenceEngine
-from openwam.deploy.model_loader import _build_action_normalizer
+from openwam.deploy.model_loader import _build_normalizer
 from openwam.model.base import BaseWAMArchitecture
 
 # --- Helper: build a realistic stats dict for a 20D eef action ---
@@ -50,9 +50,9 @@ def _write_stats_file(tmp_path, mode_key: str = "eef"):
 # --- Normalizer round-trip tests ---
 
 
-def test_action_normalizer_min_max_roundtrip():
+def test_normalizer_min_max_roundtrip():
     stats = _eef_stats_min_max()
-    norm = ActionNormalizer(mode="min_max", stats=stats)
+    norm = Normalizer(mode="min_max", stats=stats)
     x = np.random.RandomState(0).uniform(-0.5, 0.5, size=(4, 20)).astype(np.float32)
     # Clamp to stats range so round-trip is well-defined
     x = np.clip(x, stats["min"], stats["max"])
@@ -61,24 +61,24 @@ def test_action_normalizer_min_max_roundtrip():
     np.testing.assert_allclose(x, x_back, atol=1e-5)
 
 
-def test_action_normalizer_zscore_roundtrip():
+def test_normalizer_zscore_roundtrip():
     stats = _eef_stats_min_max()
-    norm = ActionNormalizer(mode="mean_std", stats=stats)
+    norm = Normalizer(mode="mean_std", stats=stats)
     x = np.random.RandomState(1).uniform(-0.5, 0.5, size=(4, 20)).astype(np.float32)
     y = norm.normalize(x)
     x_back = norm.unnormalize(y)
     np.testing.assert_allclose(x, x_back, atol=1e-5)
 
 
-# --- _build_action_normalizer branch tests ---
+# --- _build_normalizer branch tests ---
 
 
-def test_build_action_normalizer_happy_path(tmp_path):
+def test_build_normalizer_happy_path(tmp_path):
     _write_stats_file(tmp_path, mode_key="eef")
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef"}})
-    normalizer = _build_action_normalizer(cfg, str(tmp_path))
+    normalizer = _build_normalizer(cfg, str(tmp_path))
     assert normalizer is not None
-    assert isinstance(normalizer, ActionNormalizer)
+    assert isinstance(normalizer, Normalizer)
 
     # Feeding a normalized zero vector should map to the center of the range.
     # For min-max with [lo, hi], normalize(x) = 2*(x-lo)/(hi-lo) - 1, so x=0
@@ -89,40 +89,40 @@ def test_build_action_normalizer_happy_path(tmp_path):
     np.testing.assert_allclose(out, expected, atol=1e-5)
 
 
-def test_build_action_normalizer_missing_stats_raises(tmp_path):
+def test_build_normalizer_missing_stats_raises(tmp_path):
     # tmp_path is empty — no normalization_stats.npy
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef"}})
     with pytest.raises(FileNotFoundError, match="Missing required normalization_stats.npy"):
-        _build_action_normalizer(cfg, str(tmp_path))
+        _build_normalizer(cfg, str(tmp_path))
 
 
 @pytest.mark.parametrize("disabled_value", [None, "none", "null", ""])
-def test_build_action_normalizer_disabled_mode_returns_none(tmp_path, disabled_value):
+def test_build_normalizer_disabled_mode_returns_none(tmp_path, disabled_value):
     _write_stats_file(tmp_path)
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": disabled_value, "action_mode": "eef"}})
-    normalizer = _build_action_normalizer(cfg, str(tmp_path))
+    normalizer = _build_normalizer(cfg, str(tmp_path))
     assert normalizer is None
 
 
 @pytest.mark.parametrize("disabled_value", [None, "none", "null", ""])
-def test_build_action_normalizer_disabled_mode_does_not_require_stats(tmp_path, disabled_value):
+def test_build_normalizer_disabled_mode_does_not_require_stats(tmp_path, disabled_value):
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": disabled_value, "action_mode": "eef"}})
-    normalizer = _build_action_normalizer(cfg, str(tmp_path))
+    normalizer = _build_normalizer(cfg, str(tmp_path))
     assert normalizer is None
 
 
-def test_build_action_normalizer_unknown_mode_returns_none(tmp_path):
+def test_build_normalizer_unknown_mode_returns_none(tmp_path):
     _write_stats_file(tmp_path)
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "bogus", "action_mode": "eef"}})
-    normalizer = _build_action_normalizer(cfg, str(tmp_path))
+    normalizer = _build_normalizer(cfg, str(tmp_path))
     assert normalizer is None
 
 
-def test_build_action_normalizer_wrong_action_mode_returns_none(tmp_path):
+def test_build_normalizer_wrong_action_mode_returns_none(tmp_path):
     # Stats file has only "eef" but config says action_mode="joint"
     _write_stats_file(tmp_path, mode_key="eef")
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "joint"}})
-    normalizer = _build_action_normalizer(cfg, str(tmp_path))
+    normalizer = _build_normalizer(cfg, str(tmp_path))
     assert normalizer is None
 
 
@@ -138,7 +138,7 @@ def test_deployment_action_range_sanity(tmp_path):
     """
     _write_stats_file(tmp_path)
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "eef"}})
-    normalizer = _build_action_normalizer(cfg, str(tmp_path))
+    normalizer = _build_normalizer(cfg, str(tmp_path))
     assert normalizer is not None, "prerequisite: action normalizer must build"
 
     # Simulate a model output batch: 33-step action chunk in [-1, 1].
@@ -173,7 +173,7 @@ class _TinyScheduler:
 
 class _CaptureDeployArchitecture:
     def __init__(self, normalizer):
-        self.action_normalizer = normalizer
+        self.normalizer = normalizer
         self.video_scheduler = _TinyScheduler()
         self.action_scheduler = _TinyScheduler()
         self.seen_proprio_state = None
@@ -183,7 +183,7 @@ class _CaptureDeployArchitecture:
 
     def normalize_deploy_proprio(self, proprio_state):
         arr = proprio_state.detach().cpu().numpy()
-        return torch.from_numpy(self.action_normalizer.normalize(arr).astype(np.float32))
+        return torch.from_numpy(self.normalizer.normalize(arr).astype(np.float32))
 
     def generate(self, **kwargs):
         self.seen_proprio_state = kwargs["proprio_state"]
@@ -193,7 +193,7 @@ class _CaptureDeployArchitecture:
 def test_joint_engine_normalizes_raw_deploy_state_before_generate():
     """JointInferenceEngine must pass normalized state into architecture.generate()."""
     stats = _eef_stats_min_max()
-    normalizer = ActionNormalizer(mode="min_max", stats=stats)
+    normalizer = Normalizer(mode="min_max", stats=stats)
     arch = _CaptureDeployArchitecture(normalizer)
     cfg = OmegaConf.create(
         {
@@ -232,7 +232,7 @@ class _TinyGenerateArchitecture(BaseWAMArchitecture):
         self.video_backbone = _TinyVideoBackbone()
         self._device = torch.device("cpu")
         self._dtype = torch.float32
-        self.action_normalizer = normalizer
+        self.normalizer = normalizer
         self._use_proprioception_context = False
 
         class _ActionBackbone:
@@ -252,7 +252,7 @@ class _TinyGenerateArchitecture(BaseWAMArchitecture):
 def test_base_generate_unnormalizes_deploy_actions():
     """BaseWAMArchitecture.generate() must return physical-unit actions when normalizer is attached."""
     stats = _eef_stats_min_max()
-    normalizer = ActionNormalizer(mode="min_max", stats=stats)
+    normalizer = Normalizer(mode="min_max", stats=stats)
     arch = _TinyGenerateArchitecture(normalizer)
 
     result = arch.generate(

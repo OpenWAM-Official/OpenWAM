@@ -224,7 +224,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # Optional action normalizer for deployment. ``generate`` uses it to
         # return real-scale actions; deploy-side proprio preprocessing uses it
         # to normalize raw robot state into the model's training space.
-        self.action_normalizer = None
+        self.normalizer = None
 
         if cfg is not None:
             self._init_video_backbone(cfg)
@@ -727,7 +727,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         for bb in self.backbones.values():
             bb.set_dtype_device(dtype, device)
 
-    def attach_action_normalizer(self, normalizer) -> None:
+    def attach_normalizer(self, normalizer) -> None:
         """Attach (or clear) an action normalizer used by ``generate``.
 
         Deployment paths build the same normalizer used by training from
@@ -735,11 +735,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         while server-side proprio preprocessing uses it to normalize raw robot
         state into the model's training space. Pass ``None`` to clear.
         """
-        self.action_normalizer = normalizer
+        self.normalizer = normalizer
 
     def normalize_deploy_proprio(self, proprio_state):
         """Normalize raw deploy proprio with the training action normalizer."""
-        normalizer = getattr(self, "action_normalizer", None)
+        normalizer = getattr(self, "normalizer", None)
         if normalizer is None or proprio_state is None:
             return proprio_state
 
@@ -1780,7 +1780,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             video_frames = None
 
         actions = action_latents.squeeze(0).float().cpu().numpy()
-        normalizer = getattr(self, "action_normalizer", None)
+        normalizer = getattr(self, "normalizer", None)
         if normalizer is not None:
             actions = normalizer.unnormalize(actions)
 
