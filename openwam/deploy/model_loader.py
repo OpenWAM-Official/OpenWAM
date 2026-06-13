@@ -211,12 +211,16 @@ def load_from_checkpoint_dir(
 
 
 def _build_action_normalizer(cfg: DictConfig, ckpt_dir: str):
-    """Build the deploy action normalizer when checkpoint normalization is active.
+    """Build the normalizer for both deploy directions, or ``None`` if disabled.
 
-    Reads ``dataloader.normalize_mode`` and ``dataloader.action_mode`` from the
-    saved config. When normalization is disabled, returns ``None`` without
-    requiring ``normalization_stats.npy``. When enabled, loads ``normalization_stats.npy``
-    and wraps the requested stats sub-dict in an ``ActionNormalizer``.
+    Despite the ``ActionNormalizer`` name it serves both: ``normalize`` maps the
+    input proprio state into training space, ``unnormalize`` maps the output
+    action back to physical units. proprio is a single-frame action
+    (``raw_actions[0:1]``), so both share one set of stats.
+
+    Reads ``dataloader.normalize_mode`` / ``action_mode`` from the saved config;
+    when enabled, loads ``normalization_stats.npy`` and wraps the requested stats
+    sub-dict. When disabled, returns ``None`` (no stats file required).
     """
     logger.info("[normalizer] Resolving deployment action normalizer from checkpoint dir: %s", ckpt_dir)
 
