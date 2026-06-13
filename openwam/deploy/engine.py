@@ -16,7 +16,6 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
 import torch
 
 from openwam.dataloader.transforms.text_embedding_cache import resolve_cache_path_for_sha, sha256_for_prompt
@@ -409,16 +408,11 @@ class JointInferenceEngine(BaseInferenceEngine):
         if self._dit_cache is not None:
             self._dit_cache.reset()
 
-        # Extract generation params
-        proprio_state = conditions.get("proprio_state", None)
+        # Deploy proprio: array-like in, normalized model-space tensor out.
+        proprio_state = conditions.get("proprio_state")
         if proprio_state is None:
             observation = conditions.get("observation") or {}
             proprio_state = observation.get("state") if isinstance(observation, dict) else None
-        if proprio_state is not None and not isinstance(proprio_state, torch.Tensor):
-            if isinstance(proprio_state, np.ndarray):
-                proprio_state = torch.from_numpy(proprio_state)
-            else:
-                proprio_state = torch.tensor(proprio_state, dtype=torch.float32)
         if proprio_state is not None:
             proprio_state = self.architecture.normalize_deploy_proprio(proprio_state)
 

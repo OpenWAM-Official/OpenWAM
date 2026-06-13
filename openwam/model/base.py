@@ -155,7 +155,14 @@ def _ensure_cosmos25_reason1_self_contained(arch: "BaseWAMArchitecture") -> None
 
 
 def _assert_decode_video_supported(vb) -> None:
-    'Public implementation.'
+    """Fail-fast guard for ``generate(decode_video=True)`` against backbones
+    wired to an irreversible external encoder (DINOv3 / V-JEPA2).
+
+    Silently returning ``video=None`` would mask a config mismatch (the
+    caller asked for pixels but the encoder cannot produce them). Pulled
+    out of :meth:`BaseWAMArchitecture.generate` so it is independently
+    unit-testable without standing up the full denoising loop.
+    """
     enc = getattr(vb, "_encoder", None)
     if enc is not None and not enc.spec.is_reversible:
         raise ValueError(
@@ -190,8 +197,6 @@ class ActionState:
     action_latents: Optional[Tensor] = None
     timestep: Optional[Tensor] = None
     payload: Optional[Any] = None
-
-
 
 
 class BaseWAMArchitecture(ABC, nn.Module):
@@ -287,6 +292,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # ``from_scratch=false`` checkpoints (state_dict topology
         # ``_pipe.vae.*``) keep working bit-exactly.
         if enc_cfg is not None and from_scratch:
+            # Yaml whitelist applies to both paths so an in-tree typo /
+            # extra field never silently slips through deploy. The
+            # always-allowed pair is {name, model_path}; each encoder
+            # class extends the set via ``optional_yaml_keys()`` for
+            # runtime knobs (e.g. V-JEPA 2.1's ``vjepa2_1_forward``).
             from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
 
             allowed = BaseWAMArchitecture._compute_encoder_yaml_whitelist(enc_cfg, _VIDEO_ENCODER_REGISTRY)
@@ -304,11 +314,41 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
                 external_encoder = build_video_encoder(enc_cfg)
             else:
+                # Deploy: reconstruct the encoder skeleton from the saved
+                # components entry; weights filled in by the architecture's
+                # subsequent ``load_checkpoint`` strict load. ``source`` is
+                # the dict produced by deploy/model_loader.py. ``_ckpt_dir``
+                # is plumbed onto ``vb_cfg`` by model_loader and forwarded
+                # to :meth:`VideoEncoder.from_skeleton` so each encoder can
+                # consult the checkpoint-local artifacts that its
+                # :meth:`VideoEncoder.copy_deploy_artifacts` wrote at save
+                # time. For example, V-JEPA 2.1 prefers
+                # ``<ckpt_dir>/manifest.json`` with a fallback to
+                # ``encoder.model_path``. The user-side weight directory does
+                # not need to be reachable on the deploy host.
                 ckpt_dir_for_encoder = (
                     vb_cfg.get("_ckpt_dir") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_ckpt_dir", None)
                 )
                 external_encoder = self._build_external_encoder_skeleton(enc_cfg, source, ckpt_dir=ckpt_dir_for_encoder)
         elif enc_cfg is not None and source is None:
+            # Training with encoder block set but from_scratch=false. Two
+            # sub-cases:
+            #   (a) ``encoder.name == "wan_vae"`` (the default-yaml template
+            #       value) — stay silent (INFO only). Native ``pipe.vae``
+            #       and the wan_vae external encoder are bit-identical, so
+            #       nothing is lost; the default yaml ships the
+            #       ``encoder:`` block as a discoverable hint and
+            #       fail-fast here would break every default config.
+            #   (b) ``encoder.name`` is anything else (``vjepa2_1`` /
+            #       ``dinov3`` / ...) — that is an explicit
+            #       choice that *cannot* take effect under
+            #       ``from_scratch=false``: the pre-trained DiT's first
+            #       conv channels are bound to the native Wan VAE's
+            #       ``z_dim`` and there is no way to wire a different
+            #       encoder's latent space through without re-initializing
+            #       the DiT. Silently INFO-logging would produce a Wan-VAE
+            #       run that *looks* like a V-JEPA run from the yaml, so
+            #       fail-fast.
             enc_name = ""
             if isinstance(enc_cfg, dict):
                 enc_name = str(enc_cfg.get("name", ""))
@@ -459,7 +499,19 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     @staticmethod
     def _encoder_yaml_extras(enc_cfg, allowed: set[str]) -> set[str]:
-        'Public implementation.'
+        """Keys present in ``enc_cfg`` with a non-null value that are NOT
+        in ``allowed``.
+
+        Yaml-``null`` is treated as "field absent" for whitelist purposes
+        so the framework yamls (``configs/model/backbone/wan.yaml``) can
+        keep an inline ``encoder:`` block with discoverability fields
+        like an encoder-specific knob set to ``null`` — those fields stay
+        visible to operators but do not trip the whitelist when the active
+        encoder (e.g. V-JEPA 2.1, V-JEPA 2, Wan VAE) does not declare them in
+        ``optional_yaml_keys()``. An explicit non-null value still
+        triggers the whitelist error, so a user who actually sets the
+        field on the wrong encoder still gets a fail-fast.
+        """
         if isinstance(enc_cfg, dict):
             items = list(enc_cfg.items())
         else:
@@ -473,9 +525,35 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     @staticmethod
     def _build_external_encoder_skeleton(enc_cfg, source, *, ckpt_dir=None):
-        'Public implementation.'
+        """Deploy-time external encoder constructor.
+
+        Reads the encoder ``name`` (subject to the same yaml whitelist as
+        the training path) and reaches into the saved ``source`` dict for
+        the ``components`` list to find the ``attr == "vae"`` entry. That
+        entry's ``model_class`` / ``extra_kwargs`` is handed to the
+        encoder class's :meth:`VideoEncoder.from_skeleton` classmethod,
+        which instantiates the underlying module with zero weights. The
+        architecture's :meth:`load_checkpoint` strict load fills in the
+        weights immediately after.
+
+        ``ckpt_dir`` is forwarded to ``from_skeleton`` so encoders that
+        depend on side files can read them from the checkpoint dir itself,
+        not from the user-side weight directory. Two patterns coexist:
+        V-JEPA 2.1 prefers ``<ckpt_dir>/manifest.json`` and falls back to
+        ``encoder.model_path`` for older checkpoints.
+
+        Refuses to silently fall back to the native VAE path here: if the
+        cfg has an encoder block but the components list is missing a vae
+        entry (e.g. corrupted save), raise so the operator sees the
+        mismatch up front.
+        """
         from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
 
+        # Deploy-side whitelist matches the training-side whitelist in
+        # ``_init_video_backbone`` — same field set, same plumbing via
+        # ``_compute_encoder_yaml_whitelist`` (encoder class extends the
+        # always-allowed ``{name, model_path}`` with its
+        # ``optional_yaml_keys()``).
         allowed = BaseWAMArchitecture._compute_encoder_yaml_whitelist(enc_cfg, _VIDEO_ENCODER_REGISTRY)
         extras = BaseWAMArchitecture._encoder_yaml_extras(enc_cfg, allowed)
         if extras:
@@ -738,22 +816,21 @@ class BaseWAMArchitecture(ABC, nn.Module):
         self.normalizer = normalizer
 
     def normalize_deploy_proprio(self, proprio_state):
-        """Normalize raw deploy proprio with the training action normalizer."""
-        normalizer = getattr(self, "normalizer", None)
-        if normalizer is None or proprio_state is None:
-            return proprio_state
+        """Normalize raw deploy proprio (array-like) into a float32 tensor; ``None`` passes through.
+
+        The denoising loop re-casts to the model device/dtype, so a CPU tensor is fine.
+        """
+        if proprio_state is None:
+            return None
 
         import numpy as np
         import torch
 
-        was_tensor = isinstance(proprio_state, torch.Tensor)
-        device = proprio_state.device if was_tensor else None
-        dtype = proprio_state.dtype if was_tensor and proprio_state.is_floating_point() else None
-        arr = proprio_state.detach().cpu().numpy() if was_tensor else np.asarray(proprio_state, dtype=np.float32)
-        norm = normalizer.normalize(arr.astype(np.float32, copy=False))
-        if was_tensor:
-            return torch.from_numpy(norm).to(device=device, dtype=dtype or torch.float32)
-        return norm
+        arr = np.asarray(proprio_state, dtype=np.float32)
+        normalizer = getattr(self, "normalizer", None)
+        if normalizer is not None:
+            arr = normalizer.normalize(arr)
+        return torch.from_numpy(arr)
 
     # --- Checkpoint save / load ---
 
@@ -1349,7 +1426,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if inputs.get("first_frame_latents") is not None:
             inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
 
-
         # --- Prepare action noise ---
         noisy_actions, action_target, action_timesteps, action_timestep_ids, action_sigmas = (
             None,
@@ -1418,6 +1494,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             timestep=video_timesteps,
         )
 
+        # --- Video loss ---
         loss_video = self._compute_video_loss(
             video_noise_pred,
             video_target,
@@ -1510,9 +1587,27 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         return (per_sample * tw).mean()
 
-
     def _compute_action_loss(self, noise_pred, target, timestep_ids, scheduler, inputs, device):
-        'Public implementation.'
+        """Per-sample weighted action MSE loss.
+
+        Supports two action_is_pad shapes:
+          * **(B, T) bool** — legacy per-timestep mask (pre-2D migration).
+            Each masked timestep contributes 0 to per-sample loss; per_sample =
+            sum_t(loss_t) / N_valid_t, where loss_t = mean over D dims.
+          * **(B, T, D) bool** — 2-D mask covering both time AND per-dim
+            validity (new default for RoboCOIN/EgoDex/RoboTwin/OXE). Each
+            (t, d) cell contributes only when mask[t, d] is True; per_sample =
+            sum_{t,d}(loss_{t,d}) / N_valid_cells.
+
+        The two paths are *mathematically equivalent* whenever the 2D mask
+        is a broadcast of the 1D time mask across all D dims (i.e. every
+        valid timestep has every dim valid): both reduce to
+        sum_{t,d}(loss_{t,d}) / (N_valid_t * D). Verified by §7.4 regression
+        tests under plans/oxe_dataloaders.md.
+
+        A (T, 2) per-hand mask is handled by the legacy 2D path
+        (rank-3 mask, per-element broadcasting), unchanged by this migration.
+        """
         import torch.nn.functional as F
 
         tw = scheduler.training_weight(timestep_ids).to(dtype=torch.float32, device=device)
@@ -1537,6 +1632,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
             per_sample = weighted.sum(dim=(1, 2)) / valid_mask_f.sum(dim=(1, 2)).clamp(min=1)
             return (per_sample * tw).mean()
 
+        # Legacy fallback path. Handles:
+        #   (a) 1D ``(B, T)`` per-timestep mask (pre-migration contract; still
+        #       valid for any reader that didn't migrate).
+        #   (b) ``(B, T, K)`` mask whose K dim does NOT match per_element's D
+        #       (e.g. predictor stub used in tests where pred ∈ R^{T×2} but
+        #       reader emits 14-dim mask; OR a per-hand mask). Collapse
+        #       to per-step via ``any(dim=-1)`` so "any dim valid → timestep
+        #       contributes" — preserves legacy semantics.
         if valid_mask_f.ndim == 3:
             valid_mask_f = (valid_mask_f > 0).any(dim=-1).float()
         per_step = per_element.mean(dim=2)
@@ -1675,8 +1778,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 raise ValueError("use_proprioception=True requires `proprio_state` during generation.")
             inputs_shared["proprio_state"] = proprio_state.to(device=device, dtype=dtype)
 
-        encoder = getattr(vb, "_encoder", None)
-
         action_latents = torch.randn(
             1,
             action_num_frames - 1,
@@ -1750,7 +1851,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 if dit_cache is not None and video_stepping:
                     dit_cache.update(noise_pred, sigma_v)
 
-
             if video_stepping:
                 new_latents = inputs_shared["latents"] + noise_pred * (sigma_v_next - sigma_v)
                 ref_latents = inputs_shared.get("first_frame_latents")
@@ -1758,7 +1858,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     new_latents = new_latents.clone()
                     new_latents[:, :, : ref_latents.shape[2]] = ref_latents
                 inputs_shared["latents"] = new_latents
-
 
             if action_stepping and action_noise_pred is not None:
                 action_latents = self.action_scheduler.flow_step(
@@ -1914,7 +2013,18 @@ def _combine_cfg(uncond: Tensor, cond: Tensor, scale: float) -> Tensor:
 
 # Keys in ``inputs_shared`` that carry a leading batch axis and therefore
 # need duplication when stacking ``[uncond, cond]`` for cfg_merge=True.
-_CFG_BATCH_AXIS_KEYS: tuple = ('latents', 'input_latents', 'proprio_state', 'first_frame_latents', 'seq_lens', 'context_mask', 'condition_mask')
+_CFG_BATCH_AXIS_KEYS: tuple = (
+    "latents",
+    "input_latents",
+    "proprio_state",
+    "first_frame_latents",
+    "seq_lens",
+    "context_mask",
+    # cosmos25 TI2V emits ``condition_mask`` of shape (B, 1, T_lat, H_lat, W_lat)
+    # in ``_finalize_ti2v_inputs`` and the wrapper cats it to ``x_in`` along
+    # dim=1; cfg_merge=True must double B here or that cat shape-mismatches.
+    "condition_mask",
+)
 
 
 def _expand_inputs_for_cfg(

@@ -48,8 +48,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
-
 from openwam.deploy.obs_preprocess import ObsPreprocessor, ObsValidationError
 
 logger = logging.getLogger(__name__)
@@ -185,7 +183,7 @@ class PolicyServer:
         self._total_latency += latency_ms
 
         return {
-            "action": action.tolist() if isinstance(action, np.ndarray) else list(action),
+            "action": action.tolist(),
             "step": self._request_count,
             "latency_ms": round(latency_ms, 2),
         }

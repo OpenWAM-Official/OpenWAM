@@ -182,8 +182,8 @@ class _CaptureDeployArchitecture:
         del compile_cfg
 
     def normalize_deploy_proprio(self, proprio_state):
-        arr = proprio_state.detach().cpu().numpy()
-        return torch.from_numpy(self.normalizer.normalize(arr).astype(np.float32))
+        arr = np.asarray(proprio_state, dtype=np.float32)
+        return torch.from_numpy(self.normalizer.normalize(arr))
 
     def generate(self, **kwargs):
         self.seen_proprio_state = kwargs["proprio_state"]
