@@ -1091,7 +1091,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             video_frames = None
 
         actions_out = action_latents.squeeze(0).float().cpu().numpy()
-        normalizer = getattr(self, "action_normalizer", None)
+        normalizer = getattr(self, "normalizer", None)
         if normalizer is not None:
             actions_out = normalizer.unnormalize(actions_out)
 

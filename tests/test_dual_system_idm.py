@@ -405,6 +405,40 @@ def test_idm_generate_honors_action_num_frames_and_prefills_video_once(monkeypat
     assert vb.prepare_count == 2
 
 
+def test_idm_generate_runs_attached_normalizer_on_actions(monkeypatch):
+    """IDM's own generate() must unnormalize the output via the attached normalizer.
+
+    Regression: the action_normalizer -> normalizer rename left idm.py reading a
+    stale getattr key, silently skipping unnormalization for IDM deploys.
+    """
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+
+    class _AddConstNormalizer:
+        def unnormalize(self, x):
+            return x + 100.0
+
+    torch.manual_seed(0)
+    arch = _make_idm_with_video(_GenerateVideoBackbone())
+    arch.eval()
+    gen_kwargs = dict(
+        schedule=[(1.0, 1.0), (0.0, 0.5), (0.0, 0.0)],
+        prompt="",
+        num_frames=3,
+        action_num_frames=5,
+        decode_video=False,
+        seed=0,
+    )
+
+    # Same global + per-call seed → identical denoised actions; only the normalizer differs.
+    torch.manual_seed(42)
+    raw = arch.generate(**gen_kwargs)["actions"]
+    arch.normalizer = _AddConstNormalizer()
+    torch.manual_seed(42)
+    normalized = arch.generate(**gen_kwargs)["actions"]
+
+    torch.testing.assert_close(torch.from_numpy(normalized), torch.from_numpy(raw) + 100.0)
+
+
 def test_idm_generate_with_proprio_appends_context_once(monkeypatch):
     """IDM generate appends proprio once even though stage 2 bypasses forward()."""
     monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
