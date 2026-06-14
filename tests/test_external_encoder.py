@@ -45,7 +45,12 @@ class _MockEncoderBase(VideoEncoder):
     per-class — frozen dataclass forbids per-instance mutation anyway.
     """
 
-    _SPEC_KWARGS: dict = {'z_dim': 16, 'spatial_compression': 8, 'temporal_compression': 4, 'causal_temporal': True}
+    _SPEC_KWARGS: dict = {
+        "z_dim": 16,
+        "spatial_compression": 8,
+        "temporal_compression": 4,
+        "causal_temporal": True,
+    }
 
     def __init__(self):
         super().__init__()
@@ -166,7 +171,15 @@ def test_A8_validate_encoder_spec_field_by_field():
 
     # pixel_range / is_reversible / dit_patch_size are NOT in the required set
     # (excluded by VideoBackbone._ENCODER_SPEC_REQUIRED_FIELDS).
-    relaxed = VideoEncoderSpec(z_dim=16, spatial_compression=8, temporal_compression=4, causal_temporal=True, pixel_range=(0.0, 1.0), is_reversible=False, dit_patch_size=(1, 1, 1))
+    relaxed = VideoEncoderSpec(
+        z_dim=16,
+        spatial_compression=8,
+        temporal_compression=4,
+        causal_temporal=True,
+        pixel_range=(0.0, 1.0),
+        is_reversible=False,
+        dit_patch_size=(1, 1, 1),
+    )
     VideoBackbone.validate_encoder_spec(relaxed, want)
 
     # z_dim mismatch raises with a readable message.
@@ -513,7 +526,14 @@ def test_C10b_spec_validation_skipped_when_spatial_temporal_differ_for_irreversi
         def __init__(self):
             super().__init__()
             self._proj = nn.Conv3d(1024, 1024, kernel_size=1)
-            self._spec = VideoEncoderSpec(z_dim=1024, spatial_compression=16, temporal_compression=1, causal_temporal=False, is_reversible=False, dit_patch_size=(1, 1, 1))
+            self._spec = VideoEncoderSpec(
+                z_dim=1024,
+                spatial_compression=16,
+                temporal_compression=1,
+                causal_temporal=False,
+                is_reversible=False,
+                dit_patch_size=(1, 1, 1),
+            )
 
         @property
         def spec(self):
@@ -612,7 +632,15 @@ def test_C13b_reinit_without_external_encoder_is_backwards_compat():
 
 
 def test_C13c_reinit_syncs_patch_size_for_non_default_encoder():
-    'Public implementation.'
+    """Regression for the severe S1 bug: ``reinit_dit_from_scratch`` must
+    also sync ``dit.patch_size`` (used by ``WanModel.unpatchify``'s einops
+    rearrange) and ``dit.head.patch_size`` whenever the encoder declares a
+    non-default ``spec.dit_patch_size``. Pre-fix, the patch_embedding and
+    head.head Linear were rebuilt at the new shape but the unpatchify hint
+    stayed at ``(1, 2, 2)`` — any encoder with ``dit_patch_size=(1,1,1)``
+    (DINOv3 / V-JEPA2 patch-at-16) would shape-mismatch on the first
+    forward.
+    """
     from openwam.model.video_backbone.wan_adapter import reinit_dit_from_scratch
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
@@ -777,7 +805,14 @@ class WanVideoVAEEncoderStub(VideoEncoder):
         super().__init__()
         # A tiny conv so state_dict has something to enumerate (test C4).
         self._proj = nn.Conv3d(spec_z_dim, spec_z_dim, kernel_size=1)
-        self._spec = VideoEncoderSpec(z_dim=spec_z_dim, spatial_compression=8, temporal_compression=4, causal_temporal=True, is_reversible=is_reversible, dit_patch_size=dit_patch_size)
+        self._spec = VideoEncoderSpec(
+            z_dim=spec_z_dim,
+            spatial_compression=8,
+            temporal_compression=4,
+            causal_temporal=True,
+            is_reversible=is_reversible,
+            dit_patch_size=dit_patch_size,
+        )
 
     @property
     def spec(self) -> VideoEncoderSpec:
@@ -914,10 +949,18 @@ def test_D1a_encoder_yaml_whitelist_extends_per_optional_yaml_keys(monkeypatch):
         _run_init_video_backbone(bad_cfg)
 
 
-
-
 def test_D1c_encoder_yaml_whitelist_ignores_yaml_null_fields(monkeypatch):
-    'Public implementation.'
+    """Regression: a yaml-``null`` encoder field must be treated as absent.
+
+    An inline ``encoder:`` block (or a Hydra group merge) can leave a field
+    set to ``null`` that the active encoder does not declare in
+    ``optional_yaml_keys()``. The whitelist check at
+    ``BaseWAMArchitecture._init_video_backbone`` must treat yaml-null as
+    "field absent" so it does not trip a ValueError — otherwise every
+    from_scratch=true run carrying a stray null field would be blocked.
+
+    An explicit non-null value on the wrong encoder still raises (covered by
+    test_D1a)."""
     from openwam.model.video_backbone import encoder as encoder_mod
 
     monkeypatch.setattr(encoder_mod, "build_video_encoder", lambda cfg: object())
@@ -937,7 +980,8 @@ def test_D1c_encoder_yaml_whitelist_ignores_yaml_null_fields(monkeypatch):
                 "name": "vjepa2_1",
                 "model_path": "/dummy",
                 "vjepa2_1_forward": "video",
-                # The wan.yaml inline-block leftover — must NOT trip the whitelist.
+                # A stray null field the active encoder doesn't declare —
+                # must NOT trip the whitelist.
                 "unknown_encoder_knob": None,
             },
         }
@@ -951,13 +995,12 @@ def test_D1c_encoder_yaml_whitelist_ignores_yaml_null_fields(monkeypatch):
     except ValueError as e:
         if "allows only" in str(e):
             raise AssertionError(
-                f"yaml-null unknown_encoder_knob on vjepa2_1 encoder must not "
-                f"trip the whitelist; got: {e}"
+                f"a yaml-null field on the vjepa2_1 encoder must not trip the whitelist; got: {e}"
             ) from e
     except AttributeError:
         pass  # downstream temporal_compression read on stubbed backbone — fine
 
-    # Sibling guard: explicit non-null unknown_encoder_knob on vjepa2_1 must
+    # Sibling guard: an explicit non-null unknown field on vjepa2_1 must
     # STILL fail (the field is wrong-encoder, not just an inline leftover).
     cfg_explicit = {
         "video_backbone": {
@@ -1587,7 +1630,14 @@ def test_M3h_noise_initializer_reads_latent_spec_when_present():
 
     # --- Path 1: external encoder spec (DINOv3-style) ---
     pipe = _StubPipe()
-    pipe.latent_spec = VideoEncoderSpec(z_dim=1024, spatial_compression=16, temporal_compression=1, causal_temporal=False, is_reversible=False, dit_patch_size=(1, 1, 1))
+    pipe.latent_spec = VideoEncoderSpec(
+        z_dim=1024,
+        spatial_compression=16,
+        temporal_compression=1,
+        causal_temporal=False,
+        is_reversible=False,
+        dit_patch_size=(1, 1, 1),
+    )
     out = unit.process(
         pipe, height=256, width=256, num_frames=49, seed=42, rand_device="cpu", vace_reference_image=None
     )
@@ -1597,7 +1647,12 @@ def test_M3h_noise_initializer_reads_latent_spec_when_present():
 
     # --- Path 2: external encoder spec (Wan VAE-style, causal) ---
     pipe = _StubPipe()
-    pipe.latent_spec = VideoEncoderSpec(z_dim=48, spatial_compression=16, temporal_compression=4, causal_temporal=True)
+    pipe.latent_spec = VideoEncoderSpec(
+        z_dim=48,
+        spatial_compression=16,
+        temporal_compression=4,
+        causal_temporal=True,
+    )
     out = unit.process(
         pipe, height=480, width=832, num_frames=49, seed=42, rand_device="cpu", vace_reference_image=None
     )
@@ -1864,7 +1919,10 @@ def test_E_dual_system_composed_encoder_block():
     assert enc is not None, "dual_system + default backbone is missing video_backbone.encoder"
     assert enc.name == "wan_vae"
     assert "model_path" in enc
-    extras = set(enc.keys()) - {'name', 'model_path'}
+    # Keep the allowed encoder-block fields in this regression test in sync
+    # with ``BaseWAMArchitecture._init_video_backbone`` /
+    # ``_build_external_encoder_skeleton``.
+    extras = set(enc.keys()) - {"name", "model_path"}
     assert extras == set(), f"encoder block has extra fields {extras}, will trip the gate's whitelist"
 
 
@@ -2051,9 +2109,7 @@ def _build_vjepa_spy_encoder(*, embed_dim: int = 8, vjepa2_1_forward: str = "vid
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
     vit = _SpyVJEPAViT(embed_dim=embed_dim)
-    enc = VJEPA21VideoEncoder(
-        vit, embed_dim=embed_dim, variant="spy", vjepa2_1_forward=vjepa2_1_forward
-    )
+    enc = VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="spy", vjepa2_1_forward=vjepa2_1_forward)
     return enc, vit
 
 
@@ -2213,9 +2269,7 @@ def _build_vjepa_nan_propagating_encoder(*, embed_dim: int = 8, vjepa2_1_forward
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
     vit = _NaNPropagatingVJEPAViT(embed_dim=embed_dim)
-    return VJEPA21VideoEncoder(
-        vit, embed_dim=embed_dim, variant="nan-prop", vjepa2_1_forward=vjepa2_1_forward
-    )
+    return VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="nan-prop", vjepa2_1_forward=vjepa2_1_forward)
 
 
 @pytest.mark.parametrize("mode", ["video", "mixed"])
@@ -2236,8 +2290,7 @@ def test_V6j_vjepa21_cond_does_not_leak_target_pixels(mode):
     z = enc.batch_encode(video)
     assert z.shape == (1, 8, 3, 2, 2)
     assert not torch.isnan(z[:, :, 0:1]).any(), (
-        f"cond latent contains NaN under vjepa2_1_forward={mode!r} — target frames "
-        "are leaking into the cond pass"
+        f"cond latent contains NaN under vjepa2_1_forward={mode!r} — target frames are leaking into the cond pass"
     )
     # ``.all()`` is the right strength here: every target pixel frame is
     # NaN, the tubelet=2 pool groups each contain at least one NaN frame
@@ -2294,11 +2347,13 @@ def test_V6i_vjepa21_from_pretrained_forwards_yaml_field(tmp_path, monkeypatch):
     }
     (tmp_path / "manifest.json").write_text(_json.dumps(manifest))
 
-    enc = build_video_encoder({
-        "name": "vjepa2_1",
-        "model_path": str(tmp_path),
-        "vjepa2_1_forward": "mixed",
-    })
+    enc = build_video_encoder(
+        {
+            "name": "vjepa2_1",
+            "model_path": str(tmp_path),
+            "vjepa2_1_forward": "mixed",
+        }
+    )
     assert isinstance(enc, VJEPA21VideoEncoder)
     assert enc.vjepa2_1_forward == "mixed"
 
@@ -2583,10 +2638,9 @@ def test_V11b_vjepa21_from_skeleton_propagates_vjepa2_1_forward(tmp_path, monkey
     # Render via ``getMessage()`` (not ``r.message``) so the assertion compares
     # against the formatted log line — robust to %-substitutions and parity
     # with ``test_W17``'s path B style.
-    assert not any(
-        "vjepa2_1_forward" in r.getMessage() and r.levelno == logging.WARNING
-        for r in caplog.records
-    ), "explicit vjepa2_1_forward must NOT trip the pre-PR-checkpoint warning"
+    assert not any("vjepa2_1_forward" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records), (
+        "explicit vjepa2_1_forward must NOT trip the pre-PR-checkpoint warning"
+    )
 
     # --- Path B: field absent → default + warning ---
     caplog.clear()
@@ -2598,8 +2652,7 @@ def test_V11b_vjepa21_from_skeleton_propagates_vjepa2_1_forward(tmp_path, monkey
     assert enc_default.vjepa2_1_forward == "video"  # current _VJEPA21_FORWARD_DEFAULT
     warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("vjepa2_1_forward" in m and "mixed" in m for m in warning_msgs), (
-        f"expected migration warning naming the field and the legacy ``mixed`` "
-        f"value; got: {warning_msgs}"
+        f"expected migration warning naming the field and the legacy ``mixed`` value; got: {warning_msgs}"
     )
 
 
@@ -2700,9 +2753,7 @@ def test_V15_vjepa21_from_skeleton_prefers_ckpt_dir_manifest(tmp_path, monkeypat
     assert enc.variant == "vitg-rope-384"
 
 
-def test_V16_vjepa21_from_skeleton_falls_back_to_encoder_cfg_when_ckpt_dir_lacks_manifest(
-    tmp_path, monkeypatch
-):
+def test_V16_vjepa21_from_skeleton_falls_back_to_encoder_cfg_when_ckpt_dir_lacks_manifest(tmp_path, monkeypatch):
     """Old checkpoints saved before self-containment have no
     ``<ckpt_dir>/manifest.json`` — ``from_skeleton`` must fall back to the
     yaml's ``encoder.model_path`` so those checkpoints keep deploying.
@@ -2822,9 +2873,7 @@ def test_V19_vjepa21_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_
     assert any("manifest.json" in r.message for r in caplog.records)
 
 
-def test_V20_vjepa21_copy_deploy_artifacts_io_error_does_not_crash(
-    tmp_path, caplog, monkeypatch
-):
+def test_V20_vjepa21_copy_deploy_artifacts_io_error_does_not_crash(tmp_path, caplog, monkeypatch):
     """``copy_deploy_artifacts`` must NEVER raise on IO failure either —
     permission denied / disk full / disappearing mount must collapse to a
     warning + return so the trainer's safetensors save isn't lost.
@@ -2862,7 +2911,14 @@ def test_V20_vjepa21_copy_deploy_artifacts_io_error_does_not_crash(
 
 
 def test_V21_vjepa21_feature_norm_keys_present_in_state_dict():
-    'Public implementation.'
+    """``self.feature_norm`` must live directly on the encoder (NOT inside
+    ``self._m``) so the freeze yaml's ``video_backbone._encoder`` line
+    recursively covers it AND the safetensors carries it under
+    ``video_backbone._encoder.feature_norm.*``. If a future refactor
+    moves the LN into ``self._m``, deploy round-trip would still pass
+    (state_dict key sets remain consistent) but the freeze granularity
+    would silently change. Pinning the location here surfaces that as a
+    test break."""
     enc = _build_vjepa_encoder(embed_dim=8)
     keys = set(enc.state_dict().keys())
     assert "feature_norm.weight" in keys, (
@@ -3364,18 +3420,14 @@ def test_W16_vjepa2_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_p
     # cfg points at a directory with no manifest.json → warning + no-op.
     empty_src = tmp_path / "empty"
     empty_src.mkdir()
-    cfg = OmegaConf.create(
-        {"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(empty_src)}}}}
-    )
+    cfg = OmegaConf.create({"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(empty_src)}}}})
     with caplog.at_level(logging.WARNING):
         enc.copy_deploy_artifacts(str(output_dir), cfg)
     assert not (output_dir / "manifest.json").exists()
     assert any("manifest.json" in r.message for r in caplog.records)
 
 
-def test_W17_vjepa2_copy_deploy_artifacts_io_error_does_not_crash(
-    tmp_path, caplog, monkeypatch
-):
+def test_W17_vjepa2_copy_deploy_artifacts_io_error_does_not_crash(tmp_path, caplog, monkeypatch):
     """V-JEPA 2 mirror of test_V20: PermissionError / ENOSPC / disappearing-
     mount OSError during the manifest copy must collapse to a warning +
     return so the trainer's safetensors save isn't lost."""
