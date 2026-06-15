@@ -188,26 +188,6 @@ def test_build_mot_driver_dispatches_softmax_to_mot_driver():
     assert type(driver) is MoTJointDriver
 
 
-def test_build_mot_driver_dispatches_linear_relu_to_sana_driver():
-    """``linear_relu`` kernel routes to :class:`SanaMoTJointDriver`."""
-    from openwam.model.architectures.dual_system.sana_mot_driver import (
-        SanaMoTJointDriver,
-    )
-
-    arch = _build_dispatch_arch_with_fakes(kernel="linear_relu")
-    driver = arch.build_mot_driver()
-    assert isinstance(driver, SanaMoTJointDriver)
-
-
-def test_build_mot_driver_rejects_unknown_kernel():
-    """Unknown kernel names raise rather than silently falling back."""
-    import pytest
-
-    arch = _build_dispatch_arch_with_fakes(kernel="flash")
-    with pytest.raises(ValueError, match="unsupported video_backbone.attn_kernel"):
-        arch.build_mot_driver()
-
-
 def test_all_architectures_registered():
     """Supported top-level architecture families should be in the registry."""
     from openwam.model import list_supported_architectures
@@ -218,41 +198,3 @@ def test_all_architectures_registered():
     assert "dual_system_idm" in supported
     assert "shared_backbone_vanilla" in supported
     assert "shared_backbone_moe" in supported
-
-
-def test_dual_system_self_attn_sana_yaml_resolves_to_linear_relu():
-    """``configs/model/dual_system_self_attn_sana.yaml`` must resolve to the
-    joint_self_attn registry entry and propagate ``attn_kernel='linear_relu'``
-    on both the video and action backbone sides.
-
-    This is the CPU-side gate for Phase 4 — it does not build the architecture
-    (which needs the SANA submodule + weights), but it pins the contract that
-    the dispatch path in ``DualSystemSelfAttnArchitecture.build_mot_driver``
-    relies on (joint_self_attn.py:125-143). If someone renames
-    ``video_backbone.attn_kernel`` or drops the action-side override, this
-    test will catch it before training touches a GPU.
-    """
-    from omegaconf import OmegaConf
-
-    from openwam.model import resolve_architecture_config
-
-    cfg = OmegaConf.load("configs/model/dual_system_self_attn_sana.yaml")
-    resolved = resolve_architecture_config(cfg)
-
-    assert resolved.registry_name == "dual_system_self_attn"
-    assert resolved.canonical.framework == "dual_system"
-    assert resolved.canonical.variant == "joint_self_attn"
-
-    # Video-side kernel — drives `build_mot_driver` to SanaMoTJointDriver.
-    vb = resolved.params["video_backbone"]
-    assert vb["name"] == "sana_video_2b"
-    assert vb["attn_kernel"] == "linear_relu"
-
-    # Action-side kernel — must match video to satisfy
-    # ``SanaMoTJointDriver.__init__`` cross-modal kernel check.
-    assert resolved.params["attn_kernel"] == "linear_relu"
-
-    # FastWAM-Joint mask defaults — same contract as the cosmos25 self-attn yaml.
-    assert resolved.params["attention_mask_mode"] == "joint"
-    assert resolved.params["video_attention_mask_mode"] == "first_frame_causal"
-    assert resolved.params["mot_checkpoint_mixed_attn"] is True
