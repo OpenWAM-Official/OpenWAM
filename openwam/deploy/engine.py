@@ -420,7 +420,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         )
 
         # §15 — Cosmos25 cache-mode pre_encoded_text resolution. Wan never
-        # reads this kwarg (its prepare_inputs_for_inference signature has no
+        # reads this kwarg (its preprocess_input_for_inference signature has no
         # `pre_encoded_text`); the architecture-level `generate()` only forwards
         # the kwarg to the backbone when it is non-None, so Wan stays untouched.
         prompt = conditions.get("prompt", "")

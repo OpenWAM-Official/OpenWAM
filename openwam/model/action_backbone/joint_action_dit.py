@@ -707,7 +707,7 @@ class ActionDiT(ActionBackbone):
     ) -> torch.Tensor:
         """Standalone action prediction conditioned on per-layer video features.
 
-        ``DualSystemCrossAttnArchitecture.forward`` collects ``vstate.x`` at
+        ``DualSystemCrossAttnArchitecture.forward`` collects ``vstate.hidden_states`` at
         the configured bridge layers after the video backbone runs to
         completion and passes them in a ``{block_id: feat}`` dict. This entry
         point does **not** touch the video backbone or any joint-attention

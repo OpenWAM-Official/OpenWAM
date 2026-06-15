@@ -2024,7 +2024,7 @@ class WanVideoBackbone(VideoBackbone):
     ) -> None:
         """Deploy-side wrapper around :meth:`_build_vace_context_from_pixels`.
 
-        Mirrors the training path in :meth:`preprocess_input`: builds the
+        Mirrors the training path in :meth:`preprocess_input_for_train`: builds the
         same pixel-space (vace_video, vace_mask) pair from the user-facing
         ``first_frame_image`` / ``vace_video`` inputs and writes the
         resulting ``vace_context`` into ``inputs_shared``. Vendored

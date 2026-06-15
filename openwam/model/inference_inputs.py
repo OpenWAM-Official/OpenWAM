@@ -1,4 +1,4 @@
-"""Typed input bag for ``VideoBackbone.prepare_inputs_for_inference``.
+"""Typed input bag for ``VideoBackbone.preprocess_input_for_inference``.
 
 Replaces the conditional ``prep_kwargs`` dict-building previously sitting
 in ``BaseWAMArchitecture.generate`` (and a parallel copy in
@@ -34,10 +34,10 @@ from torch import Tensor
 
 @dataclass(frozen=True)
 class InferenceInputs:
-    """All knobs ``prepare_inputs_for_inference`` may consume.
+    """All knobs ``preprocess_input_for_inference`` may consume.
 
     Mirrors the kwarg list previously threaded through
-    ``BaseWAMArchitecture.generate -> vb.prepare_inputs_for_inference``.
+    ``BaseWAMArchitecture.generate -> vb.preprocess_input_for_inference``.
     Backbones consume what they understand and ignore the rest; the
     ``cfg_scale`` validator stays at the architecture layer (see
     ``BaseWAMArchitecture.generate``) so misconfiguration fails before

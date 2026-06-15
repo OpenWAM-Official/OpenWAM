@@ -672,7 +672,7 @@ class RoboTwinDataset(BaseDataset):
         # ``openwam.dataloader.reason1_embedding_computation``). When the
         # cache_dir is set, every sample dict will carry a
         # ``pre_encoded_text`` (L, D) tensor that the architecture threads to
-        # ``vb.preprocess_input``. Wan backbones drop it silently via ``**kw``.
+        # ``vb.preprocess_input_for_train``. Wan backbones drop it silently via ``**kw``.
         self._text_embedding_transform = None
         if text_embedding_cache_dir:
             from openwam.dataloader.transforms.text_embedding_cache import (

@@ -1949,7 +1949,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if not isinstance(uncond_context, Tensor):
             raise RuntimeError(
                 "CFG combine requested but `inputs_shared['uncond_context']` is missing "
-                "or not a tensor. `prepare_inputs_for_inference` should populate it when "
+                "or not a tensor. `preprocess_input_for_inference` should populate it when "
                 "cfg_scale > 1.0."
             )
 
