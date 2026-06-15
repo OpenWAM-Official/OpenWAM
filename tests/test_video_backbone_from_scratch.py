@@ -22,7 +22,7 @@ import pytest
 import torch
 
 from openwam.model.video_backbone.wan.dit import RMSNorm, WanModel
-from openwam.model.video_backbone.wan_adapter import reinit_dit_from_scratch
+from openwam.model.video_backbone.wan.wan_videobackbone import reinit_dit_from_scratch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -208,7 +208,7 @@ def test_reinit_no_dit_warns_not_crashes(caplog):
 
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.wan_adapter"):
+    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.wan.wan_videobackbone"):
         reinit_dit_from_scratch(_EmptyPipe())
     assert any("no dit/dit2" in rec.message for rec in caplog.records)
 

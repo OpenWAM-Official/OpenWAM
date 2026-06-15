@@ -25,7 +25,7 @@ import torch
 
 from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
 from openwam.model.video_backbone.wan.dit import WanModel
-from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
 
 
 def _mock_encoder_with_patch(dit_patch_size: tuple[int, int, int]) -> SimpleNamespace:

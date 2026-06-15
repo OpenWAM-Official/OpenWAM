@@ -61,7 +61,7 @@ def test_wan_video_backbone_adapter_freq_helpers():
     """extend_freqs_with_action_tokens appends 1D action RoPE by default."""
     from types import SimpleNamespace
 
-    from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+    from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
 
     pipe = SimpleNamespace(dit=None, use_unified_sequence_parallel=False)
     adapter = WanVideoBackbone(pipe)
@@ -80,7 +80,7 @@ def test_wan_video_backbone_is_ti2v():
     """_is_ti2v returns True when fuse_vae_embedding_in_latents is set."""
     from types import SimpleNamespace
 
-    from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+    from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
 
     pipe_a = SimpleNamespace(
         dit=SimpleNamespace(seperated_timestep=True, fuse_vae_embedding_in_latents=True),
@@ -120,7 +120,7 @@ def test_wan_adapter_needs_first_frame_skip_truth_table():
     """
     from types import SimpleNamespace
 
-    from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+    from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
 
     def _make_adapter(*, ti2v=False, vace=False, image_input=False):
         pipe = SimpleNamespace(
@@ -173,7 +173,7 @@ def _build_tiny_wan_backbone(*, ti2v: bool):
     from types import SimpleNamespace
 
     from openwam.model.video_backbone.wan.dit import WanModel
-    from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+    from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
 
     model = WanModel(
         dim=64,

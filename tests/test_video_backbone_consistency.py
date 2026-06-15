@@ -20,7 +20,7 @@ import torch
 from safetensors.torch import load_file
 
 from openwam.model.video_backbone.wan.pipeline import model_fn_wan_video
-from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
+from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
 
 # Override via env vars on machines that mount the checkpoints elsewhere; the
 # defaults match the shared dev box but skipif() makes a missing path a skip,
