@@ -22,7 +22,7 @@ import shutil
 
 import numpy as np
 import torch
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig
 
 from openwam.train.base import BaseTrainer
 from openwam.train.utils.checkpointing import (
@@ -767,23 +767,14 @@ class OpenWAMTrainer(BaseTrainer):
             output_path = os.path.join(base_output_path, run_dir_name)
             os.makedirs(output_path, exist_ok=True)
             # Inject video backbone component specs into config for deployment.
-            model_path = None
-            try:
-                model_path = str(self.cfg.model.video_backbone.model_path)
-            except Exception:
-                pass
-            if model_path and os.path.isdir(model_path):
-                specs = self.architecture.get_component_specs(model_path)
-                if specs is not None:
-                    with open_dict(self.cfg):
-                        self._prepare_video_backbone_config_for_checkpoint(self.cfg, specs)
+            # Make the checkpoint self-contained for deploy: merge component
+            # specs into cfg + copy backbone artifacts (tokenizer / processor),
+            # so deploy does not depend on the training-time model_path. Must run
+            # BEFORE save_config so config.yaml carries the merged specs.
+            self.architecture.save_assets_for_deployment(output_path, self.cfg)
             save_config(output_path, self.cfg)
             if self.dataset is not None:
                 save_normalization_stats(output_path, self.dataset)
-            # Copy backbone-specific deploy artifacts (tokenizer / processor / ...)
-            # so component-spec deployment does not depend on the training-time
-            # ``model.video_backbone.model_path`` being reachable.
-            self.architecture.copy_deploy_artifacts(output_path, self.cfg)
             # Copy VLM checkpoint so deploy is self-contained (tri_system).
             vlm_bb = getattr(self.architecture, "vlm_backbone", None)
             if vlm_bb is not None and getattr(vlm_bb, "_checkpoint_path", None):
@@ -1041,22 +1032,6 @@ class OpenWAMTrainer(BaseTrainer):
             return str(getattr(cfg.model.video_backbone, "name", "")).startswith("cosmos25_")
         except Exception:
             return False
-
-    @staticmethod
-    def _prepare_video_backbone_config_for_checkpoint(cfg, specs: dict) -> None:
-        """Mutate saved config so component-backed checkpoints reload portably."""
-        from omegaconf import OmegaConf
-
-        vb_cfg = cfg.model.video_backbone
-        if OpenWAMTrainer._is_cosmos25_cfg(cfg) and getattr(vb_cfg, "text_encoder_path", None):
-            # Cache-mode training (`text_encoder: none`) still registers the
-            # Reason1 inner module for safetensors; record that in the saved
-            # config so deploy builds the matching empty shell.
-            OmegaConf.update(cfg, "model.video_backbone.text_encoder", "reason1_live")
-        if "components" not in vb_cfg:
-            OmegaConf.update(cfg, "model.video_backbone.components", specs["components"])
-        if "tokenizer" in specs and "tokenizer" not in vb_cfg:
-            OmegaConf.update(cfg, "model.video_backbone.tokenizer", specs["tokenizer"])
 
     def _validate_cosmos25_reason1_artifact_source(self) -> None:
         if not self._is_cosmos25_cfg(getattr(self, "cfg", None)):

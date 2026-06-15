@@ -1033,12 +1033,41 @@ class BaseWAMArchitecture(ABC, nn.Module):
     def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
         """Delegate to each backbone so deploy-time artifacts land in ``output_dir``.
 
-        Trainer calls this once per checkpoint save (after ``save_config``).
         Backbones with no external artifacts can leave the default no-op.
         """
         for bb in self.backbones.values():
             if hasattr(bb, "copy_deploy_artifacts"):
                 bb.copy_deploy_artifacts(output_dir, cfg)
+
+    def save_assets_for_deployment(self, output_dir: str, cfg) -> None:
+        """Make the checkpoint directory self-contained for deploy.
+
+        One unified entry the trainer calls once per checkpoint save, BEFORE
+        ``save_config`` writes ``config.yaml``:
+
+        1. Merge each backbone's component-reconstruction specs into ``cfg`` (so
+           deploy rebuilds the module skeleton from ``config.yaml`` without the
+           training-time ``model_path`` being reachable). Params land in
+           ``config.yaml`` via the subsequent ``save_config``.
+        2. Copy backbone artifact files (tokenizer / processor) into
+           ``output_dir``.
+
+        Replaces the former separate ``get_component_specs`` + config-merge +
+        ``copy_deploy_artifacts`` dance in the trainer.
+        """
+        from omegaconf import OmegaConf, open_dict
+
+        model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
+        if model_path and os.path.isdir(str(model_path)):
+            specs = self.get_component_specs(str(model_path))
+            if specs is not None:
+                with open_dict(cfg):
+                    vb_cfg = cfg.model.video_backbone
+                    if "components" not in vb_cfg:
+                        OmegaConf.update(cfg, "model.video_backbone.components", specs["components"])
+                    if "tokenizer" in specs and "tokenizer" not in vb_cfg:
+                        OmegaConf.update(cfg, "model.video_backbone.tokenizer", specs["tokenizer"])
+        self.copy_deploy_artifacts(output_dir, cfg)
 
     # --- Training: preprocessing ---
 
