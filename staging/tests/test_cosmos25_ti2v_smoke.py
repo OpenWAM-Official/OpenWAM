@@ -285,9 +285,7 @@ def test_prepare_block_loop_keeps_legacy_shape_for_t2v():
     wrapper.prepare_block_loop(input_latents=latents, context=context, timestep=timestep)
     captured = wrapper.net.t_embedder.last_input
     assert captured is not None
-    assert captured.shape == (B, 1), (
-        f"T2V must keep legacy (B, 1) timestep broadcast; got {tuple(captured.shape)}."
-    )
+    assert captured.shape == (B, 1), f"T2V must keep legacy (B, 1) timestep broadcast; got {tuple(captured.shape)}."
     assert int(captured[0, 0]) == 314
 
 

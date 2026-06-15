@@ -105,38 +105,16 @@ def build_video_backbone(
 # Built-in registrations
 # ---------------------------------------------------------------------------
 
-from openwam.model.video_backbone.cosmos25.adapter import Cosmos25VideoBackbone  # noqa: E402
 from openwam.model.video_backbone.wan_adapter import WanVideoBackbone  # noqa: E402
 
 register_video_backbone("wan22_ti2v_5b")(WanVideoBackbone)
 register_video_backbone("wan21_vace_1_3b")(WanVideoBackbone)
 register_video_backbone("wan21_i2v_14b_480p")(WanVideoBackbone)
-register_video_backbone("cosmos25_predict_2b")(Cosmos25VideoBackbone)
-register_video_backbone("cosmos25_predict_14b")(Cosmos25VideoBackbone)
-
-# SANA-Video is imported lazily — its registration calls third_party/Sana via
-# pipeline_builder, which would pull timm and break OpenWAM imports for users
-# who don't have the submodule initialised. Import-on-load failures are caught
-# so a missing/broken SANA install only disables the sana_video_* keys.
-try:
-    from openwam.model.video_backbone.sana.adapter import SanaVideoBackbone  # noqa: E402
-
-    register_video_backbone("sana_video_2b")(SanaVideoBackbone)
-except Exception as _sana_import_err:  # pragma: no cover — env-dependent
-    import logging as _logging
-
-    _logging.getLogger(__name__).debug(
-        "SANA video backbone disabled at import: %s", _sana_import_err
-    )
-    SanaVideoBackbone = None  # type: ignore[assignment]
 
 __all__ = [
     "BlockLoopState",
-    "Cosmos25VideoBackbone",
     "VideoBackbone",
     "WanVideoBackbone",
     "build_video_backbone",
     "register_video_backbone",
 ]
-if SanaVideoBackbone is not None:
-    __all__.append("SanaVideoBackbone")

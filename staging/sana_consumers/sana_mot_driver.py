@@ -150,8 +150,7 @@ class SanaMoTJointDriver(MoTJointDriver):
             )
         if q_v.device != q_a.device:
             raise RuntimeError(
-                f"SanaMoTJointDriver: device mismatch at layer {layer_id} "
-                f"(video={q_v.device}, action={q_a.device})."
+                f"SanaMoTJointDriver: device mismatch at layer {layer_id} (video={q_v.device}, action={q_a.device})."
             )
         if not (vpost.get("uses_linear_attn") and apost.get("uses_linear_attn")):
             raise RuntimeError(
@@ -173,11 +172,7 @@ class SanaMoTJointDriver(MoTJointDriver):
         # SanaMoTJointDriver follows the same contract — _step_impl does NOT
         # rebuild the mask itself.
 
-        use_ckpt = (
-            self.mot_checkpoint_mixed_attn
-            and ab.training
-            and not suppress_inner_attn_ckpt
-        )
+        use_ckpt = self.mot_checkpoint_mixed_attn and ab.training and not suppress_inner_attn_ckpt
 
         mixed = self._mixed_attention(
             q_cat,
@@ -282,9 +277,7 @@ class SanaMoTJointDriver(MoTJointDriver):
                     use_reentrant=False,
                 )
             else:
-                out = _expanded_linear_attn(
-                    tilde_q, tilde_k, v, pq, pk, mask=attn_mask, eps=self.eps
-                )
+                out = _expanded_linear_attn(tilde_q, tilde_k, v, pq, pk, mask=attn_mask, eps=self.eps)
 
         return rearrange(out, "b n s d -> b s (n d)", n=n)
 

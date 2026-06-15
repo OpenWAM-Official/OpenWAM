@@ -70,19 +70,21 @@ class _FakeReason1Model:
     them at the top level for the older transformers layout.
     """
 
-    def __init__(self, *, dtype: torch.dtype, device: torch.device,
-                 hidden_size: int = _HIDDEN, num_hidden_layers: int = _NUM_LAYERS,
-                 nested_config: bool = False):
+    def __init__(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+        hidden_size: int = _HIDDEN,
+        num_hidden_layers: int = _NUM_LAYERS,
+        nested_config: bool = False,
+    ):
         if nested_config:
             self.config = types.SimpleNamespace(
-                text_config=types.SimpleNamespace(
-                    hidden_size=hidden_size, num_hidden_layers=num_hidden_layers
-                )
+                text_config=types.SimpleNamespace(hidden_size=hidden_size, num_hidden_layers=num_hidden_layers)
             )
         else:
-            self.config = types.SimpleNamespace(
-                hidden_size=hidden_size, num_hidden_layers=num_hidden_layers
-            )
+            self.config = types.SimpleNamespace(hidden_size=hidden_size, num_hidden_layers=num_hidden_layers)
         # A single trainable-then-frozen param so `.parameters()` is non-empty
         # and device/dtype probing works.
         self._param = nn.Parameter(torch.empty(1, dtype=dtype, device=device), requires_grad=True)
@@ -242,9 +244,7 @@ def test_reason1_live_encoder_geometry_validation(monkeypatch, patched_transform
 
     def _bad_from_pretrained(*_args, **kw):
         dtype = kw.get("torch_dtype", torch.float32)
-        return _FakeReason1Model(
-            dtype=dtype, device=torch.device("cpu"), hidden_size=4096
-        )
+        return _FakeReason1Model(dtype=dtype, device=torch.device("cpu"), hidden_size=4096)
 
     monkeypatch.setattr(
         transformers,
@@ -264,9 +264,7 @@ def test_reason1_live_encoder_accepts_nested_text_config(monkeypatch, patched_tr
 
     def _nested_from_pretrained(*_args, **kw):
         dtype = kw.get("torch_dtype", torch.float32)
-        return _FakeReason1Model(
-            dtype=dtype, device=torch.device("cpu"), nested_config=True
-        )
+        return _FakeReason1Model(dtype=dtype, device=torch.device("cpu"), nested_config=True)
 
     monkeypatch.setattr(
         transformers,

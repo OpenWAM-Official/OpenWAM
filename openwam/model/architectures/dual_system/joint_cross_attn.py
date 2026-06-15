@@ -15,9 +15,7 @@ from torch import Tensor
 
 from openwam.model.action_backbone.joint_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.cross_attn_compile import CompiledCrossAttnAction
 from openwam.model.architectures.registry import register_architecture
-from openwam.model.compile_options import compile_mode, cross_attn_compile_cfg, section_enabled
 from openwam.model.registry import _cfg_get
 from openwam.utils import resolve_bridge_layers
 
@@ -45,7 +43,6 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
     def __init__(self, cfg=None):
         super().__init__(cfg)
         self._detach_bridge: bool = False
-        self._compiled_cross_attn_action: CompiledCrossAttnAction | None = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -99,21 +96,6 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
     @property
     def detach_bridge(self) -> bool:
         return self._detach_bridge
-
-    def apply_compile_optimizations(self, compile_cfg) -> None:
-        """Apply the cross-attention compile mode through an action-side helper."""
-
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode != "auto":
-            super().apply_compile_optimizations(compile_cfg)
-            self._compiled_cross_attn_action = None
-            return
-
-        cross_attn_cfg = cross_attn_compile_cfg(compile_cfg)
-        if section_enabled(cross_attn_cfg, default=False) and self.action_backbone is not None:
-            self._compiled_cross_attn_action = CompiledCrossAttnAction(self.action_backbone, cross_attn_cfg)
-        else:
-            self._compiled_cross_attn_action = None
 
     def forward(
         self,
@@ -180,28 +162,15 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         if not bridges:
             return video_pred, None
 
-        compiled_action = self._compiled_cross_attn_action
-        if compiled_action is not None and compiled_action.can_run(
+        action_pred = ab(
+            noisy_actions,
+            bridges,
+            action_timestep,
+            context=action_context,
+            context_mask=action_context_mask,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        ):
-            action_pred = compiled_action.run(
-                noisy_actions,
-                bridges,
-                action_timestep,
-                context=action_context,
-                context_mask=action_context_mask,
-            )
-        else:
-            action_pred = ab(
-                noisy_actions,
-                bridges,
-                action_timestep,
-                context=action_context,
-                context_mask=action_context_mask,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            )
+        )
         return video_pred, action_pred
 
 

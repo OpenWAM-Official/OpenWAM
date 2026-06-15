@@ -20,29 +20,11 @@ from torch import Tensor
 
 from openwam.model.action_backbone.joint_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.mot_compile import CompiledMoTLoop
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
-from openwam.model.compile_options import compile_mode, section_enabled, self_attn_compile_cfg
 from openwam.utils import resolve_bridge_layers
 
 logger = logging.getLogger(__name__)
-
-
-def _mot_loop_compile_skip_reason(video_backbone) -> str | None:
-    """Return why the generic MoT compile helper is unsafe for this backbone."""
-
-    if not getattr(video_backbone, "supports_generic_mot_compile", True):
-        return str(
-            getattr(
-                video_backbone,
-                "generic_mot_compile_skip_reason",
-                "video backbone opted out of generic MoT compile",
-            )
-        )
-    if getattr(video_backbone, "attn_kernel", "softmax") != "softmax":
-        return "non-softmax MoT attention needs a dedicated compile helper"
-    return None
 
 
 @register_architecture(
@@ -59,7 +41,6 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         super().__init__(cfg)
         self._mot_driver: MoTJointDriver | None = None
         self._mot_driver_kwargs: dict = {}
-        self._compiled_mot_loop: CompiledMoTLoop | None = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -118,16 +99,6 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         Re-callable; raises if either backbone is missing. Tests that swap in
         a mock video backbone after ``__init__`` should call this method to
         wire up the driver afterwards.
-
-        Dispatches on ``video_backbone.attn_kernel``:
-
-        - ``"softmax"`` (default for Wan/Cosmos25): plain
-          :class:`MoTJointDriver` with SDPA.
-        - ``"linear_relu"`` (SANA): :class:`SanaMoTJointDriver` with cumsum
-          linear-attention. The action backbone must also be configured for
-          ``linear_relu`` — that's enforced inside the driver's constructor.
-        - Anything else: :class:`ValueError`. Silent fallback would hide a
-          config typo behind correct-looking but mathematically wrong output.
         """
         if self.video_backbone is None:
             raise RuntimeError(
@@ -141,59 +112,17 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
                 "set. Architecture must be built from a non-None cfg."
             )
 
-        kernel = getattr(self.video_backbone, "attn_kernel", "softmax")
-        if kernel == "linear_relu":
-            from openwam.model.architectures.dual_system.sana_mot_driver import (
-                SanaMoTJointDriver,
-            )
-            self._mot_driver = SanaMoTJointDriver(
-                self.video_backbone,
-                self.action_backbone,
-                **self._mot_driver_kwargs,
-            )
-        elif kernel == "softmax":
-            self._mot_driver = MoTJointDriver(
-                self.video_backbone,
-                self.action_backbone,
-                **self._mot_driver_kwargs,
-            )
-        else:
-            raise ValueError(
-                f"DualSystemSelfAttnArchitecture: unsupported video_backbone.attn_kernel='{kernel}'. "
-                "Expected 'softmax' or 'linear_relu'."
-            )
+        self._mot_driver = MoTJointDriver(
+            self.video_backbone,
+            self.action_backbone,
+            **self._mot_driver_kwargs,
+        )
         return self._mot_driver
 
     @property
     def mot_driver(self) -> MoTJointDriver | None:
         """The MoT joint-attention driver (None if the architecture wasn't fully built)."""
         return self._mot_driver
-
-    def apply_compile_optimizations(self, compile_cfg) -> None:
-        """Apply the self-attention compile mode through the MoT-loop helper."""
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode != "auto":
-            super().apply_compile_optimizations(compile_cfg)
-            self._compiled_mot_loop = None
-            return
-
-        self_attn_cfg = self_attn_compile_cfg(compile_cfg)
-        if section_enabled(self_attn_cfg, default=False):
-            driver = self._mot_driver
-            if driver is None:
-                driver = self.build_mot_driver()
-            skip_reason = _mot_loop_compile_skip_reason(self.video_backbone)
-            if skip_reason is not None:
-                logger.info(
-                    "MoT loop torch.compile disabled for %s: %s",
-                    type(self.video_backbone).__name__,
-                    skip_reason,
-                )
-                self._compiled_mot_loop = None
-                return
-            self._compiled_mot_loop = CompiledMoTLoop(driver, self_attn_cfg)
-        else:
-            self._compiled_mot_loop = None
 
     def _iter_zero3_external_params(self):
         """Raw-access leaves read by the MoT driver outside the owners' ``__call__``.
@@ -281,21 +210,12 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
-        compiled_loop = self._compiled_mot_loop
-        if compiled_loop is not None and compiled_loop.can_run(
+        vstate, astate = driver.run_joint_loop(
             vstate,
             astate,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        ):
-            vstate, astate = compiled_loop.run(vstate, astate)
-        else:
-            vstate, astate = driver.run_joint_loop(
-                vstate,
-                astate,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            )
+        )
         return vb.finalize(vstate), ab.extract_prediction(astate)
 
 

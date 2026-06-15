@@ -46,8 +46,7 @@ def _pil_video_to_tensor(frames: Any) -> Tensor:
 
     if not isinstance(frames, (list, tuple)) or not frames:
         raise ValueError(
-            f"Expected `frames` as a non-empty list of clips (each a list of PIL frames); "
-            f"got {type(frames).__name__}."
+            f"Expected `frames` as a non-empty list of clips (each a list of PIL frames); got {type(frames).__name__}."
         )
     arrs = []
     for clip in frames:
@@ -59,6 +58,7 @@ def _pil_video_to_tensor(frames: Any) -> Tensor:
     t = torch.from_numpy(stack).to(dtype=torch.float32)
     t = t / 127.5 - 1.0
     return t.permute(0, 4, 1, 2, 3).contiguous()  # (B, 3, T, H, W)
+
 
 logger = logging.getLogger(__name__)
 
@@ -203,8 +203,7 @@ class SanaVideoBackbone(VideoBackbone):
             if v is not None:
                 return int(v)
         raise AttributeError(
-            f"SanaVideoBackbone.head_dim: attn module {type(attn).__name__!r} "
-            "exposes neither 'dim' nor 'head_dim'."
+            f"SanaVideoBackbone.head_dim: attn module {type(attn).__name__!r} exposes neither 'dim' nor 'head_dim'."
         )
 
     @property
@@ -314,9 +313,7 @@ class SanaVideoBackbone(VideoBackbone):
         elif "latents" in pipeline_inputs:
             x = pipeline_inputs.pop("latents")
         else:
-            raise KeyError(
-                "SanaVideoBackbone.prepare requires either 'x' or 'latents' in pipeline_inputs."
-            )
+            raise KeyError("SanaVideoBackbone.prepare requires either 'x' or 'latents' in pipeline_inputs.")
 
         timestep = pipeline_inputs.pop("timestep")
 
@@ -332,9 +329,7 @@ class SanaVideoBackbone(VideoBackbone):
             else:
                 y = context
         else:
-            raise KeyError(
-                "SanaVideoBackbone.prepare requires 'y' or 'context' in pipeline_inputs."
-            )
+            raise KeyError("SanaVideoBackbone.prepare requires 'y' or 'context' in pipeline_inputs.")
 
         # --- 3. caption mask → (B, 1, 1, L) int16 ---
         # SANA's DISABLE_XFORMERS=1 path requires a non-None caption mask. The
@@ -443,9 +438,7 @@ class SanaVideoBackbone(VideoBackbone):
     # ABC: joint self-attention split (Phase 3-ready, available in Phase 0)
     # ----------------------------------------------------------------
 
-    def pre_attn_at_layer(
-        self, layer_id: int, state: BlockLoopState
-    ) -> Tuple[Tensor, Tensor, Tensor, dict]:
+    def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState) -> Tuple[Tensor, Tensor, Tensor, dict]:
         return self._split.block_pre_attn(layer_id, state.x, state.t_mod, state.freqs)
 
     def post_attn_at_layer(
@@ -487,12 +480,8 @@ class SanaVideoBackbone(VideoBackbone):
             "plans/sana_mot_integration_plan.md §8 for the deferred work."
         )
 
-    def extract_action_tokens(
-        self, state: BlockLoopState, n_action: int
-    ) -> Tuple[BlockLoopState, Tensor]:
-        raise NotImplementedError(
-            "SanaVideoBackbone.extract_action_tokens: see inject_action_tokens."
-        )
+    def extract_action_tokens(self, state: BlockLoopState, n_action: int) -> Tuple[BlockLoopState, Tensor]:
+        raise NotImplementedError("SanaVideoBackbone.extract_action_tokens: see inject_action_tokens.")
 
     # ----------------------------------------------------------------
     # ABC: preprocessing / decoding / device (deferred — Phase 4)
@@ -546,9 +535,7 @@ class SanaVideoBackbone(VideoBackbone):
         # --- video → latents (cache > VAE encode) ---
         if input_latents is None:
             if frames is None:
-                raise ValueError(
-                    "SanaVideoBackbone.preprocess_input requires either 'frames' or 'input_latents'."
-                )
+                raise ValueError("SanaVideoBackbone.preprocess_input requires either 'frames' or 'input_latents'.")
             if self._pipe.vae is None:
                 raise RuntimeError(
                     "SanaVideoBackbone.preprocess_input(frames=...) requires a loaded "
@@ -587,13 +574,9 @@ class SanaVideoBackbone(VideoBackbone):
                 )
             context = self._encode_text(text).to(device=device, dtype=dtype)
         else:
-            raise ValueError(
-                "SanaVideoBackbone.preprocess_input requires either 'text' or 'pre_encoded_text'."
-            )
+            raise ValueError("SanaVideoBackbone.preprocess_input requires either 'text' or 'pre_encoded_text'.")
 
-        seq_lens = torch.full(
-            (context.shape[0],), context.shape[1], dtype=torch.long, device=device
-        )
+        seq_lens = torch.full((context.shape[0],), context.shape[1], dtype=torch.long, device=device)
 
         out: dict = {
             "input_latents": input_latents,
@@ -624,9 +607,7 @@ class SanaVideoBackbone(VideoBackbone):
             text = [text]
         tokenizer = self._pipe.tokenizer
         encoder = self._pipe.text_encoder
-        enc = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(
-            next(encoder.parameters()).device
-        )
+        enc = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(next(encoder.parameters()).device)
         with torch.no_grad():
             out = encoder(**enc, output_hidden_states=False)
         return out.last_hidden_state

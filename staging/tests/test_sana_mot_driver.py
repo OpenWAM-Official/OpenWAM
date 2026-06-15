@@ -446,9 +446,7 @@ def test_mixed_attention_chunk_matches_expanded_on_joint_mask():
         phi_q = torch.cat([vpost["q_unrot"], apost["q_unrot"]], dim=1)
         phi_k = torch.cat([vpost["k_unrot"], apost["k_unrot"]], dim=1)
 
-        out_chunk = driver._mixed_attention(
-            q_cat, k_cat, v_cat, mask, phi_q=phi_q, phi_k=phi_k, use_ckpt=False
-        )
+        out_chunk = driver._mixed_attention(q_cat, k_cat, v_cat, mask, phi_q=phi_q, phi_k=phi_k, use_ckpt=False)
 
         # Manually run expanded reference in the same layout the driver uses.
         from einops import rearrange

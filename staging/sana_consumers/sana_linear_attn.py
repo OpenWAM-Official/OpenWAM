@@ -375,9 +375,7 @@ def _chunked_linear_attn_checkpointed(
     if len(chunk_index) < 2:
         raise ValueError(f"chunk_index needs at least 2 entries (got {chunk_index}).")
     if chunk_index[0] != 0 or chunk_index[-1] != tilde_q.shape[-2]:
-        raise ValueError(
-            f"chunk_index must start at 0 and end at N={tilde_q.shape[-2]}; got {chunk_index}."
-        )
+        raise ValueError(f"chunk_index must start at 0 and end at N={tilde_q.shape[-2]}; got {chunk_index}.")
 
     B, H, N, d = tilde_q.shape
     out_chunks: List[Tensor] = []
@@ -399,9 +397,7 @@ def _chunked_linear_attn_checkpointed(
             out_chunks.append(v.new_empty(B, H, 0, d))
             continue
         if i_start > i_end:
-            raise ValueError(
-                f"chunk_index not ascending: chunk_index[{c}]={i_start} > chunk_index[{c + 1}]={i_end}."
-            )
+            raise ValueError(f"chunk_index not ascending: chunk_index[{c}]={i_start} > chunk_index[{c + 1}]={i_end}.")
 
         args = (
             tilde_q[:, :, i_start:i_end, :],
@@ -413,9 +409,7 @@ def _chunked_linear_attn_checkpointed(
             z_vec,
             eps_t,
         )
-        out_c, s_mat, z_vec = torch.utils.checkpoint.checkpoint(
-            _chunk_step, *args, use_reentrant=False
-        )
+        out_c, s_mat, z_vec = torch.utils.checkpoint.checkpoint(_chunk_step, *args, use_reentrant=False)
         out_chunks.append(out_c)
 
     return torch.cat(out_chunks, dim=2)

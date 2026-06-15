@@ -232,15 +232,11 @@ def test_preprocess_input_passes_through_when_ref_images_absent(fake_wrapper):
     """
     latents = torch.randn(1, 16, 2, 4, 4)
     pre_text = torch.randn(1, 8, 24)
-    out_none = fake_wrapper.preprocess_input(
-        input_latents=latents, pre_encoded_text=pre_text, ref_images=None
-    )
+    out_none = fake_wrapper.preprocess_input(input_latents=latents, pre_encoded_text=pre_text, ref_images=None)
     assert "input_latents" in out_none
     assert "first_frame_latents" not in out_none
     assert "condition_mask" not in out_none
-    out_listed_none = fake_wrapper.preprocess_input(
-        input_latents=latents, pre_encoded_text=pre_text, ref_images=[None]
-    )
+    out_listed_none = fake_wrapper.preprocess_input(input_latents=latents, pre_encoded_text=pre_text, ref_images=[None])
     assert "first_frame_latents" not in out_listed_none
 
 

@@ -92,8 +92,7 @@ def test_real_2b_geometry(real_backbone):
     )
     assert real_backbone.dim == _EXPECTED_HIDDEN
     assert real_backbone.num_heads == _EXPECTED_SELF_HEADS, (
-        f"LiteLAReLURope self-attn heads: expected {_EXPECTED_SELF_HEADS}, "
-        f"got {real_backbone.num_heads}"
+        f"LiteLAReLURope self-attn heads: expected {_EXPECTED_SELF_HEADS}, got {real_backbone.num_heads}"
     )
     assert real_backbone.head_dim == _EXPECTED_HEAD_DIM
     assert real_backbone.attn_kernel == "linear_relu"
@@ -113,14 +112,11 @@ def test_real_2b_block_loop_forward(real_backbone):
     ``test_split_eq_native``); the point here is that strict=False weight
     load doesn't break the per-block invariants on the real 8 GB ckpt.
     """
-    x, timestep, y, mask = _build_synthetic_video_inputs(
-        batch=1, device=torch.device("cuda:0"), dtype=torch.bfloat16
-    )
+    x, timestep, y, mask = _build_synthetic_video_inputs(batch=1, device=torch.device("cuda:0"), dtype=torch.bfloat16)
     with torch.no_grad():
         state = real_backbone.prepare(x=x, timestep=timestep, y=y, mask=mask)
         assert state.x.shape == (1, _S_VIDEO, _EXPECTED_HIDDEN), (
-            f"prepare produced unexpected x shape: {state.x.shape}, expected "
-            f"(1, {_S_VIDEO}, {_EXPECTED_HIDDEN})"
+            f"prepare produced unexpected x shape: {state.x.shape}, expected (1, {_S_VIDEO}, {_EXPECTED_HIDDEN})"
         )
         for layer_id in range(real_backbone.num_layers):
             state = real_backbone.run_block(layer_id, state)
@@ -172,9 +168,7 @@ def _build_joint_inputs(video_backbone, action_backbone, *, t_action: int = 16):
     context_mask = torch.ones(1, _CAPTION_LEN, dtype=torch.bool, device=device)
 
     vstate = video_backbone.prepare(x=x, timestep=timestep, y=y, mask=mask)
-    astate = action_backbone.prepare_state(
-        noisy_actions, action_timestep, context=context, context_mask=context_mask
-    )
+    astate = action_backbone.prepare_state(noisy_actions, action_timestep, context=context, context_mask=context_mask)
     return vstate, astate
 
 
@@ -292,10 +286,16 @@ def test_real_2b_v_not_attn_to_a_invariance(real_backbone):
 
     v_a = _run(actions_a)
     v_b = _run(actions_b)
-    torch.testing.assert_close(v_a, v_b, rtol=0.0, atol=0.0, msg=(
-        "Video state changed when action tokens changed under first_frame_causal "
-        "joint mask — v↛a invariance broken."
-    ))
+    torch.testing.assert_close(
+        v_a,
+        v_b,
+        rtol=0.0,
+        atol=0.0,
+        msg=(
+            "Video state changed when action tokens changed under first_frame_causal "
+            "joint mask — v↛a invariance broken."
+        ),
+    )
 
 
 def test_real_2b_chunked_eq_expanded_on_joint_mask(real_backbone):
@@ -353,8 +353,7 @@ def test_real_2b_chunked_eq_expanded_on_joint_mask(real_backbone):
 
         H = driver.num_heads
         tq, tk, vv, pq, pk = (
-            rearrange(t, "b s (h d) -> b h s d", h=H).float()
-            for t in (q_cat, k_cat, v_cat, phi_q, phi_k)
+            rearrange(t, "b s (h d) -> b h s d", h=H).float() for t in (q_cat, k_cat, v_cat, phi_q, phi_k)
         )
 
         chunk_index = _mask_to_chunk_index(attn_mask)
@@ -366,7 +365,10 @@ def test_real_2b_chunked_eq_expanded_on_joint_mask(real_backbone):
         out_chunk = _chunked_linear_attn(tq, tk, vv, pq, pk, chunk_index, eps=driver.eps)
         out_expanded = _expanded_linear_attn(tq, tk, vv, pq, pk, mask=attn_mask, eps=driver.eps)
 
-    torch.testing.assert_close(out_chunk, out_expanded, rtol=1e-4, atol=1e-4, msg=(
-        "Chunked cumsum path disagrees with expanded reference on real 2B q/k/v "
-        "under FastWAM-Joint mask."
-    ))
+    torch.testing.assert_close(
+        out_chunk,
+        out_expanded,
+        rtol=1e-4,
+        atol=1e-4,
+        msg=("Chunked cumsum path disagrees with expanded reference on real 2B q/k/v under FastWAM-Joint mask."),
+    )

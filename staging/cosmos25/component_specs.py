@@ -159,9 +159,7 @@ def copy_cosmos25_artifacts(output_dir: str, model_path_or_cfg: Any) -> None:
     te_path = validate_reason1_artifact_source(model_path_or_cfg)
 
     dst_dir = os.path.join(output_dir, "reason1")
-    if os.path.isdir(dst_dir) and any(
-        os.path.isfile(os.path.join(dst_dir, name)) for name in _REASON1_ARTIFACT_FILES
-    ):
+    if os.path.isdir(dst_dir) and any(os.path.isfile(os.path.join(dst_dir, name)) for name in _REASON1_ARTIFACT_FILES):
         logger.info("[component_specs] Reason1 artifacts already present, skip: %s", dst_dir)
         return
 

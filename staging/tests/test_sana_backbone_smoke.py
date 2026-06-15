@@ -90,12 +90,15 @@ def test_split_eq_native():
     from openwam.model.video_backbone.sana import SanaVideoBackbone
 
     if not torch.cuda.is_available():
-        pytest.skip("Numerical equivalence requires CUDA — fp32 CPU paths in SANA's "
-                    "depth_conv can disagree from the cuda kernel by >rtol.")
+        pytest.skip(
+            "Numerical equivalence requires CUDA — fp32 CPU paths in SANA's "
+            "depth_conv can disagree from the cuda kernel by >rtol."
+        )
 
     f, h, w = 4, 8, 8
-    bb = SanaVideoBackbone.from_mini_config(depth=2, hidden_size=128, num_heads=4, linear_head_dim=32,
-                                            f=f, h=h, w=w, device="cuda", dtype=torch.float32)
+    bb = SanaVideoBackbone.from_mini_config(
+        depth=2, hidden_size=128, num_heads=4, linear_head_dim=32, f=f, h=h, w=w, device="cuda", dtype=torch.float32
+    )
     dit = bb._dit
 
     # Input shape mirrors upstream: (B, C, T, H, W). patch_size = (1, 2, 2).
@@ -157,8 +160,9 @@ def test_block_pre_post_eq_block_forward():
         pytest.skip("See test_split_eq_native — CUDA-only.")
 
     f, h, w = 4, 8, 8
-    bb = SanaVideoBackbone.from_mini_config(depth=1, hidden_size=128, num_heads=4, linear_head_dim=32,
-                                            f=f, h=h, w=w, device="cuda", dtype=torch.float32)
+    bb = SanaVideoBackbone.from_mini_config(
+        depth=1, hidden_size=128, num_heads=4, linear_head_dim=32, f=f, h=h, w=w, device="cuda", dtype=torch.float32
+    )
     B = 1
     x = torch.randn(B, 16, f, h, w, device="cuda", dtype=torch.float32)
     timestep = torch.tensor([100], device="cuda")
@@ -189,9 +193,14 @@ def test_block_pre_post_eq_block_forward():
         q, k, v, post = split.block_pre_attn(0, state.x.clone(), state.t_mod, state.freqs)
         attn_out = split.native_attn(post)
         y_split = split.block_post_attn(
-            0, attn_out, post,
-            y=state.context, y_lens=state.context_mask,
-            f=f_p, h=h_p, w=w_p,
+            0,
+            attn_out,
+            post,
+            y=state.context,
+            y_lens=state.context_mask,
+            f=f_p,
+            h=h_p,
+            w=w_p,
         )
 
     torch.testing.assert_close(y_block, y_split, rtol=1e-4, atol=1e-5)

@@ -193,8 +193,7 @@ def test_cosmos25_deploy_round_trip_reason1_in_safetensors(tmp_path, caplog):
     # --- Verify Reason1 weights round-trip byte-for-byte ---
     deploy_pipe = deploy_arch.video_backbone._pipe
     assert hasattr(deploy_pipe, "_reason1_inner"), (
-        "Deploy-side wrapper has no `_reason1_inner`; the empty-shell "
-        "registration regressed."
+        "Deploy-side wrapper has no `_reason1_inner`; the empty-shell registration regressed."
     )
     deploy_state = deploy_pipe._reason1_inner.state_dict()
     assert probe_key in deploy_state, (
@@ -216,9 +215,7 @@ def test_cosmos25_deploy_round_trip_reason1_in_safetensors(tmp_path, caplog):
 
     # --- Verify no meta-device stragglers remain after load ---
     target_device = torch.device("cuda:0")
-    meta_params = [
-        (n, p) for n, p in deploy_pipe._reason1_inner.named_parameters() if p.device.type == "meta"
-    ]
+    meta_params = [(n, p) for n, p in deploy_pipe._reason1_inner.named_parameters() if p.device.type == "meta"]
     assert not meta_params, (
         f"Deploy Reason1 still has meta-device parameters after load: "
         f"{[n for n, _ in meta_params[:5]]} (showing first 5)."
@@ -227,8 +224,7 @@ def test_cosmos25_deploy_round_trip_reason1_in_safetensors(tmp_path, caplog):
         (n, p.device) for n, p in deploy_pipe._reason1_inner.named_parameters() if p.device != target_device
     ]
     assert not wrong_device, (
-        f"Deploy Reason1 has params on the wrong device after `set_dtype_device`: "
-        f"{wrong_device[:5]} (showing first 5)."
+        f"Deploy Reason1 has params on the wrong device after `set_dtype_device`: {wrong_device[:5]} (showing first 5)."
     )
 
     # --- Verify the deploy Reason1 wrapper class is actually live (not a stub) ---

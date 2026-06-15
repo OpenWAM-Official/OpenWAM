@@ -437,9 +437,7 @@ def build_cosmos25_pipeline(
         logger.info("Cosmos checkpoint: %s", ckpt_path)
         _load_state_dict_into_net(net, ckpt_path)
     else:
-        logger.info(
-            "Cosmos DiT: skipping `*_ema_bf16.pt` bootstrap (deploy path; weights from unified safetensors)"
-        )
+        logger.info("Cosmos DiT: skipping `*_ema_bf16.pt` bootstrap (deploy path; weights from unified safetensors)")
     if sac_mode_raw != "none":
         logger.info("Enabling Cosmos SAC selective-checkpoint (mode=%s) post-load", sac_mode_raw)
         net.enable_selective_checkpoint(SACConfig(mode=CheckpointMode(sac_mode_raw)), net.blocks)
@@ -467,14 +465,10 @@ def build_cosmos25_pipeline(
                 "structural artifacts from %s)",
                 artifact_dir,
             )
-            text_encoder_obj = Reason1LiveTextEncoder.from_empty(
-                artifact_dir, dtype=torch.bfloat16, device=device
-            )
+            text_encoder_obj = Reason1LiveTextEncoder.from_empty(artifact_dir, dtype=torch.bfloat16, device=device)
         else:
             logger.info("Cosmos Reason1 live text encoder: loading from %s", text_encoder_path_raw)
-            text_encoder_obj = Reason1LiveTextEncoder(
-                Path(text_encoder_path_raw), dtype=torch.bfloat16, device=device
-            )
+            text_encoder_obj = Reason1LiveTextEncoder(Path(text_encoder_path_raw), dtype=torch.bfloat16, device=device)
 
     vae_obj = None
     if vae_choice != "none":

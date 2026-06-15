@@ -68,10 +68,7 @@ def _make_stub_sample():
         "proprio": np.zeros((20,), dtype=np.float32),
         "action_mask": np.ones((12,), dtype=bool),
         "video_mask": np.ones((_T_VIDEO,), dtype=bool),
-        "video": [
-            PIL.Image.fromarray(np.zeros((_H_VIDEO, _W_VIDEO, 3), dtype=np.uint8))
-            for _ in range(_T_VIDEO)
-        ],
+        "video": [PIL.Image.fromarray(np.zeros((_H_VIDEO, _W_VIDEO, 3), dtype=np.uint8)) for _ in range(_T_VIDEO)],
     }
 
 

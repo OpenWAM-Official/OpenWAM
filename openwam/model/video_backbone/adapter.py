@@ -101,11 +101,6 @@ class VideoBackbone(ABC, nn.Module):
     finally call ``finalize()`` to get the video noise prediction.
     """
 
-    # The generic dual-system MoT compile helper assumes a Wan-style softmax
-    # split block loop without backbone-specific tensors hidden in extras.
-    supports_generic_mot_compile: bool = True
-    generic_mot_compile_skip_reason: Optional[str] = None
-
     # ================================================================
     # Properties (6)
     # ================================================================

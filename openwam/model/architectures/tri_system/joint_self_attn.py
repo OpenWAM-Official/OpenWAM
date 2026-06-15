@@ -14,9 +14,7 @@ from torch import Tensor
 from openwam.model.action_backbone.joint_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
-from openwam.model.architectures.tri_system.mot_compile import CompiledTriSystemMoTLoop
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
-from openwam.model.compile_options import compile_mode, section_enabled, tri_system_compile_cfg
 from openwam.model.vlm_backbone.qwen3_vl import (
     Qwen3VLBackbone,
     UnderstandingExpert,
@@ -83,7 +81,6 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         self.understanding_expert = None
         self._mot_driver = None
         self._mot_driver_kwargs: dict = {}
-        self._compiled_mot_loop: CompiledTriSystemMoTLoop | None = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -168,9 +165,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         if self.action_backbone is None:
             raise RuntimeError("TriSystemJointSelfAttnArchitecture.build_mot_driver: action_backbone is not set.")
         if self.understanding_expert is None:
-            raise RuntimeError(
-                "TriSystemJointSelfAttnArchitecture.build_mot_driver: understanding_expert is not set."
-            )
+            raise RuntimeError("TriSystemJointSelfAttnArchitecture.build_mot_driver: understanding_expert is not set.")
         self._mot_driver = TriSystemMoTDriver(
             self.video_backbone,
             self.action_backbone,
@@ -201,23 +196,6 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         super().set_dtype_device(dtype, device)
         if self.understanding_expert is not None:
             self.understanding_expert.to(dtype=dtype, device=device)
-
-    def apply_compile_optimizations(self, compile_cfg) -> None:
-        """Apply the tri-system compile mode through a trimodal MoT-loop helper."""
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode != "auto":
-            super().apply_compile_optimizations(compile_cfg)
-            self._compiled_mot_loop = None
-            return
-
-        tri_cfg = tri_system_compile_cfg(compile_cfg)
-        if section_enabled(tri_cfg, default=False):
-            driver = self._mot_driver
-            if driver is None:
-                driver = self.build_mot_driver()
-            self._compiled_mot_loop = CompiledTriSystemMoTLoop(driver, tri_cfg)
-        else:
-            self._compiled_mot_loop = None
 
     def _extract_first_image(self, sample: dict):
         first_frame_image = sample.get("first_frame_image")
@@ -415,26 +393,16 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
                 f"vlm_hidden, ensure it was computed for the same batch."
             )
         ustate = ub.prepare_state(vlm_hidden, dtype=vstate.x.dtype, vlm_attention_mask=vlm_attention_mask)
-        compiled_loop = self._compiled_mot_loop
-        if compiled_loop is not None and compiled_loop.can_run(
+        driver = self._mot_driver
+        if driver is None:
+            driver = self.build_mot_driver()
+        vstate, astate, ustate = driver.run_joint_loop(
             vstate,
             astate,
             ustate,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        ):
-            vstate, astate, ustate = compiled_loop.run(vstate, astate, ustate)
-        else:
-            driver = self._mot_driver
-            if driver is None:
-                driver = self.build_mot_driver()
-            vstate, astate, ustate = driver.run_joint_loop(
-                vstate,
-                astate,
-                ustate,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            )
+        )
 
         return vb.finalize(vstate), ab.extract_prediction(astate)
 

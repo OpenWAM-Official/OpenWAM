@@ -79,8 +79,7 @@ def _resolve_upstream_factory(model_name: str) -> Any:
 
     if model_name not in MODELS._module_dict:
         raise KeyError(
-            f"SANA model factory {model_name!r} not registered. Available: "
-            f"{sorted(MODELS._module_dict)[:8]}..."
+            f"SANA model factory {model_name!r} not registered. Available: {sorted(MODELS._module_dict)[:8]}..."
         )
     return MODELS.get(model_name)
 
@@ -114,9 +113,7 @@ def build_sana_pipeline(
         spec = _spec_from_dictconfig(vb_cfg)
     elif isinstance(cfg_or_path, str):
         if not os.path.isdir(cfg_or_path):
-            raise ValueError(
-                f"build_sana_pipeline(str) expects a directory, got: {cfg_or_path!r}"
-            )
+            raise ValueError(f"build_sana_pipeline(str) expects a directory, got: {cfg_or_path!r}")
         spec = _spec_from_model_dir(cfg_or_path)
     elif isinstance(cfg_or_path, dict):
         # Unwrap ``{video_backbone: {...}}`` if the caller passed full
@@ -125,9 +122,7 @@ def build_sana_pipeline(
         vb_cfg = cfg_or_path.get("video_backbone", cfg_or_path)
         spec = _spec_from_dict(vb_cfg)
     else:
-        raise TypeError(
-            f"build_sana_pipeline: unsupported source type {type(cfg_or_path).__name__}"
-        )
+        raise TypeError(f"build_sana_pipeline: unsupported source type {type(cfg_or_path).__name__}")
 
     return _build_pipe_from_spec(spec, device=device, dtype=dtype, ckpt_dir=ckpt_dir)
 
@@ -321,9 +316,7 @@ def _spec_from_model_dir(path: str) -> _PipeSpec:
     ckpt_candidates = []
     ckpt_dir = os.path.join(path, "checkpoints")
     if os.path.isdir(ckpt_dir):
-        ckpt_candidates = [
-            os.path.join(ckpt_dir, f) for f in os.listdir(ckpt_dir) if f.endswith(".pth")
-        ]
+        ckpt_candidates = [os.path.join(ckpt_dir, f) for f in os.listdir(ckpt_dir) if f.endswith(".pth")]
     if not ckpt_candidates:
         raise FileNotFoundError(f"No checkpoints/*.pth under {path}")
     vae_path = os.path.join(path, "vae", "Wan2.1_VAE.pth")
@@ -388,9 +381,7 @@ def _build_pipe_from_spec(
         from tools.download import find_model  # type: ignore[import-not-found]
 
         state = find_model(spec.model_path)
-        if isinstance(state, dict) and "state_dict" in state and not any(
-            k.startswith("blocks.") for k in state.keys()
-        ):
+        if isinstance(state, dict) and "state_dict" in state and not any(k.startswith("blocks.") for k in state.keys()):
             state = state["state_dict"]
         # SANA's load_state_dict tolerates shape mismatches by padding (see
         # sana_multi_scale_video.py:844-1016) — keep ``strict=False`` so we
@@ -402,8 +393,7 @@ def _build_pipe_from_spec(
         # silently and the smoke would just produce garbage.
         if result.missing_keys or result.unexpected_keys:
             logger.warning(
-                "SANA ckpt load partial: %d missing, %d unexpected keys. "
-                "Sample missing=%s sample unexpected=%s",
+                "SANA ckpt load partial: %d missing, %d unexpected keys. Sample missing=%s sample unexpected=%s",
                 len(result.missing_keys),
                 len(result.unexpected_keys),
                 result.missing_keys[:3],
@@ -471,8 +461,7 @@ def _load_vae(path: Optional[str], *, device, dtype):
     result = vae.load_state_dict(state, strict=False)
     if result.missing_keys or result.unexpected_keys:
         logger.warning(
-            "Wan2.1 VAE load partial: %d missing, %d unexpected. "
-            "Sample missing=%s sample unexpected=%s",
+            "Wan2.1 VAE load partial: %d missing, %d unexpected. Sample missing=%s sample unexpected=%s",
             len(result.missing_keys),
             len(result.unexpected_keys),
             result.missing_keys[:3],
@@ -499,8 +488,7 @@ def _load_text_encoder(name: Optional[str], *, device, dtype):
         from transformers import AutoModel, AutoTokenizer
     except ImportError:
         logger.warning(
-            "build_sana_pipeline: transformers not installed; text encoder "
-            "loading skipped (name=%s).",
+            "build_sana_pipeline: transformers not installed; text encoder loading skipped (name=%s).",
             name,
         )
         return None, None

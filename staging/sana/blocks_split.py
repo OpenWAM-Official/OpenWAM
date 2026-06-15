@@ -63,9 +63,7 @@ def _apply_rope_lite(hidden_states: Tensor, freqs: Tensor) -> Tensor:
     changes the RoPE math triggers ``test_sana_split_eq_native`` rather than
     silently diverging.
     """
-    x_rotated = torch.view_as_complex(
-        hidden_states.permute(0, 1, 3, 2).to(torch.float64).unflatten(3, (-1, 2))
-    )
+    x_rotated = torch.view_as_complex(hidden_states.permute(0, 1, 3, 2).to(torch.float64).unflatten(3, (-1, 2)))
     x_out = torch.view_as_real(x_rotated * freqs).flatten(3, 4).permute(0, 1, 3, 2)
     return x_out.type_as(hidden_states)
 
@@ -141,10 +139,7 @@ class SanaMSVideoSplit:
             x = dit._pack_latents(x, bs, dit.in_channels, dit.h, dit.w, dit.f)
             dit.h = dit.h // 2
             dit.w = dit.w // 2
-        if (
-            dit.x_embedder.patch_size != dit.x_embedder.kernel_size
-            and dit.x_embedder.kernel_size == (1, 2, 2)
-        ):
+        if dit.x_embedder.patch_size != dit.x_embedder.kernel_size and dit.x_embedder.kernel_size == (1, 2, 2):
             x = F.pad(x, (0, 1, 0, 1, 0, 0))
 
         x = dit.x_embedder(x)

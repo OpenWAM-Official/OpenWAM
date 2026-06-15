@@ -82,9 +82,7 @@ def real_vb_ab():
     _skip_unless_runnable()
     from openwam.model.video_backbone.sana import SanaVideoBackbone
 
-    vb = SanaVideoBackbone.from_pretrained(
-        str(ASSET_PATH), device="cuda:0", dtype=torch.bfloat16
-    )
+    vb = SanaVideoBackbone.from_pretrained(str(ASSET_PATH), device="cuda:0", dtype=torch.bfloat16)
     vb.eval()
     ab = _build_action_backbone(vb=vb)
     return vb, ab
@@ -141,9 +139,7 @@ def test_real_2b_frame0_variance_drift_81frame(real_vb_ab):
 
     with torch.no_grad():
         vstate = vb.prepare(x=x, timestep=timestep, y=y, mask=mask)
-        astate = ab.prepare_state(
-            noisy_actions, action_timestep, context=context, context_mask=context_mask
-        )
+        astate = ab.prepare_state(noisy_actions, action_timestep, context=context, context_mask=context_mask)
 
         assert vstate.x.shape[1] == _S_VIDEO, (
             f"Expected {_S_VIDEO} video tokens at 81×480p, got {vstate.x.shape[1]} — "
@@ -181,15 +177,14 @@ def test_real_2b_frame0_variance_drift_81frame(real_vb_ab):
 
         H = driver.num_heads
         tq, tk, vv, pq, pk = (
-            rearrange(t, "b s (h d) -> b h s d", h=H).float()
-            for t in (q_cat, k_cat, v_cat, phi_q, phi_k)
+            rearrange(t, "b s (h d) -> b h s d", h=H).float() for t in (q_cat, k_cat, v_cat, phi_q, phi_k)
         )
 
         out = _chunked_linear_attn(tq, tk, vv, pq, pk, chunk_index, eps=driver.eps)
         # out: (1, H=20, S=32760+s_action, d=112) in fp32
 
         # --- Per-chunk output stats ---
-        out_frame_0 = out[:, :, : _V_TOKENS_PER_FRAME, :]
+        out_frame_0 = out[:, :, :_V_TOKENS_PER_FRAME, :]
         out_frames_1plus = out[:, :, _V_TOKENS_PER_FRAME:_S_VIDEO, :]
         out_action = out[:, :, _S_VIDEO:, :]
 
@@ -203,14 +198,12 @@ def test_real_2b_frame0_variance_drift_81frame(real_vb_ab):
         # see how close frame 0's denominator gets to driver.eps.
         # Denominator at query i = phi_q_i @ z_c + eps, where z_c is the
         # cumulative phi_k sum up to and including chunk(i).
-        z_c0 = pk[:, :, : _V_TOKENS_PER_FRAME, :].sum(dim=-2, keepdim=True)  # (1, H, 1, d)
+        z_c0 = pk[:, :, :_V_TOKENS_PER_FRAME, :].sum(dim=-2, keepdim=True)  # (1, H, 1, d)
         z_c1 = z_c0 + pk[:, :, _V_TOKENS_PER_FRAME:_S_VIDEO, :].sum(dim=-2, keepdim=True)
         z_c2 = z_c1 + pk[:, :, _S_VIDEO:, :].sum(dim=-2, keepdim=True)
 
-        denom_frame_0 = (pq[:, :, : _V_TOKENS_PER_FRAME, :] @ z_c0.transpose(-1, -2)).squeeze(-1)
-        denom_frames_1plus = (
-            pq[:, :, _V_TOKENS_PER_FRAME:_S_VIDEO, :] @ z_c1.transpose(-1, -2)
-        ).squeeze(-1)
+        denom_frame_0 = (pq[:, :, :_V_TOKENS_PER_FRAME, :] @ z_c0.transpose(-1, -2)).squeeze(-1)
+        denom_frames_1plus = (pq[:, :, _V_TOKENS_PER_FRAME:_S_VIDEO, :] @ z_c1.transpose(-1, -2)).squeeze(-1)
         denom_action = (pq[:, :, _S_VIDEO:, :] @ z_c2.transpose(-1, -2)).squeeze(-1)
 
         # Geometric mean (log-space) — denominators span many orders of magnitude.
@@ -226,8 +219,10 @@ def test_real_2b_frame0_variance_drift_81frame(real_vb_ab):
 
     # --- Report ---
     print("\n[Phase 5 §5.1 diagnostic — layer 0, 81×480p, M = first_frame_causal joint]")
-    print(f"  geometry:          S_video={_S_VIDEO}, tokens/frame={_V_TOKENS_PER_FRAME}, "
-          f"S_action={s_action}, H={H}, d={tq.shape[-1]}")
+    print(
+        f"  geometry:          S_video={_S_VIDEO}, tokens/frame={_V_TOKENS_PER_FRAME}, "
+        f"S_action={s_action}, H={H}, d={tq.shape[-1]}"
+    )
     print(f"  eps:               {driver.eps:.1e}")
     print(f"  output std         frame 0 = {std_frame_0:.4e}")
     print(f"                     frames 1+ = {std_frames_1plus:.4e}")
@@ -298,9 +293,7 @@ def test_real_2b_per_layer_variance_drift_81frame(real_vb_ab):
     original_mixed = driver._mixed_attention
 
     def captured_mixed(q_cat, k_cat, v_cat, attn_mask, *, phi_q=None, phi_k=None, use_ckpt=False):
-        out = original_mixed(
-            q_cat, k_cat, v_cat, attn_mask, phi_q=phi_q, phi_k=phi_k, use_ckpt=use_ckpt
-        )
+        out = original_mixed(q_cat, k_cat, v_cat, attn_mask, phi_q=phi_q, phi_k=phi_k, use_ckpt=use_ckpt)
         # out: (1, S_video + S_action, H*D) in bf16.
         out_f = out.float()
         captured.append(
@@ -316,9 +309,7 @@ def test_real_2b_per_layer_variance_drift_81frame(real_vb_ab):
     try:
         with torch.no_grad():
             vstate = vb.prepare(x=x, timestep=timestep, y=y, mask=mask)
-            astate = ab.prepare_state(
-                noisy_actions, action_timestep, context=context, context_mask=context_mask
-            )
+            astate = ab.prepare_state(noisy_actions, action_timestep, context=context, context_mask=context_mask)
             assert vstate.x.shape[1] == _S_VIDEO, (
                 f"Expected {_S_VIDEO} video tokens at 81×480p, got {vstate.x.shape[1]}."
             )
@@ -336,10 +327,7 @@ def test_real_2b_per_layer_variance_drift_81frame(real_vb_ab):
     max_ratio = max(ratios)
     worst_layer = int(max(range(n_layers), key=lambda i: ratios[i]))
 
-    print(
-        "\n[Phase 5 §5.1 per-layer diagnostic — full 20-block stack, "
-        "81×480p, M = first_frame_causal joint]"
-    )
+    print("\n[Phase 5 §5.1 per-layer diagnostic — full 20-block stack, 81×480p, M = first_frame_causal joint]")
     print(f"  {'layer':>5}  {'frame_0_std':>14}  {'frames_1+_std':>14}  {'action_std':>12}  {'ratio':>8}")
     for i, s in enumerate(captured):
         print(

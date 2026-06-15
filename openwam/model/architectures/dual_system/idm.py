@@ -29,13 +29,8 @@ from torch import Tensor
 
 from openwam.model.action_backbone.joint_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.idm_compile import (
-    CompiledIDMActionWithVideoCache,
-    CompiledIDMVideoLoop,
-)
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
-from openwam.model.compile_options import compile_mode, idm_compile_cfg, section_enabled
 from openwam.utils import resolve_bridge_layers
 
 logger = logging.getLogger(__name__)
@@ -268,8 +263,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         super().__init__(cfg)
         self._mot_driver: IDMMoTDriver | None = None
         self._mot_driver_kwargs: dict = {}
-        self._compiled_idm_video_loop: CompiledIDMVideoLoop | None = None
-        self._compiled_idm_action_cache: CompiledIDMActionWithVideoCache | None = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -373,46 +366,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
                 p = getattr(block, "modulation", None)
                 if p is not None:
                     yield p
-
-    def apply_compile_optimizations(self, compile_cfg) -> None:
-        """Apply IDM compile mode through stage-specific fixed-shape helpers."""
-
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode != "auto":
-            super().apply_compile_optimizations(compile_cfg)
-            self._compiled_idm_video_loop = None
-            self._compiled_idm_action_cache = None
-            return
-
-        idm_cfg = idm_compile_cfg(compile_cfg)
-        if not section_enabled(idm_cfg, default=False):
-            self._compiled_idm_video_loop = None
-            self._compiled_idm_action_cache = None
-            return
-
-        if self.video_backbone is not None and not getattr(self.video_backbone, "supports_generic_mot_compile", True):
-            reason = getattr(
-                self.video_backbone,
-                "generic_mot_compile_skip_reason",
-                "video backbone opts out of generic fixed-shape compile helpers",
-            )
-            logger.info("Skipping IDM torch.compile helpers: %s", reason)
-            self._compiled_idm_video_loop = None
-            self._compiled_idm_action_cache = None
-            return
-
-        if self.video_backbone is not None and section_enabled(idm_cfg.video_loop, default=True):
-            self._compiled_idm_video_loop = CompiledIDMVideoLoop(self.video_backbone, idm_cfg.video_loop)
-        else:
-            self._compiled_idm_video_loop = None
-
-        if section_enabled(idm_cfg.action_cache, default=True):
-            driver = self._mot_driver
-            if driver is None:
-                driver = self.build_mot_driver()
-            self._compiled_idm_action_cache = CompiledIDMActionWithVideoCache(driver, idm_cfg.action_cache)
-        else:
-            self._compiled_idm_action_cache = None
 
     # ------------------------------------------------------------------
     # Forward: dispatches between standard joint (inference fallback) and
@@ -643,16 +596,8 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             **pipeline_inputs,
         )
-        compiled_video_loop = self._compiled_idm_video_loop
-        if compiled_video_loop is not None and compiled_video_loop.can_run(
-            vstate,
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        ):
-            vstate = compiled_video_loop.run(vstate)
-        else:
-            for block_id in range(vb.num_layers):
-                vstate = vb.run_block(block_id, vstate)
+        for block_id in range(vb.num_layers):
+            vstate = vb.run_block(block_id, vstate)
         return vb.finalize(vstate)
 
     # ------------------------------------------------------------------
@@ -1051,27 +996,12 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
                 context=action_context,
                 context_mask=action_context_mask,
             )
-            compiled_action_cache = self._compiled_idm_action_cache
-            if compiled_action_cache is not None and compiled_action_cache.can_run(
+            astate = driver.run_action_with_video_cache(
                 astate,
                 video_kv_cache=video_kv_cache,
-                use_gradient_checkpointing=False,
-                use_gradient_checkpointing_offload=False,
-            ):
-                torch.compiler.cudagraph_mark_step_begin()
-                astate = compiled_action_cache.run(
-                    astate,
-                    video_kv_cache=video_kv_cache,
-                    video_seq_len=video_seq_len,
-                    video_tokens_per_frame=video_tokens_per_frame,
-                )
-            else:
-                astate = driver.run_action_with_video_cache(
-                    astate,
-                    video_kv_cache=video_kv_cache,
-                    video_seq_len=video_seq_len,
-                    video_tokens_per_frame=video_tokens_per_frame,
-                )
+                video_seq_len=video_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
+            )
             action_noise_pred = ab.extract_prediction(astate)
 
             if action_noise_pred is not None:
