@@ -1297,21 +1297,20 @@ class WanVideoBackbone(VideoBackbone):
     def preprocess_input_for_inference(self, inputs: "InferenceInputs") -> dict:
         """Prepare all inputs for the inference denoising loop.
 
-        Encapsulates: scheduler setup, unit runner (text/image/VACE encoding),
-        TI2V first-frame handling, and caching.
-        Returns a single dict ready for the denoising loop.
+        Builds every conditioning signal with an explicit backbone helper (no
+        ``WanVideoPipeline`` unit-runner): scheduler setup, text/CLIP/VAE/VACE
+        encoding, TI2V first-frame handling. Returns a single dict ready for
+        ``base.generate``. The only cached quantity is the text embedding
+        (identical for a prompt, independent of seed/dims); noise, clip_feature,
+        y, vace_context and first_frame_latents are rebuilt every call.
 
-        Takes a typed :class:`openwam.model.inference_inputs.InferenceInputs`
-        instead of a long kwargs list. CFG fields are ignored — Wan adapters
-        do not implement classifier-free guidance at inference today; the
-        validator in ``BaseWAMArchitecture.generate`` rejects ``cfg_scale > 1``
-        before we get here, so any non-default CFG state is a caller bug.
+        Takes a typed :class:`openwam.model.inference_inputs.InferenceInputs`.
+        CFG fields are ignored — Wan adapters do not implement classifier-free
+        guidance at inference; ``BaseWAMArchitecture.generate`` rejects
+        ``cfg_scale > 1`` before we get here.
         """
-        import time
-
-        # Unpack with sensible Wan defaults for tile dims (the dataclass keeps
-        # them as ``None`` so Cosmos25 / other backbones can opt in to their
-        # own defaults — Wan has long-standing concrete defaults we preserve).
+        # Wan tile defaults (the dataclass keeps them ``None`` so other
+        # backbones opt into their own; Wan has long-standing concrete ones).
         prompt = inputs.prompt
         vace_video = inputs.vace_video
         first_frame_image = inputs.first_frame_image
@@ -1327,73 +1326,14 @@ class WanVideoBackbone(VideoBackbone):
         vace_cache = inputs.vace_cache
         prompt_embed_cache = inputs.prompt_embed_cache
 
-        pipe = self._pipe
-        pipe.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
+        self._pipe.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
 
-        prompt_key = prompt
+        # ShapeChecker: snap to a model-valid grid; noise / clip / y use these.
+        height, width, num_frames = self._check_resize(height, width, num_frames)
 
-        if vace_cache and vace_cache.get("populated") and vace_cache.get("prompt_key") == prompt_key:
-            inputs_shared = vace_cache["inputs_shared"].copy()
-            inputs_shared["seed"] = seed
-            inputs_shared["vace_video"] = vace_video
-            inputs_shared["height"] = height
-            inputs_shared["width"] = width
-            inputs_shared["num_frames"] = num_frames
-            inputs_shared["sigma_shift"] = shift
-            inputs_shared["tiled"] = tiled
-            inputs_shared["tile_size"] = tile_size
-            inputs_shared["tile_stride"] = tile_stride
-
-            # vace_reference_image is always None on the OpenWAM path: native
-            # VACE's ref-prepend convention conflicts with our T_lat == video
-            # length contract. The first-frame condition rides through
-            # vace_context (built below by ``_build_vace_context_for_deploy``)
-            # so the vendored ``WanVideoUnit_VACE`` has nothing to do for us.
-
-            # cache-hit copies a prior inputs_shared dict — overwrite the I2V
-            # condition slot every call so a stale input_image / clip_feature /
-            # y does not survive into a non-I2V or no-first-frame invocation.
-            _i2v_img = self._resolve_i2v_input_image(first_frame_image)
-            inputs_shared["input_image"] = _i2v_img
-            if _i2v_img is not None:
-                # I2V routes the first-frame condition through input_image
-                # (CLIP) + y (channel-axis). vace_reference_image would make
-                # WanVideoUnit_{NoiseInitializer, InputVideoEmbedder} prepend
-                # an extra latent frame and break the channel-cat with y in
-                # prepare().
-                inputs_shared["vace_reference_image"] = None
-            else:
-                inputs_shared.pop("clip_feature", None)
-                inputs_shared.pop("y", None)
-                if self._has_vace:
-                    inputs_shared["vace_reference_image"] = None
-
-            for unit in pipe.units:
-                if self._is_text_unit(unit):
-                    continue
-                if self._has_vace and self._is_vace_unit(unit):
-                    # We supersede the vendored encode with the same batched
-                    # helper used in training; skip the unit to avoid double
-                    # work + the B=1 ref-prepend semantic that conflicts with
-                    # our T_lat==video contract.
-                    continue
-                inputs_shared, _, _ = pipe.unit_runner(unit, pipe, inputs_shared, {}, {})
-
-            WanVideoBackbone._ensure_prompt_seq_lens(self, inputs_shared, prompt)
-            self._build_vace_context_for_deploy(inputs_shared, first_frame_image, vace_video)
-            self._finalize_ti2v_first_frame_latents(inputs_shared, first_frame_image)
-            return inputs_shared
-
-        _text_embed_hit = prompt_embed_cache is not None and prompt_key in prompt_embed_cache
-        if _text_embed_hit:
-            cached_posi = prompt_embed_cache[prompt_key]
-            inputs_posi = dict(cached_posi)
-            inputs_posi["num_inference_steps"] = num_inference_steps
-        else:
-            inputs_posi = {
-                "prompt": prompt,
-                "num_inference_steps": num_inference_steps,
-            }
+        context, seq_lens = self._encode_text_for_inference(
+            prompt, vace_cache=vace_cache, prompt_embed_cache=prompt_embed_cache
+        )
 
         _DEFAULT_CAMERA_ORIGIN = (
             0,
@@ -1427,14 +1367,11 @@ class WanVideoBackbone(VideoBackbone):
             "camera_control_speed": 1 / 54,
             "camera_control_origin": _DEFAULT_CAMERA_ORIGIN,
             # vace_video / vace_video_mask / vace_reference_image are
-            # intentionally cleared on the OpenWAM path: the vendored
-            # ``WanVideoUnit_VACE`` would otherwise B=1-encode user PIL inputs
-            # using a ref-prepend convention incompatible with our
-            # T_lat == video-latent length contract. For VACE backbones we
-            # supersede that unit via ``_build_vace_context_for_deploy``
-            # below; for non-VACE backbones the slots are inert anyway. The
-            # user-supplied ``vace_video`` flows through the deploy helper
-            # rather than this dict.
+            # intentionally cleared on the OpenWAM path: native VACE's
+            # ref-prepend convention conflicts with our T_lat == video-latent
+            # length contract. For VACE backbones the first-frame condition
+            # flows through ``_build_vace_context_for_deploy`` below; for
+            # non-VACE backbones the slots are inert.
             "vace_video": None,
             "vace_video_mask": None,
             "vace_reference_image": None,
@@ -1461,61 +1398,124 @@ class WanVideoBackbone(VideoBackbone):
             "s2v_pose_latents": None,
             "motion_video": None,
         }
+        inputs_shared["context"] = context
+        inputs_shared["seq_lens"] = seq_lens
+        inputs_shared["prompt"] = prompt
+        inputs_shared["num_inference_steps"] = num_inference_steps
 
-        # I2V-only: unwrap the deploy-side single-PIL-list back to a single PIL
-        # before any unit runs (the upstream CLIP/VAE units call .resize() on
-        # this slot directly). For non-I2V backbones the helper returns None,
-        # keeping the default None set above and clearing any stale clip/y.
-        _i2v_img = self._resolve_i2v_input_image(first_frame_image)
-        inputs_shared["input_image"] = _i2v_img
-        if _i2v_img is None:
-            inputs_shared.pop("clip_feature", None)
-            inputs_shared.pop("y", None)
+        # NoiseInitializer + InputVideoEmbedder: deploy ``input_video`` is
+        # always None, so ``latents`` is the noise tensor itself. The ``noise``
+        # key is kept alongside ``latents`` (both the same tensor) to match the
+        # contract ``base.generate`` consumes.
+        noise = self._build_deploy_noise(
+            height=height, width=width, num_frames=num_frames, seed=seed, rand_device="cpu"
+        )
+        inputs_shared["noise"] = noise
+        inputs_shared["latents"] = noise
 
-        _t_text = time.time()
-        inputs_nega = {}
-
-        if _text_embed_hit:
-            for unit in pipe.units:
-                if self._is_text_unit(unit):
-                    continue
-                if self._has_vace and self._is_vace_unit(unit):
-                    continue
-                inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(
-                    unit, pipe, inputs_shared, inputs_posi, inputs_nega
-                )
-        else:
-            last_text_idx = max(
-                (i for i, u in enumerate(pipe.units) if self._is_text_unit(u)),
-                default=-1,
+        # I2V first-frame condition: CLIP embedding + VAE ``y``, each gated on
+        # the DiT requirement flags. ``_resolve_i2v_input_image`` returns None
+        # for non-I2V backbones, leaving ``input_image`` None and no clip/y.
+        i2v_img = self._resolve_i2v_input_image(first_frame_image)
+        inputs_shared["input_image"] = i2v_img
+        if i2v_img is not None:
+            clip_feature = self._build_deploy_i2v_clip(i2v_img, height=height, width=width)
+            if clip_feature is not None:
+                inputs_shared["clip_feature"] = clip_feature
+            y = self._build_deploy_i2v_y(
+                i2v_img,
+                num_frames=num_frames,
+                height=height,
+                width=width,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
             )
-            for i, unit in enumerate(pipe.units):
-                if self._has_vace and self._is_vace_unit(unit):
-                    # See cache-hit branch above: we replace the vendored VACE
-                    # encode with the batched helper used in training.
-                    if i == last_text_idx and prompt_embed_cache is not None:
-                        prompt_embed_cache[prompt_key] = inputs_posi.copy()
-                    continue
-                inputs_shared, inputs_posi, inputs_nega = pipe.unit_runner(
-                    unit, pipe, inputs_shared, inputs_posi, inputs_nega
-                )
-                if i == last_text_idx and prompt_embed_cache is not None:
-                    prompt_embed_cache[prompt_key] = inputs_posi.copy()
-
-            if last_text_idx < 0 and prompt_embed_cache is not None:
-                prompt_embed_cache[prompt_key] = inputs_posi.copy()
-
-        inputs_shared.update(inputs_posi)
-        WanVideoBackbone._ensure_prompt_seq_lens(self, inputs_shared, prompt)
+            if y is not None:
+                inputs_shared["y"] = y
 
         if vace_cache is not None:
-            vace_cache["inputs_shared"] = inputs_shared.copy()
             vace_cache["populated"] = True
-            vace_cache["prompt_key"] = prompt_key
+            vace_cache["prompt_key"] = prompt
+            vace_cache["context"] = context
+            vace_cache["seq_lens"] = seq_lens
 
         self._build_vace_context_for_deploy(inputs_shared, first_frame_image, vace_video)
         self._finalize_ti2v_first_frame_latents(inputs_shared, first_frame_image)
         return inputs_shared
+
+    def _encode_text_for_inference(self, prompt, *, vace_cache, prompt_embed_cache) -> Tuple[Tensor, Tensor]:
+        """Return deploy ``(context, seq_lens)``, reusing a cached text embed.
+
+        Text encoding is the only deploy quantity worth caching; both caches
+        store the same ``(context, seq_lens)`` pair keyed on the prompt.
+        """
+        if vace_cache and vace_cache.get("populated") and vace_cache.get("prompt_key") == prompt:
+            return vace_cache["context"], vace_cache["seq_lens"]
+        if prompt_embed_cache is not None and prompt in prompt_embed_cache:
+            return prompt_embed_cache[prompt]
+        context, seq_lens = self._encode_text([prompt])
+        if prompt_embed_cache is not None:
+            prompt_embed_cache[prompt] = (context, seq_lens)
+        return context, seq_lens
+
+    def _build_deploy_noise(self, *, height, width, num_frames, seed, rand_device) -> Tensor:
+        """Initial Gaussian latent noise for deploy (replaces NoiseInitializer)."""
+        pipe = self._pipe
+        spec = getattr(pipe, "latent_spec", None)
+        if spec is not None:
+            z_dim = spec.z_dim
+            upsample = spec.spatial_compression
+            length = (num_frames - 1) // spec.temporal_compression + (1 if spec.causal_temporal else 0)
+        else:
+            z_dim = pipe.vae.model.z_dim
+            upsample = pipe.vae.upsampling_factor
+            length = (num_frames - 1) // 4 + 1
+        shape = (1, z_dim, length, height // upsample, width // upsample)
+        return pipe.generate_noise(shape, seed=seed, rand_device=rand_device)
+
+    def _build_deploy_i2v_clip(self, input_image, *, height, width) -> Optional[Tensor]:
+        """I2V CLIP feature (replaces ImageEmbedderCLIP); None if the DiT/encoder gate fails."""
+        pipe = self._pipe
+        if pipe.image_encoder is None or not pipe.dit.require_clip_embedding:
+            return None
+        image = pipe.preprocess_image(input_image.resize((width, height))).to(pipe.device)
+        clip_context = pipe.image_encoder.encode_image([image])
+        return clip_context.to(dtype=pipe.torch_dtype, device=pipe.device)
+
+    def _build_deploy_i2v_y(
+        self, input_image, *, num_frames, height, width, tiled, tile_size, tile_stride
+    ) -> Optional[Tensor]:
+        """I2V VAE conditioning ``y`` (replaces ImageEmbedderVAE); None if the DiT gate fails.
+
+        Uses the tiled per-sample ``vae.encode`` — NOT training's ``_build_i2v_y``
+        (``batch_encode``, non-tiled) — so the deploy default ``tiled=True``
+        matches the vendored unit bit-for-bit.
+        """
+        pipe = self._pipe
+        if not pipe.dit.require_vae_embedding:
+            return None
+        image = pipe.preprocess_image(input_image.resize((width, height))).to(pipe.device)
+        msk = torch.ones(1, num_frames, height // 8, width // 8, device=pipe.device)
+        msk[:, 1:] = 0
+        vae_input = torch.concat(
+            [image.transpose(0, 1), torch.zeros(3, num_frames - 1, height, width).to(image.device)], dim=1
+        )
+        msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
+        msk = msk.view(1, msk.shape[1] // 4, 4, height // 8, width // 8)
+        msk = msk.transpose(1, 2)[0]
+        y = pipe.vae.encode(
+            [vae_input.to(dtype=pipe.torch_dtype, device=pipe.device)],
+            device=pipe.device,
+            tiled=tiled,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+        )[0]
+        y = y.to(dtype=pipe.torch_dtype, device=pipe.device)
+        y = torch.concat([msk, y])
+        y = y.unsqueeze(0)
+        y = y.to(dtype=pipe.torch_dtype, device=pipe.device)
+        return y
 
     def _finalize_ti2v_first_frame_latents(self, inputs_shared: dict, first_frame_image) -> None:
         """Emit ``first_frame_latents`` for TI2V deploy.
@@ -1549,48 +1549,6 @@ class WanVideoBackbone(VideoBackbone):
 
         ref_image_latents = self._encode_video(ref_tensor.to(device)).to(dtype=dtype, device=device)
         inputs_shared["first_frame_latents"] = ref_image_latents
-
-    @staticmethod
-    def _is_text_unit(unit) -> bool:
-        _TEXT_UNIT_CLASS_NAMES = frozenset({"WanVideoUnit_PromptEmbedder"})
-        flag = getattr(unit, "is_text_unit", None)
-        if flag is not None:
-            return bool(flag)
-        cls_name = getattr(unit, "__class__", type(unit)).__name__
-        return cls_name in _TEXT_UNIT_CLASS_NAMES
-
-    def _ensure_prompt_seq_lens(self, inputs_shared: dict, prompt) -> None:
-        """Attach text ``seq_lens`` so deploy cross-attention masks padding.
-
-        The Wan pipeline prompt unit returns ``context`` but not the tokenizer
-        mask. Training uses :meth:`_encode_text`, which supplies ``seq_lens``;
-        without it, deploy treats all 512 padded text positions as attendable.
-        """
-        if inputs_shared.get("context") is None:
-            return
-        tokenizer = getattr(self._pipe, "tokenizer", None)
-        if tokenizer is None:
-            return
-        if inputs_shared.get("seq_lens") is not None or inputs_shared.get("context_mask") is not None:
-            return
-
-        _, mask = tokenizer(prompt, return_mask=True, add_special_tokens=True)
-        seq_lens = mask.gt(0).sum(dim=1).long().to(self.device)
-        context = inputs_shared["context"]
-        if seq_lens.shape[0] != context.shape[0]:
-            if seq_lens.shape[0] == 1:
-                seq_lens = seq_lens.expand(context.shape[0])
-            elif context.shape[0] % seq_lens.shape[0] == 0:
-                repeat = context.shape[0] // seq_lens.shape[0]
-                seq_lens = seq_lens.repeat_interleave(repeat)
-            else:
-                logger.warning(
-                    "Cannot align prompt seq_lens batch %d with context batch %d; deploy text padding remains unmasked.",
-                    seq_lens.shape[0],
-                    context.shape[0],
-                )
-                return
-        inputs_shared["seq_lens"] = seq_lens
 
     def _encode_text(self, prompts: list) -> Tuple[Tensor, Tensor]:
         device = self.device
