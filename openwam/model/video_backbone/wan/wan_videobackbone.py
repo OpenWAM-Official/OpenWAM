@@ -959,21 +959,6 @@ class WanVideoBackbone(VideoBackbone):
     # ABC: Action token injection (2)
     # ================================================================
 
-    def inject_action_tokens(
-        self,
-        state: BlockLoopState,
-        action_tokens: Tensor,
-        n_action: int,
-        *,
-        timestep: Optional[Tensor] = None,
-    ) -> BlockLoopState:
-        return self.inject_shared_tokens(
-            state,
-            action_tokens,
-            n_action,
-            timestep=timestep,
-        )
-
     def inject_shared_tokens(
         self,
         state: BlockLoopState,
@@ -1050,13 +1035,6 @@ class WanVideoBackbone(VideoBackbone):
                 tmod_pieces.append(self._build_sample_t_mod(timestep, n_state, batch_size=batch_size))
             state.time_mod = torch.cat([state.time_mod, *[p.to(state.time_mod.dtype) for p in tmod_pieces]], dim=1)
         return state
-
-    def extract_action_tokens(
-        self,
-        state: BlockLoopState,
-        n_action: int,
-    ) -> Tuple[BlockLoopState, Tensor]:
-        return self.extract_shared_tokens(state, n_action, n_state=0)
 
     def extract_shared_tokens(
         self,

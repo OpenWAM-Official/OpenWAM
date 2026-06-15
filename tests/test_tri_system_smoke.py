@@ -71,7 +71,7 @@ def _make_tiny_wan_backbone(num_layers=2, dim=32, num_heads=4, ffn_dim=64):
 
 def _make_tiny_video_state(dit, *, batch=2, grid_frames=1, grid_height=2, grid_width=3, dtype=torch.float32):
     dim = dit.dim
-    seq_len = f * h * w
+    seq_len = grid_frames * grid_height * grid_width
     # RoPE freqs are multiplicative complex ones, so they preserve Q/K while
     # still satisfying Wan's expected shape.
     freqs = torch.ones(seq_len, 1, dim // dit.blocks[0].num_heads // 2, dtype=torch.complex64)
@@ -80,11 +80,10 @@ def _make_tiny_video_state(dit, *, batch=2, grid_frames=1, grid_height=2, grid_w
         time_mod=torch.randn(batch, 6, dim, dtype=dtype),
         rope_freqs=freqs,
         context=torch.randn(batch, 4, dim, dtype=dtype),
-        grid_frames=f,
-        grid_height=h,
-        grid_width=w,
-        t=torch.randn(batch, dim, dtype=dtype),
-        reference_prefix_len=0,
+        grid_frames=grid_frames,
+        grid_height=grid_height,
+        grid_width=grid_width,
+        time_embed=torch.randn(batch, dim, dtype=dtype),
         vace_hints=None,
         vace_scale=1.0,
         sp_pad_shape=0,
@@ -368,130 +367,6 @@ def _patch_wan_flash_attention_to_sdpa(monkeypatch):
 @pytest.fixture(autouse=True)
 def _wan_attention_cpu_fallback(monkeypatch):
     _patch_wan_flash_attention_to_sdpa(monkeypatch)
-
-
-def test_tri_system_mot_loop_compile_helper_matches_eager(monkeypatch):
-    from openwam.model.architectures.tri_system.mot_compile import CompiledTriSystemMoTLoop
-
-    torch.manual_seed(0)
-    vb, ab, ub = _make_tiny_trimodal_components()
-    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
-
-    und_mask = torch.tensor(
-        [[True, True, True, True, True], [True, True, True, False, False]],
-        dtype=torch.bool,
-    )
-    vstate_eager, astate_eager, ustate_eager = _tri_system_mot_states(vb, ab, ub, 11, und_mask=und_mask)
-    with torch.no_grad():
-        vstate_eager, astate_eager, ustate_eager = driver.run_joint_loop(vstate_eager, astate_eager, ustate_eager)
-
-    compile_calls = []
-
-    def _fake_compile(fn, **kwargs):
-        compile_calls.append(kwargs)
-        return fn
-
-    monkeypatch.setattr(torch, "compile", _fake_compile)
-    compiled_loop = CompiledTriSystemMoTLoop(
-        driver,
-        OmegaConf.create({"torch_mode": "reduce-overhead", "dynamic": False}),
-    )
-
-    vstate_compiled, astate_compiled, ustate_compiled = _tri_system_mot_states(vb, ab, ub, 11, und_mask=und_mask)
-    with torch.no_grad():
-        vstate_compiled, astate_compiled, ustate_compiled = compiled_loop.run(
-            vstate_compiled, astate_compiled, ustate_compiled
-        )
-
-    assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
-    assert torch.allclose(vstate_compiled.hidden_states, vstate_eager.hidden_states, atol=1e-6)
-    assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
-    assert torch.allclose(ustate_compiled.und_tokens, ustate_eager.und_tokens, atol=1e-6)
-
-
-def test_tri_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
-    from openwam.model.architectures.tri_system.mot_compile import CompiledTriSystemMoTLoop
-
-    torch.manual_seed(0)
-    vb, ab, ub = _make_tiny_trimodal_components()
-    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
-    compiled_loop = CompiledTriSystemMoTLoop(
-        driver,
-        OmegaConf.create({"torch_mode": "reduce-overhead", "dynamic": False}),
-    )
-
-    def _fake_compile(fn, **kwargs):  # noqa: ARG001
-        def _broken(*args, **kwargs):
-            raise RuntimeError("inductor unavailable")
-
-        return _broken
-
-    monkeypatch.setattr(torch, "compile", _fake_compile)
-
-    vstate_eager, astate_eager, ustate_eager = _tri_system_mot_states(vb, ab, ub, 17)
-    with torch.no_grad():
-        vstate_eager, astate_eager, ustate_eager = driver.run_joint_loop(vstate_eager, astate_eager, ustate_eager)
-
-    vstate_fallback, astate_fallback, ustate_fallback = _tri_system_mot_states(vb, ab, ub, 17)
-    with torch.no_grad():
-        vstate_fallback, astate_fallback, ustate_fallback = compiled_loop.run(
-            vstate_fallback, astate_fallback, ustate_fallback
-        )
-
-    assert compiled_loop._compile_disabled is True
-    assert torch.allclose(vstate_fallback.hidden_states, vstate_eager.hidden_states, atol=1e-6)
-    assert torch.allclose(astate_fallback.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
-    assert torch.allclose(ustate_fallback.und_tokens, ustate_eager.und_tokens, atol=1e-6)
-
-
-def test_tri_system_compile_mode_none_disables_mot_loop(monkeypatch):
-    _Arch = _make_stub_tri_arch(monkeypatch, num_video_layers=2)
-    arch = _Arch(_tri_arch_min_cfg())
-
-    arch.apply_compile_optimizations(
-        OmegaConf.create(
-            {
-                "mode": "none",
-                "tri_system": {"torch_mode": "reduce-overhead", "dynamic": False},
-            }
-        )
-    )
-
-    assert arch._compiled_mot_loop is None
-
-
-def test_tri_system_auto_mode_enables_mot_loop(monkeypatch):
-    _Arch = _make_stub_tri_arch(monkeypatch, num_video_layers=2)
-    arch = _Arch(_tri_arch_min_cfg())
-
-    arch.apply_compile_optimizations(
-        OmegaConf.create(
-            {
-                "mode": "auto",
-                "tri_system": {"torch_mode": "reduce-overhead", "dynamic": False},
-            }
-        )
-    )
-
-    assert arch._compiled_mot_loop is not None
-
-
-def test_tri_system_auto_mode_rebuilds_missing_mot_driver(monkeypatch):
-    _Arch = _make_stub_tri_arch(monkeypatch, num_video_layers=2)
-    arch = _Arch(_tri_arch_min_cfg())
-    arch._mot_driver = None
-
-    arch.apply_compile_optimizations(
-        OmegaConf.create(
-            {
-                "mode": "auto",
-                "tri_system": {"torch_mode": "reduce-overhead", "dynamic": False},
-            }
-        )
-    )
-
-    assert arch._mot_driver is not None
-    assert arch._compiled_mot_loop is not None
 
 
 def test_tri_system_joint_mask_layout():

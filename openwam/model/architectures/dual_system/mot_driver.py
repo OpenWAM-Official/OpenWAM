@@ -307,49 +307,6 @@ class MoTJointDriver:
         astate = ab.post_attn_at_layer(layer_id, astate, attn_a.contiguous(), apost)
         return vstate, astate
 
-    def _step_impl_for_compile(
-        self,
-        layer_id: int,
-        vstate: "BlockLoopState",
-        astate: "ActionState",
-        attn_mask: Optional[Tensor] = None,
-    ) -> Tuple["BlockLoopState", "ActionState"]:
-        """Compile-oriented per-layer body with tuple post-attention state."""
-        vb = self.vb
-        ab = self.ab
-
-        v_pre = getattr(vb, "pre_attn_at_layer_for_compile", vb.pre_attn_at_layer)
-        a_pre = getattr(ab, "pre_attn_at_layer_for_compile", ab.pre_attn_at_layer)
-        v_post = getattr(vb, "post_attn_at_layer_for_compile", vb.post_attn_at_layer)
-        a_post = getattr(ab, "post_attn_at_layer_for_compile", ab.post_attn_at_layer)
-
-        q_v, k_v, v_v, vpost = v_pre(layer_id, vstate)
-        q_a, k_a, v_a, apost = a_pre(layer_id, astate)
-
-        if q_v.dtype != q_a.dtype:
-            raise RuntimeError(
-                f"MoTJointDriver: dtype mismatch at layer {layer_id} "
-                f"(video={q_v.dtype}, action={q_a.dtype}). Both backbones "
-                "must produce attention inputs in matching dtype."
-            )
-        if q_v.device != q_a.device:
-            raise RuntimeError(
-                f"MoTJointDriver: device mismatch at layer {layer_id} (video={q_v.device}, action={q_a.device})."
-            )
-
-        s_video = q_v.shape[1]
-        s_action = q_a.shape[1]
-        q_cat = torch.cat([q_v, q_a], dim=1)
-        k_cat = torch.cat([k_v, k_a], dim=1)
-        v_cat = torch.cat([v_v, v_a], dim=1)
-        # Contract: same as ``_step_impl`` — caller pre-builds ``attn_mask``.
-
-        mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask)
-        attn_v, attn_a = mixed.split([s_video, s_action], dim=1)
-        vstate = v_post(layer_id, vstate, attn_v.contiguous(), vpost)
-        astate = a_post(layer_id, astate, attn_a.contiguous(), apost)
-        return vstate, astate
-
     def _step_checkpointed(
         self,
         layer_id: int,
