@@ -95,8 +95,20 @@ class WanVideoBackbone(VideoBackbone):
         to pre-PR behavior.
         """
         super().__init__()
-        self._pipe = pipe
+        # ``_pipe`` is the WanVideoPipeline that owns construction + the deploy
+        # pipeline-unit methods (preprocess_image / vae_output_to_video / ...).
+        # Store it OUTSIDE nn.Module registration (object.__setattr__) so its
+        # sub-modules are not double-counted in state_dict; the backbone instead
+        # registers the trainable sub-modules directly as named children below,
+        # so checkpoint keys are ``dit.*`` / ``vae.*`` (not ``_pipe.dit.*``).
+        object.__setattr__(self, "_pipe", pipe)
         self._encoder = external_encoder
+        # Promote pipeline sub-modules to backbone-owned named children so
+        # nn.Module collects them into state_dict at the clean top-level prefix.
+        for _name in ("dit", "dit2", "vae", "vace", "vace2", "text_encoder", "image_encoder", "motion_controller"):
+            _mod = getattr(pipe, _name, None)
+            if isinstance(_mod, nn.Module):
+                setattr(self, _name, _mod)
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
         self._shift_video = None if shift_video is None else float(shift_video)
@@ -1227,12 +1239,20 @@ class WanVideoBackbone(VideoBackbone):
     def get_submodule(self, name: str) -> nn.Module | None:
         if name == "vae" and self._uses_external_encoder:
             return self._encoder
+        # Backbone-owned named child (registered in __init__); fall back to the
+        # pipe for non-Module attributes (e.g. tokenizer) the pipe still owns.
+        mod = getattr(self, name, None)
+        if isinstance(mod, nn.Module):
+            return mod
         return getattr(self._pipe, name, None)
 
     def set_submodule(self, name: str, module: nn.Module) -> None:
         if name == "vae" and self._uses_external_encoder:
             self._encoder = module
             return
+        # Keep both views in sync: the registered named child (state_dict /
+        # forward) and the pipe attribute (deploy pipeline units read pipe.X).
+        setattr(self, name, module)
         setattr(self._pipe, name, module)
 
     # ================================================================
