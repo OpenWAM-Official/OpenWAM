@@ -78,6 +78,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             attn_kernel=str(cfg.get("attn_kernel", "softmax")),
+            shift_action=cfg.get("shift_action"),
         )
 
         # MoT driver is built once both backbones are available. The video

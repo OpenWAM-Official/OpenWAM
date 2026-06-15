@@ -36,6 +36,15 @@ class ActionBackbone(nn.Module, ABC):
         """Whether this backbone consumes a ``proprio_state`` input. Default False."""
         return False
 
+    @property
+    def shift_action(self):
+        """Optional α-shift for the action scheduler — single source of truth read by
+        the architecture for both training (``init_training_schedulers``) and inference
+        (deploy schedule). ``None`` falls back to the scheduler template default.
+        Symmetric to ``VideoBackbone.shift_video``. Concrete backbones store the
+        resolved value into ``self._shift_action`` during ``__init__``."""
+        return getattr(self, "_shift_action", None)
+
     def set_dtype_device(self, dtype, device) -> None:
         """Move action backbone params/buffers to (dtype, device).
 

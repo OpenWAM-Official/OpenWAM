@@ -643,6 +643,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
         return self.video_backbone.scheduler
 
     @property
+    def external_encoder(self):
+        """The video backbone's external encoder, or ``None`` (native VAE / no video
+        backbone). Train/deploy read this instead of reaching into video_backbone
+        internals (the layering boundary: only the architecture talks to backbones)."""
+        vb = self.video_backbone
+        return vb.external_encoder if vb is not None else None
+
+    @property
     def action_dim(self) -> int:
         return self.action_backbone.action_dim if self.action_backbone is not None else 0
 
@@ -907,35 +915,29 @@ class BaseWAMArchitecture(ABC, nn.Module):
     def init_training_schedulers(self, num_timesteps: int = 1000) -> None:
         """Initialize all backbone schedulers for training.
 
-        Single source of truth for the video α-shift:
-        ``self.video_backbone.shift_video``. The same property is read by
-        ``openwam/deploy/joint_engine.py::generate`` at inference time, so
-        the discrete training sigma buffer and the inference denoising
-        trajectory are guaranteed to be sampled from the same shifted
-        schedule — train/inference cannot drift regardless of which yaml
-        file is loaded.
+        Single source of truth for each stream's α-shift:
+        ``video_backbone.shift_video`` and ``action_backbone.shift_action``.
+        The same properties are read by the deploy schedule at inference time,
+        so the discrete training sigma buffer and the inference denoising
+        trajectory are sampled from the same shifted schedule — train/inference
+        cannot drift, and the shift is owned by the checkpoint config (not a
+        separate deploy-time knob).
 
-        Action backbone is intentionally NOT split: its scheduler always
-        falls back to the template default, matching the
-        Reconstruction-or-Semantics paper recipe (arXiv:2605.06388) which
-        applies dim-dependent shift only on non-VAE video encoders.
-
-        ``shift_video=None`` (the default for backbones without an explicit
-        cfg override) yields bit-identical pre-PR behavior: each scheduler
-        falls back to its template default (Wan = 5.0).
+        ``shift is None`` (the default for configs without an explicit override)
+        falls back to each scheduler's template default (Wan/action = 5.0),
+        i.e. bit-identical pre-shift behavior.
         """
         # ``getattr`` (rather than direct attribute access) so test doubles
-        # / mocks that extend bare ``nn.Module`` instead of the
-        # :class:`VideoBackbone` ABC still work — they simply don't carry a
-        # ``shift_video`` attribute and we fall back to the scheduler's
-        # template default, matching the production no-override path.
-        video_shift = getattr(self.video_backbone, "shift_video", None) if self.video_backbone is not None else None
+        # / mocks that don't carry the shift property still work — they fall
+        # back to the scheduler's template default, matching the production
+        # no-override path.
         for name, bb in self.backbones.items():
             if not hasattr(bb, "scheduler"):
                 continue
             kwargs = {"training": True}
-            if name == "video_backbone" and video_shift is not None:
-                kwargs["shift"] = float(video_shift)
+            shift = getattr(bb, "shift_video" if name == "video_backbone" else "shift_action", None)
+            if shift is not None:
+                kwargs["shift"] = float(shift)
             bb.scheduler.set_timesteps(num_timesteps, **kwargs)
 
     def freeze_modules(self, names: list[str]) -> list[str]:

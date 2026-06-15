@@ -108,6 +108,9 @@ action_backbone:
   dim: 1024
   text_dim: 4096
   ffn_dim: 4096
+  # Action-scheduler α-shift (symmetric to video_backbone.shift_video); single
+  # source of truth for train + deploy. null = scheduler template default (5.0).
+  shift_action: null
 
 # Video backbone. Default: Wan 2.2 TI2V-5B (the only backbone with end-to-end
 # tri_system plumbing today; VACE/I2V composition raises NotImplementedError

@@ -145,8 +145,7 @@ class OpenWAMTrainer(BaseTrainer):
         # its freeze list, warn so the user notices BEFORE consuming GPU on
         # an unintentional ViT-trainable run. Stubs / alternate architectures
         # without a ``video_backbone`` attribute fall through silently.
-        video_backbone = getattr(self.architecture, "video_backbone", None)
-        external_encoder = getattr(video_backbone, "_encoder", None) if video_backbone is not None else None
+        external_encoder = getattr(self.architecture, "external_encoder", None)
         if (
             external_encoder is not None
             and not external_encoder.spec.is_reversible

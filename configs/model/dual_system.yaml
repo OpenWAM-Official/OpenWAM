@@ -136,6 +136,11 @@ action_backbone:
   dim: 1024
   text_dim: 4096       # Wan T5-XXL context dim. COSMOS25-ONLY: override to 1024 via CLI.
   ffn_dim: 4096
+  # Flow-matching α-shift for the ACTION scheduler (symmetric to
+  # video_backbone.shift_video). Single source of truth read by BOTH
+  # init_training_schedulers and the deploy schedule, so train/inference sigma
+  # grids cannot drift. null = scheduler template default (5.0).
+  shift_action: null
   # COSMOS25-ONLY default for variant=joint_cross_attn. Cosmos25 has
   # num_heads=16, head_dim=128 — auto-resolve sizes the action self-attention
   # space to 16×128=2048, but the action residual stream is only 1024 wide

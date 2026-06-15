@@ -372,23 +372,18 @@ class JointInferenceEngine(BaseInferenceEngine):
         # Build schedule (only "sync" is supported; make_schedule raises on anything else)
         schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
-        shift = conditions.get("shift", getattr(inf_cfg, "shift", 5.0))
-
-        # Single source of truth: ``arch.video_backbone.shift_video`` is the
-        # ONLY place the video α-shift is configured (set via
-        # ``cfg.model.video_backbone.shift_video`` at yaml time). Reading
-        # here — rather than from ``cfg.inference.*`` — guarantees that the
-        # discrete training sigma buffer (set by
-        # ``init_training_schedulers`` via the same property) and the
-        # inference denoising trajectory are sampled from the identical
-        # shifted schedule. ``conditions["shift_video"]`` lets callers
-        # override per-request (deploy smoke tests / ablations) without
-        # editing the cfg tree.
-        # Nested ``getattr`` — some lightweight test doubles
-        # (e.g. ``_CaptureDeployArchitecture`` in
-        # ``tests/test_action_normalization.py``) construct a stub
-        # architecture without a ``video_backbone`` attribute at all;
-        # production code always has it.
+        # Single source of truth for each stream's α-shift is the backbone
+        # property — ``action_backbone.shift_action`` and
+        # ``video_backbone.shift_video`` — set via the model yaml and saved in
+        # the checkpoint, so the training sigma buffer (set by
+        # ``init_training_schedulers`` via the same properties) and the
+        # inference trajectory match. Deploy carries no independent shift knob.
+        # ``conditions[...]`` allows a per-request override (smoke tests /
+        # ablations). ``getattr`` guards lightweight stub architectures.
+        _ab = getattr(self.architecture, "action_backbone", None)
+        shift = conditions.get("shift", getattr(_ab, "shift_action", None) if _ab is not None else None)
+        if shift is None:
+            shift = 5.0
         _vb = getattr(self.architecture, "video_backbone", None)
         shift_video = conditions.get(
             "shift_video",

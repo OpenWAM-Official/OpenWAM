@@ -422,12 +422,6 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Override schedule type (only 'sync' is supported)",
     )
     parser.add_argument(
-        "--shift",
-        type=float,
-        default=None,
-        help="Override inference.shift (flow-matching shift)",
-    )
-    parser.add_argument(
         "--compile-mode",
         type=_normalize_compile_mode_arg,
         choices=_COMPILE_MODES,
@@ -490,8 +484,6 @@ def _apply_inference_overrides(cfg, args):
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.schedule_type is not None:
         OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
-    if args.shift is not None:
-        OmegaConf.update(cfg, "inference.shift", args.shift, merge=False)
     return cfg
 
 

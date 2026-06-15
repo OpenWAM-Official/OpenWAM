@@ -16,8 +16,11 @@ server:
 inference:
   denoise_steps: 10           # Denoising steps (FastWAM-Joint deploy default)
   schedule_type: sync         # only "sync" is supported (removed strategies live in git history)
-  shift: 5.0                  # Flow-matching shift; also discretizes the video stream unless the
-                              # backbone sets shift_video (Cosmos flow_shift != 5.0 ckpts: align manually)
+  # Flow-matching α-shift is owned by the checkpoint, NOT set here: video shift comes
+  # from cfg.model.video_backbone.shift_video and action shift from
+  # cfg.model.action_backbone.shift_action (both saved in config.yaml at train time),
+  # so train/inference sigma grids cannot drift. Per-request override via the generate
+  # `conditions` dict ("shift"/"shift_video") remains available for ablations.
 
   execution_mode: sync        # sync | async — selects SyncInferenceExecutor / AsyncInferenceExecutor
   execution_horizon: null     # async only: actions executed per chunk before switching; null = policy.execute_horizon, else full chunk

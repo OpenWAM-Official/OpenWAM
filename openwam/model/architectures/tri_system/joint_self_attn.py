@@ -149,6 +149,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             variant="joint_self_attn",
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
+            shift_action=_cfg_get(cfg, "shift_action"),
         )
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(_cfg_get(cfg, "mot_checkpoint_mixed_attn", True)),

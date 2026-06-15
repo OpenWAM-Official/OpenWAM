@@ -174,7 +174,7 @@ class VideoBackbone(ABC, nn.Module):
         """The swapped-in external :class:`VideoEncoder`, or ``None`` for the native
         VAE path. Exposed so the architecture can surface encoder state to the
         trainer without train code reaching into backbone privates."""
-        return getattr(self, "_external_encoder", None)
+        return getattr(self, "_encoder", None)
 
     @property
     def context_dim(self) -> Optional[int]:

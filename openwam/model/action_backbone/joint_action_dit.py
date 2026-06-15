@@ -389,14 +389,13 @@ class ActionDiT(ActionBackbone):
         eps: float = 1e-6,
         attn_kernel: str = "softmax",
         attn_eps: float = 1e-15,
+        shift_action: Optional[float] = None,
     ):
         super().__init__()
         if variant not in ("joint_cross_attn", *_MOT_VARIANTS):
             raise ValueError(f"Unknown variant '{variant}'. Choose from: joint_cross_attn, {', '.join(_MOT_VARIANTS)}")
         if attn_kernel not in _VALID_ATTN_KERNELS:
-            raise ValueError(
-                f"Unknown attn_kernel '{attn_kernel}'. Choose from: {', '.join(_VALID_ATTN_KERNELS)}"
-            )
+            raise ValueError(f"Unknown attn_kernel '{attn_kernel}'. Choose from: {', '.join(_VALID_ATTN_KERNELS)}")
         if len(bridge_layers) != num_layers:
             raise ValueError(
                 f"bridge_layers ({len(bridge_layers)}) must equal num_layers ({num_layers}). "
@@ -419,6 +418,7 @@ class ActionDiT(ActionBackbone):
         self._num_layers = num_layers
         self._attn_kernel = attn_kernel
         self._attn_eps = float(attn_eps)
+        self._shift_action = None if shift_action is None else float(shift_action)
         self.freq_dim = freq_dim
         self.max_action_len = max_action_len
         self.bridge_layers = bridge_layers
@@ -823,9 +823,7 @@ class ActionDiT(ActionBackbone):
             post_state["uses_linear_attn"] = True
         return q_out, k_out, v_out, post_state
 
-    def pre_attn_at_layer_for_compile(
-        self, layer_id: int, astate: "ActionState"
-    ):
+    def pre_attn_at_layer_for_compile(self, layer_id: int, astate: "ActionState"):
         """Compile-friendly pre-attention half using a tensor tuple post-state.
 
         Returns either a 4-tuple ``(q, k, v, post_state)`` for

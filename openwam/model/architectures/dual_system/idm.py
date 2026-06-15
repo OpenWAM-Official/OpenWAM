@@ -291,6 +291,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             variant="idm",
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
+            shift_action=cfg.get("shift_action"),
         )
 
         attention_mask_mode = str(cfg.get("attention_mask_mode", "joint"))
