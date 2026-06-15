@@ -343,14 +343,14 @@ class _FakePipe(nn.Module):
 
 
 def test_C1_default_path_state_dict_keys_contain_pipe_vae():
-    """Without external_encoder, _pipe.vae.* keys are present and _encoder.* is None."""
+    """Without external_encoder, native vae.* keys are present (phase-3c attribute-ization) and _encoder.* is None."""
     from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
 
     pipe = _FakePipe()
     backbone = WanVideoBackbone(pipe)  # default path, no external_encoder
     assert backbone._uses_external_encoder is False
     sd = backbone.state_dict()
-    assert any(k.startswith("_pipe.vae.") for k in sd), "default path should expose _pipe.vae.* keys"
+    assert any(k.startswith("vae.") for k in sd), "default path should expose vae.* keys"
     assert not any(k.startswith("_encoder.") for k in sd), "default path must not have _encoder.* keys"
 
 
@@ -390,7 +390,7 @@ def test_C3_external_path_releases_pipe_vae_in_from_pretrained():
 
 
 def test_C4_external_path_state_dict_keys_swap():
-    """External path: _encoder.* keys present, _pipe.vae.* absent."""
+    """External path: _encoder.* keys present, native vae.* absent."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
     from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
 
@@ -399,7 +399,7 @@ def test_C4_external_path_state_dict_keys_swap():
     backbone = WanVideoBackbone.from_pretrained(pipe, external_encoder=enc)
     sd = backbone.state_dict()
     assert any(k.startswith("_encoder.") for k in sd), "external path should expose _encoder.* keys"
-    assert not any(k.startswith("_pipe.vae.") for k in sd), "external path must release _pipe.vae"
+    assert not any(k.startswith("vae.") for k in sd), "external path must release the native vae.*"
 
 
 def test_C5_submodule_names_vae_alias_in_both_paths():
@@ -1697,12 +1697,12 @@ def test_M3f_train_save_deploy_state_dict_topology_matches():
     train_enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
     train_bb = WanVideoBackbone.from_pretrained(train_pipe, external_encoder=train_enc)
     train_keys = set(train_bb.state_dict().keys())
-    # Must use the external-encoder slot, not _pipe.vae.
+    # Must use the external-encoder slot, not the native vae.*.
     assert any(k.startswith("_encoder.") for k in train_keys), (
         "training-time backbone state_dict missing _encoder.* keys"
     )
-    assert not any(k.startswith("_pipe.vae.") for k in train_keys), (
-        "training-time backbone state_dict has _pipe.vae.* — native VAE wasn't released"
+    assert not any(k.startswith("vae.") for k in train_keys), (
+        "training-time backbone state_dict has vae.* — native VAE wasn't released"
     )
 
     # --- "Deploy" side: reconstruct from saved components entry ---
