@@ -24,22 +24,22 @@ class _StubBlockLoopState:
     forwards actually read from / write to.
 
     ``t_mod`` is a 4D dummy so the SharedBackbone fail-fast on per-token t_mod mode
-    (architecture forward enforces ``vstate.t_mod.dim() == 4``) is satisfied without
+    (architecture forward enforces ``vstate.time_mod.dim() == 4``) is satisfied without
     plumbing real per-token AdaLN values through the stub."""
 
-    x: torch.Tensor
-    t_mod: torch.Tensor = None  # type: ignore[assignment]
-    h: int = 1
-    w: int = 1
+    hidden_states: torch.Tensor
+    time_mod: torch.Tensor = None  # type: ignore[assignment]
+    grid_height: int = 1
+    grid_width: int = 1
     extras: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.t_mod is None:
-            self.t_mod = torch.zeros(1, 1, 6, 1)
+        if self.time_mod is None:
+            self.time_mod = torch.zeros(1, 1, 6, 1)
 
 
 class _StubVideoBackbone(nn.Module):
-    """Minimal video backbone whose state.x records the action-token slot.
+    """Minimal video backbone whose state.hidden_states records the action-token slot.
 
     Tracks how many times each block ran and which block_ids saw action
     tokens, so tests can assert the architecture iterated through the
@@ -65,16 +65,16 @@ class _StubVideoBackbone(nn.Module):
     def prepare(self, **_kw):
         B = 1
         return _StubBlockLoopState(
-            x=torch.zeros(B, self._video_seq, self.dim),
-            h=1,
-            w=self._video_seq,
+            hidden_states=torch.zeros(B, self._video_seq, self.dim),
+            grid_height=1,
+            grid_width=self._video_seq,
             extras={},
         )
 
     def run_block(self, block_id, state):
         self.run_block_calls.append(block_id)
         self.seen_shared_attention_masks.append(state.extras.get("shared_attention_mask"))
-        state.x = self.blocks[block_id](state.x)
+        state.hidden_states = self.blocks[block_id](state.hidden_states)
         return state
 
     def build_video_to_video_mask(self, *, video_seq_len, video_tokens_per_frame, device):  # noqa: ARG002
@@ -82,13 +82,13 @@ class _StubVideoBackbone(nn.Module):
 
     def finalize(self, state):
         # Caller has already extracted action tokens; just return a fixed-shape
-        # video noise prediction whose value depends on state.x so grads can
+        # video noise prediction whose value depends on state.hidden_states so grads can
         # propagate during backward tests.
-        return state.x.sum(dim=-1, keepdim=True)
+        return state.hidden_states.sum(dim=-1, keepdim=True)
 
     def inject_action_tokens(self, state, action_tokens, n_action, *, timestep=None):  # noqa: ARG002
         self.injected_action_tokens = n_action
-        state.x = torch.cat([state.x, action_tokens], dim=1)
+        state.hidden_states = torch.cat([state.hidden_states, action_tokens], dim=1)
         return state
 
     def inject_shared_tokens(
@@ -106,19 +106,19 @@ class _StubVideoBackbone(nn.Module):
         pieces = [action_tokens]
         if n_state:
             pieces.append(state_tokens)
-        state.x = torch.cat([state.x, *pieces], dim=1)
+        state.hidden_states = torch.cat([state.hidden_states, *pieces], dim=1)
         return state
 
     def extract_action_tokens(self, state, n_action):
-        action_tail = state.x[:, -n_action:, :]
-        state.x = state.x[:, :-n_action, :]
+        action_tail = state.hidden_states[:, -n_action:, :]
+        state.hidden_states = state.hidden_states[:, :-n_action, :]
         return state, action_tail
 
     def extract_shared_tokens(self, state, n_action, *, n_state=0):
         n_tail = n_action + n_state
-        n_video = state.x.shape[1] - n_tail
-        action_tail = state.x[:, n_video : n_video + n_action, :]
-        state.x = state.x[:, :n_video, :]
+        n_video = state.hidden_states.shape[1] - n_tail
+        action_tail = state.hidden_states[:, n_video : n_video + n_action, :]
+        state.hidden_states = state.hidden_states[:, :n_video, :]
         return state, action_tail
 
 

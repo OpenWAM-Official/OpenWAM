@@ -207,7 +207,7 @@ def test_video_backbone_shift_video_property_default_none():
         def extract_action_tokens(self, *a, **k):
             raise NotImplementedError
 
-        def preprocess_input(self, **kw):
+        def preprocess_input_for_train(self, **kw):
             raise NotImplementedError
 
         def get_submodule(self, name):
@@ -282,7 +282,7 @@ def test_video_backbone_shift_video_property_returns_stored_value():
         def extract_action_tokens(self, *a, **k):
             raise NotImplementedError
 
-        def preprocess_input(self, **kw):
+        def preprocess_input_for_train(self, **kw):
             raise NotImplementedError
 
         def get_submodule(self, name):

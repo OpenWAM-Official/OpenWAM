@@ -1,4 +1,4 @@
-"""Unit tests for vace_cache and prompt_embed_cache in WanVideoBackbone.prepare_inputs_for_inference.
+"""Unit tests for vace_cache and prompt_embed_cache in WanVideoBackbone.preprocess_input_for_inference.
 
 Tests verify:
 1. Cold start: both caches miss, all units run.
@@ -57,7 +57,7 @@ class _MockPipe:
 
 
 class _MockWanVB:
-    """Minimal WanVideoBackbone-like object with prepare_inputs_for_inference."""
+    """Minimal WanVideoBackbone-like object with preprocess_input_for_inference."""
 
     def __init__(self, pipe):
         self._pipe = pipe
@@ -74,10 +74,10 @@ class _MockWanVB:
     def dtype(self):
         return self._dtype
 
-    def prepare_inputs_for_inference(self, inputs):
+    def preprocess_input_for_inference(self, inputs):
         from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
 
-        return WanVideoBackbone.prepare_inputs_for_inference(self, inputs)
+        return WanVideoBackbone.preprocess_input_for_inference(self, inputs)
 
     def _finalize_ti2v_first_frame_latents(self, inputs_shared, first_frame_image):
         from openwam.model.video_backbone.wan_adapter import WanVideoBackbone
@@ -115,7 +115,7 @@ class _MockWanVB:
 
 def _prep(pipe, prompt, vace_cache=None, prompt_embed_cache=None, seed=0):
     vb = _MockWanVB(pipe)
-    return vb.prepare_inputs_for_inference(
+    return vb.preprocess_input_for_inference(
         InferenceInputs(
             prompt=prompt,
             vace_video=None,
@@ -262,7 +262,7 @@ def test_i2v_deploy_list_unwrap_cold_start():
 
     mock_vb = _make_i2v_mock()
     img = Image.new("RGB", (320, 384))
-    inputs = mock_vb.prepare_inputs_for_inference(
+    inputs = mock_vb.preprocess_input_for_inference(
         InferenceInputs(
             prompt="prompt_I2V",
             first_frame_image=[img],
@@ -295,7 +295,7 @@ def test_i2v_deploy_list_unwrap_cache_hit():
     vace_cache: dict = {}
 
     # 1st call populates the cache.
-    mock_vb.prepare_inputs_for_inference(
+    mock_vb.preprocess_input_for_inference(
         InferenceInputs(
             prompt="prompt_I2V",
             first_frame_image=[img],
@@ -312,7 +312,7 @@ def test_i2v_deploy_list_unwrap_cache_hit():
     assert vace_cache.get("populated"), "first call should populate vace_cache"
 
     # 2nd call must hit the cache and still unwrap the list + null vace ref.
-    inputs = mock_vb.prepare_inputs_for_inference(
+    inputs = mock_vb.preprocess_input_for_inference(
         InferenceInputs(
             prompt="prompt_I2V",
             first_frame_image=[img],

@@ -1,6 +1,6 @@
 """``prepare_inputs`` collects per-sample ``proprio_mask`` alongside ``proprio``.
 
-The full ``prepare_inputs`` flow runs through ``video_backbone.preprocess_input``
+The full ``prepare_inputs`` flow runs through ``video_backbone.preprocess_input_for_train``
 (real VAE / text encoder), which we don't want to spin up in a unit test.
 We test the proprio_mask collection by stubbing ``preprocess`` and the
 ``_pipeline_transform_instance``, keeping the rest of the path real.

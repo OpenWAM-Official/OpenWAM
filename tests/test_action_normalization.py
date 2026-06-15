@@ -216,7 +216,7 @@ class _TinyVideoBackbone:
     def __init__(self):
         self.scheduler = _TinyScheduler()
 
-    def prepare_inputs_for_inference(self, *args, **kwargs):
+    def preprocess_input_for_inference(self, *args, **kwargs):
         del args, kwargs
         return {"latents": torch.zeros(1, 1, 1, 1, 1)}
 

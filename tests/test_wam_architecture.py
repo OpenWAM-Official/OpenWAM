@@ -65,14 +65,14 @@ def _dual_system_self_attn_mot_states(arch, seed: int):
         context_mask=context_mask,
     )
     vstate = BlockLoopState(
-        x=torch.randn(1, 4, 32, generator=g),
-        t_mod=torch.zeros(1, 6, 32),
-        freqs=torch.zeros(4, 1, 1),
+        hidden_states=torch.randn(1, 4, 32, generator=g),
+        time_mod=torch.zeros(1, 6, 32),
+        rope_freqs=torch.zeros(4, 1, 1),
         context=torch.randn(1, 4, 32, generator=g),
         context_mask=torch.ones(1, 4, dtype=torch.bool),
-        f=4,
-        h=1,
-        w=1,
+        grid_frames=4,
+        grid_height=1,
+        grid_width=1,
         extras={},
     )
     return vstate, astate
@@ -492,7 +492,7 @@ def test_action_self_attention_rope_breaks_permutation_equivariance():
     """Without positional info, self-attention is permutation-equivariant.
     RoPE injects absolute position into Q/K, so permuting the input tokens
     must NOT merely permute the output (the model distinguishes positions).
-    Also: supplying RoPE freqs must change the output relative to freqs=None.
+    Also: supplying RoPE freqs must change the output relative to rope_freqs=None.
     """
     from openwam.model.action_backbone.components import precompute_freqs_cis_1d
     from openwam.model.action_backbone.joint_action_dit import ActionSelfAttention
@@ -507,12 +507,12 @@ def test_action_self_attention_rope_breaks_permutation_equivariance():
     x_perm = x[:, perm, :]
 
     with torch.no_grad():
-        out_plain = attn(x, freqs=None)
-        out_plain_perm = attn(x_perm, freqs=None)
-        out_rope = attn(x, freqs=freqs)
-        out_rope_perm = attn(x_perm, freqs=freqs)
+        out_plain = attn(x, rope_freqs=None)
+        out_plain_perm = attn(x_perm, rope_freqs=None)
+        out_rope = attn(x, rope_freqs=freqs)
+        out_rope_perm = attn(x_perm, rope_freqs=freqs)
 
-    # Sanity: freqs=None is permutation-equivariant.
+    # Sanity: rope_freqs=None is permutation-equivariant.
     assert torch.allclose(out_plain_perm, out_plain[:, perm, :], atol=1e-5)
     # RoPE must break that symmetry (content same, positions shuffled → non-permute-equivalent output).
     assert not torch.allclose(out_rope_perm, out_rope[:, perm, :], atol=1e-5), (
@@ -991,7 +991,7 @@ def test_dual_system_mot_loop_compile_helper_matches_eager(monkeypatch):
 
     def _v_post_compile(layer_id, state, attn_out, post_state):
         compile_path_calls.append("v_post")
-        state.x = post_state[0] + attn_out
+        state.hidden_states = post_state[0] + attn_out
         return state
 
     arch.video_backbone.pre_attn_at_layer_for_compile = _v_pre_compile
@@ -1025,7 +1025,7 @@ def test_dual_system_mot_loop_compile_helper_matches_eager(monkeypatch):
 
     assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
     assert compile_path_calls == ["v_pre", "v_post", "v_pre", "v_post"]
-    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(vstate_compiled.hidden_states, vstate_eager.hidden_states, atol=1e-6)
     assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
 
 
@@ -1131,7 +1131,7 @@ def test_dual_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
 
     assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
     assert compiled_loop._compile_disabled is True
-    assert torch.allclose(vstate_fallback.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(vstate_fallback.hidden_states, vstate_eager.hidden_states, atol=1e-6)
     assert torch.allclose(astate_fallback.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
 
     vstate_eager2, astate_eager2 = _dual_system_self_attn_mot_states(arch, 23)
@@ -1143,7 +1143,7 @@ def test_dual_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
         vstate_fallback2, astate_fallback2 = compiled_loop.run(vstate_fallback2, astate_fallback2)
 
     assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
-    assert torch.allclose(vstate_fallback2.x, vstate_eager2.x, atol=1e-6)
+    assert torch.allclose(vstate_fallback2.hidden_states, vstate_eager2.hidden_states, atol=1e-6)
     assert torch.allclose(astate_fallback2.payload.x_action, astate_eager2.payload.x_action, atol=1e-6)
 
 
@@ -1184,7 +1184,7 @@ def test_dual_system_mot_loop_bad_request_does_not_disable_compile(monkeypatch):
         compiled_loop.run(vstate_ok, astate_ok)
 
     vstate_bad, astate_bad = _dual_system_self_attn_mot_states(arch, 31)
-    vstate_bad.x = vstate_bad.x.to(torch.bfloat16)
+    vstate_bad.hidden_states = vstate_bad.hidden_states.to(torch.bfloat16)
     with pytest.raises(RuntimeError, match="dtype mismatch"):
         with torch.no_grad():
             compiled_loop.run(vstate_bad, astate_bad)
@@ -1205,7 +1205,7 @@ def test_dual_system_mot_loop_bad_request_does_not_disable_compile(monkeypatch):
     ]
     assert compiled_invocations == 3
     assert compiled_loop._compile_disabled is False
-    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(vstate_compiled.hidden_states, vstate_eager.hidden_states, atol=1e-6)
     assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
 
 
@@ -1238,7 +1238,7 @@ def test_dual_system_mot_loop_compile_setup_bad_request_does_not_disable_compile
     monkeypatch.setattr(torch, "compile", _fake_compile)
 
     vstate_bad, astate_bad = _dual_system_self_attn_mot_states(arch, 41)
-    vstate_bad.x = vstate_bad.x.to(torch.bfloat16)
+    vstate_bad.hidden_states = vstate_bad.hidden_states.to(torch.bfloat16)
     with pytest.raises(RuntimeError, match="dtype mismatch"):
         with torch.no_grad():
             compiled_loop.run(vstate_bad, astate_bad)
@@ -1255,7 +1255,7 @@ def test_dual_system_mot_loop_compile_setup_bad_request_does_not_disable_compile
 
     assert compile_calls == 2
     assert compiled_loop._compile_disabled is False
-    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(vstate_compiled.hidden_states, vstate_eager.hidden_states, atol=1e-6)
     assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
 
 

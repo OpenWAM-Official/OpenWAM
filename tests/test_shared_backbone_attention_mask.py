@@ -47,14 +47,14 @@ def _make_state(vb: WanVideoBackbone, video: torch.Tensor, action: torch.Tensor,
     if mask is not None:
         extras["shared_attention_mask"] = mask
     return BlockLoopState(
-        x=x,
-        t_mod=torch.zeros(x.shape[0], x.shape[1], 6, x.shape[2]),
-        freqs=_identity_freqs(x.shape[1], vb.head_dim),
+        hidden_states=x,
+        time_mod=torch.zeros(x.shape[0], x.shape[1], 6, x.shape[2]),
+        rope_freqs=_identity_freqs(x.shape[1], vb.head_dim),
         context=torch.zeros(x.shape[0], 4, x.shape[2]),
-        f=video.shape[1],
-        h=1,
-        w=1,
-        t=torch.zeros(x.shape[0], x.shape[1], x.shape[2]),
+        grid_frames=video.shape[1],
+        grid_height=1,
+        grid_width=1,
+        time_embed=torch.zeros(x.shape[0], x.shape[1], x.shape[2]),
         extras=extras,
     )
 
@@ -100,13 +100,13 @@ def _old_masked_block_reference(
 def test_shared_backbone_attention_mask_bidirectional_returns_none():
     vb = _make_wan_backbone()
     state = BlockLoopState(
-        x=torch.zeros(1, 7, vb.dim),
-        t_mod=torch.zeros(1, 7, 6, vb.dim),
-        freqs=_identity_freqs(7, vb.head_dim),
+        hidden_states=torch.zeros(1, 7, vb.dim),
+        time_mod=torch.zeros(1, 7, 6, vb.dim),
+        rope_freqs=_identity_freqs(7, vb.head_dim),
         context=torch.zeros(1, 4, vb.dim),
-        f=5,
-        h=1,
-        w=1,
+        grid_frames=5,
+        grid_height=1,
+        grid_width=1,
     )
 
     mask = build_shared_backbone_attention_mask(vb, state, n_action=2, attention_mask_mode="bidirectional")
@@ -116,13 +116,13 @@ def test_shared_backbone_attention_mask_bidirectional_returns_none():
 def test_shared_backbone_attach_mask_bidirectional_allows_missing_extras():
     vb = _make_wan_backbone()
     state = BlockLoopState(
-        x=torch.zeros(1, 7, vb.dim),
-        t_mod=torch.zeros(1, 7, 6, vb.dim),
-        freqs=_identity_freqs(7, vb.head_dim),
+        hidden_states=torch.zeros(1, 7, vb.dim),
+        time_mod=torch.zeros(1, 7, 6, vb.dim),
+        rope_freqs=_identity_freqs(7, vb.head_dim),
         context=torch.zeros(1, 4, vb.dim),
-        f=5,
-        h=1,
-        w=1,
+        grid_frames=5,
+        grid_height=1,
+        grid_width=1,
         extras=None,
     )
 
@@ -132,13 +132,13 @@ def test_shared_backbone_attach_mask_bidirectional_allows_missing_extras():
 def test_shared_backbone_attach_mask_joint_requires_extras():
     vb = _make_wan_backbone()
     state = BlockLoopState(
-        x=torch.zeros(1, 7, vb.dim),
-        t_mod=torch.zeros(1, 7, 6, vb.dim),
-        freqs=_identity_freqs(7, vb.head_dim),
+        hidden_states=torch.zeros(1, 7, vb.dim),
+        time_mod=torch.zeros(1, 7, 6, vb.dim),
+        rope_freqs=_identity_freqs(7, vb.head_dim),
         context=torch.zeros(1, 4, vb.dim),
-        f=5,
-        h=1,
-        w=1,
+        grid_frames=5,
+        grid_height=1,
+        grid_width=1,
         extras=None,
     )
 
@@ -149,13 +149,13 @@ def test_shared_backbone_attach_mask_joint_requires_extras():
 def test_shared_backbone_attach_mask_joint_rejects_usp():
     vb = _make_wan_backbone()
     state = BlockLoopState(
-        x=torch.zeros(1, 7, vb.dim),
-        t_mod=torch.zeros(1, 7, 6, vb.dim),
-        freqs=_identity_freqs(7, vb.head_dim),
+        hidden_states=torch.zeros(1, 7, vb.dim),
+        time_mod=torch.zeros(1, 7, 6, vb.dim),
+        rope_freqs=_identity_freqs(7, vb.head_dim),
         context=torch.zeros(1, 4, vb.dim),
-        f=5,
-        h=1,
-        w=1,
+        grid_frames=5,
+        grid_height=1,
+        grid_width=1,
         extras={"use_usp": True},
     )
 
@@ -218,13 +218,13 @@ def test_wan_action_tmod_rejects_mismatched_shapes():
 def test_shared_backbone_attention_mask_joint_layout():
     vb = _make_wan_backbone()
     state = BlockLoopState(
-        x=torch.zeros(1, 8, vb.dim),
-        t_mod=torch.zeros(1, 8, 6, vb.dim),
-        freqs=_identity_freqs(8, vb.head_dim),
+        hidden_states=torch.zeros(1, 8, vb.dim),
+        time_mod=torch.zeros(1, 8, 6, vb.dim),
+        rope_freqs=_identity_freqs(8, vb.head_dim),
         context=torch.zeros(1, 4, vb.dim),
-        f=5,
-        h=1,
-        w=1,
+        grid_frames=5,
+        grid_height=1,
+        grid_width=1,
     )
 
     mask = build_shared_backbone_attention_mask(vb, state, n_action=3, attention_mask_mode="joint")
@@ -240,13 +240,13 @@ def test_shared_backbone_attention_mask_joint_layout():
 def test_shared_backbone_attention_mask_joint_layout_with_state():
     vb = _make_wan_backbone()
     state = BlockLoopState(
-        x=torch.zeros(1, 10, vb.dim),
-        t_mod=torch.zeros(1, 10, 6, vb.dim),
-        freqs=_identity_freqs(10, vb.head_dim),
+        hidden_states=torch.zeros(1, 10, vb.dim),
+        time_mod=torch.zeros(1, 10, 6, vb.dim),
+        rope_freqs=_identity_freqs(10, vb.head_dim),
         context=torch.zeros(1, 4, vb.dim),
-        f=5,
-        h=1,
-        w=1,
+        grid_frames=5,
+        grid_height=1,
+        grid_width=1,
     )
 
     mask = build_shared_backbone_attention_mask(vb, state, n_action=3, n_state=2, attention_mask_mode="joint")
@@ -268,13 +268,13 @@ def test_shared_backbone_attention_mask_joint_layout_with_state():
 def test_shared_backbone_attention_mask_bidirectional_with_state_returns_none():
     vb = _make_wan_backbone()
     state = BlockLoopState(
-        x=torch.zeros(1, 10, vb.dim),
-        t_mod=torch.zeros(1, 10, 6, vb.dim),
-        freqs=_identity_freqs(10, vb.head_dim),
+        hidden_states=torch.zeros(1, 10, vb.dim),
+        time_mod=torch.zeros(1, 10, 6, vb.dim),
+        rope_freqs=_identity_freqs(10, vb.head_dim),
         context=torch.zeros(1, 4, vb.dim),
-        f=5,
-        h=1,
-        w=1,
+        grid_frames=5,
+        grid_height=1,
+        grid_width=1,
     )
 
     mask = build_shared_backbone_attention_mask(vb, state, n_action=3, n_state=2, attention_mask_mode="bidirectional")
@@ -293,21 +293,21 @@ def test_shared_backbone_joint_mask_blocks_action_from_video_queries():
     action_b = torch.randn(B, Sa, D) + 10.0
 
     mask_state = BlockLoopState(
-        x=torch.zeros(B, Sv + Sa, D),
-        t_mod=torch.zeros(B, Sv + Sa, 6, D),
-        freqs=_identity_freqs(Sv + Sa, vb.head_dim),
+        hidden_states=torch.zeros(B, Sv + Sa, D),
+        time_mod=torch.zeros(B, Sv + Sa, 6, D),
+        rope_freqs=_identity_freqs(Sv + Sa, vb.head_dim),
         context=torch.zeros(B, 4, D),
-        f=Sv,
-        h=1,
-        w=1,
+        grid_frames=Sv,
+        grid_height=1,
+        grid_width=1,
     )
     mask = build_shared_backbone_attention_mask(vb, mask_state, n_action=Sa, attention_mask_mode="joint")
 
     with torch.no_grad():
-        out_joint_a = vb.run_block(0, _make_state(vb, video, action_a, mask=mask)).x[:, :Sv]
-        out_joint_b = vb.run_block(0, _make_state(vb, video, action_b, mask=mask)).x[:, :Sv]
-        out_bidir_a = vb.run_block(0, _make_state(vb, video, action_a, mask=None)).x[:, :Sv]
-        out_bidir_b = vb.run_block(0, _make_state(vb, video, action_b, mask=None)).x[:, :Sv]
+        out_joint_a = vb.run_block(0, _make_state(vb, video, action_a, mask=mask)).hidden_states[:, :Sv]
+        out_joint_b = vb.run_block(0, _make_state(vb, video, action_b, mask=mask)).hidden_states[:, :Sv]
+        out_bidir_a = vb.run_block(0, _make_state(vb, video, action_a, mask=None)).hidden_states[:, :Sv]
+        out_bidir_b = vb.run_block(0, _make_state(vb, video, action_b, mask=None)).hidden_states[:, :Sv]
 
     assert torch.allclose(out_joint_a, out_joint_b, atol=0, rtol=0)
     assert not torch.allclose(out_bidir_a, out_bidir_b)
@@ -365,14 +365,14 @@ def test_wan_shared_token_injection_extends_tmod_freqs_and_extracts_action_only(
     vb = _make_wan_backbone(dim=24, num_heads=4)
     B, Sv, Sa, Ss, D = 2, 4, 3, 1, vb.dim
     state = BlockLoopState(
-        x=torch.zeros(B, Sv, D),
-        t_mod=torch.zeros(B, Sv, 6, D),
-        freqs=_identity_freqs(Sv, vb.head_dim),
+        hidden_states=torch.zeros(B, Sv, D),
+        time_mod=torch.zeros(B, Sv, 6, D),
+        rope_freqs=_identity_freqs(Sv, vb.head_dim),
         context=torch.zeros(B, 4, D),
-        f=Sv,
-        h=1,
-        w=1,
-        t=torch.zeros(B, Sv, D),
+        grid_frames=Sv,
+        grid_height=1,
+        grid_width=1,
+        time_embed=torch.zeros(B, Sv, D),
         extras={"dit": vb._dit, "vace": None, "use_usp": False},
     )
     action_tokens = torch.randn(B, Sa, D)
@@ -388,29 +388,29 @@ def test_wan_shared_token_injection_extends_tmod_freqs_and_extracts_action_only(
         timestep=timestep,
     )
 
-    assert state.x.shape == (B, Sv + Sa + Ss, D)
-    assert state.t_mod.shape == (B, Sv + Sa + Ss, 6, D)
-    assert state.freqs.shape[0] == Sv + Sa + Ss
+    assert state.hidden_states.shape == (B, Sv + Sa + Ss, D)
+    assert state.time_mod.shape == (B, Sv + Sa + Ss, 6, D)
+    assert state.rope_freqs.shape[0] == Sv + Sa + Ss
 
     state, action_tail = vb.extract_shared_tokens(state, Sa, n_state=Ss)
     assert action_tail.shape == (B, Sa, D)
     assert torch.allclose(action_tail, action_tokens)
-    assert state.x.shape == (B, Sv, D)
-    assert state.t_mod.shape == (B, Sv, 6, D)
-    assert state.freqs.shape[0] == Sv
+    assert state.hidden_states.shape == (B, Sv, D)
+    assert state.time_mod.shape == (B, Sv, 6, D)
+    assert state.rope_freqs.shape[0] == Sv
 
 
 def test_wan_shared_token_injection_supports_state_only_video_conditioning():
     vb = _make_wan_backbone(dim=24, num_heads=4)
     B, Sv, Ss, D = 2, 4, 1, vb.dim
     state = BlockLoopState(
-        x=torch.zeros(B, Sv, D),
-        t_mod=torch.zeros(B, Sv, 6, D),
-        freqs=_identity_freqs(Sv, vb.head_dim),
+        hidden_states=torch.zeros(B, Sv, D),
+        time_mod=torch.zeros(B, Sv, 6, D),
+        rope_freqs=_identity_freqs(Sv, vb.head_dim),
         context=torch.zeros(B, 4, D),
-        f=Sv,
-        h=1,
-        w=1,
+        grid_frames=Sv,
+        grid_height=1,
+        grid_width=1,
         extras={"dit": vb._dit, "vace": None, "use_usp": False},
     )
     state_tokens = torch.randn(B, Ss, D)
@@ -424,27 +424,27 @@ def test_wan_shared_token_injection_supports_state_only_video_conditioning():
         timestep=torch.tensor([0.25, 0.75]),
     )
 
-    assert state.x.shape == (B, Sv + Ss, D)
-    assert state.t_mod.shape == (B, Sv + Ss, 6, D)
-    assert state.freqs.shape[0] == Sv + Ss
+    assert state.hidden_states.shape == (B, Sv + Ss, D)
+    assert state.time_mod.shape == (B, Sv + Ss, 6, D)
+    assert state.rope_freqs.shape[0] == Sv + Ss
     state, action_tail = vb.extract_shared_tokens(state, 0, n_state=Ss)
     assert action_tail.shape == (B, 0, D)
-    assert state.x.shape == (B, Sv, D)
-    assert state.t_mod.shape == (B, Sv, 6, D)
-    assert state.freqs.shape[0] == Sv
+    assert state.hidden_states.shape == (B, Sv, D)
+    assert state.time_mod.shape == (B, Sv, 6, D)
+    assert state.rope_freqs.shape[0] == Sv
 
 
 def test_wan_shared_token_injection_rejects_batch_mismatch():
     vb = _make_wan_backbone(dim=24, num_heads=4)
     B, Sv, Sa, Ss, D = 2, 4, 3, 1, vb.dim
     state = BlockLoopState(
-        x=torch.zeros(B, Sv, D),
-        t_mod=torch.zeros(B, Sv, 6, D),
-        freqs=_identity_freqs(Sv, vb.head_dim),
+        hidden_states=torch.zeros(B, Sv, D),
+        time_mod=torch.zeros(B, Sv, 6, D),
+        rope_freqs=_identity_freqs(Sv, vb.head_dim),
         context=torch.zeros(B, 4, D),
-        f=Sv,
-        h=1,
-        w=1,
+        grid_frames=Sv,
+        grid_height=1,
+        grid_width=1,
     )
 
     with pytest.raises(ValueError, match="video batch=2, action batch=3"):
@@ -472,13 +472,13 @@ def test_wan_shared_token_injection_requires_timestep_for_per_token_tmod():
     vb = _make_wan_backbone(dim=24, num_heads=4)
     B, Sv, Sa, D = 2, 4, 3, vb.dim
     state = BlockLoopState(
-        x=torch.zeros(B, Sv, D),
-        t_mod=torch.zeros(B, Sv, 6, D),
-        freqs=_identity_freqs(Sv, vb.head_dim),
+        hidden_states=torch.zeros(B, Sv, D),
+        time_mod=torch.zeros(B, Sv, 6, D),
+        rope_freqs=_identity_freqs(Sv, vb.head_dim),
         context=torch.zeros(B, 4, D),
-        f=Sv,
-        h=1,
-        w=1,
+        grid_frames=Sv,
+        grid_height=1,
+        grid_width=1,
     )
 
     with pytest.raises(ValueError, match="requires `timestep`"):

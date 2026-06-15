@@ -145,7 +145,7 @@ class TriSystemMoTDriver:
         - action query rows are fully connected.
         - ``u→v`` / ``u→a`` = False and ``u→u`` = True.
 
-        Assumes ``vstate.x`` has no reference-latent prefix prepended. Wan2.2-TI2V-5B
+        Assumes ``vstate.hidden_states`` has no reference-latent prefix prepended. Wan2.2-TI2V-5B
         never populates ``reference_latents`` (model config has no ``has_ref_conv``;
         first-frame conditioning uses the ``y`` VAE-embedding path instead). If a
         future Wan variant adds a reference prefix, ``first_frame_causal`` will
@@ -398,7 +398,7 @@ class TriSystemMoTDriver:
             local_ustate = copy.copy(ustate)
             local_payload = copy.copy(outer_payload)
             local_astate.payload = local_payload
-            local_vstate.x = vx
+            local_vstate.hidden_states = vx
             self._set_action_tokens(local_astate, ax)
             local_ustate.und_tokens = ux
             self._step_impl(
@@ -409,9 +409,9 @@ class TriSystemMoTDriver:
                 attn_mask=attn_mask,
                 suppress_inner_attn_ckpt=True,
             )
-            return local_vstate.x, self._get_action_tokens(local_astate), local_ustate.und_tokens
+            return local_vstate.hidden_states, self._get_action_tokens(local_astate), local_ustate.und_tokens
 
-        vx0 = vstate.x
+        vx0 = vstate.hidden_states
         ax0 = self._get_action_tokens(astate)
         ux0 = ustate.und_tokens
 
@@ -419,7 +419,7 @@ class TriSystemMoTDriver:
         with cm:
             new_vx, new_ax, new_ux = torch.utils.checkpoint.checkpoint(_run, vx0, ax0, ux0, use_reentrant=False)
 
-        vstate.x = new_vx
+        vstate.hidden_states = new_vx
         self._set_action_tokens(astate, new_ax)
         ustate.und_tokens = new_ux
         return vstate, astate, ustate
@@ -434,13 +434,13 @@ class TriSystemMoTDriver:
         use_gradient_checkpointing_offload: bool = False,
     ) -> Tuple["BlockLoopState", "ActionState", "UnderstandingState"]:
         # Resolve sequence shapes from the backbone-populated f/h/w fields.
-        # ``vstate.x.shape[1]`` is identical to ``f*tokens_per_frame`` for
+        # ``vstate.hidden_states.shape[1]`` is identical to ``f*tokens_per_frame`` for
         # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
-        # backbones whose ``state.x`` is natively 5D ``(B, T, H, W, D)``
+        # backbones whose ``state.hidden_states`` is natively 5D ``(B, T, H, W, D)``
         # (Cosmos25) ``shape[1]`` is just ``T`` — wrong. Going through f and
         # the shared ``compute_video_tokens_per_frame`` helper is the only
         # formulation that works for both layouts.
-        s_video = int(vstate.f) * self._video_tokens_per_frame(vstate)
+        s_video = int(vstate.grid_frames) * self._video_tokens_per_frame(vstate)
         s_action = self._get_action_tokens(astate).shape[1]
         s_understanding = ustate.und_tokens.shape[1]
         attn_mask = self._build_attention_mask(
@@ -448,7 +448,7 @@ class TriSystemMoTDriver:
             s_action=s_action,
             s_understanding=s_understanding,
             video_tokens_per_frame=self._video_tokens_per_frame(vstate),
-            device=vstate.x.device,
+            device=vstate.hidden_states.device,
             und_mask=getattr(ustate, "und_mask", None),
         )
 

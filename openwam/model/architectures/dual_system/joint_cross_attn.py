@@ -149,7 +149,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         for block_id in range(vb.num_layers):
             vstate = vb.run_block(block_id, vstate)
             if block_id in bridge_set:
-                bridge = vstate.x
+                bridge = vstate.hidden_states
                 if bridge.ndim == 5:
                     # Cosmos lays out hidden state as (B, T, H, W, D); flatten
                     # the spatial axes into a single token axis so the action

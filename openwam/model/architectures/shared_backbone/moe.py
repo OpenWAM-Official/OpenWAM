@@ -26,11 +26,11 @@ from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint i
 
 
 def _validate_per_token_t_mod(vstate) -> None:
-    if vstate.t_mod.dim() != 4:
+    if vstate.time_mod.dim() != 4:
         raise RuntimeError(
             "SharedBackbone requires the video backbone to run in per-token t_mod mode "
             "(e.g. dit.seperated_timestep=True with fuse_vae_embedding_in_latents=True). "
-            f"Got vstate.t_mod with dim={vstate.t_mod.dim()}; action/state timestep would be silently ignored otherwise."
+            f"Got vstate.time_mod with dim={vstate.time_mod.dim()}; action/state timestep would be silently ignored otherwise."
         )
 
 
@@ -160,8 +160,8 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         state_tokens = None if ab is None else ab.encode_state(proprio_state)
         if action_tokens is not None:
             state_tokens = align_state_tokens_to_action_batch(state_tokens, action_tokens.shape[0])
-        elif state_tokens is not None and state_tokens.shape[0] == 1 and vstate.x.shape[0] > 1:
-            state_tokens = state_tokens.expand(vstate.x.shape[0], -1, -1)
+        elif state_tokens is not None and state_tokens.shape[0] == 1 and vstate.hidden_states.shape[0] > 1:
+            state_tokens = state_tokens.expand(vstate.hidden_states.shape[0], -1, -1)
 
         n_action = 0 if action_tokens is None else action_tokens.shape[1]
         n_state = 0 if state_tokens is None else state_tokens.shape[1]
@@ -192,21 +192,25 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         for block_id in range(vb.num_layers):
             vstate = vb.run_block(block_id, vstate)
             if n_action and block_id in ab.expert_layers_set:
-                n_video = vstate.x.shape[1] - n_action - n_state
+                n_video = vstate.hidden_states.shape[1] - n_action - n_state
                 x_action = gradient_checkpoint_forward(
                     lambda x, t, _bid=block_id: ab.apply_expert(_bid, x, t),
                     use_gradient_checkpointing and self.training,
                     use_gradient_checkpointing_offload,
-                    vstate.x[:, n_video : n_video + n_action, :],
+                    vstate.hidden_states[:, n_video : n_video + n_action, :],
                     t_mod,
                 )
                 if n_state:
-                    vstate.x = torch.cat(
-                        [vstate.x[:, :n_video, :], x_action, vstate.x[:, n_video + n_action :, :]],
+                    vstate.hidden_states = torch.cat(
+                        [
+                            vstate.hidden_states[:, :n_video, :],
+                            x_action,
+                            vstate.hidden_states[:, n_video + n_action :, :],
+                        ],
                         dim=1,
                     )
                 else:
-                    vstate.x = torch.cat([vstate.x[:, :n_video, :], x_action], dim=1)
+                    vstate.hidden_states = torch.cat([vstate.hidden_states[:, :n_video, :], x_action], dim=1)
 
         if n_action == 0:
             if n_state:

@@ -89,7 +89,7 @@ def test_idm_train_action_matches_deploy_stage2():
     astate_deploy = driver.run_action_with_video_cache(
         astate_deploy,
         video_kv_cache=kv_cache,
-        video_seq_len=int(vstate_cond_deploy.x.shape[1]),
+        video_seq_len=int(vstate_cond_deploy.hidden_states.shape[1]),
         video_tokens_per_frame=driver._video_tokens_per_frame(vstate_cond_deploy),
     )
     pred_deploy = arch.action_backbone.extract_prediction(astate_deploy)
@@ -206,33 +206,37 @@ class _TriStubVideoBackbone(nn.Module):
         context = torch.zeros(B, 2, self.dim)
         context_mask = torch.ones(B, 2, dtype=torch.bool)
         return BlockLoopState(
-            x=x,
-            t_mod=t_mod,
-            freqs=freqs,
+            hidden_states=x,
+            time_mod=t_mod,
+            rope_freqs=freqs,
             context=context,
             context_mask=context_mask,
-            f=f,
-            h=h,
-            w=w,
+            grid_frames=f,
+            grid_height=h,
+            grid_width=w,
         )
 
     def pre_attn_at_layer(self, layer_id, state):
         del layer_id
-        return state.x, state.x, state.x, {"residual": state.x}
+        return state.hidden_states, state.hidden_states, state.hidden_states, {"residual": state.hidden_states}
 
     def post_attn_at_layer(self, layer_id, state, attn_out, post_state):
         del layer_id
-        state.x = post_state["residual"] + attn_out
+        state.hidden_states = post_state["residual"] + attn_out
         return state
 
     def run_block(self, block_id, state):
         del block_id
-        state.x = state.x + 1
+        state.hidden_states = state.hidden_states + 1
         return state
 
     def finalize(self, state):
-        B = state.x.shape[0]
-        return state.x[:, :, :1].transpose(1, 2).reshape(B, 1, state.f, state.h, state.w)
+        B = state.hidden_states.shape[0]
+        return (
+            state.hidden_states[:, :, :1]
+            .transpose(1, 2)
+            .reshape(B, 1, state.grid_frames, state.grid_height, state.grid_width)
+        )
 
     def decode_video(self, latents, *, tiled=True):
         del latents, tiled
@@ -472,7 +476,7 @@ def test_idm_train_deploy_consistency_gpu():
     astate_deploy = driver.run_action_with_video_cache(
         astate_deploy,
         video_kv_cache=kv_cache,
-        video_seq_len=int(vstate_cond_deploy.x.shape[1]),
+        video_seq_len=int(vstate_cond_deploy.hidden_states.shape[1]),
         video_tokens_per_frame=driver._video_tokens_per_frame(vstate_cond_deploy),
     )
     pred_deploy = arch.action_backbone.extract_prediction(astate_deploy)

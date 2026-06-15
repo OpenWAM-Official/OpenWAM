@@ -69,20 +69,20 @@ def _make_tiny_wan_backbone(num_layers=2, dim=32, num_heads=4, ffn_dim=64):
     return WanVideoBackbone(_FakePipe(_StubDit()))
 
 
-def _make_tiny_video_state(dit, *, batch=2, f=1, h=2, w=3, dtype=torch.float32):
+def _make_tiny_video_state(dit, *, batch=2, grid_frames=1, grid_height=2, grid_width=3, dtype=torch.float32):
     dim = dit.dim
     seq_len = f * h * w
     # RoPE freqs are multiplicative complex ones, so they preserve Q/K while
     # still satisfying Wan's expected shape.
     freqs = torch.ones(seq_len, 1, dim // dit.blocks[0].num_heads // 2, dtype=torch.complex64)
     return BlockLoopState(
-        x=torch.randn(batch, seq_len, dim, dtype=dtype),
-        t_mod=torch.randn(batch, 6, dim, dtype=dtype),
-        freqs=freqs,
+        hidden_states=torch.randn(batch, seq_len, dim, dtype=dtype),
+        time_mod=torch.randn(batch, 6, dim, dtype=dtype),
+        rope_freqs=freqs,
         context=torch.randn(batch, 4, dim, dtype=dtype),
-        f=f,
-        h=h,
-        w=w,
+        grid_frames=f,
+        grid_height=h,
+        grid_width=w,
         t=torch.randn(batch, dim, dtype=dtype),
         reference_prefix_len=0,
         vace_hints=None,
@@ -329,10 +329,10 @@ def test_tri_system_mot_driver_trimodal_cpu():
     driver = TriSystemMoTDriver(vb, ab, ub)
     vstate, astate, ustate = driver.run_joint_loop(vstate, astate, ustate)
 
-    assert vstate.x.shape == (2, 6, vb.dim)
+    assert vstate.hidden_states.shape == (2, 6, vb.dim)
     assert astate.payload.x_action.shape == (2, 4, ab.dim)
     assert ustate.und_tokens.shape == (2, 5, ub.cfg.dim)
-    assert torch.isfinite(vstate.x).all()
+    assert torch.isfinite(vstate.hidden_states).all()
     assert torch.isfinite(astate.payload.x_action).all()
     assert torch.isfinite(ustate.und_tokens).all()
 
@@ -340,7 +340,7 @@ def test_tri_system_mot_driver_trimodal_cpu():
 def _tri_system_mot_states(vb, ab, ub, seed: int, *, und_mask: torch.Tensor | None = None):
     torch.manual_seed(seed)
     batch = 2
-    vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, f=1, h=2, w=3)
+    vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=3)
     noisy_actions = torch.randn(batch, 4, ab.action_dim)
     timestep = torch.tensor([10.0, 20.0])
     context = torch.randn(batch, 3, ab.text_dim)
@@ -397,16 +397,14 @@ def test_tri_system_mot_loop_compile_helper_matches_eager(monkeypatch):
         OmegaConf.create({"torch_mode": "reduce-overhead", "dynamic": False}),
     )
 
-    vstate_compiled, astate_compiled, ustate_compiled = _tri_system_mot_states(
-        vb, ab, ub, 11, und_mask=und_mask
-    )
+    vstate_compiled, astate_compiled, ustate_compiled = _tri_system_mot_states(vb, ab, ub, 11, und_mask=und_mask)
     with torch.no_grad():
         vstate_compiled, astate_compiled, ustate_compiled = compiled_loop.run(
             vstate_compiled, astate_compiled, ustate_compiled
         )
 
     assert compile_calls == [{"dynamic": False, "mode": "reduce-overhead"}]
-    assert torch.allclose(vstate_compiled.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(vstate_compiled.hidden_states, vstate_eager.hidden_states, atol=1e-6)
     assert torch.allclose(astate_compiled.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
     assert torch.allclose(ustate_compiled.und_tokens, ustate_eager.und_tokens, atol=1e-6)
 
@@ -441,7 +439,7 @@ def test_tri_system_mot_loop_compile_failure_falls_back_to_eager(monkeypatch):
         )
 
     assert compiled_loop._compile_disabled is True
-    assert torch.allclose(vstate_fallback.x, vstate_eager.x, atol=1e-6)
+    assert torch.allclose(vstate_fallback.hidden_states, vstate_eager.hidden_states, atol=1e-6)
     assert torch.allclose(astate_fallback.payload.x_action, astate_eager.payload.x_action, atol=1e-6)
     assert torch.allclose(ustate_fallback.und_tokens, ustate_eager.und_tokens, atol=1e-6)
 
@@ -542,16 +540,16 @@ def test_tri_system_joint_mask_blocks_action_indirect_video_coupling():
     vlm_hidden = torch.randn(batch, 5, ub.cfg.vlm_input_dim)
 
     def _run(action_seed: int) -> torch.Tensor:
-        vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, f=1, h=2, w=2)
-        vstate.x = video_x.clone()
-        vstate.t_mod = t_mod.clone()
+        vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=2)
+        vstate.hidden_states = video_x.clone()
+        vstate.time_mod = t_mod.clone()
         vstate.context = video_context.clone()
         actions = torch.randn(batch, s_action, ab.action_dim, generator=torch.Generator().manual_seed(action_seed))
         astate = ab.prepare_state(actions, torch.zeros(batch), context=context, context_mask=context_mask)
         ustate = ub.prepare_state(vlm_hidden)
         with torch.no_grad():
             vstate, _, _ = driver.run_joint_loop(vstate, astate, ustate)
-        return vstate.x
+        return vstate.hidden_states
 
     out_a = _run(action_seed=11)
     out_b = _run(action_seed=22)
@@ -996,12 +994,12 @@ def test_und_mask_blocks_padding_leak_end_to_end():
         # Deterministic vstate: seed before each construction since
         # _make_tiny_video_state uses torch.randn internally.
         torch.manual_seed(42)
-        vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, f=1, h=2, w=3)
+        vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=3)
         astate = ab.prepare_state(actions.clone(), torch.zeros(batch), context=context, context_mask=context_mask)
         ustate = ub.prepare_state(vlm_hidden, vlm_attention_mask=und_mask)
         with torch.no_grad():
             vstate, astate, _ = driver.run_joint_loop(vstate, astate, ustate)
-        return vstate.x, astate.payload.x_action
+        return vstate.hidden_states, astate.payload.x_action
 
     v0, a0 = _run(vlm_hidden_base)
     v1, a1 = _run(vlm_hidden_perturbed)
@@ -1191,7 +1189,7 @@ def test_tri_system_backward_per_block_modulation_grad():
     vstate, astate, ustate = driver.run_joint_loop(vstate, astate, ustate)
     pred = ab.extract_prediction(astate)
 
-    loss = vstate.x.float().sum() + pred.float().sum() + ustate.und_tokens.float().sum()
+    loss = vstate.hidden_states.float().sum() + pred.float().sum() + ustate.und_tokens.float().sum()
     loss.backward()
 
     for i, block in enumerate(dit.blocks):
@@ -1210,7 +1208,7 @@ def test_tri_system_per_token_tmod_forward():
     batch, seq_len = 2, 6
     vstate = _make_tiny_video_state(dit, batch=batch)
     # 4D t_mod: [B, S, 6, dim] — per-token modulation path (wan_adapter.py:489-493)
-    vstate.t_mod = torch.randn(batch, seq_len, 6, dim)
+    vstate.time_mod = torch.randn(batch, seq_len, 6, dim)
 
     actions = torch.randn(batch, 4, ab.action_dim)
     timestep = torch.tensor([10.0, 20.0])
@@ -1223,7 +1221,7 @@ def test_tri_system_per_token_tmod_forward():
     with torch.no_grad():
         vstate, astate, ustate = driver.run_joint_loop(vstate, astate, ustate)
 
-    assert torch.isfinite(vstate.x).all()
+    assert torch.isfinite(vstate.hidden_states).all()
     assert torch.isfinite(ab.extract_prediction(astate)).all()
 
 
@@ -1258,7 +1256,7 @@ def test_tri_system_grad_ckpt_backward_per_block():
     )
     pred = ab.extract_prediction(astate)
 
-    loss = vstate.x.float().sum() + pred.float().sum()
+    loss = vstate.hidden_states.float().sum() + pred.float().sum()
     loss.backward()
 
     for i, block in enumerate(dit.blocks):
@@ -1288,10 +1286,10 @@ def test_tri_system_optional_gpu_smoke():
     ab.to(device=device, dtype=dtype)
     ub.to(device=device, dtype=dtype)
 
-    vstate = _make_tiny_video_state(vb._pipe.dit, batch=1, f=1, h=2, w=2, dtype=dtype)
-    vstate.x = vstate.x.to(device=device)
-    vstate.t_mod = vstate.t_mod.to(device=device)
-    vstate.freqs = vstate.freqs.to(device=device)
+    vstate = _make_tiny_video_state(vb._pipe.dit, batch=1, grid_frames=1, grid_height=2, grid_width=2, dtype=dtype)
+    vstate.hidden_states = vstate.hidden_states.to(device=device)
+    vstate.time_mod = vstate.time_mod.to(device=device)
+    vstate.rope_freqs = vstate.rope_freqs.to(device=device)
     vstate.context = vstate.context.to(device=device)
     vstate.t = vstate.t.to(device=device)
 
@@ -1307,8 +1305,8 @@ def test_tri_system_optional_gpu_smoke():
         vstate, astate, ustate = driver.run_joint_loop(vstate, astate, ustate)
         action_pred = ab.extract_prediction(astate)
 
-    assert vstate.x.device == device
+    assert vstate.hidden_states.device == device
     assert action_pred.shape == (1, 3, ab.action_dim)
-    assert torch.isfinite(vstate.x).all()
+    assert torch.isfinite(vstate.hidden_states).all()
     assert torch.isfinite(action_pred).all()
     assert torch.isfinite(ustate.und_tokens).all()

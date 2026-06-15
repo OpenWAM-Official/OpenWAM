@@ -256,7 +256,7 @@ class MoTJointDriver:
         """Unwrapped per-layer body. See :meth:`step` for the public entry point.
 
         INVARIANT (consumed by :meth:`_step_checkpointed`): this method must
-        only reassign the two layer-varying tensor fields ``vstate.x`` and
+        only reassign the two layer-varying tensor fields ``vstate.hidden_states`` and
         ``astate.payload.x_action``. It MUST NOT mutate any layer-invariant
         field of ``vstate`` / ``astate`` in place — concretely, do not append
         to ``vace_hints``, write into ``extras``, or mutate ``context`` /
@@ -361,7 +361,7 @@ class MoTJointDriver:
     ) -> Tuple["BlockLoopState", "ActionState"]:
         """Run :meth:`_step_impl` under ``torch.utils.checkpoint``.
 
-        ``_step_impl`` mutates ``vstate.x`` and ``astate.payload.x_action``
+        ``_step_impl`` mutates ``vstate.hidden_states`` and ``astate.payload.x_action``
         as it walks the block, which is fine on forward but lethal on
         backward: ``torch.utils.checkpoint`` re-runs the closure during
         recompute, and that second mutation would clobber the post-forward
@@ -386,12 +386,12 @@ class MoTJointDriver:
             local_astate = copy.copy(astate)
             local_payload = copy.copy(outer_payload)
             local_astate.payload = local_payload
-            local_vstate.x = vx
+            local_vstate.hidden_states = vx
             local_payload.x_action = ax
             self._step_impl(layer_id, local_vstate, local_astate, attn_mask=attn_mask, suppress_inner_attn_ckpt=True)
-            return local_vstate.x, local_payload.x_action
+            return local_vstate.hidden_states, local_payload.x_action
 
-        vx0 = vstate.x
+        vx0 = vstate.hidden_states
         ax0 = outer_payload.x_action
 
         if offload:
@@ -400,7 +400,7 @@ class MoTJointDriver:
         else:
             new_vx, new_ax = torch.utils.checkpoint.checkpoint(_run, vx0, ax0, use_reentrant=False)
 
-        vstate.x = new_vx
+        vstate.hidden_states = new_vx
         outer_payload.x_action = new_ax
         return vstate, astate
 
@@ -422,13 +422,13 @@ class MoTJointDriver:
         :meth:`step` for memory/compute trade-offs.
         """
         # Resolve sequence shapes from the backbone-populated f/h/w fields.
-        # ``vstate.x.shape[1]`` is identical to ``f*tokens_per_frame`` for
+        # ``vstate.hidden_states.shape[1]`` is identical to ``f*tokens_per_frame`` for
         # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
-        # backbones whose ``state.x`` is natively 5D ``(B, T, H, W, D)``
+        # backbones whose ``state.hidden_states`` is natively 5D ``(B, T, H, W, D)``
         # (Cosmos25) ``shape[1]`` is just ``T`` — wrong. Going through f and
         # the shared ``compute_video_tokens_per_frame`` helper is the only
         # formulation that works for both layouts.
-        s_video = int(vstate.f) * self._video_tokens_per_frame(vstate)
+        s_video = int(vstate.grid_frames) * self._video_tokens_per_frame(vstate)
         payload = astate.payload
         if payload is None or not hasattr(payload, "x_action"):
             raise RuntimeError(
@@ -440,7 +440,7 @@ class MoTJointDriver:
             s_video=s_video,
             s_action=s_action,
             video_tokens_per_frame=self._video_tokens_per_frame(vstate),
-            device=vstate.x.device,
+            device=vstate.hidden_states.device,
         )
 
         for layer_id in range(self.num_layers):

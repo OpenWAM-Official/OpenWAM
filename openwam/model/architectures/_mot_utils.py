@@ -17,16 +17,16 @@ def compute_video_tokens_per_frame(vstate: "BlockLoopState", driver_name: str) -
     """Derive video tokens-per-frame from the spatial dims populated on ``vstate``.
 
     Used by every MoT driver to build the v↔v block of the joint attention mask.
-    The video backbone's ``prepare()`` must populate ``h`` and ``w`` on the
-    ``BlockLoopState``; if not, raise a clear error attributable to the
-    calling driver via ``driver_name``.
+    The video backbone's ``prepare()`` must populate ``grid_height`` and
+    ``grid_width`` on the ``BlockLoopState``; if not, raise a clear error
+    attributable to the calling driver via ``driver_name``.
     """
-    h = int(getattr(vstate, "h", 0))
-    w = int(getattr(vstate, "w", 0))
+    h = int(getattr(vstate, "grid_height", 0))
+    w = int(getattr(vstate, "grid_width", 0))
     if h <= 0 or w <= 0:
         raise ValueError(
             f"{driver_name}: cannot derive video_tokens_per_frame from vstate "
-            f"(h={h}, w={w}). The video backbone's prepare() must populate h/w."
+            f"(grid_height={h}, grid_width={w}). The video backbone's prepare() must populate them."
         )
     return h * w
 

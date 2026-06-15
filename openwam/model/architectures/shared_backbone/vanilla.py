@@ -25,11 +25,11 @@ from openwam.model.architectures.shared_backbone.state import align_state_tokens
 
 
 def _validate_per_token_t_mod(vstate) -> None:
-    if vstate.t_mod.dim() != 4:
+    if vstate.time_mod.dim() != 4:
         raise RuntimeError(
             "SharedBackbone requires the video backbone to run in per-token t_mod mode "
             "(e.g. dit.seperated_timestep=True with fuse_vae_embedding_in_latents=True). "
-            f"Got vstate.t_mod with dim={vstate.t_mod.dim()}; action/state timestep would be silently ignored otherwise."
+            f"Got vstate.time_mod with dim={vstate.time_mod.dim()}; action/state timestep would be silently ignored otherwise."
         )
 
 
@@ -108,8 +108,8 @@ class SharedBackboneVanillaArchitecture(BaseWAMArchitecture):
         state_tokens = None if ab is None else ab.encode_state(proprio_state)
         if action_tokens is not None:
             state_tokens = align_state_tokens_to_action_batch(state_tokens, action_tokens.shape[0])
-        elif state_tokens is not None and state_tokens.shape[0] == 1 and vstate.x.shape[0] > 1:
-            state_tokens = state_tokens.expand(vstate.x.shape[0], -1, -1)
+        elif state_tokens is not None and state_tokens.shape[0] == 1 and vstate.hidden_states.shape[0] > 1:
+            state_tokens = state_tokens.expand(vstate.hidden_states.shape[0], -1, -1)
 
         n_action = 0 if action_tokens is None else action_tokens.shape[1]
         n_state = 0 if state_tokens is None else state_tokens.shape[1]

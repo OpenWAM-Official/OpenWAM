@@ -80,19 +80,19 @@ def _wan_pre_post_via_adapter(block: DiTBlock, state: BlockLoopState, num_heads:
     del num_heads  # plumbed via block.self_attn.num_heads
     from openwam.model.video_backbone.wan.dit import modulate, rope_apply
 
-    t_mod = state.t_mod
+    t_mod = state.time_mod
     chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=1)
     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
 
-    residual_x = state.x
-    attn_input = modulate(block.norm1(state.x), shift_msa, scale_msa)
+    residual_x = state.hidden_states
+    attn_input = modulate(block.norm1(state.hidden_states), shift_msa, scale_msa)
 
     sa = block.self_attn
     q = sa.norm_q(sa.q(attn_input))
     k = sa.norm_k(sa.k(attn_input))
     v = sa.v(attn_input)
-    q = rope_apply(q, state.freqs, sa.num_heads)
-    k = rope_apply(k, state.freqs, sa.num_heads)
+    q = rope_apply(q, state.rope_freqs, sa.num_heads)
+    k = rope_apply(k, state.rope_freqs, sa.num_heads)
 
     attn_out = _attention_single_stream(q, k, v, sa.num_heads)
 
@@ -122,7 +122,9 @@ def test_wan_dit_block_split_equivalence():
         out_ref = block(x, context, t_mod, freqs)
 
     # Split: pre_attn → attention → post_attn
-    state = BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, f=S, h=1, w=1)
+    state = BlockLoopState(
+        hidden_states=x, time_mod=t_mod, rope_freqs=freqs, context=context, grid_frames=S, grid_height=1, grid_width=1
+    )
     with torch.no_grad():
         out_split = _wan_pre_post_via_adapter(block, state, num_heads)
 

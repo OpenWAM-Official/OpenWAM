@@ -1,7 +1,7 @@
 """Native-VACE input convention parity + behavior tests (CPU-only).
 
 Covers the refactor in :pull:`/* this PR */` that switched
-``wan_adapter.preprocess_input`` / ``prepare_inputs_for_inference`` from the
+``wan_adapter.preprocess_input_for_train`` / ``preprocess_input_for_inference`` from the
 old latent-space "manually inject ref frame" path to the native
 pixel-space ``{vace_video, vace_video_mask, ref_image=None}`` convention.
 
@@ -152,9 +152,7 @@ def _make_adapter_with_fake_vae(*, vace: bool = True, image_input: bool = False)
         return arr.permute(2, 0, 1).unsqueeze(0)
 
     def _preprocess_video(video, *, min_value=-1, max_value=1, **kw):
-        frames = [
-            _preprocess_image(img, min_value=min_value, max_value=max_value) for img in video
-        ]
+        frames = [_preprocess_image(img, min_value=min_value, max_value=max_value) for img in video]
         return torch.stack(frames, dim=2)[0].unsqueeze(0)
 
     pipe.preprocess_image = _preprocess_image
@@ -341,7 +339,7 @@ def test_preprocess_input_vace_drops_first_frame_latents(monkeypatch):
     H = W = 32
     T = 13
     frames = [_make_pil_first_frame(H=H, W=W, seed=i) for i in range(T)]
-    out = bb.preprocess_input(
+    out = bb.preprocess_input_for_train(
         frames=[frames],
         text=["dummy"],
         vace_videos=[None],
@@ -389,8 +387,7 @@ def test_build_vace_context_for_deploy_train_parity():
 
     assert deploy_ctx.shape == train_ctx.shape
     assert torch.allclose(deploy_ctx, train_ctx, atol=1e-6, rtol=1e-6), (
-        f"train/deploy vace_context diverged: max abs = "
-        f"{(deploy_ctx - train_ctx).abs().max().item():.3e}"
+        f"train/deploy vace_context diverged: max abs = {(deploy_ctx - train_ctx).abs().max().item():.3e}"
     )
 
 

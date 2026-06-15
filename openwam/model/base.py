@@ -1044,10 +1044,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
     def preprocess(self, **kwargs) -> dict:
         """Encode raw frames/text into latents + context for training.
 
-        Delegates to ``video_backbone.preprocess_input()``. External code
+        Delegates to ``video_backbone.preprocess_input_for_train()``. External code
         (trainer) should call this instead of touching video_backbone directly.
         """
-        return self.video_backbone.preprocess_input(**kwargs)
+        return self.video_backbone.preprocess_input_for_train(**kwargs)
 
     def set_training_runtime(
         self,
@@ -1752,7 +1752,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             cfg_scale=cfg_scale_f,
             cfg_merge=cfg_merge,
         )
-        inputs_shared = vb.prepare_inputs_for_inference(inference_inputs)
+        inputs_shared = vb.preprocess_input_for_inference(inference_inputs)
 
         if profile:
             if torch.cuda.is_available():

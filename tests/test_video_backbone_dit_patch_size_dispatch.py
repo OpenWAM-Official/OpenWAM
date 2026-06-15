@@ -114,13 +114,13 @@ def test_force_per_token_t_mod_dispatches_on_dit_patch_size(patch_size, expected
     )
 
     expected_L = _F * (_H * _W // expected_div)
-    assert state.t_mod.dim() == 4, f"force_per_token_t_mod must yield 4D t_mod; got dim={state.t_mod.dim()}"
-    assert state.t_mod.shape == (1, expected_L, 6, model.dim), (
-        f"patch={patch_size} expected L={expected_L}; got t_mod shape={tuple(state.t_mod.shape)}"
+    assert state.time_mod.dim() == 4, f"force_per_token_t_mod must yield 4D t_mod; got dim={state.time_mod.dim()}"
+    assert state.time_mod.shape == (1, expected_L, 6, model.dim), (
+        f"patch={patch_size} expected L={expected_L}; got t_mod shape={tuple(state.time_mod.shape)}"
     )
     # Cross-check against the DiT's actual post-patchify token count.
-    assert state.x.shape[1] == expected_L, (
-        f"patch={patch_size} post-patchify L={state.x.shape[1]} disagrees with "
+    assert state.hidden_states.shape[1] == expected_L, (
+        f"patch={patch_size} post-patchify L={state.hidden_states.shape[1]} disagrees with "
         f"per-token t_mod L={expected_L} — dispatch is out of sync with patchify"
     )
 
@@ -151,8 +151,8 @@ def test_ti2v_branch_dispatches_on_dit_patch_size(patch_size, expected_div):
     )
 
     expected_L = _F * (_H * _W // expected_div)
-    assert state.t_mod.dim() == 4
-    assert state.t_mod.shape == (1, expected_L, 6, model.dim), (
-        f"patch={patch_size} expected L={expected_L}; got t_mod shape={tuple(state.t_mod.shape)}"
+    assert state.time_mod.dim() == 4
+    assert state.time_mod.shape == (1, expected_L, 6, model.dim), (
+        f"patch={patch_size} expected L={expected_L}; got t_mod shape={tuple(state.time_mod.shape)}"
     )
-    assert state.x.shape[1] == expected_L
+    assert state.hidden_states.shape[1] == expected_L

@@ -109,25 +109,25 @@ class IDMMoTDriver(MoTJointDriver):
         # different video timesteps inside one video-expert sequence, so the
         # backbone must expose token-wise t_mod, mirroring FastWAM-IDM's
         # seperated_timestep + fuse_vae_embedding_in_latents requirement.
-        if vstate_noisy.t_mod.ndim != 4 or vstate_cond.t_mod.ndim != 4:
+        if vstate_noisy.time_mod.ndim != 4 or vstate_cond.time_mod.ndim != 4:
             raise ValueError(
                 "IDM teacher-forcing requires token-wise video t_mod for noisy and cond branches; "
                 "ensure the video backbone is running in separated-timestep/fused-first-frame mode."
             )
-        s_noisy = vstate_noisy.x.shape[1]
-        s_cond = vstate_cond.x.shape[1]
+        s_noisy = vstate_noisy.hidden_states.shape[1]
+        s_cond = vstate_cond.hidden_states.shape[1]
         s_action = astate.payload.x_action.shape[1]
-        if (vstate_noisy.h, vstate_noisy.w) != (vstate_cond.h, vstate_cond.w):
+        if (vstate_noisy.grid_height, vstate_noisy.grid_width) != (vstate_cond.grid_height, vstate_cond.grid_width):
             raise ValueError(
                 "IDM teacher-forcing requires noisy and cond video branches to share spatial token layout, "
-                f"got noisy h/w={(vstate_noisy.h, vstate_noisy.w)} and cond h/w={(vstate_cond.h, vstate_cond.w)}."
+                f"got noisy h/w={(vstate_noisy.grid_height, vstate_noisy.grid_width)} and cond h/w={(vstate_cond.grid_height, vstate_cond.grid_width)}."
             )
 
         # Build merged vstate
         merged_vstate = copy.copy(vstate_noisy)
-        merged_vstate.x = torch.cat([vstate_noisy.x, vstate_cond.x], dim=1)
-        merged_vstate.freqs = torch.cat([vstate_noisy.freqs, vstate_cond.freqs], dim=0)
-        merged_vstate.t_mod = torch.cat([vstate_noisy.t_mod, vstate_cond.t_mod], dim=1)
+        merged_vstate.hidden_states = torch.cat([vstate_noisy.hidden_states, vstate_cond.hidden_states], dim=1)
+        merged_vstate.rope_freqs = torch.cat([vstate_noisy.rope_freqs, vstate_cond.rope_freqs], dim=0)
+        merged_vstate.time_mod = torch.cat([vstate_noisy.time_mod, vstate_cond.time_mod], dim=1)
         if vstate_noisy.vace_hints is not None or vstate_cond.vace_hints is not None:
             if vstate_noisy.vace_hints is None or vstate_cond.vace_hints is None:
                 raise ValueError("IDM teacher-forcing requires both video branches to have VACE hints or neither.")
@@ -145,7 +145,7 @@ class IDMMoTDriver(MoTJointDriver):
             s_cond_video=s_cond,
             s_action=s_action,
             video_tokens_per_frame=video_tokens_per_frame,
-            device=merged_vstate.x.device,
+            device=merged_vstate.hidden_states.device,
         )
 
         # Run the standard joint loop with the merged video state
@@ -160,10 +160,10 @@ class IDMMoTDriver(MoTJointDriver):
             )
 
         # Split merged video back into noisy + cond
-        vstate_noisy.x = merged_vstate.x[:, :s_noisy]
-        vstate_cond.x = merged_vstate.x[:, s_noisy:]
-        vstate_noisy.t_mod = merged_vstate.t_mod[:, :s_noisy]
-        vstate_cond.t_mod = merged_vstate.t_mod[:, s_noisy:]
+        vstate_noisy.hidden_states = merged_vstate.hidden_states[:, :s_noisy]
+        vstate_cond.hidden_states = merged_vstate.hidden_states[:, s_noisy:]
+        vstate_noisy.time_mod = merged_vstate.time_mod[:, :s_noisy]
+        vstate_cond.time_mod = merged_vstate.time_mod[:, s_noisy:]
 
         return vstate_noisy, vstate_cond, astate
 
@@ -185,12 +185,12 @@ class IDMMoTDriver(MoTJointDriver):
     @torch.no_grad()
     def prefill_video_cache(self, vstate):
         """Run the frozen video branch once and cache per-layer K/V for IDM inference."""
-        video_seq_len = int(vstate.x.shape[1])
+        video_seq_len = int(vstate.hidden_states.shape[1])
         video_tokens_per_frame = self._video_tokens_per_frame(vstate)
         attn_mask = self._build_video_only_attention_mask(
             video_seq_len=video_seq_len,
             video_tokens_per_frame=video_tokens_per_frame,
-            device=vstate.x.device,
+            device=vstate.hidden_states.device,
         )
         kv_cache: list[dict[str, Tensor]] = []
         for layer_id in range(self.num_layers):
@@ -831,7 +831,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
         from openwam.model.inference_inputs import InferenceInputs
 
-        inputs_shared = vb.prepare_inputs_for_inference(
+        inputs_shared = vb.preprocess_input_for_inference(
             InferenceInputs(
                 prompt=prompt,
                 vace_video=vace_video,
@@ -973,7 +973,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         driver = self._mot_driver
         if driver is None:
             driver = self.build_mot_driver()
-        video_seq_len = int(cond_vstate.x.shape[1])
+        video_seq_len = int(cond_vstate.hidden_states.shape[1])
         video_tokens_per_frame = driver._video_tokens_per_frame(cond_vstate)
         video_kv_cache, _ = driver.prefill_video_cache(cond_vstate)
 

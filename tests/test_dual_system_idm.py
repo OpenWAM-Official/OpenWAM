@@ -251,25 +251,38 @@ class _CapturePrepareVideoBackbone(nn.Module):
         t_mod = timestep.view(B, 1, 1, 1).expand(B, s, 6, self.dim).contiguous()
         context = torch.zeros(B, 2, self.dim)
         context_mask = torch.ones(B, 2, dtype=torch.bool)
-        return BlockLoopState(x=x, t_mod=t_mod, freqs=freqs, context=context, context_mask=context_mask, f=f, h=h, w=w)
+        return BlockLoopState(
+            hidden_states=x,
+            time_mod=t_mod,
+            rope_freqs=freqs,
+            context=context,
+            context_mask=context_mask,
+            grid_frames=f,
+            grid_height=h,
+            grid_width=w,
+        )
 
     def pre_attn_at_layer(self, layer_id, state):
         del layer_id
-        return state.x, state.x, state.x, {"residual": state.x}
+        return state.hidden_states, state.hidden_states, state.hidden_states, {"residual": state.hidden_states}
 
     def post_attn_at_layer(self, layer_id, state, attn_out, post_state):
         del layer_id
-        state.x = post_state["residual"] + attn_out
+        state.hidden_states = post_state["residual"] + attn_out
         return state
 
     def run_block(self, block_id, state):
         del block_id
-        state.x = state.x + 1
+        state.hidden_states = state.hidden_states + 1
         return state
 
     def finalize(self, state):
-        B = state.x.shape[0]
-        return state.x[:, :, :1].transpose(1, 2).reshape(B, 1, state.f, state.h, state.w)
+        B = state.hidden_states.shape[0]
+        return (
+            state.hidden_states[:, :, :1]
+            .transpose(1, 2)
+            .reshape(B, 1, state.grid_frames, state.grid_height, state.grid_width)
+        )
 
     def decode_video(self, latents, *, tiled=True):
         del latents, tiled
@@ -342,13 +355,13 @@ def test_idm_training_requires_tokenwise_video_t_mod():
         mot_checkpoint_mixed_attn=False,
     )
     vstate = BlockLoopState(
-        x=torch.zeros(1, 2, 8),
-        t_mod=torch.zeros(1, 6, 8),
-        freqs=torch.zeros(2, 1, 2),
+        hidden_states=torch.zeros(1, 2, 8),
+        time_mod=torch.zeros(1, 6, 8),
+        rope_freqs=torch.zeros(2, 1, 2),
         context=torch.zeros(1, 1, 8),
-        f=2,
-        h=1,
-        w=1,
+        grid_frames=2,
+        grid_height=1,
+        grid_width=1,
     )
     astate = MagicMock()
     astate.payload.x_action = torch.zeros(1, 1, 8)
@@ -365,7 +378,7 @@ class _GenerateVideoBackbone(_CapturePrepareVideoBackbone):
         self.prepare_count = 0
         self.prepare_context_lengths = []
 
-    def prepare_inputs_for_inference(self, *args, **kwargs):
+    def preprocess_input_for_inference(self, *args, **kwargs):
         del args, kwargs
         return {
             "latents": torch.ones(1, 1, 1, 1, 1),
@@ -379,8 +392,8 @@ class _GenerateVideoBackbone(_CapturePrepareVideoBackbone):
         return super().prepare(**kw)
 
     def finalize(self, state):
-        B = state.x.shape[0]
-        return torch.zeros(B, 1, state.f, state.h, state.w)
+        B = state.hidden_states.shape[0]
+        return torch.zeros(B, 1, state.grid_frames, state.grid_height, state.grid_width)
 
 
 def test_idm_generate_honors_action_num_frames_and_prefills_video_once(monkeypatch):
@@ -512,7 +525,7 @@ def test_idm_video_cache_matches_joint_loop():
     latents = torch.randn(B, 1, 1, 1, 1)
     vstate_joint = vb.prepare(latents=latents, timestep=torch.zeros(B))
     vstate_cache = _copy.copy(vstate_joint)
-    vstate_cache.x = vstate_joint.x.clone()
+    vstate_cache.hidden_states = vstate_joint.hidden_states.clone()
 
     action_latents = torch.randn(B, 3, arch.action_backbone.action_dim)
     a_timestep = torch.tensor([0.5])
@@ -533,7 +546,7 @@ def test_idm_video_cache_matches_joint_loop():
     astate_cache = driver.run_action_with_video_cache(
         astate_cache,
         video_kv_cache=video_kv_cache,
-        video_seq_len=int(vstate_cache.x.shape[1]),
+        video_seq_len=int(vstate_cache.hidden_states.shape[1]),
         video_tokens_per_frame=driver._video_tokens_per_frame(vstate_cache),
     )
     pred_cache = arch.action_backbone.extract_prediction(astate_cache)

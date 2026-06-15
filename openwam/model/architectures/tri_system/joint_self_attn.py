@@ -386,13 +386,13 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         if vlm_hidden is None:
             vlm_hidden = self.vlm_backbone.extract_features(vlm_inputs)
         vlm_hidden = vlm_hidden.to(device=self.device)
-        if vlm_hidden.shape[0] != vstate.x.shape[0]:
+        if vlm_hidden.shape[0] != vstate.hidden_states.shape[0]:
             raise ValueError(
                 f"vlm_hidden batch size ({vlm_hidden.shape[0]}) does not match "
-                f"video state batch size ({vstate.x.shape[0]}). If using a cached "
+                f"video state batch size ({vstate.hidden_states.shape[0]}). If using a cached "
                 f"vlm_hidden, ensure it was computed for the same batch."
             )
-        ustate = ub.prepare_state(vlm_hidden, dtype=vstate.x.dtype, vlm_attention_mask=vlm_attention_mask)
+        ustate = ub.prepare_state(vlm_hidden, dtype=vstate.hidden_states.dtype, vlm_attention_mask=vlm_attention_mask)
         driver = self._mot_driver
         if driver is None:
             driver = self.build_mot_driver()

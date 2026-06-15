@@ -75,7 +75,7 @@ def build_shared_backbone_attention_mask(
     if n_action + n_state <= 0:
         raise ValueError("SharedBackbone attention mask requires at least one action or state token.")
 
-    total = int(state.x.shape[1])
+    total = int(state.hidden_states.shape[1])
     s_video = total - int(n_action) - n_state
     if s_video <= 0:
         raise ValueError(
@@ -89,7 +89,7 @@ def build_shared_backbone_attention_mask(
 
     video_tokens_per_frame = compute_video_tokens_per_frame(state, "SharedBackbone")
 
-    device = state.x.device
+    device = state.hidden_states.device
     mask = torch.zeros((total, total), dtype=torch.bool, device=device)
     mask[:s_video, :s_video] = video_backbone.build_video_to_video_mask(
         video_seq_len=s_video,

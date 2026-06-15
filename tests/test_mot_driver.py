@@ -57,13 +57,13 @@ def _make_states(
     """Build minimal vstate/astate ready for driver.step."""
     dim = vb.dim
     vstate = BlockLoopState(
-        x=torch.randn(B, s_video, dim),
-        t_mod=torch.randn(B, 6, dim),
-        freqs=torch.zeros(s_video, 1, 1),  # unused by mock
+        hidden_states=torch.randn(B, s_video, dim),
+        time_mod=torch.randn(B, 6, dim),
+        rope_freqs=torch.zeros(s_video, 1, 1),  # unused by mock
         context=torch.zeros(B, 1, dim),
-        f=s_video,
-        h=1,
-        w=1,
+        grid_frames=s_video,
+        grid_height=1,
+        grid_width=1,
     )
     actions = torch.randn(B, s_action, ab.action_dim)
     timestep = torch.randn(B)
@@ -162,8 +162,8 @@ def test_driver_dtype_mismatch_raises():
     vstate, astate = _make_states(vb, ab, B=1, s_video=4, s_action=3)
     # Force a mismatch by making the *video* mock stream emit bf16 Q/K/V while
     # the action stream stays fp32. The mock's pre_attn_at_layer just returns
-    # state.x for q/k/v, so casting state.x to bf16 is enough.
-    vstate.x = vstate.x.to(torch.bfloat16)
+    # state.hidden_states for q/k/v, so casting state.hidden_states to bf16 is enough.
+    vstate.hidden_states = vstate.hidden_states.to(torch.bfloat16)
 
     with pytest.raises(RuntimeError, match="dtype mismatch"):
         with torch.no_grad():
@@ -178,7 +178,7 @@ def test_driver_compile_step_dtype_mismatch_raises():
     driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False)
 
     vstate, astate = _make_states(vb, ab, B=1, s_video=4, s_action=3)
-    vstate.x = vstate.x.to(torch.bfloat16)
+    vstate.hidden_states = vstate.hidden_states.to(torch.bfloat16)
 
     with pytest.raises(RuntimeError, match="dtype mismatch"):
         with torch.no_grad():
@@ -270,7 +270,7 @@ def test_driver_forwards_action_stream_unchanged_when_attention_is_identity():
     vstate, astate = _make_states(vb, ab, B=1, s_video=4, s_action=3)
     with torch.no_grad():
         vstate2, astate2 = driver.run_joint_loop(vstate, astate)
-    assert vstate2.x.shape == (1, 4, 32)
+    assert vstate2.hidden_states.shape == (1, 4, 32)
     pred = ab.extract_prediction(astate2)
     assert pred.shape == (1, 3, ab.action_dim)
     assert torch.isfinite(pred).all()
@@ -300,17 +300,17 @@ def test_driver_joint_mask_blocks_video_to_action():
         context, context_mask = _make_action_context(ab, B)
         astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
         vstate = BlockLoopState(
-            x=video_x.clone(),
-            t_mod=torch.zeros(B, 6, vb.dim),
-            freqs=torch.zeros(s_video, 1, 1),
+            hidden_states=video_x.clone(),
+            time_mod=torch.zeros(B, 6, vb.dim),
+            rope_freqs=torch.zeros(s_video, 1, 1),
             context=torch.zeros(B, 1, vb.dim),
-            f=s_video,
-            h=1,
-            w=1,
+            grid_frames=s_video,
+            grid_height=1,
+            grid_width=1,
         )
         with torch.no_grad():
             vstate2, _ = driver.run_joint_loop(vstate, astate)
-        return vstate2.x
+        return vstate2.hidden_states
 
     out_a = _run(action_seed=1)
     out_b = _run(action_seed=2)
@@ -350,18 +350,18 @@ def test_driver_handles_heterogeneous_hidden_dim_end_to_end():
     context, context_mask = _make_action_context(ab, B)
     astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
     vstate = BlockLoopState(
-        x=torch.randn(B, s_video, vb.dim),
-        t_mod=torch.zeros(B, 6, vb.dim),
-        freqs=torch.zeros(s_video, 1, 1),
+        hidden_states=torch.randn(B, s_video, vb.dim),
+        time_mod=torch.zeros(B, 6, vb.dim),
+        rope_freqs=torch.zeros(s_video, 1, 1),
         context=torch.zeros(B, 1, vb.dim),
-        f=s_video,
-        h=1,
-        w=1,
+        grid_frames=s_video,
+        grid_height=1,
+        grid_width=1,
     )
     with torch.no_grad():
         vstate2, astate2 = driver.run_joint_loop(vstate, astate)
     # Each modality stays at its own hidden width post-split.
-    assert vstate2.x.shape == (B, s_video, vb.dim)
+    assert vstate2.hidden_states.shape == (B, s_video, vb.dim)
     pred = ab.extract_prediction(astate2)
     assert pred.shape == (B, s_action, ab.action_dim)
     assert torch.isfinite(pred).all()
@@ -386,17 +386,17 @@ def test_driver_bidirectional_mask_does_couple_video_to_action():
         context, context_mask = _make_action_context(ab, B)
         astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
         vstate = BlockLoopState(
-            x=video_x.clone(),
-            t_mod=torch.zeros(B, 6, vb.dim),
-            freqs=torch.zeros(s_video, 1, 1),
+            hidden_states=video_x.clone(),
+            time_mod=torch.zeros(B, 6, vb.dim),
+            rope_freqs=torch.zeros(s_video, 1, 1),
             context=torch.zeros(B, 1, vb.dim),
-            f=s_video,
-            h=1,
-            w=1,
+            grid_frames=s_video,
+            grid_height=1,
+            grid_width=1,
         )
         with torch.no_grad():
             vstate2, _ = driver.run_joint_loop(vstate, astate)
-        return vstate2.x
+        return vstate2.hidden_states
 
     out_a = _run(action_seed=1)
     out_b = _run(action_seed=2)
@@ -428,13 +428,13 @@ def test_action_uses_own_projected_text_context():
         context_mask = torch.ones(B, context.shape[1], dtype=torch.bool)
         astate = ab.prepare_state(actions.clone(), timestep, context=context, context_mask=context_mask)
         vstate = BlockLoopState(
-            x=video_x.clone(),
-            t_mod=torch.zeros(B, 6, vb.dim),
-            freqs=torch.zeros(s_video, 1, 1),
+            hidden_states=video_x.clone(),
+            time_mod=torch.zeros(B, 6, vb.dim),
+            rope_freqs=torch.zeros(s_video, 1, 1),
             context=torch.zeros(B, T_ctx, vb.dim),
-            f=s_video,
-            h=1,
-            w=1,
+            grid_frames=s_video,
+            grid_height=1,
+            grid_width=1,
         )
         with torch.no_grad():
             _, astate2 = driver.run_joint_loop(vstate, astate)
@@ -463,13 +463,13 @@ def _build_run_inputs(vb, ab, *, B, s_video, s_action, seed):
     context, context_mask = _make_action_context(ab, B, generator=g)
     astate = ab.prepare_state(actions, timestep, context=context, context_mask=context_mask)
     vstate = BlockLoopState(
-        x=torch.randn(B, s_video, vb.dim, generator=g, requires_grad=True),
-        t_mod=torch.zeros(B, 6, vb.dim),
-        freqs=torch.zeros(s_video, 1, 1),
+        hidden_states=torch.randn(B, s_video, vb.dim, generator=g, requires_grad=True),
+        time_mod=torch.zeros(B, 6, vb.dim),
+        rope_freqs=torch.zeros(s_video, 1, 1),
         context=torch.randn(B, 4, vb.dim, generator=g),
-        f=s_video,
-        h=1,
-        w=1,
+        grid_frames=s_video,
+        grid_height=1,
+        grid_width=1,
     )
     return vstate, astate
 
@@ -477,7 +477,7 @@ def _build_run_inputs(vb, ab, *, B, s_video, s_action, seed):
 def test_driver_step_checkpoint_matches_non_checkpoint_forward_and_backward():
     """Step-level activation checkpointing must be a pure memory/compute
     trade — same forward output, same gradients on both backbones, same
-    gradient on ``vstate.x``. Guards the joint_self_attn OOM fix.
+    gradient on ``vstate.hidden_states``. Guards the joint_self_attn OOM fix.
     """
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
@@ -489,9 +489,11 @@ def test_driver_step_checkpoint_matches_non_checkpoint_forward_and_backward():
     # ---- Run 1: vanilla path
     ab.zero_grad(set_to_none=True)
     vstate1, astate1 = _build_run_inputs(vb, ab, B=B, s_video=s_video, s_action=s_action, seed=7)
-    leaf_v1 = vstate1.x  # leaf tensor with requires_grad=True; ``vstate.x`` is rebound during the loop
+    leaf_v1 = (
+        vstate1.hidden_states
+    )  # leaf tensor with requires_grad=True; ``vstate.hidden_states`` is rebound during the loop
     vstate1, astate1 = driver.run_joint_loop(vstate1, astate1, use_gradient_checkpointing=False)
-    loss1 = vstate1.x.float().pow(2).sum() + astate1.payload.x_action.float().pow(2).sum()
+    loss1 = vstate1.hidden_states.float().pow(2).sum() + astate1.payload.x_action.float().pow(2).sum()
     loss1.backward()
     grad_q1 = ab.blocks[0].self_attn.q.weight.grad.detach().clone()
     grad_ffn1 = ab.blocks[0].ffn[0].weight.grad.detach().clone()
@@ -500,23 +502,23 @@ def test_driver_step_checkpoint_matches_non_checkpoint_forward_and_backward():
     # ---- Run 2: step-level checkpointing
     ab.zero_grad(set_to_none=True)
     vstate2, astate2 = _build_run_inputs(vb, ab, B=B, s_video=s_video, s_action=s_action, seed=7)
-    leaf_v2 = vstate2.x
+    leaf_v2 = vstate2.hidden_states
     vstate2, astate2 = driver.run_joint_loop(vstate2, astate2, use_gradient_checkpointing=True)
-    loss2 = vstate2.x.float().pow(2).sum() + astate2.payload.x_action.float().pow(2).sum()
+    loss2 = vstate2.hidden_states.float().pow(2).sum() + astate2.payload.x_action.float().pow(2).sum()
     loss2.backward()
     grad_q2 = ab.blocks[0].self_attn.q.weight.grad.detach().clone()
     grad_ffn2 = ab.blocks[0].ffn[0].weight.grad.detach().clone()
     grad_x2 = leaf_v2.grad.detach().clone()
 
     # Forward parity: identical inputs → identical outputs.
-    assert torch.allclose(vstate1.x, vstate2.x, rtol=1e-5, atol=1e-6), (
-        f"forward video mismatch; max diff = {(vstate1.x - vstate2.x).abs().max().item()}"
+    assert torch.allclose(vstate1.hidden_states, vstate2.hidden_states, rtol=1e-5, atol=1e-6), (
+        f"forward video mismatch; max diff = {(vstate1.hidden_states - vstate2.hidden_states).abs().max().item()}"
     )
     assert torch.allclose(astate1.payload.x_action, astate2.payload.x_action, rtol=1e-5, atol=1e-6), (
         f"forward action mismatch; "
         f"max diff = {(astate1.payload.x_action - astate2.payload.x_action).abs().max().item()}"
     )
-    # Backward parity: gradients on ab params and vstate.x leaf must match.
+    # Backward parity: gradients on ab params and vstate.hidden_states leaf must match.
     assert torch.allclose(grad_q1, grad_q2, rtol=1e-4, atol=1e-6), (
         f"action self_attn.q grad mismatch; max diff = {(grad_q1 - grad_q2).abs().max().item()}"
     )
@@ -524,7 +526,7 @@ def test_driver_step_checkpoint_matches_non_checkpoint_forward_and_backward():
         f"action ffn[0] grad mismatch; max diff = {(grad_ffn1 - grad_ffn2).abs().max().item()}"
     )
     assert torch.allclose(grad_x1, grad_x2, rtol=1e-4, atol=1e-6), (
-        f"vstate.x grad mismatch; max diff = {(grad_x1 - grad_x2).abs().max().item()}"
+        f"vstate.hidden_states grad mismatch; max diff = {(grad_x1 - grad_x2).abs().max().item()}"
     )
 
 
@@ -544,5 +546,5 @@ def test_driver_step_checkpoint_no_op_in_eval_mode():
         vstate1, astate1 = driver.run_joint_loop(vstate1, astate1, use_gradient_checkpointing=False)
         vstate2, astate2 = driver.run_joint_loop(vstate2, astate2, use_gradient_checkpointing=True)
 
-    assert torch.allclose(vstate1.x, vstate2.x, atol=1e-6)
+    assert torch.allclose(vstate1.hidden_states, vstate2.hidden_states, atol=1e-6)
     assert torch.allclose(astate1.payload.x_action, astate2.payload.x_action, atol=1e-6)

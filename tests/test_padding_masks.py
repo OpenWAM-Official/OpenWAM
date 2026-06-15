@@ -310,7 +310,7 @@ def _build_one_sample(num_frames=33, video_stride=4, valid_len=33):
     import numpy as np
 
     _, video_mask, _ = _build_masks(num_frames, video_stride, valid_len)
-    # `video` content doesn't matter: the mock backbone's preprocess_input
+    # `video` content doesn't matter: the mock backbone's preprocess_input_for_train
     # ignores raw frames and emits its own latents/context. We use a small
     # list so ``FirstFrameConditioningTransform`` still picks frame 0.
     return {
@@ -335,7 +335,7 @@ class TestPrepareInputsSkipFirst:
             def needs_first_frame_skip(self) -> bool:
                 return needs_skip
 
-            def preprocess_input(self, *, frames=None, text=None, **kw):
+            def preprocess_input_for_train(self, *, frames=None, text=None, **kw):
                 out = {
                     "input_latents": torch.randn(1, 16, 3, 8, 8),
                     "context": torch.randn(1, 4, self._dim),

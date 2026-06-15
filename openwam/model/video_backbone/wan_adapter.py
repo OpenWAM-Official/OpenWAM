@@ -730,16 +730,16 @@ class WanVideoBackbone(VideoBackbone):
                 x = chunks[get_sequence_parallel_rank()]
 
         return BlockLoopState(
-            x=x,
-            t_mod=t_mod,
-            freqs=freqs,
+            hidden_states=x,
+            time_mod=t_mod,
+            rope_freqs=freqs,
             context=context,
             context_mask=context_mask,
-            f=f,
-            h=h,
-            w=w,
+            grid_frames=f,
+            grid_height=h,
+            grid_width=w,
             tokens_per_frame_patch=tokens_per_frame_patch,
-            t=t,
+            time_embed=t,
             vace_hints=vace_hints,
             vace_scale=vace_scale,
             sp_pad_shape=sp_pad_shape,
@@ -755,7 +755,7 @@ class WanVideoBackbone(VideoBackbone):
         context_mask = state.context_mask
 
         block_context_mask = (
-            context_mask.unsqueeze(1).expand(-1, state.x.shape[1], -1) if context_mask is not None else None
+            context_mask.unsqueeze(1).expand(-1, state.hidden_states.shape[1], -1) if context_mask is not None else None
         )
         if attn_mask is not None:
             if block_context_mask is None:
@@ -766,30 +766,30 @@ class WanVideoBackbone(VideoBackbone):
                         device=state.context.device,
                     )
                     .unsqueeze(1)
-                    .expand(-1, state.x.shape[1], -1)
+                    .expand(-1, state.hidden_states.shape[1], -1)
                 )
-            state.x = gradient_checkpoint_forward(
+            state.hidden_states = gradient_checkpoint_forward(
                 block,
                 state.use_gradient_checkpointing,
                 state.use_gradient_checkpointing_offload,
-                state.x,
+                state.hidden_states,
                 state.context,
-                state.t_mod,
-                state.freqs,
+                state.time_mod,
+                state.rope_freqs,
                 block_context_mask,
                 attn_mask,
             )
             self._apply_post_block_residuals(block_id, state)
             return state
 
-        state.x = gradient_checkpoint_forward(
+        state.hidden_states = gradient_checkpoint_forward(
             block,
             state.use_gradient_checkpointing,
             state.use_gradient_checkpointing_offload,
-            state.x,
+            state.hidden_states,
             state.context,
-            state.t_mod,
-            state.freqs,
+            state.time_mod,
+            state.rope_freqs,
             block_context_mask,
         )
 
@@ -797,11 +797,11 @@ class WanVideoBackbone(VideoBackbone):
         return state
 
     def _apply_post_block_residuals(self, block_id: int, state: BlockLoopState) -> None:
-        """Apply post-block residuals (VACE hint) to ``state.x``.
+        """Apply post-block residuals (VACE hint) to ``state.hidden_states``.
 
         Shared by :meth:`run_block` and :meth:`post_attn_at_layer` so the joint
         self-attention path picks up VACE without duplicating the residual
-        logic. Mutates ``state.x`` in place.
+        logic. Mutates ``state.hidden_states`` in place.
         """
         vace = state.extras.get("vace")
         use_usp = state.extras.get("use_usp", False)
@@ -816,7 +816,7 @@ class WanVideoBackbone(VideoBackbone):
                     current_vace_hint = torch.chunk(current_vace_hint, get_sequence_parallel_world_size(), dim=1)[
                         get_sequence_parallel_rank()
                     ]
-                    target_len = state.x.shape[1]
+                    target_len = state.hidden_states.shape[1]
                     if current_vace_hint.shape[1] < target_len:
                         current_vace_hint = torch.nn.functional.pad(
                             current_vace_hint,
@@ -824,24 +824,24 @@ class WanVideoBackbone(VideoBackbone):
                             value=0,
                         )
             vace_len = current_vace_hint.shape[1]
-            if state.x.shape[1] == vace_len:
+            if state.hidden_states.shape[1] == vace_len:
                 # dual_system / video-only path: hint length matches the full
                 # token sequence, apply the residual to everything.
-                state.x = state.x + current_vace_hint * state.vace_scale
-            elif state.x.shape[1] > vace_len:
-                # shared_backbone path: state.x has been extended with
+                state.hidden_states = state.hidden_states + current_vace_hint * state.vace_scale
+            elif state.hidden_states.shape[1] > vace_len:
+                # shared_backbone path: state.hidden_states has been extended with
                 # action/state tokens. VACE residuals only apply to the leading
                 # video slice; action/state tokens still get the VACE signal
                 # indirectly through self-attention (both 'joint' and
                 # 'bidirectional' modes route action→video).
-                video_slice = state.x[:, :vace_len] + current_vace_hint * state.vace_scale
-                state.x = torch.cat([video_slice, state.x[:, vace_len:]], dim=1)
+                video_slice = state.hidden_states[:, :vace_len] + current_vace_hint * state.vace_scale
+                state.hidden_states = torch.cat([video_slice, state.hidden_states[:, vace_len:]], dim=1)
             else:
-                # Defensive: no legitimate path makes state.x shorter than the
+                # Defensive: no legitimate path makes state.hidden_states shorter than the
                 # VACE hint. If we ever hit this, something upstream broke the
                 # video-token-count invariant — investigate before patching.
                 raise ValueError(
-                    f"_apply_post_block_residuals: state.x.shape[1]={state.x.shape[1]} "
+                    f"_apply_post_block_residuals: state.hidden_states.shape[1]={state.hidden_states.shape[1]} "
                     f"< vace_hint.shape[1]={vace_len} at block {block_id}; "
                     "this is unreachable under dual_system or shared_backbone today—"
                     "investigate the upstream caller before patching this branch."
@@ -873,7 +873,7 @@ class WanVideoBackbone(VideoBackbone):
         """Compile-friendly Wan pre-attention half using a tensor tuple post-state."""
         block = state.extras["dit"].blocks[layer_id]
 
-        t_mod = state.t_mod
+        t_mod = state.time_mod
         has_seq = t_mod.dim() == 4
         chunk_dim = 2 if has_seq else 1
         chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=chunk_dim)
@@ -881,15 +881,15 @@ class WanVideoBackbone(VideoBackbone):
             chunks = tuple(c.squeeze(2) for c in chunks)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
 
-        residual_x = state.x
-        attn_input = modulate(block.norm1(state.x), shift_msa, scale_msa)
+        residual_x = state.hidden_states
+        attn_input = modulate(block.norm1(state.hidden_states), shift_msa, scale_msa)
 
         sa = block.self_attn
         q = sa.norm_q(sa.q(attn_input))
         k = sa.norm_k(sa.k(attn_input))
         v = sa.v(attn_input)
-        q = rope_apply(q, state.freqs, sa.num_heads)
-        k = rope_apply(k, state.freqs, sa.num_heads)
+        q = rope_apply(q, state.rope_freqs, sa.num_heads)
+        k = rope_apply(k, state.rope_freqs, sa.num_heads)
 
         post_state = (residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         return q, k, v, post_state
@@ -929,7 +929,7 @@ class WanVideoBackbone(VideoBackbone):
         x = x + block.cross_attn(block.norm3(x), state.context, ctx_mask=context_mask)
         mlp_input = modulate(block.norm2(x), shift_mlp, scale_mlp)
         x = block.gate(x, gate_mlp, block.ffn(mlp_input))
-        state.x = x
+        state.hidden_states = x
 
         self._apply_post_block_residuals(layer_id, state)
         return state
@@ -939,9 +939,9 @@ class WanVideoBackbone(VideoBackbone):
         dit = state.extras["dit"]
         use_usp = state.extras.get("use_usp", False)
         head = dit.head
-        t_head = state.t if state.t.dim() == 3 else state.t.unsqueeze(1)
+        t_head = state.time_embed if state.time_embed.dim() == 3 else state.time_embed.unsqueeze(1)
 
-        x = head(state.x, t_head)
+        x = head(state.hidden_states, t_head)
 
         if use_usp:
             import torch.distributed as dist
@@ -952,7 +952,7 @@ class WanVideoBackbone(VideoBackbone):
                 if state.sp_pad_shape > 0:
                     x = x[:, : -state.sp_pad_shape]
 
-        x = dit.unpatchify(x, (state.f, state.h, state.w))
+        x = dit.unpatchify(x, (state.grid_frames, state.grid_height, state.grid_width))
         return x
 
     # ================================================================
@@ -998,7 +998,7 @@ class WanVideoBackbone(VideoBackbone):
             raise ValueError(f"n_action must be non-negative, got {n_action}")
         if n_action + n_state <= 0:
             raise ValueError("inject_shared_tokens requires at least one action or state token.")
-        batch_size = state.x.shape[0]
+        batch_size = state.hidden_states.shape[0]
         appended_pieces = []
         if n_action:
             if action_tokens is None:
@@ -1010,11 +1010,11 @@ class WanVideoBackbone(VideoBackbone):
                 )
             if action_tokens.shape[1] != n_action:
                 raise ValueError(f"action_tokens length {action_tokens.shape[1]} does not match n_action={n_action}")
-            if action_tokens.shape[2] != state.x.shape[2]:
+            if action_tokens.shape[2] != state.hidden_states.shape[2]:
                 raise ValueError(
-                    f"action_tokens dim {action_tokens.shape[2]} does not match video dim {state.x.shape[2]}"
+                    f"action_tokens dim {action_tokens.shape[2]} does not match video dim {state.hidden_states.shape[2]}"
                 )
-            appended_pieces.append(action_tokens.to(state.x.dtype))
+            appended_pieces.append(action_tokens.to(state.hidden_states.dtype))
         elif action_tokens is not None and action_tokens.shape[1] != 0:
             raise ValueError("action_tokens were provided but n_action=0.")
         if n_state:
@@ -1027,11 +1027,11 @@ class WanVideoBackbone(VideoBackbone):
                 )
             if state_tokens.shape[1] != n_state:
                 raise ValueError(f"state_tokens length {state_tokens.shape[1]} does not match n_state={n_state}")
-            if state_tokens.shape[2] != state.x.shape[2]:
+            if state_tokens.shape[2] != state.hidden_states.shape[2]:
                 raise ValueError(
-                    f"state_tokens dim {state_tokens.shape[2]} does not match video dim {state.x.shape[2]}"
+                    f"state_tokens dim {state_tokens.shape[2]} does not match video dim {state.hidden_states.shape[2]}"
                 )
-            appended_pieces.append(state_tokens.to(state.x.dtype))
+            appended_pieces.append(state_tokens.to(state.hidden_states.dtype))
         else:
             if state_tokens is not None and state_tokens.shape[1] != 0:
                 raise ValueError("state_tokens were provided but n_state=0.")
@@ -1040,15 +1040,15 @@ class WanVideoBackbone(VideoBackbone):
         if self._is_per_token_t_mod_active(state) and timestep is None:
             raise ValueError("inject_shared_tokens requires `timestep` when per-token t_mod is active.")
 
-        state.x = torch.cat([state.x, appended], dim=1)
-        state.freqs = self._extend_freqs_with_shared_tokens(state.freqs, n_action, n_state)
+        state.hidden_states = torch.cat([state.hidden_states, appended], dim=1)
+        state.rope_freqs = self._extend_freqs_with_shared_tokens(state.rope_freqs, n_action, n_state)
         if self._is_per_token_t_mod_active(state):
             tmod_pieces = []
             if n_action:
                 tmod_pieces.append(self._build_action_t_mod(timestep, n_action, batch_size=batch_size))
             if n_state:
                 tmod_pieces.append(self._build_sample_t_mod(timestep, n_state, batch_size=batch_size))
-            state.t_mod = torch.cat([state.t_mod, *[p.to(state.t_mod.dtype) for p in tmod_pieces]], dim=1)
+            state.time_mod = torch.cat([state.time_mod, *[p.to(state.time_mod.dtype) for p in tmod_pieces]], dim=1)
         return state
 
     def extract_action_tokens(
@@ -1067,25 +1067,25 @@ class WanVideoBackbone(VideoBackbone):
     ) -> Tuple[BlockLoopState, Tensor]:
         n_state = int(n_state or 0)
         n_tail = int(n_action) + n_state
-        if n_action < 0 or n_tail <= 0 or n_tail >= state.x.shape[1]:
+        if n_action < 0 or n_tail <= 0 or n_tail >= state.hidden_states.shape[1]:
             raise ValueError(
-                f"extract_shared_tokens called with n_action={n_action}, n_state={n_state} but state.x has "
-                f"shape[1]={state.x.shape[1]}; expected n_action >= 0 and 0 < n_action + n_state < state.x.shape[1] "
+                f"extract_shared_tokens called with n_action={n_action}, n_state={n_state} but state.hidden_states has "
+                f"shape[1]={state.hidden_states.shape[1]}; expected n_action >= 0 and 0 < n_action + n_state < state.hidden_states.shape[1] "
                 "(was inject_shared_tokens called first with the same lengths?)."
             )
-        n_video = state.x.shape[1] - n_tail
-        action_tokens = state.x[:, n_video : n_video + n_action, :]
-        state.x = state.x[:, :n_video, :]
-        state.freqs = state.freqs[:n_video]
-        if state.t_mod.dim() == 4:
-            state.t_mod = state.t_mod[:, :n_video, :, :]
+        n_video = state.hidden_states.shape[1] - n_tail
+        action_tokens = state.hidden_states[:, n_video : n_video + n_action, :]
+        state.hidden_states = state.hidden_states[:, :n_video, :]
+        state.rope_freqs = state.rope_freqs[:n_video]
+        if state.time_mod.dim() == 4:
+            state.time_mod = state.time_mod[:, :n_video, :, :]
         return state, action_tokens
 
     # ================================================================
     # ABC: Unified preprocessing (1)
     # ================================================================
 
-    def preprocess_input(self, *, frames=None, text=None, **kw) -> dict:
+    def preprocess_input_for_train(self, *, frames=None, text=None, **kw) -> dict:
         """Unified preprocessing: raw data → tensors ready for denoising loop.
 
         Args:
@@ -1382,7 +1382,7 @@ class WanVideoBackbone(VideoBackbone):
             return first_frame_image[0]
         return first_frame_image
 
-    def prepare_inputs_for_inference(self, inputs: "InferenceInputs") -> dict:
+    def preprocess_input_for_inference(self, inputs: "InferenceInputs") -> dict:
         """Prepare all inputs for the inference denoising loop.
 
         Encapsulates: scheduler setup, unit runner (text/image/VACE encoding),
@@ -2073,7 +2073,7 @@ class WanVideoBackbone(VideoBackbone):
         inputs_shared["vace_scale"] = 1.0
 
     def _is_per_token_t_mod_active(self, state: BlockLoopState) -> bool:
-        return state.t_mod.dim() == 4
+        return state.time_mod.dim() == 4
 
     def _build_i2v_y(
         self,

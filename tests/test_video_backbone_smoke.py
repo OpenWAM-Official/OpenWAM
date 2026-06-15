@@ -214,7 +214,7 @@ def test_force_per_token_t_mod_broadcast_shape():
         context=context,
         force_per_token_t_mod=True,
     )
-    assert state.t_mod.dim() == 4, "force_per_token_t_mod must yield a 4D t_mod"
+    assert state.time_mod.dim() == 4, "force_per_token_t_mod must yield a 4D t_mod"
 
     # Every token's row in t_mod should equal the broadcasted single-timestep
     # projection — proves the broadcast path didn't accidentally vary by token.
@@ -222,8 +222,8 @@ def test_force_per_token_t_mod_broadcast_shape():
     # are identical inputs, so the outputs are mathematically equal; we still
     # need a small atol because batched matmul (CPU MKL in particular) is not
     # guaranteed to use the same reduction order across rows (~3e-8 in float32).
-    first = state.t_mod[:, 0]
-    assert torch.allclose(state.t_mod, first.unsqueeze(1).expand_as(state.t_mod), atol=1e-6, rtol=1e-6)
+    first = state.time_mod[:, 0]
+    assert torch.allclose(state.time_mod, first.unsqueeze(1).expand_as(state.time_mod), atol=1e-6, rtol=1e-6)
 
 
 def test_zero_clean_prefix_t_mod_overwrites_first_frame():
@@ -236,7 +236,7 @@ def test_zero_clean_prefix_t_mod_overwrites_first_frame():
     timestep = torch.tensor([500.0])
     context = torch.randn(B, 3, 32)
     # ``first_frame_latents`` non-None is the trigger that mirrors how
-    # ``WanVideoBackbone.preprocess_input`` flags VACE in production.
+    # ``WanVideoBackbone.preprocess_input_for_train`` flags VACE in production.
     first_frame_latents = latents[:, :, 0:1].clone()
 
     state = backbone.prepare(
@@ -247,7 +247,7 @@ def test_zero_clean_prefix_t_mod_overwrites_first_frame():
         zero_clean_prefix_t_mod=True,
         first_frame_latents=first_frame_latents,
     )
-    assert state.t_mod.dim() == 4
+    assert state.time_mod.dim() == 4
 
     # ``tokens_per_frame`` reflects the after-patchify token layout
     # (H//patch_h * W//patch_w with patch=(1,2,2) → 2*2=4 tokens/frame).
@@ -256,14 +256,10 @@ def test_zero_clean_prefix_t_mod_overwrites_first_frame():
     # First-frame tokens must all share the same t_mod row (the t=0 projection),
     # different from the sampled-t row used by later frames. atol/rtol cover
     # the same ~3e-8 batched-matmul roundoff documented above.
-    first_frame_rows = state.t_mod[:, :tokens_per_frame]
-    later_frame_rows = state.t_mod[:, tokens_per_frame:]
-    assert torch.allclose(
-        first_frame_rows, first_frame_rows[:, :1].expand_as(first_frame_rows), atol=1e-6, rtol=1e-6
-    )
-    assert torch.allclose(
-        later_frame_rows, later_frame_rows[:, :1].expand_as(later_frame_rows), atol=1e-6, rtol=1e-6
-    )
+    first_frame_rows = state.time_mod[:, :tokens_per_frame]
+    later_frame_rows = state.time_mod[:, tokens_per_frame:]
+    assert torch.allclose(first_frame_rows, first_frame_rows[:, :1].expand_as(first_frame_rows), atol=1e-6, rtol=1e-6)
+    assert torch.allclose(later_frame_rows, later_frame_rows[:, :1].expand_as(later_frame_rows), atol=1e-6, rtol=1e-6)
     assert not torch.allclose(first_frame_rows[:, 0], later_frame_rows[:, 0]), (
         "first-frame t_mod row should differ from the sampled-timestep row"
     )
@@ -295,11 +291,11 @@ def test_zero_clean_prefix_t_mod_inactive_without_trigger():
         zero_clean_prefix_t_mod=True,
         # NOTE: no first_frame_latents kwarg.
     )
-    assert state.t_mod.dim() == 4
-    first = state.t_mod[:, 0]
+    assert state.time_mod.dim() == 4
+    first = state.time_mod[:, 0]
     # Same batched-matmul roundoff caveat as
     # ``test_force_per_token_t_mod_broadcast_shape``.
-    assert torch.allclose(state.t_mod, first.unsqueeze(1).expand_as(state.t_mod), atol=1e-6, rtol=1e-6)
+    assert torch.allclose(state.time_mod, first.unsqueeze(1).expand_as(state.time_mod), atol=1e-6, rtol=1e-6)
 
 
 def test_ti2v_branch_ignores_zero_clean_prefix_t_mod_kwarg():
@@ -328,9 +324,9 @@ def test_ti2v_branch_ignores_zero_clean_prefix_t_mod_kwarg():
         force_per_token_t_mod=True,
         zero_clean_prefix_t_mod=True,
     )
-    assert state_a.t_mod.dim() == 4
-    assert state_b.t_mod.dim() == 4
-    assert torch.allclose(state_a.t_mod, state_b.t_mod), (
+    assert state_a.time_mod.dim() == 4
+    assert state_b.time_mod.dim() == 4
+    assert torch.allclose(state_a.time_mod, state_b.time_mod), (
         "TI2V branch must be unaffected by the broadcast-path kwargs"
     )
 

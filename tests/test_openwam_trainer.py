@@ -215,7 +215,15 @@ class _MockVideoBackbone(VideoBackbone):
         context = torch.randn(B, 4, self._dim)
         context_mask = torch.ones(B, 4, dtype=torch.bool)
         return BlockLoopState(
-            x=x, t_mod=t_mod, freqs=freqs, context=context, context_mask=context_mask, f=f, h=h, w=w, extras={}
+            hidden_states=x,
+            time_mod=t_mod,
+            rope_freqs=freqs,
+            context=context,
+            context_mask=context_mask,
+            grid_frames=f,
+            grid_height=h,
+            grid_width=w,
+            extras={},
         )
 
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
@@ -228,7 +236,7 @@ class _MockVideoBackbone(VideoBackbone):
         exercise concat/split shape handling end-to-end. ``post_state`` carries
         the residual and a no-op modulation that ``post_attn_at_layer`` consumes.
         """
-        residual = state.x
+        residual = state.hidden_states
         post_state = {"residual": residual}
         return residual, residual, residual, post_state
 
@@ -238,15 +246,15 @@ class _MockVideoBackbone(VideoBackbone):
         No cross-attn, no FFN, no VACE residuals — those are the real
         backbone's responsibility and aren't exercised by the trainer mock.
         """
-        state.x = post_state["residual"] + attn_out
+        state.hidden_states = post_state["residual"] + attn_out
         return state
 
     def finalize(self, state: BlockLoopState):
-        B = state.x.shape[0]
+        B = state.hidden_states.shape[0]
         return torch.randn(B, 16, 3, 8, 8)
 
     def inject_action_tokens(self, state, action_tokens, n_action, *, timestep=None):
-        state.x = torch.cat([state.x, action_tokens.to(state.x.dtype)], dim=1)
+        state.hidden_states = torch.cat([state.hidden_states, action_tokens.to(state.hidden_states.dtype)], dim=1)
         return state
 
     def inject_shared_tokens(
@@ -262,27 +270,27 @@ class _MockVideoBackbone(VideoBackbone):
         self.last_injected = {"n_action": int(n_action), "n_state": int(n_state)}
         pieces = []
         if n_action:
-            pieces.append(action_tokens.to(state.x.dtype))
+            pieces.append(action_tokens.to(state.hidden_states.dtype))
         if n_state:
-            pieces.append(state_tokens.to(state.x.dtype))
-        state.x = torch.cat([state.x, *pieces], dim=1)
+            pieces.append(state_tokens.to(state.hidden_states.dtype))
+        state.hidden_states = torch.cat([state.hidden_states, *pieces], dim=1)
         return state
 
     def extract_action_tokens(self, state, n_action):
-        n_video = state.x.shape[1] - n_action
-        action_tokens = state.x[:, n_video:, :]
-        state.x = state.x[:, :n_video, :]
+        n_video = state.hidden_states.shape[1] - n_action
+        action_tokens = state.hidden_states[:, n_video:, :]
+        state.hidden_states = state.hidden_states[:, :n_video, :]
         return state, action_tokens
 
     def extract_shared_tokens(self, state, n_action, *, n_state=0):
         self.last_extracted = {"n_action": int(n_action), "n_state": int(n_state)}
         n_tail = n_action + n_state
-        n_video = state.x.shape[1] - n_tail
-        action_tokens = state.x[:, n_video : n_video + n_action, :]
-        state.x = state.x[:, :n_video, :]
+        n_video = state.hidden_states.shape[1] - n_tail
+        action_tokens = state.hidden_states[:, n_video : n_video + n_action, :]
+        state.hidden_states = state.hidden_states[:, :n_video, :]
         return state, action_tokens
 
-    def preprocess_input(self, *, frames=None, text=None, **kw):
+    def preprocess_input_for_train(self, *, frames=None, text=None, **kw):
         # ``first_frame_latents`` puts the test on the Wan TI2V path
         # (latent[0] = conditioning, loss + mask both skip it).
         return {
