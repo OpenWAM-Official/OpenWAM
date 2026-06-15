@@ -112,6 +112,12 @@ class WanVideoBackbone(VideoBackbone):
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
         self._shift_video = None if shift_video is None else float(shift_video)
+        # Resolve the Wan family variant (I2V / TI2V / VACE / plain) ONCE from
+        # loaded components; first-frame conditioning is delegated to it so the
+        # hot paths carry no per-variant branches.
+        from openwam.model.video_backbone.wan import variants as _variants
+
+        self._variant = _variants.detect(getattr(pipe, "dit", None), getattr(pipe, "vace", None))
         # Resolve DiT patch size + temporal contract into backbone-owned
         # instance attributes so the properties defined on the ABC
         # (dit_patch_size / temporal_compression / causal_temporal) have
@@ -409,7 +415,7 @@ class WanVideoBackbone(VideoBackbone):
           ``latent[0]`` enters the loss as a predicted frame.
         - Future Wan T2V: none of the above → ``False``.
         """
-        return self._is_ti2v
+        return self._variant.needs_first_frame_skip
 
     @property
     def _freq_dim(self) -> int:
@@ -1104,117 +1110,25 @@ class WanVideoBackbone(VideoBackbone):
         input_latents = self._encode_video(stacked_inputs)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
-        vace_videos = kw.get("vace_videos")
-        ref_images = kw.get("ref_images")
-
-        has_ref = ref_images is not None and ref_images[0] is not None
-        has_image_input = bool(getattr(self._dit, "has_image_input", False))
-
-        # Three-way mutually exclusive backbone-condition pipelines, keyed off
-        # backbone identity:
-        #   - I2V  (has_image_input=True): first-frame rides on clip_feature + y
-        #     (channel-axis concat in prepare()); native VACE bypass not present.
-        #   - TI2V (_is_ti2v=True): first_frame_latents = input_latents[:, :, 0:1]
-        #     plus the seperated_timestep path pins t=0 on frame-0 tokens.
-        #   - VACE: native convention. Build pixel-space (vace_video, vace_mask,
-        #     ref_image=None) inputs and feed the *batched* equivalent of
-        #     ``WanVideoUnit_VACE.process``. Video latents stay fully noised and
-        #     loss covers every frame; the first-frame signal flows solely via
-        #     ``vace_context``. No ``first_frame_latents`` is emitted — that key
-        #     is reserved for TI2V's clean-replacement contract.
-
-        vace_context = None
-        if self._has_vace:
-            vace_video_pixels, vace_mask_pixels = self._build_vace_pixel_inputs(
-                vace_videos=vace_videos,
-                first_frame_image=ref_images,
-                B=B,
-                num_frames=num_frames,
-                height=height,
-                width=width,
-                dtype=stacked_inputs.dtype,
-                device=stacked_inputs.device,
-                # Reuse the already-preprocessed input video so we don't
-                # re-decode the first PIL frame from disk; ``stacked_inputs`` is
-                # in the same [-1, 1] preprocessed space the native unit would
-                # produce after ``pipe.preprocess_video``.
-                preprocessed_video=stacked_inputs,
-            )
-            vace_context = self._build_vace_context_from_pixels(vace_video_pixels, vace_mask_pixels)
-
-        # ---------------- I2V (clip_feature + y) ----------------
-        # Three-way mutually exclusive condition pipelines, keyed off
-        # has_image_input so VACE's require_vae_embedding=True does not
-        # accidentally trigger I2V y construction:
-        #   - TI2V (wan22_ti2v_5b):       _is_ti2v=True,  has_image_input=False
-        #   - VACE (wan21_vace_1_3b):     _has_vace=True, has_image_input=False
-        #   - I2V  (wan21_i2v_14b_480p):  has_image_input=True
-        needs_clip = (
-            has_image_input
-            and bool(getattr(self._dit, "require_clip_embedding", False))
-            and self._pipe.image_encoder is not None
+        # Variant-specific first-frame / control conditioning — the I2V /
+        # TI2V / VACE branches are encapsulated in ``self._variant`` (resolved
+        # once at construction), so this method carries no per-variant ``if``.
+        # See ``wan/variants/`` for each family's contract.
+        cond = self._variant.build_train_conditioning(
+            self,
+            input_latents=input_latents,
+            frames=frames,
+            ref_images=kw.get("ref_images"),
+            vace_videos=kw.get("vace_videos"),
+            stacked_inputs=stacked_inputs,
+            B=B,
+            num_frames=num_frames,
+            height=height,
+            width=width,
+            device=device,
+            dtype=dtype,
+            first_frame_image=kw.get("first_frame_image"),
         )
-        needs_y = has_image_input and bool(getattr(self._dit, "require_vae_embedding", False))
-
-        clip_feature = None
-        y = None
-        if needs_clip or needs_y:
-            # I2V conditioning image source priority:
-            #   1. kw["first_frame_image"]: explicit override (deploy may pass).
-            #   2. kw["ref_images"]: training-time path — base.py:530 always
-            #      collects sample["first_frame_image"] into ref_images=...
-            #   3. frames[i][0]: fallback to first frame of the GT video clip.
-            first_frame_image = kw.get("first_frame_image")
-            if first_frame_image is not None and not isinstance(first_frame_image, list):
-                first_frame_image = [first_frame_image] * B
-            if first_frame_image is None and ref_images is not None:
-                first_frame_image = []
-                for ref in ref_images:
-                    if isinstance(ref, list):
-                        first_frame_image.append(ref[0])
-                    else:
-                        first_frame_image.append(ref)
-            if first_frame_image is None:
-                first_frame_image = [clip[0] for clip in frames]
-            if len(first_frame_image) != B:
-                raise ValueError(f"first_frame_image batch ({len(first_frame_image)}) != frames batch ({B})")
-
-            if needs_clip:
-                clip_pieces = []
-                for img in first_frame_image:
-                    img_t = self._pipe.preprocess_image(img.resize((width, height))).to(device)
-                    clip_pieces.append(self._pipe.image_encoder.encode_image([img_t]))
-                clip_feature = torch.cat(clip_pieces, dim=0).to(dtype=dtype, device=device)
-
-            if needs_y:
-                y = self._build_i2v_y(
-                    first_frame_image=first_frame_image,
-                    num_frames=num_frames,
-                    height=height,
-                    width=width,
-                    device=device,
-                    dtype=dtype,
-                )
-
-        # TI2V first-frame conditioning: extract latent[0] from the already-
-        # encoded video latents (no second VAE call, no prepend). Aligned with
-        # FastWAM / main PR#19. ``base.compute_loss`` clean-replaces
-        # ``latents[:, :, 0:1]`` with this signal on every step so the DiT sees
-        # [clean ref, noisy 1..T_lat-1]; ``_compute_video_loss`` then trims
-        # frame 0 from pred/target via ``n_skip = max(num_clean_prefix, 1)``.
-        # ``fuse_vae_embedding_in_latents`` stays gated on ``_is_ti2v`` — only
-        # TI2V's DiT has the ``seperated_timestep`` consumer.
-        #
-        # VACE intentionally does NOT set ``first_frame_latents``: its
-        # conditioning rides entirely on ``vace_context`` (built above via the
-        # native pixel-space convention), and the video latent path stays fully
-        # noised + fully supervised. See ``needs_first_frame_skip`` docstring
-        # for why the VACE branch is absent from both the loss-side skip
-        # signals.
-        first_frame_latents = None
-        num_clean_prefix = 0
-        if has_ref and not has_image_input and self._is_ti2v:
-            first_frame_latents = input_latents[:, :, 0:1].clone()
 
         return {
             "input_latents": input_latents,
@@ -1223,13 +1137,13 @@ class WanVideoBackbone(VideoBackbone):
             "height": height,
             "width": width,
             "num_frames": num_frames,
-            "vace_context": vace_context,
+            "vace_context": cond.get("vace_context"),
             "vace_scale": 1.0,
-            "fuse_vae_embedding_in_latents": self._is_ti2v and has_ref,
-            "num_clean_prefix_frames": num_clean_prefix,
-            "first_frame_latents": first_frame_latents,
-            "clip_feature": clip_feature,
-            "y": y,
+            "fuse_vae_embedding_in_latents": cond.get("fuse_vae_embedding_in_latents", False),
+            "num_clean_prefix_frames": cond.get("num_clean_prefix_frames", 0),
+            "first_frame_latents": cond.get("first_frame_latents"),
+            "clip_feature": cond.get("clip_feature"),
+            "y": cond.get("y"),
         }
 
     # ================================================================
