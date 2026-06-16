@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from openwam.model.video_backbone.wan import conditioning
 from openwam.model.video_backbone.wan.preprocess import preprocess_image
 from openwam.model.video_backbone.wan.variants.base import WanVariant
 
@@ -54,12 +55,13 @@ class I2VVariant(WanVariant):
             clip_feature = torch.cat(clip_pieces, dim=0).to(dtype=dtype, device=device)
 
         if needs_y:
-            y = bb._build_i2v_y(
+            y = conditioning.build_i2v_y(
                 first_frame_image=first_frame_image,
                 num_frames=num_frames,
                 height=height,
                 width=width,
-                device=device,
+                vae=bb.vae,
                 dtype=dtype,
+                device=device,
             )
         return {"clip_feature": clip_feature, "y": y}

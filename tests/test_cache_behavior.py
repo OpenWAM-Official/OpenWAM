@@ -20,6 +20,8 @@ Plus the I2V deploy first-frame unwrap path.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 from openwam.model.inference_inputs import InferenceInputs
@@ -70,16 +72,21 @@ class _MockWanVB:
         self._is_ti2v = False
         self._has_vace = False
         self._device = "cpu"
-        self._dtype = None
+        self._dtype = torch.float32
         self._encode_text_calls: list[list] = []
-        # Encode seam now lives in wan.encode free functions; provide the
-        # tokenizer / text_encoder / division factors they read explicitly.
+        # Encode + conditioning seams now live in wan.encode / wan.conditioning
+        # free functions; provide the state they read explicitly.
         self._tokenizer = _MockTokenizer()
         self.text_encoder = _MockTextEncoder(self._encode_text_calls)
         self._height_division_factor = 16
         self._width_division_factor = 16
         self._time_division_factor = 4
         self._time_division_remainder = 1
+        self._latent_spec = SimpleNamespace(
+            z_dim=4, spatial_compression=8, temporal_compression=4, causal_temporal=True
+        )
+        self._dit = SimpleNamespace(has_image_input=False)
+        self.video_encoder = None
 
     @property
     def device(self):
@@ -93,29 +100,14 @@ class _MockWanVB:
     def scheduler(self):
         return self._pipe.scheduler
 
-    # --- stubbed conditioning seams (no real weights / GPU) ---
-    def _build_deploy_noise(self, *, height, width, num_frames, seed, rand_device):
-        return torch.zeros(1, 4, 1, height // 8, width // 8)
+    @property
+    def dit(self):
+        # backbone build_deploy_i2v_clip/y read self.dit; mirror self._dit.
+        return self._dit
 
-    def _build_deploy_i2v_clip(self, input_image, *, height, width):
-        return torch.zeros(1, 1, 8)
-
-    def _build_deploy_i2v_y(self, input_image, *, num_frames, height, width, tiled, tile_size, tile_stride):
-        return torch.zeros(1, 20, 1, height // 8, width // 8)
-
-    # --- real methods under test ---
+    # --- real method under test (conditioning seams now in wan.conditioning) ---
     def preprocess_input_for_inference(self, inputs):
         return WanVideoBackbone.preprocess_input_for_inference(self, inputs)
-
-    def _resolve_i2v_input_image(self, first_frame_image):
-        return WanVideoBackbone._resolve_i2v_input_image(self, first_frame_image)
-
-    def _finalize_ti2v_first_frame_latents(self, inputs_shared, first_frame_image):
-        return WanVideoBackbone._finalize_ti2v_first_frame_latents(self, inputs_shared, first_frame_image)
-
-    def _build_vace_context_for_deploy(self, inputs_shared, first_frame_image, vace_video):
-        # _has_vace=False → real method is a no-op fast path.
-        return WanVideoBackbone._build_vace_context_for_deploy(self, inputs_shared, first_frame_image, vace_video)
 
 
 # ---------------------------------------------------------------------------
@@ -251,13 +243,14 @@ def test_both_caches_none_does_not_crash():
 
 
 def _make_i2v_mock():
-    """Mock that satisfies the I2V predicate of ``_resolve_i2v_input_image``."""
-    from types import SimpleNamespace
-
+    """Mock satisfying the I2V predicate of ``resolve_i2v_input_image`` plus the
+    clip+y conditioning builders (image_encoder + vae stubs)."""
     mock_vb = _MockWanVB()
-    mock_vb._dit = SimpleNamespace(has_image_input=True)
+    mock_vb._dit = SimpleNamespace(has_image_input=True, require_clip_embedding=True, require_vae_embedding=True)
     mock_vb._is_ti2v = False
     mock_vb._has_vace = False
+    mock_vb.image_encoder = SimpleNamespace(encode_image=lambda imgs: torch.zeros(1, 1, 8))
+    mock_vb.vae = SimpleNamespace(encode=lambda vids, device, **kw: [torch.zeros(16, 5, 4, 4)])
     return mock_vb
 
 

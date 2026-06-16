@@ -28,6 +28,8 @@ from types import SimpleNamespace
 
 import torch
 
+from openwam.model.video_backbone.wan import conditioning
+
 # ---------------------------------------------------------------------------
 # Fake Wan VAE: just enough surface for the helper + the vendored unit.
 # ---------------------------------------------------------------------------
@@ -181,7 +183,7 @@ def test_pixel_inputs_default_first_frame_condition():
     H = W = 32
     T = 13
     first_frame = _make_pil_first_frame(H=H, W=W, seed=42)
-    vace_video_pixels, vace_mask_pixels = bb._build_vace_pixel_inputs(
+    vace_video_pixels, vace_mask_pixels = conditioning.build_vace_pixel_inputs(
         vace_videos=None,
         first_frame_image=[first_frame],
         B=1,
@@ -210,8 +212,7 @@ def test_pixel_inputs_default_first_frame_condition():
 
 def test_pixel_inputs_unconditional():
     """No ref + no user vace_video → unconditional padding (all-black, all-ones-mask)."""
-    bb = _make_adapter_with_fake_vae()
-    vp, vm = bb._build_vace_pixel_inputs(
+    vp, vm = conditioning.build_vace_pixel_inputs(
         vace_videos=None,
         first_frame_image=None,
         B=2,
@@ -281,7 +282,7 @@ def test_build_vace_context_for_deploy_train_parity():
     first_frame = _make_pil_first_frame(H=H, W=W, seed=11)
 
     # Training-side pixel construction.
-    train_vp, train_vm = bb._build_vace_pixel_inputs(
+    train_vp, train_vm = conditioning.build_vace_pixel_inputs(
         vace_videos=None,
         first_frame_image=[first_frame],
         B=1,
@@ -291,11 +292,22 @@ def test_build_vace_context_for_deploy_train_parity():
         dtype=torch.float32,
         device=torch.device("cpu"),
     )
-    train_ctx = bb._build_vace_context_from_pixels(train_vp, train_vm)
+    train_ctx = conditioning.build_vace_context_from_pixels(
+        train_vp, train_vm, vae=bb.vae, encoder=bb.video_encoder, device=bb.device
+    )
 
     # Deploy-side construction.
     inputs_shared = {"num_frames": T, "height": H, "width": W}
-    bb._build_vace_context_for_deploy(inputs_shared, first_frame, vace_video=None)
+    conditioning.build_vace_context_for_deploy(
+        inputs_shared,
+        first_frame,
+        vace_video=None,
+        has_vace=bb._has_vace,
+        vae=bb.vae,
+        encoder=bb.video_encoder,
+        dtype=bb.dtype,
+        device=bb.device,
+    )
     deploy_ctx = inputs_shared["vace_context"]
 
     assert deploy_ctx.shape == train_ctx.shape
@@ -308,7 +320,16 @@ def test_build_vace_context_for_deploy_noop_for_non_vace():
     """Non-VACE backbones must leave inputs_shared untouched."""
     bb = _make_adapter_with_fake_vae(vace=False)
     inputs_shared = {"num_frames": 13, "height": 32, "width": 32, "vace_context": None}
-    bb._build_vace_context_for_deploy(inputs_shared, first_frame_image=None, vace_video=None)
+    conditioning.build_vace_context_for_deploy(
+        inputs_shared,
+        first_frame_image=None,
+        vace_video=None,
+        has_vace=bb._has_vace,
+        vae=bb.vae,
+        encoder=bb.video_encoder,
+        dtype=bb.dtype,
+        device=bb.device,
+    )
     assert inputs_shared["vace_context"] is None
 
 
@@ -344,10 +365,15 @@ def test_build_vace_context_for_deploy_forwards_tiled_kwargs(monkeypatch):
         "tile_size": (30, 52),
         "tile_stride": (15, 26),
     }
-    bb._build_vace_context_for_deploy(
+    conditioning.build_vace_context_for_deploy(
         inputs_shared,
         first_frame_image=_make_pil_first_frame(H=32, W=32, seed=1),
         vace_video=None,
+        has_vace=bb._has_vace,
+        vae=bb.vae,
+        encoder=bb.video_encoder,
+        dtype=bb.dtype,
+        device=bb.device,
     )
 
     # Two encode calls (inactive + reactive); both must see tiled=True.
