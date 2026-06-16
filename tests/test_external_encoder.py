@@ -331,15 +331,7 @@ class _FakePipe(nn.Module):
         self.vace = nn.Module() if has_vace else None
         self.height_division_factor = 0
         self.width_division_factor = 0
-        # preprocess_video / vae_output_to_video are called only on the
-        # default path; route them through the VAE module to keep mocks lean.
         self.device = "cpu"
-
-    def preprocess_video(self, frames):
-        return torch.zeros(1, 3, 4, 64, 64)
-
-    def vae_output_to_video(self, t):
-        return ["frame0", "frame1"]
 
 
 def test_C1_default_path_state_dict_keys_contain_pipe_vae():
@@ -354,9 +346,10 @@ def test_C1_default_path_state_dict_keys_contain_pipe_vae():
     assert not any(k.startswith("_encoder.") for k in sd), "default path must not have _encoder.* keys"
 
 
-def test_C2_default_path_pipe_vae_call_sites_preserved():
-    """5 IO entries route through pipe.vae (and pipe.preprocess_video /
-    pipe.vae_output_to_video) on the default path."""
+def test_C2_default_path_pipe_vae_call_sites_preserved(monkeypatch):
+    """Default path: encode/decode still route through pipe.vae; preprocess_video
+    / vae_output_to_video now route through the stateless ``wan.preprocess`` helpers."""
+    import openwam.model.video_backbone.wan_videobackbone as vbb
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     pipe = _FakePipe()
@@ -365,16 +358,18 @@ def test_C2_default_path_pipe_vae_call_sites_preserved():
     # (training-time default). Tests run under CPU-only CI, so override to CPU
     # before exercising _decode_latents (which does ``latents.to(self.device)``).
     backbone._device = torch.device("cpu")
-    # _preprocess_video → pipe.preprocess_video
-    _ = backbone._preprocess_video([None])
+    # _preprocess_video → wan.preprocess.preprocess_video (no longer pipe)
+    monkeypatch.setattr(vbb, "preprocess_video", lambda frames, **kw: torch.zeros(1, 3, 4, 64, 64))
+    assert backbone._preprocess_video([None]).shape == (1, 3, 4, 64, 64)
     # _encode_video → pipe.vae.batch_encode
     enc = backbone._encode_video(torch.zeros(1, 3, 4, 64, 64))
     assert enc.shape[1] == 16  # VAE z_dim
-    # _decode_latents → pipe.vae.decode; _latents_to_frames → pipe.vae_output_to_video
+    # _decode_latents → pipe.vae.decode
     dec = backbone._decode_latents(torch.zeros(1, 16, 4, 8, 8))
     assert dec.shape == (1, 3, 16, 64, 64)
-    frames = backbone._latents_to_frames(dec)
-    assert frames == ["frame0", "frame1"]
+    # _latents_to_frames → wan.preprocess.vae_output_to_video (no longer pipe)
+    monkeypatch.setattr(vbb, "vae_output_to_video", lambda t: ["frame0", "frame1"])
+    assert backbone._latents_to_frames(dec) == ["frame0", "frame1"]
 
 
 def test_C3_external_path_releases_pipe_vae_in_from_pretrained():

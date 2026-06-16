@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from openwam.model.video_backbone.wan.preprocess import preprocess_image
 from openwam.model.video_backbone.wan.variants.base import WanVariant
 
 
@@ -47,7 +48,7 @@ class I2VVariant(WanVariant):
         if needs_clip:
             clip_pieces = []
             for img in first_frame_image:
-                img_t = bb._pipe.preprocess_image(img.resize((width, height))).to(device)
+                img_t = preprocess_image(img.resize((width, height)), dtype=bb.dtype, device=bb.device).to(device)
                 clip_pieces.append(bb._pipe.image_encoder.encode_image([img_t]))
             clip_feature = torch.cat(clip_pieces, dim=0).to(dtype=dtype, device=device)
 

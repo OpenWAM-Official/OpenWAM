@@ -64,6 +64,10 @@ class _MockWanVB:
     def dtype(self):
         return self._dtype
 
+    @property
+    def scheduler(self):
+        return self._pipe.scheduler
+
     # --- stubbed encode seams (no real weights / GPU) ---
     def _encode_text(self, prompts):
         self._encode_text_calls.append(list(prompts))

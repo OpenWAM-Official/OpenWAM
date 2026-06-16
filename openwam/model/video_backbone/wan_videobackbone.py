@@ -33,6 +33,13 @@ from openwam.model.video_backbone.videobackbone_base import BlockLoopState, Vide
 if TYPE_CHECKING:
     from openwam.model.inference_inputs import InferenceInputs
 from openwam.model.video_backbone.wan.dit import modulate, rope_apply, sinusoidal_embedding_1d
+from openwam.model.video_backbone.wan.preprocess import (
+    check_resize_height_width,
+    generate_noise,
+    preprocess_image,
+    preprocess_video,
+    vae_output_to_video,
+)
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
 logger = logging.getLogger(__name__)
@@ -109,6 +116,17 @@ class WanVideoBackbone(VideoBackbone):
             _mod = getattr(pipe, _name, None)
             if isinstance(_mod, nn.Module):
                 setattr(self, _name, _mod)
+        # Backbone-owned non-Module state (was read off ``_pipe``). Captured once
+        # here from the just-built pipe; from_pretrained sets the external-encoder
+        # division factors / latent_spec before ``cls(pipe, ...)`` so these are
+        # final at construction time.
+        self._scheduler = getattr(pipe, "scheduler", None)
+        self._tokenizer = getattr(pipe, "tokenizer", None)
+        self._height_division_factor = getattr(pipe, "height_division_factor", None)
+        self._width_division_factor = getattr(pipe, "width_division_factor", None)
+        self._time_division_factor = getattr(pipe, "time_division_factor", None)
+        self._time_division_remainder = getattr(pipe, "time_division_remainder", None)
+        self._latent_spec = getattr(pipe, "latent_spec", None)
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
         self._shift_video = None if shift_video is None else float(shift_video)
@@ -435,7 +453,7 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def scheduler(self):
-        return self._pipe.scheduler
+        return self._scheduler
 
     @property
     def submodule_names(self) -> list[str]:
@@ -1248,7 +1266,7 @@ class WanVideoBackbone(VideoBackbone):
         vace_cache = inputs.vace_cache
         prompt_embed_cache = inputs.prompt_embed_cache
 
-        self._pipe.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
+        self.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
 
         # ShapeChecker: snap to a model-valid grid; noise / clip / y use these.
         height, width, num_frames = self._check_resize(height, width, num_frames)
@@ -1383,7 +1401,7 @@ class WanVideoBackbone(VideoBackbone):
     def _build_deploy_noise(self, *, height, width, num_frames, seed, rand_device) -> Tensor:
         """Initial Gaussian latent noise for deploy (replaces NoiseInitializer)."""
         pipe = self._pipe
-        spec = getattr(pipe, "latent_spec", None)
+        spec = self._latent_spec
         if spec is not None:
             z_dim = spec.z_dim
             upsample = spec.spatial_compression
@@ -1393,14 +1411,16 @@ class WanVideoBackbone(VideoBackbone):
             upsample = pipe.vae.upsampling_factor
             length = (num_frames - 1) // 4 + 1
         shape = (1, z_dim, length, height // upsample, width // upsample)
-        return pipe.generate_noise(shape, seed=seed, rand_device=rand_device)
+        return generate_noise(shape, seed=seed, rand_device=rand_device, dtype=self.dtype, device=self.device)
 
     def _build_deploy_i2v_clip(self, input_image, *, height, width) -> Optional[Tensor]:
         """I2V CLIP feature (replaces ImageEmbedderCLIP); None if the DiT/encoder gate fails."""
         pipe = self._pipe
         if pipe.image_encoder is None or not pipe.dit.require_clip_embedding:
             return None
-        image = pipe.preprocess_image(input_image.resize((width, height))).to(pipe.device)
+        image = preprocess_image(input_image.resize((width, height)), dtype=self.dtype, device=self.device).to(
+            pipe.device
+        )
         clip_context = pipe.image_encoder.encode_image([image])
         return clip_context.to(dtype=pipe.torch_dtype, device=pipe.device)
 
@@ -1416,7 +1436,9 @@ class WanVideoBackbone(VideoBackbone):
         pipe = self._pipe
         if not pipe.dit.require_vae_embedding:
             return None
-        image = pipe.preprocess_image(input_image.resize((width, height))).to(pipe.device)
+        image = preprocess_image(input_image.resize((width, height)), dtype=self.dtype, device=self.device).to(
+            pipe.device
+        )
         msk = torch.ones(1, num_frames, height // 8, width // 8, device=pipe.device)
         msk[:, 1:] = 0
         vae_input = torch.concat(
@@ -1473,7 +1495,7 @@ class WanVideoBackbone(VideoBackbone):
 
     def _encode_text(self, prompts: list) -> Tuple[Tensor, Tensor]:
         device = self.device
-        ids, mask = self._pipe.tokenizer(
+        ids, mask = self._tokenizer(
             prompts,
             return_mask=True,
             add_special_tokens=True,
@@ -1492,7 +1514,7 @@ class WanVideoBackbone(VideoBackbone):
     def _preprocess_video(self, frames) -> Tensor:
         if self._uses_external_encoder:
             return self._encoder.preprocess_video(frames)
-        return self._pipe.preprocess_video(frames)
+        return preprocess_video(frames, dtype=self.dtype, device=self.device)
 
     def _encode_video(self, video_tensor: Tensor, *, tiled: bool = False) -> Tensor:
         if self._uses_external_encoder:
@@ -1553,10 +1575,18 @@ class WanVideoBackbone(VideoBackbone):
     def _latents_to_frames(self, video_tensor: Tensor) -> list:
         if self._uses_external_encoder:
             return self._encoder.to_frames(video_tensor)
-        return self._pipe.vae_output_to_video(video_tensor)
+        return vae_output_to_video(video_tensor)
 
     def _check_resize(self, h, w, num_frames):
-        return self._pipe.check_resize_height_width(h, w, num_frames)
+        return check_resize_height_width(
+            h,
+            w,
+            num_frames,
+            height_division_factor=self._height_division_factor,
+            width_division_factor=self._width_division_factor,
+            time_division_factor=self._time_division_factor,
+            time_division_remainder=self._time_division_remainder,
+        )
 
     def _build_vace_context(self, vace_video, input_latents, device) -> Tensor:
         all_vace = []
@@ -1706,7 +1736,9 @@ class WanVideoBackbone(VideoBackbone):
                     ref = first_frame_image[i] if isinstance(first_frame_image, list) else first_frame_image
                     if isinstance(ref, list):
                         ref = ref[0]
-                    pp = self._pipe.preprocess_image(ref.resize((width, height))).to(device=device, dtype=dtype)
+                    pp = preprocess_image(ref.resize((width, height)), dtype=self.dtype, device=self.device).to(
+                        device=device, dtype=dtype
+                    )
                     if pp.dim() == 4 and pp.shape[0] == 1:
                         pp = pp[0]
                     vace_video_pixels[i, :, 0] = pp
@@ -1738,7 +1770,9 @@ class WanVideoBackbone(VideoBackbone):
             vace_video_slice[:, :, 0:1] = preprocessed_first_frame.to(dtype=dtype, device=device)
             return
         ref = ref_image[0] if isinstance(ref_image, list) else ref_image
-        pp = self._pipe.preprocess_image(ref.resize((width, height))).to(device=device, dtype=dtype)
+        pp = preprocess_image(ref.resize((width, height)), dtype=self.dtype, device=self.device).to(
+            device=device, dtype=dtype
+        )
         if pp.dim() == 4 and pp.shape[0] == 1:
             pp = pp[0]
         vace_video_slice[0, :, 0] = pp
@@ -1888,7 +1922,9 @@ class WanVideoBackbone(VideoBackbone):
         vae_inputs = []
         msks = []
         for img in first_frame_image:
-            image = pipe.preprocess_image(img.resize((width, height))).to(device)  # (1, 3, H, W)
+            image = preprocess_image(img.resize((width, height)), dtype=self.dtype, device=self.device).to(
+                device
+            )  # (1, 3, H, W)
             vae_input = torch.cat(
                 [image.transpose(0, 1), torch.zeros(3, num_frames - 1, height, width, device=device)],
                 dim=1,
