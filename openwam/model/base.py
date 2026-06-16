@@ -426,7 +426,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     "video_backbone.from_scratch=true but backbone has no 'dit'; skipping. (Non-Wan backbone?)"
                 )
             else:
-                from openwam.model.video_backbone.wan_videobackbone import reinit_dit_from_scratch
+                from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
 
                 reinit_dit_from_scratch(
                     self.video_backbone,
@@ -452,7 +452,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # checkpoint) stays untouched.
         if self.video_backbone is not None and source is not None and external_encoder is not None:
             if getattr(self.video_backbone, "dit", None) is not None:
-                from openwam.model.video_backbone.wan_videobackbone import adapt_dit_to_external_encoder
+                from openwam.model.video_backbone.wan.reinit import adapt_dit_to_external_encoder
 
                 adapt_dit_to_external_encoder(
                     self.video_backbone,

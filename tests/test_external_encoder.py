@@ -590,7 +590,7 @@ def test_C12_decode_video_blocks_irreversible_encoder():
 def test_C13a_reinit_with_external_encoder_rebuilds_modules():
     """reinit_dit_from_scratch(pipe, external_encoder=enc) rebuilds
     patch_embedding and head.head at the encoder's z_dim, and syncs in_dim."""
-    from openwam.model.video_backbone.wan_videobackbone import reinit_dit_from_scratch
+    from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
@@ -609,7 +609,7 @@ def test_C13b_reinit_without_external_encoder_is_backwards_compat():
     """reinit_dit_from_scratch(pipe) WITHOUT external_encoder kwarg must behave
     exactly as before (no shape change). Guards the 17 existing from_scratch
     test cases in test_video_backbone_from_scratch.py."""
-    from openwam.model.video_backbone.wan_videobackbone import reinit_dit_from_scratch
+    from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     original_in_channels = pipe.dit.patch_embedding.in_channels
@@ -636,7 +636,7 @@ def test_C13c_reinit_syncs_patch_size_for_non_default_encoder():
     (DINOv3 / V-JEPA2 patch-at-16) would shape-mismatch on the first
     forward.
     """
-    from openwam.model.video_backbone.wan_videobackbone import reinit_dit_from_scratch
+    from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False, dit_patch_size=(1, 1, 1))
@@ -688,7 +688,7 @@ def test_C13e_adapt_dit_to_external_encoder_no_reset():
     ``patch_embedding.in_channels == 48`` because the reshape lived
     inside the reset path which is gated on training (source is None).
     """
-    from openwam.model.video_backbone.wan_videobackbone import adapt_dit_to_external_encoder
+    from openwam.model.video_backbone.wan.reinit import adapt_dit_to_external_encoder
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     # Attach a sentinel sub-module that the adapt path must NOT touch.
@@ -718,7 +718,7 @@ def test_C13f_adapt_dit_to_external_encoder_requires_patch_size():
     refuses ``dit_patch_size=None`` so callers source it from the
     backbone rather than the encoder spec.
     """
-    from openwam.model.video_backbone.wan_videobackbone import adapt_dit_to_external_encoder
+    from openwam.model.video_backbone.wan.reinit import adapt_dit_to_external_encoder
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
@@ -733,7 +733,7 @@ def test_C13d_reinit_with_external_encoder_requires_dit_patch_size():
     must source it from ``self.video_backbone.dit_patch_size`` so the DiT
     rebuild reads the same value as the dataloader bridge and the cross-check
     in :meth:`BaseWAMArchitecture._init_video_backbone`."""
-    from openwam.model.video_backbone.wan_videobackbone import reinit_dit_from_scratch
+    from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
@@ -1502,12 +1502,11 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
     We probe by spying on the module-level function and asserting it
     isn't called when ``source is not None`` in the cfg.
     """
-    import openwam.model.video_backbone.wan_videobackbone as wan_videobackbone_mod
+    import openwam.model.video_backbone.wan.reinit as reinit_mod
     from openwam.model.base import BaseWAMArchitecture
-    from openwam.model.video_backbone import wan_videobackbone
 
     reinit_calls = []
-    original_reinit = wan_videobackbone_mod.reinit_dit_from_scratch
+    original_reinit = reinit_mod.reinit_dit_from_scratch
 
     def _spy_reinit(*a, **kw):
         # Record-only stub: don't invoke the real reinit because the
@@ -1515,10 +1514,9 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
         # IndexError. We only care whether reinit was called at all.
         reinit_calls.append((a, kw))
 
-    wan_videobackbone_mod.reinit_dit_from_scratch = _spy_reinit
-    # ``base.py`` imports it locally inside the function, so the patch
-    # must target the wan_videobackbone module attribute.
-    wan_videobackbone.reinit_dit_from_scratch = _spy_reinit
+    # ``base.py`` does ``from ...wan.reinit import reinit_dit_from_scratch``
+    # locally inside the function, so the patch must target wan.reinit.
+    reinit_mod.reinit_dit_from_scratch = _spy_reinit
 
     # Make build_video_backbone hand back a stub backbone so we can drive
     # _init_video_backbone end-to-end without a real pipeline build.
@@ -1568,8 +1566,7 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
             f"training path with from_scratch=true should reinit exactly once, got {len(reinit_calls)}"
         )
     finally:
-        wan_videobackbone_mod.reinit_dit_from_scratch = original_reinit
-        wan_videobackbone.reinit_dit_from_scratch = original_reinit
+        reinit_mod.reinit_dit_from_scratch = original_reinit
         vb_pkg.build_video_backbone = original_build
 
 
