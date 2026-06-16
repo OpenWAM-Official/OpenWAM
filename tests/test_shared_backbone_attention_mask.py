@@ -16,6 +16,7 @@ from openwam.model.architectures.shared_backbone.mask import (
     set_video_attention_mask_mode,
 )
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState
+from openwam.model.video_backbone.wan import action_tokens
 from openwam.model.video_backbone.wan.models.dit import DiTBlock, modulate, rope_apply
 from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
@@ -183,7 +184,7 @@ def test_shared_backbone_action_rope_defaults_to_1d():
     vb = _make_wan_backbone(dim=32, num_heads=4)
     base = _identity_freqs(seq_len=2, head_dim=vb.head_dim)
 
-    freqs = vb._extend_freqs_with_action_tokens(base, n_action_tokens=3)
+    freqs = action_tokens.extend_freqs_with_action_tokens(base, n_action_tokens=3)
 
     assert freqs.shape == (5, 1, vb.head_dim // 2)
     assert torch.allclose(freqs[:2], base)
@@ -195,7 +196,7 @@ def test_shared_backbone_action_rope_defaults_to_1d():
 def test_wan_action_tmod_broadcasts_scalar_to_batch():
     vb = _make_wan_backbone(dim=24, num_heads=4)
 
-    t_mod = vb._build_action_t_mod(torch.tensor([0.5]), n_action_tokens=3, batch_size=2)
+    t_mod = action_tokens.build_action_t_mod(torch.tensor([0.5]), n_action_tokens=3, dit=vb._dit, batch_size=2)
 
     assert t_mod.shape == (2, 3, 6, vb.dim)
 
@@ -203,8 +204,10 @@ def test_wan_action_tmod_broadcasts_scalar_to_batch():
 def test_wan_action_tmod_accepts_per_sample_and_per_token():
     vb = _make_wan_backbone(dim=24, num_heads=4)
 
-    per_sample = vb._build_action_t_mod(torch.tensor([0.5, 0.8]), n_action_tokens=3, batch_size=2)
-    per_token = vb._build_action_t_mod(torch.rand(2, 3), n_action_tokens=3, batch_size=2)
+    per_sample = action_tokens.build_action_t_mod(
+        torch.tensor([0.5, 0.8]), n_action_tokens=3, dit=vb._dit, batch_size=2
+    )
+    per_token = action_tokens.build_action_t_mod(torch.rand(2, 3), n_action_tokens=3, dit=vb._dit, batch_size=2)
 
     assert per_sample.shape == (2, 3, 6, vb.dim)
     assert per_token.shape == (2, 3, 6, vb.dim)
@@ -214,9 +217,9 @@ def test_wan_action_tmod_rejects_mismatched_shapes():
     vb = _make_wan_backbone(dim=24, num_heads=4)
 
     with pytest.raises(ValueError, match="action_timestep"):
-        vb._build_action_t_mod(torch.rand(3), n_action_tokens=3, batch_size=2)
+        action_tokens.build_action_t_mod(torch.rand(3), n_action_tokens=3, dit=vb._dit, batch_size=2)
     with pytest.raises(ValueError, match="action_timestep"):
-        vb._build_action_t_mod(torch.rand(2, 2), n_action_tokens=3, batch_size=2)
+        action_tokens.build_action_t_mod(torch.rand(2, 2), n_action_tokens=3, dit=vb._dit, batch_size=2)
 
 
 def test_shared_backbone_attention_mask_joint_layout():
@@ -492,8 +495,8 @@ def test_wan_state_tmod_uses_sample_level_timestep_from_per_token_input():
     vb = _make_wan_backbone(dim=24, num_heads=4)
     per_token = torch.tensor([[0.1, 0.2, 0.3], [0.7, 0.8, 0.9]])
 
-    state_tmod = vb._build_sample_t_mod(per_token, n_tokens=2, batch_size=2)
-    first_tmod = vb._build_sample_t_mod(per_token[:, 0], n_tokens=2, batch_size=2)
+    state_tmod = action_tokens.build_sample_t_mod(per_token, n_tokens=2, dit=vb._dit, batch_size=2)
+    first_tmod = action_tokens.build_sample_t_mod(per_token[:, 0], n_tokens=2, dit=vb._dit, batch_size=2)
 
     assert state_tmod.shape == (2, 2, 6, vb.dim)
     assert torch.allclose(state_tmod, first_tmod)

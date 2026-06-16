@@ -23,6 +23,7 @@ from openwam.model.video_backbone.videobackbone_base import BlockLoopState, Vide
 
 if TYPE_CHECKING:
     from openwam.model.inference_inputs import InferenceInputs
+from openwam.model.video_backbone.wan import action_tokens as wan_action_tokens
 from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply, sinusoidal_embedding_1d
 from openwam.model.video_backbone.wan.preprocess import (
     check_resize_height_width,
@@ -804,17 +805,21 @@ class WanVideoBackbone(VideoBackbone):
                 raise ValueError("state_tokens were provided but n_state=0.")
         appended = torch.cat(appended_pieces, dim=1)
 
-        if self._is_per_token_t_mod_active(state) and timestep is None:
+        if wan_action_tokens.is_per_token_t_mod_active(state.time_mod) and timestep is None:
             raise ValueError("inject_shared_tokens requires `timestep` when per-token t_mod is active.")
 
         state.hidden_states = torch.cat([state.hidden_states, appended], dim=1)
-        state.rope_freqs = self._extend_freqs_with_shared_tokens(state.rope_freqs, n_action, n_state)
-        if self._is_per_token_t_mod_active(state):
+        state.rope_freqs = wan_action_tokens.extend_freqs_with_shared_tokens(state.rope_freqs, n_action, n_state)
+        if wan_action_tokens.is_per_token_t_mod_active(state.time_mod):
             tmod_pieces = []
             if n_action:
-                tmod_pieces.append(self._build_action_t_mod(timestep, n_action, batch_size=batch_size))
+                tmod_pieces.append(
+                    wan_action_tokens.build_action_t_mod(timestep, n_action, dit=self._dit, batch_size=batch_size)
+                )
             if n_state:
-                tmod_pieces.append(self._build_sample_t_mod(timestep, n_state, batch_size=batch_size))
+                tmod_pieces.append(
+                    wan_action_tokens.build_sample_t_mod(timestep, n_state, dit=self._dit, batch_size=batch_size)
+                )
             state.time_mod = torch.cat([state.time_mod, *[p.to(state.time_mod.dtype) for p in tmod_pieces]], dim=1)
         return state
 
@@ -1518,9 +1523,6 @@ class WanVideoBackbone(VideoBackbone):
         )
         inputs_shared["vace_context"] = vace_context
 
-    def _is_per_token_t_mod_active(self, state: BlockLoopState) -> bool:
-        return state.time_mod.dim() == 4
-
     def _build_i2v_y(
         self,
         *,
@@ -1559,105 +1561,6 @@ class WanVideoBackbone(VideoBackbone):
         y_lat = self.vae.batch_encode(vae_inputs_b, device=device).to(dtype=dtype, device=device)
         y = torch.cat([msks_b, y_lat], dim=1)  # (B, 20, T_lat, H_lat, W_lat)
         return y
-
-    def _build_action_t_mod(
-        self,
-        action_timestep: Tensor,
-        n_action_tokens: int,
-        *,
-        batch_size: int,
-    ) -> Tensor:
-        dit = self._dit
-        if action_timestep.dim() == 2:
-            if action_timestep.shape != (batch_size, n_action_tokens):
-                raise ValueError(
-                    f"action_timestep has shape {tuple(action_timestep.shape)}; expected "
-                    f"(B={batch_size}, n_action_tokens={n_action_tokens})."
-                )
-            B_t = action_timestep.shape[0]
-            flat = action_timestep.reshape(B_t * n_action_tokens)
-            t_emb = sinusoidal_embedding_1d(dit.freq_dim, flat)
-            dtype = next(dit.time_embedding.parameters()).dtype
-            t = dit.time_embedding(t_emb.to(dtype=dtype, device=t_emb.device))
-            t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
-            t_mod = t_mod.view(B_t, n_action_tokens, 6, dit.dim)
-        else:
-            timestep_flat = action_timestep.flatten()
-            if timestep_flat.numel() == 1:
-                timestep_flat = timestep_flat.expand(batch_size)
-            elif timestep_flat.numel() != batch_size:
-                raise ValueError(
-                    f"action_timestep has shape {tuple(action_timestep.shape)}; expected scalar, "
-                    f"(B={batch_size},), or (B={batch_size}, n_action_tokens={n_action_tokens})."
-                )
-            t_emb = sinusoidal_embedding_1d(dit.freq_dim, timestep_flat)
-            dtype = next(dit.time_embedding.parameters()).dtype
-            t = dit.time_embedding(t_emb.to(dtype=dtype, device=t_emb.device))
-            t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
-            t_mod = t_mod.unsqueeze(1).expand(-1, n_action_tokens, -1, -1)
-        return t_mod
-
-    def _build_sample_t_mod(
-        self,
-        timestep: Tensor,
-        n_tokens: int,
-        *,
-        batch_size: int,
-    ) -> Tensor:
-        timestep_flat = timestep.flatten()
-        if timestep_flat.numel() == 1:
-            timestep_flat = timestep_flat.expand(batch_size)
-        elif timestep_flat.numel() == batch_size:
-            pass
-        elif timestep.dim() == 2 and timestep.shape[0] == batch_size:
-            timestep_flat = timestep[:, 0]
-        else:
-            raise ValueError(
-                f"timestep has shape {tuple(timestep.shape)}; expected scalar, (B={batch_size},), "
-                f"or (B={batch_size}, T) for sample-level state t_mod."
-            )
-        dit = self._dit
-        t_emb = sinusoidal_embedding_1d(dit.freq_dim, timestep_flat)
-        dtype = next(dit.time_embedding.parameters()).dtype
-        t = dit.time_embedding(t_emb.to(dtype=dtype, device=t_emb.device))
-        t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
-        t_mod = t_mod.unsqueeze(1).expand(-1, n_tokens, -1, -1)
-        return t_mod
-
-    def _extend_freqs_with_action_tokens(self, freqs: Tensor, n_action_tokens: int) -> Tensor:
-        """Append 1D action RoPE frequencies to ``freqs`` (DreamZero's separate
-        action RoPE — 1D positions in action-horizon space). Tied to Wan's
-        complex-form RoPE; a different RoPE representation needs this changed too.
-        """
-        if n_action_tokens <= 0:
-            return freqs
-        return torch.cat([freqs, self._build_1d_action_freqs(freqs, n_action_tokens)], dim=0)
-
-    def _extend_freqs_with_shared_tokens(self, freqs: Tensor, n_action_tokens: int, n_state_tokens: int = 0) -> Tensor:
-        pieces = [freqs]
-        if n_action_tokens > 0:
-            pieces.append(self._build_1d_action_freqs(freqs, n_action_tokens))
-        if n_state_tokens > 0:
-            pieces.append(self._build_1d_state_freqs(freqs, n_state_tokens))
-        return torch.cat(pieces, dim=0)
-
-    @staticmethod
-    def _build_1d_action_freqs(freqs: Tensor, n_action_tokens: int, theta: float = 10000.0) -> Tensor:
-        head_dim = int(freqs.shape[-1]) * 2
-        positions = torch.arange(n_action_tokens, dtype=torch.float64, device=freqs.device)
-        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float64, device=freqs.device) / head_dim))
-        angles = torch.outer(positions, inv_freq)
-        action_freqs = torch.polar(torch.ones_like(angles), angles).view(n_action_tokens, 1, -1)
-        return action_freqs.to(dtype=freqs.dtype)
-
-    @staticmethod
-    def _build_1d_state_freqs(freqs: Tensor, n_state_tokens: int, theta: float = 10000.0) -> Tensor:
-        head_dim = int(freqs.shape[-1]) * 2
-        positions = torch.arange(n_state_tokens, dtype=torch.float64, device=freqs.device)
-        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float64, device=freqs.device) / head_dim))
-        angles = torch.outer(positions, inv_freq)
-        state_freqs = torch.polar(torch.ones_like(angles), angles).view(n_state_tokens, 1, -1)
-        return state_freqs.to(dtype=freqs.dtype)
 
     def apply_compile(self, compile_cfg) -> None:
         """torch.compile backbone sub-modules per config bool flags

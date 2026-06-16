@@ -61,21 +61,16 @@ def test_import_text_encoder():
 
 def test_wan_video_backbone_adapter_freq_helpers():
     """extend_freqs_with_action_tokens appends 1D action RoPE by default."""
-    from types import SimpleNamespace
-
-    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
-
-    pipe = SimpleNamespace(dit=None, use_unified_sequence_parallel=False)
-    adapter = WanVideoBackbone(pipe)
+    from openwam.model.video_backbone.wan import action_tokens
 
     freqs = torch.polar(torch.ones(4, 1, 6), torch.zeros(4, 1, 6))
-    extended = adapter._extend_freqs_with_action_tokens(freqs, 2)
+    extended = action_tokens.extend_freqs_with_action_tokens(freqs, 2)
     assert extended.shape == (6, 1, 6)
     assert torch.allclose(extended[-2], torch.ones_like(extended[-2]))
     assert not torch.allclose(extended[-1], torch.ones_like(extended[-1]))
 
     # n_action_tokens=0 is a passthrough.
-    assert adapter._extend_freqs_with_action_tokens(freqs, 0) is freqs
+    assert action_tokens.extend_freqs_with_action_tokens(freqs, 0) is freqs
 
 
 def test_wan_video_backbone_is_ti2v():
