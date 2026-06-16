@@ -16,7 +16,7 @@ from openwam.model.action_backbone.joint_action_dit import ActionDiT, ActionDiTS
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState
 from openwam.model.video_backbone.wan.dit import DiTBlock
-from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
+from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 from openwam.model.vlm_backbone.qwen3_vl import (
     Qwen3VLBackbone,
     UnderstandingExpert,

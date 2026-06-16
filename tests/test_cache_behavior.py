@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 
 from openwam.model.inference_inputs import InferenceInputs
-from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
+from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
 # ---------------------------------------------------------------------------
 # Minimal mock infrastructure

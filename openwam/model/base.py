@@ -427,7 +427,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     "video_backbone.from_scratch=true but backbone has no '_pipe'; skipping. (Non-Wan backbone?)"
                 )
             else:
-                from openwam.model.video_backbone.wan.wan_videobackbone import reinit_dit_from_scratch
+                from openwam.model.video_backbone.wan_videobackbone import reinit_dit_from_scratch
 
                 reinit_dit_from_scratch(
                     pipe,
@@ -454,7 +454,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if self.video_backbone is not None and source is not None and external_encoder is not None:
             pipe = getattr(self.video_backbone, "_pipe", None)
             if pipe is not None:
-                from openwam.model.video_backbone.wan.wan_videobackbone import adapt_dit_to_external_encoder
+                from openwam.model.video_backbone.wan_videobackbone import adapt_dit_to_external_encoder
 
                 adapt_dit_to_external_encoder(
                     pipe,

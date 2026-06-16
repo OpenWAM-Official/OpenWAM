@@ -17,7 +17,7 @@ from openwam.model.architectures.shared_backbone.mask import (
 )
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState
 from openwam.model.video_backbone.wan.dit import DiTBlock, modulate, rope_apply
-from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
+from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
 
 def _make_wan_backbone(*, dim: int = 24, num_heads: int = 4) -> WanVideoBackbone:

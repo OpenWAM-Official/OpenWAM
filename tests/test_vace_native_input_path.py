@@ -117,7 +117,7 @@ class _FakeWanVAE:
 
 
 def _make_adapter_with_fake_vae(*, vace: bool = True, image_input: bool = False):
-    from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
+    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     vae = _FakeWanVAE(z_dim=16)
     dit = SimpleNamespace(
@@ -449,7 +449,7 @@ def test_is_vace_unit_identifies_vendored_class():
         WanVideoUnit_PromptEmbedder,
         WanVideoUnit_VACE,
     )
-    from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone
+    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     assert WanVideoBackbone._is_vace_unit(WanVideoUnit_VACE())
     assert not WanVideoBackbone._is_vace_unit(WanVideoUnit_PromptEmbedder())

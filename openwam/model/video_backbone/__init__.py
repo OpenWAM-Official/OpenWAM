@@ -105,7 +105,7 @@ def build_video_backbone(
 # Built-in registrations
 # ---------------------------------------------------------------------------
 
-from openwam.model.video_backbone.wan.wan_videobackbone import WanVideoBackbone  # noqa: E402
+from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone  # noqa: E402
 
 register_video_backbone("wan22_ti2v_5b")(WanVideoBackbone)
 register_video_backbone("wan21_vace_1_3b")(WanVideoBackbone)
