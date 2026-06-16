@@ -10,10 +10,10 @@ faithful decomposition of ``model_fn_wan_video`` in ``wan/pipeline.py``.
 The original function is left untouched — consistency tests verify that
 both paths produce identical outputs.
 
-``WanVideoBackbone`` owns the entire Wan pipeline (DiT, VAE, text encoder,
-tokenizer, VACE, etc.) as a private ``_pipe`` attribute. External code
-accesses pipeline capabilities through the :class:`VideoBackbone` ABC
-methods — ``_pipe`` is never exposed.
+``WanVideoBackbone`` owns the Wan modules (DiT, VAE, text encoder, tokenizer,
+VACE, etc.) directly — modules as named children, scheduler/tokenizer/division
+factors as plain attributes. External code reaches them only through the
+:class:`VideoBackbone` ABC methods.
 """
 
 from __future__ import annotations
@@ -46,10 +46,11 @@ logger = logging.getLogger(__name__)
 
 
 class WanVideoBackbone(VideoBackbone):
-    """Wraps a Wan pipeline to expose the VideoBackbone interface.
+    """Exposes the Wan modules through the VideoBackbone interface.
 
-    Owns the entire pipeline (DiT, VAE, text encoder, tokenizer, VACE)
-    as a private ``_pipe``. External code never touches ``_pipe`` directly.
+    Owns DiT / VAE / text encoder / tokenizer / VACE directly: modules are
+    registered as named children (clean ``dit.*`` / ``vae.*`` state_dict keys);
+    scheduler / tokenizer / division factors are plain attributes.
 
     Construction: use ``from_pretrained(source)`` for all paths.
     """
@@ -86,7 +87,7 @@ class WanVideoBackbone(VideoBackbone):
         """Internal constructor. Use ``from_pretrained()`` instead.
 
         ``external_encoder`` must be ``None`` on the default path so
-        ``state_dict()`` carries only ``_pipe.vae.*`` keys (not also
+        ``state_dict()`` carries only ``vae.*`` keys (not also
         ``_encoder.*``). Setting it activates the external-encoder routing
         in :meth:`_preprocess_video` / :meth:`_encode_video` /
         :meth:`_decode_latents` / :meth:`_latents_to_frames` and aliases
@@ -102,19 +103,20 @@ class WanVideoBackbone(VideoBackbone):
         to pre-PR behavior.
         """
         super().__init__()
-        # ``_pipe`` is the WanVideoPipeline that owns construction + the deploy
-        # pipeline-unit methods (preprocess_image / vae_output_to_video / ...).
-        # Store it OUTSIDE nn.Module registration (object.__setattr__) so its
-        # sub-modules are not double-counted in state_dict; the backbone instead
-        # registers the trainable sub-modules directly as named children below,
-        # so checkpoint keys are ``dit.*`` / ``vae.*`` (not ``_pipe.dit.*``).
-        object.__setattr__(self, "_pipe", pipe)
+        # ``pipe`` is a transient construction carrier: the backbone drains its
+        # sub-modules (registered as named children below → clean ``dit.*`` /
+        # ``vae.*`` state_dict keys) plus its non-Module state (scheduler /
+        # tokenizer / division factors / latent_spec) into itself, then lets the
+        # pipe go out of scope. Nothing reads ``pipe`` after construction.
         self._encoder = external_encoder
         # Promote pipeline sub-modules to backbone-owned named children so
         # nn.Module collects them into state_dict at the clean top-level prefix.
         for _name in ("dit", "dit2", "vae", "vace", "vace2", "text_encoder", "image_encoder", "motion_controller"):
             _mod = getattr(pipe, _name, None)
-            if isinstance(_mod, nn.Module):
+            if _mod is not None:
+                # nn.Module → registered named child (clean ``dit.*`` state_dict
+                # key); a non-Module value (test mocks) lands as a plain
+                # attribute so the same ``self.<name>`` access resolves on both.
                 setattr(self, _name, _mod)
         # Backbone-owned non-Module state (was read off ``_pipe``). Captured once
         # here from the just-built pipe; from_pretrained sets the external-encoder
@@ -394,7 +396,7 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def _dit(self):
-        return self._pipe.dit
+        return self.dit
 
     @property
     def _uses_external_encoder(self) -> bool:
@@ -404,7 +406,7 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def _has_vace(self) -> bool:
-        return getattr(self._pipe, "vace", None) is not None
+        return getattr(self, "vace", None) is not None
 
     @property
     def _is_ti2v(self) -> bool:
@@ -466,7 +468,7 @@ class WanVideoBackbone(VideoBackbone):
             if name == "vae" and self._uses_external_encoder:
                 names.append(name)
                 continue
-            if getattr(self._pipe, name, None) is not None:
+            if getattr(self, name, None) is not None:
                 names.append(name)
         return names
 
@@ -556,9 +558,9 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     def prepare(self, **kw) -> BlockLoopState:
-        dit = self._pipe.dit
-        motion_controller = getattr(self._pipe, "motion_controller", None)
-        vace = getattr(self._pipe, "vace", None)
+        dit = self.dit
+        motion_controller = getattr(self, "motion_controller", None)
+        vace = getattr(self, "vace", None)
         latents = kw["latents"]
         timestep = kw["timestep"]
         context = kw["context"]
@@ -1097,21 +1099,16 @@ class WanVideoBackbone(VideoBackbone):
     def get_submodule(self, name: str) -> nn.Module | None:
         if name == "vae" and self._uses_external_encoder:
             return self._encoder
-        # Backbone-owned named child (registered in __init__); fall back to the
-        # pipe for non-Module attributes (e.g. tokenizer) the pipe still owns.
+        # Backbone-owned named child (registered in __init__). Non-Module names
+        # (tokenizer / scheduler) are not submodules and resolve to None.
         mod = getattr(self, name, None)
-        if isinstance(mod, nn.Module):
-            return mod
-        return getattr(self._pipe, name, None)
+        return mod if isinstance(mod, nn.Module) else None
 
     def set_submodule(self, name: str, module: nn.Module) -> None:
         if name == "vae" and self._uses_external_encoder:
             self._encoder = module
             return
-        # Keep both views in sync: the registered named child (state_dict /
-        # forward) and the pipe attribute (deploy pipeline units read pipe.X).
         setattr(self, name, module)
-        setattr(self._pipe, name, module)
 
     # ================================================================
     # ABC: Decoding (1)
@@ -1134,12 +1131,8 @@ class WanVideoBackbone(VideoBackbone):
     def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
         """Move all owned submodules to (dtype, device).
 
-        Also syncs ``self._pipe.device`` because ``BasePipeline.device`` is a
-        plain attribute consumed by inference-time pipeline units (VAE encode,
-        image preprocess, control tensors — see ``wan/pipeline.py``). The
-        training path never touches those units, but deploy
-        (``openwam/deploy/model_loader.py``) relies on this single call to
-        keep the pipeline's device record in sync.
+        Updates the ``_dtype`` / ``_device`` records that the ``dtype`` /
+        ``device`` properties (and deploy preprocessing) read back.
 
         This method must NOT call ``mod.eval()``: trainable submodules
         (dit, vace) need to stay in train mode; eval/train state of frozen
@@ -1151,7 +1144,6 @@ class WanVideoBackbone(VideoBackbone):
             mod = self.get_submodule(name)
             if mod is not None:
                 mod.to(dtype=dtype, device=device)
-        self._pipe.device = device
 
     # ================================================================
     # Component specs for self-contained checkpoints
@@ -1400,29 +1392,28 @@ class WanVideoBackbone(VideoBackbone):
 
     def _build_deploy_noise(self, *, height, width, num_frames, seed, rand_device) -> Tensor:
         """Initial Gaussian latent noise for deploy (replaces NoiseInitializer)."""
-        pipe = self._pipe
         spec = self._latent_spec
         if spec is not None:
             z_dim = spec.z_dim
             upsample = spec.spatial_compression
             length = (num_frames - 1) // spec.temporal_compression + (1 if spec.causal_temporal else 0)
         else:
-            z_dim = pipe.vae.model.z_dim
-            upsample = pipe.vae.upsampling_factor
+            z_dim = self.vae.model.z_dim
+            upsample = self.vae.upsampling_factor
             length = (num_frames - 1) // 4 + 1
         shape = (1, z_dim, length, height // upsample, width // upsample)
         return generate_noise(shape, seed=seed, rand_device=rand_device, dtype=self.dtype, device=self.device)
 
     def _build_deploy_i2v_clip(self, input_image, *, height, width) -> Optional[Tensor]:
         """I2V CLIP feature (replaces ImageEmbedderCLIP); None if the DiT/encoder gate fails."""
-        pipe = self._pipe
-        if pipe.image_encoder is None or not pipe.dit.require_clip_embedding:
+        image_encoder = getattr(self, "image_encoder", None)
+        if image_encoder is None or not self.dit.require_clip_embedding:
             return None
         image = preprocess_image(input_image.resize((width, height)), dtype=self.dtype, device=self.device).to(
-            pipe.device
+            self.device
         )
-        clip_context = pipe.image_encoder.encode_image([image])
-        return clip_context.to(dtype=pipe.torch_dtype, device=pipe.device)
+        clip_context = image_encoder.encode_image([image])
+        return clip_context.to(dtype=self.dtype, device=self.device)
 
     def _build_deploy_i2v_y(
         self, input_image, *, num_frames, height, width, tiled, tile_size, tile_stride
@@ -1433,13 +1424,12 @@ class WanVideoBackbone(VideoBackbone):
         (``batch_encode``, non-tiled) — so the deploy default ``tiled=True``
         matches the vendored unit bit-for-bit.
         """
-        pipe = self._pipe
-        if not pipe.dit.require_vae_embedding:
+        if not self.dit.require_vae_embedding:
             return None
         image = preprocess_image(input_image.resize((width, height)), dtype=self.dtype, device=self.device).to(
-            pipe.device
+            self.device
         )
-        msk = torch.ones(1, num_frames, height // 8, width // 8, device=pipe.device)
+        msk = torch.ones(1, num_frames, height // 8, width // 8, device=self.device)
         msk[:, 1:] = 0
         vae_input = torch.concat(
             [image.transpose(0, 1), torch.zeros(3, num_frames - 1, height, width).to(image.device)], dim=1
@@ -1447,17 +1437,17 @@ class WanVideoBackbone(VideoBackbone):
         msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
         msk = msk.view(1, msk.shape[1] // 4, 4, height // 8, width // 8)
         msk = msk.transpose(1, 2)[0]
-        y = pipe.vae.encode(
-            [vae_input.to(dtype=pipe.torch_dtype, device=pipe.device)],
-            device=pipe.device,
+        y = self.vae.encode(
+            [vae_input.to(dtype=self.dtype, device=self.device)],
+            device=self.device,
             tiled=tiled,
             tile_size=tile_size,
             tile_stride=tile_stride,
         )[0]
-        y = y.to(dtype=pipe.torch_dtype, device=pipe.device)
+        y = y.to(dtype=self.dtype, device=self.device)
         y = torch.concat([msk, y])
         y = y.unsqueeze(0)
-        y = y.to(dtype=pipe.torch_dtype, device=pipe.device)
+        y = y.to(dtype=self.dtype, device=self.device)
         return y
 
     def _finalize_ti2v_first_frame_latents(self, inputs_shared: dict, first_frame_image) -> None:
@@ -1506,7 +1496,7 @@ class WanVideoBackbone(VideoBackbone):
         ids = ids.to(device)
         mask = mask.to(device)
         seq_lens = mask.gt(0).sum(dim=1).long()
-        context = self._pipe.text_encoder(ids, mask)
+        context = self.text_encoder(ids, mask)
         for i, v in enumerate(seq_lens):
             context[i, v:] = 0
         return context, seq_lens
@@ -1519,7 +1509,7 @@ class WanVideoBackbone(VideoBackbone):
     def _encode_video(self, video_tensor: Tensor, *, tiled: bool = False) -> Tensor:
         if self._uses_external_encoder:
             return self._encoder.batch_encode(video_tensor)
-        return self._pipe.vae.batch_encode(video_tensor, device=video_tensor.device)
+        return self.vae.batch_encode(video_tensor, device=video_tensor.device)
 
     def _encode_video_for_vace(
         self,
@@ -1557,7 +1547,7 @@ class WanVideoBackbone(VideoBackbone):
         # tiled=True) and call the per-sample tiled encode.
         outs = []
         for i in range(pixels.shape[0]):
-            lat = self._pipe.vae.encode(
+            lat = self.vae.encode(
                 [pixels[i]],
                 device=self.device,
                 tiled=True,
@@ -1570,7 +1560,7 @@ class WanVideoBackbone(VideoBackbone):
     def _decode_latents(self, latents: Tensor, *, tiled: bool = True) -> Tensor:
         if self._uses_external_encoder:
             return self._encoder.decode(latents.to(self.device), tiled=tiled)
-        return self._pipe.vae.decode(latents.to(self.device), device=self.device, tiled=tiled)
+        return self.vae.decode(latents.to(self.device), device=self.device, tiled=tiled)
 
     def _latents_to_frames(self, video_tensor: Tensor) -> list:
         if self._uses_external_encoder:
@@ -1918,7 +1908,6 @@ class WanVideoBackbone(VideoBackbone):
         matching ``_encode_video`` (line ~1311). ``batch_encode`` supports
         non-tiled only; training already runs the VAE non-tiled.
         """
-        pipe = self._pipe
         vae_inputs = []
         msks = []
         for img in first_frame_image:
@@ -1940,7 +1929,7 @@ class WanVideoBackbone(VideoBackbone):
 
         vae_inputs_b = torch.stack(vae_inputs, dim=0).to(dtype=dtype, device=device)  # (B, 3, T, H, W)
         msks_b = torch.stack(msks, dim=0).to(dtype=dtype, device=device)  # (B, 4, T_lat, H_lat, W_lat)
-        y_lat = pipe.vae.batch_encode(vae_inputs_b, device=device).to(dtype=dtype, device=device)
+        y_lat = self.vae.batch_encode(vae_inputs_b, device=device).to(dtype=dtype, device=device)
         y = torch.cat([msks_b, y_lat], dim=1)  # (B, 20, T_lat, H_lat, W_lat)
         return y
 
@@ -2072,7 +2061,7 @@ class WanVideoBackbone(VideoBackbone):
         for flag, submod_name in flag_to_submodule.items():
             if not cfg_get(compile_cfg, flag, False):
                 continue
-            mod = getattr(self._pipe, submod_name, None)
+            mod = getattr(self, submod_name, None)
             if mod is None:
                 continue
             if submod_name == "dit" and hasattr(mod, "blocks"):
@@ -2084,7 +2073,7 @@ class WanVideoBackbone(VideoBackbone):
                 )
             else:
                 compile_kwargs = torch_compile_kwargs(compile_cfg)
-                setattr(self._pipe, submod_name, torch.compile(mod, **compile_kwargs))
+                setattr(self, submod_name, torch.compile(mod, **compile_kwargs))
                 logger.info("torch.compile enabled for %s (%s)", submod_name, compile_kwargs)
 
     @staticmethod

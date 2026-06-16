@@ -314,7 +314,7 @@ def test_tri_system_yaml_bridge_layers_resolve(monkeypatch):
 def test_tri_system_mot_driver_trimodal_cpu():
     torch.manual_seed(0)
     vb, ab, ub = _make_tiny_trimodal_components()
-    vstate = _make_tiny_video_state(vb._pipe.dit)
+    vstate = _make_tiny_video_state(vb.dit)
     noisy_actions = torch.randn(2, 4, ab.action_dim)
     timestep = torch.tensor([10.0, 20.0])
     context = torch.randn(2, 3, ab.text_dim)
@@ -336,7 +336,7 @@ def test_tri_system_mot_driver_trimodal_cpu():
 def _tri_system_mot_states(vb, ab, ub, seed: int, *, und_mask: torch.Tensor | None = None):
     torch.manual_seed(seed)
     batch = 2
-    vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=3)
+    vstate = _make_tiny_video_state(vb.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=3)
     noisy_actions = torch.randn(batch, 4, ab.action_dim)
     timestep = torch.tensor([10.0, 20.0])
     context = torch.randn(batch, 3, ab.text_dim)
@@ -412,7 +412,7 @@ def test_tri_system_joint_mask_blocks_action_indirect_video_coupling():
     vlm_hidden = torch.randn(batch, 5, ub.cfg.vlm_input_dim)
 
     def _run(action_seed: int) -> torch.Tensor:
-        vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=2)
+        vstate = _make_tiny_video_state(vb.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=2)
         vstate.hidden_states = video_x.clone()
         vstate.time_mod = t_mod.clone()
         vstate.context = video_context.clone()
@@ -718,7 +718,7 @@ def test_tri_system_forward_rejects_vlm_hidden_batch_mismatch():
     """
     torch.manual_seed(0)
     vb, ab, ub = _make_tiny_trimodal_components()
-    dit = vb._pipe.dit  # noqa: SLF001
+    dit = vb.dit  # noqa: SLF001
 
     # batch=2 video state
     vstate = _make_tiny_video_state(dit, batch=2)
@@ -866,7 +866,7 @@ def test_und_mask_blocks_padding_leak_end_to_end():
         # Deterministic vstate: seed before each construction since
         # _make_tiny_video_state uses torch.randn internally.
         torch.manual_seed(42)
-        vstate = _make_tiny_video_state(vb._pipe.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=3)
+        vstate = _make_tiny_video_state(vb.dit, batch=batch, grid_frames=1, grid_height=2, grid_width=3)
         astate = ab.prepare_state(actions.clone(), torch.zeros(batch), context=context, context_mask=context_mask)
         ustate = ub.prepare_state(vlm_hidden, vlm_attention_mask=und_mask)
         with torch.no_grad():
@@ -1048,7 +1048,7 @@ def test_tri_system_backward_per_block_modulation_grad():
     for p in ub.parameters():
         p.requires_grad_(True)
 
-    dit = vb._pipe.dit  # noqa: SLF001
+    dit = vb.dit  # noqa: SLF001
     vstate = _make_tiny_video_state(dit, batch=2)
     actions = torch.randn(2, 4, ab.action_dim)
     timestep = torch.tensor([10.0, 20.0])
@@ -1076,7 +1076,7 @@ def test_tri_system_per_token_tmod_forward():
     vb, ab, ub = _make_tiny_trimodal_components()
     dim = vb.dim
 
-    dit = vb._pipe.dit  # noqa: SLF001
+    dit = vb.dit  # noqa: SLF001
     batch, seq_len = 2, 6
     vstate = _make_tiny_video_state(dit, batch=batch)
     # 4D t_mod: [B, S, 6, dim] — per-token modulation path (wan_videobackbone.py:575)
@@ -1110,7 +1110,7 @@ def test_tri_system_grad_ckpt_backward_per_block():
         p.requires_grad_(True)
     ab.train()
 
-    dit = vb._pipe.dit  # noqa: SLF001
+    dit = vb.dit  # noqa: SLF001
     vstate = _make_tiny_video_state(dit, batch=2)
     actions = torch.randn(2, 4, ab.action_dim)
     timestep = torch.tensor([10.0, 20.0])
@@ -1158,7 +1158,7 @@ def test_tri_system_optional_gpu_smoke():
     ab.to(device=device, dtype=dtype)
     ub.to(device=device, dtype=dtype)
 
-    vstate = _make_tiny_video_state(vb._pipe.dit, batch=1, grid_frames=1, grid_height=2, grid_width=2, dtype=dtype)
+    vstate = _make_tiny_video_state(vb.dit, batch=1, grid_frames=1, grid_height=2, grid_width=2, dtype=dtype)
     vstate.hidden_states = vstate.hidden_states.to(device=device)
     vstate.time_mod = vstate.time_mod.to(device=device)
     vstate.rope_freqs = vstate.rope_freqs.to(device=device)

@@ -18,7 +18,8 @@ class I2VVariant(WanVariant):
         self, bb, *, frames, ref_images, B, num_frames, height, width, device, dtype, **kw
     ) -> dict:
         dit = bb._dit
-        needs_clip = bool(getattr(dit, "require_clip_embedding", False)) and bb._pipe.image_encoder is not None
+        image_encoder = getattr(bb, "image_encoder", None)
+        needs_clip = bool(getattr(dit, "require_clip_embedding", False)) and image_encoder is not None
         needs_y = bool(getattr(dit, "require_vae_embedding", False))
         if not (needs_clip or needs_y):
             return {}
@@ -49,7 +50,7 @@ class I2VVariant(WanVariant):
             clip_pieces = []
             for img in first_frame_image:
                 img_t = preprocess_image(img.resize((width, height)), dtype=bb.dtype, device=bb.device).to(device)
-                clip_pieces.append(bb._pipe.image_encoder.encode_image([img_t]))
+                clip_pieces.append(image_encoder.encode_image([img_t]))
             clip_feature = torch.cat(clip_pieces, dim=0).to(dtype=dtype, device=device)
 
         if needs_y:

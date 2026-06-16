@@ -381,7 +381,7 @@ def test_C3_external_path_releases_pipe_vae_in_from_pretrained():
     enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
     backbone = WanVideoBackbone.from_pretrained(pipe, external_encoder=enc)
     assert backbone._uses_external_encoder is True
-    assert backbone._pipe.vae is None
+    assert getattr(backbone, "vae", None) is None
 
 
 def test_C4_external_path_state_dict_keys_swap():
@@ -1528,7 +1528,7 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
 
     def _stub_build(name, cfg, **kw):
         bb = nn.Module()
-        bb._pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
+        bb.dit = _FakePipe(vae_z_dim=16, vae_upsample=8).dit  # base.py gates reinit on backbone.dit
         bb._uses_external_encoder = False
         bb.temporal_compression = 4
         bb.causal_temporal = True

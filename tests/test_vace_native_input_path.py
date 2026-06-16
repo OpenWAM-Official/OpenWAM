@@ -161,6 +161,9 @@ def _make_adapter_with_fake_vae(*, vace: bool = True, image_input: bool = False)
     bb = WanVideoBackbone(pipe)
     bb._device = torch.device("cpu")
     bb._dtype = torch.float32
+    # Test handle: the vendored-unit parity test needs the source pipe (the
+    # backbone no longer keeps a ``_pipe`` after the container was removed).
+    bb._src_pipe = pipe
     return bb
 
 
@@ -231,7 +234,9 @@ def test_pixel_inputs_default_first_frame_condition():
     assert vace_mask_pixels.shape == (1, 1, T, H, W)
 
     # t=0: first frame content, mask=0.
-    expected_first_pp = bb._pipe.preprocess_image(first_frame.resize((W, H)))[0]
+    from openwam.model.video_backbone.wan.preprocess import preprocess_image
+
+    expected_first_pp = preprocess_image(first_frame.resize((W, H)), dtype=bb.dtype, device=bb.device)[0]
     assert torch.allclose(vace_video_pixels[0, :, 0], expected_first_pp)
     assert torch.all(vace_mask_pixels[0, :, 0] == 0)
 
@@ -297,7 +302,7 @@ def test_build_vace_context_parity_with_vendored_unit_b1():
     vendored_mask = [mask_t0] + [mask_tk] * (T - 1)
 
     out = _make_vendored_unit_call(
-        bb._pipe,
+        bb._src_pipe,
         vace_video=vendored_vace_video,
         vace_video_mask=vendored_mask,
         vace_reference_image=None,

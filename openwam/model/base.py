@@ -421,16 +421,15 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # the strict load would surface them against zeroed weights instead
         # of the random init, masking the diagnostic.
         if self.video_backbone is not None and from_scratch and source is None:
-            pipe = getattr(self.video_backbone, "_pipe", None)
-            if pipe is None:
+            if getattr(self.video_backbone, "dit", None) is None:
                 logger.warning(
-                    "video_backbone.from_scratch=true but backbone has no '_pipe'; skipping. (Non-Wan backbone?)"
+                    "video_backbone.from_scratch=true but backbone has no 'dit'; skipping. (Non-Wan backbone?)"
                 )
             else:
                 from openwam.model.video_backbone.wan_videobackbone import reinit_dit_from_scratch
 
                 reinit_dit_from_scratch(
-                    pipe,
+                    self.video_backbone,
                     external_encoder=external_encoder,
                     dit_patch_size=self.video_backbone.dit_patch_size,
                 )
@@ -452,12 +451,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # path (where Wan's saved components already match the
         # checkpoint) stays untouched.
         if self.video_backbone is not None and source is not None and external_encoder is not None:
-            pipe = getattr(self.video_backbone, "_pipe", None)
-            if pipe is not None:
+            if getattr(self.video_backbone, "dit", None) is not None:
                 from openwam.model.video_backbone.wan_videobackbone import adapt_dit_to_external_encoder
 
                 adapt_dit_to_external_encoder(
-                    pipe,
+                    self.video_backbone,
                     external_encoder,
                     self.video_backbone.dit_patch_size,
                 )
@@ -958,7 +956,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         wrapper is what actually saves activation memory.
 
         Uses ``nn.Module.get_submodule()`` so dotted paths like
-        ``video_backbone._pipe.text_encoder`` work naturally; unknown names
+        ``video_backbone.text_encoder`` work naturally; unknown names
         are silently skipped, so a freeze list mentioning modules absent on a
         given architecture (e.g. ``vlm_backbone.vlm_model`` on dual_system)
         is harmless.
