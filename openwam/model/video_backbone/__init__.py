@@ -30,6 +30,7 @@ __all__ = [
     "WanVideoBackbone",
     "build_video_backbone",
     "register_video_backbone",
+    "_VIDEO_BACKBONE_REGISTRY",
 ]
 
 # Built-in registrations (kept at the bottom so the implementation can import

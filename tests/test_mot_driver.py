@@ -16,8 +16,8 @@ import pytest
 import torch
 
 from openwam.model.action_backbone.joint_action_dit import ActionDiT
+from openwam.model.architectures.architecture_base import ActionState
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
-from openwam.model.base import ActionState
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState
 from tests.test_openwam_trainer import _MockVideoBackbone
 

@@ -28,7 +28,7 @@ import torch
 from torch import Tensor
 
 from openwam.model.action_backbone.joint_action_dit import ActionDiT
-from openwam.model.architectures.base import BaseWAMArchitecture
+from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.utils import resolve_bridge_layers

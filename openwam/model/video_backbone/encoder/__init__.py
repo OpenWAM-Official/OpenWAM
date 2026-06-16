@@ -45,6 +45,7 @@ __all__ = [
     "WanVideoVAEEncoder",
     "build_video_encoder",
     "register_video_encoder",
+    "_VIDEO_ENCODER_REGISTRY",
 ]
 
 # Built-in registrations (kept at the bottom so implementations can import from

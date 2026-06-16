@@ -2,10 +2,10 @@
 
 Composes package-native components:
   - Loss: implemented inside ``BaseWAMArchitecture.compute_loss``
-    (openwam/model/base.py) — joint flow-matching MSE on video and action.
+    (openwam/model/architectures/architecture_base.py) — joint flow-matching MSE on video and action.
   - Optimizer groups: openwam.train.utils.optimizer_groups
   - Checkpointing: openwam.train.utils.checkpointing
-  - Architecture: openwam.model.registry (DualSystem / MoE / SharedBackbone)
+  - Architecture: openwam.model.architectures.registry (DualSystem / MoE / SharedBackbone)
 
 Usage:
     trainer = OpenWAMTrainer(cfg, accelerator, dataset)
@@ -1038,7 +1038,10 @@ class OpenWAMTrainer(BaseTrainer):
         """
         from safetensors.torch import save_file
 
-        from openwam.model.base import _ensure_cosmos25_reason1_self_contained, _exclude_vlm_from_state_dict
+        from openwam.model.architectures.architecture_base import (
+            _ensure_cosmos25_reason1_self_contained,
+            _exclude_vlm_from_state_dict,
+        )
 
         unwrapped = (
             self.accelerator.unwrap_model(self.architecture) if self.accelerator is not None else self.architecture

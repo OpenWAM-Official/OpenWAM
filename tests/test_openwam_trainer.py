@@ -603,7 +603,7 @@ def test_save_load_checkpoint():
 
 def test_save_checkpoint_excludes_vlm_backbone():
     """Architecture save_checkpoint must exclude vlm_backbone params (saved separately)."""
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     class _VLMArch(BaseWAMArchitecture):
         def __init__(self):
@@ -635,7 +635,7 @@ def test_save_checkpoint_excludes_vlm_backbone():
 
 def test_trainer_checkpoint_excludes_vlm_backbone():
     """Trainer save_checkpoint must exclude vlm_backbone params (saved separately)."""
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
     from openwam.train.openwam_trainer import OpenWAMTrainer
 
     class _VLMArch(BaseWAMArchitecture):

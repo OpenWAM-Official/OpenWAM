@@ -23,8 +23,8 @@ from torch import Tensor
 from openwam.model.architectures._mot_utils import compute_video_tokens_per_frame
 
 if TYPE_CHECKING:
-    from openwam.model.action_backbone.backbone import ActionBackbone
-    from openwam.model.base import ActionState
+    from openwam.model.action_backbone.actionbackbone_base import ActionBackbone
+    from openwam.model.architectures.architecture_base import ActionState
     from openwam.model.video_backbone.videobackbone_base import BlockLoopState, VideoBackbone
     from openwam.model.vlm_backbone.qwen3_vl.und_expert import UnderstandingExpert, UnderstandingState
 

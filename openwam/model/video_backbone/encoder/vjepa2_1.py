@@ -116,7 +116,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # down to Wan-latent O(1). It is structurally trainable, but in the
         # current OpenWAM data path the entire encoder forward runs inside
         # ``BaseWAMArchitecture.preprocess`` / ``prepare_inputs``, both
-        # decorated with ``@torch.no_grad`` (see ``openwam/model/base.py``
+        # decorated with ``@torch.no_grad`` (see ``openwam/model/architectures/architecture_base.py``
         # ~L765/L793). So even with ``requires_grad=True`` the LayerNorm
         # params receive no gradient and behave as a fixed standardizer
         # across training. Both the freeze yaml (which freezes

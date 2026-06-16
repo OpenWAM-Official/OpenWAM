@@ -6,7 +6,7 @@ The flow under test:
         (video_backbone.temporal_compression / causal_temporal)
             │
             ▼
-    openwam.model.base.BaseWAMArchitecture._init_video_backbone
+    openwam.model.architectures.architecture_base.BaseWAMArchitecture._init_video_backbone
         (cross-check: yaml values match constructed encoder.spec — fail-fast)
             │
             ▼
@@ -95,7 +95,7 @@ class _StubArchitecture:
 
 
 def _run_init_video_backbone(model_cfg):
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     stub = _StubArchitecture()
     BaseWAMArchitecture._init_video_backbone(stub, model_cfg)
@@ -324,7 +324,7 @@ def test_C9_prepare_inputs_passes_backbone_temporal_factor(monkeypatch):
     """
     import torch
 
-    import openwam.model.base as base_mod
+    import openwam.model.architectures.architecture_base as base_mod
 
     captured = {}
 

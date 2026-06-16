@@ -12,24 +12,24 @@ import pytest
 def test_execution_plan_import_fails():
     """``ExecutionPlan`` must not be importable from base or any architecture base."""
     with pytest.raises(ImportError):
-        from openwam.model.base import ExecutionPlan  # noqa: F401
+        from openwam.model.architectures.architecture_base import ExecutionPlan  # noqa: F401
     with pytest.raises(ImportError):
-        from openwam.model.architectures.base import ExecutionPlan  # noqa: F401
+        from openwam.model.architectures.architecture_base import ExecutionPlan  # noqa: F401
 
 
 def test_runtime_state_import_fails():
     """``RuntimeState`` must not be importable from base or any architecture base."""
     with pytest.raises(ImportError):
-        from openwam.model.base import RuntimeState  # noqa: F401
+        from openwam.model.architectures.architecture_base import RuntimeState  # noqa: F401
     with pytest.raises(ImportError):
-        from openwam.model.architectures.base import RuntimeState  # noqa: F401
+        from openwam.model.architectures.architecture_base import RuntimeState  # noqa: F401
 
 
 def test_action_state_has_no_runtime_state_field():
     """``ActionState`` must expose a flat ``payload`` field — no ``runtime_state`` wrapper."""
     from dataclasses import fields
 
-    from openwam.model.base import ActionState
+    from openwam.model.architectures.architecture_base import ActionState
 
     field_names = {f.name for f in fields(ActionState)}
     assert "runtime_state" not in field_names, (
@@ -40,7 +40,7 @@ def test_action_state_has_no_runtime_state_field():
 
 def test_action_backbone_abc_has_no_5stage_adapter():
     """ABC must not declare 5-stage block-loop adapter methods."""
-    from openwam.model.action_backbone.backbone import ActionBackbone
+    from openwam.model.action_backbone.actionbackbone_base import ActionBackbone
 
     forbidden = ("before_loop", "run_block", "after_loop", "execution_plan")
     own = vars(ActionBackbone)
@@ -53,7 +53,7 @@ def test_action_backbone_abc_has_no_5stage_adapter():
 
 def test_base_architecture_forward_is_abstract():
     """``BaseWAMArchitecture.forward`` must be abstract — no shared dispatch."""
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     assert "forward" in BaseWAMArchitecture.__abstractmethods__
 

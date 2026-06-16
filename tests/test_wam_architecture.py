@@ -148,7 +148,7 @@ def test_tri_system_rejects_vlm_freeze_in_model_config():
 
 
 def test_freeze_modules_supports_vlm_dotted_path():
-    from openwam.model.architectures.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     class TestArch(BaseWAMArchitecture):
         def __init__(self):
@@ -863,7 +863,7 @@ def test_normalize_architecture_spec_dual_system_joint_self_attn():
 def test_resolve_architecture_config_from_canonical_dual_system_fields():
     from types import SimpleNamespace
 
-    from openwam.model.registry import resolve_architecture_config
+    from openwam.model.architectures.registry import resolve_architecture_config
 
     model_cfg = SimpleNamespace(
         architecture={
@@ -887,7 +887,7 @@ def test_resolve_architecture_config_from_canonical_dual_system_fields():
 def test_resolve_architecture_config_from_canonical_fields():
     from types import SimpleNamespace
 
-    from openwam.model.registry import resolve_architecture_config
+    from openwam.model.architectures.registry import resolve_architecture_config
 
     model_cfg = SimpleNamespace(
         architecture={
@@ -978,7 +978,7 @@ def test_dual_system_self_attn_payload_is_action_dit_state():
 
 def test_register_custom_architecture():
     """Verify that custom architectures can be registered."""
-    from openwam.model.architectures.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
     from openwam.model.architectures.registry import ARCHITECTURE_METADATA, ARCHITECTURE_REGISTRY, register_architecture
 
     @register_architecture("test_custom", framework="test", variant="custom")
@@ -1015,7 +1015,7 @@ def test_freeze_modules_disables_grad_and_wraps_forward_in_no_grad():
     """
     from torch import nn
 
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     class _Arch(BaseWAMArchitecture):
         def __init__(self):
@@ -1055,7 +1055,7 @@ def test_freeze_modules_skips_unknown_paths():
     """
     from torch import nn
 
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     class _Arch(BaseWAMArchitecture):
         def __init__(self):
@@ -1081,7 +1081,7 @@ def test_freeze_modules_wraps_all_descendants_in_no_grad():
     """
     from torch import nn
 
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     class _Inner(nn.Module):
         def __init__(self):
@@ -1127,7 +1127,7 @@ def test_freeze_parent_blocks_trainable_child_grad():
     partial-freeze (e.g. LoRA on a frozen base) requires freezing specific
     leaves, not the parent. See base.py:75-81.
     """
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     class _Arch(BaseWAMArchitecture):
         def __init__(self):
@@ -1164,7 +1164,7 @@ def test_base_generate_signature_takes_extra_pipeline_inputs():
     """
     import inspect
 
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     sig = inspect.signature(BaseWAMArchitecture.generate)
     has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())

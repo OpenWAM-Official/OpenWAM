@@ -199,7 +199,7 @@ def test_idm_teacher_forcing_mask():
 
 def test_idm_resolve_from_framework_variant():
     """IDM can be resolved from (framework='dual_system', variant='idm')."""
-    from openwam.model.registry import _FRAMEWORK_VARIANT_INDEX
+    from openwam.model.architectures.registry import _FRAMEWORK_VARIANT_INDEX
 
     assert ("dual_system", "idm") in _FRAMEWORK_VARIANT_INDEX
     assert _FRAMEWORK_VARIANT_INDEX[("dual_system", "idm")] == "dual_system_idm"

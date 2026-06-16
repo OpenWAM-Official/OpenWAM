@@ -613,7 +613,7 @@ def test_tri_system_generate_reuses_cached_vlm_hidden(monkeypatch):
         return {"video": None, "actions": None}
 
     monkeypatch.setattr(
-        "openwam.model.architectures.base.BaseWAMArchitecture.generate",
+        "openwam.model.architectures.architecture_base.BaseWAMArchitecture.generate",
         _fake_base_generate,
     )
 
@@ -637,7 +637,7 @@ def test_save_checkpoint_excludes_vlm_backbone(tmp_path):
     (b) non-VLM params round-trip correctly,
     (c) load_checkpoint with vlm_backbone present uses strict=False.
     """
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     class _VLMArch(BaseWAMArchitecture):
         def __init__(self):
@@ -674,7 +674,7 @@ def test_save_load_round_trip_vlm_tied_weights_excluded(tmp_path):
     removes all ``vlm_backbone.*`` keys (including the tied pair) before
     ``save_file`` sees them.  Non-VLM params round-trip with value equality.
     """
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     class _VLMWithTiedWeights(BaseWAMArchitecture):
         def __init__(self):
@@ -901,8 +901,8 @@ def test_freeze_modules_wraps_vlm_extract_features_in_no_grad():
     forward output non-grad-tracking — both ``requires_grad=False`` on params
     and ``forward`` wrapped in ``no_grad``, without any backbone-internal check.
     """
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
     from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
-    from openwam.model.base import BaseWAMArchitecture
 
     backbone = _make_qwen_backbone_for_test()
 
@@ -946,8 +946,8 @@ def test_freeze_modules_covers_qwen3vl_inner_model_bypass():
     actually-called ``vlm_model.model.forward`` stays grad-tracking and the
     activation memory we tried to save is silently never released.
     """
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
     from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
-    from openwam.model.base import BaseWAMArchitecture
 
     class _InnerQwenModel(nn.Module):
         """Mimics Qwen3VLModel — the inner transformer that extract_features actually calls."""

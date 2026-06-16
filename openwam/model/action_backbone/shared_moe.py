@@ -33,7 +33,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from openwam.model.action_backbone.backbone import ActionBackbone
+from openwam.model.action_backbone.actionbackbone_base import ActionBackbone
 from openwam.model.action_backbone.components import (
     DEFAULT_ACTION_DECODER_HIDDEN_DIM,
     ActionEncoder,

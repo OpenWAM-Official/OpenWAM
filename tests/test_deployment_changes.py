@@ -892,7 +892,7 @@ class TestCudagraphMarkStepBegin:
     subsequent run' when fixed-shape compile paths are active.
 
     After the architecture refactor the dispatch site is in
-    ``BaseWAMArchitecture.generate()`` in ``base.py``.
+    ``BaseWAMArchitecture.generate()`` in ``architecture_base.py``.
     """
 
     _DISPATCH_SUBSTRINGS = (
@@ -906,7 +906,7 @@ class TestCudagraphMarkStepBegin:
 
     def _source(self):
         # Only check generate() method, not compute_loss()
-        src = (PROJECT_ROOT / "openwam" / "model" / "base.py").read_text()
+        src = (PROJECT_ROOT / "openwam" / "model" / "architectures" / "architecture_base.py").read_text()
         marker = "def generate("
         idx = src.index(marker)
         return src[idx:]

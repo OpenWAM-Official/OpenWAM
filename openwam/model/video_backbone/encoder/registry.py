@@ -1,6 +1,6 @@
 """Video encoder registry + factory.
 
-Decorator-based registration, mirroring ``openwam/model/registry.py`` for
+Decorator-based registration, mirroring ``openwam/model/architectures/registry.py`` for
 architectures. Encoder implementations self-register via
 ``@register_video_encoder("name")``; the package ``__init__`` imports them to
 trigger registration. ``build_video_encoder`` is the config-driven factory.

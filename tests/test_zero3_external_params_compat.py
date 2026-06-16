@@ -1,5 +1,5 @@
 """CPU-only tests for the ZeRO-3 external-parameter protocol on the
-``BaseWAMArchitecture`` (``openwam/model/base.py``) plus regression coverage
+``BaseWAMArchitecture`` (``openwam/model/architectures/architecture_base.py``) plus regression coverage
 that the new ``self(...)`` call in ``compute_loss`` does not affect non-ZeRO-3
 paths.
 
@@ -181,9 +181,7 @@ def test_register_zero3_externals_with_ds_id_calls_spy(monkeypatch):
         f"expected {expected} registrations (one per action block modulation), got {len(spy_calls)}"
     )
     assert all(mod is arch for mod, _ in spy_calls), "all leaves must register against the architecture"
-    assert getattr(arch, "_zero3_externals_registered", False) is True, (
-        "gate must seal after a successful register"
-    )
+    assert getattr(arch, "_zero3_externals_registered", False) is True, "gate must seal after a successful register"
 
 
 # ---------------------------------------------------------------------------
@@ -294,9 +292,7 @@ def test_dual_system_self_attn_external_params_enumerate_action_modulation():
     assert leaves, "joint_self_attn must enumerate at least one external leaf"
     expected = [block.modulation for block in arch.action_backbone.blocks]
     leaf_ids = {id(p) for p in leaves}
-    assert leaf_ids == {id(p) for p in expected}, (
-        "iterator must yield exactly the action backbone modulation leaves"
-    )
+    assert leaf_ids == {id(p) for p in expected}, "iterator must yield exactly the action backbone modulation leaves"
 
 
 def test_dual_system_idm_external_params_enumerate_action_modulation():
@@ -310,9 +306,7 @@ def test_dual_system_idm_external_params_enumerate_action_modulation():
     assert leaves, "dual_system_idm must enumerate at least one external leaf"
     expected = [block.modulation for block in arch.action_backbone.blocks]
     leaf_ids = {id(p) for p in leaves}
-    assert leaf_ids == {id(p) for p in expected}, (
-        "iterator must yield exactly the action backbone modulation leaves"
-    )
+    assert leaf_ids == {id(p) for p in expected}, "iterator must yield exactly the action backbone modulation leaves"
 
 
 def test_tri_system_external_params_enumerate_action_and_und_leaves(monkeypatch):
@@ -342,11 +336,7 @@ def test_tri_system_external_params_enumerate_action_and_und_leaves(monkeypatch)
     expected_video = [block.modulation for block in arch.video_backbone._dit.blocks]
     expected_action = [block.modulation for block in arch.action_backbone.blocks]
     expected_und = [block.wan_und_qkv for block in arch.understanding_expert.blocks]
-    expected_ids = (
-        {id(p) for p in expected_video}
-        | {id(p) for p in expected_action}
-        | {id(p) for p in expected_und}
-    )
+    expected_ids = {id(p) for p in expected_video} | {id(p) for p in expected_action} | {id(p) for p in expected_und}
     leaf_ids = {id(p) for p in leaves}
     assert leaf_ids == expected_ids, (
         "iterator must yield exactly video.modulation ∪ action.modulation ∪ und.wan_und_qkv leaves"
@@ -354,9 +344,7 @@ def test_tri_system_external_params_enumerate_action_and_und_leaves(monkeypatch)
     # Guard the unique-to-tri branch explicitly so a future "iterate only
     # video+action" regression doesn't slip past the set-equality alone.
     und_ids = {id(p) for p in expected_und}
-    assert any(id(p) in und_ids for p in leaves), (
-        "understanding_expert.wan_und_qkv leaves must be present"
-    )
+    assert any(id(p) in und_ids for p in leaves), "understanding_expert.wan_und_qkv leaves must be present"
 
 
 def test_idm_compute_loss_fires_architecture_forward_pre_hook():

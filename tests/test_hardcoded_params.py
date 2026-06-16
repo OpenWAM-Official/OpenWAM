@@ -244,7 +244,7 @@ def test_generate_tile_defaults_are_none():
     """generate() signature should default tile_size and tile_stride to None."""
     import inspect
 
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     sig = inspect.signature(BaseWAMArchitecture.generate)
     assert sig.parameters["tile_size"].default is None

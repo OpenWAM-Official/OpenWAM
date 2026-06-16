@@ -40,7 +40,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from openwam.model.action_backbone.backbone import ActionBackbone
+from openwam.model.action_backbone.actionbackbone_base import ActionBackbone
 from openwam.model.action_backbone.components import (
     RMSNorm,
     get_attention_fn,
@@ -50,7 +50,7 @@ from openwam.model.action_backbone.components import (
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
 if TYPE_CHECKING:
-    from openwam.model.base import ActionState
+    from openwam.model.architectures.architecture_base import ActionState
 
 
 _MOT_VARIANTS = ("joint_self_attn", "idm")
@@ -716,7 +716,7 @@ class ActionDiT(ActionBackbone):
         use_gradient_checkpointing: bool = False,  # noqa: ARG002 — driver handles ckpt itself
         use_gradient_checkpointing_offload: bool = False,  # noqa: ARG002
     ) -> "ActionState":
-        from openwam.model.base import ActionState
+        from openwam.model.architectures.architecture_base import ActionState
 
         x = self._embed_actions(noisy_actions)
         timestep = self._prepare_timestep(timestep, noisy_actions.shape[0])

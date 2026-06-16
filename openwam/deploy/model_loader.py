@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from openwam.model.architectures.base import BaseWAMArchitecture
+from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
 logger = logging.getLogger(__name__)
 

@@ -856,7 +856,7 @@ class _StubArchitecture:
 def _run_init_video_backbone(model_cfg):
     """Drive BaseWAMArchitecture._init_video_backbone in isolation by binding
     the method onto a stub. Returns (stub, raised_or_none)."""
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     stub = _StubArchitecture()
     BaseWAMArchitecture._init_video_backbone(stub, model_cfg)
@@ -1047,7 +1047,7 @@ def test_D2_encoder_block_with_from_scratch_false_silently_ignored(monkeypatch, 
 
     import logging
 
-    caplog.set_level(logging.INFO, logger="openwam.model.base")
+    caplog.set_level(logging.INFO, logger="openwam.model.architectures.architecture_base")
 
     cfg = {
         "video_backbone": {
@@ -1099,7 +1099,7 @@ def test_D2b_deploy_with_encoder_block_and_from_scratch_false_keeps_native_vae(m
     monkeypatch.setattr(vb_pkg, "build_video_backbone", fake_build_backbone)
     # Patch on the class so the bound-method dispatch in _init_video_backbone
     # picks it up.
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     monkeypatch.setattr(BaseWAMArchitecture, "_build_external_encoder_skeleton", staticmethod(fake_skeleton))
 
@@ -1213,7 +1213,7 @@ def test_D5_generate_decode_video_true_blocks_irreversible_encoder():
     directly with a stub backbone, so a regression that renames
     ``vb.video_encoder`` or flips the polarity is caught here.
     """
-    from openwam.model.base import _assert_decode_video_supported
+    from openwam.model.architectures.architecture_base import _assert_decode_video_supported
 
     class _StubBackbone:
         pass
@@ -1449,7 +1449,7 @@ def test_M3d_build_external_encoder_skeleton_picks_vae_entry_from_source():
     ``attr=='vae'`` entry, then dispatches to the registered encoder's
     ``from_skeleton``.
     """
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
     from openwam.model.video_backbone.encoder import (
         _VIDEO_ENCODER_REGISTRY,
         WanVideoVAEEncoder,
@@ -1508,7 +1508,7 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
     isn't called when ``source is not None`` in the cfg.
     """
     import openwam.model.video_backbone.wan.reinit as reinit_mod
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 
     reinit_calls = []
     original_reinit = reinit_mod.reinit_dit_from_scratch
@@ -1683,7 +1683,7 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
 
     from omegaconf import OmegaConf
 
-    from openwam.model.base import BaseWAMArchitecture
+    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
     from openwam.train.utils.optimizer_groups import _pipe_named_parameters
