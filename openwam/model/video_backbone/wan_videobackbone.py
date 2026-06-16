@@ -23,7 +23,7 @@ from openwam.model.video_backbone.videobackbone_base import BlockLoopState, Vide
 
 if TYPE_CHECKING:
     from openwam.model.inference_inputs import InferenceInputs
-from openwam.model.video_backbone.wan.dit import modulate, rope_apply, sinusoidal_embedding_1d
+from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply, sinusoidal_embedding_1d
 from openwam.model.video_backbone.wan.preprocess import (
     check_resize_height_width,
     generate_noise,
@@ -1864,7 +1864,7 @@ def reinit_dit_from_scratch(
 
     import torch.nn as nn
 
-    from openwam.model.video_backbone.wan.dit import MLP, DiTBlock, Head, RMSNorm
+    from openwam.model.video_backbone.wan.models.dit import MLP, DiTBlock, Head, RMSNorm
 
     stdlib_resettable = (nn.Linear, nn.Conv2d, nn.Conv3d, nn.Embedding, nn.LayerNorm)
 

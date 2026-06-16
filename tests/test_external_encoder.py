@@ -1417,7 +1417,7 @@ def test_M3c_wan_vae_encoder_from_skeleton_matches_from_pretrained_topology():
 
     # Deploy path: skeleton from components entry. ``_FakeWanVAEModule``
     # lives at this dotted path; in production it'd be
-    # ``openwam.model.video_backbone.wan.vae.WanVideoVAE38`` etc.
+    # ``openwam.model.video_backbone.wan.models.vae.WanVideoVAE38`` etc.
     components_entry = {
         "attr": "vae",
         "model_class": "tests.test_external_encoder._FakeWanVAEModule",
@@ -1461,7 +1461,7 @@ def test_M3d_build_external_encoder_skeleton_picks_vae_entry_from_source():
         "components": [
             {
                 "attr": "dit",
-                "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+                "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
                 "extra_kwargs": {},
             },
             {

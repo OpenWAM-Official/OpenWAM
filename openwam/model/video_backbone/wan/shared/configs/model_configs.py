@@ -3,7 +3,7 @@ wan_series = [
         # Example: ModelConfig(model_id="krea/krea-realtime-video", origin_file_pattern="krea-realtime-video-14b.safetensors")
         "model_hash": "5ec04e02b42d2580483ad69f4e76346a",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -23,20 +23,20 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth")
         "model_hash": "9c8818c2cbea55eca56c7b447df170da",
         "model_name": "wan_video_text_encoder",
-        "model_class": "openwam.model.video_backbone.wan.text_encoder.WanTextEncoder",
+        "model_class": "openwam.model.video_backbone.wan.models.text_encoder.WanTextEncoder",
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="Wan2.1_VAE.pth")
         "model_hash": "ccc42284ea13e1ad04693284c7a09be6",
         "model_name": "wan_video_vae",
-        "model_class": "openwam.model.video_backbone.wan.vae.WanVideoVAE",
+        "model_class": "openwam.model.video_backbone.wan.models.vae.WanVideoVAE",
         "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_vae.WanVideoVAEStateDictConverter",
     },
     {
         # Example: ModelConfig(model_id="ByteDance/Video-As-Prompt-Wan2.1-14B", origin_file_pattern="transformer/diffusion_pytorch_model*.safetensors")
         "model_hash": "5f90e66a0672219f12d9a626c8c21f61",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -56,14 +56,14 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth")
         "model_hash": "5941c53e207d62f20f9025686193c40b",
         "model_name": "wan_video_image_encoder",
-        "model_class": "openwam.model.video_backbone.wan.image_encoder.WanImageEncoder",
+        "model_class": "openwam.model.video_backbone.wan.models.image_encoder.WanImageEncoder",
         "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_image_encoder.WanImageEncoderStateDictConverter",
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "9269f8db9040a9d860eaca435be61814",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -82,7 +82,7 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-FLF2V-14B-720P", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "3ef3b1f8e1dab83d5b71fd7b617f859f",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -102,7 +102,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.1-Fun-1.3B-Control", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "349723183fc063b2bfc10bb2835cf677",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -121,7 +121,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.1-Fun-1.3B-InP", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "6d6ccde6845b95ad9114ab993d917893",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -140,7 +140,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.1-Fun-14B-Control", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "efa44cddf936c70abd0ea28b6cbe946c",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -159,7 +159,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.1-Fun-14B-InP", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "6bfcfb3b342cb286ce886889d519a77e",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -178,7 +178,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-1.3B-Control-Camera", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "ac6a5aa74f4a0aab6f64eb9a72f19901",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -200,7 +200,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-1.3B-Control", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "70ddad9d3a133785da5ea371aae09504",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -222,7 +222,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-14B-Control-Camera", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "b61c605c2adbd23124d152ed28e049ae",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -244,7 +244,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-14B-Control", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "26bde73488a92e64cc20b0a7485b9e5b",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -266,7 +266,7 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "aafcfd9672c3a2456dc46e1cb6e52c70",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -285,7 +285,7 @@ wan_series = [
         # Example: ModelConfig(model_id="iic/VACE-Wan2.1-1.3B-Preview", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "a61453409b67cd3246cf0c3bebad47ba",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -305,14 +305,14 @@ wan_series = [
         # Example: ModelConfig(model_id="iic/VACE-Wan2.1-1.3B-Preview", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "a61453409b67cd3246cf0c3bebad47ba",
         "model_name": "wan_video_vace",
-        "model_class": "openwam.model.video_backbone.wan.vace.VaceWanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.vace.VaceWanModel",
         "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_vace.VaceWanModelDictConverter",
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-VACE-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "7a513e1f257a861512b1afd387a8ecd9",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -332,7 +332,7 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-VACE-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "7a513e1f257a861512b1afd387a8ecd9",
         "model_name": "wan_video_vace",
-        "model_class": "openwam.model.video_backbone.wan.vace.VaceWanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.vace.VaceWanModel",
         "extra_kwargs": {
             "vace_layers": (0, 5, 10, 15, 20, 25, 30, 35),
             "vace_in_dim": 96,
@@ -349,7 +349,7 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "31fa352acb8a1b1d33cd8764273d80a2",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": True,
             "patch_size": [1, 2, 2],
@@ -369,7 +369,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-Control-Camera", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors")
         "model_hash": "47dbeab5e560db3180adf51dc0232fb1",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -392,7 +392,7 @@ wan_series = [
         # Example: ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-Control", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors")
         "model_hash": "2267d489f0ceb9f21836532952852ee5",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -415,7 +415,7 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors")
         "model_hash": "5b013604280dd715f8457c6ed6d6a626",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -435,7 +435,7 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "1f5ab7703c6fc803fdded85ff040c316",
         "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit.WanModel",
+        "model_class": "openwam.model.video_backbone.wan.models.dit.WanModel",
         "extra_kwargs": {
             "has_image_input": False,
             "patch_size": [1, 2, 2],
@@ -458,7 +458,7 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="Wan2.2_VAE.pth")
         "model_hash": "e1de6c02cdac79f8b739f4d3698cd216",
         "model_name": "wan_video_vae",
-        "model_class": "openwam.model.video_backbone.wan.vae.WanVideoVAE38",
+        "model_class": "openwam.model.video_backbone.wan.models.vae.WanVideoVAE38",
         "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_vae.WanVideoVAEStateDictConverter",
     },
 ]

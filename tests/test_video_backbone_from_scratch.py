@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from openwam.model.video_backbone.wan.dit import RMSNorm, WanModel
+from openwam.model.video_backbone.wan.models.dit import RMSNorm, WanModel
 from openwam.model.video_backbone.wan_videobackbone import reinit_dit_from_scratch
 
 # ---------------------------------------------------------------------------

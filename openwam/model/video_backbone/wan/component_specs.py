@@ -96,7 +96,7 @@ def generate_video_backbone_component_specs(model_dir: str) -> dict:
     tokenizer_src = os.path.join(model_dir, "google", "umt5-xxl")
     if os.path.isdir(tokenizer_src):
         result["tokenizer"] = {
-            "class": "openwam.model.video_backbone.wan.text_encoder.HuggingfaceTokenizer",
+            "class": "openwam.model.video_backbone.wan.models.text_encoder.HuggingfaceTokenizer",
             "attr": "tokenizer",
             "subdir": "tokenizer/google/umt5-xxl",
             "path_kwarg": "name",

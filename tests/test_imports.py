@@ -230,7 +230,7 @@ def test_wan_dit_block_public_attrs_for_mot():
 
     import torch.nn as nn
 
-    from openwam.model.video_backbone.wan.dit import DiTBlock
+    from openwam.model.video_backbone.wan.models.dit import DiTBlock
 
     block = DiTBlock(has_image_input=False, dim=32, num_heads=4, ffn_dim=64, eps=1e-6)
     for name in ("self_attn", "cross_attn", "norm1", "norm2", "norm3", "ffn", "modulation"):

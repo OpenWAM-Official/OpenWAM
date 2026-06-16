@@ -350,7 +350,7 @@ def _log_attention_backends(logger):
 
     # --- Video DiT backend (Wan first-class path, checked at import time, no env var) ---
     try:
-        import openwam.model.video_backbone.wan.dit as _vdit
+        import openwam.model.video_backbone.wan.models.dit as _vdit
 
         if getattr(_vdit, "FLASH_ATTN_3_AVAILABLE", False):
             vdit_backend = "flash_attention_3"

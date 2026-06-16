@@ -19,14 +19,14 @@ def test_import_pipeline():
 
 def test_import_wan_model():
     """WanModel (video DiT) should be importable."""
-    from openwam.model.video_backbone.wan.dit import WanModel
+    from openwam.model.video_backbone.wan.models.dit import WanModel
 
     assert WanModel is not None
 
 
 def test_wan_model_has_dim():
     """WanModel instance should expose .dim attribute for video_dim derivation."""
-    from openwam.model.video_backbone.wan.dit import WanModel
+    from openwam.model.video_backbone.wan.models.dit import WanModel
 
     # Tiny model for testing (not real weights)
     model = WanModel(
@@ -47,14 +47,14 @@ def test_wan_model_has_dim():
 
 def test_import_vae():
     """WanVideoVAE should be importable."""
-    from openwam.model.video_backbone.wan.vae import WanVideoVAE
+    from openwam.model.video_backbone.wan.models.vae import WanVideoVAE
 
     assert WanVideoVAE is not None
 
 
 def test_import_text_encoder():
     """WanTextEncoder should be importable."""
-    from openwam.model.video_backbone.wan.text_encoder import WanTextEncoder
+    from openwam.model.video_backbone.wan.models.text_encoder import WanTextEncoder
 
     assert WanTextEncoder is not None
 
@@ -174,7 +174,7 @@ def _build_tiny_wan_backbone(*, ti2v: bool):
     """
     from types import SimpleNamespace
 
-    from openwam.model.video_backbone.wan.dit import WanModel
+    from openwam.model.video_backbone.wan.models.dit import WanModel
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     model = WanModel(
@@ -267,7 +267,7 @@ def test_zero_clean_prefix_t_mod_overwrites_first_frame():
     )
 
     # Sanity: the first-frame row must match the manually computed t=0 projection.
-    from openwam.model.video_backbone.wan.dit import sinusoidal_embedding_1d
+    from openwam.model.video_backbone.wan.models.dit import sinusoidal_embedding_1d
 
     zero_ts = torch.zeros_like(timestep)
     t_zero = model.time_embedding(sinusoidal_embedding_1d(model.freq_dim, zero_ts).to(latents.dtype))

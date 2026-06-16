@@ -16,7 +16,7 @@ from openwam.model.architectures.shared_backbone.mask import (
     set_video_attention_mask_mode,
 )
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState
-from openwam.model.video_backbone.wan.dit import DiTBlock, modulate, rope_apply
+from openwam.model.video_backbone.wan.models.dit import DiTBlock, modulate, rope_apply
 from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
 

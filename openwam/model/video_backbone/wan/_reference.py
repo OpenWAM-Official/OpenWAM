@@ -3,9 +3,9 @@ from typing import Optional
 import torch
 from einops import rearrange
 
-from openwam.model.video_backbone.wan.dit import WanModel, sinusoidal_embedding_1d
+from openwam.model.video_backbone.wan.models.dit import WanModel, sinusoidal_embedding_1d
+from openwam.model.video_backbone.wan.models.vace import VaceWanModel
 from openwam.model.video_backbone.wan.shared.core import gradient_checkpoint_forward
-from openwam.model.video_backbone.wan.vace import VaceWanModel
 
 
 def model_fn_wan_video(

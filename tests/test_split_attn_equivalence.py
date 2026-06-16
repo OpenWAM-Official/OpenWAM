@@ -13,12 +13,12 @@ import torch
 
 from openwam.model.action_backbone.joint_action_dit import ActionDiT, SelfAttnActionDiTBlock
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState
-from openwam.model.video_backbone.wan.dit import DiTBlock, precompute_freqs_cis_3d
+from openwam.model.video_backbone.wan.models.dit import DiTBlock, precompute_freqs_cis_3d
 
 
 def _attention_single_stream(q, k, v, num_heads):
     """Standalone attention matching what DiTBlock.self_attn.attn does internally."""
-    from openwam.model.video_backbone.wan.dit import flash_attention
+    from openwam.model.video_backbone.wan.models.dit import flash_attention
 
     return flash_attention(q, k, v, num_heads=num_heads)
 
@@ -78,7 +78,7 @@ def _wan_pre_post_via_adapter(block: DiTBlock, state: BlockLoopState, num_heads:
     the adapter drifts from the plain block forward.
     """
     del num_heads  # plumbed via block.self_attn.num_heads
-    from openwam.model.video_backbone.wan.dit import modulate, rope_apply
+    from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply
 
     t_mod = state.time_mod
     chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=1)

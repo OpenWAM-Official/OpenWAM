@@ -15,7 +15,7 @@ from omegaconf import OmegaConf
 from openwam.model.action_backbone.joint_action_dit import ActionDiT, ActionDiTState
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState
-from openwam.model.video_backbone.wan.dit import DiTBlock
+from openwam.model.video_backbone.wan.models.dit import DiTBlock
 from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 from openwam.model.vlm_backbone.qwen3_vl import (
     Qwen3VLBackbone,
@@ -349,7 +349,7 @@ def _tri_system_mot_states(vb, ab, ub, seed: int, *, und_mask: torch.Tensor | No
 
 def _patch_wan_flash_attention_to_sdpa(monkeypatch):
     """Keep CPU-only tests off CUDA-only flash-attn kernels when installed."""
-    from openwam.model.video_backbone.wan import dit as wan_dit
+    from openwam.model.video_backbone.wan.models import dit as wan_dit
 
     def _sdpa(q, k, v, num_heads: int, compatibility_mode=False, attn_mask=None):  # noqa: ARG001
         q = wan_dit.rearrange(q, "b s (n d) -> b n s d", n=num_heads)

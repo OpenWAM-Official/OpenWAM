@@ -32,7 +32,7 @@ CUDA_AVAILABLE = torch.cuda.is_available()
 
 def _load_dit_only(model_dir: str, device: str = "cuda:0"):
     """Load just the DiT model from a checkpoint directory."""
-    from openwam.model.video_backbone.wan.dit import WanModel
+    from openwam.model.video_backbone.wan.models.dit import WanModel
 
     with open(os.path.join(model_dir, "config.json")) as f:
         cfg = json.load(f)
