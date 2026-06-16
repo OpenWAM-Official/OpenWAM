@@ -182,7 +182,7 @@ def build_training_pipeline(cfg: DictConfig, *, skip_native_vae: bool = False):
     Returns:
         Initialized WanVideoPipeline ready for training.
     """
-    from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline
+    from openwam.model.video_backbone.wan.loader import load_wan_components
 
     t = cfg.training
     backbone_cfg = cfg.model.video_backbone
@@ -196,12 +196,12 @@ def build_training_pipeline(cfg: DictConfig, *, skip_native_vae: bool = False):
     if skip_native_vae:
         model_configs = _filter_native_vae_configs(model_configs)
 
-    # Load pipeline
-    pipe = WanVideoPipeline.from_pretrained(
-        torch_dtype=torch.bfloat16,
+    # Load components
+    pipe = load_wan_components(
+        model_configs,
+        tokenizer_config,
         device=device,
-        model_configs=model_configs,
-        tokenizer_config=tokenizer_config,
+        torch_dtype=torch.bfloat16,
     )
 
     # Apply LoRA if configured
@@ -214,11 +214,18 @@ def build_training_pipeline(cfg: DictConfig, *, skip_native_vae: bool = False):
             int(getattr(t, "lora_rank", 32)),
         )
 
-    # Gradient checkpointing
+    # Gradient checkpointing — the holder is not an nn.Module, so walk each
+    # loaded sub-module's own tree (was ``pipe.modules()`` on the old pipeline).
     if bool(t.use_gradient_checkpointing):
-        for module in pipe.modules():
-            if hasattr(module, "gradient_checkpointing_enable"):
-                module.gradient_checkpointing_enable()
+        from openwam.model.video_backbone.wan.loader import _MODULE_SLOTS
+
+        for _name in _MODULE_SLOTS:
+            comp = getattr(pipe, _name, None)
+            if comp is None:
+                continue
+            for module in comp.modules():
+                if hasattr(module, "gradient_checkpointing_enable"):
+                    module.gradient_checkpointing_enable()
 
     return pipe
 

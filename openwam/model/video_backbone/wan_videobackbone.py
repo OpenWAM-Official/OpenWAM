@@ -1606,23 +1606,6 @@ class WanVideoBackbone(VideoBackbone):
     #     ``vace_mask = [0, 1, ..., 1]``, ``ref_image = None`` — keeping
     #     ``vace_context.shape[2] == video_latent.shape[2]`` and avoiding the
     #     extra latent frame that ref-prepend would inject.
-    #
-    # A parity test in ``tests/test_vace_native_input_path.py`` pins
-    # ``_build_vace_context_from_pixels`` to be element-wise equal to the
-    # vendored unit at B=1 (no ref_image case) to guarantee no semantic drift.
-
-    @staticmethod
-    def _is_vace_unit(unit) -> bool:
-        """True iff ``unit`` is the vendored ``WanVideoUnit_VACE``.
-
-        We supersede that unit's pixel→latent encode with
-        :meth:`_build_vace_context_from_pixels` so train and deploy share the
-        same batched path. Skipping the unit avoids both double work and the
-        B=1 ref-prepend semantic that conflicts with our T_lat==video-latent
-        length contract.
-        """
-        return unit.__class__.__name__ == "WanVideoUnit_VACE"
-
     def _build_vace_pixel_inputs(
         self,
         *,
@@ -1844,9 +1827,9 @@ class WanVideoBackbone(VideoBackbone):
         Mirrors the training path in :meth:`preprocess_input_for_train`: builds the
         same pixel-space (vace_video, vace_mask) pair from the user-facing
         ``first_frame_image`` / ``vace_video`` inputs and writes the
-        resulting ``vace_context`` into ``inputs_shared``. Vendored
-        ``WanVideoUnit_VACE`` is skipped (see :meth:`_is_vace_unit`) so the
-        two paths produce bit-equivalent vace_context.
+        resulting ``vace_context`` into ``inputs_shared`` via the same batched
+        pixel→latent encode as training, so the two paths produce
+        bit-equivalent vace_context.
 
         ``tiled`` / ``tile_size`` / ``tile_stride`` are forwarded so the
         deploy default (``tiled=True``, set on the InferenceInputs dataclass)
@@ -2102,10 +2085,10 @@ class WanVideoBackbone(VideoBackbone):
                 instantiating, so the empty native VAE never allocates CPU
                 tensors. Used by the irreversible external-encoder path.
         """
-        from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline
+        from openwam.model.video_backbone.wan.loader import new_components
         from openwam.model.video_backbone.wan.pipeline_builder import _build_tokenizer, _import_class
 
-        pipe = WanVideoPipeline(device=device, torch_dtype=torch.bfloat16)
+        pipe = new_components(device=device, torch_dtype=torch.bfloat16)
 
         for entry in components:
             if skip_native_vae and entry.get("attr") == "vae":
@@ -2167,7 +2150,7 @@ class WanVideoBackbone(VideoBackbone):
                 :meth:`WanVideoPipeline.from_pretrained` materializes it.
                 Used by the irreversible external-encoder path.
         """
-        from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline
+        from openwam.model.video_backbone.wan.loader import load_wan_components
         from openwam.model.video_backbone.wan.pipeline_builder import (
             _filter_native_vae_configs,
             discover_model_files,
@@ -2176,11 +2159,11 @@ class WanVideoBackbone(VideoBackbone):
         model_configs, tokenizer_config = discover_model_files(model_path)
         if skip_native_vae:
             model_configs = _filter_native_vae_configs(model_configs)
-        return WanVideoPipeline.from_pretrained(
-            torch_dtype=torch.bfloat16,
+        return load_wan_components(
+            model_configs,
+            tokenizer_config,
             device=device,
-            model_configs=model_configs,
-            tokenizer_config=tokenizer_config,
+            torch_dtype=torch.bfloat16,
         )
 
 

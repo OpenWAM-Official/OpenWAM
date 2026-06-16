@@ -19,7 +19,7 @@ import pytest
 import torch
 from safetensors.torch import load_file
 
-from openwam.model.video_backbone.wan.pipeline import model_fn_wan_video
+from openwam.model.video_backbone.wan._reference import model_fn_wan_video
 from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
 # Override via env vars on machines that mount the checkpoints elsewhere; the

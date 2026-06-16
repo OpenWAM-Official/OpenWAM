@@ -8,11 +8,13 @@ import torch
 
 
 def test_import_pipeline():
-    """WanVideoPipeline should be importable from the first-class Wan backbone package."""
-    from openwam.model.video_backbone.wan.pipeline import WanVideoPipeline
+    """The Wan construction entry (loader) + golden-reference forward import cleanly."""
+    from openwam.model.video_backbone.wan._reference import model_fn_wan_video
+    from openwam.model.video_backbone.wan.loader import load_wan_components, new_components
 
-    assert WanVideoPipeline is not None
-    assert hasattr(WanVideoPipeline, "from_pretrained")
+    assert callable(load_wan_components)
+    assert callable(new_components)
+    assert callable(model_fn_wan_video)
 
 
 def test_import_wan_model():

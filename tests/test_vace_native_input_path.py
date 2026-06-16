@@ -161,44 +161,7 @@ def _make_adapter_with_fake_vae(*, vace: bool = True, image_input: bool = False)
     bb = WanVideoBackbone(pipe)
     bb._device = torch.device("cpu")
     bb._dtype = torch.float32
-    # Test handle: the vendored-unit parity test needs the source pipe (the
-    # backbone no longer keeps a ``_pipe`` after the container was removed).
-    bb._src_pipe = pipe
     return bb
-
-
-def _make_vendored_unit_call(pipe, *, vace_video, vace_video_mask, vace_reference_image, num_frames, H, W):
-    """Run the real ``WanVideoUnit_VACE.process`` with our fake pipe.
-
-    The vendored unit expects ``pipe`` to expose ``vae`` / ``preprocess_video``
-    / ``load_models_to_device`` / ``device`` / ``torch_dtype``. We add a
-    no-op ``load_models_to_device`` and reuse the fake pipe otherwise.
-    """
-    from openwam.model.video_backbone.wan.pipeline import WanVideoUnit_VACE
-
-    pipe.load_models_to_device = lambda names: None
-    pipe.torch_dtype = torch.float32
-    pipe.device = torch.device("cpu")
-    unit = WanVideoUnit_VACE()
-    out = unit.process(
-        pipe,
-        vace_video=vace_video,
-        vace_video_mask=vace_video_mask,
-        vace_reference_image=vace_reference_image,
-        vace_scale=1.0,
-        height=H,
-        width=W,
-        num_frames=num_frames,
-        tiled=False,
-        tile_size=(30, 52),
-        tile_stride=(15, 26),
-    )
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 def _make_pil_first_frame(H: int = 32, W: int = 32, seed: int = 0):
@@ -260,63 +223,6 @@ def test_pixel_inputs_unconditional():
     )
     assert torch.all(vp == -1.0)
     assert torch.all(vm == 1.0)
-
-
-def test_build_vace_context_parity_with_vendored_unit_b1():
-    """At B=1 (no ref_image prepend), ``_build_vace_context_from_pixels`` must
-    be element-equal to the vendored ``WanVideoUnit_VACE.process`` output.
-
-    This is the core anti-shift guarantee: the batched helper is a faithful
-    1:1 translation of the vendored unit. Any divergence here is a real
-    numerical shift between train/deploy and the native path.
-    """
-    bb = _make_adapter_with_fake_vae()
-    H = W = 32
-    T = 13
-
-    # Build pixel-space inputs through the helper (this is what training
-    # would produce).
-    first_frame = _make_pil_first_frame(H=H, W=W, seed=7)
-    vp, vm = bb._build_vace_pixel_inputs(
-        vace_videos=None,
-        first_frame_image=[first_frame],
-        B=1,
-        num_frames=T,
-        height=H,
-        width=W,
-        dtype=torch.float32,
-        device=torch.device("cpu"),
-    )
-    ours = bb._build_vace_context_from_pixels(vp, vm)
-
-    # The vendored unit needs PIL-list inputs. Construct the same content via
-    # PIL: a list of [first_frame, black, black, ...] frames and a list of
-    # [black_mask, white_mask, white_mask, ...] frames.
-    import numpy as np
-    from PIL import Image
-
-    black_pil = Image.fromarray(np.zeros((H, W, 3), dtype=np.uint8))
-    vendored_vace_video = [first_frame.resize((W, H))] + [black_pil] * (T - 1)
-    mask_t0 = Image.fromarray(np.zeros((H, W, 3), dtype=np.uint8))  # RGB 0 → 0
-    mask_tk = Image.fromarray(np.full((H, W, 3), 255, dtype=np.uint8))  # RGB 255 → 1
-    vendored_mask = [mask_t0] + [mask_tk] * (T - 1)
-
-    out = _make_vendored_unit_call(
-        bb._src_pipe,
-        vace_video=vendored_vace_video,
-        vace_video_mask=vendored_mask,
-        vace_reference_image=None,
-        num_frames=T,
-        H=H,
-        W=W,
-    )
-    theirs = out["vace_context"]
-
-    assert ours.shape == theirs.shape, f"shape mismatch: ours={ours.shape}, theirs={theirs.shape}"
-    assert torch.allclose(ours, theirs, atol=1e-6, rtol=1e-6), (
-        "Native parity broken: batched helper output diverges from the vendored "
-        f"unit at B=1. Max abs diff = {(ours - theirs).abs().max().item():.3e}"
-    )
 
 
 def test_preprocess_input_vace_drops_first_frame_latents(monkeypatch):
@@ -444,18 +350,3 @@ def test_build_vace_context_for_deploy_forwards_tiled_kwargs():
         assert call["tiled"] is True
         assert call["tile_size"] == (30, 52)
         assert call["tile_stride"] == (15, 26)
-
-
-def test_is_vace_unit_identifies_vendored_class():
-    """``_is_vace_unit`` must positively identify the vendored unit so deploy
-    can skip it; non-VACE units must return False."""
-    from openwam.model.video_backbone.wan.pipeline import (
-        WanVideoUnit_ImageEmbedderVAE,
-        WanVideoUnit_PromptEmbedder,
-        WanVideoUnit_VACE,
-    )
-    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
-
-    assert WanVideoBackbone._is_vace_unit(WanVideoUnit_VACE())
-    assert not WanVideoBackbone._is_vace_unit(WanVideoUnit_PromptEmbedder())
-    assert not WanVideoBackbone._is_vace_unit(WanVideoUnit_ImageEmbedderVAE())

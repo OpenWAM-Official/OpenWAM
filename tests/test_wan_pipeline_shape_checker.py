@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from openwam.model.video_backbone.wan.shared.diffusion.base_pipeline import BasePipeline
+from openwam.model.video_backbone.wan.preprocess import check_resize_height_width
 
 
 class _StubPipe:
@@ -36,7 +36,15 @@ class _StubPipe:
 
 
 def _call(pipe, num_frames: int) -> int:
-    height, width, out_frames = BasePipeline.check_resize_height_width(pipe, 384, 320, num_frames)
+    height, width, out_frames = check_resize_height_width(
+        384,
+        320,
+        num_frames,
+        height_division_factor=pipe.height_division_factor,
+        width_division_factor=pipe.width_division_factor,
+        time_division_factor=pipe.time_division_factor,
+        time_division_remainder=pipe.time_division_remainder,
+    )
     assert (height, width) == (384, 320)
     return out_frames
 
