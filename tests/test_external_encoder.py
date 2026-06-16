@@ -24,7 +24,6 @@ import torch.nn as nn
 from PIL import Image
 from torch import Tensor
 
-from openwam.model.video_backbone.adapter import VideoBackbone
 from openwam.model.video_backbone.encoder import (
     _VIDEO_ENCODER_REGISTRY,
     VideoEncoder,
@@ -32,6 +31,7 @@ from openwam.model.video_backbone.encoder import (
     build_video_encoder,
     register_video_encoder,
 )
+from openwam.model.video_backbone.videobackbone_base import VideoBackbone
 
 # ---------------------------------------------------------------------------
 # Mock encoders for the ABC/registry/spec layer (no real weights needed).

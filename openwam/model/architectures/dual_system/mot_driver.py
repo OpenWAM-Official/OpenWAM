@@ -29,7 +29,7 @@ from openwam.model.architectures._mot_utils import compute_video_tokens_per_fram
 if TYPE_CHECKING:
     from openwam.model.action_backbone.backbone import ActionBackbone
     from openwam.model.base import ActionState
-    from openwam.model.video_backbone.adapter import BlockLoopState, VideoBackbone
+    from openwam.model.video_backbone.videobackbone_base import BlockLoopState, VideoBackbone
 
 logger = logging.getLogger(__name__)
 

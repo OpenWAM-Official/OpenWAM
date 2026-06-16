@@ -147,7 +147,7 @@ def test_wan_adapter_needs_first_frame_skip_truth_table():
 def test_video_backbone_abc_needs_first_frame_skip_default_false():
     """The ABC default keeps every backbone that doesn't opt in OFF, so cosmos25
     T2V (no override) treats ``latent[0]`` as a predicted frame in the loss."""
-    from openwam.model.video_backbone.adapter import VideoBackbone
+    from openwam.model.video_backbone.videobackbone_base import VideoBackbone
 
     # Property is defined on the ABC so we can read it off the class without
     # instantiating (constructor needs subclass-specific kwargs).

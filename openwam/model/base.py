@@ -174,7 +174,7 @@ def _assert_decode_video_supported(vb) -> None:
 
 if TYPE_CHECKING:
     from openwam.model.action_backbone.backbone import ActionBackbone
-    from openwam.model.video_backbone.adapter import VideoBackbone
+    from openwam.model.video_backbone.videobackbone_base import VideoBackbone
 
 
 @dataclass

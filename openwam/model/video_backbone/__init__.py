@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Type
 
-from openwam.model.video_backbone.adapter import (
+from openwam.model.video_backbone.videobackbone_base import (
     BlockLoopState,
     VideoBackbone,
 )

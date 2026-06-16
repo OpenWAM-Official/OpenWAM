@@ -28,7 +28,7 @@ from einops import rearrange
 from torch import Tensor
 
 from openwam.model.compile_options import cfg_get, torch_compile_kwargs
-from openwam.model.video_backbone.adapter import BlockLoopState, VideoBackbone
+from openwam.model.video_backbone.videobackbone_base import BlockLoopState, VideoBackbone
 
 if TYPE_CHECKING:
     from openwam.model.inference_inputs import InferenceInputs
