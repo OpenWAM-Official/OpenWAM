@@ -1,7 +1,7 @@
 """Native-VACE input convention parity + behavior tests (CPU-only).
 
 Covers the refactor in :pull:`/* this PR */` that switched
-``wan_adapter.preprocess_input_for_train`` / ``preprocess_input_for_inference`` from the
+``WanVideoBackbone.preprocess_input_for_train`` / ``preprocess_input_for_inference`` from the
 old latent-space "manually inject ref frame" path to the native
 pixel-space ``{vace_video, vace_video_mask, ref_image=None}`` convention.
 

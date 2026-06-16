@@ -123,7 +123,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         """Raw-access leaves read by the MoT driver outside the owners' ``__call__``.
 
         - ``vb._dit.blocks[i].modulation`` (Wan / Cosmos25) is read inside
-          ``pre_attn_at_layer_for_compile`` (``wan_adapter.py:536``)
+          ``pre_attn_at_layer_for_compile`` (``wan_videobackbone.py:824``)
         - ``ab.blocks[i].modulation`` is read inside
           ``ActionDiT.pre_attn_at_layer_for_compile`` (``joint_action_dit.py:782``)
         """

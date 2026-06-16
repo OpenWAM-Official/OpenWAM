@@ -1529,7 +1529,7 @@ class WanVideoBackbone(VideoBackbone):
             # External encoders do not expose a generic tiled-encode contract;
             # fall back to batch_encode. Currently unreachable since VACE +
             # external_encoder is fail-fast at construction
-            # (``wan_adapter.py:_pipe.vace is not None`` branch).
+            # (``wan_videobackbone.py:_pipe.vace is not None`` branch).
             return self._encoder.batch_encode(pixels).to(dtype=pixels.dtype, device=pixels.device)
         # Native Wan VAE: loop B samples (deploy is B=1, training never sets
         # tiled=True) and call the per-sample tiled encode.

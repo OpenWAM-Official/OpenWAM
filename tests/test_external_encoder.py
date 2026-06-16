@@ -275,7 +275,7 @@ def test_B4_wan_vae_is_reversible_true_by_default():
 
 
 class _FakeDiT(nn.Module):
-    """Minimal DiT stand-in carrying the attributes wan_adapter / reinit
+    """Minimal DiT stand-in carrying the attributes WanVideoBackbone / reinit
     inspect. Notably has ``patch_embedding`` and ``head.head`` for the
     rebuild path, and ``has_image_input`` for the I2V fail-fast probe.
     """
@@ -304,7 +304,7 @@ class _FakeDiT(nn.Module):
 
 
 class _FakePipe(nn.Module):
-    """Minimal pipe stand-in that wan_adapter.from_pretrained mutates.
+    """Minimal pipe stand-in that WanVideoBackbone.from_pretrained mutates.
 
     Inherits ``nn.Module`` so that ``state_dict()`` on the surrounding
     backbone recurses into ``self._pipe.vae.*`` keys — matching how the
@@ -325,7 +325,7 @@ class _FakePipe(nn.Module):
         # ``vace`` is a sibling module on ``WanVideoPipeline`` when the
         # backbone is from the VACE family (``wan21_vace_1_3b`` /
         # ``wan_vace_14b``). The actual module is a ``VaceWanModel``; for
-        # the wan_adapter fail-fast probe (which only does
+        # the WanVideoBackbone fail-fast probe (which only does
         # ``getattr(pipe, "vace", None) is not None``) a plain placeholder
         # is sufficient.
         self.vace = nn.Module() if has_vace else None
@@ -1336,7 +1336,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
     """
     from omegaconf import OmegaConf
 
-    from openwam.model.video_backbone import wan_videobackbone as wan_adapter
+    from openwam.model.video_backbone import wan_videobackbone
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     captured: dict = {}
@@ -1350,7 +1350,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         return _FakePipe(vae_z_dim=16, vae_upsample=8)
 
     original = WanVideoBackbone._build_pipe_from_model_path
-    wan_adapter.WanVideoBackbone._build_pipe_from_model_path = staticmethod(_spy_model_path)
+    wan_videobackbone.WanVideoBackbone._build_pipe_from_model_path = staticmethod(_spy_model_path)
     import openwam.model.video_backbone.wan.pipeline_builder as pb_mod
 
     original_btp = pb_mod.build_training_pipeline
@@ -1404,7 +1404,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         WanVideoBackbone.from_pretrained(deploy_cfg)
         assert captured["skip"] is False
     finally:
-        wan_adapter.WanVideoBackbone._build_pipe_from_model_path = original
+        wan_videobackbone.WanVideoBackbone._build_pipe_from_model_path = original
         pb_mod.build_training_pipeline = original_btp
 
 
@@ -1507,12 +1507,12 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
     We probe by spying on the module-level function and asserting it
     isn't called when ``source is not None`` in the cfg.
     """
-    import openwam.model.video_backbone.wan_videobackbone as wan_adapter_mod
+    import openwam.model.video_backbone.wan_videobackbone as wan_videobackbone_mod
     from openwam.model.base import BaseWAMArchitecture
-    from openwam.model.video_backbone import wan_videobackbone as wan_adapter
+    from openwam.model.video_backbone import wan_videobackbone
 
     reinit_calls = []
-    original_reinit = wan_adapter_mod.reinit_dit_from_scratch
+    original_reinit = wan_videobackbone_mod.reinit_dit_from_scratch
 
     def _spy_reinit(*a, **kw):
         # Record-only stub: don't invoke the real reinit because the
@@ -1520,10 +1520,10 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
         # IndexError. We only care whether reinit was called at all.
         reinit_calls.append((a, kw))
 
-    wan_adapter_mod.reinit_dit_from_scratch = _spy_reinit
+    wan_videobackbone_mod.reinit_dit_from_scratch = _spy_reinit
     # ``base.py`` imports it locally inside the function, so the patch
-    # must target the wan_adapter module attribute.
-    wan_adapter.reinit_dit_from_scratch = _spy_reinit
+    # must target the wan_videobackbone module attribute.
+    wan_videobackbone.reinit_dit_from_scratch = _spy_reinit
 
     # Make build_video_backbone hand back a stub backbone so we can drive
     # _init_video_backbone end-to-end without a real pipeline build.
@@ -1573,8 +1573,8 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
             f"training path with from_scratch=true should reinit exactly once, got {len(reinit_calls)}"
         )
     finally:
-        wan_adapter_mod.reinit_dit_from_scratch = original_reinit
-        wan_adapter.reinit_dit_from_scratch = original_reinit
+        wan_videobackbone_mod.reinit_dit_from_scratch = original_reinit
+        wan_videobackbone.reinit_dit_from_scratch = original_reinit
         vb_pkg.build_video_backbone = original_build
 
 

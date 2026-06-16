@@ -1079,7 +1079,7 @@ def test_tri_system_per_token_tmod_forward():
     dit = vb._pipe.dit  # noqa: SLF001
     batch, seq_len = 2, 6
     vstate = _make_tiny_video_state(dit, batch=batch)
-    # 4D t_mod: [B, S, 6, dim] — per-token modulation path (wan_adapter.py:489-493)
+    # 4D t_mod: [B, S, 6, dim] — per-token modulation path (wan_videobackbone.py:575)
     vstate.time_mod = torch.randn(batch, seq_len, 6, dim)
 
     actions = torch.randn(batch, 4, ab.action_dim)

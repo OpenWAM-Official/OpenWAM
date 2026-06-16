@@ -97,7 +97,7 @@ def test_wan_video_backbone_is_ti2v():
     assert adapter_b._is_ti2v is False
 
 
-def test_wan_adapter_needs_first_frame_skip_truth_table():
+def test_wan_videobackbone_needs_first_frame_skip_truth_table():
     """``needs_first_frame_skip`` is True only for Wan configs where
     ``latent[0]`` is unconditionally a clean conditioning frame the loss
     must skip: TI2V (``fuse_vae_embedding_in_latents``) is the only such

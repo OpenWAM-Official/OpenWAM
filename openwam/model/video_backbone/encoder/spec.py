@@ -34,7 +34,7 @@ class VideoEncoderSpec:
             standalone latent token (Wan-style); False for uniform tubelet
             schedules.
         pixel_range: Nominal input range. Informational only — not consumed
-            by the backbone (see ``adapter.py`` ``_ENCODER_SPEC_REQUIRED_FIELDS``;
+            by the backbone (see ``videobackbone_base.py`` ``_ENCODER_SPEC_REQUIRED_FIELDS``;
             deliberately excluded from cross-encoder validation). Encoders
             that apply additional internal normalization in ``preprocess_video``
             (e.g. ImageNet mean/std for V-JEPA) may legitimately emit

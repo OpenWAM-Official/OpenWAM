@@ -121,7 +121,7 @@ class BasePipeline(torch.nn.Module):
             # ``dit_patch_size[0]=1``). ``time_division_factor`` is set in
             # ``WanVideoBackbone.from_pretrained`` as ``temporal_compression *
             # dit_patch_size[0]``; see
-            # ``openwam/model/video_backbone/wan_adapter.py`` ~L283-L284 for
+            # ``openwam/model/video_backbone/wan_videobackbone.py`` ~L302 for
             # the source-of-truth assignment. With factor=1, any
             # ``N % 1 == 0`` so the ``!= remainder`` check would always fire and
             # silently bump num_frames by 1 every call — guard against it.
