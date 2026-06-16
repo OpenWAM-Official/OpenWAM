@@ -49,11 +49,6 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             cfg.setdefault("video_dim", self.video_backbone.dim)
             cfg.setdefault("num_heads", self.video_backbone.num_heads)
             cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
-            # Propagate the video backbone's attention kernel down to the
-            # action backbone so the SDPA / linear-relu choice is made in one
-            # place. SanaMoTJointDriver requires both sides to match; this
-            # avoids the user having to set the kernel twice.
-            cfg.setdefault("attn_kernel", getattr(self.video_backbone, "attn_kernel", "softmax"))
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
         text_dim = self._resolve_text_dim(cfg)
@@ -77,7 +72,6 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             variant="joint_self_attn",
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
-            attn_kernel=str(cfg.get("attn_kernel", "softmax")),
             shift_action=cfg.get("shift_action"),
         )
 
@@ -130,10 +124,6 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
 
         - ``vb._dit.blocks[i].modulation`` (Wan / Cosmos25) is read inside
           ``pre_attn_at_layer_for_compile`` (``wan_adapter.py:536``)
-        - ``vb._dit.blocks[i].scale_shift_table`` (SANA) is read inside
-          ``SanaMSVideoSplit.block_pre_attn`` (``blocks_split.py:271``) — the
-          AdaLN parameter on SANA blocks (analog of Wan ``modulation``); under
-          ZeRO-3 this would otherwise be partitioned at read time.
         - ``ab.blocks[i].modulation`` is read inside
           ``ActionDiT.pre_attn_at_layer_for_compile`` (``joint_action_dit.py:782``)
         """
@@ -141,7 +131,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         dit = getattr(vb, "_dit", None) if vb is not None else None
         if dit is not None:
             for block in getattr(dit, "blocks", ()):
-                for attr in ("modulation", "scale_shift_table"):
+                for attr in ("modulation",):
                     p = getattr(block, attr, None)
                     if p is not None:
                         yield p

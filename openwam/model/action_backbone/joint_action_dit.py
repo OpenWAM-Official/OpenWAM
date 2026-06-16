@@ -54,7 +54,6 @@ if TYPE_CHECKING:
 
 
 _MOT_VARIANTS = ("joint_self_attn", "idm")
-_VALID_ATTN_KERNELS = ("softmax", "linear_relu")
 
 
 @dataclass
@@ -387,15 +386,11 @@ class ActionDiT(ActionBackbone):
         freq_dim: int = 256,
         max_action_len: int = 1024,
         eps: float = 1e-6,
-        attn_kernel: str = "softmax",
-        attn_eps: float = 1e-15,
         shift_action: Optional[float] = None,
     ):
         super().__init__()
         if variant not in ("joint_cross_attn", *_MOT_VARIANTS):
             raise ValueError(f"Unknown variant '{variant}'. Choose from: joint_cross_attn, {', '.join(_MOT_VARIANTS)}")
-        if attn_kernel not in _VALID_ATTN_KERNELS:
-            raise ValueError(f"Unknown attn_kernel '{attn_kernel}'. Choose from: {', '.join(_VALID_ATTN_KERNELS)}")
         if len(bridge_layers) != num_layers:
             raise ValueError(
                 f"bridge_layers ({len(bridge_layers)}) must equal num_layers ({num_layers}). "
@@ -416,8 +411,6 @@ class ActionDiT(ActionBackbone):
         self._head_dim = attn_head_dim
         self._num_heads = num_heads
         self._num_layers = num_layers
-        self._attn_kernel = attn_kernel
-        self._attn_eps = float(attn_eps)
         self._shift_action = None if shift_action is None else float(shift_action)
         self.freq_dim = freq_dim
         self.max_action_len = max_action_len
@@ -513,32 +506,6 @@ class ActionDiT(ActionBackbone):
     @property
     def num_layers(self) -> int:
         return self._num_layers
-
-    @property
-    def attn_kernel(self) -> str:
-        """Attention kernel exposed for MoT driver dispatch.
-
-        ``"softmax"`` (default) routes through the existing SDPA-based
-        :class:`MoTJointDriver`. ``"linear_relu"`` selects the SANA-style
-        cumsum linear-attention path provided by
-        :class:`SanaMoTJointDriver` (plans/sana_mot_integration_plan.md §3.2).
-
-        When ``linear_relu`` is selected, :meth:`pre_attn_at_layer` applies
-        ReLU to Q/K **between** RMSNorm and RoPE (mirroring SANA's
-        ``LiteLAReLURope``) and exposes the unrotated ReLU'd Q/K via
-        ``post_state["q_unrot"]`` / ``post_state["k_unrot"]`` so the driver
-        can compute SANA's dual-track denominator.
-        """
-        return self._attn_kernel
-
-    @property
-    def attn_eps(self) -> float:
-        """Denominator epsilon for ``attn_kernel="linear_relu"``.
-
-        Defaults to ``1e-15`` to match SANA's ``LiteLAReLURope.eps`` upstream
-        (third_party/Sana/diffusion/model/nets/sana_blocks.py:317).
-        """
-        return self._attn_eps
 
     # ------------------------------------------------------------------
     # Helpers shared by both variants
@@ -793,20 +760,8 @@ class ActionDiT(ActionBackbone):
         Returns Q/K/V shaped ``(B, T_action, num_heads * head_dim)`` (matching
         the layout produced by Wan ``self_attn.q/k/v`` after RMSNorm and RoPE
         — ready to concatenate with the video Q/K/V).
-
-        For ``attn_kernel == "linear_relu"`` the returned ``post_state`` dict
-        additionally carries ``q_unrot`` and ``k_unrot`` (ReLU'd, pre-RoPE Q/K
-        in MoT ``(B, S, H*D)`` layout) and ``uses_linear_attn=True``, matching
-        the contract that :class:`SanaMoTJointDriver` expects (mirrors
-        ``openwam/model/video_backbone/sana/blocks_split.py::block_pre_attn``).
         """
-        ret = self.pre_attn_at_layer_for_compile(layer_id, astate)
-        if self._attn_kernel == "linear_relu":
-            q_out, k_out, v_out, post_tuple, q_unrot, k_unrot = ret
-        else:
-            q_out, k_out, v_out, post_tuple = ret
-            q_unrot = None
-            k_unrot = None
+        q_out, k_out, v_out, post_tuple = self.pre_attn_at_layer_for_compile(layer_id, astate)
         residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_tuple
         block: SelfAttnActionDiTBlock = self.blocks[layer_id]
         post_state = {
@@ -817,22 +772,13 @@ class ActionDiT(ActionBackbone):
             "scale_mlp": scale_mlp,
             "gate_mlp": gate_mlp,
         }
-        if self._attn_kernel == "linear_relu":
-            post_state["q_unrot"] = q_unrot
-            post_state["k_unrot"] = k_unrot
-            post_state["uses_linear_attn"] = True
         return q_out, k_out, v_out, post_state
 
     def pre_attn_at_layer_for_compile(self, layer_id: int, astate: "ActionState"):
         """Compile-friendly pre-attention half using a tensor tuple post-state.
 
-        Returns either a 4-tuple ``(q, k, v, post_state)`` for
-        ``attn_kernel == "softmax"`` or a 6-tuple
-        ``(q, k, v, post_state, q_unrot, k_unrot)`` for ``"linear_relu"``.
-        The two arities are intentional — keeping the softmax tuple at four
-        elements preserves the existing compile contract for Wan/Cosmos25
-        consumers, while the extended tuple lets the SANA driver pull the
-        unrotated ReLU'd Q/K it needs for SANA's dual-track denominator.
+        Returns a 4-tuple ``(q, k, v, post_state)`` where ``post_state`` is the
+        tensor tuple ``(residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)``.
         """
         payload: ActionDiTState = astate.payload
         block: SelfAttnActionDiTBlock = self.blocks[layer_id]
@@ -855,19 +801,6 @@ class ActionDiT(ActionBackbone):
         k = rearrange(k, "b s (n d) -> b n s d", n=self._num_heads)
         v = rearrange(v, "b s (n d) -> b n s d", n=self._num_heads)
 
-        if self._attn_kernel == "linear_relu":
-            # SANA's LiteLAReLURope applies ReLU between qk_norm and RoPE, then
-            # uses the *un*-rotated ReLU'd Q/K for the denominator's row-sum.
-            # Mirror that here so cross-modality inner products
-            # (tilde_q_v · tilde_k_a, etc.) are kernel-aligned with the video side.
-            q = torch.relu(q)
-            k = torch.relu(k)
-            q_unrot = rearrange(q, "b n s d -> b s (n d)", n=self._num_heads)
-            k_unrot = rearrange(k, "b n s d -> b s (n d)", n=self._num_heads)
-        else:
-            q_unrot = None  # type: ignore[assignment]
-            k_unrot = None  # type: ignore[assignment]
-
         q = rope_apply_1d(q, payload.action_freqs)
         k = rope_apply_1d(k, payload.action_freqs)
         # Driver consumes (B, S, H*D) — keep modality streams in matching layout.
@@ -876,8 +809,6 @@ class ActionDiT(ActionBackbone):
         v_out = rearrange(v, "b n s d -> b s (n d)", n=self._num_heads)
 
         post_state = (residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
-        if self._attn_kernel == "linear_relu":
-            return q_out, k_out, v_out, post_state, q_unrot, k_unrot
         return q_out, k_out, v_out, post_state
 
     def post_attn_at_layer(

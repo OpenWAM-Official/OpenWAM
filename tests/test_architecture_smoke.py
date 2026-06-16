@@ -130,9 +130,9 @@ def test_shared_backbone_flow():
     assert pred.shape == (B, T_action, 7)
 
 
-def _build_dispatch_arch_with_fakes(*, kernel: str):
-    """Construct a ``DualSystemSelfAttnArchitecture`` with stub backbones and
-    a chosen ``attn_kernel`` for dispatch unit tests.
+def _build_dispatch_arch_with_fakes():
+    """Construct a ``DualSystemSelfAttnArchitecture`` with stub backbones for
+    dispatch unit tests.
 
     The architecture's normal ``__init__`` requires a video backbone config
     to build ActionDiT; here we sidestep that by constructing with
@@ -146,10 +146,6 @@ def _build_dispatch_arch_with_fakes(*, kernel: str):
     )
 
     class _StubBackbone(nn.Module):
-        def __init__(self, attn_kernel: str):
-            super().__init__()
-            self._attn_kernel = attn_kernel
-
         @property
         def num_layers(self) -> int:
             return 2
@@ -162,15 +158,11 @@ def _build_dispatch_arch_with_fakes(*, kernel: str):
         def head_dim(self) -> int:
             return 16
 
-        @property
-        def attn_kernel(self) -> str:
-            return self._attn_kernel
-
         video_attention_mask_mode = "bidirectional"
 
     arch = DualSystemSelfAttnArchitecture(cfg=None)
-    arch.video_backbone = _StubBackbone(kernel)
-    arch.action_backbone = _StubBackbone(kernel)
+    arch.video_backbone = _StubBackbone()
+    arch.action_backbone = _StubBackbone()
     arch._mot_driver_kwargs = {
         "mot_checkpoint_mixed_attn": True,
         "attention_mask_mode": "joint",
@@ -183,7 +175,7 @@ def test_build_mot_driver_dispatches_softmax_to_mot_driver():
     """Default kernel routes to :class:`MoTJointDriver` (Wan/Cosmos25 unaffected)."""
     from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 
-    arch = _build_dispatch_arch_with_fakes(kernel="softmax")
+    arch = _build_dispatch_arch_with_fakes()
     driver = arch.build_mot_driver()
     assert type(driver) is MoTJointDriver
 
