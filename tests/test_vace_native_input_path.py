@@ -236,16 +236,18 @@ def test_preprocess_input_vace_drops_first_frame_latents(monkeypatch):
     pure-CPU smoke that exercises the dict contract.
     """
     bb = _make_adapter_with_fake_vae(vace=True)
+    import openwam.model.video_backbone.wan.encode as enc_mod
+    import openwam.model.video_backbone.wan_videobackbone as vbb
+
     monkeypatch.setattr(
-        bb,
-        "_encode_text",
-        lambda prompts: (torch.zeros(1, 4, 32), torch.ones(1, dtype=torch.long)),
+        enc_mod,
+        "encode_text",
+        lambda prompts, **kw: (torch.zeros(1, 4, 32), torch.ones(1, dtype=torch.long)),
     )
-    monkeypatch.setattr(
-        bb,
-        "_check_resize",
-        lambda h, w, t: (h, w, t),
-    )
+    # encode_text is mocked, but ``text_encoder=self.text_encoder`` is still
+    # evaluated as a call arg; the fake pipe has no text_encoder, so stub it.
+    monkeypatch.setattr(bb, "text_encoder", None, raising=False)
+    monkeypatch.setattr(vbb, "check_resize_height_width", lambda h, w, t, **kw: (h, w, t))
 
     H = W = 32
     T = 13
@@ -310,7 +312,7 @@ def test_build_vace_context_for_deploy_noop_for_non_vace():
     assert inputs_shared["vace_context"] is None
 
 
-def test_build_vace_context_for_deploy_forwards_tiled_kwargs():
+def test_build_vace_context_for_deploy_forwards_tiled_kwargs(monkeypatch):
     """``_build_vace_context_for_deploy`` must forward ``tiled`` / ``tile_size`` /
     ``tile_stride`` from inputs_shared to the encode helper.
 
@@ -319,16 +321,20 @@ def test_build_vace_context_for_deploy_forwards_tiled_kwargs():
     a single GPU. This is the issue codex flagged on first review.
     """
     bb = _make_adapter_with_fake_vae(vace=True)
-    # Spy on _encode_video_for_vace to inspect the tiled kwargs the caller
-    # threaded through.
+    # Spy on wan.encode.encode_video_for_vace to inspect the tiled kwargs the
+    # caller threaded through.
+    import openwam.model.video_backbone.wan.encode as enc_mod
+
     seen: list[dict] = []
-    original = bb._encode_video_for_vace
+    original = enc_mod.encode_video_for_vace
 
-    def _spy(pixels, *, tiled, tile_size, tile_stride):
+    def _spy(pixels, *, vae, encoder=None, device, tiled, tile_size, tile_stride):
         seen.append({"tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride})
-        return original(pixels, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        return original(
+            pixels, vae=vae, encoder=encoder, device=device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride
+        )
 
-    bb._encode_video_for_vace = _spy
+    monkeypatch.setattr(enc_mod, "encode_video_for_vace", _spy)
 
     inputs_shared = {
         "num_frames": 13,

@@ -347,29 +347,34 @@ def test_C1_default_path_state_dict_keys_contain_pipe_vae():
 
 
 def test_C2_default_path_pipe_vae_call_sites_preserved(monkeypatch):
-    """Default path: encode/decode still route through pipe.vae; preprocess_video
-    / vae_output_to_video now route through the stateless ``wan.preprocess`` helpers."""
-    import openwam.model.video_backbone.wan_videobackbone as vbb
+    """Default path (encoder=None): wan.encode routes encode/decode through the
+    native vae; preprocess_video / latents_to_frames route through wan.preprocess."""
+    import openwam.model.video_backbone.wan.encode as enc_mod
+    from openwam.model.video_backbone.wan import encode as wan_encode
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     pipe = _FakePipe()
     backbone = WanVideoBackbone(pipe)
-    # WanVideoBackbone.__init__ hard-codes ``self._device = torch.device("cuda")``
-    # (training-time default). Tests run under CPU-only CI, so override to CPU
-    # before exercising _decode_latents (which does ``latents.to(self.device)``).
     backbone._device = torch.device("cpu")
-    # _preprocess_video → wan.preprocess.preprocess_video (no longer pipe)
-    monkeypatch.setattr(vbb, "preprocess_video", lambda frames, **kw: torch.zeros(1, 3, 4, 64, 64))
-    assert backbone._preprocess_video([None]).shape == (1, 3, 4, 64, 64)
-    # _encode_video → pipe.vae.batch_encode
-    enc = backbone._encode_video(torch.zeros(1, 3, 4, 64, 64))
+    vae = getattr(backbone, "vae", None)
+    # preprocess_video(encoder=None) → wan.preprocess.preprocess_video
+    monkeypatch.setattr(enc_mod, "_preprocess_video_native", lambda frames, **kw: torch.zeros(1, 3, 4, 64, 64))
+    assert wan_encode.preprocess_video([None], encoder=None, dtype=torch.float32, device="cpu").shape == (
+        1,
+        3,
+        4,
+        64,
+        64,
+    )
+    # encode_video(encoder=None) → vae.batch_encode
+    enc = wan_encode.encode_video(torch.zeros(1, 3, 4, 64, 64), vae=vae, encoder=None)
     assert enc.shape[1] == 16  # VAE z_dim
-    # _decode_latents → pipe.vae.decode
-    dec = backbone._decode_latents(torch.zeros(1, 16, 4, 8, 8))
+    # decode_latents(encoder=None) → vae.decode
+    dec = wan_encode.decode_latents(torch.zeros(1, 16, 4, 8, 8), vae=vae, encoder=None, device="cpu")
     assert dec.shape == (1, 3, 16, 64, 64)
-    # _latents_to_frames → wan.preprocess.vae_output_to_video (no longer pipe)
-    monkeypatch.setattr(vbb, "vae_output_to_video", lambda t: ["frame0", "frame1"])
-    assert backbone._latents_to_frames(dec) == ["frame0", "frame1"]
+    # latents_to_frames(encoder=None) → wan.preprocess.vae_output_to_video
+    monkeypatch.setattr(enc_mod, "vae_output_to_video", lambda t: ["frame0", "frame1"])
+    assert wan_encode.latents_to_frames(dec, encoder=None) == ["frame0", "frame1"]
 
 
 def test_C3_external_path_releases_pipe_vae_in_from_pretrained():
@@ -1709,10 +1714,10 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
 
     # 3) Real yaml freeze list (no hand-curation — read the file that ships).
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    yaml_cfg = OmegaConf.load(repo_root / "configs/training_strategy/joint.yaml")
+    yaml_cfg = OmegaConf.load(repo_root / "configs/model/dual_system.yaml")
     freeze_list = list(yaml_cfg.freeze)
     assert "video_backbone._encoder" in freeze_list, (
-        "joint.yaml must list video_backbone._encoder for this test to be meaningful"
+        "dual_system.yaml must list video_backbone._encoder for this test to be meaningful"
     )
 
     # 4) Run the exact production freeze_modules call.
@@ -1753,14 +1758,14 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
 @pytest.mark.parametrize(
     "yaml_path",
     [
-        "configs/training_strategy/joint.yaml",
-        "configs/training_strategy/video_only.yaml",
+        "configs/model/dual_system.yaml",
+        "configs/model/shared_backbone.yaml",
+        "configs/model/tri_system.yaml",
     ],
 )
-def test_D7_training_strategy_yaml_freezes_encoder(yaml_path):
-    """The two training_strategy yamls that ship a ``freeze:`` list MUST
-    enumerate ``video_backbone._encoder``. Pre-fix only ``_pipe.vae`` was
-    listed and the external-encoder path silently bypassed freeze."""
+def test_D7_model_yaml_freezes_encoder(yaml_path):
+    """Every model yaml that ships a ``freeze:`` list MUST enumerate
+    ``video_backbone._encoder`` so the external-encoder path is frozen."""
     import pathlib
 
     from omegaconf import OmegaConf
@@ -1773,7 +1778,7 @@ def test_D7_training_strategy_yaml_freezes_encoder(yaml_path):
         f"external-encoder path will leave the encoder trainable. Got: {freeze}"
     )
     # The native-path entry must remain so default training stays bit-exact.
-    assert "video_backbone._pipe.vae" in freeze
+    assert "video_backbone.vae" in freeze
 
 
 # ===========================================================================

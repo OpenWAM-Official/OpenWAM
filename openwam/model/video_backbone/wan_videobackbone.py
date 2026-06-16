@@ -24,13 +24,12 @@ from openwam.model.video_backbone.videobackbone_base import BlockLoopState, Vide
 if TYPE_CHECKING:
     from openwam.model.inference_inputs import InferenceInputs
 from openwam.model.video_backbone.wan import action_tokens as wan_action_tokens
+from openwam.model.video_backbone.wan import encode as wan_encode
 from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply, sinusoidal_embedding_1d
 from openwam.model.video_backbone.wan.preprocess import (
     check_resize_height_width,
     generate_noise,
     preprocess_image,
-    preprocess_video,
-    vae_output_to_video,
 )
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
@@ -857,16 +856,28 @@ class WanVideoBackbone(VideoBackbone):
         device = self.device
         dtype = self.dtype
 
-        height, width, num_frames = self._check_resize(frames[0][0].size[1], frames[0][0].size[0], len(frames[0]))
+        height, width, num_frames = check_resize_height_width(
+            frames[0][0].size[1],
+            frames[0][0].size[0],
+            len(frames[0]),
+            height_division_factor=self._height_division_factor,
+            width_division_factor=self._width_division_factor,
+            time_division_factor=self._time_division_factor,
+            time_division_remainder=self._time_division_remainder,
+        )
 
         B = len(frames)
-        context, seq_lens = self._encode_text(text)
+        context, seq_lens = wan_encode.encode_text(
+            text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
+        )
 
         all_input_videos = []
         for clip_frames in frames:
-            all_input_videos.append(self._preprocess_video(clip_frames))
+            all_input_videos.append(
+                wan_encode.preprocess_video(clip_frames, encoder=self._encoder, dtype=self.dtype, device=self.device)
+            )
         stacked_inputs = torch.cat(all_input_videos, dim=0)
-        input_latents = self._encode_video(stacked_inputs)
+        input_latents = wan_encode.encode_video(stacked_inputs, vae=getattr(self, "vae", None), encoder=self._encoder)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
         # Variant-specific first-frame / control conditioning lives in
@@ -930,8 +941,10 @@ class WanVideoBackbone(VideoBackbone):
                 "spec.is_reversible=False). Pass decode_video=False to generate() to "
                 "retrieve raw latents, or train a separate pixel decoder."
             )
-        video_tensor = self._decode_latents(latents, tiled=tiled)
-        return self._latents_to_frames(video_tensor)
+        video_tensor = wan_encode.decode_latents(
+            latents, vae=getattr(self, "vae", None), encoder=self._encoder, device=self.device, tiled=tiled
+        )
+        return wan_encode.latents_to_frames(video_tensor, encoder=self._encoder)
 
     # ================================================================
     # ABC: Device management (1)
@@ -1027,10 +1040,23 @@ class WanVideoBackbone(VideoBackbone):
         self.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
 
         # ShapeChecker: snap to a model-valid grid; noise / clip / y use these.
-        height, width, num_frames = self._check_resize(height, width, num_frames)
+        height, width, num_frames = check_resize_height_width(
+            height,
+            width,
+            num_frames,
+            height_division_factor=self._height_division_factor,
+            width_division_factor=self._width_division_factor,
+            time_division_factor=self._time_division_factor,
+            time_division_remainder=self._time_division_remainder,
+        )
 
-        context, seq_lens = self._encode_text_for_inference(
-            prompt, vace_cache=vace_cache, prompt_embed_cache=prompt_embed_cache
+        context, seq_lens = wan_encode.encode_text_for_inference(
+            prompt,
+            vace_cache=vace_cache,
+            prompt_embed_cache=prompt_embed_cache,
+            tokenizer=self._tokenizer,
+            text_encoder=self.text_encoder,
+            device=self.device,
         )
 
         _DEFAULT_CAMERA_ORIGIN = (
@@ -1135,17 +1161,6 @@ class WanVideoBackbone(VideoBackbone):
         self._finalize_ti2v_first_frame_latents(inputs_shared, first_frame_image)
         return inputs_shared
 
-    def _encode_text_for_inference(self, prompt, *, vace_cache, prompt_embed_cache) -> Tuple[Tensor, Tensor]:
-        """Deploy ``(context, seq_lens)``, reusing a prompt-keyed cached embed."""
-        if vace_cache and vace_cache.get("populated") and vace_cache.get("prompt_key") == prompt:
-            return vace_cache["context"], vace_cache["seq_lens"]
-        if prompt_embed_cache is not None and prompt in prompt_embed_cache:
-            return prompt_embed_cache[prompt]
-        context, seq_lens = self._encode_text([prompt])
-        if prompt_embed_cache is not None:
-            prompt_embed_cache[prompt] = (context, seq_lens)
-        return context, seq_lens
-
     def _build_deploy_noise(self, *, height, width, num_frames, seed, rand_device) -> Tensor:
         """Initial Gaussian latent noise for deploy (replaces NoiseInitializer)."""
         spec = self._latent_spec
@@ -1223,97 +1238,20 @@ class WanVideoBackbone(VideoBackbone):
         inputs_shared["fuse_vae_embedding_in_latents"] = True
         inputs_shared["num_clean_prefix_frames"] = 0
         ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
-        ref_tensor = self._preprocess_video(ref_frames)
+        ref_tensor = wan_encode.preprocess_video(
+            ref_frames, encoder=self._encoder, dtype=self.dtype, device=self.device
+        )
 
-        ref_image_latents = self._encode_video(ref_tensor.to(device)).to(dtype=dtype, device=device)
+        ref_image_latents = wan_encode.encode_video(
+            ref_tensor.to(device), vae=getattr(self, "vae", None), encoder=self._encoder
+        ).to(dtype=dtype, device=device)
         inputs_shared["first_frame_latents"] = ref_image_latents
-
-    def _encode_text(self, prompts: list) -> Tuple[Tensor, Tensor]:
-        device = self.device
-        ids, mask = self._tokenizer(
-            prompts,
-            return_mask=True,
-            add_special_tokens=True,
-            max_length=512,
-            padding="max_length",
-            truncation=True,
-        )
-        ids = ids.to(device)
-        mask = mask.to(device)
-        seq_lens = mask.gt(0).sum(dim=1).long()
-        context = self.text_encoder(ids, mask)
-        for i, v in enumerate(seq_lens):
-            context[i, v:] = 0
-        return context, seq_lens
-
-    def _preprocess_video(self, frames) -> Tensor:
-        if self._uses_external_encoder:
-            return self._encoder.preprocess_video(frames)
-        return preprocess_video(frames, dtype=self.dtype, device=self.device)
-
-    def _encode_video(self, video_tensor: Tensor, *, tiled: bool = False) -> Tensor:
-        if self._uses_external_encoder:
-            return self._encoder.batch_encode(video_tensor)
-        return self.vae.batch_encode(video_tensor, device=video_tensor.device)
-
-    def _encode_video_for_vace(
-        self,
-        pixels: Tensor,
-        *,
-        tiled: bool,
-        tile_size: tuple,
-        tile_stride: tuple,
-    ) -> Tensor:
-        """Tiled-aware VAE encode for the VACE pixel→latent helper, returning
-        ``(B, z_dim, T_lat, H_lat, W_lat)``. ``tiled=False`` (training) batches
-        in one call; ``tiled=True`` (deploy) loops per-sample with bounded peak
-        memory, mirroring the vendored unit so large-frame deploy does not OOM.
-        """
-        if not tiled:
-            return self._encode_video(pixels).to(dtype=pixels.dtype, device=pixels.device)
-        if self._uses_external_encoder:
-            # No generic tiled-encode contract; fall back to batch_encode.
-            # Unreachable today (VACE + external_encoder is fail-fast).
-            return self._encoder.batch_encode(pixels).to(dtype=pixels.dtype, device=pixels.device)
-        # Native Wan VAE: per-sample tiled encode (deploy is B=1).
-        outs = []
-        for i in range(pixels.shape[0]):
-            lat = self.vae.encode(
-                [pixels[i]],
-                device=self.device,
-                tiled=True,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-            )
-            outs.append(lat)
-        return torch.cat(outs, dim=0).to(dtype=pixels.dtype, device=pixels.device)
-
-    def _decode_latents(self, latents: Tensor, *, tiled: bool = True) -> Tensor:
-        if self._uses_external_encoder:
-            return self._encoder.decode(latents.to(self.device), tiled=tiled)
-        return self.vae.decode(latents.to(self.device), device=self.device, tiled=tiled)
-
-    def _latents_to_frames(self, video_tensor: Tensor) -> list:
-        if self._uses_external_encoder:
-            return self._encoder.to_frames(video_tensor)
-        return vae_output_to_video(video_tensor)
-
-    def _check_resize(self, h, w, num_frames):
-        return check_resize_height_width(
-            h,
-            w,
-            num_frames,
-            height_division_factor=self._height_division_factor,
-            width_division_factor=self._width_division_factor,
-            time_division_factor=self._time_division_factor,
-            time_division_remainder=self._time_division_remainder,
-        )
 
     def _build_vace_context(self, vace_video, input_latents, device) -> Tensor:
         all_vace = []
         for clip_frames in vace_video:
-            vt = self._preprocess_video(clip_frames)
-            vl = self._encode_video(vt.to(device))
+            vt = wan_encode.preprocess_video(clip_frames, encoder=self._encoder, dtype=self.dtype, device=self.device)
+            vl = wan_encode.encode_video(vt.to(device), vae=getattr(self, "vae", None), encoder=self._encoder)
             all_vace.append(vl)
         return torch.cat(all_vace, dim=0) if all_vace else None
 
@@ -1363,7 +1301,9 @@ class WanVideoBackbone(VideoBackbone):
             for i in range(B):
                 vv = vace_videos[i] if vace_videos is not None else None
                 if vv is not None:
-                    vv_pp = self._preprocess_video(vv).to(dtype=dtype, device=device)
+                    vv_pp = wan_encode.preprocess_video(
+                        vv, encoder=self._encoder, dtype=self.dtype, device=self.device
+                    ).to(dtype=dtype, device=device)
                     if vv_pp.shape[2] != num_frames:
                         raise ValueError(
                             f"User-provided vace_videos[{i}] has T={vv_pp.shape[2]} but "
@@ -1456,8 +1396,24 @@ class WanVideoBackbone(VideoBackbone):
         # Native's redundant ``+ 0 * ...`` terms dropped (identical at B=1).
         inactive = vace_video_pixels * (1 - vace_mask_pixels)
         reactive = vace_video_pixels * vace_mask_pixels
-        inactive_lat = self._encode_video_for_vace(inactive, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-        reactive_lat = self._encode_video_for_vace(reactive, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        inactive_lat = wan_encode.encode_video_for_vace(
+            inactive,
+            vae=getattr(self, "vae", None),
+            encoder=self._encoder,
+            device=self.device,
+            tiled=tiled,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+        )
+        reactive_lat = wan_encode.encode_video_for_vace(
+            reactive,
+            vae=getattr(self, "vae", None),
+            encoder=self._encoder,
+            device=self.device,
+            tiled=tiled,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+        )
         vace_video_latents = torch.cat([inactive_lat, reactive_lat], dim=1)
 
         P, Q = 8, 8

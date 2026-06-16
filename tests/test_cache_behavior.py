@@ -40,6 +40,23 @@ class _MockPipe:
         self.scheduler = _MockScheduler()
 
 
+class _MockTokenizer:
+    def __call__(self, prompts, **kw):
+        n = len(prompts)
+        return torch.zeros(n, 4, dtype=torch.long), torch.ones(n, 4, dtype=torch.long)
+
+
+class _MockTextEncoder:
+    """Records each call so a test can count how often text was encoded."""
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def __call__(self, ids, mask):
+        self._calls.append(list(range(ids.shape[0])))
+        return torch.zeros(ids.shape[0], 4, 8)
+
+
 class _MockWanVB:
     """WanVideoBackbone-like object exercising the deploy cache seam.
 
@@ -55,6 +72,14 @@ class _MockWanVB:
         self._device = "cpu"
         self._dtype = None
         self._encode_text_calls: list[list] = []
+        # Encode seam now lives in wan.encode free functions; provide the
+        # tokenizer / text_encoder / division factors they read explicitly.
+        self._tokenizer = _MockTokenizer()
+        self.text_encoder = _MockTextEncoder(self._encode_text_calls)
+        self._height_division_factor = 16
+        self._width_division_factor = 16
+        self._time_division_factor = 4
+        self._time_division_remainder = 1
 
     @property
     def device(self):
@@ -68,14 +93,7 @@ class _MockWanVB:
     def scheduler(self):
         return self._pipe.scheduler
 
-    # --- stubbed encode seams (no real weights / GPU) ---
-    def _encode_text(self, prompts):
-        self._encode_text_calls.append(list(prompts))
-        return torch.zeros(1, 4, 8), torch.ones(1, dtype=torch.long)
-
-    def _check_resize(self, h, w, num_frames):
-        return h, w, num_frames
-
+    # --- stubbed conditioning seams (no real weights / GPU) ---
     def _build_deploy_noise(self, *, height, width, num_frames, seed, rand_device):
         return torch.zeros(1, 4, 1, height // 8, width // 8)
 
@@ -88,11 +106,6 @@ class _MockWanVB:
     # --- real methods under test ---
     def preprocess_input_for_inference(self, inputs):
         return WanVideoBackbone.preprocess_input_for_inference(self, inputs)
-
-    def _encode_text_for_inference(self, prompt, *, vace_cache, prompt_embed_cache):
-        return WanVideoBackbone._encode_text_for_inference(
-            self, prompt, vace_cache=vace_cache, prompt_embed_cache=prompt_embed_cache
-        )
 
     def _resolve_i2v_input_image(self, first_frame_image):
         return WanVideoBackbone._resolve_i2v_input_image(self, first_frame_image)
