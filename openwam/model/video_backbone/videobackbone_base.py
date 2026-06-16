@@ -45,23 +45,20 @@ class BlockLoopState:
     context: Tensor  # text cross-attention embedding
     context_mask: Optional[Tensor] = None  # (B, L_context) bool, True = attend
 
-    # Patch grid for unpatchify (backbone-internal, architecture reads only)
+    # Patch grid for unpatchify (backbone writes; architecture reads for masks)
     grid_frames: int = 0
     grid_height: int = 0
     grid_width: int = 0
-    tokens_per_frame_patch: int = 0  # grid_height * grid_width; cached for video-slice arithmetic
 
-    # Backbone-internal (architecture does not touch)
-    time_embed: Optional[Tensor] = None  # head time embedding
+    # MoT-shared: backbone generates per-block VACE hints; dual_system IDM
+    # merges them across the noisy/cond branches (tri_system rejects them).
     vace_hints: Optional[list] = None
-    vace_scale: float = 1.0
-    sp_pad_shape: int = 0
 
     # Loop config threaded from prepare() into run_block()
     use_gradient_checkpointing: bool = False
     use_gradient_checkpointing_offload: bool = False
 
-    # Backbone-private escape hatch
+    # Backbone-private escape hatch (Wan also stashes dit/vace/time_embed here)
     extras: dict = field(default_factory=dict)
 
 

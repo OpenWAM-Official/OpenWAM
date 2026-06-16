@@ -43,7 +43,12 @@ def _identity_freqs(seq_len: int, head_dim: int) -> torch.Tensor:
 
 def _make_state(vb: WanVideoBackbone, video: torch.Tensor, action: torch.Tensor, *, mask=None) -> BlockLoopState:
     x = torch.cat([video, action], dim=1)
-    extras = {"dit": vb._dit, "vace": None, "use_usp": False}
+    extras = {
+        "dit": vb._dit,
+        "vace": None,
+        "use_usp": False,
+        "time_embed": torch.zeros(x.shape[0], x.shape[1], x.shape[2]),
+    }
     if mask is not None:
         extras["shared_attention_mask"] = mask
     return BlockLoopState(
@@ -54,7 +59,6 @@ def _make_state(vb: WanVideoBackbone, video: torch.Tensor, action: torch.Tensor,
         grid_frames=video.shape[1],
         grid_height=1,
         grid_width=1,
-        time_embed=torch.zeros(x.shape[0], x.shape[1], x.shape[2]),
         extras=extras,
     )
 
@@ -372,8 +376,7 @@ def test_wan_shared_token_injection_extends_tmod_freqs_and_extracts_action_only(
         grid_frames=Sv,
         grid_height=1,
         grid_width=1,
-        time_embed=torch.zeros(B, Sv, D),
-        extras={"dit": vb._dit, "vace": None, "use_usp": False},
+        extras={"dit": vb._dit, "vace": None, "use_usp": False, "time_embed": torch.zeros(B, Sv, D)},
     )
     action_tokens = torch.randn(B, Sa, D)
     state_tokens = torch.randn(B, Ss, D)

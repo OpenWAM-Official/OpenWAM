@@ -421,10 +421,6 @@ class WanVideoBackbone(VideoBackbone):
     def _freq_dim(self) -> int:
         return int(self._dit.freq_dim)
 
-    @property
-    def _use_unified_sequence_parallel(self) -> bool:
-        return bool(getattr(self._pipe, "use_unified_sequence_parallel", False))
-
     # ================================================================
     # ABC: Properties (6) — device/dtype inherited from VideoBackbone
     # ================================================================
@@ -553,8 +549,6 @@ class WanVideoBackbone(VideoBackbone):
         clip_feature = kw.get("clip_feature")
         y = kw.get("y")
         vace_context = kw.get("vace_context")
-        vace_scale = kw.get("vace_scale", 1.0)
-        use_usp = kw.get("use_unified_sequence_parallel", self._use_unified_sequence_parallel)
         motion_bucket_id = kw.get("motion_bucket_id")
         control_camera_latents_input = kw.get("control_camera_latents_input")
         fuse_vae_embedding_in_latents = kw.get("fuse_vae_embedding_in_latents", False)
@@ -562,10 +556,6 @@ class WanVideoBackbone(VideoBackbone):
         use_gradient_checkpointing = kw.get("use_gradient_checkpointing", False)
         use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
         force_per_token_t_mod = bool(kw.get("force_per_token_t_mod", False))
-
-        if use_usp:
-            import torch.distributed as dist
-            from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size
 
         if dit.seperated_timestep and fuse_vae_embedding_in_latents:
             batch_size = latents.shape[0]
@@ -581,13 +571,6 @@ class WanVideoBackbone(VideoBackbone):
             token_timesteps = token_timesteps.reshape(batch_size, -1)
             t_emb = sinusoidal_embedding_1d(dit.freq_dim, token_timesteps.reshape(-1))
             t = dit.time_embedding(t_emb.to(latents.dtype)).reshape(batch_size, -1, dit.dim)
-            if use_usp and dist.is_initialized() and dist.get_world_size() > 1:
-                t_chunks = torch.chunk(t, get_sequence_parallel_world_size(), dim=1)
-                t_chunks = [
-                    torch.nn.functional.pad(chunk, (0, 0, 0, t_chunks[0].shape[1] - chunk.shape[1]), value=0)
-                    for chunk in t_chunks
-                ]
-                t = t_chunks[get_sequence_parallel_rank()]
             t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
         elif force_per_token_t_mod:
             # Non-TI2V backbones under joint-attention / shared_backbone need 4D
@@ -635,21 +618,6 @@ class WanVideoBackbone(VideoBackbone):
                 t[:, :num_clean] = t_zero_base.view(batch_size, 1, 1, -1)
                 t = t.reshape(batch_size, L, -1)
 
-            if use_usp and dist.is_initialized() and dist.get_world_size() > 1:
-                # NOTE: known pre-existing limitation — when ``vace_context``
-                # is set (VACE backbone) and USP is enabled, the VACE hint
-                # generator below receives full-sequence ``x``/``vace_context``
-                # but the rank-local ``t_mod``, producing a shape mismatch.
-                # OpenWAM training does not enable USP today
-                # (``pipe.use_unified_sequence_parallel`` defaults to False),
-                # so this codepath is dormant; out of scope for PR#56. Same
-                # caveat applies to the TI2V branch above.
-                t_chunks = torch.chunk(t, get_sequence_parallel_world_size(), dim=1)
-                t_chunks = [
-                    torch.nn.functional.pad(chunk, (0, 0, 0, t_chunks[0].shape[1] - chunk.shape[1]), value=0)
-                    for chunk in t_chunks
-                ]
-                t = t_chunks[get_sequence_parallel_rank()]
             t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
         else:
             t = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep))
@@ -705,7 +673,6 @@ class WanVideoBackbone(VideoBackbone):
         x = dit.patchify(x, control_camera_latents_input)
 
         f, h, w = x.shape[2:]
-        tokens_per_frame_patch = h * w
         x = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
         freqs = (
             torch.cat(
@@ -723,7 +690,7 @@ class WanVideoBackbone(VideoBackbone):
         extras = {}
         extras["dit"] = dit
         extras["vace"] = vace
-        extras["use_usp"] = use_usp
+        extras["time_embed"] = t  # Wan head time embedding; consumed in finalize()
         vace_hints = None
         if vace_context is not None:
             vace_hints = vace(
@@ -736,17 +703,6 @@ class WanVideoBackbone(VideoBackbone):
                 use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             )
 
-        sp_pad_shape = 0
-        if use_usp:
-            if dist.is_initialized() and dist.get_world_size() > 1:
-                chunks = torch.chunk(x, get_sequence_parallel_world_size(), dim=1)
-                sp_pad_shape = chunks[0].shape[1] - chunks[-1].shape[1]
-                chunks = [
-                    torch.nn.functional.pad(chunk, (0, 0, 0, chunks[0].shape[1] - chunk.shape[1]), value=0)
-                    for chunk in chunks
-                ]
-                x = chunks[get_sequence_parallel_rank()]
-
         return BlockLoopState(
             hidden_states=x,
             time_mod=t_mod,
@@ -756,11 +712,7 @@ class WanVideoBackbone(VideoBackbone):
             grid_frames=f,
             grid_height=h,
             grid_width=w,
-            tokens_per_frame_patch=tokens_per_frame_patch,
-            time_embed=t,
             vace_hints=vace_hints,
-            vace_scale=vace_scale,
-            sp_pad_shape=sp_pad_shape,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             extras=extras,
@@ -822,37 +774,21 @@ class WanVideoBackbone(VideoBackbone):
         logic. Mutates ``state.hidden_states`` in place.
         """
         vace = state.extras.get("vace")
-        use_usp = state.extras.get("use_usp", False)
 
         if state.vace_hints is not None and vace is not None and block_id in vace.vace_layers_mapping:
             current_vace_hint = state.vace_hints[vace.vace_layers_mapping[block_id]]
-            if use_usp:
-                import torch.distributed as dist
-                from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size
-
-                if dist.is_initialized() and dist.get_world_size() > 1:
-                    current_vace_hint = torch.chunk(current_vace_hint, get_sequence_parallel_world_size(), dim=1)[
-                        get_sequence_parallel_rank()
-                    ]
-                    target_len = state.hidden_states.shape[1]
-                    if current_vace_hint.shape[1] < target_len:
-                        current_vace_hint = torch.nn.functional.pad(
-                            current_vace_hint,
-                            (0, 0, 0, target_len - current_vace_hint.shape[1]),
-                            value=0,
-                        )
             vace_len = current_vace_hint.shape[1]
             if state.hidden_states.shape[1] == vace_len:
                 # dual_system / video-only path: hint length matches the full
                 # token sequence, apply the residual to everything.
-                state.hidden_states = state.hidden_states + current_vace_hint * state.vace_scale
+                state.hidden_states = state.hidden_states + current_vace_hint
             elif state.hidden_states.shape[1] > vace_len:
                 # shared_backbone path: state.hidden_states has been extended with
                 # action/state tokens. VACE residuals only apply to the leading
                 # video slice; action/state tokens still get the VACE signal
                 # indirectly through self-attention (both 'joint' and
                 # 'bidirectional' modes route action→video).
-                video_slice = state.hidden_states[:, :vace_len] + current_vace_hint * state.vace_scale
+                video_slice = state.hidden_states[:, :vace_len] + current_vace_hint
                 state.hidden_states = torch.cat([video_slice, state.hidden_states[:, vace_len:]], dim=1)
             else:
                 # Defensive: no legitimate path makes state.hidden_states shorter than the
@@ -955,20 +891,11 @@ class WanVideoBackbone(VideoBackbone):
     def finalize(self, state: BlockLoopState):
         """Wan DiT head + unpatchify. Returns ``(B, z_dim, F, H, W)``."""
         dit = state.extras["dit"]
-        use_usp = state.extras.get("use_usp", False)
         head = dit.head
-        t_head = state.time_embed if state.time_embed.dim() == 3 else state.time_embed.unsqueeze(1)
+        t_embed = state.extras["time_embed"]
+        t_head = t_embed if t_embed.dim() == 3 else t_embed.unsqueeze(1)
 
         x = head(state.hidden_states, t_head)
-
-        if use_usp:
-            import torch.distributed as dist
-            from xfuser.core.distributed import get_sp_group
-
-            if dist.is_initialized() and dist.get_world_size() > 1:
-                x = get_sp_group().all_gather(x, dim=1)
-                if state.sp_pad_shape > 0:
-                    x = x[:, : -state.sp_pad_shape]
 
         x = dit.unpatchify(x, (state.grid_frames, state.grid_height, state.grid_width))
         return x
@@ -1138,7 +1065,6 @@ class WanVideoBackbone(VideoBackbone):
             "width": width,
             "num_frames": num_frames,
             "vace_context": cond.get("vace_context"),
-            "vace_scale": 1.0,
             "fuse_vae_embedding_in_latents": cond.get("fuse_vae_embedding_in_latents", False),
             "num_clean_prefix_frames": cond.get("num_clean_prefix_frames", 0),
             "first_frame_latents": cond.get("first_frame_latents"),
@@ -1261,10 +1187,6 @@ class WanVideoBackbone(VideoBackbone):
     # Deploy-facing public methods (not in ABC — Wan-specific)
     # ================================================================
 
-    @property
-    def is_ti2v(self) -> bool:
-        return self._is_ti2v
-
     def _resolve_i2v_input_image(self, first_frame_image):
         """Normalize ``first_frame_image`` into a single PIL (or None) for I2V deploy.
 
@@ -1375,7 +1297,6 @@ class WanVideoBackbone(VideoBackbone):
             "vace_video": None,
             "vace_video_mask": None,
             "vace_reference_image": None,
-            "vace_scale": 1.0,
             "seed": seed,
             "rand_device": "cpu",
             "height": height,
@@ -1940,7 +1861,6 @@ class WanVideoBackbone(VideoBackbone):
             tile_stride=tuple(inputs_shared.get("tile_stride") or (18, 16)),
         )
         inputs_shared["vace_context"] = vace_context
-        inputs_shared["vace_scale"] = 1.0
 
     def _is_per_token_t_mod_active(self, state: BlockLoopState) -> bool:
         return state.time_mod.dim() == 4

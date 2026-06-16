@@ -83,13 +83,10 @@ def _make_tiny_video_state(dit, *, batch=2, grid_frames=1, grid_height=2, grid_w
         grid_frames=grid_frames,
         grid_height=grid_height,
         grid_width=grid_width,
-        time_embed=torch.randn(batch, dim, dtype=dtype),
         vace_hints=None,
-        vace_scale=1.0,
-        sp_pad_shape=0,
         use_gradient_checkpointing=False,
         use_gradient_checkpointing_offload=False,
-        extras={"dit": dit, "use_usp": False},
+        extras={"dit": dit, "use_usp": False, "time_embed": torch.randn(batch, dim, dtype=dtype)},
     )
 
 
