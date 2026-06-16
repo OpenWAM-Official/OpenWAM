@@ -1,19 +1,10 @@
-"""Wan-specific implementation of :class:`VideoBackbone`.
+"""Wan-specific :class:`VideoBackbone`: bridges architecture-driven action
+injection and Wan's video forward.
 
-Lives outside ``wan/`` to keep the ``wan/`` package focused on Wan-internal
-implementation (DiT, VACE, SP, etc.). This module
-sits at the boundary between architecture-driven action injection and
-Wan's video forward.
-
-The three-step interface (``prepare`` / ``run_block`` / ``finalize``) is a
-faithful decomposition of ``model_fn_wan_video`` in ``wan/pipeline.py``.
-The original function is left untouched — consistency tests verify that
-both paths produce identical outputs.
-
-``WanVideoBackbone`` owns the Wan modules (DiT, VAE, text encoder, tokenizer,
-VACE, etc.) directly — modules as named children, scheduler/tokenizer/division
-factors as plain attributes. External code reaches them only through the
-:class:`VideoBackbone` ABC methods.
+Lives outside ``wan/`` to keep that package Wan-internal. Owns the Wan
+modules (DiT/VAE/text encoder/tokenizer/VACE) directly — modules as named
+children, scheduler/tokenizer/division factors as plain attributes; external
+code reaches them only through the ABC methods.
 """
 
 from __future__ import annotations
@@ -48,11 +39,9 @@ logger = logging.getLogger(__name__)
 class WanVideoBackbone(VideoBackbone):
     """Exposes the Wan modules through the VideoBackbone interface.
 
-    Owns DiT / VAE / text encoder / tokenizer / VACE directly: modules are
-    registered as named children (clean ``dit.*`` / ``vae.*`` state_dict keys);
-    scheduler / tokenizer / division factors are plain attributes.
-
-    Construction: use ``from_pretrained(source)`` for all paths.
+    Modules registered as named children (clean ``dit.*`` / ``vae.*`` keys);
+    scheduler / tokenizer / division factors are plain attributes. Construct
+    via ``from_pretrained(source)``.
     """
 
     # ================================================================
@@ -60,149 +49,100 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     @classmethod
-    def get_native_dit_patch_size(cls, pipe) -> Tuple[int, int, int]:
-        """Wan family's native DiT first-layer patch size.
-
-        All Wan2.x DiT variants (TI2V / I2V / VACE / Wan2.2) use ``(1, 2, 2)``
-        — the value is baked into ``WanModel.patch_embedding``'s ``Conv3d``
-        kernel and stride. We don't read it back from ``pipe.dit`` because
-        the value is invariant across the family and querying ``pipe.dit``
-        here would couple this classmethod to a non-trivial pipeline state.
+    def get_native_dit_patch_size(cls, holder) -> Tuple[int, int, int]:
+        """Wan family's native DiT patch size — invariant ``(1, 2, 2)`` across
+        all Wan2.x variants, so hard-coded rather than probed off the loaded DiT.
         """
         return (1, 2, 2)
 
     @classmethod
-    def get_native_temporal_contract(cls, pipe) -> Tuple[int, bool]:
-        """Wan family's native VAE temporal contract.
-
-        Hard-coded ``(4, True)`` across the Wan2.1 / Wan2.2 line — the causal
-        first-frame token plus 4-frame tail grouping is invariant. Same
-        rationale as :meth:`get_native_dit_patch_size`: probing ``pipe.vae``
-        here would couple the classmethod to a non-trivial pipeline state for
-        a value that is invariant by family.
+    def get_native_temporal_contract(cls, holder) -> Tuple[int, bool]:
+        """Wan family's native VAE temporal contract — invariant ``(4, True)``
+        (causal first-frame token + 4-frame tail grouping); hard-coded rather
+        than probed off the loaded VAE, same rationale as the patch-size sibling.
         """
         return (4, True)
 
-    def __init__(self, pipe, *, external_encoder=None, shift_video=None):
+    def __init__(self, holder, *, external_encoder=None, shift_video=None):
         """Internal constructor. Use ``from_pretrained()`` instead.
 
-        ``external_encoder`` must be ``None`` on the default path so
-        ``state_dict()`` carries only ``vae.*`` keys (not also
-        ``_encoder.*``). Setting it activates the external-encoder routing
-        in :meth:`_preprocess_video` / :meth:`_encode_video` /
-        :meth:`_decode_latents` / :meth:`_latents_to_frames` and aliases
-        the encoder under ``"vae"`` in :attr:`submodule_names`.
+        ``external_encoder`` is ``None`` on the default path so ``state_dict()``
+        carries only ``vae.*`` keys; setting it activates external-encoder VAE-IO
+        routing and aliases the encoder under ``"vae"``.
 
-        ``shift_video`` is the optional Esser-et-al. α-shift applied to
-        the video scheduler. Stored as ``self._shift_video`` so the ABC
-        :attr:`VideoBackbone.shift_video` property returns it — single
-        source of truth consumed by both
-        :meth:`BaseWAMArchitecture.init_training_schedulers` and
-        ``openwam/deploy/joint_engine.py::generate``. ``None`` keeps the
-        scheduler's template default (Wan = 5.0), which is bit-identical
-        to pre-PR behavior.
+        ``shift_video`` is the optional Esser α-shift on the video scheduler,
+        stored as the single source of truth behind the ABC property. ``None``
+        keeps the scheduler template default (Wan = 5.0).
         """
         super().__init__()
-        # ``pipe`` is a transient construction carrier: the backbone drains its
-        # sub-modules (registered as named children below → clean ``dit.*`` /
-        # ``vae.*`` state_dict keys) plus its non-Module state (scheduler /
-        # tokenizer / division factors / latent_spec) into itself, then lets the
-        # pipe go out of scope. Nothing reads ``pipe`` after construction.
+        # ``holder`` is a transient carrier: drain its sub-modules + non-Module
+        # state into self, then let it go out of scope. Nothing reads it after.
         self._encoder = external_encoder
-        # Promote pipeline sub-modules to backbone-owned named children so
-        # nn.Module collects them into state_dict at the clean top-level prefix.
+        # Promote sub-modules to named children so state_dict uses clean prefixes.
         for _name in ("dit", "dit2", "vae", "vace", "vace2", "text_encoder", "image_encoder", "motion_controller"):
-            _mod = getattr(pipe, _name, None)
+            _mod = getattr(holder, _name, None)
             if _mod is not None:
-                # nn.Module → registered named child (clean ``dit.*`` state_dict
-                # key); a non-Module value (test mocks) lands as a plain
-                # attribute so the same ``self.<name>`` access resolves on both.
+                # nn.Module → named child; non-Module (test mocks) → plain attr,
+                # same ``self.<name>`` access resolves on both.
                 setattr(self, _name, _mod)
-        # Backbone-owned non-Module state (was read off ``_pipe``). Captured once
-        # here from the just-built pipe; from_pretrained sets the external-encoder
-        # division factors / latent_spec before ``cls(pipe, ...)`` so these are
-        # final at construction time.
-        self._scheduler = getattr(pipe, "scheduler", None)
-        self._tokenizer = getattr(pipe, "tokenizer", None)
-        self._height_division_factor = getattr(pipe, "height_division_factor", None)
-        self._width_division_factor = getattr(pipe, "width_division_factor", None)
-        self._time_division_factor = getattr(pipe, "time_division_factor", None)
-        self._time_division_remainder = getattr(pipe, "time_division_remainder", None)
-        self._latent_spec = getattr(pipe, "latent_spec", None)
+        # Backbone-owned non-Module state. from_pretrained sets the external
+        # division factors / latent_spec before ``cls(holder, ...)``.
+        self._scheduler = getattr(holder, "scheduler", None)
+        self._tokenizer = getattr(holder, "tokenizer", None)
+        self._height_division_factor = getattr(holder, "height_division_factor", None)
+        self._width_division_factor = getattr(holder, "width_division_factor", None)
+        self._time_division_factor = getattr(holder, "time_division_factor", None)
+        self._time_division_remainder = getattr(holder, "time_division_remainder", None)
+        self._latent_spec = getattr(holder, "latent_spec", None)
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
         self._shift_video = None if shift_video is None else float(shift_video)
-        # Resolve the Wan family variant (I2V / TI2V / VACE / plain) ONCE from
-        # loaded components; first-frame conditioning is delegated to it so the
-        # hot paths carry no per-variant branches.
+        # Resolve the Wan variant (I2V/TI2V/VACE/plain) ONCE; first-frame
+        # conditioning delegates to it so hot paths carry no per-variant branch.
         from openwam.model.video_backbone.wan import variants as _variants
 
-        self._variant = _variants.detect(getattr(pipe, "dit", None), getattr(pipe, "vace", None))
-        # Resolve DiT patch size + temporal contract into backbone-owned
-        # instance attributes so the properties defined on the ABC
-        # (dit_patch_size / temporal_compression / causal_temporal) have
-        # a single value to return regardless of whether an external
-        # encoder is plugged in. Callers downstream (base.py mask
-        # downsampling, dataloader divisibility) consult the backbone
-        # attributes and never branch on ``self._encoder is None``.
+        self._variant = _variants.detect(getattr(holder, "dit", None), getattr(holder, "vace", None))
+        # Resolve patch size + temporal contract into instance attrs so the ABC
+        # properties have a single value regardless of external encoder; callers
+        # consult these attrs and never branch on ``self._encoder is None``.
         if external_encoder is not None:
             self._dit_patch_size = external_encoder.spec.dit_patch_size
             self._temporal_compression = int(external_encoder.spec.temporal_compression)
             self._causal_temporal = bool(external_encoder.spec.causal_temporal)
         else:
-            self._dit_patch_size = self.get_native_dit_patch_size(pipe)
-            self._temporal_compression, self._causal_temporal = self.get_native_temporal_contract(pipe)
+            self._dit_patch_size = self.get_native_dit_patch_size(holder)
+            self._temporal_compression, self._causal_temporal = self.get_native_temporal_contract(holder)
 
     @classmethod
     def from_pretrained(cls, source, *, external_encoder=None, **kw) -> WanVideoBackbone:
-        """Build a WanVideoBackbone from various source types.
+        """Build a WanVideoBackbone from a source.
 
-        Supported sources:
-        - ``DictConfig``: full Hydra config → ``build_training_pipeline(cfg)``
-        - ``str`` directory path: auto-discover model files → lightweight build
-        - ``dict`` with ``video_backbone.model_path``: lightweight build from model dir
-        - anything else: treated as an already-built pipe object
+        Sources: ``DictConfig`` (full Hydra cfg → loader), ``str`` dir path /
+        ``dict`` with ``model_path`` (lightweight build), else an already-built
+        component holder. Construction returns a transient holder that
+        ``__init__`` drains into the backbone.
 
-        When ``external_encoder`` is provided:
-          1. Fails fast for I2V backbones (their first conv hardcodes
-             ``in_dim = 4 + z_dim`` — see ``_build_i2v_y``).
-          2. Validates the encoder spec against the pipeline's native VAE.
-             ``is_reversible=True`` enforces strict z_dim equality;
-             ``is_reversible=False`` skips z_dim (patch_embedding will be
-             rebuilt by :func:`reinit_dit_from_scratch`) but still checks
-             spatial / temporal / causal — backbone-side code makes strong
-             assumptions about these.
-          3. Sets ``pipe.height/width_division_factor`` from
-             ``encoder.spec.spatial_compression * encoder.spec.dit_patch_size[1or2]``.
-          4. Releases ``pipe.vae`` so state_dict keys don't double-count
-             VAE params with the external encoder.
+        With ``external_encoder``: (1) fail-fast for I2V/VACE backbones;
+        (2) validate the encoder spec (strict only when ``is_reversible``);
+        (3) derive division factors from the encoder spec; (4) release the
+        native VAE. See the inline numbered comments for the why.
         """
         from omegaconf import DictConfig
 
-        # Skip native VAE materialization on:
-        #   - training, irreversible external encoder: validation is already
-        #     bypassed (encoder owns its latent geometry), so loading native
-        #     VAE only to release it is pure waste (~1.5GB Wan2.2).
-        #   - deploy with ANY external encoder: state_dict topology is
-        #     ``_encoder._m.*`` (was saved that way during training);
-        #     deploy must not also materialize ``_pipe.vae.*`` slot since
-        #     (a) the slot has no checkpoint weights to fill it, (b)
-        #     ``_build_pipe_from_components`` would otherwise duplicate the
-        #     VAE inside the encoder, and (c) ``cls(pipe, external_encoder)``
-        #     ends with ``pipe.vae = None`` anyway.
-        # Reversible-on-training is the one case that keeps loading native
-        # VAE — needed for the spec-equality cross-check at step (2) below
-        # against ``v.z_dim`` / ``v.upsampling_factor``.
+        # Skip materializing the native VAE (avoid ~1.5GB waste / a duplicate
+        # VAE slot deploy has no weights for) on training-with-irreversible and
+        # on deploy-with-ANY external encoder. Reversible-on-training keeps it,
+        # needed for the step-(2) spec cross-check against ``v.z_dim`` etc.
         is_deploy = not isinstance(source, DictConfig)
         skip_native_vae = bool(external_encoder is not None and (is_deploy or not external_encoder.spec.is_reversible))
 
         if isinstance(source, DictConfig):
             from openwam.model.video_backbone.wan.pipeline_builder import build_training_pipeline
 
-            pipe = build_training_pipeline(source, skip_native_vae=skip_native_vae)
+            holder = build_training_pipeline(source, skip_native_vae=skip_native_vae)
         elif isinstance(source, str):
             if os.path.isdir(source):
-                pipe = cls._build_pipe_from_model_path(
+                holder = cls._build_holder_from_model_path(
                     source, device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
                 )
             else:
@@ -210,7 +150,7 @@ class WanVideoBackbone(VideoBackbone):
         elif isinstance(source, dict):
             vb_cfg = source.get("video_backbone", source)
             if isinstance(vb_cfg, dict) and "components" in vb_cfg:
-                pipe = cls._build_pipe_from_components(
+                holder = cls._build_holder_from_components(
                     vb_cfg["components"],
                     tokenizer=vb_cfg.get("tokenizer"),
                     device=kw.get("device", "cpu"),
@@ -226,69 +166,44 @@ class WanVideoBackbone(VideoBackbone):
                     raise ValueError(
                         "dict source must contain 'video_backbone.components' or 'video_backbone.model_path'"
                     )
-                pipe = cls._build_pipe_from_model_path(
+                holder = cls._build_holder_from_model_path(
                     str(model_path), device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
                 )
         else:
-            pipe = source
+            holder = source
 
         if external_encoder is not None:
-            # (1) I2V fail-fast — the pretrained DiT's first conv is built with
-            # in_dim = 4 + z_dim (mask channels + VAE z_dim); an external
-            # encoder would silently break the channel-cat with ``y`` in
-            # prepare(). Surface this at construction rather than wait for
-            # the runtime AttributeError in ``_build_i2v_y``.
-            if bool(getattr(pipe.dit, "has_image_input", False)):
+            # (1) I2V fail-fast: the pretrained DiT first conv hardcodes
+            # in_dim = 4 + z_dim, so an external encoder breaks the ``y``
+            # channel-cat. Surface at construction, not at runtime.
+            if bool(getattr(holder.dit, "has_image_input", False)):
                 raise ValueError(
                     "I2V backbones cannot use external encoders: DiT first "
                     "conv in_dim = 4 + z_dim is hardcoded into the pretrained "
                     "weights. See docs/external_video_encoder.md §6."
                 )
 
-            # (1b) VACE fail-fast — current PR scope is Wan2.2-TI2V-5B
-            # only. VACE backbones have two hard incompatibilities the
-            # adapter does not yet rebuild:
-            #
-            #   - ``VaceWanModel.vace_patch_embedding`` hardcodes
-            #     ``vace_in_dim = 2 * z_dim + 64 = 96`` (z_dim=16 of the
-            #     native Wan VAE); ``reinit_dit_from_scratch`` only rebuilds
-            #     ``dit.patch_embedding`` / ``dit.head.head``, not the VACE
-            #     embedding — any encoder with a different z_dim makes
-            #     ``_build_vace_context`` produce a tensor that does not
-            #     match the embedding's in_channels.
-            #
-            #   - The vendored ``WanVideoUnit_VACE.process`` inference path
-            #     calls ``pipe.vae.encode(...)`` directly (wan/pipeline.py).
-            #     On the external-encoder path ``pipe.vae`` is None, so
-            #     deploy raises AttributeError on the first ``vace_video``
-            #     input.
-            #
-            # Surface at construction so users do not discover this only
-            # at deploy time. See docs/external_video_encoder.md §6.
-            if getattr(pipe, "vace", None) is not None:
+            # (1b) VACE fail-fast: two hard incompatibilities the adapter does
+            # not rebuild — ``vace_patch_embedding`` hardcodes vace_in_dim=96
+            # (native z_dim=16), and the deploy VACE path reads the native VAE
+            # which is None here. Surface at construction.
+            if getattr(holder, "vace", None) is not None:
                 raise ValueError(
                     "VACE backbones cannot use external encoders: this PR's scope is "
                     "Wan2.2-TI2V-5B only. VaceWanModel.vace_patch_embedding's "
                     "vace_in_dim=96 is baked into the pretrained weights, and the "
-                    "vendored WanVideoUnit_VACE inference path reads pipe.vae which "
+                    "vendored WanVideoUnit_VACE inference path reads the native VAE which "
                     "is None on the external-encoder path. See "
                     "docs/external_video_encoder.md §6."
                 )
 
-            # (2) Spec validation. Strict equality only when the encoder claims
-            # to be a drop-in VAE replacement (is_reversible=True). For
-            # irreversible encoders (DINOv3 / V-JEPA2 etc.) the entire
-            # point is to introduce a different latent geometry — z_dim,
-            # spatial_compression, temporal_compression, causal_temporal will
-            # all typically differ from the backbone's native VAE. The encoder
-            # owns this geometry via spec.dit_patch_size and the
-            # build_dit_input_proj / build_dit_output_proj hooks (called from
-            # reinit_dit_from_scratch); height/width_division_factor are
-            # derived from the encoder side as well. So we skip the validation
-            # entirely for irreversible encoders.
+            # (2) Spec validation. Strict equality only for a drop-in VAE
+            # replacement (is_reversible=True); irreversible encoders exist
+            # precisely to introduce a different latent geometry, which they own
+            # via their spec, so validation is skipped for them.
             from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
 
-            v = getattr(pipe, "vae", None)
+            v = getattr(holder, "vae", None)
             if v is not None and external_encoder.spec.is_reversible:
                 want = VideoEncoderSpec(
                     z_dim=int(v.z_dim),
@@ -298,42 +213,26 @@ class WanVideoBackbone(VideoBackbone):
                 )
                 VideoBackbone.validate_encoder_spec(external_encoder.spec, want)
 
-            # (3) Spatial division factor derived from the encoder's declared
-            # ``dit_patch_size`` rather than a hardcoded ``* 2``. For Wan VAE
-            # (dit_patch_size=(1,2,2)) this is identical to the pre-existing
-            # constant; for ViT-style encoders that pre-patchify at 16x and
-            # declare dit_patch_size=(1,1,1), the DiT's first conv becomes a
-            # pure channel projection and the total spatial division factor
-            # equals the encoder's own spatial_compression.
+            # (3) Spatial/time division factors derived from the encoder spec,
+            # not a hardcoded ``* 2`` / Wan-VAE grid — otherwise
+            # ``check_resize_height_width`` would round encoder-legal sizes to
+            # Wan's grid. Remainder is 1 iff causal ("first frame separable,
+            # then groups of temporal_compression").
             ps = external_encoder.spec.dit_patch_size
-            pipe.height_division_factor = external_encoder.spec.spatial_compression * ps[1]
-            pipe.width_division_factor = external_encoder.spec.spatial_compression * ps[2]
-            # Time division must also follow the encoder spec, not the
-            # pipeline default (which is hardcoded to ``time_division_factor=4,
-            # time_division_remainder=1`` for native Wan VAE). Without this,
-            # the pipeline's ``check_resize_height_width`` would silently
-            # round encoder-legal frame counts to Wan VAE's grid. For
-            # ``temporal_compression=4 causal`` (V-JEPA's emulated grouping
-            # after ViT tubelet=2 + extra time-pool stride=2; identical to
-            # Wan VAE's own causal grid), the legal T_pixel values are
-            # 9, 13, 17, ... — i.e. ``(T_pixel - 1) % 4 == 0``. The
-            # remainder is 1 iff the encoder is causal: same "first frame
-            # separable, then groups of ``temporal_compression``" contract.
-            pipe.time_division_factor = external_encoder.spec.temporal_compression * ps[0]
-            pipe.time_division_remainder = 1 if external_encoder.spec.causal_temporal else 0
+            holder.height_division_factor = external_encoder.spec.spatial_compression * ps[1]
+            holder.width_division_factor = external_encoder.spec.spatial_compression * ps[2]
+            holder.time_division_factor = external_encoder.spec.temporal_compression * ps[0]
+            holder.time_division_remainder = 1 if external_encoder.spec.causal_temporal else 0
 
             # (4) Release the native VAE so state_dict keys don't double-count
-            # VAE params with the external encoder. Print rather than
-            # logger.info because architecture init runs before the trainer's
-            # logger is wired up and INFO would be swallowed; the user needs
-            # this visible to confirm the external_encoder path is active.
-            # Gated on rank=0 to avoid 4x duplicate lines under torchrun.
-            pipe.vae = None
+            # with the external encoder. print (not logger.info) because arch
+            # init runs before the logger is wired up; rank-0 gated.
+            holder.vae = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             if int(os.environ.get("RANK", 0)) == 0:
                 print(
-                    f"[WanVideoBackbone] pipe.vae released; "
+                    f"[WanVideoBackbone] native VAE released; "
                     f"external_encoder={type(external_encoder).__name__} "
                     f"(z_dim={external_encoder.spec.z_dim}, "
                     f"is_reversible={external_encoder.spec.is_reversible}, "
@@ -341,46 +240,29 @@ class WanVideoBackbone(VideoBackbone):
                     flush=True,
                 )
 
-            # (5) Expose latent-shape metadata on ``pipe`` so vendored
-            # inference units (``WanVideoUnit_NoiseInitializer``) can read
-            # ``z_dim`` / ``spatial_compression`` / ``temporal_compression`` /
-            # ``causal_temporal`` without falling back to ``pipe.vae``
-            # (which is now None). The unit's fallback branch still hits
-            # ``pipe.vae`` on the native VAE path where ``pipe.latent_spec``
-            # is absent. Plain attribute (not nn.Module) — does not enter
-            # state_dict.
-            pipe.latent_spec = external_encoder.spec
+            # (5) Expose latent-shape metadata so deploy noise init can read it
+            # without falling back to the native VAE (now None). Plain attr — not
+            # in state_dict.
+            holder.latent_spec = external_encoder.spec
 
-        # Resolve optional cfg-side ``shift_video`` (Esser SD3 α-shift on the
-        # video scheduler) and pass it to the constructor. We read here
-        # rather than in ``__init__`` because the cfg shape depends on the
-        # ``source`` type (DictConfig from training, dict from deploy,
-        # plain pipe with no cfg context). ``None`` keeps the scheduler's
-        # template default (Wan = 5.0).
+        # Resolve optional cfg-side ``shift_video`` here (not in __init__)
+        # because the cfg shape depends on the ``source`` type.
         shift_video_cfg = cls._resolve_cfg_shift_video(source)
 
-        return cls(pipe, external_encoder=external_encoder, shift_video=shift_video_cfg)
+        return cls(holder, external_encoder=external_encoder, shift_video=shift_video_cfg)
 
     @staticmethod
     def _resolve_cfg_shift_video(source) -> Optional[float]:
-        """Extract ``cfg.model.video_backbone.shift_video`` from various
-        ``from_pretrained`` source shapes.
-
-        Returns ``None`` when the field is unset, the source has no cfg
-        context (plain pipe / model-path str), or the value is explicitly
-        null. Caller stores the result on ``self._shift_video`` for
-        downstream consumers (``init_training_schedulers`` /
-        ``joint_engine.generate``).
+        """Extract ``shift_video`` from the various ``from_pretrained`` source
+        shapes; ``None`` when unset or the source has no cfg context.
         """
         from omegaconf import DictConfig
 
         vb_cfg = None
         if isinstance(source, DictConfig):
-            # Training path: full Hydra cfg, video_backbone block lives under it.
             vb_cfg = source.get("video_backbone") if "video_backbone" in source else None
         elif isinstance(source, dict):
-            # Deploy path: model_loader hands us a dict that either IS the
-            # video_backbone block or contains it.
+            # model_loader hands a dict that either IS or contains video_backbone.
             vb_cfg = source.get("video_backbone", source) if "video_backbone" in source else source
         if vb_cfg is None:
             return None
@@ -400,8 +282,7 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def _uses_external_encoder(self) -> bool:
-        """True when this backbone is routing VAE IO through an external
-        :class:`VideoEncoder` rather than its native ``pipe.vae``."""
+        """True when routing VAE IO through an external encoder, not the native VAE."""
         return self._encoder is not None
 
     @property
@@ -414,26 +295,13 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def needs_first_frame_skip(self) -> bool:
-        """``True`` iff this Wan variant unconditionally treats ``latent[0]`` as a
-        clean conditioning frame that must be excluded from the diffusion loss.
+        """``True`` iff ``latent[0]`` is a clean conditioning frame excluded from
+        the diffusion loss. Only TI2V (per-token t=0 on frame-0 tokens) skips.
 
-        - TI2V (``fuse_vae_embedding_in_latents``): ``latent[0]`` is the encoded
-          first-frame reference; the per-token timestep path pins t=0 on those
-          tokens. Always skipped.
-        - I2V (``has_image_input``): the first-frame condition rides on the
-          ``y`` side channel and ``latent[0]`` itself is fully noised on both
-          train and deploy. Deploy starts ``latent[0]`` from pure noise and
-          the denoising loop must produce a meaningful frame-0 output, so
-          training has to supervise ``latent[0]`` against that target.
-          Skipping it here is exactly what drove the cell-4 mock loss
-          divergence — model never gets a frame-0 gradient and produces
-          garbage there at inference. So I2V is NOT in the skip list.
-        - VACE: starting with the native-VACE PR, the first-frame condition is
-          delivered exclusively through the ``vace_context`` bypass; ``video``
-          itself is fully noised and fully supervised (matches native
-          ``WanVideoUnit_VACE`` convention). So VACE is NOT in the skip list —
-          ``latent[0]`` enters the loss as a predicted frame.
-        - Future Wan T2V: none of the above → ``False``.
+        I2V and VACE do NOT skip: their first-frame condition rides a side
+        channel (``y`` / ``vace_context``) while ``latent[0]`` stays fully noised
+        and supervised. For I2V, skipping starves frame-0 of gradient and
+        produces garbage there at inference (the cell-4 mock-loss divergence).
         """
         return self._variant.needs_first_frame_skip
 
@@ -459,10 +327,9 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def submodule_names(self) -> list[str]:
-        # ``vae`` is reported under either path so training_strategy
-        # ``freeze_modules: [vae, ...]`` works without yaml changes when an
-        # external encoder is swapped in (pipe.vae is None on the external
-        # path; the alias resolves to ``self._encoder`` in get_submodule).
+        # ``vae`` is reported under either path so ``freeze_modules: [vae]``
+        # works unchanged when an external encoder is swapped in (the alias
+        # resolves to ``self._encoder`` in get_submodule).
         names = []
         for name in ("dit", "vace", "text_encoder", "vae", "image_encoder"):
             if name == "vae" and self._uses_external_encoder:
@@ -482,20 +349,12 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def video_attention_mask_mode(self) -> str:
-        """Video self-attention mask mode used by joint MoT mask construction.
+        """Video self-attention mask mode for joint MoT mask construction.
 
-        Three modes mirror FastWAM's ``WanVideoDiT.video_attention_mask_mode``
-        (see [wan_video_dit.py:473-507](references/FastWAM/src/fastwam/models/wan22/wan_video_dit.py#L473)):
-
-        - ``bidirectional``: full v↔v coupling (default).
-        - ``per_frame_causal``: each frame's tokens may only attend to its own
-          frame and earlier frames (token-level causal block-diagonal).
-        - ``first_frame_causal``: the first-frame tokens see only themselves;
-          all later frames see the full video. FastWAM-Joint default.
-
-        Sourced from the underlying Wan DiT when available, otherwise from the
-        ``video_attention_mask_mode`` attribute set on this backbone (default
-        ``bidirectional`` for back-compat).
+        Modes: ``bidirectional`` (full v↔v, default), ``per_frame_causal``
+        (token-level causal block-diagonal), ``first_frame_causal`` (first frame
+        sees only itself, later frames see all). Explicit override wins, else
+        the DiT's value, else ``bidirectional``.
         """
         explicit = getattr(self, "_video_attention_mask_mode", None)
         if explicit is not None:
@@ -512,11 +371,8 @@ class WanVideoBackbone(VideoBackbone):
         video_tokens_per_frame: int,
         device: torch.device,
     ) -> torch.Tensor:
-        """Build the video↔video block of the joint MoT attention mask.
-
-        ``True`` means "attend to". Mirrors FastWAM's
-        :meth:`WanVideoDiT.build_video_to_video_mask` so MoTJointDriver and
-        FastWAM-Joint produce the same mask layout.
+        """Build the video↔video block of the joint MoT attention mask
+        (``True`` = attend to). Layout matches FastWAM's equivalent.
         """
         if video_seq_len <= 0:
             raise ValueError(f"video_seq_len must be positive, got {video_seq_len}")
@@ -542,9 +398,7 @@ class WanVideoBackbone(VideoBackbone):
         if mode == "first_frame_causal":
             video_mask = torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
             first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
-            # First-frame query rows can attend only to the first-frame keys
-            # (they don't peek at the rest of the video). All later rows are
-            # left at True (= see everything).
+            # First-frame rows attend only to first-frame keys; later rows stay True.
             video_mask[:first_frame_tokens, first_frame_tokens:] = False
             return video_mask
 
@@ -594,12 +448,8 @@ class WanVideoBackbone(VideoBackbone):
             t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
         elif force_per_token_t_mod:
             # Non-TI2V backbones under joint-attention / shared_backbone need 4D
-            # t_mod (one of: ``inject_shared_tokens`` extending the residual with
-            # per-token action/state entries; ``IDMMoTDriver`` concatenating
-            # noisy + cond video sequences with different timesteps). Compute the
-            # time embedding once on (B,) and broadcast to (B, L, dim) — running
-            # the MLP per token would repeat the same Linear/SiLU/Linear stack
-            # L times (L ≈ 4680 for VACE-1.3B, ≈18720 for I2V-14B-480P).
+            # t_mod. Compute the time embedding once on (B,) and broadcast to
+            # (B, L, dim) — a per-token MLP would repeat the stack L times.
             batch_size = latents.shape[0]
             f_lat = latents.shape[2]
             ps = self._dit_patch_size
@@ -609,23 +459,10 @@ class WanVideoBackbone(VideoBackbone):
             t_base = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype))  # (B, dim)
             t = t_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
 
-            # Optional clean-prefix alignment. The TI2V branch above pins the
-            # first ``num_clean`` frames' timesteps to 0 so the model receives a
-            # "this frame is the clean ref" signal that matches the latent-side
-            # ``first_frame_latents`` replacement done in ``base.compute_loss``.
-            # Other Wan backbones (VACE, I2V) historically lacked this in the
-            # broadcast path — the residual data was clean but t_mod still
-            # carried the sampled timestep. When the caller opts in via
-            # ``zero_clean_prefix_t_mod=True`` AND a clean prefix is actually
-            # present, we mirror TI2V's behavior by overwriting the first
-            # ``num_clean`` frames' time embedding with ``time_embedding(0)``.
-            # Mathematically equivalent to TI2V's per-token path (the latter
-            # builds an (B*L,) timestep vector with prefix=0 before embedding);
-            # we do the same overwrite at the embedding layer instead so the
-            # per-token MLP stays a single (B, dim) call. ``num_clean`` mirrors
-            # the TI2V branch's ``max(num_clean_prefix_frames, 1)`` fallback so
-            # callers can rely on ``first_frame_latents`` alone (with
-            # ``num_clean_prefix_frames=0``) to trigger the prefix.
+            # Optional clean-prefix alignment: when opted in AND a clean prefix
+            # is present, overwrite the first ``num_clean`` frames' time embedding
+            # with ``time_embedding(0)`` — mirrors TI2V's per-token t=0 pin but
+            # at the embedding layer, keeping the MLP a single (B, dim) call.
             zero_clean_prefix = bool(kw.get("zero_clean_prefix_t_mod", False))
             has_clean_ref = num_clean_prefix_frames > 0 or kw.get("first_frame_latents") is not None
             if zero_clean_prefix and has_clean_ref:
@@ -646,12 +483,8 @@ class WanVideoBackbone(VideoBackbone):
         if motion_bucket_id is not None and motion_controller is not None:
             motion_term = motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))  # (B, 6, dim)
             if t_mod.dim() == 4:
-                # Broadcast the (B, 6, dim) motion term across the L tokens of a
-                # 4D t_mod. Without the unsqueeze, ``(B, 6, dim) + (B, L, 6, dim)``
-                # right-aligns and aliases B onto L, which silently mis-broadcasts
-                # when B == L (per-batch motion id, per-token t_mod) and shape-errors
-                # when B != L. Latent bug exposed once non-TI2V archs opt into 4D
-                # t_mod via ``force_per_token_t_mod=True``.
+                # Broadcast (B, 6, dim) across L; without the unsqueeze the add
+                # right-aligns and aliases B onto L (mis-broadcasts when B == L).
                 motion_term = motion_term.unsqueeze(1)  # (B, 1, 6, dim)
             t_mod = t_mod + motion_term
         context = dit.text_embedding(context)
@@ -787,11 +620,8 @@ class WanVideoBackbone(VideoBackbone):
         return state
 
     def _apply_post_block_residuals(self, block_id: int, state: BlockLoopState) -> None:
-        """Apply post-block residuals (VACE hint) to ``state.hidden_states``.
-
-        Shared by :meth:`run_block` and :meth:`post_attn_at_layer` so the joint
-        self-attention path picks up VACE without duplicating the residual
-        logic. Mutates ``state.hidden_states`` in place.
+        """Apply the VACE hint residual to ``state.hidden_states`` in place.
+        Shared by run_block and post_attn_at_layer.
         """
         vace = state.extras.get("vace")
 
@@ -799,20 +629,15 @@ class WanVideoBackbone(VideoBackbone):
             current_vace_hint = state.vace_hints[vace.vace_layers_mapping[block_id]]
             vace_len = current_vace_hint.shape[1]
             if state.hidden_states.shape[1] == vace_len:
-                # dual_system / video-only path: hint length matches the full
-                # token sequence, apply the residual to everything.
+                # dual_system / video-only: hint spans the full sequence.
                 state.hidden_states = state.hidden_states + current_vace_hint
             elif state.hidden_states.shape[1] > vace_len:
-                # shared_backbone path: state.hidden_states has been extended with
-                # action/state tokens. VACE residuals only apply to the leading
-                # video slice; action/state tokens still get the VACE signal
-                # indirectly through self-attention (both 'joint' and
-                # 'bidirectional' modes route action→video).
+                # shared_backbone: residual applies only to the leading video
+                # slice; action/state tokens get VACE via self-attention.
                 video_slice = state.hidden_states[:, :vace_len] + current_vace_hint
                 state.hidden_states = torch.cat([video_slice, state.hidden_states[:, vace_len:]], dim=1)
             else:
-                # Defensive: no legitimate path makes state.hidden_states shorter than the
-                # VACE hint. If we ever hit this, something upstream broke the
+                # Defensive: hidden_states shorter than the hint breaks the
                 # video-token-count invariant — investigate before patching.
                 raise ValueError(
                     f"_apply_post_block_residuals: state.hidden_states.shape[1]={state.hidden_states.shape[1]} "
@@ -822,11 +647,9 @@ class WanVideoBackbone(VideoBackbone):
                 )
 
     def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState) -> Tuple[Tensor, Tensor, Tensor, dict]:
-        """First half of a Wan DiT block: norm1 + AdaLN modulate + Q/K/V + RoPE.
-
-        Faithful split of :meth:`DiTBlock.forward` (in ``wan/dit.py``) up to the
-        attention call. Used by :class:`MoTJointDriver` to pull video-side
-        Q/K/V before the mixed attention. Pairs with :meth:`post_attn_at_layer`.
+        """First half of a Wan DiT block (norm1 + AdaLN + Q/K/V + RoPE), up to
+        the attention call. Lets MoTJointDriver pull video-side Q/K/V before the
+        mixed attention; pairs with :meth:`post_attn_at_layer`.
         """
         q, k, v, post_tuple = self.pre_attn_at_layer_for_compile(layer_id, state)
         residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_tuple
@@ -871,12 +694,9 @@ class WanVideoBackbone(VideoBackbone):
     def post_attn_at_layer(
         self, layer_id: int, state: BlockLoopState, attn_out: Tensor, post_state: dict
     ) -> BlockLoopState:
-        """Second half of a Wan DiT block: gate(residual, self_attn.o(attn_out))
-        → cross-attn (text context) → FFN → VACE residuals.
-
-        ``attn_out`` is the unprojected attention output (pre ``self_attn.o``)
-        for the *video* slice of the joint mixed attention; this method finishes
-        applying the block and the standard post-block residuals.
+        """Second half of a Wan DiT block: gate → cross-attn → FFN → VACE
+        residuals. ``attn_out`` is the unprojected (pre ``self_attn.o``) attention
+        output for the video slice of the joint mixed attention.
         """
         if isinstance(post_state, dict):
             post_state = (
@@ -934,12 +754,9 @@ class WanVideoBackbone(VideoBackbone):
         n_state: int = 0,
         timestep: Optional[Tensor] = None,
     ) -> BlockLoopState:
-        """Append action tokens followed by optional state tokens.
-
-        SharedBackbone layout is ``[video][action][state]``. State tokens use
-        independent 1D RoPE positions and the same sample-level action timestep
-        as the action tokens. Following DreamZero, action/state AdaLN t_mod is
-        generated from timestep only.
+        """Append action then optional state tokens (layout ``[video][action]
+        [state]``). State tokens use independent 1D RoPE positions; action/state
+        AdaLN t_mod comes from timestep only (DreamZero).
         """
         n_state = int(n_state or 0)
         if n_state < 0:
@@ -1029,18 +846,8 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     def preprocess_input_for_train(self, *, frames=None, text=None, **kw) -> dict:
-        """Unified preprocessing: raw data → tensors ready for denoising loop.
-
-        Args:
-            frames: List of video clips (each a list of PIL Images), one per batch sample.
-            text: List of text prompts.
-            vace_videos: List of VACE video clips (each a list of PIL Images or None).
-            ref_images: List of reference image clips (each a list of PIL Images or None).
-
-        Returns:
-            Dict with: input_latents, context, seq_lens, height, width, num_frames,
-            vace_context (optional), first_frame_latents (optional),
-            fuse_vae_embedding_in_latents, num_clean_prefix_frames.
+        """Unified train preprocessing: raw data (``frames``/``text``, optional
+        ``vace_videos``/``ref_images`` in kw) → the denoising-loop input dict.
         """
         device = self.device
         dtype = self.dtype
@@ -1057,10 +864,8 @@ class WanVideoBackbone(VideoBackbone):
         input_latents = self._encode_video(stacked_inputs)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
-        # Variant-specific first-frame / control conditioning — the I2V /
-        # TI2V / VACE branches are encapsulated in ``self._variant`` (resolved
-        # once at construction), so this method carries no per-variant ``if``.
-        # See ``wan/variants/`` for each family's contract.
+        # Variant-specific first-frame / control conditioning lives in
+        # ``self._variant``, so this method carries no per-variant ``if``.
         cond = self._variant.build_train_conditioning(
             self,
             input_latents=input_latents,
@@ -1099,8 +904,7 @@ class WanVideoBackbone(VideoBackbone):
     def get_submodule(self, name: str) -> nn.Module | None:
         if name == "vae" and self._uses_external_encoder:
             return self._encoder
-        # Backbone-owned named child (registered in __init__). Non-Module names
-        # (tokenizer / scheduler) are not submodules and resolve to None.
+        # Non-Module names (tokenizer / scheduler) resolve to None.
         mod = getattr(self, name, None)
         return mod if isinstance(mod, nn.Module) else None
 
@@ -1129,14 +933,11 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
-        """Move all owned submodules to (dtype, device).
+        """Move all owned submodules to (dtype, device) and update the
+        ``_dtype`` / ``_device`` records.
 
-        Updates the ``_dtype`` / ``_device`` records that the ``dtype`` /
-        ``device`` properties (and deploy preprocessing) read back.
-
-        This method must NOT call ``mod.eval()``: trainable submodules
-        (dit, vace) need to stay in train mode; eval/train state of frozen
-        modules is irrelevant since their forward runs under ``no_grad``.
+        Must NOT call ``mod.eval()``: trainable submodules (dit, vace) must stay
+        in train mode; frozen ones run under ``no_grad`` so their mode is moot.
         """
         self._dtype = dtype
         self._device = device
@@ -1150,42 +951,18 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     def get_component_specs(self, model_path: str) -> dict:
-        """Generate component specs from *model_path* for config persistence.
-
-        Uses MODEL_CONFIGS hash matching to discover sub-module classes and
-        kwargs. The returned dict is injected into ``cfg.model.video_backbone``
-        before saving ``config.yaml``, so deploy can reconstruct the pipeline
-        without needing the original *model_path*.
-
-        Returns a dict with keys ``components`` (list) and optionally
-        ``tokenizer`` (dict).
+        """Component specs from *model_path* (``components`` + optional
+        ``tokenizer``), injected into the saved config so deploy can rebuild the
+        pipeline without the original *model_path*.
         """
         from openwam.model.video_backbone.wan.component_specs import generate_video_backbone_component_specs
 
         return generate_video_backbone_component_specs(model_path)
 
     def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
-        """Copy backbone-side deploy artifacts next to ``config.yaml``.
-
-        Two artifact families:
-
-        * Wan tokenizer — always copied, source is ``model.video_backbone.model_path``.
-        * External encoder side files — forwarded to
-          ``self._encoder.copy_deploy_artifacts`` when an external encoder is
-          plugged in. Two policies are in use today:
-
-          - **Copy-or-skip** (V-JEPA 2.1): copies ``manifest.json`` and
-            logs+returns on ``OSError`` so a permission / ENOSPC failure
-            does not crash the otherwise-good training save. ``from_skeleton``
-            then falls back to ``encoder.model_path``.
-          - **Strict self-contained**: writes
-            ``encoder_meta/{encoder_name.txt, encoder_config.json,
-            manifest.json}`` and re-raises any failure so deploy can rely on
-            the metadata being present.
-
-          Encoders whose structural state is fully captured by
-          safetensors + ``components`` (e.g. Wan VAE) inherit the ABC's
-          no-op default.
+        """Copy backbone-side deploy artifacts next to ``config.yaml``: the Wan
+        tokenizer (always), plus the external encoder's own side files (forwarded
+        to its ``copy_deploy_artifacts``; policy is encoder-specific).
         """
         from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
 
@@ -1198,19 +975,11 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
 
     def _resolve_i2v_input_image(self, first_frame_image):
-        """Normalize ``first_frame_image`` into a single PIL (or None) for I2V deploy.
-
-        ``openwam/deploy/policy.py`` wraps a single PIL into ``[img]`` before
-        calling this method. Upstream I2V CLIP/VAE units (``wan/pipeline.py``)
-        call ``.resize`` on the value directly and would raise on a list,
-        whereas the TI2V finalize path handles a list itself. Always route the
-        I2V deploy path through this helper.
+        """Normalize ``first_frame_image`` to a single PIL (or None) for I2V
+        deploy: I2V CLIP/VAE units ``.resize`` the value and choke on a list.
         """
-        # ``_dit`` / ``_is_ti2v`` / ``_has_vace`` are properties on the real
-        # WanVideoBackbone; the defensive ``getattr`` is for lightweight test
-        # mocks (e.g. ``tests/test_cache_behavior.py::_MockWanVB``) that
-        # bypass the full Wan pipeline and set these as plain instance fields
-        # or omit them entirely.
+        # Defensive ``getattr`` is for test mocks that set these as plain fields
+        # or omit them; on the real backbone they are properties.
         is_i2v = (
             bool(getattr(getattr(self, "_dit", None), "has_image_input", False))
             and not getattr(self, "_is_ti2v", False)
@@ -1227,22 +996,14 @@ class WanVideoBackbone(VideoBackbone):
         return first_frame_image
 
     def preprocess_input_for_inference(self, inputs: "InferenceInputs") -> dict:
-        """Prepare all inputs for the inference denoising loop.
+        """Build the inference denoising-loop input dict from a typed
+        :class:`InferenceInputs`, via explicit backbone helpers (no unit-runner).
 
-        Builds every conditioning signal with an explicit backbone helper (no
-        ``WanVideoPipeline`` unit-runner): scheduler setup, text/CLIP/VAE/VACE
-        encoding, TI2V first-frame handling. Returns a single dict ready for
-        ``base.generate``. The only cached quantity is the text embedding
-        (identical for a prompt, independent of seed/dims); noise, clip_feature,
-        y, vace_context and first_frame_latents are rebuilt every call.
-
-        Takes a typed :class:`openwam.model.inference_inputs.InferenceInputs`.
-        CFG fields are ignored — Wan adapters do not implement classifier-free
-        guidance at inference; ``BaseWAMArchitecture.generate`` rejects
-        ``cfg_scale > 1`` before we get here.
+        Only the text embedding is cached (prompt-keyed, seed/dim-independent);
+        noise/clip/y/vace_context/first_frame_latents are rebuilt every call.
+        CFG fields are ignored — Wan does no CFG at inference.
         """
-        # Wan tile defaults (the dataclass keeps them ``None`` so other
-        # backbones opt into their own; Wan has long-standing concrete ones).
+        # Wan tile defaults (dataclass keeps them None for other backbones).
         prompt = inputs.prompt
         vace_video = inputs.vace_video
         first_frame_image = inputs.first_frame_image
@@ -1298,12 +1059,9 @@ class WanVideoBackbone(VideoBackbone):
             "camera_control_direction": None,
             "camera_control_speed": 1 / 54,
             "camera_control_origin": _DEFAULT_CAMERA_ORIGIN,
-            # vace_video / vace_video_mask / vace_reference_image are
-            # intentionally cleared on the OpenWAM path: native VACE's
-            # ref-prepend convention conflicts with our T_lat == video-latent
-            # length contract. For VACE backbones the first-frame condition
-            # flows through ``_build_vace_context_for_deploy`` below; for
-            # non-VACE backbones the slots are inert.
+            # vace_* slots cleared: native VACE's ref-prepend breaks our
+            # T_lat == video-latent contract. VACE first-frame flows through
+            # ``_build_vace_context_for_deploy`` below instead.
             "vace_video": None,
             "vace_video_mask": None,
             "vace_reference_image": None,
@@ -1334,19 +1092,16 @@ class WanVideoBackbone(VideoBackbone):
         inputs_shared["prompt"] = prompt
         inputs_shared["num_inference_steps"] = num_inference_steps
 
-        # NoiseInitializer + InputVideoEmbedder: deploy ``input_video`` is
-        # always None, so ``latents`` is the noise tensor itself. The ``noise``
-        # key is kept alongside ``latents`` (both the same tensor) to match the
-        # contract ``base.generate`` consumes.
+        # Deploy ``input_video`` is always None, so ``latents`` == ``noise``
+        # (same tensor under both keys, as base.generate expects).
         noise = self._build_deploy_noise(
             height=height, width=width, num_frames=num_frames, seed=seed, rand_device="cpu"
         )
         inputs_shared["noise"] = noise
         inputs_shared["latents"] = noise
 
-        # I2V first-frame condition: CLIP embedding + VAE ``y``, each gated on
-        # the DiT requirement flags. ``_resolve_i2v_input_image`` returns None
-        # for non-I2V backbones, leaving ``input_image`` None and no clip/y.
+        # I2V first-frame: CLIP + VAE ``y``, each gated on the DiT flags.
+        # ``_resolve_i2v_input_image`` is None for non-I2V backbones.
         i2v_img = self._resolve_i2v_input_image(first_frame_image)
         inputs_shared["input_image"] = i2v_img
         if i2v_img is not None:
@@ -1376,11 +1131,7 @@ class WanVideoBackbone(VideoBackbone):
         return inputs_shared
 
     def _encode_text_for_inference(self, prompt, *, vace_cache, prompt_embed_cache) -> Tuple[Tensor, Tensor]:
-        """Return deploy ``(context, seq_lens)``, reusing a cached text embed.
-
-        Text encoding is the only deploy quantity worth caching; both caches
-        store the same ``(context, seq_lens)`` pair keyed on the prompt.
-        """
+        """Deploy ``(context, seq_lens)``, reusing a prompt-keyed cached embed."""
         if vace_cache and vace_cache.get("populated") and vace_cache.get("prompt_key") == prompt:
             return vace_cache["context"], vace_cache["seq_lens"]
         if prompt_embed_cache is not None and prompt in prompt_embed_cache:
@@ -1418,11 +1169,9 @@ class WanVideoBackbone(VideoBackbone):
     def _build_deploy_i2v_y(
         self, input_image, *, num_frames, height, width, tiled, tile_size, tile_stride
     ) -> Optional[Tensor]:
-        """I2V VAE conditioning ``y`` (replaces ImageEmbedderVAE); None if the DiT gate fails.
-
-        Uses the tiled per-sample ``vae.encode`` — NOT training's ``_build_i2v_y``
-        (``batch_encode``, non-tiled) — so the deploy default ``tiled=True``
-        matches the vendored unit bit-for-bit.
+        """I2V VAE conditioning ``y``; None if the DiT gate fails. Uses the tiled
+        per-sample ``vae.encode`` (not training's batched ``_build_i2v_y``) so
+        deploy ``tiled=True`` matches the vendored unit bit-for-bit.
         """
         if not self.dit.require_vae_embedding:
             return None
@@ -1451,21 +1200,12 @@ class WanVideoBackbone(VideoBackbone):
         return y
 
     def _finalize_ti2v_first_frame_latents(self, inputs_shared: dict, first_frame_image) -> None:
-        """Emit ``first_frame_latents`` for TI2V deploy.
+        """Emit ``first_frame_latents`` for TI2V deploy: its ``seperated_timestep``
+        DiT needs both ``fuse_vae_embedding_in_latents=True`` AND
+        ``first_frame_latents`` so frame-0 tokens get t=0 and base.generate can
+        clean-replace ``latents[:, :, 0:1]`` each step.
 
-        TI2V's ``seperated_timestep`` DiT requires both
-        ``fuse_vae_embedding_in_latents=True`` AND ``first_frame_latents`` so
-        the per-token timestep path can zero the timestep on frame-0 tokens
-        and ``base.generate`` can clean-replace ``latents[:, :, 0:1]`` on every
-        denoising step.
-
-        VACE intentionally has no branch here: its first-frame condition flows
-        through ``vace_context`` (built by ``_build_vace_context_for_deploy``),
-        and ``video`` itself stays fully noised — matching the native
-        ``WanVideoUnit_VACE`` "predict everything via the bypass" semantic.
-
-        I2V also skips this path: its conditioning rides on the ``y`` channel,
-        ``first_frame_latents`` is never used.
+        VACE/I2V skip this — their first-frame rides ``vace_context`` / ``y``.
         """
         if not self._is_ti2v or first_frame_image is None:
             if first_frame_image is None:
@@ -1519,32 +1259,18 @@ class WanVideoBackbone(VideoBackbone):
         tile_size: tuple,
         tile_stride: tuple,
     ) -> Tensor:
-        """Tiled-aware VAE encode for the VACE pixel→latent helper.
-
-        Two branches:
-
-        - ``tiled=False`` (training default + non-tiled deploy): one batched
-          ``vae.batch_encode(B, 3, T, H, W)`` call. Fast, but requires the
-          full video to fit on one GPU.
-        - ``tiled=True`` (deploy default at 480x832 / 720x1280): loop the
-          batch and invoke ``vae.encode([video], tiled=True, ...)`` per
-          sample. Slower but bounded peak memory. Mirrors what the vendored
-          ``WanVideoUnit_VACE.process`` does at B=1 — without this the
-          deploy VACE encode would silently switch to full-frame and OOM.
-
-        Returns a tensor on ``pixels`` device/dtype with shape
-        ``(B, z_dim, T_lat, H_lat, W_lat)``.
+        """Tiled-aware VAE encode for the VACE pixel→latent helper, returning
+        ``(B, z_dim, T_lat, H_lat, W_lat)``. ``tiled=False`` (training) batches
+        in one call; ``tiled=True`` (deploy) loops per-sample with bounded peak
+        memory, mirroring the vendored unit so large-frame deploy does not OOM.
         """
         if not tiled:
             return self._encode_video(pixels).to(dtype=pixels.dtype, device=pixels.device)
         if self._uses_external_encoder:
-            # External encoders do not expose a generic tiled-encode contract;
-            # fall back to batch_encode. Currently unreachable since VACE +
-            # external_encoder is fail-fast at construction
-            # (``wan_videobackbone.py:_pipe.vace is not None`` branch).
+            # No generic tiled-encode contract; fall back to batch_encode.
+            # Unreachable today (VACE + external_encoder is fail-fast).
             return self._encoder.batch_encode(pixels).to(dtype=pixels.dtype, device=pixels.device)
-        # Native Wan VAE: loop B samples (deploy is B=1, training never sets
-        # tiled=True) and call the per-sample tiled encode.
+        # Native Wan VAE: per-sample tiled encode (deploy is B=1).
         outs = []
         for i in range(pixels.shape[0]):
             lat = self.vae.encode(
@@ -1589,23 +1315,11 @@ class WanVideoBackbone(VideoBackbone):
     # ================================================================
     # Native-VACE input convention (training + deploy)
     # ================================================================
-    #
-    # These helpers replicate ``WanVideoUnit_VACE.process``
-    # (``wan/pipeline.py:782-876``) verbatim except they:
-    #
-    #   - Accept a batch (B >= 1) where the vendored unit assumes B=1.
-    #     Native unit is hardcoded for the inference path which never sees
-    #     B > 1; OpenWAM training is batched. TI2V/I2V follow the same
-    #     "manually batch around the unit" approach via ``batch_encode`` and
-    #     ``_build_i2v_y``; this is the VACE counterpart.
-    #
-    #   - Skip the optional ``vace_reference_image`` prepend (lines 846-871 of
-    #     the vendored unit). OpenWAM uses VACE for the "know first frame,
-    #     predict the rest" use case; the canonical encoding is
-    #     ``vace_video = [first_frame, black, ..., black]``,
-    #     ``vace_mask = [0, 1, ..., 1]``, ``ref_image = None`` — keeping
-    #     ``vace_context.shape[2] == video_latent.shape[2]`` and avoiding the
-    #     extra latent frame that ref-prepend would inject.
+    # These helpers replicate ``WanVideoUnit_VACE.process`` except they (a)
+    # accept a batch (B >= 1) where the vendored unit assumes B=1, and (b) skip
+    # the ``vace_reference_image`` prepend — OpenWAM uses the canonical
+    # ``[first_frame, black...]`` / mask ``[0, 1...]`` form, keeping
+    # ``vace_context.shape[2] == video_latent.shape[2]``.
     def _build_vace_pixel_inputs(
         self,
         *,
@@ -1619,48 +1333,21 @@ class WanVideoBackbone(VideoBackbone):
         device: torch.device,
         preprocessed_video: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
-        """Construct the native pixel-space ``(vace_video, vace_video_mask)``
-        pair fed to :meth:`_build_vace_context_from_pixels`.
+        """Build the pixel-space ``(vace_video, vace_video_mask)`` pair (shapes
+        ``(B, 3, T, H, W)`` in [-1,1] and ``(B, 1, T, H, W)`` in [0,1]) for
+        :meth:`_build_vace_context_from_pixels`.
 
-        Output convention (matches what the vendored
-        ``WanVideoUnit_VACE.process`` would expect to receive *after*
-        ``pipe.preprocess_video`` had been applied to its PIL-list input):
+        Three branches by priority: (1) user-provided ``vace_videos[i]`` verbatim
+        (mask all-ones; unreachable in training today); (2) ``first_frame_image``
+        → ``[first_frame, black...]`` / mask ``[0, 1...]`` (default); (3) neither
+        → unconditional all-black / all-ones.
 
-            vace_video shape:   (B, 3, T_pix, H, W),   values in [-1, 1]
-            vace_video_mask:    (B, 1, T_pix, H, W),   values in [0, 1]
-
-        Three branches, in priority:
-
-          1. ``vace_videos[i]`` is a user-provided PIL list / tensor: use it
-             verbatim for sample i, with mask defaulting to all-ones (every
-             frame reactive / to-be-predicted). Currently unreachable in
-             training (the OpenWAM dataloader always sets vace_video=None)
-             but kept for forward compatibility.
-
-          2. ``first_frame_image`` is provided (training and deploy default):
-             the canonical "know first frame, predict the rest" form.
-             vace_video = [first_frame_pp, black, ..., black]
-             vace_mask  = [0, 1, ..., 1]
-
-          3. Neither: unconditional generation through the VACE bypass.
-             vace_video stays all-black (preprocessed -1, NOT 0 — "0" in
-             preprocessed space is *gray*, not black; the native unit derives
-             this implicitly by passing PIL black PNGs through
-             ``pipe.preprocess_video`` which maps RGB 0 → -1).
-             vace_mask stays all-ones.
-
-        ``preprocessed_video`` is the batched (B, 3, T, H, W) preprocessed
-        video tensor returned by ``pipe.preprocess_video`` upstream. When
-        provided AND branch (2) fires, we slice ``[:, :, 0:1]`` directly
-        instead of re-preprocessing the first PIL frame, saving one CPU
-        copy per training step.
+        ``preprocessed_video``, when given under branch (2), is sliced ``[:,:,0:1]``
+        to reuse the already-preprocessed first frame and save a CPU copy.
         """
-        # Padding init = preprocessed black (-1). This matches the native
-        # unit's behavior when the user passes PIL black images through
-        # ``pipe.preprocess_video`` (which maps RGB(0,0,0) → -1 via
-        # ``image * (2/255) + (-1) = -1``). NOT torch.zeros — that would be
-        # preprocessed-0 = "gray", which is the bug the old latent-space
-        # construction effectively committed.
+        # Padding init = preprocessed black (-1), matching ``preprocess_video``'s
+        # RGB(0) → -1. NOT torch.zeros — preprocessed-0 is *gray*, the bug the
+        # old latent-space construction committed.
         vace_video_pixels = torch.full((B, 3, num_frames, height, width), fill_value=-1.0, dtype=dtype, device=device)
         vace_mask_pixels = torch.ones((B, 1, num_frames, height, width), dtype=dtype, device=device)
 
@@ -1678,9 +1365,8 @@ class WanVideoBackbone(VideoBackbone):
                             f"num_frames={num_frames}; this branch does not auto pad/truncate."
                         )
                     vace_video_pixels[i] = vv_pp[0]
-                    # User-supplied vace_video implies "predict every frame
-                    # using this as reactive" — leave mask all-ones unless
-                    # they also supplied a mask (future extension point).
+                    # User-supplied vace_video → predict every frame; mask stays
+                    # all-ones (per-frame mask is a future extension point).
                 elif has_ref:
                     self._fill_first_frame_condition(
                         vace_video_pixels[i : i + 1],
@@ -1698,11 +1384,8 @@ class WanVideoBackbone(VideoBackbone):
             # Batch-wide first-frame condition: zero the t=0 mask channel.
             vace_mask_pixels[:, :, 0:1] = 0.0
             if preprocessed_video is not None and preprocessed_video.shape[0] == B:
-                # Fast path: reuse the already-preprocessed input video's
-                # first frame. The dataloader always passes
-                # first_frame_image = [video[0]] and video[0] is what got
-                # preprocessed into ``preprocessed_video[:, :, 0:1]`` — same
-                # bits, no PIL roundtrip.
+                # Fast path: reuse the preprocessed input video's first frame
+                # (same bits as first_frame_image, no PIL roundtrip).
                 vace_video_pixels[:, :, 0:1] = preprocessed_video[:, :, 0:1].to(dtype=dtype, device=device)
             else:
                 for i in range(B):
@@ -1731,12 +1414,8 @@ class WanVideoBackbone(VideoBackbone):
         device: torch.device,
         preprocessed_first_frame: Optional[Tensor] = None,
     ) -> None:
-        """In-place fill of one sample's vace_video[t=0] + vace_mask[t=0].
-
-        ``vace_video_slice`` / ``vace_mask_slice`` are (1, 3, T, H, W) and
-        (1, 1, T, H, W) views into the per-sample slots, expected to start
-        as all-black / all-ones (the defaults from
-        :meth:`_build_vace_pixel_inputs`).
+        """In-place fill of one sample's vace_video[t=0] + vace_mask[t=0]. The
+        ``(1,3,T,H,W)`` / ``(1,1,T,H,W)`` slices start all-black / all-ones.
         """
         vace_mask_slice[:, :, 0:1] = 0.0
         if preprocessed_first_frame is not None:
@@ -1759,35 +1438,17 @@ class WanVideoBackbone(VideoBackbone):
         tile_size: tuple = (34, 34),
         tile_stride: tuple = (18, 16),
     ) -> Tensor:
-        """Batched reimplementation of ``WanVideoUnit_VACE.process``'s pixel
-        → latent conversion (skipping the ``vace_reference_image`` prepend).
+        """Batched pixel→latent conversion of ``WanVideoUnit_VACE.process`` (no
+        ref-prepend), output ``(B, 96, T_lat, H_lat, W_lat) = concat([inactive
+        (z=16), reactive(z=16), mask(P*Q=64)])``.
 
-        Mirror of ``wan/pipeline.py:782-876`` — same formulas, only changes
-        are (a) ``[:, 0]`` instead of ``[0, 0]`` to keep the batch dim, and
-        (b) one extra ``B`` axis in the ``rearrange`` pattern. P=Q=8 and the
-        ``(T_pix + 3) // 4`` temporal downsample come from the vendored unit
-        verbatim; both are baked into the VACE module's pretrained weights
-        (``vace_in_dim = 2*z_dim + P*Q = 96``) and the Wan VAE causal 4x
-        temporal compression.
-
-        ``tiled`` / ``tile_size`` / ``tile_stride`` mirror the vendored unit's
-        tiled VAE encode path. Training keeps the default (``tiled=False``,
-        batched ``vae.batch_encode``) since training resolutions fit native;
-        deploy forwards its ``inputs_shared['tiled' / ...]`` values so the
-        VACE pixel→latent encode does NOT silently regress from tiled (the
-        vendored deploy default) to full-frame at 480x832 / 720x1280 and OOM
-        on a single GPU.
-
-        Output: ``(B, 96, T_lat, H_lat, W_lat) = concat([inactive(z=16),
-        reactive(z=16), mask(P*Q=64)], dim=1)``.
+        P=Q=8 and ``(T_pix+3)//4`` are baked into the VACE pretrained weights
+        (``vace_in_dim=96``) / Wan VAE causal 4x. ``tiled`` must be forwarded from
+        deploy so large-frame VACE encode does not regress to full-frame and OOM.
         """
         import torch.nn.functional as F
 
-        # Native (B=1):
-        #   inactive = vace_video * (1 - mask) + 0 * mask
-        #   reactive = vace_video * mask + 0 * (1 - mask)
-        # The ``+ 0 * ...`` terms are redundant; we drop them. Mathematically
-        # identical to the vendored unit at B=1.
+        # Native's redundant ``+ 0 * ...`` terms dropped (identical at B=1).
         inactive = vace_video_pixels * (1 - vace_mask_pixels)
         reactive = vace_video_pixels * vace_mask_pixels
         inactive_lat = self._encode_video_for_vace(inactive, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
@@ -1802,9 +1463,7 @@ class WanVideoBackbone(VideoBackbone):
                 f"for the native VACE rearrange (pretrained vace_in_dim=96 "
                 f"requires this exact tile layout)."
             )
-        # Native (B=1):
-        #   rearrange(vace_video_mask[0, 0], "T (H P) (W Q) -> 1 (P Q) T H W", ...)
-        # Batched:
+        # Batched form of native's ``rearrange(mask[0,0], "T (H P) (W Q) -> ...")``.
         vace_mask_latents = rearrange(vace_mask_pixels[:, 0], "B T (H P) (W Q) -> B (P Q) T H W", P=P, Q=Q)
         T_pix = vace_mask_latents.shape[2]
         T_lat = (T_pix + 3) // 4
@@ -1822,20 +1481,10 @@ class WanVideoBackbone(VideoBackbone):
         first_frame_image,
         vace_video,
     ) -> None:
-        """Deploy-side wrapper around :meth:`_build_vace_context_from_pixels`.
-
-        Mirrors the training path in :meth:`preprocess_input_for_train`: builds the
-        same pixel-space (vace_video, vace_mask) pair from the user-facing
-        ``first_frame_image`` / ``vace_video`` inputs and writes the
-        resulting ``vace_context`` into ``inputs_shared`` via the same batched
-        pixel→latent encode as training, so the two paths produce
-        bit-equivalent vace_context.
-
-        ``tiled`` / ``tile_size`` / ``tile_stride`` are forwarded so the
-        deploy default (``tiled=True``, set on the InferenceInputs dataclass)
-        keeps using the tiled VAE encode path — without this, large-frame
-        deploy (480x832 / 720x1280) would silently regress to full-frame
-        VAE encode and OOM on a single GPU.
+        """Deploy wrapper around :meth:`_build_vace_context_from_pixels`,
+        mirroring the training path so the two produce bit-equivalent
+        ``vace_context``. Forwards ``tiled`` so large-frame deploy keeps the
+        tiled encode and does not OOM.
         """
         if not self._has_vace:
             return
@@ -1882,14 +1531,9 @@ class WanVideoBackbone(VideoBackbone):
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tensor:
-        """Build the Wan2.1-I2V ``y`` conditioning tensor batch-wise.
-
-        Output shape: ``(B, 20, T_lat, H_lat, W_lat) = concat([msk(4), vae_y(16)])``
-        on the channel dim. Mirrors ``WanVideoUnit_ImageEmbedderVAE.process``
-        in ``wan/pipeline.py`` (which assumes ``B=1`` at inference) but
-        encodes the whole batch in a single VAE forward via ``batch_encode``,
-        matching ``_encode_video`` (line ~1311). ``batch_encode`` supports
-        non-tiled only; training already runs the VAE non-tiled.
+        """Build the Wan2.1-I2V ``y`` batch-wise: ``(B, 20, T_lat, H_lat, W_lat)
+        = concat([msk(4), vae_y(16)])``. Encodes the whole batch via non-tiled
+        ``batch_encode`` (training already runs the VAE non-tiled).
         """
         vae_inputs = []
         msks = []
@@ -1981,16 +1625,9 @@ class WanVideoBackbone(VideoBackbone):
         return t_mod
 
     def _extend_freqs_with_action_tokens(self, freqs: Tensor, n_action_tokens: int) -> Tensor:
-        """Append SharedBackbone 1D action RoPE frequencies to ``freqs``.
-
-        This mirrors DreamZero's separate action RoPE: action tokens receive a
-        1D sequence position in action-horizon space instead of being treated as
-        extra video tokens.
-
-        Tied to Wan's complex-form ``view_as_complex`` RoPE in
-        ``components.rope_apply_1d`` — switching the video DiT to a different
-        RoPE representation (sincos table, polar pair, …) requires changing this
-        helper accordingly.
+        """Append 1D action RoPE frequencies to ``freqs`` (DreamZero's separate
+        action RoPE — 1D positions in action-horizon space). Tied to Wan's
+        complex-form RoPE; a different RoPE representation needs this changed too.
         """
         if n_action_tokens <= 0:
             return freqs
@@ -2023,15 +1660,10 @@ class WanVideoBackbone(VideoBackbone):
         return state_freqs.to(dtype=freqs.dtype)
 
     def apply_compile(self, compile_cfg) -> None:
-        """Apply torch.compile to backbone sub-modules based on config flags.
-
-        For each sub-module in ``submodule_names``, checks for a matching
-        bool flag in *compile_cfg*. The DiT is special-cased: its blocks
-        are compiled individually (per-block compile is more CUDA-graph
-        friendly than compiling the whole DiT).
-
-        Recognized flag names: ``video_dit`` (or ``dit``), ``vae``,
-        ``vace``, ``text_encoder``, ``image_encoder``.
+        """torch.compile backbone sub-modules per config bool flags
+        (``video_dit``/``dit``, ``vae``, ``vace``, ``text_encoder``,
+        ``image_encoder``). DiT blocks are compiled individually (more
+        CUDA-graph friendly than compiling the whole DiT).
         """
         flag_to_submodule = {
             "video_dit": "dit",
@@ -2060,7 +1692,7 @@ class WanVideoBackbone(VideoBackbone):
                 logger.info("torch.compile enabled for %s (%s)", submod_name, compile_kwargs)
 
     @staticmethod
-    def _build_pipe_from_components(
+    def _build_holder_from_components(
         components: list,
         tokenizer: dict = None,
         device: str = "cpu",
@@ -2069,26 +1701,17 @@ class WanVideoBackbone(VideoBackbone):
         *,
         skip_native_vae: bool = False,
     ):
-        """Build an empty WanVideoPipeline from component specs (config-driven).
+        """Build an empty component holder from specs. Weights are NOT
+        loaded here (``load_checkpoint`` does that). Tokenizer resolves
+        ckpt-local first, then falls back to the ``model_path`` layout.
 
-        Weights are NOT loaded here — ``architecture.load_checkpoint`` handles
-        that separately.
-
-        Tokenizer resolution order:
-          1. ``ckpt_dir`` + ``tokenizer.subdir`` — checkpoint-local tokenizer
-             copied during training save.
-          2. ``model_path`` upstream layout — components-based persistence
-             falls back to ``<model_path>/google/umt5-xxl/``.
-
-        Args:
-            skip_native_vae: When True, drop ``attr == "vae"`` entries before
-                instantiating, so the empty native VAE never allocates CPU
-                tensors. Used by the irreversible external-encoder path.
+        ``skip_native_vae`` drops the ``vae`` entry so it never allocates CPU
+        tensors (irreversible external-encoder path).
         """
         from openwam.model.video_backbone.wan.loader import new_components
         from openwam.model.video_backbone.wan.pipeline_builder import _build_tokenizer, _import_class
 
-        pipe = new_components(device=device, torch_dtype=torch.bfloat16)
+        holder = new_components(device=device, torch_dtype=torch.bfloat16)
 
         for entry in components:
             if skip_native_vae and entry.get("attr") == "vae":
@@ -2096,7 +1719,7 @@ class WanVideoBackbone(VideoBackbone):
             cls = _import_class(entry["model_class"])
             kwargs = entry.get("extra_kwargs", {}) or {}
             logger.info(
-                "Instantiating %s as pipe.%s (extra_kwargs keys=%s)",
+                "Instantiating %s as holder.%s (extra_kwargs keys=%s)",
                 entry["model_class"],
                 entry["attr"],
                 list(kwargs.keys()),
@@ -2104,11 +1727,11 @@ class WanVideoBackbone(VideoBackbone):
             with torch.device(device):
                 model = cls(**kwargs)
             model.to(dtype=torch.bfloat16)
-            setattr(pipe, entry["attr"], model)
+            setattr(holder, entry["attr"], model)
 
-        if getattr(pipe, "vae", None) is not None and hasattr(pipe.vae, "upsampling_factor"):
-            pipe.height_division_factor = pipe.vae.upsampling_factor * 2
-            pipe.width_division_factor = pipe.vae.upsampling_factor * 2
+        if getattr(holder, "vae", None) is not None and hasattr(holder.vae, "upsampling_factor"):
+            holder.height_division_factor = holder.vae.upsampling_factor * 2
+            holder.width_division_factor = holder.vae.upsampling_factor * 2
 
         if tokenizer:
             tok = None
@@ -2116,9 +1739,7 @@ class WanVideoBackbone(VideoBackbone):
             if ckpt_dir and subdir and os.path.isdir(os.path.join(ckpt_dir, subdir)):
                 tok = _build_tokenizer(tokenizer, ckpt_dir)
             elif model_path and os.path.isdir(model_path):
-                # Checkpoint-local specs store tokenizer paths under
-                # ``tokenizer/``; upstream Wan model dirs store
-                # ``google/umt5-xxl/`` directly.
+                # ckpt-local specs prefix ``tokenizer/``; upstream dirs don't.
                 fallback_subdir = subdir
                 if fallback_subdir.startswith("tokenizer/"):
                     fallback_subdir = fallback_subdir[len("tokenizer/") :]
@@ -2136,19 +1757,15 @@ class WanVideoBackbone(VideoBackbone):
                     f"nor under model_path={model_path!r} (with 'tokenizer/' prefix stripped). "
                     "Either copy the tokenizer into the checkpoint dir, or ensure model_path is reachable."
                 )
-            setattr(pipe, tokenizer.get("attr", "tokenizer"), tok)
+            setattr(holder, tokenizer.get("attr", "tokenizer"), tok)
 
-        return pipe
+        return holder
 
     @staticmethod
-    def _build_pipe_from_model_path(model_path: str, device: str = "cpu", *, skip_native_vae: bool = False):
-        """Build a WanVideoPipeline from a model directory without full Hydra config.
-
-        Args:
-            skip_native_vae: When True, filter ``discover_model_files`` output
-                to drop the native VAE weight file before
-                :meth:`WanVideoPipeline.from_pretrained` materializes it.
-                Used by the irreversible external-encoder path.
+    def _build_holder_from_model_path(model_path: str, device: str = "cpu", *, skip_native_vae: bool = False):
+        """Build a component holder from a model dir without full Hydra config.
+        ``skip_native_vae`` drops the native VAE weight file before it
+        materializes (irreversible external-encoder path).
         """
         from openwam.model.video_backbone.wan.loader import load_wan_components
         from openwam.model.video_backbone.wan.pipeline_builder import (
@@ -2168,12 +1785,9 @@ class WanVideoBackbone(VideoBackbone):
 
 
 def _probe_dit_stats(dit) -> dict:
-    """Snapshot a few representative tensors for before/after verification.
-
-    Picks tensors that exercise both code paths of ``reinit_dit_from_scratch``:
-      - ``blocks[0].self_attn.q.weight`` — covered by stdlib ``reset_parameters``
-      - ``blocks[0].modulation`` — directly-mounted nn.Parameter, hand-reset
-      - ``head.modulation`` — same category, separate code branch
+    """Snapshot representative tensors for before/after verification, covering
+    both reinit paths: ``q.weight`` (stdlib reset) and ``blocks[0].modulation``
+    / ``head.modulation`` (hand-reset nn.Parameters).
     """
     return {
         "q.weight_mean": float(dit.blocks[0].self_attn.q.weight.float().mean().item()),
@@ -2186,44 +1800,24 @@ def _probe_dit_stats(dit) -> dict:
 
 
 def adapt_dit_to_external_encoder(
-    pipe,
+    backbone,
     external_encoder,
     dit_patch_size: Optional[Tuple[int, int, int]],
 ) -> None:
-    """Rebuild ``pipe.dit.patch_embedding`` / ``head.head`` / ``patch_size`` /
-    ``in_dim`` to match an external :class:`VideoEncoder`'s latent shape.
+    """Rebuild ``backbone.dit`` ``patch_embedding`` / ``head.head`` / ``patch_size``
+    / ``in_dim`` to match an external encoder's latent shape (``wan_vae`` is a
+    no-op shape-wise; non-VAE encoders adapt the first conv / final Linear).
 
-    The encoder owns both projection hooks; defaults produce the
-    Wan-original Conv3d / Linear pair, so ``wan_vae`` lands here as a
-    no-op shape-wise. Non-VAE encoders (V-JEPA, DINOv3, ...) adapt the
-    first conv's ``in_channels`` to the encoder's ``z_dim`` and the
-    final Linear's ``out_features`` to ``z_dim * prod(dit_patch_size)``.
+    ``patch_size`` must be synced because ``unpatchify`` rearranges by it; a
+    different ``dit_patch_size`` would otherwise shape-mismatch on first forward.
+    Called from reinit (training) and deploy ``_init_video_backbone``.
 
-    ``WanModel.unpatchify`` uses ``self.patch_size`` for its einops
-    rearrange (dit.py:372-381), so an encoder declaring a different
-    ``dit_patch_size`` would otherwise feed a Linear-out of width
-    ``z_dim`` into an unpatchify that still expects ``z_dim * 4`` and
-    shape-mismatch on the first forward. ``dit.in_dim`` is also
-    synced so downstream code that inspects it (e.g. I2V's
-    ``_build_i2v_y``) sees the new value.
-
-    Called from two sites:
-
-    * :func:`reinit_dit_from_scratch` (training path) — runs before the
-      stdlib ``reset_parameters`` loop; the duplicate random init is
-      harmless.
-    * ``base.py:_init_video_backbone`` deploy path — runs once when an
-      external encoder is in play and a saved checkpoint will populate
-      the rebuilt modules via strict ``load_checkpoint``.
-
-    ``dit_patch_size`` MUST come from the backbone (single source of
-    truth — see :attr:`VideoBackbone.dit_patch_size`). Reading
-    ``external_encoder.spec.dit_patch_size`` directly here would bypass
-    the abstraction.
+    ``dit_patch_size`` MUST come from the backbone (single source of truth);
+    reading ``external_encoder.spec`` directly here bypasses the abstraction.
     """
-    dits = [m for m in (getattr(pipe, "dit", None), getattr(pipe, "dit2", None)) if m is not None]
+    dits = [m for m in (getattr(backbone, "dit", None), getattr(backbone, "dit2", None)) if m is not None]
     if not dits:
-        logger.warning("adapt_dit_to_external_encoder: pipe has no dit/dit2")
+        logger.warning("adapt_dit_to_external_encoder: backbone has no dit/dit2")
         return
     if dit_patch_size is None:
         raise ValueError(
@@ -2237,9 +1831,7 @@ def adapt_dit_to_external_encoder(
         dit.patch_embedding = external_encoder.build_dit_input_proj(dit.dim)
         dit.patch_size = ps
         head_mod = getattr(dit, "head", None)
-        # MotWanModel-style DiTs may not own a head (they exit early into a
-        # control adapter); guard the assignment so the rebuild path remains
-        # generic across Wan variants.
+        # MotWanModel-style DiTs may lack a head; guard the assignment.
         if head_mod is not None and hasattr(head_mod, "head"):
             head_mod.head = external_encoder.build_dit_output_proj(dit.dim)
             head_mod.patch_size = ps
@@ -2247,56 +1839,26 @@ def adapt_dit_to_external_encoder(
 
 
 def reinit_dit_from_scratch(
-    pipe,
+    backbone,
     *,
     external_encoder=None,
     dit_patch_size: Optional[Tuple[int, int, int]] = None,
     verbose: bool = True,
 ) -> None:
-    """Re-initialize all learnable parameters in ``pipe.dit`` (and
-    ``pipe.dit2`` if present) using PyTorch standard initialization. Does
-    NOT touch ``pipe.vae`` / ``pipe.text_encoder`` / ``pipe.image_encoder`` /
-    ``pipe.vace`` — only the DiT(s).
+    """Re-initialize all learnable params in ``backbone.dit`` (and ``dit2``) with
+    PyTorch standard init; VAE / text_encoder / image_encoder / vace untouched.
+    Used by the ``from_scratch`` switch to ablate pretrained-vs-scratch DiT.
 
-    Used by the ``video_backbone.from_scratch`` config switch to ablate
-    "pretrained DiT vs from-scratch DiT" while keeping VAE and the text
-    encoder loaded with their pretrained weights (these are typically
-    frozen by the training_strategy yaml).
+    Two steps: (1) ``reset_parameters()`` for stdlib layers; (2) hand-reset the
+    directly-mounted ``nn.Parameter`` that ``modules()`` does NOT yield (~30
+    ``DiTBlock.modulation`` + ~180 ``RMSNorm.weight`` per 30-layer DiT) — without
+    this they would silently retain pretrained values. Buffers (``freqs`` cache)
+    are deterministic and left alone.
 
-    Two-step strategy:
-
-    1. ``modules().reset_parameters()`` for stdlib layers
-       (``nn.Linear`` / ``Conv2d`` / ``Conv3d`` / ``Embedding`` /
-       ``LayerNorm``) — covers the vast majority of params.
-    2. Hand-reset four classes of directly-mounted ``nn.Parameter`` that
-       ``module.modules()`` does not yield. Without this, ~30
-       ``DiTBlock.modulation`` tensors and ~180 ``RMSNorm.weight`` tensors
-       per 30-layer Wan DiT would silently retain the loaded pretrained
-       values and the ablation would not be clean. See the audit in
-       ``plans/a-vectorized-crystal.md``.
-
-    Buffers and non-parameter tensors (e.g. ``WanModel.freqs`` RoPE cache)
-    are deterministic functions of the model hyperparams and are left
-    untouched.
-
-    Args:
-        pipe: A Wan pipeline with ``.dit`` (and optionally ``.dit2``) attached.
-        external_encoder: Optional :class:`VideoEncoder`. When provided, the
-            DiT's ``patch_embedding`` and (if present) ``head.head`` are
-            rebuilt via the encoder's :meth:`build_dit_input_proj` /
-            :meth:`build_dit_output_proj` hooks BEFORE the stdlib reset
-            loop runs. For ``wan_vae`` this is a no-op shape-wise (defaults
-            reproduce the original Wan layout); for non-VAE encoders this
-            adapts the first conv's ``in_channels`` to the encoder's
-            ``z_dim``. ``dit.in_dim`` metadata is synced afterwards so
-            downstream consumers (I2V's ``_build_i2v_y`` etc.) see the
-            updated value. None preserves the historical "reset weights
-            only, do not touch shapes" behavior.
-        verbose: When True (default) and we're on rank 0, prints a
-            human-readable BEFORE/AFTER summary directly to stdout — this is
-            independent of the ``logging`` configuration so users see the
-            verification trace in the terminal regardless of whether their
-            launcher routes ``logger.info`` to stderr/stdout/a file.
+    ``external_encoder``: when provided, rebuild patch_embedding / head.head via
+    its hooks BEFORE the reset loop (no-op shape-wise for ``wan_vae``); ``None``
+    keeps the "reset weights only, don't touch shapes" behavior. ``verbose``
+    prints a rank-0 BEFORE/AFTER summary via ``print`` (independent of logging).
     """
     import os
 
@@ -2306,42 +1868,25 @@ def reinit_dit_from_scratch(
 
     stdlib_resettable = (nn.Linear, nn.Conv2d, nn.Conv3d, nn.Embedding, nn.LayerNorm)
 
-    dits = [m for m in (getattr(pipe, "dit", None), getattr(pipe, "dit2", None)) if m is not None]
+    dits = [m for m in (getattr(backbone, "dit", None), getattr(backbone, "dit2", None)) if m is not None]
     if not dits:
-        logger.warning("reinit_dit_from_scratch: pipe has no dit/dit2 to re-init")
+        logger.warning("reinit_dit_from_scratch: backbone has no dit/dit2 to re-init")
         return
 
     rank = int(os.environ.get("RANK", 0))
     is_main = rank == 0
 
-    # Rebuild patch_embedding + head.head BEFORE reset_parameters. The
-    # encoder owns both hooks; defaults produce the Wan-original Conv3d/
-    # Linear pair, so wan_vae lands here as a no-op shape-wise. Non-VAE
-    # encoders adapt the first conv's in_channels and final Linear's
-    # out_features to the encoder's z_dim and dit_patch_size. The
-    # subsequent reset_parameters() loop re-initializes these new
-    # modules with the standard distribution again — harmless, just a
-    # duplicate random init in the same distribution.
+    # Rebuild patch_embedding + head.head BEFORE reset_parameters (no-op
+    # shape-wise for wan_vae). The subsequent reset re-inits them again —
+    # harmless duplicate random init in the same distribution.
     if external_encoder is not None:
-        adapt_dit_to_external_encoder(pipe, external_encoder, dit_patch_size)
+        adapt_dit_to_external_encoder(backbone, external_encoder, dit_patch_size)
 
-    # ZeRO-3 interaction: when the accelerator has ZeRO-3 enabled, each
-    # nn.Parameter in the loaded ``pipe.dit`` is already partitioned into a
-    # 1-D shard at this point (the ``_zero3_init_disabled`` scope in
-    # ``OpenWAMTrainer.__init__`` is a no-op on deepspeed 0.18.5; partitioning
-    # happens during ``deepspeed.zero.Init(enabled=True)`` which the
-    # Accelerator activates globally). ``Linear.reset_parameters`` then trips
-    # on ``_calculate_fan_in_and_fan_out`` because the weight is 1-D. Wrap
-    # the reset + hand-init in ``deepspeed.zero.GatheredParameters`` so each
-    # root's params are temporarily materialized to their full
-    # 2-D/5-D shape, reset, and re-partitioned on exit.
-    # ``modifier_rank=0`` broadcasts rank-0's values to the rest of the
-    # group, so the random reset is bit-identical across ranks regardless
-    # of pre-init torch RNG drift (cfg.project.seed already enforces this,
-    # but the broadcast is the deterministic floor). Newly-built modules
-    # from ``build_dit_input_proj`` / ``build_dit_output_proj`` lack
-    # ``ds_id`` and pass through the gather unchanged. Non-ZeRO-3 paths
-    # (DDP, ZeRO-2, single GPU) hit the ``nullcontext`` fast-path.
+    # ZeRO-3 interaction: params arrive partitioned to 1-D shards, which trips
+    # ``Linear.reset_parameters`` (fan-in/out needs >=2D). Gather them to full
+    # shape for the reset, re-partition on exit; ``modifier_rank=0`` broadcasts
+    # rank-0 so the reset is bit-identical across ranks. Non-ZeRO-3 paths hit
+    # the ``nullcontext`` fast-path.
     from contextlib import nullcontext
 
     def _gather_zero3(root_mod):
@@ -2385,9 +1930,7 @@ def reinit_dit_from_scratch(
     )
 
     if verbose and is_main:
-        # Use print(..., flush=True) so the verification line surfaces even
-        # under non-INFO logging configurations (e.g. plain torchrun without
-        # logging.basicConfig). Bounded output: 4 lines per DiT module.
+        # print(flush=True) so the trace surfaces under non-INFO logging.
         bar = "=" * 78
         print(bar, flush=True)
         print(

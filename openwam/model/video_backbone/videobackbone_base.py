@@ -1,16 +1,5 @@
 """Contract between the WAM architecture and a concrete video backbone.
 
-The video DiT block loop is backbone-specific (patchify, RoPE, VACE, SP); the
-action-injection logic is architecture-specific. This module defines the seam:
-
-- :class:`VideoBackbone` exposes the block loop via ``prepare`` / ``run_block``
-  / ``finalize`` (+ optional joint-attention and shared-token hooks). The
-  architecture writes its own for-loop, inserting its logic between calls.
-- :class:`BlockLoopState` is the mutable state flowing through the three steps.
-  Architecture code may mutate ``hidden_states`` / ``time_mod`` / ``rope_freqs``
-  / ``context`` (e.g. append/slice shared tokens, extend RoPE / per-token
-  time_mod). ``grid_*`` and ``extras`` are backbone-internal.
-
 Layering: only the architecture talks to the backbone through this contract;
 train/deploy go through the architecture, never the backbone object directly.
 """
@@ -30,12 +19,8 @@ from torch import Tensor
 class BlockLoopState:
     """Mutable state flowing through prepare → run_block → finalize.
 
-    The architecture may mutate ``hidden_states`` / ``time_mod`` / ``rope_freqs``
-    / ``context`` between ``prepare`` and ``run_block`` (append action/state
-    tokens, extend RoPE / per-token time_mod). ``inject_shared_tokens`` and
-    ``extract_shared_tokens`` keep these aligned and must be called in pairs.
-    ``grid_*`` and ``extras`` are backbone-owned; architecture code reads but
-    does not write them.
+    Architecture may read/write ``hidden_states`` / ``time_mod`` / ``rope_freqs``
+    / ``context``; ``grid_*`` and ``extras`` are backbone-owned (read-only to it).
     """
 
     # Architecture may read/write
@@ -45,13 +30,12 @@ class BlockLoopState:
     context: Tensor  # text cross-attention embedding
     context_mask: Optional[Tensor] = None  # (B, L_context) bool, True = attend
 
-    # Patch grid for unpatchify (backbone writes; architecture reads for masks)
+    # Patch grid for unpatchify
     grid_frames: int = 0
     grid_height: int = 0
     grid_width: int = 0
 
-    # MoT-shared: backbone generates per-block VACE hints; dual_system IDM
-    # merges them across the noisy/cond branches (tri_system rejects them).
+    # Per-block VACE hints: dual_system IDM merges across branches; tri_system rejects.
     vace_hints: Optional[list] = None
 
     # Loop config threaded from prepare() into run_block()
@@ -65,12 +49,8 @@ class BlockLoopState:
 class VideoBackbone(ABC, nn.Module):
     """Architecture ↔ video backbone contract — the architecture's private helper.
 
-    Minimal implementation = the ``@abstractmethod`` members below. Optional
-    hooks ship working defaults so a backbone that only runs the basic block
-    loop need not implement them. Inherits ``nn.Module`` so components
-    registered as named children (``self.dit`` / ``self.vae`` / ...) are moved
-    by the default :meth:`set_dtype_device`, found by ``get_submodule``, and
-    serialized into the architecture state_dict.
+    Inherits ``nn.Module`` so named children (``self.dit`` / ``self.vae`` / ...)
+    are moved by :meth:`set_dtype_device` and serialized into the state_dict.
     """
 
     # ================================================================
@@ -80,22 +60,22 @@ class VideoBackbone(ABC, nn.Module):
     @property
     @abstractmethod
     def dim(self) -> int:
-        """Hidden dim of the video DiT. Action tokens project to this to concat."""
+        """Hidden dim of the video DiT."""
 
     @property
     @abstractmethod
     def num_layers(self) -> int:
-        """Number of DiT blocks; the architecture's block loop iterates over this."""
+        """Number of DiT blocks."""
 
     @property
     @abstractmethod
     def num_heads(self) -> int:
-        """Attention heads per block. Joint-attention sizes Q/K/V reshapes from this."""
+        """Attention heads per block."""
 
     @property
     @abstractmethod
     def head_dim(self) -> int:
-        """Per-head attention dim. Used by joint-attention structural validation."""
+        """Per-head attention dim."""
 
     @property
     @abstractmethod
@@ -104,14 +84,12 @@ class VideoBackbone(ABC, nn.Module):
 
     @property
     def dit_patch_size(self) -> Tuple[int, int, int]:
-        """DiT ``(T, H, W)`` patch size on the latent grid. Store the resolved
-        tuple into ``self._dit_patch_size`` during ``__init__``."""
+        """DiT ``(T, H, W)`` patch size; set ``self._dit_patch_size`` in ``__init__``."""
         return self._dit_patch_size
 
     @property
     def temporal_compression(self) -> int:
-        """``T_pixel / T_lat`` of this backbone's latent path. Store the resolved
-        value into ``self._temporal_compression`` during ``__init__``."""
+        """``T_pixel / T_lat``; set ``self._temporal_compression`` in ``__init__``."""
         return self._temporal_compression
 
     # ================================================================
@@ -125,11 +103,8 @@ class VideoBackbone(ABC, nn.Module):
 
     @abstractmethod
     def preprocess_input_for_train(self, *, frames=None, text=None, **kw) -> dict:
-        """Raw training data (PIL frames / text / VACE / first frame) → tensor dict.
-
-        Returns at least ``input_latents`` / ``context`` / ``seq_lens``.
-        Unconsumed kwargs are dropped via ``**kw``.
-        """
+        """Raw training data → tensor dict with at least ``input_latents`` /
+        ``context`` / ``seq_lens``. Unconsumed kwargs are dropped via ``**kw``."""
 
     # ================================================================
     # Required: three-step execution
@@ -161,22 +136,19 @@ class VideoBackbone(ABC, nn.Module):
 
     @property
     def shift_video(self) -> Optional[float]:
-        """Optional Esser-et-al. α-shift for the video scheduler (single source of
-        truth, read by the architecture for both training and inference). ``None``
-        falls back to the scheduler template default (Wan = 5.0)."""
+        """α-shift for the video scheduler (single source of truth for train +
+        inference). ``None`` falls back to the scheduler default (Wan = 5.0)."""
         return getattr(self, "_shift_video", None)
 
     @property
     def external_encoder(self):
-        """The swapped-in external :class:`VideoEncoder`, or ``None`` for the native
-        VAE path. Exposed so the architecture can surface encoder state to the
-        trainer without train code reaching into backbone privates."""
+        """The swapped-in external :class:`VideoEncoder`, or ``None`` for the
+        native VAE path."""
         return getattr(self, "_encoder", None)
 
     @property
     def context_dim(self) -> Optional[int]:
-        """Per-token dim of the text/context embedding, when it differs from Wan's
-        4096. ``None`` keeps the legacy 4096 fallback."""
+        """Per-token text/context embedding dim. ``None`` keeps the 4096 fallback."""
         return None
 
     @property
@@ -191,8 +163,8 @@ class VideoBackbone(ABC, nn.Module):
 
     @property
     def submodule_names(self) -> list[str]:
-        """Names of manageable sub-modules (dit, vae, text_encoder, ...) for the
-        trainer's freeze/device bookkeeping. Default: registered child names."""
+        """Manageable sub-module names for trainer freeze/device bookkeeping.
+        Default: registered child names."""
         return [name for name, _ in self.named_children()]
 
     @property
@@ -203,8 +175,7 @@ class VideoBackbone(ABC, nn.Module):
     def build_video_to_video_mask(
         self, video_seq_len: int, video_tokens_per_frame: int, device: torch.device
     ) -> Tensor:
-        """Build the v↔v attention-mask block. Default bidirectional; mode is read
-        from :attr:`video_attention_mask_mode`."""
+        """Build the v↔v attention-mask block; mode from :attr:`video_attention_mask_mode`."""
         if self.video_attention_mask_mode != "bidirectional":
             raise NotImplementedError(
                 f"{type(self).__name__} does not implement build_video_to_video_mask "
@@ -217,12 +188,11 @@ class VideoBackbone(ABC, nn.Module):
     # ================================================================
 
     def preprocess_input_for_inference(self, inputs) -> dict:
-        """Deploy-time input prep (prompt/image/VACE encode, noise init). Returns a
-        dict ready for the inference denoising loop. Training-only backbones omit it."""
+        """Deploy-time input prep → dict ready for the inference denoising loop."""
         raise NotImplementedError(f"{type(self).__name__} does not support deploy inference.")
 
     def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:
-        """Latent ``(B, C, T, H, W)`` → list of PIL frames. Irreversible encoders omit it."""
+        """Latent ``(B, C, T, H, W)`` → PIL frames. Irreversible encoders omit it."""
         raise NotImplementedError(f"{type(self).__name__} does not support decode_video.")
 
     # ================================================================
@@ -230,9 +200,8 @@ class VideoBackbone(ABC, nn.Module):
     # ================================================================
 
     def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState) -> Tuple[Tensor, Tensor, Tensor, dict]:
-        """Block first half: norm + modulate + Q/K/V + RoPE, excluding attention itself.
-        Returns ``(q, k, v, post_state)``; ``post_state`` carries residual/gate for
-        :meth:`post_attn_at_layer`."""
+        """Block first half (norm + modulate + Q/K/V + RoPE, no attention). Returns
+        ``(q, k, v, post_state)``; ``post_state`` feeds :meth:`post_attn_at_layer`."""
         raise NotImplementedError(f"{type(self).__name__} does not support joint self-attention.")
 
     def post_attn_at_layer(
@@ -255,9 +224,8 @@ class VideoBackbone(ABC, nn.Module):
         n_state: int = 0,
         timestep: Optional[Tensor] = None,
     ) -> BlockLoopState:
-        """Append action (+ optional state) tokens to the video sequence:
-        ``[video][action][state]``. Extends RoPE / per-token time_mod to match.
-        ``n_state=0`` degenerates to pure action injection."""
+        """Append action (+ optional state) tokens as ``[video][action][state]``,
+        extending RoPE / time_mod to match. Pair with :meth:`extract_shared_tokens`."""
         raise NotImplementedError(f"{type(self).__name__} does not support shared-backbone.")
 
     def extract_shared_tokens(
@@ -271,9 +239,8 @@ class VideoBackbone(ABC, nn.Module):
     # ================================================================
 
     def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
-        """Move everything to ``(dtype, device)``. Default covers registered
-        children; backbones with out-of-tree state override (call ``super()``
-        first). Must NOT ``.eval()`` — trainable submodules stay in train mode."""
+        """Move everything to ``(dtype, device)``. Overrides call ``super()`` first.
+        Must NOT ``.eval()`` — trainable submodules stay in train mode."""
         self._dtype = dtype
         self._device = device
         self.to(dtype=dtype, device=device)
@@ -283,8 +250,7 @@ class VideoBackbone(ABC, nn.Module):
     # ================================================================
 
     def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
-        """Copy backbone-side deploy artifacts (tokenizer/processor) into ``output_dir``.
-        Default no-op; backbones with external side files override."""
+        """Copy backbone-side deploy artifacts into ``output_dir``. Default no-op."""
 
     # ================================================================
     # External encoder spec validation (helper for from_pretrained)
@@ -299,8 +265,8 @@ class VideoBackbone(ABC, nn.Module):
 
     @classmethod
     def validate_encoder_spec(cls, got, want) -> None:
-        """Fail-fast when an external encoder's spec disagrees with the host
-        backbone's expected spec. ``want=None`` skips the check."""
+        """Fail-fast when an external encoder's spec disagrees with ``want``.
+        ``want=None`` skips the check."""
         if want is None:
             return
         mismatched = [f for f in cls._ENCODER_SPEC_REQUIRED_FIELDS if getattr(got, f) != getattr(want, f)]

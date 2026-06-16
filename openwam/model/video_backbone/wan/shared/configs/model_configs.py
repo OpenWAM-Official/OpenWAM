@@ -53,24 +53,11 @@ wan_series = [
         "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_dit.WanVideoDiTFromDiffusers",
     },
     {
-        # Example: ModelConfig(model_id="ByteDance/Video-As-Prompt-Wan2.1-14B", origin_file_pattern="transformer/diffusion_pytorch_model*.safetensors")
-        "model_hash": "5f90e66a0672219f12d9a626c8c21f61",
-        "model_name": "wan_video_vap",
-        "model_class": "openwam.model.video_backbone.wan.mot.MotWanModel",
-        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_mot.WanVideoMotStateDictConverter",
-    },
-    {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth")
         "model_hash": "5941c53e207d62f20f9025686193c40b",
         "model_name": "wan_video_image_encoder",
         "model_class": "openwam.model.video_backbone.wan.image_encoder.WanImageEncoder",
         "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_image_encoder.WanImageEncoderStateDictConverter",
-    },
-    {
-        # Example: ModelConfig(model_id="DiffSynth-Studio/Wan2.1-1.3b-speedcontrol-v1", origin_file_pattern="model.safetensors")
-        "model_hash": "dbd5ec76bbf977983f972c151d545389",
-        "model_name": "wan_video_motion_controller",
-        "model_class": "openwam.model.video_backbone.wan.motion_controller.WanMotionControllerModel",
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
@@ -379,13 +366,6 @@ wan_series = [
         "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_dit.WanVideoDiTStateDictConverter",
     },
     {
-        # Example: ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
-        "model_hash": "31fa352acb8a1b1d33cd8764273d80a2",
-        "model_name": "wan_video_animate_adapter",
-        "model_class": "openwam.model.video_backbone.wan.animate_adapter.WanAnimateAdapter",
-        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_animate_adapter.WanAnimateAdapterStateDictConverter",
-    },
-    {
         # Example: ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-Control-Camera", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors")
         "model_hash": "47dbeab5e560db3180adf51dc0232fb1",
         "model_name": "wan_video_dit",
@@ -452,27 +432,6 @@ wan_series = [
         },
     },
     {
-        # Example: ModelConfig(model_id="Wan-AI/Wan2.2-S2V-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
-        "model_hash": "966cffdcc52f9c46c391768b27637614",
-        "model_name": "wan_video_dit",
-        "model_class": "openwam.model.video_backbone.wan.dit_s2v.WanS2VModel",
-        "extra_kwargs": {
-            "dim": 5120,
-            "in_dim": 16,
-            "ffn_dim": 13824,
-            "out_dim": 16,
-            "text_dim": 4096,
-            "freq_dim": 256,
-            "eps": 1e-06,
-            "patch_size": (1, 2, 2),
-            "num_heads": 40,
-            "num_layers": 40,
-            "cond_dim": 16,
-            "audio_dim": 1024,
-            "num_audio_token": 4,
-        },
-    },
-    {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "1f5ab7703c6fc803fdded85ff040c316",
         "model_name": "wan_video_dit",
@@ -501,13 +460,6 @@ wan_series = [
         "model_name": "wan_video_vae",
         "model_class": "openwam.model.video_backbone.wan.vae.WanVideoVAE38",
         "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wan_video_vae.WanVideoVAEStateDictConverter",
-    },
-    {
-        # Example: ModelConfig(model_id="Wan-AI/Wan2.2-S2V-14B", origin_file_pattern="wav2vec2-large-xlsr-53-english/model.safetensors")
-        "model_hash": "06be60f3a4526586d8431cd038a71486",
-        "model_name": "wans2v_audio_encoder",
-        "model_class": "openwam.model.video_backbone.wan.wav2vec.WanS2VAudioEncoder",
-        "state_dict_converter": "openwam.model.video_backbone.wan.shared.utils.state_dict_converters.wans2v_audio_encoder.WanS2VAudioEncoderStateDictConverter",
     },
 ]
 

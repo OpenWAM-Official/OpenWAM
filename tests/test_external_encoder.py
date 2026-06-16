@@ -1324,7 +1324,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         deploy must not materialize the empty native VAE slot)
       - no external encoder → False on both paths
 
-    Monkeypatches ``_build_pipe_from_model_path`` to capture the kwarg
+    Monkeypatches ``_build_holder_from_model_path`` to capture the kwarg
     rather than stand up a real pipeline. Training-path uses a real
     ``DictConfig`` to exercise the ``isinstance(source, DictConfig)``
     dispatch added for the deploy fix.
@@ -1344,8 +1344,8 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         captured["skip"] = skip_native_vae
         return _FakePipe(vae_z_dim=16, vae_upsample=8)
 
-    original = WanVideoBackbone._build_pipe_from_model_path
-    wan_videobackbone.WanVideoBackbone._build_pipe_from_model_path = staticmethod(_spy_model_path)
+    original = WanVideoBackbone._build_holder_from_model_path
+    wan_videobackbone.WanVideoBackbone._build_holder_from_model_path = staticmethod(_spy_model_path)
     import openwam.model.video_backbone.wan.pipeline_builder as pb_mod
 
     original_btp = pb_mod.build_training_pipeline
@@ -1399,7 +1399,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         WanVideoBackbone.from_pretrained(deploy_cfg)
         assert captured["skip"] is False
     finally:
-        wan_videobackbone.WanVideoBackbone._build_pipe_from_model_path = original
+        wan_videobackbone.WanVideoBackbone._build_holder_from_model_path = original
         pb_mod.build_training_pipeline = original_btp
 
 
@@ -1638,7 +1638,7 @@ def test_M3f_train_save_deploy_state_dict_topology_matches():
     }
     deploy_enc = WanVideoVAEEncoder.from_skeleton(components_entry)
     # In production this comes from cls.from_pretrained(source=dict-with-components),
-    # which routes through _build_pipe_from_components(skip_native_vae=True). For this
+    # which routes through _build_holder_from_components(skip_native_vae=True). For this
     # closure check the WanVideoBackbone construction path is the same as training,
     # just with a fresh pipe sans the loaded VAE — using _FakePipe directly is
     # equivalent because skip_native_vae=True on deploy zeroes pipe.vae anyway.
