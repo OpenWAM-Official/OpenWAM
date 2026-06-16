@@ -61,4 +61,4 @@ name: dinov3
 # ``docs/external_video_encoder.md`` §6 — DINOv3 is the only encoder
 # that re-reads the HF config at deploy instead of going through a
 # sidecar manifest).
-model_path: /path/to/vit-base-16
+model_path: /path/to/DINOv3
