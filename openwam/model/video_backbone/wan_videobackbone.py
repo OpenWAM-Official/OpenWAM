@@ -295,20 +295,6 @@ class WanVideoBackbone(VideoBackbone):
         return self._scheduler
 
     @property
-    def submodule_names(self) -> list[str]:
-        # ``vae`` is reported under either path so ``freeze_modules: [vae]``
-        # works unchanged when an external encoder is swapped in (the alias
-        # resolves to ``self.video_encoder`` in get_submodule).
-        names = []
-        for name in ("dit", "vace", "text_encoder", "vae", "image_encoder"):
-            if name == "vae" and self._uses_external_encoder:
-                names.append(name)
-                continue
-            if getattr(self, name, None) is not None:
-                names.append(name)
-        return names
-
-    @property
     def num_heads(self) -> int:
         return int(self._dit.blocks[0].num_heads)
 
@@ -918,24 +904,6 @@ class WanVideoBackbone(VideoBackbone):
             latents, vae=getattr(self, "vae", None), encoder=self.video_encoder, device=self.device, tiled=tiled
         )
         return wan_encode.latents_to_frames(video_tensor, encoder=self.video_encoder)
-
-    # ================================================================
-    # ABC: Device management (1)
-    # ================================================================
-
-    def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
-        """Move all owned submodules to (dtype, device) and update the
-        ``_dtype`` / ``_device`` records.
-
-        Must NOT call ``mod.eval()``: trainable submodules (dit, vace) must stay
-        in train mode; frozen ones run under ``no_grad`` so their mode is moot.
-        """
-        self._dtype = dtype
-        self._device = device
-        for name in self.submodule_names:
-            mod = self.get_submodule(name)
-            if mod is not None:
-                mod.to(dtype=dtype, device=device)
 
     # ================================================================
     # Component specs for self-contained checkpoints

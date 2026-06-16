@@ -373,22 +373,6 @@ def test_C4_external_path_state_dict_keys_swap():
     assert not any(k.startswith("vae.") for k in sd), "external path must release the native vae.*"
 
 
-def test_C5_submodule_names_vae_alias_in_both_paths():
-    """submodule_names always contains 'vae' — alias resolves differently
-    depending on whether external_encoder is set."""
-    from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
-    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
-
-    pipe_default = _FakePipe()
-    backbone_default = WanVideoBackbone(pipe_default)
-    assert "vae" in backbone_default.submodule_names
-
-    pipe_external = _FakePipe()
-    enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
-    backbone_external = WanVideoBackbone.from_pretrained(pipe_external, external_encoder=enc)
-    assert "vae" in backbone_external.submodule_names
-
-
 def test_C6_get_submodule_vae_routes_to_encoder_on_external_path():
     """get_submodule('vae') returns the encoder on external path, pipe.vae on default."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
@@ -405,7 +389,7 @@ def test_C6_get_submodule_vae_routes_to_encoder_on_external_path():
 
 
 def test_C7_set_dtype_device_moves_external_encoder():
-    """The encoder is a submodule, so it follows submodule_names through set_dtype_device."""
+    """The encoder is a named child, so set_dtype_device (self.to) moves it too."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 

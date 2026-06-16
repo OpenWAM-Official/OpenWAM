@@ -162,12 +162,6 @@ class VideoBackbone(ABC, nn.Module):
         return False
 
     @property
-    def submodule_names(self) -> list[str]:
-        """Manageable sub-module names for trainer freeze/device bookkeeping.
-        Default: registered child names."""
-        return [name for name, _ in self.named_children()]
-
-    @property
     def video_attention_mask_mode(self) -> str:
         """v↔v mask mode for joint MoT. Default bidirectional; causal backbones override."""
         return "bidirectional"
