@@ -923,26 +923,19 @@ class WanVideoBackbone(VideoBackbone):
         return wan_encode.latents_to_frames(video_tensor, encoder=self.video_encoder)
 
     # ================================================================
-    # Component specs for self-contained checkpoints
+    # Self-contained checkpoint: specs into config + artifacts into dir
     # ================================================================
 
-    def get_component_specs(self, model_path: str) -> dict:
-        """Component specs from *model_path* (``components`` + optional
-        ``tokenizer``), injected into the saved config so deploy can rebuild the
-        pipeline without the original *model_path*.
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Make this backbone's checkpoint slice self-contained in one pass:
+        merge the Wan component + tokenizer specs into ``cfg`` and copy the Wan
+        tokenizer into ``output_dir`` (single tokenizer-layout source, no
+        duplication), then forward to the external encoder's own deploy-artifact
+        hook so its side files (e.g. V-JEPA ``manifest.json``) land alongside.
         """
-        from openwam.model.video_backbone.wan.component_specs import generate_video_backbone_component_specs
+        from openwam.model.video_backbone.wan.component_specs import save_video_backbone_deploy_assets
 
-        return generate_video_backbone_component_specs(model_path)
-
-    def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
-        """Copy backbone-side deploy artifacts next to ``config.yaml``: the Wan
-        tokenizer (always), plus the external encoder's own side files (forwarded
-        to its ``copy_deploy_artifacts``; policy is encoder-specific).
-        """
-        from openwam.model.video_backbone.wan.component_specs import copy_video_backbone_tokenizer
-
-        copy_video_backbone_tokenizer(output_dir, cfg)
+        save_video_backbone_deploy_assets(output_dir, cfg)
         if self.video_encoder is not None:
             self.video_encoder.copy_deploy_artifacts(output_dir, cfg)
 

@@ -1,8 +1,8 @@
-"""BaseWAMArchitecture.copy_deploy_artifacts dispatches to every backbone.
+"""BaseWAMArchitecture.save_assets_for_deployment dispatches save_deploy_assets
+to every backbone that implements it.
 
-Used by the trainer so different backbones (Wan tokenizer, Cosmos
-tokenizer+processor, future ones) can ship their own deploy artifacts
-without the trainer importing them directly.
+Lets different backbones (Wan component specs + tokenizer, future ones) ship
+their own deploy assets without the trainer importing them directly.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ class _RecordingBackbone(nn.Module):
         super().__init__()
         self.calls: list[tuple[str, object]] = []
 
-    def copy_deploy_artifacts(self, output_dir, cfg):
+    def save_deploy_assets(self, output_dir, cfg):
         self.calls.append((output_dir, cfg))
 
 
@@ -36,7 +36,7 @@ def test_dispatch_to_all_backbones(tmp_path):
     arch.action_backbone = ab
 
     cfg = {"model": {"video_backbone": {"model_path": str(tmp_path)}}}
-    arch.copy_deploy_artifacts(str(tmp_path), cfg)
+    arch.save_assets_for_deployment(str(tmp_path), cfg)
 
     assert vb.calls == [(str(tmp_path), cfg)]
     assert ab.calls == [(str(tmp_path), cfg)]
@@ -44,8 +44,8 @@ def test_dispatch_to_all_backbones(tmp_path):
 
 def test_backbone_without_hook_is_skipped(tmp_path):
     arch = _ConcreteArch(cfg=None)
-    arch.video_backbone = nn.Linear(1, 1)  # no copy_deploy_artifacts attribute
+    arch.video_backbone = nn.Linear(1, 1)  # no save_deploy_assets attribute
     arch.action_backbone = _RecordingBackbone()
 
-    arch.copy_deploy_artifacts(str(tmp_path), cfg={})
+    arch.save_assets_for_deployment(str(tmp_path), cfg={})
     assert arch.action_backbone.calls == [(str(tmp_path), {})]

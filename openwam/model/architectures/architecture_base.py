@@ -583,7 +583,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         Subclasses with additional backbones (e.g. TriSystem with a VLM
         backbone) should override this to include them. The returned dict
         is used by ``init_training_schedulers``, ``set_dtype_device``,
-        ``move_frozen_to_device``, and ``get_component_specs`` to iterate
+        ``move_frozen_to_device``, and ``save_assets_for_deployment`` to iterate
         over all backbones generically.
         """
         result = {}
@@ -968,53 +968,20 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if mod is not None:
                 mod.to(device=device)
 
-    def get_component_specs(self, model_path: str) -> Optional[dict]:
-        """Get component specs from all backbones for self-contained checkpoint config."""
-        for bb in self.backbones.values():
-            if hasattr(bb, "get_component_specs"):
-                specs = bb.get_component_specs(model_path)
-                if specs is not None:
-                    return specs
-        return None
-
-    def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
-        """Delegate to each backbone so deploy-time artifacts land in ``output_dir``.
-
-        Backbones with no external artifacts can leave the default no-op.
-        """
-        for bb in self.backbones.values():
-            if hasattr(bb, "copy_deploy_artifacts"):
-                bb.copy_deploy_artifacts(output_dir, cfg)
-
     def save_assets_for_deployment(self, output_dir: str, cfg) -> None:
         """Make the checkpoint directory self-contained for deploy.
 
-        One unified entry the trainer calls once per checkpoint save, BEFORE
-        ``save_config`` writes ``config.yaml``:
-
-        1. Merge each backbone's component-reconstruction specs into ``cfg`` (so
-           deploy rebuilds the module skeleton from ``config.yaml`` without the
-           training-time ``model_path`` being reachable). Params land in
-           ``config.yaml`` via the subsequent ``save_config``.
-        2. Copy backbone artifact files (tokenizer / processor) into
-           ``output_dir``.
-
-        Replaces the former separate ``get_component_specs`` + config-merge +
-        ``copy_deploy_artifacts`` dance in the trainer.
+        One entry the trainer calls once per checkpoint save, BEFORE
+        ``save_config`` writes ``config.yaml``. Each backbone's
+        :meth:`VideoBackbone.save_deploy_assets` merges its component/tokenizer
+        reconstruction specs into ``cfg`` (so deploy rebuilds the module
+        skeletons from ``config.yaml`` without the training-time ``model_path``)
+        and copies its artifact files (tokenizer / processor) into ``output_dir``.
+        Backbone types that ship no deploy assets simply don't define the hook.
         """
-        from omegaconf import OmegaConf, open_dict
-
-        model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
-        if model_path and os.path.isdir(str(model_path)):
-            specs = self.get_component_specs(str(model_path))
-            if specs is not None:
-                with open_dict(cfg):
-                    vb_cfg = cfg.model.video_backbone
-                    if "components" not in vb_cfg:
-                        OmegaConf.update(cfg, "model.video_backbone.components", specs["components"])
-                    if "tokenizer" in specs and "tokenizer" not in vb_cfg:
-                        OmegaConf.update(cfg, "model.video_backbone.tokenizer", specs["tokenizer"])
-        self.copy_deploy_artifacts(output_dir, cfg)
+        for bb in self.backbones.values():
+            if hasattr(bb, "save_deploy_assets"):
+                bb.save_deploy_assets(output_dir, cfg)
 
     # --- Training: preprocessing ---
 

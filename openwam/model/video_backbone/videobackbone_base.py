@@ -240,11 +240,18 @@ class VideoBackbone(ABC, nn.Module):
         self.to(dtype=dtype, device=device)
 
     # ================================================================
-    # Optional deploy-artifact hooks (orchestrated by the architecture)
+    # Optional deploy-asset hook (orchestrated by the architecture)
     # ================================================================
 
-    def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
-        """Copy backbone-side deploy artifacts into ``output_dir``. Default no-op."""
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Make this backbone's slice of the checkpoint self-contained.
+
+        Both halves of self-containment in one place: (1) write the backbone's
+        component/tokenizer reconstruction specs into ``cfg`` (so deploy rebuilds
+        the module skeletons from ``config.yaml`` without the training-time
+        ``model_path``), and (2) copy its non-weight artifact files (tokenizer /
+        processor / external-encoder side files) into ``output_dir``. Runs before
+        the architecture writes ``config.yaml``. Default no-op."""
 
 
 __all__ = [

@@ -686,18 +686,18 @@ def test_C13d_reinit_with_external_encoder_requires_dit_patch_size():
         reinit_dit_from_scratch(pipe, external_encoder=enc, verbose=False)
 
 
-def test_C14_wan_copy_deploy_artifacts_forwards_to_external_encoder(tmp_path):
-    """``WanVideoBackbone.copy_deploy_artifacts`` must call the external
-    encoder's hook so V-JEPA's ``manifest.json`` lands in the checkpoint dir.
+def test_C14_wan_save_deploy_assets_forwards_to_external_encoder(tmp_path):
+    """``WanVideoBackbone.save_deploy_assets`` must forward to the external
+    encoder's ``copy_deploy_artifacts`` hook so V-JEPA's ``manifest.json`` lands
+    in the checkpoint dir.
 
-    The Wan tokenizer copy step inside the same method is a no-op here
-    because we pass a plain ``dict`` cfg — ``copy_video_backbone_tokenizer``
-    reaches into ``cfg.model.video_backbone.model_path`` via attribute access
-    (DictConfig-style), so a dict cfg raises AttributeError which the
-    helper catches and logs. That keeps this test isolated to the
-    encoder-forwarding behavior we actually want to verify, without us
-    having to stand up a real Wan model directory on disk.
+    The Wan spec/tokenizer step inside the same method is a no-op here because
+    ``model_path`` points at a nonexistent dir, so ``save_video_backbone_deploy_assets``
+    early-returns. That keeps this test isolated to the encoder-forwarding
+    behavior, without standing up a real Wan model directory on disk.
     """
+    from omegaconf import OmegaConf
+
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     class _RecordingEncoder(_MockEncoderBase):
@@ -711,24 +711,27 @@ def test_C14_wan_copy_deploy_artifacts_forwards_to_external_encoder(tmp_path):
     pipe = _FakePipe()
     enc = _RecordingEncoder()
     backbone = WanVideoBackbone.from_pretrained(pipe, external_encoder=enc)
-    cfg = {"model": {"video_backbone": {"model_path": "/nonexistent"}}}
-    backbone.copy_deploy_artifacts(str(tmp_path), cfg)
+    cfg = OmegaConf.create({"model": {"video_backbone": {"model_path": "/nonexistent"}}})
+    backbone.save_deploy_assets(str(tmp_path), cfg)
 
     assert enc.calls == [(str(tmp_path), cfg)]
 
 
-def test_C15_wan_copy_deploy_artifacts_no_op_without_external_encoder(tmp_path):
-    """Without an external encoder, ``WanVideoBackbone.copy_deploy_artifacts``
-    only invokes the tokenizer copy — no encoder hook call, no crash on the
+def test_C15_wan_save_deploy_assets_no_op_without_external_encoder(tmp_path):
+    """Without an external encoder, ``WanVideoBackbone.save_deploy_assets``
+    only runs the spec/tokenizer step — no encoder hook call, no crash on the
     default path. Regression guard against accidentally routing the encoder
     branch into the default path.
     """
+    from omegaconf import OmegaConf
+
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     pipe = _FakePipe()
     backbone = WanVideoBackbone(pipe)
     assert backbone.video_encoder is None
-    backbone.copy_deploy_artifacts(str(tmp_path), {"model": {"video_backbone": {"model_path": str(tmp_path)}}})
+    cfg = OmegaConf.create({"model": {"video_backbone": {"model_path": str(tmp_path)}}})
+    backbone.save_deploy_assets(str(tmp_path), cfg)
     # No exception, no spurious files.
     # (Tokenizer copy is itself a warning-on-missing path; we don't assert
     # its side effects here — they are covered by Wan-side unit tests.)
