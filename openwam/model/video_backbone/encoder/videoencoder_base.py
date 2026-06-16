@@ -2,8 +2,7 @@
 
 :class:`VideoEncoderSpec` is the latent contract (z_dim / compression / patch
 geometry) derived from the loaded encoder weights — NOT from yaml. The encoder's
-``from_pretrained`` populates it from the actual loaded state, and backbone-side
-validators (``VideoBackbone.validate_encoder_spec``) fail-fast on a mismatch.
+``from_pretrained`` populates it from the actual loaded state.
 
 :class:`VideoEncoder` is the ABC each pluggable encoder subclasses. The package
 ``__init__`` re-exports both alongside the registry + factory.
@@ -35,8 +34,7 @@ class VideoEncoderSpec:
             standalone latent token (Wan-style); False for uniform tubelet
             schedules.
         pixel_range: Nominal input range. Informational only — not consumed
-            by the backbone (see ``videobackbone_base.py`` ``_ENCODER_SPEC_REQUIRED_FIELDS``;
-            deliberately excluded from cross-encoder validation). Encoders
+            by the backbone. Encoders
             that apply additional internal normalization in ``preprocess_video``
             (e.g. ImageNet mean/std for V-JEPA) may legitimately emit
             tensors outside this nominal range; the field documents the

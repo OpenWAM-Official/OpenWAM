@@ -31,7 +31,6 @@ from openwam.model.video_backbone.encoder import (
     build_video_encoder,
     register_video_encoder,
 )
-from openwam.model.video_backbone.videobackbone_base import VideoBackbone
 
 # ---------------------------------------------------------------------------
 # Mock encoders for the ABC/registry/spec layer (no real weights needed).
@@ -161,34 +160,6 @@ def test_A7_custom_dit_patch_size_propagates_to_hook_kernel():
     assert inp.kernel_size == (1, 1, 1)
     assert inp.stride == (1, 1, 1)
     assert out.out_features == 1024 * 1  # prod((1,1,1)) = 1
-
-
-def test_A8_validate_encoder_spec_field_by_field():
-    want = VideoEncoderSpec(z_dim=16, spatial_compression=8, temporal_compression=4, causal_temporal=True)
-
-    # Identical spec passes.
-    VideoBackbone.validate_encoder_spec(want, want)
-
-    # pixel_range / is_reversible / dit_patch_size are NOT in the required set
-    # (excluded by VideoBackbone._ENCODER_SPEC_REQUIRED_FIELDS).
-    relaxed = VideoEncoderSpec(
-        z_dim=16,
-        spatial_compression=8,
-        temporal_compression=4,
-        causal_temporal=True,
-        pixel_range=(0.0, 1.0),
-        is_reversible=False,
-        dit_patch_size=(1, 1, 1),
-    )
-    VideoBackbone.validate_encoder_spec(relaxed, want)
-
-    # z_dim mismatch raises with a readable message.
-    bad_z = VideoEncoderSpec(z_dim=48, spatial_compression=8, temporal_compression=4, causal_temporal=True)
-    with pytest.raises(ValueError, match=r"z_dim"):
-        VideoBackbone.validate_encoder_spec(bad_z, want)
-
-    # want=None is a graceful no-op (e.g. backbone already released pipe.vae).
-    VideoBackbone.validate_encoder_spec(bad_z, None)
 
 
 # ===========================================================================
@@ -484,16 +455,6 @@ def test_C8b_vace_backbone_rejects_external_encoder_at_construction():
         WanVideoBackbone.from_pretrained(pipe, external_encoder=enc)
 
 
-def test_C9_spec_validation_strict_when_reversible():
-    """Reversible encoder with mismatched z_dim is rejected immediately."""
-    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
-
-    pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    bad_encoder = WanVideoVAEEncoderStub(spec_z_dim=48, is_reversible=True)
-    with pytest.raises(ValueError, match=r"z_dim"):
-        WanVideoBackbone.from_pretrained(pipe, external_encoder=bad_encoder)
-
-
 def test_C10_spec_validation_fully_skipped_when_irreversible():
     """Irreversible encoder declares its own latent geometry; the backbone
     skips validation entirely (z_dim, spatial/temporal compression, causal
@@ -508,13 +469,11 @@ def test_C10_spec_validation_fully_skipped_when_irreversible():
     assert backbone._uses_external_encoder is True
 
 
-def test_C10b_spec_validation_skipped_when_spatial_temporal_differ_for_irreversible():
-    """The real motivating case: a DINOv3-style encoder declares
-    spatial_compression=16 / temporal_compression=1 / causal=False, all of
-    which differ from Wan2.1's native VAE (spatial=8, temporal=4,
-    causal=True). Pre-fix this raised ValueError on the
-    validate_encoder_spec call. Post-fix the call is skipped entirely for
-    irreversible encoders and from_pretrained completes successfully."""
+def test_C10b_divergent_geometry_irreversible_encoder_loads():
+    """A DINOv3-style encoder declares spatial_compression=16 /
+    temporal_compression=1 / causal=False, all differing from Wan2.1's native
+    VAE (spatial=8, temporal=4, causal=True). from_pretrained must accept it and
+    derive division factors from the encoder's own spec."""
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
@@ -550,9 +509,6 @@ def test_C10b_spec_validation_skipped_when_spatial_temporal_differ_for_irreversi
             return cls()
 
     enc = _DinoLikeEncoder()
-    # Pre-fix this raised:
-    #   ValueError: encoder spec mismatch on ['spatial_compression', 'temporal_compression', 'causal_temporal']: ...
-    # Post-fix the call below is expected to succeed.
     backbone = WanVideoBackbone.from_pretrained(pipe, external_encoder=enc)
     assert backbone._uses_external_encoder is True
     # And the division factor honors the encoder's dit_patch_size=(1,1,1):

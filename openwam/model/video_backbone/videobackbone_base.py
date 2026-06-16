@@ -252,28 +252,6 @@ class VideoBackbone(ABC, nn.Module):
     def copy_deploy_artifacts(self, output_dir: str, cfg) -> None:
         """Copy backbone-side deploy artifacts into ``output_dir``. Default no-op."""
 
-    # ================================================================
-    # External encoder spec validation (helper for from_pretrained)
-    # ================================================================
-
-    _ENCODER_SPEC_REQUIRED_FIELDS: Tuple[str, ...] = (
-        "z_dim",
-        "spatial_compression",
-        "temporal_compression",
-        "causal_temporal",
-    )
-
-    @classmethod
-    def validate_encoder_spec(cls, got, want) -> None:
-        """Fail-fast when an external encoder's spec disagrees with ``want``.
-        ``want=None`` skips the check."""
-        if want is None:
-            return
-        mismatched = [f for f in cls._ENCODER_SPEC_REQUIRED_FIELDS if getattr(got, f) != getattr(want, f)]
-        if mismatched:
-            details = ", ".join(f"{f}: got={getattr(got, f)!r}, want={getattr(want, f)!r}" for f in mismatched)
-            raise ValueError(f"encoder spec mismatch on {mismatched}: {details}")
-
 
 __all__ = [
     "BlockLoopState",

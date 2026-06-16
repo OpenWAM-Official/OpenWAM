@@ -47,21 +47,6 @@ class WanVideoBackbone(VideoBackbone):
     # Construction
     # ================================================================
 
-    @classmethod
-    def get_native_dit_patch_size(cls, holder) -> Tuple[int, int, int]:
-        """Wan family's native DiT patch size — invariant ``(1, 2, 2)`` across
-        all Wan2.x variants, so hard-coded rather than probed off the loaded DiT.
-        """
-        return (1, 2, 2)
-
-    @classmethod
-    def get_native_temporal_contract(cls, holder) -> Tuple[int, bool]:
-        """Wan family's native VAE temporal contract — invariant ``(4, True)``
-        (causal first-frame token + 4-frame tail grouping); hard-coded rather
-        than probed off the loaded VAE, same rationale as the patch-size sibling.
-        """
-        return (4, True)
-
     def __init__(self, holder, *, external_encoder=None, shift_video=None):
         """Internal constructor. Use ``from_pretrained()`` instead.
 
@@ -109,8 +94,10 @@ class WanVideoBackbone(VideoBackbone):
             self._temporal_compression = int(external_encoder.spec.temporal_compression)
             self._causal_temporal = bool(external_encoder.spec.causal_temporal)
         else:
-            self._dit_patch_size = self.get_native_dit_patch_size(holder)
-            self._temporal_compression, self._causal_temporal = self.get_native_temporal_contract(holder)
+            # Wan native contract, invariant across all Wan2.x variants: DiT
+            # patch (1,2,2); VAE 4× temporal compression + causal first-frame token.
+            self._dit_patch_size = (1, 2, 2)
+            self._temporal_compression, self._causal_temporal = 4, True
 
     @classmethod
     def from_pretrained(cls, source, *, external_encoder=None, **kw) -> WanVideoBackbone:
@@ -122,8 +109,7 @@ class WanVideoBackbone(VideoBackbone):
         ``__init__`` drains into the backbone.
 
         With ``external_encoder``: (1) fail-fast for I2V/VACE backbones;
-        (2) validate the encoder spec (strict only when ``is_reversible``);
-        (3) derive division factors from the encoder spec; (4) release the
+        (2) derive division factors from the encoder spec; (3) release the
         native VAE. See the inline numbered comments for the why.
         """
         from omegaconf import DictConfig
@@ -196,23 +182,7 @@ class WanVideoBackbone(VideoBackbone):
                     "docs/external_video_encoder.md §6."
                 )
 
-            # (2) Spec validation. Strict equality only for a drop-in VAE
-            # replacement (is_reversible=True); irreversible encoders exist
-            # precisely to introduce a different latent geometry, which they own
-            # via their spec, so validation is skipped for them.
-            from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoderSpec
-
-            v = getattr(holder, "vae", None)
-            if v is not None and external_encoder.spec.is_reversible:
-                want = VideoEncoderSpec(
-                    z_dim=int(v.z_dim),
-                    spatial_compression=int(v.upsampling_factor),
-                    temporal_compression=4,
-                    causal_temporal=True,
-                )
-                VideoBackbone.validate_encoder_spec(external_encoder.spec, want)
-
-            # (3) Spatial/time division factors derived from the encoder spec,
+            # (2) Spatial/time division factors derived from the encoder spec,
             # not a hardcoded ``* 2`` / Wan-VAE grid — otherwise
             # ``check_resize_height_width`` would round encoder-legal sizes to
             # Wan's grid. Remainder is 1 iff causal ("first frame separable,
@@ -223,7 +193,7 @@ class WanVideoBackbone(VideoBackbone):
             holder.time_division_factor = external_encoder.spec.temporal_compression * ps[0]
             holder.time_division_remainder = 1 if external_encoder.spec.causal_temporal else 0
 
-            # (4) Release the native VAE so state_dict keys don't double-count
+            # (3) Release the native VAE so state_dict keys don't double-count
             # with the external encoder. print (not logger.info) because arch
             # init runs before the logger is wired up; rank-0 gated.
             holder.vae = None
