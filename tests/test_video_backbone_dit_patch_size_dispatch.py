@@ -23,7 +23,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
+from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoderSpec
 from openwam.model.video_backbone.wan.models.dit import WanModel
 from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 

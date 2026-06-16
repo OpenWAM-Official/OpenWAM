@@ -2,7 +2,6 @@ defaults:
   - accelerate: deepspeed_zero2   # [Optional]: deepspeed_zero1, deepspeed_zero2(default), deepspeed_zero3
   - model: dual_system            # [Optional]: dual_system(default), shared_backbone, tri_system
   - dataloader: robotwin          # [Optional]: robotwin(default)
-  - training_strategy: joint      # [Optional]: joint(default) or video_only
   - _self_
 
 training:
@@ -28,35 +27,26 @@ training:
 
   # --- Per-module LR (null = use base learning_rate) ---
   action_lr: null                 # Override LR for action model parameters
-  # video_lr defaults to the active backbone's `recommended_video_lr` if it
-  # declares one (Cosmos25: 2e-5, see configs/model/backbone/cosmos25.yaml);
-  # backbones without that field (e.g. Wan) resolve to null → falls back to
-  # `learning_rate`. Override on CLI to force a specific value:
-  #   bash scripts/train.sh ... training.video_lr=5e-5
-  video_lr: ${oc.select:model.video_backbone.recommended_video_lr,null}
-  lora_lr: null                   # Override LR for LoRA parameters
+  video_lr: null                  # Override LR for video backbone parameters
 
   # --- Memory optimization ---
   use_gradient_checkpointing: true       # Trade compute for memory in DiT blocks
   use_gradient_checkpointing_offload: false  # Offload checkpointed activations to CPU
   initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
 
+  # --- Loss weights ---
+  lambda_video: 1.0               # Video flow-matching loss weight
+  lambda_action: 1.0              # Action flow-matching loss weight
+
   # --- Flow matching timestep range ---
   max_timestep_boundary: 1.0      # Upper bound (fraction of total timesteps)
   min_timestep_boundary: 0.0      # Lower bound (fraction of total timesteps)
-
-  # --- Per-token action timestep sampling (opt-in; default matches Round 1 baseline) ---
-  # false → one diffusion timestep per sample shared across all action tokens.
-  # true  → one independent timestep per action token (DreamZero decoupled-mode style);
-  #         enables ExpertFFN per-token AdaLN. TRAINING path only — inference in
-  #         openwam/deploy/joint_engine.py still broadcasts per-sample.
-  #         Surfaced as a schema anchor so Hydra struct-mode catches typos.
-  action_timestep_per_token: false
 
   # --- LoRA ---
   lora_base_model: null           # Pipeline sub-module to apply LoRA (e.g. "dit"); null = no LoRA
   lora_target_modules: "q,k,v,o,ffn.0,ffn.2"  # Comma-separated target module names
   lora_rank: 32                   # LoRA rank
+  lora_lr: null                   # Override LR for LoRA parameters
 
   # --- Checkpoint ---
   output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output
@@ -65,13 +55,6 @@ training:
 
   # --- Data loading ---
   dataset_num_workers: 8          # DataLoader num_workers (0 = main process)
-
-  # --- Decoupled training (DreamZero-Flash style) ---
-  decoupled:
-    enabled: false                # Enable Beta-distributed video timestep sampling
-    video_beta_a: 0.5            # Beta(a, b): lower a = more bias toward high noise
-    video_beta_b: 1.0            # Beta(a, b)
-    warmup_steps: 0              # Steps of uniform sampling before switching to Beta
 
 project:
   name: open-wam

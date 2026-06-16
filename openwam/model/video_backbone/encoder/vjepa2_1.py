@@ -23,9 +23,9 @@ import torch.nn as nn
 from PIL import Image
 from torchvision import transforms as T
 
-from openwam.model.video_backbone.encoder import VideoEncoder, register_video_encoder
-from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
+from openwam.model.video_backbone.encoder.registry import register_video_encoder
 from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION, SVAE, build_svae, load_svae
+from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # ~L765/L793). So even with ``requires_grad=True`` the LayerNorm
         # params receive no gradient and behave as a fixed standardizer
         # across training. Both the freeze yaml (which freezes
-        # ``video_backbone._encoder`` wholesale) and the no_grad
+        # ``video_backbone.video_encoder`` wholesale) and the no_grad
         # decorators have to be lifted before this can adapt — out of
         # scope for the V-JEPA 2.1 integration PR. The module still lives
         # OUTSIDE ``self._m`` so a future PR can carve out a grad-enabled
@@ -472,7 +472,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         automatically.
 
         ViT weights are NOT loaded here — the architecture's strict
-        ``load_checkpoint`` populates ``_encoder._m.*`` from the saved
+        ``load_checkpoint`` populates ``video_encoder._m.*`` from the saved
         safetensors immediately after this call returns.
         """
         manifest_dir = cls._resolve_manifest_dir(ckpt_dir, encoder_cfg)

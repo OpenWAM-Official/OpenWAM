@@ -36,7 +36,7 @@ def test_make_schedule_sync():
 
 @pytest.mark.parametrize(
     "removed",
-    ["video_leading", "cascade", "action_only", "decoupled_flash", "decoupled_asymmetric", "bogus"],
+    ["video_leading", "cascade", "action_only", "bogus"],
 )
 def test_make_schedule_rejects_removed_strategies(removed):
     from openwam.deploy.denoise_schedule import make_schedule

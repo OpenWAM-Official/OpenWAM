@@ -1,154 +1,66 @@
-# Dual-System WAM Architecture
-# Separate ActionDiT paired with a video DiT. Three variants:
-#   - joint_cross_attn: video runs to completion → bridge features captured
-#     at configured layers → ActionDiT runs once with cross-attention to those
-#     features. The two streams interact only through the bridge.
-#   - joint_self_attn:  MoTJointDriver runs a single mixed self-attention at
-#     every transformer layer (FastWAM MoT pattern). Q/K/V from each modality
-#     are concatenated, attention is computed once, then split back. Requires
-#     identical num_layers / num_heads / head_dim across the two backbones.
-#   - idm: FastWAM-IDM style teacher-forcing training, then two-stage inference:
-#     denoise video first and use frozen video K/V while denoising actions.
-#     COSMOS25-ONLY NOTE: idm is Wan-only — Cosmos25 supports joint_cross_attn
-#     and joint_self_attn (§17), but not idm.
-#
-# Video backbone is composed from the Hydra `backbone` group at
-# `configs/model/backbone/`. Default is Wan (configs/model/backbone/wan.yaml,
-# wan22_ti2v_5b inside). Switch via CLI:
-#   bash scripts/train.sh model=dual_system model/backbone=cosmos25
-# Per-backbone fields and switching notes live inside each group yaml.
+# Dual-System WAM: separate ActionDiT + video DiT. Variants:
+#   joint_cross_attn: video runs to completion → bridge features → ActionDiT
+#                     runs once with cross-attention to them.
+#   joint_self_attn:  MoTJointDriver runs one mixed self-attention per layer;
+#                     requires num_layers/num_heads/head_dim parity across backbones.
+#   idm:              teacher-forcing training + two-stage inference. Wan-only
+#                     (Cosmos25 raises NotImplementedError).
+# Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos25.
 
 defaults:
-  - backbone: wan        # default; CLI: model/backbone=cosmos25
-  - _self_               # framework-level fields below override group defaults if any clash
+  - video_backbone: wan   # CLI: model/video_backbone=cosmos25
+  - _self_
+
+# Frozen pretrained components (freeze_modules walks each via get_submodule;
+# missing paths silently skipped — image_encoder None on TI2V/VACE, _encoder
+# only on the from_scratch external-encoder path).
+freeze:
+  - video_backbone.text_encoder
+  - video_backbone.vae
+  - video_backbone.image_encoder
+  - video_backbone.video_encoder
 
 architecture:
-  # Common dual-system selector and data-shape knobs.
   framework: dual_system
   variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm (idm = Wan only)
   action_dim: 20
 
-  # Proprioceptive state conditioning.
-  # Used by all dual-system variants. When enabled, dataloaders must provide
-  # sample["proprio"], and the architecture appends one FastWAM-style proprio
-  # token to the raw text context before video/action backbones consume it.
+  # When true, dataloader must provide sample["proprio"]; one proprio token is
+  # appended to the text context before the backbones consume it.
   use_proprioception: true
   state_dim: 20                  # required when use_proprioception=true
 
-  # Common ActionDiT layer selection.
-  # joint_cross_attn: chooses which video DiT layers feed bridge cross-attention.
-  # joint_self_attn/idm: there is no bridge feature collection, but the resolved
-  # layer count is still used to size ActionDiT. It must match the video
-  # backbone's num_layers for MoT mixed attention. Usually leave
-  # bridge_layers: null + bridge_interval: 1.
-  #   (a) Explicit list:  bridge_layers: [0, 1, ..., 29]
-  #   (b) Interval mode:  set bridge_layers: null and use bridge_interval.
-  #       - interval=1 → all inferred video DiT layers
-  #       - interval=2 → every other inferred layer
-  # COSMOS25-ONLY NOTE: on Cosmos25 (28 blocks), interval=1 yields 28 ActionDiT
-  # layers — matches the MoT per-layer parity requirement for joint_self_attn.
+  # ActionDiT layer selection. joint_cross_attn: which video layers feed the
+  # bridge. joint_self_attn/idm: sizes ActionDiT (must match vb.num_layers).
+  # bridge_layers: explicit list, OR null + bridge_interval (1=all, 2=every other).
   bridge_layers: null
   bridge_interval: 1
 
-  # ------------------------------
-  # joint_self_attn + idm behavior
-  # ------------------------------
-  # MoTJointDriver options. Only used when variant is joint_self_attn or idm;
-  # ignored by joint_cross_attn.
-  mot_checkpoint_mixed_attn: true       # gradient-checkpoint the mixed attention itself; trades VRAM for one extra recompute per layer
-  # OpenWAM MoT joint-mask mode. Only user-configurable for variant=joint_self_attn.
-  # variant=idm fixes this internally to ``joint``: IDM training uses its own
-  # teacher-forcing mask, and IDM inference must keep the matching FastWAM-style
-  # video/action joint mask. Do not override this field for idm.
-  #
-  # Available layouts:
-  #   bidirectional: pass attn_mask=None (full v↔a). Useful for ablations.
-  #   joint        : [Sv+Sa, Sv+Sa] bool mask with v↔v from
-  #                  ``video_attention_mask_mode``, a↔a True, a→v True,
-  #                  v→a False (video doesn't see action; required for
-  #                  optional video-KV prefill).
-  attention_mask_mode: joint
-  # Video-to-video self-attention mask used by the video backbone.
-  # joint_self_attn: controls the v↔v block inside the joint mask.
-  # idm: controls the noisy-video and cond-video v↔v submasks inside the
-  #      teacher-forcing training mask, and the frozen-video cache prefill mask
-  #      during inference. This mirrors FastWAM's video_expert
-  #      build_video_to_video_mask() behavior.
-  #   bidirectional       : full v↔v
-  #   per_frame_causal    : token-level frame-causal block-diagonal
-  #   first_frame_causal  : first-frame tokens only see themselves; rest see all
-  # FastWAM-Joint uses ``first_frame_causal`` by default.
-  video_attention_mask_mode: first_frame_causal
+  # MoT options (joint_self_attn / idm only; ignored by joint_cross_attn).
+  mot_checkpoint_mixed_attn: true       # grad-checkpoint the mixed attention (VRAM ↓, +1 recompute/layer)
+  # joint mask: v↔v from video_attention_mask_mode, a↔a True, a→v True, v→a False.
+  # idm fixes this to `joint` internally — do not override for idm.
+  attention_mask_mode: joint   # joint | bidirectional
+  # v↔v block layout; idm also uses it for the teacher-forcing + cache-prefill submasks.
+  video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
 
-  # ------------------------------
-  # joint_cross_attn-only behavior
-  # ------------------------------
-  # Only used when variant=joint_cross_attn; ignored under joint_self_attn/idm.
-  # IDM does not have a detach_bridge operation: its action path is coupled
-  # through MoT teacher-forcing during training and frozen-video KV cache during
-  # inference, not through detachable bridge features.
-  detach_bridge: false
+  detach_bridge: false             # joint_cross_attn only
+  idm_video_cond_noise_prob: 0.5   # idm only
 
-  # ------------------------------
-  # idm-only behavior
-  # ------------------------------
-  # Only used when variant is idm.
-  idm_video_cond_noise_prob: 0.5
-
-# ActionDiT transformer parameters.
-# Geometry fields are auto-resolved from the loaded video_backbone by the
-# architecture __init__ (see openwam/model/architectures/dual_system/{joint_self_attn,joint_cross_attn,idm}.py):
-#   - num_layers   : auto from len(bridge_layers)
-#   - video_dim    : auto from video_backbone.dim
-#   - num_heads    : auto from video_backbone.num_heads
-#                    joint_self_attn / idm hard-require parity (MoT mixed
-#                    attention). joint_cross_attn does not require parity but
-#                    defaults to vb for apples-to-apples; CLI overrides accepted.
-#   - attn_head_dim: auto from video_backbone.head_dim, same parity rule.
-#   - text_dim     : auto from video_backbone.context_dim (see
-#                    BaseWAMModel._resolve_text_dim). For Wan T5-XXL the
-#                    default 4096 below matches video_backbone.context_dim
-#                    exactly — kept explicit for legibility. COSMOS25-ONLY
-#                    NOTE: override on CLI when switching to cosmos25
-#                    (`model.action_backbone.text_dim=1024`). Cosmos25's
-#                    context_dim is 1024, not Wan's 4096 — leaving 4096 in
-#                    place silently overrides the auto-resolve and crashes
-#                    the action expert's context embedding with a shape
-#                    mismatch.
-# Because the auto-resolve fields are not present in the yaml, Hydra struct
-# mode requires `+` (append) instead of plain assign for cosmos25 cross-attn
-# overrides:
-#   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
-#
-# FastWAM-Joint heterogeneous-hidden layout: action residual stream is narrower
-# than video (1024 vs 3072 on TI2V-5B) but Q/K/V project to the shared
-# ``num_heads * attn_head_dim`` attention space, so the MoT driver
-# (joint_self_attn) still runs a single mixed attention. joint_cross_attn
-# accepts the same fields so the two variants can be compared apples-to-apples
-# — only the inter-modality coupling differs.
-#   - dim     : action residual hidden dim
-#   - text_dim: raw text/proprio context dim before the action expert's own
-#               context embedding
-#   - ffn_dim : action expert FFN intermediate dim
-# Action expert param count at the default setup: ~1.0B (vs ~5.0B video expert
-# on TI2V-5B).
+# ActionDiT. Geometry auto-resolved from video_backbone (num_layers/video_dim/
+# num_heads/attn_head_dim); joint_self_attn/idm hard-require head parity.
+# text_dim auto-resolves from video_backbone.context_dim — the 4096 below matches
+# Wan T5-XXL, kept explicit. COSMOS25: context_dim=1024, so override
+# `model.action_backbone.text_dim=1024` or the action context-embed shape-crashes.
+# Struct mode needs `+` for the absent num_heads/attn_head_dim fields.
 action_backbone:
   dim: 1024
-  text_dim: 4096       # Wan T5-XXL context dim. COSMOS25-ONLY: override to 1024 via CLI.
+  text_dim: 4096       # Wan T5-XXL. COSMOS25-ONLY: override to 1024 via CLI.
   ffn_dim: 4096
-  # Flow-matching α-shift for the ACTION scheduler (symmetric to
-  # video_backbone.shift_video). Single source of truth read by BOTH
-  # init_training_schedulers and the deploy schedule, so train/inference sigma
-  # grids cannot drift. null = scheduler template default (5.0).
+  # ACTION scheduler α-shift (symmetric to video shift_video); single source of
+  # truth for train + deploy. null = template default (5.0).
   shift_action: null
-  # COSMOS25-ONLY default for variant=joint_cross_attn. Cosmos25 has
-  # num_heads=16, head_dim=128 — auto-resolve sizes the action self-attention
-  # space to 16×128=2048, but the action residual stream is only 1024 wide
-  # so a 2048-d attention wastes Q/K/V/output_proj compute. The MVP cross-attn
-  # default pins 16×64=1024 (matches residual hidden), halving action-side
-  # self-attention compute. Cross-attention to the 1024-d video context is
-  # unaffected. Append on CLI for joint_cross_attn on Cosmos25:
+  # COSMOS25 joint_cross_attn only: pin 16×64=1024 (action stream is 1024 wide;
+  # auto-resolve's 16×128=2048 wastes attention compute):
   #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
-  # DO NOT append these for joint_self_attn — MoT mixed attention requires
-  # per-layer parity with cosmos25 (16/128), so the action side must
-  # auto-resolve to 16×128.
+  # Do NOT add for joint_self_attn — MoT needs per-layer 16×128 parity.

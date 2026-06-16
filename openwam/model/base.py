@@ -77,7 +77,7 @@ def _wrap_forward_in_no_grad(module: nn.Module) -> None:
     wrapped in ``no_grad``. For partial-freeze setups (e.g. LoRA on a frozen base,
     or training only the LM head of an otherwise frozen VLM), do NOT pass the
     parent's dotted path to ``freeze_modules``; pass the specific leaves you want
-    frozen instead. The current freeze list in ``configs/training_strategy/*.yaml``
+    frozen instead. The current freeze list in ``configs/model/*.yaml``
     only names complete subtrees, so this limitation does not bite today.
     """
     for sub in module.modules():
@@ -163,7 +163,7 @@ def _assert_decode_video_supported(vb) -> None:
     out of :meth:`BaseWAMArchitecture.generate` so it is independently
     unit-testable without standing up the full denoising loop.
     """
-    enc = getattr(vb, "_encoder", None)
+    enc = getattr(vb, "video_encoder", None)
     if enc is not None and not enc.spec.is_reversible:
         raise ValueError(
             f"generate(decode_video=True) but the configured encoder "

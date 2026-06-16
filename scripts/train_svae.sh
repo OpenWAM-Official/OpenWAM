@@ -5,7 +5,7 @@
 # The S-VAE reducer is small and fully replicated, so this is plain DDP via
 # HuggingFace Accelerate (no DeepSpeed) — mirrors scripts/train.sh so the same
 # topology env vars apply. Standalone Hydra config
-# (configs/model/encoder/svae/train.yaml) — no model/dataloader chain.
+# (configs/model/video_backbone/encoder/svae/train.yaml) — no model/dataloader chain.
 #
 # Required:
 #   train.features_dir=<dir written by collect_svae_features.py>

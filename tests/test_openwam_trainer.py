@@ -134,27 +134,14 @@ class _MockVideoBackbone(VideoBackbone):
         self._dtype = torch.float32
         # ABC-property backings (mirror Wan native so legacy mask code stays
         # bit-for-bit identical).
-        self._dit_patch_size = self.get_native_dit_patch_size(None)
-        self._temporal_compression, self._causal_temporal = self.get_native_temporal_contract(None)
+        self._dit_patch_size = (1, 2, 2)
+        self._temporal_compression, self._causal_temporal = 4, True
         self.last_injected = None
         self.last_extracted = None
 
     @classmethod
     def from_pretrained(cls, source, **kw):
         return cls()
-
-    @classmethod
-    def get_native_dit_patch_size(cls, pipe):
-        # Test stubs don't care about patch geometry; return the Wan native
-        # ``(T, H, W) = (1, 2, 2)`` so behaviour matches WanVideoBackbone /
-        # Cosmos25VideoBackbone defaults.
-        return (1, 2, 2)
-
-    @classmethod
-    def get_native_temporal_contract(cls, pipe):
-        # Mirror Wan native ``(4, True)`` so legacy mask/divisibility tests
-        # built on this stub keep their previous behaviour.
-        return (4, True)
 
     @property
     def dim(self) -> int:
@@ -425,7 +412,7 @@ def test_freeze_joint_strategy():
     arch = _make_tiny_arch()
     action_dit = arch.action_backbone
 
-    freeze_list = ["text_encoder", "vae"]  # from configs/training_strategy/joint.yaml
+    freeze_list = ["text_encoder", "vae"]  # from configs/model/dual_system.yaml
     _apply_freeze(pipe, {"action_dit": action_dit}, freeze_list)
 
     assert not any(p.requires_grad for p in pipe.text_encoder.parameters())

@@ -335,7 +335,7 @@ class _FakePipe(nn.Module):
 
 
 def test_C1_default_path_state_dict_keys_contain_pipe_vae():
-    """Without external_encoder, native vae.* keys are present (phase-3c attribute-ization) and _encoder.* is None."""
+    """Without external_encoder, native vae.* keys are present (phase-3c attribute-ization) and video_encoder.* is None."""
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     pipe = _FakePipe()
@@ -343,7 +343,7 @@ def test_C1_default_path_state_dict_keys_contain_pipe_vae():
     assert backbone._uses_external_encoder is False
     sd = backbone.state_dict()
     assert any(k.startswith("vae.") for k in sd), "default path should expose vae.* keys"
-    assert not any(k.startswith("_encoder.") for k in sd), "default path must not have _encoder.* keys"
+    assert not any(k.startswith("video_encoder.") for k in sd), "default path must not have video_encoder.* keys"
 
 
 def test_C2_default_path_pipe_vae_call_sites_preserved(monkeypatch):
@@ -390,7 +390,7 @@ def test_C3_external_path_releases_pipe_vae_in_from_pretrained():
 
 
 def test_C4_external_path_state_dict_keys_swap():
-    """External path: _encoder.* keys present, native vae.* absent."""
+    """External path: video_encoder.* keys present, native vae.* absent."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
@@ -398,7 +398,7 @@ def test_C4_external_path_state_dict_keys_swap():
     enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
     backbone = WanVideoBackbone.from_pretrained(pipe, external_encoder=enc)
     sd = backbone.state_dict()
-    assert any(k.startswith("_encoder.") for k in sd), "external path should expose _encoder.* keys"
+    assert any(k.startswith("video_encoder.") for k in sd), "external path should expose video_encoder.* keys"
     assert not any(k.startswith("vae.") for k in sd), "external path must release the native vae.*"
 
 
@@ -787,7 +787,7 @@ def test_C15_wan_copy_deploy_artifacts_no_op_without_external_encoder(tmp_path):
 
     pipe = _FakePipe()
     backbone = WanVideoBackbone(pipe)
-    assert backbone._encoder is None
+    assert backbone.video_encoder is None
     backbone.copy_deploy_artifacts(str(tmp_path), {"model": {"video_backbone": {"model_path": str(tmp_path)}}})
     # No exception, no spurious files.
     # (Tokenizer copy is itself a warning-on-missing path; we don't assert
@@ -1072,7 +1072,7 @@ def test_D2b_deploy_with_encoder_block_and_from_scratch_false_keeps_native_vae(m
     for discoverability). The state_dict topology is ``_pipe.vae.*`` —
     the encoder block must NOT trigger external-encoder-skeleton
     construction on the deploy path; otherwise strict checkpoint load
-    would mismatch ``_pipe.vae.*`` vs ``_encoder._m.*``.
+    would mismatch ``_pipe.vae.*`` vs ``video_encoder._m.*``.
 
     Same gate as training (test_D2): encoder honored ONLY when
     ``from_scratch=true``. Deploy path stays quiet (no log spam) —
@@ -1203,7 +1203,7 @@ def test_D4_encoder_not_built_when_no_encoder_block(monkeypatch):
 
 
 def test_D5_generate_decode_video_true_blocks_irreversible_encoder():
-    """``_assert_decode_video_supported`` raises when ``vb._encoder`` is
+    """``_assert_decode_video_supported`` raises when ``vb.video_encoder`` is
     irreversible — the same helper :meth:`BaseWAMArchitecture.generate`
     calls just before invoking ``vb.decode_video`` when ``decode_video=True``.
 
@@ -1211,7 +1211,7 @@ def test_D5_generate_decode_video_true_blocks_irreversible_encoder():
     require the entire scheduler/pipeline stack; instead we extract the
     guard as ``_assert_decode_video_supported`` (base.py) and exercise it
     directly with a stub backbone, so a regression that renames
-    ``vb._encoder`` or flips the polarity is caught here.
+    ``vb.video_encoder`` or flips the polarity is caught here.
     """
     from openwam.model.base import _assert_decode_video_supported
 
@@ -1220,23 +1220,23 @@ def test_D5_generate_decode_video_true_blocks_irreversible_encoder():
 
     # Irreversible → fail-fast.
     vb_irrev = _StubBackbone()
-    vb_irrev._encoder = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    vb_irrev.video_encoder = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
     with pytest.raises(ValueError, match=r"irreversible"):
         _assert_decode_video_supported(vb_irrev)
 
     # Reversible → no-op.
     vb_rev = _StubBackbone()
-    vb_rev._encoder = WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True)
+    vb_rev.video_encoder = WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True)
     _assert_decode_video_supported(vb_rev)
 
-    # Native VAE path (no _encoder attribute at all) → no-op.
+    # Native VAE path (no video_encoder attribute at all) → no-op.
     vb_native = _StubBackbone()
     _assert_decode_video_supported(vb_native)
 
-    # Native VAE path (_encoder is None — what WanVideoBackbone sets when
+    # Native VAE path (video_encoder is None — what WanVideoBackbone sets when
     # external_encoder is not provided) → no-op.
     vb_native_none = _StubBackbone()
-    vb_native_none._encoder = None
+    vb_native_none.video_encoder = None
     _assert_decode_video_supported(vb_native_none)
 
 
@@ -1245,7 +1245,7 @@ def test_D6_freeze_modules_resolves_encoder_dotted_path_on_external_path():
     routes through an external encoder, ``pipe.vae`` is None and the
     historical ``freeze: [..., video_backbone._pipe.vae, ...]`` entry is
     silently skipped — leaving the encoder's pretrained weights trainable.
-    The fix lists ``video_backbone._encoder`` in the freeze yamls; this
+    The fix lists ``video_backbone.video_encoder`` in the freeze yamls; this
     test verifies the dotted path actually resolves via
     ``nn.Module.get_submodule`` and that ``requires_grad_(False)`` then
     propagates to every encoder parameter.
@@ -1267,26 +1267,26 @@ def test_D6_freeze_modules_resolves_encoder_dotted_path_on_external_path():
     arch = _ArchContainer(backbone)
 
     # get_submodule routes through the WanVideoBackbone's _modules dict;
-    # ``_encoder = external_encoder`` in __init__ registers it there.
-    resolved = arch.get_submodule("video_backbone._encoder")
+    # ``video_encoder = external_encoder`` in __init__ registers it there.
+    resolved = arch.get_submodule("video_backbone.video_encoder")
     assert resolved is enc
 
     # Encoder parameters are trainable by default. Pre-fix: the freeze yaml
     # entry (_pipe.vae) was silently skipped because pipe.vae=None, so the
-    # encoder stayed trainable. Post-fix: the new yaml entry (_encoder)
+    # encoder stayed trainable. Post-fix: the new yaml entry (video_encoder)
     # resolves and the call below disables grad on every encoder param.
     assert any(p.requires_grad for p in enc.parameters())
     resolved.requires_grad_(False)
     assert all(not p.requires_grad for p in enc.parameters())
 
-    # Sibling guards: native VAE path → _encoder is None and not in _modules,
+    # Sibling guards: native VAE path → video_encoder is None and not in _modules,
     # so freeze_modules's get_submodule call must raise AttributeError so
     # the framework can silently skip it (yaml lists both paths).
     pipe2 = _FakePipe(vae_z_dim=16, vae_upsample=8)
     backbone2 = WanVideoBackbone.from_pretrained(pipe2)  # no external_encoder
     arch2 = _ArchContainer(backbone2)
     with pytest.raises(AttributeError):
-        arch2.get_submodule("video_backbone._encoder")
+        arch2.get_submodule("video_backbone.video_encoder")
 
 
 def test_M3a_filter_native_vae_configs_drops_vae_entries():
@@ -1325,7 +1325,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
       - training (``DictConfig`` source) + irreversible encoder → True
       - training + reversible encoder → False (validation needs native VAE)
       - deploy (``dict`` / ``str`` source) + any external encoder → True
-        (state_dict topology is ``_encoder._m.*``, not ``_pipe.vae.*``;
+        (state_dict topology is ``video_encoder._m.*``, not ``_pipe.vae.*``;
         deploy must not materialize the empty native VAE slot)
       - no external encoder → False on both paths
 
@@ -1380,7 +1380,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         WanVideoBackbone.from_pretrained(train_cfg)
         assert captured["skip"] is False
 
-        # --- Deploy path: dict source (state_dict topology is _encoder._m.*) ---
+        # --- Deploy path: dict source (state_dict topology is video_encoder._m.*) ---
         deploy_cfg = {"video_backbone": {"model_path": "/dummy"}}
 
         # Deploy + reversible → skip=True (no native VAE slot to materialize).
@@ -1625,8 +1625,8 @@ def test_M3f_train_save_deploy_state_dict_topology_matches():
     train_bb = WanVideoBackbone.from_pretrained(train_pipe, external_encoder=train_enc)
     train_keys = set(train_bb.state_dict().keys())
     # Must use the external-encoder slot, not the native vae.*.
-    assert any(k.startswith("_encoder.") for k in train_keys), (
-        "training-time backbone state_dict missing _encoder.* keys"
+    assert any(k.startswith("video_encoder.") for k in train_keys), (
+        "training-time backbone state_dict missing video_encoder.* keys"
     )
     assert not any(k.startswith("vae.") for k in train_keys), (
         "training-time backbone state_dict has vae.* — native VAE wasn't released"
@@ -1694,7 +1694,7 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     backbone = WanVideoBackbone.from_pretrained(pipe, external_encoder=enc)
     assert backbone._uses_external_encoder is True
-    assert backbone._encoder is enc
+    assert backbone.video_encoder is enc
 
     # 2) Stand-in architecture: only the bits freeze_modules /
     #    _pipe_named_parameters touch. Cannot subclass BaseWAMArchitecture
@@ -1716,13 +1716,15 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     yaml_cfg = OmegaConf.load(repo_root / "configs/model/dual_system.yaml")
     freeze_list = list(yaml_cfg.freeze)
-    assert "video_backbone._encoder" in freeze_list, (
-        "dual_system.yaml must list video_backbone._encoder for this test to be meaningful"
+    assert "video_backbone.video_encoder" in freeze_list, (
+        "dual_system.yaml must list video_backbone.video_encoder for this test to be meaningful"
     )
 
     # 4) Run the exact production freeze_modules call.
     frozen = BaseWAMArchitecture.freeze_modules(arch, freeze_list)
-    assert "video_backbone._encoder" in frozen, f"_encoder failed to freeze; freeze_modules returned: {frozen}"
+    assert "video_backbone.video_encoder" in frozen, (
+        f"video_encoder failed to freeze; freeze_modules returned: {frozen}"
+    )
 
     # 5) Sanity: encoder has parameters at all, and every single one is now
     #    requires_grad=False.
@@ -1738,17 +1740,17 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
         lambda_action = 0  # excluded; not relevant here
 
     pairs = _pipe_named_parameters(_ModelStub())
-    # Encoder parameter names appear as ``video_backbone._encoder._m.*`` in
+    # Encoder parameter names appear as ``video_backbone.video_encoder._m.*`` in
     # the production output (mod_name="video_backbone" + named_parameters
     # path).
-    leaked = [name for name, _ in pairs if "_encoder." in name]
+    leaked = [name for name, _ in pairs if "video_encoder." in name]
     assert leaked == [], f"Encoder parameters leaked into _pipe_named_parameters: {leaked[:5]}..."
 
     # 7) Sibling guard: encoder params are reachable from the backbone via
     #    backbone.named_parameters() (so the test isn't trivially passing
     #    because they were hidden), they're just filtered by requires_grad.
     by_name = dict(backbone.named_parameters())
-    enc_param_keys = [k for k in by_name if k.startswith("_encoder.")]
+    enc_param_keys = [k for k in by_name if k.startswith("video_encoder.")]
     assert len(enc_param_keys) > 0, (
         "encoder parameters must be reachable via backbone.named_parameters otherwise the leak check above is trivial"
     )
@@ -1765,7 +1767,7 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
 )
 def test_D7_model_yaml_freezes_encoder(yaml_path):
     """Every model yaml that ships a ``freeze:`` list MUST enumerate
-    ``video_backbone._encoder`` so the external-encoder path is frozen."""
+    ``video_backbone.video_encoder`` so the external-encoder path is frozen."""
     import pathlib
 
     from omegaconf import OmegaConf
@@ -1773,8 +1775,8 @@ def test_D7_model_yaml_freezes_encoder(yaml_path):
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     cfg = OmegaConf.load(repo_root / yaml_path)
     freeze = list(cfg.get("freeze", []) or [])
-    assert "video_backbone._encoder" in freeze, (
-        f"{yaml_path} freeze list missing video_backbone._encoder; "
+    assert "video_backbone.video_encoder" in freeze, (
+        f"{yaml_path} freeze list missing video_backbone.video_encoder; "
         f"external-encoder path will leave the encoder trainable. Got: {freeze}"
     )
     # The native-path entry must remain so default training stays bit-exact.
@@ -1782,7 +1784,7 @@ def test_D7_model_yaml_freezes_encoder(yaml_path):
 
 
 # ===========================================================================
-# Commit 6: E1-E3 — framework yamls carry the encoder block (inline)
+# Commit 6: E1-E3 — framework yamls expose the encoder block (composed via the video_backbone group)
 # ===========================================================================
 #
 # These tests verify the yaml ships with the documented defaults so that
@@ -1791,43 +1793,14 @@ def test_D7_model_yaml_freezes_encoder(yaml_path):
 
 
 @pytest.mark.parametrize(
-    "yaml_path",
-    [
-        # dual_system.yaml no longer ships an inline `video_backbone:` block —
-        # it composes from the Hydra `backbone` group instead (default
-        # `backbone/wan.yaml`). See test_E_dual_system_composed_encoder_block
-        # below for the composed-default verification.
-        "configs/model/shared_backbone.yaml",
-        "configs/model/tri_system.yaml",
-    ],
+    "model_name",
+    ["dual_system", "shared_backbone", "tri_system"],
 )
-def test_E_framework_yaml_has_inline_encoder_block(yaml_path):
-    """Each framework yaml's video_backbone block contains an inline
-    encoder: {name, model_path} sub-block with `wan_vae` as the default."""
-    import pathlib
-
-    from omegaconf import OmegaConf
-
-    repo_root = pathlib.Path(__file__).resolve().parent.parent
-    cfg = OmegaConf.load(repo_root / yaml_path)
-
-    vb = cfg.video_backbone
-    assert vb is not None, f"{yaml_path} missing video_backbone block"
-    enc = vb.get("encoder")
-    assert enc is not None, f"{yaml_path} missing video_backbone.encoder block"
-    assert enc.name == "wan_vae", f"{yaml_path} default encoder.name should be wan_vae, got {enc.name!r}"
-    assert "model_path" in enc, f"{yaml_path} encoder block missing model_path"
-    # Yaml whitelist enforces {name, model_path} only; ensure no extra fields
-    # have crept in.
-    extras = set(enc.keys()) - {"name", "model_path"}
-    assert extras == set(), f"{yaml_path} encoder block has extra fields {extras}, will trip the gate's whitelist"
-
-
-def test_E_dual_system_composed_encoder_block():
-    """dual_system.yaml composes its video_backbone from the Hydra `backbone`
-    group (default `backbone/wan.yaml`). The composed config must still expose
-    a `video_backbone.encoder: {name=wan_vae, model_path=...}` block so the
-    encoder-gate path stays identical to shared_backbone / tri_system."""
+def test_E_composed_encoder_block(model_name):
+    """Each framework composes video_backbone from the Hydra `video_backbone`
+    group (default wan.yaml → encoder/wan_vae.yaml); the composed config must
+    expose video_backbone.encoder: {name=wan_vae, model_path=...} so the
+    encoder-gate path is identical across architectures."""
     import os
     import pathlib
 
@@ -1836,21 +1809,16 @@ def test_E_dual_system_composed_encoder_block():
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     config_dir = os.path.abspath(repo_root / "configs")
-
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg = compose(config_name="train", overrides=["model=dual_system"])
+        cfg = compose(config_name="train", overrides=[f"model={model_name}"])
 
-    vb = cfg.model.video_backbone
-    enc = vb.get("encoder")
-    assert enc is not None, "dual_system + default backbone is missing video_backbone.encoder"
-    assert enc.name == "wan_vae"
-    assert "model_path" in enc
-    # Keep the allowed encoder-block fields in this regression test in sync
-    # with ``BaseWAMArchitecture._init_video_backbone`` /
-    # ``_build_external_encoder_skeleton``.
+    enc = cfg.model.video_backbone.get("encoder")
+    assert enc is not None, f"{model_name} missing video_backbone.encoder"
+    assert enc.name == "wan_vae", f"{model_name} default encoder.name should be wan_vae, got {enc.name!r}"
+    assert "model_path" in enc, f"{model_name} encoder block missing model_path"
     extras = set(enc.keys()) - {"name", "model_path"}
-    assert extras == set(), f"encoder block has extra fields {extras}, will trip the gate's whitelist"
+    assert extras == set(), f"{model_name} encoder block has extra fields {extras}"
 
 
 # ======================================================================
@@ -2839,9 +2807,9 @@ def test_V20_vjepa21_copy_deploy_artifacts_io_error_does_not_crash(tmp_path, cap
 
 def test_V21_vjepa21_feature_norm_keys_present_in_state_dict():
     """``self.feature_norm`` must live directly on the encoder (NOT inside
-    ``self._m``) so the freeze yaml's ``video_backbone._encoder`` line
+    ``self._m``) so the freeze yaml's ``video_backbone.video_encoder`` line
     recursively covers it AND the safetensors carries it under
-    ``video_backbone._encoder.feature_norm.*``. If a future refactor
+    ``video_backbone.video_encoder.feature_norm.*``. If a future refactor
     moves the LN into ``self._m``, deploy round-trip would still pass
     (state_dict key sets remain consistent) but the freeze granularity
     would silently change. Pinning the location here surfaces that as a
@@ -2862,7 +2830,7 @@ def test_V21_vjepa21_feature_norm_keys_present_in_state_dict():
 # ======================================================================
 
 
-def _build_vjepa2_encoder(embed_dim: int = 8):
+def _build_vjepa2video_encoder(embed_dim: int = 8):
     """Construct a ``VJEPA2VideoEncoder`` around the shared mock ViT."""
     from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder
 
@@ -2938,7 +2906,7 @@ def test_W3_vjepa2_spec_invariants():
     patch, temporal_compression=4, z_dim from manifest. Locks the contract
     so a future refactor of either encoder cannot silently drift them apart.
     """
-    enc = _build_vjepa2_encoder(embed_dim=1408)
+    enc = _build_vjepa2video_encoder(embed_dim=1408)
     spec = enc.spec
     assert spec.is_reversible is False
     assert spec.causal_temporal is True
@@ -2955,7 +2923,7 @@ def test_W4_vjepa2_batch_encode_t_lat_shapes():
     -> T_lat == 3. Same downstream shapes so the host backbone consumes
     either encoder interchangeably.
     """
-    enc = _build_vjepa2_encoder(embed_dim=8)
+    enc = _build_vjepa2video_encoder(embed_dim=8)
     v1 = torch.randn(1, 3, 1, 32, 32)
     z1 = enc.batch_encode(v1)
     assert z1.shape == (1, 8, 1, 2, 2)
@@ -2974,7 +2942,7 @@ def test_W4b_vjepa2_pool_target_temporal_is_mean():
     """V-JEPA 2 mirror of test_V5b: ``_pool_target_temporal`` must be an
     actual mean, not stride-2 indexing. Guards against silent regression.
     """
-    enc = _build_vjepa2_encoder(embed_dim=2)
+    enc = _build_vjepa2video_encoder(embed_dim=2)
     z_target = torch.tensor([1.0, 2.0, 3.0, 4.0]).view(1, 1, 4, 1, 1).expand(1, 2, 4, 1, 1).contiguous()
     pooled = enc._pool_target_temporal(z_target)
     assert pooled.shape == (1, 2, 2, 1, 1)
@@ -3024,7 +2992,7 @@ def test_W7_vjepa2_t_pixel_not_div4_minus1_rejected(Tp):
     constraint but fail the new one). Loose ``\\d+`` regex tracks the
     encoder's pool-stride constant.
     """
-    enc = _build_vjepa2_encoder()
+    enc = _build_vjepa2video_encoder()
     with pytest.raises(ValueError, match=r"\(T_pixel - 1\) % \d+ == 0"):
         enc.batch_encode(torch.randn(1, 3, Tp, 32, 32))
 
@@ -3121,7 +3089,7 @@ def test_W9b_vjepa2_from_skeleton_rejects_vjepa2_1_forward_null(tmp_path):
 
 def test_W10_vjepa2_decode_raises():
     """Irreversible encoder: decode/to_frames raise NotImplementedError."""
-    enc = _build_vjepa2_encoder()
+    enc = _build_vjepa2video_encoder()
     with pytest.raises(NotImplementedError, match="irreversible"):
         enc.decode(torch.zeros(1, 8, 1, 2, 2))
     with pytest.raises(NotImplementedError, match="irreversible"):
@@ -3133,7 +3101,7 @@ def test_W11_vjepa2_default_dit_input_proj_shape():
     default ``build_dit_input_proj`` produces Conv3d(z_dim, dit_dim,
     (1,2,2), (1,2,2)). Mirrors V-JEPA 2.1 (test_V7).
     """
-    enc = _build_vjepa2_encoder(embed_dim=1408)
+    enc = _build_vjepa2video_encoder(embed_dim=1408)
     conv = enc.build_dit_input_proj(dit_dim=1024)
     assert isinstance(conv, nn.Conv3d)
     assert conv.in_channels == 1408
@@ -3265,14 +3233,14 @@ def test_W13_vjepa2_manifest_patch_tubelet_mismatch_rejected(tmp_path):
 def test_W14_vjepa2_feature_norm_keys_present_in_state_dict():
     """Mirror of test_V21 for V-JEPA 2: ``self.feature_norm`` must live
     directly on the encoder (NOT inside ``self._m``) so the freeze yaml's
-    ``video_backbone._encoder`` line recursively covers it AND the
-    safetensors carries it under ``video_backbone._encoder.feature_norm.*``.
+    ``video_backbone.video_encoder`` line recursively covers it AND the
+    safetensors carries it under ``video_backbone.video_encoder.feature_norm.*``.
     Without an explicit pin here, a future refactor moving the LN into
     ``self._m`` would still round-trip fine but silently change the freeze
     granularity for V-JEPA 2 (deploy round-trip is invariant, but a
-    user's freeze yaml that targets ``_encoder.feature_norm`` no longer
+    user's freeze yaml that targets ``video_encoder.feature_norm`` no longer
     matches). The V-JEPA 2.1 counterpart is ``test_V21``."""
-    enc = _build_vjepa2_encoder(embed_dim=8)
+    enc = _build_vjepa2video_encoder(embed_dim=8)
     keys = set(enc.state_dict().keys())
     assert "feature_norm.weight" in keys, (
         "feature_norm.weight is missing from V-JEPA 2 encoder state_dict. "
@@ -3313,7 +3281,7 @@ def test_W15_vjepa2_copy_deploy_artifacts_copies_manifest(tmp_path):
     output_dir = tmp_path / "ckpt-out"
     output_dir.mkdir()
 
-    enc = _build_vjepa2_encoder(embed_dim=1408)
+    enc = _build_vjepa2video_encoder(embed_dim=1408)
     cfg = OmegaConf.create(
         {"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(encoder_src)}}}}
     )
@@ -3333,7 +3301,7 @@ def test_W16_vjepa2_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_p
 
     from omegaconf import OmegaConf
 
-    enc = _build_vjepa2_encoder(embed_dim=1408)
+    enc = _build_vjepa2video_encoder(embed_dim=1408)
     output_dir = tmp_path / "ckpt-out"
     output_dir.mkdir()
 
@@ -3369,7 +3337,7 @@ def test_W17_vjepa2_copy_deploy_artifacts_io_error_does_not_crash(tmp_path, capl
     (encoder_src / "manifest.json").write_text(_json.dumps(_build_vjepa2_manifest_payload()))
     output_dir = tmp_path / "ckpt-out"
     output_dir.mkdir()
-    enc = _build_vjepa2_encoder(embed_dim=1408)
+    enc = _build_vjepa2video_encoder(embed_dim=1408)
     cfg = OmegaConf.create(
         {"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(encoder_src)}}}}
     )

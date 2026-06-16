@@ -34,8 +34,8 @@ import torch.nn as nn
 from PIL import Image
 from torchvision import transforms as T
 
-from openwam.model.video_backbone.encoder import VideoEncoder, register_video_encoder
-from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
+from openwam.model.video_backbone.encoder.registry import register_video_encoder
+from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class VJEPA2VideoEncoder(VideoEncoder):
         # Post-norm matches the sibling encoders: a plain LayerNorm at
         # init (weight=1, bias=0) acts as per-token standardization that
         # pulls raw ViT-scale features down to Wan-latent O(1). Frozen
-        # for now by the freeze_modules path on ``video_backbone._encoder``
+        # for now by the freeze_modules path on ``video_backbone.video_encoder``
         # plus the @torch.no_grad-decorated preprocess/prepare_inputs
         # hooks. A future PR can carve out a grad-enabled path.
         self.feature_norm = nn.LayerNorm(int(embed_dim))
@@ -281,7 +281,7 @@ class VJEPA2VideoEncoder(VideoEncoder):
            reachable on the deploy host.
 
         ViT weights are NOT loaded here — the architecture's strict
-        ``load_checkpoint`` populates ``_encoder._m.*`` from the saved
+        ``load_checkpoint`` populates ``video_encoder._m.*`` from the saved
         safetensors immediately after this call returns.
         """
         cls._reject_vjepa2_1_only_cfg_keys(encoder_cfg)

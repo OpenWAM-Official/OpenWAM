@@ -1,46 +1,32 @@
-# ---------------------------------------------------------------------------
-# Base deploy settings
-# ---------------------------------------------------------------------------
-checkpoint_path: null          # Default checkpoint directory; --ckpt-dir on the CLI overrides this.
+# --- Base deploy settings ---
+checkpoint_path: null          # Default checkpoint dir; --ckpt-dir overrides
 device: cuda:0
 server:
   host: "0.0.0.0"
   port: 8848                   # WebSocket port
 
-# ---------------------------------------------------------------------------
-# Inference parameters (cfg.inference)
-# Consumed by JointInferenceEngine.generate() and the executor selection.
-# Every field has a CLI override of the same name (--denoise-steps,
-# --execution-mode, ...) in openwam-serve / scripts/deploy.py.
-# ---------------------------------------------------------------------------
+# --- Inference (cfg.inference) ---
+# Every field has a same-name CLI override (--denoise-steps, --execution-mode, ...).
 inference:
-  denoise_steps: 10           # Denoising steps (FastWAM-Joint deploy default)
-  schedule_type: sync         # only "sync" is supported (removed strategies live in git history)
-  # Flow-matching α-shift is owned by the checkpoint, NOT set here: video shift comes
-  # from cfg.model.video_backbone.shift_video and action shift from
-  # cfg.model.action_backbone.shift_action (both saved in config.yaml at train time),
-  # so train/inference sigma grids cannot drift. Per-request override via the generate
-  # `conditions` dict ("shift"/"shift_video") remains available for ablations.
+  denoise_steps: 10           # Denoising steps (FastWAM-Joint default)
+  schedule_type: sync         # Within one denoise pass: how video/action timesteps advance.
+                              #   Only "sync" (both streams lockstep). NOT execution_mode below.
 
-  execution_mode: sync        # sync | async — selects SyncInferenceExecutor / AsyncInferenceExecutor
-  execution_horizon: null     # async only: actions executed per chunk before switching; null = policy.execute_horizon, else full chunk
-  inference_delay_steps: null # async only: expected inference latency in steps; null = half of resolved horizon
+  execution_mode: sync        # sync | async — Sync/AsyncInferenceExecutor
+  execution_horizon: null     # async only: actions per chunk; null = policy.execute_horizon
+  inference_delay_steps: null # async only: inference latency in steps; null = half horizon
 
-
-# ---------------------------------------------------------------------------
-# Deploy-time optimizations
-# Read by JointInferenceEngine._init_optimizations() via cfg.optimization.
-# ---------------------------------------------------------------------------
+# --- Deploy-time optimizations (cfg.optimization) ---
 optimization:
-  decode_video: false         # false = skip VAE decode and return video=null (actions-only serving)
+  decode_video: false         # false = skip VAE decode, return video=null (actions-only)
 
   dit_cache:
     enabled: false            # DiT velocity cache: skip video DiT when prediction is stable
     cosine_threshold: 0.99    # Skip if cosine similarity to previous prediction exceeds this
-    max_skips: 3              # Maximum consecutive skips before forcing recompute
+    max_skips: 3              # Max consecutive skips before forcing recompute
 
   compile:
-    mode: auto                 # auto | none; backbones may opt out per section (e.g. Cosmos25 skips the MoT-loop compile)
+    mode: auto                 # auto | none; backbones may opt out per section
     self_attn:
       torch_mode: default
       dynamic: false           # Fixed-shape MoT-loop compile for dual_system_self_attn

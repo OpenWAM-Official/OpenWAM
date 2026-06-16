@@ -3,8 +3,6 @@
 Composes package-native components:
   - Loss: implemented inside ``BaseWAMArchitecture.compute_loss``
     (openwam/model/base.py) — joint flow-matching MSE on video and action.
-    Optionally wrapped with ``DecoupledFlowMatchLoss`` for DreamZero-Flash
-    style Beta-distributed video timestep sampling.
   - Optimizer groups: openwam.train.utils.optimizer_groups
   - Checkpointing: openwam.train.utils.checkpointing
   - Architecture: openwam.model.registry (DualSystem / MoE / SharedBackbone)
@@ -132,28 +130,32 @@ class OpenWAMTrainer(BaseTrainer):
             self.architecture.set_dtype_device(self.architecture.dtype, self.architecture.device)
 
         # --- Freeze: apply after all models are built ---
-        # Read from training_strategy config (e.g. joint.yaml / video_only.yaml)
-        strategy = cfg.training_strategy
-        freeze_list = list(getattr(strategy, "freeze", []))
+        # Frozen pretrained components are declared per-architecture in the model
+        # yaml (configs/model/*.yaml `freeze:`). freeze_modules silently skips
+        # paths absent on a given architecture, so each model lists only its own.
+        freeze_list = list(getattr(m, "freeze", []))
         for name in self.architecture.freeze_modules(freeze_list):
             logger.info("Frozen: %s", name)
 
         # External encoder freeze sanity-check: when the host backbone has
         # swapped in an irreversible encoder (e.g. V-JEPA 2.1 / DINOv3 — no
         # pixel ``decode``), it's almost always pretrained-and-frozen at the
-        # ViT level. If the training_strategy doesn't mention the encoder in
-        # its freeze list, warn so the user notices BEFORE consuming GPU on
-        # an unintentional ViT-trainable run. Stubs / alternate architectures
-        # without a ``video_backbone`` attribute fall through silently.
+        # ViT level. If the model freeze list doesn't mention the encoder,
+        # warn so the user notices BEFORE consuming GPU on an unintentional
+        # ViT-trainable run. Architectures without a
+        # ``video_backbone`` attribute fall through silently.
         external_encoder = getattr(self.architecture, "external_encoder", None)
         if (
             external_encoder is not None
             and not external_encoder.spec.is_reversible
-            and not any(p == "video_backbone._encoder" or p.startswith("video_backbone._encoder.") for p in freeze_list)
+            and not any(
+                p == "video_backbone.video_encoder" or p.startswith("video_backbone.video_encoder.")
+                for p in freeze_list
+            )
         ):
             logger.warning(
                 "external encoder %s is not in freeze_modules; ViT is fully trainable. "
-                "Add 'video_backbone._encoder' to your training_strategy freeze list "
+                "Add 'video_backbone.video_encoder' to your model freeze list "
                 "if you intended to freeze the ViT backbone.",
                 type(external_encoder).__name__,
             )
@@ -163,7 +165,7 @@ class OpenWAMTrainer(BaseTrainer):
         # (see ``text_encoder.py:103-104``), re-walk the registered
         # ``_reason1_inner`` and confirm it. Reason1 is now an ``nn.Module``
         # child of the wrapper (so its weights ride into the unified
-        # safetensors), and a future training_strategy that opts to train
+        # safetensors), and a future model freeze config that opts to train
         # Reason1 would need an explicit config entry — this guard keeps the
         # current default safe from accidental flips and protects against
         # ZeRO-3 partitioning the 16 GB encoder if the zero.Init guard above
@@ -173,28 +175,9 @@ class OpenWAMTrainer(BaseTrainer):
         # Initialize all schedulers (video + action) inside architecture
         self.architecture.init_training_schedulers(1000)
 
-        # Loss weights from training_strategy config
-        self.lambda_video = float(strategy.lambda_video)
-        self.lambda_action = float(strategy.lambda_action)
-
-        self.action_timestep_per_token = bool(getattr(t, "action_timestep_per_token", False))
-        if self.action_timestep_per_token:
-            raise ValueError(
-                "action_timestep_per_token=True is not supported by the current OpenWAM "
-                "training path. Use per-sample action timesteps."
-            )
-
-        # Decoupled training support
-        decoupled_cfg = getattr(t, "decoupled", None)
-        self.decoupled_sampler = None
-        if decoupled_cfg is not None and getattr(decoupled_cfg, "enabled", False):
-            from openwam.train.loss.decoupled_loss import DecoupledFlowMatchLoss
-
-            self.decoupled_sampler = DecoupledFlowMatchLoss(
-                video_beta_a=float(getattr(decoupled_cfg, "video_beta_a", 0.5)),
-                video_beta_b=float(getattr(decoupled_cfg, "video_beta_b", 1.0)),
-                warmup_steps=int(getattr(decoupled_cfg, "warmup_steps", 0)),
-            )
+        # Loss weights from the training config
+        self.lambda_video = float(t.lambda_video)
+        self.lambda_action = float(t.lambda_action)
 
         # Load action stats
         if dataset is not None and self.lambda_action > 0:
@@ -406,8 +389,6 @@ class OpenWAMTrainer(BaseTrainer):
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
             current_step=self._current_step,
-            decoupled_sampler=self.decoupled_sampler,
-            action_timestep_per_token=self.action_timestep_per_token,
         )
 
         return {

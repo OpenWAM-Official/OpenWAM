@@ -46,8 +46,8 @@ from einops import rearrange, repeat
 from PIL import Image
 from torch import Tensor
 
-from openwam.model.video_backbone.encoder import VideoEncoder, register_video_encoder
-from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
+from openwam.model.video_backbone.encoder.registry import register_video_encoder
+from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 logger = logging.getLogger(__name__)
 

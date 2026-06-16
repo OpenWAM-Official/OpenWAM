@@ -44,12 +44,12 @@ from einops import rearrange, repeat
 from PIL import Image
 from torch import Tensor
 
-from openwam.model.video_backbone.encoder import VideoEncoder, register_video_encoder
 from openwam.model.video_backbone.encoder.flux import (
     FluxVaeEncoderCore,
     convert_diffusers_encoder_sd,
 )
-from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
+from openwam.model.video_backbone.encoder.registry import register_video_encoder
+from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
         # Gradient enablement is the caller's responsibility — the host backbone's
         # preprocess / prepare_inputs already wrap the encode path in
         # ``@torch.no_grad`` for the frozen-feature use case (matches wan_vae /
-        # dinov3). The VAE is in the ``video_backbone._encoder`` freeze list.
+        # dinov3). The VAE is in the ``video_backbone.video_encoder`` freeze list.
         z = self._core.encode(flat)  # (B*T, z_dim, H/sc, W/sc)
         grid = rearrange(z, "(B T) D H W -> B D T H W", B=b, T=t)
         return _causal_temporal_pool(grid)

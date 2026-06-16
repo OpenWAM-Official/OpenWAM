@@ -46,7 +46,7 @@ OpenWAM/
 │   ├── deploy/        # Policy server, model loader, joint inference engine, scheduler
 │   └── utils/         # Shared utilities
 ├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests
-├── configs/           # Hydra configs for model, dataloader, training_strategy, accelerate
+├── configs/           # Hydra configs for model, dataloader, accelerate
 ├── tests/             # Unit tests
 ├── docs/
 ├── assets_repo/       # Architecture diagrams
@@ -185,10 +185,9 @@ bash scripts/train.sh \
 
 The main config is `configs/train.yaml`. All fields can be overridden via Hydra CLI as shown above.
 
-Training strategy presets in `configs/training_strategy/`:
-
-- `joint.yaml` — joint video + action training
-- `video_only.yaml` — video-only training (action head frozen)
+Loss weights (`lambda_video` / `lambda_action`) live in `configs/train.yaml`; each
+architecture's frozen pretrained components are declared in its `configs/model/*.yaml`
+top-level `freeze:` list.
 
 Architecture configs in `configs/model/`:
 
@@ -406,9 +405,8 @@ OpenWAM uses Hydra composition rooted at `configs/train.yaml`.
 
 Key config groups:
 
-- `configs/model/` — architecture type, action backbone, video backbone
+- `configs/model/` — architecture type, action/video backbone, frozen-component `freeze:` list
 - `configs/dataloader/` — dataset adapters (RoboTwin)
-- `configs/training_strategy/` — training presets (joint, video_only)
 - `configs/accelerate/` — distributed training (DeepSpeed ZeRO stages)
 - `configs/deploy.yaml` — policy server defaults (`checkpoint_path`, `device`, `server`, `inference`, `optimization`)
 

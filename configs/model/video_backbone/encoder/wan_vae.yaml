@@ -1,0 +1,5 @@
+# Native Wan VAE — default external encoder; reproduces the in-DiT VAE path.
+# `encoder:` is only consumed when video_backbone.from_scratch=true (else ignored).
+# Swap via CLI: model/video_backbone/encoder=dinov3 (see docs/external_video_encoder.md).
+name: wan_vae
+model_path: /path/to/Wan2.2-TI2V-5B

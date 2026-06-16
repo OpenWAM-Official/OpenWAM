@@ -1,7 +1,7 @@
 """Offline feature collector for training the S-VAE reducer.
 
 Builds the same encoder + dataloader production training uses (via the
-``configs/model/encoder/svae/collect.yaml`` Hydra chain), then iterates the
+``configs/model/video_backbone/encoder/svae/collect.yaml`` Hydra chain), then iterates the
 FULL dataset exactly once — the same single-epoch traversal training does — and
 runs every clip through ``encoder.batch_encode_pooled_for_svae_training`` to
 harvest the POST-POOL, pre-feature_norm features the S-VAE compresses. Each clip
@@ -93,7 +93,11 @@ def _resolve_raw_dim(encoder) -> int:
     return int(encoder.spec.z_dim)
 
 
-@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="model/encoder/svae/collect")
+@hydra.main(
+    version_base=None,
+    config_path=str(PROJECT_ROOT / "configs"),
+    config_name="model/video_backbone/encoder/svae/collect",
+)
 def main(cfg: DictConfig) -> None:
     rank, local_rank, world_size = _setup_distributed()
     is_main = rank == 0
@@ -122,7 +126,7 @@ def main(cfg: DictConfig) -> None:
             "via FIELD overrides on the CLI, e.g. "
             "model.video_backbone.encoder.name=vjepa2_1 "
             "model.video_backbone.encoder.model_path=<weights dir> "
-            "(the 'model/encoder=...' group-select idiom does not resolve from this "
+            "(the 'model/video_backbone/encoder=...' group-select idiom does not resolve from this "
             "nested entry config)."
         )
 

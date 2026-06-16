@@ -127,7 +127,7 @@ def test_architecture_support_lists():
 
 
 def test_tri_system_rejects_vlm_freeze_in_model_config():
-    """VLM freezing is trainer-owned via training_strategy.freeze."""
+    """VLM freezing is trainer-owned via the model freeze list."""
     from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
 
     cfg = {
@@ -143,7 +143,7 @@ def test_tri_system_rejects_vlm_freeze_in_model_config():
         },
     }
 
-    with pytest.raises(ValueError, match="training_strategy.freeze"):
+    with pytest.raises(ValueError, match="moved to the model"):
         TriSystemJointSelfAttnArchitecture(cfg)
 
 
@@ -167,7 +167,7 @@ def test_freeze_modules_supports_vlm_dotted_path():
 
 
 def test_openwam_trainer_uses_strategy_freeze_for_tri_system_vlm(monkeypatch):
-    """Tri-system VLM freeze is owned by training_strategy.freeze."""
+    """Tri-system VLM freeze is owned by the model freeze list."""
 
     from omegaconf import OmegaConf
 
@@ -233,17 +233,16 @@ def test_openwam_trainer_uses_strategy_freeze_for_tri_system_vlm(monkeypatch):
         {
             "training": {
                 "initialize_model_on_cpu": False,
-                "action_timestep_per_token": False,
                 "use_gradient_checkpointing": False,
                 "use_gradient_checkpointing_offload": False,
                 "max_timestep_boundary": 1.0,
                 "min_timestep_boundary": 0.0,
-            },
-            "model": {"architecture": {"framework": "tri_system", "variant": "joint_self_attn"}},
-            "training_strategy": {
-                "freeze": ["vlm_backbone.vlm_model"],
                 "lambda_video": 1.0,
                 "lambda_action": 1.0,
+            },
+            "model": {
+                "architecture": {"framework": "tri_system", "variant": "joint_self_attn"},
+                "freeze": ["vlm_backbone.vlm_model"],
             },
         }
     )
@@ -1052,7 +1051,7 @@ def test_freeze_modules_disables_grad_and_wraps_forward_in_no_grad():
 def test_freeze_modules_skips_unknown_paths():
     """Freeze list may mention modules absent on the current architecture
     (e.g. ``vlm_backbone.vlm_model`` on dual_system) — they are silently
-    skipped, so a shared training_strategy YAML works across architectures.
+    skipped, so each model yaml's freeze list only needs its own components.
     """
     from torch import nn
 

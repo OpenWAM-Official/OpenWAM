@@ -181,14 +181,6 @@ def test_video_backbone_shift_video_property_default_none():
             return 1
 
         @classmethod
-        def get_native_dit_patch_size(cls, pipe):
-            return (1, 2, 2)
-
-        @classmethod
-        def get_native_temporal_contract(cls, pipe):
-            return (4, True)
-
-        @classmethod
         def from_pretrained(cls, source, **kw):
             return cls()
 
@@ -254,14 +246,6 @@ def test_video_backbone_shift_video_property_returns_stored_value():
         @property
         def head_dim(self):
             return 1
-
-        @classmethod
-        def get_native_dit_patch_size(cls, pipe):
-            return (1, 2, 2)
-
-        @classmethod
-        def get_native_temporal_contract(cls, pipe):
-            return (4, True)
 
         @classmethod
         def from_pretrained(cls, source, **kw):

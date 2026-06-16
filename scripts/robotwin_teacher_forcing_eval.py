@@ -131,8 +131,6 @@ def main() -> None:
                     lambda_video=args.lambda_video,
                     lambda_action=args.lambda_action,
                     current_step=0,
-                    decoupled_sampler=None,
-                    action_timestep_per_token=False,
                 )
             if torch.cuda.is_available():
                 torch.cuda.synchronize()

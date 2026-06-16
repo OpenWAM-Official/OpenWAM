@@ -72,9 +72,9 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         vlm_cfg = _cfg_get(cfg, "vlm_backbone", {}) or {}
         if _cfg_has(vlm_cfg, "freeze"):
             raise ValueError(
-                "model.architecture.vlm_backbone.freeze has moved to training_strategy.freeze. "
-                "Remove it from configs/model/tri_system.yaml and add 'vlm_backbone.vlm_model' "
-                "to the training strategy freeze list instead."
+                "model.architecture.vlm_backbone.freeze has moved to the model `freeze:` list. "
+                "Remove it from configs/model/tri_system.yaml's vlm_backbone block and add "
+                "'vlm_backbone.vlm_model' to the top-level `freeze:` list instead."
             )
         super().__init__(cfg)
         self.vlm_backbone = None

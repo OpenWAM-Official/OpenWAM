@@ -1,132 +1,41 @@
-# Shared Backbone Architecture Family
-# Action tokens are concatenated to the video token sequence and processed by
-# the same DiT. The family has two variants:
-#   - vanilla: plain shared DiT path, no extra expert FFN
-#   - moe:     shared DiT path + expert FFN corrections on action tokens
-#
-# Video backbone is configured inline in the `video_backbone:` block at the
-# bottom of this file. Default is Wan 2.2 TI2V-5B. To switch, either edit
-# `video_backbone.name` / `video_backbone.model_path` here, or override on CLI:
-#   bash scripts/train.sh model=shared_backbone \
-#       model.video_backbone.name=wan21_vace_1_3b \
-#       model.video_backbone.model_path=/path/to/Wan2.1-VACE-1.3B
-# IMPORTANT: `name` is only used for registry dispatch (all wan variants share
-# one adapter); the actual backbone loaded is determined entirely by
-# `model_path`. CLI overrides must update BOTH fields together — overriding
-# only `name` silently loads whatever `model_path` still points at. A
-# normalize-and-match cross-check in `build_training_pipeline` logs a WARNING
-# on mismatch but does not abort.
-#
-# shared_backbone does not need an `action_backbone:` block: action tokens
-# project directly to ``video_backbone.dim``, so there is no separate action
-# residual stream to size. The expert FFN width (moe-only) lives below as
-# ``architecture.expert_ffn_dim``.
+# Shared-Backbone WAM: action tokens concatenated into the video DiT sequence.
+# Variants: vanilla (plain shared DiT) | moe (+ expert FFN on action tokens).
+# No `action_backbone:` block: action tokens project directly to video_backbone.dim.
+# Video backbone from the Hydra `video_backbone` group (default Wan22 TI2V-5B).
+
+defaults:
+  - video_backbone: wan
+  - _self_
+
+# Frozen pretrained components (freeze_modules walks each via get_submodule;
+# missing paths silently skipped — image_encoder None on TI2V/VACE, _encoder
+# only on the from_scratch external-encoder path).
+freeze:
+  - video_backbone.text_encoder
+  - video_backbone.vae
+  - video_backbone.image_encoder
+  - video_backbone.video_encoder
 
 architecture:
-  # Common shared-backbone selector and data-shape knobs.
   framework: shared_backbone
   variant: vanilla   # vanilla | moe
   action_dim: 20
 
-  # Optional proprio/state conditioning. When enabled, dataloaders must provide
-  # sample["proprio"] with shape [state_dim] or [1, state_dim]. SharedBackbone
-  # encodes it as one state token appended after action tokens:
-  #   [video tokens] [action tokens] [state token]
-  # The state token uses the same sample-level action timestep as the action
-  # chunk; DreamZero-style block/per-token state timesteps are intentionally not
-  # enabled in this first implementation.
+  # When true, dataloader must provide sample["proprio"] ([state_dim] or
+  # [1, state_dim]); encoded as one state token after the action tokens:
+  #   [video tokens][action tokens][state token].
   use_proprioception: true
   state_dim: 20
 
-  # ------------------------------
-  # shared behavior (vanilla + moe)
-  # ------------------------------
-  # Shared action decoder MLP hidden width.
-  action_decoder_hidden_dim: 1024
+  action_decoder_hidden_dim: 1024   # shared action decoder MLP width
 
-  # Both variants concatenate action/state tokens into the shared DiT sequence,
-  # so both use the same shared self-attention mask layout.
-  # Shared self-attention mask layout:
-  #   bidirectional: full video/action/state coupling.
-  #   joint        : [Sv+Sa+Ss, Sv+Sa+Ss] bool mask with:
-  #                  - v↔v from ``video_attention_mask_mode``
-  #                  - v→state True, v→action False
-  #                  - action→video/action/state True
-  #                  - state→state True, state→video/action False
-  attention_mask_mode: joint
-  # video_attention_mask_mode controls the v↔v block when
-  # attention_mask_mode=joint:
-  #   bidirectional       : full v↔v
-  #   per_frame_causal    : token-level frame-causal block-diagonal
-  #   first_frame_causal  : first-frame tokens only see themselves; rest see all
-  video_attention_mask_mode: first_frame_causal
+  # joint mask: v↔v from video_attention_mask_mode; v→state True / v→action False;
+  # action→all True; state→state True / state→{v,a} False.
+  attention_mask_mode: joint   # joint | bidirectional
+  video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
 
-  # ------------------------------
-  # moe-only behavior
-  # ------------------------------
-  # expert_ffn_dim is only used when variant=moe.
-  expert_ffn_dim: 4096
-
-  # The following layer-selection fields are only used when variant=moe.
-  # Two ways to choose which video DiT layers receive the expert FFN.
-  # len(expert_layers) auto-determines num_experts either way.
-  #   (a) Explicit list:  expert_layers: [0, 1, ..., 29]
-  #   (b) Interval mode:  set expert_layers: null and use expert_interval.
-  #       - interval=1 → all inferred video DiT layers
-  #       - interval=2 → every other inferred layer
-  #       The total layer count is inferred from the loaded video backbone;
-  #       users do not need to set it manually.
+  expert_ffn_dim: 4096   # moe only
+  # moe only: which video layers get the expert FFN. len(expert_layers) sets
+  # num_experts. expert_layers: explicit list, OR null + expert_interval (1=all, 2=every other).
   expert_layers: null
   expert_interval: 1
-
-# Video backbone. Default: Wan 2.2 TI2V-5B.
-#
-# DiT geometry per backbone (auto-consumed by the architecture; no need to
-# mirror in this yaml):
-#   - wan22_ti2v_5b     : dim=3072, num_heads=24, head_dim=128, num_layers=30
-#   - wan21_vace_1_3b   : dim=1536, num_heads=12, head_dim=128, num_layers=30
-#   - wan21_i2v_14b_480p: dim=5120, num_heads=40, head_dim=128, num_layers=40
-#
-# Resolution: any height/width with height % 32 == 0 and width % 32 == 0 for
-# wan22_ti2v_5b; VACE-1.3B only supports 480x832 or 720x1280; I2V-14B-480P
-# expects 480x832 first-frame conditioning. Actual training resolution is set
-# by the dataloader config.
-#
-# `from_scratch: true` keeps the Wan DiT structure but discards the loaded DiT
-# weights and re-initializes them from PyTorch defaults. VAE and text encoder
-# still load pretrained weights and are frozen by the training_strategy yaml.
-# Reproducibility is governed by `cfg.project.seed`.
-#
-# To switch backbones, comment out the default `name` + `model_path` below and
-# uncomment ONE alternative pair below. Keep `name` and `model_path` paired —
-# overriding only one of them on the CLI silently loads the wrong backbone
-# (see "IMPORTANT" note at the top of this file).
-# Tested alternatives (uncomment as a pair):
-#   # name: wan21_vace_1_3b
-#   # model_path: /path/to/Wan2.1-VACE-1.3B
-#
-#   # name: wan21_i2v_14b_480p
-#   # model_path: /path/to/weights/Wan2.1-I2V-14B-480P
-video_backbone:
-  name: wan22_ti2v_5b
-  model_path: /path/to/Wan2.2-TI2V-5B  # [Required] Path to your own directory
-  from_scratch: false
-  # MUST match encoder.spec.temporal_compression / causal_temporal.
-  # Wan VAE       = (4, True)   ← default
-  # V-JEPA 2.1    = (2, True)   ← causal emulation via image-branch first-frame
-  # DINOv3        = (1, False)  ← per-frame, no tubelet
-  # Together with dataset.num_frames / video_stride must satisfy:
-  #   if causal_temporal:  (num_video_frames - 1) % temporal_compression == 0
-  #   else:                 num_video_frames      % temporal_compression == 0
-  # base.py asserts these against the constructed encoder; mismatch = fail-fast.
-  temporal_compression: 4
-  causal_temporal: true
-  shift_video: null
-  # External encoder swap. Only consumed when from_scratch=true; when
-  # from_scratch=false the block is silently ignored (an INFO log is emitted
-  # so users debugging can find the answer). Default `wan_vae` reproduces
-  # the native pipe.vae path bit-for-bit. See docs/external_video_encoder.md
-  # for non-VAE encoders.
-  encoder:
-    name: wan_vae
-    model_path: /path/to/Wan2.2-TI2V-5B

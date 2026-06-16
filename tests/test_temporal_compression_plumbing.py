@@ -120,7 +120,7 @@ def _patch_backbone_builders(monkeypatch, encoder_factory):
         enc = kw.get("external_encoder", None)
         bb = nn.Module()
         bb._pipe = None
-        bb._encoder = enc
+        bb.video_encoder = enc
         if enc is not None:
             bb.temporal_compression = int(enc.spec.temporal_compression)
             bb.causal_temporal = bool(enc.spec.causal_temporal)
@@ -134,65 +134,6 @@ def _patch_backbone_builders(monkeypatch, encoder_factory):
 
     monkeypatch.setattr(enc_pkg, "build_video_encoder", fake_build_encoder)
     monkeypatch.setattr(vb_pkg, "build_video_backbone", fake_build_backbone)
-
-
-# ===========================================================================
-# C1 — cross-check raises when yaml says (2, True) but encoder spec is (4, True)
-# ===========================================================================
-
-
-def test_C1_cross_check_yaml_vs_encoder_mismatch_raises(monkeypatch):
-    """yaml declares (tc=2, causal=True) but the constructed external encoder
-    reports (tc=4, causal=True): _init_video_backbone must fail-fast so the
-    dataloader divisibility rule cannot silently disagree with the encoder."""
-    _patch_backbone_builders(monkeypatch, lambda: _make_mock_encoder(temporal_compression=4, causal_temporal=True))
-
-    cfg = {
-        "video_backbone": {
-            "name": "wan22_ti2v_5b",
-            "model_path": "/dummy",
-            "from_scratch": True,
-            "encoder": {"name": "wan_vae", "model_path": "/dummy"},
-            "temporal_compression": 2,
-            "causal_temporal": True,
-        }
-    }
-    with pytest.raises(ValueError, match=r"does not match"):
-        _run_init_video_backbone(cfg)
-
-
-# ===========================================================================
-# C2 — native Wan VAE path: yaml must be (4, True), else ValueError
-# ===========================================================================
-
-
-def test_C2_native_wan_vae_requires_default_contract(monkeypatch):
-    """No encoder block → native Wan VAE path. Wan VAE is hard-coded to
-    (tc=4, causal=True); yaml declaring (tc=2, causal=True) must raise."""
-
-    def fake_build_backbone(name, cfg, **kw):
-        bb = nn.Module()
-        bb._pipe = None
-        bb._encoder = None
-        bb.temporal_compression = 4
-        bb.causal_temporal = True
-        return bb
-
-    import openwam.model.video_backbone as vb_pkg
-
-    monkeypatch.setattr(vb_pkg, "build_video_backbone", fake_build_backbone)
-
-    cfg = {
-        "video_backbone": {
-            "name": "wan22_ti2v_5b",
-            "model_path": "/dummy",
-            "from_scratch": False,
-            "temporal_compression": 2,
-            "causal_temporal": True,
-        }
-    }
-    with pytest.raises(ValueError, match=r"native VAE"):
-        _run_init_video_backbone(cfg)
 
 
 # ===========================================================================
@@ -297,41 +238,6 @@ def test_C4b_bridge_causal_mismatch_emits_warning(caplog):
     )
     # Model wins.
     assert cfg.dataloader.causal_temporal is False
-
-
-# ===========================================================================
-# C5 — back-compat: legacy yaml without the new fields loads under defaults
-# ===========================================================================
-
-
-def test_C5_legacy_yaml_defaults_to_wan_vae_contract(monkeypatch):
-    """A yaml that pre-dates the new fields (no temporal_compression /
-    causal_temporal under video_backbone) must still load — the
-    cross-check defaults to (4, True), which matches the native Wan VAE
-    path bit-for-bit."""
-
-    def fake_build_backbone(name, cfg, **kw):
-        bb = nn.Module()
-        bb._pipe = None
-        bb._encoder = None
-        bb.temporal_compression = 4
-        bb.causal_temporal = True
-        return bb
-
-    import openwam.model.video_backbone as vb_pkg
-
-    monkeypatch.setattr(vb_pkg, "build_video_backbone", fake_build_backbone)
-
-    cfg = {
-        "video_backbone": {
-            "name": "wan22_ti2v_5b",
-            "model_path": "/dummy",
-            "from_scratch": False,
-            # no temporal_compression / causal_temporal fields at all
-        }
-    }
-    # Should not raise.
-    _run_init_video_backbone(cfg)
 
 
 # ===========================================================================

@@ -1,0 +1,14 @@
+# DINOv3 ViT external video encoder. Activate via CLI:
+#   model.video_backbone.from_scratch=true model.video_backbone.shift_video=12.0 model/video_backbone/encoder=dinov3
+# Spec temporal contract is (4, true), same as the native Wan VAE.
+# Structural fields (z_dim/spatial_compression/num_register_tokens) are read from the HF
+# config.json at model_path, NOT yaml (z_dim = hidden_size: 768 for ViT-B, 1024 L, 1280 H ...).
+# from_scratch=true is REQUIRED: Wan DiT's first conv is bound to native VAE z_dim=48;
+# reinit_dit_from_scratch rebuilds patch_embedding/head against the DINOv3 hidden_size.
+# SECURITY: from_pretrained/from_skeleton pass trust_remote_code=True (the snapshot's
+# modeling_*.py runs at load) — only point model_path at directories you trust.
+
+name: dinov3
+# [Required] HF DINOv3 snapshot dir: config.json + modeling_*.py + safetensors. Deploy host
+# must read it too (DINOv3 re-reads HF config at deploy; see docs/external_video_encoder.md §6).
+model_path: /path/to/DINOv3

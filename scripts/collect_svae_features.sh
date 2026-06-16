@@ -4,10 +4,10 @@
 #
 # Mirrors ``scripts/train.sh`` so training overrides paste in verbatim. The
 # wrapped entry point reads the same Hydra default chain as train.yaml (via
-# ``configs/model/encoder/svae/collect.yaml``) plus an ``svae_collect`` block.
+# ``configs/model/video_backbone/encoder/svae/collect.yaml``) plus an ``svae_collect`` block.
 #
 # Required CLI overrides (external encoders only). Select the encoder via these
-# FIELD overrides — the ``+model/encoder=<name>`` group-append idiom does NOT
+# FIELD overrides — the ``model/video_backbone/encoder=<name>`` group-select idiom does NOT
 # resolve from this nested entry config (Hydra searches the group relative to
 # the config's own dir), and the collector refuses the default wan_vae anyway:
 #   model.video_backbone.encoder.name=vjepa2_1

@@ -612,8 +612,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
         current_step: int = 0,
-        decoupled_sampler=None,
-        action_timestep_per_token: bool = False,
         **inputs,
     ) -> dict:
         """IDM training loss with three branches and teacher-forcing mask.
@@ -638,19 +636,8 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         input_latents = inputs["input_latents"]
         B = input_latents.shape[0]
 
-        if action_timestep_per_token:
-            raise ValueError("action_timestep_per_token=True is not supported for IDM.")
-
         # ---- Branch A: noisy video (denoising target) ----
-        if decoupled_sampler is not None:
-            video_t, decoupled_action_t = decoupled_sampler.sample_timesteps(B, current_step=current_step, device="cpu")
-            num_ts = len(vb.scheduler.timesteps)
-            video_timestep_ids = (
-                (video_t / decoupled_sampler.num_train_timesteps * num_ts).long().clamp(min_tb, max_tb - 1)
-            )
-        else:
-            decoupled_action_t = None
-            video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
+        video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
 
         video_timesteps = vb.scheduler.timesteps[video_timestep_ids].to(dtype=_dtype, device=_device)
         video_sigmas = vb.scheduler.sigmas[video_timestep_ids].to(dtype=_dtype, device=_device)
@@ -669,15 +656,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         action_timesteps = None
         action_timestep_ids = None
         if lambda_action > 0 and actions is not None:
-            if decoupled_action_t is not None:
-                num_ts_a = len(action_scheduler.timesteps)
-                action_timestep_ids = (
-                    (decoupled_action_t / decoupled_sampler.num_train_timesteps * num_ts_a)
-                    .long()
-                    .clamp(0, num_ts_a - 1)
-                )
-            else:
-                action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
+            action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
 
             action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(dtype=_dtype, device=_device)
             action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(dtype=_dtype, device=_device)
@@ -940,7 +919,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         # and treats it as t=0 clean video. That's only valid when those latents
         # are an actual video condition — either Stage 1 denoised them, or the
         # caller supplied `input_video_latents`. With a schedule that has no
-        # video step (e.g. action_only / decoupled_flash) and no input_video_latents,
+        # video step (e.g. action_only) and no input_video_latents,
         # we'd silently prefill from the random initial latents and the action
         # denoiser would condition on pure noise. Fail loudly instead.
         if not did_video_step and input_video_latents is None:

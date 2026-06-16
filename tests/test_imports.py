@@ -80,10 +80,6 @@ def test_import_training_base():
     assert hasattr(BaseTrainer, "train_step")
 
 
-def test_import_training_loss():
-    from openwam.train.loss.decoupled_loss import DecoupledFlowMatchLoss  # noqa: F401
-
-
 def test_import_training_optimizer_groups():
     from openwam.train.utils.optimizer_groups import (  # noqa: F401
         attach_optimizer_groups,
@@ -94,7 +90,6 @@ def test_import_training_optimizer_groups():
 def test_import_training_init():
     from openwam.train import (  # noqa: F401
         BaseTrainer,
-        DecoupledFlowMatchLoss,
         OpenWAMTrainer,
     )
 

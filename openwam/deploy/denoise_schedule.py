@@ -13,9 +13,9 @@ describing the per-iteration noise levels for the joint denoising loop,
 terminated with a ``(0.0, 0.0)`` sentinel.
 
 Only the ``sync`` strategy is supported. The removed strategies
-(video_leading / cascade / action_only / decoupled_flash /
-decoupled_asymmetric) live in git history; none of them ever shipped in
-a config, and ``make_schedule`` raises ``NotImplementedError`` for them.
+(video_leading / cascade / action_only) live in git history; none of
+them ever shipped in a config, and ``make_schedule`` raises
+``NotImplementedError`` for them.
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ def schedule_sync(
     scheduler. Action always uses ``shift`` — by design, since the
     Reconstruction-or-Semantics recipe (arXiv:2605.06388) applies
     dim-dependent shift to non-VAE video encoders only. The model was
-    trained on independent ``(sigma_v, sigma_a)`` samples
-    (openwam/train/loss/decoupled_loss.py), so any per-stream shift
+    trained on independent ``(sigma_v, sigma_a)`` samples (independent
+    randint per stream in ``compute_loss``), so any per-stream shift
     combination is in-distribution.
     """
     sv = shift if shift_video is None else shift_video
@@ -80,8 +80,7 @@ def make_schedule(
     if strategy != "sync":
         raise NotImplementedError(
             f"schedule_type={strategy!r} has been removed; only 'sync' is supported. "
-            "video_leading/cascade/action_only/decoupled_flash/decoupled_asymmetric "
-            "live in git history."
+            "video_leading/cascade/action_only live in git history."
         )
     return schedule_sync(video_scheduler, action_scheduler, num_steps=num_steps, shift=shift, shift_video=shift_video)
 

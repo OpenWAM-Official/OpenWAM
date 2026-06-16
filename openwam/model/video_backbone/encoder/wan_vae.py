@@ -22,8 +22,8 @@ from einops import reduce, repeat
 from PIL import Image
 from torch import Tensor
 
-from openwam.model.video_backbone.encoder import VideoEncoder, register_video_encoder
-from openwam.model.video_backbone.encoder.spec import VideoEncoderSpec
+from openwam.model.video_backbone.encoder.registry import register_video_encoder
+from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +175,7 @@ class WanVideoVAEEncoder(VideoEncoder):
         Mirrors :meth:`WanVideoBackbone._build_pipe_from_components`'s
         instantiation pattern so the resulting module has bit-identical
         structure (same kwargs, same dtype, same construction-time device)
-        — only ``self._encoder._m.*`` lives where ``self._pipe.vae.*``
+        — only ``self.video_encoder._m.*`` lives where ``self._pipe.vae.*``
         would on the training-side native path.
         """
         import importlib

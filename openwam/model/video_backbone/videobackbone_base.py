@@ -144,7 +144,7 @@ class VideoBackbone(ABC, nn.Module):
     def external_encoder(self):
         """The swapped-in external :class:`VideoEncoder`, or ``None`` for the
         native VAE path."""
-        return getattr(self, "_encoder", None)
+        return getattr(self, "video_encoder", None)
 
     @property
     def context_dim(self) -> Optional[int]:

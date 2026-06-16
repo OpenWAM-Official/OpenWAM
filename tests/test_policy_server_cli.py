@@ -70,15 +70,11 @@ def test_cli_exposes_ckpt_name_and_inference_overrides():
     assert args.ckpt_name is None
     assert args.denoise_steps is None
     assert args.schedule_type is None
-    assert args.shift is None
     assert args.device is None  # fallback chain resolves later: CLI > yaml > cuda
 
-    args = _build_argparser().parse_args(
-        ["--ckpt-name", "checkpoint_step_42.safetensors", "--denoise-steps", "7", "--shift", "3.5"]
-    )
+    args = _build_argparser().parse_args(["--ckpt-name", "checkpoint_step_42.safetensors", "--denoise-steps", "7"])
     assert args.ckpt_name == "checkpoint_step_42.safetensors"
     assert args.denoise_steps == 7
-    assert args.shift == 3.5
 
 
 def test_cli_schedule_type_only_accepts_sync():

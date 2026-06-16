@@ -1,0 +1,47 @@
+# @package _global_
+# Standalone S-VAE trainer; consumes the feature shards from collect_svae_features.py
+# (no model/dataloader chain — unlike collect.yaml it does NOT inherit train.yaml).
+# Entry: scripts/train_svae.py. Defaults follow the PS-VAE adapter recipe; the only
+# structural deviation is latent_dim (Wan VAE channel count for downstream parity).
+
+# input_dim is NOT set here — the trainer reads it from the collected stats.
+svae:
+  latent_dim: 48 # compact latent channels; 48 = Wan VAE z_dim (deviation from reference 96).
+  num_heads: 16 # must divide input_dim.
+  num_layers: 3 # pre-LN Transformer blocks per side (encoder / decoder).
+  intermediate_size: 2048 # FFN hidden width per block.
+  dropout: 0.0
+
+train:
+  features_dir: ??? # REQUIRED — dir from collect_svae_features.py (features_*.pt + stats.pt).
+  output_dir: /path/to/workspace/openwam/svae
+
+  batch_size: 8 # clips per step.
+  num_epochs: 50
+  max_steps: null # optional hard cap; null = full num_epochs.
+  num_workers: 4
+
+  lr: 1.0e-4 # AdamW peak LR.
+  betas: [0.9, 0.99]
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  # Linear warmup over warmup_epochs (from lr*1e-3) → cosine decay to lr*min_lr_ratio.
+  warmup_epochs: 1
+  min_lr_ratio: 0.9 # reference near-flat decay (~10% drop).
+
+  # KL: beta * KL(q(z|x) || N(0,I)); beta warmed up over kl_warmup_ratio, kept tiny so
+  # reconstruction dominates.
+  beta: 1.0e-4
+  kl_warmup_ratio: 0.2
+  free_bits_per_dim: 0.0 # 0 = reference plain KL; >0 = off-by-default posterior-collapse rescue.
+  cos_weight: 1.0 # weight on the (1 - cosine) recon term (added to MSE).
+
+  seed: 42
+  mixed_precision: bf16 # AMP dtype: bf16 | fp16 | no. Weights stay fp32.
+  log_every: 20
+
+  # wandb (rank-0). project: null to disable; entity/run_name overridable on CLI/env.
+  wandb:
+    project: open-wam-svae
+    run_name: null
+    entity: null

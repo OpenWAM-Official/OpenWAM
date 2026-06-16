@@ -60,8 +60,7 @@ class _ShardedFeatureDataset(Dataset):
         shards = sorted(glob.glob(str(features_dir / "features_rank*_part*.pt")))
         if not shards:
             raise FileNotFoundError(
-                f"No features_rank*_part*.pt shards under {features_dir}. "
-                f"Run scripts/collect_svae_features.py first."
+                f"No features_rank*_part*.pt shards under {features_dir}. Run scripts/collect_svae_features.py first."
             )
         self._parts: list[torch.Tensor] = []
         self._cum: list[int] = []  # cumulative clip counts (exclusive-end per part)
@@ -155,7 +154,9 @@ def _latent_diagnostics(out: dict, *, active_kl_threshold: float = 1e-2) -> dict
     }
 
 
-@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="model/encoder/svae/train")
+@hydra.main(
+    version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="model/video_backbone/encoder/svae/train"
+)
 def main(cfg: DictConfig) -> None:
     sys.path.insert(0, str(PROJECT_ROOT))
     from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION, SVAE, svae_loss
@@ -307,9 +308,7 @@ def main(cfg: DictConfig) -> None:
                         elapsed,
                     )
                     if wandb_run is not None:
-                        clips_per_s = (
-                            step * int(tr.batch_size) * accelerator.num_processes
-                        ) / max(elapsed, 1e-6)
+                        clips_per_s = (step * int(tr.batch_size) * accelerator.num_processes) / max(elapsed, 1e-6)
                         wandb_run.log(
                             {
                                 "train/loss": rec["loss"],
