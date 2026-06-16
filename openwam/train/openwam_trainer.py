@@ -102,10 +102,6 @@ class OpenWAMTrainer(BaseTrainer):
         # partitioned. So frozen modules never enter the shard table and
         # never trigger an all-gather. See ``_zero3_init_disabled`` below for
         # the actual deepspeed 0.18.5 behavior.
-        #
-        # Cosmos Reason1 also gets the defense-in-depth re-freeze pass below
-        # (``_refreeze_cosmos_reason1``) so a future trainable-text-encoder
-        # config can't accidentally leak Reason1 into the trainable graph.
         from openwam.model import build_architecture, resolve_architecture_config
 
         resolved_arch = resolve_architecture_config(m)
@@ -159,18 +155,6 @@ class OpenWAMTrainer(BaseTrainer):
                 "if you intended to freeze the ViT backbone.",
                 type(external_encoder).__name__,
             )
-
-        # Defense-in-depth: even though ``Reason1LiveTextEncoder.__init__``
-        # already sets ``requires_grad_(False)`` on every Qwen2.5-VL param
-        # (see ``text_encoder.py:103-104``), re-walk the registered
-        # ``_reason1_inner`` and confirm it. Reason1 is now an ``nn.Module``
-        # child of the wrapper (so its weights ride into the unified
-        # safetensors), and a future model freeze config that opts to train
-        # Reason1 would need an explicit config entry — this guard keeps the
-        # current default safe from accidental flips and protects against
-        # ZeRO-3 partitioning the 16 GB encoder if the zero.Init guard above
-        # ever regresses.
-        self._refreeze_cosmos_reason1()
 
         # Initialize all schedulers (video + action) inside architecture
         self.architecture.init_training_schedulers(1000)
@@ -310,38 +294,6 @@ class OpenWAMTrainer(BaseTrainer):
         except ImportError:
             return nullcontext()
         return deepspeed.zero.Init(enabled=False)
-
-    def _refreeze_cosmos_reason1(self) -> None:
-        """Re-confirm ``requires_grad_(False)`` on the inner Reason1 Qwen module.
-
-        Reason1 is registered as ``_reason1_inner`` on
-        ``Cosmos25PipelineWrapper`` so its ~16 GB Qwen2.5-VL weights flow
-        into the unified safetensors. The wrapper's constructor already
-        freezes them (``text_encoder.py:103-104``), but training strategies
-        that ``freeze_modules`` against a *different* path may not reach this
-        sub-module by name. A redundant walk here is cheap insurance against
-        the encoder accidentally becoming trainable (which would also put
-        ZeRO-3 partitioning back on the critical path).
-
-        No-op on non-Cosmos25 backbones (Wan, etc.).
-        """
-        try:
-            pipe = self.architecture.video_backbone._pipe
-        except AttributeError:
-            return
-        inner = getattr(pipe, "_reason1_inner", None)
-        if inner is None:
-            return
-        flipped = 0
-        for p in inner.parameters():
-            if p.requires_grad:
-                p.requires_grad_(False)
-                flipped += 1
-        if flipped:
-            logger.info(
-                "Re-froze %d Reason1 parameter tensors that had requires_grad=True after freeze_modules.",
-                flipped,
-            )
 
     def _load_normalization_stats(self, dataset):
         """Load action normalization stats from dataset into architecture buffers."""
@@ -730,11 +682,6 @@ class OpenWAMTrainer(BaseTrainer):
         keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
         base_output_path = getattr(t, "output_path", "./models")
 
-        # Validate on every rank before rank-0-only artifact copying. If this
-        # failed only on rank 0, distributed jobs could hang at the subsequent
-        # output-path broadcast.
-        self._validate_cosmos25_reason1_artifact_source()
-
         # Create output directory on rank 0 only, then broadcast the path
         # so all ranks share the same directory (avoids duplicate dirs from
         # slightly different timestamps across processes).
@@ -1007,22 +954,6 @@ class OpenWAMTrainer(BaseTrainer):
 
         self.on_train_end(global_step, output_path=output_path, wandb_run=wandb_run)
 
-    @staticmethod
-    def _is_cosmos25_cfg(cfg) -> bool:
-        try:
-            return str(getattr(cfg.model.video_backbone, "name", "")).startswith("cosmos25_")
-        except Exception:
-            return False
-
-    def _validate_cosmos25_reason1_artifact_source(self) -> None:
-        if not self._is_cosmos25_cfg(getattr(self, "cfg", None)):
-            return
-        try:
-            from openwam.model.video_backbone.cosmos25.component_specs import validate_reason1_artifact_source
-        except ImportError:
-            return
-        validate_reason1_artifact_source(self.cfg)
-
     def save_checkpoint(self, path: str):
         """Export architecture state to safetensors. Safe under ZeRO-1/2/3, DDP, and single-process.
 
@@ -1038,16 +969,7 @@ class OpenWAMTrainer(BaseTrainer):
         """
         from safetensors.torch import save_file
 
-        from openwam.model.architectures.architecture_base import (
-            _ensure_cosmos25_reason1_self_contained,
-            _exclude_vlm_from_state_dict,
-        )
-
-        unwrapped = (
-            self.accelerator.unwrap_model(self.architecture) if self.accelerator is not None else self.architecture
-        )
-        self._validate_cosmos25_reason1_artifact_source()
-        _ensure_cosmos25_reason1_self_contained(unwrapped)
+        from openwam.model.architectures.architecture_base import _exclude_vlm_from_state_dict
 
         if self.accelerator is not None:
             state_dict = self.accelerator.get_state_dict(self.architecture)

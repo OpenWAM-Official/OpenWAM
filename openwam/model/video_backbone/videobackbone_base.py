@@ -147,8 +147,8 @@ class VideoBackbone(ABC, nn.Module):
         return getattr(self, "video_encoder", None)
 
     @property
-    def context_dim(self) -> Optional[int]:
-        """Per-token text/context embedding dim. ``None`` keeps the 4096 fallback."""
+    def text_dim(self) -> Optional[int]:
+        """Per-token raw text/context embedding dim. ``None`` keeps the 4096 fallback."""
         return None
 
     @property

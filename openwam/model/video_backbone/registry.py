@@ -35,6 +35,7 @@ def build_video_backbone(
     device: Optional[str] = None,
     ckpt_dir: Optional[str] = None,
     external_encoder: Any = None,
+    text_dim: Optional[int] = None,
 ) -> VideoBackbone:
     """Instantiate a VideoBackbone from the registry.
 
@@ -46,10 +47,6 @@ def build_video_backbone(
         becomes ``cls.from_pretrained(source, device=..., ckpt_dir=...)``. This
         is used by :class:`BaseWAMArchitecture` when the saved config carries a
         ``video_backbone._source`` field.
-
-    When ``source`` is given but ``name`` is missing or unregistered, the first
-    registered class is used as a fallback (preserves backward compatibility
-    with older checkpoints).
 
     Args:
         name:     Registry key (e.g. ``"wan22_ti2v_5b"``). Required unless
@@ -64,12 +61,12 @@ def build_video_backbone(
                   from yaml + model_path) and deploy (built from the saved
                   components entry via :meth:`VideoEncoder.from_skeleton`,
                   weights filled in by the architecture's checkpoint load).
+        text_dim: Optional architecture-level raw text/context dimension.
+                  Forwarded to the backbone so it can validate that its text
+                  embedding expects the same context width as the action stream.
     """
     if name and name in _VIDEO_BACKBONE_REGISTRY:
         cls = _VIDEO_BACKBONE_REGISTRY[name]
-    elif source is not None and _VIDEO_BACKBONE_REGISTRY:
-        # Older checkpoints may lack a registry-aligned name; pick any class.
-        cls = next(iter(_VIDEO_BACKBONE_REGISTRY.values()))
     else:
         available = ", ".join(sorted(_VIDEO_BACKBONE_REGISTRY)) or "(none)"
         raise KeyError(f"Unknown video backbone '{name}'. Available: {available}")
@@ -82,7 +79,13 @@ def build_video_backbone(
             kw["ckpt_dir"] = ckpt_dir
         if external_encoder is not None:
             kw["external_encoder"] = external_encoder
+        if text_dim is not None:
+            kw["text_dim"] = int(text_dim)
         return cls.from_pretrained(source, **kw)
     if external_encoder is not None:
+        if text_dim is not None:
+            return cls.from_pretrained(cfg, external_encoder=external_encoder, text_dim=int(text_dim))
         return cls.from_pretrained(cfg, external_encoder=external_encoder)
+    if text_dim is not None:
+        return cls.from_pretrained(cfg, text_dim=int(text_dim))
     return cls.from_pretrained(cfg)

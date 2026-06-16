@@ -27,6 +27,9 @@ architecture:
   action_dim: 20
   use_proprioception: true
   state_dim: 20
+  # Raw text/context dim shared by the video + action streams. Auto-resolves
+  # from video_backbone.text_dim; 4096 = Wan T5-XXL.
+  text_dim: 4096
 
   # joint mask: v→v from video_attention_mask_mode; v→a off, v→u on; action rows
   # fully connected; understanding rows see understanding only.
@@ -56,10 +59,10 @@ architecture:
     eps: 1.0e-5
 
 # ActionDiT. Geometry auto-resolved from video_backbone (num_layers/video_dim/
-# num_heads/attn_head_dim, hard head parity). dim/ffn_dim/text_dim are free.
+# num_heads/attn_head_dim, hard head parity). dim/ffn_dim are free; raw context
+# width comes from architecture.text_dim above (shared with the video stream).
 action_backbone:
   dim: 1024
-  text_dim: 4096
   ffn_dim: 4096
   # ACTION scheduler α-shift (symmetric to video shift_video); single source of
   # truth for train + deploy. null = template default (5.0).

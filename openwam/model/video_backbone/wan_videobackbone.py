@@ -18,7 +18,6 @@ import torch.nn as nn
 from einops import rearrange
 from torch import Tensor
 
-from openwam.model.compile_options import cfg_get, torch_compile_kwargs
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState, VideoBackbone
 
 if TYPE_CHECKING:
@@ -47,7 +46,7 @@ class WanVideoBackbone(VideoBackbone):
     # Construction
     # ================================================================
 
-    def __init__(self, holder, *, external_encoder=None, shift_video=None):
+    def __init__(self, holder, *, external_encoder=None, shift_video=None, text_dim: Optional[int] = None):
         """Internal constructor. Use ``from_pretrained()`` instead.
 
         ``external_encoder`` is ``None`` on the default path so ``state_dict()``
@@ -81,6 +80,13 @@ class WanVideoBackbone(VideoBackbone):
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
         self._shift_video = None if shift_video is None else float(shift_video)
+        actual_text_dim = self._infer_text_dim()
+        self._text_dim = actual_text_dim if text_dim is None else int(text_dim)
+        if actual_text_dim is not None and text_dim is not None and actual_text_dim != self._text_dim:
+            raise ValueError(
+                f"architecture.text_dim={self._text_dim} does not match "
+                f"Wan DiT text_embedding input dim={actual_text_dim}."
+            )
         # Resolve the Wan variant (I2V/TI2V/VACE/plain) ONCE; first-frame
         # conditioning delegates to it so hot paths carry no per-variant branch.
         from openwam.model.video_backbone.wan import variants as _variants
@@ -100,7 +106,9 @@ class WanVideoBackbone(VideoBackbone):
             self._temporal_compression, self._causal_temporal = 4, True
 
     @classmethod
-    def from_pretrained(cls, source, *, external_encoder=None, **kw) -> WanVideoBackbone:
+    def from_pretrained(
+        cls, source, *, external_encoder=None, text_dim: Optional[int] = None, **kw
+    ) -> WanVideoBackbone:
         """Build a WanVideoBackbone from a source.
 
         Sources: ``DictConfig`` (full Hydra cfg → loader), ``str`` dir path /
@@ -218,7 +226,7 @@ class WanVideoBackbone(VideoBackbone):
         # because the cfg shape depends on the ``source`` type.
         shift_video_cfg = cls._resolve_cfg_shift_video(source)
 
-        return cls(holder, external_encoder=external_encoder, shift_video=shift_video_cfg)
+        return cls(holder, external_encoder=external_encoder, shift_video=shift_video_cfg, text_dim=text_dim)
 
     @staticmethod
     def _resolve_cfg_shift_video(source) -> Optional[float]:
@@ -301,6 +309,21 @@ class WanVideoBackbone(VideoBackbone):
     @property
     def head_dim(self) -> int:
         return int(self._dit.dim) // self.num_heads
+
+    @property
+    def text_dim(self) -> Optional[int]:
+        return getattr(self, "_text_dim", None)
+
+    def _infer_text_dim(self) -> Optional[int]:
+        """Wan DiT text_embedding input width (the raw context dim it expects)."""
+        text_embedding = getattr(getattr(self, "dit", None), "text_embedding", None)
+        if isinstance(text_embedding, nn.Linear):
+            return int(text_embedding.in_features)
+        if isinstance(text_embedding, nn.Module):
+            for module in text_embedding.modules():
+                if isinstance(module, nn.Linear):
+                    return int(module.in_features)
+        return None
 
     @property
     def video_attention_mask_mode(self) -> str:
@@ -873,7 +896,7 @@ class WanVideoBackbone(VideoBackbone):
         }
 
     # ================================================================
-    # ABC: Sub-module access (2)
+    # ABC: Sub-module access (1)
     # ================================================================
 
     def get_submodule(self, name: str) -> nn.Module | None:
@@ -882,12 +905,6 @@ class WanVideoBackbone(VideoBackbone):
         # Non-Module names (tokenizer / scheduler) resolve to None.
         mod = getattr(self, name, None)
         return mod if isinstance(mod, nn.Module) else None
-
-    def set_submodule(self, name: str, module: nn.Module) -> None:
-        if name == "vae" and self._uses_external_encoder:
-            self.video_encoder = module
-            return
-        setattr(self, name, module)
 
     # ================================================================
     # ABC: Decoding (1)
@@ -1119,38 +1136,6 @@ class WanVideoBackbone(VideoBackbone):
             device=self.device,
         )
         return inputs_shared
-
-    def apply_compile(self, compile_cfg) -> None:
-        """torch.compile backbone sub-modules per config bool flags
-        (``video_dit``/``dit``, ``vae``, ``vace``, ``text_encoder``,
-        ``image_encoder``). DiT blocks are compiled individually (more
-        CUDA-graph friendly than compiling the whole DiT).
-        """
-        flag_to_submodule = {
-            "video_dit": "dit",
-            "dit": "dit",
-            "vae": "vae",
-            "vace": "vace",
-            "text_encoder": "text_encoder",
-            "image_encoder": "image_encoder",
-        }
-        for flag, submod_name in flag_to_submodule.items():
-            if not cfg_get(compile_cfg, flag, False):
-                continue
-            mod = getattr(self, submod_name, None)
-            if mod is None:
-                continue
-            if submod_name == "dit" and hasattr(mod, "blocks"):
-                compile_kwargs = torch_compile_kwargs(compile_cfg, default_mode="reduce-overhead")
-                for i, block in enumerate(mod.blocks):
-                    mod.blocks[i] = torch.compile(block, **compile_kwargs)
-                logger.info(
-                    "torch.compile enabled for %s blocks (%d, %s)", submod_name, len(mod.blocks), compile_kwargs
-                )
-            else:
-                compile_kwargs = torch_compile_kwargs(compile_cfg)
-                setattr(self, submod_name, torch.compile(mod, **compile_kwargs))
-                logger.info("torch.compile enabled for %s (%s)", submod_name, compile_kwargs)
 
     @staticmethod
     def _build_holder_from_components(

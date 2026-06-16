@@ -91,17 +91,6 @@ logger = logging.getLogger(__name__)
 # to avoid tied-weight deduplication complexity.
 VLM_STATE_DICT_PREFIX = "vlm_backbone."
 
-# Substring marker for the Cosmos25 Reason1 text-encoder inner module.
-# Pre-self-containment checkpoints (saved with `text_encoder: none`) lack any
-# `_reason1_inner.*` keys, but a deploy run that resurrects the encoder by
-# setting `text_encoder: reason1_live` + `text_encoder_path: ...` will eager-
-# load real weights into a registered `_reason1_inner` submodule on the
-# pipeline wrapper. The strict safetensors load then surfaces those eager-
-# loaded params as `missing`; tolerating them is safe so long as the wrapper
-# has no meta tensors (the self-contained `from_empty` path uses meta and
-# MUST receive its weights from the safetensors — see `load_checkpoint`).
-REASON1_INNER_KEY_MARKER = "._reason1_inner."
-
 
 def _exclude_vlm_from_state_dict(state_dict: dict[str, "Tensor"]) -> dict[str, "Tensor"]:
     """Filter out VLM backbone parameters from a state dict.
@@ -113,45 +102,6 @@ def _exclude_vlm_from_state_dict(state_dict: dict[str, "Tensor"]) -> dict[str, "
     from the checkpoint.
     """
     return {k: v for k, v in state_dict.items() if not k.startswith(VLM_STATE_DICT_PREFIX)}
-
-
-def _looks_like_cosmos25_video_backbone(vb: Any) -> bool:
-    """Best-effort Cosmos25 check that avoids importing the heavy adapter."""
-    pipe = getattr(vb, "_pipe", None)
-    if pipe is None:
-        return False
-    vb_name = f"{type(vb).__module__}.{type(vb).__name__}"
-    if "cosmos25" in vb_name.lower():
-        return True
-    # Fallback for tests / wrappers: Cosmos25 exposes a DiT ``net`` plus the
-    # 2B text context dimension. This intentionally stays conservative.
-    return bool(hasattr(pipe, "net") and getattr(pipe, "context_dim", None) == 1024)
-
-
-def _ensure_cosmos25_reason1_self_contained(arch: "BaseWAMArchitecture") -> None:
-    """Fail fast before saving a non-self-contained Cosmos25 checkpoint."""
-    vb = getattr(arch, "video_backbone", None)
-    if not _looks_like_cosmos25_video_backbone(vb):
-        return
-    pipe = getattr(vb, "_pipe", None)
-    if getattr(pipe, "_reason1_inner", None) is not None:
-        return
-    cfg = getattr(arch, "cfg", None)
-    vb_cfg = arch._cfg_get(cfg, "video_backbone", None)
-    te_path = arch._cfg_get(vb_cfg, "text_encoder_path", None)
-    if te_path:
-        raise RuntimeError(
-            "Cosmos25 checkpoint save is missing `_pipe._reason1_inner` even though "
-            f"video_backbone.text_encoder_path={te_path!r} is set. Rebuild the model with "
-            "the current Cosmos25 pipeline_builder so Reason1 is loaded and registered "
-            "before saving."
-        )
-    raise RuntimeError(
-        "Cosmos25 checkpoint save requires the Reason1 encoder in safetensors for both "
-        "cache and live-encoder training modes, but `_pipe._reason1_inner` is absent and "
-        "`model.video_backbone.text_encoder_path` is unset. Set text_encoder_path to the "
-        "Cosmos-Reason1-7B bundle when constructing the training model."
-    )
 
 
 def _assert_decode_video_supported(vb) -> None:
@@ -370,13 +320,23 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 "to activate the encoder swap. See docs/external_video_encoder.md."
             )
 
+        text_dim = self._cfg_get(cfg, "text_dim", None)
+        text_dim = None if text_dim in (None, 0) else int(text_dim)
         if source is not None:
             ckpt_dir = vb_cfg.get("_ckpt_dir") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_ckpt_dir", None)
             self.video_backbone = build_video_backbone(
-                vb_name, cfg, source=source, device="cpu", ckpt_dir=ckpt_dir, external_encoder=external_encoder
+                vb_name,
+                cfg,
+                source=source,
+                device="cpu",
+                ckpt_dir=ckpt_dir,
+                external_encoder=external_encoder,
+                text_dim=text_dim,
             )
         elif vb_name is not None:
-            self.video_backbone = build_video_backbone(vb_name, cfg, external_encoder=external_encoder)
+            self.video_backbone = build_video_backbone(
+                vb_name, cfg, external_encoder=external_encoder, text_dim=text_dim
+            )
 
         # Cross-check: yaml-declared temporal contract must match what the
         # backbone actually exposes (sourced from external encoder spec on the
@@ -590,21 +550,30 @@ class BaseWAMArchitecture(ABC, nn.Module):
         return dim
 
     def _resolve_text_dim(self, cfg, *, default: int = 4096) -> int:
-        """Resolve the action-side context (text) dim.
+        """Resolve the architecture-level raw text/context dim.
 
-        Priority: explicit ``cfg.text_dim`` → ``video_backbone.context_dim`` →
-        ``default`` (4096, the Wan T5-XXL dim). Backbones whose text encoder
-        differs from Wan (e.g. Cosmos) report their context dim via
-        :attr:`VideoBackbone.context_dim`; older Wan configs that omit
-        ``text_dim`` keep working through the default.
+        ``text_dim`` is shared by the video backbone, action backbone, and
+        proprio-as-context encoder. It therefore lives under ``architecture:``
+        in yaml, not under ``action_backbone:``. If omitted, the video backbone's
+        declared ``text_dim`` is used, with Wan's 4096 as the final default.
+        When both are present they must match, otherwise video/action context
+        projections would be built for different input widths.
         """
         raw = self._cfg_get(cfg, "text_dim", None)
-        if raw not in (None, 0):
-            return int(raw)
+        cfg_dim = None if raw in (None, 0) else int(raw)
+        vb_dim = None
         if self.video_backbone is not None:
-            ctx_dim = getattr(self.video_backbone, "context_dim", None)
-            if ctx_dim:
-                return int(ctx_dim)
+            raw_vb_dim = getattr(self.video_backbone, "text_dim", None)
+            vb_dim = None if raw_vb_dim in (None, 0) else int(raw_vb_dim)
+        if cfg_dim is not None and vb_dim is not None and cfg_dim != vb_dim:
+            raise ValueError(
+                f"architecture.text_dim={cfg_dim} does not match video_backbone.text_dim={vb_dim}. "
+                "Use a single shared raw context dimension for both video and action streams."
+            )
+        if cfg_dim is not None:
+            return cfg_dim
+        if vb_dim is not None:
+            return vb_dim
         return int(default)
 
     @property
@@ -849,7 +818,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """
         from safetensors.torch import save_file
 
-        _ensure_cosmos25_reason1_self_contained(self)
         state_dict = self.state_dict()
         if getattr(self, "vlm_backbone", None) is not None:
             state_dict = _exclude_vlm_from_state_dict(state_dict)
@@ -864,15 +832,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
         missing ``vlm_backbone.*`` keys are tolerated; unexpected or missing
         non-VLM keys still raise under ``strict=True``.
 
-        Meta-device sub-modules (cosmos25 self-contained deploy: Reason1 /
-        VAE / DiT empty shells built via ``from_empty`` /
-        ``init_empty_weights``) need ``load_state_dict(..., assign=True)``
-        — the default in-place copy is a silent no-op against meta tensors
-        and leaves the shells unpopulated. ``assign=True`` rebinds the
-        parameter slot to the safetensors tensor instead. We only flip
-        the flag when meta params actually exist so the training-resume
-        path (real-device params, in-place copy preserves identity)
-        is unchanged.
+        Meta-device sub-modules (self-contained deploy empty shells built
+        via ``from_empty`` / ``init_empty_weights``) need
+        ``load_state_dict(..., assign=True)`` — the default in-place copy is
+        a silent no-op against meta tensors and leaves the shells
+        unpopulated. ``assign=True`` rebinds the parameter slot to the
+        safetensors tensor instead. We only flip the flag when meta params
+        actually exist so the training-resume path (real-device params,
+        in-place copy preserves identity) is unchanged.
         """
         from safetensors.torch import load_file
 
@@ -880,24 +847,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         has_vlm = getattr(self, "vlm_backbone", None) is not None
         has_meta = any(p.device.type == "meta" for p in self.parameters())
         missing, unexpected = self.load_state_dict(state_dict, strict=False, assign=has_meta)
-        # Backward compat for pre-self-containment Cosmos25 checkpoints: those
-        # were saved with `text_encoder: none`, so the safetensors has no
-        # `_reason1_inner.*` keys. If the deploy config now resurrects the
-        # encoder via `text_encoder_path`, the eager-loaded weights are
-        # already valid and the strict-load "missing" entries for that subtree
-        # are noise. Skip the exemption when the model has meta tensors —
-        # that branch (`from_empty` self-contained deploy) genuinely needs
-        # those keys from the safetensors and silent tolerance would leave
-        # uninitialized weights.
-        if missing and not has_meta:
-            tolerated = [k for k in missing if REASON1_INNER_KEY_MARKER in k]
-            if tolerated:
-                logger.info(
-                    "Tolerated %d missing %s* keys (encoder loaded externally from text_encoder_path)",
-                    len(tolerated),
-                    REASON1_INNER_KEY_MARKER.lstrip("."),
-                )
-                missing = [k for k in missing if REASON1_INNER_KEY_MARKER not in k]
         if strict and not has_vlm:
             if missing or unexpected:
                 raise RuntimeError(f"Strict load failed: missing={missing}, unexpected={unexpected}")
@@ -1440,17 +1389,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         video_timesteps = vb.scheduler.timesteps[video_timestep_ids].to(dtype=_dtype, device=_device)
         video_sigmas = vb.scheduler.sigmas[video_timestep_ids].to(dtype=_dtype, device=_device)
 
-        # --- Add video noise ---
+        # --- Add video noise (flow-matching: linear interp + velocity target) ---
         video_noise = torch.randn_like(inputs["input_latents"])
-        if hasattr(vb, "add_training_noise"):
-            inputs["latents"] = vb.add_training_noise(inputs["input_latents"], video_noise, video_timestep_ids)
-        else:
-            sigma_bc = video_sigmas.view(B, 1, 1, 1, 1)
-            inputs["latents"] = (1 - sigma_bc) * inputs["input_latents"] + sigma_bc * video_noise
-        if hasattr(vb, "training_target"):
-            video_target = vb.training_target(inputs["input_latents"], video_noise, video_timestep_ids)
-        else:
-            video_target = video_noise - inputs["input_latents"]
+        sigma_bc = video_sigmas.view(B, 1, 1, 1, 1)
+        inputs["latents"] = (1 - sigma_bc) * inputs["input_latents"] + sigma_bc * video_noise
+        video_target = video_noise - inputs["input_latents"]
 
         if inputs.get("first_frame_latents") is not None:
             inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]

@@ -29,6 +29,9 @@ architecture:
   # appended to the text context before the backbones consume it.
   use_proprioception: true
   state_dim: 20                  # required when use_proprioception=true
+  # Raw text/context dim shared by the video + action streams. Auto-resolves
+  # from video_backbone.text_dim; 4096 = Wan T5-XXL, kept explicit.
+  text_dim: 4096
 
   # ActionDiT layer selection. joint_cross_attn: which video layers feed the
   # bridge. joint_self_attn/idm: sizes ActionDiT (must match vb.num_layers).
@@ -49,13 +52,11 @@ architecture:
 
 # ActionDiT. Geometry auto-resolved from video_backbone (num_layers/video_dim/
 # num_heads/attn_head_dim); joint_self_attn/idm hard-require head parity.
-# text_dim auto-resolves from video_backbone.context_dim — the 4096 below matches
-# Wan T5-XXL, kept explicit. COSMOS25: context_dim=1024, so override
-# `model.action_backbone.text_dim=1024` or the action context-embed shape-crashes.
+# Raw context width comes from architecture.text_dim above (shared with the
+# video stream) — do NOT set text_dim here.
 # Struct mode needs `+` for the absent num_heads/attn_head_dim fields.
 action_backbone:
   dim: 1024
-  text_dim: 4096       # Wan T5-XXL. COSMOS25-ONLY: override to 1024 via CLI.
   ffn_dim: 4096
   # ACTION scheduler α-shift (symmetric to video shift_video); single source of
   # truth for train + deploy. null = template default (5.0).

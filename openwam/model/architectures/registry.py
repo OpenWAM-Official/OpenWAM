@@ -133,7 +133,10 @@ def resolve_architecture_config(
     params["framework"] = framework
     params["variant"] = variant
     if action_cfg:
-        params.update({k: v for k, v in action_cfg.items()})
+        # ``text_dim`` is architecture-owned because the raw context is consumed
+        # by both video and action streams. Keep action_backbone for
+        # action-specific hyperparameters only.
+        params.update({k: v for k, v in action_cfg.items() if k != "text_dim"})
 
     vb_cfg = getattr(model_cfg, "video_backbone", None)
     if vb_cfg is not None:

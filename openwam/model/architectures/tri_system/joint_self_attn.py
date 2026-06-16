@@ -127,7 +127,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         action_dim_hidden = int(_cfg_get(cfg, "dim", 1024))
         num_heads = int(_cfg_get(cfg, "num_heads", self.video_backbone.num_heads))
         attn_head_dim = int(_cfg_get(cfg, "attn_head_dim", self.video_backbone.head_dim))
-        text_dim = int(_cfg_get(cfg, "text_dim", 4096))
+        text_dim = self._resolve_text_dim(cfg)
 
         # Bridge layers — which video DiT layers participate in joint attention.
         # For ``joint_self_attn`` variant the MoT driver requires
