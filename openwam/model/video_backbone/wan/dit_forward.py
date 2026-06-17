@@ -62,9 +62,8 @@ def build_time_modulation(
         # is present, overwrite the first ``num_clean`` frames' time embedding
         # with ``time_embedding(0)`` — mirrors TI2V's per-token t=0 pin but
         # at the embedding layer, keeping the MLP a single (B, dim) call.
-        zero_clean_prefix = zero_clean_prefix_t_mod
         has_clean_ref = num_clean_prefix_frames > 0 or has_first_frame_latents
-        if zero_clean_prefix and has_clean_ref:
+        if zero_clean_prefix_t_mod and has_clean_ref:
             num_clean = max(num_clean_prefix_frames, 1)
             zero_ts = torch.zeros_like(timestep)
             time_embed_zero = dit.time_embedding(

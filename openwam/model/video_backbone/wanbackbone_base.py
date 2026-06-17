@@ -325,10 +325,11 @@ class WanBackboneBase(VideoBackbone):
             .to(hidden_states.device)
         )
 
-        extras = {}
-        extras["dit"] = dit
-        extras["vace"] = vace
-        extras["time_embed"] = time_embed  # Wan head time embedding; consumed in finalize()
+        extras = {
+            "dit": dit,
+            "vace": vace,
+            "time_embed": time_embed,  # Wan head time embedding; consumed in finalize()
+        }
         vace_hints = None
         if vace_context is not None:
             vace_hints = vace(
