@@ -2115,7 +2115,7 @@ def test_V6i_vjepa21_from_pretrained_forwards_yaml_field(tmp_path, monkeypatch):
     """
     import json as _json
 
-    from openwam.model.video_backbone.encoder import build_video_encoder
+    from openwam.model.video_backbone.encoder import _vjepa_loader, build_video_encoder
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
     # Wire fake vjepa2 modules; route the arch wrapper to our spy ViT.
@@ -2129,7 +2129,7 @@ def test_V6i_vjepa21_from_pretrained_forwards_yaml_field(tmp_path, monkeypatch):
     _install_fake_vjepa_modules(monkeypatch, _wrapper)
     # Patch the weight loader; the ViT is zero-weight already and the
     # spy doesn't have the matching state_dict shape, so we skip load.
-    monkeypatch.setattr(VJEPA21VideoEncoder, "_load_vit_weights", lambda *a, **kw: None)
+    monkeypatch.setattr(_vjepa_loader, "load_vit_weights", lambda *a, **kw: None)
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2221,7 +2221,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
     crash, exercised against the canonical manifest the production checkpoint
     ships with.
     """
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder import _vjepa_loader
 
     captured_kwargs: dict = {}
 
@@ -2269,7 +2269,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
         "checkpoint_key": "target_encoder",
     }
     with pytest.raises(_StopAfterConstruct):
-        VJEPA21VideoEncoder._load_vit("/unused", manifest)
+        _vjepa_loader.load_vit("/unused", manifest)
     assert "use_rope" not in captured_kwargs
     assert captured_kwargs["patch_size"] == 16
     assert captured_kwargs["interpolate_rope"] is True
@@ -2278,7 +2278,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
 def test_V10_vjepa21_load_vit_rope_arch_with_use_rope_false_fails_fast():
     """Manifest with ``arch_name=*_rope`` and ``use_rope=False`` is contradictory —
     we raise a ``ValueError`` at load time instead of silently overriding."""
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder import _vjepa_loader
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2295,7 +2295,7 @@ def test_V10_vjepa21_load_vit_rope_arch_with_use_rope_false_fails_fast():
         "checkpoint_key": "target_encoder",
     }
     with pytest.raises(ValueError, match="hardcodes use_rope=True"):
-        VJEPA21VideoEncoder._load_vit("/unused", manifest)
+        _vjepa_loader.load_vit("/unused", manifest)
 
 
 # ----------------------------------------------------------------------
