@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 from openwam.model.video_backbone.wan import action_tokens as wan_action_tokens
 from openwam.model.video_backbone.wan import conditioning as wan_conditioning
 from openwam.model.video_backbone.wan import encode as wan_encode
+from openwam.model.video_backbone.wan import loader
 from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply, sinusoidal_embedding_1d
 from openwam.model.video_backbone.wan.preprocess import (
     check_resize_height_width,
@@ -61,6 +62,12 @@ class WanVideoBackbone(VideoBackbone):
         # ``holder`` is a transient carrier: drain its sub-modules + non-Module
         # state into self, then let it go out of scope. Nothing reads it after.
         self.video_encoder = external_encoder
+        # Optional sub-modules declared up front so the attribute always exists
+        # (the loop below only setattr's the ones the holder actually carries).
+        self.vae = None
+        self.vace = None
+        self.image_encoder = None
+        self.motion_controller = None
         # Promote sub-modules to named children so state_dict uses clean prefixes.
         for _name in ("dit", "dit2", "vae", "vace", "vace2", "text_encoder", "image_encoder", "motion_controller"):
             _mod = getattr(holder, _name, None)
@@ -80,7 +87,7 @@ class WanVideoBackbone(VideoBackbone):
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
         self._shift_video = None if shift_video is None else float(shift_video)
-        actual_text_dim = self._infer_text_dim()
+        actual_text_dim = loader.infer_text_dim(getattr(holder, "dit", None))
         self._text_dim = actual_text_dim if text_dim is None else int(text_dim)
         if actual_text_dim is not None and text_dim is not None and actual_text_dim != self._text_dim:
             raise ValueError(
@@ -135,7 +142,7 @@ class WanVideoBackbone(VideoBackbone):
             holder = build_training_pipeline(source, skip_native_vae=skip_native_vae)
         elif isinstance(source, str):
             if os.path.isdir(source):
-                holder = cls._build_holder_from_model_path(
+                holder = loader.build_holder_from_model_path(
                     source, device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
                 )
             else:
@@ -143,7 +150,7 @@ class WanVideoBackbone(VideoBackbone):
         elif isinstance(source, dict):
             vb_cfg = source.get("video_backbone", source)
             if isinstance(vb_cfg, dict) and "components" in vb_cfg:
-                holder = cls._build_holder_from_components(
+                holder = loader.build_holder_from_components(
                     vb_cfg["components"],
                     tokenizer=vb_cfg.get("tokenizer"),
                     device=kw.get("device", "cpu"),
@@ -159,7 +166,7 @@ class WanVideoBackbone(VideoBackbone):
                     raise ValueError(
                         "dict source must contain 'video_backbone.components' or 'video_backbone.model_path'"
                     )
-                holder = cls._build_holder_from_model_path(
+                holder = loader.build_holder_from_model_path(
                     str(model_path), device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
                 )
         else:
@@ -214,30 +221,9 @@ class WanVideoBackbone(VideoBackbone):
 
         # Resolve optional cfg-side ``shift_video`` here (not in __init__)
         # because the cfg shape depends on the ``source`` type.
-        shift_video_cfg = cls._resolve_cfg_shift_video(source)
+        shift_video_cfg = loader.resolve_cfg_shift_video(source)
 
         return cls(holder, external_encoder=external_encoder, shift_video=shift_video_cfg, text_dim=text_dim)
-
-    @staticmethod
-    def _resolve_cfg_shift_video(source) -> Optional[float]:
-        """Extract ``shift_video`` from the various ``from_pretrained`` source
-        shapes; ``None`` when unset or the source has no cfg context.
-        """
-        from omegaconf import DictConfig
-
-        vb_cfg = None
-        if isinstance(source, DictConfig):
-            vb_cfg = source.get("video_backbone") if "video_backbone" in source else None
-        elif isinstance(source, dict):
-            # model_loader hands a dict that either IS or contains video_backbone.
-            vb_cfg = source.get("video_backbone", source) if "video_backbone" in source else source
-        if vb_cfg is None:
-            return None
-        if isinstance(vb_cfg, dict):
-            raw = vb_cfg.get("shift_video")
-        else:
-            raw = getattr(vb_cfg, "shift_video", None)
-        return None if raw is None else float(raw)
 
     # ================================================================
     # Internal properties
@@ -254,7 +240,7 @@ class WanVideoBackbone(VideoBackbone):
 
     @property
     def _has_vace(self) -> bool:
-        return getattr(self, "vace", None) is not None
+        return self.vace is not None
 
     @property
     def _is_ti2v(self) -> bool:
@@ -303,17 +289,6 @@ class WanVideoBackbone(VideoBackbone):
     @property
     def text_dim(self) -> Optional[int]:
         return getattr(self, "_text_dim", None)
-
-    def _infer_text_dim(self) -> Optional[int]:
-        """Wan DiT text_embedding input width (the raw context dim it expects)."""
-        text_embedding = getattr(getattr(self, "dit", None), "text_embedding", None)
-        if isinstance(text_embedding, nn.Linear):
-            return int(text_embedding.in_features)
-        if isinstance(text_embedding, nn.Module):
-            for module in text_embedding.modules():
-                if isinstance(module, nn.Linear):
-                    return int(module.in_features)
-        return None
 
     @property
     def video_attention_mask_mode(self) -> str:
@@ -379,26 +354,22 @@ class WanVideoBackbone(VideoBackbone):
     # ABC: Three-step execution (3)
     # ================================================================
 
-    def prepare(self, **kw) -> BlockLoopState:
-        dit = self.dit
-        motion_controller = getattr(self, "motion_controller", None)
-        vace = getattr(self, "vace", None)
-        latents = kw["latents"]
-        timestep = kw["timestep"]
-        context = kw["context"]
-        context_mask = kw.get("context_mask")
-        seq_lens = kw.get("seq_lens")
-        clip_feature = kw.get("clip_feature")
-        image_cond_latents = kw.get("y")
-        vace_context = kw.get("vace_context")
-        motion_bucket_id = kw.get("motion_bucket_id")
-        control_camera_latents_input = kw.get("control_camera_latents_input")
-        fuse_vae_embedding_in_latents = kw.get("fuse_vae_embedding_in_latents", False)
-        num_clean_prefix_frames = kw.get("num_clean_prefix_frames", 0)
-        use_gradient_checkpointing = kw.get("use_gradient_checkpointing", False)
-        use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
-        force_per_token_t_mod = bool(kw.get("force_per_token_t_mod", False))
-
+    def _build_time_modulation(
+        self,
+        dit,
+        timestep,
+        latents,
+        *,
+        fuse_vae_embedding_in_latents: bool,
+        force_per_token_t_mod: bool,
+        num_clean_prefix_frames: int,
+        zero_clean_prefix_t_mod: bool,
+        has_first_frame_latents: bool,
+    ) -> Tuple[Tensor, Tensor]:
+        """Build ``(time_embed, time_modulation)`` for ``prepare``. TI2V uses
+        per-token t=0 on the clean prefix; ``force_per_token_t_mod`` broadcasts a
+        single (B,) embedding to (B, L, dim); else the plain (B,) path.
+        """
         if dit.seperated_timestep and fuse_vae_embedding_in_latents:
             batch_size = latents.shape[0]
             num_clean = max(num_clean_prefix_frames, 1)
@@ -433,8 +404,8 @@ class WanVideoBackbone(VideoBackbone):
             # is present, overwrite the first ``num_clean`` frames' time embedding
             # with ``time_embedding(0)`` — mirrors TI2V's per-token t=0 pin but
             # at the embedding layer, keeping the MLP a single (B, dim) call.
-            zero_clean_prefix = bool(kw.get("zero_clean_prefix_t_mod", False))
-            has_clean_ref = num_clean_prefix_frames > 0 or kw.get("first_frame_latents") is not None
+            zero_clean_prefix = zero_clean_prefix_t_mod
+            has_clean_ref = num_clean_prefix_frames > 0 or has_first_frame_latents
             if zero_clean_prefix and has_clean_ref:
                 num_clean = max(num_clean_prefix_frames, 1)
                 zero_ts = torch.zeros_like(timestep)
@@ -449,6 +420,38 @@ class WanVideoBackbone(VideoBackbone):
         else:
             time_embed = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep))
             time_modulation = dit.time_projection(time_embed).unflatten(1, (6, dit.dim))
+        return time_embed, time_modulation
+
+    def prepare(self, **kw) -> BlockLoopState:
+        dit = self.dit
+        motion_controller = self.motion_controller
+        vace = self.vace
+        latents = kw["latents"]
+        timestep = kw["timestep"]
+        context = kw["context"]
+        context_mask = kw.get("context_mask")
+        seq_lens = kw.get("seq_lens")
+        clip_feature = kw.get("clip_feature")
+        image_cond_latents = kw.get("y")
+        vace_context = kw.get("vace_context")
+        motion_bucket_id = kw.get("motion_bucket_id")
+        control_camera_latents_input = kw.get("control_camera_latents_input")
+        fuse_vae_embedding_in_latents = kw.get("fuse_vae_embedding_in_latents", False)
+        num_clean_prefix_frames = kw.get("num_clean_prefix_frames", 0)
+        use_gradient_checkpointing = kw.get("use_gradient_checkpointing", False)
+        use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
+        force_per_token_t_mod = bool(kw.get("force_per_token_t_mod", False))
+
+        time_embed, time_modulation = self._build_time_modulation(
+            dit,
+            timestep,
+            latents,
+            fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            force_per_token_t_mod=force_per_token_t_mod,
+            num_clean_prefix_frames=num_clean_prefix_frames,
+            zero_clean_prefix_t_mod=bool(kw.get("zero_clean_prefix_t_mod", False)),
+            has_first_frame_latents=kw.get("first_frame_latents") is not None,
+        )
 
         if motion_bucket_id is not None and motion_controller is not None:
             motion_term = motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))  # (B, 6, dim)
@@ -859,9 +862,7 @@ class WanVideoBackbone(VideoBackbone):
                 )
             )
         stacked_inputs = torch.cat(all_input_videos, dim=0)
-        input_latents = wan_encode.encode_video(
-            stacked_inputs, vae=getattr(self, "vae", None), encoder=self.video_encoder
-        )
+        input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
         # Variant-specific first-frame / control conditioning lives in
@@ -920,7 +921,7 @@ class WanVideoBackbone(VideoBackbone):
                 "retrieve raw latents, or train a separate pixel decoder."
             )
         video_tensor = wan_encode.decode_latents(
-            latents, vae=getattr(self, "vae", None), encoder=self.video_encoder, device=self.device, tiled=tiled
+            latents, vae=self.vae, encoder=self.video_encoder, device=self.device, tiled=tiled
         )
         return wan_encode.latents_to_frames(video_tensor, encoder=self.video_encoder)
 
@@ -1056,7 +1057,7 @@ class WanVideoBackbone(VideoBackbone):
             seed=seed,
             rand_device="cpu",
             latent_spec=self._latent_spec,
-            vae=getattr(self, "vae", None),
+            vae=self.vae,
             dtype=self.dtype,
             device=self.device,
         )
@@ -1075,7 +1076,7 @@ class WanVideoBackbone(VideoBackbone):
                 height=height,
                 width=width,
                 dit=self.dit,
-                image_encoder=getattr(self, "image_encoder", None),
+                image_encoder=self.image_encoder,
                 dtype=self.dtype,
                 device=self.device,
             )
@@ -1090,7 +1091,7 @@ class WanVideoBackbone(VideoBackbone):
                 tile_size=tile_size,
                 tile_stride=tile_stride,
                 dit=self.dit,
-                vae=getattr(self, "vae", None),
+                vae=self.vae,
                 dtype=self.dtype,
                 device=self.device,
             )
@@ -1108,7 +1109,7 @@ class WanVideoBackbone(VideoBackbone):
             first_frame_image,
             vace_video,
             has_vace=self._has_vace,
-            vae=getattr(self, "vae", None),
+            vae=self.vae,
             encoder=self.video_encoder,
             dtype=self.dtype,
             device=self.device,
@@ -1118,103 +1119,11 @@ class WanVideoBackbone(VideoBackbone):
             first_frame_image,
             is_ti2v=self._is_ti2v,
             encoder=self.video_encoder,
-            vae=getattr(self, "vae", None),
+            vae=self.vae,
             dtype=self.dtype,
             device=self.device,
         )
         return inputs_shared
-
-    @staticmethod
-    def _build_holder_from_components(
-        components: list,
-        tokenizer: dict = None,
-        device: str = "cpu",
-        ckpt_dir: str = None,
-        model_path: str = None,
-        *,
-        skip_native_vae: bool = False,
-    ):
-        """Build an empty component holder from specs. Weights are NOT
-        loaded here (``load_checkpoint`` does that). Tokenizer resolves
-        ckpt-local first, then falls back to the ``model_path`` layout.
-
-        ``skip_native_vae`` drops the ``vae`` entry so it never allocates CPU
-        tensors (irreversible external-encoder path).
-        """
-        from openwam.model.video_backbone.wan.loader import new_components
-        from openwam.model.video_backbone.wan.pipeline_builder import _build_tokenizer, _import_class
-
-        holder = new_components(device=device, torch_dtype=torch.bfloat16)
-
-        for entry in components:
-            if skip_native_vae and entry.get("attr") == "vae":
-                continue
-            cls = _import_class(entry["model_class"])
-            kwargs = entry.get("extra_kwargs", {}) or {}
-            logger.info(
-                "Instantiating %s as holder.%s (extra_kwargs keys=%s)",
-                entry["model_class"],
-                entry["attr"],
-                list(kwargs.keys()),
-            )
-            with torch.device(device):
-                model = cls(**kwargs)
-            model.to(dtype=torch.bfloat16)
-            setattr(holder, entry["attr"], model)
-
-        if getattr(holder, "vae", None) is not None and hasattr(holder.vae, "upsampling_factor"):
-            holder.height_division_factor = holder.vae.upsampling_factor * 2
-            holder.width_division_factor = holder.vae.upsampling_factor * 2
-
-        if tokenizer:
-            tok = None
-            subdir = tokenizer.get("subdir", "")
-            if ckpt_dir and subdir and os.path.isdir(os.path.join(ckpt_dir, subdir)):
-                tok = _build_tokenizer(tokenizer, ckpt_dir)
-            elif model_path and os.path.isdir(model_path):
-                # ckpt-local specs prefix ``tokenizer/``; upstream dirs don't.
-                fallback_subdir = subdir
-                if fallback_subdir.startswith("tokenizer/"):
-                    fallback_subdir = fallback_subdir[len("tokenizer/") :]
-                if fallback_subdir and os.path.isdir(os.path.join(model_path, fallback_subdir)):
-                    fallback_cfg = dict(tokenizer)
-                    fallback_cfg["subdir"] = fallback_subdir
-                    logger.info(
-                        "Tokenizer not found under ckpt_dir; falling back to model_path/%s",
-                        fallback_subdir,
-                    )
-                    tok = _build_tokenizer(fallback_cfg, model_path)
-            if tok is None:
-                raise FileNotFoundError(
-                    f"Tokenizer subdir {subdir!r} not found under ckpt_dir={ckpt_dir!r} "
-                    f"nor under model_path={model_path!r} (with 'tokenizer/' prefix stripped). "
-                    "Either copy the tokenizer into the checkpoint dir, or ensure model_path is reachable."
-                )
-            setattr(holder, tokenizer.get("attr", "tokenizer"), tok)
-
-        return holder
-
-    @staticmethod
-    def _build_holder_from_model_path(model_path: str, device: str = "cpu", *, skip_native_vae: bool = False):
-        """Build a component holder from a model dir without full Hydra config.
-        ``skip_native_vae`` drops the native VAE weight file before it
-        materializes (irreversible external-encoder path).
-        """
-        from openwam.model.video_backbone.wan.loader import load_wan_components
-        from openwam.model.video_backbone.wan.pipeline_builder import (
-            _filter_native_vae_configs,
-            discover_model_files,
-        )
-
-        model_configs, tokenizer_config = discover_model_files(model_path)
-        if skip_native_vae:
-            model_configs = _filter_native_vae_configs(model_configs)
-        return load_wan_components(
-            model_configs,
-            tokenizer_config,
-            device=device,
-            torch_dtype=torch.bfloat16,
-        )
 
 
 __all__ = ["WanVideoBackbone"]

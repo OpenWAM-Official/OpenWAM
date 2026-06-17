@@ -9,14 +9,20 @@ the empty holder used by the config-driven (``components``) deploy path.
 
 from __future__ import annotations
 
+import logging
+import os
 from types import SimpleNamespace
+from typing import Optional
 
 import torch
+import torch.nn as nn
 
 from openwam.model.video_backbone.wan.models.text_encoder import HuggingfaceTokenizer
 from openwam.model.video_backbone.wan.shared.core.device.npu_compatible_device import get_device_type
 from openwam.model.video_backbone.wan.shared.diffusion import FlowMatchScheduler
 from openwam.model.video_backbone.wan.shared.models.model_loader import ModelPool
+
+logger = logging.getLogger(__name__)
 
 # Names of the module slots a holder carries (Module → backbone named child;
 # others stay plain attributes). Mirrors WanVideoPipeline's old attribute set.
@@ -137,3 +143,126 @@ def load_wan_components(
         c.tokenizer = HuggingfaceTokenizer(name=tokenizer_config.path, seq_len=512, clean="whitespace")
 
     return c
+
+
+def resolve_cfg_shift_video(source) -> Optional[float]:
+    """Extract ``shift_video`` from the various ``from_pretrained`` source
+    shapes; ``None`` when unset or the source has no cfg context.
+    """
+    from omegaconf import DictConfig
+
+    vb_cfg = None
+    if isinstance(source, DictConfig):
+        vb_cfg = source.get("video_backbone") if "video_backbone" in source else None
+    elif isinstance(source, dict):
+        # model_loader hands a dict that either IS or contains video_backbone.
+        vb_cfg = source.get("video_backbone", source) if "video_backbone" in source else source
+    if vb_cfg is None:
+        return None
+    if isinstance(vb_cfg, dict):
+        raw = vb_cfg.get("shift_video")
+    else:
+        raw = getattr(vb_cfg, "shift_video", None)
+    return None if raw is None else float(raw)
+
+
+def infer_text_dim(dit) -> Optional[int]:
+    """Wan DiT text_embedding input width (the raw context dim it expects)."""
+    text_embedding = getattr(dit, "text_embedding", None)
+    if isinstance(text_embedding, nn.Linear):
+        return int(text_embedding.in_features)
+    if isinstance(text_embedding, nn.Module):
+        for module in text_embedding.modules():
+            if isinstance(module, nn.Linear):
+                return int(module.in_features)
+    return None
+
+
+def build_holder_from_components(
+    components: list,
+    tokenizer: dict = None,
+    device: str = "cpu",
+    ckpt_dir: str = None,
+    model_path: str = None,
+    *,
+    skip_native_vae: bool = False,
+):
+    """Build an empty component holder from specs. Weights are NOT
+    loaded here (``load_checkpoint`` does that). Tokenizer resolves
+    ckpt-local first, then falls back to the ``model_path`` layout.
+
+    ``skip_native_vae`` drops the ``vae`` entry so it never allocates CPU
+    tensors (irreversible external-encoder path).
+    """
+    from openwam.model.video_backbone.wan.pipeline_builder import _build_tokenizer, _import_class
+
+    holder = new_components(device=device, torch_dtype=torch.bfloat16)
+
+    for entry in components:
+        if skip_native_vae and entry.get("attr") == "vae":
+            continue
+        cls = _import_class(entry["model_class"])
+        kwargs = entry.get("extra_kwargs", {}) or {}
+        logger.info(
+            "Instantiating %s as holder.%s (extra_kwargs keys=%s)",
+            entry["model_class"],
+            entry["attr"],
+            list(kwargs.keys()),
+        )
+        with torch.device(device):
+            model = cls(**kwargs)
+        model.to(dtype=torch.bfloat16)
+        setattr(holder, entry["attr"], model)
+
+    if getattr(holder, "vae", None) is not None and hasattr(holder.vae, "upsampling_factor"):
+        holder.height_division_factor = holder.vae.upsampling_factor * 2
+        holder.width_division_factor = holder.vae.upsampling_factor * 2
+
+    if tokenizer:
+        tok = None
+        subdir = tokenizer.get("subdir", "")
+        if ckpt_dir and subdir and os.path.isdir(os.path.join(ckpt_dir, subdir)):
+            tok = _build_tokenizer(tokenizer, ckpt_dir)
+        elif model_path and os.path.isdir(model_path):
+            # ckpt-local specs prefix ``tokenizer/``; upstream dirs don't.
+            fallback_subdir = subdir
+            if fallback_subdir.startswith("tokenizer/"):
+                fallback_subdir = fallback_subdir[len("tokenizer/") :]
+            if fallback_subdir and os.path.isdir(os.path.join(model_path, fallback_subdir)):
+                fallback_cfg = dict(tokenizer)
+                fallback_cfg["subdir"] = fallback_subdir
+                logger.info(
+                    "Tokenizer not found under ckpt_dir; falling back to model_path/%s",
+                    fallback_subdir,
+                )
+                tok = _build_tokenizer(fallback_cfg, model_path)
+        if tok is None:
+            raise FileNotFoundError(
+                f"Tokenizer subdir {subdir!r} not found under ckpt_dir={ckpt_dir!r} "
+                f"nor under model_path={model_path!r} (with 'tokenizer/' prefix stripped). "
+                "Either copy the tokenizer into the checkpoint dir, or ensure model_path is reachable."
+            )
+        setattr(holder, tokenizer.get("attr", "tokenizer"), tok)
+
+    return holder
+
+
+def build_holder_from_model_path(model_path: str, device: str = "cpu", *, skip_native_vae: bool = False):
+    """Build a component holder from a model dir without full Hydra config.
+    ``skip_native_vae`` drops the native VAE weight file before it
+    materializes (irreversible external-encoder path).
+    """
+    from openwam.model.video_backbone.wan.pipeline_builder import (
+        _filter_native_vae_configs,
+        discover_model_files,
+    )
+
+    model_configs, tokenizer_config = discover_model_files(model_path)
+    if skip_native_vae:
+        model_configs = _filter_native_vae_configs(model_configs)
+    return load_wan_components(
+        model_configs,
+        tokenizer_config,
+        device=device,
+        torch_dtype=torch.bfloat16,
+    )

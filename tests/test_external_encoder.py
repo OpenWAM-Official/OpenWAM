@@ -1272,14 +1272,14 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         deploy must not materialize the empty native VAE slot)
       - no external encoder → False on both paths
 
-    Monkeypatches ``_build_holder_from_model_path`` to capture the kwarg
+    Monkeypatches ``loader.build_holder_from_model_path`` to capture the kwarg
     rather than stand up a real pipeline. Training-path uses a real
     ``DictConfig`` to exercise the ``isinstance(source, DictConfig)``
     dispatch added for the deploy fix.
     """
     from omegaconf import OmegaConf
 
-    from openwam.model.video_backbone import wan_videobackbone
+    from openwam.model.video_backbone.wan import loader as loader_mod
     from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
 
     captured: dict = {}
@@ -1292,8 +1292,8 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         captured["skip"] = skip_native_vae
         return _FakePipe(vae_z_dim=16, vae_upsample=8)
 
-    original = WanVideoBackbone._build_holder_from_model_path
-    wan_videobackbone.WanVideoBackbone._build_holder_from_model_path = staticmethod(_spy_model_path)
+    original = loader_mod.build_holder_from_model_path
+    loader_mod.build_holder_from_model_path = _spy_model_path
     import openwam.model.video_backbone.wan.pipeline_builder as pb_mod
 
     original_btp = pb_mod.build_training_pipeline
@@ -1347,7 +1347,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         WanVideoBackbone.from_pretrained(deploy_cfg)
         assert captured["skip"] is False
     finally:
-        wan_videobackbone.WanVideoBackbone._build_holder_from_model_path = original
+        loader_mod.build_holder_from_model_path = original
         pb_mod.build_training_pipeline = original_btp
 
 
