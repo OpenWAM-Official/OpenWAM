@@ -4,7 +4,7 @@
 # Video backbone from the Hydra `video_backbone` group (default Wan22 TI2V-5B).
 
 defaults:
-  - video_backbone: wan
+  - video_backbone: wan22   # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21
   - _self_
 
 # Frozen pretrained components (freeze_modules walks each via get_submodule;
