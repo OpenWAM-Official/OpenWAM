@@ -210,11 +210,8 @@ class VideoEncoder(ABC, nn.Module):
         ignored (see :class:`WanVideoVAEEncoder.from_skeleton`).
 
         The three kwargs are a **menu of data sources**, not a single
-        priority chain. Each encoder picks one primary source per its
-        persistence story; some encoders also pick a secondary source as
-        a fallback for older checkpoints (see
-        :class:`VJEPA21VideoEncoder`), and some encoders adopt a strict
-        self-contained policy with no fallback at all.
+        priority chain. Each encoder picks the source matching its
+        persistence story:
 
         * ``components_entry`` — the dict shape produced by
           :func:`generate_video_backbone_component_specs`:
@@ -223,25 +220,16 @@ class VideoEncoder(ABC, nn.Module):
           by the saved Wan ``components`` entry (e.g. :class:`WanVideoVAEEncoder`).
         * ``ckpt_dir`` — the deploy-side checkpoint directory. Use this for
           per-encoder structural artifacts that the training-side
-          :meth:`save_deploy_assets` hook wrote next to the safetensors.
-          Two flavors are in use today:
-
-            - **Preferred-with-fallback** (V-JEPA 2.1): the encoder reads
-              ``<ckpt_dir>/manifest.json`` first and falls back to
-              ``<encoder_cfg.model_path>/manifest.json`` for older
-              checkpoints saved before the self-containment patch.
-            - **Strict self-contained**: the encoder reads
-              ``<ckpt_dir>/encoder_meta/encoder_config.json`` and
-              ``encoder.model_path`` is *never* consulted at deploy time.
-              Missing ckpt_dir or encoder_meta raises immediately.
-
+          :meth:`save_deploy_assets` hook wrote next to the safetensors
+          (V-JEPA 2.1's ``manifest.json``, dinov3 / flux_vae's
+          ``config.json``). These encoders are strictly self-contained: they
+          read only from ``ckpt_dir`` and a missing artifact raises —
+          ``encoder.model_path`` is never consulted at deploy time.
         * ``encoder_cfg`` — the yaml ``model.video_backbone.encoder`` block
-          (a dict / DictConfig with ``name`` and ``model_path``). Use this
-          as a fallback source for encoders that adopted the
-          preferred-with-fallback policy above, OR as the primary source for
-          legacy paths that have not yet migrated to ``ckpt_dir``. Trade-off:
-          the deploy host must be able to read ``encoder.model_path`` for
-          those paths.
+          (a dict / DictConfig with ``name`` and ``model_path``). Used for
+          non-structural runtime knobs an encoder still needs at deploy time
+          (e.g. V-JEPA 2.1's ``vjepa2_1_forward`` / ``svae_target_dim``), not
+          as a weights / geometry source.
 
         Default implementation raises so non-supporting encoders fail
         loudly at deploy time rather than silently mismatch state_dict
@@ -266,23 +254,14 @@ class VideoEncoder(ABC, nn.Module):
         a no-op for encoders whose structural state is fully captured by
         the safetensors weights plus the saved ``components`` entry (e.g.
         :class:`WanVideoVAEEncoder`); encoders that depend on side files
-        like ``manifest.json`` override this to copy them next to the
-        ``checkpoint_step_*.safetensors``.
+        like ``manifest.json`` / ``config.json`` override this to copy them
+        next to the ``checkpoint_step_*.safetensors``.
 
-        Two policies coexist under this ABC; both are documented as
-        supported in :meth:`from_skeleton`:
-
-        - **Preferred-with-fallback** (V-JEPA 2.1): a missing source file
-          here is logged as a warning and treated as best-effort —
-          :meth:`from_skeleton` will fall back to ``encoder.model_path``
-          at deploy time. Subclasses that pick this policy MUST NOT raise.
-        - **Strict self-contained**: a missing
-          source file here is a hard error — re-raise so the checkpoint
-          save aborts rather than silently producing a deploy-unloadable
-          artifact. Subclasses that pick this policy MUST document their
-          re-raise behavior in their own class docstring so external
-          callers do not ``try/except`` this method assuming the V-JEPA
-          contract.
+        Overriding encoders are strictly self-contained: a missing source /
+        unresolvable cfg / copy IO error must raise so the checkpoint save
+        aborts rather than silently producing a deploy-unloadable artifact
+        (:meth:`from_skeleton` reads these artifacts only from ``ckpt_dir``,
+        with no ``encoder.model_path`` fallback).
         """
         return None
 

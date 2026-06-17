@@ -106,10 +106,15 @@ def test_S7_deploy_sidecar_write_and_read(tmp_path):
     red = _enc(1408, svae=True)
     out = tmp_path / "ckpt"
     out.mkdir()
-    # model_path=None forces the manifest copy to skip; the S-VAE sidecar is
-    # written regardless (it has no fallback).
+    # save_deploy_assets is strictly self-contained: it copies manifest.json
+    # from encoder.model_path (hard error if absent) and writes the S-VAE
+    # sidecar alongside. Provide a dummy manifest so the call succeeds; this
+    # test asserts on the S-VAE sidecar half.
+    src = tmp_path / "enc_src"
+    src.mkdir()
+    (src / "manifest.json").write_text("{}")
     cfg = SimpleNamespace(
-        model=SimpleNamespace(video_backbone=SimpleNamespace(encoder=SimpleNamespace(model_path=None)))
+        model=SimpleNamespace(video_backbone=SimpleNamespace(encoder=SimpleNamespace(model_path=str(src))))
     )
     red.save_deploy_assets(str(out), cfg)
 

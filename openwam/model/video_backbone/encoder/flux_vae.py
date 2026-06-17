@@ -233,15 +233,12 @@ class FluxVAEVideoEncoder(VideoEncoder):
         No weights are loaded here — the architecture's strict checkpoint load
         fills them in (including the BatchNorm running stats). ``components_entry``
         is ignored: its ``vae`` entry is the Wan VAE placeholder, not the FLUX
-        core. The config is resolved preferred-with-fallback, mirroring V-JEPA's
-        manifest handling:
-
-        1. ``<ckpt_dir>/flux_vae/config.json`` — written by
-           :meth:`save_deploy_assets` at save time (self-contained deploy).
-        2. ``<encoder.model_path>/config.json`` — fallback when the checkpoint
-           was copied without its sidecar; requires the FLUX VAE dir reachable.
+        core. The config is read strictly from
+        ``<ckpt_dir>/flux_vae/config.json`` (written by :meth:`save_deploy_assets`);
+        deploy is self-contained, with no ``encoder.model_path`` fallback — a
+        checkpoint saved without its config sidecar fails loudly here.
         """
-        config_dir = cls._resolve_config_dir(ckpt_dir, encoder_cfg)
+        config_dir = cls._resolve_config_dir(ckpt_dir)
         core_kwargs = _read_flux_vae_config(config_dir)
         with torch.device(device):
             core = FluxVaeEncoderCore(**core_kwargs)
@@ -256,44 +253,34 @@ class FluxVAEVideoEncoder(VideoEncoder):
         return cls(core)
 
     @staticmethod
-    def _resolve_config_dir(ckpt_dir: str | None, encoder_cfg: Any) -> str:
-        """Pick the dir holding a readable FLUX.2 VAE ``config.json`` at deploy
-        time. Preferred: ``<ckpt_dir>/flux_vae`` (written by
-        :meth:`save_deploy_assets`); fallback: ``<encoder.model_path>``.
+    def _resolve_config_dir(ckpt_dir: str | None) -> str:
+        """Return the dir holding a readable FLUX.2 VAE ``config.json`` at deploy time.
+
+        Strictly self-contained: only ``<ckpt_dir>/flux_vae/config.json`` (written
+        by :meth:`save_deploy_assets`) is consulted; there is no
+        ``encoder.model_path`` fallback. A missing config is a hard error.
         """
         ckpt_cfg = os.path.join(ckpt_dir, _FLUX_CKPT_SUBDIR, "config.json") if ckpt_dir else None
         if ckpt_cfg and os.path.isfile(ckpt_cfg):
             return os.path.join(str(ckpt_dir), _FLUX_CKPT_SUBDIR)
-
-        fallback_dir = None
-        if encoder_cfg is not None:
-            if isinstance(encoder_cfg, dict):
-                fallback_dir = encoder_cfg.get("model_path")
-            else:
-                fallback_dir = getattr(encoder_cfg, "model_path", None)
-        if fallback_dir and os.path.isfile(os.path.join(str(fallback_dir), "config.json")):
-            return str(fallback_dir)
-
-        fallback_cfg = os.path.join(str(fallback_dir), "config.json") if fallback_dir else None
         raise FileNotFoundError(
-            "FluxVAEVideoEncoder.from_skeleton: no readable config.json. Tried "
-            f"ckpt_dir={ckpt_cfg!r} and encoder.model_path={fallback_cfg!r}. Either "
-            "re-save the checkpoint with the current code (which writes "
-            "flux_vae/config.json into ckpt_dir), or make encoder.model_path reachable."
+            "FluxVAEVideoEncoder.from_skeleton: no readable config.json at "
+            f"ckpt_dir={ckpt_cfg!r}. Re-save the checkpoint with the current "
+            "code, which writes flux_vae/config.json into ckpt_dir."
         )
 
     def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
         """Copy the FLUX.2 VAE ``config.json`` into
         ``<output_dir>/flux_vae/config.json`` so deploy is self-contained.
 
-        Best-effort: a missing source / unresolvable cfg / IO error logs a
-        warning and skips — :meth:`from_skeleton` then falls back to
-        ``encoder.model_path``. Never raises (a copy hiccup must not crash an
-        otherwise-good checkpoint save), mirroring V-JEPA 2's manifest copy.
+        Strict self-contained: an unresolvable cfg / missing source / copy IO
+        error all raise, because :meth:`from_skeleton` reads the config only
+        from ``ckpt_dir`` — a checkpoint saved without its config sidecar
+        cannot be deployed. Runs once at rank-0 start-up before any weights are
+        saved, so a raise fails the run fast.
         """
         import shutil
 
-        model_path = None
         try:
             enc_cfg = cfg.model.video_backbone.encoder
             if isinstance(enc_cfg, dict):
@@ -301,40 +288,24 @@ class FluxVAEVideoEncoder(VideoEncoder):
             else:
                 model_path = getattr(enc_cfg, "model_path", None)
         except Exception:
-            # cfg shape (dict / DictConfig / mock) varies; the contract forbids
-            # raising, so anything that blocks reading model_path = skip + fall back.
-            pass
+            # cfg shape (dict / DictConfig / mock) varies; an unreadable cfg
+            # collapses to model_path=None and the hard error below.
+            model_path = None
 
         if not model_path:
-            logger.warning(
+            raise FileNotFoundError(
                 "FluxVAEVideoEncoder.save_deploy_assets: cannot resolve "
-                "model.video_backbone.encoder.model_path from cfg; skipping config "
-                "copy. Deploy will fall back to encoder.model_path."
+                "model.video_backbone.encoder.model_path from cfg; cannot copy "
+                "config.json (deploy reads it only from ckpt_dir)."
             )
-            return
         src = os.path.join(str(model_path), "config.json")
         dst = os.path.join(output_dir, _FLUX_CKPT_SUBDIR, "config.json")
         if not os.path.isfile(src):
-            logger.warning(
-                "FluxVAEVideoEncoder.save_deploy_assets: config.json not found at %s; "
-                "skipping copy. Deploy will fall back to encoder.model_path.",
-                src,
-            )
-            return
+            raise FileNotFoundError(f"FluxVAEVideoEncoder.save_deploy_assets: config.json not found at {src}.")
         if os.path.abspath(src) == os.path.abspath(dst):
             return
-        try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copyfile(src, dst)
-        except OSError as e:
-            logger.warning(
-                "FluxVAEVideoEncoder.save_deploy_assets: copying %s -> %s failed (%s); "
-                "skipping. Deploy will fall back to encoder.model_path.",
-                src,
-                dst,
-                e,
-            )
-            return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(src, dst)
         logger.info("FluxVAEVideoEncoder.save_deploy_assets: copied %s -> %s", src, dst)
 
 

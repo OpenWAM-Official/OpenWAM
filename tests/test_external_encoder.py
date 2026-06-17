@@ -2339,7 +2339,7 @@ def _install_fake_vjepa_modules(monkeypatch, wrapper_factory):
 
 
 def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
-    """``from_skeleton`` reads manifest from encoder_cfg.model_path, builds a
+    """``from_skeleton`` reads manifest from ckpt_dir, builds a
     zero-weight ViT shell, and skips torch.load entirely — even though
     ``manifest['checkpoint_file']`` would point at a non-existent file.
     """
@@ -2375,7 +2375,7 @@ def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
 
     enc = VJEPA21VideoEncoder.from_skeleton(
         components_entry={"attr": "vae", "model_class": "ignored", "extra_kwargs": {}},
-        encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
+        ckpt_dir=str(tmp_path),
     )
     assert isinstance(enc, VJEPA21VideoEncoder)
     assert enc.spec.z_dim == 1408
@@ -2433,6 +2433,7 @@ def test_V11b_vjepa21_from_skeleton_propagates_vjepa2_1_forward(tmp_path, monkey
         enc_mixed = VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "ignored", "extra_kwargs": {}},
             encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path), "vjepa2_1_forward": "mixed"},
+            ckpt_dir=str(tmp_path),
         )
     assert enc_mixed.vjepa2_1_forward == "mixed"
     # Render via ``getMessage()`` (not ``r.message``) so the assertion compares
@@ -2448,6 +2449,7 @@ def test_V11b_vjepa21_from_skeleton_propagates_vjepa2_1_forward(tmp_path, monkey
         enc_default = VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "ignored", "extra_kwargs": {}},
             encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
+            ckpt_dir=str(tmp_path),
         )
     assert enc_default.vjepa2_1_forward == "video"  # current _VJEPA21_FORWARD_DEFAULT
     warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -2456,46 +2458,47 @@ def test_V11b_vjepa21_from_skeleton_propagates_vjepa2_1_forward(tmp_path, monkey
     )
 
 
-def test_V12_vjepa21_from_skeleton_requires_some_manifest_source():
-    """``from_skeleton`` without ``encoder_cfg`` AND without ``ckpt_dir`` raises
-    a single FileNotFoundError naming both attempted paths (None / None).
-    components_entry alone doesn't carry ViT geometry (it's Wan VAE class).
+def test_V12_vjepa21_from_skeleton_requires_ckpt_dir():
+    """``from_skeleton`` without ``ckpt_dir`` raises FileNotFoundError naming
+    ckpt_dir — deploy reads the manifest only from there (no model_path
+    fallback). components_entry alone doesn't carry ViT geometry (it's the
+    Wan VAE class).
     """
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
-    with pytest.raises(FileNotFoundError, match=r"ckpt_dir.*encoder\.model_path"):
+    with pytest.raises(FileNotFoundError, match=r"ckpt_dir"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
         )
 
 
-def test_V13_vjepa21_from_skeleton_requires_model_path(tmp_path):
-    """``encoder_cfg`` without ``model_path`` (or with empty string) fails fast
-    via the same dual-path FileNotFoundError so the operator sees we tried
-    both sources before giving up.
+def test_V13_vjepa21_from_skeleton_ignores_model_path_without_ckpt_dir(tmp_path):
+    """Strict self-contained: even with a readable ``encoder_cfg.model_path``
+    (manifest present there), ``from_skeleton`` raises when ``ckpt_dir`` is
+    absent — the model_path fallback was removed (A3), so the manifest is
+    sourced only from ckpt_dir.
     """
+    import json as _json
+
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
-    with pytest.raises(FileNotFoundError, match=r"ckpt_dir.*encoder\.model_path"):
+    # model_path HAS a manifest, but no ckpt_dir is given → must still fail.
+    (tmp_path / "manifest.json").write_text(_json.dumps(_build_vjepa_manifest_payload()))
+    with pytest.raises(FileNotFoundError, match=r"ckpt_dir"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
-            encoder_cfg={"name": "vjepa2_1"},
-        )
-    with pytest.raises(FileNotFoundError, match=r"ckpt_dir.*encoder\.model_path"):
-        VJEPA21VideoEncoder.from_skeleton(
-            components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
-            encoder_cfg={"name": "vjepa2_1", "model_path": ""},
+            encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
         )
 
 
 def test_V14_vjepa21_from_skeleton_missing_manifest(tmp_path):
-    """``encoder_cfg.model_path`` that has no ``manifest.json`` → FileNotFoundError."""
+    """``ckpt_dir`` that has no ``manifest.json`` → FileNotFoundError."""
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
     with pytest.raises(FileNotFoundError, match="manifest.json"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
-            encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
+            ckpt_dir=str(tmp_path),
         )
 
 
@@ -2540,9 +2543,9 @@ def test_V15_vjepa21_from_skeleton_prefers_ckpt_dir_manifest(tmp_path, monkeypat
 
     _install_fake_vjepa_modules(monkeypatch, _fake_wrapper)
 
-    # Deliberately point encoder_cfg.model_path at a NON-EXISTENT directory.
-    # If from_skeleton's priority order is wrong it'll try this path and
-    # raise FileNotFoundError; the test verifies it never gets there.
+    # Point encoder_cfg.model_path at a NON-EXISTENT directory: from_skeleton
+    # reads the manifest only from ckpt_dir and must never reach model_path
+    # (which has no manifest fallback after A3).
     enc = VJEPA21VideoEncoder.from_skeleton(
         components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
         encoder_cfg={"name": "vjepa2_1", "model_path": "/nonexistent/unmounted/path"},
@@ -2553,10 +2556,10 @@ def test_V15_vjepa21_from_skeleton_prefers_ckpt_dir_manifest(tmp_path, monkeypat
     assert enc.variant == "vitg-rope-384"
 
 
-def test_V16_vjepa21_from_skeleton_falls_back_to_encoder_cfg_when_ckpt_dir_lacks_manifest(tmp_path, monkeypatch):
-    """Old checkpoints saved before self-containment have no
-    ``<ckpt_dir>/manifest.json`` — ``from_skeleton`` must fall back to the
-    yaml's ``encoder.model_path`` so those checkpoints keep deploying.
+def test_V16_vjepa21_from_skeleton_no_model_path_fallback(tmp_path):
+    """Strict self-contained: when ``<ckpt_dir>/manifest.json`` is absent,
+    ``from_skeleton`` raises even though ``encoder.model_path`` carries a
+    readable manifest — the model_path fallback was removed (A3).
     """
     import json as _json
 
@@ -2568,42 +2571,31 @@ def test_V16_vjepa21_from_skeleton_falls_back_to_encoder_cfg_when_ckpt_dir_lacks
     encoder_src.mkdir()
     (encoder_src / "manifest.json").write_text(_json.dumps(_build_vjepa_manifest_payload()))
 
-    def _fake_wrapper(**kwargs):
-        return _MockVJEPAViT(embed_dim=1408)
-
-    _install_fake_vjepa_modules(monkeypatch, _fake_wrapper)
-
-    enc = VJEPA21VideoEncoder.from_skeleton(
-        components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
-        encoder_cfg={"name": "vjepa2_1", "model_path": str(encoder_src)},
-        ckpt_dir=str(ckpt_dir),
-    )
-    assert isinstance(enc, VJEPA21VideoEncoder)
-    assert enc.spec.z_dim == 1408
-
-
-def test_V17_vjepa21_from_skeleton_no_manifest_anywhere(tmp_path):
-    """Neither ``<ckpt_dir>/manifest.json`` nor ``encoder.model_path`` works:
-    fail with a single error that names BOTH paths verbatim so the operator
-    can see both locations without reading the source.
-    """
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
-
-    ckpt_dir = tmp_path / "ckpt"
-    ckpt_dir.mkdir()  # empty
-    encoder_src = tmp_path / "vjepa-weights"
-    encoder_src.mkdir()  # empty too
-
-    with pytest.raises(FileNotFoundError) as exc:
+    with pytest.raises(FileNotFoundError, match="manifest.json"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
             encoder_cfg={"name": "vjepa2_1", "model_path": str(encoder_src)},
             ckpt_dir=str(ckpt_dir),
         )
-    # Lock the operator-facing UX: both attempted paths appear in the message.
+
+
+def test_V17_vjepa21_from_skeleton_no_manifest_names_ckpt_dir(tmp_path):
+    """Missing manifest fails with an error naming ckpt_dir — the only source
+    consulted (no encoder.model_path fallback after A3).
+    """
+    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+
+    ckpt_dir = tmp_path / "ckpt"
+    ckpt_dir.mkdir()  # empty
+
+    with pytest.raises(FileNotFoundError) as exc:
+        VJEPA21VideoEncoder.from_skeleton(
+            components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
+            ckpt_dir=str(ckpt_dir),
+        )
+    # Lock the operator-facing UX: the attempted ckpt_dir path appears in the message.
     msg = str(exc.value)
     assert str(ckpt_dir) in msg, f"ckpt_dir missing from error: {msg}"
-    assert str(encoder_src) in msg, f"encoder.model_path missing from error: {msg}"
 
 
 def test_V18_vjepa21_save_deploy_assets_copies_manifest(tmp_path, monkeypatch):
@@ -2637,14 +2629,11 @@ def test_V18_vjepa21_save_deploy_assets_copies_manifest(tmp_path, monkeypatch):
     assert _json.loads(dst.read_text()) == manifest_payload
 
 
-def test_V19_vjepa21_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_path, caplog):
-    """The hook must NEVER raise on missing source — a copy failure must
-    not crash an otherwise-good training run. Missing cfg / missing source
-    file log a warning and return; deploy then falls back to
-    ``encoder.model_path``.
+def test_V19_vjepa21_save_deploy_assets_missing_cfg_raises(tmp_path):
+    """Strict self-contained: an unresolvable cfg / missing source manifest
+    raises — :meth:`from_skeleton` has no fallback, so a checkpoint saved
+    without its manifest can't be deployed.
     """
-    import logging
-
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: F401
 
     enc = _build_vjepa_encoder(embed_dim=1408)
@@ -2652,14 +2641,12 @@ def test_V19_vjepa21_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_pat
     output_dir = tmp_path / "ckpt-out"
     output_dir.mkdir()
 
-    # cfg without model.video_backbone.encoder → warning + no-op.
-    with caplog.at_level(logging.WARNING):
+    # cfg without model.video_backbone.encoder → raise.
+    with pytest.raises(FileNotFoundError, match="model_path"):
         enc.save_deploy_assets(str(output_dir), cfg={})
     assert not (output_dir / "manifest.json").exists()
-    assert any("model_path" in r.message for r in caplog.records)
 
-    caplog.clear()
-    # cfg points at a directory with no manifest.json → warning + no-op.
+    # cfg points at a directory with no manifest.json → raise.
     from omegaconf import OmegaConf
 
     empty_src = tmp_path / "empty"
@@ -2667,21 +2654,19 @@ def test_V19_vjepa21_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_pat
     cfg = OmegaConf.create(
         {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(empty_src)}}}}
     )
-    with caplog.at_level(logging.WARNING):
+    with pytest.raises(FileNotFoundError, match="manifest.json"):
         enc.save_deploy_assets(str(output_dir), cfg)
     assert not (output_dir / "manifest.json").exists()
-    assert any("manifest.json" in r.message for r in caplog.records)
 
 
-def test_V20_vjepa21_save_deploy_assets_io_error_does_not_crash(tmp_path, caplog, monkeypatch):
-    """``save_deploy_assets`` must NEVER raise on IO failure either —
-    permission denied / disk full / disappearing mount must collapse to a
-    warning + return so the trainer's safetensors save isn't lost.
+def test_V20_vjepa21_save_deploy_assets_io_error_raises(tmp_path, monkeypatch):
+    """Strict self-contained: a copy IO error (read-only fs / ENOSPC /
+    disappearing mount) propagates instead of being swallowed — the checkpoint
+    save aborts rather than producing a deploy-unloadable artifact.
 
     Reproduces wayrise #1: read-only fs / PermissionError / ENOSPC.
     """
     import json as _json
-    import logging
     import shutil
 
     from omegaconf import OmegaConf
@@ -2700,14 +2685,9 @@ def test_V20_vjepa21_save_deploy_assets_io_error_does_not_crash(tmp_path, caplog
         raise PermissionError("simulated read-only filesystem")
 
     monkeypatch.setattr(shutil, "copyfile", _boom)
-    with caplog.at_level(logging.WARNING):
-        # Must NOT raise — assertion is "we got here".
+    with pytest.raises(PermissionError, match="simulated"):
         enc.save_deploy_assets(str(output_dir), cfg)
     assert not (output_dir / "manifest.json").exists()
-    formatted = [r.getMessage() for r in caplog.records]
-    assert any("failed" in m and "simulated" in m for m in formatted), (
-        f"expected warning naming the copy failure; got: {formatted}"
-    )
 
 
 def test_V21_vjepa21_feature_norm_keys_present_in_state_dict():
@@ -2731,9 +2711,9 @@ def test_V21_vjepa21_feature_norm_keys_present_in_state_dict():
 def test_X1_flux_vae_save_deploy_assets_self_contained(tmp_path):
     """``FluxVAEVideoEncoder.save_deploy_assets`` copies the FLUX.2 VAE
     config.json into ``<ckpt>/flux_vae/config.json``, and ``_resolve_config_dir``
-    then prefers that checkpoint-local copy over ``encoder.model_path`` — so
-    deploy is self-contained (no original FLUX dir needed). Mirrors V-JEPA's
-    manifest self-containment (test_V18).
+    reads only that checkpoint-local copy — deploy is strictly self-contained
+    (no ``encoder.model_path`` fallback). Mirrors V-JEPA's manifest
+    self-containment (test_V18).
 
     Exercises the save/resolve plumbing without building a real FLUX core
     (``save_deploy_assets`` / ``_resolve_config_dir`` read no instance state),
@@ -2756,34 +2736,37 @@ def test_X1_flux_vae_save_deploy_assets_self_contained(tmp_path):
 
     # config landed in the checkpoint-local namespace
     assert (ckpt / _FLUX_CKPT_SUBDIR / "config.json").is_file()
-    # resolve prefers the ckpt copy even when model_path is unreachable -> self-contained
-    assert FluxVAEVideoEncoder._resolve_config_dir(str(ckpt), {"model_path": "/nonexistent"}) == str(
-        ckpt / _FLUX_CKPT_SUBDIR
-    )
-    # fallback to model_path when the ckpt carries no sidecar
-    assert FluxVAEVideoEncoder._resolve_config_dir(None, {"model_path": str(src)}) == str(src)
-    # neither source reachable -> raise
+    # resolve reads the ckpt-local sidecar (single source, no model_path fallback)
+    assert FluxVAEVideoEncoder._resolve_config_dir(str(ckpt)) == str(ckpt / _FLUX_CKPT_SUBDIR)
+    # no ckpt sidecar -> hard error (strictly self-contained; model_path never consulted)
     with pytest.raises(FileNotFoundError):
-        FluxVAEVideoEncoder._resolve_config_dir(None, {"model_path": "/nonexistent"})
+        FluxVAEVideoEncoder._resolve_config_dir(None)
+    empty_ckpt = tmp_path / "empty_ckpt"
+    empty_ckpt.mkdir()
+    with pytest.raises(FileNotFoundError):
+        FluxVAEVideoEncoder._resolve_config_dir(str(empty_ckpt))
 
 
-def test_X2_flux_vae_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_path):
-    """``save_deploy_assets`` must never raise on an unresolvable cfg / missing
-    config — it logs and skips, and deploy falls back to ``encoder.model_path``.
+def test_X2_flux_vae_save_deploy_assets_missing_cfg_raises(tmp_path):
+    """Strict self-contained: ``save_deploy_assets`` raises on an unresolvable
+    cfg (no ``encoder.model_path``) — :meth:`from_skeleton` has no fallback, so
+    a checkpoint saved without its config sidecar can't be deployed.
     """
     from openwam.model.video_backbone.encoder.flux_vae import FluxVAEVideoEncoder
 
     enc = FluxVAEVideoEncoder.__new__(FluxVAEVideoEncoder)
-    enc.save_deploy_assets(str(tmp_path), cfg={})  # no encoder.model_path -> warn + skip
+    with pytest.raises(FileNotFoundError):
+        enc.save_deploy_assets(str(tmp_path), cfg={})  # no encoder.model_path -> raise
     assert not (tmp_path / "flux_vae").exists()
 
 
 def test_Y1_dinov3_save_deploy_assets_self_contained(tmp_path):
     """``DinoV3VideoEncoder.save_deploy_assets`` copies the DINOv3 ``config.json``
-    into ``<ckpt>/dinov3/config.json``, and ``_resolve_config_dir`` then prefers
-    that checkpoint-local copy over ``encoder.model_path`` — so deploy is
-    self-contained (native DINOv3 needs only config.json; the model class comes
-    from the installed transformers library, not bundled modeling code).
+    into ``<ckpt>/dinov3/config.json``, and ``_resolve_config_dir`` reads only
+    that checkpoint-local copy — deploy is strictly self-contained (no
+    ``encoder.model_path`` fallback; native DINOv3 needs only config.json, the
+    model class comes from the installed transformers library, not bundled
+    modeling code).
     """
     from omegaconf import OmegaConf
 
@@ -2801,23 +2784,25 @@ def test_Y1_dinov3_save_deploy_assets_self_contained(tmp_path):
     enc.save_deploy_assets(str(ckpt), cfg)
 
     assert (ckpt / _DINOV3_CKPT_SUBDIR / "config.json").is_file()
-    # resolve prefers the ckpt copy even when model_path is unreachable -> self-contained
-    assert DinoV3VideoEncoder._resolve_config_dir(str(ckpt), {"model_path": "/nonexistent"}) == str(
-        ckpt / _DINOV3_CKPT_SUBDIR
-    )
-    # fallback to model_path when the ckpt carries no sidecar
-    assert DinoV3VideoEncoder._resolve_config_dir(None, {"model_path": str(src)}) == str(src)
-    # neither source reachable -> raise
+    # resolve reads the ckpt-local sidecar (single source, no model_path fallback)
+    assert DinoV3VideoEncoder._resolve_config_dir(str(ckpt)) == str(ckpt / _DINOV3_CKPT_SUBDIR)
+    # no ckpt sidecar -> hard error (strictly self-contained; model_path never consulted)
     with pytest.raises(FileNotFoundError):
-        DinoV3VideoEncoder._resolve_config_dir(None, {"model_path": "/nonexistent"})
+        DinoV3VideoEncoder._resolve_config_dir(None)
+    empty_ckpt = tmp_path / "empty_ckpt"
+    empty_ckpt.mkdir()
+    with pytest.raises(FileNotFoundError):
+        DinoV3VideoEncoder._resolve_config_dir(str(empty_ckpt))
 
 
-def test_Y2_dinov3_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_path):
-    """``save_deploy_assets`` must never raise on an unresolvable cfg / missing
-    config — it logs and skips, and deploy falls back to ``encoder.model_path``.
+def test_Y2_dinov3_save_deploy_assets_missing_cfg_raises(tmp_path):
+    """Strict self-contained: ``save_deploy_assets`` raises on an unresolvable
+    cfg (no ``encoder.model_path``) — :meth:`from_skeleton` has no fallback, so
+    a checkpoint saved without its config sidecar can't be deployed.
     """
     from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder
 
     enc = DinoV3VideoEncoder.__new__(DinoV3VideoEncoder)
-    enc.save_deploy_assets(str(tmp_path), cfg={})  # no encoder.model_path -> warn + skip
+    with pytest.raises(FileNotFoundError):
+        enc.save_deploy_assets(str(tmp_path), cfg={})  # no encoder.model_path -> raise
     assert not (tmp_path / "dinov3").exists()
