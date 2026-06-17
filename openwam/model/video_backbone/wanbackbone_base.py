@@ -274,8 +274,6 @@ class WanBackboneBase(VideoBackbone):
                 seq_lens = seq_lens.to(device=context.device)
                 positions = torch.arange(context.shape[1], device=context.device).unsqueeze(0)
                 context_mask = positions < seq_lens.unsqueeze(1)
-            else:
-                context_mask = None
         else:
             context_mask = context_mask.to(device=context.device, dtype=torch.bool)
             if context_mask.ndim != 2:

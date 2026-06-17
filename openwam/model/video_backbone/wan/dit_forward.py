@@ -36,8 +36,7 @@ def build_time_modulation(
         batch_size = latents.shape[0]
         num_clean = max(num_clean_prefix_frames, 1)
         f_lat = latents.shape[2]
-        tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
-        tokens_per_frame = tokens_per_frame_patch
+        tokens_per_frame = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
         token_timesteps = torch.ones(
             batch_size, f_lat, tokens_per_frame, dtype=latents.dtype, device=latents.device
         ) * timestep.view(batch_size, 1, 1)
@@ -52,8 +51,7 @@ def build_time_modulation(
         # (B, L, dim) — a per-token MLP would repeat the stack L times.
         batch_size = latents.shape[0]
         f_lat = latents.shape[2]
-        tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
-        tokens_per_frame = tokens_per_frame_patch
+        tokens_per_frame = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
         L = f_lat * tokens_per_frame
         time_embed_base = dit.time_embedding(
             sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype)
