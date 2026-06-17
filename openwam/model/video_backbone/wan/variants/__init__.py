@@ -2,7 +2,7 @@
 
 Each Wan family member (I2V / TI2V / VACE / plain) differs only in how the
 first-frame / control signal is turned into conditioning. Those differences are
-encapsulated in :class:`WanVariant` subclasses so ``WanVideoBackbone`` carries
+encapsulated in :class:`WanVariant` subclasses so ``WanBackboneBase`` carries
 no ``if has_image_input / _is_ti2v / _has_vace`` branches in its hot paths —
 the variant is resolved once at construction via :func:`detect` and every
 variant-specific decision is delegated to ``self._variant``.

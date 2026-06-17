@@ -172,10 +172,10 @@ class WanVideoVAEEncoder(VideoEncoder):
         captured by ``components_entry``, so no side files / yaml fallback
         is needed.
 
-        Mirrors :meth:`WanVideoBackbone._build_pipe_from_components`'s
+        Mirrors :func:`wan.loader.build_holder_from_components`'s
         instantiation pattern so the resulting module has bit-identical
         structure (same kwargs, same dtype, same construction-time device)
-        — only ``self.video_encoder._m.*`` lives where ``self._pipe.vae.*``
+        — only ``self.video_encoder._m.*`` lives where ``self.vae.*``
         would on the training-side native path.
         """
         import importlib

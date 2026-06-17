@@ -174,7 +174,7 @@ def build_training_pipeline(cfg: DictConfig, *, skip_native_vae: bool = False):
             ``cfg.model.video_backbone``).
         skip_native_vae: When True, filter the discovered ``ModelConfig``
             list to drop the native VAE weight file before it is loaded.
-            Used by :meth:`WanVideoBackbone.from_pretrained` on the
+            Used by :meth:`Wan22Ti2vBackbone.from_pretrained` on the
             irreversible external-encoder path so the ~1.5GB Wan2.2 VAE
             never materializes on CPU only to be released immediately
             after. See [docs/external_video_encoder.md](../../docs/external_video_encoder.md) §6.

@@ -2,7 +2,7 @@
 
 ``load_wan_components`` replaces the former ``WanVideoPipeline.from_pretrained``:
 it loads the Wan modules from a ``ModelConfig`` list and returns a plain holder
-(``SimpleNamespace``) that :meth:`WanVideoBackbone.__init__` drains into itself.
+(``SimpleNamespace``) that :meth:`WanBackboneBase.__init__` drains into itself.
 No ``BasePipeline`` / ``WanVideoPipeline`` is involved. ``new_components`` builds
 the empty holder used by the config-driven (``components``) deploy path.
 """

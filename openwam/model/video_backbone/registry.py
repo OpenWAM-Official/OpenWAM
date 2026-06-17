@@ -1,8 +1,8 @@
 """Video backbone registry + factory.
 
 Decorator-based registration, mirroring ``openwam/model/architectures/registry.py`` for
-architectures. A backbone class registers under one or more names (a single
-``WanVideoBackbone`` backs several checkpoint variants); ``build_video_backbone``
+architectures. A backbone class registers under one or more names (a Wan
+backbone class backs several checkpoint variants); ``build_video_backbone``
 is the factory used by ``BaseWAMArchitecture`` for both training and deploy.
 """
 
