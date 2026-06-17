@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from openwam.model.architectures.dual_system import DualSystemCrossAttnArchitecture
-from openwam.model.video_backbone.videobackbone_base import BlockLoopState, VideoBackbone
+from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
 
 # ---------------------------------------------------------------------------
 # Mock pipeline: replaces WanVideoPipeline to avoid loading ~20GB of weights

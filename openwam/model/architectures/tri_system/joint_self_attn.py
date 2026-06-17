@@ -288,7 +288,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         """Raw-access leaves read by the tri-system MoT driver outside owners' ``__call__``.
 
         - ``vb._dit.blocks[i].modulation`` — read in ``pre_attn_at_layer_for_compile``
-          (``wan_videobackbone.py:824``)
+          (``wan_backbone.py:824``)
         - ``ab.blocks[i].modulation`` — read in
           ``ActionDiT.pre_attn_at_layer_for_compile`` (``joint_action_dit.py:782``)
         - ``ub.blocks[i].wan_und_qkv`` — read in

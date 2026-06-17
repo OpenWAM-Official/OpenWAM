@@ -1,7 +1,7 @@
 """DiT re-initialization / external-encoder adaptation.
 
 Free functions operating on a backbone's ``dit`` / ``dit2`` — lifted out of
-``wan_videobackbone.py`` so the backbone class carries only its ABC
+``wan_backbone.py`` so the backbone class carries only its ABC
 implementation. ``reinit_dit_from_scratch`` (training ``from_scratch``) and
 ``adapt_dit_to_external_encoder`` (deploy reshape) are the public entry points;
 ``base.py`` calls them.

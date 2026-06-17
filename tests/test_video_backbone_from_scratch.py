@@ -208,7 +208,7 @@ def test_reinit_no_dit_warns_not_crashes(caplog):
 
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.wan_videobackbone"):
+    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.wan"):
         reinit_dit_from_scratch(_EmptyPipe())
     assert any("no dit/dit2" in rec.message for rec in caplog.records)
 

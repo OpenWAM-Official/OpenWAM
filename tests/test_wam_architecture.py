@@ -52,7 +52,7 @@ def _make_dual_system_cross_attn_fixture():
 
 
 def _dual_system_self_attn_mot_states(arch, seed: int):
-    from openwam.model.video_backbone.videobackbone_base import BlockLoopState
+    from openwam.model.video_backbone.base import BlockLoopState
 
     g = torch.Generator().manual_seed(seed)
     actions = torch.randn(1, 3, 7, generator=g)

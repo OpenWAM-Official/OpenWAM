@@ -77,24 +77,24 @@ def test_wan_video_backbone_is_ti2v():
     """_is_ti2v returns True when fuse_vae_embedding_in_latents is set."""
     from types import SimpleNamespace
 
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+    from openwam.model.video_backbone.wan_backbone import Wan21
 
     pipe_a = SimpleNamespace(
         dit=SimpleNamespace(seperated_timestep=True, fuse_vae_embedding_in_latents=True),
         use_unified_sequence_parallel=False,
     )
-    adapter_a = Wan21Backbone(pipe_a)
+    adapter_a = Wan21(pipe_a)
     assert adapter_a._is_ti2v is True
 
     pipe_b = SimpleNamespace(
         dit=SimpleNamespace(seperated_timestep=False),
         use_unified_sequence_parallel=False,
     )
-    adapter_b = Wan21Backbone(pipe_b)
+    adapter_b = Wan21(pipe_b)
     assert adapter_b._is_ti2v is False
 
 
-def test_wan_videobackbone_needs_first_frame_skip_truth_table():
+def test_wan_needs_first_frame_skip_truth_table():
     """``needs_first_frame_skip`` is True only for Wan configs where
     ``latent[0]`` is unconditionally a clean conditioning frame the loss
     must skip: TI2V (``fuse_vae_embedding_in_latents``) is the only such
@@ -117,7 +117,7 @@ def test_wan_videobackbone_needs_first_frame_skip_truth_table():
     """
     from types import SimpleNamespace
 
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+    from openwam.model.video_backbone.wan_backbone import Wan21
 
     def _make_adapter(*, ti2v=False, vace=False, image_input=False):
         pipe = SimpleNamespace(
@@ -129,7 +129,7 @@ def test_wan_videobackbone_needs_first_frame_skip_truth_table():
             vace=object() if vace else None,
             use_unified_sequence_parallel=False,
         )
-        return Wan21Backbone(pipe)
+        return Wan21(pipe)
 
     assert _make_adapter(ti2v=True).needs_first_frame_skip is True
     # I2V: y side-channel conveys frame 0; latent[0] is fully noised on
@@ -144,7 +144,7 @@ def test_wan_videobackbone_needs_first_frame_skip_truth_table():
 def test_video_backbone_abc_needs_first_frame_skip_default_false():
     """The ABC default keeps every backbone that doesn't opt in OFF, so cosmos25
     T2V (no override) treats ``latent[0]`` as a predicted frame in the loss."""
-    from openwam.model.video_backbone.videobackbone_base import VideoBackbone
+    from openwam.model.video_backbone.base import VideoBackbone
 
     # Property is defined on the ABC so we can read it off the class without
     # instantiating (constructor needs subclass-specific kwargs).
@@ -170,7 +170,7 @@ def _build_tiny_wan_backbone(*, ti2v: bool):
     from types import SimpleNamespace
 
     from openwam.model.video_backbone.wan.models.dit import WanModel
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+    from openwam.model.video_backbone.wan_backbone import Wan21
 
     model = WanModel(
         dim=64,
@@ -193,7 +193,7 @@ def _build_tiny_wan_backbone(*, ti2v: bool):
         vace=None,
         use_unified_sequence_parallel=False,
     )
-    return Wan21Backbone(pipe), model
+    return Wan21(pipe), model
 
 
 def test_force_per_token_t_mod_broadcast_shape():

@@ -1,7 +1,7 @@
 """Action / state token t_mod + 1D RoPE helpers for shared-backbone
 (DreamZero-style) action injection.
 
-Free functions consumed by ``WanBackboneBase.inject_shared_tokens`` — the DiT
+Free functions consumed by ``WanBase.inject_shared_tokens`` — the DiT
 is passed explicitly so this module stays Wan-internal (no backbone/ABC import;
 ``is_per_token_t_mod_active`` takes the ``time_mod`` tensor, not BlockLoopState).
 """

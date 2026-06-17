@@ -191,7 +191,7 @@ class _TriStubVideoBackbone(nn.Module):
         return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
 
     def prepare(self, **kw):
-        from openwam.model.video_backbone.videobackbone_base import BlockLoopState
+        from openwam.model.video_backbone.base import BlockLoopState
 
         latents = kw["latents"]
         timestep = kw["timestep"]

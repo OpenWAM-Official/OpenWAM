@@ -152,7 +152,7 @@ def test_action_sigma_unchanged_regardless_of_video_shift():
 
 def test_video_backbone_shift_video_property_default_none():
     """A bare VideoBackbone (no _shift_video set) returns None."""
-    from openwam.model.video_backbone.videobackbone_base import VideoBackbone
+    from openwam.model.video_backbone.base import VideoBackbone
 
     class _StubBackbone(VideoBackbone):  # noqa: D401 — minimal stub for property test
         # Required-abstract members; values irrelevant.
@@ -220,7 +220,7 @@ def test_video_backbone_shift_video_property_default_none():
 
 def test_video_backbone_shift_video_property_returns_stored_value():
     """When ``_shift_video`` is set, the property returns it."""
-    from openwam.model.video_backbone.videobackbone_base import VideoBackbone
+    from openwam.model.video_backbone.base import VideoBackbone
 
     class _StubBackbone(VideoBackbone):
         @property

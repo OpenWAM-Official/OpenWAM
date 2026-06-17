@@ -1,8 +1,11 @@
-"""Shared Wan :class:`VideoBackbone` base: DiT forward, conditioning, deploy.
+"""Shared Wan :class:`VideoBackbone` base plus the concrete Wan subclasses.
 
-Holds every piece of behavior common to the Wan family. Concrete backbones
-(:class:`Wan22Ti2vBackbone` / :class:`Wan21Backbone`) live in
-``wan_videobackbone.py`` and add only their construction + encoder specifics.
+:class:`WanBase` holds every piece of behavior common to the Wan family (DiT
+forward, conditioning, deploy). Concrete backbones add only their construction
++ encoder specifics:
+  - :class:`Wan22Ti2v` — Wan2.2-TI2V-5B; supports swapping the native VAE for
+    an external :class:`VideoEncoder`.
+  - :class:`Wan21` — Wan2.1 I2V / VACE; native VAE only.
 
 Lives outside ``wan/`` to keep that package Wan-internal. Owns the Wan
 modules (DiT/VAE/text encoder/tokenizer/VACE) directly — modules as named
@@ -13,6 +16,7 @@ code reaches them only through the ABC methods.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -20,7 +24,7 @@ import torch.nn as nn
 from einops import rearrange
 from torch import Tensor
 
-from openwam.model.video_backbone.videobackbone_base import BlockLoopState, VideoBackbone
+from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
 
 if TYPE_CHECKING:
     from openwam.model.inference_inputs import InferenceInputs
@@ -38,7 +42,7 @@ from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint i
 logger = logging.getLogger(__name__)
 
 
-class WanBackboneBase(VideoBackbone):
+class WanBase(VideoBackbone):
     """Exposes the Wan modules through the VideoBackbone interface.
 
     Modules registered as named children (clean ``dit.*`` / ``vae.*`` keys);
@@ -885,4 +889,119 @@ class WanBackboneBase(VideoBackbone):
         return inputs_shared
 
 
-__all__ = ["WanBackboneBase"]
+class Wan22Ti2v(WanBase):
+    """Wan2.2-TI2V-5B backbone with optional external-encoder VAE-IO routing.
+
+    ``external_encoder`` is ``None`` on the default path so ``state_dict()``
+    carries only ``vae.*`` keys; setting it activates external-encoder VAE-IO
+    routing and aliases the encoder under ``"vae"``.
+    """
+
+    def __init__(self, holder, *, external_encoder=None, shift_video=None, text_dim: Optional[int] = None):
+        """Internal constructor. Use ``from_pretrained()`` instead."""
+        # Base sets self.video_encoder after nn.Module.__init__ (an nn.Module
+        # encoder cannot be assigned before that), activating VAE-IO routing.
+        super().__init__(holder, external_encoder=external_encoder, shift_video=shift_video, text_dim=text_dim)
+        if external_encoder is not None:
+            # Override the native (1,2,2)/4×/causal contract with the encoder's;
+            # callers consult these attrs and never branch on the encoder.
+            self._dit_patch_size = external_encoder.spec.dit_patch_size
+            self._temporal_compression = int(external_encoder.spec.temporal_compression)
+            self._causal_temporal = bool(external_encoder.spec.causal_temporal)
+
+    @classmethod
+    def from_pretrained(cls, source, *, external_encoder=None, text_dim: Optional[int] = None, **kw) -> "Wan22Ti2v":
+        """Build a Wan22Ti2v from a source.
+
+        Sources: ``DictConfig`` (full Hydra cfg → loader), ``str`` dir path /
+        ``dict`` with ``model_path`` (lightweight build), else an already-built
+        component holder. Construction returns a transient holder that
+        ``__init__`` drains into the backbone.
+
+        With ``external_encoder``: derive division factors from the encoder
+        spec, release the native VAE, expose latent-shape metadata. See the
+        inline comments.
+        """
+        from omegaconf import DictConfig
+
+        # Skip materializing the native VAE (avoid ~1.5GB waste / a duplicate
+        # VAE slot deploy has no weights for) on training-with-irreversible and
+        # on deploy-with-ANY external encoder. Reversible-on-training keeps it,
+        # needed for the step-(2) spec cross-check against ``v.z_dim`` etc.
+        is_deploy = not isinstance(source, DictConfig)
+        skip_native_vae = bool(external_encoder is not None and (is_deploy or not external_encoder.spec.is_reversible))
+
+        holder = loader.build_holder(source, skip_native_vae=skip_native_vae, **kw)
+
+        if external_encoder is not None:
+            # (3) Division factors from the encoder spec, not a hardcoded ``* 2`` / Wan-VAE grid, else
+            # ``check_resize_height_width`` rounds encoder-legal sizes to Wan's grid. Remainder is 1 iff causal.
+            patch_size = external_encoder.spec.dit_patch_size
+            holder.height_division_factor = external_encoder.spec.spatial_compression * patch_size[1]
+            holder.width_division_factor = external_encoder.spec.spatial_compression * patch_size[2]
+            holder.time_division_factor = external_encoder.spec.temporal_compression * patch_size[0]
+            holder.time_division_remainder = 1 if external_encoder.spec.causal_temporal else 0
+
+            # (4) Release the native VAE so state_dict keys don't double-count with the external encoder. print (not
+            # logger.info) because arch init runs before the logger is wired up; rank-0 gated.
+            holder.vae = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if int(os.environ.get("RANK", 0)) == 0:
+                print(
+                    f"[Wan22Ti2v] native VAE released; "
+                    f"external_encoder={type(external_encoder).__name__} "
+                    f"(z_dim={external_encoder.spec.z_dim}, "
+                    f"is_reversible={external_encoder.spec.is_reversible}, "
+                    f"dit_patch_size={external_encoder.spec.dit_patch_size})",
+                    flush=True,
+                )
+
+            # (5) Expose latent-shape metadata so deploy noise init reads it without the native VAE (now None).
+            holder.latent_spec = external_encoder.spec
+
+        # Resolve optional cfg-side ``shift_video`` here (not in __init__)
+        # because the cfg shape depends on the ``source`` type.
+        shift_video_cfg = loader.resolve_cfg_shift_video(source)
+
+        return cls(holder, external_encoder=external_encoder, shift_video=shift_video_cfg, text_dim=text_dim)
+
+    # ================================================================
+    # External-encoder-aware overrides
+    # ================================================================
+
+    def get_submodule(self, name: str) -> nn.Module | None:
+        if name == "vae" and self._uses_external_encoder:
+            return self.video_encoder
+        return super().get_submodule(name)
+
+    def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:
+        if self._uses_external_encoder and not self.video_encoder.spec.is_reversible:
+            raise NotImplementedError(
+                f"decode_video on irreversible encoder ({type(self.video_encoder).__name__}; "
+                "spec.is_reversible=False). Pass decode_video=False to generate() to "
+                "retrieve raw latents, or train a separate pixel decoder."
+            )
+        return super().decode_video(latents, tiled=tiled)
+
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Wan deploy assets, then forward to the external encoder's own
+        deploy-artifact hook so its side files (e.g. V-JEPA ``manifest.json``)
+        land alongside.
+        """
+        super().save_deploy_assets(output_dir, cfg)
+        if self.video_encoder is not None:
+            self.video_encoder.save_deploy_assets(output_dir, cfg)
+
+
+class Wan21(WanBase):
+    """Wan2.1 I2V / VACE backbone — native VAE only (no external encoder)."""
+
+    @classmethod
+    def from_pretrained(cls, source, *, text_dim: Optional[int] = None, **kw) -> "Wan21":
+        """Build a Wan21 from a source (see :func:`wan.loader.build_holder`)."""
+        holder = loader.build_holder(source, **kw)
+        return cls(holder, shift_video=loader.resolve_cfg_shift_video(source), text_dim=text_dim)
+
+
+__all__ = ["WanBase", "Wan22Ti2v", "Wan21"]

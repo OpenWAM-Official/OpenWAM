@@ -352,7 +352,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         ``block.modulation``. The IDM training loop runs through
         :class:`IDMMoTDriver` which inherits ``MoTJointDriver.step``, so the
         partitioned-leaf raw reads happen at the same call sites
-        (``wan_videobackbone.py:824`` + ``joint_action_dit.py:782``).
+        (``wan_backbone.py:824`` + ``joint_action_dit.py:782``).
         """
         vb = self.video_backbone
         dit = getattr(vb, "_dit", None) if vb is not None else None

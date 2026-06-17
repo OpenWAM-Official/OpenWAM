@@ -15,13 +15,13 @@ from openwam.model.architectures.shared_backbone.mask import (
     build_shared_backbone_attention_mask,
     set_video_attention_mask_mode,
 )
-from openwam.model.video_backbone.videobackbone_base import BlockLoopState
+from openwam.model.video_backbone.base import BlockLoopState
 from openwam.model.video_backbone.wan import action_tokens
 from openwam.model.video_backbone.wan.models.dit import DiTBlock, modulate, rope_apply
-from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+from openwam.model.video_backbone.wan_backbone import Wan21
 
 
-def _make_wan_backbone(*, dim: int = 24, num_heads: int = 4) -> Wan21Backbone:
+def _make_wan_backbone(*, dim: int = 24, num_heads: int = 4) -> Wan21:
     block = DiTBlock(has_image_input=False, dim=dim, num_heads=num_heads, ffn_dim=48)
     block.eval()
     dit = SimpleNamespace(
@@ -32,7 +32,7 @@ def _make_wan_backbone(*, dim: int = 24, num_heads: int = 4) -> Wan21Backbone:
         time_projection=nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6)),
         video_attention_mask_mode="bidirectional",
     )
-    return Wan21Backbone(SimpleNamespace(dit=dit))
+    return Wan21(SimpleNamespace(dit=dit))
 
 
 def _identity_freqs(seq_len: int, head_dim: int) -> torch.Tensor:
@@ -42,7 +42,7 @@ def _identity_freqs(seq_len: int, head_dim: int) -> torch.Tensor:
     )
 
 
-def _make_state(vb: Wan21Backbone, video: torch.Tensor, action: torch.Tensor, *, mask=None) -> BlockLoopState:
+def _make_state(vb: Wan21, video: torch.Tensor, action: torch.Tensor, *, mask=None) -> BlockLoopState:
     x = torch.cat([video, action], dim=1)
     extras = {
         "dit": vb._dit,

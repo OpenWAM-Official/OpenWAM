@@ -20,7 +20,7 @@ import torch
 from safetensors.torch import load_file
 
 from openwam.model.video_backbone.wan._reference import model_fn_wan_video
-from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+from openwam.model.video_backbone.wan_backbone import Wan21
 
 # Override via env vars on machines that mount the checkpoints elsewhere; the
 # defaults match the shared dev box but skipif() makes a missing path a skip,
@@ -74,7 +74,7 @@ def _load_dit_only(model_dir: str, device: str = "cuda:0"):
 
 
 class _FakePipe:
-    """Minimal duck-typed pipeline for Wan21Backbone."""
+    """Minimal duck-typed pipeline for Wan21."""
 
     def __init__(self, dit):
         self.dit = dit
@@ -88,7 +88,7 @@ def _run_original(dit, inputs):
 
 
 def _run_decomposed(pipe, inputs):
-    backbone = Wan21Backbone(pipe)
+    backbone = Wan21(pipe)
     with torch.no_grad():
         state = backbone.prepare(dit=pipe.dit, **inputs)
         for block_id in range(backbone.num_layers):

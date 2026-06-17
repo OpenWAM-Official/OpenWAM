@@ -275,7 +275,7 @@ class _FakeDiT(nn.Module):
 
 
 class _FakePipe(nn.Module):
-    """Minimal pipe stand-in that Wan21Backbone.from_pretrained mutates.
+    """Minimal pipe stand-in that Wan21.from_pretrained mutates.
 
     Inherits ``nn.Module`` so that ``state_dict()`` on the surrounding
     backbone recurses into ``self._pipe.vae.*`` keys — matching how the
@@ -307,10 +307,10 @@ class _FakePipe(nn.Module):
 
 def test_C1_default_path_state_dict_keys_contain_pipe_vae():
     """Without external_encoder, native vae.* keys are present (phase-3c attribute-ization) and video_encoder.* is None."""
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+    from openwam.model.video_backbone.wan_backbone import Wan21
 
     pipe = _FakePipe()
-    backbone = Wan21Backbone(pipe)  # default path, no external_encoder
+    backbone = Wan21(pipe)  # default path, no external_encoder
     assert backbone._uses_external_encoder is False
     sd = backbone.state_dict()
     assert any(k.startswith("vae.") for k in sd), "default path should expose vae.* keys"
@@ -322,10 +322,10 @@ def test_C2_default_path_pipe_vae_call_sites_preserved(monkeypatch):
     native vae; preprocess_video / latents_to_frames route through wan.preprocess."""
     import openwam.model.video_backbone.wan.encode as enc_mod
     from openwam.model.video_backbone.wan import encode as wan_encode
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+    from openwam.model.video_backbone.wan_backbone import Wan21
 
     pipe = _FakePipe()
-    backbone = Wan21Backbone(pipe)
+    backbone = Wan21(pipe)
     backbone._device = torch.device("cpu")
     vae = getattr(backbone, "vae", None)
     # preprocess_video(encoder=None) → wan.preprocess.preprocess_video
@@ -351,11 +351,11 @@ def test_C2_default_path_pipe_vae_call_sites_preserved(monkeypatch):
 def test_C3_external_path_releases_pipe_vae_in_from_pretrained():
     """from_pretrained must set pipe.vae=None when an external_encoder is wired."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe()
     enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert backbone._uses_external_encoder is True
     assert getattr(backbone, "vae", None) is None
 
@@ -363,11 +363,11 @@ def test_C3_external_path_releases_pipe_vae_in_from_pretrained():
 def test_C4_external_path_state_dict_keys_swap():
     """External path: video_encoder.* keys present, native vae.* absent."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe()
     enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     sd = backbone.state_dict()
     assert any(k.startswith("video_encoder.") for k in sd), "external path should expose video_encoder.* keys"
     assert not any(k.startswith("vae.") for k in sd), "external path must release the native vae.*"
@@ -376,26 +376,26 @@ def test_C4_external_path_state_dict_keys_swap():
 def test_C6_get_submodule_vae_routes_to_encoder_on_external_path():
     """get_submodule('vae') returns the encoder on external path, pipe.vae on default."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone, Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan21, Wan22Ti2v
 
     pipe_default = _FakePipe()
-    backbone_default = Wan21Backbone(pipe_default)
+    backbone_default = Wan21(pipe_default)
     assert backbone_default.get_submodule("vae") is pipe_default.vae
 
     pipe_external = _FakePipe()
     enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
-    backbone_external = Wan22Ti2vBackbone.from_pretrained(pipe_external, external_encoder=enc)
+    backbone_external = Wan22Ti2v.from_pretrained(pipe_external, external_encoder=enc)
     assert backbone_external.get_submodule("vae") is enc
 
 
 def test_C7_set_dtype_device_moves_external_encoder():
     """The encoder is a named child, so set_dtype_device (self.to) moves it too."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe()
     enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     # Track moves via a side-effect: read the encoder's proj dtype after .to().
     backbone.set_dtype_device(torch.float32, torch.device("cpu"))
     assert next(enc._m.parameters()).dtype == torch.float32
@@ -407,11 +407,11 @@ def test_C10_spec_validation_fully_skipped_when_irreversible():
     are all encoder-owned). This case exercises a matching spatial=8 so it
     only verifies the z_dim mismatch is tolerated; C10b covers the harder
     case where spatial also differs from the backbone's native VAE."""
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert backbone._uses_external_encoder is True
 
 
@@ -420,7 +420,7 @@ def test_C10b_divergent_geometry_irreversible_encoder_loads():
     temporal_compression=1 / causal=False, all differing from Wan2.1's native
     VAE (spatial=8, temporal=4, causal=True). from_pretrained must accept it and
     derive division factors from the encoder's own spec."""
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
 
@@ -455,7 +455,7 @@ def test_C10b_divergent_geometry_irreversible_encoder_loads():
             return cls()
 
     enc = _DinoLikeEncoder()
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert backbone._uses_external_encoder is True
     # And the division factor honors the encoder's dit_patch_size=(1,1,1):
     # spatial(16) * dit_patch_size[1or2](1) = 16, NOT spatial * 2.
@@ -466,18 +466,18 @@ def test_C10b_divergent_geometry_irreversible_encoder_loads():
 def test_C11_dit_patch_size_drives_height_width_division_factor():
     """spec.dit_patch_size=(1,1,1) — height/width_division_factor equals
     spatial_compression (no extra *2). Verifies the hardcoded *2 is gone."""
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False, dit_patch_size=(1, 1, 1))
-    Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert pipe.height_division_factor == 8  # spatial_compression * 1
     assert pipe.width_division_factor == 8
 
     # And the default (1,2,2) still works the same as before.
     pipe2 = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc2 = WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True, dit_patch_size=(1, 2, 2))
-    Wan22Ti2vBackbone.from_pretrained(pipe2, external_encoder=enc2)
+    Wan22Ti2v.from_pretrained(pipe2, external_encoder=enc2)
     assert pipe2.height_division_factor == 16  # 8 * 2
     assert pipe2.width_division_factor == 16
 
@@ -485,11 +485,11 @@ def test_C11_dit_patch_size_drives_height_width_division_factor():
 def test_C12_decode_video_blocks_irreversible_encoder():
     """decode_video must raise NotImplementedError when the encoder is irreversible.
     The error message must reference the contract violation, not be a generic AttributeError."""
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     with pytest.raises(NotImplementedError, match="irreversible"):
         backbone.decode_video(torch.zeros(1, 1024, 4, 8, 8))
 
@@ -660,7 +660,7 @@ def test_C14_wan_save_deploy_assets_forwards_to_external_encoder(tmp_path):
     """
     from omegaconf import OmegaConf
 
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     class _RecordingEncoder(_MockEncoderBase):
         def __init__(self):
@@ -672,7 +672,7 @@ def test_C14_wan_save_deploy_assets_forwards_to_external_encoder(tmp_path):
 
     pipe = _FakePipe()
     enc = _RecordingEncoder()
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     cfg = OmegaConf.create({"model": {"video_backbone": {"model_path": "/nonexistent"}}})
     backbone.save_deploy_assets(str(tmp_path), cfg)
 
@@ -687,10 +687,10 @@ def test_C15_wan_save_deploy_assets_no_op_without_external_encoder(tmp_path):
     """
     from omegaconf import OmegaConf
 
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+    from openwam.model.video_backbone.wan_backbone import Wan21
 
     pipe = _FakePipe()
-    backbone = Wan21Backbone(pipe)
+    backbone = Wan21(pipe)
     assert backbone.video_encoder is None
     cfg = OmegaConf.create({"model": {"video_backbone": {"model_path": str(tmp_path)}}})
     backbone.save_deploy_assets(str(tmp_path), cfg)
@@ -1155,11 +1155,11 @@ def test_D6_freeze_modules_resolves_encoder_dotted_path_on_external_path():
     ``nn.Module.get_submodule`` and that ``requires_grad_(False)`` then
     propagates to every encoder parameter.
     """
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
 
     # Mount the backbone on an architecture-shaped container, just like the
     # real BaseWAMArchitecture does — freeze_modules resolves dotted paths
@@ -1188,7 +1188,7 @@ def test_D6_freeze_modules_resolves_encoder_dotted_path_on_external_path():
     # so freeze_modules's get_submodule call must raise AttributeError so
     # the framework can silently skip it (yaml lists both paths).
     pipe2 = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    backbone2 = Wan22Ti2vBackbone.from_pretrained(pipe2)  # no external_encoder
+    backbone2 = Wan22Ti2v.from_pretrained(pipe2)  # no external_encoder
     arch2 = _ArchContainer(backbone2)
     with pytest.raises(AttributeError):
         arch2.get_submodule("video_backbone.video_encoder")
@@ -1225,7 +1225,7 @@ def test_M3a_filter_native_vae_configs_drops_vae_entries():
 
 
 def test_M3b_from_pretrained_routes_skip_native_vae():
-    """``Wan21Backbone.from_pretrained`` decides ``skip_native_vae`` via:
+    """``Wan21.from_pretrained`` decides ``skip_native_vae`` via:
 
       - training (``DictConfig`` source) + irreversible encoder → True
       - training + reversible encoder → False (validation needs native VAE)
@@ -1242,7 +1242,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
     from omegaconf import OmegaConf
 
     from openwam.model.video_backbone.wan import loader as loader_mod
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone, Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan21, Wan22Ti2v
 
     captured: dict = {}
 
@@ -1266,7 +1266,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
 
         # Training + irreversible → skip=True.
         captured.clear()
-        Wan22Ti2vBackbone.from_pretrained(
+        Wan22Ti2v.from_pretrained(
             train_cfg,
             external_encoder=WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False),
         )
@@ -1274,7 +1274,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
 
         # Training + reversible → skip=False (need native VAE for spec validation).
         captured.clear()
-        Wan22Ti2vBackbone.from_pretrained(
+        Wan22Ti2v.from_pretrained(
             train_cfg,
             external_encoder=WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True),
         )
@@ -1282,7 +1282,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
 
         # Training + no encoder → skip=False.
         captured.clear()
-        Wan21Backbone.from_pretrained(train_cfg)
+        Wan21.from_pretrained(train_cfg)
         assert captured["skip"] is False
 
         # --- Deploy path: dict source (state_dict topology is video_encoder._m.*) ---
@@ -1290,7 +1290,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
 
         # Deploy + reversible → skip=True (no native VAE slot to materialize).
         captured.clear()
-        Wan22Ti2vBackbone.from_pretrained(
+        Wan22Ti2v.from_pretrained(
             deploy_cfg,
             external_encoder=WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True),
         )
@@ -1298,7 +1298,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
 
         # Deploy + irreversible → skip=True.
         captured.clear()
-        Wan22Ti2vBackbone.from_pretrained(
+        Wan22Ti2v.from_pretrained(
             deploy_cfg,
             external_encoder=WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False),
         )
@@ -1306,7 +1306,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
 
         # Deploy + no encoder → skip=False (no encoder means use native VAE).
         captured.clear()
-        Wan21Backbone.from_pretrained(deploy_cfg)
+        Wan21.from_pretrained(deploy_cfg)
         assert captured["skip"] is False
     finally:
         loader_mod.build_holder_from_model_path = original
@@ -1481,7 +1481,7 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
 
 
 def test_M3g_from_pretrained_attaches_pipe_latent_spec_on_external_path():
-    """``Wan21Backbone.from_pretrained`` must attach
+    """``Wan21.from_pretrained`` must attach
     ``pipe.latent_spec`` (= ``external_encoder.spec``) so vendored
     inference units (``WanVideoUnit_NoiseInitializer``) can read latent
     shape metadata without falling back to ``pipe.vae`` (which is None
@@ -1491,19 +1491,19 @@ def test_M3g_from_pretrained_attaches_pipe_latent_spec_on_external_path():
     unit's fallback branch then reads ``pipe.vae`` as before, preserving
     bit-exact behavior for old checkpoints.
     """
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     # --- External encoder path: pipe.latent_spec is set ---
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     enc = WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True)
-    Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert hasattr(pipe, "latent_spec"), "pipe.latent_spec missing on external-encoder path"
     assert pipe.latent_spec is enc.spec, "pipe.latent_spec must reference encoder.spec verbatim"
     assert pipe.vae is None, "pipe.vae must be released on external-encoder path"
 
     # --- Native VAE path: pipe.latent_spec is absent ---
     pipe2 = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    Wan22Ti2vBackbone.from_pretrained(pipe2)  # no external_encoder
+    Wan22Ti2v.from_pretrained(pipe2)  # no external_encoder
     assert not hasattr(pipe2, "latent_spec"), (
         "pipe.latent_spec must not be attached on the native VAE path "
         "— the vendored unit's pipe.vae fallback must remain authoritative"
@@ -1522,12 +1522,12 @@ def test_M3f_train_save_deploy_state_dict_topology_matches():
     failure mode that surfaced after PR #60's first deploy attempt.
     """
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     # --- "Training" side ---
     train_pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
     train_enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
-    train_bb = Wan22Ti2vBackbone.from_pretrained(train_pipe, external_encoder=train_enc)
+    train_bb = Wan22Ti2v.from_pretrained(train_pipe, external_encoder=train_enc)
     train_keys = set(train_bb.state_dict().keys())
     # Must use the external-encoder slot, not the native vae.*.
     assert any(k.startswith("video_encoder.") for k in train_keys), (
@@ -1550,7 +1550,7 @@ def test_M3f_train_save_deploy_state_dict_topology_matches():
     # just with a fresh pipe sans the loaded VAE — using _FakePipe directly is
     # equivalent because skip_native_vae=True on deploy zeroes pipe.vae anyway.
     deploy_pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    deploy_bb = Wan22Ti2vBackbone.from_pretrained(deploy_pipe, external_encoder=deploy_enc)
+    deploy_bb = Wan22Ti2v.from_pretrained(deploy_pipe, external_encoder=deploy_enc)
     deploy_keys = set(deploy_bb.state_dict().keys())
 
     # The crux: bit-exact key topology.
@@ -1590,14 +1590,14 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
 
     from openwam.model.architectures.architecture_base import BaseWAMArchitecture
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
-    from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
     from openwam.train.utils.optimizer_groups import _pipe_named_parameters
 
     # 1) Real encoder + real backbone.
     vae_module = _FakeWanVAEModule(z_dim=16, upsampling_factor=8)
     enc = WanVideoVAEEncoder(vae_module)
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    backbone = Wan22Ti2vBackbone.from_pretrained(pipe, external_encoder=enc)
+    backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert backbone._uses_external_encoder is True
     assert backbone.video_encoder is enc
 

@@ -119,7 +119,7 @@ class _FakeWanVAE:
 
 
 def _make_adapter_with_fake_vae(*, vace: bool = True, image_input: bool = False):
-    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
+    from openwam.model.video_backbone.wan_backbone import Wan21
 
     vae = _FakeWanVAE(z_dim=16)
     dit = SimpleNamespace(
@@ -160,7 +160,7 @@ def _make_adapter_with_fake_vae(*, vace: bool = True, image_input: bool = False)
     pipe.preprocess_image = _preprocess_image
     pipe.preprocess_video = _preprocess_video
 
-    bb = Wan21Backbone(pipe)
+    bb = Wan21(pipe)
     bb._device = torch.device("cpu")
     bb._dtype = torch.float32
     return bb
@@ -238,7 +238,7 @@ def test_preprocess_input_vace_drops_first_frame_latents(monkeypatch):
     """
     bb = _make_adapter_with_fake_vae(vace=True)
     import openwam.model.video_backbone.wan.encode as enc_mod
-    import openwam.model.video_backbone.wan_videobackbone as vbb
+    import openwam.model.video_backbone.wan_backbone as vbb
 
     monkeypatch.setattr(
         enc_mod,

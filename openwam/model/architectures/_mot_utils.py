@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from openwam.model.video_backbone.videobackbone_base import BlockLoopState
+    from openwam.model.video_backbone.base import BlockLoopState
 
 
 def compute_video_tokens_per_frame(vstate: "BlockLoopState", driver_name: str) -> int:

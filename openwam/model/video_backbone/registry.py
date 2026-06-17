@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Type
 
-from openwam.model.video_backbone.videobackbone_base import VideoBackbone
+from openwam.model.video_backbone.base import VideoBackbone
 
 _VIDEO_BACKBONE_REGISTRY: Dict[str, Type[VideoBackbone]] = {}
 

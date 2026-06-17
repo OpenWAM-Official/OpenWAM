@@ -239,7 +239,7 @@ class _CapturePrepareVideoBackbone(nn.Module):
         return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
 
     def prepare(self, **kw):
-        from openwam.model.video_backbone.videobackbone_base import BlockLoopState
+        from openwam.model.video_backbone.base import BlockLoopState
 
         latents = kw["latents"]
         timestep = kw["timestep"]
@@ -337,7 +337,7 @@ def test_idm_clean_cond_video_uses_zero_timestep():
 
 def test_idm_training_requires_tokenwise_video_t_mod():
     """IDM should fail loudly if a backbone cannot represent noisy/cond timesteps in one sequence."""
-    from openwam.model.video_backbone.videobackbone_base import BlockLoopState
+    from openwam.model.video_backbone.base import BlockLoopState
 
     vb = MagicMock()
     vb.num_layers = 1
