@@ -69,7 +69,7 @@ class Wan22Ti2vBackbone(WanBackboneBase):
         is_deploy = not isinstance(source, DictConfig)
         skip_native_vae = bool(external_encoder is not None and (is_deploy or not external_encoder.spec.is_reversible))
 
-        holder = cls._build_holder(source, skip_native_vae=skip_native_vae, **kw)
+        holder = loader.build_holder(source, skip_native_vae=skip_native_vae, **kw)
 
         if external_encoder is not None:
             # (3) Division factors from the encoder spec, not a hardcoded ``* 2`` / Wan-VAE grid, else
@@ -137,8 +137,8 @@ class Wan21Backbone(WanBackboneBase):
 
     @classmethod
     def from_pretrained(cls, source, *, text_dim: Optional[int] = None, **kw) -> "Wan21Backbone":
-        """Build a Wan21Backbone from a source (see :meth:`WanBackboneBase._build_holder`)."""
-        holder = cls._build_holder(source, **kw)
+        """Build a Wan21Backbone from a source (see :func:`wan.loader.build_holder`)."""
+        holder = loader.build_holder(source, **kw)
         return cls(holder, shift_video=loader.resolve_cfg_shift_video(source), text_dim=text_dim)
 
 

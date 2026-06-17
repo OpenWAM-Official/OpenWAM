@@ -13,7 +13,6 @@ code reaches them only through the ABC methods.
 from __future__ import annotations
 
 import logging
-import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -27,9 +26,10 @@ if TYPE_CHECKING:
     from openwam.model.inference_inputs import InferenceInputs
 from openwam.model.video_backbone.wan import action_tokens as wan_action_tokens
 from openwam.model.video_backbone.wan import conditioning as wan_conditioning
+from openwam.model.video_backbone.wan import dit_forward as wan_dit_forward
 from openwam.model.video_backbone.wan import encode as wan_encode
 from openwam.model.video_backbone.wan import loader
-from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply, sinusoidal_embedding_1d
+from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply
 from openwam.model.video_backbone.wan.preprocess import (
     check_resize_height_width,
 )
@@ -109,45 +109,6 @@ class WanBackboneBase(VideoBackbone):
         # The external-encoder subclass overrides these from its encoder spec.
         self._dit_patch_size = (1, 2, 2)
         self._temporal_compression, self._causal_temporal = 4, True
-
-    @classmethod
-    def _build_holder(cls, source, *, skip_native_vae: bool = False, **kw):
-        """Resolve a ``from_pretrained`` source into a transient component holder.
-
-        Sources: ``DictConfig`` (full Hydra cfg → pipeline builder), ``str`` dir
-        path / ``dict`` with ``model_path`` (lightweight build via loader), else
-        an already-built component holder. ``__init__`` drains the holder.
-        """
-        from omegaconf import DictConfig
-
-        if isinstance(source, DictConfig):
-            from openwam.model.video_backbone.wan.pipeline_builder import build_training_pipeline
-
-            return build_training_pipeline(source, skip_native_vae=skip_native_vae)
-        if isinstance(source, str):
-            if os.path.isdir(source):
-                return loader.build_holder_from_model_path(
-                    source, device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
-                )
-            raise ValueError(f"from_pretrained(str) expects a directory path, got: {source!r}.")
-        if isinstance(source, dict):
-            vb_cfg = source.get("video_backbone", source)
-            if isinstance(vb_cfg, dict) and "components" in vb_cfg:
-                return loader.build_holder_from_components(
-                    vb_cfg["components"],
-                    tokenizer=vb_cfg.get("tokenizer"),
-                    device=kw.get("device", "cpu"),
-                    ckpt_dir=kw.get("ckpt_dir"),
-                    model_path=vb_cfg.get("model_path"),
-                    skip_native_vae=skip_native_vae,
-                )
-            model_path = vb_cfg.get("model_path") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "model_path", None)
-            if model_path is None:
-                raise ValueError("dict source must contain 'video_backbone.components' or 'video_backbone.model_path'")
-            return loader.build_holder_from_model_path(
-                str(model_path), device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
-            )
-        return source
 
     # ================================================================
     # Internal properties
@@ -278,74 +239,6 @@ class WanBackboneBase(VideoBackbone):
     # ABC: Three-step execution (3)
     # ================================================================
 
-    def _build_time_modulation(
-        self,
-        dit,
-        timestep,
-        latents,
-        *,
-        fuse_vae_embedding_in_latents: bool,
-        force_per_token_t_mod: bool,
-        num_clean_prefix_frames: int,
-        zero_clean_prefix_t_mod: bool,
-        has_first_frame_latents: bool,
-    ) -> Tuple[Tensor, Tensor]:
-        """Build ``(time_embed, time_modulation)`` for ``prepare``. TI2V uses
-        per-token t=0 on the clean prefix; ``force_per_token_t_mod`` broadcasts a
-        single (B,) embedding to (B, L, dim); else the plain (B,) path.
-        """
-        if dit.seperated_timestep and fuse_vae_embedding_in_latents:
-            batch_size = latents.shape[0]
-            num_clean = max(num_clean_prefix_frames, 1)
-            f_lat = latents.shape[2]
-            patch_size = self._dit_patch_size
-            tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
-            tokens_per_frame = tokens_per_frame_patch
-            token_timesteps = torch.ones(
-                batch_size, f_lat, tokens_per_frame, dtype=latents.dtype, device=latents.device
-            ) * timestep.view(batch_size, 1, 1)
-            token_timesteps[:, :num_clean, :] = 0
-            token_timesteps = token_timesteps.reshape(batch_size, -1)
-            time_sinusoid = sinusoidal_embedding_1d(dit.freq_dim, token_timesteps.reshape(-1))
-            time_embed = dit.time_embedding(time_sinusoid.to(latents.dtype)).reshape(batch_size, -1, dit.dim)
-            time_modulation = dit.time_projection(time_embed).unflatten(2, (6, dit.dim))
-        elif force_per_token_t_mod:
-            # Non-TI2V backbones under joint-attention / shared_backbone need 4D
-            # t_mod. Compute the time embedding once on (B,) and broadcast to
-            # (B, L, dim) — a per-token MLP would repeat the stack L times.
-            batch_size = latents.shape[0]
-            f_lat = latents.shape[2]
-            patch_size = self._dit_patch_size
-            tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
-            tokens_per_frame = tokens_per_frame_patch
-            L = f_lat * tokens_per_frame
-            time_embed_base = dit.time_embedding(
-                sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype)
-            )  # (B, dim)
-            time_embed = time_embed_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
-
-            # Optional clean-prefix alignment: when opted in AND a clean prefix
-            # is present, overwrite the first ``num_clean`` frames' time embedding
-            # with ``time_embedding(0)`` — mirrors TI2V's per-token t=0 pin but
-            # at the embedding layer, keeping the MLP a single (B, dim) call.
-            zero_clean_prefix = zero_clean_prefix_t_mod
-            has_clean_ref = num_clean_prefix_frames > 0 or has_first_frame_latents
-            if zero_clean_prefix and has_clean_ref:
-                num_clean = max(num_clean_prefix_frames, 1)
-                zero_ts = torch.zeros_like(timestep)
-                time_embed_zero = dit.time_embedding(
-                    sinusoidal_embedding_1d(dit.freq_dim, zero_ts).to(latents.dtype)
-                )  # (B, dim)
-                time_embed = time_embed.view(batch_size, f_lat, tokens_per_frame, -1)
-                time_embed[:, :num_clean] = time_embed_zero.view(batch_size, 1, 1, -1)
-                time_embed = time_embed.reshape(batch_size, L, -1)
-
-            time_modulation = dit.time_projection(time_embed).unflatten(2, (6, dit.dim))
-        else:
-            time_embed = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep))
-            time_modulation = dit.time_projection(time_embed).unflatten(1, (6, dit.dim))
-        return time_embed, time_modulation
-
     def prepare(self, **kw) -> BlockLoopState:
         dit = self.dit
         motion_controller = self.motion_controller
@@ -366,10 +259,11 @@ class WanBackboneBase(VideoBackbone):
         use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
         force_per_token_t_mod = bool(kw.get("force_per_token_t_mod", False))
 
-        time_embed, time_modulation = self._build_time_modulation(
+        time_embed, time_modulation = wan_dit_forward.build_time_modulation(
             dit,
             timestep,
             latents,
+            patch_size=self._dit_patch_size,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
             force_per_token_t_mod=force_per_token_t_mod,
             num_clean_prefix_frames=num_clean_prefix_frames,
@@ -505,7 +399,7 @@ class WanBackboneBase(VideoBackbone):
                 block_context_mask,
                 attn_mask,
             )
-            self._apply_post_block_residuals(block_id, state)
+            wan_dit_forward.apply_post_block_residuals(block_id, state)
             return state
 
         state.hidden_states = gradient_checkpoint_forward(
@@ -519,35 +413,8 @@ class WanBackboneBase(VideoBackbone):
             block_context_mask,
         )
 
-        self._apply_post_block_residuals(block_id, state)
+        wan_dit_forward.apply_post_block_residuals(block_id, state)
         return state
-
-    def _apply_post_block_residuals(self, block_id: int, state: BlockLoopState) -> None:
-        """Apply the VACE hint residual to ``state.hidden_states`` in place.
-        Shared by run_block and post_attn_at_layer.
-        """
-        vace = state.extras.get("vace")
-
-        if state.vace_hints is not None and vace is not None and block_id in vace.vace_layers_mapping:
-            current_vace_hint = state.vace_hints[vace.vace_layers_mapping[block_id]]
-            vace_len = current_vace_hint.shape[1]
-            if state.hidden_states.shape[1] == vace_len:
-                # dual_system / video-only: hint spans the full sequence.
-                state.hidden_states = state.hidden_states + current_vace_hint
-            elif state.hidden_states.shape[1] > vace_len:
-                # shared_backbone: residual applies only to the leading video
-                # slice; action/state tokens get VACE via self-attention.
-                video_slice = state.hidden_states[:, :vace_len] + current_vace_hint
-                state.hidden_states = torch.cat([video_slice, state.hidden_states[:, vace_len:]], dim=1)
-            else:
-                # Defensive: hidden_states shorter than the hint breaks the
-                # video-token-count invariant — investigate before patching.
-                raise ValueError(
-                    f"_apply_post_block_residuals: state.hidden_states.shape[1]={state.hidden_states.shape[1]} "
-                    f"< vace_hint.shape[1]={vace_len} at block {block_id}; "
-                    "this is unreachable under dual_system or shared_backbone today—"
-                    "investigate the upstream caller before patching this branch."
-                )
 
     def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState) -> Tuple[Tensor, Tensor, Tensor, dict]:
         """First half of a Wan DiT block (norm1 + AdaLN + Q/K/V + RoPE), up to
@@ -632,7 +499,7 @@ class WanBackboneBase(VideoBackbone):
         hidden_states = block.gate(hidden_states, gate_mlp, block.ffn(mlp_input))
         state.hidden_states = hidden_states
 
-        self._apply_post_block_residuals(layer_id, state)
+        wan_dit_forward.apply_post_block_residuals(layer_id, state)
         return state
 
     def finalize(self, state: BlockLoopState):
@@ -857,7 +724,7 @@ class WanBackboneBase(VideoBackbone):
         save_video_backbone_deploy_assets(output_dir, cfg)
 
     # ================================================================
-    # Deploy-facing public methods (not in ABC — Wan-specific)
+    # ABC: Deploy-input preprocessing (override)
     # ================================================================
 
     def preprocess_input_for_inference(self, inputs: "InferenceInputs") -> dict:

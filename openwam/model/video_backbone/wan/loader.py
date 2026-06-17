@@ -266,3 +266,40 @@ def build_holder_from_model_path(model_path: str, device: str = "cpu", *, skip_n
         device=device,
         torch_dtype=torch.bfloat16,
     )
+
+
+def build_holder(source, *, skip_native_vae: bool = False, **kw):
+    """Resolve a ``from_pretrained`` source into a transient component holder.
+
+    Sources: ``DictConfig`` (full Hydra cfg → pipeline builder), ``str`` dir
+    path / ``dict`` with ``model_path`` (lightweight build via loader), else
+    an already-built component holder. ``__init__`` drains the holder.
+    """
+    from omegaconf import DictConfig
+
+    if isinstance(source, DictConfig):
+        from openwam.model.video_backbone.wan.pipeline_builder import build_training_pipeline
+
+        return build_training_pipeline(source, skip_native_vae=skip_native_vae)
+    if isinstance(source, str):
+        if os.path.isdir(source):
+            return build_holder_from_model_path(source, device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae)
+        raise ValueError(f"from_pretrained(str) expects a directory path, got: {source!r}.")
+    if isinstance(source, dict):
+        vb_cfg = source.get("video_backbone", source)
+        if isinstance(vb_cfg, dict) and "components" in vb_cfg:
+            return build_holder_from_components(
+                vb_cfg["components"],
+                tokenizer=vb_cfg.get("tokenizer"),
+                device=kw.get("device", "cpu"),
+                ckpt_dir=kw.get("ckpt_dir"),
+                model_path=vb_cfg.get("model_path"),
+                skip_native_vae=skip_native_vae,
+            )
+        model_path = vb_cfg.get("model_path") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "model_path", None)
+        if model_path is None:
+            raise ValueError("dict source must contain 'video_backbone.components' or 'video_backbone.model_path'")
+        return build_holder_from_model_path(
+            str(model_path), device=kw.get("device", "cpu"), skip_native_vae=skip_native_vae
+        )
+    return source
