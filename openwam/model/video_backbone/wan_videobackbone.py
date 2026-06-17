@@ -116,9 +116,9 @@ class WanVideoBackbone(VideoBackbone):
         component holder. Construction returns a transient holder that
         ``__init__`` drains into the backbone.
 
-        With ``external_encoder``: (1) fail-fast for I2V/VACE backbones;
-        (2) derive division factors from the encoder spec; (3) release the
-        native VAE. See the inline numbered comments for the why.
+        With ``external_encoder``: (1)(2) fail-fast for I2V/VACE backbones;
+        (3) derive division factors from the encoder spec; (4) release the
+        native VAE; (5) expose latent-shape metadata. See the inline comments.
         """
         from omegaconf import DictConfig
 
@@ -166,9 +166,7 @@ class WanVideoBackbone(VideoBackbone):
             holder = source
 
         if external_encoder is not None:
-            # (1) I2V fail-fast: the pretrained DiT first conv hardcodes
-            # in_dim = 4 + z_dim, so an external encoder breaks the ``y``
-            # channel-cat. Surface at construction, not at runtime.
+            # (1) I2V fail-fast: pretrained DiT first conv hardcodes in_dim = 4 + z_dim, breaking the ``y`` channel-cat.
             if bool(getattr(holder.dit, "has_image_input", False)):
                 raise ValueError(
                     "I2V backbones cannot use external encoders: DiT first "
@@ -176,10 +174,8 @@ class WanVideoBackbone(VideoBackbone):
                     "weights. See docs/external_video_encoder.md §6."
                 )
 
-            # (1b) VACE fail-fast: two hard incompatibilities the adapter does
-            # not rebuild — ``vace_patch_embedding`` hardcodes vace_in_dim=96
-            # (native z_dim=16), and the deploy VACE path reads the native VAE
-            # which is None here. Surface at construction.
+            # (2) VACE fail-fast: vace_patch_embedding hardcodes vace_in_dim=96, and the deploy VACE path reads the
+            # native VAE which is None here.
             if getattr(holder, "vace", None) is not None:
                 raise ValueError(
                     "VACE backbones cannot use external encoders: this PR's scope is "
@@ -190,20 +186,16 @@ class WanVideoBackbone(VideoBackbone):
                     "docs/external_video_encoder.md §6."
                 )
 
-            # (2) Spatial/time division factors derived from the encoder spec,
-            # not a hardcoded ``* 2`` / Wan-VAE grid — otherwise
-            # ``check_resize_height_width`` would round encoder-legal sizes to
-            # Wan's grid. Remainder is 1 iff causal ("first frame separable,
-            # then groups of temporal_compression").
-            ps = external_encoder.spec.dit_patch_size
-            holder.height_division_factor = external_encoder.spec.spatial_compression * ps[1]
-            holder.width_division_factor = external_encoder.spec.spatial_compression * ps[2]
-            holder.time_division_factor = external_encoder.spec.temporal_compression * ps[0]
+            # (3) Division factors from the encoder spec, not a hardcoded ``* 2`` / Wan-VAE grid, else
+            # ``check_resize_height_width`` rounds encoder-legal sizes to Wan's grid. Remainder is 1 iff causal.
+            patch_size = external_encoder.spec.dit_patch_size
+            holder.height_division_factor = external_encoder.spec.spatial_compression * patch_size[1]
+            holder.width_division_factor = external_encoder.spec.spatial_compression * patch_size[2]
+            holder.time_division_factor = external_encoder.spec.temporal_compression * patch_size[0]
             holder.time_division_remainder = 1 if external_encoder.spec.causal_temporal else 0
 
-            # (3) Release the native VAE so state_dict keys don't double-count
-            # with the external encoder. print (not logger.info) because arch
-            # init runs before the logger is wired up; rank-0 gated.
+            # (4) Release the native VAE so state_dict keys don't double-count with the external encoder. print (not
+            # logger.info) because arch init runs before the logger is wired up; rank-0 gated.
             holder.vae = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -217,9 +209,7 @@ class WanVideoBackbone(VideoBackbone):
                     flush=True,
                 )
 
-            # (5) Expose latent-shape metadata so deploy noise init can read it
-            # without falling back to the native VAE (now None). Plain attr — not
-            # in state_dict.
+            # (5) Expose latent-shape metadata so deploy noise init reads it without the native VAE (now None).
             holder.latent_spec = external_encoder.spec
 
         # Resolve optional cfg-side ``shift_video`` here (not in __init__)
@@ -399,7 +389,7 @@ class WanVideoBackbone(VideoBackbone):
         context_mask = kw.get("context_mask")
         seq_lens = kw.get("seq_lens")
         clip_feature = kw.get("clip_feature")
-        y = kw.get("y")
+        image_cond_latents = kw.get("y")
         vace_context = kw.get("vace_context")
         motion_bucket_id = kw.get("motion_bucket_id")
         control_camera_latents_input = kw.get("control_camera_latents_input")
@@ -413,29 +403,31 @@ class WanVideoBackbone(VideoBackbone):
             batch_size = latents.shape[0]
             num_clean = max(num_clean_prefix_frames, 1)
             f_lat = latents.shape[2]
-            ps = self._dit_patch_size
-            tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (ps[1] * ps[2])
+            patch_size = self._dit_patch_size
+            tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
             tokens_per_frame = tokens_per_frame_patch
             token_timesteps = torch.ones(
                 batch_size, f_lat, tokens_per_frame, dtype=latents.dtype, device=latents.device
             ) * timestep.view(batch_size, 1, 1)
             token_timesteps[:, :num_clean, :] = 0
             token_timesteps = token_timesteps.reshape(batch_size, -1)
-            t_emb = sinusoidal_embedding_1d(dit.freq_dim, token_timesteps.reshape(-1))
-            t = dit.time_embedding(t_emb.to(latents.dtype)).reshape(batch_size, -1, dit.dim)
-            t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
+            time_sinusoid = sinusoidal_embedding_1d(dit.freq_dim, token_timesteps.reshape(-1))
+            time_embed = dit.time_embedding(time_sinusoid.to(latents.dtype)).reshape(batch_size, -1, dit.dim)
+            time_modulation = dit.time_projection(time_embed).unflatten(2, (6, dit.dim))
         elif force_per_token_t_mod:
             # Non-TI2V backbones under joint-attention / shared_backbone need 4D
             # t_mod. Compute the time embedding once on (B,) and broadcast to
             # (B, L, dim) — a per-token MLP would repeat the stack L times.
             batch_size = latents.shape[0]
             f_lat = latents.shape[2]
-            ps = self._dit_patch_size
-            tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (ps[1] * ps[2])
+            patch_size = self._dit_patch_size
+            tokens_per_frame_patch = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
             tokens_per_frame = tokens_per_frame_patch
             L = f_lat * tokens_per_frame
-            t_base = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype))  # (B, dim)
-            t = t_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
+            time_embed_base = dit.time_embedding(
+                sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype)
+            )  # (B, dim)
+            time_embed = time_embed_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
 
             # Optional clean-prefix alignment: when opted in AND a clean prefix
             # is present, overwrite the first ``num_clean`` frames' time embedding
@@ -446,25 +438,25 @@ class WanVideoBackbone(VideoBackbone):
             if zero_clean_prefix and has_clean_ref:
                 num_clean = max(num_clean_prefix_frames, 1)
                 zero_ts = torch.zeros_like(timestep)
-                t_zero_base = dit.time_embedding(
+                time_embed_zero = dit.time_embedding(
                     sinusoidal_embedding_1d(dit.freq_dim, zero_ts).to(latents.dtype)
                 )  # (B, dim)
-                t = t.view(batch_size, f_lat, tokens_per_frame, -1)
-                t[:, :num_clean] = t_zero_base.view(batch_size, 1, 1, -1)
-                t = t.reshape(batch_size, L, -1)
+                time_embed = time_embed.view(batch_size, f_lat, tokens_per_frame, -1)
+                time_embed[:, :num_clean] = time_embed_zero.view(batch_size, 1, 1, -1)
+                time_embed = time_embed.reshape(batch_size, L, -1)
 
-            t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
+            time_modulation = dit.time_projection(time_embed).unflatten(2, (6, dit.dim))
         else:
-            t = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep))
-            t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
+            time_embed = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep))
+            time_modulation = dit.time_projection(time_embed).unflatten(1, (6, dit.dim))
 
         if motion_bucket_id is not None and motion_controller is not None:
             motion_term = motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))  # (B, 6, dim)
-            if t_mod.dim() == 4:
+            if time_modulation.dim() == 4:
                 # Broadcast (B, 6, dim) across L; without the unsqueeze the add
                 # right-aligns and aliases B onto L (mis-broadcasts when B == L).
                 motion_term = motion_term.unsqueeze(1)  # (B, 1, 6, dim)
-            t_mod = t_mod + motion_term
+            time_modulation = time_modulation + motion_term
         context = dit.text_embedding(context)
         if context_mask is None:
             if seq_lens is not None:
@@ -482,14 +474,14 @@ class WanVideoBackbone(VideoBackbone):
                     f"context_mask shape must match context [B, L], got {tuple(context_mask.shape)} vs {tuple(context.shape)}"
                 )
 
-        x = latents
-        if x.shape[0] != context.shape[0]:
-            x = torch.concat([x] * context.shape[0], dim=0)
+        hidden_states = latents
+        if hidden_states.shape[0] != context.shape[0]:
+            hidden_states = torch.concat([hidden_states] * context.shape[0], dim=0)
         if timestep.shape[0] != context.shape[0]:
             timestep = torch.concat([timestep] * context.shape[0], dim=0)
 
-        if y is not None and dit.require_vae_embedding:
-            x = torch.cat([x, y], dim=1)
+        if image_cond_latents is not None and dit.require_vae_embedding:
+            hidden_states = torch.cat([hidden_states, image_cond_latents], dim=1)
         if clip_feature is not None and dit.require_clip_embedding:
             clip_embdding = dit.img_emb(clip_feature)
             context = torch.cat([clip_embdding, context], dim=1)
@@ -501,48 +493,54 @@ class WanVideoBackbone(VideoBackbone):
                 )
                 context_mask = torch.cat([clip_mask, context_mask], dim=1)
 
-        x = dit.patchify(x, control_camera_latents_input)
+        hidden_states = dit.patchify(hidden_states, control_camera_latents_input)
 
-        f, h, w = x.shape[2:]
-        x = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
+        grid_frames, grid_height, grid_width = hidden_states.shape[2:]
+        hidden_states = rearrange(hidden_states, "b c f h w -> b (f h w) c").contiguous()
         freqs = (
             torch.cat(
                 [
-                    dit.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                    dit.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                    dit.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
+                    dit.freqs[0][:grid_frames]
+                    .view(grid_frames, 1, 1, -1)
+                    .expand(grid_frames, grid_height, grid_width, -1),
+                    dit.freqs[1][:grid_height]
+                    .view(1, grid_height, 1, -1)
+                    .expand(grid_frames, grid_height, grid_width, -1),
+                    dit.freqs[2][:grid_width]
+                    .view(1, 1, grid_width, -1)
+                    .expand(grid_frames, grid_height, grid_width, -1),
                 ],
                 dim=-1,
             )
-            .reshape(f * h * w, 1, -1)
-            .to(x.device)
+            .reshape(grid_frames * grid_height * grid_width, 1, -1)
+            .to(hidden_states.device)
         )
 
         extras = {}
         extras["dit"] = dit
         extras["vace"] = vace
-        extras["time_embed"] = t  # Wan head time embedding; consumed in finalize()
+        extras["time_embed"] = time_embed  # Wan head time embedding; consumed in finalize()
         vace_hints = None
         if vace_context is not None:
             vace_hints = vace(
-                x,
+                hidden_states,
                 vace_context,
                 context,
-                t_mod,
+                time_modulation,
                 freqs,
                 use_gradient_checkpointing=use_gradient_checkpointing,
                 use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             )
 
         return BlockLoopState(
-            hidden_states=x,
-            time_mod=t_mod,
+            hidden_states=hidden_states,
+            time_mod=time_modulation,
             rope_freqs=freqs,
             context=context,
             context_mask=context_mask,
-            grid_frames=f,
-            grid_height=h,
-            grid_width=w,
+            grid_frames=grid_frames,
+            grid_height=grid_height,
+            grid_width=grid_width,
             vace_hints=vace_hints,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
@@ -648,10 +646,12 @@ class WanVideoBackbone(VideoBackbone):
         """Compile-friendly Wan pre-attention half using a tensor tuple post-state."""
         block = state.extras["dit"].blocks[layer_id]
 
-        t_mod = state.time_mod
-        has_seq = t_mod.dim() == 4
+        time_modulation = state.time_mod
+        has_seq = time_modulation.dim() == 4
         chunk_dim = 2 if has_seq else 1
-        chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=chunk_dim)
+        chunks = (
+            block.modulation.to(dtype=time_modulation.dtype, device=time_modulation.device) + time_modulation
+        ).chunk(6, dim=chunk_dim)
         if has_seq:
             chunks = tuple(c.squeeze(2) for c in chunks)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
@@ -659,12 +659,12 @@ class WanVideoBackbone(VideoBackbone):
         residual_x = state.hidden_states
         attn_input = modulate(block.norm1(state.hidden_states), shift_msa, scale_msa)
 
-        sa = block.self_attn
-        q = sa.norm_q(sa.q(attn_input))
-        k = sa.norm_k(sa.k(attn_input))
-        v = sa.v(attn_input)
-        q = rope_apply(q, state.rope_freqs, sa.num_heads)
-        k = rope_apply(k, state.rope_freqs, sa.num_heads)
+        self_attn = block.self_attn
+        q = self_attn.norm_q(self_attn.q(attn_input))
+        k = self_attn.norm_k(self_attn.k(attn_input))
+        v = self_attn.v(attn_input)
+        q = rope_apply(q, state.rope_freqs, self_attn.num_heads)
+        k = rope_apply(k, state.rope_freqs, self_attn.num_heads)
 
         post_state = (residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         return q, k, v, post_state
@@ -691,17 +691,19 @@ class WanVideoBackbone(VideoBackbone):
     ) -> BlockLoopState:
         """Compile-friendly Wan post-attention half consuming a tensor tuple."""
         block = state.extras["dit"].blocks[layer_id]
-        sa = block.self_attn
+        self_attn = block.self_attn
         residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_state
 
-        x = block.gate(residual_x, gate_msa, sa.o(attn_out))
+        hidden_states = block.gate(residual_x, gate_msa, self_attn.o(attn_out))
         context_mask = None
         if state.context_mask is not None:
-            context_mask = state.context_mask.unsqueeze(1).expand(-1, x.shape[1], -1).unsqueeze(1)
-        x = x + block.cross_attn(block.norm3(x), state.context, ctx_mask=context_mask)
-        mlp_input = modulate(block.norm2(x), shift_mlp, scale_mlp)
-        x = block.gate(x, gate_mlp, block.ffn(mlp_input))
-        state.hidden_states = x
+            context_mask = state.context_mask.unsqueeze(1).expand(-1, hidden_states.shape[1], -1).unsqueeze(1)
+        hidden_states = hidden_states + block.cross_attn(
+            block.norm3(hidden_states), state.context, ctx_mask=context_mask
+        )
+        mlp_input = modulate(block.norm2(hidden_states), shift_mlp, scale_mlp)
+        hidden_states = block.gate(hidden_states, gate_mlp, block.ffn(mlp_input))
+        state.hidden_states = hidden_states
 
         self._apply_post_block_residuals(layer_id, state)
         return state
@@ -710,13 +712,13 @@ class WanVideoBackbone(VideoBackbone):
         """Wan DiT head + unpatchify. Returns ``(B, z_dim, F, H, W)``."""
         dit = state.extras["dit"]
         head = dit.head
-        t_embed = state.extras["time_embed"]
-        t_head = t_embed if t_embed.dim() == 3 else t_embed.unsqueeze(1)
+        time_embed = state.extras["time_embed"]
+        head_time_embed = time_embed if time_embed.dim() == 3 else time_embed.unsqueeze(1)
 
-        x = head(state.hidden_states, t_head)
+        hidden_states = head(state.hidden_states, head_time_embed)
 
-        x = dit.unpatchify(x, (state.grid_frames, state.grid_height, state.grid_width))
-        return x
+        hidden_states = dit.unpatchify(hidden_states, (state.grid_frames, state.grid_height, state.grid_width))
+        return hidden_states
 
     # ================================================================
     # ABC: Action token injection (2)
@@ -844,7 +846,7 @@ class WanVideoBackbone(VideoBackbone):
             time_division_remainder=self._time_division_remainder,
         )
 
-        B = len(frames)
+        batch_size = len(frames)
         context, seq_lens = wan_encode.encode_text(
             text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
         )
@@ -871,7 +873,7 @@ class WanVideoBackbone(VideoBackbone):
             ref_images=kw.get("ref_images"),
             vace_videos=kw.get("vace_videos"),
             stacked_inputs=stacked_inputs,
-            B=B,
+            B=batch_size,
             num_frames=num_frames,
             height=height,
             width=width,
@@ -1035,18 +1037,10 @@ class WanVideoBackbone(VideoBackbone):
             "cfg_merge": False,
             "sigma_shift": shift,
             "motion_bucket_id": None,
-            "longcat_video": None,
             "tiled": tiled,
             "tile_size": tile_size,
             "tile_stride": tile_stride,
-            "sliding_window_size": None,
-            "sliding_window_stride": None,
             "input_audio": None,
-            "audio_sample_rate": 16000,
-            "s2v_pose_video": None,
-            "audio_embeds": None,
-            "s2v_pose_latents": None,
-            "motion_video": None,
         }
         inputs_shared["context"] = context
         inputs_shared["seq_lens"] = seq_lens
@@ -1087,7 +1081,7 @@ class WanVideoBackbone(VideoBackbone):
             )
             if clip_feature is not None:
                 inputs_shared["clip_feature"] = clip_feature
-            y = wan_conditioning.build_deploy_i2v_y(
+            image_cond_latents = wan_conditioning.build_deploy_i2v_y(
                 i2v_img,
                 num_frames=num_frames,
                 height=height,
@@ -1100,8 +1094,8 @@ class WanVideoBackbone(VideoBackbone):
                 dtype=self.dtype,
                 device=self.device,
             )
-            if y is not None:
-                inputs_shared["y"] = y
+            if image_cond_latents is not None:
+                inputs_shared["y"] = image_cond_latents
 
         if vace_cache is not None:
             vace_cache["populated"] = True
