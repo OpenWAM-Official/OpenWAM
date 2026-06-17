@@ -94,11 +94,6 @@ class WanBackboneBase(VideoBackbone):
         self._shift_video = None if shift_video is None else float(shift_video)
         actual_text_dim = loader.infer_text_dim(getattr(holder, "dit", None))
         self._text_dim = actual_text_dim if text_dim is None else int(text_dim)
-        if actual_text_dim is not None and text_dim is not None and actual_text_dim != self._text_dim:
-            raise ValueError(
-                f"architecture.text_dim={self._text_dim} does not match "
-                f"Wan DiT text_embedding input dim={actual_text_dim}."
-            )
         # Resolve the Wan variant (I2V/TI2V/VACE/plain) ONCE; first-frame
         # conditioning delegates to it so hot paths carry no per-variant branch.
         from openwam.model.video_backbone.wan import variants as _variants
@@ -202,11 +197,6 @@ class WanBackboneBase(VideoBackbone):
         """Build the video↔video block of the joint MoT attention mask
         (``True`` = attend to). Layout matches FastWAM's equivalent.
         """
-        if video_seq_len <= 0:
-            raise ValueError(f"video_seq_len must be positive, got {video_seq_len}")
-        if video_tokens_per_frame <= 0:
-            raise ValueError(f"video_tokens_per_frame must be positive, got {video_tokens_per_frame}")
-
         mode = self.video_attention_mask_mode
         if mode == "bidirectional":
             return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
@@ -533,12 +523,6 @@ class WanBackboneBase(VideoBackbone):
         AdaLN t_mod comes from timestep only (DreamZero).
         """
         n_state = int(n_state or 0)
-        if n_state < 0:
-            raise ValueError(f"n_state must be non-negative, got {n_state}")
-        if n_action < 0:
-            raise ValueError(f"n_action must be non-negative, got {n_action}")
-        if n_action + n_state <= 0:
-            raise ValueError("inject_shared_tokens requires at least one action or state token.")
         batch_size = state.hidden_states.shape[0]
         appended_pieces = []
         if n_action:
@@ -556,8 +540,6 @@ class WanBackboneBase(VideoBackbone):
                     f"action_tokens dim {action_tokens.shape[2]} does not match video dim {state.hidden_states.shape[2]}"
                 )
             appended_pieces.append(action_tokens.to(state.hidden_states.dtype))
-        elif action_tokens is not None and action_tokens.shape[1] != 0:
-            raise ValueError("action_tokens were provided but n_action=0.")
         if n_state:
             if state_tokens is None:
                 raise ValueError("n_state > 0 requires state_tokens.")
@@ -573,9 +555,6 @@ class WanBackboneBase(VideoBackbone):
                     f"state_tokens dim {state_tokens.shape[2]} does not match video dim {state.hidden_states.shape[2]}"
                 )
             appended_pieces.append(state_tokens.to(state.hidden_states.dtype))
-        else:
-            if state_tokens is not None and state_tokens.shape[1] != 0:
-                raise ValueError("state_tokens were provided but n_state=0.")
         appended = torch.cat(appended_pieces, dim=1)
 
         if wan_action_tokens.is_per_token_t_mod_active(state.time_mod) and timestep is None:
