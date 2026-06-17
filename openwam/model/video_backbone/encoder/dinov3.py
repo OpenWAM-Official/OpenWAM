@@ -46,8 +46,8 @@ from einops import rearrange, repeat
 from PIL import Image
 from torch import Tensor
 
+from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
-from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 # Checkpoint-local namespace for the DINOv3 HF config, so a self-contained deploy
 # reads ``<ckpt>/dinov3/config.json`` instead of needing the original
@@ -136,7 +136,7 @@ class DinoV3VideoEncoder(VideoEncoder):
         # temporal=4 causal, dit_patch=(1,2,2)) so token counts match while
         # ``z_dim`` differs (768 vs 48). is_reversible=False causes the
         # backbone to skip the strict spec equality check.
-        self._spec = VideoEncoderSpec(
+        self._spec = VideoEncoderProperties(
             z_dim=int(embed_dim),
             spatial_compression=int(patch_size),
             temporal_compression=4,
@@ -147,7 +147,7 @@ class DinoV3VideoEncoder(VideoEncoder):
         )
 
     @property
-    def spec(self) -> VideoEncoderSpec:
+    def spec(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames) -> Tensor:

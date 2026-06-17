@@ -1,6 +1,6 @@
 """VideoEncoder ABC and the structural spec it exposes to the host backbone.
 
-:class:`VideoEncoderSpec` is the latent contract (z_dim / compression / patch
+:class:`VideoEncoderProperties` is the latent contract (z_dim / compression / patch
 geometry) derived from the loaded encoder weights — NOT from yaml. The encoder's
 ``from_pretrained`` populates it from the actual loaded state.
 
@@ -20,7 +20,7 @@ from torch import Tensor
 
 
 @dataclass(frozen=True)
-class VideoEncoderSpec:
+class VideoEncoderProperties:
     """Latent contract exposed by a :class:`VideoEncoder`.
 
     Attributes:
@@ -90,7 +90,7 @@ class VideoEncoder(ABC, nn.Module):
 
     @property
     @abstractmethod
-    def spec(self) -> VideoEncoderSpec:
+    def spec(self) -> VideoEncoderProperties:
         """Structural contract derived from loaded weights, not yaml."""
 
     @abstractmethod

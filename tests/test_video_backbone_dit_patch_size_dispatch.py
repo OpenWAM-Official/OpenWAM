@@ -23,7 +23,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoderSpec
+from openwam.model.video_backbone.encoder.base import VideoEncoderProperties
 from openwam.model.video_backbone.wan.models.dit import WanModel
 from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
@@ -35,7 +35,7 @@ def _mock_encoder_with_patch(dit_patch_size: tuple[int, int, int]) -> SimpleName
     ``external_encoder is not None`` — the full :class:`VideoEncoder` ABC is
     not needed for the dispatch path under test.
     """
-    spec = VideoEncoderSpec(
+    spec = VideoEncoderProperties(
         z_dim=16,
         spatial_compression=8,
         temporal_compression=4,

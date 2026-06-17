@@ -6,7 +6,7 @@ backbone keeps using its built-in ``pipe.vae`` and the encoder package is
 inert (registration still runs, but no encoder is instantiated).
 
 This package is the public facade. The pieces live in dedicated modules:
-  - ``videoencoder_base`` — :class:`VideoEncoder` ABC + :class:`VideoEncoderSpec`
+  - ``base`` — :class:`VideoEncoder` ABC + :class:`VideoEncoderProperties`
   - ``registry``          — the registry dict + ``register_video_encoder`` /
                             ``build_video_encoder``
 This file only re-exports them and imports each implementation at the bottom
@@ -28,19 +28,18 @@ The author NEVER needs to touch ``wan_backbone.py`` / ``dit.py`` /
 
 from __future__ import annotations
 
+from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import (
     _VIDEO_ENCODER_REGISTRY,
     build_video_encoder,
     register_video_encoder,
 )
-from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 __all__ = [
     "VideoEncoder",
-    "VideoEncoderSpec",
+    "VideoEncoderProperties",
     "DinoV3VideoEncoder",
     "FluxVAEVideoEncoder",
-    "VJEPA2VideoEncoder",
     "VJEPA21VideoEncoder",
     "WanVideoVAEEncoder",
     "build_video_encoder",
@@ -49,10 +48,9 @@ __all__ = [
 ]
 
 # Built-in registrations (kept at the bottom so implementations can import from
-# ``registry`` / ``videoencoder_base`` without circular issues). Adding a new
+# ``registry`` / ``base`` without circular issues). Adding a new
 # encoder = adding a new line here and a new file alongside.
 from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.flux_vae import FluxVAEVideoEncoder  # noqa: E402, F401
-from openwam.model.video_backbone.encoder.vjepa2 import VJEPA2VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: E402, F401
 from openwam.model.video_backbone.encoder.wan_vae import WanVideoVAEEncoder  # noqa: E402, F401

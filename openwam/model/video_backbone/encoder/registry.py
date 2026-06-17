@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder
+from openwam.model.video_backbone.encoder.base import VideoEncoder
 
 _VIDEO_ENCODER_REGISTRY: dict[str, type[VideoEncoder]] = {}
 

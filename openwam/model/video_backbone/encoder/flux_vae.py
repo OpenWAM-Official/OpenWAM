@@ -44,12 +44,12 @@ from einops import rearrange, repeat
 from PIL import Image
 from torch import Tensor
 
+from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.flux import (
     FluxVaeEncoderCore,
     convert_diffusers_encoder_sd,
 )
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
-from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
     def __init__(self, core: FluxVaeEncoderCore):
         super().__init__()
         self._core = core
-        self._spec = VideoEncoderSpec(
+        self._spec = VideoEncoderProperties(
             z_dim=int(core.z_dim),
             spatial_compression=int(core.spatial_compression),
             temporal_compression=4,
@@ -157,7 +157,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
         )
 
     @property
-    def spec(self) -> VideoEncoderSpec:
+    def spec(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames) -> Tensor:

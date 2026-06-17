@@ -30,7 +30,7 @@ import pytest
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-from openwam.model.video_backbone.encoder import VideoEncoder, VideoEncoderSpec
+from openwam.model.video_backbone.encoder import VideoEncoder, VideoEncoderProperties
 
 # ---------------------------------------------------------------------------
 # Local mock encoder — minimal concrete VideoEncoder, parameterizable spec.
@@ -47,10 +47,10 @@ class _MockEncoderBase(VideoEncoder):
 
     def __init__(self):
         super().__init__()
-        self._spec = VideoEncoderSpec(**self._SPEC_KWARGS)
+        self._spec = VideoEncoderProperties(**self._SPEC_KWARGS)
 
     @property
-    def spec(self) -> VideoEncoderSpec:
+    def spec(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames):

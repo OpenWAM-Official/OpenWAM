@@ -22,8 +22,8 @@ from einops import reduce, repeat
 from PIL import Image
 from torch import Tensor
 
+from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
-from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ class WanVideoVAEEncoder(VideoEncoder):
         # first-frame token; z_dim and upsampling_factor come from the loaded
         # weights so Wan2.1 (z=16, upsample=8) and Wan2.2 (z=48, upsample=16)
         # share this same wrapper.
-        self._spec = VideoEncoderSpec(
+        self._spec = VideoEncoderProperties(
             z_dim=int(vae.z_dim),
             spatial_compression=int(vae.upsampling_factor),
             temporal_compression=4,
@@ -112,7 +112,7 @@ class WanVideoVAEEncoder(VideoEncoder):
         )
 
     @property
-    def spec(self) -> VideoEncoderSpec:
+    def spec(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames) -> Tensor:

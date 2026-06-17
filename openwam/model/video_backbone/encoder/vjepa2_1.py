@@ -23,9 +23,9 @@ import torch.nn as nn
 from PIL import Image
 from torchvision import transforms as T
 
+from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
 from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION, SVAE, build_svae, load_svae
-from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # rebuild against the smaller dim.
         self._svae: SVAE | None = self._build_svae(svae_path, svae_target_dim, svae_config)
         effective_z_dim = self._svae.latent_dim if self._svae is not None else self._raw_embed_dim
-        self._spec = VideoEncoderSpec(
+        self._spec = VideoEncoderProperties(
             z_dim=int(effective_z_dim),
             spatial_compression=16,
             # Effective temporal compression of the encoder is 4 (matching
@@ -170,7 +170,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         return svae
 
     @property
-    def spec(self) -> VideoEncoderSpec:
+    def spec(self) -> VideoEncoderProperties:
         return self._spec
 
     @property
