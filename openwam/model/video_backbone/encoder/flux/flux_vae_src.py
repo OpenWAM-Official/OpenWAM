@@ -226,7 +226,7 @@ class FluxVaeEncoderCore(nn.Module):
             z_channels=z_channels,
         )
         self.ps = list(ps)
-        # spatial_compression is a single scalar (VideoEncoderSpec), so the pack
+        # spatial_compression is a single scalar (VideoEncoderProperties), so the pack
         # must be square — otherwise H and W would compress by different factors
         # and the scalar would silently describe only one axis.
         if self.ps[0] != self.ps[1]:
