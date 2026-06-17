@@ -118,7 +118,7 @@ def test_import_model_config():
 
 
 def test_import_video_backbone():
-    from openwam.model.video_backbone import WanVideoBackbone  # noqa: F401
+    from openwam.model.video_backbone import Wan21Backbone, Wan22Ti2vBackbone  # noqa: F401
     from openwam.model.video_backbone.wan.loader import load_wan_components  # noqa: F401
 
 

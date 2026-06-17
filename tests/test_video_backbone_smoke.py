@@ -77,20 +77,20 @@ def test_wan_video_backbone_is_ti2v():
     """_is_ti2v returns True when fuse_vae_embedding_in_latents is set."""
     from types import SimpleNamespace
 
-    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
+    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
 
     pipe_a = SimpleNamespace(
         dit=SimpleNamespace(seperated_timestep=True, fuse_vae_embedding_in_latents=True),
         use_unified_sequence_parallel=False,
     )
-    adapter_a = WanVideoBackbone(pipe_a)
+    adapter_a = Wan21Backbone(pipe_a)
     assert adapter_a._is_ti2v is True
 
     pipe_b = SimpleNamespace(
         dit=SimpleNamespace(seperated_timestep=False),
         use_unified_sequence_parallel=False,
     )
-    adapter_b = WanVideoBackbone(pipe_b)
+    adapter_b = Wan21Backbone(pipe_b)
     assert adapter_b._is_ti2v is False
 
 
@@ -117,7 +117,7 @@ def test_wan_videobackbone_needs_first_frame_skip_truth_table():
     """
     from types import SimpleNamespace
 
-    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
+    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
 
     def _make_adapter(*, ti2v=False, vace=False, image_input=False):
         pipe = SimpleNamespace(
@@ -129,7 +129,7 @@ def test_wan_videobackbone_needs_first_frame_skip_truth_table():
             vace=object() if vace else None,
             use_unified_sequence_parallel=False,
         )
-        return WanVideoBackbone(pipe)
+        return Wan21Backbone(pipe)
 
     assert _make_adapter(ti2v=True).needs_first_frame_skip is True
     # I2V: y side-channel conveys frame 0; latent[0] is fully noised on
@@ -170,7 +170,7 @@ def _build_tiny_wan_backbone(*, ti2v: bool):
     from types import SimpleNamespace
 
     from openwam.model.video_backbone.wan.models.dit import WanModel
-    from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
+    from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
 
     model = WanModel(
         dim=64,
@@ -193,7 +193,7 @@ def _build_tiny_wan_backbone(*, ti2v: bool):
         vace=None,
         use_unified_sequence_parallel=False,
     )
-    return WanVideoBackbone(pipe), model
+    return Wan21Backbone(pipe), model
 
 
 def test_force_per_token_t_mod_broadcast_shape():

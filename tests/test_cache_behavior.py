@@ -1,5 +1,5 @@
 """Unit tests for vace_cache / prompt_embed_cache in
-WanVideoBackbone.preprocess_input_for_inference.
+WanBackboneBase.preprocess_input_for_inference.
 
 The deploy method builds every conditioning signal with explicit helpers (no
 WanVideoPipeline unit-runner). The only cached quantity is the text embedding
@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import torch
 
 from openwam.model.inference_inputs import InferenceInputs
-from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
+from openwam.model.video_backbone.wanbackbone_base import WanBackboneBase
 
 # ---------------------------------------------------------------------------
 # Minimal mock infrastructure
@@ -107,7 +107,7 @@ class _MockWanVB:
 
     # --- real method under test (conditioning seams now in wan.conditioning) ---
     def preprocess_input_for_inference(self, inputs):
-        return WanVideoBackbone.preprocess_input_for_inference(self, inputs)
+        return WanBackboneBase.preprocess_input_for_inference(self, inputs)
 
 
 # ---------------------------------------------------------------------------

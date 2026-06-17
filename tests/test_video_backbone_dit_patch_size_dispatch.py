@@ -25,7 +25,7 @@ import torch
 
 from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoderSpec
 from openwam.model.video_backbone.wan.models.dit import WanModel
-from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
+from openwam.model.video_backbone.wan_videobackbone import Wan22Ti2vBackbone
 
 
 def _mock_encoder_with_patch(dit_patch_size: tuple[int, int, int]) -> SimpleNamespace:
@@ -49,7 +49,7 @@ def _build_backbone_with_patch(
     patch_size: tuple[int, int, int],
     *,
     ti2v: bool = False,
-) -> tuple[WanVideoBackbone, WanModel]:
+) -> tuple[Wan22Ti2vBackbone, WanModel]:
     """Tiny CPU backbone whose DiT patchifies at ``patch_size`` and whose
     adapter's ``_dit_patch_size`` matches via a mock external encoder.
 
@@ -79,7 +79,7 @@ def _build_backbone_with_patch(
         use_unified_sequence_parallel=False,
     )
     encoder = _mock_encoder_with_patch(patch_size)
-    return WanVideoBackbone(pipe, external_encoder=encoder), model
+    return Wan22Ti2vBackbone(pipe, external_encoder=encoder), model
 
 
 # H = W = 8 is divisible by every patch under test (2, 1, 4); F = 2 keeps

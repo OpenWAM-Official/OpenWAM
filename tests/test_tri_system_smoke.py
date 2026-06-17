@@ -16,7 +16,7 @@ from openwam.model.action_backbone.joint_action_dit import ActionDiT, ActionDiTS
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
 from openwam.model.video_backbone.videobackbone_base import BlockLoopState
 from openwam.model.video_backbone.wan.models.dit import DiTBlock
-from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone
+from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone
 from openwam.model.vlm_backbone.qwen3_vl import (
     Qwen3VLBackbone,
     UnderstandingExpert,
@@ -32,7 +32,7 @@ WAN22_TI2V_5B = os.environ.get("OPENWAM_WAN22_TI2V_5B", "/path/to/Wan2.2-TI2V-5B
 
 
 class _FakePipe:
-    """Minimal duck-typed pipeline for WanVideoBackbone.
+    """Minimal duck-typed pipeline for Wan21Backbone.
 
     Mirrors the shortcut in ``tests/test_video_backbone_consistency.py``:
     only ``dit`` is populated so ``WanVideoBackbone`` can run the block
@@ -66,7 +66,7 @@ def _make_tiny_wan_backbone(num_layers=2, dim=32, num_heads=4, ffn_dim=64):
             self.blocks = blocks
             self.head = nn.Identity()
 
-    return WanVideoBackbone(_FakePipe(_StubDit()))
+    return Wan21Backbone(_FakePipe(_StubDit()))
 
 
 def _make_tiny_video_state(dit, *, batch=2, grid_frames=1, grid_height=2, grid_width=3, dtype=torch.float32):

@@ -27,7 +27,8 @@ from openwam.model.video_backbone.videobackbone_base import BlockLoopState, Vide
 __all__ = [
     "BlockLoopState",
     "VideoBackbone",
-    "WanVideoBackbone",
+    "Wan22Ti2vBackbone",
+    "Wan21Backbone",
     "build_video_backbone",
     "register_video_backbone",
     "_VIDEO_BACKBONE_REGISTRY",
@@ -35,8 +36,8 @@ __all__ = [
 
 # Built-in registrations (kept at the bottom so the implementation can import
 # from ``registry`` / ``videobackbone_base`` without circular issues).
-from openwam.model.video_backbone.wan_videobackbone import WanVideoBackbone  # noqa: E402
+from openwam.model.video_backbone.wan_videobackbone import Wan21Backbone, Wan22Ti2vBackbone  # noqa: E402
 
-register_video_backbone("wan22_ti2v_5b")(WanVideoBackbone)
-register_video_backbone("wan21_vace_1_3b")(WanVideoBackbone)
-register_video_backbone("wan21_i2v_14b_480p")(WanVideoBackbone)
+register_video_backbone("wan22_ti2v_5b")(Wan22Ti2vBackbone)
+register_video_backbone("wan21_vace_1_3b")(Wan21Backbone)
+register_video_backbone("wan21_i2v_14b_480p")(Wan21Backbone)
