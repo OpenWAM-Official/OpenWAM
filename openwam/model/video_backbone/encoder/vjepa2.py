@@ -272,7 +272,7 @@ class VJEPA2VideoEncoder(VideoEncoder):
         preferred-with-fallback manifest resolution:
 
         1. ``<ckpt_dir>/manifest.json`` — written by
-           :meth:`copy_deploy_artifacts` at checkpoint save time. This
+           :meth:`save_deploy_assets` at checkpoint save time. This
            is the primary path that keeps the deploy host self-contained.
         2. ``<encoder_cfg.model_path>/manifest.json`` — second source
            used when ``<ckpt_dir>/manifest.json`` is unreachable (e.g.
@@ -371,7 +371,7 @@ class VJEPA2VideoEncoder(VideoEncoder):
             "hand-copy manifest.json into the checkpoint dir."
         )
 
-    def copy_deploy_artifacts(self, output_dir: str, cfg: Any) -> None:
+    def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
         """Copy ``manifest.json`` from ``encoder.model_path`` into
         ``<output_dir>/manifest.json`` so deploy is self-contained.
 
@@ -397,7 +397,7 @@ class VJEPA2VideoEncoder(VideoEncoder):
 
         if not model_path:
             logger.warning(
-                "VJEPA2VideoEncoder.copy_deploy_artifacts: cannot resolve "
+                "VJEPA2VideoEncoder.save_deploy_assets: cannot resolve "
                 "model.video_backbone.encoder.model_path from cfg; skipping "
                 "manifest copy. Deploy will fall back to encoder.model_path."
             )
@@ -406,7 +406,7 @@ class VJEPA2VideoEncoder(VideoEncoder):
         dst = os.path.join(output_dir, "manifest.json")
         if not os.path.isfile(src):
             logger.warning(
-                "VJEPA2VideoEncoder.copy_deploy_artifacts: manifest.json "
+                "VJEPA2VideoEncoder.save_deploy_assets: manifest.json "
                 "not found at %s; skipping copy. Deploy will fall back to "
                 "encoder.model_path.",
                 src,
@@ -419,7 +419,7 @@ class VJEPA2VideoEncoder(VideoEncoder):
             shutil.copyfile(src, dst)
         except OSError as e:
             logger.warning(
-                "VJEPA2VideoEncoder.copy_deploy_artifacts: copying %s -> %s "
+                "VJEPA2VideoEncoder.save_deploy_assets: copying %s -> %s "
                 "failed (%s); skipping. Deploy will fall back to encoder.model_path.",
                 src,
                 dst,
@@ -427,7 +427,7 @@ class VJEPA2VideoEncoder(VideoEncoder):
             )
             return
         logger.info(
-            "VJEPA2VideoEncoder.copy_deploy_artifacts: copied %s -> %s",
+            "VJEPA2VideoEncoder.save_deploy_assets: copied %s -> %s",
             src,
             dst,
         )

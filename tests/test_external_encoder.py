@@ -688,7 +688,7 @@ def test_C13d_reinit_with_external_encoder_requires_dit_patch_size():
 
 def test_C14_wan_save_deploy_assets_forwards_to_external_encoder(tmp_path):
     """``WanVideoBackbone.save_deploy_assets`` must forward to the external
-    encoder's ``copy_deploy_artifacts`` hook so V-JEPA's ``manifest.json`` lands
+    encoder's ``save_deploy_assets`` hook so V-JEPA's ``manifest.json`` lands
     in the checkpoint dir.
 
     The Wan spec/tokenizer step inside the same method is a no-op here because
@@ -705,7 +705,7 @@ def test_C14_wan_save_deploy_assets_forwards_to_external_encoder(tmp_path):
             super().__init__()
             self.calls: list = []
 
-        def copy_deploy_artifacts(self, output_dir, cfg):
+        def save_deploy_assets(self, output_dir, cfg):
             self.calls.append((output_dir, cfg))
 
     pipe = _FakePipe()
@@ -2644,7 +2644,7 @@ def test_V17_vjepa21_from_skeleton_no_manifest_anywhere(tmp_path):
     assert str(encoder_src) in msg, f"encoder.model_path missing from error: {msg}"
 
 
-def test_V18_vjepa21_copy_deploy_artifacts_copies_manifest(tmp_path, monkeypatch):
+def test_V18_vjepa21_save_deploy_assets_copies_manifest(tmp_path, monkeypatch):
     """Training-side hook copies ``<encoder.model_path>/manifest.json`` into
     ``<output_dir>/manifest.json``. New checkpoints saved after this change
     are self-contained.
@@ -2668,14 +2668,14 @@ def test_V18_vjepa21_copy_deploy_artifacts_copies_manifest(tmp_path, monkeypatch
     cfg = OmegaConf.create(
         {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(encoder_src)}}}}
     )
-    enc.copy_deploy_artifacts(str(output_dir), cfg)
+    enc.save_deploy_assets(str(output_dir), cfg)
 
     dst = output_dir / "manifest.json"
     assert dst.exists()
     assert _json.loads(dst.read_text()) == manifest_payload
 
 
-def test_V19_vjepa21_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_path, caplog):
+def test_V19_vjepa21_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_path, caplog):
     """The hook must NEVER raise on missing source — a copy failure must
     not crash an otherwise-good training run. Missing cfg / missing source
     file log a warning and return; deploy then falls back to
@@ -2692,7 +2692,7 @@ def test_V19_vjepa21_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_
 
     # cfg without model.video_backbone.encoder → warning + no-op.
     with caplog.at_level(logging.WARNING):
-        enc.copy_deploy_artifacts(str(output_dir), cfg={})
+        enc.save_deploy_assets(str(output_dir), cfg={})
     assert not (output_dir / "manifest.json").exists()
     assert any("model_path" in r.message for r in caplog.records)
 
@@ -2706,13 +2706,13 @@ def test_V19_vjepa21_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_
         {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(empty_src)}}}}
     )
     with caplog.at_level(logging.WARNING):
-        enc.copy_deploy_artifacts(str(output_dir), cfg)
+        enc.save_deploy_assets(str(output_dir), cfg)
     assert not (output_dir / "manifest.json").exists()
     assert any("manifest.json" in r.message for r in caplog.records)
 
 
-def test_V20_vjepa21_copy_deploy_artifacts_io_error_does_not_crash(tmp_path, caplog, monkeypatch):
-    """``copy_deploy_artifacts`` must NEVER raise on IO failure either —
+def test_V20_vjepa21_save_deploy_assets_io_error_does_not_crash(tmp_path, caplog, monkeypatch):
+    """``save_deploy_assets`` must NEVER raise on IO failure either —
     permission denied / disk full / disappearing mount must collapse to a
     warning + return so the trainer's safetensors save isn't lost.
 
@@ -2740,7 +2740,7 @@ def test_V20_vjepa21_copy_deploy_artifacts_io_error_does_not_crash(tmp_path, cap
     monkeypatch.setattr(shutil, "copyfile", _boom)
     with caplog.at_level(logging.WARNING):
         # Must NOT raise — assertion is "we got here".
-        enc.copy_deploy_artifacts(str(output_dir), cfg)
+        enc.save_deploy_assets(str(output_dir), cfg)
     assert not (output_dir / "manifest.json").exists()
     formatted = [r.getMessage() for r in caplog.records]
     assert any("failed" in m and "simulated" in m for m in formatted), (
@@ -3208,7 +3208,7 @@ def _build_vjepa2_manifest_payload() -> dict:
     }
 
 
-def test_W15_vjepa2_copy_deploy_artifacts_copies_manifest(tmp_path):
+def test_W15_vjepa2_save_deploy_assets_copies_manifest(tmp_path):
     """V-JEPA 2 mirror of test_V18: training-side hook copies
     ``<encoder.model_path>/manifest.json`` into ``<output_dir>/manifest.json``
     so new checkpoints are self-contained on deploy."""
@@ -3228,14 +3228,14 @@ def test_W15_vjepa2_copy_deploy_artifacts_copies_manifest(tmp_path):
     cfg = OmegaConf.create(
         {"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(encoder_src)}}}}
     )
-    enc.copy_deploy_artifacts(str(output_dir), cfg)
+    enc.save_deploy_assets(str(output_dir), cfg)
 
     dst = output_dir / "manifest.json"
     assert dst.exists()
     assert _json.loads(dst.read_text()) == manifest_payload
 
 
-def test_W16_vjepa2_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_path, caplog):
+def test_W16_vjepa2_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_path, caplog):
     """V-JEPA 2 mirror of test_V19: missing cfg / missing source file must
     log a warning and skip the copy rather than raising. A copy hiccup
     cannot crash an otherwise-good training run; deploy then falls back
@@ -3250,7 +3250,7 @@ def test_W16_vjepa2_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_p
 
     # cfg without model.video_backbone.encoder → warning + no-op.
     with caplog.at_level(logging.WARNING):
-        enc.copy_deploy_artifacts(str(output_dir), cfg={})
+        enc.save_deploy_assets(str(output_dir), cfg={})
     assert not (output_dir / "manifest.json").exists()
     assert any("model_path" in r.message for r in caplog.records)
 
@@ -3260,12 +3260,12 @@ def test_W16_vjepa2_copy_deploy_artifacts_missing_cfg_is_warning_not_raise(tmp_p
     empty_src.mkdir()
     cfg = OmegaConf.create({"model": {"video_backbone": {"encoder": {"name": "vjepa2", "model_path": str(empty_src)}}}})
     with caplog.at_level(logging.WARNING):
-        enc.copy_deploy_artifacts(str(output_dir), cfg)
+        enc.save_deploy_assets(str(output_dir), cfg)
     assert not (output_dir / "manifest.json").exists()
     assert any("manifest.json" in r.message for r in caplog.records)
 
 
-def test_W17_vjepa2_copy_deploy_artifacts_io_error_does_not_crash(tmp_path, caplog, monkeypatch):
+def test_W17_vjepa2_save_deploy_assets_io_error_does_not_crash(tmp_path, caplog, monkeypatch):
     """V-JEPA 2 mirror of test_V20: PermissionError / ENOSPC / disappearing-
     mount OSError during the manifest copy must collapse to a warning +
     return so the trainer's safetensors save isn't lost."""
@@ -3291,7 +3291,7 @@ def test_W17_vjepa2_copy_deploy_artifacts_io_error_does_not_crash(tmp_path, capl
     monkeypatch.setattr(shutil, "copyfile", _boom)
     with caplog.at_level(logging.WARNING):
         # Must NOT raise — assertion is "we got here".
-        enc.copy_deploy_artifacts(str(output_dir), cfg)
+        enc.save_deploy_assets(str(output_dir), cfg)
     assert not (output_dir / "manifest.json").exists()
     formatted = [r.getMessage() for r in caplog.records]
     assert any("failed" in m and "simulated" in m for m in formatted), (
@@ -3314,3 +3314,98 @@ def test_W18_vjepa_target_temporal_pool_stride_constant_pinned():
 
     assert VJEPA21VideoEncoder._TARGET_TEMPORAL_POOL_STRIDE == 2
     assert VJEPA2VideoEncoder._TARGET_TEMPORAL_POOL_STRIDE == 2
+
+
+def test_X1_flux_vae_save_deploy_assets_self_contained(tmp_path):
+    """``FluxVAEVideoEncoder.save_deploy_assets`` copies the FLUX.2 VAE
+    config.json into ``<ckpt>/flux_vae/config.json``, and ``_resolve_config_dir``
+    then prefers that checkpoint-local copy over ``encoder.model_path`` — so
+    deploy is self-contained (no original FLUX dir needed). Mirrors V-JEPA's
+    manifest self-containment (test_V18).
+
+    Exercises the save/resolve plumbing without building a real FLUX core
+    (``save_deploy_assets`` / ``_resolve_config_dir`` read no instance state),
+    so no FLUX weights are needed on disk.
+    """
+    from omegaconf import OmegaConf
+
+    from openwam.model.video_backbone.encoder.flux_vae import _FLUX_CKPT_SUBDIR, FluxVAEVideoEncoder
+
+    src = tmp_path / "flux_src"
+    src.mkdir()
+    (src / "config.json").write_text('{"block_out_channels": [128], "latent_channels": 32}')
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    cfg = OmegaConf.create({"model": {"video_backbone": {"encoder": {"model_path": str(src)}}}})
+
+    # Bypass core build — save_deploy_assets / _resolve_config_dir read no self state.
+    enc = FluxVAEVideoEncoder.__new__(FluxVAEVideoEncoder)
+    enc.save_deploy_assets(str(ckpt), cfg)
+
+    # config landed in the checkpoint-local namespace
+    assert (ckpt / _FLUX_CKPT_SUBDIR / "config.json").is_file()
+    # resolve prefers the ckpt copy even when model_path is unreachable -> self-contained
+    assert FluxVAEVideoEncoder._resolve_config_dir(str(ckpt), {"model_path": "/nonexistent"}) == str(
+        ckpt / _FLUX_CKPT_SUBDIR
+    )
+    # fallback to model_path when the ckpt carries no sidecar
+    assert FluxVAEVideoEncoder._resolve_config_dir(None, {"model_path": str(src)}) == str(src)
+    # neither source reachable -> raise
+    with pytest.raises(FileNotFoundError):
+        FluxVAEVideoEncoder._resolve_config_dir(None, {"model_path": "/nonexistent"})
+
+
+def test_X2_flux_vae_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_path):
+    """``save_deploy_assets`` must never raise on an unresolvable cfg / missing
+    config — it logs and skips, and deploy falls back to ``encoder.model_path``.
+    """
+    from openwam.model.video_backbone.encoder.flux_vae import FluxVAEVideoEncoder
+
+    enc = FluxVAEVideoEncoder.__new__(FluxVAEVideoEncoder)
+    enc.save_deploy_assets(str(tmp_path), cfg={})  # no encoder.model_path -> warn + skip
+    assert not (tmp_path / "flux_vae").exists()
+
+
+def test_Y1_dinov3_save_deploy_assets_self_contained(tmp_path):
+    """``DinoV3VideoEncoder.save_deploy_assets`` copies the DINOv3 ``config.json``
+    into ``<ckpt>/dinov3/config.json``, and ``_resolve_config_dir`` then prefers
+    that checkpoint-local copy over ``encoder.model_path`` — so deploy is
+    self-contained (native DINOv3 needs only config.json; the model class comes
+    from the installed transformers library, not bundled modeling code).
+    """
+    from omegaconf import OmegaConf
+
+    from openwam.model.video_backbone.encoder.dinov3 import _DINOV3_CKPT_SUBDIR, DinoV3VideoEncoder
+
+    src = tmp_path / "dinov3_src"
+    src.mkdir()
+    (src / "config.json").write_text('{"model_type": "dinov3_vit", "hidden_size": 384, "patch_size": 16}')
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    cfg = OmegaConf.create({"model": {"video_backbone": {"encoder": {"model_path": str(src)}}}})
+
+    # Bypass ViT build — save_deploy_assets / _resolve_config_dir read no self state.
+    enc = DinoV3VideoEncoder.__new__(DinoV3VideoEncoder)
+    enc.save_deploy_assets(str(ckpt), cfg)
+
+    assert (ckpt / _DINOV3_CKPT_SUBDIR / "config.json").is_file()
+    # resolve prefers the ckpt copy even when model_path is unreachable -> self-contained
+    assert DinoV3VideoEncoder._resolve_config_dir(str(ckpt), {"model_path": "/nonexistent"}) == str(
+        ckpt / _DINOV3_CKPT_SUBDIR
+    )
+    # fallback to model_path when the ckpt carries no sidecar
+    assert DinoV3VideoEncoder._resolve_config_dir(None, {"model_path": str(src)}) == str(src)
+    # neither source reachable -> raise
+    with pytest.raises(FileNotFoundError):
+        DinoV3VideoEncoder._resolve_config_dir(None, {"model_path": "/nonexistent"})
+
+
+def test_Y2_dinov3_save_deploy_assets_missing_cfg_is_warning_not_raise(tmp_path):
+    """``save_deploy_assets`` must never raise on an unresolvable cfg / missing
+    config — it logs and skips, and deploy falls back to ``encoder.model_path``.
+    """
+    from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder
+
+    enc = DinoV3VideoEncoder.__new__(DinoV3VideoEncoder)
+    enc.save_deploy_assets(str(tmp_path), cfg={})  # no encoder.model_path -> warn + skip
+    assert not (tmp_path / "dinov3").exists()

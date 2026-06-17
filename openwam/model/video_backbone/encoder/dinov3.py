@@ -49,6 +49,11 @@ from torch import Tensor
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
 from openwam.model.video_backbone.encoder.videoencoder_base import VideoEncoder, VideoEncoderSpec
 
+# Checkpoint-local namespace for the DINOv3 HF config, so a self-contained deploy
+# reads ``<ckpt>/dinov3/config.json`` instead of needing the original
+# ``encoder.model_path`` reachable (mirrors flux_vae / V-JEPA's sidecar).
+_DINOV3_CKPT_SUBDIR = "dinov3"
+
 logger = logging.getLogger(__name__)
 
 
@@ -253,11 +258,12 @@ class DinoV3VideoEncoder(VideoEncoder):
         if not os.path.isdir(model_path):
             raise FileNotFoundError(f"encoder model_path is not a directory: {model_path}")
 
-        # DINOv3 is not in transformers<4.52 stock; rely on the snapshot's
-        # bundled modeling code via trust_remote_code. AutoConfig is loaded
-        # explicitly so the structural fields we care about (embed_dim,
-        # patch_size, register tokens) are read from the on-disk config and
-        # never from yaml.
+        # AutoConfig is loaded explicitly so the structural fields (embed_dim,
+        # patch_size, register tokens) are read from the on-disk config, never
+        # from yaml. ``trust_remote_code=True`` is a no-op for native-format
+        # DINOv3 (``model_type: dinov3_vit``, no ``auto_map`` → built-in
+        # ``DINOv3ViTModel`` from transformers); it still supports older
+        # snapshots that ship custom modeling code via ``auto_map``.
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         vit = AutoModel.from_pretrained(
             model_path,
@@ -292,47 +298,40 @@ class DinoV3VideoEncoder(VideoEncoder):
         encoder_cfg: Any = None,
         ckpt_dir: str | None = None,
     ) -> "DinoV3VideoEncoder":
-        """Deploy-time zero-weight ViT shell, sized by ``encoder.model_path/config.json``.
+        """Deploy-time zero-weight ViT shell, sized by the DINOv3 HF ``config.json``.
 
-        Uses ``AutoModel.from_config`` (vs. ``from_pretrained``) so no weights
-        are loaded; the architecture's strict ``load_checkpoint`` fills them in
-        from the saved safetensors. ``components_entry`` and ``ckpt_dir`` are
-        accepted for ABC signature parity but unused: unlike the V-JEPA
-        path there is no manifest sidecar — the deploy host must therefore be
-        able to read the original ``encoder.model_path`` directory in full,
-        not just ``config.json``. Because both this method and
-        :meth:`from_pretrained` pass ``trust_remote_code=True``, the bundled
-        ``modeling_*.py`` files next to ``config.json`` are also required at
-        deploy time. Structural fields (``hidden_size`` / ``patch_size`` /
+        No weights are loaded here (``AutoModel.from_config``) — the
+        architecture's strict ``load_checkpoint`` fills them in. ``components_entry``
+        is ignored (its ``vae`` entry is the Wan VAE placeholder). The config is
+        resolved preferred-with-fallback, mirroring flux_vae / V-JEPA:
+
+        1. ``<ckpt_dir>/dinov3/config.json`` — written by :meth:`save_deploy_assets`
+           at save time (self-contained deploy).
+        2. ``<encoder.model_path>/config.json`` — fallback when the checkpoint was
+           copied without its sidecar.
+
+        For native-format DINOv3 (``model_type: dinov3_vit``, no ``auto_map``,
+        ``DINOv3ViTModel`` built into transformers) the config alone is enough and
+        ``trust_remote_code=True`` is a no-op. A snapshot whose config carries an
+        ``auto_map`` pointing at bundled ``modeling_*.py`` would additionally need
+        those files reachable — config-only self-containment does not cover that
+        rarer case. Structural fields (``hidden_size`` / ``patch_size`` /
         ``num_register_tokens``) come from the HF config.
         """
         from transformers import AutoConfig, AutoModel
 
-        model_path = None
-        if encoder_cfg is not None:
-            if isinstance(encoder_cfg, dict):
-                model_path = encoder_cfg.get("model_path")
-            else:
-                model_path = getattr(encoder_cfg, "model_path", None)
-        if not model_path or not os.path.isdir(str(model_path)):
-            raise FileNotFoundError(
-                "DinoV3VideoEncoder.from_skeleton requires encoder.model_path "
-                "to be a readable directory in the deploy-side "
-                f"cfg.video_backbone.encoder block; got {model_path!r}."
-            )
-
-        config = AutoConfig.from_pretrained(str(model_path), trust_remote_code=True)
+        config_dir = cls._resolve_config_dir(ckpt_dir, encoder_cfg)
+        config = AutoConfig.from_pretrained(config_dir, trust_remote_code=True)
         with torch.device(device):
             vit = AutoModel.from_config(config, trust_remote_code=True)
         vit = vit.to(dtype=torch.bfloat16).eval()
 
-        embed_dim, patch_size, num_register_tokens = cls._extract_structural_fields(config, str(model_path))
+        embed_dim, patch_size, num_register_tokens = cls._extract_structural_fields(config, config_dir)
 
         logger.info(
             "DinoV3VideoEncoder.from_skeleton: instantiated from %s "
-            "(embed_dim=%d, patch_size=%d, register_tokens=%d) — "
-            "weights pending checkpoint load",
-            model_path,
+            "(embed_dim=%d, patch_size=%d, register_tokens=%d) — weights pending checkpoint load",
+            config_dir,
             embed_dim,
             patch_size,
             num_register_tokens,
@@ -343,6 +342,88 @@ class DinoV3VideoEncoder(VideoEncoder):
             patch_size=patch_size,
             num_register_tokens=num_register_tokens,
         )
+
+    @staticmethod
+    def _resolve_config_dir(ckpt_dir: str | None, encoder_cfg: Any) -> str:
+        """Pick the dir holding a readable DINOv3 ``config.json`` at deploy time.
+        Preferred: ``<ckpt_dir>/dinov3`` (written by :meth:`save_deploy_assets`);
+        fallback: ``<encoder.model_path>``.
+        """
+        ckpt_cfg = os.path.join(ckpt_dir, _DINOV3_CKPT_SUBDIR, "config.json") if ckpt_dir else None
+        if ckpt_cfg and os.path.isfile(ckpt_cfg):
+            return os.path.join(str(ckpt_dir), _DINOV3_CKPT_SUBDIR)
+
+        fallback_dir = None
+        if encoder_cfg is not None:
+            if isinstance(encoder_cfg, dict):
+                fallback_dir = encoder_cfg.get("model_path")
+            else:
+                fallback_dir = getattr(encoder_cfg, "model_path", None)
+        if fallback_dir and os.path.isfile(os.path.join(str(fallback_dir), "config.json")):
+            return str(fallback_dir)
+
+        fallback_cfg = os.path.join(str(fallback_dir), "config.json") if fallback_dir else None
+        raise FileNotFoundError(
+            "DinoV3VideoEncoder.from_skeleton: no readable config.json. Tried "
+            f"ckpt_dir={ckpt_cfg!r} and encoder.model_path={fallback_cfg!r}. Either "
+            "re-save the checkpoint with the current code (which writes "
+            "dinov3/config.json into ckpt_dir), or make encoder.model_path reachable."
+        )
+
+    def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
+        """Copy the DINOv3 HF ``config.json`` into ``<output_dir>/dinov3/config.json``
+        so deploy is self-contained.
+
+        Best-effort: a missing source / unresolvable cfg / IO error logs a warning
+        and skips — :meth:`from_skeleton` then falls back to ``encoder.model_path``.
+        Never raises (a copy hiccup must not crash an otherwise-good checkpoint
+        save), mirroring flux_vae / V-JEPA 2.
+        """
+        import shutil
+
+        model_path = None
+        try:
+            enc_cfg = cfg.model.video_backbone.encoder
+            if isinstance(enc_cfg, dict):
+                model_path = enc_cfg.get("model_path")
+            else:
+                model_path = getattr(enc_cfg, "model_path", None)
+        except Exception:
+            # cfg shape (dict / DictConfig / mock) varies; the contract forbids
+            # raising, so anything that blocks reading model_path = skip + fall back.
+            pass
+
+        if not model_path:
+            logger.warning(
+                "DinoV3VideoEncoder.save_deploy_assets: cannot resolve "
+                "model.video_backbone.encoder.model_path from cfg; skipping config "
+                "copy. Deploy will fall back to encoder.model_path."
+            )
+            return
+        src = os.path.join(str(model_path), "config.json")
+        dst = os.path.join(output_dir, _DINOV3_CKPT_SUBDIR, "config.json")
+        if not os.path.isfile(src):
+            logger.warning(
+                "DinoV3VideoEncoder.save_deploy_assets: config.json not found at %s; "
+                "skipping copy. Deploy will fall back to encoder.model_path.",
+                src,
+            )
+            return
+        if os.path.abspath(src) == os.path.abspath(dst):
+            return
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(src, dst)
+        except OSError as e:
+            logger.warning(
+                "DinoV3VideoEncoder.save_deploy_assets: copying %s -> %s failed (%s); "
+                "skipping. Deploy will fall back to encoder.model_path.",
+                src,
+                dst,
+                e,
+            )
+            return
+        logger.info("DinoV3VideoEncoder.save_deploy_assets: copied %s -> %s", src, dst)
 
 
 __all__ = ["DinoV3VideoEncoder"]

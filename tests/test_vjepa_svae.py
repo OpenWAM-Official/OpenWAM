@@ -111,7 +111,7 @@ def test_S7_deploy_sidecar_write_and_read(tmp_path):
     cfg = SimpleNamespace(
         model=SimpleNamespace(video_backbone=SimpleNamespace(encoder=SimpleNamespace(model_path=None)))
     )
-    red.copy_deploy_artifacts(str(out), cfg)
+    red.save_deploy_assets(str(out), cfg)
 
     sidecar = out / "svae_config.json"
     assert sidecar.exists()

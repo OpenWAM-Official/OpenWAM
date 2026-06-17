@@ -206,7 +206,7 @@ class VideoEncoder(ABC, nn.Module):
           by the saved Wan ``components`` entry (e.g. :class:`WanVideoVAEEncoder`).
         * ``ckpt_dir`` — the deploy-side checkpoint directory. Use this for
           per-encoder structural artifacts that the training-side
-          :meth:`copy_deploy_artifacts` hook wrote next to the safetensors.
+          :meth:`save_deploy_assets` hook wrote next to the safetensors.
           Two flavors are in use today:
 
             - **Preferred-with-fallback** (V-JEPA 2.1): the encoder reads
@@ -240,10 +240,10 @@ class VideoEncoder(ABC, nn.Module):
     # Training-side deploy-artifact copy
     # ------------------------------------------------------------------
 
-    def copy_deploy_artifacts(self, output_dir: str, cfg: Any) -> None:
+    def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
         """Copy per-encoder deploy artifacts into the checkpoint directory.
 
-        Called by the host backbone's ``copy_deploy_artifacts`` after each
+        Called by the host backbone's ``save_deploy_assets`` after each
         checkpoint save so deploy is self-contained — the deploy host no
         longer needs ``encoder.model_path`` to be reachable. The default is
         a no-op for encoders whose structural state is fully captured by

@@ -937,7 +937,7 @@ class WanVideoBackbone(VideoBackbone):
 
         save_video_backbone_deploy_assets(output_dir, cfg)
         if self.video_encoder is not None:
-            self.video_encoder.copy_deploy_artifacts(output_dir, cfg)
+            self.video_encoder.save_deploy_assets(output_dir, cfg)
 
     # ================================================================
     # Deploy-facing public methods (not in ABC — Wan-specific)

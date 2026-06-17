@@ -160,6 +160,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         cfg: Architecture-specific configuration (OmegaConf DictConfig or dict).
     """
 
+    # --- Construction & config resolution ---
+
     def __init__(self, cfg=None):
         super().__init__()
         self.cfg = cfg
@@ -271,7 +273,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 # is plumbed onto ``vb_cfg`` by model_loader and forwarded
                 # to :meth:`VideoEncoder.from_skeleton` so each encoder can
                 # consult the checkpoint-local artifacts that its
-                # :meth:`VideoEncoder.copy_deploy_artifacts` wrote at save
+                # :meth:`VideoEncoder.save_deploy_assets` wrote at save
                 # time. For example, V-JEPA 2.1 prefers
                 # ``<ckpt_dir>/manifest.json`` with a fallback to
                 # ``encoder.model_path``. The user-side weight directory does
@@ -576,6 +578,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             return vb_dim
         return int(default)
 
+    # --- Backbone composition ---
+
     @property
     def backbones(self) -> dict[str, nn.Module]:
         """All backbone modules owned by this architecture.
@@ -630,15 +634,24 @@ class BaseWAMArchitecture(ABC, nn.Module):
         return getattr(self.action_backbone, "expert_layers", ()) if self.action_backbone is not None else ()
 
     @property
-    def trainable_action_module(self) -> Optional[nn.Module]:
-        """The nn.Module whose parameters are trained as the action model."""
-        return self.action_backbone
-
-    @property
     def uses_proprioception(self) -> bool:
         return bool(getattr(self, "_use_proprioception_context", False)) or (
             self.action_backbone is not None and self.action_backbone.uses_proprioception
         )
+
+    @property
+    def action_mean(self) -> Tensor:
+        if self.action_backbone is not None:
+            return self.action_backbone.action_mean
+        return torch.zeros(self.action_dim)
+
+    @property
+    def action_std(self) -> Tensor:
+        if self.action_backbone is not None:
+            return self.action_backbone.action_std
+        return torch.ones(self.action_dim)
+
+    # --- Proprio-as-context conditioning ---
 
     def _init_proprio_context(self, cfg, *, text_dim: int = 4096) -> None:
         """Initialize FastWAM-style proprio-as-context conditioning."""
@@ -748,18 +761,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # Keep the original text seq_lens and make context_mask authoritative.
         return updated
 
-    @property
-    def action_mean(self) -> Tensor:
-        if self.action_backbone is not None:
-            return self.action_backbone.action_mean
-        return torch.zeros(self.action_dim)
-
-    @property
-    def action_std(self) -> Tensor:
-        if self.action_backbone is not None:
-            return self.action_backbone.action_std
-        return torch.ones(self.action_dim)
-
     # --- Device / dtype (top-level authority) ---
 
     @property
@@ -779,6 +780,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             proprio_encoder.to(dtype=dtype, device=device)
         for bb in self.backbones.values():
             bb.set_dtype_device(dtype, device)
+
+    # --- Normalizer (deployment) ---
 
     def attach_normalizer(self, normalizer) -> None:
         """Attach (or clear) an action normalizer used by ``generate``.

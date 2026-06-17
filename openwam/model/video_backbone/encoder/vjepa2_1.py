@@ -457,7 +457,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         Manifest source priority (and the rationale for each branch):
 
         1. ``<ckpt_dir>/manifest.json`` — written by
-           :meth:`copy_deploy_artifacts` at checkpoint save time. The
+           :meth:`save_deploy_assets` at checkpoint save time. The
            preferred branch for self-contained deploy: the deploy host
            needs to read the checkpoint dir anyway, and the manifest is
            a small (<1 KB) JSON.
@@ -633,7 +633,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             "hand-copy manifest.json into the checkpoint dir."
         )
 
-    def copy_deploy_artifacts(self, output_dir: str, cfg: Any) -> None:
+    def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
         """Copy ``manifest.json`` from ``encoder.model_path`` into
         ``<output_dir>/manifest.json`` so deploy is self-contained.
 
@@ -647,7 +647,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         then falls back to the legacy ``encoder.model_path`` branch in
         :meth:`from_skeleton`).
 
-        IO failure handling matters because :meth:`copy_deploy_artifacts`
+        IO failure handling matters because :meth:`save_deploy_assets`
         runs inside the trainer's checkpoint save flow — losing the
         safetensors save over a manifest-copy ``PermissionError`` /
         ``ENOSPC`` / disappearing-mount ``OSError`` would be a strict
@@ -658,7 +658,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # The S-VAE sidecar has NO deploy-time fallback (unlike the manifest,
         # which can fall back to ``encoder.model_path``): without it
         # ``from_skeleton`` cannot size the reducer and the strict checkpoint
-        # load fails. ``copy_deploy_artifacts`` runs once at run start-up, before
+        # load fails. ``save_deploy_assets`` runs once at run start-up, before
         # any weights are saved, so letting a write failure raise here fails the
         # run fast rather than silently producing checkpoints that cannot be
         # deployed. (It is a rank-0-only start-up step, so the raise surfaces on
@@ -682,7 +682,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
 
         if not model_path:
             logger.warning(
-                "VJEPA21VideoEncoder.copy_deploy_artifacts: cannot resolve "
+                "VJEPA21VideoEncoder.save_deploy_assets: cannot resolve "
                 "model.video_backbone.encoder.model_path from cfg; skipping "
                 "manifest copy. Deploy will fall back to encoder.model_path."
             )
@@ -691,7 +691,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         dst = os.path.join(output_dir, "manifest.json")
         if not os.path.isfile(src):
             logger.warning(
-                "VJEPA21VideoEncoder.copy_deploy_artifacts: manifest.json "
+                "VJEPA21VideoEncoder.save_deploy_assets: manifest.json "
                 "not found at %s; skipping copy. Deploy will fall back to "
                 "encoder.model_path.",
                 src,
@@ -704,7 +704,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             shutil.copyfile(src, dst)
         except OSError as e:
             logger.warning(
-                "VJEPA21VideoEncoder.copy_deploy_artifacts: copying %s -> %s "
+                "VJEPA21VideoEncoder.save_deploy_assets: copying %s -> %s "
                 "failed (%s); skipping. Deploy will fall back to encoder.model_path.",
                 src,
                 dst,
@@ -712,7 +712,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             )
             return
         logger.info(
-            "VJEPA21VideoEncoder.copy_deploy_artifacts: copied %s -> %s",
+            "VJEPA21VideoEncoder.save_deploy_assets: copied %s -> %s",
             src,
             dst,
         )
@@ -720,7 +720,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
     def _write_svae_sidecar(self, output_dir: str) -> None:
         """Write the attached S-VAE's structural config to
         ``<output_dir>/svae_config.json`` so deploy can rebuild a same-shape
-        shell. Raises on IO failure — see :meth:`copy_deploy_artifacts` for why
+        shell. Raises on IO failure — see :meth:`save_deploy_assets` for why
         this one must abort rather than warn-and-skip.
 
         The payload is versioned with the same ``_CHECKPOINT_FORMAT_VERSION`` as
@@ -733,12 +733,12 @@ class VJEPA21VideoEncoder(VideoEncoder):
         os.makedirs(output_dir, exist_ok=True)
         with open(dst, "w") as f:
             json.dump({"format_version": _CHECKPOINT_FORMAT_VERSION, "model_config": self._svae.config_dict()}, f)
-        logger.info("VJEPA21VideoEncoder.copy_deploy_artifacts: wrote S-VAE sidecar %s", dst)
+        logger.info("VJEPA21VideoEncoder.save_deploy_assets: wrote S-VAE sidecar %s", dst)
 
     @staticmethod
     def _read_svae_sidecar(ckpt_dir: str | None) -> dict | None:
         """Read ``<ckpt_dir>/svae_config.json`` (written by
-        :meth:`copy_deploy_artifacts`). Returns the structural ``model_config``
+        :meth:`save_deploy_assets`). Returns the structural ``model_config``
         dict when the checkpoint carried an S-VAE reducer, else ``None`` (reducer
         disabled). There is intentionally no ``encoder.model_path`` fallback:
         the sidecar is checkpoint-local and self-contained by construction.
