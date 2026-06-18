@@ -14,14 +14,14 @@ from omegaconf import OmegaConf
 
 from openwam.model.action_backbone.joint_action_dit import ActionDiT, ActionDiTState
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
+from openwam.model.architectures.tri_system.und_expert import (
+    UnderstandingExpert,
+    UnderstandingExpertConfig,
+)
 from openwam.model.video_backbone.base import BlockLoopState
 from openwam.model.video_backbone.wan.models.dit import DiTBlock
 from openwam.model.video_backbone.wan_backbone import Wan21
 from openwam.model.vlm_backbone import Qwen3VLBackbone
-from openwam.model.vlm_backbone.qwen3_vl import (
-    UnderstandingExpert,
-    UnderstandingExpertConfig,
-)
 
 WAN22_TI2V_5B = os.environ.get("OPENWAM_WAN22_TI2V_5B", "/path/to/Wan2.2-TI2V-5B")
 
