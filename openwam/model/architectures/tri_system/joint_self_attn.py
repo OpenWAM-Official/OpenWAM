@@ -210,7 +210,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         return None
 
     def _collate_vlm_inputs(self, items: list[dict]) -> dict[str, torch.Tensor]:
-        return self.vlm_backbone._batch_vlm_inputs(items)  # noqa: SLF001 - architecture owns this integration.
+        return self.vlm_backbone.batch_vlm_inputs(items)
 
     @torch.no_grad()
     def prepare_inputs(self, batch: list[dict]) -> dict:

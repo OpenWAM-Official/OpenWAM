@@ -8,8 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from openwam.model.vlm_backbone.base import VlmBackbone
 
-class Qwen3VLBackbone(nn.Module):
+
+class Qwen3VLBackbone(VlmBackbone):
     def __init__(
         self,
         checkpoint_path: str,
@@ -58,11 +60,6 @@ class Qwen3VLBackbone(nn.Module):
     def hidden_size(self) -> int:
         return int(self.vlm_model.config.text_config.hidden_size)
 
-    def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
-        """Match the lightweight backbone interface used by BaseWAMArchitecture."""
-        self.dtype = dtype
-        self.to(dtype=dtype, device=device)
-
     def get_submodule(self, name: str) -> nn.Module | None:
         return getattr(self, name, None)
 
@@ -92,13 +89,11 @@ class Qwen3VLBackbone(nn.Module):
                 ],
             }
         ]
-        if hasattr(self.processor, "apply_chat_template"):
-            return self.processor.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        return "<image>" + prompt
+        return self.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
 
     def prepare_vlm_inputs(self, prompts: list[str], images: list[Any]) -> dict[str, torch.Tensor]:
         """Build Qwen3-VL processor inputs from OpenWAM prompt + first-frame images."""
@@ -110,13 +105,14 @@ class Qwen3VLBackbone(nn.Module):
         )
         return {k: v for k, v in inputs.items() if isinstance(v, torch.Tensor)}
 
-    def _device(self) -> torch.device:
+    @property
+    def device(self) -> torch.device:
         try:
             return next(self.vlm_model.parameters()).device
         except StopIteration:
             return torch.device("cpu")
 
-    def _batch_vlm_inputs(self, vlm_inputs: dict | list[dict]) -> dict[str, torch.Tensor]:
+    def batch_vlm_inputs(self, vlm_inputs: dict | list[dict]) -> dict[str, torch.Tensor]:
         if isinstance(vlm_inputs, dict):
             # Only tensor entries are forwarded to the VLM; non-tensor metadata (e.g.
             # processor attributes, image grids stored as lists) is dropped. The list
@@ -187,8 +183,8 @@ class Qwen3VLBackbone(nn.Module):
         future upstream version inserts visual patches at the embedding stage
         without growing ``input_ids``).
         """
-        batch = self._batch_vlm_inputs(vlm_inputs)
-        device = self._device()
+        batch = self.batch_vlm_inputs(vlm_inputs)
+        device = self.device
         model_inputs = {}
         for key, value in batch.items():
             if key in {"pixel_values", "pixel_values_videos"}:

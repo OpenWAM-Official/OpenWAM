@@ -563,7 +563,7 @@ def test_qwen3_vl_extract_features_list_fake_pads_and_concats():
 def test_qwen3_vl_batch_inputs_rejects_bad_attention_mask_shape():
     backbone = _make_qwen_backbone_for_test()
     with pytest.raises(ValueError, match="attention_mask"):
-        backbone._batch_vlm_inputs(  # noqa: SLF001 - targeted batching contract
+        backbone.batch_vlm_inputs(
             [
                 {
                     "input_ids": torch.ones(1, 2, dtype=torch.long),
