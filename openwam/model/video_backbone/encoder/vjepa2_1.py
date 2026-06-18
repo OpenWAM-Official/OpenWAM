@@ -125,16 +125,6 @@ class VJEPA21VideoEncoder(VideoEncoder):
         """
         return self._vjepa2_1_forward
 
-    @classmethod
-    def optional_yaml_keys(cls) -> set[str]:
-        # ``vjepa2_1_forward``: condition-frame forward mode (runtime config;
-        # ViT weights identical across modes).
-        # ``svae_path`` / ``svae_target_dim``: optional S-VAE feature reducer
-        # (see ``openwam/model/video_backbone/encoder/svae.py``). All are
-        # yaml-level (not in the manifest) — they describe consumer wiring, not
-        # weight properties. Defaults applied in ``__init__`` if absent.
-        return {"vjepa2_1_forward", "svae_path", "svae_target_dim"}
-
     def preprocess_video(self, frames: List[Image.Image]) -> torch.Tensor:
         """List[PIL] -> (1, 3, T, H, W) in ImageNet-normalized space."""
         device = next(self._m.parameters()).device
@@ -268,9 +258,9 @@ class VJEPA21VideoEncoder(VideoEncoder):
         svae_path: str | None = None,
         svae_target_dim: int | None = None,
     ) -> "VJEPA21VideoEncoder":
-        # Explicit signature (no ``**kw``) so a programmatic kwarg typo raises
-        # TypeError instead of silently using the default. The yaml path is
-        # already filtered by ``build_video_encoder`` via ``optional_yaml_keys``.
+        # Explicit signature (no ``**kw``) so a typo'd yaml / programmatic field
+        # raises TypeError instead of being silently ignored — ``build_video_encoder``
+        # forwards every non-{name, model_path} yaml field straight here.
         manifest = loader.read_and_validate_manifest(model_path)
         vit_encoder = loader.prepare_vjepa_imports_and_patch()
         vit = loader.build_vit_from_manifest(vit_encoder, manifest)

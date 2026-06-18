@@ -146,30 +146,10 @@ class VideoEncoder(ABC, nn.Module):
     @abstractmethod
     def from_pretrained(cls, model_path: str, **kw: Any) -> "VideoEncoder":
         """Construct from a weights directory. ``model_path`` is the only
-        always-required user-facing argument (read from yaml). Additional
-        kwargs may be forwarded from yaml fields whose names are returned
-        by :meth:`optional_yaml_keys` — those names are part of the yaml
-        whitelist applied in ``BaseWAMArchitecture._init_video_backbone``
-        and pass through ``build_video_encoder`` to this constructor."""
-
-    # ------------------------------------------------------------------
-    # Optional yaml field whitelist
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def optional_yaml_keys(cls) -> set[str]:
-        """Optional yaml fields this encoder accepts beyond ``{name, model_path}``.
-
-        Default: empty set. Override per-encoder to expose runtime knobs
-        (not structural weights properties — those belong in ``manifest.json``).
-        Returned names are added to the whitelist enforced in
-        :meth:`BaseWAMArchitecture._init_video_backbone` and forwarded into
-        :meth:`from_pretrained` / :meth:`from_skeleton` as kwargs. Adding a
-        key here is the single edit needed to expose it through yaml — the
-        forwarding plumbing in ``build_video_encoder`` reads this method
-        and packs the kwargs accordingly.
-        """
-        return set()
+        always-required user-facing argument (read from yaml). Any other
+        non-null yaml field is forwarded by ``build_video_encoder`` as a kwarg;
+        the subclass signature is the contract — an explicit signature raises
+        ``TypeError`` on an unknown field, a ``**kw`` one ignores extras."""
 
     # ------------------------------------------------------------------
     # Deploy-time skeleton constructor

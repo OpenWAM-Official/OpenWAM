@@ -244,22 +244,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # ``from_scratch=false`` checkpoints (state_dict topology
         # ``_pipe.vae.*``) keep working bit-exactly.
         if enc_cfg is not None and from_scratch:
-            # Yaml whitelist applies to both paths so an in-tree typo /
-            # extra field never silently slips through deploy. The
-            # always-allowed pair is {name, model_path}; each encoder
-            # class extends the set via ``optional_yaml_keys()`` for
-            # runtime knobs (e.g. V-JEPA 2.1's ``vjepa2_1_forward``).
-            from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
-
-            allowed = BaseWAMArchitecture._compute_encoder_yaml_whitelist(enc_cfg, _VIDEO_ENCODER_REGISTRY)
-            extras = BaseWAMArchitecture._encoder_yaml_extras(enc_cfg, allowed)
-            if extras:
-                raise ValueError(
-                    f"video_backbone.encoder allows only {sorted(allowed)} in yaml; got extra "
-                    f"fields {sorted(extras)}. Spec fields like z_dim are derived from the "
-                    "loaded weights — yaml cannot override them."
-                )
-
             if source is None:
                 # Training: build the encoder from yaml + model_path.
                 from openwam.model.video_backbone.encoder import build_video_encoder
@@ -429,67 +413,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 )
 
     @staticmethod
-    def _compute_encoder_yaml_whitelist(enc_cfg, registry) -> set[str]:
-        """Encoder-aware allowed-yaml-keys set.
-
-        Always includes ``{"name", "model_path"}``; extends with the
-        ``optional_yaml_keys()`` set of the registered encoder class
-        named by ``enc_cfg["name"]`` (e.g. ``"vjepa2_1_forward"`` for
-        V-JEPA 2.1). Unknown encoder names yield just the base pair.
-
-        Failure ordering when the encoder name is unknown:
-        - if ``enc_cfg`` carries no extras beyond ``{name, model_path}``,
-          the caller's whitelist check passes and the downstream
-          ``build_video_encoder`` registry lookup raises the proper
-          ``KeyError`` with the available-encoders hint;
-        - if ``enc_cfg`` carries extras, the caller's whitelist check
-          raises ``ValueError`` first (the ``KeyError`` is masked). This
-          is intentional: an unknown encoder name + non-whitelisted field
-          is most likely a typo, and the whitelist diagnostic surfaces
-          both problems together.
-        """
-        base = {"name", "model_path"}
-        if isinstance(enc_cfg, dict):
-            enc_name = enc_cfg.get("name")
-        else:
-            enc_name = getattr(enc_cfg, "name", None)
-        if not enc_name or enc_name not in registry:
-            return base
-        return base | registry[enc_name].optional_yaml_keys()
-
-    @staticmethod
-    def _encoder_yaml_extras(enc_cfg, allowed: set[str]) -> set[str]:
-        """Keys present in ``enc_cfg`` with a non-null value that are NOT
-        in ``allowed``.
-
-        Yaml-``null`` is treated as "field absent" for whitelist purposes
-        so the framework yamls (``configs/model/backbone/wan.yaml``) can
-        keep an inline ``encoder:`` block with discoverability fields
-        like an encoder-specific knob set to ``null`` — those fields stay
-        visible to operators but do not trip the whitelist when the active
-        encoder (e.g. V-JEPA 2.1, V-JEPA 2, Wan VAE) does not declare them in
-        ``optional_yaml_keys()``. An explicit non-null value still
-        triggers the whitelist error, so a user who actually sets the
-        field on the wrong encoder still gets a fail-fast.
-        """
-        if isinstance(enc_cfg, dict):
-            items = list(enc_cfg.items())
-        else:
-            # OmegaConf DictConfig — iterate via .items() if available,
-            # otherwise fall back to (key, getattr) pairs.
-            try:
-                items = list(enc_cfg.items())
-            except AttributeError:
-                items = [(k, getattr(enc_cfg, k, None)) for k in enc_cfg.keys()]
-        return {k for k, v in items if v is not None and k not in allowed}
-
-    @staticmethod
     def _build_external_encoder_skeleton(enc_cfg, source, *, ckpt_dir=None):
         """Deploy-time external encoder constructor.
 
-        Reads the encoder ``name`` (subject to the same yaml whitelist as
-        the training path) and reaches into the saved ``source`` dict for
-        the ``components`` list to find the ``attr == "vae"`` entry. That
+        Reads the encoder ``name`` and reaches into the saved ``source`` dict
+        for the ``components`` list to find the ``attr == "vae"`` entry. That
         entry's ``model_class`` / ``extra_kwargs`` is handed to the
         encoder class's :meth:`VideoEncoder.from_skeleton` classmethod,
         which instantiates the underlying module with zero weights. The
@@ -509,17 +437,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """
         from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
 
-        # Deploy-side whitelist matches the training-side whitelist in
-        # ``_init_video_backbone`` — same field set, same plumbing via
-        # ``_compute_encoder_yaml_whitelist`` (encoder class extends the
-        # always-allowed ``{name, model_path}`` with its
-        # ``optional_yaml_keys()``).
-        allowed = BaseWAMArchitecture._compute_encoder_yaml_whitelist(enc_cfg, _VIDEO_ENCODER_REGISTRY)
-        extras = BaseWAMArchitecture._encoder_yaml_extras(enc_cfg, allowed)
-        if extras:
-            raise ValueError(
-                f"video_backbone.encoder allows only {sorted(allowed)} in yaml; got extra fields {sorted(extras)}."
-            )
         enc_name = enc_cfg["name"] if isinstance(enc_cfg, dict) else enc_cfg.name
         if enc_name not in _VIDEO_ENCODER_REGISTRY:
             available = ", ".join(sorted(_VIDEO_ENCODER_REGISTRY)) or "(none)"

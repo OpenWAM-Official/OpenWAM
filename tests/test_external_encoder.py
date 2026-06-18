@@ -768,161 +768,6 @@ def _run_init_video_backbone(model_cfg):
     return stub
 
 
-def test_D1_encoder_yaml_rejects_extra_fields(monkeypatch):
-    """Yaml whitelist allows only {name, model_path}; extras must raise."""
-    # Patch build_video_encoder to a no-op stub so the gate check is reached
-    # before any real encoder loading. We expect a ValueError BEFORE that
-    # call happens (whitelist runs first).
-    cfg = {
-        "video_backbone": {
-            "name": "wan22_ti2v_5b",
-            "model_path": "/dummy",
-            "from_scratch": True,
-            "encoder": {"name": "wan_vae", "model_path": "/dummy", "z_dim": 16},  # z_dim is extra
-        }
-    }
-    with pytest.raises(ValueError, match=r"allows only"):
-        _run_init_video_backbone(cfg)
-
-
-def test_D1a_encoder_yaml_whitelist_extends_per_optional_yaml_keys(monkeypatch):
-    """An optional yaml field is allowed only on encoders that opt in via
-    :meth:`VideoEncoder.optional_yaml_keys`. The same field on a different
-    encoder (which did NOT opt in) is rejected.
-
-    Concretely: ``vjepa2_1_forward`` is in V-JEPA 2.1's optional set, so it
-    is accepted on the vjepa2_1 encoder block; the same field is NOT in
-    wan_vae's optional set, so it is rejected on a wan_vae encoder block.
-    Guards against a yaml typo (``vjepa2_1_forward`` on wan_vae) silently
-    being ignored.
-    """
-    # vjepa2_1 + vjepa2_1_forward: build_video_encoder is the only thing
-    # the gate actually invokes after the whitelist passes; patch it to a
-    # no-op stub so the test does not need real weights.
-    from openwam.model.video_backbone import encoder as encoder_mod
-
-    monkeypatch.setattr(encoder_mod, "build_video_encoder", lambda cfg: object())
-    monkeypatch.setattr(
-        "openwam.model.video_backbone.build_video_backbone",
-        lambda *a, **kw: nn.Module(),
-    )
-
-    ok_cfg = {
-        "video_backbone": {
-            "name": "wan22_ti2v_5b",
-            "model_path": "/dummy",
-            "from_scratch": True,
-            "temporal_compression": 4,
-            "causal_temporal": True,
-            "encoder": {
-                "name": "vjepa2_1",
-                "model_path": "/dummy",
-                "vjepa2_1_forward": "video",
-            },
-        }
-    }
-    # Whitelist must allow vjepa2_1_forward on the vjepa2_1 encoder. The
-    # temporal_compression cross-check would fire AFTER the whitelist;
-    # since build_video_backbone is stubbed to a bare Module (no
-    # temporal_compression attribute), that read raises AttributeError —
-    # which the try/except below catches. We only care that the whitelist
-    # ValueError did NOT fire.
-    try:
-        _run_init_video_backbone(ok_cfg)
-    except ValueError as e:
-        if "allows only" in str(e):
-            raise AssertionError(
-                f"vjepa2_1_forward should be allowed on vjepa2_1 encoder; got whitelist error: {e}"
-            ) from e
-    except AttributeError:
-        pass  # downstream temporal_compression read fails — fine, whitelist already passed
-
-    # Same field on wan_vae must trip the whitelist.
-    bad_cfg = {
-        "video_backbone": {
-            "name": "wan22_ti2v_5b",
-            "model_path": "/dummy",
-            "from_scratch": True,
-            "encoder": {
-                "name": "wan_vae",
-                "model_path": "/dummy",
-                "vjepa2_1_forward": "video",
-            },
-        }
-    }
-    with pytest.raises(ValueError, match=r"allows only"):
-        _run_init_video_backbone(bad_cfg)
-
-
-def test_D1c_encoder_yaml_whitelist_ignores_yaml_null_fields(monkeypatch):
-    """Regression: a yaml-``null`` encoder field must be treated as absent.
-
-    An inline ``encoder:`` block (or a Hydra group merge) can leave a field
-    set to ``null`` that the active encoder does not declare in
-    ``optional_yaml_keys()``. The whitelist check at
-    ``BaseWAMArchitecture._init_video_backbone`` must treat yaml-null as
-    "field absent" so it does not trip a ValueError — otherwise every
-    from_scratch=true run carrying a stray null field would be blocked.
-
-    An explicit non-null value on the wrong encoder still raises (covered by
-    test_D1a)."""
-    from openwam.model.video_backbone import encoder as encoder_mod
-
-    monkeypatch.setattr(encoder_mod, "build_video_encoder", lambda cfg: object())
-    monkeypatch.setattr(
-        "openwam.model.video_backbone.build_video_backbone",
-        lambda *a, **kw: nn.Module(),
-    )
-
-    cfg = {
-        "video_backbone": {
-            "name": "wan22_ti2v_5b",
-            "model_path": "/dummy",
-            "from_scratch": True,
-            "temporal_compression": 4,
-            "causal_temporal": True,
-            "encoder": {
-                "name": "vjepa2_1",
-                "model_path": "/dummy",
-                "vjepa2_1_forward": "video",
-                # A stray null field the active encoder doesn't declare —
-                # must NOT trip the whitelist.
-                "unknown_encoder_knob": None,
-            },
-        }
-    }
-    # Whitelist must pass. The downstream backbone build may then fail on
-    # the temporal_compression / build_video_backbone stub (see test_D1a's
-    # comment) — we tolerate that because the assertion here is "no
-    # ValueError about extra fields was raised".
-    try:
-        _run_init_video_backbone(cfg)
-    except ValueError as e:
-        if "allows only" in str(e):
-            raise AssertionError(
-                f"a yaml-null field on the vjepa2_1 encoder must not trip the whitelist; got: {e}"
-            ) from e
-    except AttributeError:
-        pass  # downstream temporal_compression read on stubbed backbone — fine
-
-    # Sibling guard: an explicit non-null unknown field on vjepa2_1 must
-    # STILL fail (the field is wrong-encoder, not just an inline leftover).
-    cfg_explicit = {
-        "video_backbone": {
-            "name": "wan22_ti2v_5b",
-            "model_path": "/dummy",
-            "from_scratch": True,
-            "encoder": {
-                "name": "vjepa2_1",
-                "model_path": "/dummy",
-                "unknown_encoder_knob": True,  # explicit → operator mistake
-            },
-        }
-    }
-    with pytest.raises(ValueError, match=r"allows only"):
-        _run_init_video_backbone(cfg_explicit)
-
-
 def test_D2_encoder_block_with_from_scratch_false_silently_ignored(monkeypatch, caplog):
     """The encoder block is silently ignored (no error, encoder NOT built)
     when from_scratch=false. The default yaml ships with an encoder: block
@@ -1389,12 +1234,6 @@ def test_M3d_build_external_encoder_skeleton_picks_vae_entry_from_source():
     # Missing components → loud error (no silent fallback to native VAE).
     with pytest.raises(RuntimeError, match=r"no video_backbone\.components|components"):
         BaseWAMArchitecture._build_external_encoder_skeleton(enc_cfg, {"components": []})
-
-    # Extra yaml field → same whitelist as training path.
-    with pytest.raises(ValueError, match=r"allows only"):
-        BaseWAMArchitecture._build_external_encoder_skeleton(
-            {"name": "wan_vae", "model_path": "/x", "extra_field": 1}, source
-        )
 
     # Unknown encoder name.
     register_video_encoder  # noqa: F841 — ensure registry is imported
@@ -1911,19 +1750,6 @@ def _build_vjepa_spy_encoder(*, embed_dim: int = 8, vjepa2_1_forward: str = "vid
     vit = _SpyVJEPAViT(embed_dim=embed_dim)
     enc = VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="spy", vjepa2_1_forward=vjepa2_1_forward)
     return enc, vit
-
-
-def test_V6a_vjepa21_optional_yaml_keys_exposes_forward_knob():
-    """``optional_yaml_keys`` returns exactly the yaml fields this encoder
-    consumes beyond ``{name, model_path}``: the ``vjepa2_1_forward`` knob plus
-    the optional S-VAE reducer wiring (``svae_path`` / ``svae_target_dim``).
-    The base-side whitelist (``BaseWAMArchitecture._compute_encoder_yaml_whitelist``)
-    reads this method, so an empty / wrong set here is what gates a typo
-    being silently accepted from yaml.
-    """
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
-
-    assert VJEPA21VideoEncoder.optional_yaml_keys() == {"vjepa2_1_forward", "svae_path", "svae_target_dim"}
 
 
 def test_V6b_vjepa21_forward_default_is_video():
