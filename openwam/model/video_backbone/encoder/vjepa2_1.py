@@ -25,6 +25,7 @@ from torchvision import transforms as T
 from openwam.model.video_backbone.encoder import _vjepa_loader
 from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
+from openwam.model.video_backbone.encoder.svae import reducer
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,8 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # (see ``batch_encode``). When enabled it advertises ``latent_dim`` as
         # ``z_dim`` so the DiT conv / unpatchify head / freeze yaml rebuild
         # against the reduced dim.
-        self._svae = self._build_svae(svae_path, svae_target_dim, svae_config)
-        effective_z_dim = self._effective_z_dim(self._raw_embed_dim)
+        self._svae = reducer.build(svae_path, svae_target_dim, svae_config)
+        effective_z_dim = reducer.effective_z_dim(self._svae, self._raw_embed_dim)
         self._spec = VideoEncoderProperties(
             z_dim=int(effective_z_dim),
             spatial_compression=16,
@@ -169,7 +170,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
           independent so deploy/train see the same cond latent.
         """
         z = self._batch_encode_pooled_raw(video)
-        z = self._apply_svae_if_enabled(z)
+        z = reducer.reduce(self._svae, z)
         z = self._apply_feature_norm(z)
         return z
 
@@ -366,8 +367,8 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # S-VAE) sizes a zero-weight shell here; strict ``load_checkpoint``
         # fills ``_svae.*`` right after. ``svae_target_dim`` from the saved yaml
         # is an optional cross-check against the sidecar's ``latent_dim``.
-        svae_config = cls._read_svae_sidecar(ckpt_dir)
-        svae_target_dim = cls._read_svae_target_dim_from_cfg(encoder_cfg)
+        svae_config = reducer.read_sidecar(ckpt_dir)
+        svae_target_dim = reducer.read_target_dim_from_cfg(encoder_cfg)
         logger.info(
             "VJEPA21VideoEncoder.from_skeleton: %s instantiated from %s "
             "(embed_dim=%d, variant=%s, vjepa2_1_forward=%s, svae=%s) — weights pending checkpoint load",
@@ -454,10 +455,10 @@ class VJEPA21VideoEncoder(VideoEncoder):
         """
         import shutil
 
-        # The S-VAE sidecar is likewise strict (``_write_svae_sidecar`` raises):
+        # The S-VAE sidecar is likewise strict (``reducer.write_sidecar`` raises):
         # without it ``from_skeleton`` cannot size the reducer.
         if self._svae is not None:
-            self._write_svae_sidecar(output_dir)
+            reducer.write_sidecar(self._svae, output_dir, type(self).__name__)
 
         try:
             enc_cfg = cfg.model.video_backbone.encoder

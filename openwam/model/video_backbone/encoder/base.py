@@ -10,20 +10,13 @@ geometry) derived from the loaded encoder weights — NOT from yaml. The encoder
 
 from __future__ import annotations
 
-import json
-import logging
 import math
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
 import torch.nn as nn
 from torch import Tensor
-
-from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION, SVAE, build_svae, load_svae
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -88,18 +81,10 @@ class VideoEncoder(ABC, nn.Module):
     ``from_pretrained``. They MAY implement ``decode`` / ``to_frames`` (only
     when ``spec.is_reversible=True``) and MAY override
     ``build_dit_input_proj`` / ``build_dit_output_proj`` when the default
-    Wan-style projection is not appropriate. They MAY also attach the optional
-    S-VAE feature reducer (default disabled) — see the "Optional S-VAE feature
-    reducer" block at the bottom of this class.
+    Wan-style projection is not appropriate. An encoder that wants to compress
+    its raw features MAY hold an optional frozen S-VAE reducer — see
+    :mod:`openwam.model.video_backbone.encoder.svae.reducer`.
     """
-
-    def __init__(self) -> None:
-        super().__init__()
-        # Optional frozen S-VAE feature reducer; ``None`` = disabled. Encoders
-        # that want it opt in from their own ``__init__`` via
-        # ``self._svae = self._build_svae(...)``; all others leave it None and
-        # every S-VAE helper below is a no-op (state_dict is bit-unchanged).
-        self._svae: SVAE | None = None
 
     # ------------------------------------------------------------------
     # Required: latent contract + per-step IO
@@ -305,143 +290,3 @@ class VideoEncoder(ABC, nn.Module):
         """
         ps = self.spec.dit_patch_size
         return nn.Linear(dit_dim, self.spec.z_dim * math.prod(ps))
-
-    # ------------------------------------------------------------------
-    # Optional S-VAE feature reducer (general capability; default disabled)
-    # ------------------------------------------------------------------
-    # A frozen per-token S-VAE (:mod:`openwam.model.video_backbone.encoder.svae`)
-    # that compresses an encoder's raw per-token features to a smaller ``z_dim``.
-    # Any encoder MAY opt in by calling ``self._svae = self._build_svae(...)`` in
-    # its ``__init__`` and routing ``batch_encode`` through
-    # :meth:`_apply_svae_if_enabled`; currently only ``VJEPA21VideoEncoder`` does.
-    # When ``self._svae is None`` (the default) every helper below is a no-op, so
-    # the other encoders' ``batch_encode`` / ``spec`` / ``state_dict`` are
-    # bit-unchanged.
-
-    @staticmethod
-    def _build_svae(
-        svae_path: str | None,
-        svae_target_dim: int | None,
-        svae_config: dict | None,
-    ) -> SVAE | None:
-        """Construct the optional frozen S-VAE reducer from one of three sources.
-
-        Mirrors the PCA plumbing's three branches but stores an ``nn.Module``
-        (trainable encoder+decoder weights) rather than two static buffers:
-
-        * ``svae_path``   — training: load a standalone-trained checkpoint.
-        * ``svae_config`` — deploy skeleton: rebuild a zero-weight shell from the
-          sidecar config dict; the architecture's strict ``load_checkpoint``
-          fills the weights immediately after construction.
-        * neither — disabled (raw passthrough; ``z_dim`` stays ``embed_dim``).
-
-        The reducer is always returned frozen and in eval mode; the world-model
-        data path runs it inside ``@torch.no_grad`` preprocessing, and
-        ``batch_encode`` calls :meth:`SVAE.encode_mean` (deterministic) so a
-        recursive ``host.train()`` cannot flip it into a stochastic path.
-        """
-        if svae_path is not None and svae_config is not None:
-            raise ValueError("Pass only one of svae_path / svae_config, not both.")
-        if svae_path is not None:
-            svae = load_svae(svae_path)
-        elif svae_config is not None:
-            svae = build_svae(dict(svae_config))
-        else:
-            return None
-        if svae_target_dim is not None and int(svae_target_dim) != svae.latent_dim:
-            raise ValueError(
-                f"svae_target_dim ({svae_target_dim}) does not match the S-VAE latent_dim ({svae.latent_dim})."
-            )
-        svae.eval()
-        svae.requires_grad_(False)
-        return svae
-
-    def _effective_z_dim(self, raw_dim: int) -> int:
-        """The encoder's advertised ``z_dim``: the S-VAE ``latent_dim`` when a
-        reducer is attached, else ``raw_dim``. Opt-in encoders call this to size
-        ``spec.z_dim`` (and any post-reduce norm) so the DiT first conv /
-        unpatchify head / freeze yaml all rebuild against the reduced dim.
-        """
-        return self._svae.latent_dim if self._svae is not None else int(raw_dim)
-
-    def _apply_svae_if_enabled(self, z: Tensor) -> Tensor:
-        """Reduce raw post-pool features with the frozen S-VAE (deterministic
-        posterior mean), or pass them through unchanged when none is attached.
-
-        Under DeepSpeed ZeRO-3 the reducer's frozen parameters are partitioned,
-        and the forward-pre-hook that would gather them does not fire on this
-        preprocessing path (preprocess runs before the architecture forward, so
-        no module ``__call__`` on ``self`` has triggered a gather). We therefore
-        gather them read-only for the duration of the reduce. No-op off ZeRO-3 —
-        the parameters then carry no ``ds_id`` and the gather list is empty.
-        """
-        if self._svae is None:
-            return z
-        ds_params = [p for p in self._svae.parameters() if getattr(p, "ds_id", None) is not None]
-        if ds_params:
-            import deepspeed
-
-            with deepspeed.zero.GatheredParameters(ds_params, modifier_rank=None):
-                return self._svae.encode_mean(z)
-        return self._svae.encode_mean(z)
-
-    def _write_svae_sidecar(self, output_dir: str) -> None:
-        """Write the attached S-VAE's structural config to
-        ``<output_dir>/svae_config.json`` so deploy can rebuild a same-shape
-        shell. Raises on IO failure — see the opt-in encoder's
-        ``save_deploy_assets`` for why this one must abort rather than
-        warn-and-skip.
-
-        The payload is versioned with the same ``_CHECKPOINT_FORMAT_VERSION`` as
-        the standalone ``svae.pt`` so a stale sidecar (e.g. one written by a
-        build whose ``config_dict`` schema differs) is rejected with a clear
-        message on read instead of crashing ``SVAE.__init__`` with an unexpected
-        keyword.
-        """
-        dst = os.path.join(output_dir, "svae_config.json")
-        os.makedirs(output_dir, exist_ok=True)
-        with open(dst, "w") as f:
-            json.dump({"format_version": _CHECKPOINT_FORMAT_VERSION, "model_config": self._svae.config_dict()}, f)
-        logger.info("%s: wrote S-VAE sidecar %s", type(self).__name__, dst)
-
-    @staticmethod
-    def _read_svae_sidecar(ckpt_dir: str | None) -> dict | None:
-        """Read ``<ckpt_dir>/svae_config.json`` (written by
-        :meth:`_write_svae_sidecar`). Returns the structural ``model_config``
-        dict when the checkpoint carried an S-VAE reducer, else ``None`` (reducer
-        disabled). There is intentionally no ``encoder.model_path`` fallback:
-        the sidecar is checkpoint-local and self-contained by construction.
-
-        Validates the sidecar ``format_version`` (matching the standalone
-        checkpoint), so a legacy unversioned / mismatched sidecar fails fast here
-        with a clear message rather than deeper in ``build_svae``.
-        """
-        if not ckpt_dir:
-            return None
-        path = os.path.join(ckpt_dir, "svae_config.json")
-        if not os.path.isfile(path):
-            return None
-        with open(path, "r") as f:
-            payload = json.load(f)
-        fmt = payload.get("format_version") if isinstance(payload, dict) else None
-        if fmt != _CHECKPOINT_FORMAT_VERSION or "model_config" not in payload:
-            raise ValueError(
-                f"{path!r} has unsupported S-VAE sidecar format_version={fmt!r} "
-                f"(this build writes/reads version {_CHECKPOINT_FORMAT_VERSION}). "
-                f"Re-export the deploy checkpoint with the current build."
-            )
-        return payload["model_config"]
-
-    @staticmethod
-    def _read_svae_target_dim_from_cfg(encoder_cfg: Any) -> int | None:
-        """Pick ``svae_target_dim`` from the saved encoder yaml if present —
-        used only as a cross-check against the sidecar's ``latent_dim`` in
-        ``__init__``. Absent / null collapses to ``None`` (no cross-check).
-        """
-        if encoder_cfg is None:
-            return None
-        if isinstance(encoder_cfg, dict):
-            value = encoder_cfg.get("svae_target_dim")
-        else:
-            value = getattr(encoder_cfg, "svae_target_dim", None)
-        return int(value) if value is not None else None

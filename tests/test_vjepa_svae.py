@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION
+from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION, reducer
 from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
 
 
@@ -125,8 +125,8 @@ def test_S7_deploy_sidecar_write_and_read(tmp_path):
     payload = json.loads(sidecar.read_text())
     assert payload["format_version"] == _CHECKPOINT_FORMAT_VERSION
     assert payload["model_config"] == red._svae.config_dict()
-    assert VJEPA21VideoEncoder._read_svae_sidecar(str(out)) == red._svae.config_dict()
-    assert VJEPA21VideoEncoder._read_svae_sidecar(str(tmp_path / "absent")) is None
+    assert reducer.read_sidecar(str(out)) == red._svae.config_dict()
+    assert reducer.read_sidecar(str(tmp_path / "absent")) is None
 
 
 def test_S7b_deploy_sidecar_rejects_legacy_unversioned(tmp_path):
@@ -138,7 +138,7 @@ def test_S7b_deploy_sidecar_rejects_legacy_unversioned(tmp_path):
         json.dumps({"input_dim": 1408, "latent_dim": 48, "hidden_dim": 16, "num_layers": 1, "num_heads": 2})
     )
     with pytest.raises(ValueError, match="format_version"):
-        VJEPA21VideoEncoder._read_svae_sidecar(str(out))
+        reducer.read_sidecar(str(out))
 
 
 def test_S8_deploy_skeleton_strict_load_roundtrip():
