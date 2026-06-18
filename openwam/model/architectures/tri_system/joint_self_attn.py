@@ -15,8 +15,8 @@ from openwam.model.action_backbone.joint_action_dit import ActionDiT
 from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
+from openwam.model.vlm_backbone import Qwen3VLBackbone
 from openwam.model.vlm_backbone.qwen3_vl import (
-    Qwen3VLBackbone,
     UnderstandingExpert,
     UnderstandingExpertConfig,
 )
