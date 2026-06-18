@@ -4,10 +4,10 @@ Vendored from ``references/flux2`` and isolated in its own subpackage so the
 bulky extracted model code stays separate from the thin :class:`VideoEncoder`
 wrapper in ``encoder/flux_vae.py``. Import the public API from this package:
 
-    from openwam.model.video_backbone.encoder.flux import FluxVaeEncoderCore
+    from openwam.model.video_backbone.encoder.flux_vae_src import FluxVaeEncoderCore
 """
 
-from openwam.model.video_backbone.encoder.flux.flux_vae_src import (
+from openwam.model.video_backbone.encoder.flux_vae_src.autoencoder import (
     Encoder,
     FluxVaeEncoderCore,
     convert_attn,

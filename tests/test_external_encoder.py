@@ -2242,7 +2242,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
     fake_vjepa_modules = types.SimpleNamespace(
         rotate_queries_or_keys=lambda x, pos, n_registers, has_cls_first: x,
     )
-    _vendor = "openwam.model.video_backbone.encoder.vjepa2_1._vendor"
+    _vendor = "openwam.model.video_backbone.encoder.vjepa2_src._vendor"
     monkeypatch.setitem(sys.modules, f"{_vendor}.vision_transformer", fake_module)
     monkeypatch.setitem(sys.modules, f"{_vendor}.modules", fake_vjepa_modules)
 
@@ -2317,9 +2317,9 @@ def _install_fake_vjepa_modules(monkeypatch, wrapper_factory):
         rotate_queries_or_keys=lambda x, pos, n_registers, has_cls_first: x,
     )
     # ``loader.prepare_vjepa_imports_and_patch`` does
-    # ``from ...vjepa2_1._vendor import vision_transformer, modules`` — inject the
+    # ``from ...vjepa2_src._vendor import vision_transformer, modules`` — inject the
     # fakes at those sys.modules keys so no real (timm-dependent) ViT loads.
-    _vendor = "openwam.model.video_backbone.encoder.vjepa2_1._vendor"
+    _vendor = "openwam.model.video_backbone.encoder.vjepa2_src._vendor"
     monkeypatch.setitem(sys.modules, f"{_vendor}.vision_transformer", vision_transformer)
     monkeypatch.setitem(sys.modules, f"{_vendor}.modules", fake_vjepa_modules)
 

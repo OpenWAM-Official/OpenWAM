@@ -1,4 +1,4 @@
-"""V-JEPA 2.1 ViT + manifest loading for :class:`..encoder.VJEPA21VideoEncoder`.
+"""V-JEPA 2.1 ViT + manifest loading for :class:`..vjepa2_1.VJEPA21VideoEncoder`.
 
 The vendored-ViT-coupled, weight-loading concerns: manifest read/validate, the
 ``._vendor`` import + RoPE dtype monkey-patch, the zero-weight ViT construction,
@@ -91,8 +91,8 @@ def prepare_vjepa_imports_and_patch():
     ``_openwam_dtype_safe`` sentinel so repeated calls (training reload, deploy
     skeleton + later weight load, EMA replicas) do not re-wrap.
     """
-    from openwam.model.video_backbone.encoder.vjepa2_1._vendor import modules as vjepa_modules
-    from openwam.model.video_backbone.encoder.vjepa2_1._vendor import vision_transformer as vit_encoder
+    from openwam.model.video_backbone.encoder.vjepa2_src._vendor import modules as vjepa_modules
+    from openwam.model.video_backbone.encoder.vjepa2_src._vendor import vision_transformer as vit_encoder
 
     if not getattr(vjepa_modules.rotate_queries_or_keys, "_openwam_dtype_safe", False):
         _orig_rotate = vjepa_modules.rotate_queries_or_keys

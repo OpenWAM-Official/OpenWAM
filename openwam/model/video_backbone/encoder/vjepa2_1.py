@@ -25,7 +25,7 @@ from torchvision import transforms as T
 from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
 from openwam.model.video_backbone.encoder.svae import reducer
-from openwam.model.video_backbone.encoder.vjepa2_1 import loader
+from openwam.model.video_backbone.encoder.vjepa2_src import loader
 
 logger = logging.getLogger(__name__)
 

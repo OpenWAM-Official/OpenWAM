@@ -76,7 +76,7 @@ npu = ["torch==2.7.1+cpu", "torch-npu==2.7.1", "torchvision==0.22.1+cpu"]
 #     bash scripts/install_cosmos25.sh
 cosmos25 = []
 # V-JEPA 2.1 video encoder. The ViT is vendored in-tree
-# (openwam/.../encoder/vjepa2_1/_vendor/), so timm is the only pip-installable
+# (openwam/.../encoder/vjepa2_src/_vendor/), so timm is the only pip-installable
 # runtime dep — ``_vendor/modules.py`` imports ``timm.models.layers.drop_path``.
 # Kept out of core: the default dual_system backbone (action_backbone/ActionDiT)
 # never imports timm — only V-JEPA does.
@@ -101,7 +101,7 @@ exclude = [
     "third_party/",
     "previous_codebase/",
     "openwam/model/video_backbone/diffsynth/",
-    "openwam/model/video_backbone/encoder/vjepa2_1/_vendor/",
+    "openwam/model/video_backbone/encoder/vjepa2_src/_vendor/",
     "sandbox/",
 ]
 

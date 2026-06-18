@@ -214,7 +214,7 @@ def test_F8_converter_round_trips_into_core():
     """A synthetic diffusers state-dict (built by inverse-mapping a tiny real
     core's keys, with attention weights squeezed to 2D) must convert back to a
     dict that strict-loads into the core."""
-    from openwam.model.video_backbone.encoder.flux import (
+    from openwam.model.video_backbone.encoder.flux_vae_src import (
         FluxVaeEncoderCore,
         convert_diffusers_encoder_sd,
     )
@@ -267,7 +267,7 @@ def test_F9_flux_vae_default_hooks_wan_parity():
 def test_F10_core_rejects_non_square_pack():
     """spatial_compression is a single scalar, so a non-square pack (ps[0] !=
     ps[1]) would silently describe only one axis — the core must reject it."""
-    from openwam.model.video_backbone.encoder.flux import FluxVaeEncoderCore
+    from openwam.model.video_backbone.encoder.flux_vae_src import FluxVaeEncoderCore
 
     with pytest.raises(ValueError, match=r"square pixel-shuffle pack"):
         FluxVaeEncoderCore(ch=32, ch_mult=[1, 2], z_channels=4, num_res_blocks=1, ps=(2, 4))
@@ -276,7 +276,7 @@ def test_F10_core_rejects_non_square_pack():
 def test_F11_converter_rejects_missing_bn_stats():
     """A checkpoint without the FLUX.2 BatchNorm whitening stats is not an
     AutoencoderKLFlux2; the converter must say so instead of a bare KeyError."""
-    from openwam.model.video_backbone.encoder.flux import (
+    from openwam.model.video_backbone.encoder.flux_vae_src import (
         FluxVaeEncoderCore,
         convert_diffusers_encoder_sd,
     )

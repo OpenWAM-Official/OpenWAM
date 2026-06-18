@@ -45,7 +45,7 @@ from PIL import Image
 from torch import Tensor
 
 from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
-from openwam.model.video_backbone.encoder.flux import (
+from openwam.model.video_backbone.encoder.flux_vae_src import (
     FluxVaeEncoderCore,
     convert_diffusers_encoder_sd,
 )
