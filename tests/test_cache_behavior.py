@@ -87,6 +87,10 @@ class _MockWanVB:
         )
         self._dit = SimpleNamespace(has_image_input=False)
         self.video_encoder = None
+        # preprocess passes vae= unconditionally, but build_deploy_noise only
+        # dereferences it when _latent_spec is None (never here). The I2V tests
+        # override this with a real encode stub via _make_i2v_mock.
+        self.vae = None
 
     @property
     def device(self):

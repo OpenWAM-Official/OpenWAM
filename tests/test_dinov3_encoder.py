@@ -321,21 +321,23 @@ def test_D9_dinov3_decode_and_to_frames_raise():
 
 
 def test_D10a_dinov3_from_skeleton_no_encoder_cfg_raises():
-    """``from_skeleton(encoder_cfg=None)`` → cannot resolve model_path →
+    """``from_skeleton(ckpt_dir=None)`` → no readable config.json (deploy is
+    strictly self-contained, no ``encoder.model_path`` fallback) →
     FileNotFoundError before any HF call."""
     from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder
 
-    with pytest.raises(FileNotFoundError, match="encoder.model_path"):
+    with pytest.raises(FileNotFoundError, match=r"no readable config\.json"):
         DinoV3VideoEncoder.from_skeleton({}, device="cpu", encoder_cfg=None, ckpt_dir=None)
 
 
 def test_D10b_dinov3_from_skeleton_missing_path_raises(tmp_path):
-    """``from_skeleton`` with a non-existent ``model_path`` fails fast at
-    the directory check (before ``AutoConfig.from_pretrained``)."""
+    """``from_skeleton`` ignores ``encoder_cfg.model_path`` (batch 4 dropped the
+    fallback): even with a ``model_path`` set, ``ckpt_dir=None`` fails fast in
+    ``_resolve_config_dir`` before any ``AutoConfig.from_pretrained`` call."""
     from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder
 
     bogus = tmp_path / "does-not-exist"
-    with pytest.raises(FileNotFoundError, match="encoder.model_path"):
+    with pytest.raises(FileNotFoundError, match=r"no readable config\.json"):
         DinoV3VideoEncoder.from_skeleton(
             {},
             device="cpu",
