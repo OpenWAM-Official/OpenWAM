@@ -1,12 +1,11 @@
-"""V-JEPA 2.1 ViT + manifest loading, split out of ``vjepa2_1.py``.
+"""V-JEPA 2.1 ViT + manifest loading for :class:`..encoder.VJEPA21VideoEncoder`.
 
-These are the upstream-``app.vjepa_2_1``-coupled, weight-loading concerns of
-:class:`~openwam.model.video_backbone.encoder.vjepa2_1.VJEPA21VideoEncoder`:
-manifest read/validate, the import bootstrap + RoPE dtype monkey-patch, the
-zero-weight ViT construction, and the pretrained-weight load. They live here as
-module-level functions (not encoder methods) so the encoder file stays focused
-on the latent contract + ``batch_encode`` path. ``VJEPA21VideoEncoder.
-from_pretrained`` / ``from_skeleton`` call into these.
+The vendored-ViT-coupled, weight-loading concerns: manifest read/validate, the
+``._vendor`` import + RoPE dtype monkey-patch, the zero-weight ViT construction,
+and the pretrained-weight load. They live here as module-level functions (not
+encoder methods) so ``encoder.py`` stays focused on the latent contract +
+``batch_encode`` path. ``VJEPA21VideoEncoder.from_pretrained`` / ``from_skeleton``
+call into these.
 """
 
 from __future__ import annotations
@@ -55,13 +54,13 @@ def read_and_validate_manifest(model_path: str) -> dict:
 
 
 def check_arch_use_rope_consistency(manifest: dict) -> None:
-    """Manifest-internal contradiction check, isolated from vjepa2 imports.
+    """Manifest-internal contradiction check, isolated from the ViT import.
 
-    Runs without touching ``third_party/vjepa2`` so the error stays
-    correct in CI/dev environments where the submodule isn't
-    initialized. Called by ``read_and_validate_manifest`` (the
-    ``from_pretrained`` / ``from_skeleton`` path) and by ``load_vit``
-    (PR #83 V9/V10 regression tests), so all paths get the same fail-fast.
+    Runs without importing ``._vendor`` so the error stays correct in
+    environments without the ViT's deps (e.g. ``timm``) installed. Called by
+    ``read_and_validate_manifest`` (the ``from_pretrained`` / ``from_skeleton``
+    path) and by ``load_vit`` (PR #83 V9/V10 regression tests), so all paths get
+    the same fail-fast.
     """
     arch_name = manifest["arch_name"]
     manifest_use_rope = manifest.get("use_rope", True)
@@ -74,48 +73,26 @@ def check_arch_use_rope_consistency(manifest: dict) -> None:
 
 
 def prepare_vjepa_imports_and_patch():
-    """Bootstrap ``third_party/vjepa2`` import path + install the RoPE
-    dtype monkey-patch. Idempotent. Returns the imported
-    ``vision_transformer`` module.
+    """Import the vendored ViT modules + install the RoPE dtype monkey-patch.
+    Idempotent. Returns the ``vision_transformer`` module.
 
-    Avoids ``torch.hub.load(...)``: upstream ``VJEPA_BASE_URL`` currently
-    points to a localhost test endpoint and is not pullable. The
-    ``facebookresearch/vjepa2`` repo is vendored as a git submodule under
-    ``third_party/vjepa2`` (branch ``vjepa2_1``) and exposes its model
-    code as ``app.vjepa_2_1.*`` — the repo root itself is the package.
+    The ViT lives in-tree under ``._vendor`` (Apache-2.0, lifted from
+    facebookresearch/vjepa2 @ ``vjepa2_1``) — no ``third_party`` submodule or
+    ``sys.path`` bootstrap is needed.
 
-    ``tests/conftest.py`` already inserts ``third_party/vjepa2`` into
-    ``sys.path``; for non-pytest entry points (``scripts/train.py`` /
-    REPL / deploy) we bootstrap the same path lazily on first call so
-    the encoder works without forcing every launcher to know about the
-    layout. No-op if the submodule isn't checked out — the import below
-    then raises with a clear ``ModuleNotFoundError`` telling the user
-    to run ``git submodule update --init third_party/vjepa2``.
-
-    The RoPE dtype monkey-patch root-cause-fixes a V-JEPA / SDPA
-    dtype mismatch under mixed-precision: upstream
-    ``rotate_queries_or_keys`` builds its sin/cos table from a fp32
-    mask (``1.0 * frame_ids``) and einsums it against an fp32
-    ``omega``, so the rotated Q/K leave the function in fp32 even
-    when ``x`` is bf16. The host backbone keeps V in bf16, and
-    PyTorch SDPA refuses ``query.dtype != value.dtype``. The patch
-    casts the output back to ``x.dtype`` on exit — covers all six
-    call sites in ``AttentionRoPE.forward`` (qd/kd, qh/kh, qw/kw)
-    without editing the vendored submodule. Idempotent via the
-    ``_openwam_dtype_safe`` sentinel so repeated calls (training
-    reload, deploy skeleton + later weight load, EMA replicas) do
-    not re-wrap.
+    The RoPE dtype monkey-patch root-cause-fixes a V-JEPA / SDPA dtype mismatch
+    under mixed precision: upstream ``rotate_queries_or_keys`` builds its sin/cos
+    table from a fp32 mask (``1.0 * frame_ids``) and einsums it against an fp32
+    ``omega``, so the rotated Q/K leave the function in fp32 even when ``x`` is
+    bf16. The host backbone keeps V in bf16, and PyTorch SDPA refuses
+    ``query.dtype != value.dtype``. The patch casts the output back to
+    ``x.dtype`` on exit — covers all six call sites in ``AttentionRoPE.forward``
+    (qd/kd, qh/kh, qw/kw) without editing the vendored source. Idempotent via the
+    ``_openwam_dtype_safe`` sentinel so repeated calls (training reload, deploy
+    skeleton + later weight load, EMA replicas) do not re-wrap.
     """
-    import sys
-    from pathlib import Path
-
-    repo_root = Path(__file__).resolve().parents[4]
-    vjepa2_root = repo_root / "third_party" / "vjepa2"
-    if vjepa2_root.is_dir() and str(vjepa2_root) not in sys.path:
-        sys.path.insert(0, str(vjepa2_root))
-
-    from app.vjepa_2_1.models import vision_transformer as vit_encoder
-    from app.vjepa_2_1.models.utils import modules as vjepa_modules
+    from openwam.model.video_backbone.encoder.vjepa2_1._vendor import modules as vjepa_modules
+    from openwam.model.video_backbone.encoder.vjepa2_1._vendor import vision_transformer as vit_encoder
 
     if not getattr(vjepa_modules.rotate_queries_or_keys, "_openwam_dtype_safe", False):
         _orig_rotate = vjepa_modules.rotate_queries_or_keys

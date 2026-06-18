@@ -4,13 +4,15 @@ repos:
     hooks:
       - id: ruff
         args: [--fix]
+        exclude: ^openwam/model/video_backbone/encoder/vjepa2_1/_vendor/
       - id: ruff-format
+        exclude: ^openwam/model/video_backbone/encoder/vjepa2_1/_vendor/
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^(third_party/|openwam/model/video_backbone/diffsynth/)
+        exclude: ^(third_party/|openwam/model/video_backbone/diffsynth/|openwam/model/video_backbone/encoder/vjepa2_1/_vendor/)
       - id: end-of-file-fixer
-        exclude: ^(third_party/|openwam/model/video_backbone/diffsynth/)
+        exclude: ^(third_party/|openwam/model/video_backbone/diffsynth/|openwam/model/video_backbone/encoder/vjepa2_1/_vendor/)
       - id: check-yaml

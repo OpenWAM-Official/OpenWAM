@@ -2115,8 +2115,9 @@ def test_V6i_vjepa21_from_pretrained_forwards_yaml_field(tmp_path, monkeypatch):
     """
     import json as _json
 
-    from openwam.model.video_backbone.encoder import _vjepa_loader, build_video_encoder
+    from openwam.model.video_backbone.encoder import build_video_encoder
     from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa2_1 import loader as _vjepa_loader
 
     # Wire fake vjepa2 modules; route the arch wrapper to our spy ViT.
     # ``vit_kwargs`` from ``_build_vit_from_manifest`` does NOT include
@@ -2221,7 +2222,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
     crash, exercised against the canonical manifest the production checkpoint
     ships with.
     """
-    from openwam.model.video_backbone.encoder import _vjepa_loader
+    from openwam.model.video_backbone.encoder.vjepa2_1 import loader as _vjepa_loader
 
     captured_kwargs: dict = {}
 
@@ -2241,18 +2242,9 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
     fake_vjepa_modules = types.SimpleNamespace(
         rotate_queries_or_keys=lambda x, pos, n_registers, has_cls_first: x,
     )
-    fake_app = types.ModuleType("app")
-    fake_app_vjepa = types.ModuleType("app.vjepa_2_1")
-    fake_app_vjepa_models = types.ModuleType("app.vjepa_2_1.models")
-    fake_app_vjepa_models.vision_transformer = fake_module
-    fake_app_vjepa_models_utils = types.ModuleType("app.vjepa_2_1.models.utils")
-    fake_app_vjepa_models_utils.modules = fake_vjepa_modules
-    monkeypatch.setitem(sys.modules, "app", fake_app)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1", fake_app_vjepa)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models", fake_app_vjepa_models)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.vision_transformer", fake_module)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.utils", fake_app_vjepa_models_utils)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.utils.modules", fake_vjepa_modules)
+    _vendor = "openwam.model.video_backbone.encoder.vjepa2_1._vendor"
+    monkeypatch.setitem(sys.modules, f"{_vendor}.vision_transformer", fake_module)
+    monkeypatch.setitem(sys.modules, f"{_vendor}.modules", fake_vjepa_modules)
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2278,7 +2270,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
 def test_V10_vjepa21_load_vit_rope_arch_with_use_rope_false_fails_fast():
     """Manifest with ``arch_name=*_rope`` and ``use_rope=False`` is contradictory —
     we raise a ``ValueError`` at load time instead of silently overriding."""
-    from openwam.model.video_backbone.encoder import _vjepa_loader
+    from openwam.model.video_backbone.encoder.vjepa2_1 import loader as _vjepa_loader
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2324,18 +2316,12 @@ def _install_fake_vjepa_modules(monkeypatch, wrapper_factory):
     fake_vjepa_modules = types.SimpleNamespace(
         rotate_queries_or_keys=lambda x, pos, n_registers, has_cls_first: x,
     )
-    fake_app = types.ModuleType("app")
-    fake_app_vjepa = types.ModuleType("app.vjepa_2_1")
-    fake_app_vjepa_models = types.ModuleType("app.vjepa_2_1.models")
-    fake_app_vjepa_models.vision_transformer = vision_transformer
-    fake_app_vjepa_models_utils = types.ModuleType("app.vjepa_2_1.models.utils")
-    fake_app_vjepa_models_utils.modules = fake_vjepa_modules
-    monkeypatch.setitem(sys.modules, "app", fake_app)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1", fake_app_vjepa)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models", fake_app_vjepa_models)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.vision_transformer", vision_transformer)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.utils", fake_app_vjepa_models_utils)
-    monkeypatch.setitem(sys.modules, "app.vjepa_2_1.models.utils.modules", fake_vjepa_modules)
+    # ``loader.prepare_vjepa_imports_and_patch`` does
+    # ``from ...vjepa2_1._vendor import vision_transformer, modules`` — inject the
+    # fakes at those sys.modules keys so no real (timm-dependent) ViT loads.
+    _vendor = "openwam.model.video_backbone.encoder.vjepa2_1._vendor"
+    monkeypatch.setitem(sys.modules, f"{_vendor}.vision_transformer", vision_transformer)
+    monkeypatch.setitem(sys.modules, f"{_vendor}.modules", fake_vjepa_modules)
 
 
 def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):

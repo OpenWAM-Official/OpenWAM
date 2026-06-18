@@ -22,10 +22,10 @@ import torch.nn as nn
 from PIL import Image
 from torchvision import transforms as T
 
-from openwam.model.video_backbone.encoder import _vjepa_loader
 from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
 from openwam.model.video_backbone.encoder.svae import reducer
+from openwam.model.video_backbone.encoder.vjepa2_1 import loader
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +48,8 @@ class VJEPA21VideoEncoder(VideoEncoder):
     """V-JEPA 2.1 video encoder.
 
     Constructor takes an already-built ViT module so unit tests can inject a
-    mock without going through ``_vjepa_loader`` (which requires the upstream
-    ``app.vjepa_2_1`` package and a local checkpoint file).
+    mock without going through ``loader`` (which builds the vendored ViT and
+    needs a local checkpoint file).
     """
 
     def __init__(
@@ -64,10 +64,10 @@ class VJEPA21VideoEncoder(VideoEncoder):
         svae_config: dict | None = None,
     ):
         super().__init__()
-        # ``_vjepa_loader`` installs a RoPE monkey-patch that casts the rotated
+        # ``loader`` installs a RoPE monkey-patch that casts the rotated
         # Q/K back to ``x.dtype``: upstream would promote them to fp32 (fp32
         # sin/cos table), mismatching bf16 V at SDPA and tripping DeepSpeed
-        # ZeRO-3's bf16 all_gather on this frozen submodule.
+        # ZeRO-3's bf16 all_gather on this frozen ViT.
         self._m = vit
         self._variant = variant
         if vjepa2_1_forward not in _VJEPA21_FORWARD_ALLOWED:
@@ -300,10 +300,10 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # Explicit signature (no ``**kw``) so a programmatic kwarg typo raises
         # TypeError instead of silently using the default. The yaml path is
         # already filtered by ``build_video_encoder`` via ``optional_yaml_keys``.
-        manifest = _vjepa_loader.read_and_validate_manifest(model_path)
-        vit_encoder = _vjepa_loader.prepare_vjepa_imports_and_patch()
-        vit = _vjepa_loader.build_vit_from_manifest(vit_encoder, manifest)
-        _vjepa_loader.load_vit_weights(vit, model_path, manifest)
+        manifest = loader.read_and_validate_manifest(model_path)
+        vit_encoder = loader.prepare_vjepa_imports_and_patch()
+        vit = loader.build_vit_from_manifest(vit_encoder, manifest)
+        loader.load_vit_weights(vit, model_path, manifest)
         return cls(
             vit,
             embed_dim=int(manifest["embed_dim"]),
@@ -342,10 +342,10 @@ class VJEPA21VideoEncoder(VideoEncoder):
         safetensors immediately after this call returns.
         """
         manifest_dir = cls._resolve_manifest_dir(ckpt_dir)
-        manifest = _vjepa_loader.read_and_validate_manifest(manifest_dir)
-        vit_encoder = _vjepa_loader.prepare_vjepa_imports_and_patch()
+        manifest = loader.read_and_validate_manifest(manifest_dir)
+        vit_encoder = loader.prepare_vjepa_imports_and_patch()
         with torch.device(device):
-            vit = _vjepa_loader.build_vit_from_manifest(vit_encoder, manifest)
+            vit = loader.build_vit_from_manifest(vit_encoder, manifest)
         # ``vjepa2_1_forward`` is a runtime knob plumbed through the yaml
         # ``encoder`` block so a checkpoint+yaml pair rebuilds the same encoder
         # the run trained. We warn (only) when a saved yaml omits it: that is
