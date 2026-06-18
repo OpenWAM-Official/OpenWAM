@@ -225,32 +225,6 @@ class DinoV3VideoEncoder(VideoEncoder):
     # decode / to_frames intentionally omitted — defaults from VideoEncoder
     # raise NotImplementedError because spec.is_reversible=False.
 
-    @staticmethod
-    def _extract_structural_fields(config: Any, model_path: str) -> tuple[int, int, int]:
-        """Read ``(embed_dim, patch_size, num_register_tokens)`` from an HF config.
-
-        Centralised so :meth:`from_pretrained` and :meth:`from_skeleton`
-        agree on which attributes to probe and how to fail. ``hidden_size``
-        is the canonical DINOv3 / HF ViT field; ``embed_dim`` is kept as a
-        fallback for forks that rename it. Both are checked with explicit
-        ``None`` discrimination (rather than truthy fallback) so a
-        misconfigured ``hidden_size=0`` would surface here instead of being
-        silently overwritten by ``embed_dim``.
-        """
-        hidden = getattr(config, "hidden_size", None)
-        if hidden is None:
-            hidden = getattr(config, "embed_dim", None)
-        if hidden is None:
-            raise ValueError(
-                f"Could not infer embed_dim from DINOv3 config at {model_path} (checked hidden_size, embed_dim)."
-            )
-        embed_dim = int(hidden)
-        if embed_dim <= 0:
-            raise ValueError(f"DINOv3 config at {model_path} reports non-positive hidden_size/embed_dim={embed_dim!r}.")
-        patch_size = int(getattr(config, "patch_size", 16))
-        num_register_tokens = int(getattr(config, "num_register_tokens", 0))
-        return embed_dim, patch_size, num_register_tokens
-
     @classmethod
     def from_pretrained(cls, model_path: str, **kw: Any) -> "DinoV3VideoEncoder":
         from transformers import AutoConfig, AutoModel
@@ -341,23 +315,6 @@ class DinoV3VideoEncoder(VideoEncoder):
             num_register_tokens=num_register_tokens,
         )
 
-    @staticmethod
-    def _resolve_config_dir(ckpt_dir: str | None) -> str:
-        """Return the dir holding a readable DINOv3 ``config.json`` at deploy time.
-
-        Strictly self-contained: only ``<ckpt_dir>/dinov3/config.json`` (written
-        by :meth:`save_deploy_assets`) is consulted; there is no
-        ``encoder.model_path`` fallback. A missing config is a hard error.
-        """
-        ckpt_cfg = os.path.join(ckpt_dir, _DINOV3_CKPT_SUBDIR, "config.json") if ckpt_dir else None
-        if ckpt_cfg and os.path.isfile(ckpt_cfg):
-            return os.path.join(str(ckpt_dir), _DINOV3_CKPT_SUBDIR)
-        raise FileNotFoundError(
-            "DinoV3VideoEncoder.from_skeleton: no readable config.json at "
-            f"ckpt_dir={ckpt_cfg!r}. Re-save the checkpoint with the current "
-            "code, which writes dinov3/config.json into ckpt_dir."
-        )
-
     def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
         """Copy the DINOv3 HF ``config.json`` into ``<output_dir>/dinov3/config.json``
         so deploy is self-contained.
@@ -396,6 +353,53 @@ class DinoV3VideoEncoder(VideoEncoder):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(src, dst)
         logger.info("DinoV3VideoEncoder.save_deploy_assets: copied %s -> %s", src, dst)
+
+    # ------------------------------------------------------------------
+    # Private load / deploy helpers (the VideoEncoder contract is above)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_structural_fields(config: Any, model_path: str) -> tuple[int, int, int]:
+        """Read ``(embed_dim, patch_size, num_register_tokens)`` from an HF config.
+
+        Centralised so :meth:`from_pretrained` and :meth:`from_skeleton`
+        agree on which attributes to probe and how to fail. ``hidden_size``
+        is the canonical DINOv3 / HF ViT field; ``embed_dim`` is kept as a
+        fallback for forks that rename it. Both are checked with explicit
+        ``None`` discrimination (rather than truthy fallback) so a
+        misconfigured ``hidden_size=0`` would surface here instead of being
+        silently overwritten by ``embed_dim``.
+        """
+        hidden = getattr(config, "hidden_size", None)
+        if hidden is None:
+            hidden = getattr(config, "embed_dim", None)
+        if hidden is None:
+            raise ValueError(
+                f"Could not infer embed_dim from DINOv3 config at {model_path} (checked hidden_size, embed_dim)."
+            )
+        embed_dim = int(hidden)
+        if embed_dim <= 0:
+            raise ValueError(f"DINOv3 config at {model_path} reports non-positive hidden_size/embed_dim={embed_dim!r}.")
+        patch_size = int(getattr(config, "patch_size", 16))
+        num_register_tokens = int(getattr(config, "num_register_tokens", 0))
+        return embed_dim, patch_size, num_register_tokens
+
+    @staticmethod
+    def _resolve_config_dir(ckpt_dir: str | None) -> str:
+        """Return the dir holding a readable DINOv3 ``config.json`` at deploy time.
+
+        Strictly self-contained: only ``<ckpt_dir>/dinov3/config.json`` (written
+        by :meth:`save_deploy_assets`) is consulted; there is no
+        ``encoder.model_path`` fallback. A missing config is a hard error.
+        """
+        ckpt_cfg = os.path.join(ckpt_dir, _DINOV3_CKPT_SUBDIR, "config.json") if ckpt_dir else None
+        if ckpt_cfg and os.path.isfile(ckpt_cfg):
+            return os.path.join(str(ckpt_dir), _DINOV3_CKPT_SUBDIR)
+        raise FileNotFoundError(
+            "DinoV3VideoEncoder.from_skeleton: no readable config.json at "
+            f"ckpt_dir={ckpt_cfg!r}. Re-save the checkpoint with the current "
+            "code, which writes dinov3/config.json into ckpt_dir."
+        )
 
 
 __all__ = ["DinoV3VideoEncoder"]

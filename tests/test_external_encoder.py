@@ -1734,8 +1734,8 @@ def test_E_composed_encoder_block(model_name):
 class _MockVJEPAViT(nn.Module):
     """Tiny CPU stand-in for the V-JEPA 2.1 ViT.
 
-    Reproduces only what ``VJEPA21VideoEncoder._encode_image`` /
-    ``_encode_video_tubelet`` consume: ``(B, C, T, H, W) -> (B, L, D)`` with
+    Reproduces only what ``VJEPA21VideoEncoder._vit_grid`` consumes:
+    ``(B, C, T, H, W) -> (B, L, D)`` with
     ``L`` matching the post-patchify token count for tubelet=1 (T==1 branch)
     and tubelet=2 (T>1 branch). Has at least one parameter so ``next(
     self.parameters())`` yields a device/dtype anchor.

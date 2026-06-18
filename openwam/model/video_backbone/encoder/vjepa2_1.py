@@ -153,26 +153,22 @@ class VJEPA21VideoEncoder(VideoEncoder):
     _TARGET_TEMPORAL_POOL_STRIDE = 2
 
     def batch_encode(self, video: torch.Tensor) -> torch.Tensor:
-        """(B, 3, T_pixel, H, W) -> (B, embed_dim, T_lat, H/16, W/16).
+        """(B, 3, T_pixel, H, W) -> (B, z_dim, T_lat, H/16, W/16).
 
         ``T_lat == 1`` when ``T_pixel == 1`` (TI2V ref-frame fast path); else
         ``1 + (T_pixel - 1) // 4`` (1 cond latent + ``(T_pixel-1)/4`` targets),
-        emulating Wan VAE causal grouping. Output shape is identical under both
-        ``vjepa2_1_forward`` modes; they differ only in the condition pass:
-
-        - Condition (frame 0, no target leakage): ``"video"`` (default) routes
-          ``cat([f0, f0])`` through the video branch (tubelet=2); ``"mixed"``
-          routes f0 through the image branch (tubelet=1). Both yield 1 latent.
-        - Target (both modes): ``cat([f0, f0, t1..tN])`` → video branch → drop
-          the first (prepended-pair) latent → ``N/2`` raw targets → avg-pool
-          stride 2 → ``N/4``. The prepended pair lets temporal attention see
-          the reference frame; dropping its latent keeps cond and target
-          independent so deploy/train see the same cond latent.
+        emulating Wan VAE causal grouping. The raw encode + pool lives in
+        :meth:`_batch_encode_pooled_raw`; here we apply the optional S-VAE
+        reducer (base hook) then the per-token feature_norm.
         """
         z = self._batch_encode_pooled_raw(video)
-        z = reducer.reduce(self._svae, z)
-        z = self._apply_feature_norm(z)
-        return z
+        z = self._apply_svae(z)
+        # Per-token feature_norm AFTER the pool so the LayerNorm re-standardizes
+        # the post-pool distribution: (B,D,T,h,w) -> flatten tokens -> LN -> back.
+        B, D, Tp, h, w = z.shape
+        z = z.permute(0, 2, 3, 4, 1).reshape(-1, D)
+        z = self.feature_norm(z)
+        return z.view(B, Tp, h, w, D).permute(0, 4, 1, 2, 3).contiguous()
 
     def _batch_encode_pooled_raw(self, video: torch.Tensor) -> torch.Tensor:
         """Encoder forward + temporal mean-pool, BEFORE S-VAE / feature_norm.
@@ -181,7 +177,15 @@ class VJEPA21VideoEncoder(VideoEncoder):
         mean-pooled target latents — the exact tensor the S-VAE consumes. Split
         from :meth:`batch_encode` so offline S-VAE training
         (:meth:`batch_encode_pooled_for_svae_training`) sees the same post-pool
-        distribution.
+        distribution. The two passes:
+
+        - Condition (frame 0, no target leakage): ``"mixed"`` routes f0 through
+          the image branch (tubelet=1); ``"video"`` (default) dups it to a
+          2-frame clip through the video branch (tubelet=2). Both yield 1 latent.
+        - Target: prepend ``[f0, f0]`` so temporal attention sees the reference
+          frame, run the video branch, drop the first (prepended-pair) latent,
+          then avg-pool over time (stride 2). The drop keeps cond/target
+          independent so deploy/train see the same cond latent.
         """
         B, C, Tp, H, W = video.shape
         if C != 3:
@@ -192,16 +196,18 @@ class VJEPA21VideoEncoder(VideoEncoder):
         if video.dtype != m_dtype:
             video = video.to(m_dtype)
         f0 = video[:, :, 0:1]
+        if self._vjepa2_1_forward == "mixed":
+            z_cond = self._vit_grid(f0)
+        else:
+            z_cond = self._vit_grid(torch.cat([f0, f0], dim=2))
         if Tp == 1:
-            return self._encode_condition(f0)
-        # tubelet=2 + extra time-pool ⇒ (T_pixel - 1) % 4 == 0. RoBoTwin
-        # (T_pixel=9): (9-1) % 4 == 0. ✓
+            return z_cond
+        # tubelet=2 + extra time-pool ⇒ (T_pixel - 1) % 4 == 0. RoBoTwin (T=9): ✓
         divisor = 2 * self._TARGET_TEMPORAL_POOL_STRIDE
         if (Tp - 1) % divisor != 0:
             raise ValueError(f"V-JEPA 2.1 causal emulation needs (T_pixel - 1) % {divisor} == 0, got T_pixel={Tp}.")
-        z_cond = self._encode_condition(f0)
-        z_target_raw = self._encode_target_with_prepend(f0, video[:, :, 1:])
-        z_target = self._pool_target_temporal(z_target_raw)
+        z_target = self._vit_grid(torch.cat([f0, f0, video[:, :, 1:]], dim=2))[:, :, 1:]
+        z_target = self._pool_target_temporal(z_target)
         return torch.cat([z_cond, z_target], dim=2)
 
     def batch_encode_pooled_for_svae_training(self, video: torch.Tensor) -> torch.Tensor:
@@ -221,63 +227,28 @@ class VJEPA21VideoEncoder(VideoEncoder):
             )
         return self._batch_encode_pooled_raw(video)
 
-    def _pool_target_temporal(self, z_target: torch.Tensor) -> torch.Tensor:
-        """(B, D, T_target_raw, h, w) -> (B, D, T_target_raw/2, h, w) via
-        avg-pool over time with stride ``_TARGET_TEMPORAL_POOL_STRIDE``.
+    def _vit_grid(self, x5: torch.Tensor) -> torch.Tensor:
+        """(B, 3, T, H, W) -> (B, D, T_lat, H/16, W/16) via the V-JEPA 2.1 ViT.
 
-        ``batch_encode`` guarantees ``T_target_raw`` is divisible by the
-        stride before calling here. Done BEFORE ``_apply_feature_norm`` so
-        the LayerNorm re-standardizes the (slightly-attenuated) post-pool
-        feature distribution and the final per-token output stays
-        comparable to V-JEPA-native scale.
+        ``T == 1`` selects the image branch (tubelet=1, T_lat=1); ``T > 1`` the
+        video branch (tubelet=2, T_lat=T/2). The flat ``(B, L, D)`` output is
+        T-major then (H,W) row-major, so it reshapes straight to the grid.
+        """
+        flat = self._m(x5)
+        B, _, T, H, W = x5.shape
+        h, w = H // 16, W // 16
+        t_lat = 1 if T == 1 else T // 2
+        return flat.transpose(1, 2).reshape(B, -1, t_lat, h, w).contiguous()
+
+    def _pool_target_temporal(self, z_target: torch.Tensor) -> torch.Tensor:
+        """(B, D, T_raw, h, w) -> (B, D, T_raw/2, h, w): avg-pool over time with
+        stride ``_TARGET_TEMPORAL_POOL_STRIDE`` (a mean of each consecutive pair,
+        NOT stride-2 indexing). Kept a named method so V5b can pin the mean
+        semantics against a silent regression that would still pass shape checks.
         """
         s = self._TARGET_TEMPORAL_POOL_STRIDE
         B, D, T, h, w = z_target.shape
         return z_target.reshape(B, D, T // s, s, h, w).mean(dim=3)
-
-    def _encode_condition(self, f0: torch.Tensor) -> torch.Tensor:
-        """(B, 3, 1, H, W) -> (B, D, 1, H/16, W/16). See ``batch_encode`` docstring."""
-        if self._vjepa2_1_forward == "mixed":
-            return self._encode_image(f0[:, :, 0])
-        return self._encode_video_tubelet(torch.cat([f0, f0], dim=2))
-
-    def _encode_target_with_prepend(self, f0: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """(B, 3, 1, H, W) + (B, 3, N_even, H, W) -> (B, D, N/2, H/16, W/16).
-
-        Runs ``video_branch(cat([f0, f0, targets]))`` and drops the first
-        temporal latent (which encodes the prepended frame-0 pair). The
-        kept slices are the target latents whose temporal attention has
-        already seen the reference frame — exactly the supervision signal
-        we want for the target stream, without leaking target information
-        back into the condition lane (which uses its own forward).
-        """
-        clip = torch.cat([f0, f0, targets], dim=2)
-        z_full = self._encode_video_tubelet(clip)
-        return z_full[:, :, 1:]
-
-    # V-JEPA 2.1 ViT.forward: input (B,C,T,H,W); T==1 → image branch (tubelet=1),
-    # else video branch (tubelet=2). Output (B, L, D) flat, L = T_lat·(H/16)·(W/16)
-    # in T-major then (H,W) row-major order.
-    def _encode_image(self, image: torch.Tensor) -> torch.Tensor:
-        """(B, 3, H, W) -> (B, D, 1, H/16, W/16) via V-JEPA 2.1 image branch."""
-        x5 = image.unsqueeze(2)  # (B, 3, 1, H, W) -> image branch
-        flat = self._m(x5)  # (B, L, D), L = (H/16)*(W/16)
-        B, _, H, W = image.shape
-        h, w = H // 16, W // 16
-        return flat.transpose(1, 2).reshape(B, -1, 1, h, w).contiguous()
-
-    def _encode_video_tubelet(self, video: torch.Tensor) -> torch.Tensor:
-        """(B, 3, T_even, H, W) -> (B, D, T_even/2, H/16, W/16) via tubelet=2."""
-        flat = self._m(video)  # (B, L, D), L = (T/2)*(H/16)*(W/16)
-        B, _, Tp, H, W = video.shape
-        h, w = H // 16, W // 16
-        return flat.transpose(1, 2).reshape(B, -1, Tp // 2, h, w).contiguous()
-
-    def _apply_feature_norm(self, z: torch.Tensor) -> torch.Tensor:
-        B, D, Tp, h, w = z.shape
-        z = z.permute(0, 2, 3, 4, 1).reshape(-1, D)
-        z = self.feature_norm(z)
-        return z.view(B, Tp, h, w, D).permute(0, 4, 1, 2, 3).contiguous()
 
     def decode(self, latents: torch.Tensor, **kw: Any) -> torch.Tensor:
         raise NotImplementedError(
@@ -341,7 +312,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         ``load_checkpoint`` populates ``video_encoder._m.*`` from the saved
         safetensors immediately after this call returns.
         """
-        manifest_dir = cls._resolve_manifest_dir(ckpt_dir)
+        manifest_dir = loader.resolve_manifest_dir(ckpt_dir)
         manifest = loader.read_and_validate_manifest(manifest_dir)
         vit_encoder = loader.prepare_vjepa_imports_and_patch()
         with torch.device(device):
@@ -353,8 +324,8 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # compatible (temporal_compression 2→4 + the 2-pass target rewrite) and
         # must be retrained. ``encoder_cfg is None`` (programmatic callers) is
         # not warned — there is no saved yaml to fix.
-        vjepa2_1_forward = cls._read_vjepa2_1_forward_from_cfg(encoder_cfg)
-        if encoder_cfg is not None and not cls._cfg_has_vjepa2_1_forward(encoder_cfg):
+        vjepa2_1_forward = loader.read_vjepa2_1_forward_from_cfg(encoder_cfg, _VJEPA21_FORWARD_DEFAULT)
+        if encoder_cfg is not None and not loader.cfg_has_vjepa2_1_forward(encoder_cfg):
             logger.warning(
                 "VJEPA21VideoEncoder.from_skeleton: saved encoder yaml has no "
                 "``vjepa2_1_forward`` field; defaulting to %r. A pre-PR-#92 "
@@ -386,55 +357,6 @@ class VJEPA21VideoEncoder(VideoEncoder):
             vjepa2_1_forward=vjepa2_1_forward,
             svae_config=svae_config,
             svae_target_dim=svae_target_dim,
-        )
-
-    @staticmethod
-    def _cfg_has_vjepa2_1_forward(encoder_cfg: Any) -> bool:
-        """Report whether the saved encoder yaml carries the key at all
-        (yaml-``null`` counts as present). ``from_skeleton`` needs this — vs.
-        :meth:`_read_vjepa2_1_forward_from_cfg`, which collapses absent/null to
-        the default — to fire the pre-PR-checkpoint migration warning only when
-        the operator truly omitted the key.
-        """
-        if encoder_cfg is None:
-            return False
-        if isinstance(encoder_cfg, dict):
-            return "vjepa2_1_forward" in encoder_cfg
-        _MISSING = object()
-        return getattr(encoder_cfg, "vjepa2_1_forward", _MISSING) is not _MISSING
-
-    @staticmethod
-    def _read_vjepa2_1_forward_from_cfg(encoder_cfg: Any) -> _VJEPA21Forward:
-        """Pick ``vjepa2_1_forward`` from the saved yaml; absent / yaml-null
-        collapse to the default."""
-        if encoder_cfg is None:
-            return _VJEPA21_FORWARD_DEFAULT
-        if isinstance(encoder_cfg, dict):
-            value = encoder_cfg.get("vjepa2_1_forward")
-        else:
-            value = getattr(encoder_cfg, "vjepa2_1_forward", None)
-        if value is None:
-            return _VJEPA21_FORWARD_DEFAULT
-        return str(value)  # type: ignore[return-value]  # __init__ validates
-
-    @staticmethod
-    def _resolve_manifest_dir(ckpt_dir: str | None) -> str:
-        """Return ``ckpt_dir`` when it holds a readable ``manifest.json``.
-
-        Deploy is strictly self-contained: the manifest must live next to the
-        checkpoint (written by :meth:`save_deploy_assets`); there is no
-        ``encoder.model_path`` fallback. A missing manifest is a hard error.
-        ``os.path.isfile`` (not ``exists``) rejects a directory named
-        ``manifest.json`` so the failure is named here rather than as a
-        confusing ``json.load`` error later.
-        """
-        ckpt_manifest = os.path.join(ckpt_dir, "manifest.json") if ckpt_dir else None
-        if ckpt_manifest and os.path.isfile(ckpt_manifest):
-            return str(ckpt_dir)
-        raise FileNotFoundError(
-            "VJEPA21VideoEncoder.from_skeleton: no readable manifest.json at "
-            f"ckpt_dir={ckpt_manifest!r}. Re-save the checkpoint with the "
-            "current code, which writes manifest.json into ckpt_dir."
         )
 
     def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:

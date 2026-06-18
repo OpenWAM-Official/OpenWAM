@@ -252,23 +252,6 @@ class FluxVAEVideoEncoder(VideoEncoder):
         )
         return cls(core)
 
-    @staticmethod
-    def _resolve_config_dir(ckpt_dir: str | None) -> str:
-        """Return the dir holding a readable FLUX.2 VAE ``config.json`` at deploy time.
-
-        Strictly self-contained: only ``<ckpt_dir>/flux_vae/config.json`` (written
-        by :meth:`save_deploy_assets`) is consulted; there is no
-        ``encoder.model_path`` fallback. A missing config is a hard error.
-        """
-        ckpt_cfg = os.path.join(ckpt_dir, _FLUX_CKPT_SUBDIR, "config.json") if ckpt_dir else None
-        if ckpt_cfg and os.path.isfile(ckpt_cfg):
-            return os.path.join(str(ckpt_dir), _FLUX_CKPT_SUBDIR)
-        raise FileNotFoundError(
-            "FluxVAEVideoEncoder.from_skeleton: no readable config.json at "
-            f"ckpt_dir={ckpt_cfg!r}. Re-save the checkpoint with the current "
-            "code, which writes flux_vae/config.json into ckpt_dir."
-        )
-
     def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
         """Copy the FLUX.2 VAE ``config.json`` into
         ``<output_dir>/flux_vae/config.json`` so deploy is self-contained.
@@ -307,6 +290,27 @@ class FluxVAEVideoEncoder(VideoEncoder):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(src, dst)
         logger.info("FluxVAEVideoEncoder.save_deploy_assets: copied %s -> %s", src, dst)
+
+    # ------------------------------------------------------------------
+    # Private deploy helper (the VideoEncoder contract is above)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_config_dir(ckpt_dir: str | None) -> str:
+        """Return the dir holding a readable FLUX.2 VAE ``config.json`` at deploy time.
+
+        Strictly self-contained: only ``<ckpt_dir>/flux_vae/config.json`` (written
+        by :meth:`save_deploy_assets`) is consulted; there is no
+        ``encoder.model_path`` fallback. A missing config is a hard error.
+        """
+        ckpt_cfg = os.path.join(ckpt_dir, _FLUX_CKPT_SUBDIR, "config.json") if ckpt_dir else None
+        if ckpt_cfg and os.path.isfile(ckpt_cfg):
+            return os.path.join(str(ckpt_dir), _FLUX_CKPT_SUBDIR)
+        raise FileNotFoundError(
+            "FluxVAEVideoEncoder.from_skeleton: no readable config.json at "
+            f"ckpt_dir={ckpt_cfg!r}. Re-save the checkpoint with the current "
+            "code, which writes flux_vae/config.json into ckpt_dir."
+        )
 
 
 __all__ = ["FluxVAEVideoEncoder"]

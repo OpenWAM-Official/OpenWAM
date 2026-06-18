@@ -190,3 +190,56 @@ def load_vit(model_path: str, manifest: dict) -> nn.Module:
     vit = build_vit_from_manifest(vit_encoder, manifest)
     load_vit_weights(vit, model_path, manifest)
     return vit
+
+
+# ----------------------------------------------------------------------
+# Deploy / cfg helpers (lowered out of the VJEPA21VideoEncoder subclass so it
+# implements only the VideoEncoder contract).
+# ----------------------------------------------------------------------
+
+
+def resolve_manifest_dir(ckpt_dir: str | None) -> str:
+    """Return ``ckpt_dir`` when it holds a readable ``manifest.json``.
+
+    Deploy is strictly self-contained: the manifest must live next to the
+    checkpoint (written by ``save_deploy_assets``); there is no
+    ``encoder.model_path`` fallback, and a missing manifest is a hard error.
+    ``os.path.isfile`` (not ``exists``) rejects a directory named
+    ``manifest.json`` so the failure is named here, not as a later ``json.load``.
+    """
+    ckpt_manifest = os.path.join(ckpt_dir, "manifest.json") if ckpt_dir else None
+    if ckpt_manifest and os.path.isfile(ckpt_manifest):
+        return str(ckpt_dir)
+    raise FileNotFoundError(
+        "VJEPA21VideoEncoder.from_skeleton: no readable manifest.json at "
+        f"ckpt_dir={ckpt_manifest!r}. Re-save the checkpoint with the current "
+        "code, which writes manifest.json into ckpt_dir."
+    )
+
+
+def cfg_has_vjepa2_1_forward(encoder_cfg: Any) -> bool:
+    """Whether the saved encoder yaml carries the ``vjepa2_1_forward`` key at all
+    (yaml-``null`` counts as present). ``from_skeleton`` uses this — vs.
+    :func:`read_vjepa2_1_forward_from_cfg`, which collapses absent/null to the
+    default — to fire the pre-PR-checkpoint migration warning only when the
+    operator truly omitted the key.
+    """
+    if encoder_cfg is None:
+        return False
+    if isinstance(encoder_cfg, dict):
+        return "vjepa2_1_forward" in encoder_cfg
+    _MISSING = object()
+    return getattr(encoder_cfg, "vjepa2_1_forward", _MISSING) is not _MISSING
+
+
+def read_vjepa2_1_forward_from_cfg(encoder_cfg: Any, default: str) -> str:
+    """Pick ``vjepa2_1_forward`` from the saved yaml; absent / yaml-null collapse
+    to ``default``. The caller's ``__init__`` validates the returned value.
+    """
+    if encoder_cfg is None:
+        return default
+    if isinstance(encoder_cfg, dict):
+        value = encoder_cfg.get("vjepa2_1_forward")
+    else:
+        value = getattr(encoder_cfg, "vjepa2_1_forward", None)
+    return default if value is None else str(value)

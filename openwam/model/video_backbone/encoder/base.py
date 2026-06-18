@@ -18,6 +18,9 @@ from typing import Any
 import torch.nn as nn
 from torch import Tensor
 
+from openwam.model.video_backbone.encoder.svae import reducer
+from openwam.model.video_backbone.encoder.svae.model import SVAE
+
 
 @dataclass(frozen=True)
 class VideoEncoderProperties:
@@ -85,6 +88,14 @@ class VideoEncoder(ABC, nn.Module):
     its raw features MAY hold an optional frozen S-VAE reducer — see
     :mod:`openwam.model.video_backbone.encoder.svae.reducer`.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Optional frozen S-VAE reducer; ``None`` = disabled. A subclass opts in
+        # from its own ``__init__`` via ``self._svae = reducer.build(...)`` and
+        # routes batch_encode through :meth:`_apply_svae`. The SVAE network +
+        # build / sidecar plumbing live in :mod:`...svae.reducer`.
+        self._svae: SVAE | None = None
 
     # ------------------------------------------------------------------
     # Required: latent contract + per-step IO
@@ -290,3 +301,22 @@ class VideoEncoder(ABC, nn.Module):
         """
         ps = self.spec.dit_patch_size
         return nn.Linear(dit_dim, self.spec.z_dim * math.prod(ps))
+
+    # ------------------------------------------------------------------
+    # Optional S-VAE feature reducer (opt-in extension point)
+    # ------------------------------------------------------------------
+    # A subclass that compresses its raw per-token features sets
+    # ``self._svae = reducer.build(...)`` in __init__ and routes batch_encode
+    # through :meth:`_apply_svae`. Default (``_svae is None``) is a passthrough,
+    # so non-opting encoders stay bit-unchanged. The SVAE network + build /
+    # sidecar plumbing live in :mod:`openwam.model.video_backbone.encoder.svae`.
+
+    def _apply_svae(self, z: Tensor) -> Tensor:
+        """Reduce features through the optional frozen S-VAE, else passthrough.
+
+        The single opt-in hook a subclass's ``batch_encode`` calls;
+        :func:`reducer.reduce` does the ZeRO-3 gather + deterministic posterior
+        mean. Reducer construction / ``svae_target_dim`` sizing / deploy sidecar
+        stay in :mod:`...svae.reducer`.
+        """
+        return reducer.reduce(self._svae, z)
