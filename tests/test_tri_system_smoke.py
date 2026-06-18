@@ -171,7 +171,7 @@ def test_understanding_expert_config_accepts_explicit_ffn_dim(monkeypatch):
         def _init_video_backbone(self, cfg):  # noqa: ARG002
             self.video_backbone, _, _ = _make_tiny_trimodal_components(num_layers=1)
 
-    monkeypatch.setattr(tri_mod, "Qwen3VLBackbone", _StubVLM)
+    monkeypatch.setattr(tri_mod, "build_vlm_backbone", lambda *a, **k: _StubVLM())
 
     cfg = {
         "vlm_backbone": {"checkpoint_path": "", "load_pretrained": False},
@@ -208,7 +208,7 @@ def test_understanding_expert_rejects_ffn_dim_multiplier(monkeypatch):
         def _init_video_backbone(self, cfg):  # noqa: ARG002
             self.video_backbone, _, _ = _make_tiny_trimodal_components(num_layers=1)
 
-    monkeypatch.setattr(tri_mod, "Qwen3VLBackbone", _StubVLM)
+    monkeypatch.setattr(tri_mod, "build_vlm_backbone", lambda *a, **k: _StubVLM())
 
     cfg = {
         "vlm_backbone": {"checkpoint_path": "", "load_pretrained": False},
@@ -246,7 +246,7 @@ def _make_stub_tri_arch(monkeypatch, num_video_layers: int = 3):
         def _init_video_backbone(self, cfg):  # noqa: ARG002
             self.video_backbone, _, _ = _make_tiny_trimodal_components(num_layers=num_video_layers)
 
-    monkeypatch.setattr(tri_mod, "Qwen3VLBackbone", _StubVLM)
+    monkeypatch.setattr(tri_mod, "build_vlm_backbone", lambda *a, **k: _StubVLM())
     return _Arch
 
 

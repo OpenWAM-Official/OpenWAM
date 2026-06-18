@@ -15,7 +15,7 @@ from openwam.model.action_backbone.joint_action_dit import ActionDiT
 from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
-from openwam.model.vlm_backbone import Qwen3VLBackbone
+from openwam.model.vlm_backbone import build_vlm_backbone
 from openwam.model.vlm_backbone.qwen3_vl import (
     UnderstandingExpert,
     UnderstandingExpertConfig,
@@ -95,7 +95,8 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             # passes an explicit bridge_layers list.
             cfg.setdefault("bridge_interval", 1)
 
-        self.vlm_backbone = Qwen3VLBackbone(
+        self.vlm_backbone = build_vlm_backbone(
+            _cfg_get(vlm_cfg, "name", "qwen3_vl"),
             checkpoint_path=_cfg_get(vlm_cfg, "checkpoint_path"),
             dtype=self.dtype,
             load_pretrained=bool(_cfg_get(vlm_cfg, "load_pretrained", True)),

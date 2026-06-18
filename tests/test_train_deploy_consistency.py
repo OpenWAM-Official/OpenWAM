@@ -273,7 +273,7 @@ def _make_stub_tri_arch_for_forward(monkeypatch, num_video_layers=1, vlm_input_d
         def _init_video_backbone(self, cfg):  # noqa: ARG002
             self.video_backbone = _TriStubVideoBackbone()
 
-    monkeypatch.setattr(tri_mod, "Qwen3VLBackbone", _StubVLM)
+    monkeypatch.setattr(tri_mod, "build_vlm_backbone", lambda *a, **k: _StubVLM())
 
     cfg = {
         "vlm_backbone": {"checkpoint_path": "", "load_pretrained": False},
