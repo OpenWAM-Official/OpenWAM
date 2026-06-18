@@ -56,14 +56,14 @@ class _MockEncoderBase(VideoEncoder):
         self._spec = VideoEncoderProperties(**self._SPEC_KWARGS)
 
     @property
-    def spec(self) -> VideoEncoderProperties:
+    def properties(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames):
         return torch.zeros(1, 3, 4, 8, 8)
 
     def batch_encode(self, video: Tensor) -> Tensor:
-        s = self.spec
+        s = self.properties
         B, _, T, H, W = video.shape
         return torch.zeros(
             B, s.z_dim, T // s.temporal_compression, H // s.spatial_compression, W // s.spatial_compression
@@ -122,17 +122,17 @@ def test_A3_register_rejects_non_subclass():
 
 
 def test_A4_default_decode_raises_with_contract_aware_msg():
-    enc = _make_mock_encoder(is_reversible=False)
+    enc = _make_mock_encoder(pixel_decode=False)
     with pytest.raises(NotImplementedError) as exc:
         enc.decode(torch.zeros(1, 16, 4, 8, 8))
-    assert "is_reversible=False" in str(exc.value)
+    assert "pixel_decode=False" in str(exc.value)
 
 
 def test_A5_default_to_frames_raises_with_contract_aware_msg():
-    enc = _make_mock_encoder(is_reversible=False)
+    enc = _make_mock_encoder(pixel_decode=False)
     with pytest.raises(NotImplementedError) as exc:
         enc.to_frames(torch.zeros(1, 3, 4, 8, 8))
-    assert "is_reversible=False" in str(exc.value)
+    assert "pixel_decode=False" in str(exc.value)
 
 
 def test_A6_default_hooks_produce_wan_structure_for_z_dim_16():
@@ -203,10 +203,10 @@ def test_B2_wan_vae_default_hooks_match_wan21():
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
 
     enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=16, upsampling_factor=8))
-    assert enc.spec.z_dim == 16
-    assert enc.spec.spatial_compression == 8
-    assert enc.spec.temporal_compression == 4
-    assert enc.spec.causal_temporal is True
+    assert enc.properties.z_dim == 16
+    assert enc.properties.spatial_compression == 8
+    assert enc.properties.temporal_compression == 4
+    assert enc.properties.causal_temporal is True
     inp = enc.build_dit_input_proj(dit_dim=1536)
     assert isinstance(inp, nn.Conv3d)
     assert (inp.in_channels, inp.out_channels) == (16, 1536)
@@ -221,8 +221,8 @@ def test_B3_wan_vae_default_hooks_match_wan22():
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
 
     enc = WanVideoVAEEncoder(_FakeWanVAEModule(z_dim=48, upsampling_factor=16))
-    assert enc.spec.z_dim == 48
-    assert enc.spec.spatial_compression == 16
+    assert enc.properties.z_dim == 48
+    assert enc.properties.spatial_compression == 16
     inp = enc.build_dit_input_proj(dit_dim=1536)
     assert (inp.in_channels, inp.out_channels) == (48, 1536)
     assert inp.kernel_size == (1, 2, 2)
@@ -230,14 +230,14 @@ def test_B3_wan_vae_default_hooks_match_wan22():
     assert out.out_features == 48 * 4
 
 
-def test_B4_wan_vae_is_reversible_true_by_default():
-    """Wan VAE has a real pixel decoder → spec.is_reversible inherits the dataclass
+def test_B4_wan_vae_pixel_decode_true_by_default():
+    """Wan VAE has a real pixel decoder → properties.pixel_decode inherits the dataclass
     default ``True``. Confirms WanVideoVAEEncoder doesn't accidentally flip it."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
 
     enc = WanVideoVAEEncoder(_FakeWanVAEModule())
-    assert enc.spec.is_reversible is True
-    assert enc.spec.dit_patch_size == (1, 2, 2)
+    assert enc.properties.pixel_decode is True
+    assert enc.properties.dit_patch_size == (1, 2, 2)
 
 
 # ===========================================================================
@@ -410,7 +410,7 @@ def test_C10_spec_validation_fully_skipped_when_irreversible():
     from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False)
     backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert backbone._uses_external_encoder is True
 
@@ -436,12 +436,12 @@ def test_C10b_divergent_geometry_irreversible_encoder_loads():
                 spatial_compression=16,
                 temporal_compression=1,
                 causal_temporal=False,
-                is_reversible=False,
+                pixel_decode=False,
                 dit_patch_size=(1, 1, 1),
             )
 
         @property
-        def spec(self):
+        def properties(self):
             return self._spec
 
         def preprocess_video(self, frames):
@@ -464,19 +464,19 @@ def test_C10b_divergent_geometry_irreversible_encoder_loads():
 
 
 def test_C11_dit_patch_size_drives_height_width_division_factor():
-    """spec.dit_patch_size=(1,1,1) — height/width_division_factor equals
+    """properties.dit_patch_size=(1,1,1) — height/width_division_factor equals
     spatial_compression (no extra *2). Verifies the hardcoded *2 is gone."""
     from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False, dit_patch_size=(1, 1, 1))
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False, dit_patch_size=(1, 1, 1))
     Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert pipe.height_division_factor == 8  # spatial_compression * 1
     assert pipe.width_division_factor == 8
 
     # And the default (1,2,2) still works the same as before.
     pipe2 = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc2 = WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True, dit_patch_size=(1, 2, 2))
+    enc2 = WanVideoVAEEncoderStub(spec_z_dim=16, pixel_decode=True, dit_patch_size=(1, 2, 2))
     Wan22Ti2v.from_pretrained(pipe2, external_encoder=enc2)
     assert pipe2.height_division_factor == 16  # 8 * 2
     assert pipe2.width_division_factor == 16
@@ -488,7 +488,7 @@ def test_C12_decode_video_blocks_irreversible_encoder():
     from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False)
     backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     with pytest.raises(NotImplementedError, match="irreversible"):
         backbone.decode_video(torch.zeros(1, 1024, 4, 8, 8))
@@ -500,11 +500,11 @@ def test_C13a_reinit_with_external_encoder_rebuilds_modules():
     from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False)
     reinit_dit_from_scratch(
         pipe,
         external_encoder=enc,
-        dit_patch_size=enc.spec.dit_patch_size,
+        dit_patch_size=enc.properties.dit_patch_size,
         verbose=False,
     )
     assert pipe.dit.patch_embedding.in_channels == 1024
@@ -537,7 +537,7 @@ def test_C13c_reinit_syncs_patch_size_for_non_default_encoder():
     """Regression for the severe S1 bug: ``reinit_dit_from_scratch`` must
     also sync ``dit.patch_size`` (used by ``WanModel.unpatchify``'s einops
     rearrange) and ``dit.head.patch_size`` whenever the encoder declares a
-    non-default ``spec.dit_patch_size``. Pre-fix, the patch_embedding and
+    non-default ``properties.dit_patch_size``. Pre-fix, the patch_embedding and
     head.head Linear were rebuilt at the new shape but the unpatchify hint
     stayed at ``(1, 2, 2)`` — any encoder with ``dit_patch_size=(1,1,1)``
     (DINOv3 / V-JEPA2 patch-at-16) would shape-mismatch on the first
@@ -546,11 +546,11 @@ def test_C13c_reinit_syncs_patch_size_for_non_default_encoder():
     from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False, dit_patch_size=(1, 1, 1))
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False, dit_patch_size=(1, 1, 1))
     reinit_dit_from_scratch(
         pipe,
         external_encoder=enc,
-        dit_patch_size=enc.spec.dit_patch_size,
+        dit_patch_size=enc.properties.dit_patch_size,
         verbose=False,
     )
 
@@ -578,7 +578,7 @@ def test_C13c_reinit_syncs_patch_size_for_non_default_encoder():
     assert tokens.shape == (1, pipe.dit.dim, 4, 16, 16)  # stride=(1,1,1) preserves grid
     flat = torch.zeros(1, 8, pipe.dit.dim)
     out = pipe.dit.head.head(flat)
-    assert out.shape[-1] == enc.spec.z_dim * math.prod(enc.spec.dit_patch_size)
+    assert out.shape[-1] == enc.properties.z_dim * math.prod(enc.properties.dit_patch_size)
 
 
 def test_C13e_adapt_dit_to_external_encoder_no_reset():
@@ -605,9 +605,9 @@ def test_C13e_adapt_dit_to_external_encoder_no_reset():
     sentinel.weight.data.fill_(0.1234)
     sentinel_snapshot = sentinel.weight.detach().clone()
     pipe.dit.add_module("sentinel_check", sentinel)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False)
 
-    adapt_dit_to_external_encoder(pipe, enc, enc.spec.dit_patch_size)
+    adapt_dit_to_external_encoder(pipe, enc, enc.properties.dit_patch_size)
 
     # Shapes adapted to the encoder.
     assert pipe.dit.patch_embedding.in_channels == 1024
@@ -628,14 +628,14 @@ def test_C13f_adapt_dit_to_external_encoder_requires_patch_size():
     from openwam.model.video_backbone.wan.reinit import adapt_dit_to_external_encoder
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False)
     with pytest.raises(ValueError, match=r"dit_patch_size is required"):
         adapt_dit_to_external_encoder(pipe, enc, None)
 
 
 def test_C13d_reinit_with_external_encoder_requires_dit_patch_size():
     """Single-source-of-truth guard: ``reinit_dit_from_scratch`` must refuse
-    to silently fall back to ``external_encoder.spec.dit_patch_size`` when
+    to silently fall back to ``external_encoder.properties.dit_patch_size`` when
     ``dit_patch_size`` is omitted. The backbone owns this geometry — callers
     must source it from ``self.video_backbone.dit_patch_size`` so the DiT
     rebuild reads the same value as the dataloader bridge and the cross-check
@@ -643,7 +643,7 @@ def test_C13d_reinit_with_external_encoder_requires_dit_patch_size():
     from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False)
     with pytest.raises(ValueError, match=r"dit_patch_size is required"):
         reinit_dit_from_scratch(pipe, external_encoder=enc, verbose=False)
 
@@ -703,10 +703,10 @@ def test_C15_wan_save_deploy_assets_no_op_without_external_encoder(tmp_path):
 
 
 class WanVideoVAEEncoderStub(VideoEncoder):
-    """Custom-spec encoder used by C9-C13 to control z_dim / is_reversible /
+    """Custom-spec encoder used by C9-C13 to control z_dim / pixel_decode /
     dit_patch_size without touching real Wan VAE weights."""
 
-    def __init__(self, *, spec_z_dim: int, is_reversible: bool, dit_patch_size=(1, 2, 2)):
+    def __init__(self, *, spec_z_dim: int, pixel_decode: bool, dit_patch_size=(1, 2, 2)):
         super().__init__()
         # A tiny conv so state_dict has something to enumerate (test C4).
         self._proj = nn.Conv3d(spec_z_dim, spec_z_dim, kernel_size=1)
@@ -715,12 +715,12 @@ class WanVideoVAEEncoderStub(VideoEncoder):
             spatial_compression=8,
             temporal_compression=4,
             causal_temporal=True,
-            is_reversible=is_reversible,
+            pixel_decode=pixel_decode,
             dit_patch_size=dit_patch_size,
         )
 
     @property
-    def spec(self) -> VideoEncoderProperties:
+    def properties(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames):
@@ -733,7 +733,7 @@ class WanVideoVAEEncoderStub(VideoEncoder):
 
     @classmethod
     def from_pretrained(cls, model_path: str, **kw):
-        return cls(spec_z_dim=16, is_reversible=True)
+        return cls(spec_z_dim=16, pixel_decode=True)
 
 
 # ===========================================================================
@@ -882,7 +882,7 @@ def test_D3_encoder_built_when_from_scratch_true_and_encoder_set(monkeypatch):
 
     def fake_build_encoder(enc_cfg):
         encoder_built.append(enc_cfg)
-        return WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True)
+        return WanVideoVAEEncoderStub(spec_z_dim=16, pixel_decode=True)
 
     def fake_build_backbone(name, cfg, **kw):
         backbone_kwargs.update(kw)
@@ -970,13 +970,13 @@ def test_D5_generate_decode_video_true_blocks_irreversible_encoder():
 
     # Irreversible → fail-fast.
     vb_irrev = _StubBackbone()
-    vb_irrev.video_encoder = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    vb_irrev.video_encoder = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False)
     with pytest.raises(ValueError, match=r"irreversible"):
         _assert_decode_video_supported(vb_irrev)
 
     # Reversible → no-op.
     vb_rev = _StubBackbone()
-    vb_rev.video_encoder = WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True)
+    vb_rev.video_encoder = WanVideoVAEEncoderStub(spec_z_dim=16, pixel_decode=True)
     _assert_decode_video_supported(vb_rev)
 
     # Native VAE path (no video_encoder attribute at all) → no-op.
@@ -1003,7 +1003,7 @@ def test_D6_freeze_modules_resolves_encoder_dotted_path_on_external_path():
     from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False)
     backbone = Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
 
     # Mount the backbone on an architecture-shaped container, just like the
@@ -1113,7 +1113,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         captured.clear()
         Wan22Ti2v.from_pretrained(
             train_cfg,
-            external_encoder=WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False),
+            external_encoder=WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False),
         )
         assert captured["skip"] is True
 
@@ -1121,7 +1121,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         captured.clear()
         Wan22Ti2v.from_pretrained(
             train_cfg,
-            external_encoder=WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True),
+            external_encoder=WanVideoVAEEncoderStub(spec_z_dim=16, pixel_decode=True),
         )
         assert captured["skip"] is False
 
@@ -1137,7 +1137,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         captured.clear()
         Wan22Ti2v.from_pretrained(
             deploy_cfg,
-            external_encoder=WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True),
+            external_encoder=WanVideoVAEEncoderStub(spec_z_dim=16, pixel_decode=True),
         )
         assert captured["skip"] is True
 
@@ -1145,7 +1145,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         captured.clear()
         Wan22Ti2v.from_pretrained(
             deploy_cfg,
-            external_encoder=WanVideoVAEEncoderStub(spec_z_dim=1024, is_reversible=False),
+            external_encoder=WanVideoVAEEncoderStub(spec_z_dim=1024, pixel_decode=False),
         )
         assert captured["skip"] is True
 
@@ -1190,7 +1190,7 @@ def test_M3c_wan_vae_encoder_from_skeleton_matches_from_pretrained_topology():
         f"  extra on deploy:   {sorted(extra_on_deploy)}"
     )
     # Spec is derived from loaded weights — must agree across paths.
-    assert enc_train.spec == enc_deploy.spec
+    assert enc_train.properties == enc_deploy.properties
 
 
 def test_M3d_build_external_encoder_skeleton_picks_vae_entry_from_source():
@@ -1228,8 +1228,8 @@ def test_M3d_build_external_encoder_skeleton_picks_vae_entry_from_source():
     }
     enc = BaseWAMArchitecture._build_external_encoder_skeleton(enc_cfg, source)
     assert isinstance(enc, WanVideoVAEEncoder)
-    assert enc.spec.z_dim == 16
-    assert enc.spec.spatial_compression == 8
+    assert enc.properties.z_dim == 16
+    assert enc.properties.spatial_compression == 8
 
     # Missing components → loud error (no silent fallback to native VAE).
     with pytest.raises(RuntimeError, match=r"no video_backbone\.components|components"):
@@ -1321,7 +1321,7 @@ def test_M3e_deploy_path_does_not_reinit_dit_when_from_scratch_true():
 
 def test_M3g_from_pretrained_attaches_pipe_latent_spec_on_external_path():
     """``Wan21.from_pretrained`` must attach
-    ``pipe.latent_spec`` (= ``external_encoder.spec``) so vendored
+    ``pipe.latent_spec`` (= ``external_encoder.properties``) so vendored
     inference units (``WanVideoUnit_NoiseInitializer``) can read latent
     shape metadata without falling back to ``pipe.vae`` (which is None
     on this path).
@@ -1334,10 +1334,10 @@ def test_M3g_from_pretrained_attaches_pipe_latent_spec_on_external_path():
 
     # --- External encoder path: pipe.latent_spec is set ---
     pipe = _FakePipe(vae_z_dim=16, vae_upsample=8)
-    enc = WanVideoVAEEncoderStub(spec_z_dim=16, is_reversible=True)
+    enc = WanVideoVAEEncoderStub(spec_z_dim=16, pixel_decode=True)
     Wan22Ti2v.from_pretrained(pipe, external_encoder=enc)
     assert hasattr(pipe, "latent_spec"), "pipe.latent_spec missing on external-encoder path"
-    assert pipe.latent_spec is enc.spec, "pipe.latent_spec must reference encoder.spec verbatim"
+    assert pipe.latent_spec is enc.properties, "pipe.latent_spec must reference encoder.properties verbatim"
     assert pipe.vae is None, "pipe.vae must be released on external-encoder path"
 
     # --- Native VAE path: pipe.latent_spec is absent ---
@@ -1632,14 +1632,13 @@ def test_V3_vjepa21_spec_invariants():
     temporal_compression=4 (ViT tubelet=2 + extra avg-pool stride=2, Wan VAE
     parity), z_dim wired from manifest."""
     enc = _build_vjepa_encoder(embed_dim=1408)
-    spec = enc.spec
-    assert spec.is_reversible is False
-    assert spec.causal_temporal is True
-    assert spec.dit_patch_size == (1, 2, 2)
-    assert spec.z_dim == 1408
-    assert spec.spatial_compression == 16
-    assert spec.temporal_compression == 4
-    assert spec.pixel_range == (-1.0, 1.0)
+    properties = enc.properties
+    assert properties.pixel_decode is False
+    assert properties.causal_temporal is True
+    assert properties.dit_patch_size == (1, 2, 2)
+    assert properties.z_dim == 1408
+    assert properties.spatial_compression == 16
+    assert properties.temporal_compression == 4
 
 
 def test_V4_vjepa21_preprocess_imagenet_normalize():
@@ -2190,7 +2189,7 @@ def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
         ckpt_dir=str(tmp_path),
     )
     assert isinstance(enc, VJEPA21VideoEncoder)
-    assert enc.spec.z_dim == 1408
+    assert enc.properties.z_dim == 1408
     assert enc.variant == "vitg-rope-384"
     # _rope wrapper must NOT receive use_rope (PR #83 invariant)
     assert "use_rope" not in captured
@@ -2364,7 +2363,7 @@ def test_V15_vjepa21_from_skeleton_prefers_ckpt_dir_manifest(tmp_path, monkeypat
         ckpt_dir=str(ckpt_dir),
     )
     assert isinstance(enc, VJEPA21VideoEncoder)
-    assert enc.spec.z_dim == 1408
+    assert enc.properties.z_dim == 1408
     assert enc.variant == "vitg-rope-384"
 
 

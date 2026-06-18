@@ -46,7 +46,7 @@ def adapt_dit_to_external_encoder(
     Called from reinit (training) and deploy ``_init_video_backbone``.
 
     ``dit_patch_size`` MUST come from the backbone (single source of truth);
-    reading ``external_encoder.spec`` directly here bypasses the abstraction.
+    reading ``external_encoder.properties`` directly here bypasses the abstraction.
     """
     dits = [m for m in (getattr(backbone, "dit", None), getattr(backbone, "dit2", None)) if m is not None]
     if not dits:
@@ -57,7 +57,7 @@ def adapt_dit_to_external_encoder(
             "adapt_dit_to_external_encoder: dit_patch_size is required. "
             "Source it from the backbone (e.g. "
             "self.video_backbone.dit_patch_size) rather than reading "
-            "external_encoder.spec.dit_patch_size directly."
+            "external_encoder.properties.dit_patch_size directly."
         )
     ps = tuple(dit_patch_size)
     for dit in dits:
@@ -68,7 +68,7 @@ def adapt_dit_to_external_encoder(
         if head_mod is not None and hasattr(head_mod, "head"):
             head_mod.head = external_encoder.build_dit_output_proj(dit.dim)
             head_mod.patch_size = ps
-        dit.in_dim = external_encoder.spec.z_dim
+        dit.in_dim = external_encoder.properties.z_dim
 
 
 def reinit_dit_from_scratch(

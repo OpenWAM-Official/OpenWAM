@@ -7,7 +7,7 @@ The flow under test:
             │
             ▼
     openwam.model.architectures.architecture_base.BaseWAMArchitecture._init_video_backbone
-        (cross-check: yaml values match constructed encoder.spec — fail-fast)
+        (cross-check: yaml values match constructed encoder.properties — fail-fast)
             │
             ▼
     openwam.train.utils.temporal_contract.apply_temporal_contract_bridge
@@ -50,7 +50,7 @@ class _MockEncoderBase(VideoEncoder):
         self._spec = VideoEncoderProperties(**self._SPEC_KWARGS)
 
     @property
-    def spec(self) -> VideoEncoderProperties:
+    def properties(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames):
@@ -61,7 +61,7 @@ class _MockEncoderBase(VideoEncoder):
     def batch_encode(self, video):
         import torch
 
-        s = self.spec
+        s = self.properties
         B, _, T, H, W = video.shape
         return torch.zeros(
             B, s.z_dim, T // s.temporal_compression, H // s.spatial_compression, W // s.spatial_compression
@@ -122,8 +122,8 @@ def _patch_backbone_builders(monkeypatch, encoder_factory):
         bb._pipe = None
         bb.video_encoder = enc
         if enc is not None:
-            bb.temporal_compression = int(enc.spec.temporal_compression)
-            bb.causal_temporal = bool(enc.spec.causal_temporal)
+            bb.temporal_compression = int(enc.properties.temporal_compression)
+            bb.causal_temporal = bool(enc.properties.causal_temporal)
         else:
             bb.temporal_compression = 4
             bb.causal_temporal = True

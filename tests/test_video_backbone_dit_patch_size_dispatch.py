@@ -10,7 +10,7 @@ pre-patchifies the latent grid, its declared ``dit_patch_size`` may be
 silently produces the wrong per-token sequence length.
 
 These parametrized tests construct a tiny CPU WanModel + matching
-``external_encoder.spec.dit_patch_size`` and verify the per-token ``t_mod``
+``external_encoder.properties.dit_patch_size`` and verify the per-token ``t_mod``
 length equals ``f_lat * (H * W // (ps[1] * ps[2]))`` for three patch
 configurations. Native ``(1, 2, 2)`` is included so the existing behavior
 is locked in as a regression guard.
@@ -29,20 +29,20 @@ from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 
 
 def _mock_encoder_with_patch(dit_patch_size: tuple[int, int, int]) -> SimpleNamespace:
-    """Duck-typed encoder exposing only ``encoder.spec.dit_patch_size``.
+    """Duck-typed encoder exposing only ``encoder.properties.dit_patch_size``.
 
     ``WanVideoBackbone.__init__`` reads exactly this one attribute when
     ``external_encoder is not None`` — the full :class:`VideoEncoder` ABC is
     not needed for the dispatch path under test.
     """
-    spec = VideoEncoderProperties(
+    properties = VideoEncoderProperties(
         z_dim=16,
         spatial_compression=8,
         temporal_compression=4,
         causal_temporal=True,
         dit_patch_size=dit_patch_size,
     )
-    return SimpleNamespace(spec=spec)
+    return SimpleNamespace(properties=properties)
 
 
 def _build_backbone_with_patch(

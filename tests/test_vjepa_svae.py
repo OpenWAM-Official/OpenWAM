@@ -51,11 +51,11 @@ def _enc(embed_dim: int = 1408, svae: bool = False, latent_dim: int = 48, svae_t
 
 def test_S1_spec_zdim_and_feature_norm_track_reducer():
     raw = _enc(1408, svae=False)
-    assert raw.spec.z_dim == 1408
+    assert raw.properties.z_dim == 1408
     assert raw.feature_norm.normalized_shape == (1408,)
 
     red = _enc(1408, svae=True, latent_dim=48)
-    assert red.spec.z_dim == 48
+    assert red.properties.z_dim == 48
     assert red.feature_norm.normalized_shape == (48,)
 
 

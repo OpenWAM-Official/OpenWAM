@@ -116,7 +116,7 @@ class DinoV3VideoEncoder(VideoEncoder):
     ``head.head`` are rebuilt from :class:`VideoEncoder`'s default hooks so
     dinov3 reuses the exact same projection structure as the wan_vae path.
 
-    No ``decode`` / ``to_frames`` (``spec.is_reversible=False``) — the ABC
+    No ``decode`` / ``to_frames`` (``properties.pixel_decode=False``) — the ABC
     defaults raise ``NotImplementedError`` with a contract-aware message.
     """
 
@@ -134,20 +134,19 @@ class DinoV3VideoEncoder(VideoEncoder):
         self._out_norm = nn.LayerNorm(int(embed_dim), elementwise_affine=False, eps=1e-6)
         # Spec mirrors Wan VAE's geometry on Wan2.2-TI2V-5B (spatial=16,
         # temporal=4 causal, dit_patch=(1,2,2)) so token counts match while
-        # ``z_dim`` differs (768 vs 48). is_reversible=False causes the
+        # ``z_dim`` differs (768 vs 48). pixel_decode=False causes the
         # backbone to skip the strict spec equality check.
         self._spec = VideoEncoderProperties(
             z_dim=int(embed_dim),
             spatial_compression=int(patch_size),
             temporal_compression=4,
             causal_temporal=True,
-            pixel_range=(-1.0, 1.0),  # informational; preprocess_video applies ImageNet stats
-            is_reversible=False,
+            pixel_decode=False,
             dit_patch_size=(1, 2, 2),
         )
 
     @property
-    def spec(self) -> VideoEncoderProperties:
+    def properties(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames) -> Tensor:
@@ -223,7 +222,7 @@ class DinoV3VideoEncoder(VideoEncoder):
         return rearrange(pooled, "B T H W D -> B D T H W")
 
     # decode / to_frames intentionally omitted — defaults from VideoEncoder
-    # raise NotImplementedError because spec.is_reversible=False.
+    # raise NotImplementedError because properties.pixel_decode=False.
 
     @classmethod
     def from_pretrained(cls, model_path: str, **kw: Any) -> "DinoV3VideoEncoder":

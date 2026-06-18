@@ -905,9 +905,9 @@ class Wan22Ti2v(WanBase):
         if external_encoder is not None:
             # Override the native (1,2,2)/4×/causal contract with the encoder's;
             # callers consult these attrs and never branch on the encoder.
-            self._dit_patch_size = external_encoder.spec.dit_patch_size
-            self._temporal_compression = int(external_encoder.spec.temporal_compression)
-            self._causal_temporal = bool(external_encoder.spec.causal_temporal)
+            self._dit_patch_size = external_encoder.properties.dit_patch_size
+            self._temporal_compression = int(external_encoder.properties.temporal_compression)
+            self._causal_temporal = bool(external_encoder.properties.causal_temporal)
 
     @classmethod
     def from_pretrained(cls, source, *, external_encoder=None, text_dim: Optional[int] = None, **kw) -> "Wan22Ti2v":
@@ -929,18 +929,20 @@ class Wan22Ti2v(WanBase):
         # on deploy-with-ANY external encoder. Reversible-on-training keeps it,
         # needed for the step-(2) spec cross-check against ``v.z_dim`` etc.
         is_deploy = not isinstance(source, DictConfig)
-        skip_native_vae = bool(external_encoder is not None and (is_deploy or not external_encoder.spec.is_reversible))
+        skip_native_vae = bool(
+            external_encoder is not None and (is_deploy or not external_encoder.properties.pixel_decode)
+        )
 
         holder = loader.build_holder(source, skip_native_vae=skip_native_vae, **kw)
 
         if external_encoder is not None:
             # (3) Division factors from the encoder spec, not a hardcoded ``* 2`` / Wan-VAE grid, else
             # ``check_resize_height_width`` rounds encoder-legal sizes to Wan's grid. Remainder is 1 iff causal.
-            patch_size = external_encoder.spec.dit_patch_size
-            holder.height_division_factor = external_encoder.spec.spatial_compression * patch_size[1]
-            holder.width_division_factor = external_encoder.spec.spatial_compression * patch_size[2]
-            holder.time_division_factor = external_encoder.spec.temporal_compression * patch_size[0]
-            holder.time_division_remainder = 1 if external_encoder.spec.causal_temporal else 0
+            patch_size = external_encoder.properties.dit_patch_size
+            holder.height_division_factor = external_encoder.properties.spatial_compression * patch_size[1]
+            holder.width_division_factor = external_encoder.properties.spatial_compression * patch_size[2]
+            holder.time_division_factor = external_encoder.properties.temporal_compression * patch_size[0]
+            holder.time_division_remainder = 1 if external_encoder.properties.causal_temporal else 0
 
             # (4) Release the native VAE so state_dict keys don't double-count with the external encoder. print (not
             # logger.info) because arch init runs before the logger is wired up; rank-0 gated.
@@ -951,14 +953,14 @@ class Wan22Ti2v(WanBase):
                 print(
                     f"[Wan22Ti2v] native VAE released; "
                     f"external_encoder={type(external_encoder).__name__} "
-                    f"(z_dim={external_encoder.spec.z_dim}, "
-                    f"is_reversible={external_encoder.spec.is_reversible}, "
-                    f"dit_patch_size={external_encoder.spec.dit_patch_size})",
+                    f"(z_dim={external_encoder.properties.z_dim}, "
+                    f"pixel_decode={external_encoder.properties.pixel_decode}, "
+                    f"dit_patch_size={external_encoder.properties.dit_patch_size})",
                     flush=True,
                 )
 
             # (5) Expose latent-shape metadata so deploy noise init reads it without the native VAE (now None).
-            holder.latent_spec = external_encoder.spec
+            holder.latent_spec = external_encoder.properties
 
         # Resolve optional cfg-side ``shift_video`` here (not in __init__)
         # because the cfg shape depends on the ``source`` type.
@@ -976,10 +978,10 @@ class Wan22Ti2v(WanBase):
         return super().get_submodule(name)
 
     def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:
-        if self._uses_external_encoder and not self.video_encoder.spec.is_reversible:
+        if self._uses_external_encoder and not self.video_encoder.properties.pixel_decode:
             raise NotImplementedError(
                 f"decode_video on irreversible encoder ({type(self.video_encoder).__name__}; "
-                "spec.is_reversible=False). Pass decode_video=False to generate() to "
+                "properties.pixel_decode=False). Pass decode_video=False to generate() to "
                 "retrieve raw latents, or train a separate pixel decoder."
             )
         return super().decode_video(latents, tiled=tiled)

@@ -114,10 +114,10 @@ def _assert_decode_video_supported(vb) -> None:
     unit-testable without standing up the full denoising loop.
     """
     enc = getattr(vb, "video_encoder", None)
-    if enc is not None and not enc.spec.is_reversible:
+    if enc is not None and not enc.properties.pixel_decode:
         raise ValueError(
             f"generate(decode_video=True) but the configured encoder "
-            f"({type(enc).__name__}) is irreversible (spec.is_reversible=False). "
+            f"({type(enc).__name__}) is irreversible (properties.pixel_decode=False). "
             "Pass decode_video=False to retrieve raw latents."
         )
 
@@ -387,7 +387,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # from the saved Wan ``components[dit].extra_kwargs`` (in/out_dim
         # = native Wan VAE z_dim, e.g. 48), but the saved checkpoint
         # stores the external-encoder-adapted shapes (in/out_dim =
-        # encoder.spec.z_dim, e.g. 1408 for V-JEPA 2.1 ViT-g). The
+        # encoder.properties.z_dim, e.g. 1408 for V-JEPA 2.1 ViT-g). The
         # training-side ``reinit_dit_from_scratch`` performs this
         # reshape before the random-init reset; on deploy we want the
         # reshape WITHOUT the reset so the subsequent strict
@@ -409,7 +409,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     "Deploy with external encoder %s: DiT patch_embedding / "
                     "head.head reshaped to z_dim=%d before strict load",
                     type(external_encoder).__name__,
-                    external_encoder.spec.z_dim,
+                    external_encoder.properties.z_dim,
                 )
 
     @staticmethod

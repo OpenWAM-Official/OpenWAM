@@ -143,7 +143,7 @@ class OpenWAMTrainer(BaseTrainer):
         external_encoder = getattr(self.architecture, "external_encoder", None)
         if (
             external_encoder is not None
-            and not external_encoder.spec.is_reversible
+            and not external_encoder.properties.pixel_decode
             and not any(
                 p == "video_backbone.video_encoder" or p.startswith("video_backbone.video_encoder.")
                 for p in freeze_list

@@ -5,7 +5,7 @@ that have non-trivial logic and were previously untested:
 
 - D1   registry round-trip (``register_video_encoder("dinov3")``)
 - D2   spec invariants (z_dim/patch from ctor kwargs, fixed temporal=4,
-       causal=True, dit_patch_size=(1,2,2), is_reversible=False)
+       causal=True, dit_patch_size=(1,2,2), pixel_decode=False)
 - D3   ImageNet preprocess shape + normalisation (gray frame ≈ 0)
 - D4   ``batch_encode`` shape contract on T_pixel ∈ {1, 5, 9}
 - D5   causal mean pool semantics (frame 0 kept verbatim, rest 4-grouped)
@@ -123,14 +123,13 @@ def test_D2_dinov3_spec_invariants():
     NOT drift, so they're pinned here.
     """
     enc = _build_encoder(embed_dim=768, patch=16, num_register_tokens=4)
-    spec = enc.spec
-    assert spec.z_dim == 768
-    assert spec.spatial_compression == 16
-    assert spec.temporal_compression == 4
-    assert spec.causal_temporal is True
-    assert spec.dit_patch_size == (1, 2, 2)
-    assert spec.is_reversible is False
-    assert spec.pixel_range == (-1.0, 1.0)
+    properties = enc.properties
+    assert properties.z_dim == 768
+    assert properties.spatial_compression == 16
+    assert properties.temporal_compression == 4
+    assert properties.causal_temporal is True
+    assert properties.dit_patch_size == (1, 2, 2)
+    assert properties.pixel_decode is False
 
 
 # ---------------------------------------------------------------------------
@@ -302,17 +301,17 @@ def test_D8b_dinov3_foreign_forward_raises_typeerror():
 
 
 # ---------------------------------------------------------------------------
-# D9: decode/to_frames raise (is_reversible=False)
+# D9: decode/to_frames raise (pixel_decode=False)
 # ---------------------------------------------------------------------------
 
 
 def test_D9_dinov3_decode_and_to_frames_raise():
     """Irreversible encoder: ``decode`` / ``to_frames`` use the ABC's
-    default which raises NotImplementedError citing ``is_reversible``."""
+    default which raises NotImplementedError citing ``pixel_decode``."""
     enc = _build_encoder()
-    with pytest.raises(NotImplementedError, match="is_reversible"):
+    with pytest.raises(NotImplementedError, match="pixel_decode"):
         enc.decode(torch.zeros(1, 8, 1, 2, 2))
-    with pytest.raises(NotImplementedError, match="is_reversible"):
+    with pytest.raises(NotImplementedError, match="pixel_decode"):
         enc.to_frames(torch.zeros(1, 3, 1, 32, 32))
 
 

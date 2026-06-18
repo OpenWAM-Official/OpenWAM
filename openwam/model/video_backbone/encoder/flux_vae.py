@@ -138,7 +138,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
     ``config.json``). The DiT-side projections reuse :class:`VideoEncoder`'s
     default hooks so flux_vae shares the exact Wan VAE token layout.
 
-    No ``decode`` / ``to_frames`` (``spec.is_reversible=False``) — only the
+    No ``decode`` / ``to_frames`` (``properties.pixel_decode=False``) — only the
     encoder half of the VAE is loaded, so the ABC defaults raise
     ``NotImplementedError`` with a contract-aware message.
     """
@@ -151,13 +151,12 @@ class FluxVAEVideoEncoder(VideoEncoder):
             spatial_compression=int(core.spatial_compression),
             temporal_compression=4,
             causal_temporal=True,
-            pixel_range=(-1.0, 1.0),
-            is_reversible=False,
+            pixel_decode=False,
             dit_patch_size=(1, 2, 2),
         )
 
     @property
-    def spec(self) -> VideoEncoderProperties:
+    def properties(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames) -> Tensor:
@@ -198,7 +197,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
         return _causal_temporal_pool(grid)
 
     # decode / to_frames intentionally omitted — defaults from VideoEncoder
-    # raise NotImplementedError because spec.is_reversible=False.
+    # raise NotImplementedError because properties.pixel_decode=False.
 
     @classmethod
     def from_pretrained(cls, model_path: str, **kw: Any) -> "FluxVAEVideoEncoder":

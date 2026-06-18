@@ -4,7 +4,7 @@ Only the *encoder* half of the FLUX.2-dev VAE is vendored here, lifted verbatim
 (module-for-module) from ``references/flux2/src/flux2/autoencoder.py`` so the
 weight tensors load by name. The pixel ``Decoder`` / ``Upsample`` are
 deliberately omitted — this subsystem consumes the VAE purely as a frozen
-image→latent feature extractor (``spec.is_reversible=False``), so carrying the
+image→latent feature extractor (``properties.pixel_decode=False``), so carrying the
 decoder would only burn memory.
 
 The on-disk checkpoint at the configured ``model_path`` is in **diffusers

@@ -1,10 +1,10 @@
 """V-JEPA 2.1 video encoder (Mur-Labadia et al., arXiv:2603.14482).
 
 Plugs into the :class:`VideoBackbone` external-encoder path introduced in
-PR #60. ``spec.is_reversible=False`` — the host backbone must rebuild its
+PR #60. ``properties.pixel_decode=False`` — the host backbone must rebuild its
 DiT first conv via the default ``build_dit_input_proj`` hook and skip the
-strict native-VAE spec validation. ``spec.causal_temporal=True`` and
-``spec.temporal_compression=4`` (ViT tubelet=2 + an encoder-side avg-pool
+strict native-VAE spec validation. ``properties.causal_temporal=True`` and
+``properties.temporal_compression=4`` (ViT tubelet=2 + an encoder-side avg-pool
 over time with stride=2) emulate the Wan VAE's causal grouping (1 cond
 latent from frame 0 + 1 latent per 4 target pixel frames), so the host
 DiT receives the same latent token-count whether the encoder is V-JEPA
@@ -88,8 +88,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             # ``(T_pix - 1) // tc + 1`` lands on the same T_lat.
             temporal_compression=4,
             causal_temporal=True,
-            pixel_range=(-1.0, 1.0),
-            is_reversible=False,
+            pixel_decode=False,
             # (1, 2, 2) matches Wan VAE's DiT-side patch layout: the default
             # ``build_dit_input_proj`` Conv3d((1,2,2),(1,2,2)) pools 4 V-JEPA
             # spatial neighbors per DiT token for token-count parity.
@@ -107,7 +106,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         self.feature_norm = nn.LayerNorm(int(effective_z_dim))
 
     @property
-    def spec(self) -> VideoEncoderProperties:
+    def properties(self) -> VideoEncoderProperties:
         return self._spec
 
     @property
@@ -242,7 +241,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
 
     def decode(self, latents: torch.Tensor, **kw: Any) -> torch.Tensor:
         raise NotImplementedError(
-            "VJEPA21VideoEncoder is irreversible (spec.is_reversible=False); "
+            "VJEPA21VideoEncoder is irreversible (properties.pixel_decode=False); "
             "pixel decode is not defined. Pass decode_video=False to generate()."
         )
 

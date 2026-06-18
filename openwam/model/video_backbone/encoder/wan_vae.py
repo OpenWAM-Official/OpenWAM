@@ -106,13 +106,12 @@ class WanVideoVAEEncoder(VideoEncoder):
             spatial_compression=int(vae.upsampling_factor),
             temporal_compression=4,
             causal_temporal=True,
-            pixel_range=(-1.0, 1.0),
-            # is_reversible defaults to True — Wan VAE has a real pixel decoder.
+            # pixel_decode defaults to True — Wan VAE has a real pixel decoder.
             # dit_patch_size defaults to (1, 2, 2) — the Wan DiT's native value.
         )
 
     @property
-    def spec(self) -> VideoEncoderProperties:
+    def properties(self) -> VideoEncoderProperties:
         return self._spec
 
     def preprocess_video(self, frames) -> Tensor:

@@ -5,7 +5,7 @@ diffusers->BFL state-dict converter in ``flux/flux_vae_src.py``:
 
 - F1   registry round-trip (``register_video_encoder("flux_vae")``)
 - F2   spec invariants (z_dim/spatial from the loaded core, fixed temporal=4,
-       causal=True, dit_patch_size=(1,2,2), is_reversible=False)
+       causal=True, dit_patch_size=(1,2,2), pixel_decode=False)
 - F3   preprocess shape + [-1, 1] range (matches Wan VAE, not ImageNet)
 - F4   ``batch_encode`` shape contract on T_pixel ∈ {1, 5, 9}
 - F5   causal mean pool semantics through the wrapper (frame 0 verbatim,
@@ -87,14 +87,13 @@ def test_F2_flux_vae_spec_invariants():
     """Token-count parity with Wan VAE depends on temporal=4, causal=True,
     dit_patch_size=(1,2,2); z_dim/spatial come from the loaded core."""
     enc = _build_encoder(z_dim=128, spatial_compression=16)
-    spec = enc.spec
-    assert spec.z_dim == 128
-    assert spec.spatial_compression == 16
-    assert spec.temporal_compression == 4
-    assert spec.causal_temporal is True
-    assert spec.dit_patch_size == (1, 2, 2)
-    assert spec.is_reversible is False
-    assert spec.pixel_range == (-1.0, 1.0)
+    properties = enc.properties
+    assert properties.z_dim == 128
+    assert properties.spatial_compression == 16
+    assert properties.temporal_compression == 4
+    assert properties.causal_temporal is True
+    assert properties.dit_patch_size == (1, 2, 2)
+    assert properties.pixel_decode is False
 
 
 # ---------------------------------------------------------------------------

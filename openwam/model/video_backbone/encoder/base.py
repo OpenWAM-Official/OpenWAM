@@ -36,13 +36,7 @@ class VideoEncoderProperties:
         causal_temporal: True if the first input frame is encoded into its own
             standalone latent token (Wan-style); False for uniform tubelet
             schedules.
-        pixel_range: Nominal input range. Informational only — not consumed
-            by the backbone. Encoders
-            that apply additional internal normalization in ``preprocess_video``
-            (e.g. ImageNet mean/std for V-JEPA) may legitimately emit
-            tensors outside this nominal range; the field documents the
-            pre-normalization input expectation, not the post-preprocess output.
-        is_reversible: Whether the encoder offers a pixel ``decode``. False is
+        pixel_decode: Whether the encoder offers a pixel ``decode``. False is
             a hard contract: :meth:`VideoEncoder.decode` / ``to_frames`` are
             allowed to raise ``NotImplementedError``, the backbone-side
             ``decode_video`` and ``BaseWAMArchitecture.generate(decode_video=True)``
@@ -67,8 +61,7 @@ class VideoEncoderProperties:
     spatial_compression: int
     temporal_compression: int
     causal_temporal: bool
-    pixel_range: tuple[float, float] = (-1.0, 1.0)
-    is_reversible: bool = True
+    pixel_decode: bool = True
     dit_patch_size: tuple[int, int, int] = (1, 2, 2)
 
 
@@ -80,9 +73,9 @@ class VideoEncoder(ABC, nn.Module):
     native ``pipe.vae`` is used and ``state_dict`` keys remain bit-exact
     with the upstream pretrained checkpoint.
 
-    Subclasses MUST implement ``spec`` / ``preprocess_video`` / ``batch_encode`` /
+    Subclasses MUST implement ``properties`` / ``preprocess_video`` / ``batch_encode`` /
     ``from_pretrained``. They MAY implement ``decode`` / ``to_frames`` (only
-    when ``spec.is_reversible=True``) and MAY override
+    when ``properties.pixel_decode=True``) and MAY override
     ``build_dit_input_proj`` / ``build_dit_output_proj`` when the default
     Wan-style projection is not appropriate. An encoder that wants to compress
     its raw features MAY hold an optional frozen S-VAE reducer — see
@@ -103,12 +96,12 @@ class VideoEncoder(ABC, nn.Module):
 
     @property
     @abstractmethod
-    def spec(self) -> VideoEncoderProperties:
+    def properties(self) -> VideoEncoderProperties:
         """Structural contract derived from loaded weights, not yaml."""
 
     @abstractmethod
     def preprocess_video(self, frames) -> Tensor:
-        """List[PIL.Image] -> ``(B=1, 3, T, H, W)`` tensor in ``spec.pixel_range``."""
+        """List[PIL.Image] -> ``(B=1, 3, T, H, W)`` tensor."""
 
     @abstractmethod
     def batch_encode(self, video: Tensor) -> Tensor:
@@ -123,10 +116,10 @@ class VideoEncoder(ABC, nn.Module):
 
     def decode(self, latents: Tensor, *, tiled: bool = True) -> Tensor:
         """Decode latent -> pixel video. Optional; only valid when
-        ``spec.is_reversible=True``."""
+        ``properties.pixel_decode=True``."""
         raise NotImplementedError(
             f"{type(self).__name__}.decode unavailable "
-            f"(spec.is_reversible={self.spec.is_reversible}). "
+            f"(properties.pixel_decode={self.properties.pixel_decode}). "
             "Use latent-level metrics for training, or train a separate "
             "pixel decoder if you need to visualize generated samples."
         )
@@ -135,7 +128,7 @@ class VideoEncoder(ABC, nn.Module):
         """``(B, 3, T, H, W)`` pixel tensor -> ``list[PIL.Image]``. Optional;
         same constraint as :meth:`decode`."""
         raise NotImplementedError(
-            f"{type(self).__name__}.to_frames unavailable (spec.is_reversible={self.spec.is_reversible})."
+            f"{type(self).__name__}.to_frames unavailable (properties.pixel_decode={self.properties.pixel_decode})."
         )
 
     # ------------------------------------------------------------------
@@ -255,32 +248,32 @@ class VideoEncoder(ABC, nn.Module):
         DiT token embeddings.
 
         Default implementation produces the Wan-original layout:
-        ``nn.Conv3d(spec.z_dim, dit_dim,
-                    kernel_size=spec.dit_patch_size, stride=spec.dit_patch_size)``.
+        ``nn.Conv3d(properties.z_dim, dit_dim,
+                    kernel_size=properties.dit_patch_size, stride=properties.dit_patch_size)``.
 
         Shape contract:
-            input  -- ``(B, spec.z_dim, T_lat, H_lat, W_lat)``
+            input  -- ``(B, properties.z_dim, T_lat, H_lat, W_lat)``
             output -- ``(B, dit_dim, T_out, H_out, W_out)`` where
                       ``T_out = T_lat / dit_patch_size[0]`` etc.
         """
-        ps = self.spec.dit_patch_size
-        return nn.Conv3d(self.spec.z_dim, dit_dim, kernel_size=ps, stride=ps)
+        ps = self.properties.dit_patch_size
+        return nn.Conv3d(self.properties.z_dim, dit_dim, kernel_size=ps, stride=ps)
 
     def build_dit_output_proj(self, dit_dim: int) -> nn.Module:
         """Return an ``nn.Module`` mapping DiT token embeddings back into
         an unpatchify-ready linear vector.
 
         Default implementation produces the Wan-original layout:
-        ``nn.Linear(dit_dim, spec.z_dim * prod(spec.dit_patch_size))``.
+        ``nn.Linear(dit_dim, properties.z_dim * prod(properties.dit_patch_size))``.
 
         Shape contract:
             input  -- ``(B, L, dit_dim)``
-            output -- ``(B, L, spec.z_dim * prod(spec.dit_patch_size))``
+            output -- ``(B, L, properties.z_dim * prod(properties.dit_patch_size))``
                       The host DiT applies ``unpatchify`` on top to recover
-                      ``(B, spec.z_dim, T_lat, H_lat, W_lat)``.
+                      ``(B, properties.z_dim, T_lat, H_lat, W_lat)``.
         """
-        ps = self.spec.dit_patch_size
-        return nn.Linear(dit_dim, self.spec.z_dim * math.prod(ps))
+        ps = self.properties.dit_patch_size
+        return nn.Linear(dit_dim, self.properties.z_dim * math.prod(ps))
 
     # ------------------------------------------------------------------
     # Optional S-VAE feature reducer (opt-in extension point)
