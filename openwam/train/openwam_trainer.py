@@ -596,14 +596,25 @@ class OpenWAMTrainer(BaseTrainer):
 
         Default implementation updates the progress bar and logs to wandb.
         """
+        # Loss label names. In latent mode the action stream actually predicts
+        # the LATENT action (loss_action -> "latent_action") and the decoder MSE
+        # is the REAL action loss (loss_decoder -> "action"). Explicit mode keeps
+        # the literal names.
+        if self.latent_action_enabled:
+            action_label, decoder_label = "latent_action", "action"
+        else:
+            action_label, decoder_label = "action", "decoder"
+
         if pbar is not None:
             pbar.set_postfix(
-                loss=f"{loss_total:.4f}",
-                video=f"{loss_video:.4f}",
-                action=f"{loss_action:.4f}",
-                decoder=f"{loss_decoder:.4f}",
-                lr=f"{lr:.2e}",
-                epoch=epoch,
+                {
+                    "loss": f"{loss_total:.4f}",
+                    "video": f"{loss_video:.4f}",
+                    action_label: f"{loss_action:.4f}",
+                    decoder_label: f"{loss_decoder:.4f}",
+                    "lr": f"{lr:.2e}",
+                    "epoch": epoch,
+                }
             )
             pbar.update(1)
 
@@ -614,8 +625,8 @@ class OpenWAMTrainer(BaseTrainer):
             log_dict = {
                 "train/loss": loss_total,
                 "train/loss_video": loss_video,
-                "train/loss_action": loss_action,
-                "train/loss_decoder": loss_decoder,
+                f"train/loss_{action_label}": loss_action,
+                f"train/loss_{decoder_label}": loss_decoder,
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
                 "performance/steps_per_sec": steps_per_sec,
@@ -638,8 +649,8 @@ class OpenWAMTrainer(BaseTrainer):
                 )
             msg = (
                 f"[debug][step {global_step:04d} opt {opt_step:04d}] "
-                f"loss={loss_total:.6f} video={loss_video:.6f} action={loss_action:.6f} "
-                f"decoder={loss_decoder:.6f} "
+                f"loss={loss_total:.6f} video={loss_video:.6f} {action_label}={loss_action:.6f} "
+                f"{decoder_label}={loss_decoder:.6f} "
                 f"grad_norm={grad_norm:.6f} lr={lr:.3e} epoch={epoch} "
                 f"steps_per_sec={steps_per_sec:.3f}{mem_suffix}"
             )
@@ -656,7 +667,8 @@ class OpenWAMTrainer(BaseTrainer):
                 with open(loss_log_path, "a", encoding="utf-8") as f:
                     if write_header:
                         f.write(
-                            "step,opt_step,epoch,loss,loss_video,loss_action,loss_decoder,grad_norm,lr,steps_per_sec,"
+                            f"step,opt_step,epoch,loss,loss_video,loss_{action_label},loss_{decoder_label},"
+                            "grad_norm,lr,steps_per_sec,"
                             "mem_alloc_gb,mem_reserved_gb,step_peak_alloc_gb,step_peak_reserved_gb,"
                             "run_peak_alloc_gb,run_peak_reserved_gb\n"
                         )
