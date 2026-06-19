@@ -106,6 +106,9 @@ def resolve_architecture_config(
 
     framework = _cfg_get(arch_cfg, "framework", None)
     variant = _cfg_get(arch_cfg, "variant", None)
+    if variant is None:
+        # shared_backbone carries variant in the action_backbone group, not architecture.
+        variant = _cfg_get(action_cfg, "variant", None)
 
     lookup_key = (framework, variant)
     if lookup_key not in _FRAMEWORK_VARIANT_INDEX:
@@ -133,14 +136,19 @@ def resolve_architecture_config(
     params["framework"] = framework
     params["variant"] = variant
     if action_cfg:
-        # ``text_dim`` is architecture-owned because the raw context is consumed
-        # by both video and action streams. Keep action_backbone for
-        # action-specific hyperparameters only.
-        params.update({k: v for k, v in action_cfg.items() if k != "text_dim"})
+        # ``text_dim`` is architecture-owned (raw context shared by both streams);
+        # ``variant`` is resolved above; ``latent_encoder`` is trainer-side only.
+        # ``type`` + ``latent_decoder`` ARE forwarded so the architecture can build
+        # the latent->action decoder when type=latent.
+        _non_arch = {"text_dim", "variant", "latent_encoder"}
+        params.update({k: v for k, v in action_cfg.items() if k not in _non_arch})
 
     vb_cfg = getattr(model_cfg, "video_backbone", None)
     if vb_cfg is not None:
         params["video_backbone"] = vb_cfg
+    vlm_cfg = getattr(model_cfg, "vlm_backbone", None)
+    if vlm_cfg is not None:
+        params["vlm_backbone"] = vlm_cfg
     if video_dim:
         params["video_dim"] = video_dim
     if num_dit_layers is not None:

@@ -128,7 +128,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         action_dim_hidden = int(_cfg_get(cfg, "dim", 1024))
         num_heads = int(_cfg_get(cfg, "num_heads", self.video_backbone.num_heads))
         attn_head_dim = int(_cfg_get(cfg, "attn_head_dim", self.video_backbone.head_dim))
-        text_dim = self._resolve_text_dim(cfg)
+        text_dim = int(_cfg_get(cfg, "text_dim", 4096))  # Wan T5-XXL context width
 
         # Bridge layers — which video DiT layers participate in joint attention.
         # For ``joint_self_attn`` variant the MoT driver requires
@@ -151,6 +151,8 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             shift_action=_cfg_get(cfg, "shift_action"),
+            action_type=_cfg_get(cfg, "type", "explicit"),
+            latent_decoder=_cfg_get(cfg, "latent_decoder"),
         )
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(_cfg_get(cfg, "mot_checkpoint_mixed_attn", True)),

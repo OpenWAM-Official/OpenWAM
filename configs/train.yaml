@@ -37,6 +37,7 @@ training:
   # --- Loss weights ---
   lambda_video: 1.0               # Video flow-matching loss weight
   lambda_action: 1.0              # Action flow-matching loss weight
+  lambda_decoder: 0.0             # Latent->action decoder MSE weight (latent mode only; set >0 in post-train)
 
   # --- Flow matching timestep range ---
   max_timestep_boundary: 1.0      # Upper bound (fraction of total timesteps)

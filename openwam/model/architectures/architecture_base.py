@@ -468,33 +468,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             raise ValueError("video_dim must be specified in config or inferred from video_backbone")
         return dim
 
-    def _resolve_text_dim(self, cfg, *, default: int = 4096) -> int:
-        """Resolve the architecture-level raw text/context dim.
-
-        ``text_dim`` is shared by the video backbone, action backbone, and
-        proprio-as-context encoder. It therefore lives under ``architecture:``
-        in yaml, not under ``action_backbone:``. If omitted, the video backbone's
-        declared ``text_dim`` is used, with Wan's 4096 as the final default.
-        When both are present they must match, otherwise video/action context
-        projections would be built for different input widths.
-        """
-        raw = self._cfg_get(cfg, "text_dim", None)
-        cfg_dim = None if raw in (None, 0) else int(raw)
-        vb_dim = None
-        if self.video_backbone is not None:
-            raw_vb_dim = getattr(self.video_backbone, "text_dim", None)
-            vb_dim = None if raw_vb_dim in (None, 0) else int(raw_vb_dim)
-        if cfg_dim is not None and vb_dim is not None and cfg_dim != vb_dim:
-            raise ValueError(
-                f"architecture.text_dim={cfg_dim} does not match video_backbone.text_dim={vb_dim}. "
-                "Use a single shared raw context dimension for both video and action streams."
-            )
-        if cfg_dim is not None:
-            return cfg_dim
-        if vb_dim is not None:
-            return vb_dim
-        return int(default)
-
     # --- Backbone composition ---
 
     @property
@@ -695,6 +668,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         proprio_encoder = getattr(self, "proprio_encoder", None)
         if proprio_encoder is not None:
             proprio_encoder.to(dtype=dtype, device=device)
+        # action_backbone owns its latent decoder; its set_dtype_device moves it.
         for bb in self.backbones.values():
             bb.set_dtype_device(dtype, device)
 
@@ -1213,6 +1187,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         actions: Optional[torch.Tensor] = None,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
+        lambda_decoder: float = 0.0,
         current_step: int = 0,
         decoupled_sampler=None,
         action_timestep_per_token: bool = False,
@@ -1247,6 +1222,15 @@ class BaseWAMArchitecture(ABC, nn.Module):
         action_scheduler = self.action_backbone.scheduler
         _dtype = self.dtype
         _device = self.device
+
+        # End-to-end decoder reconstructs the latent from ActionDiT's velocity
+        # prediction, which only exists when the action stream runs.
+        has_decoder = self.action_backbone is not None and self.action_backbone.has_latent_decoder
+        if has_decoder and lambda_decoder > 0 and lambda_action <= 0:
+            raise ValueError(
+                "Latent decoder (lambda_decoder>0) trains end-to-end on ActionDiT's predicted "
+                "latent and requires lambda_action>0 (the action/latent stream must run)."
+            )
 
         if actions is None:
             actions = inputs.pop("actions", None)
@@ -1286,7 +1270,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
 
         # --- Prepare action noise ---
-        noisy_actions, action_target, action_timesteps, action_timestep_ids, action_sigmas = (
+        noisy_actions, action_target, action_timesteps, action_timestep_ids, action_sigmas, a_sigma_bc = (
+            None,
             None,
             None,
             None,
@@ -1330,6 +1315,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # MoT design, attention itself does not consume sample-level padding.
         forward_inputs.pop("action_is_pad", None)
         forward_inputs.pop("video_is_pad", None)
+        # Decoder-only supervision tensors must not leak into the forward pass.
+        forward_inputs.pop("decoder_target", None)
+        forward_inputs.pop("decoder_action_is_pad", None)
 
         # Route per-sample proprio_mask through pipeline_inputs to
         # ``_append_proprio_context_token``. Internal-only key; pop'd there.
@@ -1384,11 +1372,31 @@ class BaseWAMArchitecture(ABC, nn.Module):
         else:
             loss = lambda_video * loss_video + lambda_action * loss_action
 
-        return {
+        result = {
             "loss": loss,
             "loss_video": lambda_video * loss_video.detach(),
             "loss_action": lambda_action * loss_action.detach(),
         }
+
+        # --- Latent->action decoder loss (latent mode only, end-to-end) ---
+        # Decoder consumes the clean latent RECONSTRUCTED from ActionDiT's own
+        # velocity prediction: x0 = noisy - sigma * velocity_pred. This carries a
+        # gradient back into ActionDiT, so the decoder MSE jointly optimizes the
+        # latent representation (true end-to-end). It also matches deployment,
+        # where ActionDiT denoises to a clean latent before the decoder runs.
+        # Full action_is_pad -> loss 0 -> no decoder/ActionDiT gradient.
+        if lambda_decoder > 0 and self.action_backbone is not None:
+            decoder_target = inputs.get("decoder_target")
+            if decoder_target is not None:
+                latent_x0 = noisy_actions - a_sigma_bc * action_noise_pred
+                decoded = self.action_backbone.decode_latent_to_action(latent_x0)
+                if decoded is not None:
+                    decoder_target = decoder_target.to(dtype=_dtype, device=_device)
+                    loss_decoder = self._masked_mse(decoded, decoder_target, inputs.get("decoder_action_is_pad"))
+                    result["loss"] = result["loss"] + lambda_decoder * loss_decoder
+                    result["loss_decoder"] = (lambda_decoder * loss_decoder).detach()
+
+        return result
 
     def _compute_video_loss(self, noise_pred, target, timestep_ids, inputs, device):
         """Per-sample weighted video MSE loss."""
@@ -1506,6 +1514,27 @@ class BaseWAMArchitecture(ABC, nn.Module):
         valid_count = valid_mask_f.sum(dim=1).clamp(min=1)
         per_sample = per_step.sum(dim=1) / valid_count
         return (per_sample * tw).mean()
+
+    @staticmethod
+    def _masked_mse(pred, target, is_pad):
+        """Unweighted MSE over valid (non-pad) elements; full pad -> 0.
+
+        Used by the latent->action decoder. ``is_pad`` may be None, (B, T), or
+        (B, T, D); a (B, T) mask broadcasts across the action dim.
+        """
+        import torch.nn.functional as F
+
+        per_element = F.mse_loss(pred.float(), target.float(), reduction="none")
+        if is_pad is None:
+            return per_element.mean()
+        valid = (~is_pad.to(device=per_element.device, dtype=torch.bool)).float()
+        if valid.shape != per_element.shape:
+            if valid.ndim == 3:
+                valid = (valid > 0).any(dim=-1, keepdim=True).float().expand_as(per_element)
+            elif valid.ndim == 2:
+                valid = valid.unsqueeze(-1).expand_as(per_element)
+        weighted = per_element * valid
+        return weighted.sum() / valid.sum().clamp(min=1.0)
 
     # --- Inference: generation ---
 

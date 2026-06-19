@@ -1,10 +1,11 @@
 # Shared-Backbone WAM: action tokens concatenated into the video DiT sequence.
-# Variants: vanilla (plain shared DiT) | moe (+ expert FFN on action tokens).
-# No `action_backbone:` block: action tokens project directly to video_backbone.dim.
-# Video backbone from the Hydra `video_backbone` group (default Wan22 TI2V-5B).
+# Variant via the `action_backbone` group: shared_vanilla (plain shared DiT) |
+# shared_moe (+ expert FFN on action tokens). Action tokens project directly to
+# video_backbone.dim. Video backbone from the `video_backbone` group (default Wan22).
 
 defaults:
-  - video_backbone: wan22   # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21
+  - video_backbone: wan22             # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21
+  - action_backbone: shared_vanilla   # CLI: model/action_backbone=shared_moe
   - _self_
 
 # Frozen pretrained components (freeze_modules walks each via get_submodule;
@@ -18,7 +19,6 @@ freeze:
 
 architecture:
   framework: shared_backbone
-  variant: vanilla   # vanilla | moe
   action_dim: 20
 
   # When true, dataloader must provide sample["proprio"] ([state_dim] or
@@ -27,15 +27,7 @@ architecture:
   use_proprioception: true
   state_dim: 20
 
-  action_decoder_hidden_dim: 1024   # shared action decoder MLP width
-
   # joint mask: v↔v from video_attention_mask_mode; v→state True / v→action False;
   # action→all True; state→state True / state→{v,a} False.
   attention_mask_mode: joint   # joint | bidirectional
   video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
-
-  expert_ffn_dim: 4096   # moe only
-  # moe only: which video layers get the expert FFN. len(expert_layers) sets
-  # num_experts. expert_layers: explicit list, OR null + expert_interval (1=all, 2=every other).
-  expert_layers: null
-  expert_interval: 1

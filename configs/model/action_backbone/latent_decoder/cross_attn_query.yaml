@@ -1,0 +1,11 @@
+# Learnable-query cross-attention decoder (cfg.model.action_backbone.latent_decoder.*).
+# Only consumed when model.action_backbone.type=latent: decodes ActionDiT's predicted
+# latent action tokens into executable real actions. Deterministic (no diffusion).
+name: cross_attn_query
+hidden_dim: 1024
+num_layers: 4
+num_heads: 8
+attn_head_dim: 128
+ffn_dim: 4096
+num_query: 32        # real action horizon = dataloader num_frames-1 (e.g. 33-1)
+real_action_dim: 20  # robot action_mode dim (eef=20 / joint=14)

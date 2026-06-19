@@ -1,0 +1,6 @@
+# Qwen3-VL-2B understanding backbone (cfg.model.vlm_backbone.*). Only tri_system
+# consumes vlm_backbone; build_vlm_backbone defaults to the qwen3_vl implementation
+# (no `name` needed while it's the only VLM; 2B/4B etc. differ only by checkpoint_path).
+checkpoint_path: /path/to/Qwen3-VL-2B-Instruct  # [Required]
+load_pretrained: true   # false = random-init (ablations / CPU smoke tests). Frozen in joint training.
+max_length: 512         # VLM processor max text length; longer inputs truncated.

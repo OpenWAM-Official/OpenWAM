@@ -59,7 +59,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
-        text_dim = self._resolve_text_dim(cfg)
+        text_dim = int(self._cfg_get(cfg, "text_dim", 4096))  # Wan T5-XXL context width
         self._init_proprio_context(cfg, text_dim=text_dim)
         self._detach_bridge = bool(cfg.get("detach_bridge", False))
 
@@ -91,6 +91,8 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             shift_action=cfg.get("shift_action"),
+            action_type=cfg.get("type", "explicit"),
+            latent_decoder=cfg.get("latent_decoder"),
         )
 
     @property

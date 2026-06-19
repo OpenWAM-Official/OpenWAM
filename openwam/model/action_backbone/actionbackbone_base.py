@@ -37,6 +37,23 @@ class ActionBackbone(nn.Module, ABC):
         return False
 
     @property
+    def has_latent_decoder(self) -> bool:
+        """Whether this backbone owns a latent->action decoder. Default False.
+
+        The architecture is decoder-agnostic: it only asks the action backbone
+        whether one exists (for fail-fast) and calls ``decode_latent_to_action``.
+        """
+        return False
+
+    def decode_latent_to_action(self, latent):
+        """Decode predicted latent action into real action, or None if no decoder.
+
+        ``latent`` is the clean latent reconstructed from the backbone's own
+        velocity prediction (carries its gradient). Default no-op for backbones
+        without a decoder (explicit mode, SharedBackbone)."""
+        return None
+
+    @property
     def shift_action(self):
         """Optional α-shift for the action scheduler — single source of truth read by
         the architecture for both training (``init_training_schedulers``) and inference

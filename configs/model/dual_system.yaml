@@ -8,7 +8,8 @@
 # Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos25.
 
 defaults:
-  - video_backbone: wan22   # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21 (VACE/I2V) | cosmos25
+  - video_backbone: wan22         # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21 (VACE/I2V) | cosmos25
+  - action_backbone: action_dit   # ActionDiT (dual/tri only support ActionDiT)
   - _self_
 
 # Frozen pretrained components (freeze_modules walks each via get_submodule;
@@ -29,9 +30,6 @@ architecture:
   # appended to the text context before the backbones consume it.
   use_proprioception: true
   state_dim: 20                  # required when use_proprioception=true
-  # Raw text/context dim shared by the video + action streams. Auto-resolves
-  # from video_backbone.text_dim; 4096 = Wan T5-XXL, kept explicit.
-  text_dim: 4096
 
   # ActionDiT layer selection. joint_cross_attn: which video layers feed the
   # bridge. joint_self_attn/idm: sizes ActionDiT (must match vb.num_layers).
@@ -49,19 +47,3 @@ architecture:
 
   detach_bridge: false             # joint_cross_attn only
   idm_video_cond_noise_prob: 0.5   # idm only
-
-# ActionDiT. Geometry auto-resolved from video_backbone (num_layers/video_dim/
-# num_heads/attn_head_dim); joint_self_attn/idm hard-require head parity.
-# Raw context width comes from architecture.text_dim above (shared with the
-# video stream) — do NOT set text_dim here.
-# Struct mode needs `+` for the absent num_heads/attn_head_dim fields.
-action_backbone:
-  dim: 1024
-  ffn_dim: 4096
-  # ACTION scheduler α-shift (symmetric to video shift_video); single source of
-  # truth for train + deploy. null = template default (5.0).
-  shift_action: null
-  # COSMOS25 joint_cross_attn only: pin 16×64=1024 (action stream is 1024 wide;
-  # auto-resolve's 16×128=2048 wastes attention compute):
-  #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
-  # Do NOT add for joint_self_attn — MoT needs per-layer 16×128 parity.

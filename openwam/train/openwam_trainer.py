@@ -33,6 +33,19 @@ from openwam.train.utils.optimizer_groups import build_trainable_parameters
 logger = logging.getLogger(__name__)
 
 
+def _cfg_get(cfg, key: str, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _latent_action_enabled(cfg: DictConfig) -> bool:
+    action_cfg = _cfg_get(getattr(cfg, "model", None), "action_backbone", None)
+    return _cfg_get(action_cfg, "type", "explicit") == "latent"
+
+
 class OpenWAMTrainer(BaseTrainer):
     """Joint video-action trainer for OpenWAM.
 
@@ -162,9 +175,46 @@ class OpenWAMTrainer(BaseTrainer):
         # Loss weights from the training config
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)
+        self.lambda_decoder = float(_cfg_get(t, "lambda_decoder", 0.0))
+        self.latent_action_provider = None
+        self.latent_action_enabled = _latent_action_enabled(cfg)
+
+        if self.latent_action_enabled:
+            latent_cfg = cfg.model.action_backbone.latent_encoder
+            output_cfg = _cfg_get(latent_cfg, "output")
+            action_dim = int(_cfg_get(output_cfg, "action_dim", 0) or 0)
+            token_dim = int(_cfg_get(output_cfg, "token_dim", action_dim) or 0)
+            arch_cfg = getattr(cfg.model, "architecture", None)
+            cfg_uses_proprio = bool(_cfg_get(arch_cfg, "use_proprioception", False))
+            if cfg_uses_proprio or bool(getattr(self.architecture, "uses_proprioception", False)):
+                raise ValueError(
+                    "model.action_backbone.type=latent requires model.architecture.use_proprioception=false "
+                    "for latent-action pretraining."
+                )
+            if action_dim <= 0:
+                raise ValueError("model.action_backbone.latent_encoder.output.action_dim must be a positive integer.")
+            if token_dim != action_dim:
+                raise ValueError(
+                    f"model.action_backbone.latent_encoder.output.token_dim={token_dim} must match "
+                    f"output.action_dim={action_dim}."
+                )
+            if int(self.architecture.action_dim) != action_dim:
+                raise ValueError(
+                    f"model.action_backbone.latent_encoder.output.action_dim={action_dim} does not match "
+                    f"architecture.action_dim={self.architecture.action_dim}."
+                )
+            if self.lambda_action <= 0:
+                raise ValueError("model.action_backbone.type=latent requires training.lambda_action > 0.")
+            from openwam.model.action_backbone.latent_encoder import build_latent_action_provider
+
+            self.latent_action_provider = build_latent_action_provider(
+                latent_cfg,
+                device=self.architecture.device,
+                dtype=self.architecture.dtype,
+            )
 
         # Load action stats
-        if dataset is not None and self.lambda_action > 0:
+        if dataset is not None and self.lambda_action > 0 and not self.latent_action_enabled:
             self._load_normalization_stats(dataset)
 
         # Push forward-time training flags onto the architecture so prepare_inputs
@@ -332,14 +382,26 @@ class OpenWAMTrainer(BaseTrainer):
         if not isinstance(batch, list):
             batch = [batch]
 
+        # Latent mode keeps the real action + action_mask (collected by
+        # prepare_inputs) as the decoder's supervision; only ActionDiT's
+        # ``actions`` is swapped to the latent target (which has no pad mask).
         inputs = self.architecture.prepare_inputs(batch)
-        if self.lambda_action > 0 and inputs.get("actions") is None:
+        if self.latent_action_enabled:
+            if self.latent_action_provider is None:
+                raise RuntimeError("model.action_backbone.type=latent but latent_action_provider is not initialized.")
+            inputs["decoder_target"] = inputs.get("actions")
+            inputs["decoder_action_is_pad"] = inputs.get("action_is_pad")
+            inputs["action_is_pad"] = None
+            videos = [sample["video"] for sample in batch]
+            inputs["actions"] = self.latent_action_provider(videos)
+        elif self.lambda_action > 0 and inputs.get("actions") is None:
             raise ValueError("lambda_action > 0 but no action in data.")
 
         result = self.architecture.compute_loss(
             **inputs,
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
+            lambda_decoder=self.lambda_decoder,
             current_step=self._current_step,
         )
 
@@ -347,6 +409,7 @@ class OpenWAMTrainer(BaseTrainer):
             "total": result["loss"],
             "video": result.get("loss_video", torch.tensor(0.0)),
             "action": result.get("loss_action", torch.tensor(0.0)),
+            "decoder": result.get("loss_decoder", torch.tensor(0.0)),
         }
 
     def _init_wandb(self):
@@ -747,6 +810,9 @@ class OpenWAMTrainer(BaseTrainer):
             self.architecture.set_dtype_device(self.architecture.dtype, self.accelerator.device)
             # Frozen modules (T5, VAE) — idempotent defensive move
             self.architecture.move_frozen_to_device(self.accelerator.device)
+            if self.latent_action_provider is not None:
+                self.latent_action_provider.to(self.accelerator.device)
+                self.latent_action_provider.device = torch.device(self.accelerator.device)
 
             logger.info("DeepSpeed: architecture wrapped, device=%s", self.accelerator.device)
         elif self.accelerator is not None:
@@ -754,6 +820,9 @@ class OpenWAMTrainer(BaseTrainer):
             self.architecture, optimizer, dataloader = self.accelerator.prepare(
                 self.architecture, optimizer, dataloader
             )
+            if self.latent_action_provider is not None:
+                self.latent_action_provider.to(self.accelerator.device)
+                self.latent_action_provider.device = torch.device(self.accelerator.device)
 
         # Wire the (possibly wrapped) DistributedSampler's ``seed`` to
         # ``cfg.project.seed``. Without this, accelerator.prepare's auto-wrapped
