@@ -589,6 +589,7 @@ class OpenWAMTrainer(BaseTrainer):
         wandb_run=None,
         steps_per_sec: float = 0.0,
         batch_size: int = 1,
+        loss_decoder: float = 0.0,
         **ctx,
     ):
         """Hook called after each training step. Override for custom logging.
@@ -600,6 +601,7 @@ class OpenWAMTrainer(BaseTrainer):
                 loss=f"{loss_total:.4f}",
                 video=f"{loss_video:.4f}",
                 action=f"{loss_action:.4f}",
+                decoder=f"{loss_decoder:.4f}",
                 lr=f"{lr:.2e}",
                 epoch=epoch,
             )
@@ -613,6 +615,7 @@ class OpenWAMTrainer(BaseTrainer):
                 "train/loss": loss_total,
                 "train/loss_video": loss_video,
                 "train/loss_action": loss_action,
+                "train/loss_decoder": loss_decoder,
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
                 "performance/steps_per_sec": steps_per_sec,
@@ -636,6 +639,7 @@ class OpenWAMTrainer(BaseTrainer):
             msg = (
                 f"[debug][step {global_step:04d} opt {opt_step:04d}] "
                 f"loss={loss_total:.6f} video={loss_video:.6f} action={loss_action:.6f} "
+                f"decoder={loss_decoder:.6f} "
                 f"grad_norm={grad_norm:.6f} lr={lr:.3e} epoch={epoch} "
                 f"steps_per_sec={steps_per_sec:.3f}{mem_suffix}"
             )
@@ -652,13 +656,13 @@ class OpenWAMTrainer(BaseTrainer):
                 with open(loss_log_path, "a", encoding="utf-8") as f:
                     if write_header:
                         f.write(
-                            "step,opt_step,epoch,loss,loss_video,loss_action,grad_norm,lr,steps_per_sec,"
+                            "step,opt_step,epoch,loss,loss_video,loss_action,loss_decoder,grad_norm,lr,steps_per_sec,"
                             "mem_alloc_gb,mem_reserved_gb,step_peak_alloc_gb,step_peak_reserved_gb,"
                             "run_peak_alloc_gb,run_peak_reserved_gb\n"
                         )
                     f.write(
                         f"{global_step},{opt_step},{epoch},{loss_total:.10g},{loss_video:.10g},"
-                        f"{loss_action:.10g},{grad_norm:.10g},{lr:.10g},{steps_per_sec:.10g},"
+                        f"{loss_action:.10g},{loss_decoder:.10g},{grad_norm:.10g},{lr:.10g},{steps_per_sec:.10g},"
                         f"{mem_stats.get('mem_alloc_gb', float('nan')):.6g},"
                         f"{mem_stats.get('mem_reserved_gb', float('nan')):.6g},"
                         f"{mem_stats.get('step_peak_alloc_gb', float('nan')):.6g},"
@@ -926,6 +930,9 @@ class OpenWAMTrainer(BaseTrainer):
                             losses["action"].item()
                             if isinstance(losses["action"], torch.Tensor)
                             else float(losses["action"]),
+                            losses["decoder"].item()
+                            if isinstance(losses["decoder"], torch.Tensor)
+                            else float(losses["decoder"]),
                             grad_norm.item(),
                         ],
                         device=_device,
@@ -936,7 +943,8 @@ class OpenWAMTrainer(BaseTrainer):
                     loss_total = global_metrics[0].item()
                     loss_video = global_metrics[1].item()
                     loss_action = global_metrics[2].item()
-                    global_grad_norm = global_metrics[3].item()
+                    loss_decoder = global_metrics[3].item()
+                    global_grad_norm = global_metrics[4].item()
                 else:
                     loss_total = loss.detach().item()
                     loss_video = (
@@ -946,6 +954,11 @@ class OpenWAMTrainer(BaseTrainer):
                         losses["action"].item()
                         if isinstance(losses["action"], torch.Tensor)
                         else float(losses["action"])
+                    )
+                    loss_decoder = (
+                        losses["decoder"].item()
+                        if isinstance(losses["decoder"], torch.Tensor)
+                        else float(losses["decoder"])
                     )
                     global_grad_norm = grad_norm.item()
 
@@ -967,6 +980,7 @@ class OpenWAMTrainer(BaseTrainer):
                     loss_total=loss_total,
                     loss_video=loss_video,
                     loss_action=loss_action,
+                    loss_decoder=loss_decoder,
                     grad_norm=global_grad_norm,
                     lr=current_lr,
                     epoch=epoch,
