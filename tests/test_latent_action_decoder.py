@@ -168,3 +168,146 @@ def test_actiondit_decoder_on_device_via_set_dtype():
     ad.set_dtype_device(torch.float32, torch.device("cpu"))
     dev = next(ad.latent_action_decoder.parameters()).device
     assert dev.type == "cpu"  # decoder followed set_dtype_device
+
+
+# --- Architecture-level end-to-end (CPU mock backbone) ---
+# Exercises the full latent encoder->ActionDiT->decoder->loss path through the
+# real dual_system compute_loss, mirroring the remote GPU verify but with a mock
+# video backbone so structure + gradient flow are covered without Wan weights.
+
+_LATENT_DIM = 32  # ActionDiT hidden = mock video_dim; doubles as latent token_dim here
+_REAL_ACTION_DIM = 7
+_NUM_QUERY = 5
+_T_LATENT = 6  # latent sequence length (e.g. pairs*tokens_per_pair)
+
+
+def _make_latent_dual(lambda_decoder_cfg=True):
+    """Build a dual_system (cross_attn) in latent mode with a latent decoder,
+    on a mock video backbone — no Wan weights."""
+    from openwam.model.architectures.dual_system.joint_cross_attn import DualSystemCrossAttnArchitecture
+    from tests.test_openwam_trainer import _MockVideoBackbone
+
+    dec_cfg = {
+        "name": "cross_attn_query",
+        "hidden_dim": 32,
+        "num_layers": 2,
+        "num_heads": 4,
+        "attn_head_dim": 8,
+        "ffn_dim": 64,
+        "num_query": _NUM_QUERY,
+        "real_action_dim": _REAL_ACTION_DIM,
+    }
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
+        "action_dim": _LATENT_DIM,  # latent mode: action_dim == latent token_dim
+        "dim": _LATENT_DIM,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": _LATENT_DIM,
+        "text_dim": 16,
+        "bridge_layers": (0, 1),
+        "type": "latent",
+        "latent_decoder": dec_cfg if lambda_decoder_cfg else None,
+    }
+    arch = DualSystemCrossAttnArchitecture(cfg=cfg)
+    arch.video_backbone = _MockVideoBackbone(dim=_LATENT_DIM, num_layers=2, num_heads=4)
+    arch._device = torch.device("cpu")
+    arch._dtype = torch.float32
+    return arch
+
+
+def _latent_loss_inputs(B=1, full_mask=False):
+    from tests.test_openwam_trainer import _make_fake_loss_inputs
+
+    inputs = _make_fake_loss_inputs(B=B, action_dim=_LATENT_DIM, video_dim=_LATENT_DIM)
+    # ActionDiT target = latent (B, T_latent, latent_dim); decoder target = real action.
+    inputs["actions"] = torch.randn(B, _T_LATENT, _LATENT_DIM)
+    inputs["decoder_target"] = torch.randn(B, _NUM_QUERY, _REAL_ACTION_DIM)
+    is_pad = torch.ones if full_mask else torch.zeros
+    inputs["decoder_action_is_pad"] = is_pad(B, _NUM_QUERY, _REAL_ACTION_DIM, dtype=torch.bool)
+    return inputs
+
+
+def test_arch_latent_decoder_end_to_end_gradient():
+    """Full compute_loss: decoder loss present and backprops into ActionDiT."""
+    from tests.test_openwam_trainer import _MockScheduler
+
+    arch = _make_latent_dual()
+    arch.action_backbone.scheduler = _MockScheduler()
+    assert arch.action_backbone.has_latent_decoder is True
+
+    inputs = _latent_loss_inputs(B=1)
+    result = arch.compute_loss(**inputs, lambda_video=1.0, lambda_action=1.0, lambda_decoder=1.0, current_step=0)
+
+    assert "loss_decoder" in result and result["loss_decoder"].item() > 0
+    result["loss"].backward()
+    g_action = sum(p.grad.abs().sum().item() for p in arch.action_backbone.parameters() if p.grad is not None)
+    assert g_action > 0  # decoder MSE reached ActionDiT (end-to-end)
+
+
+def test_arch_latent_decoder_full_mask_zero():
+    """Full action mask -> decoder loss 0, no decoder gradient."""
+    from tests.test_openwam_trainer import _MockScheduler
+
+    arch = _make_latent_dual()
+    arch.action_backbone.scheduler = _MockScheduler()
+
+    inputs = _latent_loss_inputs(B=1, full_mask=True)
+    result = arch.compute_loss(**inputs, lambda_video=0.0, lambda_action=1.0, lambda_decoder=1.0, current_step=0)
+
+    ld = result.get("loss_decoder")
+    assert (ld.item() if ld is not None else 0.0) == 0.0
+    result["loss"].backward()
+    g_dec = sum(
+        p.grad.abs().sum().item() for p in arch.action_backbone.latent_action_decoder.parameters() if p.grad is not None
+    )
+    assert g_dec == 0.0
+
+
+def test_arch_latent_decoder_fail_fast_without_action():
+    """lambda_decoder>0 requires lambda_action>0 (reconstruction needs velocity)."""
+    from tests.test_openwam_trainer import _MockScheduler
+
+    arch = _make_latent_dual()
+    arch.action_backbone.scheduler = _MockScheduler()
+    inputs = _latent_loss_inputs(B=1)
+    with pytest.raises(ValueError, match="requires lambda_action>0"):
+        arch.compute_loss(**inputs, lambda_video=1.0, lambda_action=0.0, lambda_decoder=1.0, current_step=0)
+
+
+def test_arch_explicit_no_decoder():
+    """Explicit dual_system has no decoder; decoder branch is inert."""
+    from openwam.model.architectures.dual_system.joint_cross_attn import DualSystemCrossAttnArchitecture
+    from tests.test_openwam_trainer import _make_fake_loss_inputs, _MockScheduler, _MockVideoBackbone
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_cross_attn",
+        "detach_bridge": False,
+        "action_dim": _REAL_ACTION_DIM,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "text_dim": 16,
+        "bridge_layers": (0, 1),
+        # no type/latent_decoder -> explicit
+    }
+    arch = DualSystemCrossAttnArchitecture(cfg=cfg)
+    arch.video_backbone = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
+    arch._device, arch._dtype = torch.device("cpu"), torch.float32
+    arch.action_backbone.scheduler = _MockScheduler()
+    assert arch.action_backbone.has_latent_decoder is False
+
+    inputs = _make_fake_loss_inputs(B=1, action_dim=_REAL_ACTION_DIM)
+    result = arch.compute_loss(
+        **inputs,
+        actions=torch.randn(1, 5, _REAL_ACTION_DIM),
+        lambda_video=1.0,
+        lambda_action=1.0,
+        lambda_decoder=1.0,
+        current_step=0,
+    )
+    assert "loss_decoder" not in result  # decoder branch inert in explicit mode
