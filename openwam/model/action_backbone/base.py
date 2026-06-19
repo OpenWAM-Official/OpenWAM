@@ -30,6 +30,7 @@ class ActionBackbone(nn.Module, ABC):
     def __init__(self):
         super().__init__()
         self.scheduler = ActionScheduler()
+        self._shift_action = None
 
     @property
     def uses_proprioception(self) -> bool:
@@ -57,10 +58,10 @@ class ActionBackbone(nn.Module, ABC):
     def shift_action(self):
         """Optional α-shift for the action scheduler — single source of truth read by
         the architecture for both training (``init_training_schedulers``) and inference
-        (deploy schedule). ``None`` falls back to the scheduler template default.
-        Symmetric to ``VideoBackbone.shift_video``. Concrete backbones store the
-        resolved value into ``self._shift_action`` during ``__init__``."""
-        return getattr(self, "_shift_action", None)
+        (deploy schedule). ``None`` (the default) falls back to the scheduler template;
+        concrete backbones may set ``self._shift_action`` in ``__init__``. Symmetric to
+        ``VideoBackbone.shift_video``."""
+        return self._shift_action
 
     def set_dtype_device(self, dtype, device) -> None:
         """Move action backbone params/buffers to (dtype, device).

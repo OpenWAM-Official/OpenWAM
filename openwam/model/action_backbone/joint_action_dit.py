@@ -366,9 +366,6 @@ class ActionDiT(ActionBackbone):
             ``range(num_layers)`` — the driver runs joint attention at every
             layer regardless and this is informational only.
         variant: ``"joint_cross_attn"``, ``"joint_self_attn"``, or ``"idm"``.
-        use_proprioception / state_dim:
-            Deprecated on ActionDiT. Dual-system architectures append proprio
-            as a context token before video/action cross-attention.
     """
 
     def __init__(
@@ -496,8 +493,6 @@ class ActionDiT(ActionBackbone):
         # Action normalization stats (saved as persistent buffers for checkpoint)
         self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
         self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
-
-        self.state_dim = 0
 
     # ------------------------------------------------------------------
     # ActionBackbone interface
