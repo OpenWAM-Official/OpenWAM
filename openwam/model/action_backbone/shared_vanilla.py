@@ -18,7 +18,7 @@ from typing import Optional
 
 import torch
 
-from openwam.model.action_backbone.actionbackbone_base import ActionBackbone
+from openwam.model.action_backbone.base import ActionBackbone
 from openwam.model.action_backbone.components import (
     DEFAULT_ACTION_DECODER_HIDDEN_DIM,
     ActionEncoder,

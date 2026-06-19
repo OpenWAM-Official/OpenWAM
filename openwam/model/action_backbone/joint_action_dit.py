@@ -40,7 +40,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from openwam.model.action_backbone.actionbackbone_base import ActionBackbone
+from openwam.model.action_backbone.base import ActionBackbone
 from openwam.model.action_backbone.components import (
     RMSNorm,
     get_attention_fn,

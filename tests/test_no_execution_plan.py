@@ -40,7 +40,7 @@ def test_action_state_has_no_runtime_state_field():
 
 def test_action_backbone_abc_has_no_5stage_adapter():
     """ABC must not declare 5-stage block-loop adapter methods."""
-    from openwam.model.action_backbone.actionbackbone_base import ActionBackbone
+    from openwam.model.action_backbone.base import ActionBackbone
 
     forbidden = ("before_loop", "run_block", "after_loop", "execution_plan")
     own = vars(ActionBackbone)
