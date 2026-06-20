@@ -76,24 +76,6 @@ class RMSNorm(nn.Module):
         return normed.to(dtype) * self.weight
 
 
-class ActionEmbedding(nn.Module):
-    """Projects raw action vectors to hidden dimension.
-
-    Architecture: Linear → GELU → Linear
-    """
-
-    def __init__(self, action_dim: int, hidden_dim: int):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(action_dim, hidden_dim),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x)
-
-
 class TimestepEmbedding(nn.Module):
     """Sinusoidal timestep embedding followed by MLP projection.
 
@@ -132,34 +114,6 @@ class TimestepModulation(nn.Module):
 
     def forward(self, t_embed: torch.Tensor) -> torch.Tensor:
         return self.proj(t_embed).unflatten(-1, (self.n_params, -1))
-
-
-class ActionOutputHead(nn.Module):
-    """Output head for action prediction with AdaLN modulation.
-
-    Applies LayerNorm → AdaLN (shift + scale from timestep) → Linear.
-    Output weights are zero-initialized for stable training start.
-    """
-
-    def __init__(self, dim: int, action_dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
-        self.head = nn.Linear(dim, action_dim)
-        self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
-
-        nn.init.zeros_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
-
-    def forward(self, x: torch.Tensor, t_embed: torch.Tensor) -> torch.Tensor:
-        """Apply modulated output head.
-
-        Args:
-            x: (B, T, dim) hidden states
-            t_embed: (B, dim) timestep embedding for modulation
-        """
-        shift, scale = (self.modulation + t_embed.unsqueeze(1)).chunk(2, dim=1)
-        x = self.norm(x) * (1 + scale) + shift
-        return self.head(x)
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -276,11 +230,10 @@ DEFAULT_ACTION_DECODER_HIDDEN_DIM = 1024
 class ActionOutputMLP(nn.Module):
     """2-layer MLP output projection for action prediction.
 
-    Unlike `ActionOutputHead` (LayerNorm + AdaLN + Linear, zero-init output
-    for a stable start), this head is a plain Linear -> ReLU -> Linear stack
-    with small-random weight initialization (N(0, 0.02), zero bias) on both
-    layers. Used by SharedBackbone / MoE architectures; DualSystem's
-    ActionDiT decodes with a single ``Linear(dim, action_dim)``.
+    A plain Linear -> ReLU -> Linear stack with small-random weight
+    initialization (N(0, 0.02), zero bias) on both layers. Used by
+    SharedBackbone / MoE architectures; DualSystem's ActionDiT decodes with a
+    single ``Linear(dim, action_dim)``.
 
     Args:
         input_dim:  Hidden size of incoming action tokens (= video_dim).

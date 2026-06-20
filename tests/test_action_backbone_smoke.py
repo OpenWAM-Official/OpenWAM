@@ -11,9 +11,7 @@ import torch
 def test_components_import():
     """Shared components should be importable."""
     from openwam.model.action_backbone.components import (
-        ActionEmbedding,
         ActionEncoder,
-        ActionOutputHead,
         ActionOutputMLP,
         RMSNorm,
         SinusoidalPositionalEncoding,
@@ -25,9 +23,7 @@ def test_components_import():
     assert all(
         c is not None
         for c in [
-            ActionEmbedding,
             ActionEncoder,
-            ActionOutputHead,
             ActionOutputMLP,
             RMSNorm,
             SinusoidalPositionalEncoding,
@@ -36,16 +32,6 @@ def test_components_import():
             sinusoidal_embedding_1d,
         ]
     )
-
-
-def test_action_embedding_shape():
-    """ActionEmbedding should project action_dim -> hidden_dim."""
-    from openwam.model.action_backbone.components import ActionEmbedding
-
-    embed = ActionEmbedding(action_dim=7, hidden_dim=64)
-    x = torch.randn(2, 10, 7)
-    out = embed(x)
-    assert out.shape == (2, 10, 64)
 
 
 def test_timestep_embedding_shape():
@@ -66,26 +52,6 @@ def test_timestep_modulation_shape():
     t_embed = torch.randn(2, 64)
     out = mod(t_embed)
     assert out.shape == (2, 9, 64)
-
-
-def test_action_output_head_shape():
-    """ActionOutputHead should produce (B, T, action_dim)."""
-    from openwam.model.action_backbone.components import ActionOutputHead
-
-    head = ActionOutputHead(dim=64, action_dim=7)
-    x = torch.randn(2, 10, 64)
-    t_embed = torch.randn(2, 64)
-    out = head(x, t_embed)
-    assert out.shape == (2, 10, 7)
-
-
-def test_action_output_head_zero_init():
-    """ActionOutputHead weights should be zero-initialized."""
-    from openwam.model.action_backbone.components import ActionOutputHead
-
-    head = ActionOutputHead(dim=64, action_dim=7)
-    assert torch.all(head.head.weight == 0)
-    assert torch.all(head.head.bias == 0)
 
 
 def test_action_dit_small_instantiate():
