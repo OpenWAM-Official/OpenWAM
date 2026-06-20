@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from openwam.model.action_backbone.latent_encoder.lapa_dinov3 import _validate_lapa_paths, is_lfs_pointer_file
+from openwam.model.action_backbone.latent_encoder.lapa_dinov3 import is_lfs_pointer_file
+from openwam.model.action_backbone.latent_encoder.lapa_dinov3_src.checkpoint import validate_lapa_paths
 
 
 def test_lfs_pointer_detection(tmp_path: Path):
@@ -31,7 +32,7 @@ def test_lapa_path_validation_rejects_wrong_dinov3_hidden_size(tmp_path: Path):
     (dinov3_dir / "config.json").write_text('{"hidden_size": 768}', encoding="utf-8")
 
     with pytest.raises(ValueError, match="hidden_size=1024"):
-        _validate_lapa_paths(
+        validate_lapa_paths(
             {"lapa_model_dir": str(lapa_dir), "dinov3_model_dir": str(dinov3_dir)},
             expected_dim=1024,
         )
@@ -51,7 +52,7 @@ def test_lapa_path_validation_rejects_dinov3_lfs_pointer(tmp_path: Path):
     )
 
     with pytest.raises(RuntimeError, match="DINOv3 weight file is still a Git LFS pointer"):
-        _validate_lapa_paths(
+        validate_lapa_paths(
             {"lapa_model_dir": str(lapa_dir), "dinov3_model_dir": str(dinov3_dir)},
             expected_dim=1024,
         )
@@ -76,7 +77,7 @@ def test_lapa_provider_builds_flattened_pair_targets_without_real_model(monkeypa
             ids = torch.zeros(n, 16, dtype=torch.long, device=video.device)
             return tokens, ids
 
-    monkeypatch.setattr(lapa_mod, "_validate_lapa_paths", lambda _paths, expected_dim=None: (Path("."), Path(".")))
+    monkeypatch.setattr(lapa_mod, "validate_lapa_paths", lambda _paths, expected_dim=None: (Path("."), Path(".")))
     monkeypatch.setattr(lapa_mod, "LatentActionQuantizationDinov3Feature", _FakeModel)
     monkeypatch.setattr(torch, "load", lambda *args, **kwargs: {"model": {}})
 
@@ -114,9 +115,10 @@ def test_lapa_provider_rejects_short_video(monkeypatch):
 
 def test_lapa_provider_rejects_ambiguous_channel_first_t3_video():
     import openwam.model.action_backbone.latent_encoder.lapa_dinov3 as lapa_mod
+    from openwam.model.action_backbone.latent_encoder.lapa_dinov3_src.video_io import video_to_tensor
 
     with pytest.raises(ValueError, match="Ambiguous video tensor layout"):
-        lapa_mod._video_to_tensor(torch.rand(3, 3, 8, 8))
+        video_to_tensor(torch.rand(3, 3, 8, 8))
 
     class _BareProvider(lapa_mod.LAPADinov3TargetProvider):
         def __init__(self):
@@ -134,7 +136,7 @@ def test_lapa_provider_rejects_action_dim_token_dim_mismatch(monkeypatch):
         def __init__(self, **kwargs):
             super().__init__()
 
-    monkeypatch.setattr(lapa_mod, "_validate_lapa_paths", lambda _paths, expected_dim=None: (Path("."), Path(".")))
+    monkeypatch.setattr(lapa_mod, "validate_lapa_paths", lambda _paths, expected_dim=None: (Path("."), Path(".")))
     monkeypatch.setattr(lapa_mod, "LatentActionQuantizationDinov3Feature", _FakeModel)
 
     cfg = {
@@ -149,7 +151,7 @@ def test_lapa_provider_rejects_action_dim_token_dim_mismatch(monkeypatch):
 
 
 def test_lapa_load_state_dict_rejects_unmatched_keys(monkeypatch):
-    from openwam.model.action_backbone.latent_encoder import lapa_dinov3_model as model_mod
+    from openwam.model.action_backbone.latent_encoder.lapa_dinov3_src import model as model_mod
 
     class _TinyTokenizer(torch.nn.Module):
         def forward(self, x):
@@ -181,14 +183,14 @@ def test_lapa_load_state_dict_rejects_unmatched_keys(monkeypatch):
 def test_lapa_real_checkpoint_loads_with_expected_key_coverage():
     from unittest.mock import patch
 
-    from openwam.model.action_backbone.latent_encoder.lapa_dinov3_model import LatentActionQuantizationDinov3Feature
+    from openwam.model.action_backbone.latent_encoder.lapa_dinov3_src.model import LatentActionQuantizationDinov3Feature
 
     class _TinyTokenizer(torch.nn.Module):
         def forward(self, x):  # noqa: D401
             return type("Out", (), {"last_hidden_state": torch.zeros(x.shape[0], 201, 1024)})()
 
     with patch(
-        "openwam.model.action_backbone.latent_encoder.lapa_dinov3_model.load_dinov3_tokenizer",
+        "openwam.model.action_backbone.latent_encoder.lapa_dinov3_src.model.load_dinov3_tokenizer",
         return_value=_TinyTokenizer(),
     ):
         model = LatentActionQuantizationDinov3Feature(
@@ -218,7 +220,7 @@ def test_lapa_real_checkpoint_loads_with_expected_key_coverage():
 def test_lapa_matches_larybench_reference_for_fixed_pair(monkeypatch):
     import sys
 
-    from openwam.model.action_backbone.latent_encoder.lapa_dinov3_model import LatentActionQuantizationDinov3Feature
+    from openwam.model.action_backbone.latent_encoder.lapa_dinov3_src.model import LatentActionQuantizationDinov3Feature
 
     repo = Path.cwd()
     ref_root = repo / "ref_code" / "LARYBench"
