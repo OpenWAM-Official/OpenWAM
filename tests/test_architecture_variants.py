@@ -327,7 +327,7 @@ def test_dual_system_self_attn_rejects_interval_gt_1():
         "ffn_dim": 4 * WAN_VIDEO_DIM,
         "num_heads": 4,
     }
-    # Architecture constructs an ActionDiT with 10 layers, then MoTJointDriver
+    # Architecture constructs an ActionDiT with 10 layers, then DualSystemMoTDriver
     # validates layer-count parity and raises.
     with pytest.raises(ValueError, match="num_layers"):
         _build_arch("dual_system_self_attn", cfg)

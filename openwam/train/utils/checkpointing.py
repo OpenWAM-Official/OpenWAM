@@ -131,7 +131,7 @@ def save_trainable_checkpoint(
                 names.add(f"{mod_prefix}.{bname}" if mod_prefix else bname)
         return names
 
-    # ActionBackbone: all parameters + persistent buffers
+    # action backbone: all parameters + persistent buffers
     for name, param in action_backbone.named_parameters():
         state_dict[f"action_backbone.{name}"] = _maybe_cast(param.data)
     skip_action = _non_persistent_names(action_backbone)

@@ -1,5 +1,5 @@
 defaults:
-  - accelerate: deepspeed_zero2   # [Optional]: deepspeed_zero1, deepspeed_zero2(default), deepspeed_zero3
+  - accelerate: deepspeed_zero2   # [Optional]: deepspeed_zero1, deepspeed_zero2(default)
   - model: dual_system            # [Optional]: dual_system(default), shared_backbone, tri_system
   - dataloader: robotwin          # [Optional]: robotwin(default)
   - _self_

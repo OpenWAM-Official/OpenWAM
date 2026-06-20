@@ -16,7 +16,7 @@ from torch import nn
 from openwam.dataloader.transforms.normalize import Normalizer
 from openwam.deploy.engine import JointInferenceEngine
 from openwam.deploy.model_loader import _build_normalizer
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+from openwam.model.architectures.base import BaseWAMArchitecture
 
 # --- Helper: build a realistic stats dict for a 20D eef action ---
 

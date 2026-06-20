@@ -1,8 +1,0 @@
-# SharedBackbone MoE action backbone (cfg.model.action_backbone.*): action tokens
-# share the video DiT + receive an expert FFN correction at expert_layers.
-variant: moe
-action_decoder_hidden_dim: 1024   # shared action decoder MLP width
-expert_ffn_dim: 4096
-# Which video layers get the expert FFN: set via `bridge_layers` / `bridge_interval`
-# in the architecture block (configs/model/shared_backbone.yaml), shared with
-# dual/tri_system. len(bridge_layers) sets num_experts.

@@ -6,7 +6,7 @@ The flow under test:
         (video_backbone.temporal_compression / causal_temporal)
             │
             ▼
-    openwam.model.architectures.architecture_base.BaseWAMArchitecture._init_video_backbone
+    openwam.model.architectures.base.BaseWAMArchitecture._init_video_backbone
         (cross-check: yaml values match constructed encoder.properties — fail-fast)
             │
             ▼
@@ -95,7 +95,7 @@ class _StubArchitecture:
 
 
 def _run_init_video_backbone(model_cfg):
-    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+    from openwam.model.architectures.base import BaseWAMArchitecture
 
     stub = _StubArchitecture()
     BaseWAMArchitecture._init_video_backbone(stub, model_cfg)
@@ -292,7 +292,7 @@ def test_C8_mask_downsampler_temporal_factor_2():
     """
     import torch
 
-    from openwam.utils import downsample_video_mask_to_latent
+    from openwam.model.architectures.utils.common import downsample_video_mask_to_latent
 
     # All-False = "no padding"; the shape change is the point of the test.
     video_is_pad = torch.zeros((1, 9), dtype=torch.bool)
@@ -324,7 +324,7 @@ def test_C9_prepare_inputs_passes_backbone_temporal_factor(monkeypatch):
     """
     import torch
 
-    import openwam.model.architectures.architecture_base as base_mod
+    import openwam.model.architectures.base as base_mod
 
     captured = {}
 
@@ -338,10 +338,12 @@ def test_C9_prepare_inputs_passes_backbone_temporal_factor(monkeypatch):
         return torch.zeros((*video_is_pad.shape[:-1], T_lat_tail), dtype=torch.bool)
 
     monkeypatch.setattr(base_mod, "downsample_video_mask_to_latent", fake_downsample, raising=False)
-    # Also patch the import-from-openwam.utils alias used inside prepare_inputs.
-    import openwam.utils as utils_mod
+    # prepare_inputs does a local ``from ...utils.common import
+    # downsample_video_mask_to_latent`` each call, so patch the common module
+    # (the actual source the local import resolves against).
+    import openwam.model.architectures.utils.common as common_mod
 
-    monkeypatch.setattr(utils_mod, "downsample_video_mask_to_latent", fake_downsample)
+    monkeypatch.setattr(common_mod, "downsample_video_mask_to_latent", fake_downsample)
 
     class _FakeBackbone:
         temporal_compression = 2

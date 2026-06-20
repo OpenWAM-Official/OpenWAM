@@ -164,7 +164,7 @@ class SVAE(nn.Module):
 
     def _apply(self, fn, recurse=True):
         # Keep the per-channel standardisation stats in fp32 across a host
-        # ``.to(dtype)`` (e.g. the deploy-time / ZeRO-3 bf16 cast). They are
+        # ``.to(dtype)`` (e.g. the deploy-time bf16 cast). They are
         # applied via an explicit ``.to(x.dtype)`` in ``_standardize``, so fp32
         # storage preserves their precision (these are dataset statistics, not
         # compute tensors) without forcing the reduce off the host's bf16 compute

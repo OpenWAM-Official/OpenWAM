@@ -90,7 +90,7 @@ def test_set_input_stats_clamps_zero_std():
 
 
 def test_standardisation_stats_stay_fp32_across_dtype_cast():
-    # The deploy/ZeRO-3 host casts the encoder to bf16; the standardisation
+    # The deploy host casts the encoder to bf16; the standardisation
     # buffers must stay fp32 (they are dataset stats, not compute tensors) so
     # the standardisation matches standalone fp32-buffer training.
     m = _mk().eval()

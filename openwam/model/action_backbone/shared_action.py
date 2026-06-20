@@ -1,26 +1,20 @@
-"""MoE Action Backbone: action-side helpers for SharedBackbone MoE.
+"""SharedBackbone action backbones (vanilla + MoE).
 
-Inspired by BAGEL's Mixture-of-Transformer-Experts (MoT) pattern:
-- Action tokens are concatenated to the video token sequence (handled by
-  the architecture, not this module).
-- Shared self-attention: action and video tokens attend to each other
-  using the VIDEO DiT's Q/K/V projections (shared representational
-  space).
-- Expert FFN: at the video DiT layers named by ``bridge_layers``, action
-  tokens receive an additional FFN correction for modality-specific capacity.
+Both share :class:`SharedActionBackbone` (action I/O: input projection, output
+head, normalization buffers, scheduler) and differ only in how action tokens
+couple to the video DiT:
 
-This module owns the action-side parameters but **does not** drive the
-video DiT block loop — the architecture's ``forward`` runs the loop and
-calls ``apply_expert(layer_id, ...)`` exactly when ``layer_id in
-bridge_layers``.
+- :class:`SharedVanillaActionBackbone` — no expert FFN; the raw shared DiT learns
+  the modality boundary itself. ``encode`` returns tokens.
+- :class:`SharedMoEActionBackbone` — adds a per-layer expert FFN (BAGEL-style
+  Mixture-of-Transformer-Experts) at the video DiT layers named by
+  ``bridge_layers``. ``encode`` also builds the expert-FFN AdaLN modulation.
 
-API surface:
-    encode(noisy_actions, timestep) -> (tokens, t_mod, t_embed)
-    apply_expert(layer_id, x_action, t_mod) -> x_action
-    decode(action_tokens) -> action_prediction
-    bridge_layers                            (property, inherited)
+Neither module drives the video DiT block loop — the architecture's ``forward``
+runs the loop with action tokens injected and calls ``encode`` / ``decode`` (and
+for MoE ``apply_expert(layer_id, ...)`` when ``layer_id in bridge_layers``).
 
-References:
+References (MoE):
 - BAGEL (ByteDance Seed): Shared attention + expert FFN for multimodal
   understanding and generation (arXiv:2505.14683).
 - DreamZero: Shared backbone WAM with action+video in same DiT.
@@ -38,6 +32,56 @@ from openwam.model.action_backbone.components import (
     TimestepEmbedding,
     TimestepModulation,
 )
+
+
+class SharedVanillaActionBackbone(SharedActionBackbone):
+    """Action-side I/O for SharedBackbone vanilla.
+
+    Holds (via :class:`SharedActionBackbone`):
+      - ``input_proj``: action_dim -> video_dim (fuses timestep)
+      - ``action_output_head``: video_dim -> decoder_hidden_dim -> action_dim
+      - ``action_mean`` / ``action_std`` persistent buffers
+      - ``scheduler``: ActionScheduler
+
+    No expert FFN — the raw shared DiT learns the modality boundary itself.
+    """
+
+    def __init__(
+        self,
+        action_dim: int,
+        video_dim: int,
+        max_action_len: int = 512,
+        action_decoder_hidden_dim: Optional[int] = None,
+        use_proprioception: bool = False,
+        state_dim: int = 0,
+    ):
+        super().__init__(
+            action_dim,
+            video_dim,
+            max_action_len=max_action_len,
+            action_decoder_hidden_dim=action_decoder_hidden_dim,
+            use_proprioception=use_proprioception,
+            state_dim=state_dim,
+        )
+        self._init_action_input()
+        self._init_action_output()
+
+    def encode(self, noisy_actions: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+        """Project noisy actions into video_dim space.
+
+        Args:
+            noisy_actions: (B, T, action_dim).
+            timestep: action diffusion timestep, accepted shapes match
+                ``ActionEncoder``: (1,), (B,), or (B, T).
+
+        Returns:
+            (B, T, video_dim) action tokens ready to be appended to the
+            video sequence.
+        """
+        T = noisy_actions.shape[1]
+        if T > self._max_action_len:
+            raise ValueError(f"Action sequence length {T} exceeds max_action_len {self._max_action_len}.")
+        return self.input_proj(noisy_actions, timestep)
 
 
 class ExpertFFNBlock(nn.Module):
@@ -94,9 +138,7 @@ class ExpertFFNBlock(nn.Module):
 class SharedMoEActionBackbone(SharedActionBackbone):
     """Action-side helpers for SharedBackbone MoE.
 
-    Owns:
-      - ``input_proj`` / ``action_output_head``:
-        encode/decode for action tokens (project into video_dim, decode back).
+    Owns (beyond :class:`SharedActionBackbone`'s action I/O):
       - ``time_embedding`` / ``time_projection``: produce the AdaLN t_mod
         consumed by the expert FFN blocks. **Independent from the video DiT's
         own ``time_embedding`` / ``time_projection``**: the video DiT's
@@ -105,7 +147,6 @@ class SharedMoEActionBackbone(SharedActionBackbone):
         the expert-FFN AdaLN. Two separate routes is intentional —
         modality-specific modulation for the modality-specific FFN.
       - ``expert_blocks``: one ``ExpertFFNBlock`` per entry in ``bridge_layers``.
-      - ``action_mean`` / ``action_std``: normalization stats.
 
     Unlike ActionDiT, this module has no self-attention or cross-attention
     of its own — action tokens participate in the video DiT's shared
@@ -203,4 +244,4 @@ class SharedMoEActionBackbone(SharedActionBackbone):
         return self.expert_blocks[self.expert_layer_to_index[layer_id]](x_action, t_mod)
 
 
-__all__ = ["ExpertFFNBlock", "SharedMoEActionBackbone"]
+__all__ = ["ExpertFFNBlock", "SharedMoEActionBackbone", "SharedVanillaActionBackbone"]

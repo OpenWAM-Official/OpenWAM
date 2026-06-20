@@ -2,7 +2,7 @@
 
 True joint attention (MMDiT / FastWAM MoT style): at every transformer
 layer, the video and action backbones each compute Q/K/V independently
-through ``pre_attn_at_layer``; :class:`MoTJointDriver` concatenates the
+through ``pre_attn_at_layer``; :class:`DualSystemMoTDriver` concatenates the
 two modalities, runs a single mixed self-attention, splits the result,
 and feeds each slice back through ``post_attn_at_layer``.
 
@@ -19,10 +19,10 @@ import torch
 from torch import Tensor
 
 from openwam.model.action_backbone.action_dit import ActionDiT
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
+from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
-from openwam.utils import resolve_bridge_layers
+from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.architectures.utils.mot_utils import DualSystemMoTDriver
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
 
     def __init__(self, cfg=None):
         super().__init__(cfg)
-        self._mot_driver: MoTJointDriver | None = None
+        self._mot_driver: DualSystemMoTDriver | None = None
         self._mot_driver_kwargs: dict = {}
         if cfg is None:
             return
@@ -56,7 +56,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
 
         # FastWAM-Joint compat: action residual hidden_dim may differ from
         # video_dim. The MoT driver only requires num_heads / attn_head_dim
-        # parity (validated at MoTJointDriver.__init__).
+        # parity (validated at DualSystemMoTDriver.__init__).
         action_dim_hidden = int(cfg.get("dim", 1024))
         num_heads = int(cfg.get("num_heads", 24))
         attn_head_dim = int(cfg.get("attn_head_dim", video_dim // num_heads))
@@ -90,8 +90,8 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         if self.video_backbone is not None:
             self.build_mot_driver()
 
-    def build_mot_driver(self) -> MoTJointDriver:
-        """Construct the :class:`MoTJointDriver` from the current backbones.
+    def build_mot_driver(self) -> DualSystemMoTDriver:
+        """Construct the :class:`DualSystemMoTDriver` from the current backbones.
 
         Re-callable; raises if either backbone is missing. Tests that swap in
         a mock video backbone after ``__init__`` should call this method to
@@ -109,7 +109,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
                 "set. Architecture must be built from a non-None cfg."
             )
 
-        self._mot_driver = MoTJointDriver(
+        self._mot_driver = DualSystemMoTDriver(
             self.video_backbone,
             self.action_backbone,
             **self._mot_driver_kwargs,
@@ -117,32 +117,9 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         return self._mot_driver
 
     @property
-    def mot_driver(self) -> MoTJointDriver | None:
+    def mot_driver(self) -> DualSystemMoTDriver | None:
         """The MoT joint-attention driver (None if the architecture wasn't fully built)."""
         return self._mot_driver
-
-    def _iter_zero3_external_params(self):
-        """Raw-access leaves read by the MoT driver outside the owners' ``__call__``.
-
-        - ``vb._dit.blocks[i].modulation`` (Wan / Cosmos25) is read inside
-          ``pre_attn_at_layer_for_compile`` (``wan_backbone.py:824``)
-        - ``ab.blocks[i].modulation`` is read inside
-          ``ActionDiT.pre_attn_at_layer_for_compile`` (``action_dit.py:782``)
-        """
-        vb = self.video_backbone
-        dit = getattr(vb, "_dit", None) if vb is not None else None
-        if dit is not None:
-            for block in getattr(dit, "blocks", ()):
-                for attr in ("modulation",):
-                    p = getattr(block, attr, None)
-                    if p is not None:
-                        yield p
-        ab = self.action_backbone
-        if ab is not None:
-            for block in getattr(ab, "blocks", ()):
-                p = getattr(block, "modulation", None)
-                if p is not None:
-                    yield p
 
     def forward(
         self,

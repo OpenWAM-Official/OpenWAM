@@ -1,4 +1,4 @@
-"""Action backbone package: the ActionBackbone ABC + its concrete implementations.
+"""Action backbone package: the action-stream ABCs + concrete implementations.
 
     from openwam.model.action_backbone import ActionDiT, SharedVanillaActionBackbone
 
@@ -10,16 +10,16 @@ only re-exports the public classes.
 
 from openwam.model.action_backbone.action_dit import ActionDiT
 from openwam.model.action_backbone.base import (
-    ActionBackbone,
     ActionDiTBackbone,
     SharedActionBackbone,
 )
 from openwam.model.action_backbone.scheduler import ActionScheduler
-from openwam.model.action_backbone.shared_moe import SharedMoEActionBackbone
-from openwam.model.action_backbone.shared_vanilla import SharedVanillaActionBackbone
+from openwam.model.action_backbone.shared_action import (
+    SharedMoEActionBackbone,
+    SharedVanillaActionBackbone,
+)
 
 __all__ = [
-    "ActionBackbone",
     "ActionDiT",
     "ActionScheduler",
     "ActionDiTBackbone",

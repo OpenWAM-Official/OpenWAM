@@ -16,7 +16,7 @@ Three variants share this module:
 
 - ``variant='joint_self_attn'``: a stack of :class:`SelfAttnActionDiTBlock`
   blocks with the same Q/K/V split layout as the video DiT.
-  :class:`MoTJointDriver` drives the per-layer loop via
+  :class:`DualSystemMoTDriver` drives the per-layer loop via
   :meth:`pre_attn_at_layer` / :meth:`post_attn_at_layer`, concatenating
   Q/K/V across modalities and running a single mixed attention.
 
@@ -50,7 +50,7 @@ from openwam.model.action_backbone.components import (
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
 if TYPE_CHECKING:
-    from openwam.model.architectures.architecture_base import ActionState
+    from openwam.model.architectures.base import ActionState
 
 
 _MOT_VARIANTS = ("joint_self_attn", "idm")
@@ -62,7 +62,7 @@ class ActionDiTState:
 
     Populated by :meth:`ActionDiT.prepare_state` and consumed by
     :meth:`ActionDiT.pre_attn_at_layer` / :meth:`ActionDiT.post_attn_at_layer`
-    (called per layer from :class:`MoTJointDriver`) and finally by
+    (called per layer from :class:`DualSystemMoTDriver`) and finally by
     :meth:`ActionDiT.extract_prediction`.
     """
 
@@ -256,7 +256,7 @@ class CrossAttnActionDiTBlock(nn.Module):
 class SelfAttnActionDiTBlock(nn.Module):
     """Action expert block driven by the MoT joint self-attention loop.
 
-    The block is split around self-attention so :class:`MoTJointDriver` can
+    The block is split around self-attention so :class:`DualSystemMoTDriver` can
     concatenate video/action Q/K/V, run one mixed attention, and return the
     action slice. After that mixed attention, the action stream cross-attends
     to its own text/proprio context embedding and then runs the FFN. The
@@ -335,7 +335,7 @@ class ActionDiT(ActionDiTBackbone):
     - ``joint_cross_attn`` → :class:`CrossAttnActionDiTBlock` + :meth:`forward`.
     - ``joint_self_attn`` / ``idm`` → :class:`SelfAttnActionDiTBlock` +
       :meth:`pre_attn_at_layer` / :meth:`post_attn_at_layer`, driven by
-      :class:`MoTJointDriver`.
+      :class:`DualSystemMoTDriver`.
 
     Args:
         action_dim: Dimension of raw action vectors (e.g. 20 for bimanual).
@@ -350,7 +350,7 @@ class ActionDiT(ActionDiTBackbone):
             the video backbone's ``num_heads``.
         num_layers: Number of action-side blocks. For ``joint_self_attn`` this
             **must** equal the video backbone's ``num_layers`` (validated by
-            :class:`MoTJointDriver`).
+            :class:`DualSystemMoTDriver`).
         video_dim: Cross-attn variant: video feature dim, projected to ``dim``
             on entry. Self-attn variant: informational only — kept so the
             cfg → constructor signature is uniform; the architecture validates
@@ -360,7 +360,7 @@ class ActionDiT(ActionDiTBackbone):
             text encoder width (4096).
         attn_head_dim: Per-head attention dim. Defaults to ``dim // num_heads``
             when not specified. Under ``joint_self_attn`` must equal the video
-            backbone's ``head_dim`` (validated by :class:`MoTJointDriver`).
+            backbone's ``head_dim`` (validated by :class:`DualSystemMoTDriver`).
         bridge_layers: Cross-attn variant: which video DiT layers feed each
             action block (1:1 mapping). Self-attn variant: typically the full
             ``range(num_layers)`` — the driver runs joint attention at every
@@ -494,7 +494,7 @@ class ActionDiT(ActionDiTBackbone):
         self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
 
     # ------------------------------------------------------------------
-    # ActionBackbone interface
+    # ActionDiTBackbone interface
     # ------------------------------------------------------------------
 
     @property
@@ -733,7 +733,7 @@ class ActionDiT(ActionDiTBackbone):
         use_gradient_checkpointing: bool = False,  # noqa: ARG002 — driver handles ckpt itself
         use_gradient_checkpointing_offload: bool = False,  # noqa: ARG002
     ) -> "ActionState":
-        from openwam.model.architectures.architecture_base import ActionState
+        from openwam.model.architectures.base import ActionState
 
         x = self._embed_actions(noisy_actions)
         timestep = self._prepare_timestep(timestep, noisy_actions.shape[0])

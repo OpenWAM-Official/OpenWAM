@@ -20,7 +20,7 @@ import torch
 
 from openwam.dataloader.transforms.text_embedding_cache import resolve_cache_path_for_sha, sha256_for_prompt
 from openwam.deploy.denoise_schedule import make_schedule
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+from openwam.model.architectures.base import BaseWAMArchitecture
 
 logger = logging.getLogger(__name__)
 

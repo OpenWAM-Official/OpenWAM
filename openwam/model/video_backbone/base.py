@@ -146,6 +146,20 @@ class VideoBackbone(ABC, nn.Module):
         native VAE path."""
         return getattr(self, "video_encoder", None)
 
+    def reinit_for_from_scratch(self, *, external_encoder=None, source=None) -> None:
+        """Re-init the DiT for a ``from_scratch`` run, owning the dit/patch-size
+        details internally so the architecture stays backbone-agnostic.
+
+        Two paths, distinguished by ``source``:
+          - ``source is None`` (training): random-reinit the DiT weights, after
+            reshaping I/O to ``external_encoder``'s latent dim when one is swapped in.
+          - ``source is not None`` (deploy): reshape I/O to ``external_encoder``'s
+            latent dim WITHOUT resetting, so the subsequent strict checkpoint load
+            populates the reshaped tensors. No-op when ``external_encoder is None``.
+
+        Default raises — only backbones with a re-initializable DiT (Wan) support it."""
+        raise NotImplementedError(f"{type(self).__name__} does not support from_scratch DiT re-initialization.")
+
     @property
     def text_dim(self) -> Optional[int]:
         """Per-token raw text/context embedding dim. ``None`` keeps the 4096 fallback."""
@@ -181,8 +195,13 @@ class VideoBackbone(ABC, nn.Module):
     # Optional: deploy preprocessing + decode (default raise)
     # ================================================================
 
-    def preprocess_input_for_inference(self, inputs) -> dict:
-        """Deploy-time input prep → dict ready for the inference denoising loop."""
+    def preprocess_input_for_inference(self, **kw) -> dict:
+        """Deploy-time input prep → dict ready for the inference denoising loop.
+
+        Producers pass explicit kwargs (prompt / vace_video / first_frame_image /
+        num_frames / height / width / seed / num_inference_steps / shift / tiled /
+        vace_cache / prompt_embed_cache); backbones declare what they consume and
+        let ``**kw`` swallow the rest."""
         raise NotImplementedError(f"{type(self).__name__} does not support deploy inference.")
 
     def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:

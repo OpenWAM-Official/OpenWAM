@@ -1,5 +1,4 @@
 import torch
-from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.utils import ContextManagers
 
 from ..vram.disk_map import DiskMap
@@ -22,7 +21,7 @@ def load_model(
     state_dict=None,
 ):
     config = {} if config is None else config
-    with ContextManagers(get_init_context(torch_dtype=torch_dtype, device=device)):
+    with ContextManagers(get_init_context()):
         model = model_class(**config)
     # What is `module_map`?
     # This is a module mapping table for VRAM management.
@@ -75,15 +74,7 @@ def load_model(
             state_dict = state_dict_converter(state_dict)
         else:
             state_dict = {i: state_dict[i] for i in state_dict}
-        # Why does DeepSpeed ZeRO Stage 3 need to be handled separately?
-        # Because at this stage, model parameters are partitioned across multiple GPUs.
-        # Loading them directly could lead to excessive GPU memory consumption.
-        if is_deepspeed_zero3_enabled():
-            from transformers.integrations.deepspeed import _load_state_dict_into_zero3_model
-
-            _load_state_dict_into_zero3_model(model, state_dict)
-        else:
-            model.load_state_dict(state_dict, assign=True)
+        model.load_state_dict(state_dict, assign=True)
         # Why do we call `to()`?
         # Because some models override the behavior of `to()`,
         # especially those from libraries like Transformers.
@@ -118,19 +109,8 @@ def load_model_with_disk_offload(
     return model
 
 
-def get_init_context(torch_dtype, device):
-    if is_deepspeed_zero3_enabled():
-        import deepspeed
-        from transformers.modeling_utils import set_zero3_state
-
-        # Why do we use "deepspeed.zero.Init"?
-        # Weight segmentation of the model can be performed on the CPU side
-        # and loading the segmented weights onto the computing card
-        init_contexts = [deepspeed.zero.Init(remote_device=device, dtype=torch_dtype), set_zero3_state()]
-    else:
-        # Why do we use `skip_model_initialization`?
-        # It skips the random initialization of model parameters,
-        # thereby speeding up model loading and avoiding excessive memory usage.
-        init_contexts = [skip_model_initialization()]
-
-    return init_contexts
+def get_init_context():
+    # Why do we use `skip_model_initialization`?
+    # It skips the random initialization of model parameters,
+    # thereby speeding up model loading and avoiding excessive memory usage.
+    return [skip_model_initialization()]

@@ -168,7 +168,7 @@ def test_latent_reconstruction_formula():
 
 
 def test_masked_mse_full_pad_is_zero():
-    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+    from openwam.model.architectures.base import BaseWAMArchitecture
 
     pred = torch.randn(2, 32, 20, requires_grad=True)
     target = torch.randn(2, 32, 20)
@@ -180,7 +180,7 @@ def test_masked_mse_full_pad_is_zero():
 
 
 def test_masked_mse_shapes():
-    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+    from openwam.model.architectures.base import BaseWAMArchitecture
 
     pred = torch.zeros(1, 4, 3)
     target = torch.ones(1, 4, 3)

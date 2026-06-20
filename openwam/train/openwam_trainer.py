@@ -2,7 +2,7 @@
 
 Composes package-native components:
   - Loss: implemented inside ``BaseWAMArchitecture.compute_loss``
-    (openwam/model/architectures/architecture_base.py) — joint flow-matching MSE on video and action.
+    (openwam/model/architectures/base.py) — joint flow-matching MSE on video and action.
   - Optimizer groups: openwam.train.utils.optimizer_groups
   - Checkpointing: openwam.train.utils.checkpointing
   - Architecture: openwam.model.architectures.registry (DualSystem / MoE / SharedBackbone)
@@ -99,27 +99,10 @@ class OpenWAMTrainer(BaseTrainer):
         m = cfg.model
 
         # Build architecture (creates video_backbone internally from config).
-        # Wrap construction in a ZeRO-3 init-disable scope: when the Accelerator
-        # was built with ``zero3_init_flag=True``, DeepSpeed enters a global
-        # ``zero.Init(enabled=True)`` context that auto-partitions every
-        # nn.Parameter at allocation time. For OpenWAM that's actively harmful
-        # — frozen modules (Wan UMT5 ~13 GiB / Cosmos Reason1 ~16 GiB
-        # Qwen2.5-VL, VAE) get partitioned along with trainable DiT, and every
-        # forward then triggers a ~26 GiB all-gather spike to materialize them
-        # (guaranteed OOM on forward 2 of training). Wrapping construction in
-        # ``zero.Init(enabled=False)`` skips DeepSpeed's per-Parameter
-        # tracking (no ``ds_id`` / ``ds_status`` is attached). At
-        # ``initialize()`` time, untagged params stay replicated; only params
-        # constructed under the outer ``zero.Init(enabled=True)`` scope (the
-        # trainable DiT/VACE created by ``build_architecture`` below) get
-        # partitioned. So frozen modules never enter the shard table and
-        # never trigger an all-gather. See ``_zero3_init_disabled`` below for
-        # the actual deepspeed 0.18.5 behavior.
         from openwam.model import build_architecture, resolve_architecture_config
 
         resolved_arch = resolve_architecture_config(m)
-        with self._zero3_init_disabled():
-            self.architecture = build_architecture(resolved_arch.registry_name, resolved_arch.params)
+        self.architecture = build_architecture(resolved_arch.registry_name, resolved_arch.params)
         logger.info(
             "Architecture: %s (framework=%s variant=%s)",
             resolved_arch.registry_name,
@@ -312,38 +295,6 @@ class OpenWAMTrainer(BaseTrainer):
                 run_seed,
                 type(sampler).__name__ if sampler is not None else "None",
             )
-
-    @staticmethod
-    def _zero3_init_disabled():
-        """Context that skips DeepSpeed ZeRO-3 *construction-time* partitioning.
-
-        On deepspeed 0.18.5 ``zero.Init(enabled=False)`` is a no-op context
-        manager (``partition_parameters.py:344-358``) — it merely suppresses
-        the ``zero.Init`` constructor's per-Parameter hooks while the scope is
-        active, so newly-allocated params have no ``ds_id`` / ``ds_status``
-        attached at allocation time. It does **not** make the resulting params
-        "stay replicated": once ``deepspeed.initialize`` runs,
-        ``_convert_to_zero_parameters`` (``parameter_offload.py:205-226``) walks
-        the whole model and partitions every trainable param it finds — frozen
-        params included if they're still on the trainable graph.
-
-        What this scope actually buys: avoiding the construction-time overhead
-        of running ``zero.Init`` hooks on every leaf as huge frozen modules
-        (text_encoder ~13 GiB umt5-xxl, VAE) are built. Frozen modules that
-        the trainer later marks ``requires_grad_(False)`` and removes from the
-        optimizer's parameter groups stay un-partitioned in practice because
-        DeepSpeed's prepare only partitions params it actually owns; that's a
-        separate concern from this context manager. The DDP / single-GPU path
-        is unaffected because deepspeed isn't importable there — the
-        ``ImportError`` branch returns a ``nullcontext``.
-        """
-        from contextlib import nullcontext
-
-        try:
-            import deepspeed
-        except ImportError:
-            return nullcontext()
-        return deepspeed.zero.Init(enabled=False)
 
     def _load_normalization_stats(self, dataset):
         """Load action normalization stats from dataset into architecture buffers."""
@@ -1007,9 +958,8 @@ class OpenWAMTrainer(BaseTrainer):
                 )
 
                 # Periodic checkpoint saving. ALL ranks must enter
-                # ``save_checkpoint`` together because under ZeRO-3 it issues a
-                # collective all-gather to consolidate sharded params; only the
-                # rank-0 file IO is gated.
+                # ``save_checkpoint`` together because ``get_state_dict`` is a
+                # DeepSpeed collective; only the rank-0 file IO is gated.
                 _is_main = self.accelerator is None or self.accelerator.is_main_process
                 if self.should_save_checkpoint(global_step, save_steps):
                     ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
@@ -1032,7 +982,7 @@ class OpenWAMTrainer(BaseTrainer):
         pbar.close()
 
         # Save final checkpoint. Same rule as periodic saves: ALL ranks enter
-        # ``save_checkpoint`` (collective under ZeRO-3); only rank-0 writes IO.
+        # ``save_checkpoint`` (DeepSpeed collective); only rank-0 writes IO.
         _is_main = self.accelerator is None or self.accelerator.is_main_process
         if save_steps:
             ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
@@ -1050,11 +1000,11 @@ class OpenWAMTrainer(BaseTrainer):
         self.on_train_end(global_step, output_path=output_path, wandb_run=wandb_run)
 
     def save_checkpoint(self, path: str):
-        """Export architecture state to safetensors. Safe under ZeRO-1/2/3, DDP, and single-process.
+        """Export architecture state to safetensors. Safe under ZeRO-1/2, DDP, and single-process.
 
-        ALL ranks must call this together. Under ZeRO-3 ``Accelerator.get_state_dict``
-        issues a collective all-gather to consolidate sharded params on rank 0; under
-        ZeRO-1/2 / DDP / single-process it falls back to a local ``unwrap(model).state_dict()``.
+        ALL ranks must call this together because ``Accelerator.get_state_dict`` is a
+        DeepSpeed collective; under ZeRO-1/2 / DDP / single-process the params are
+        replicated so it resolves to a local ``unwrap(model).state_dict()``.
         Only rank 0 writes the file.
 
         VLM backbone parameters (tri_system's Qwen3-VL) are excluded from the
@@ -1064,7 +1014,7 @@ class OpenWAMTrainer(BaseTrainer):
         """
         from safetensors.torch import save_file
 
-        from openwam.model.architectures.architecture_base import _exclude_vlm_from_state_dict
+        from openwam.model.architectures.base import _exclude_vlm_from_state_dict
 
         if self.accelerator is not None:
             state_dict = self.accelerator.get_state_dict(self.architecture)
@@ -1080,37 +1030,16 @@ class OpenWAMTrainer(BaseTrainer):
     def load_checkpoint(self, path: str, strict: bool = True):
         """Load a checkpoint into the architecture.
 
-        Currently supports ZeRO-1 / ZeRO-2 / DDP / single-process. ZeRO-3 is NOT
-        supported: after ``accelerator.prepare()`` each rank holds only a sharded
-        ``ds_tensor`` slice of every parameter, so a naive ``load_state_dict``
-        would either shape-mismatch or silently write a full tensor into a
-        slice slot. Tracked as a TODO in README (resume-from-checkpoint under
-        ZeRO-3 needs ``deepspeed.zero.GatheredParameters`` plumbing).
+        Supports ZeRO-1 / ZeRO-2 / DDP / single-process (params are replicated,
+        not sharded, on all of these).
 
         Loads weights into the *unwrapped* underlying ``BaseWAMArchitecture`` so we don't
         invoke ``DeepSpeedEngine.load_checkpoint`` (which expects DeepSpeed's own sharded
         checkpoint layout, not our flat safetensors).
 
-        ``strict`` defaults to ``True`` so a renamed state-dict (e.g. v1.0 → v1.1
-        where ``moe_expert_dit.*`` became ``shared_moe.*``) raises explicitly
+        ``strict`` defaults to ``True`` so a renamed state-dict raises explicitly
         rather than dropping weights silently.
         """
-        # ZeRO-3 guard. Raise before doing anything destructive to the in-memory
-        # sharded params; the caller has to either load before prepare() or wrap
-        # the load in ``deepspeed.zero.GatheredParameters``.
-        if self.accelerator is not None:
-            ds_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
-            if ds_plugin is not None:
-                zero_stage = int(getattr(ds_plugin, "zero_stage", 0) or 0)
-                if zero_stage >= 3:
-                    raise RuntimeError(
-                        "load_checkpoint does not support ZeRO-3: params are sharded "
-                        "after accelerator.prepare(). Either call this before prepare(), "
-                        "or wrap the load in deepspeed.zero.GatheredParameters("
-                        "list(unwrapped.parameters()), modifier_rank=0). "
-                        "See the resume-from-checkpoint TODO in README."
-                    )
-
         unwrapped = (
             self.accelerator.unwrap_model(self.architecture) if self.accelerator is not None else self.architecture
         )

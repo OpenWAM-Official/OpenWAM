@@ -1,4 +1,0 @@
-# SharedBackbone vanilla action backbone (cfg.model.action_backbone.*): action
-# tokens share the video DiT with no expert FFN.
-variant: vanilla
-action_decoder_hidden_dim: 1024   # shared action decoder MLP width

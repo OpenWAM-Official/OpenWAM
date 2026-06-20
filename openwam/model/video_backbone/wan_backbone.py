@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -25,9 +25,6 @@ from einops import rearrange
 from torch import Tensor
 
 from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
-
-if TYPE_CHECKING:
-    from openwam.model.inference_inputs import InferenceInputs
 from openwam.model.video_backbone.wan import action_tokens as wan_action_tokens
 from openwam.model.video_backbone.wan import conditioning as wan_conditioning
 from openwam.model.video_backbone.wan import dit_forward as wan_dit_forward
@@ -191,6 +188,28 @@ class WanBase(VideoBackbone):
     @video_attention_mask_mode.setter
     def video_attention_mask_mode(self, mode: str) -> None:
         self._video_attention_mask_mode = mode
+
+    def reinit_for_from_scratch(self, *, external_encoder=None, source=None) -> None:
+        """from_scratch DiT re-init, owning the Wan dit/patch-size internally.
+
+        Training (``source is None``): random-reinit the DiT, reshaping I/O to
+        ``external_encoder`` first when one is swapped in. Deploy
+        (``source is not None``): reshape-only (no reset) so the strict checkpoint
+        load populates the reshaped tensors; skipped when no external encoder.
+        Both transparently no-op when the backbone carries no dit (logged inside
+        the reinit helpers)."""
+        if source is None:
+            from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
+
+            reinit_dit_from_scratch(
+                self,
+                external_encoder=external_encoder,
+                dit_patch_size=self.dit_patch_size,
+            )
+        elif external_encoder is not None:
+            from openwam.model.video_backbone.wan.reinit import adapt_dit_to_external_encoder
+
+            adapt_dit_to_external_encoder(self, external_encoder, self.dit_patch_size)
 
     def build_video_to_video_mask(
         self,
@@ -411,7 +430,7 @@ class WanBase(VideoBackbone):
 
     def pre_attn_at_layer(self, layer_id: int, state: BlockLoopState) -> Tuple[Tensor, Tensor, Tensor, dict]:
         """First half of a Wan DiT block (norm1 + AdaLN + Q/K/V + RoPE), up to
-        the attention call. Lets MoTJointDriver pull video-side Q/K/V before the
+        the attention call. Lets DualSystemMoTDriver pull video-side Q/K/V before the
         mixed attention; pairs with :meth:`post_attn_at_layer`.
         """
         q, k, v, post_tuple = self.pre_attn_at_layer_for_compile(layer_id, state)
@@ -709,29 +728,34 @@ class WanBase(VideoBackbone):
     # ABC: Deploy-input preprocessing (override)
     # ================================================================
 
-    def preprocess_input_for_inference(self, inputs: "InferenceInputs") -> dict:
-        """Build the inference denoising-loop input dict from a typed
-        :class:`InferenceInputs`, via explicit backbone helpers (no unit-runner).
+    def preprocess_input_for_inference(
+        self,
+        *,
+        prompt: str,
+        vace_video=None,
+        first_frame_image=None,
+        num_frames: int = 49,
+        height: int = 384,
+        width: int = 320,
+        seed: int = 42,
+        num_inference_steps: int = 50,
+        shift: float = 5.0,
+        tiled: bool = True,
+        vace_cache: Optional[dict] = None,
+        prompt_embed_cache: Optional[dict] = None,
+        **kw,
+    ) -> dict:
+        """Build the inference denoising-loop input dict from explicit kwargs,
+        via explicit backbone helpers (no unit-runner).
 
         Only the text embedding is cached (prompt-keyed, seed/dim-independent);
         noise/clip/y/vace_context/first_frame_latents are rebuilt every call.
-        CFG fields are ignored — Wan does no CFG at inference.
+        ``**kw`` swallows fields other backbones consume (CFG / pre-encoded text)
+        that Wan ignores — Wan does no CFG at inference.
         """
-        # Wan tile defaults (dataclass keeps them None for other backbones).
-        prompt = inputs.prompt
-        vace_video = inputs.vace_video
-        first_frame_image = inputs.first_frame_image
-        num_frames = inputs.num_frames
-        height = inputs.height
-        width = inputs.width
-        seed = inputs.seed
-        tiled = inputs.tiled
-        num_inference_steps = inputs.num_inference_steps
-        shift = inputs.shift
-        tile_size = inputs.tile_size if inputs.tile_size is not None else (30, 52)
-        tile_stride = inputs.tile_stride if inputs.tile_stride is not None else (15, 26)
-        vace_cache = inputs.vace_cache
-        prompt_embed_cache = inputs.prompt_embed_cache
+        # Wan native tiling grid (other backbones may differ).
+        tile_size = (30, 52)
+        tile_stride = (15, 26)
 
         self.scheduler.set_timesteps(num_inference_steps=num_inference_steps, shift=shift)
 

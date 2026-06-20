@@ -70,21 +70,9 @@ def effective_z_dim(svae: SVAE | None, raw_dim: int) -> int:
 
 def reduce(svae: SVAE | None, z: Tensor) -> Tensor:
     """Reduce raw post-pool features with the frozen S-VAE (deterministic
-    posterior mean), or pass them through unchanged when none is attached.
-
-    Under DeepSpeed ZeRO-3 the reducer's frozen parameters are partitioned and
-    the forward-pre-hook that would gather them does not fire on this
-    preprocessing path, so gather them read-only for the reduce. No-op off
-    ZeRO-3 — the parameters carry no ``ds_id`` and the gather list is empty.
-    """
+    posterior mean), or pass them through unchanged when none is attached."""
     if svae is None:
         return z
-    ds_params = [p for p in svae.parameters() if getattr(p, "ds_id", None) is not None]
-    if ds_params:
-        import deepspeed
-
-        with deepspeed.zero.GatheredParameters(ds_params, modifier_rank=None):
-            return svae.encode_mean(z)
     return svae.encode_mean(z)
 
 

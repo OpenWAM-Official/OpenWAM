@@ -603,7 +603,7 @@ def test_save_load_checkpoint():
 
 def test_save_checkpoint_excludes_vlm_backbone():
     """Architecture save_checkpoint must exclude vlm_backbone params (saved separately)."""
-    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+    from openwam.model.architectures.base import BaseWAMArchitecture
 
     class _VLMArch(BaseWAMArchitecture):
         def __init__(self):
@@ -635,7 +635,7 @@ def test_save_checkpoint_excludes_vlm_backbone():
 
 def test_trainer_checkpoint_excludes_vlm_backbone():
     """Trainer save_checkpoint must exclude vlm_backbone params (saved separately)."""
-    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+    from openwam.model.architectures.base import BaseWAMArchitecture
     from openwam.train.openwam_trainer import OpenWAMTrainer
 
     class _VLMArch(BaseWAMArchitecture):
@@ -696,7 +696,9 @@ def test_manage_checkpoints():
 
 def test_downsample_video_mask():
     """Verify the frame → latent mask downsampling logic."""
-    from openwam.utils import downsample_video_mask_to_latent as _downsample_video_mask_to_latent
+    from openwam.model.architectures.utils.common import (
+        downsample_video_mask_to_latent as _downsample_video_mask_to_latent,
+    )
 
     # 9 frames: frame 0 excluded, frames 1-8 grouped by 4
     # All valid (is_pad=False) → all latent steps valid

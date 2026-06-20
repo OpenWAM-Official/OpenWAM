@@ -1,5 +1,3 @@
-import contextlib
-
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -100,15 +98,8 @@ def _cfg(*, enabled=True, action_dim=1024, use_proprio=False):
 
 
 def _patch_trainer(monkeypatch, *, arch):
-    import openwam.train.openwam_trainer as trainer_mod
-
     monkeypatch.setattr("openwam.model.resolve_architecture_config", lambda _m: _Resolved())
     monkeypatch.setattr("openwam.model.build_architecture", lambda _name, _params: arch)
-    monkeypatch.setattr(
-        trainer_mod.OpenWAMTrainer,
-        "_zero3_init_disabled",
-        staticmethod(lambda: contextlib.nullcontext()),
-    )
     monkeypatch.setattr("openwam.model.action_backbone.latent_encoder.build_latent_action_provider", _FakeProvider)
 
 

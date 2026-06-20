@@ -28,15 +28,15 @@ import torch
 from torch import Tensor
 
 from openwam.model.action_backbone.action_dit import ActionDiT
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
+from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
-from openwam.utils import resolve_bridge_layers
+from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.architectures.utils.mot_utils import DualSystemMoTDriver
 
 logger = logging.getLogger(__name__)
 
 
-class IDMMoTDriver(MoTJointDriver):
+class IDMMoTDriver(DualSystemMoTDriver):
     """Extended MoT driver for IDM teacher-forcing training.
 
     At training time the video sequence is doubled: [noisy_video, cond_video].
@@ -347,35 +347,9 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
     def mot_driver(self) -> IDMMoTDriver | None:
         return self._mot_driver
 
-    def _iter_zero3_external_params(self):
-        """Raw-access leaves read by the IDM MoT driver outside owners' ``__call__``.
-
-        Same set as :class:`DualSystemSelfAttnArchitecture`: video + action
-        ``block.modulation``. The IDM training loop runs through
-        :class:`IDMMoTDriver` which inherits ``MoTJointDriver.step``, so the
-        partitioned-leaf raw reads happen at the same call sites
-        (``wan_backbone.py:824`` + ``action_dit.py:782``).
-        """
-        vb = self.video_backbone
-        dit = getattr(vb, "_dit", None) if vb is not None else None
-        if dit is not None:
-            for block in getattr(dit, "blocks", ()):
-                p = getattr(block, "modulation", None)
-                if p is not None:
-                    yield p
-        ab = self.action_backbone
-        if ab is not None:
-            for block in getattr(ab, "blocks", ()):
-                p = getattr(block, "modulation", None)
-                if p is not None:
-                    yield p
-
     # ------------------------------------------------------------------
     # Forward: dispatches between standard joint (inference fallback) and
-    # the IDM 3-branch training path. Training goes through ``self(...)`` so
-    # the architecture-level forward-pre-hook fires (ZeRO-3 external-param
-    # gather) before :class:`IDMMoTDriver` does raw reads of partitioned
-    # ``block.modulation`` leaves.
+    # the IDM 3-branch training path.
     # ------------------------------------------------------------------
 
     def forward(
@@ -484,10 +458,8 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """Run the IDM 3-branch training pass.
 
-        Called only via :meth:`forward` (and hence ``self.__call__``) so the
-        ZeRO-3 forward-pre-hook fires on the architecture and the registered
-        external ``block.modulation`` leaves are gathered for the duration of
-        the MoT driver loop.
+        Called only via :meth:`forward` (and hence ``self.__call__``) so any
+        architecture-level forward-pre-hooks fire before the MoT driver loop.
 
         ``pipeline_inputs`` carries the noisy-branch ``latents`` and
         ``timestep``; the cond branch overrides them with
@@ -705,14 +677,8 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
         # ---- Run forward through ``self.__call__`` ----
         # Routing through ``self(...)`` (not ``self.forward(...)``) makes
-        # ``nn.Module.__call__`` invoke the architecture-level
-        # forward-pre-hook. Under DeepSpeed ZeRO-3 that hook gathers the
-        # ``block.modulation`` leaves registered by
-        # ``_register_zero3_externals`` — the raw-access leaves
-        # ``IDMMoTDriver`` reads inside ``run_idm_training_loop``. On
-        # non-ZeRO-3 paths this is a no-op detour through an empty hook
-        # chain. Mirrors the base ``compute_loss`` pattern.
-        self._register_zero3_externals()
+        # ``nn.Module.__call__`` invoke any architecture-level forward-pre-hooks.
+        # Mirrors the base ``compute_loss`` pattern.
         video_noise_pred, action_noise_pred = self(
             noisy_actions if lambda_action > 0 else None,
             action_timesteps if lambda_action > 0 else None,
@@ -811,25 +777,20 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
-        from openwam.model.inference_inputs import InferenceInputs
-
+        # Wan uses its own native tiling grid; tile_size/tile_stride are not forwarded.
         inputs_shared = vb.preprocess_input_for_inference(
-            InferenceInputs(
-                prompt=prompt,
-                vace_video=vace_video,
-                first_frame_image=first_frame_image,
-                num_frames=num_frames,
-                height=height,
-                width=width,
-                seed=seed,
-                num_inference_steps=num_inference_steps,
-                shift=shift,
-                tiled=tiled,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-                vace_cache=vace_cache,
-                prompt_embed_cache=prompt_embed_cache,
-            )
+            prompt=prompt,
+            vace_video=vace_video,
+            first_frame_image=first_frame_image,
+            num_frames=num_frames,
+            height=height,
+            width=width,
+            seed=seed,
+            num_inference_steps=num_inference_steps,
+            shift=shift,
+            tiled=tiled,
+            vace_cache=vace_cache,
+            prompt_embed_cache=prompt_embed_cache,
         )
 
         if profile:

@@ -13,8 +13,8 @@ from typing import Optional, Tuple
 
 from torch import Tensor
 
-from openwam.model.action_backbone.shared_vanilla import SharedVanillaActionBackbone
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+from openwam.model.action_backbone.shared_action import SharedVanillaActionBackbone
+from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.shared_backbone.mask import (
     attach_shared_attention_mask,

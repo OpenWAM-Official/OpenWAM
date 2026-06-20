@@ -1,8 +1,8 @@
 """Smoke tests for WAM architecture composition.
 
 Each architecture exposes a different action-backbone contract:
-  - joint_cross_attn → ActionBackbone.forward(action_tokens, bridges, timestep)
-  - joint_self_attn  → MoTJointDriver coordinates pre/post_attn_at_layer
+  - joint_cross_attn → ActionDiT.forward(action_tokens, bridges, timestep)
+  - joint_self_attn  → DualSystemMoTDriver coordinates pre/post_attn_at_layer
   - shared_backbone vanilla → encode / decode helpers; architecture forward drives vb loop
   - shared_backbone moe → encode / apply_expert(layer_id, ...) / decode helpers
 
@@ -74,7 +74,7 @@ def test_dual_system_joint_self_attn_flow():
 
 
 def test_dual_system_self_attn_has_mot_driver():
-    """DualSystemSelfAttn must construct a MoTJointDriver when wired with a video backbone."""
+    """DualSystemSelfAttn must construct a DualSystemMoTDriver when wired with a video backbone."""
     # The __init__ short-circuits when video_backbone is None, so this just checks
     # the attribute is present on the architecture (MoT driver itself is exercised
     # in tests/test_mot_driver.py).
@@ -172,12 +172,12 @@ def _build_dispatch_arch_with_fakes():
 
 
 def test_build_mot_driver_dispatches_softmax_to_mot_driver():
-    """Default kernel routes to :class:`MoTJointDriver` (Wan/Cosmos25 unaffected)."""
-    from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
+    """Default kernel routes to :class:`DualSystemMoTDriver` (Wan/Cosmos25 unaffected)."""
+    from openwam.model.architectures.utils.mot_utils import DualSystemMoTDriver
 
     arch = _build_dispatch_arch_with_fakes()
     driver = arch.build_mot_driver()
-    assert type(driver) is MoTJointDriver
+    assert type(driver) is DualSystemMoTDriver
 
 
 def test_all_architectures_registered():

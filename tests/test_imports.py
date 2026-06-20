@@ -102,7 +102,7 @@ def test_import_action_dit():
 
 
 def test_import_moe_action_backbone():
-    from openwam.model.action_backbone.shared_moe import ExpertFFNBlock, SharedMoEActionBackbone  # noqa: F401
+    from openwam.model.action_backbone.shared_action import ExpertFFNBlock, SharedMoEActionBackbone  # noqa: F401
 
 
 def test_import_action_scheduler():

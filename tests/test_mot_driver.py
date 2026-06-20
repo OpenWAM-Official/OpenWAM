@@ -1,4 +1,4 @@
-"""Unit tests for :class:`MoTJointDriver` — the joint-attention coordinator.
+"""Unit tests for :class:`DualSystemMoTDriver` — the joint-attention coordinator.
 
 Covers:
 - Construction-time validation (num_layers / num_heads / head_dim parity,
@@ -16,8 +16,8 @@ import pytest
 import torch
 
 from openwam.model.action_backbone.action_dit import ActionDiT
-from openwam.model.architectures.architecture_base import ActionState
-from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
+from openwam.model.architectures.base import ActionState
+from openwam.model.architectures.utils.mot_utils import DualSystemMoTDriver
 from openwam.model.video_backbone.base import BlockLoopState
 from tests.test_openwam_trainer import _MockVideoBackbone
 
@@ -81,14 +81,14 @@ def test_driver_validates_num_layers():
     vb = _MockVideoBackbone(dim=32, num_layers=4, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=3)
     with pytest.raises(ValueError, match="num_layers"):
-        MoTJointDriver(vb, ab)
+        DualSystemMoTDriver(vb, ab)
 
 
 def test_driver_validates_num_heads():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=8)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     with pytest.raises(ValueError, match="num_heads"):
-        MoTJointDriver(vb, ab)
+        DualSystemMoTDriver(vb, ab)
 
 
 def test_driver_validates_head_dim():
@@ -96,14 +96,14 @@ def test_driver_validates_head_dim():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=64, num_heads=4, num_layers=2)
     with pytest.raises(ValueError, match="head_dim"):
-        MoTJointDriver(vb, ab)
+        DualSystemMoTDriver(vb, ab)
 
 
 def test_driver_rejects_unknown_mask_mode():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     with pytest.raises(ValueError, match="attention_mask_mode"):
-        MoTJointDriver(vb, ab, attention_mask_mode="causal")
+        DualSystemMoTDriver(vb, ab, attention_mask_mode="causal")
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +115,7 @@ def test_driver_step_calls_both_backbones():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False)
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False)
 
     vstate, astate = _make_states(vb, ab, B=2, s_video=9, s_action=5)
 
@@ -157,7 +157,7 @@ def test_driver_dtype_mismatch_raises():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False)
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False)
 
     vstate, astate = _make_states(vb, ab, B=1, s_video=4, s_action=3)
     # Force a mismatch by making the *video* mock stream emit bf16 Q/K/V while
@@ -175,7 +175,7 @@ def test_driver_attention_mask_bidirectional_returns_none():
     the fastest fused kernel."""
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
-    driver = MoTJointDriver(vb, ab, attention_mask_mode="bidirectional")
+    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode="bidirectional")
 
     mask = driver._build_attention_mask(s_video=4, s_action=3, video_tokens_per_frame=4, device=torch.device("cpu"))
     assert mask is None
@@ -186,7 +186,7 @@ def test_driver_attention_mask_joint_layout():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     # _MockVideoBackbone defaults to bidirectional v↔v (full True).
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
-    driver = MoTJointDriver(vb, ab, attention_mask_mode="joint")
+    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode="joint")
 
     Sv, Sa = 6, 3
     mask = driver._build_attention_mask(s_video=Sv, s_action=Sa, video_tokens_per_frame=Sv, device=torch.device("cpu"))
@@ -220,7 +220,7 @@ def test_driver_joint_mask_first_frame_causal():
 
     vb = _VBFirstFrame(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
-    driver = MoTJointDriver(vb, ab, attention_mask_mode="joint")
+    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode="joint")
 
     Sv, Sa, tokens_per_frame = 6, 3, 2
     mask = driver._build_attention_mask(
@@ -250,7 +250,7 @@ def test_driver_forwards_action_stream_unchanged_when_attention_is_identity():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False)
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False)
 
     vstate, astate = _make_states(vb, ab, B=1, s_video=4, s_action=3)
     with torch.no_grad():
@@ -273,7 +273,7 @@ def test_driver_joint_mask_blocks_video_to_action():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False, attention_mask_mode="joint")
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False, attention_mask_mode="joint")
 
     # Two runs that share video input but use different action inputs.
     B, s_video, s_action = 1, 4, 3
@@ -327,7 +327,7 @@ def test_driver_handles_heterogeneous_hidden_dim_end_to_end():
     )
     ab.eval()
     # vb head_dim is 64/4=16 — matches ab.attn_head_dim. Driver should accept.
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False)
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False)
 
     B, s_video, s_action = 1, 4, 3
     actions = torch.randn(B, s_action, ab.action_dim)
@@ -360,7 +360,7 @@ def test_driver_bidirectional_mask_does_couple_video_to_action():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False, attention_mask_mode="bidirectional")
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False, attention_mask_mode="bidirectional")
 
     B, s_video, s_action = 1, 4, 3
     video_x = torch.randn(B, s_video, vb.dim)
@@ -402,7 +402,7 @@ def test_action_uses_own_projected_text_context():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False)
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False)
 
     B, s_video, s_action, T_ctx = 1, 4, 3, 5
     actions = torch.randn(B, s_action, ab.action_dim)
@@ -467,7 +467,7 @@ def test_driver_step_checkpoint_matches_non_checkpoint_forward_and_backward():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.train()  # _step_checkpointed only fires when ab.training
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=True)
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=True)
 
     B, s_video, s_action = 2, 4, 3
 
@@ -522,7 +522,7 @@ def test_driver_step_checkpoint_no_op_in_eval_mode():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = MoTJointDriver(vb, ab, mot_checkpoint_mixed_attn=False)
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False)
 
     vstate1, astate1 = _build_run_inputs(vb, ab, B=1, s_video=4, s_action=3, seed=11)
     vstate2, astate2 = _build_run_inputs(vb, ab, B=1, s_video=4, s_action=3, seed=11)

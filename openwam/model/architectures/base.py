@@ -11,7 +11,7 @@ Supported architecture families:
    A separate ActionDiT consumes features from the video DiT. Variants:
    `joint_cross_attn` (bridge cross-attention after a full video forward)
    / `joint_self_attn` (MMDiT-style mixed attention at every layer, driven
-   by :class:`MoTJointDriver`).
+   by :class:`DualSystemMoTDriver`).
 
 3. **Tri-System** (`framework=tri_system`)
    Motus-style mixture of transformers: Wan video DiT + action expert +
@@ -27,7 +27,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -123,8 +123,10 @@ def _assert_decode_video_supported(vb) -> None:
 
 
 if TYPE_CHECKING:
-    from openwam.model.action_backbone.base import ActionBackbone
+    from openwam.model.action_backbone.base import ActionDiTBackbone, SharedActionBackbone
     from openwam.model.video_backbone.base import VideoBackbone
+
+    AnyActionBackbone = Union["ActionDiTBackbone", "SharedActionBackbone"]
 
 
 @dataclass
@@ -132,7 +134,7 @@ class ActionState:
     """Mutable state container used by the joint self-attention path.
 
     Only ``DualSystemSelfAttnArchitecture`` needs this — its action stream is
-    threaded through ``MoTJointDriver``, which mutates the payload across
+    threaded through ``DualSystemMoTDriver``, which mutates the payload across
     layers. SharedBackbone and DualSystem cross-attn don't go through this
     container.
 
@@ -153,7 +155,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
     """Base class for WAM architecture variants.
 
     Composes a ``video_backbone`` and an ``action_backbone`` plus optional
-    extra backbones. Subclasses instantiate the appropriate ActionBackbone
+    extra backbones. Subclasses instantiate the appropriate action backbone
     subclass in ``__init__`` and own the complete ``forward()`` control flow.
 
     Args:
@@ -166,7 +168,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         super().__init__()
         self.cfg = cfg
         self.video_backbone: Optional["VideoBackbone"] = None
-        self.action_backbone: Optional["ActionBackbone"] = None
+        self.action_backbone: Optional["AnyActionBackbone"] = None
         self._device = torch.device("cuda")
         self._dtype = torch.bfloat16
 
@@ -366,51 +368,16 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # work in the best case, but if the checkpoint had any missing keys
         # the strict load would surface them against zeroed weights instead
         # of the random init, masking the diagnostic.
-        if self.video_backbone is not None and from_scratch and source is None:
-            if getattr(self.video_backbone, "dit", None) is None:
-                logger.warning(
-                    "video_backbone.from_scratch=true but backbone has no 'dit'; skipping. (Non-Wan backbone?)"
-                )
-            else:
-                from openwam.model.video_backbone.wan.reinit import reinit_dit_from_scratch
-
-                reinit_dit_from_scratch(
-                    self.video_backbone,
-                    external_encoder=external_encoder,
-                    dit_patch_size=self.video_backbone.dit_patch_size,
-                )
-                logger.info(
-                    "video_backbone.from_scratch=true: DiT re-initialized; VAE / text_encoder keep pretrained weights"
-                )
-
-        # Deploy path with an external encoder: DiT was just constructed
-        # from the saved Wan ``components[dit].extra_kwargs`` (in/out_dim
-        # = native Wan VAE z_dim, e.g. 48), but the saved checkpoint
-        # stores the external-encoder-adapted shapes (in/out_dim =
-        # encoder.properties.z_dim, e.g. 1408 for V-JEPA 2.1 ViT-g). The
-        # training-side ``reinit_dit_from_scratch`` performs this
-        # reshape before the random-init reset; on deploy we want the
-        # reshape WITHOUT the reset so the subsequent strict
-        # ``load_checkpoint`` can populate ``patch_embedding`` /
-        # ``head.head`` from the safetensors. Gated on
-        # ``external_encoder is not None`` so the native-VAE deploy
-        # path (where Wan's saved components already match the
-        # checkpoint) stays untouched.
-        if self.video_backbone is not None and source is not None and external_encoder is not None:
-            if getattr(self.video_backbone, "dit", None) is not None:
-                from openwam.model.video_backbone.wan.reinit import adapt_dit_to_external_encoder
-
-                adapt_dit_to_external_encoder(
-                    self.video_backbone,
-                    external_encoder,
-                    self.video_backbone.dit_patch_size,
-                )
-                logger.info(
-                    "Deploy with external encoder %s: DiT patch_embedding / "
-                    "head.head reshaped to z_dim=%d before strict load",
-                    type(external_encoder).__name__,
-                    external_encoder.properties.z_dim,
-                )
+        # Both the training reset (source is None) and the deploy reshape-only
+        # path (source set + external encoder) are owned by the backbone via the
+        # ``reinit_for_from_scratch`` contract — the architecture no longer
+        # reaches into ``vb.dit`` / ``wan.reinit``. Non-Wan backbones raise
+        # NotImplementedError, so this stays gated on from_scratch.
+        if self.video_backbone is not None and from_scratch:
+            self.video_backbone.reinit_for_from_scratch(
+                external_encoder=external_encoder,
+                source=source,
+            )
 
     @staticmethod
     def _build_external_encoder_skeleton(enc_cfg, source, *, ckpt_dir=None):
@@ -920,7 +887,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             tensors, masks, and forward-time flags ready for ``compute_loss``.
         """
         from openwam.dataloader.transforms.pipeline import FirstFrameConditioningTransform
-        from openwam.utils import downsample_video_mask_to_latent
+        from openwam.model.architectures.utils.common import downsample_video_mask_to_latent
 
         if isinstance(batch, dict):
             batch = [batch]
@@ -1115,69 +1082,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         return inputs
 
-    # --- ZeRO-3 external-parameter protocol ---
-    #
-    # The MoT driver reads several leaf ``nn.Parameter`` (e.g. ``block.modulation``,
-    # ``block.wan_und_qkv``) directly inside the architecture forward, bypassing the
-    # owning submodule's ``__call__``. Under DeepSpeed ZeRO-3 those leaves are
-    # partitioned and the forward-pre-hook that would gather them never fires for
-    # the owner. The fix is the standard external-parameter protocol: register
-    # the leaves against ``self`` (the architecture) and call ``self(...)`` so the
-    # architecture-level forward-pre-hook gathers them before the raw read.
-
-    def _iter_zero3_external_params(self):
-        """Yield each raw-access leaf ``nn.Parameter`` that the MoT path reads.
-
-        Default: empty. Overridden by every architecture whose training
-        forward pulls partitioned leaves outside the owner submodule's
-        ``__call__`` — concretely, the MoT-driven variants:
-
-        - ``DualSystemSelfAttnArchitecture`` — video + action ``block.modulation``
-        - ``DualSystemIDMArchitecture`` — same as joint_self_attn; IDM's
-          ``compute_loss`` override routes its 3-branch forward through
-          ``self.__call__`` so the same protocol applies.
-        - ``TriSystemJointSelfAttnArchitecture`` — also understanding
-          ``block.wan_und_qkv``.
-
-        Cross-attn and shared variants go through standard ``block.__call__``
-        and don't need to override.
-        """
-        return ()
-
-    def _register_zero3_externals(self) -> None:
-        """Register raw-access leaves as DeepSpeed ZeRO-3 external params of ``self``.
-
-        Required because the MoT driver reads these leaves directly, bypassing
-        the owning submodule's ``__call__``. Registering them makes DeepSpeed
-        gather them on ``self.__call__``'s forward-pre-hook and hold through
-        backward — without this AccumulateGrad sees a size-0 leaf.
-
-        Idempotent + no-op when deepspeed isn't importable or params lack
-        ``ds_id`` (non-ZeRO-3 paths, CPU mock tests). The gate only seals after
-        at least one successful register so a pre-``accelerator.prepare`` call
-        (params still un-partitioned) can be retried post-prepare. Architectures
-        whose iterator is empty by design (cross-attn, shared variants) seal
-        immediately — they will never need to register anything.
-        """
-        if getattr(self, "_zero3_externals_registered", False):
-            return
-        leaves = list(self._iter_zero3_external_params())
-        if not leaves:
-            self._zero3_externals_registered = True
-            return
-        try:
-            from deepspeed.runtime.zero import register_external_parameter
-        except ImportError:
-            self._zero3_externals_registered = True
-            return
-        registered_any = False
-        for p in leaves:
-            if getattr(p, "ds_id", None) is not None:
-                register_external_parameter(self, p)
-                registered_any = True
-        if registered_any:
-            self._zero3_externals_registered = True
-
     # --- Training: loss computation ---
 
     def compute_loss(
@@ -1224,7 +1128,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         # End-to-end decoder reconstructs the latent from ActionDiT's velocity
         # prediction, which only exists when the action stream runs.
-        has_decoder = self.action_backbone is not None and self.action_backbone.has_latent_decoder
+        has_decoder = getattr(self.action_backbone, "has_latent_decoder", False)
         if has_decoder and lambda_decoder > 0 and lambda_action <= 0:
             raise ValueError(
                 "Latent decoder (lambda_decoder>0) trains end-to-end on ActionDiT's predicted "
@@ -1324,12 +1228,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             forward_inputs["_proprio_sample_mask"] = proprio_mask
 
         # Use ``self(...)`` (not ``self.forward(...)``) so ``nn.Module.__call__``
-        # is invoked and the architecture-level forward-pre-hook fires. Under
-        # DeepSpeed ZeRO-3 that hook gathers the leaves registered by
-        # ``_register_zero3_externals`` (raw-access params read by the MoT
-        # driver). On non-ZeRO-3 paths this is a no-op detour through the empty
-        # hook chain.
-        self._register_zero3_externals()
+        # is invoked and any architecture-level forward-pre-hooks fire.
         video_noise_pred, action_noise_pred = self(
             noisy_actions if lambda_action > 0 else None,
             action_timesteps if lambda_action > 0 else None,
@@ -1609,9 +1508,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # use the same cache key, so re-running uncond off a cond-tagged hit
         # would silently corrupt the velocity prediction. MVP keeps it simple
         # — disable the cache whenever CFG is on; future work can add a
-        # (cond, uncond) slot. Everything else flows through ``InferenceInputs``
-        # which has unambiguous defaults; backbones that don't implement CFG
-        # (Wan) simply ignore those fields.
+        # (cond, uncond) slot. CFG is applied by the denoising loop below, not
+        # forwarded to the backbone preprocess (Wan does no CFG at inference).
         cfg_scale_f = float(cfg_scale)
         if cfg_scale_f < 1.0:
             raise ValueError(f"cfg_scale must be >= 1.0; got {cfg_scale!r}.")
@@ -1620,14 +1518,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
-        from openwam.model.inference_inputs import InferenceInputs
-
-        inference_inputs = InferenceInputs(
+        # CFG / pre-encoded-text / tile knobs are not forwarded: Wan does no CFG
+        # at inference and uses its own native tiling grid; CFG is handled by the
+        # denoising loop below via ``cfg_scale_f`` / ``cfg_merge``.
+        inputs_shared = vb.preprocess_input_for_inference(
             prompt=prompt,
             vace_video=vace_video,
             first_frame_image=first_frame_image,
-            pre_encoded_text=pre_encoded_text,
-            uncond_pre_encoded_text=uncond_pre_encoded_text,
             num_frames=num_frames,
             height=height,
             width=width,
@@ -1635,14 +1532,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
             num_inference_steps=num_inference_steps,
             shift=shift,
             tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
             vace_cache=vace_cache,
             prompt_embed_cache=prompt_embed_cache,
-            cfg_scale=cfg_scale_f,
-            cfg_merge=cfg_merge,
         )
-        inputs_shared = vb.preprocess_input_for_inference(inference_inputs)
 
         if profile:
             if torch.cuda.is_available():
@@ -1773,7 +1665,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # actions, conditioned on the already-normalized proprio when the decoder
         # uses it. Explicit mode has no decoder and skips this. Both then
         # unnormalize back to physical units.
-        if self.action_backbone is not None and self.action_backbone.has_latent_decoder:
+        if getattr(self.action_backbone, "has_latent_decoder", False):
             decode_proprio = proprio.to(device=device, dtype=dtype) if proprio is not None else None
             action_latents = self.action_backbone.decode_latent_to_action(action_latents, decode_proprio)
 

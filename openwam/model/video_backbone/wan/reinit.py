@@ -115,47 +115,29 @@ def reinit_dit_from_scratch(
     if external_encoder is not None:
         adapt_dit_to_external_encoder(backbone, external_encoder, dit_patch_size)
 
-    # ZeRO-3 interaction: params arrive partitioned to 1-D shards, which trips
-    # ``Linear.reset_parameters`` (fan-in/out needs >=2D). Gather them to full
-    # shape for the reset, re-partition on exit; ``modifier_rank=0`` broadcasts
-    # rank-0 so the reset is bit-identical across ranks. Non-ZeRO-3 paths hit
-    # the ``nullcontext`` fast-path.
-    from contextlib import nullcontext
-
-    def _gather_zero3(root_mod):
-        try:
-            import deepspeed
-        except ImportError:
-            return nullcontext()
-        params = [p for p in root_mod.parameters() if hasattr(p, "ds_id")]
-        if not params:
-            return nullcontext()
-        return deepspeed.zero.GatheredParameters(params, modifier_rank=0)
-
     before_stats = [] if (verbose and is_main) else None
     after_stats = [] if (verbose and is_main) else None
 
     for root in dits:
-        with _gather_zero3(root):
-            if before_stats is not None:
-                before_stats.append(_probe_dit_stats(root))
+        if before_stats is not None:
+            before_stats.append(_probe_dit_stats(root))
+        for sub in root.modules():
+            if isinstance(sub, stdlib_resettable):
+                sub.reset_parameters()
+        with torch.no_grad():
             for sub in root.modules():
-                if isinstance(sub, stdlib_resettable):
-                    sub.reset_parameters()
-            with torch.no_grad():
-                for sub in root.modules():
-                    if isinstance(sub, RMSNorm):
-                        sub.weight.fill_(1.0)
-                    elif isinstance(sub, DiTBlock):
-                        dim = sub.modulation.shape[-1]
-                        sub.modulation.normal_(mean=0.0, std=dim**-0.5)
-                    elif isinstance(sub, Head):
-                        dim = sub.modulation.shape[-1]
-                        sub.modulation.normal_(mean=0.0, std=dim**-0.5)
-                    elif isinstance(sub, MLP) and getattr(sub, "has_pos_emb", False):
-                        sub.emb_pos.zero_()
-            if after_stats is not None:
-                after_stats.append(_probe_dit_stats(root))
+                if isinstance(sub, RMSNorm):
+                    sub.weight.fill_(1.0)
+                elif isinstance(sub, DiTBlock):
+                    dim = sub.modulation.shape[-1]
+                    sub.modulation.normal_(mean=0.0, std=dim**-0.5)
+                elif isinstance(sub, Head):
+                    dim = sub.modulation.shape[-1]
+                    sub.modulation.normal_(mean=0.0, std=dim**-0.5)
+                elif isinstance(sub, MLP) and getattr(sub, "has_pos_emb", False):
+                    sub.emb_pos.zero_()
+        if after_stats is not None:
+            after_stats.append(_probe_dit_stats(root))
 
     logger.info(
         "reinit_dit_from_scratch: re-initialized %d DiT module(s); VAE/T5 untouched",

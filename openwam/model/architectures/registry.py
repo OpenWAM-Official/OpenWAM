@@ -30,7 +30,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Type
 
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+from openwam.model.architectures.base import BaseWAMArchitecture
 
 ARCHITECTURE_REGISTRY: Dict[str, Type[BaseWAMArchitecture]] = {}
 ARCHITECTURE_SUPPORT: Dict[str, "ArchitectureSupport"] = {}
@@ -106,9 +106,6 @@ def resolve_architecture_config(
 
     framework = _cfg_get(arch_cfg, "framework", None)
     variant = _cfg_get(arch_cfg, "variant", None)
-    if variant is None:
-        # shared_backbone carries variant in the action_backbone group, not architecture.
-        variant = _cfg_get(action_cfg, "variant", None)
 
     lookup_key = (framework, variant)
     if lookup_key not in _FRAMEWORK_VARIANT_INDEX:

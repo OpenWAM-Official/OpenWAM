@@ -66,8 +66,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         super().__init__()
         # ``loader`` installs a RoPE monkey-patch that casts the rotated
         # Q/K back to ``x.dtype``: upstream would promote them to fp32 (fp32
-        # sin/cos table), mismatching bf16 V at SDPA and tripping DeepSpeed
-        # ZeRO-3's bf16 all_gather on this frozen ViT.
+        # sin/cos table), mismatching bf16 V at SDPA on this frozen ViT.
         self._m = vit
         self._variant = variant
         if vjepa2_1_forward not in _VJEPA21_FORWARD_ALLOWED:

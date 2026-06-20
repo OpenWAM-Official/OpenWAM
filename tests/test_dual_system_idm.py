@@ -508,7 +508,7 @@ def test_idm_video_cache_matches_joint_loop():
     Stage 2 reuses ``prefill_video_cache`` + ``run_action_with_video_cache``
     instead of running joint attention every action step. That's only valid
     when the joint mask blocks ``v→a`` — see
-    ``MoTJointDriver._build_joint_mask``. If that invariant ever regresses
+    ``DualSystemMoTDriver._build_joint_mask``. If that invariant ever regresses
     (or the cache layout drifts from what the joint K/V would be), the
     cached action output will diverge from the joint action output. This
     test pins the equivalence numerically.

@@ -85,7 +85,7 @@ def build_shared_backbone_attention_mask(
 
     # Reuse the MoT helper so the v↔v mask uses the same tokens_per_frame
     # value across SharedBackbone and DualSystem paths.
-    from openwam.model.architectures._mot_utils import compute_video_tokens_per_frame
+    from openwam.model.architectures.utils.common import compute_video_tokens_per_frame
 
     video_tokens_per_frame = compute_video_tokens_per_frame(state, "SharedBackbone")
 

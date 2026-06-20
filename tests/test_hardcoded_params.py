@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from openwam.model.action_backbone.action_dit import ActionDiT
-from openwam.model.action_backbone.shared_moe import SharedMoEActionBackbone
+from openwam.model.action_backbone.shared_action import SharedMoEActionBackbone
 from openwam.model.architectures.dual_system import DualSystemCrossAttnArchitecture
 from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
@@ -244,7 +244,7 @@ def test_generate_tile_defaults_are_none():
     """generate() signature should default tile_size and tile_stride to None."""
     import inspect
 
-    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+    from openwam.model.architectures.base import BaseWAMArchitecture
 
     sig = inspect.signature(BaseWAMArchitecture.generate)
     assert sig.parameters["tile_size"].default is None

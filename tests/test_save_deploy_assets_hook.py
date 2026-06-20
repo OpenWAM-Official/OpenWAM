@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import torch.nn as nn
 
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+from openwam.model.architectures.base import BaseWAMArchitecture
 
 
 class _RecordingBackbone(nn.Module):

@@ -288,8 +288,8 @@ class VideoEncoder(ABC, nn.Module):
         """Reduce features through the optional frozen S-VAE, else passthrough.
 
         The single opt-in hook a subclass's ``batch_encode`` calls;
-        :func:`reducer.reduce` does the ZeRO-3 gather + deterministic posterior
-        mean. Reducer construction / ``svae_target_dim`` sizing / deploy sidecar
-        stay in :mod:`...svae.reducer`.
+        :func:`reducer.reduce` does the deterministic posterior mean. Reducer
+        construction / ``svae_target_dim`` sizing / deploy sidecar stay in
+        :mod:`...svae.reducer`.
         """
         return reducer.reduce(self._svae, z)

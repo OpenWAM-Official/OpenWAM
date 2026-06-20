@@ -59,7 +59,7 @@ class TestAccelerateYamlMixedPrecision:
             "training.mixed_precision should be removed; accelerate.mixed_precision is now the only source"
         )
 
-    @pytest.mark.parametrize("stage", ["deepspeed_zero1", "deepspeed_zero2", "deepspeed_zero3"])
+    @pytest.mark.parametrize("stage", ["deepspeed_zero1", "deepspeed_zero2"])
     def test_accelerate_field_exists(self, stage):
         from omegaconf import OmegaConf
 
@@ -892,7 +892,7 @@ class TestCudagraphMarkStepBegin:
     subsequent run' when fixed-shape compile paths are active.
 
     After the architecture refactor the dispatch site is in
-    ``BaseWAMArchitecture.generate()`` in ``architecture_base.py``.
+    ``BaseWAMArchitecture.generate()`` in ``base.py``.
     """
 
     _DISPATCH_SUBSTRINGS = (
@@ -906,7 +906,7 @@ class TestCudagraphMarkStepBegin:
 
     def _source(self):
         # Only check generate() method, not compute_loss()
-        src = (PROJECT_ROOT / "openwam" / "model" / "architectures" / "architecture_base.py").read_text()
+        src = (PROJECT_ROOT / "openwam" / "model" / "architectures" / "base.py").read_text()
         marker = "def generate("
         idx = src.index(marker)
         return src[idx:]

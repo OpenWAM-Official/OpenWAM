@@ -13,8 +13,8 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from openwam.model.action_backbone.shared_moe import SharedMoEActionBackbone
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+from openwam.model.action_backbone.shared_action import SharedMoEActionBackbone
+from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.shared_backbone.mask import (
     attach_shared_attention_mask,
@@ -22,8 +22,8 @@ from openwam.model.architectures.shared_backbone.mask import (
     validate_shared_attention_mask_mode,
 )
 from openwam.model.architectures.shared_backbone.state import align_state_tokens_to_action_batch
+from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
-from openwam.utils import resolve_bridge_layers
 
 
 def _validate_per_token_t_mod(vstate) -> None:

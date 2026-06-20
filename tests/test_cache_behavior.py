@@ -24,7 +24,6 @@ from types import SimpleNamespace
 
 import torch
 
-from openwam.model.inference_inputs import InferenceInputs
 from openwam.model.video_backbone.wan_backbone import WanBase
 
 # ---------------------------------------------------------------------------
@@ -110,8 +109,8 @@ class _MockWanVB:
         return self._dit
 
     # --- real method under test (conditioning seams now in wan.conditioning) ---
-    def preprocess_input_for_inference(self, inputs):
-        return WanBase.preprocess_input_for_inference(self, inputs)
+    def preprocess_input_for_inference(self, **kw):
+        return WanBase.preprocess_input_for_inference(self, **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -121,20 +120,18 @@ class _MockWanVB:
 
 def _prep(vb, prompt, vace_cache=None, prompt_embed_cache=None, seed=0):
     return vb.preprocess_input_for_inference(
-        InferenceInputs(
-            prompt=prompt,
-            vace_video=None,
-            first_frame_image=None,
-            num_frames=17,
-            height=32,
-            width=32,
-            seed=seed,
-            tiled=False,
-            num_inference_steps=2,
-            shift=5.0,
-            vace_cache=vace_cache,
-            prompt_embed_cache=prompt_embed_cache,
-        )
+        prompt=prompt,
+        vace_video=None,
+        first_frame_image=None,
+        num_frames=17,
+        height=32,
+        width=32,
+        seed=seed,
+        tiled=False,
+        num_inference_steps=2,
+        shift=5.0,
+        vace_cache=vace_cache,
+        prompt_embed_cache=prompt_embed_cache,
     )
 
 
@@ -268,17 +265,15 @@ def test_i2v_deploy_list_unwrap():
     mock_vb = _make_i2v_mock()
     img = Image.new("RGB", (320, 384))
     inputs = mock_vb.preprocess_input_for_inference(
-        InferenceInputs(
-            prompt="prompt_I2V",
-            first_frame_image=[img],
-            num_frames=17,
-            height=32,
-            width=32,
-            seed=0,
-            tiled=False,
-            num_inference_steps=2,
-            shift=5.0,
-        )
+        prompt="prompt_I2V",
+        first_frame_image=[img],
+        num_frames=17,
+        height=32,
+        width=32,
+        seed=0,
+        tiled=False,
+        num_inference_steps=2,
+        shift=5.0,
     )
     assert isinstance(inputs["input_image"], Image.Image), (
         f"I2V deploy should unwrap [PIL] to a single PIL, got {type(inputs['input_image'])}"
@@ -298,34 +293,30 @@ def test_i2v_deploy_unwrap_stable_across_cache():
     vace_cache: dict = {}
 
     mock_vb.preprocess_input_for_inference(
-        InferenceInputs(
-            prompt="prompt_I2V",
-            first_frame_image=[img],
-            num_frames=17,
-            height=32,
-            width=32,
-            seed=0,
-            tiled=False,
-            num_inference_steps=2,
-            shift=5.0,
-            vace_cache=vace_cache,
-        )
+        prompt="prompt_I2V",
+        first_frame_image=[img],
+        num_frames=17,
+        height=32,
+        width=32,
+        seed=0,
+        tiled=False,
+        num_inference_steps=2,
+        shift=5.0,
+        vace_cache=vace_cache,
     )
     assert vace_cache.get("populated")
 
     inputs = mock_vb.preprocess_input_for_inference(
-        InferenceInputs(
-            prompt="prompt_I2V",
-            first_frame_image=[img],
-            num_frames=17,
-            height=32,
-            width=32,
-            seed=1,
-            tiled=False,
-            num_inference_steps=2,
-            shift=5.0,
-            vace_cache=vace_cache,
-        )
+        prompt="prompt_I2V",
+        first_frame_image=[img],
+        num_frames=17,
+        height=32,
+        width=32,
+        seed=1,
+        tiled=False,
+        num_inference_steps=2,
+        shift=5.0,
+        vace_cache=vace_cache,
     )
     assert isinstance(inputs["input_image"], Image.Image)
     assert inputs["vace_reference_image"] is None

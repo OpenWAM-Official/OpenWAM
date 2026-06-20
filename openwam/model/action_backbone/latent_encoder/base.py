@@ -3,9 +3,9 @@
 A latent-action encoder turns a batch of videos into clean latent-action
 targets used as the regression target when ``model.action_backbone.type=latent``
 (LAPA-style pretraining). It is a frozen **label generator** living on the
-trainer side — not part of the architecture tree, not an
-:class:`~openwam.model.action_backbone.base.ActionBackbone`. The trainer builds
-it once and calls it per step to replace the dataloader's real actions.
+trainer side — not part of the architecture tree, not an action backbone
+(:class:`~openwam.model.action_backbone.base.ActionDiTBackbone`). The trainer
+builds it once and calls it per step to replace the dataloader's real actions.
 
 Subclass contract:
     __init__(cfg, *, device, dtype)   construct + load frozen weights

@@ -14,9 +14,9 @@ import torch
 from torch import Tensor
 
 from openwam.model.action_backbone.action_dit import ActionDiT
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import _cfg_get, register_architecture
-from openwam.utils import resolve_bridge_layers
+from openwam.model.architectures.utils.common import resolve_bridge_layers
 
 
 def _cross_attn_options(cfg) -> dict:

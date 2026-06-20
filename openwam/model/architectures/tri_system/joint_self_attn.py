@@ -12,15 +12,15 @@ import torch.nn as nn
 from torch import Tensor
 
 from openwam.model.action_backbone.action_dit import ActionDiT
-from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
-from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
 from openwam.model.architectures.tri_system.und_expert import (
     UnderstandingExpert,
     UnderstandingExpertConfig,
 )
+from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.architectures.utils.mot_utils import TriSystemMoTDriver
 from openwam.model.vlm_backbone import build_vlm_backbone
-from openwam.utils import resolve_bridge_layers
 
 
 def _cfg_get(cfg, key, default=None):
@@ -286,36 +286,6 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             **kwargs,
         )
         return result
-
-    def _iter_zero3_external_params(self):
-        """Raw-access leaves read by the tri-system MoT driver outside owners' ``__call__``.
-
-        - ``vb._dit.blocks[i].modulation`` — read in ``pre_attn_at_layer_for_compile``
-          (``wan_backbone.py:824``)
-        - ``ab.blocks[i].modulation`` — read in
-          ``ActionDiT.pre_attn_at_layer_for_compile`` (``action_dit.py:782``)
-        - ``ub.blocks[i].wan_und_qkv`` — read in
-          ``UnderstandingExpert.pre_attn_at_layer_for_compile`` (``und_expert.py:155``)
-        """
-        vb = self.video_backbone
-        dit = getattr(vb, "_dit", None) if vb is not None else None
-        if dit is not None:
-            for block in getattr(dit, "blocks", ()):
-                p = getattr(block, "modulation", None)
-                if p is not None:
-                    yield p
-        ab = self.action_backbone
-        if ab is not None:
-            for block in getattr(ab, "blocks", ()):
-                p = getattr(block, "modulation", None)
-                if p is not None:
-                    yield p
-        ub = self.understanding_expert
-        if ub is not None:
-            for block in getattr(ub, "blocks", ()):
-                p = getattr(block, "wan_und_qkv", None)
-                if p is not None:
-                    yield p
 
     def forward(
         self,

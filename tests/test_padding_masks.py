@@ -30,7 +30,7 @@ def _build_masks(num_frames: int, video_stride: int, valid_len: int):
 
 
 def _downsample(video_is_pad):
-    from openwam.utils import downsample_video_mask_to_latent
+    from openwam.model.architectures.utils.common import downsample_video_mask_to_latent
 
     return downsample_video_mask_to_latent(video_is_pad)
 
@@ -381,7 +381,7 @@ class TestPrepareInputsSkipFirst:
         # case)... but our mock emits 3 latents directly; the dataloader
         # mask length is still derived from the raw video mask. Assert the
         # resulting mask matches the raw downsample (skip_first=False).
-        from openwam.utils import downsample_video_mask_to_latent
+        from openwam.model.architectures.utils.common import downsample_video_mask_to_latent
 
         _, video_mask, _ = _build_masks(33, 4, 33)
         expected = downsample_video_mask_to_latent(~video_mask, skip_first=False)

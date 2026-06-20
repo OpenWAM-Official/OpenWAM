@@ -22,7 +22,7 @@ class _ModelStub:
     ``_compute_action_loss``."""
 
     # Pull in the actual implementation under test.
-    from openwam.model.architectures.architecture_base import BaseWAMArchitecture
+    from openwam.model.architectures.base import BaseWAMArchitecture
 
     _compute_action_loss = BaseWAMArchitecture._compute_action_loss
 
