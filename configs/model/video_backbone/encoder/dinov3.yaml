@@ -12,3 +12,12 @@ name: dinov3
 # [Required] HF DINOv3 snapshot dir: config.json + modeling_*.py + safetensors. Deploy host
 # must read it too (DINOv3 re-reads HF config at deploy; see docs/external_video_encoder.md §6).
 model_path: /path/to/DINOv3
+
+# Optional frozen S-VAE feature reducer (raw embed_dim → svae_target_dim). When set, post-pool
+# features are compressed and the encoder advertises svae_target_dim as its DiT-facing z_dim
+# (e.g. 48 to match Wan VAE). Leave both null for the raw embed_dim path. svae_path: trained
+# svae.pt (weights travel in the main checkpoint; deploy rebuilds from a svae_config.json
+# sidecar). svae_target_dim: optional cross-check vs the S-VAE latent_dim. Collect → train via
+# scripts/collect_svae_features.py (name=dinov3) → scripts/train_svae.py.
+svae_path: null
+svae_target_dim: null

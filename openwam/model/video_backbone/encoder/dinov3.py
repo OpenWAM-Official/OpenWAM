@@ -48,6 +48,7 @@ from torch import Tensor
 
 from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
+from openwam.model.video_backbone.encoder.svae import reducer
 
 # Checkpoint-local namespace for the DINOv3 HF config, so a self-contained deploy
 # reads ``<ckpt>/dinov3/config.json`` instead of needing the original
@@ -120,24 +121,43 @@ class DinoV3VideoEncoder(VideoEncoder):
     defaults raise ``NotImplementedError`` with a contract-aware message.
     """
 
-    def __init__(self, vit: nn.Module, *, embed_dim: int, patch_size: int, num_register_tokens: int):
+    def __init__(
+        self,
+        vit: nn.Module,
+        *,
+        embed_dim: int,
+        patch_size: int,
+        num_register_tokens: int,
+        svae_path: str | None = None,
+        svae_target_dim: int | None = None,
+        svae_config: dict | None = None,
+    ):
         super().__init__()
         self._m = vit
         self._num_register_tokens = int(num_register_tokens)
+        # Raw post-pool channel dim before any S-VAE reduction; kept separate
+        # from the effective z_dim so offline S-VAE collection
+        # (``batch_encode_pooled_for_svae_training``) reports the un-reduced dim.
+        self._raw_embed_dim = int(embed_dim)
+        # Optional frozen S-VAE reducer (mirrors VJEPA21VideoEncoder). When
+        # attached, ``z_dim`` / ``_out_norm`` rebuild against its ``latent_dim``.
+        self._svae = reducer.build(svae_path, svae_target_dim, svae_config)
+        effective_z_dim = reducer.effective_z_dim(self._svae, self._raw_embed_dim)
         # Per-token output normalization. ``elementwise_affine=False`` means no
         # learnable γ/β — this is a pure geometric rescale, registered as a
         # ``nn.Module`` only so ``set_dtype_device`` / ``state_dict`` treat it
         # uniformly with the rest of the encoder. ViT's ``last_hidden_state``
         # already comes from a final LayerNorm in most HF implementations, so
         # this layer is near-identity in the common case but still guarantees
-        # the target distribution invariant for downstream flow-matching.
-        self._out_norm = nn.LayerNorm(int(embed_dim), elementwise_affine=False, eps=1e-6)
+        # the target distribution invariant for downstream flow-matching. With
+        # the S-VAE on it operates over the already-whitened ``latent_dim``.
+        self._out_norm = nn.LayerNorm(int(effective_z_dim), elementwise_affine=False, eps=1e-6)
         # Spec mirrors Wan VAE's geometry on Wan2.2-TI2V-5B (spatial=16,
         # temporal=4 causal, dit_patch=(1,2,2)) so token counts match while
         # ``z_dim`` differs (768 vs 48). pixel_decode=False causes the
         # backbone to skip the strict spec equality check.
         self._spec = VideoEncoderProperties(
-            z_dim=int(embed_dim),
+            z_dim=int(effective_z_dim),
             spatial_compression=int(patch_size),
             temporal_compression=4,
             causal_temporal=True,
@@ -156,11 +176,24 @@ class DinoV3VideoEncoder(VideoEncoder):
         return torch.stack(images, dim=2)
 
     def batch_encode(self, video: Tensor) -> Tensor:
-        """``(B, 3, T, H, W) → (B, embed_dim, T_lat, H/16, W/16)``.
+        """``(B, 3, T, H, W) → (B, z_dim, T_lat, H/16, W/16)``.
 
         Per-frame ViT forward (folded into the batch axis), drop CLS +
-        register tokens, reshape back to a 5D grid, causal-mean-pool
-        along T, then per-token (channel-axis) LayerNorm.
+        register tokens, reshape to a 5D grid, causal-mean-pool along T,
+        optionally reduce via the frozen S-VAE (base hook), then per-token
+        (channel-axis) LayerNorm.
+        """
+        z = self._batch_encode_pooled_raw(video)
+        z = self._apply_svae(z)
+        return self._apply_feature_norm(z)
+
+    def _batch_encode_pooled_raw(self, video: Tensor) -> Tensor:
+        """``(B, 3, T, H, W) → (B, embed_dim, T_lat, H/16, W/16)`` BEFORE the
+        S-VAE reduce / trailing LayerNorm.
+
+        Split from :meth:`batch_encode` so offline S-VAE training
+        (:meth:`batch_encode_pooled_for_svae_training`) sees byte-for-byte the
+        same post-pool, pre-LayerNorm distribution the main path produces.
         """
         if video.dim() != 5 or video.shape[1] != 3:
             raise ValueError(f"batch_encode expects (B, 3, T, H, W); got {tuple(video.shape)}")
@@ -214,18 +247,43 @@ class DinoV3VideoEncoder(VideoEncoder):
             Hl=h // ps,
             Wl=w // ps,
         )
-        pooled = _causal_temporal_pool(grid)
-        # Per-token LayerNorm along D=embed_dim. Move D to the last axis,
-        # apply LN, then move back to (B, D, T_lat, H_lat, W_lat).
+        return _causal_temporal_pool(grid)
+
+    def _apply_feature_norm(self, pooled: Tensor) -> Tensor:
+        """Per-token LayerNorm along the current channel dim: move D last, apply
+        the non-affine ``_out_norm``, restore ``(B, D, T_lat, H_lat, W_lat)``."""
         pooled = rearrange(pooled, "B D T H W -> B T H W D")
         pooled = self._out_norm(pooled)
         return rearrange(pooled, "B T H W D -> B D T H W")
+
+    def batch_encode_pooled_for_svae_training(self, video: Tensor) -> Tensor:
+        """Raw post-pool features for offline S-VAE training / stats collection.
+
+        Returns the ``(B, embed_dim, T_lat, H/16, W/16)`` tensor the S-VAE
+        consumes — BEFORE the trailing LayerNorm — so the reducer trains on the
+        un-whitened distribution (matches the V-JEPA 2.1 contract used by
+        :mod:`scripts.collect_svae_features`). Fails fast if an S-VAE is already
+        attached: statistics must be collected on a raw encoder.
+        """
+        if self._svae is not None:
+            raise RuntimeError(
+                "batch_encode_pooled_for_svae_training requires a raw encoder; "
+                "svae_path / svae_config / svae_target_dim must be unset."
+            )
+        return self._batch_encode_pooled_raw(video)
 
     # decode / to_frames intentionally omitted — defaults from VideoEncoder
     # raise NotImplementedError because properties.pixel_decode=False.
 
     @classmethod
-    def from_pretrained(cls, model_path: str, **kw: Any) -> "DinoV3VideoEncoder":
+    def from_pretrained(
+        cls,
+        model_path: str,
+        *,
+        svae_path: str | None = None,
+        svae_target_dim: int | None = None,
+        **kw: Any,
+    ) -> "DinoV3VideoEncoder":
         from transformers import AutoConfig, AutoModel
 
         if not os.path.isdir(model_path):
@@ -249,17 +307,20 @@ class DinoV3VideoEncoder(VideoEncoder):
         embed_dim, patch_size, num_register_tokens = cls._extract_structural_fields(config, model_path)
 
         logger.info(
-            "DinoV3VideoEncoder loaded %s (embed_dim=%d, patch_size=%d, register_tokens=%d)",
+            "DinoV3VideoEncoder loaded %s (embed_dim=%d, patch_size=%d, register_tokens=%d, svae=%s)",
             model_path,
             embed_dim,
             patch_size,
             num_register_tokens,
+            "on" if svae_path is not None else "off",
         )
         return cls(
             vit,
             embed_dim=embed_dim,
             patch_size=patch_size,
             num_register_tokens=num_register_tokens,
+            svae_path=svae_path,
+            svae_target_dim=svae_target_dim,
         )
 
     @classmethod
@@ -299,19 +360,29 @@ class DinoV3VideoEncoder(VideoEncoder):
 
         embed_dim, patch_size, num_register_tokens = cls._extract_structural_fields(config, config_dir)
 
+        # Reducer rebuild: the sidecar (if the training ckpt carried an S-VAE)
+        # sizes a zero-weight shell here; strict ``load_checkpoint`` fills
+        # ``_svae.*`` right after. ``svae_target_dim`` from the saved yaml is an
+        # optional cross-check against the sidecar's ``latent_dim``.
+        svae_config = reducer.read_sidecar(ckpt_dir)
+        svae_target_dim = reducer.read_target_dim_from_cfg(encoder_cfg)
+
         logger.info(
             "DinoV3VideoEncoder.from_skeleton: instantiated from %s "
-            "(embed_dim=%d, patch_size=%d, register_tokens=%d) — weights pending checkpoint load",
+            "(embed_dim=%d, patch_size=%d, register_tokens=%d, svae=%s) — weights pending checkpoint load",
             config_dir,
             embed_dim,
             patch_size,
             num_register_tokens,
+            "on" if svae_config is not None else "off",
         )
         return cls(
             vit,
             embed_dim=embed_dim,
             patch_size=patch_size,
             num_register_tokens=num_register_tokens,
+            svae_config=svae_config,
+            svae_target_dim=svae_target_dim,
         )
 
     def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
@@ -325,6 +396,11 @@ class DinoV3VideoEncoder(VideoEncoder):
         saved, so a raise fails the run fast.
         """
         import shutil
+
+        # The S-VAE sidecar is strict (``reducer.write_sidecar`` raises): without
+        # it ``from_skeleton`` cannot size the reducer.
+        if self._svae is not None:
+            reducer.write_sidecar(self._svae, output_dir, type(self).__name__)
 
         try:
             enc_cfg = cfg.model.video_backbone.encoder

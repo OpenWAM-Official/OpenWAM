@@ -2590,8 +2590,9 @@ def test_Y1_dinov3_save_deploy_assets_self_contained(tmp_path):
     ckpt.mkdir()
     cfg = OmegaConf.create({"model": {"video_backbone": {"encoder": {"model_path": str(src)}}}})
 
-    # Bypass ViT build — save_deploy_assets / _resolve_config_dir read no self state.
+    # Bypass ViT build; no reducer attached, so only the config.json half runs.
     enc = DinoV3VideoEncoder.__new__(DinoV3VideoEncoder)
+    enc._svae = None
     enc.save_deploy_assets(str(ckpt), cfg)
 
     assert (ckpt / _DINOV3_CKPT_SUBDIR / "config.json").is_file()
@@ -2614,6 +2615,7 @@ def test_Y2_dinov3_save_deploy_assets_missing_cfg_raises(tmp_path):
     from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder
 
     enc = DinoV3VideoEncoder.__new__(DinoV3VideoEncoder)
+    enc._svae = None
     with pytest.raises(FileNotFoundError):
         enc.save_deploy_assets(str(tmp_path), cfg={})  # no encoder.model_path -> raise
     assert not (tmp_path / "dinov3").exists()

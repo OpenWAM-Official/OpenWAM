@@ -27,6 +27,7 @@ so they run on the lint job's CPU PyTorch image.
 
 from __future__ import annotations
 
+import json
 import types
 
 import pytest
@@ -390,3 +391,132 @@ def test_D11d_dinov3_extract_structural_fields_zero_hidden_does_not_fall_back():
     cfg = types.SimpleNamespace(hidden_size=0, embed_dim=512, patch_size=16)
     with pytest.raises(ValueError, match="non-positive"):
         DinoV3VideoEncoder._extract_structural_fields(cfg, "fake/path")
+
+
+# ---------------------------------------------------------------------------
+# DS: optional S-VAE feature reducer (mirrors tests/test_vjepa_svae.py)
+# ---------------------------------------------------------------------------
+
+
+def _svae_cfg(input_dim: int, latent_dim: int = 48) -> dict:
+    return dict(
+        input_dim=input_dim, latent_dim=latent_dim, num_heads=2, num_layers=1, intermediate_size=16, dropout=0.0
+    )
+
+
+def _enc_svae(*, embed_dim: int = 1408, svae: bool = False, latent_dim: int = 48, svae_target_dim=None):
+    from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder
+
+    kw = {}
+    if svae:
+        kw["svae_config"] = _svae_cfg(embed_dim, latent_dim)
+    if svae_target_dim is not None:
+        kw["svae_target_dim"] = svae_target_dim
+    vit = _MockDinoViT(embed_dim=embed_dim, patch=16, num_register_tokens=0)
+    return DinoV3VideoEncoder(vit, embed_dim=embed_dim, patch_size=16, num_register_tokens=0, **kw)
+
+
+def test_DS1_zdim_and_out_norm_track_reducer():
+    """``properties.z_dim`` and the non-affine ``_out_norm`` both rebuild against
+    the reducer's ``latent_dim`` when an S-VAE is attached, else the raw dim."""
+    raw = _enc_svae(embed_dim=1408, svae=False)
+    assert raw.properties.z_dim == 1408
+    assert raw._out_norm.normalized_shape == (1408,)
+
+    red = _enc_svae(embed_dim=1408, svae=True, latent_dim=48)
+    assert red.properties.z_dim == 48
+    assert red._out_norm.normalized_shape == (48,)
+
+
+def test_DS2_batch_encode_output_is_reduced():
+    red = _enc_svae(embed_dim=1408, svae=True, latent_dim=48)
+    z = red.batch_encode(torch.randn(1, 3, 9, 32, 32))
+    assert z.shape == (1, 48, 3, 2, 2)  # (B, latent, T_lat=3, H/16, W/16)
+
+
+def test_DS3_svae_runs_after_pool_on_raw_dim():
+    # The reducer must receive the POST-POOL (T_lat=3), RAW-dim (1408) tensor —
+    # not pre-pool (T=9) nor an already-reduced one.
+    red = _enc_svae(embed_dim=1408, svae=True)
+    captured = {}
+    orig = red._svae.encode_mean
+
+    def spy(z):
+        captured["shape"] = tuple(z.shape)
+        return orig(z)
+
+    red._svae.encode_mean = spy
+    red.batch_encode(torch.randn(1, 3, 9, 32, 32))
+    assert captured["shape"] == (1, 1408, 3, 2, 2)
+
+
+def test_DS4_pooled_for_training_raw_vs_reduced():
+    raw = _enc_svae(embed_dim=1408, svae=False)
+    out = raw.batch_encode_pooled_for_svae_training(torch.randn(1, 3, 9, 32, 32))
+    assert out.shape == (1, 1408, 3, 2, 2)  # raw dim, post-pool, pre-LayerNorm
+
+    red = _enc_svae(embed_dim=1408, svae=True)
+    with pytest.raises(RuntimeError, match="raw encoder"):
+        red.batch_encode_pooled_for_svae_training(torch.randn(1, 3, 9, 32, 32))
+
+
+def test_DS5_svae_target_dim_mismatch_raises():
+    with pytest.raises(ValueError, match="does not match"):
+        _enc_svae(embed_dim=1408, svae=True, latent_dim=48, svae_target_dim=24)
+
+
+def test_DS6_reducer_is_frozen_eval():
+    red = _enc_svae(embed_dim=1408, svae=True)
+    assert red._svae.training is False
+    assert all(not p.requires_grad for p in red._svae.parameters())
+
+
+def test_DS7_deploy_sidecar_write_and_read(tmp_path):
+    from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION, reducer
+
+    red = _enc_svae(embed_dim=1408, svae=True)
+    out = tmp_path / "ckpt"
+    out.mkdir()
+    # save_deploy_assets is strictly self-contained: it copies the DINOv3
+    # config.json from encoder.model_path (hard error if absent) AND writes the
+    # S-VAE sidecar. Provide a dummy config.json so the call succeeds; this test
+    # asserts on the S-VAE sidecar half.
+    src = tmp_path / "enc_src"
+    src.mkdir()
+    (src / "config.json").write_text("{}")
+    cfg = types.SimpleNamespace(
+        model=types.SimpleNamespace(
+            video_backbone=types.SimpleNamespace(encoder=types.SimpleNamespace(model_path=str(src)))
+        )
+    )
+    red.save_deploy_assets(str(out), cfg)
+
+    sidecar = out / "svae_config.json"
+    assert sidecar.exists()
+    payload = json.loads(sidecar.read_text())
+    assert payload["format_version"] == _CHECKPOINT_FORMAT_VERSION
+    assert payload["model_config"] == red._svae.config_dict()
+    assert reducer.read_sidecar(str(out)) == red._svae.config_dict()
+    assert reducer.read_sidecar(str(tmp_path / "absent")) is None
+
+
+def test_DS8_deploy_skeleton_strict_load_roundtrip():
+    enc1 = _enc_svae(embed_dim=1408, svae=True)
+    # non-trivial reducer buffers so the round-trip actually exercises them
+    enc1._svae.set_input_stats(torch.randn(1408).abs() + 0.1, torch.rand(1408) + 0.5)
+
+    skeleton = _enc_svae(embed_dim=1408, svae=True)
+    missing_unexpected = skeleton.load_state_dict(enc1.state_dict(), strict=True)
+    assert not missing_unexpected.missing_keys and not missing_unexpected.unexpected_keys
+
+    enc1.eval()
+    skeleton.eval()
+    v9 = torch.randn(1, 3, 9, 32, 32)
+    assert torch.allclose(enc1.batch_encode(v9), skeleton.batch_encode(v9), atol=1e-5)
+
+
+def test_DS9_disabled_is_passthrough():
+    raw = _enc_svae(embed_dim=8, svae=False)
+    z = raw.batch_encode(torch.zeros(1, 3, 9, 32, 32))
+    assert z.shape == (1, 8, 3, 2, 2)  # unchanged raw-dim behaviour
+    assert raw._svae is None
