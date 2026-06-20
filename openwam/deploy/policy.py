@@ -87,5 +87,5 @@ class WAMPolicy:
         if obs.get("prompt"):
             conditions["prompt"] = obs["prompt"]
         if "state" in obs and obs["state"] is not None:
-            conditions["proprio_state"] = obs["state"]
+            conditions["proprio"] = obs["state"]
         return conditions

@@ -383,7 +383,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         noisy_actions: Optional[Tensor],
         action_timestep: Optional[Tensor],
         *,
-        proprio_state: Optional[Tensor] = None,
+        proprio: Optional[Tensor] = None,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         cond_video_latents: Optional[Tensor] = None,
@@ -417,7 +417,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
                 action_timestep=action_timestep,
                 cond_video_latents=cond_video_latents,
                 cond_video_timestep=cond_video_timestep,
-                proprio_state=proprio_state,
+                proprio=proprio,
                 use_gradient_checkpointing=use_gradient_checkpointing,
                 use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
                 **pipeline_inputs,
@@ -428,7 +428,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         if vb is None:
             raise RuntimeError("video_backbone is None")
 
-        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio_state)
+        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
         action_context = pipeline_inputs.get("context")
         action_context_mask = pipeline_inputs.get("context_mask")
         if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:
@@ -477,7 +477,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         action_timestep: Optional[Tensor],
         cond_video_latents: Tensor,
         cond_video_timestep: Tensor,
-        proprio_state: Optional[Tensor] = None,
+        proprio: Optional[Tensor] = None,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         **pipeline_inputs,
@@ -499,7 +499,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         if vb is None:
             raise RuntimeError("video_backbone is None")
 
-        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio_state)
+        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
         action_context = pipeline_inputs.get("context")
         action_context_mask = pipeline_inputs.get("context_mask")
         if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:
@@ -694,7 +694,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
         # ---- Prepare forward inputs ----
         forward_inputs = dict(inputs)
-        proprio_state = forward_inputs.pop("proprio_state", None)
+        proprio = forward_inputs.pop("proprio", None)
         use_grad_ckpt = forward_inputs.pop("use_gradient_checkpointing", False)
         use_grad_ckpt_offload = forward_inputs.pop("use_gradient_checkpointing_offload", False)
         forward_inputs.pop("action_is_pad", None)
@@ -716,7 +716,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         video_noise_pred, action_noise_pred = self(
             noisy_actions if lambda_action > 0 else None,
             action_timesteps if lambda_action > 0 else None,
-            proprio_state=proprio_state,
+            proprio=proprio,
             use_gradient_checkpointing=use_grad_ckpt,
             use_gradient_checkpointing_offload=use_grad_ckpt_offload,
             cond_video_latents=latents_cond,
@@ -790,7 +790,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         profile: bool = False,
         vace_cache: Optional[dict] = None,
         prompt_embed_cache: Optional[dict] = None,
-        proprio_state: Optional[Tensor] = None,
+        proprio: Optional[Tensor] = None,
     ) -> dict:
         """Two-stage IDM generation.
 
@@ -845,12 +845,12 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             latents[:, :, : ref_latents.shape[2]] = ref_latents
             inputs_shared["latents"] = latents
         if self.uses_proprioception:
-            if proprio_state is None:
-                raise ValueError("use_proprioception=True requires `proprio_state` during generation.")
-            inputs_shared["proprio_state"] = proprio_state.to(device=device, dtype=dtype)
+            if proprio is None:
+                raise ValueError("use_proprioception=True requires `proprio` during generation.")
+            inputs_shared["proprio"] = proprio.to(device=device, dtype=dtype)
 
-        proprio_state_arg = inputs_shared.pop("proprio_state", None)
-        inputs_shared_with_proprio = self._append_proprio_context_token(dict(inputs_shared), proprio_state_arg)
+        proprio_arg = inputs_shared.pop("proprio", None)
+        inputs_shared_with_proprio = self._append_proprio_context_token(dict(inputs_shared), proprio_arg)
 
         # Initialize latents
         action_latents = torch.randn(

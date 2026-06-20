@@ -558,7 +558,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         self.proprio_dim = state_dim
         self.proprio_encoder = nn.Linear(state_dim, self.context_dim)
 
-    def _append_proprio_context_token(self, pipeline_inputs: dict, proprio_state: Optional[Tensor]) -> dict:
+    def _append_proprio_context_token(self, pipeline_inputs: dict, proprio: Optional[Tensor]) -> dict:
         """Append one proprio token to raw text context and extend context_mask.
 
         If the caller passed a per-sample mask via ``pipeline_inputs['_proprio_sample_mask']``
@@ -575,24 +575,24 @@ class BaseWAMArchitecture(ABC, nn.Module):
             return pipeline_inputs
         if self.proprio_encoder is None:
             raise RuntimeError("proprio context is enabled but proprio_encoder is not initialized.")
-        if proprio_state is None:
-            raise ValueError("use_proprioception=True requires `proprio_state` from sample['proprio'] or obs['state'].")
-        if proprio_state.ndim == 1:
-            proprio_state = proprio_state.unsqueeze(0)
-        elif proprio_state.ndim == 3 and proprio_state.shape[1] == 1:
-            proprio_state = proprio_state[:, 0, :]
-        if proprio_state.ndim != 2:
-            raise ValueError(f"proprio_state must be [B, D] or [B, 1, D], got shape {tuple(proprio_state.shape)}")
-        if proprio_state.shape[1] != self.proprio_dim:
-            raise ValueError(f"proprio_state last dim must be {self.proprio_dim}, got {proprio_state.shape[1]}")
+        if proprio is None:
+            raise ValueError("use_proprioception=True requires `proprio` from sample['proprio'] or obs['state'].")
+        if proprio.ndim == 1:
+            proprio = proprio.unsqueeze(0)
+        elif proprio.ndim == 3 and proprio.shape[1] == 1:
+            proprio = proprio[:, 0, :]
+        if proprio.ndim != 2:
+            raise ValueError(f"proprio must be [B, D] or [B, 1, D], got shape {tuple(proprio.shape)}")
+        if proprio.shape[1] != self.proprio_dim:
+            raise ValueError(f"proprio last dim must be {self.proprio_dim}, got {proprio.shape[1]}")
 
         context = pipeline_inputs["context"]
-        if context.shape[0] != proprio_state.shape[0]:
-            if proprio_state.shape[0] == 1 and context.shape[0] > 1:
-                proprio_state = proprio_state.expand(context.shape[0], -1)
+        if context.shape[0] != proprio.shape[0]:
+            if proprio.shape[0] == 1 and context.shape[0] > 1:
+                proprio = proprio.expand(context.shape[0], -1)
             else:
                 raise ValueError(
-                    f"Batch mismatch between context and proprio_state: {context.shape[0]} vs {proprio_state.shape[0]}"
+                    f"Batch mismatch between context and proprio: {context.shape[0]} vs {proprio.shape[0]}"
                 )
 
         # Normalize sample_mask to (B, 1) bool on context's device.
@@ -605,7 +605,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         #                    real dim still gates the token in.
         if sample_mask is None:
             sample_mask = torch.ones(
-                (proprio_state.shape[0], 1),
+                (proprio.shape[0], 1),
                 dtype=torch.bool,
                 device=context.device,
             )
@@ -616,13 +616,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 sample_mask = sample_mask.any(dim=-1)
             elif sample_mask.ndim == 1:
                 sample_mask = sample_mask.unsqueeze(-1)
-            if sample_mask.shape != (proprio_state.shape[0], 1):
+            if sample_mask.shape != (proprio.shape[0], 1):
                 raise ValueError(
-                    f"_proprio_sample_mask shape {tuple(sample_mask.shape)} must be ({proprio_state.shape[0]}, 1)"
+                    f"_proprio_sample_mask shape {tuple(sample_mask.shape)} must be ({proprio.shape[0]}, 1)"
                 )
 
         proprio_token = (
-            self.proprio_encoder(proprio_state.to(device=context.device, dtype=self.proprio_encoder.weight.dtype))
+            self.proprio_encoder(proprio.to(device=context.device, dtype=self.proprio_encoder.weight.dtype))
             .to(dtype=context.dtype)
             .unsqueeze(1)
         )
@@ -684,18 +684,18 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """
         self.normalizer = normalizer
 
-    def normalize_deploy_proprio(self, proprio_state):
+    def normalize_deploy_proprio(self, proprio):
         """Normalize raw deploy proprio (array-like) into a float32 tensor; ``None`` passes through.
 
         The denoising loop re-casts to the model device/dtype, so a CPU tensor is fine.
         """
-        if proprio_state is None:
+        if proprio is None:
             return None
 
         import numpy as np
         import torch
 
-        arr = np.asarray(proprio_state, dtype=np.float32)
+        arr = np.asarray(proprio, dtype=np.float32)
         normalizer = getattr(self, "normalizer", None)
         if normalizer is not None:
             arr = normalizer.normalize(arr)
@@ -961,12 +961,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 action = action.to(dtype=_dtype, device=_device).unsqueeze(0)
             all_actions.append(action)
 
+            # Carry proprio whenever the sample provides it — both the main-stream
+            # proprio-context path and the latent decoder consume it downstream,
+            # so the bridge into ``inputs`` is not gated on a single consumer's flag.
             proprio = sample.get("proprio")
-            if self.uses_proprioception:
-                if proprio is None:
-                    raise ValueError(
-                        "use_proprioception=True requires sample['proprio']; action[0] fallback is disabled."
-                    )
+            if proprio is not None:
                 if isinstance(proprio, np.ndarray):
                     proprio = torch.from_numpy(proprio)
                 proprio = proprio.to(dtype=_dtype, device=_device)
@@ -1065,8 +1064,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
             "actions": action_data,
         }
 
-        if self.uses_proprioception:
-            inputs["proprio_state"] = torch.stack(all_proprios, dim=0).contiguous()
+        # Bridge proprio into inputs whenever the batch carries it (not gated on
+        # uses_proprioception): the main-stream proprio-context path AND the
+        # latent decoder both read inputs["proprio"]. Consumers that don't need
+        # it simply ignore it.
+        if all_proprios[0] is not None:
+            inputs["proprio"] = torch.stack(all_proprios, dim=0).contiguous()
             # Reconcile mixed 1-D (1,) / 2-D (1, D) proprio_masks before stacking:
             # promote any 1-D enable-flag to (1, D) (broadcasts the sample-level
             # flag across all dims) so a batch mixing a 2-D reader mask with a
@@ -1201,7 +1204,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         Callers should produce ``inputs`` via ``self.prepare_inputs(batch)``
         (preferred) or assemble it manually with the same keys: the output of
-        ``self.preprocess()`` plus any of ``actions / proprio_state /
+        ``self.preprocess()`` plus any of ``actions / proprio /
         action_is_pad / video_is_pad / use_gradient_checkpointing[_offload] /
         max_timestep_boundary / min_timestep_boundary``.
 
@@ -1306,7 +1309,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         # --- Joint forward pass ---
         forward_inputs = dict(inputs)
-        proprio_state = forward_inputs.pop("proprio_state", None)
+        proprio = forward_inputs.pop("proprio", None)
         proprio_mask = forward_inputs.pop("proprio_mask", None)
         use_grad_ckpt = forward_inputs.pop("use_gradient_checkpointing", False)
         use_grad_ckpt_offload = forward_inputs.pop("use_gradient_checkpointing_offload", False)
@@ -1334,7 +1337,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         video_noise_pred, action_noise_pred = self(
             noisy_actions if lambda_action > 0 else None,
             action_timesteps if lambda_action > 0 else None,
-            proprio_state=proprio_state,
+            proprio=proprio,
             use_gradient_checkpointing=use_grad_ckpt,
             use_gradient_checkpointing_offload=use_grad_ckpt_offload,
             **forward_inputs,
@@ -1389,10 +1392,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
             decoder_target = inputs.get("decoder_target")
             if decoder_target is not None:
                 latent_x0 = noisy_actions - a_sigma_bc * action_noise_pred
-                # proprio_state is already in the dataloader's normalized space
+                # proprio is already in the dataloader's normalized space
                 # (same space as decoder_target); the decoder ignores it unless
                 # it was built with use_proprioception.
-                decoded = self.action_backbone.decode_latent_to_action(latent_x0, proprio_state)
+                decoded = self.action_backbone.decode_latent_to_action(latent_x0, proprio)
                 if decoded is not None:
                     decoder_target = decoder_target.to(dtype=_dtype, device=_device)
                     loss_decoder = self._masked_mse(decoded, decoder_target, inputs.get("decoder_action_is_pad"))
@@ -1565,7 +1568,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         profile: bool = False,
         vace_cache: Optional[dict] = None,
         prompt_embed_cache: Optional[dict] = None,
-        proprio_state: Optional[Tensor] = None,
+        proprio: Optional[Tensor] = None,
         cfg_scale: float = 1.0,
         cfg_merge: bool = False,
         pre_encoded_text: Optional[Tensor] = None,
@@ -1665,9 +1668,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
             latents[:, :, : ref_latents.shape[2]] = ref_latents
             inputs_shared["latents"] = latents
         if self.uses_proprioception:
-            if proprio_state is None:
-                raise ValueError("use_proprioception=True requires `proprio_state` during generation.")
-            inputs_shared["proprio_state"] = proprio_state.to(device=device, dtype=dtype)
+            if proprio is None:
+                raise ValueError("use_proprioception=True requires `proprio` during generation.")
+            inputs_shared["proprio"] = proprio.to(device=device, dtype=dtype)
 
         action_latents = torch.randn(
             1,
@@ -1775,7 +1778,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # uses it. Explicit mode has no decoder and skips this. Both then
         # unnormalize back to physical units.
         if self.action_backbone is not None and self.action_backbone.has_latent_decoder:
-            decode_proprio = proprio_state.to(device=device, dtype=dtype) if proprio_state is not None else None
+            decode_proprio = proprio.to(device=device, dtype=dtype) if proprio is not None else None
             action_latents = self.action_backbone.decode_latent_to_action(action_latents, decode_proprio)
 
         actions = action_latents.squeeze(0).float().cpu().numpy()
@@ -1879,7 +1882,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         noisy_actions: Optional[Tensor],
         action_timestep: Optional[Tensor],
         *,
-        proprio_state: Optional[Tensor] = None,
+        proprio: Optional[Tensor] = None,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         **pipeline_inputs,
@@ -1916,7 +1919,7 @@ def _combine_cfg(uncond: Tensor, cond: Tensor, scale: float) -> Tensor:
 _CFG_BATCH_AXIS_KEYS: tuple = (
     "latents",
     "input_latents",
-    "proprio_state",
+    "proprio",
     "first_frame_latents",
     "seq_lens",
     "context_mask",
@@ -1951,18 +1954,18 @@ def _expand_inputs_for_cfg(
     expanded["context"] = torch.cat([uncond_context, cond_context], dim=0)
     expanded["uncond_context"] = None
 
-    # proprio_state can come in raw 1D ``(D,)`` shape (the architecture's
-    # ``_compute_proprio_state`` normalises inside forward); cfg_merge
+    # proprio can come in raw 1D ``(D,)`` shape (the architecture's
+    # ``_compute_proprio`` normalises inside forward); cfg_merge
     # stacks BEFORE forward so we must normalise to ``(B, D)`` first,
     # otherwise ``cat([(D,), (D,)], dim=0)`` lands on ``(2·D,)`` and the
     # last-dim check downstream raises. Mirrors the (B, 1, D) → (B, D)
     # squeeze the architecture itself does.
-    proprio = expanded.get("proprio_state")
+    proprio = expanded.get("proprio")
     if isinstance(proprio, Tensor):
         if proprio.ndim == 1:
-            expanded["proprio_state"] = proprio.unsqueeze(0)
+            expanded["proprio"] = proprio.unsqueeze(0)
         elif proprio.ndim == 3 and proprio.shape[1] == 1:
-            expanded["proprio_state"] = proprio[:, 0, :]
+            expanded["proprio"] = proprio[:, 0, :]
 
     for key in _CFG_BATCH_AXIS_KEYS:
         v = expanded.get(key)

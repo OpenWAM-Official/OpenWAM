@@ -266,7 +266,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         # `.squeeze(0)`s a `(1, L, D)` tensor to 2D `(L, D)` before saving. Every
         # downstream consumer (pipeline_wrapper preprocess, _build_uncond_context,
         # _append_proprio_context_token) assumes 3D `(B, L, D)`. The training path
-        # `base.py:_compute_proprio_state_and_context` already normalises via a
+        # `base.py:_compute_proprio_and_context` already normalises via a
         # `ndim==2 → stack` step (base.py:687-706); deploy has no equivalent until
         # here. Restore the batch axis at the cache/inference boundary so existing
         # 2D safetensors caches stay readable without a rewrite.
@@ -404,12 +404,12 @@ class JointInferenceEngine(BaseInferenceEngine):
             self._dit_cache.reset()
 
         # Deploy proprio: array-like in, normalized model-space tensor out.
-        proprio_state = conditions.get("proprio_state")
-        if proprio_state is None:
+        proprio = conditions.get("proprio")
+        if proprio is None:
             observation = conditions.get("observation") or {}
-            proprio_state = observation.get("state") if isinstance(observation, dict) else None
-        if proprio_state is not None:
-            proprio_state = self.architecture.normalize_deploy_proprio(proprio_state)
+            proprio = observation.get("state") if isinstance(observation, dict) else None
+        if proprio is not None:
+            proprio = self.architecture.normalize_deploy_proprio(proprio)
 
         action_num_frames = int(conditions.get("num_frames", getattr(inf_cfg, "num_frames", 49)))
         video_num_frames = int(
@@ -446,7 +446,7 @@ class JointInferenceEngine(BaseInferenceEngine):
                 "profile": self._profile,
                 "vace_cache": self._vace_cache,
                 "prompt_embed_cache": self._prompt_embed_cache,
-                "proprio_state": proprio_state,
+                "proprio": proprio,
                 "cfg_scale": self._cfg_scale,
                 "cfg_merge": self._cfg_merge,
                 "pre_encoded_text": cached_pre_encoded_text,

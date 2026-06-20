@@ -707,7 +707,7 @@ def test_dual_system_joint_cross_attn_passes_appended_proprio_context_to_action(
         video_pred, action_pred = arch(
             torch.randn(B, 5, 7),
             torch.tensor([0.5]),
-            proprio_state=torch.randn(B, 7),
+            proprio=torch.randn(B, 7),
             latents=torch.randn(B, 16, 1, 2, 2),
             timestep=torch.tensor([0.5]),
             context=torch.randn(B, 3, 16),

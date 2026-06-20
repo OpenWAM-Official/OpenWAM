@@ -322,7 +322,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         noisy_actions: Optional[Tensor],
         action_timestep: Optional[Tensor],
         *,
-        proprio_state: Optional[Tensor] = None,
+        proprio: Optional[Tensor] = None,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         **pipeline_inputs,
@@ -335,7 +335,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
                 "video_backbone is None — pass pipe= to build_architecture or "
                 "architecture.__init__ to enable forward()."
             )
-        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio_state)
+        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
         vlm_inputs = pipeline_inputs.pop("vlm_inputs", None)
         vlm_hidden = pipeline_inputs.pop("vlm_hidden", None)
         vlm_attention_mask = pipeline_inputs.pop("vlm_attention_mask", None)

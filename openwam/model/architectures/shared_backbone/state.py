@@ -21,5 +21,5 @@ def align_state_tokens_to_action_batch(state_tokens: Optional[Tensor], action_ba
     if state_tokens.shape[0] == 1 and action_batch_size > 1:
         return state_tokens.expand(action_batch_size, -1, -1)
     raise ValueError(
-        f"Batch mismatch between action tokens and proprio_state: {action_batch_size} vs {state_tokens.shape[0]}"
+        f"Batch mismatch between action tokens and proprio: {action_batch_size} vs {state_tokens.shape[0]}"
     )

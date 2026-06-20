@@ -113,7 +113,7 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         noisy_actions: Optional[Tensor],
         action_timestep: Optional[Tensor],
         *,
-        proprio_state: Optional[Tensor] = None,
+        proprio: Optional[Tensor] = None,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         **pipeline_inputs,
@@ -157,7 +157,7 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
             t_mod = None
         else:
             action_tokens, t_mod = ab.encode(noisy_actions, action_timestep)
-        state_tokens = None if ab is None else ab.encode_state(proprio_state)
+        state_tokens = None if ab is None else ab.encode_state(proprio)
         if action_tokens is not None:
             state_tokens = align_state_tokens_to_action_batch(state_tokens, action_tokens.shape[0])
         elif state_tokens is not None and state_tokens.shape[0] == 1 and vstate.hidden_states.shape[0] > 1:

@@ -49,7 +49,7 @@ class ActionBackbone(nn.Module, ABC):
 
     @property
     def uses_proprioception(self) -> bool:
-        """Whether this backbone consumes a ``proprio_state`` input. Default False."""
+        """Whether this backbone consumes a ``proprio`` input. Default False."""
         return False
 
     @property
@@ -96,7 +96,7 @@ class SharedActionBackbone(ActionBackbone):
     and calls these helpers at the right moments. The contract is:
 
         encode(noisy_actions, timestep) -> tokens (+ extras, MoE only)
-        encode_state(proprio_state)     -> state token | None
+        encode_state(proprio)     -> state token | None
         decode(action_tail)             -> action_prediction
 
     Shared action I/O (``input_proj`` / ``state_encoder`` / ``action_output_head``
@@ -144,13 +144,13 @@ class SharedActionBackbone(ActionBackbone):
     def uses_proprioception(self) -> bool:
         return self._use_proprioception
 
-    def encode_state(self, proprio_state: torch.Tensor) -> Optional[torch.Tensor]:
+    def encode_state(self, proprio: torch.Tensor) -> Optional[torch.Tensor]:
         if not self._use_proprioception:
             return None
-        if proprio_state is None:
-            raise ValueError("SharedBackbone use_proprioception=True requires `proprio_state`.")
+        if proprio is None:
+            raise ValueError("SharedBackbone use_proprioception=True requires `proprio`.")
         assert self.state_encoder is not None
-        return self.state_encoder(proprio_state)
+        return self.state_encoder(proprio)
 
     def decode(self, action_tokens: torch.Tensor) -> torch.Tensor:
         """(B, T, video_dim) action tail -> (B, T, action_dim) prediction."""

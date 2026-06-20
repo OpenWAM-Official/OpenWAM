@@ -218,9 +218,9 @@ class StateEncoder(nn.Module):
         elif state.ndim == 3 and state.shape[1] == 1:
             state = state[:, 0, :]
         if state.ndim != 2:
-            raise ValueError(f"proprio_state must have shape [D], [B, D] or [B, 1, D], got {tuple(state.shape)}")
+            raise ValueError(f"proprio must have shape [D], [B, D] or [B, 1, D], got {tuple(state.shape)}")
         if state.shape[-1] != self.state_dim:
-            raise ValueError(f"proprio_state last dim must be {self.state_dim}, got {state.shape[-1]}")
+            raise ValueError(f"proprio last dim must be {self.state_dim}, got {state.shape[-1]}")
         return self.proj(state).unsqueeze(1)
 
 

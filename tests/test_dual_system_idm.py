@@ -470,7 +470,7 @@ def test_idm_generate_with_proprio_appends_context_once(monkeypatch):
         action_num_frames=5,
         decode_video=False,
         seed=0,
-        proprio_state=torch.randn(1, 3),
+        proprio=torch.randn(1, 3),
     )
 
     assert result["video"] is None

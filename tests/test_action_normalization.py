@@ -176,17 +176,17 @@ class _CaptureDeployArchitecture:
         self.normalizer = normalizer
         self.video_scheduler = _TinyScheduler()
         self.action_scheduler = _TinyScheduler()
-        self.seen_proprio_state = None
+        self.seen_proprio = None
 
     def apply_compile_optimizations(self, compile_cfg):
         del compile_cfg
 
-    def normalize_deploy_proprio(self, proprio_state):
-        arr = np.asarray(proprio_state, dtype=np.float32)
+    def normalize_deploy_proprio(self, proprio):
+        arr = np.asarray(proprio, dtype=np.float32)
         return torch.from_numpy(self.normalizer.normalize(arr))
 
     def generate(self, **kwargs):
-        self.seen_proprio_state = kwargs["proprio_state"]
+        self.seen_proprio = kwargs["proprio"]
         return {"video": None, "actions": np.zeros((1, 20), dtype=np.float32)}
 
 
@@ -206,8 +206,8 @@ def test_joint_engine_normalizes_raw_deploy_state_before_generate():
     raw_state = stats["max"].astype(np.float32)
     engine.generate({"observation": {"state": raw_state}, "num_frames": 2})
 
-    assert arch.seen_proprio_state is not None
-    np.testing.assert_allclose(arch.seen_proprio_state.numpy(), np.ones_like(raw_state), atol=1e-6)
+    assert arch.seen_proprio is not None
+    np.testing.assert_allclose(arch.seen_proprio.numpy(), np.ones_like(raw_state), atol=1e-6)
 
 
 class _TinyVideoBackbone:
@@ -325,7 +325,7 @@ def test_base_generate_latent_decodes_then_unnormalizes():
         num_frames=2,
         decode_video=False,
         seed=123,
-        proprio_state=torch.from_numpy(proprio),
+        proprio=torch.from_numpy(proprio),
     )
 
     # Decoded shape (num_query, real_action_dim), proprio was routed to the decoder.

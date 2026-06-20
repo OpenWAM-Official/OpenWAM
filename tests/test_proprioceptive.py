@@ -42,7 +42,7 @@ def test_proprio_context_token_extends_context_and_mask():
 
 def test_proprio_context_requires_dataset_field():
     arch = _ContextProprioArch(state_dim=7, text_dim=16)
-    with pytest.raises(ValueError, match="requires `proprio_state`"):
+    with pytest.raises(ValueError, match="requires `proprio`"):
         arch._append_proprio_context_token({"context": torch.randn(1, 4, 16)}, None)
 
 

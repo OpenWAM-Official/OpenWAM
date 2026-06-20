@@ -149,7 +149,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         noisy_actions: Optional[Tensor],
         action_timestep: Optional[Tensor],
         *,
-        proprio_state: Optional[Tensor] = None,
+        proprio: Optional[Tensor] = None,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
         **pipeline_inputs,
@@ -162,7 +162,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
                 "architecture.__init__ to enable forward()."
             )
 
-        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio_state)
+        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
         action_context = pipeline_inputs.get("context")
         action_context_mask = pipeline_inputs.get("context_mask")
         if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:

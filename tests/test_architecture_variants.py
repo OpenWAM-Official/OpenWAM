@@ -99,7 +99,7 @@ def _run_compute_loss(arch):
     actions = torch.randn(1, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
     if arch.uses_proprioception:
-        inputs["proprio_state"] = torch.randn(1, int(arch.action_backbone.state_dim))
+        inputs["proprio"] = torch.randn(1, int(arch.action_backbone.state_dim))
     if getattr(getattr(arch, "action_backbone", None), "variant", None) == "joint_self_attn":
         text_dim = arch.action_backbone.text_dim
         inputs["context"] = torch.randn(1, 4, text_dim)
@@ -254,9 +254,7 @@ def test_dual_system_cross_attn_inherits_geometry_from_video_backbone():
     class _CrossAttnWithMockBackbone(DualSystemCrossAttnArchitecture):
         def _init_video_backbone(self, _cfg):
             # Attach mock BEFORE __init__'s vb-derived setdefault block runs.
-            self.video_backbone = _MockVideoBackbone(
-                dim=WAN_VIDEO_DIM, num_layers=WAN_NUM_LAYERS, num_heads=4
-            )
+            self.video_backbone = _MockVideoBackbone(dim=WAN_VIDEO_DIM, num_layers=WAN_NUM_LAYERS, num_heads=4)
 
     # Deliberately omit num_heads + attn_head_dim — must come from vb, not from
     # the hard-coded fallback (num_heads=12 / attn_head_dim=dim//num_heads).
@@ -389,7 +387,7 @@ def test_shared_backbone_vanilla_with_proprio_requires_state_dim():
         _build_arch("shared_backbone_vanilla", cfg)
 
 
-def test_shared_backbone_vanilla_with_proprio_requires_proprio_state():
+def test_shared_backbone_vanilla_with_proprio_requires_proprio():
     """When enabled, proprio must be provided explicitly to the forward path."""
     cfg = {
         "framework": "shared_backbone",
@@ -404,7 +402,7 @@ def test_shared_backbone_vanilla_with_proprio_requires_proprio_state():
     actions = torch.randn(1, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
 
-    with pytest.raises(ValueError, match="proprio_state"):
+    with pytest.raises(ValueError, match="proprio"):
         arch.compute_loss(**inputs, actions=actions, current_step=0)
 
 
@@ -440,7 +438,7 @@ def test_shared_backbone_vanilla_with_proprio_broadcasts_single_state():
     arch.init_training_schedulers(1000)
     actions = torch.randn(2, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=2, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
-    inputs["proprio_state"] = torch.randn(1, ACTION_DIM)
+    inputs["proprio"] = torch.randn(1, ACTION_DIM)
 
     out = arch.compute_loss(**inputs, actions=actions, current_step=0)
     assert torch.isfinite(out["loss"])
@@ -460,7 +458,7 @@ def test_shared_backbone_vanilla_with_proprio_rejects_bad_batch_match():
     arch.init_training_schedulers(1000)
     actions = torch.randn(2, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=2, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
-    inputs["proprio_state"] = torch.randn(3, ACTION_DIM)
+    inputs["proprio"] = torch.randn(3, ACTION_DIM)
 
     with pytest.raises(ValueError, match="Batch mismatch"):
         arch.compute_loss(**inputs, actions=actions, current_step=0)
@@ -483,7 +481,7 @@ def test_shared_backbone_vanilla_with_proprio_conditions_video_only_path():
     _, action_pred = arch.forward(
         None,
         None,
-        proprio_state=torch.randn(1, ACTION_DIM),
+        proprio=torch.randn(1, ACTION_DIM),
         **inputs,
         timestep=torch.tensor([0.5]),
     )
@@ -764,8 +762,7 @@ def test_framework_backbone_hydra_compose(framework, backbone):
         f"compose — inline `video_backbone:` block is broken"
     )
     assert vb.name == backbone, (
-        f"{framework} × {backbone}: composed video_backbone.name={vb.name!r}, "
-        f"expected {backbone!r}"
+        f"{framework} × {backbone}: composed video_backbone.name={vb.name!r}, expected {backbone!r}"
     )
     assert vb.model_path == dummy_model_path, (
         f"{framework} × {backbone}: composed video_backbone.model_path="
@@ -790,8 +787,7 @@ def test_framework_default_backbone_is_wan22_ti2v_5b(framework):
         cfg = compose(config_name="train", overrides=[f"model={framework}"])
 
     assert cfg.model.video_backbone.name == "wan22_ti2v_5b", (
-        f"{framework} default backbone is "
-        f"{cfg.model.video_backbone.name!r}, expected 'wan22_ti2v_5b'"
+        f"{framework} default backbone is {cfg.model.video_backbone.name!r}, expected 'wan22_ti2v_5b'"
     )
 
 

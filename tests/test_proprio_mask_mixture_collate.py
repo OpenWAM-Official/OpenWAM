@@ -79,13 +79,13 @@ def _agibot_like_sample(state_dim: int = 20):
 
 def _run_through_proprio_helper(arch: _StubArch, inputs: dict, text_len: int = 4):
     """Helper: synthesize a context tensor + drive _append_proprio_context_token."""
-    B = inputs["proprio_state"].shape[0]
+    B = inputs["proprio"].shape[0]
     pipeline_inputs = {
         "context": torch.randn(B, text_len, arch.context_dim),
         "seq_lens": torch.tensor([text_len] * B),
         "_proprio_sample_mask": inputs["proprio_mask"],
     }
-    return arch._append_proprio_context_token(pipeline_inputs, inputs["proprio_state"])
+    return arch._append_proprio_context_token(pipeline_inputs, inputs["proprio"])
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ def test_egodex_agibot_mixed_batch_end_to_end():
     inputs = arch.prepare_inputs(batch)
 
     # prepare_inputs squeezes (1, D) → (D,) per sample, so stacked → (B, D)
-    assert inputs["proprio_state"].shape == (2, 20)
+    assert inputs["proprio"].shape == (2, 20)
     assert inputs["proprio_mask"].shape == (2, 1)
     assert inputs["proprio_mask"].squeeze(-1).tolist() == [False, True]
 
@@ -140,7 +140,7 @@ def test_mixed_batch_egodex_no_proprio_encoder_grad():
         "seq_lens": torch.tensor([4, 4]),
         "_proprio_sample_mask": inputs_mixed["proprio_mask"],
     }
-    out_mixed = arch_mixed._append_proprio_context_token(pipeline_inputs_mixed, inputs_mixed["proprio_state"])
+    out_mixed = arch_mixed._append_proprio_context_token(pipeline_inputs_mixed, inputs_mixed["proprio"])
     out_mixed["context"].sum().backward()
     g_mixed = arch_mixed.proprio_encoder.weight.grad.clone()
 
@@ -156,7 +156,7 @@ def test_mixed_batch_egodex_no_proprio_encoder_grad():
         "seq_lens": torch.tensor([4]),
         "_proprio_sample_mask": inputs_solo["proprio_mask"],
     }
-    out_solo = arch_solo._append_proprio_context_token(pipeline_inputs_solo, inputs_solo["proprio_state"])
+    out_solo = arch_solo._append_proprio_context_token(pipeline_inputs_solo, inputs_solo["proprio"])
     out_solo["context"].sum().backward()
     g_solo = arch_solo.proprio_encoder.weight.grad.clone()
 
