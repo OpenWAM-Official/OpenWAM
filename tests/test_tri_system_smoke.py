@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-from openwam.model.action_backbone.joint_action_dit import ActionDiT, ActionDiTState
+from openwam.model.action_backbone.action_dit import ActionDiT, ActionDiTState
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
 from openwam.model.architectures.tri_system.und_expert import (
     UnderstandingExpert,

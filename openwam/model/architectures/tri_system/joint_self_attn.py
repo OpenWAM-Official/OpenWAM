@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from openwam.model.action_backbone.joint_action_dit import ActionDiT
+from openwam.model.action_backbone.action_dit import ActionDiT
 from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
@@ -293,7 +293,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         - ``vb._dit.blocks[i].modulation`` — read in ``pre_attn_at_layer_for_compile``
           (``wan_backbone.py:824``)
         - ``ab.blocks[i].modulation`` — read in
-          ``ActionDiT.pre_attn_at_layer_for_compile`` (``joint_action_dit.py:782``)
+          ``ActionDiT.pre_attn_at_layer_for_compile`` (``action_dit.py:782``)
         - ``ub.blocks[i].wan_und_qkv`` — read in
           ``UnderstandingExpert.pre_attn_at_layer_for_compile`` (``und_expert.py:155``)
         """

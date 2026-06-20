@@ -105,7 +105,7 @@ def test_architecture_module_layout_imports():
 
 
 def test_architecture_state_types_import():
-    from openwam.model.action_backbone.joint_action_dit import ActionDiTState
+    from openwam.model.action_backbone.action_dit import ActionDiTState
 
     assert ActionDiTState is not None
 
@@ -493,8 +493,8 @@ def test_action_self_attention_rope_breaks_permutation_equivariance():
     must NOT merely permute the output (the model distinguishes positions).
     Also: supplying RoPE freqs must change the output relative to freqs=None.
     """
+    from openwam.model.action_backbone.action_dit import ActionSelfAttention
     from openwam.model.action_backbone.components import precompute_freqs_cis_1d
-    from openwam.model.action_backbone.joint_action_dit import ActionSelfAttention
 
     dim, num_heads, seq = 32, 4, 4
     head_dim = dim // num_heads
@@ -548,7 +548,7 @@ def test_action_flash_attention_backend_falls_back_to_sdpa_on_cpu(monkeypatch):
 
 def test_action_dit_joint_cross_attn_uses_rope():
     """ActionDiT joint_cross_attn runs end-to-end with RoPE (no learned absolute PE)."""
-    from openwam.model.action_backbone.joint_action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -572,7 +572,7 @@ def test_action_dit_joint_cross_attn_uses_rope():
 
 def test_action_dit_joint_self_attn_uses_only_rope():
     """joint_self_attn relies solely on RoPE (no learned absolute PE)."""
-    from openwam.model.action_backbone.joint_action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -956,7 +956,7 @@ def test_build_architecture_shared_backbone_moe_canonical_config():
 def test_dual_system_self_attn_payload_is_action_dit_state():
     """joint_self_attn populates a flat payload of type ActionDiTState."""
     from openwam.model import build_architecture
-    from openwam.model.action_backbone.joint_action_dit import ActionDiTState
+    from openwam.model.action_backbone.action_dit import ActionDiTState
 
     cfg = {
         "framework": "dual_system",

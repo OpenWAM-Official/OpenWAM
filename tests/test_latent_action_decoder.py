@@ -114,7 +114,7 @@ def test_masked_mse_shapes():
 
 
 def _build_action_dit(action_type, action_dim, with_decoder=True):
-    from openwam.model.action_backbone.joint_action_dit import ActionDiT
+    from openwam.model.action_backbone.action_dit import ActionDiT
 
     dec_cfg = {
         "name": "cross_attn_query",

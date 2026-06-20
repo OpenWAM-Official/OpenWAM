@@ -15,7 +15,7 @@ from typing import Tuple
 import pytest
 import torch
 
-from openwam.model.action_backbone.joint_action_dit import ActionDiT
+from openwam.model.action_backbone.action_dit import ActionDiT
 from openwam.model.architectures.architecture_base import ActionState
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.video_backbone.base import BlockLoopState

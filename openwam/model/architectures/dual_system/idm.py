@@ -27,7 +27,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from openwam.model.action_backbone.joint_action_dit import ActionDiT
+from openwam.model.action_backbone.action_dit import ActionDiT
 from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
@@ -354,7 +354,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         ``block.modulation``. The IDM training loop runs through
         :class:`IDMMoTDriver` which inherits ``MoTJointDriver.step``, so the
         partitioned-leaf raw reads happen at the same call sites
-        (``wan_backbone.py:824`` + ``joint_action_dit.py:782``).
+        (``wan_backbone.py:824`` + ``action_dit.py:782``).
         """
         vb = self.video_backbone
         dit = getattr(vb, "_dit", None) if vb is not None else None

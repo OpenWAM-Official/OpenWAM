@@ -14,7 +14,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from openwam.model.action_backbone.joint_action_dit import ActionSelfAttention, BridgeCrossAttention
+from openwam.model.action_backbone.action_dit import ActionSelfAttention, BridgeCrossAttention
 
 
 def _cfg_get(cfg: Any, key: str, default: Any = None) -> Any:

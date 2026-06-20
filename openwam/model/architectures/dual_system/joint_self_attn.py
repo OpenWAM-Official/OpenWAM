@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from openwam.model.action_backbone.joint_action_dit import ActionDiT
+from openwam.model.action_backbone.action_dit import ActionDiT
 from openwam.model.architectures.architecture_base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import MoTJointDriver
 from openwam.model.architectures.registry import register_architecture
@@ -127,7 +127,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         - ``vb._dit.blocks[i].modulation`` (Wan / Cosmos25) is read inside
           ``pre_attn_at_layer_for_compile`` (``wan_backbone.py:824``)
         - ``ab.blocks[i].modulation`` is read inside
-          ``ActionDiT.pre_attn_at_layer_for_compile`` (``joint_action_dit.py:782``)
+          ``ActionDiT.pre_attn_at_layer_for_compile`` (``action_dit.py:782``)
         """
         vb = self.video_backbone
         dit = getattr(vb, "_dit", None) if vb is not None else None

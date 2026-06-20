@@ -95,7 +95,7 @@ def test_import_training_init():
 
 
 def test_import_action_dit():
-    from openwam.model.action_backbone.joint_action_dit import (  # noqa: F401
+    from openwam.model.action_backbone.action_dit import (  # noqa: F401
         ActionDiT,
         ActionDiTState,
     )
