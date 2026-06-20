@@ -40,7 +40,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from openwam.model.action_backbone.base import ActionBackbone
+from openwam.model.action_backbone.base import ActionDiTBackbone
 from openwam.model.action_backbone.components import (
     RMSNorm,
     get_attention_fn,
@@ -325,7 +325,7 @@ class SelfAttnActionDiTBlock(nn.Module):
         return x
 
 
-class ActionDiT(ActionBackbone):
+class ActionDiT(ActionDiTBackbone):
     """Lightweight Diffusion Transformer for action generation.
 
     Two variants share the action encoder, action-owned text/proprio context

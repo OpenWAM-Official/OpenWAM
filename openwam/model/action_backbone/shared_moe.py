@@ -33,12 +33,8 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from openwam.model.action_backbone.base import ActionBackbone
+from openwam.model.action_backbone.base import SharedActionBackbone
 from openwam.model.action_backbone.components import (
-    DEFAULT_ACTION_DECODER_HIDDEN_DIM,
-    ActionEncoder,
-    ActionOutputMLP,
-    StateEncoder,
     TimestepEmbedding,
     TimestepModulation,
 )
@@ -95,7 +91,7 @@ class ExpertFFNBlock(nn.Module):
         return x + gate * self.ffn(h)
 
 
-class SharedMoEActionBackbone(ActionBackbone):
+class SharedMoEActionBackbone(SharedActionBackbone):
     """Action-side helpers for SharedBackbone MoE.
 
     Owns:
@@ -129,38 +125,29 @@ class SharedMoEActionBackbone(ActionBackbone):
         use_proprioception: bool = False,
         state_dim: int = 0,
     ):
-        super().__init__()
-        self._action_dim = int(action_dim)
-        self._video_dim = int(video_dim)
-        self._max_action_len = int(max_action_len)
-        self._action_decoder_hidden_dim = int(action_decoder_hidden_dim or DEFAULT_ACTION_DECODER_HIDDEN_DIM)
-        self._use_proprioception = bool(use_proprioception)
-        self.state_dim = int(state_dim or 0)
-        if self._use_proprioception and self.state_dim <= 0:
-            raise ValueError("use_proprioception=True requires state_dim > 0 for SharedBackbone state tokens.")
+        super().__init__(
+            action_dim,
+            video_dim,
+            max_action_len=max_action_len,
+            action_decoder_hidden_dim=action_decoder_hidden_dim,
+            use_proprioception=use_proprioception,
+            state_dim=state_dim,
+        )
         self.expert_layers = tuple(int(i) for i in expert_layers)
         self.expert_layers_set = set(self.expert_layers)
         self.expert_layer_to_index = {layer_id: idx for idx, layer_id in enumerate(self.expert_layers)}
         self.num_experts = len(self.expert_layers)
 
-        self.input_proj = ActionEncoder(self._action_dim, self._video_dim)
-        self.state_encoder = StateEncoder(self.state_dim, self._video_dim) if self._use_proprioception else None
+        # Module-creation order is load-bearing for parameter-init RNG: input
+        # projection first, MoE-specific time/expert modules next, output head
+        # last — matching the pre-refactor sequence so weights stay identical.
+        self._init_action_input()
         self.time_embedding = TimestepEmbedding(freq_dim, self._video_dim)
         self.time_projection = TimestepModulation(self._video_dim, 3)
         self.expert_blocks = nn.ModuleList(
             [ExpertFFNBlock(self._video_dim, expert_ffn_dim, eps) for _ in range(self.num_experts)]
         )
-        self.action_output_head = ActionOutputMLP(self._video_dim, self._action_decoder_hidden_dim, self._action_dim)
-        self.register_buffer("action_mean", torch.zeros(self._action_dim), persistent=True)
-        self.register_buffer("action_std", torch.ones(self._action_dim), persistent=True)
-
-    @property
-    def action_dim(self) -> int:
-        return self._action_dim
-
-    @property
-    def uses_proprioception(self) -> bool:
-        return self._use_proprioception
+        self._init_action_output()
 
     def encode(self, noisy_actions: torch.Tensor, timestep: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Project actions and build expert-FFN AdaLN modulation.
@@ -200,14 +187,6 @@ class SharedMoEActionBackbone(ActionBackbone):
 
         return x, t_mod
 
-    def encode_state(self, proprio_state: torch.Tensor) -> Optional[torch.Tensor]:
-        if not self._use_proprioception:
-            return None
-        if proprio_state is None:
-            raise ValueError("SharedBackbone use_proprioception=True requires `proprio_state`.")
-        assert self.state_encoder is not None
-        return self.state_encoder(proprio_state)
-
     def apply_expert(self, layer_id: int, x_action: torch.Tensor, t_mod: torch.Tensor) -> torch.Tensor:
         """Apply the expert FFN at the given video DiT layer to action tokens.
 
@@ -223,10 +202,6 @@ class SharedMoEActionBackbone(ActionBackbone):
             (B, T_action, video_dim) corrected action tokens.
         """
         return self.expert_blocks[self.expert_layer_to_index[layer_id]](x_action, t_mod)
-
-    def decode(self, action_tokens: torch.Tensor) -> torch.Tensor:
-        """Project action tokens back from video_dim to action_dim."""
-        return self.action_output_head(action_tokens)
 
 
 __all__ = ["ExpertFFNBlock", "SharedMoEActionBackbone"]
