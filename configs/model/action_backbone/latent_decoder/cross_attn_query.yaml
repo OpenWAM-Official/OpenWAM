@@ -14,5 +14,5 @@ real_action_dim: 20  # robot action_mode dim (eef=20 / joint=14)
 # action is proprio-agnostic, so this anchors the decode to the current pose.
 # Independent of the architecture's main-stream use_proprioception (which stays
 # false in latent mode). proprio_dim must match the action_mode dim.
-use_proprioception: false
+use_proprioception: true
 proprio_dim: 20
