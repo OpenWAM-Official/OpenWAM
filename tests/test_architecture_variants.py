@@ -601,7 +601,7 @@ def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth
     actions = torch.randn(1, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
 
-    with pytest.raises(ValueError, match="expert_layers"):
+    with pytest.raises(ValueError, match="bridge_layers"):
         arch.compute_loss(**inputs, actions=actions, current_step=0)
 
 

@@ -35,10 +35,6 @@ def _validate_per_token_t_mod(vstate) -> None:
         )
 
 
-def _cfg_get(cfg, key: str, default=None):
-    return cfg.get(key, default) if isinstance(cfg, dict) else getattr(cfg, key, default)
-
-
 @register_architecture(
     "shared_backbone_moe",
     status="supported",
@@ -91,10 +87,10 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
                 "video_backbone is None — pass pipe= to build_architecture or "
                 "architecture.__init__ to enable forward()."
             )
-        invalid_expert_layers = [layer for layer in ab.bridge_layers if layer >= vb.num_layers]
-        if invalid_expert_layers:
+        invalid_bridge_layers = [layer for layer in ab.bridge_layers if layer >= vb.num_layers]
+        if invalid_bridge_layers:
             raise ValueError(
-                f"expert_layers {invalid_expert_layers} exceed video_backbone.num_layers={vb.num_layers}. "
+                f"bridge_layers {invalid_bridge_layers} exceed video_backbone.num_layers={vb.num_layers}. "
                 "SharedBackbone MoE expert layers must match the actual video backbone depth."
             )
         set_video_attention_mask_mode(vb, getattr(self, "video_attention_mask_mode", None))
