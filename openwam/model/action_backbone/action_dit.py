@@ -413,8 +413,7 @@ class ActionDiT(ActionDiTBackbone):
         self._shift_action = None if shift_action is None else float(shift_action)
         self.freq_dim = freq_dim
         self.max_action_len = max_action_len
-        self.bridge_layers = bridge_layers
-        self.bridge_layers_set = set(bridge_layers)
+        self._bridge_layers = tuple(bridge_layers)
         self.variant = variant
         self.text_dim = int(text_dim)
 
@@ -593,26 +592,26 @@ class ActionDiT(ActionDiTBackbone):
     # ------------------------------------------------------------------
 
     def bridge_tuple_from_dict(self, bridges: Dict[int, torch.Tensor]) -> tuple[torch.Tensor, ...]:
-        """Return bridges ordered by ``self.bridge_layers`` for compile-friendly calls."""
+        """Return bridges ordered by ``self._bridge_layers`` for compile-friendly calls."""
 
-        missing = [bid for bid in self.bridge_layers if bid not in bridges]
+        missing = [bid for bid in self._bridge_layers if bid not in bridges]
         if missing:
             raise ValueError(
                 f"bridges dict missing video block ids {missing}; "
-                f"expected one entry per bridge_layers={self.bridge_layers}."
+                f"expected one entry per bridge_layers={self._bridge_layers}."
             )
-        return tuple(bridges[bid] for bid in self.bridge_layers)
+        return tuple(bridges[bid] for bid in self._bridge_layers)
 
     def _validate_bridge_tuple(self, x: torch.Tensor, bridge_tuple: tuple[torch.Tensor, ...]) -> None:
-        if len(bridge_tuple) != len(self.bridge_layers):
+        if len(bridge_tuple) != len(self._bridge_layers):
             raise ValueError(
-                f"bridge_tuple length ({len(bridge_tuple)}) must match bridge_layers={self.bridge_layers}."
+                f"bridge_tuple length ({len(bridge_tuple)}) must match bridge_layers={self._bridge_layers}."
             )
 
         for i, bridge in enumerate(bridge_tuple):
             if bridge.ndim != 3:
                 raise ValueError(
-                    f"bridge tensor for video block {self.bridge_layers[i]} must have shape [B, T_video, C], "
+                    f"bridge tensor for video block {self._bridge_layers[i]} must have shape [B, T_video, C], "
                     f"got {tuple(bridge.shape)}."
                 )
             if bridge.shape[0] != x.shape[0]:
@@ -702,7 +701,7 @@ class ActionDiT(ActionDiTBackbone):
             action_tokens: ``(B, T_action, action_dim)`` noisy action sequence.
             bridges: ``{block_id: (B, T_video, video_dim)}`` mapping from
                 video DiT block index to its captured hidden state. Must
-                contain every index in ``self.bridge_layers``.
+                contain every index in ``self._bridge_layers``.
             timestep: ``(B,)`` or ``(1,)`` action diffusion timestep.
             context: Optional raw text/proprio context ``(B, L, text_dim)``.
             context_mask: Optional bool mask ``(B, L)`` where True means attend.

@@ -136,7 +136,7 @@ def _make_vanilla(video_dim=64, num_layers=4):
     return arch
 
 
-def _make_moe(video_dim=64, num_layers=4, expert_layers=(0, 2)):
+def _make_moe(video_dim=64, num_layers=4, bridge_layers=(0, 2)):
     arch = SharedBackboneMoEArchitecture(
         cfg={
             "framework": "shared_backbone",
@@ -144,7 +144,7 @@ def _make_moe(video_dim=64, num_layers=4, expert_layers=(0, 2)):
             "action_dim": 7,
             "video_dim": video_dim,
             "expert_ffn_dim": 128,
-            "expert_layers": list(expert_layers),
+            "bridge_layers": list(bridge_layers),
         }
     )
     arch.video_backbone = _StubVideoBackbone(dim=video_dim, num_layers=num_layers, video_seq=20)
@@ -211,7 +211,7 @@ def test_vanilla_forward_video_only_when_actions_none():
 
 
 def test_moe_forward_calls_apply_expert_only_at_expert_layers():
-    arch = _make_moe(video_dim=64, num_layers=5, expert_layers=(0, 2, 4))
+    arch = _make_moe(video_dim=64, num_layers=5, bridge_layers=(0, 2, 4))
     arch.eval()
     vb = arch.video_backbone
     ab = arch.action_backbone
@@ -239,7 +239,7 @@ def test_moe_forward_calls_apply_expert_only_at_expert_layers():
 
 
 def test_moe_forward_passes_joint_mask_to_every_video_block():
-    arch = _make_moe(video_dim=64, num_layers=5, expert_layers=(0, 2, 4))
+    arch = _make_moe(video_dim=64, num_layers=5, bridge_layers=(0, 2, 4))
     arch.eval()
     vb = arch.video_backbone
 

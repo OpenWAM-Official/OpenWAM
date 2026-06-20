@@ -147,7 +147,7 @@ def test_moe_dit_instantiate():
         action_dim=7,
         video_dim=64,
         expert_ffn_dim=128,
-        expert_layers=(0, 1),
+        bridge_layers=(0, 1),
     )
     assert dit.action_dim == 7
     assert dit.num_experts == 2
@@ -242,7 +242,7 @@ def test_moe_encode_uses_action_encoder():
             "action_dim": 14,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "expert_layers": [0, 1, 2],
+            "bridge_layers": [0, 1, 2],
         }
     )
     assert isinstance(arch.action_backbone.input_proj, ActionEncoder)
@@ -264,7 +264,7 @@ def test_moe_encode_per_token_timestep():
             "action_dim": 14,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "expert_layers": [0, 1, 2],
+            "bridge_layers": [0, 1, 2],
         }
     )
     actions = torch.randn(2, 16, 14)
@@ -319,7 +319,7 @@ def test_moe_encode_per_sample_keeps_tmod_rank3():
             "action_dim": 14,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "expert_layers": [0, 1, 2],
+            "bridge_layers": [0, 1, 2],
         }
     )
     actions = torch.randn(2, 16, 14)
@@ -401,7 +401,7 @@ def test_moe_expert_uses_action_output_mlp():
             "action_dim": 14,
             "video_dim": 128,
             "expert_ffn_dim": 256,
-            "expert_layers": [0, 1, 2],
+            "bridge_layers": [0, 1, 2],
         }
     )
     assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)

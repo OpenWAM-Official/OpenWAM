@@ -264,8 +264,8 @@ def test_shared_backbone_moe_compute_loss_structural_no_regression():
         "dim": 64,
         "ffn_dim": 128,
         "num_heads": 4,
-        "expert_layers": None,
-        "expert_interval": 1,
+        "bridge_layers": None,
+        "bridge_interval": 1,
     }
     arch = _build_shared_moe_arch(cfg)
     out = _run_compute_loss(arch)

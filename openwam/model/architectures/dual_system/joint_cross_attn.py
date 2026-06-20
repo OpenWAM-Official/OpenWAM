@@ -144,7 +144,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
                 vstate = vb.run_block(block_id, vstate)
             return vb.finalize(vstate), None
 
-        bridge_set = ab.bridge_layers_set
+        bridge_set = frozenset(ab.bridge_layers)
         bridges: dict[int, Tensor] = {}
         detach_bridge = self._detach_bridge
 

@@ -40,6 +40,12 @@ class ActionBackbone(nn.Module, ABC):
     Concrete subclasses inherit directly — there is no wrapping layer. The
     state_dict therefore lives at ``action_backbone.<param-name>`` with no
     extra prefix.
+
+    Buffer contract: every concrete backbone registers the persistent
+    denormalization buffers ``action_mean`` / ``action_std`` (shape
+    ``(action_dim,)``) — ``nn.Module.__getattr__`` exposes them as attributes,
+    so the architecture reads ``action_backbone.action_mean`` / ``.action_std``
+    through this contract rather than reaching into a subclass.
     """
 
     def __init__(self):
@@ -78,6 +84,22 @@ class ActionBackbone(nn.Module, ABC):
         concrete backbones may set ``self._shift_action`` in ``__init__``. Symmetric to
         ``VideoBackbone.shift_video``."""
         return self._shift_action
+
+    @property
+    def bridge_layers(self) -> tuple[int, ...]:
+        """Video DiT blocks where the action stream couples to the video stream.
+        Default none. ActionDiT overrides with its bridge cross-attn layers;
+        SharedMoE with its expert-FFN layers — the architecture iterates the
+        video block loop and acts (cross-attn / expert FFN) at these block ids."""
+        return getattr(self, "_bridge_layers", ())
+
+    def apply_expert(self, layer_id: int, x_action, t_mod):
+        """Apply the per-layer SharedMoE expert FFN to action tokens. Default
+        raises — the architecture only calls this for layer_id in bridge_layers,
+        so a backbone without an expert FFN (ActionDiT, vanilla) is never reached."""
+        raise NotImplementedError(
+            f"{type(self).__name__} has no expert FFN (bridge_layers carries no expert correction)."
+        )
 
     def set_dtype_device(self, dtype, device) -> None:
         """Move action backbone params/buffers to (dtype, device).

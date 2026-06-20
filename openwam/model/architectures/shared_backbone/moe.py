@@ -1,7 +1,7 @@
 """SharedBackbone MoE architecture.
 
 Action tokens are concatenated to the video token sequence and ride
-through the shared video DiT blocks. At configured ``expert_layers``
+through the shared video DiT blocks. At the configured ``bridge_layers``
 the action tokens receive an extra expert FFN correction for
 modality-specific capacity.
 """
@@ -23,6 +23,7 @@ from openwam.model.architectures.shared_backbone.mask import (
 )
 from openwam.model.architectures.shared_backbone.state import align_state_tokens_to_action_batch
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
+from openwam.utils import resolve_bridge_layers
 
 
 def _validate_per_token_t_mod(vstate) -> None:
@@ -36,41 +37,6 @@ def _validate_per_token_t_mod(vstate) -> None:
 
 def _cfg_get(cfg, key: str, default=None):
     return cfg.get(key, default) if isinstance(cfg, dict) else getattr(cfg, key, default)
-
-
-def resolve_expert_layers(cfg, *, num_layers: Optional[int]) -> tuple[int, ...]:
-    """Resolve MoE expert layer ids from ``expert_layers`` or ``expert_interval``."""
-    layers_raw = _cfg_get(cfg, "expert_layers", None)
-    if layers_raw is None:
-        interval_raw = _cfg_get(cfg, "expert_interval", None)
-        if interval_raw is None:
-            raise ValueError("expert_layers is null but expert_interval is not set")
-        if num_layers is None:
-            raise ValueError(
-                "expert_layers is null but video_backbone.num_layers is unavailable. "
-                "Build SharedBackbone MoE with a video_backbone so expert_interval can be resolved "
-                "from the actual backbone depth."
-            )
-        interval = int(interval_raw)
-        if interval < 1:
-            raise ValueError(f"expert_interval must be >= 1, got {interval}")
-        layers = tuple(range(0, int(num_layers), interval))
-    elif isinstance(layers_raw, str):
-        layers = tuple(int(x) for x in layers_raw.split(",") if x)
-    else:
-        layers = tuple(int(x) for x in layers_raw)
-
-    layers = tuple(sorted(layers))
-    if len(set(layers)) != len(layers):
-        raise ValueError(f"expert_layers must be unique, got {layers}")
-    invalid = [layer for layer in layers if layer < 0]
-    if num_layers is not None:
-        invalid.extend(layer for layer in layers if layer >= int(num_layers))
-    if invalid:
-        if num_layers is None:
-            raise ValueError(f"expert_layers must be non-negative, got invalid layers {invalid}")
-        raise ValueError(f"expert_layers must be in [0, {int(num_layers) - 1}], got invalid layers {invalid}")
-    return layers
 
 
 @register_architecture(
@@ -96,13 +62,13 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         if vb is not None:
             set_video_attention_mask_mode(vb, self.video_attention_mask_mode)
 
-        expert_layers = resolve_expert_layers(cfg, num_layers=num_layers)
+        bridge_layers = resolve_bridge_layers(cfg, num_layers=num_layers)
 
         self.action_backbone = SharedMoEActionBackbone(
             action_dim=int(cfg.get("action_dim", 20)),
             video_dim=video_dim,
             expert_ffn_dim=int(cfg.get("expert_ffn_dim", 4096)),
-            expert_layers=expert_layers,
+            bridge_layers=bridge_layers,
             action_decoder_hidden_dim=action_decoder_hidden_dim,
             use_proprioception=use_proprioception,
             state_dim=state_dim,
@@ -125,7 +91,7 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
                 "video_backbone is None — pass pipe= to build_architecture or "
                 "architecture.__init__ to enable forward()."
             )
-        invalid_expert_layers = [layer for layer in ab.expert_layers if layer >= vb.num_layers]
+        invalid_expert_layers = [layer for layer in ab.bridge_layers if layer >= vb.num_layers]
         if invalid_expert_layers:
             raise ValueError(
                 f"expert_layers {invalid_expert_layers} exceed video_backbone.num_layers={vb.num_layers}. "
@@ -191,7 +157,7 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
 
         for block_id in range(vb.num_layers):
             vstate = vb.run_block(block_id, vstate)
-            if n_action and block_id in ab.expert_layers_set:
+            if n_action and block_id in ab.bridge_layers:
                 n_video = vstate.hidden_states.shape[1] - n_action - n_state
                 x_action = gradient_checkpoint_forward(
                     lambda x, t, _bid=block_id: ab.apply_expert(_bid, x, t),
@@ -221,4 +187,4 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         return vb.finalize(vstate), ab.decode(action_tail)
 
 
-__all__ = ["SharedBackboneMoEArchitecture", "resolve_expert_layers"]
+__all__ = ["SharedBackboneMoEArchitecture"]

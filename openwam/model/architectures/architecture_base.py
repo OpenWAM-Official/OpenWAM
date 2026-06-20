@@ -113,7 +113,7 @@ def _assert_decode_video_supported(vb) -> None:
     out of :meth:`BaseWAMArchitecture.generate` so it is independently
     unit-testable without standing up the full denoising loop.
     """
-    enc = getattr(vb, "video_encoder", None)
+    enc = vb.external_encoder
     if enc is not None and not enc.properties.pixel_decode:
         raise ValueError(
             f"generate(decode_video=True) but the configured encoder "
@@ -517,11 +517,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     @property
     def bridge_layers(self) -> tuple:
-        return getattr(self.action_backbone, "bridge_layers", ()) if self.action_backbone is not None else ()
-
-    @property
-    def expert_layers(self) -> tuple:
-        return getattr(self.action_backbone, "expert_layers", ()) if self.action_backbone is not None else ()
+        return self.action_backbone.bridge_layers if self.action_backbone is not None else ()
 
     @property
     def uses_proprioception(self) -> bool:

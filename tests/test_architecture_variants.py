@@ -348,7 +348,7 @@ def test_shared_backbone_vanilla_loads_and_runs():
     }
     arch = _build_arch("shared_backbone_vanilla", cfg)
 
-    assert arch.action_backbone.expert_layers == ()
+    assert arch.action_backbone.bridge_layers == ()
 
     n_params = _count_params(arch.action_backbone)
     print(f"\n[shared_backbone_vanilla] action_backbone params: {n_params:,}")
@@ -497,18 +497,18 @@ def test_shared_backbone_vanilla_with_proprio_conditions_video_only_path():
 
 
 def test_shared_backbone_moe_default_all_layers():
-    """MoE with ``expert_layers: null + expert_interval: 1``: one expert per video DiT layer."""
+    """MoE with ``bridge_layers: null + bridge_interval: 1``: one expert per video DiT layer."""
     cfg = {
         "framework": "shared_backbone",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 1024,
-        "expert_layers": None,
-        "expert_interval": 1,
+        "bridge_layers": None,
+        "bridge_interval": 1,
     }
     arch = _build_shared_moe_arch(cfg)
 
-    expert_layers = arch.action_backbone.expert_layers
+    expert_layers = arch.action_backbone.bridge_layers
     assert len(expert_layers) == WAN_NUM_LAYERS, f"expected {WAN_NUM_LAYERS} expert layers, got {len(expert_layers)}"
     assert expert_layers == tuple(range(WAN_NUM_LAYERS))
     assert len(arch.action_backbone.expert_blocks) == WAN_NUM_LAYERS
@@ -526,8 +526,8 @@ def test_shared_backbone_moe_with_proprio_loads_and_runs():
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 256,
-        "expert_layers": None,
-        "expert_interval": 1,
+        "bridge_layers": None,
+        "bridge_interval": 1,
         "use_proprioception": True,
         "state_dim": ACTION_DIM,
     }
@@ -545,13 +545,13 @@ def test_shared_backbone_moe_interval_uses_video_backbone_num_layers():
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 256,
-        "expert_layers": None,
-        "expert_interval": 2,
+        "bridge_layers": None,
+        "bridge_interval": 2,
     }
 
     arch = _build_shared_moe_arch(cfg, num_layers=4)
 
-    assert arch.action_backbone.expert_layers == (0, 2)
+    assert arch.action_backbone.bridge_layers == (0, 2)
 
 
 def test_shared_backbone_moe_default_expert_ffn_dim_matches_yaml_default():
@@ -560,7 +560,7 @@ def test_shared_backbone_moe_default_expert_ffn_dim_matches_yaml_default():
         "framework": "shared_backbone",
         "variant": "moe",
         "action_dim": ACTION_DIM,
-        "expert_layers": [0],
+        "bridge_layers": [0],
     }
 
     arch = _build_shared_moe_arch(cfg, num_layers=2)
@@ -578,11 +578,11 @@ def test_shared_backbone_moe_interval_requires_video_backbone():
         "action_dim": ACTION_DIM,
         "video_dim": WAN_VIDEO_DIM,
         "expert_ffn_dim": 256,
-        "expert_layers": None,
-        "expert_interval": 2,
+        "bridge_layers": None,
+        "bridge_interval": 2,
     }
 
-    with pytest.raises(ValueError, match="video_backbone.num_layers"):
+    with pytest.raises(ValueError, match="num_layers must be provided"):
         build_architecture("shared_backbone_moe", cfg)
 
 
@@ -594,7 +594,7 @@ def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth
         "action_dim": ACTION_DIM,
         "video_dim": WAN_VIDEO_DIM,
         "expert_ffn_dim": 256,
-        "expert_layers": [0, 5],
+        "bridge_layers": [0, 5],
     }
     arch = _build_arch("shared_backbone_moe", cfg, num_layers=4)
     arch.init_training_schedulers(1000)
@@ -607,18 +607,18 @@ def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth
 
 def test_shared_backbone_moe_explicit_expert_layers():
     """Explicit expert_layers controls which video DiT layers carry an expert FFN."""
-    expert_layers = (1, 4, 7, 10, 13, 16, 19, 22, 25, 28)
+    bridge_layers = (1, 4, 7, 10, 13, 16, 19, 22, 25, 28)
     cfg = {
         "framework": "shared_backbone",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 1024,
-        "expert_layers": list(expert_layers),
+        "bridge_layers": list(bridge_layers),
     }
     arch = _build_shared_moe_arch(cfg)
 
-    assert arch.action_backbone.expert_layers == expert_layers
-    assert len(arch.action_backbone.expert_blocks) == len(expert_layers) == 10
+    assert arch.action_backbone.bridge_layers == bridge_layers
+    assert len(arch.action_backbone.expert_blocks) == len(bridge_layers) == 10
 
     n_params = _count_params(arch.action_backbone)
     print(f"\n[shared_backbone_moe / explicit-10] action_backbone params: {n_params:,}")
@@ -674,7 +674,7 @@ def test_shared_backbone_moe_explicit_expert_layers():
                 "variant": "moe",
                 "action_dim": ACTION_DIM,
                 "expert_ffn_dim": 1024,
-                "expert_layers": list(range(0, WAN_NUM_LAYERS, 2)),
+                "bridge_layers": list(range(0, WAN_NUM_LAYERS, 2)),
             },
             15,
         ),
@@ -688,8 +688,8 @@ def test_all_variants_load_and_run(registry_name, cfg, expected_selected_count):
     else:
         arch = _build_arch(registry_name, cfg)
 
-    if hasattr(arch.action_backbone, "expert_layers"):
-        selected_layers = arch.action_backbone.expert_layers
+    if hasattr(arch.action_backbone, "bridge_layers"):
+        selected_layers = arch.action_backbone.bridge_layers
     else:
         selected_layers = arch.action_backbone.bridge_layers
     assert len(selected_layers) == expected_selected_count

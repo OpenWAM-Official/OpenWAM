@@ -53,10 +53,6 @@ class SharedVanillaActionBackbone(SharedActionBackbone):
         self._init_action_input()
         self._init_action_output()
 
-    @property
-    def expert_layers(self) -> tuple[int, ...]:
-        return ()
-
     def encode(self, noisy_actions: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
         """Project noisy actions into video_dim space.
 

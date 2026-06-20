@@ -285,11 +285,11 @@ def test_build_architecture_shared_backbone_moe():
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
-        "expert_layers": (1, 3),
+        "bridge_layers": (1, 3),
     }
     arch = build_architecture("shared_backbone_moe", cfg)
     assert arch.action_dim == 7
-    assert arch.expert_layers == (1, 3)
+    assert arch.bridge_layers == (1, 3)
     assert arch.action_backbone is not None
     assert len(arch.action_backbone.expert_blocks) == 2
 
@@ -301,7 +301,7 @@ def test_build_architecture_shared():
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
     arch = build_architecture("shared_backbone_vanilla", cfg)
     assert arch.action_dim == 7
-    assert arch.expert_layers == ()
+    assert arch.bridge_layers == ()
 
 
 def test_build_architecture_unknown():
@@ -360,7 +360,7 @@ def test_shared_backbone_moe_encode_apply_decode():
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
-        "expert_layers": (0, 1),
+        "bridge_layers": (0, 1),
     }
     arch = build_architecture("shared_backbone_moe", cfg)
     arch.eval()
@@ -375,7 +375,7 @@ def test_shared_backbone_moe_encode_apply_decode():
 
     # Apply expert at each expert layer; output shape preserved.
     x_action = tokens
-    for block_id in ab.expert_layers:
+    for block_id in ab.bridge_layers:
         x_action = ab.apply_expert(block_id, x_action, t_mod)
     assert x_action.shape == (B, T_action, 128)
 
@@ -426,7 +426,7 @@ def test_moe_expert_ffn_and_output_head_init():
         action_dim=7,
         video_dim=64,
         expert_ffn_dim=128,
-        expert_layers=(0, 1),
+        bridge_layers=(0, 1),
     )
     # Expert FFN output layer: zero-init preserved (pretrained video DiT
     # behavior at init for action tokens).
@@ -799,11 +799,11 @@ def test_moe_uses_expert_layers():
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
-        "expert_layers": (1, 3),
+        "bridge_layers": (1, 3),
     }
     arch = build_architecture("shared_backbone_moe", cfg)
-    assert arch.expert_layers == (1, 3)
-    assert arch.action_backbone.expert_layers_set == {1, 3}
+    assert arch.bridge_layers == (1, 3)
+    assert frozenset(arch.action_backbone.bridge_layers) == {1, 3}
 
 
 def test_shared_backbone_has_no_expert_layers():
@@ -812,7 +812,7 @@ def test_shared_backbone_has_no_expert_layers():
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 5}
     arch = build_architecture("shared_backbone_vanilla", cfg)
-    assert arch.expert_layers == ()
+    assert arch.bridge_layers == ()
 
 
 def test_normalize_architecture_spec_shared_backbone():
@@ -946,7 +946,7 @@ def test_build_architecture_shared_backbone_moe_canonical_config():
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
-        "expert_layers": (1, 3),
+        "bridge_layers": (1, 3),
     }
     arch = build_architecture("shared_backbone_moe", cfg)
     assert arch.cfg["framework"] == "shared_backbone"

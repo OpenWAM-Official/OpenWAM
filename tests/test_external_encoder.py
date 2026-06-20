@@ -961,12 +961,16 @@ def test_D5_generate_decode_video_true_blocks_irreversible_encoder():
     require the entire scheduler/pipeline stack; instead we extract the
     guard as ``_assert_decode_video_supported`` (base.py) and exercise it
     directly with a stub backbone, so a regression that renames
-    ``vb.video_encoder`` or flips the polarity is caught here.
+    ``vb.external_encoder`` or flips the polarity is caught here.
     """
     from openwam.model.architectures.architecture_base import _assert_decode_video_supported
 
     class _StubBackbone:
-        pass
+        # Mirror VideoBackbone.external_encoder: expose the wired-in encoder
+        # (None on the native VAE path) through the ABC contract the guard reads.
+        @property
+        def external_encoder(self):
+            return getattr(self, "video_encoder", None)
 
     # Irreversible → fail-fast.
     vb_irrev = _StubBackbone()

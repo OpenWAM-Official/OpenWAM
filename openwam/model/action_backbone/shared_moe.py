@@ -6,19 +6,19 @@ Inspired by BAGEL's Mixture-of-Transformer-Experts (MoT) pattern:
 - Shared self-attention: action and video tokens attend to each other
   using the VIDEO DiT's Q/K/V projections (shared representational
   space).
-- Expert FFN: at designated ``expert_layers``, action tokens receive an
-  additional FFN correction for modality-specific capacity.
+- Expert FFN: at the video DiT layers named by ``bridge_layers``, action
+  tokens receive an additional FFN correction for modality-specific capacity.
 
 This module owns the action-side parameters but **does not** drive the
 video DiT block loop — the architecture's ``forward`` runs the loop and
 calls ``apply_expert(layer_id, ...)`` exactly when ``layer_id in
-expert_layers_set``.
+bridge_layers``.
 
 API surface:
     encode(noisy_actions, timestep) -> (tokens, t_mod, t_embed)
     apply_expert(layer_id, x_action, t_mod) -> x_action
     decode(action_tokens) -> action_prediction
-    expert_layers_set                        (attribute)
+    bridge_layers                            (property, inherited)
 
 References:
 - BAGEL (ByteDance Seed): Shared attention + expert FFN for multimodal
@@ -104,7 +104,7 @@ class SharedMoEActionBackbone(SharedActionBackbone):
         ``_build_action_t_mod`` in the adapter), while these ones drive only
         the expert-FFN AdaLN. Two separate routes is intentional —
         modality-specific modulation for the modality-specific FFN.
-      - ``expert_blocks``: one ``ExpertFFNBlock`` per entry in ``expert_layers``.
+      - ``expert_blocks``: one ``ExpertFFNBlock`` per entry in ``bridge_layers``.
       - ``action_mean`` / ``action_std``: normalization stats.
 
     Unlike ActionDiT, this module has no self-attention or cross-attention
@@ -117,7 +117,7 @@ class SharedMoEActionBackbone(SharedActionBackbone):
         action_dim: int,
         video_dim: int,
         expert_ffn_dim: int,
-        expert_layers: Tuple[int, ...],
+        bridge_layers: Tuple[int, ...],
         freq_dim: int = 256,
         max_action_len: int = 512,
         action_decoder_hidden_dim: Optional[int] = None,
@@ -133,10 +133,9 @@ class SharedMoEActionBackbone(SharedActionBackbone):
             use_proprioception=use_proprioception,
             state_dim=state_dim,
         )
-        self.expert_layers = tuple(int(i) for i in expert_layers)
-        self.expert_layers_set = set(self.expert_layers)
-        self.expert_layer_to_index = {layer_id: idx for idx, layer_id in enumerate(self.expert_layers)}
-        self.num_experts = len(self.expert_layers)
+        self._bridge_layers = tuple(int(i) for i in bridge_layers)
+        self.expert_layer_to_index = {layer_id: idx for idx, layer_id in enumerate(self._bridge_layers)}
+        self.num_experts = len(self._bridge_layers)
 
         # Module-creation order is load-bearing for parameter-init RNG: input
         # projection first, MoE-specific time/expert modules next, output head
@@ -190,7 +189,7 @@ class SharedMoEActionBackbone(SharedActionBackbone):
     def apply_expert(self, layer_id: int, x_action: torch.Tensor, t_mod: torch.Tensor) -> torch.Tensor:
         """Apply the expert FFN at the given video DiT layer to action tokens.
 
-        ``layer_id`` must be in ``expert_layers_set`` — the architecture's
+        ``layer_id`` must be in ``bridge_layers`` — the architecture's
         forward is responsible for the membership check before calling.
 
         Args:

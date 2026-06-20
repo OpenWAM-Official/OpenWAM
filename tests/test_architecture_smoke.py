@@ -93,7 +93,7 @@ def test_shared_backbone_moe_flow():
         "action_dim": 7,
         "video_dim": 64,
         "expert_ffn_dim": 128,
-        "expert_layers": (0, 2),
+        "bridge_layers": (0, 2),
     }
     arch = build_architecture("shared_backbone_moe", cfg)
     ab = arch.action_backbone
@@ -106,7 +106,7 @@ def test_shared_backbone_moe_flow():
     assert tokens.shape == (B, T_action, 64)
 
     x_action = tokens
-    for block_id in ab.expert_layers:
+    for block_id in ab.bridge_layers:
         x_action = ab.apply_expert(block_id, x_action, t_mod)
     pred = ab.decode(x_action)
     assert pred.shape == (B, T_action, 7)

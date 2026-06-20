@@ -31,3 +31,9 @@ architecture:
   # action→all True; state→state True / state→{v,a} False.
   attention_mask_mode: joint   # joint | bidirectional
   video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
+
+  # shared_moe only: which video DiT layers apply an expert FFN to action tokens
+  # (shared_vanilla ignores). Same schema/name as dual/tri_system bridge_layers.
+  # bridge_layers: explicit list, OR null + bridge_interval (1=all, 2=every other).
+  bridge_layers: null
+  bridge_interval: 1

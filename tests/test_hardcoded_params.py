@@ -68,12 +68,12 @@ def test_moe_dit_requires_all_params():
     with pytest.raises(TypeError):
         SharedMoEActionBackbone(action_dim=20)
 
-    # Should succeed with all required params (num_experts is derived from expert_layers)
+    # Should succeed with all required params (num_experts is derived from bridge_layers)
     moe = SharedMoEActionBackbone(
         action_dim=14,
         video_dim=128,
         expert_ffn_dim=512,
-        expert_layers=(0, 1, 2),
+        bridge_layers=(0, 1, 2),
     )
     assert moe.action_dim == 14
     assert moe._video_dim == 128
@@ -134,7 +134,7 @@ def test_moe_architecture_no_video_dim_raises():
         "framework": "shared_backbone",
         "variant": "moe",
         "action_dim": 20,
-        "expert_layers": (0, 1, 2),
+        "bridge_layers": (0, 1, 2),
         "expert_ffn_dim": 512,
     }
     with pytest.raises(ValueError, match="video_dim must be specified"):
