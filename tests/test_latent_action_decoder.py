@@ -21,6 +21,88 @@ def _small_decoder(num_query=32, real_action_dim=20, latent_dim=1024):
     )
 
 
+def _small_decoder_proprio(num_query=32, real_action_dim=20, latent_dim=1024, proprio_dim=20):
+    return LatentQueryDecoder(
+        latent_dim=latent_dim,
+        real_action_dim=real_action_dim,
+        num_query=num_query,
+        hidden_dim=64,
+        num_layers=2,
+        num_heads=4,
+        attn_head_dim=16,
+        ffn_dim=128,
+        use_proprioception=True,
+        proprio_dim=proprio_dim,
+    )
+
+
+def test_decoder_proprio_shape():
+    """Proprio-conditioned decoder: (latent, proprio) -> (B, num_query, real_action_dim)."""
+    dec = _small_decoder_proprio(num_query=8, real_action_dim=7, proprio_dim=20)
+    latent = torch.randn(3, 6, 1024)
+    proprio = torch.randn(3, 1, 20)
+    out = dec(latent, proprio)
+    assert out.shape == (3, 8, 7)
+
+
+def test_decoder_proprio_affects_output():
+    """Changing proprio must change the decoded action (proprio truly enters KV)."""
+    torch.manual_seed(0)
+    dec = _small_decoder_proprio(num_query=8, real_action_dim=7, proprio_dim=20).eval()
+    latent = torch.randn(2, 6, 1024)
+    p_a = torch.randn(2, 1, 20, generator=torch.Generator().manual_seed(11))
+    p_b = torch.randn(2, 1, 20, generator=torch.Generator().manual_seed(22))
+    with torch.no_grad():
+        out_a = dec(latent, p_a)
+        out_b = dec(latent, p_b)
+    assert not torch.allclose(out_a, out_b, atol=1e-5)
+
+
+def test_decoder_proprio_required_when_enabled():
+    """use_proprioception=True but no proprio -> fail fast."""
+    dec = _small_decoder_proprio(proprio_dim=20)
+    with pytest.raises(ValueError, match="requires a proprio"):
+        dec(torch.randn(2, 6, 1024))
+
+
+def test_decoder_proprio_dim_required():
+    """use_proprioception=True with proprio_dim<=0 -> fail fast at construction."""
+    with pytest.raises(ValueError, match="proprio_dim > 0"):
+        LatentQueryDecoder(latent_dim=1024, real_action_dim=20, num_query=8, use_proprioception=True, proprio_dim=0)
+
+
+def test_decoder_proprio_shape_normalization():
+    """Decoder accepts (D,) and (B, D) proprio, broadcasting to (B, 1, D)."""
+    dec = _small_decoder_proprio(num_query=8, real_action_dim=7, proprio_dim=20).eval()
+    latent = torch.randn(2, 6, 1024)
+    with torch.no_grad():
+        out_1d = dec(latent, torch.randn(20))  # (D,)
+        out_2d = dec(latent, torch.randn(2, 20))  # (B, D)
+    assert out_1d.shape == (2, 8, 7)
+    assert out_2d.shape == (2, 8, 7)
+
+
+def test_build_decoder_proprio_from_cfg():
+    """build_latent_action_decoder wires use_proprioception + proprio_dim."""
+    cfg = {
+        "name": "cross_attn_query",
+        "num_query": 8,
+        "real_action_dim": 7,
+        "hidden_dim": 64,
+        "num_layers": 2,
+        "num_heads": 4,
+        "attn_head_dim": 16,
+        "ffn_dim": 128,
+        "use_proprioception": True,
+        "proprio_dim": 20,
+    }
+    dec = build_latent_action_decoder(cfg, latent_dim=1024)
+    assert dec.use_proprioception is True
+    assert dec.proprio_proj is not None
+    out = dec(torch.randn(2, 6, 1024), torch.randn(2, 1, 20))
+    assert out.shape == (2, 8, 7)
+
+
 def test_decoder_shape():
     dec = _small_decoder(num_query=32, real_action_dim=20)
     out = dec(torch.randn(2, 128, 1024))

@@ -61,12 +61,13 @@ class ActionBackbone(nn.Module, ABC):
         """
         return False
 
-    def decode_latent_to_action(self, latent):
+    def decode_latent_to_action(self, latent, proprio=None):
         """Decode predicted latent action into real action, or None if no decoder.
 
         ``latent`` is the clean latent reconstructed from the backbone's own
-        velocity prediction (carries its gradient). Default no-op for backbones
-        without a decoder (explicit mode, SharedBackbone)."""
+        velocity prediction (carries its gradient). ``proprio`` is the optional
+        normalized current state, used only when the decoder conditions on it.
+        Default no-op for backbones without a decoder (explicit, SharedBackbone)."""
         return None
 
     @property

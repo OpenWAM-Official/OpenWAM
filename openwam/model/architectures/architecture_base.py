@@ -1389,7 +1389,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
             decoder_target = inputs.get("decoder_target")
             if decoder_target is not None:
                 latent_x0 = noisy_actions - a_sigma_bc * action_noise_pred
-                decoded = self.action_backbone.decode_latent_to_action(latent_x0)
+                # proprio_state is already in the dataloader's normalized space
+                # (same space as decoder_target); the decoder ignores it unless
+                # it was built with use_proprioception.
+                decoded = self.action_backbone.decode_latent_to_action(latent_x0, proprio_state)
                 if decoded is not None:
                     decoder_target = decoder_target.to(dtype=_dtype, device=_device)
                     loss_decoder = self._masked_mse(decoded, decoder_target, inputs.get("decoder_action_is_pad"))
@@ -1765,6 +1768,15 @@ class BaseWAMArchitecture(ABC, nn.Module):
             video_frames = vb.decode_video(inputs_shared["latents"], tiled=tiled)
         else:
             video_frames = None
+
+        # Latent mode: ActionDiT denoised to a clean latent (schedule ends at
+        # sigma_a=0, denoise_schedule.py); decode it to real (still-normalized)
+        # actions, conditioned on the already-normalized proprio when the decoder
+        # uses it. Explicit mode has no decoder and skips this. Both then
+        # unnormalize back to physical units.
+        if self.action_backbone is not None and self.action_backbone.has_latent_decoder:
+            decode_proprio = proprio_state.to(device=device, dtype=dtype) if proprio_state is not None else None
+            action_latents = self.action_backbone.decode_latent_to_action(action_latents, decode_proprio)
 
         actions = action_latents.squeeze(0).float().cpu().numpy()
         normalizer = getattr(self, "normalizer", None)

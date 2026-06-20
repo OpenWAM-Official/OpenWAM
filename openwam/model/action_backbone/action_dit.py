@@ -506,10 +506,12 @@ class ActionDiT(ActionDiTBackbone):
     def has_latent_decoder(self) -> bool:
         return self.latent_action_decoder is not None
 
-    def decode_latent_to_action(self, latent: torch.Tensor) -> Optional[torch.Tensor]:
+    def decode_latent_to_action(
+        self, latent: torch.Tensor, proprio: Optional[torch.Tensor] = None
+    ) -> Optional[torch.Tensor]:
         if self.latent_action_decoder is None:
             return None
-        return self.latent_action_decoder(latent)
+        return self.latent_action_decoder(latent, proprio)
 
     @property
     def num_heads(self) -> int:

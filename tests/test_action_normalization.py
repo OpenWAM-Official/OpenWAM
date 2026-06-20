@@ -239,6 +239,7 @@ class _TinyGenerateArchitecture(BaseWAMArchitecture):
             action_dim = 20
             scheduler = _TinyScheduler()
             uses_proprioception = False
+            has_latent_decoder = False
 
         self.action_backbone = _ActionBackbone()
 
@@ -275,3 +276,62 @@ def test_base_generate_unnormalizes_deploy_actions():
     )
     expected = normalizer.unnormalize(normalized)
     np.testing.assert_allclose(result["actions"], expected, atol=1e-6)
+
+
+class _LatentDecoderActionBackbone(nn.Module):
+    """Stub action backbone exposing a latent->action decoder for generate()."""
+
+    action_dim = 20  # latent token_dim in latent mode
+
+    def __init__(self, num_query, real_action_dim, proprio_dim=20):
+        super().__init__()
+        self.scheduler = _TinyScheduler()
+        self.uses_proprioception = False
+        self.num_query = num_query
+        self.real_action_dim = real_action_dim
+        self.proprio_dim = proprio_dim
+        self.seen_proprio = None
+
+    @property
+    def has_latent_decoder(self):
+        return True
+
+    def decode_latent_to_action(self, latent, proprio=None):
+        # Record proprio to assert it was routed in; emit a fixed (B, num_query,
+        # real_action_dim) so the test checks shape + unnormalize, not values.
+        self.seen_proprio = proprio
+        b = latent.shape[0]
+        base = torch.arange(self.num_query * self.real_action_dim, dtype=latent.dtype)
+        return base.view(1, self.num_query, self.real_action_dim).expand(b, -1, -1)
+
+
+class _TinyLatentGenerateArchitecture(_TinyGenerateArchitecture):
+    def __init__(self, normalizer, num_query, real_action_dim):
+        super().__init__(normalizer)
+        self.action_backbone = _LatentDecoderActionBackbone(num_query, real_action_dim)
+
+
+def test_base_generate_latent_decodes_then_unnormalizes():
+    """Latent mode: generate() decodes latent->action AND unnormalizes (same path as explicit)."""
+    num_query, real_action_dim = 5, 20
+    stats = _eef_stats_min_max()
+    normalizer = Normalizer(mode="min_max", stats=stats)
+    arch = _TinyLatentGenerateArchitecture(normalizer, num_query, real_action_dim)
+
+    proprio = np.zeros(real_action_dim, dtype=np.float32)
+    result = arch.generate(
+        schedule=[(0.0, 1.0), (0.0, 0.0)],
+        prompt="",
+        num_frames=2,
+        decode_video=False,
+        seed=123,
+        proprio_state=torch.from_numpy(proprio),
+    )
+
+    # Decoded shape (num_query, real_action_dim), proprio was routed to the decoder.
+    assert result["actions"].shape == (num_query, real_action_dim)
+    assert arch.action_backbone.seen_proprio is not None
+    # Output went through unnormalize (decoder emits an arange; unnormalize maps it).
+    raw = torch.arange(num_query * real_action_dim, dtype=torch.float32).view(num_query, real_action_dim).numpy()
+    expected = normalizer.unnormalize(raw)
+    np.testing.assert_allclose(result["actions"], expected, atol=1e-5)
