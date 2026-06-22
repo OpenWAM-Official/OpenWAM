@@ -1,7 +1,7 @@
 """V-JEPA 2.1 ViT + manifest loading for :class:`..vjepa2_1.VJEPA21VideoEncoder`.
 
 The vendored-ViT-coupled, weight-loading concerns: manifest read/validate, the
-``._vendor`` import + RoPE dtype monkey-patch, the zero-weight ViT construction,
+vendored-ViT import + RoPE dtype monkey-patch, the zero-weight ViT construction,
 and the pretrained-weight load. They live here as module-level functions (not
 encoder methods) so ``encoder.py`` stays focused on the latent contract +
 ``batch_encode`` path. ``VJEPA21VideoEncoder.from_pretrained`` / ``from_skeleton``
@@ -56,7 +56,7 @@ def read_and_validate_manifest(model_path: str) -> dict:
 def check_arch_use_rope_consistency(manifest: dict) -> None:
     """Manifest-internal contradiction check, isolated from the ViT import.
 
-    Runs without importing ``._vendor`` so the error stays correct in
+    Runs without importing the vendored ViT so the error stays correct in
     environments without the ViT's deps (e.g. ``timm``) installed. Called by
     ``read_and_validate_manifest`` (the ``from_pretrained`` / ``from_skeleton``
     path) and by ``load_vit`` (PR #83 V9/V10 regression tests), so all paths get
@@ -76,7 +76,7 @@ def prepare_vjepa_imports_and_patch():
     """Import the vendored ViT modules + install the RoPE dtype monkey-patch.
     Idempotent. Returns the ``vision_transformer`` module.
 
-    The ViT lives in-tree under ``._vendor`` (Apache-2.0, lifted from
+    The ViT lives in-tree alongside this loader (Apache-2.0, lifted from
     facebookresearch/vjepa2 @ ``vjepa2_1``) — no ``third_party`` submodule or
     ``sys.path`` bootstrap is needed.
 
@@ -91,8 +91,8 @@ def prepare_vjepa_imports_and_patch():
     ``_openwam_dtype_safe`` sentinel so repeated calls (training reload, deploy
     skeleton + later weight load, EMA replicas) do not re-wrap.
     """
-    from openwam.model.video_backbone.encoder.vjepa2_src._vendor import modules as vjepa_modules
-    from openwam.model.video_backbone.encoder.vjepa2_src._vendor import vision_transformer as vit_encoder
+    from openwam.model.video_backbone.encoder.vjepa2_src import modules as vjepa_modules
+    from openwam.model.video_backbone.encoder.vjepa2_src import vision_transformer as vit_encoder
 
     if not getattr(vjepa_modules.rotate_queries_or_keys, "_openwam_dtype_safe", False):
         _orig_rotate = vjepa_modules.rotate_queries_or_keys

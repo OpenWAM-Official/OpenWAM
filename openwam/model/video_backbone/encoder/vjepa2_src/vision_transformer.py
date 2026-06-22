@@ -11,10 +11,9 @@ import torch
 import torch.nn as nn
 
 from .masks_utils import apply_masks
-from .tensors import trunc_normal_
-
 from .modules import Block
 from .patch_embed import PatchEmbed, PatchEmbed3D
+from .tensors import trunc_normal_
 
 
 class VisionTransformer(nn.Module):
@@ -83,22 +82,14 @@ class VisionTransformer(nn.Module):
                 in_chans=in_chans,
                 embed_dim=embed_dim,
             )
-            self.num_patches = (
-                (num_frames // tubelet_size)
-                * (img_size[0] // patch_size)
-                * (img_size[1] // patch_size)
-            )
+            self.num_patches = (num_frames // tubelet_size) * (img_size[0] // patch_size) * (img_size[1] // patch_size)
         else:
-            self.patch_embed = PatchEmbed(
-                patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim
-            )
+            self.patch_embed = PatchEmbed(patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
             self.num_patches = (img_size[0] // patch_size) * (img_size[1] // patch_size)
 
         if self.img_temporal_dim_size is not None:
             if not isinstance(self.img_temporal_dim_size, int):
-                raise ValueError(
-                    f"img_temporal_dim_size must be an int, got {self.img_temporal_dim_size}"
-                )
+                raise ValueError(f"img_temporal_dim_size must be an int, got {self.img_temporal_dim_size}")
             self.patch_embed_img = PatchEmbed3D(
                 patch_size=patch_size,
                 tubelet_size=1,
@@ -173,9 +164,7 @@ class VisionTransformer(nn.Module):
                 self.out_layers_distillation = [47]
         else:
             print("Check the code! ;)")
-        self.norms_block = nn.ModuleList(
-            [norm_layer(embed_dim) for _ in range(len(self.hierarchical_layers))]
-        )
+        self.norms_block = nn.ModuleList([norm_layer(embed_dim) for _ in range(len(self.hierarchical_layers))])
 
         self.cls_token = None
         self.return_hierarchical = False
@@ -208,20 +197,12 @@ class VisionTransformer(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
         elif self.init_type == "xavier_uniform":
-            if (
-                isinstance(m, nn.Linear)
-                or isinstance(m, nn.Conv2d)
-                or isinstance(m, nn.Conv3d)
-            ):
+            if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv3d):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
         elif self.init_type == "xavier_normal":
-            if (
-                isinstance(m, nn.Linear)
-                or isinstance(m, nn.Conv2d)
-                or isinstance(m, nn.Conv3d)
-            ):
+            if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv3d):
                 nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
@@ -340,21 +321,15 @@ class VisionTransformer(nn.Module):
             return x
 
     def interpolate_pos_encoding(self, x, pos_embed):
-
         _, N, dim = pos_embed.shape
 
         if self.is_video:
-
             _, _, T, H, W = x.shape
             if H == self.img_height and W == self.img_width and T == self.num_frames:
                 return pos_embed
 
             elif H == self.img_height and W == self.img_width and T < self.num_frames:
-                new_N = int(
-                    (T // self.tubelet_size)
-                    * (H // self.patch_size)
-                    * (W // self.patch_size)
-                )
+                new_N = int((T // self.tubelet_size) * (H // self.patch_size) * (W // self.patch_size))
                 return pos_embed[:, :new_N, :]
 
             T = T // self.tubelet_size
@@ -377,7 +352,6 @@ class VisionTransformer(nn.Module):
             return pos_embed
 
         else:
-
             _, _, H, W = x.shape
             if H == self.img_height and W == self.img_width:
                 return pos_embed
@@ -386,9 +360,7 @@ class VisionTransformer(nn.Module):
             scale_factor = math.sqrt(npatch / N)
 
             pos_embed = nn.functional.interpolate(
-                pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(
-                    0, 3, 1, 2
-                ),
+                pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
                 scale_factor=scale_factor,
                 mode="bicubic",
             )

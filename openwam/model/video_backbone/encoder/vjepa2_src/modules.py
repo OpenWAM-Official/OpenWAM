@@ -7,15 +7,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from timm.models.layers import drop_path
 
 
 def rotate_queries_or_keys(x, pos, n_registers, has_cls_first):
     B, num_heads, N, D = x.size()
-    assert (
-        D % 2 == 0
-    ), "Embedding dimension must be a multiple of 2 for block matrix rotation"
+    assert D % 2 == 0, "Embedding dimension must be a multiple of 2 for block matrix rotation"
 
     n_cls = 1 if has_cls_first else 0
     start_ctx = n_cls
@@ -110,9 +107,7 @@ class SwiGLUFFN(nn.Module):
         if wide_silu:
             swiglu_hidden_features = int(2 * hidden_features / 3)
             align_as = 8
-            swiglu_hidden_features = (
-                (swiglu_hidden_features + align_as - 1) // align_as * align_as
-            )
+            swiglu_hidden_features = (swiglu_hidden_features + align_as - 1) // align_as * align_as
         self.fc1 = nn.Linear(in_features, swiglu_hidden_features)
         self.fc2 = nn.Linear(in_features, swiglu_hidden_features)
         self.act = act_layer()
@@ -217,9 +212,7 @@ class RoPEAttention(nn.Module):
             d_mask, h_mask, w_mask = self.separate_positions(mask, H_patches, W_patches)
         else:
             if T is None or H_patches is None or W_patches is None:
-                mask = torch.arange(
-                    int(grid_depth * self.grid_size * self.grid_size), device=x.device
-                )
+                mask = torch.arange(int(grid_depth * self.grid_size * self.grid_size), device=x.device)
             else:
                 mask = torch.arange(int(T * H_patches * W_patches), device=x.device)
             d_mask, h_mask, w_mask = self.separate_positions(mask, H_patches, W_patches)
@@ -284,9 +277,7 @@ class RoPEAttention(nn.Module):
 
         if self.use_sdpa:
             with torch.backends.cuda.sdp_kernel():
-                x = F.scaled_dot_product_attention(
-                    q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal
-                )
+                x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal)
                 attn = None
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -328,18 +319,12 @@ class Attention(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         if self.use_sdpa:
             with torch.backends.cuda.sdp_kernel():
-                x = F.scaled_dot_product_attention(
-                    q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal
-                )
+                x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal)
                 attn = None
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -468,18 +453,10 @@ class CrossAttention(nn.Module):
 
     def forward(self, q, x):
         B, n, C = q.shape
-        q = (
-            self.q(q)
-            .reshape(B, n, self.num_heads, C // self.num_heads)
-            .permute(0, 2, 1, 3)
-        )
+        q = self.q(q).reshape(B, n, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
         B, N, C = x.shape
-        kv = (
-            self.kv(x)
-            .reshape(B, N, 2, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
+        kv = self.kv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         k, v = kv[0], kv[1]
 
         if self.use_sdpa:
@@ -509,9 +486,7 @@ class CrossAttentionBlock(nn.Module):
         self.xattn = CrossAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias)
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = MLP(
-            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer
-        )
+        self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer)
 
     def forward(self, q, x):
         y = self.xattn(q, self.norm1(x))
@@ -526,9 +501,7 @@ class Lambda_LinearWarmupHold:
     0 before start_iter and constant (=lambda_value) from end_iter onwards.
     """
 
-    def __init__(
-        self, lambda_value: float, start_iter: int = 15_000, end_iter: int = 30_000
-    ):
+    def __init__(self, lambda_value: float, start_iter: int = 15_000, end_iter: int = 30_000):
         assert end_iter > start_iter, "end_iter must be > start_iter"
         self.lambda_value = float(lambda_value)
         self.start = int(start_iter)
