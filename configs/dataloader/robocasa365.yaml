@@ -1,0 +1,58 @@
+type: robocasa365
+
+# ── Dataset root ─────────────────────────────────────────────────────────────
+# Points at the RAW RoboCasa365 download (LeRobot v2.1, read directly — no
+# migration/conversion). May be EITHER:
+#   - a single task's lerobot/ bucket (has meta/info.json), or
+#   - a root holding many .../<Task>/<date>/lerobot buckets (multi-task: one
+#     RoboCasa365Dataset per bucket, concatenated).
+# Fixed-base task subset (moma_required=No, 112 tasks):
+#   benchmarks/robocasa365/fixed_base_tasks.json
+dataset_dir: /path/to/robocasa365/datasets/v1.0
+task_name: null                   # null = use every discovered bucket; set name = filter to one task dir
+task_roots: null                  # optional explicit list of bucket paths (relative to dataset_dir); overrides discovery
+
+# ── Frame sampling (aligned with OXE / RoboCOIN / RoboTwin) ──────────────────
+# num_frames   = state window length in raw frames; action horizon = num_frames - 1.
+# video_stride = video-only stride; state/action stay at raw rate.
+# video length = (num_frames - 1) // video_stride + 1   (must divide evenly)
+# proprio = eef_pose[0:1] (1, 20); action = eef_pose[1:num_frames] (num_frames-1, 20).
+num_frames: 33
+video_stride: 4
+window_stride: 1
+repeat: 1
+
+# ── Image size / multi-view L-shape (FastWAM-compatible) ─────────────────────
+# multiview=true → L-shape canvas 384H×320W (matches the deploy server's compose,
+# so train/eval frames stay in-distribution):
+#   +---------------------------+   top  256H×320W → robot0_agentview_left (head)
+#   |          head             |
+#   +-------------+-------------+   bot-L 128H×160W → robot0_eye_in_hand (the arm's wrist)
+#   |    wrist    |   BLACK     |   bot-R 128H×160W → BLACK (single-arm: no 2nd wrist)
+#   +-------------+-------------+
+# When multiview=true, height MUST be 384 and width MUST be 320.
+height: 384
+width: 320
+multiview: true
+# Override the 3-slot layout if needed (top, bot-left, bot-right). The sentinel
+# "__missing_right_wrist__" renders a black slot. Default fills head + wrist + black.
+camera_layout: null
+
+# ── Train / val split ────────────────────────────────────────────────────────
+split: train
+val_ratio: 0.0                    # fraction of episodes reserved for validation
+seed: 42
+
+# ── Action / proprio normalization (single-arm 20-D EEF) ─────────────────────
+# RoboCasa365 is single-arm: action & proprio are BOTH the absolute EEF pose from
+# observation.state — eef_pos(3) + eef_rot(quat→rot6d, 6) + gripper(1) → the LEFT
+# 10 dims of the bimanual 20-D EEF (right 10 zero-padded + masked). One shared
+# 10-D stats normalizes the whole sequence. Stats auto-resolve and, if absent,
+# auto-compute on first load to {data_root}/{task}_eef_stats.npy (precompute via
+# `python -m openwam.dataloader.robocasa365_stats_computation <bucket>`).
+#   null / "none" → no normalization (raw physical units)
+#   "min-max"     → rescale each dim into [-1, 1] using {min, max}   [default]
+#   "z-score"     → (x - mean) / std
+#   "quantile"    → clip((x - q01) / (q99 - q01) * 2 - 1, -1, 1)
+normalize_mode: min-max
+normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resolve under each bucket
