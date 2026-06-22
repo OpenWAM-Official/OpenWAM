@@ -40,6 +40,7 @@ The wire contract (message types) lives in ``benchmarks/utils/transport.py``
 
 from benchmarks.utils.action_conversion import (
     eef20d_to_ee16d,
+    eef20d_to_robocasa12d,
     quat_xyzw_to_rot6d,
     robotwin_endpose_to_eef20d,
     rot6d_to_quat_xyzw,
@@ -58,6 +59,7 @@ __all__ = [
     "WSPolicyClient",
     "build_payload",
     "eef20d_to_ee16d",
+    "eef20d_to_robocasa12d",
     "encode_numpy_b64",
     "encode_path_b64",
     "quat_xyzw_to_rot6d",

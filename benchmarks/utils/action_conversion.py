@@ -105,6 +105,95 @@ def eef20d_to_ee16d(action: np.ndarray) -> np.ndarray:
     return np.concatenate([l_xyz, l_quat, l_grip, r_xyz, r_quat, r_grip]).astype(np.float32)
 
 
+def _rot6d_to_matrix(r6d: np.ndarray) -> np.ndarray:
+    """6D rotation (first two columns) -> 3x3 rotation matrix (Gram-Schmidt)."""
+    a1, a2 = np.asarray(r6d[:3], np.float64), np.asarray(r6d[3:6], np.float64)
+    b1 = a1 / max(float(np.linalg.norm(a1)), 1e-8)
+    b2 = a2 - float(np.dot(b1, a2)) * b1
+    b2 = b2 / max(float(np.linalg.norm(b2)), 1e-8)
+    b3 = np.cross(b1, b2)
+    return np.stack([b1, b2, b3], axis=1)  # columns = b1,b2,b3
+
+
+def _matrix_to_axis_angle(R: np.ndarray) -> np.ndarray:
+    """3x3 rotation matrix -> axis-angle (rotation vector), pure numpy."""
+    angle = np.arccos(np.clip((np.trace(R) - 1.0) * 0.5, -1.0, 1.0))
+    if angle < 1e-8:
+        return np.zeros(3, np.float32)
+    axis = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]], np.float64)
+    axis = axis / max(float(np.linalg.norm(axis)), 1e-8)
+    return (axis * angle).astype(np.float32)
+
+
+def eef20d_to_robocasa12d(
+    action: np.ndarray,
+    proprio_eef_pos: np.ndarray,
+    proprio_eef_rot6d: np.ndarray,
+    *,
+    pos_scale: float,
+    rot_scale: float,
+    base_motion: np.ndarray | None = None,
+    control_mode: float = -1.0,
+    clip: bool = True,
+) -> np.ndarray:
+    """Bridge the model's 20-D **absolute** EEF pose to RoboCasa's 12-D **OSC** action.
+
+    RoboCasa365's ``RoboCasaGymEnv`` consumes a 12-D robosuite OSC_POSE + mobile-base
+    action; the OpenWAM model trained by ``RoboCasa365Dataset`` instead predicts a
+    20-D *absolute* single-arm EEF pose (left half ``[pos3, rot6d6, grip1]``, right
+    half 0). This is the dual of robotwin's client-side ``eef20d_to_ee16d`` — except
+    robotwin's env takes absolute 16-D poses, whereas RoboCasa's OSC controller takes
+    *delta* commands scaled into ``[-1, 1]``, so the conversion needs the current
+    proprio (to form the delta) and the controller's scaling.
+
+    Output is the flat 12-D in the SERVER/``slice_action`` order (NOT modality.json
+    order)::
+
+        [eef_pos_cmd(3), eef_rot_cmd(3), gripper(1), base_motion(4), control_mode(1)]
+
+    Args:
+        action: 20-D EEF action; only the left-arm 10 dims ``[pos3, rot6d6, grip1]`` are used.
+        proprio_eef_pos: (3,) current absolute EEF position (from ``state.end_effector_position_relative``).
+        proprio_eef_rot6d: (6,) current EEF rotation as rot6d (quat->rot6d of ``state.end_effector_rotation_relative``).
+        pos_scale: robosuite OSC position ``output_max`` (metres mapped to action 1.0). **REQUIRED, env-specific** —
+            read it from the eval env's OSC_POSE controller config; a wrong value drives wrong-magnitude motions.
+        rot_scale: robosuite OSC rotation ``output_max`` (radians mapped to action 1.0). Same caveat as ``pos_scale``.
+        base_motion: (4,) base command; defaults to zeros (fixed-base subset — base is dropped at train time).
+        control_mode: scalar; defaults to -1.0 (the near-constant value observed in the fixed-base data).
+        clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
+
+    NOTE: ``pos_scale`` / ``rot_scale`` and the ``control_mode`` / ``base_motion`` constants
+    are part of the env's OSC controller contract. They cannot be verified without a
+    RoboCasa365-trained checkpoint run in the real env (Phase 2); the math (delta + axis-angle
+    + ordering) here is unit-tested, but the scalar contract must be confirmed end-to-end.
+    """
+    act = np.asarray(action, dtype=np.float64).reshape(-1)
+    if act.shape[0] != 20:
+        raise ValueError(f"expected a 20-D EEF action, got {act.shape[0]}")
+    cur_pos = np.asarray(proprio_eef_pos, np.float64).reshape(-1)
+    if cur_pos.shape[0] != 3:
+        raise ValueError(f"proprio_eef_pos must be 3-D, got {cur_pos.shape[0]}")
+    tgt_pos, tgt_r6d, grip = act[0:3], act[3:9], act[9:10]
+
+    # Position: absolute target -> scaled OSC delta.
+    pos_cmd = (tgt_pos - cur_pos) / max(float(pos_scale), 1e-8)
+
+    # Rotation: relative rotation R_target @ R_current^-1 -> axis-angle -> scaled.
+    R_t = _rot6d_to_matrix(tgt_r6d)
+    R_c = _rot6d_to_matrix(np.asarray(proprio_eef_rot6d, np.float64).reshape(-1))
+    rot_cmd = _matrix_to_axis_angle(R_t @ R_c.T).astype(np.float64) / max(float(rot_scale), 1e-8)
+
+    if clip:
+        pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
+        rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
+
+    base = np.zeros(4, np.float64) if base_motion is None else np.asarray(base_motion, np.float64).reshape(-1)
+    if base.shape[0] != 4:
+        raise ValueError(f"base_motion must be 4-D, got {base.shape[0]}")
+    # SERVER / slice_action order: eef_pos, eef_rot, grip, base_motion, control_mode.
+    return np.concatenate([pos_cmd, rot_cmd, grip, base, [float(control_mode)]]).astype(np.float32)
+
+
 def robotwin_endpose_to_eef20d(
     left_endpose: np.ndarray,
     right_endpose: np.ndarray,
