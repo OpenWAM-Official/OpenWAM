@@ -10,9 +10,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from openwam.model.architectures.shared_backbone.mask import (
-    attach_shared_attention_mask,
-    build_shared_backbone_attention_mask,
+from openwam.model.architectures.shared_backbone.state import attach_shared_attention_mask
+from openwam.model.architectures.utils.mask_modes import (
+    ACTION_SEES_VIDEO,
+    ISOLATED,
+    MUTUAL,
+    VIDEO_SEES_ACTION,
     set_video_attention_mask_mode,
 )
 from openwam.model.video_backbone.base import BlockLoopState
@@ -47,7 +50,6 @@ def _make_state(vb: Wan21, video: torch.Tensor, action: torch.Tensor, *, mask=No
     extras = {
         "dit": vb._dit,
         "vace": None,
-        "use_usp": False,
         "time_embed": torch.zeros(x.shape[0], x.shape[1], x.shape[2]),
     }
     if mask is not None:
@@ -102,39 +104,24 @@ def _old_masked_block_reference(
     return block.gate(x, gate_mlp, block.ffn(input_x))
 
 
-def test_shared_backbone_attention_mask_bidirectional_returns_none():
-    vb = _make_wan_backbone()
+def _build_mask_via_attach(vb, *, n_video, n_action, n_state=0, mode=ACTION_SEES_VIDEO):
+    """Drive the real shared path: attach builds the mask onto state.extras."""
+    total = n_video + n_action + n_state
     state = BlockLoopState(
-        hidden_states=torch.zeros(1, 7, vb.dim),
-        time_mod=torch.zeros(1, 7, 6, vb.dim),
-        rope_freqs=_identity_freqs(7, vb.head_dim),
+        hidden_states=torch.zeros(1, total, vb.dim),
+        time_mod=torch.zeros(1, total, 6, vb.dim),
+        rope_freqs=_identity_freqs(total, vb.head_dim),
         context=torch.zeros(1, 4, vb.dim),
-        grid_frames=5,
+        grid_frames=n_video,
         grid_height=1,
         grid_width=1,
+        extras={},
     )
-
-    mask = build_shared_backbone_attention_mask(vb, state, n_action=2, attention_mask_mode="bidirectional")
-    assert mask is None
-
-
-def test_shared_backbone_attach_mask_bidirectional_allows_missing_extras():
-    vb = _make_wan_backbone()
-    state = BlockLoopState(
-        hidden_states=torch.zeros(1, 7, vb.dim),
-        time_mod=torch.zeros(1, 7, 6, vb.dim),
-        rope_freqs=_identity_freqs(7, vb.head_dim),
-        context=torch.zeros(1, 4, vb.dim),
-        grid_frames=5,
-        grid_height=1,
-        grid_width=1,
-        extras=None,
-    )
-
-    attach_shared_attention_mask(vb, state, n_action=2, attention_mask_mode="bidirectional")
+    attach_shared_attention_mask(vb, state, n_action, n_state=n_state, attention_mask_mode=mode)
+    return state.extras["shared_attention_mask"]
 
 
-def test_shared_backbone_attach_mask_joint_requires_extras():
+def test_shared_backbone_attach_mask_requires_extras():
     vb = _make_wan_backbone()
     state = BlockLoopState(
         hidden_states=torch.zeros(1, 7, vb.dim),
@@ -148,10 +135,10 @@ def test_shared_backbone_attach_mask_joint_requires_extras():
     )
 
     with pytest.raises(RuntimeError, match="shared_attention_mask"):
-        attach_shared_attention_mask(vb, state, n_action=2, attention_mask_mode="joint")
+        attach_shared_attention_mask(vb, state, n_action=2, attention_mask_mode=ACTION_SEES_VIDEO)
 
 
-def test_shared_backbone_attach_mask_joint_rejects_usp():
+def test_shared_backbone_attach_mask_rejects_unknown_mode():
     vb = _make_wan_backbone()
     state = BlockLoopState(
         hidden_states=torch.zeros(1, 7, vb.dim),
@@ -161,11 +148,11 @@ def test_shared_backbone_attach_mask_joint_rejects_usp():
         grid_frames=5,
         grid_height=1,
         grid_width=1,
-        extras={"use_usp": True},
+        extras={},
     )
 
-    with pytest.raises(NotImplementedError, match="unified sequence parallel"):
-        attach_shared_attention_mask(vb, state, n_action=2, attention_mask_mode="joint")
+    with pytest.raises(ValueError, match="attention_mask_mode"):
+        attach_shared_attention_mask(vb, state, n_action=2, attention_mask_mode="bidirectional")
 
 
 def test_shared_backbone_set_video_attention_mask_mode_warns_when_not_settable(caplog):
@@ -222,19 +209,9 @@ def test_wan_action_tmod_rejects_mismatched_shapes():
         action_tokens.build_action_t_mod(torch.rand(2, 2), n_action_tokens=3, dit=vb._dit, batch_size=2)
 
 
-def test_shared_backbone_attention_mask_joint_layout():
+def test_shared_backbone_attention_mask_action_sees_video_layout():
     vb = _make_wan_backbone()
-    state = BlockLoopState(
-        hidden_states=torch.zeros(1, 8, vb.dim),
-        time_mod=torch.zeros(1, 8, 6, vb.dim),
-        rope_freqs=_identity_freqs(8, vb.head_dim),
-        context=torch.zeros(1, 4, vb.dim),
-        grid_frames=5,
-        grid_height=1,
-        grid_width=1,
-    )
-
-    mask = build_shared_backbone_attention_mask(vb, state, n_action=3, attention_mask_mode="joint")
+    mask = _build_mask_via_attach(vb, n_video=5, n_action=3, mode=ACTION_SEES_VIDEO)
     Sv, Sa = 5, 3
     assert mask.shape == (Sv + Sa, Sv + Sa)
     assert mask.dtype == torch.bool
@@ -244,19 +221,9 @@ def test_shared_backbone_attention_mask_joint_layout():
     assert mask[Sv:, Sv:].all()
 
 
-def test_shared_backbone_attention_mask_joint_layout_with_state():
+def test_shared_backbone_attention_mask_layout_with_state():
     vb = _make_wan_backbone()
-    state = BlockLoopState(
-        hidden_states=torch.zeros(1, 10, vb.dim),
-        time_mod=torch.zeros(1, 10, 6, vb.dim),
-        rope_freqs=_identity_freqs(10, vb.head_dim),
-        context=torch.zeros(1, 4, vb.dim),
-        grid_frames=5,
-        grid_height=1,
-        grid_width=1,
-    )
-
-    mask = build_shared_backbone_attention_mask(vb, state, n_action=3, n_state=2, attention_mask_mode="joint")
+    mask = _build_mask_via_attach(vb, n_video=5, n_action=3, n_state=2, mode=ACTION_SEES_VIDEO)
     Sv, Sa, Ss = 5, 3, 2
     v = slice(0, Sv)
     a = slice(Sv, Sv + Sa)
@@ -272,21 +239,39 @@ def test_shared_backbone_attention_mask_joint_layout_with_state():
     assert mask[s, s].all()
 
 
-def test_shared_backbone_attention_mask_bidirectional_with_state_returns_none():
+@pytest.mark.parametrize(
+    "mode, v_sees_a, a_sees_all_v",
+    [
+        (MUTUAL, True, True),
+        (ACTION_SEES_VIDEO, False, True),
+        (VIDEO_SEES_ACTION, True, False),
+        (ISOLATED, False, False),
+    ],
+)
+def test_shared_backbone_cross_modal_modes_with_state_tail(mode, v_sees_a, a_sees_all_v):
+    """All four modes drive the shared mask; the state token stays a read-only
+    tail (everyone sees it, it sees only itself). v↔v here is bidirectional
+    (mock backbone), so tokens_per_frame=1 makes only the first video row a
+    first-frame row."""
     vb = _make_wan_backbone()
-    state = BlockLoopState(
-        hidden_states=torch.zeros(1, 10, vb.dim),
-        time_mod=torch.zeros(1, 10, 6, vb.dim),
-        rope_freqs=_identity_freqs(10, vb.head_dim),
-        context=torch.zeros(1, 4, vb.dim),
-        grid_frames=5,
-        grid_height=1,
-        grid_width=1,
-    )
-
-    mask = build_shared_backbone_attention_mask(vb, state, n_action=3, n_state=2, attention_mask_mode="bidirectional")
-
-    assert mask is None
+    Sv, Sa, Ss, ff = 5, 3, 2, 1
+    mask = _build_mask_via_attach(vb, n_video=Sv, n_action=Sa, n_state=Ss, mode=mode)
+    u_start = Sv + Sa
+    # a↔a full.
+    assert mask[Sv:u_start, Sv:u_start].all()
+    # state read-only tail.
+    assert mask[:u_start, u_start:].all()
+    assert mask[u_start:, u_start:].all()
+    assert not mask[u_start:, :u_start].any()
+    # v→a: first-frame row excluded; later rows follow the mode.
+    assert not mask[:ff, Sv:u_start].any()
+    assert mask[ff:Sv, Sv:u_start].all() if v_sees_a else not mask[ff:Sv, Sv:u_start].any()
+    # a→v: all video, or first frame only.
+    if a_sees_all_v:
+        assert mask[Sv:u_start, :Sv].all()
+    else:
+        assert mask[Sv:u_start, :ff].all()
+        assert not mask[Sv:u_start, ff:Sv].any()
 
 
 def test_shared_backbone_joint_mask_blocks_action_from_video_queries():
@@ -299,16 +284,7 @@ def test_shared_backbone_joint_mask_blocks_action_from_video_queries():
     action_a = torch.randn(B, Sa, D)
     action_b = torch.randn(B, Sa, D) + 10.0
 
-    mask_state = BlockLoopState(
-        hidden_states=torch.zeros(B, Sv + Sa, D),
-        time_mod=torch.zeros(B, Sv + Sa, 6, D),
-        rope_freqs=_identity_freqs(Sv + Sa, vb.head_dim),
-        context=torch.zeros(B, 4, D),
-        grid_frames=Sv,
-        grid_height=1,
-        grid_width=1,
-    )
-    mask = build_shared_backbone_attention_mask(vb, mask_state, n_action=Sa, attention_mask_mode="joint")
+    mask = _build_mask_via_attach(vb, n_video=Sv, n_action=Sa, mode=ACTION_SEES_VIDEO)
 
     with torch.no_grad():
         out_joint_a = vb.run_block(0, _make_state(vb, video, action_a, mask=mask)).hidden_states[:, :Sv]
@@ -379,7 +355,7 @@ def test_wan_shared_token_injection_extends_tmod_freqs_and_extracts_action_only(
         grid_frames=Sv,
         grid_height=1,
         grid_width=1,
-        extras={"dit": vb._dit, "vace": None, "use_usp": False, "time_embed": torch.zeros(B, Sv, D)},
+        extras={"dit": vb._dit, "vace": None, "time_embed": torch.zeros(B, Sv, D)},
     )
     action_tokens = torch.randn(B, Sa, D)
     state_tokens = torch.randn(B, Ss, D)
@@ -417,7 +393,7 @@ def test_wan_shared_token_injection_supports_state_only_video_conditioning():
         grid_frames=Sv,
         grid_height=1,
         grid_width=1,
-        extras={"dit": vb._dit, "vace": None, "use_usp": False},
+        extras={"dit": vb._dit, "vace": None},
     )
     state_tokens = torch.randn(B, Ss, D)
 

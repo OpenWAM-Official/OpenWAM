@@ -13,7 +13,6 @@ The driver owns no parameters — a plain Python class, absent from ``state_dict
 from __future__ import annotations
 
 import copy
-import logging
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -22,15 +21,17 @@ from einops import rearrange
 from torch import Tensor
 
 from openwam.model.architectures.utils.common import compute_video_tokens_per_frame
+from openwam.model.architectures.utils.mask_modes import (
+    ACTION_SEES_VIDEO,
+    build_cross_modal_attention_mask,
+    set_video_attention_mask_mode,
+    validate_attention_mask_mode,
+)
 
 if TYPE_CHECKING:
     from openwam.model.action_backbone.base import ActionDiTBackbone
     from openwam.model.architectures.base import ActionState
     from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
-
-logger = logging.getLogger(__name__)
-
-_VALID_ATTENTION_MASK_MODES = ("bidirectional", "joint")
 
 
 class DualSystemMoTDriver:
@@ -47,23 +48,12 @@ class DualSystemMoTDriver:
     backbone owns its own Q/K/V projections that map their residual streams
     into the shared ``num_heads * head_dim`` attention space.
 
-    Two ``attention_mask_mode`` values are supported:
-
-    - ``bidirectional``: pass ``None`` to SDPA — full v↔a coupling, fastest
-      kernel selection. Useful for ablations and tests.
-    - ``joint``: build the FastWAM-Joint mask
-      ([fastwam_joint.py:29-49](references/FastWAM/src/fastwam/models/wan22/fastwam_joint.py#L29)),
-      a ``[Sv+Sa, Sv+Sa]`` bool layout where:
-
-        - ``v↔v`` is determined by ``vb.video_attention_mask_mode``
-          (``bidirectional`` / ``per_frame_causal`` / ``first_frame_causal``);
-        - ``a↔a`` is fully connected;
-        - ``a→v`` is fully connected (action queries see all video keys);
-        - ``v→a`` is **off** (video queries do not see action keys —
-          this is what makes optional video-KV prefill correct).
-
-      The mask is built once per :meth:`run_joint_loop` from the shapes in
-      ``vstate`` and reused across layers.
+    The cross-modal ``[Sv+Sa, Sv+Sa]`` mask is built once per
+    :meth:`run_joint_loop` and reused across layers. ``v↔v`` follows
+    ``vb.video_attention_mask_mode``; ``a↔a`` is fully connected; the v↔a
+    coupling follows ``attention_mask_mode`` — see :mod:`utils.mask_modes`
+    for the four modes (default ``action_sees_video``, the FastWAM-Joint
+    layout where video does not see action so video-KV prefill stays correct).
     """
 
     def __init__(
@@ -72,7 +62,7 @@ class DualSystemMoTDriver:
         ab: "ActionDiTBackbone",
         *,
         mot_checkpoint_mixed_attn: bool = True,
-        attention_mask_mode: str = "joint",
+        attention_mask_mode: str = ACTION_SEES_VIDEO,
         video_attention_mask_mode: Optional[str] = None,
     ) -> None:
         if vb.num_layers != ab.num_layers:
@@ -90,11 +80,7 @@ class DualSystemMoTDriver:
             raise ValueError(
                 f"DualSystemMoTDriver: video head_dim ({vb.head_dim}) must equal action head_dim ({ab.head_dim})."
             )
-        if attention_mask_mode not in _VALID_ATTENTION_MASK_MODES:
-            raise ValueError(
-                f"DualSystemMoTDriver: unknown attention_mask_mode '{attention_mask_mode}'. "
-                f"Choose from: {_VALID_ATTENTION_MASK_MODES}."
-            )
+        validate_attention_mask_mode(attention_mask_mode)
 
         self.vb = vb
         self.ab = ab
@@ -106,49 +92,11 @@ class DualSystemMoTDriver:
 
         # Allow the architecture / config to override the video v↔v sub-mode.
         # When None we defer to whatever ``vb.video_attention_mask_mode`` reports.
-        if video_attention_mask_mode is not None:
-            try:
-                vb.video_attention_mask_mode = video_attention_mask_mode  # type: ignore[misc]
-            except AttributeError:
-                logger.warning(
-                    "video_attention_mask_mode='%s' supplied to DualSystemMoTDriver but "
-                    "%s does not expose a settable property; falling back to %s.",
-                    video_attention_mask_mode,
-                    type(vb).__name__,
-                    vb.video_attention_mask_mode,
-                )
+        set_video_attention_mask_mode(vb, video_attention_mask_mode)
 
     # ------------------------------------------------------------------
     # Mixed attention
     # ------------------------------------------------------------------
-
-    def _build_joint_mask(
-        self,
-        s_video: int,
-        s_action: int,
-        video_tokens_per_frame: int,
-        device: torch.device,
-    ) -> Tensor:
-        """Build the FastWAM-Joint ``[Sv+Sa, Sv+Sa]`` bool attention mask.
-
-        Layout (rows = queries, cols = keys; ``True`` means "attend to"):
-
-        - ``[:Sv, :Sv]`` = ``vb.build_video_to_video_mask(...)``
-        - ``[Sv:, Sv:]`` = True  (action↔action)
-        - ``[Sv:, :Sv]`` = True  (action queries → all video keys)
-        - ``[:Sv, Sv:]`` = False (video queries → no action keys)
-        """
-        total = s_video + s_action
-        mask = torch.zeros((total, total), dtype=torch.bool, device=device)
-        mask[:s_video, :s_video] = self.vb.build_video_to_video_mask(
-            video_seq_len=s_video,
-            video_tokens_per_frame=video_tokens_per_frame,
-            device=device,
-        )
-        mask[s_video:, s_video:] = True
-        mask[s_video:, :s_video] = True
-        # ``mask[:s_video, s_video:]`` stays False — video doesn't see action.
-        return mask
 
     def _build_attention_mask(
         self,
@@ -157,22 +105,21 @@ class DualSystemMoTDriver:
         video_tokens_per_frame: int,
         *,
         device: torch.device,
-    ) -> Optional[Tensor]:
-        """Return the SDPA attn_mask for the configured mode.
+    ) -> Tensor:
+        """Build the ``[Sv+Sa, Sv+Sa]`` cross-modal bool mask for the configured mode.
 
-        ``bidirectional`` returns ``None`` so SDPA picks the fastest fused
-        kernel (semantically equivalent to a fully-True mask).
+        Delegates to :func:`build_cross_modal_attention_mask`. ``v↔v`` follows
+        ``vb.video_attention_mask_mode``; ``a↔a`` is fully connected; ``v↔a``
+        follows ``attention_mask_mode`` (see :mod:`utils.mask_modes`).
         """
-        if self.attention_mask_mode == "bidirectional":
-            return None
-        if self.attention_mask_mode == "joint":
-            return self._build_joint_mask(
-                s_video=s_video,
-                s_action=s_action,
-                video_tokens_per_frame=video_tokens_per_frame,
-                device=device,
-            )
-        raise RuntimeError(f"unhandled attention_mask_mode '{self.attention_mask_mode}'")
+        return build_cross_modal_attention_mask(
+            self.vb,
+            s_video=s_video,
+            s_action=s_action,
+            video_tokens_per_frame=video_tokens_per_frame,
+            mode=self.attention_mask_mode,
+            device=device,
+        )
 
     def _mixed_attention(
         self,
@@ -286,10 +233,8 @@ class DualSystemMoTDriver:
         k_cat = torch.cat([k_v, k_a], dim=1)
         v_cat = torch.cat([v_v, v_a], dim=1)
         # Contract: `run_joint_loop` pre-builds ``attn_mask`` once per forward and
-        # passes it in for every layer. ``attn_mask=None`` is the SDPA "no mask"
-        # signal — legitimate only when ``attention_mask_mode='bidirectional'``.
-        # _step_impl does NOT rebuild the mask itself; any direct caller must follow
-        # the same contract.
+        # passes it in for every layer. _step_impl does NOT rebuild the mask
+        # itself; any direct caller must pass the same pre-built mask.
 
         if self.mot_checkpoint_mixed_attn and ab.training and not suppress_inner_attn_ckpt:
             mixed = torch.utils.checkpoint.checkpoint(

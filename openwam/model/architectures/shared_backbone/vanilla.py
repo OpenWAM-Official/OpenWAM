@@ -16,12 +16,15 @@ from torch import Tensor
 from openwam.model.action_backbone.shared_action_backbone import SharedVanillaActionBackbone
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
-from openwam.model.architectures.shared_backbone.mask import (
+from openwam.model.architectures.shared_backbone.state import (
+    align_state_tokens_to_action_batch,
     attach_shared_attention_mask,
-    set_video_attention_mask_mode,
-    validate_shared_attention_mask_mode,
 )
-from openwam.model.architectures.shared_backbone.state import align_state_tokens_to_action_batch
+from openwam.model.architectures.utils.mask_modes import (
+    ACTION_SEES_VIDEO,
+    set_video_attention_mask_mode,
+    validate_attention_mask_mode,
+)
 
 
 def _validate_per_token_t_mod(vstate) -> None:
@@ -53,7 +56,7 @@ class SharedBackboneVanillaArchitecture(BaseWAMArchitecture):
         action_decoder_hidden_dim = cfg.get("action_decoder_hidden_dim")
         use_proprioception = bool(cfg.get("use_proprioception", False))
         state_dim = int(cfg.get("state_dim", 0) or 0)
-        self.attention_mask_mode = validate_shared_attention_mask_mode(str(cfg.get("attention_mask_mode", "joint")))
+        self.attention_mask_mode = validate_attention_mask_mode(str(cfg.get("attention_mask_mode", ACTION_SEES_VIDEO)))
         self.video_attention_mask_mode = str(cfg.get("video_attention_mask_mode", "first_frame_causal"))
         if self.video_backbone is not None:
             set_video_attention_mask_mode(self.video_backbone, self.video_attention_mask_mode)
@@ -134,7 +137,7 @@ class SharedBackboneVanillaArchitecture(BaseWAMArchitecture):
                 vstate,
                 n_action,
                 n_state=n_state,
-                attention_mask_mode=getattr(self, "attention_mask_mode", "joint"),
+                attention_mask_mode=getattr(self, "attention_mask_mode", ACTION_SEES_VIDEO),
             )
 
         for block_id in range(vb.num_layers):

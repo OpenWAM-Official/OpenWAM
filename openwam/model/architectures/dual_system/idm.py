@@ -32,6 +32,7 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
 
 logger = logging.getLogger(__name__)
 
@@ -173,9 +174,7 @@ class IDMMoTDriver(DualSystemMoTDriver):
         video_seq_len: int,
         video_tokens_per_frame: int,
         device: torch.device,
-    ) -> Optional[Tensor]:
-        if self.attention_mask_mode == "bidirectional":
-            return None
+    ) -> Tensor:
         return self.vb.build_video_to_video_mask(
             video_seq_len=video_seq_len,
             video_tokens_per_frame=video_tokens_per_frame,
@@ -296,16 +295,16 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             latent_decoder=cfg.get("latent_decoder"),
         )
 
-        attention_mask_mode = str(cfg.get("attention_mask_mode", "joint"))
-        if attention_mask_mode != "joint":
+        attention_mask_mode = str(cfg.get("attention_mask_mode", ACTION_SEES_VIDEO))
+        if attention_mask_mode != ACTION_SEES_VIDEO:
             raise ValueError(
-                "DualSystem IDM fixes attention_mask_mode='joint' to preserve FastWAM-IDM "
+                "DualSystem IDM fixes attention_mask_mode='action_sees_video' to preserve FastWAM-IDM "
                 "train/inference mask semantics. Do not set attention_mask_mode for variant='idm'."
             )
 
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(cfg.get("mot_checkpoint_mixed_attn", True)),
-            "attention_mask_mode": "joint",
+            "attention_mask_mode": ACTION_SEES_VIDEO,
             "video_attention_mask_mode": str(cfg.get("video_attention_mask_mode", "first_frame_causal")),
         }
 

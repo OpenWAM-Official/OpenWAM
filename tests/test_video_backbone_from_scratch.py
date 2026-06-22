@@ -344,7 +344,7 @@ model:
     bridge_layers: null
     bridge_interval: 1
     mot_checkpoint_mixed_attn: true
-    attention_mask_mode: joint
+    attention_mask_mode: action_sees_video
     video_attention_mask_mode: first_frame_causal
     dim: 1024
     text_dim: 4096
@@ -444,7 +444,7 @@ model:
     bridge_layers: null
     bridge_interval: 1
     mot_checkpoint_mixed_attn: true
-    attention_mask_mode: joint
+    attention_mask_mode: action_sees_video
     video_attention_mask_mode: first_frame_causal
     dim: 1024
     text_dim: 4096

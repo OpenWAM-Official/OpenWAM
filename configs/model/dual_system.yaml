@@ -39,9 +39,15 @@ architecture:
 
   # MoT options (joint_self_attn / idm only; ignored by joint_cross_attn).
   mot_checkpoint_mixed_attn: true       # grad-checkpoint the mixed attention (VRAM ↓, +1 recompute/layer)
-  # joint mask: v↔v from video_attention_mask_mode, a↔a True, a→v True, v→a False.
-  # idm fixes this to `joint` internally — do not override for idm.
-  attention_mask_mode: joint   # joint | bidirectional
+  # Cross-modal visibility (video<->action). Two invariants: v<->v controlled by
+  # video_attention_mask_mode; a<->a always mutually visible. Modes:
+  #   mutual             video sees action (except first-frame rows), action sees all video
+  #   action_sees_video  video can't see action, action sees all video
+  #   video_sees_action  video sees action (except first-frame rows), action sees only first frame
+  #   isolated           video can't see action, action sees only first frame
+  # joint_self_attn only; joint_cross_attn ignores this (no joint mask);
+  # idm locks action_sees_video internally (do not override).
+  attention_mask_mode: action_sees_video
   # v↔v block layout; idm also uses it for the teacher-forcing + cache-prefill submasks.
   video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
 

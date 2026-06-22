@@ -96,7 +96,7 @@ def test_idm_rejects_non_joint_attention_mask_mode():
 
     from openwam.model import build_architecture
 
-    with pytest.raises(ValueError, match="attention_mask_mode='joint'"):
+    with pytest.raises(ValueError, match="attention_mask_mode='action_sees_video'"):
         build_architecture(
             "dual_system_idm",
             {
@@ -108,7 +108,7 @@ def test_idm_rejects_non_joint_attention_mask_mode():
                 "num_heads": 4,
                 "video_dim": 64,
                 "bridge_layers": (0, 2),
-                "attention_mask_mode": "bidirectional",
+                "attention_mask_mode": "mutual",
             },
         )
 
@@ -159,7 +159,7 @@ def test_idm_teacher_forcing_mask():
     ab.head_dim = 16
     ab.training = False
 
-    driver = IDMMoTDriver(vb, ab, attention_mask_mode="joint")
+    driver = IDMMoTDriver(vb, ab, attention_mask_mode="action_sees_video")
 
     s_noisy = 10
     s_cond = 10
@@ -508,7 +508,7 @@ def test_idm_video_cache_matches_joint_loop():
     Stage 2 reuses ``prefill_video_cache`` + ``run_action_with_video_cache``
     instead of running joint attention every action step. That's only valid
     when the joint mask blocks ``v→a`` — see
-    ``DualSystemMoTDriver._build_joint_mask``. If that invariant ever regresses
+    ``DualSystemMoTDriver._build_attention_mask``. If that invariant ever regresses
     (or the cache layout drifts from what the joint K/V would be), the
     cached action output will diverge from the joint action output. This
     test pins the equivalence numerically.

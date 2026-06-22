@@ -12,7 +12,6 @@ absent from ``state_dict``.
 from __future__ import annotations
 
 import copy
-import logging
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -22,6 +21,12 @@ from einops import rearrange
 from torch import Tensor
 
 from openwam.model.architectures.utils.common import compute_video_tokens_per_frame
+from openwam.model.architectures.utils.mask_modes import (
+    ACTION_SEES_VIDEO,
+    build_cross_modal_attention_mask,
+    set_video_attention_mask_mode,
+    validate_attention_mask_mode,
+)
 
 if TYPE_CHECKING:
     from openwam.model.action_backbone.base import ActionDiTBackbone
@@ -29,19 +34,16 @@ if TYPE_CHECKING:
     from openwam.model.architectures.tri_system.und_expert import UnderstandingExpert, UnderstandingState
     from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
 
-logger = logging.getLogger(__name__)
-
-_VALID_ATTENTION_MASK_MODES = ("bidirectional", "joint")
-
 
 class TriSystemMoTDriver:
     """Drive one Motus layer loop across video, action, and understanding streams.
 
-    ``attention_mask_mode='joint'`` builds a trimodal mask with layout
-    ``[video, action, understanding]`` where video queries cannot attend to
-    action keys, action queries remain fully connected, and understanding
-    queries attend only to understanding keys. ``bidirectional`` keeps the
-    fully-connected trimodal attention.
+    The trimodal ``[video, action, understanding]`` mask is built once per
+    :meth:`run_joint_loop`. ``v↔v`` follows ``vb.video_attention_mask_mode``;
+    ``a↔a`` is fully connected; understanding is a read-only tail (everyone
+    attends to it, it attends only to itself); the v↔a coupling follows
+    ``attention_mask_mode`` — see :mod:`utils.mask_modes` for the four modes
+    (default ``action_sees_video``: video does not see action, action sees all video).
     """
 
     def __init__(
@@ -51,7 +53,7 @@ class TriSystemMoTDriver:
         ub: "UnderstandingExpert",
         *,
         mot_checkpoint_mixed_attn: bool = True,
-        attention_mask_mode: str = "joint",
+        attention_mask_mode: str = ACTION_SEES_VIDEO,
         video_attention_mask_mode: Optional[str] = None,
     ) -> None:
         if vb.num_layers != ab.num_layers:
@@ -74,11 +76,7 @@ class TriSystemMoTDriver:
                 "TriSystemMoTDriver: video/action/understanding head_dim must match "
                 f"(video={vb.head_dim}, action={ab.head_dim}, understanding={ub.head_dim})."
             )
-        if attention_mask_mode not in _VALID_ATTENTION_MASK_MODES:
-            raise ValueError(
-                f"TriSystemMoTDriver: unknown attention_mask_mode '{attention_mask_mode}'. "
-                f"Choose from: {_VALID_ATTENTION_MASK_MODES}."
-            )
+        validate_attention_mask_mode(attention_mask_mode)
 
         self.vb = vb
         self.ab = ab
@@ -89,17 +87,7 @@ class TriSystemMoTDriver:
         self.mot_checkpoint_mixed_attn = bool(mot_checkpoint_mixed_attn)
         self.attention_mask_mode = attention_mask_mode
 
-        if video_attention_mask_mode is not None:
-            try:
-                vb.video_attention_mask_mode = video_attention_mask_mode  # type: ignore[misc]
-            except AttributeError:
-                logger.warning(
-                    "video_attention_mask_mode='%s' supplied to TriSystemMoTDriver but "
-                    "%s does not expose a settable property; falling back to %s.",
-                    video_attention_mask_mode,
-                    type(vb).__name__,
-                    vb.video_attention_mask_mode,
-                )
+        set_video_attention_mask_mode(vb, video_attention_mask_mode)
 
     @staticmethod
     def _get_action_tokens(astate: "ActionState") -> Tensor:
@@ -127,46 +115,9 @@ class TriSystemMoTDriver:
             "or `action_tokens` before checkpointed execution."
         )
 
-    def _build_joint_mask(
-        self,
-        s_video: int,
-        s_action: int,
-        s_understanding: int,
-        video_tokens_per_frame: int,
-        device: torch.device,
-    ) -> Tensor:
-        """Build the trimodal ``[Sv+Sa+Su, Sv+Sa+Su]`` bool attention mask.
-
-        Layout (rows = queries, cols = keys; ``True`` means "attend to"):
-
-        - ``v→v`` = ``vb.build_video_to_video_mask(...)``
-        - ``v→a`` = False
-        - ``v→u`` = True
-        - action query rows are fully connected.
-        - ``u→v`` / ``u→a`` = False and ``u→u`` = True.
-
-        Assumes ``vstate.hidden_states`` has no reference-latent prefix prepended. Wan2.2-TI2V-5B
-        never populates ``reference_latents`` (model config has no ``has_ref_conv``;
-        first-frame conditioning uses the ``y`` VAE-embedding path instead). If a
-        future Wan variant adds a reference prefix, ``first_frame_causal`` will
-        misalign — the first ``tokens_per_frame`` tokens will be reference rather
-        than the real first frame.
-        """
-        total = s_video + s_action + s_understanding
-        mask = torch.ones((total, total), dtype=torch.bool, device=device)
-        mask[:s_video, :s_video] = self.vb.build_video_to_video_mask(
-            video_seq_len=s_video,
-            video_tokens_per_frame=video_tokens_per_frame,
-            device=device,
-        )
-        mask[:s_video, s_video : s_video + s_action] = False
-        u_start = s_video + s_action
-        mask[u_start:, :u_start] = False
-        return mask
-
     def _apply_und_padding_mask(
         self,
-        base_mask: Optional[Tensor],
+        base_mask: Tensor,
         und_mask: Tensor,
         s_video: int,
         s_action: int,
@@ -192,13 +143,7 @@ class TriSystemMoTDriver:
         total = s_video + s_action + s_understanding
         u_start = s_video + s_action
 
-        if base_mask is None:
-            # bidirectional mode — start from all-True 2D base.
-            base_2d = torch.ones((total, total), dtype=torch.bool, device=device)
-        else:
-            base_2d = base_mask
-
-        mask = base_2d.unsqueeze(0).unsqueeze(0).expand(B, 1, total, total).contiguous()
+        mask = base_mask.unsqueeze(0).unsqueeze(0).expand(B, 1, total, total).contiguous()
         # Caller (_build_attention_mask) guards via `und_mask.all()` — when we reach here
         # there is guaranteed to be at least one padded position, so no need to short-circuit.
         pad = ~und_mask.to(device=device, dtype=torch.bool)  # [B, Su]
@@ -223,21 +168,22 @@ class TriSystemMoTDriver:
         *,
         device: torch.device,
         und_mask: Optional[Tensor] = None,
-    ) -> Optional[Tensor]:
-        base: Optional[Tensor]
-        if self.attention_mask_mode == "bidirectional":
-            base = None
-        elif self.attention_mask_mode == "joint":
-            base = self._build_joint_mask(
-                s_video=s_video,
-                s_action=s_action,
-                s_understanding=s_understanding,
-                video_tokens_per_frame=video_tokens_per_frame,
-                device=device,
-            )
-        else:
-            raise RuntimeError(f"unhandled attention_mask_mode '{self.attention_mask_mode}'")
+    ) -> Tensor:
+        """Build the trimodal mask: video + action + understanding read-only tail.
 
+        Assumes no reference-latent prefix on ``vstate.hidden_states``. Wan2.2-TI2V-5B
+        never populates ``reference_latents``; if a future variant adds one,
+        ``first_frame_causal`` would misalign (first tokens become reference).
+        """
+        base = build_cross_modal_attention_mask(
+            self.vb,
+            s_video=s_video,
+            s_action=s_action,
+            video_tokens_per_frame=video_tokens_per_frame,
+            mode=self.attention_mask_mode,
+            device=device,
+            n_readonly_tail=s_understanding,
+        )
         if und_mask is None or bool(und_mask.all()):
             return base
         return self._apply_und_padding_mask(
@@ -326,10 +272,8 @@ class TriSystemMoTDriver:
         k_cat = torch.cat([k_v, k_a, k_u], dim=1)
         v_cat = torch.cat([v_v, v_a, v_u], dim=1)
         # Contract: `run_joint_loop` pre-builds ``attn_mask`` once per forward and
-        # passes it in for every layer. ``attn_mask=None`` is the SDPA "no mask"
-        # signal — legitimate only when ``attention_mask_mode='bidirectional'`` and
-        # no und padding is present. _step_impl does NOT rebuild the mask itself;
-        # any direct caller must follow the same contract.
+        # passes it in for every layer. _step_impl does NOT rebuild the mask itself;
+        # any direct caller must pass the same pre-built mask.
         if self.mot_checkpoint_mixed_attn and self.ab.training and not suppress_inner_attn_ckpt:
             mixed = torch.utils.checkpoint.checkpoint(
                 self._mixed_attention, q_cat, k_cat, v_cat, attn_mask, use_reentrant=False

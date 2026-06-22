@@ -165,7 +165,7 @@ def _build_dispatch_arch_with_fakes():
     arch.action_backbone = _StubBackbone()
     arch._mot_driver_kwargs = {
         "mot_checkpoint_mixed_attn": True,
-        "attention_mask_mode": "joint",
+        "attention_mask_mode": "action_sees_video",
         "video_attention_mask_mode": "first_frame_causal",
     }
     return arch

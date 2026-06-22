@@ -20,6 +20,7 @@ from openwam.model.architectures.tri_system.und_expert import (
     UnderstandingExpertConfig,
 )
 from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
 from openwam.model.vlm_backbone import build_vlm_backbone
 
 
@@ -156,7 +157,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         )
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(_cfg_get(cfg, "mot_checkpoint_mixed_attn", True)),
-            "attention_mask_mode": str(_cfg_get(cfg, "attention_mask_mode", "joint")),
+            "attention_mask_mode": str(_cfg_get(cfg, "attention_mask_mode", ACTION_SEES_VIDEO)),
             "video_attention_mask_mode": str(_cfg_get(cfg, "video_attention_mask_mode", "first_frame_causal")),
         }
         self.build_mot_driver()
@@ -338,14 +339,8 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
                 vstate = vb.run_block(block_id, vstate)
             return vb.finalize(vstate), None
 
-        if vstate.extras.get("tea_cache") is not None:
-            raise NotImplementedError("tri_system + TeaCache not supported")
-        if vstate.extras.get("use_usp", False):
-            raise NotImplementedError("tri_system + sequence parallel not supported")
         if vstate.vace_hints is not None:
             raise NotImplementedError("tri_system + VACE not supported")
-        if vstate.extras.get("animate_adapter") is not None:
-            raise NotImplementedError("tri_system + Animate not supported")
         if vlm_hidden is None and vlm_inputs is None:
             raise ValueError("tri_system forward with actions requires `vlm_inputs` or cached `vlm_hidden`.")
 

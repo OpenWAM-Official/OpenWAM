@@ -18,6 +18,13 @@ from openwam.model.architectures.tri_system.und_expert import (
     UnderstandingExpert,
     UnderstandingExpertConfig,
 )
+from openwam.model.architectures.utils.mask_modes import (
+    ACTION_SEES_VIDEO,
+    ISOLATED,
+    MUTUAL,
+    VIDEO_SEES_ACTION,
+    build_cross_modal_attention_mask,
+)
 from openwam.model.video_backbone.base import BlockLoopState
 from openwam.model.video_backbone.wan.models.dit import DiTBlock
 from openwam.model.video_backbone.wan_backbone import Wan21
@@ -86,7 +93,7 @@ def _make_tiny_video_state(dit, *, batch=2, grid_frames=1, grid_height=2, grid_w
         vace_hints=None,
         use_gradient_checkpointing=False,
         use_gradient_checkpointing_offload=False,
-        extras={"dit": dit, "use_usp": False, "time_embed": torch.randn(batch, dim, dtype=dtype)},
+        extras={"dit": dit, "time_embed": torch.randn(batch, dim, dtype=dtype)},
     )
 
 
@@ -369,7 +376,7 @@ def _wan_attention_cpu_fallback(monkeypatch):
 def test_tri_system_joint_mask_layout():
     torch.manual_seed(0)
     vb, ab, ub = _make_tiny_trimodal_components()
-    driver = TriSystemMoTDriver(vb, ab, ub, attention_mask_mode="joint")
+    driver = TriSystemMoTDriver(vb, ab, ub, attention_mask_mode=ACTION_SEES_VIDEO)
 
     Sv, Sa, Su = 6, 4, 5
     mask = driver._build_attention_mask(  # noqa: SLF001 - targeted mask contract test
@@ -401,7 +408,7 @@ def test_tri_system_joint_mask_blocks_action_indirect_video_coupling():
     vb, ab, ub = _make_tiny_trimodal_components()
     ab.eval()
     ub.eval()
-    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False, attention_mask_mode="joint")
+    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False, attention_mask_mode=ACTION_SEES_VIDEO)
 
     batch, s_action = 1, 4
     video_x = torch.randn(batch, 4, vb.dim)
@@ -430,19 +437,45 @@ def test_tri_system_joint_mask_blocks_action_indirect_video_coupling():
     )
 
 
-def test_tri_system_bidirectional_mask_is_none():
+@pytest.mark.parametrize(
+    "mode, v_sees_a, a_sees_all_v",
+    [
+        (MUTUAL, True, True),
+        (ACTION_SEES_VIDEO, False, True),
+        (VIDEO_SEES_ACTION, True, False),
+        (ISOLATED, False, False),
+    ],
+)
+def test_tri_system_cross_modal_modes_with_und_tail(mode, v_sees_a, a_sees_all_v):
+    """All four modes drive the trimodal mask; understanding stays a read-only
+    tail (everyone sees u, u sees only itself) regardless of the v↔a mode."""
     vb, ab, ub = _make_tiny_trimodal_components()
-    driver = TriSystemMoTDriver(vb, ab, ub, attention_mask_mode="bidirectional")
+    driver = TriSystemMoTDriver(vb, ab, ub, attention_mask_mode=mode)
 
+    Sv, Sa, Su, ff = 6, 2, 4, 2
     mask = driver._build_attention_mask(  # noqa: SLF001 - targeted mask contract test
-        s_video=3,
-        s_action=2,
-        s_understanding=4,
-        video_tokens_per_frame=1,
+        s_video=Sv,
+        s_action=Sa,
+        s_understanding=Su,
+        video_tokens_per_frame=ff,
         device=torch.device("cpu"),
     )
-
-    assert mask is None
+    u_start = Sv + Sa
+    # a↔a full.
+    assert mask[Sv:u_start, Sv:u_start].all()
+    # understanding read-only tail: everyone sees u; u sees only u.
+    assert mask[:u_start, u_start:].all()
+    assert mask[u_start:, u_start:].all()
+    assert not mask[u_start:, :u_start].any()
+    # v→a: first-frame rows never see action; later rows follow the mode.
+    assert not mask[:ff, Sv:u_start].any()
+    assert mask[ff:Sv, Sv:u_start].all() if v_sees_a else not mask[ff:Sv, Sv:u_start].any()
+    # a→v: all video, or first frame only.
+    if a_sees_all_v:
+        assert mask[Sv:u_start, :Sv].all()
+    else:
+        assert mask[Sv:u_start, :ff].all()
+        assert not mask[Sv:u_start, ff:Sv].any()
 
 
 def test_tri_system_yaml_mask_settings_resolve_to_driver():
@@ -452,7 +485,7 @@ def test_tri_system_yaml_mask_settings_resolve_to_driver():
     resolved = resolve_architecture_config(cfg)
 
     assert resolved.registry_name == "tri_system_joint_self_attn"
-    assert resolved.params["attention_mask_mode"] == "joint"
+    assert resolved.params["attention_mask_mode"] == "action_sees_video"
     assert resolved.params["video_attention_mask_mode"] == "first_frame_causal"
     assert resolved.params["mot_checkpoint_mixed_attn"] is True
 
@@ -467,7 +500,7 @@ def test_tri_system_yaml_mask_settings_resolve_to_driver():
     )
     assert driver.mot_checkpoint_mixed_attn is True
 
-    assert driver.attention_mask_mode == "joint"
+    assert driver.attention_mask_mode == ACTION_SEES_VIDEO
     assert vb.video_attention_mask_mode == "first_frame_causal"
 
     Sv, Sa, Su, tokens_per_frame = 6, 4, 5, 3
@@ -761,7 +794,7 @@ def test_und_mask_baseline_no_mask_unchanged():
     vb, ab, ub = _make_tiny_trimodal_components()
     ab.eval()
     ub.eval()
-    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False, attention_mask_mode="joint")
+    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False, attention_mask_mode=ACTION_SEES_VIDEO)
 
     Sv, Sa, Su, tokens_per_frame = 6, 4, 5, 3
     base_only = driver._build_attention_mask(  # noqa: SLF001 - mask contract test
@@ -790,7 +823,7 @@ def test_und_mask_per_batch_expansion_blocks_padding_keys():
     """Padded und positions become invalid KEYS for video/action/und queries."""
     torch.manual_seed(0)
     vb, ab, ub = _make_tiny_trimodal_components()
-    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False, attention_mask_mode="joint")
+    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False, attention_mask_mode=ACTION_SEES_VIDEO)
 
     Sv, Sa, Su, tokens_per_frame = 6, 4, 5, 3
     und_mask = torch.tensor(
@@ -812,12 +845,14 @@ def test_und_mask_per_batch_expansion_blocks_padding_keys():
     assert mask.shape == (2, 1, Sv + Sa + Su, Sv + Sa + Su)
     u_start = Sv + Sa
     # Batch 0 == baseline 2D mask
-    base_2d = driver._build_joint_mask(  # noqa: SLF001
+    base_2d = build_cross_modal_attention_mask(
+        vb,
         s_video=Sv,
         s_action=Sa,
-        s_understanding=Su,
         video_tokens_per_frame=tokens_per_frame,
+        mode=driver.attention_mask_mode,
         device=torch.device("cpu"),
+        n_readonly_tail=Su,
     )
     assert torch.equal(mask[0, 0], base_2d)
     # Batch 1: last 2 und KEY columns are False for any query (other than padded und self-row)
@@ -842,7 +877,7 @@ def test_und_mask_blocks_padding_leak_end_to_end():
     vb, ab, ub = _make_tiny_trimodal_components()
     ab.eval()
     ub.eval()
-    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False, attention_mask_mode="joint")
+    driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False, attention_mask_mode=ACTION_SEES_VIDEO)
 
     batch = 2
     s_action = 4

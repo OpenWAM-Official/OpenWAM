@@ -18,6 +18,12 @@ import torch
 from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import ActionState
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
+from openwam.model.architectures.utils.mask_modes import (
+    ACTION_SEES_VIDEO,
+    ISOLATED,
+    MUTUAL,
+    VIDEO_SEES_ACTION,
+)
 from openwam.model.video_backbone.base import BlockLoopState
 from tests.test_openwam_trainer import _MockVideoBackbone
 
@@ -170,23 +176,12 @@ def test_driver_dtype_mismatch_raises():
             driver.step(0, vstate, astate)
 
 
-def test_driver_attention_mask_bidirectional_returns_none():
-    """bidirectional mode is a no-op mask — passes None to SDPA so it can pick
-    the fastest fused kernel."""
-    vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
-    ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
-    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode="bidirectional")
-
-    mask = driver._build_attention_mask(s_video=4, s_action=3, video_tokens_per_frame=4, device=torch.device("cpu"))
-    assert mask is None
-
-
-def test_driver_attention_mask_joint_layout():
-    """joint mask: a→a + a→v True, v→a False, v→v from vb.video_attention_mask_mode."""
+def test_driver_attention_mask_action_sees_video_layout():
+    """action_sees_video mask: a→a + a→v True, v→a False, v→v from vb.video_attention_mask_mode."""
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     # _MockVideoBackbone defaults to bidirectional v↔v (full True).
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
-    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode="joint")
+    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode=ACTION_SEES_VIDEO)
 
     Sv, Sa = 6, 3
     mask = driver._build_attention_mask(s_video=Sv, s_action=Sa, video_tokens_per_frame=Sv, device=torch.device("cpu"))
@@ -203,24 +198,62 @@ def test_driver_attention_mask_joint_layout():
     assert not mask[:Sv, Sv:].any()
 
 
-def test_driver_joint_mask_first_frame_causal():
-    """When vb reports first_frame_causal, the joint mask's v↔v block
-    matches FastWAM's layout: first frame only sees itself, others see all video."""
+class _VBFirstFrameDouble(_MockVideoBackbone):
+    """Video backbone double reporting first_frame_causal v↔v."""
 
-    class _VBFirstFrame(_MockVideoBackbone):
-        @property
-        def video_attention_mask_mode(self):
-            return "first_frame_causal"
+    @property
+    def video_attention_mask_mode(self):
+        return "first_frame_causal"
 
-        def build_video_to_video_mask(self, video_seq_len, video_tokens_per_frame, device):
-            mask = torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
-            ff = min(video_tokens_per_frame, video_seq_len)
-            mask[:ff, ff:] = False
-            return mask
+    def build_video_to_video_mask(self, video_seq_len, video_tokens_per_frame, device):
+        mask = torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
+        ff = min(video_tokens_per_frame, video_seq_len)
+        mask[:ff, ff:] = False
+        return mask
 
-    vb = _VBFirstFrame(dim=32, num_layers=2, num_heads=4)
+
+@pytest.mark.parametrize(
+    "mode, v_sees_a, a_sees_all_v",
+    [
+        (MUTUAL, True, True),
+        (ACTION_SEES_VIDEO, False, True),
+        (VIDEO_SEES_ACTION, True, False),
+        (ISOLATED, False, False),
+    ],
+)
+def test_driver_cross_modal_mode_layouts(mode, v_sees_a, a_sees_all_v):
+    """Four modes share two invariants (v↔v from vb, a↔a full) and differ only
+    in v→a (excluding first-frame rows) and a→v (all video vs first frame only)."""
+    vb = _VBFirstFrameDouble(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
-    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode="joint")
+    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode=mode)
+
+    Sv, Sa, ff = 6, 3, 2
+    mask = driver._build_attention_mask(s_video=Sv, s_action=Sa, video_tokens_per_frame=ff, device=torch.device("cpu"))
+    # a↔a always full.
+    assert mask[Sv:, Sv:].all()
+
+    # v→a: first-frame rows never see action; later rows match v_sees_a.
+    assert not mask[:ff, Sv:].any(), "first-frame video rows must never see action"
+    if v_sees_a:
+        assert mask[ff:Sv, Sv:].all()
+    else:
+        assert not mask[ff:Sv, Sv:].any()
+
+    # a→v: all video, or only the first frame.
+    if a_sees_all_v:
+        assert mask[Sv:, :Sv].all()
+    else:
+        assert mask[Sv:, :ff].all()
+        assert not mask[Sv:, ff:Sv].any()
+
+
+def test_driver_joint_mask_first_frame_causal():
+    """When vb reports first_frame_causal, the action_sees_video mask's v↔v block
+    matches FastWAM's layout: first frame only sees itself, others see all video."""
+    vb = _VBFirstFrameDouble(dim=32, num_layers=2, num_heads=4)
+    ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
+    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode=ACTION_SEES_VIDEO)
 
     Sv, Sa, tokens_per_frame = 6, 3, 2
     mask = driver._build_attention_mask(
@@ -264,7 +297,7 @@ def test_driver_forwards_action_stream_unchanged_when_attention_is_identity():
 def test_driver_joint_mask_blocks_video_to_action():
     """FastWAM-Joint property: video output is independent of action input.
 
-    With ``attention_mask_mode='joint'`` the mask sets ``v→a = False`` so
+    With ``attention_mask_mode='action_sees_video'`` the mask sets ``v→a = False`` so
     video queries cannot attend to action keys. Therefore changing the
     action input must not change the video output (within numerical noise).
     This is the prerequisite for video-KV prefill in inference.
@@ -273,7 +306,7 @@ def test_driver_joint_mask_blocks_video_to_action():
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False, attention_mask_mode="joint")
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False, attention_mask_mode=ACTION_SEES_VIDEO)
 
     # Two runs that share video input but use different action inputs.
     B, s_video, s_action = 1, 4, 3
@@ -352,15 +385,19 @@ def test_driver_handles_heterogeneous_hidden_dim_end_to_end():
     assert torch.isfinite(pred).all()
 
 
-def test_driver_bidirectional_mask_does_couple_video_to_action():
-    """Negative control: under ``bidirectional`` mode, the same setup as
+def test_driver_mutual_mask_does_couple_video_to_action():
+    """Negative control: under ``mutual`` mode, the same setup as
     ``test_driver_joint_mask_blocks_video_to_action`` should produce a different
-    video output for different actions (proving the joint test isn't a no-op)."""
+    video output for different actions (proving the joint test isn't a no-op).
+
+    With ``grid_frames=4`` and a 1×1 grid, tokens_per_frame=1, so only the first
+    video row is excluded from seeing action — rows 1..3 do see it.
+    """
     torch.manual_seed(0)
     vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
     ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
     ab.eval()
-    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False, attention_mask_mode="bidirectional")
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False, attention_mask_mode=MUTUAL)
 
     B, s_video, s_action = 1, 4, 3
     video_x = torch.randn(B, s_video, vb.dim)
@@ -385,9 +422,9 @@ def test_driver_bidirectional_mask_does_couple_video_to_action():
 
     out_a = _run(action_seed=1)
     out_b = _run(action_seed=2)
-    # In bidirectional mode the video does see the action — outputs differ.
+    # In mutual mode the video does see the action — outputs differ.
     assert not torch.allclose(out_a, out_b, atol=1e-4), (
-        "bidirectional mask: changing action did not change video output — the test mock or driver pipeline is broken."
+        "mutual mask: changing action did not change video output — the test mock or driver pipeline is broken."
     )
 
 

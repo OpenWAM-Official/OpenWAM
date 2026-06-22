@@ -23,6 +23,7 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         # :meth:`build_mot_driver` directly.
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(cfg.get("mot_checkpoint_mixed_attn", True)),
-            "attention_mask_mode": str(cfg.get("attention_mask_mode", "joint")),
+            "attention_mask_mode": str(cfg.get("attention_mask_mode", ACTION_SEES_VIDEO)),
             "video_attention_mask_mode": str(cfg.get("video_attention_mask_mode", "first_frame_causal")),
         }
         if self.video_backbone is not None:
