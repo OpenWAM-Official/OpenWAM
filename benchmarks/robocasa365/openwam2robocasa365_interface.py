@@ -1,0 +1,373 @@
+"""RoboCasa365 eval adapter for the OpenWAM policy server.
+
+Lives in the benchmark client environment and talks to an already-running
+OpenWAM WebSocket server. The model, checkpoint, image preprocessing and action
+denormalization all stay server-side. Mirrors ``benchmarks/libero`` but for the
+single-arm PandaOmron 16-D state layout that
+``robocasa.wrappers.gym_wrapper.RoboCasaGymEnv`` produces.
+
+Action spaces (two layers — don't conflate):
+  * ``RoboCasaGymEnv`` consumes a fixed **12-D robosuite OSC + base** action
+    (``eef_pos3 + eef_rot3 + grip1 + base4 + mode1``, the env's native delta-OSC).
+  * The OpenWAM model trained by ``openwam.dataloader.robocasa365.RoboCasa365Dataset``
+    predicts a **20-D absolute EEF pose** (the repo-standard EEF schema, dual of
+    robotwin). When the server returns 20-D, ``act()`` bridges it to the env's 12-D
+    via ``benchmarks.utils.eef20d_to_robocasa12d`` (the dual of robotwin's client-side
+    ``eef20d_to_ee16d``); a 12-D server action is passed through unchanged. The bridge
+    needs the env's OSC position/rotation scaling (``osc_pos_scale`` / ``osc_rot_scale``)
+    — set them from the eval env's OSC_POSE controller config; without them a 20-D
+    action cannot be converted (raises, rather than emit wrong-magnitude motions).
+
+Debug dumping follows the robotwin convention (``ep{N}/step_{N}/`` with per-camera
+JPGs + ``meta.json``) and adds a labeled ``cameras.png`` montage plus
+state/action breakdowns and pass/fail ``checks`` for quick verification.
+"""
+
+from __future__ import annotations
+
+import os as _os
+import sys as _sys
+
+_PROJECT_ROOT = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+if _PROJECT_ROOT not in _sys.path:
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+import base64  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Iterable, Optional  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+from benchmarks.utils import (  # noqa: E402
+    WSPolicyClient,
+    build_payload,
+    eef20d_to_robocasa12d,
+    encode_numpy_b64,
+    quat_xyzw_to_rot6d,
+    transport,
+)
+
+# Flat 12-D server action -> the action dict RoboCasaGymEnv.step() consumes.
+# Order matches robocasa/scripts/dataset_scripts/convert_hdf5_lerobot.py.
+ACTION_SLICES = {
+    "action.end_effector_position": (0, 3),
+    "action.end_effector_rotation": (3, 6),
+    "action.gripper_close": (6, 7),
+    "action.base_motion": (7, 11),
+    "action.control_mode": (11, 12),
+}
+ACTION_DIM = 12
+
+# 16-D proprio state, concatenated in the order the model was trained on.
+DEFAULT_STATE_KEYS = [
+    "state.base_position",                    # 3
+    "state.base_rotation",                    # 4
+    "state.end_effector_position_relative",   # 3
+    "state.end_effector_rotation_relative",   # 4
+    "state.gripper_qpos",                     # 2
+]
+STATE_DIM = 16
+
+# Fixed client-side camera slots the server expects (head required). The stems
+# match robotwin's per-camera debug JPG names (head.jpg / left.jpg / right.jpg).
+IMAGE_SLOTS = ("head_camera", "left_wrist_camera", "right_wrist_camera")
+_SLOT_STEMS = {"head_camera": "head", "left_wrist_camera": "left", "right_wrist_camera": "right"}
+
+
+def assemble_state(obs: dict, state_keys: Iterable[str]) -> list:
+    """Concatenate the proprio state keys (in order) into a flat float list."""
+    state: list = []
+    missing: list = []
+    for key in state_keys:
+        if key not in obs:
+            missing.append(key)
+            continue
+        state.extend(np.asarray(obs[key], dtype=np.float32).reshape(-1).tolist())
+    if missing:
+        raise KeyError(f"RoboCasa365 obs missing state key(s): {missing}")
+    return state
+
+
+def slice_action(flat) -> dict:
+    """Split the flat 12-D server action into the 5-key RoboCasaGymEnv action dict."""
+    flat = np.asarray(flat, dtype=np.float32).reshape(-1)
+    if flat.shape[0] != ACTION_DIM:
+        raise ValueError(f"expected a {ACTION_DIM}-D action, got {flat.shape[0]}")
+    return {key: flat[start:end] for key, (start, end) in ACTION_SLICES.items()}
+
+
+def transform_image(image, mode: str) -> np.ndarray:
+    """Return an H×W×3 uint8 image.
+
+    ``RoboCasaGymEnv`` already flips offscreen frames upright (``img[::-1]``), so
+    the default ``mode='none'`` is a passthrough; ``'rotate_180'`` is kept as an
+    escape hatch for checkpoints trained on un-flipped frames.
+    """
+    if mode not in ("none", "rotate_180"):
+        raise ValueError("image_transform must be 'none' or 'rotate_180'")
+    arr = np.asarray(image)
+    if arr.ndim != 3 or arr.shape[-1] != 3:
+        raise ValueError(f"image must be HxWx3, got {arr.shape}")
+    arr = arr.astype(np.uint8, copy=False)
+    if mode == "rotate_180":
+        return arr[::-1, ::-1]
+    return arr
+
+
+def build_obs_payload(
+    obs: dict,
+    *,
+    head_camera_key: str,
+    left_wrist_camera_key: Optional[str],
+    right_wrist_camera_key: Optional[str],
+    image_transform: str,
+    state_keys: Iterable[str],
+    prompt: str,
+) -> dict:
+    """Turn a RoboCasaGymEnv obs dict into an OpenWAM obs payload (no server).
+
+    Encodes the 3 camera slots (head required) and assembles the proprio state.
+    """
+
+    def _encode(key: Optional[str], *, required: bool) -> Optional[str]:
+        if not key:
+            if required:
+                raise KeyError("head_camera_key is required")
+            return None
+        if key not in obs or obs[key] is None:
+            if required:
+                raise KeyError(f"RoboCasa365 obs missing camera key: {key}")
+            return None
+        return encode_numpy_b64(transform_image(obs[key], image_transform))
+
+    return build_payload(
+        head=_encode(head_camera_key, required=True),
+        left_wrist=_encode(left_wrist_camera_key, required=False),
+        right_wrist=_encode(right_wrist_camera_key, required=False),
+        prompt=prompt,
+        state=assemble_state(obs, state_keys),
+    )
+
+
+def _montage(images: list, labels: list):
+    """Lay decoded camera frames side by side with a label strip (black = empty, matching the server's black-fill)."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    tile_h, strip_h, gap = 256, 18, 4
+    font = ImageFont.load_default()
+    tiles = []
+    for im, label in zip(images, labels):
+        if im is None:
+            im = Image.new("RGB", (tile_h, tile_h), (0, 0, 0))
+        else:
+            w, h = im.size
+            im = im.resize((max(1, round(w * tile_h / h)), tile_h))
+        strip = Image.new("RGB", (im.width, strip_h), (0, 0, 0))
+        ImageDraw.Draw(strip).text((2, 3), label, fill=(255, 255, 255), font=font)
+        tile = Image.new("RGB", (im.width, tile_h + strip_h), (0, 0, 0))
+        tile.paste(strip, (0, 0))
+        tile.paste(im, (0, strip_h))
+        tiles.append(tile)
+    total_w = sum(t.width for t in tiles) + gap * (len(tiles) - 1)
+    canvas = Image.new("RGB", (total_w, tile_h + strip_h), (0, 0, 0))
+    x = 0
+    for t in tiles:
+        canvas.paste(t, (x, 0))
+        x += t.width + gap
+    return canvas
+
+
+def dump_obs_debug(
+    obs: dict,
+    payload: dict,
+    out_dir,
+    *,
+    state_keys: Iterable[str] = DEFAULT_STATE_KEYS,
+    action=None,
+    episode=None,
+    step=None,
+    server_step=None,
+    latency_ms=None,
+    save_montage: bool = True,
+) -> Path:
+    """Write one step's debug bundle (robotwin layout + a montage + checks).
+
+    Files (under ``out_dir``, conventionally ``{debug_dir}/ep{N}/step_{N}/``):
+      ``head.jpg`` / ``left.jpg`` / ``right.jpg`` - the frames the client sent
+          (a missing slot writes a ``{stem}_missing.txt`` stub, like robotwin).
+      ``cameras.png`` - the same 3 frames decoded + labeled side by side.
+      ``meta.json`` - robotwin fields (episode/step/prompt/state/action/
+          server_step/latency_ms) plus state_breakdown / action_sliced / checks.
+    """
+    from PIL import Image
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    images = []
+    for slot in IMAGE_SLOTS:
+        b64 = payload.get("images", {}).get(slot)
+        stem = _SLOT_STEMS[slot]
+        if b64 is None:
+            images.append(None)
+            (out_dir / f"{stem}_missing.txt").write_text(f"{slot} not sent", encoding="utf-8")
+            continue
+        im = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+        im.save(out_dir / f"{stem}.jpg", format="JPEG")
+        images.append(im)
+    if save_montage:
+        _montage(images, list(IMAGE_SLOTS)).save(out_dir / "cameras.png")
+
+    state = payload.get("state")
+    meta = {
+        "episode": episode,
+        "step": step,
+        "prompt": payload.get("prompt", ""),
+        "state": state,
+        "state_breakdown": {
+            key: np.asarray(obs[key], dtype=float).reshape(-1).tolist() for key in state_keys if key in obs
+        },
+        "image_slots": {slot: (None if im is None else list(im.size)) for slot, im in zip(IMAGE_SLOTS, images)},
+        "server_step": server_step,
+        "latency_ms": latency_ms,
+    }
+    checks = {
+        "state_dim_is_16": state is not None and len(state) == STATE_DIM,
+        "head_and_wrist_present": (
+            payload.get("images", {}).get("head_camera") is not None
+            and payload.get("images", {}).get("left_wrist_camera") is not None
+        ),
+    }
+    if action is not None:
+        flat = np.asarray(action, dtype=np.float32).reshape(-1).tolist()
+        meta["action"] = flat
+        meta["action_sliced"] = {key: flat[start:end] for key, (start, end) in ACTION_SLICES.items()}
+        checks["action_dim_is_12"] = len(flat) == ACTION_DIM
+    meta["checks"] = checks
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return out_dir
+
+
+class OpenWAMRoboCasa365Policy:
+    """WebSocket policy client for RoboCasa365 single-arm eval.
+
+    ``act(obs, prompt)`` returns the action **dict** that
+    ``RoboCasaGymEnv.step()`` expects. Pass ``_client`` to inject a fake
+    transport in unit tests (skips the real WebSocket connection). With
+    ``debug=True`` it writes a per-step bundle under
+    ``{debug_dir}/ep{N}/step_{N}/`` (montage only on the first step of each episode).
+    """
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8848,
+        request_timeout: int = 300,
+        head_camera_key: str = "video.robot0_agentview_left",   # 3rd-person workspace view
+        left_wrist_camera_key: Optional[str] = "video.robot0_eye_in_hand",  # the single arm's real wrist cam
+        right_wrist_camera_key: Optional[str] = None,  # single-arm has no 2nd wrist -> server black-fills this slot
+        image_transform: str = "none",
+        state_keys: Optional[list] = None,
+        state_dim: Optional[int] = STATE_DIM,
+        action_dim: int = ACTION_DIM,
+        osc_pos_scale: Optional[float] = None,
+        osc_rot_scale: Optional[float] = None,
+        debug: bool = False,
+        debug_dir: str = "./debug_robocasa365",
+        _client=None,
+    ) -> None:
+        if image_transform not in ("none", "rotate_180"):
+            raise ValueError("image_transform must be 'none' or 'rotate_180'")
+        self._client = _client or WSPolicyClient(f"ws://{host}:{port}", timeout=request_timeout)
+        self._head_camera_key = head_camera_key
+        self._left_wrist_camera_key = left_wrist_camera_key
+        self._right_wrist_camera_key = right_wrist_camera_key
+        self._image_transform = image_transform
+        self._state_keys = list(state_keys) if state_keys else list(DEFAULT_STATE_KEYS)
+        self._state_dim = state_dim
+        self._action_dim = action_dim
+        self._osc_pos_scale = osc_pos_scale
+        self._osc_rot_scale = osc_rot_scale
+        self._debug = debug
+        self._debug_dir = debug_dir
+        self._episode = -1
+        self._step = 0
+
+        pong = self._client.ping()
+        if pong.get("type") != transport.PONG:
+            raise RuntimeError(f"OpenWAM server ping returned unexpected response: {pong}")
+        print(
+            f"[OpenWAMRoboCasa365Policy] action_dim={action_dim} state_dim={state_dim} "
+            f"image_transform={image_transform} "
+            f"cameras=({head_camera_key}, {left_wrist_camera_key}, {right_wrist_camera_key})"
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def reset(self) -> None:
+        self._episode += 1
+        self._step = 0
+        ack = self._client.reset()
+        if ack.get("type") != transport.RESET_ACK:
+            raise RuntimeError(f"OpenWAM server reset returned unexpected response: {ack}")
+
+    def _bridge_eef20d(self, obs: dict, flat: np.ndarray) -> np.ndarray:
+        """Convert a 20-D absolute EEF action to the env's 12-D OSC action.
+
+        Needs the current proprio (to form the OSC delta) and the env's OSC scaling.
+        Raises if the scales weren't configured — emitting an unscaled/guessed action
+        would drive wrong-magnitude motions.
+        """
+        if self._osc_pos_scale is None or self._osc_rot_scale is None:
+            raise ValueError(
+                "server returned a 20-D EEF action but osc_pos_scale/osc_rot_scale are unset; "
+                "set them from the eval env's OSC_POSE controller config to enable the 20-D->12-D bridge."
+            )
+        pos = np.asarray(obs["state.end_effector_position_relative"], np.float32).reshape(-1)
+        rot6d = quat_xyzw_to_rot6d(np.asarray(obs["state.end_effector_rotation_relative"], np.float32).reshape(-1))
+        return eef20d_to_robocasa12d(
+            flat,
+            proprio_eef_pos=pos,
+            proprio_eef_rot6d=rot6d,
+            pos_scale=self._osc_pos_scale,
+            rot_scale=self._osc_rot_scale,
+        )
+
+    def act(self, obs: dict, prompt: str) -> dict:
+        payload = build_obs_payload(
+            obs,
+            head_camera_key=self._head_camera_key,
+            left_wrist_camera_key=self._left_wrist_camera_key,
+            right_wrist_camera_key=self._right_wrist_camera_key,
+            image_transform=self._image_transform,
+            state_keys=self._state_keys,
+            prompt=prompt,
+        )
+        if self._state_dim is not None and len(payload["state"]) != self._state_dim:
+            raise ValueError(f"RoboCasa365 state dim {len(payload['state'])} != expected {self._state_dim}")
+        response = self._client.predict(payload)
+        flat = np.asarray(response["action"], dtype=np.float32).reshape(-1)
+        # 20-D absolute EEF (RoboCasa365Dataset-trained model) -> env 12-D OSC.
+        # Dual of robotwin's client-side eef20d_to_ee16d; 12-D is passed through.
+        if flat.shape[0] == 20:
+            flat = self._bridge_eef20d(obs, flat)
+        if flat.shape[0] != self._action_dim:
+            raise ValueError(f"OpenWAM returned action dim {flat.shape[0]}, expected {self._action_dim}")
+        if self._debug:
+            dump_obs_debug(
+                obs,
+                payload,
+                Path(self._debug_dir) / f"ep{self._episode:04d}" / f"step_{self._step:04d}",
+                state_keys=self._state_keys,
+                action=flat,
+                episode=self._episode,
+                step=self._step,
+                server_step=response.get("step"),
+                latency_ms=response.get("latency_ms"),
+                save_montage=(self._step == 0),
+            )
+        self._step += 1
+        return slice_action(flat)

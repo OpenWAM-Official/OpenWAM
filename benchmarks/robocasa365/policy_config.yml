@@ -1,0 +1,58 @@
+# OpenWAM RoboCasa365 benchmark client config.
+#
+# Template: single_eval.sh patches host/port/task/split at runtime; copy this and
+# set POLICY_CONFIG_PATH=/path/to/custom.yml to override the rest. The OpenWAM
+# server reads the checkpoint's config.yaml and does all preprocessing / multi-view
+# composition / prompt wrapping / action denormalization. The client only forwards
+# raw frames + a 16-D state and gets a 12-D action back.
+
+host: 127.0.0.1
+port: 8848
+request_timeout: 300
+
+# Benchmark task selection (robocasa/<task>; split=target = held-out eval scenes).
+split: target
+task: OpenDrawer
+num_trials: 5
+max_steps: 500
+seed: 0
+
+# Observation mapping. RoboCasa365 is single-arm with 2 third-person agentview
+# cameras + 1 wrist cam. We send TWO real views: agentview_left (3rd-person) as
+# head_camera and the eye_in_hand wrist cam as left_wrist_camera. The single arm
+# has no 2nd wrist, so right_wrist_camera stays null — the server black-fills that
+# slot when composing the multi-view layout. (Phase-2 training must match this
+# 2-view layout.)
+head_camera_key: video.robot0_agentview_left
+left_wrist_camera_key: video.robot0_eye_in_hand
+right_wrist_camera_key: null
+
+# RoboCasaGymEnv already returns upright frames (it flips with img[::-1]), so no
+# client-side rotation. Set 'rotate_180' only for checkpoints trained on raw frames.
+image_transform: none
+
+# Proprio: 16-D, concatenated in training order. state_dim is a fail-fast check
+# against the checkpoint config.
+state_keys:
+  - state.base_position
+  - state.base_rotation
+  - state.end_effector_position_relative
+  - state.end_effector_rotation_relative
+  - state.gripper_qpos
+state_dim: 16
+
+# Action: the env consumes a flat 12-D vector (eef_pos 3 + eef_rot 3 + gripper 1 +
+# base 4 + mode 1), sliced into the RoboCasaGymEnv action dict. A RoboCasa365Dataset-
+# trained model emits the repo-standard 20-D EEF instead; the client bridges 20-D ->
+# 12-D (see README "Action spaces"). A 12-D server action is passed through unchanged.
+action_dim: 12
+
+# OSC scaling for the 20-D -> 12-D bridge: the eval env's OSC_POSE controller
+# output_max (position metres / rotation radians that map to action magnitude 1.0).
+# REQUIRED only when the server returns 20-D; a 20-D action with these unset raises
+# (rather than emit wrong-magnitude motions). Read them from the env controller config.
+osc_pos_scale: null
+osc_rot_scale: null
+
+debug: false
+debug_dir: ./debug_robocasa365
