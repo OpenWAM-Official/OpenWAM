@@ -221,7 +221,7 @@ class IDMMoTDriver(DualSystemMoTDriver):
             video_tokens_per_frame=int(video_tokens_per_frame),
             device=payload.x_action.device,
         )
-        action_mask = None if joint_mask is None else joint_mask[video_seq_len : video_seq_len + s_action, :]
+        action_mask = joint_mask[video_seq_len : video_seq_len + s_action, :]
 
         for layer_id in range(self.num_layers):
             q_a, k_a, v_a, apost = self.ab.pre_attn_at_layer(layer_id, astate)
