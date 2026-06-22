@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 import torch
 
-from openwam.model.action_backbone.action_dit import ActionDiT
-from openwam.model.action_backbone.shared_action import SharedMoEActionBackbone
+from openwam.model.action_backbone.separate_action_dit import ActionDiT
+from openwam.model.action_backbone.shared_action_backbone import SharedMoEActionBackbone
 from openwam.model.architectures.dual_system import DualSystemCrossAttnArchitecture
 from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
 from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture

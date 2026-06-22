@@ -8,13 +8,13 @@ builds ``SharedVanillaActionBackbone`` / ``SharedMoEActionBackbone``), so this f
 only re-exports the public classes.
 """
 
-from openwam.model.action_backbone.action_dit import ActionDiT
 from openwam.model.action_backbone.base import (
     ActionDiTBackbone,
     SharedActionBackbone,
 )
 from openwam.model.action_backbone.scheduler import ActionScheduler
-from openwam.model.action_backbone.shared_action import (
+from openwam.model.action_backbone.separate_action_dit import ActionDiT
+from openwam.model.action_backbone.shared_action_backbone import (
     SharedMoEActionBackbone,
     SharedVanillaActionBackbone,
 )

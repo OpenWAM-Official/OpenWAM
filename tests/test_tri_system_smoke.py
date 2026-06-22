@@ -12,12 +12,12 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-from openwam.model.action_backbone.action_dit import ActionDiT, ActionDiTState
+from openwam.model.action_backbone.separate_action_dit import ActionDiT, ActionDiTState
+from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
 from openwam.model.architectures.tri_system.und_expert import (
     UnderstandingExpert,
     UnderstandingExpertConfig,
 )
-from openwam.model.architectures.utils.mot_utils import TriSystemMoTDriver
 from openwam.model.video_backbone.base import BlockLoopState
 from openwam.model.video_backbone.wan.models.dit import DiTBlock
 from openwam.model.video_backbone.wan_backbone import Wan21

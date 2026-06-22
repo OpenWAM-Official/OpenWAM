@@ -11,15 +11,15 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from openwam.model.action_backbone.action_dit import ActionDiT
+from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
+from openwam.model.architectures.tri_system.mot_driver import TriSystemMoTDriver
 from openwam.model.architectures.tri_system.und_expert import (
     UnderstandingExpert,
     UnderstandingExpertConfig,
 )
 from openwam.model.architectures.utils.common import resolve_bridge_layers
-from openwam.model.architectures.utils.mot_utils import TriSystemMoTDriver
 from openwam.model.vlm_backbone import build_vlm_backbone
 
 

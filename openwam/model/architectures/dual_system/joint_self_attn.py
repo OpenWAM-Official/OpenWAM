@@ -18,11 +18,11 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from openwam.model.action_backbone.action_dit import ActionDiT
+from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
+from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
-from openwam.model.architectures.utils.mot_utils import DualSystemMoTDriver
 
 logger = logging.getLogger(__name__)
 

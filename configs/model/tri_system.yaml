@@ -5,7 +5,7 @@
 
 defaults:
   - video_backbone: wan22         # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21
-  - action_backbone: action_dit   # ActionDiT (dual/tri only support ActionDiT)
+  - action_backbone: separate_action_dit # ActionDiT (dual/tri only support ActionDiT)
   - vlm_backbone: qwen3_vl_2b      # Qwen3-VL understanding backbone (tri only)
   - _self_
 

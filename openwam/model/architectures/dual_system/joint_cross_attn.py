@@ -13,7 +13,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from openwam.model.action_backbone.action_dit import ActionDiT
+from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import _cfg_get, register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers

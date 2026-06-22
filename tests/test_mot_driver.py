@@ -15,9 +15,9 @@ from typing import Tuple
 import pytest
 import torch
 
-from openwam.model.action_backbone.action_dit import ActionDiT
+from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import ActionState
-from openwam.model.architectures.utils.mot_utils import DualSystemMoTDriver
+from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.video_backbone.base import BlockLoopState
 from tests.test_openwam_trainer import _MockVideoBackbone
 

@@ -58,7 +58,7 @@ def test_action_dit_small_instantiate():
     """ActionDiT should instantiate with small parameters."""
     import torch.nn as nn
 
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.separate_action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -88,7 +88,7 @@ def test_action_dit_small_instantiate():
 
 def test_action_dit_forward_shape():
     """ActionDiT forward should produce (B, T, action_dim)."""
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.separate_action_dit import ActionDiT
 
     dit = ActionDiT(
         action_dim=7,
@@ -110,7 +110,7 @@ def test_action_dit_forward_shape():
 
 def test_action_dit_joint_cross_attn_context_shape_and_effect():
     """joint_cross_attn should accept action-owned raw text/proprio context."""
-    from openwam.model.action_backbone.action_dit import ActionDiT
+    from openwam.model.action_backbone.separate_action_dit import ActionDiT
 
     torch.manual_seed(0)
     dit = ActionDiT(
@@ -141,7 +141,7 @@ def test_action_dit_joint_cross_attn_context_shape_and_effect():
 
 def test_moe_dit_instantiate():
     """SharedMoEActionBackbone should instantiate with small parameters."""
-    from openwam.model.action_backbone.shared_action import SharedMoEActionBackbone
+    from openwam.model.action_backbone.shared_action_backbone import SharedMoEActionBackbone
 
     dit = SharedMoEActionBackbone(
         action_dim=7,
@@ -278,7 +278,7 @@ def test_moe_encode_per_token_timestep():
 
 def test_expert_ffn_block_per_token_tmod_shape():
     """ExpertFFNBlock should accept per-token t_mod (B, T, 3, dim)."""
-    from openwam.model.action_backbone.shared_action import ExpertFFNBlock
+    from openwam.model.action_backbone.shared_action_backbone import ExpertFFNBlock
 
     block = ExpertFFNBlock(dim=64, ffn_dim=128)
     x = torch.randn(2, 8, 64)
@@ -293,7 +293,7 @@ def test_expert_ffn_block_per_token_matches_broadcast():
     Sanity-checks that the new per-token AdaLN branch introduces no semantic
     drift vs. the per-sample branch when all T tokens share the same t_mod.
     """
-    from openwam.model.action_backbone.shared_action import ExpertFFNBlock
+    from openwam.model.action_backbone.shared_action_backbone import ExpertFFNBlock
 
     torch.manual_seed(0)
     block = ExpertFFNBlock(dim=64, ffn_dim=128)
