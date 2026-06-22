@@ -215,7 +215,7 @@ class RoboCOINDataset(LeRobotV3Reader):
         if not stats_path.exists():
             raise FileNotFoundError(
                 f"normalize_mode={self._normalize_mode!r} but stats file is missing: {stats_path}. "
-                f"Run scripts/robocoin_compute_stats.py to generate it, or set normalize_mode=null."
+                f"Run python -m openwam.dataloader.utils.stats_computation.robocoin_stats_computation to generate it, or set normalize_mode=null."
             )
         with open(stats_path) as f:
             raw = json.load(f)
@@ -225,7 +225,7 @@ class RoboCOINDataset(LeRobotV3Reader):
             self._normalize_mode,
             dim=_ACTION_DIM,
             strict_minmax=False,
-            source_hint=f"{stats_path}: eef.* — re-run scripts/robocoin_compute_stats.py",
+            source_hint=f"{stats_path}: eef.* — re-run python -m openwam.dataloader.utils.stats_computation.robocoin_stats_computation",
         )
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:

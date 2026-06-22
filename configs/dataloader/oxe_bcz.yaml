@@ -32,7 +32,7 @@ split: train
 
 # ── Action / proprio normalization ──────────────────────────────────────────
 # Reads {dataset_dir}/meta/eef_stats.json (state + action stacked into a single
-# stats dict). Run scripts/oxe_compute_stats.py --dataset BC-Z to generate it.
+# stats dict). Run python -m openwam.dataloader.utils.stats_computation.oxe_stats_computation --dataset BC-Z to generate it.
 # Default is quantile (q01/q99 + clip) — robust to outliers across all 4 OXE
 # datasets, see plans/oxe_dataloaders.md §3.4.
 #   null / "none" → no normalization

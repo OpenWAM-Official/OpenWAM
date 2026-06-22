@@ -1,21 +1,21 @@
-"""Compute per-dataset EEF stats for the 4 OXE datasets.
+"""Public implementation. Dataset-specific audit notes were removed."""
 
-For each dataset, scan all data parquet shards, extract state + action,
-convert to 10-D EEF (``pos(3) + rot6d(6) + grip(1)``), and write a
-merged ``min / max / mean / std / q01 / q99`` summary to
-``{dataset_dir}/meta/eef_stats.json``.
 
-The output single-share stats file is consumed by the OXE readers via
-:func:`openwam.dataloader.utils.normalization.apply_normalization` when
-``normalize_mode`` is set to ``"min-max"`` or ``"quantile"`` (the
-yaml default). state and action are stacked into a single ``(N, 10)``
-matrix so the resulting stats apply uniformly to both streams.
 
-Usage:
-    python scripts/oxe_compute_stats.py --dataset BC-Z
-    python scripts/oxe_compute_stats.py --all
-    python scripts/oxe_compute_stats.py --all --root /path/to/OXE
-"""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 from __future__ import annotations
 
@@ -37,10 +37,10 @@ from openwam.dataloader.utils.oxe_schema import (
 )
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
-logger = logging.getLogger("oxe_compute_stats")
+logger = logging.getLogger("oxe_stats_computation")
 
-# Schema spec: which parquet columns to read for state/action per dataset, and
-# how to convert them to 10-D EEF.
+
+
 SCHEMA: Dict[str, Dict] = {
     "BC-Z": {
         "state_cols": ["observation.state"],
@@ -51,23 +51,23 @@ SCHEMA: Dict[str, Dict] = {
     "Bridge": {
         "state_cols": ["observation.state"],
         "action_cols": ["action"],
-        "state_fn": "bcz_state",  # Same 8-D layout as BC-Z
+        "state_fn": "bcz_state",
         "action_fn": "euler7_action",
     },
     "RT-1": {
         "state_cols": ["observation.state"],
         "action_cols": ["action"],
-        "state_fn": "rt1_state",  # quat-based
+        "state_fn": "rt1_state",
         "action_fn": "euler7_action",
     },
     "DROID": {
-        # DROID state = cartesian (6) + gripper (1)
+
         "state_cols": [
             "observation.state.cartesian_position",
             "observation.state.gripper_position",
         ],
-        # Action.original is the Euler EEF column we want (not the default
-        # joint-space action).
+
+
         "action_cols": ["action.original"],
         "state_fn": "droid_state",
         "action_fn": "euler7_action",
@@ -92,18 +92,18 @@ def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
 
 def _convert_action(rows: Dict[str, np.ndarray], action_fn: str) -> np.ndarray:
     if action_fn == "euler7_action":
-        # find the action column key (only one for OXE datasets)
+
         return euler7_action_to_arm10(rows[list(rows.keys())[0]])
     raise ValueError(f"unknown action_fn={action_fn}")
 
 
 def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
-    """Load one parquet shard, returning a dict {col: ndarray-of-stacked-rows}."""
+    """Public implementation. Dataset-specific audit notes were removed."""
     table = pq.read_table(path, memory_map=True, columns=cols)
     out: Dict[str, np.ndarray] = {}
     for c in cols:
         col_data = table.column(c).to_pylist()
-        # Handle scalar columns (e.g. DROID gripper_position is float).
+
         if col_data and not isinstance(col_data[0], (list, np.ndarray)):
             out[c] = np.asarray(col_data, dtype=np.float32).reshape(-1, 1)
         else:
@@ -112,11 +112,11 @@ def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
 
 
 def compute_dataset_stats(dataset_dir: Path, dataset_name: str) -> Tuple[dict, int, int]:
-    """Walk a dataset's data parquets, convert to 10-D EEF, aggregate stats.
+    """Public implementation. Dataset-specific audit notes were removed."""
 
-    Returns:
-        (stats_dict, n_state_samples, n_action_samples)
-    """
+
+
+
     spec = SCHEMA[dataset_name]
     parquet_paths = sorted((dataset_dir / "data").rglob("*.parquet"))
     if not parquet_paths:
@@ -139,7 +139,7 @@ def compute_dataset_stats(dataset_dir: Path, dataset_name: str) -> Tuple[dict, i
     action_all = np.concatenate(action_arrs, axis=0)
     n_state = int(len(state_all))
     n_action = int(len(action_all))
-    # Merged stats: stack state and action so a single set of params governs both.
+
     merged = np.concatenate([state_all, action_all], axis=0)
     logger.info(
         "%s: merged %d state + %d action rows = %d total samples for stats",
@@ -164,7 +164,7 @@ def compute_dataset_stats(dataset_dir: Path, dataset_name: str) -> Tuple[dict, i
 
 
 def _print_stats_table(stats: dict, name: str) -> None:
-    """Per-dim summary for human eyeballing."""
+    """Public implementation. Dataset-specific audit notes were removed."""
     dim_names = ["x", "y", "z", "r6_0", "r6_1", "r6_2", "r6_3", "r6_4", "r6_5", "grip"]
     print(f"\n  {name}  (n_samples={stats['n_samples']:,})")
     print(f"  {'dim':<6} {'min':>10} {'max':>10} {'q01':>10} {'q99':>10} {'mean':>10} {'std':>10}")

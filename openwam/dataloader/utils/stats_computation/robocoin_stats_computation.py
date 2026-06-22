@@ -1,64 +1,62 @@
 #!/usr/bin/env python3
-"""Compute per-robot-type unified EEF stats for RoboCOIN datasets.
+"""Public implementation. Dataset-specific audit notes were removed."""
 
-For each robot_type, streams all parquet files and pulls BOTH the action and
-the state EEF columns (action: eef_sim_pose_action + gripper_open_scale_action,
-state: eef_sim_pose_state + gripper_open_scale_state). Each row is converted
-euler→rot6d (14D→20D) and the two streams are concatenated row-wise before
-accumulating mean/std/min/max. The resulting stats live in the SAME 20-D EEF
-space that the dataloader uses for both action and proprio supervision; using
-a single set of stats for both is the simplest correct thing because the two
-streams share schema, coordinate frame and physical units.
 
-Results are written to:
-    {dataset_dir}/meta/stats_{robot_type}.json
 
-with the schema:
-    {
-      "eef": {
-        "mean": [...20], "std": [...20], "min": [...20], "max": [...20],
-        "q01": [...20], "q99": [...20],   # for quantile normalization
-        "num_timesteps": <total rows across action+state>,
-        "num_datasets": <n>,
-        "num_files": <m>,
-        "robot_type": "<name>",
-        "pool": "action+state"     # marker so future readers know what's in here
-      }
-    }
 
-mean/std/min/max are exact (streamed over every row). q01/q99 are estimated
-from a bounded uniform reservoir sample (RESERVOIR_CAP rows) because exact
-quantiles cannot be accumulated online; q01/q99 are stable well below the cap.
 
-The old eef_stats_{robot_type}.json files (which stored only the action stats
-under a top-level "action" key) are NOT touched by this script — clean up
-manually after verification.
 
-Usage:
-    python scripts/robocoin_compute_stats.py --dataset_dir /path/to/RoboCOIN
-    python scripts/robocoin_compute_stats.py --dataset_dir /path/to/RoboCOIN --robot_type ruantong_a2d
-"""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import argparse
 import json
 import os
-import sys
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from openwam.dataloader.robocoin import _eef14_to_eef20
 
-# Reservoir capacity for the q01/q99 estimate. mean/std/min/max are exact
-# (streamed over every row); quantiles can't be computed online, so we keep a
-# bounded uniform random sample and take np.quantile on it. 1M rows × 20-D
-# float32 ≈ 80 MB per robot type, and q01/q99 are stable far below that.
+
+
+
+
 RESERVOIR_CAP = 1_000_000
 
 
 class Accumulator:
-    """Online mean/std/min/max accumulator + reservoir for q01/q99."""
+    """Public implementation. Dataset-specific audit notes were removed."""
 
     def __init__(self, dim: int = 20, reservoir_cap: int = RESERVOIR_CAP, seed: int = 0):
         self.dim = dim
@@ -67,15 +65,15 @@ class Accumulator:
         self.m2 = np.zeros(dim, dtype=np.float64)
         self.min_val = np.full(dim, np.inf, dtype=np.float64)
         self.max_val = np.full(dim, -np.inf, dtype=np.float64)
-        # Reservoir sample (Algorithm R) for quantile estimation.
+
         self.cap = int(reservoir_cap)
         self.rng = np.random.RandomState(seed)
         self._res = np.empty((self.cap, dim), dtype=np.float32)
-        self._res_n = 0  # rows currently in the reservoir
-        self._res_seen = 0  # rows offered to the reservoir so far
+        self._res_n = 0
+        self._res_seen = 0
 
     def update(self, batch: np.ndarray):
-        """Update with (N, dim) array using Welford's online algorithm."""
+        """Public implementation. Dataset-specific audit notes were removed."""
         for i in range(len(batch)):
             x = batch[i].astype(np.float64)
             self.count += 1
@@ -88,7 +86,7 @@ class Accumulator:
         self._reservoir_add(np.asarray(batch, dtype=np.float32))
 
     def update_batch(self, batch: np.ndarray):
-        """Batch update (more efficient for large arrays)."""
+        """Public implementation. Dataset-specific audit notes were removed."""
         n = len(batch)
         if n == 0:
             return
@@ -116,11 +114,11 @@ class Accumulator:
             self.max_val = np.maximum(self.max_val, batch_max)
 
     def _reservoir_add(self, batch: np.ndarray):
-        """Feed (N, dim) rows into the reservoir (vectorized Algorithm R)."""
+        """Public implementation. Dataset-specific audit notes were removed."""
         n = len(batch)
         if n == 0:
             return
-        # Phase 1: fill until the reservoir is at capacity.
+
         if self._res_n < self.cap:
             take = min(self.cap - self._res_n, n)
             self._res[self._res_n : self._res_n + take] = batch[:take]
@@ -129,10 +127,10 @@ class Accumulator:
             batch = batch[take:]
             if len(batch) == 0:
                 return
-        # Phase 2: each further row replaces a random slot with prob cap/(seen+1).
+
         m = len(batch)
-        t = self._res_seen + np.arange(m)  # 0-indexed global position (>= cap)
-        p = self.rng.randint(0, t + 1)  # random int in [0, t] per row
+        t = self._res_seen + np.arange(m)
+        p = self.rng.randint(0, t + 1)
         keep = p < self.cap
         self._res[p[keep]] = batch[keep]
         self._res_seen += m
@@ -144,7 +142,7 @@ class Accumulator:
             res = self._res[: self._res_n]
             q01 = np.quantile(res, 0.01, axis=0)
             q99 = np.quantile(res, 0.99, axis=0)
-        else:  # no data — degenerate fallback (keeps the schema complete)
+        else:
             q01 = self.min_val
             q99 = self.max_val
         return {
@@ -158,7 +156,7 @@ class Accumulator:
 
 
 def discover_datasets_by_robot_type(root: str) -> dict:
-    """Group datasets by robot_type."""
+    """Public implementation. Dataset-specific audit notes were removed."""
     groups = {}
     for name in sorted(os.listdir(root)):
         info_path = os.path.join(root, name, "meta", "info.json")
@@ -180,13 +178,13 @@ _NEEDED_COLS = [
 
 
 def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
-    """Compute unified action+state EEF stats across all datasets of one robot type.
+    """Public implementation. Dataset-specific audit notes were removed."""
 
-    Each parquet row contributes TWO 20-D points to the pool: one from action
-    columns and one from state columns. The accumulator sees their union, so
-    min/max end up as the per-dim envelope across both streams and mean/std
-    reflect the joint distribution.
-    """
+
+
+
+
+
     acc = Accumulator(dim=20)
     total_files = 0
     for ds_dir in dataset_dirs:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compute per-robot-type unified 20-D EEF stats for RoboMIND datasets.
 
-Mirrors ``scripts/robocoin_compute_stats.py``. For each ``robot_type`` (pooled
+Mirrors ``robocoin_stats_computation``. For each ``robot_type`` (pooled
 across benchmarks — e.g. franka_3rgb_b10/b11/b12 share one stats file), streams
 all parquet files and pulls BOTH the ``action`` and ``observation.state`` EEF
 columns. Each row is converted to the canonical 20-D EEF schema with the SAME
@@ -36,23 +36,24 @@ mean/std/min/max are exact (streamed over every row); q01/q99 are estimated
 from a bounded uniform reservoir sample.
 
 Usage:
-    python scripts/robomind_compute_stats.py --dataset_dir /path/to/robomind
-    python scripts/robomind_compute_stats.py --dataset_dir <root> --robot_type franka_panda_3rgb
+    python -m openwam.dataloader.utils.stats_computation.robomind_stats_computation --dataset_dir /path/to/robomind
+    python -m openwam.dataloader.utils.stats_computation.robomind_stats_computation --dataset_dir <root> --robot_type franka_panda_3rgb
 """
 
 import argparse
 import json
 import os
-import sys
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # Reuse the reader's accumulator (exact mean/std/min/max + reservoir q01/q99)
 # and the reader's raw→20-D converter, so stats and reader never diverge.
-from openwam.dataloader.robomind import resolve_robomind_layout, robomind_raw_to_20d  # noqa: E402
-from scripts.robocoin_compute_stats import RESERVOIR_CAP, Accumulator  # noqa: E402
+from openwam.dataloader.robomind import resolve_robomind_layout, robomind_raw_to_20d
+from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
+    RESERVOIR_CAP,
+    Accumulator,
+)
 
 _NEEDED_COLS = ["observation.state", "action"]
 

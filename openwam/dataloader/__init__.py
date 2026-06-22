@@ -6,7 +6,7 @@ from openwam.dataloader.registry import (
     list_registered_datasets,
     register_dataset,
 )
-from openwam.dataloader.robotwin_dataset import (
+from openwam.dataloader.robotwin import (
     EEF_ACTION_DIM,
     EEF_GRIPPER_INDICES,
     JOINT_GRIPPER_INDICES,

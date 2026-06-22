@@ -1,4 +1,4 @@
-"""Tests for scripts/robomind_compute_stats.py.
+"""Tests for robomind_stats_computation.
 
 The Accumulator (mean/std/min/max + reservoir q01/q99) is RoboCOIN's and is
 already covered by test_robocoin_compute_stats.py — this file only exercises
@@ -8,14 +8,10 @@ the RoboMIND-specific pieces:
     each group's eef_kind from info.json cameras, and raises on a kind clash;
   * ``compute_stats_for_robot_type`` — pools action+state through the SAME
     ``robomind_raw_to_20d`` the reader uses, emitting the 20-D ``eef`` schema.
-
-The script isn't an importable package, so it's loaded from its file path
-(same pattern as test_robocoin_compute_stats.py).
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -25,18 +21,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from openwam.dataloader.robomind import robomind_raw_to_20d
-
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "robomind_compute_stats.py"
-_spec = importlib.util.spec_from_file_location("robomind_compute_stats_under_test", _SCRIPT)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
+from openwam.dataloader.utils.stats_computation import robomind_stats_computation as _mod
 
 P = "observation.images."
 # (robot_type, raw_dim, camera keys, expected eef_kind)
 EMB = {
     "single_euler": ("franka_panda_3rgb", 7, [P + "camera_top"]),
     "single_quat": ("franka_panda_sim", 8, [P + "camera_front_external", P + "camera_handeye"]),
-    "dual_euler": ("agilex_cobot_magic_v2", 14, [P + "camera_front", P + "camera_left_wrist", P + "camera_right_wrist"]),
+    "dual_euler": (
+        "agilex_cobot_magic_v2",
+        14,
+        [P + "camera_front", P + "camera_left_wrist", P + "camera_right_wrist"],
+    ),
 }
 
 

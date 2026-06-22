@@ -87,7 +87,7 @@ ROBOMIND_EEF_KINDS = ("single_euler", "single_quat", "dual_euler")
 
 # ---------------------------------------------------------------------------
 # Layout resolution + raw → 20-D conversion (module-level, shared with the
-# stats script — mirrors how scripts/robocoin_compute_stats.py imports
+# stats script — mirrors how robocoin_stats_computation imports
 # _eef14_to_eef20 from robocoin.py).
 # ---------------------------------------------------------------------------
 
@@ -126,7 +126,7 @@ def robomind_raw_to_20d(arr: np.ndarray, kind: str) -> np.ndarray:
     """Convert a RoboMIND raw EEF array to the canonical 20-D EEF schema.
 
     **Pure geometry, no normalization** — shared verbatim by the reader
-    (``_action_20d`` / ``_proprio_20d``) and ``scripts/robomind_compute_stats.py``
+    (``_action_20d`` / ``_proprio_20d``) and ``robomind_stats_computation``
     so the two produce bit-identical 20-D points. The reader applies
     ``_normalize_array`` on top; the stats script accumulates the raw output.
 
@@ -232,7 +232,7 @@ class RoboMINDDataset(LeRobotV3Reader):
         if not stats_path.exists():
             raise FileNotFoundError(
                 f"normalize_mode={self._normalize_mode!r} but stats file is missing: {stats_path}. "
-                f"Run scripts/robomind_compute_stats.py to generate it, or set normalize_mode=null."
+                f"Run python -m openwam.dataloader.utils.stats_computation.robomind_stats_computation to generate it, or set normalize_mode=null."
             )
         with open(stats_path) as f:
             raw = json.load(f)
@@ -242,7 +242,7 @@ class RoboMINDDataset(LeRobotV3Reader):
             self._normalize_mode,
             dim=EEF_DIM,
             strict_minmax=False,
-            source_hint=f"{stats_path}: eef.* — re-run scripts/robomind_compute_stats.py",
+            source_hint=f"{stats_path}: eef.* — re-run python -m openwam.dataloader.utils.stats_computation.robomind_stats_computation",
         )
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:

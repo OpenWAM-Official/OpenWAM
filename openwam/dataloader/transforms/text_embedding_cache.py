@@ -41,7 +41,7 @@ BUCKET_PREFIX_LEN = 2
 
 _PRECOMPUTE_HINT = (
     "Run the offline precompute first:\n"
-    "  python -m openwam.dataloader.reason1_embedding_computation \\\n"
+    "  python -m openwam.dataloader.utils.stats_computation.reason1_embedding_computation \\\n"
     "      --reason1-ckpt /path/to/Cosmos-Reason1-7B \\\n"
     "      --cosmos-ckpt  /path/to/Cosmos-Predict2.5-2B/base/post-trained/<uuid>_ema_bf16.pt \\\n"
     "      --dataset-config configs/dataloader/robotwin.yaml \\\n"

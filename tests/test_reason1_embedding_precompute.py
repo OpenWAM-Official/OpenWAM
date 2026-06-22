@@ -1,4 +1,4 @@
-"""Unit tests for ``openwam.dataloader.reason1_embedding_computation``.
+"""Unit tests for ``openwam.dataloader.utils.stats_computation.reason1_embedding_computation``.
 
 Mostly hits the pure-Python helpers and the crossattn_proj loader against
 a stand-in checkpoint dict — does NOT need the real Reason1-7B weights or
@@ -15,8 +15,8 @@ import pytest
 import torch
 from safetensors.torch import load_file
 
-from openwam.dataloader import reason1_embedding_computation as ript
 from openwam.dataloader.transforms.text_embedding_cache import bucketed_cache_path_for_sha
+from openwam.dataloader.utils.stats_computation import reason1_embedding_computation as ript
 
 
 def test_constants_match_upstream_geometry():
@@ -212,7 +212,7 @@ def test_enumerate_prompts_walks_seen_unseen_and_dedups(tmp_path, monkeypatch):
     def fake_discover(_dataset_dir, _robot, _variant, tasks):
         return [("fold_towel", str(data_root))]
 
-    monkeypatch.setattr("openwam.dataloader.robotwin_dataset.discover_robotwin_roots", fake_discover)
+    monkeypatch.setattr("openwam.dataloader.robotwin.discover_robotwin_roots", fake_discover)
 
     cfg = {
         "dataset_dir": str(dataset_dir),
@@ -247,7 +247,7 @@ def test_enumerate_prompts_includes_task_fallback_even_without_instructions(tmp_
     def fake_discover(_dataset_dir, _robot, _variant, tasks):
         return [("open_laptop", str(data_root))]
 
-    monkeypatch.setattr("openwam.dataloader.robotwin_dataset.discover_robotwin_roots", fake_discover)
+    monkeypatch.setattr("openwam.dataloader.robotwin.discover_robotwin_roots", fake_discover)
 
     cfg = {
         "dataset_dir": str(dataset_dir),

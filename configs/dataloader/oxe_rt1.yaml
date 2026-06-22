@@ -31,7 +31,7 @@ split: train
 # range outliers (action_y reaches 22.09 in eef_stats.json) — under min-max
 # 98% of action_y compresses into a ~1.6%-wide band (post-norm std ≈ 0.008 vs
 # ≈ 0.43 under quantile), so quantile is strongly recommended for RT-1.
-# See plans/oxe_dataloaders.md §3.4 + §1.2 and scripts/oxe_verify_normalization.py.
+# See plans/oxe_dataloaders.md §3.4 + §1.2 and openwam.dataloader.utils.stats_computation.oxe_stats_computation.
 #   null / "none" → no normalization
 #   "min-max"     → ((x - min) / (max - min) * 2 - 1)
 #   "z-score"     → ((x - mean) / std)

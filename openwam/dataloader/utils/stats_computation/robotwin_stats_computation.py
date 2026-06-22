@@ -14,15 +14,15 @@ whichever sub-dict matches ``action_mode`` at dataset-construction time.
 Usage
 -----
     # yaml-driven (preferred)
-    python -m openwam.dataloader.robotwin_stats_computation \
+    python -m openwam.dataloader.utils.stats_computation.robotwin_stats_computation \
         --config configs/dataloader/robotwin.yaml
 
     # single-task
-    python -m openwam.dataloader.robotwin_stats_computation \
+    python -m openwam.dataloader.utils.stats_computation.robotwin_stats_computation \
         --data_root /path/to/task/{robot}_{variant}/data
 
     # multi-task
-    python -m openwam.dataloader.robotwin_stats_computation \
+    python -m openwam.dataloader.utils.stats_computation.robotwin_stats_computation \
         --dataset_dir /path/to/RoboTwin2.0/dataset --robot aloha-agilex --variant both
 """
 
@@ -362,7 +362,7 @@ def compute_multitask_robotwin_stats(
     Returns:
         Nested dict identical in shape to :func:`compute_normalization_stats`.
     """
-    from openwam.dataloader.robotwin_dataset import discover_robotwin_roots
+    from openwam.dataloader.robotwin import discover_robotwin_roots
 
     variant_list = ["clean_50", "randomized_500"] if variant == "both" else [variant]
 
@@ -478,7 +478,7 @@ def _load_yaml_config(path: str) -> dict:
 
 def _resolve_tasks_from_config(cfg: dict) -> Optional[list]:
     """Match the task-resolution semantics of ``MultiTaskRoboTwinDataset.from_config``."""
-    from openwam.dataloader.robotwin_dataset import ROBOTWIN_ALL_TASKS, ROBOTWIN_TRAIN_TASKS
+    from openwam.dataloader.robotwin import ROBOTWIN_ALL_TASKS, ROBOTWIN_TRAIN_TASKS
 
     task_name = cfg.get("task_name")
     if task_name:

@@ -99,7 +99,7 @@ def test_joint_mode_basic():
     (num_frames-1)*video_stride + 1 raw frames. Action trajectory has
     num_frames-1 steps; proprio is the first sampled action.
     """
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -140,7 +140,7 @@ def test_short_episode_pads_and_masks():
       - pad_len          = 7   (last frame repeated in video + actions)
       - action_mask[t]   = (t + 1) < 10  → first 9 True, remaining 7 False
     """
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=10, seed=0)
@@ -185,7 +185,7 @@ def test_long_episode_tail_windows_are_included_and_padded():
     For T=20, num_frames=17, every start in 0..18 is valid. A start near the
     end should be padded while still containing at least one real action label.
     """
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -224,7 +224,7 @@ def test_long_episode_tail_windows_are_included_and_padded():
 
 def test_tail_windows_always_have_at_least_one_valid_action():
     """The loader must not enumerate samples with fully padded action labels."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -251,7 +251,7 @@ def test_single_frame_episode_has_no_valid_action_window():
     """A sample must contain at least one future action label."""
     import pytest
 
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=1, seed=0)
@@ -273,7 +273,7 @@ def test_build_sample_rejects_window_without_valid_action_label():
     """Internal sample construction also enforces the action-label invariant."""
     import pytest
 
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -296,7 +296,7 @@ def test_build_sample_rejects_window_without_valid_action_label():
 
 def test_val_fixed_samples_use_full_window_start_range():
     """Fixed val sampling keeps the historical full-window distribution."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -321,7 +321,7 @@ def test_val_fixed_samples_use_full_window_start_range():
 
 def test_val_exhaustive_windows_use_full_window_start_range():
     """Uncapped val sampling should match the fixed-sample val semantics."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -346,7 +346,7 @@ def test_tail_masks_flow_through_prepare_inputs_and_loss():
     """Dataset tail masks must become loss masks and suppress padded errors."""
     import torch
 
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
     from tests.test_openwam_trainer import _make_tiny_arch
 
     class _UnitScheduler:
@@ -443,7 +443,7 @@ def test_video_stride_does_not_affect_action_length():
       - action horizon  = num_frames - 1 = 16  (full raw rate)
       - proprio         = raw_actions[0:1], shape (1, D)
     """
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=30, seed=0)
@@ -473,7 +473,7 @@ def test_video_stride_does_not_affect_action_length():
 
 def test_invalid_video_stride_rejected():
     """(num_frames - 1) must be divisible by video_stride; else ValueError."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -496,7 +496,7 @@ def test_invalid_video_stride_rejected():
 
 def test_joint_mode_minmax_normalization():
     """Joint mode applies min-max normalization to joints and binary to grippers."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=42)
@@ -529,7 +529,7 @@ def test_joint_mode_minmax_normalization():
 
 def test_joint_mode_gripper_continuous():
     """Joint mode gripper uses raw continuous values, min-max normalized like all dims."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -559,7 +559,7 @@ def test_joint_mode_gripper_continuous():
 
 def test_joint_mode_denormalize_roundtrip():
     """denormalize_action inverts normalization back to raw units."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -597,7 +597,7 @@ def test_joint_mode_denormalize_roundtrip():
 
 def test_eef_mode_basic():
     """EEF mode loads correctly and returns action_dim=20."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -626,7 +626,7 @@ def test_eef_mode_basic():
 
 def test_eef_mode_minmax_normalization():
     """EEF mode with normalize_mode='min-max' rescales all 20 dims into [-1, 1]."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
@@ -660,7 +660,7 @@ def test_eef_mode_minmax_normalization():
 
 def test_eef_mode_zscore_normalization():
     """EEF mode with normalize_mode='z-score' centers around the stats mean."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=40, seed=0)
@@ -699,7 +699,7 @@ def test_eef_mode_zscore_normalization():
 
 def test_eef_roundtrip_denormalize():
     """EEF normalize → denormalize should recover the raw value for both modes."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     for mode in ("min-max", "z-score"):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -727,7 +727,7 @@ def test_eef_roundtrip_denormalize():
 
 def test_eef_gripper_raw_values():
     """EEF mode uses raw continuous gripper values from HDF5 without inversion."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # T=10, num_frames=9, video_stride=2 → window [0..8], num_video_frames=5.
@@ -767,7 +767,7 @@ def test_eef_gripper_raw_values():
 
 def test_eef_denormalize_passthrough():
     """With normalize_mode=None, denormalize_action is an identity."""
-    from openwam.dataloader.robotwin_dataset import RoboTwinDataset
+    from openwam.dataloader.robotwin import RoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -798,7 +798,7 @@ def test_eef_denormalize_passthrough():
 
 def test_multi_variant_discovery():
     """MultiTaskRoboTwinDataset with variant='both' discovers clean and randomized."""
-    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+    from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create directory structure for 2 tasks × 2 variants
@@ -829,7 +829,7 @@ def test_multi_variant_discovery():
 
 def test_multi_variant_single_variant_compat():
     """MultiTaskRoboTwinDataset with variant='clean_50' loads a single variant."""
-    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+    from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for task in ["task_a"]:
@@ -893,7 +893,7 @@ def test_rotation_conversion_roundtrip():
 
 def test_normalization_stats_nested_schema_contains_both_modes():
     """compute_normalization_stats returns a nested dict with both 'joint' and 'eef'."""
-    from openwam.dataloader.robotwin_stats_computation import compute_normalization_stats
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import compute_normalization_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(3):
@@ -913,7 +913,7 @@ def test_normalization_stats_nested_schema_contains_both_modes():
 
 def test_multitask_normalization_stats_nested_schema():
     """compute_multitask_robotwin_stats also returns both modes."""
-    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import compute_multitask_robotwin_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for task in ["task_a", "task_b"]:
@@ -956,7 +956,7 @@ def _make_multitask_layout(root, tasks, robot="test-robot", variant="clean_50", 
 
 def test_multitask_action_stats_can_resume_from_partial_checkpoint():
     """Second run reuses already-persisted task shards instead of starting over."""
-    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import compute_multitask_robotwin_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _make_multitask_layout(tmpdir, ["task_a", "task_b"])
@@ -999,7 +999,7 @@ def test_resume_does_not_recompute_already_checkpointed_shards():
     invocation and the prior test would still pass. Pins the actual contract
     PR #77 review flagged: already-persisted task-roots are *skipped*.
     """
-    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import compute_multitask_robotwin_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _make_multitask_layout(tmpdir, ["task_a", "task_b"])
@@ -1037,7 +1037,7 @@ def test_resume_does_not_recompute_already_checkpointed_shards():
 
 def test_resume_ignores_shards_dropped_from_tasks_list():
     """Shrinking tasks only rebuilds from the current task_roots' shards."""
-    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import compute_multitask_robotwin_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _make_multitask_layout(tmpdir, ["task_a", "task_b"])
@@ -1076,7 +1076,7 @@ def test_resume_ignores_shards_dropped_from_tasks_list():
 
 def test_resume_shards_are_keyed_by_data_root():
     """Reusing checkpoint_path across robots does not mix incompatible shards."""
-    from openwam.dataloader.robotwin_stats_computation import compute_multitask_robotwin_stats
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import compute_multitask_robotwin_stats
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _make_multitask_layout(tmpdir, ["task_a"], robot="robot-x", variant="clean_50")
@@ -1112,7 +1112,7 @@ def test_resume_shards_are_keyed_by_data_root():
 
 def test_atomic_save_stats_npy_roundtrip(tmp_path):
     """atomic_save_stats_npy should produce a fully-formed .npy at the target path."""
-    from openwam.dataloader.robotwin_stats_computation import atomic_save_stats_npy
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import atomic_save_stats_npy
 
     target = str(tmp_path / "stats.npy")
     payload = {"joint": {"mean": np.zeros(14, dtype=np.float32)}, "num_timesteps": 7}
@@ -1127,8 +1127,8 @@ def test_atomic_save_stats_npy_roundtrip(tmp_path):
 
 def test_multitask_peer_rank_waits_for_shared_stats(monkeypatch, tmp_path):
     """Peer ranks should wait for rank 0's final .npy instead of computing stats."""
-    import openwam.dataloader.robotwin_dataset as ds_mod
-    from openwam.dataloader.robotwin_stats_computation import atomic_save_stats_npy
+    import openwam.dataloader.robotwin as ds_mod
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import atomic_save_stats_npy
 
     dataset_dir = str(tmp_path)
     stats_path = os.path.join(dataset_dir, "test-robot_clean_50_stats.npy")
@@ -1194,7 +1194,7 @@ def test_multitask_peer_rank_waits_for_shared_stats(monkeypatch, tmp_path):
 def test_registry_robotwin_is_multitask():
     """Registry 'robotwin' type maps to MultiTaskRoboTwinDataset."""
     from openwam.dataloader.registry import DATASET_REGISTRY
-    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+    from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     assert "robotwin" in DATASET_REGISTRY
     assert DATASET_REGISTRY["robotwin"] is MultiTaskRoboTwinDataset
@@ -1209,7 +1209,7 @@ def test_registry_robotwin_multitask_removed():
 
 def test_from_config_task_resolution_single_task():
     """from_config with task_name set resolves to [task_name]."""
-    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+    from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     config = {
         "type": "robotwin",
@@ -1246,7 +1246,7 @@ def test_from_config_task_resolution_single_task():
 
 def test_from_config_task_resolution_holdout():
     """from_config with holdout_tasks excludes them from training tasks."""
-    from openwam.dataloader.robotwin_dataset import (
+    from openwam.dataloader.robotwin import (
         ROBOTWIN_ALL_TASKS,
         MultiTaskRoboTwinDataset,
     )
@@ -1287,7 +1287,7 @@ def test_from_config_task_resolution_holdout():
 def test_from_config_via_registry():
     """build_dataset dispatches to MultiTaskRoboTwinDataset.from_config."""
     from openwam.dataloader.registry import build_dataset
-    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+    from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     config = {
         "type": "robotwin",

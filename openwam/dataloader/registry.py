@@ -82,7 +82,7 @@ def _register_builtins():
     from openwam.dataloader.oxe_rt1 import OxeRt1Dataset
     from openwam.dataloader.robocoin import MultiRobotCOINDataset
     from openwam.dataloader.robomind import RoboMINDDataset
-    from openwam.dataloader.robotwin_dataset import MultiTaskRoboTwinDataset
+    from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
     register_dataset("mixture")(MixtureDataset)

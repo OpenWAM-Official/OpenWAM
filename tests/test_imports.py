@@ -15,7 +15,7 @@ def test_import_data_base():
 
 
 def test_import_data_robotwin():
-    from openwam.dataloader.robotwin_dataset import (  # noqa: F401
+    from openwam.dataloader.robotwin import (  # noqa: F401
         ROBOTWIN_ALL_TASKS,
         ROBOTWIN_HOLDOUT_TASKS,
         ROBOTWIN_TRAIN_TASKS,
@@ -31,7 +31,7 @@ def test_import_data_transforms():
 
 
 def test_import_data_normalization_stats():
-    from openwam.dataloader.robotwin_stats_computation import (  # noqa: F401
+    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import (  # noqa: F401
         compute_multitask_robotwin_stats,
         compute_normalization_stats,
         parse_tasks_file,

@@ -31,7 +31,7 @@ split: train
 # Reads {dataset_dir}/meta/eef_stats.json (state + action stacked). All three
 # modes are supported; quantile is the default (robust to outliers across all
 # 4 OXE datasets). See plans/oxe_dataloaders.md §3.4 and
-# scripts/oxe_verify_normalization.py for the empirical comparison.
+# openwam.dataloader.utils.stats_computation.oxe_stats_computation for the empirical comparison.
 #   null / "none" → no normalization
 #   "min-max"     → ((x - min) / (max - min) * 2 - 1)
 #   "z-score"     → ((x - mean) / std)

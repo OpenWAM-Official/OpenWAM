@@ -1,6 +1,6 @@
 """Dataset-neutral multi-view image composition and prompt formatting.
 
-These helpers used to live inside ``robotwin_dataset.py`` but are pure image /
+These helpers used to live inside ``robotwin.py`` but are pure image /
 text utilities reused by both the RoboTwin dataloader and the deployment
 ``policy_server``. Keeping them in a transform module avoids deploy → dataset
 hard-coupling.

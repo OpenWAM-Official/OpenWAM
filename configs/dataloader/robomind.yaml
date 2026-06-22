@@ -47,7 +47,7 @@ enable_action_supervision: true
 # ── Normalization (decision A2) ──────────────────────────────────────────────
 # quantile (per-robot_type 20-D EEF stats) — aligns with OXE / RoboCOIN-quantile.
 # REQUIRES stats files at {root}/meta/stats_<robot_type>.json; generate first:
-#   python scripts/robomind_compute_stats.py --dataset_dir <root>
+#   python -m openwam.dataloader.utils.stats_computation.robomind_stats_computation --dataset_dir <root>
 # Set to null to disable in-reader normalization (passthrough).
 normalize_mode: quantile
 

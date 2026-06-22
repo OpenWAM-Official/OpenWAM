@@ -15,7 +15,7 @@ The flow under test:
         (forward into cfg.dataloader before build_dataset runs)
             │
             ▼
-    openwam.dataloader.robotwin_dataset
+    openwam.dataloader.robotwin
         (branching divisibility check: causal=(N-1)%tc, non-causal=N%tc)
 
 The tests below exercise each hop in isolation — no full DiT / pipeline
@@ -246,7 +246,7 @@ def test_C4b_bridge_causal_mismatch_emits_warning(caplog):
 
 
 def test_C6_non_causal_divisibility():
-    from openwam.dataloader.robotwin_dataset import _check_temporal_divisibility
+    from openwam.dataloader.robotwin import _check_temporal_divisibility
 
     # N=10, tc=2, non-causal → 10 % 2 == 0 → ok
     _check_temporal_divisibility(num_video_frames=10, temporal_compression=2, causal_temporal=False)
@@ -262,7 +262,7 @@ def test_C6_non_causal_divisibility():
 
 
 def test_C7_causal_divisibility():
-    from openwam.dataloader.robotwin_dataset import _check_temporal_divisibility
+    from openwam.dataloader.robotwin import _check_temporal_divisibility
 
     # N=9, tc=2, causal → (9-1) % 2 == 0 → ok
     _check_temporal_divisibility(num_video_frames=9, temporal_compression=2, causal_temporal=True)

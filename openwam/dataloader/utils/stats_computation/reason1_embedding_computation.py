@@ -26,7 +26,7 @@ plus the task-name fallback used by ``_resolve_prompt``), this tool:
 
 Usage::
 
-    python -m openwam.dataloader.reason1_embedding_computation \\
+    python -m openwam.dataloader.utils.stats_computation.reason1_embedding_computation \\
         --reason1-ckpt /path/to/assets/Cosmos-Reason1-7B \\
         --cosmos-ckpt  /path/to/assets/Cosmos-Predict2.5-2B/base/post-trained/<uuid>_ema_bf16.pt \\
         --dataset-config configs/dataloader/robotwin.yaml \\
@@ -108,13 +108,13 @@ def _enumerate_prompts(dataset_cfg: dict) -> list[str]:
     """Walk the dataset's instruction JSONs and return every formatted prompt
     that ``RoboTwinDataset._get_prompt`` could ever return.
 
-    ``_resolve_prompt`` (robotwin_dataset.py:221-274) picks via
+    ``_resolve_prompt`` (robotwin.py:221-274) picks via
     ``random.choice`` over the ``seen`` / ``unseen`` pools per call, so the
     cache must enumerate every entry — not just a sampled instance. We also
     include the task-name fallback string and the empty caption (the latter
     is saved separately as ``empty.safetensors``).
     """
-    from openwam.dataloader.robotwin_dataset import (
+    from openwam.dataloader.robotwin import (
         ROBOTWIN_ALL_TASKS,
         ROBOTWIN_TRAIN_TASKS,
         discover_robotwin_roots,

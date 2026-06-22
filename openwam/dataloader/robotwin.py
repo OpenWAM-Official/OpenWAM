@@ -591,7 +591,7 @@ class RoboTwinDataset(BaseDataset):
                         f"  [normalizer] Found pre-computed single-task stats file: {stats_path} (exists ✓, will load)"
                     )
                 else:
-                    from openwam.dataloader.robotwin_stats_computation import (
+                    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import (
                         atomic_save_stats_npy,
                         compute_normalization_stats,
                     )
@@ -669,7 +669,7 @@ class RoboTwinDataset(BaseDataset):
 
         # ---- Optional pre-encoded text cache (e.g. Cosmos-Reason1 for the
         # Cosmos25 backbone, pre-computed via
-        # ``openwam.dataloader.reason1_embedding_computation``). When the
+        # ``openwam.dataloader.utils.stats_computation.reason1_embedding_computation``). When the
         # cache_dir is set, every sample dict will carry a
         # ``pre_encoded_text`` (L, D) tensor that the architecture threads to
         # ``vb.preprocess_input_for_train``. Wan backbones drop it silently via ``**kw``.
@@ -1158,7 +1158,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
                         f"(exists ✓, will load)"
                     )
                 else:
-                    from openwam.dataloader.robotwin_stats_computation import (
+                    from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import (
                         atomic_save_stats_npy,
                         cleanup_partial_stats_checkpoint,
                         compute_multitask_robotwin_stats,

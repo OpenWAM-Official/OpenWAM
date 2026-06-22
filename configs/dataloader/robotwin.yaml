@@ -75,7 +75,7 @@ val_variant: null
 
 # --- Pre-computed text embedding cache (Cosmos-Reason1 for Cosmos25 backbone) ---
 # Pre-compute once per unique caption with:
-#   python -m openwam.dataloader.reason1_embedding_computation \
+#   python -m openwam.dataloader.utils.stats_computation.reason1_embedding_computation \
 #       --reason1-ckpt /path/to/Cosmos-Reason1-7B \
 #       --cosmos-ckpt  /path/to/Cosmos-Predict2.5-2B/base/post-trained/<uuid>_ema_bf16.pt \
 #       --dataset-config configs/dataloader/robotwin.yaml \
