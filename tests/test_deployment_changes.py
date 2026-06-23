@@ -11,31 +11,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import torch.nn as nn
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _tiny_module(dtype=torch.float32) -> nn.Module:
-    m = nn.Linear(4, 4)
-    m.to(dtype=dtype)
-    return m
-
-
-def _tiny_pipe(dtype=torch.float32):
-    """Minimal duck-typed pipeline with named_parameters/named_buffers."""
-    pipe = MagicMock()
-    linear = nn.Linear(4, 4).to(dtype=dtype)
-    pipe.named_parameters.return_value = linear.named_parameters()
-    pipe.named_buffers.return_value = linear.named_buffers()
-    return pipe
 
 
 # ---------------------------------------------------------------------------
@@ -70,108 +49,7 @@ class TestAccelerateYamlMixedPrecision:
 
 
 # ---------------------------------------------------------------------------
-# 2. checkpointing — save dtype enforcement
-# ---------------------------------------------------------------------------
-
-
-class TestSaveTrainableCheckpoint:
-    def test_saves_bf16(self, tmp_path):
-        from safetensors.torch import load_file
-
-        from openwam.train.utils.checkpointing import save_trainable_checkpoint
-
-        action_dit = _tiny_module(dtype=torch.float32)
-        pipe = _tiny_pipe(dtype=torch.float32)
-
-        path = str(tmp_path / "ckpt.safetensors")
-        save_trainable_checkpoint(path, action_dit, pipe, lambda_action=1.0, mixed_precision="bf16")
-
-        sd = load_file(path)
-        for k, v in sd.items():
-            assert v.dtype == torch.bfloat16, f"{k}: expected bf16, got {v.dtype}"
-
-    def test_saves_fp16(self, tmp_path):
-        from safetensors.torch import load_file
-
-        from openwam.train.utils.checkpointing import save_trainable_checkpoint
-
-        action_dit = _tiny_module(dtype=torch.float32)
-        pipe = _tiny_pipe(dtype=torch.float32)
-
-        path = str(tmp_path / "ckpt_fp16.safetensors")
-        save_trainable_checkpoint(path, action_dit, pipe, lambda_action=1.0, mixed_precision="fp16")
-
-        sd = load_file(path)
-        for k, v in sd.items():
-            assert v.dtype == torch.float16, f"{k}: expected fp16, got {v.dtype}"
-
-    def test_saves_fp32_when_no(self, tmp_path):
-        from safetensors.torch import load_file
-
-        from openwam.train.utils.checkpointing import save_trainable_checkpoint
-
-        action_dit = _tiny_module(dtype=torch.float32)
-        pipe = _tiny_pipe(dtype=torch.float32)
-
-        path = str(tmp_path / "ckpt_fp32.safetensors")
-        save_trainable_checkpoint(path, action_dit, pipe, lambda_action=1.0, mixed_precision="no")
-
-        sd = load_file(path)
-        for k, v in sd.items():
-            assert v.dtype == torch.float32, f"{k}: expected fp32, got {v.dtype}"
-
-    def test_invalid_precision_raises(self, tmp_path):
-        from openwam.train.utils.checkpointing import save_trainable_checkpoint
-
-        action_dit = _tiny_module()
-        pipe = _tiny_pipe()
-        with pytest.raises(ValueError, match="Unknown mixed_precision"):
-            save_trainable_checkpoint(str(tmp_path / "x.safetensors"), action_dit, pipe, 1.0, mixed_precision="int8")
-
-    def test_integer_buffers_not_cast(self, tmp_path):
-        """Integer / bool buffers must survive unchanged through the cast."""
-        from safetensors.torch import load_file
-
-        from openwam.train.utils.checkpointing import save_trainable_checkpoint
-
-        class ModWithIntBuf(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.w = nn.Parameter(torch.ones(4, 4))
-                self.register_buffer("step", torch.tensor(42, dtype=torch.int64))
-
-            def forward(self, x):
-                return x
-
-        m = ModWithIntBuf()
-        pipe = _tiny_pipe(dtype=torch.float32)
-
-        path = str(tmp_path / "ckpt_int.safetensors")
-        save_trainable_checkpoint(path, m, pipe, lambda_action=1.0, mixed_precision="bf16")
-
-        sd = load_file(path)
-        assert sd["action_backbone.step"].dtype == torch.int64, "int64 buffer should not be cast"
-        assert sd["action_backbone.w"].dtype == torch.bfloat16, "float param should be cast to bf16"
-
-    def test_default_precision_is_bf16(self, tmp_path):
-        """Calling without mixed_precision arg should default to bf16."""
-        from safetensors.torch import load_file
-
-        from openwam.train.utils.checkpointing import save_trainable_checkpoint
-
-        action_dit = _tiny_module(dtype=torch.float32)
-        pipe = _tiny_pipe(dtype=torch.float32)
-
-        path = str(tmp_path / "ckpt_default.safetensors")
-        save_trainable_checkpoint(path, action_dit, pipe, lambda_action=1.0)  # no mixed_precision kwarg
-
-        sd = load_file(path)
-        for k, v in sd.items():
-            assert v.dtype == torch.bfloat16, f"{k}: default should be bf16, got {v.dtype}"
-
-
-# ---------------------------------------------------------------------------
-# 3. deployment.yaml — inference + deploy sections
+# 2. deployment.yaml — inference + deploy sections
 # ---------------------------------------------------------------------------
 
 

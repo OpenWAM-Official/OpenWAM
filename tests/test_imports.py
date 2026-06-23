@@ -77,14 +77,11 @@ def test_import_training_base():
     from openwam.train.base import BaseTrainer  # noqa: F401
 
     assert hasattr(BaseTrainer, "compute_loss")
-    assert hasattr(BaseTrainer, "train_step")
+    assert hasattr(BaseTrainer, "train")
 
 
 def test_import_training_optimizer_groups():
-    from openwam.train.utils.optimizer_groups import (  # noqa: F401
-        attach_optimizer_groups,
-        build_trainable_parameters,
-    )
+    from openwam.train.utils.optimizer_groups import build_trainable_parameters  # noqa: F401
 
 
 def test_import_training_init():

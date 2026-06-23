@@ -23,14 +23,10 @@ Helpers:
   replaying identical augmentations every epoch.
 - ``make_dataloader_generator`` returns a fresh ``torch.Generator`` seeded
   for the local rank, intended to be passed to ``DataLoader(generator=...)``.
-- ``make_noise_generator`` returns a per-rank ``torch.Generator`` on the
-  requested device, intended for diffusion noise sampling.
 - ``per_step_seed`` derives a deterministic ``int`` seed from the run seed,
   the rank and a step counter; useful for ``torch.manual_seed`` calls done
   inside the forward pass when threading a generator all the way down to
   ``q_sample`` would require invasive changes.
-- ``read_env_seed`` reads an integer seed from an environment variable
-  (default ``OPENWAM_SEED``), returning ``None`` when unset or empty.
 - ``RANK_OFFSET`` keeps each rank's RNG stream disjoint; export so callers
   picking up state from other tools agree on the convention.
 """
@@ -39,7 +35,6 @@ from __future__ import annotations
 
 import os
 import random
-from typing import Optional
 
 import numpy as np
 import torch
@@ -110,22 +105,6 @@ def make_dataloader_generator(seed: int, *, rank: int = 0) -> torch.Generator:
     return g
 
 
-def make_noise_generator(
-    seed: int,
-    *,
-    device: torch.device | str = "cpu",
-    rank: int = 0,
-) -> torch.Generator:
-    """Build a device-bound ``torch.Generator`` for diffusion noise sampling.
-
-    Use a per-rank stream offset so each FSDP rank generates an independent
-    yet deterministic noise sequence.
-    """
-    g = torch.Generator(device=device)
-    g.manual_seed(int(seed) + RANK_OFFSET * int(rank))
-    return g
-
-
 def per_step_seed(seed: int, *, rank: int = 0, step: int = 0) -> int:
     """Derive a deterministic per-step seed used for in-forward ``manual_seed`` calls.
 
@@ -141,18 +120,3 @@ def per_step_seed(seed: int, *, rank: int = 0, step: int = 0) -> int:
     overlap window is pushed past any step count you care about.
     """
     return int(seed) + RANK_OFFSET * int(rank) + int(step)
-
-
-def read_env_seed(env_var: str = "OPENWAM_SEED") -> Optional[int]:
-    """Return the integer seed from ``env_var`` when set, else ``None``.
-
-    Empty string is treated the same as unset so a no-op
-    ``export OPENWAM_SEED=`` keeps the default non-deterministic behaviour.
-    """
-    raw = os.environ.get(env_var, "")
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{env_var} must be an integer, got {raw!r}") from exc
