@@ -91,6 +91,25 @@ def _expand_ranges(tokens: Token) -> List[int]:
     return out
 
 
+def _coerce_spec(spec):
+    """Normalize an OmegaConf ``ListConfig`` to a plain (possibly nested) list.
+
+    Dataloader configs reach the readers as OmegaConf containers —
+    ``scripts/train.py`` passes ``cfg.dataloader`` straight into
+    ``build_dataset`` without ``to_container`` — so ``unify_action_map`` arrives
+    as a ``ListConfig``, which is **not** a ``list``/``tuple`` and would be
+    rejected below. Convert recursively (also unwraps the nested paired form).
+    No-op for plain lists or when OmegaConf isn't installed.
+    """
+    try:
+        from omegaconf import ListConfig, OmegaConf
+    except Exception:
+        return spec
+    if isinstance(spec, ListConfig):
+        return OmegaConf.to_container(spec, resolve=True)
+    return spec
+
+
 def _is_paired(spec: Sequence) -> bool:
     """Paired form iff every top-level element is itself a list/tuple."""
     return all(isinstance(el, (list, tuple)) for el in spec)
@@ -112,6 +131,7 @@ def parse_unify_spec(spec: Sequence, unify_dim: int = UNIFY_DIM) -> np.ndarray:
         ValueError: on any malformed / out-of-range / overlapping / non-covering
             spec, with a message pointing at the offending part.
     """
+    spec = _coerce_spec(spec)  # OmegaConf ListConfig (Hydra-loaded yaml) -> plain list
     if not isinstance(spec, (list, tuple)) or len(spec) == 0:
         raise ValueError(f"unify spec must be a non-empty list, got {spec!r}")
 
