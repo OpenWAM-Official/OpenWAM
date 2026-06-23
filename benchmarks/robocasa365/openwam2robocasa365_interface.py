@@ -46,6 +46,7 @@ from benchmarks.utils import (  # noqa: E402
     eef20d_to_robocasa12d,
     encode_numpy_b64,
     quat_xyzw_to_rot6d,
+    robocasa_state_to_eef20d,
     transport,
 )
 
@@ -60,7 +61,9 @@ ACTION_SLICES = {
 }
 ACTION_DIM = 12
 
-# 16-D proprio state, concatenated in the order the model was trained on.
+# Raw 16-D obs state keys (kept for the debug breakdown). The model is NOT trained on
+# this raw 16-D vector — it trains on the 20-D single-arm EEF proprio (see below), so the
+# client converts before sending. DEFAULT_STATE_KEYS is only used for the debug display now.
 DEFAULT_STATE_KEYS = [
     "state.base_position",                    # 3
     "state.base_rotation",                    # 4
@@ -68,7 +71,15 @@ DEFAULT_STATE_KEYS = [
     "state.end_effector_rotation_relative",   # 4
     "state.gripper_qpos",                     # 2
 ]
-STATE_DIM = 16
+# The 3 obs keys the 20-D EEF proprio is built from (base is dropped, like training).
+PROPRIO_EEF_KEYS = (
+    "state.end_effector_position_relative",   # 3
+    "state.end_effector_rotation_relative",   # 4 (quat xyzw)
+    "state.gripper_qpos",                     # 2
+)
+# Proprio is sent as the SAME 20-D EEF representation the model trains on
+# (RoboCasa365Dataset proprio = eef20d[0:1]); the server validates this dim and normalizes it.
+STATE_DIM = 20
 
 # Fixed client-side camera slots the server expects (head required). The stems
 # match robotwin's per-camera debug JPG names (head.jpg / left.jpg / right.jpg).
@@ -77,7 +88,10 @@ _SLOT_STEMS = {"head_camera": "head", "left_wrist_camera": "left", "right_wrist_
 
 
 def assemble_state(obs: dict, state_keys: Iterable[str]) -> list:
-    """Concatenate the proprio state keys (in order) into a flat float list."""
+    """Concatenate the raw proprio state keys (in order) into a flat float list.
+
+    Kept for the debug breakdown; NOT what gets sent (see ``assemble_eef20d_proprio``).
+    """
     state: list = []
     missing: list = []
     for key in state_keys:
@@ -88,6 +102,25 @@ def assemble_state(obs: dict, state_keys: Iterable[str]) -> list:
     if missing:
         raise KeyError(f"RoboCasa365 obs missing state key(s): {missing}")
     return state
+
+
+def assemble_eef20d_proprio(obs: dict) -> list:
+    """Build the 20-D single-arm EEF proprio (RAW) the model trains on, from a RoboCasa obs.
+
+    Mirrors the dataloader's proprio exactly (``state_to_arm10`` + ``assemble_single_arm_left``):
+    ``[eef_pos_rel(3), rot6d(eef_rot_rel quat,6), gripper_separation(1), <right 10 zeros>]``.
+    Sent raw (physical) — the server normalizes. This replaces the stale 16-D raw send so the
+    deploy proprio matches the trained representation (the dual of robotwin's _extract_eef_proprio).
+    """
+    missing = [k for k in PROPRIO_EEF_KEYS if k not in obs]
+    if missing:
+        raise KeyError(f"RoboCasa365 obs missing proprio key(s): {missing}")
+    eef20d = robocasa_state_to_eef20d(
+        obs["state.end_effector_position_relative"],
+        obs["state.end_effector_rotation_relative"],
+        obs["state.gripper_qpos"],
+    )
+    return eef20d.astype(np.float32).reshape(-1).tolist()
 
 
 def slice_action(flat) -> dict:
@@ -147,7 +180,9 @@ def build_obs_payload(
         left_wrist=_encode(left_wrist_camera_key, required=False),
         right_wrist=_encode(right_wrist_camera_key, required=False),
         prompt=prompt,
-        state=assemble_state(obs, state_keys),
+        # Send the 20-D EEF proprio the model trains on (NOT the raw 16-D). state_keys is
+        # retained for the debug breakdown only.
+        state=assemble_eef20d_proprio(obs),
     )
 
 
@@ -234,7 +269,7 @@ def dump_obs_debug(
         "latency_ms": latency_ms,
     }
     checks = {
-        "state_dim_is_16": state is not None and len(state) == STATE_DIM,
+        "state_dim_is_20": state is not None and len(state) == STATE_DIM,
         "head_and_wrist_present": (
             payload.get("images", {}).get("head_camera") is not None
             and payload.get("images", {}).get("left_wrist_camera") is not None

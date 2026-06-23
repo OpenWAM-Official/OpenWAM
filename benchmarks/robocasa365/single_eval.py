@@ -85,7 +85,7 @@ def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
         ),
         image_transform=cfg.get("image_transform", "none"),
         state_keys=list(cfg.get("state_keys") or DEFAULT_STATE_KEYS),
-        state_dim=_parse_optional_int(cfg.get("state_dim", 16), "state_dim"),
+        state_dim=_parse_optional_int(cfg.get("state_dim", 20), "state_dim"),
         action_dim=int(cfg.get("action_dim", 12)),
         osc_pos_scale=cfg.get("osc_pos_scale"),
         osc_rot_scale=cfg.get("osc_rot_scale"),

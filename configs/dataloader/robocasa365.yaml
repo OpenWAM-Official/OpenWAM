@@ -43,16 +43,22 @@ split: train
 val_ratio: 0.0                    # fraction of episodes reserved for validation
 seed: 42
 
-# ── Action / proprio normalization (single-arm 20-D EEF) ─────────────────────
+# ── Action / proprio (single-arm 20-D EEF) ──────────────────────────────────
 # RoboCasa365 is single-arm: action & proprio are BOTH the absolute EEF pose from
 # observation.state — eef_pos(3) + eef_rot(quat→rot6d, 6) + gripper(1) → the LEFT
-# 10 dims of the bimanual 20-D EEF (right 10 zero-padded + masked). One shared
-# 10-D stats normalizes the whole sequence. Stats auto-resolve and, if absent,
-# auto-compute on first load to {data_root}/{task}_eef_stats.npy (precompute via
+# 10 dims of the bimanual 20-D EEF (right 10 zero-padded + masked).
+# action_mode MUST be eef: the deploy server (model_loader) reads dataloader.action_mode
+# to pick the normalizer's stats key; without it deploy defaults to 'joint', finds no
+# 'joint' stats, and silently disables de-normalization.
+action_mode: eef
+# Stats are persisted at the full 20-D action dim so the deploy normalizer can invert the
+# model's 20-D output. Auto-resolve and, if absent, auto-compute on first load to
+# {data_root}/{task}_eef_stats.npy (precompute via
 # `python -m openwam.dataloader.robocasa365_stats_computation <bucket>`).
 #   null / "none" → no normalization (raw physical units)
-#   "min-max"     → rescale each dim into [-1, 1] using {min, max}   [default]
-#   "z-score"     → (x - mean) / std
-#   "quantile"    → clip((x - q01) / (q99 - q01) * 2 - 1, -1, 1)
+#   "min-max"     → rescale each dim into [-1, 1] using {min, max}   [default; deploy-resolvable]
+#   "z-score"     → (x - mean) / std                                  [deploy-resolvable]
+# (quantile is NOT supported here — the deploy normalizer can't invert it, so the dataloader
+#  rejects it rather than let a checkpoint silently lose normalization at serve time.)
 normalize_mode: min-max
 normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resolve under each bucket

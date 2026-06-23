@@ -185,6 +185,35 @@ class TestNormalize:
         assert ds.normalization_stats is None
         assert sample["action"].shape == (32, EEF_DIM)
 
+    def test_deploy_stats_roundtrip_20d(self, tmp_path):
+        """The DEPLOY round-trip (the N1/S1 bug): the persisted stats are 20-D and keyed
+        'eef', so the deploy normalizer (load_mode_stats + Normalizer) inverts the model's
+        20-D action without a 10-vs-20 broadcast error and round-trips."""
+        from openwam.dataloader.transforms.normalize import YAML_TO_NORM_MODE, Normalizer, load_mode_stats
+
+        b = make_robocasa_bucket(tmp_path)
+        with _mock_video_decoder():
+            ds = RoboCasa365Dataset(
+                data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96, normalize_mode="min-max"
+            )
+            s = ds[0]
+        # persisted file: 20-D stats under 'eef' (what save_normalization_stats copies + deploy reads)
+        eef = load_mode_stats(ds.normalization_stats_path, "eef")
+        assert eef is not None and len(eef["mean"]) == EEF_DIM, "persisted deploy stats must be 20-D"
+        # deploy: build the SAME normalizer and un-normalize a 20-D model action (no broadcast error)
+        norm = Normalizer(mode=YAML_TO_NORM_MODE["min-max"], stats=eef)
+        act20 = s["action"][0].numpy()  # (20,)
+        phys = norm.unnormalize(act20)
+        assert phys.shape == (EEF_DIM,)
+        assert norm.normalize(phys) == pytest.approx(act20, abs=1e-4)  # round-trips
+
+    def test_quantile_mode_rejected(self, tmp_path):
+        # quantile is not deploy-resolvable (YAML_TO_NORM_MODE lacks it) -> reject at init,
+        # else the checkpoint silently loses normalization at serve time.
+        b = make_robocasa_bucket(tmp_path)
+        with pytest.raises(ValueError, match="deploy-resolvable"):
+            RoboCasa365Dataset(data_root=str(b), normalize_mode="quantile", multiview=False, height=64, width=96)
+
 
 class TestMultiAndRegistry:
     def test_multi_from_config_single_bucket(self, tmp_path):
@@ -230,6 +259,20 @@ class TestMultiAndRegistry:
         assert paths == {str(shared)}, paths
         # no per-task stats files were written under the buckets
         assert not list(Path(tmp_path).glob("**/taskA_eef_stats.npy"))
+
+    def test_root_mode_filters_to_fixed_base(self, tmp_path):
+        # Root discovery must drop non-fixed-base (mobile-base) buckets, which would violate
+        # the base_motion=0 / control_mode=-1 design.
+        from openwam.dataloader.robocasa365 import _fixed_base_task_names
+
+        names = _fixed_base_task_names()
+        assert "OpenDrawer" in names and len(names) == 112
+        make_robocasa_bucket(tmp_path / "keep")  # -> .../OpenDrawer/.../lerobot (fixed-base)
+        mobile = tmp_path / "drop" / "MobileNonFixedBaseTask" / "20250101" / "lerobot" / "meta"
+        mobile.mkdir(parents=True)
+        (mobile / "info.json").write_text("{}")  # just enough to be discovered
+        roots = MultiTaskRoboCasa365Dataset._resolve_task_roots(str(tmp_path), None, None)
+        assert {tn for tn, _ in roots} == {"OpenDrawer"}  # mobile task filtered out
 
     def test_registered_to_multi(self):
         from openwam.dataloader.registry import DATASET_REGISTRY, list_registered_datasets

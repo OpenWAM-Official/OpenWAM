@@ -36,6 +36,7 @@ wrist), composed into the L-shape via ``assemble_multiview_layout``.
 
 from __future__ import annotations
 
+import functools
 import glob
 import json
 import os
@@ -59,18 +60,22 @@ from openwam.dataloader.utils.eef import (
     ARM10_DIM,
     EEF_DIM,
     LEFT_ARM_DIM_MASK,
+    assemble_single_arm_left,
     build_action_mask_2d,
     build_proprio_mask_2d,
-    single_arm_20d,
 )
-from openwam.dataloader.utils.normalization import materialize_eef_stats
+from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 from openwam.dataloader.utils.video_io import decode_video_frames
 
 # Phase-1 2-view mapping (also what the deploy server composes).
 HEAD_CAMERA = "observation.images.robot0_agentview_left"
 WRIST_CAMERA = "observation.images.robot0_eye_in_hand"
-STATS_DIM = ARM10_DIM  # single-arm stats live on the 10-D arm
+STATS_DIM = ARM10_DIM  # the per-arm stats are COMPUTED at 10-D, then expanded to 20-D for persist
 _MISSING_RIGHT = "__missing_right_wrist__"
+# Modes the DEPLOY normalizer (openwam.dataloader.transforms.normalize.YAML_TO_NORM_MODE) can
+# invert. quantile is deliberately excluded — it's not in YAML_TO_NORM_MODE, so a quantile-trained
+# checkpoint would silently lose normalization at serve time. Mirrors robotwin's mode guard.
+_DEPLOY_RESOLVABLE_MODES = ("min-max", "z-score")
 
 # observation.state slices (16-D).
 _STATE_EEF_POS = slice(7, 10)
@@ -85,6 +90,57 @@ _WRIST_SLOT_H, _WRIST_SLOT_W = 128, 160
 def _task_dir_name(lerobot_dir: str) -> str:
     """Task name from a ``.../<Task>/<date>/lerobot`` bucket path."""
     return os.path.basename(os.path.dirname(os.path.dirname(lerobot_dir.rstrip("/")))) or "task"
+
+
+# Authoritative fixed-base (moma_required=No) task list — root-mode discovery is filtered to it
+# so mobile-base tasks (which violate the base_motion=0 / control_mode=-1 design) can't sneak in.
+_FIXED_BASE_JSON = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "benchmarks", "robocasa365", "fixed_base_tasks.json")
+)
+
+
+def _compute_shared_stats_rank0_synced(shared_path: str, data_roots: list) -> None:
+    """Compute + persist the shared multitask stats with rank-0 synchronization.
+
+    On a multi-GPU first run, only rank 0 computes + atomically writes; other ranks poll for the
+    file (mirrors robotwin). Without this, every rank races to write the same ``{path}.tmp`` →
+    torn writes + N× redundant compute over all buckets.
+    """
+    from openwam.dataloader.robocasa365_stats_computation import atomic_save_stats_npy, compute_multitask_stats
+
+    try:
+        import torch.distributed as dist
+
+        dist_ready = dist.is_available() and dist.is_initialized()
+    except Exception:
+        dist_ready = False
+    rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+
+    if not dist_ready or rank == 0:
+        print(f"  [normalizer] computing SHARED multitask stats over {len(data_roots)} buckets -> {shared_path}")
+        atomic_save_stats_npy(shared_path, compute_multitask_stats(data_roots))
+        return
+    # non-rank0: wait for rank 0 to produce the file
+    import time
+
+    deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
+    while not os.path.exists(shared_path):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"timed out waiting for rank 0 to produce shared stats: {shared_path}")
+        time.sleep(float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10)))
+
+
+@functools.lru_cache(maxsize=1)
+def _fixed_base_task_names() -> frozenset:
+    """The 112 fixed-base task names from ``benchmarks/robocasa365/fixed_base_tasks.json``."""
+    if not os.path.exists(_FIXED_BASE_JSON):
+        raise FileNotFoundError(
+            f"fixed-base task list not found at {_FIXED_BASE_JSON}; root-mode discovery is filtered "
+            "to it. Pass an explicit task_roots/task_name, or restore the json."
+        )
+    with open(_FIXED_BASE_JSON) as f:
+        data = json.load(f)
+    return frozenset(t["name"] for t in data.get("tasks", []))
 
 
 def state_to_arm10(state: np.ndarray) -> np.ndarray:
@@ -248,11 +304,20 @@ class RoboCasa365Dataset(BaseDataset):
                 li = eligible[vr.randint(0, len(eligible) - 1)]
                 self._val_samples.append((li, vr.randint(0, max(0, self._ep_lengths[li] - self.num_frames))))
 
-        # ── action normalization (10-D arm stats; auto-compute if missing) ─
-        self._stats: Optional[dict] = None  # 10-D arm stats (forward path)
-        self._stats20: Optional[dict] = None  # 20-D expansion (trainer / eval contract)
+        # ── action normalization (20-D EEF stats; auto-compute if missing) ─
+        # Stats are persisted + loaded at the full 20-D action dim (left=arm, right=neutral),
+        # so the deploy-time un-normalization of the model's 20-D output round-trips cleanly
+        # (the 10-D forward path was the deploy-break; see _DEPLOY_RESOLVABLE_MODES).
+        self._stats: Optional[dict] = None  # 20-D stats (forward + persist + deploy)
         self.normalization_stats_path: Optional[str] = None
         if self.normalize_mode is not None:
+            if self.normalize_mode not in _DEPLOY_RESOLVABLE_MODES:
+                raise ValueError(
+                    f"normalize_mode={self.normalize_mode!r} is not deploy-resolvable. "
+                    f"Use one of {sorted(_DEPLOY_RESOLVABLE_MODES)} or null — a mode the deploy "
+                    "normalizer (YAML_TO_NORM_MODE) can invert, else the checkpoint silently "
+                    "loses normalization at serve time."
+                )
             stats_path = self._resolve_stats_path(normalization_stats_path)
             if stats_path.endswith(".json"):
                 with open(stats_path) as f:
@@ -261,11 +326,10 @@ class RoboCasa365Dataset(BaseDataset):
                 raw = np.load(stats_path, allow_pickle=True).item()
             raw = raw.get("eef", raw)  # accept flat or {"eef": {...}} schema
             self._stats = materialize_eef_stats(
-                raw, self.normalize_mode, dim=STATS_DIM, strict_minmax=True, source_hint=stats_path
+                raw, self.normalize_mode, dim=EEF_DIM, strict_minmax=True, source_hint=stats_path
             )
-            self._stats20 = _expand_stats_to_20d(self._stats)
             self.normalization_stats_path = stats_path
-            print(f"  [normalizer] {self.normalize_mode}, dim={STATS_DIM}, stats={stats_path}")
+            print(f"  [normalizer] {self.normalize_mode}, dim={EEF_DIM}, stats={stats_path}")
         else:
             print("  [normalizer] DISABLED (normalize_mode=None)")
 
@@ -292,31 +356,26 @@ class RoboCasa365Dataset(BaseDataset):
 
     @property
     def normalization_stats(self) -> Optional[dict]:
-        """20-D stats (arm10 left, neutral right) for the trainer's action buffers
-        and eval denormalization. None when normalization is disabled."""
-        return dict(self._stats20) if self._stats20 is not None else None
+        """20-D stats (arm10 left, neutral right) — the SAME dict persisted to the checkpoint
+        and read by the deploy normalizer, and copied into the trainer's action buffers.
+        None when normalization is disabled."""
+        return dict(self._stats) if self._stats is not None else None
 
     def denormalize_action(self, action) -> np.ndarray:
-        """Invert normalization on the left-arm 10 dims (right 10 stay 0).
+        """Invert the 20-D normalization for the active mode (no-op when disabled).
 
-        Inverse of ``apply_normalization`` for the active mode; no-op when
-        normalization is disabled.
+        Right-10 dims carry neutral stats (min=-1/max=1/mean0/std1) so they pass through ~unchanged;
+        the left-10 are inverted with the real arm stats. Same contract as the deploy normalizer.
         """
         arr = np.asarray(action, dtype=np.float32)
         if self._stats is None or self.normalize_mode is None:
             return arr.copy()
-        s, left = self._stats, arr[..., :ARM10_DIM]
+        s = self._stats
         if self.normalize_mode == "z-score":
-            de = left * s["std"] + s["mean"]
-        elif self.normalize_mode == "min-max":
-            de = (left + 1.0) * 0.5 * (s["max"] - s["min"]) + s["min"]
-        elif self.normalize_mode == "quantile":
-            de = (left + 1.0) * 0.5 * (s["q99"] - s["q01"]) + s["q01"]
-        else:
-            de = left
-        out = arr.copy()
-        out[..., :ARM10_DIM] = de
-        return out
+            return (arr * s["std"] + s["mean"]).astype(np.float32)
+        if self.normalize_mode == "min-max":
+            return ((arr + 1.0) * 0.5 * (s["max"] - s["min"]) + s["min"]).astype(np.float32)
+        return arr.copy()
 
     def __len__(self) -> int:
         return len(self._val_samples) if self._val_samples is not None else len(self._window_index)
@@ -336,10 +395,28 @@ class RoboCasa365Dataset(BaseDataset):
             self._video_path_tmpl.format(episode_chunk=chunk, video_key=camera, episode_index=ep_global_idx),
         )
 
-    def _read_state(self, ep_global_idx: int, start: int, end: int) -> np.ndarray:
+    def _read_full_state_uncached(self, ep_global_idx: int) -> np.ndarray:
         df = pd.read_parquet(self._data_path(ep_global_idx), columns=["observation.state"])
-        st = np.stack(df["observation.state"].values).astype(np.float32)  # (T, 16)
-        return st[start:end]
+        return np.stack(df["observation.state"].values).astype(np.float32)  # (T, 16)
+
+    def _read_state(self, ep_global_idx: int, start: int, end: int) -> np.ndarray:
+        # Cache the per-episode parquet decode: with window_stride=1 a length-T episode yields
+        # ~T windows, all hitting the same episode — without the cache each re-decodes the whole
+        # parquet (mirrors LeRobotV3Reader's lru_cache). _state_cache is (re)built lazily so it
+        # survives DataLoader-worker pickling (see __getstate__/__setstate__).
+        cache = getattr(self, "_state_cache", None)
+        if cache is None:
+            cache = self._state_cache = functools.lru_cache(maxsize=8)(self._read_full_state_uncached)
+        return cache(ep_global_idx)[start:end]
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_state_cache", None)  # lru_cache over a bound method isn't picklable
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._state_cache = None
 
     def _decode_camera(self, ep_global_idx: int, camera: str, frame_indices, slot_h: int, slot_w: int):
         return decode_video_frames(self._video_path(ep_global_idx, camera), list(frame_indices), slot_h, slot_w)
@@ -391,9 +468,10 @@ class RoboCasa365Dataset(BaseDataset):
             pad = self.num_frames - actual_len
             arm10 = np.concatenate([arm10, np.repeat(arm10[-1:], pad, axis=0)], axis=0)
 
-        # normalize the whole arm seq once, then slot into the single-arm 20-D
-        # schema (right 10 zero). proprio = pose[0]; action = pose[1:].
-        eef20d = single_arm_20d(arm10, self._stats, self.normalize_mode)  # (num_frames, 20)
+        # Assemble the single-arm 20-D (right 10 = 0) then normalize at the full 20-D with
+        # the neutral-right stats (right-10 stay 0; identical left-10 result to the old
+        # normalize-10-then-pad, but now the stats dim matches what's persisted for deploy).
+        eef20d = apply_normalization(assemble_single_arm_left(arm10), self._stats, self.normalize_mode)
         proprio = eef20d[0:1].astype(np.float32)
         action = eef20d[1 : self.num_frames].astype(np.float32)
 
@@ -518,13 +596,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         name = f"{task_name}_eef_stats.npy" if task_name else "robocasa365_multitask_eef_stats.npy"
         shared = os.path.join(dataset_dir, name)
         if not os.path.exists(shared):
-            from openwam.dataloader.robocasa365_stats_computation import (
-                atomic_save_stats_npy,
-                compute_multitask_stats,
-            )
-
-            print(f"  [normalizer] computing SHARED multitask stats over {len(roots)} buckets -> {shared}")
-            atomic_save_stats_npy(shared, compute_multitask_stats([dr for _, dr in roots]))
+            _compute_shared_stats_rank0_synced(shared, [dr for _, dr in roots])
         return shared
 
     @staticmethod
@@ -546,8 +618,10 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         # Single bucket: dataset_dir points straight at a lerobot/ dir.
         if os.path.isfile(os.path.join(dataset_dir, "meta", "info.json")):
             return [(task_name or _task_dir_name(dataset_dir), dataset_dir)]
-        # Root mode: discover every */lerobot bucket below dataset_dir.
-        out = []
+        # Root mode: discover every */lerobot bucket below dataset_dir, FILTERED to the
+        # fixed-base task list (so mobile-base tasks can't violate the base-drop assumption).
+        fixed_base = _fixed_base_task_names()
+        out, dropped = [], []
         for info_path in sorted(
             glob.glob(os.path.join(dataset_dir, "**", "lerobot", "meta", "info.json"), recursive=True)
         ):
@@ -555,7 +629,12 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             tn = os.path.basename(os.path.dirname(os.path.dirname(dr)))  # .../<Task>/<date>/lerobot
             if task_name and tn != task_name:
                 continue
+            if tn not in fixed_base:
+                dropped.append(tn)
+                continue
             out.append((tn, dr))
+        if dropped:
+            print(f"  [robocasa365] dropped {len(dropped)} non-fixed-base bucket(s): {sorted(set(dropped))[:8]}...")
         return out
 
     @property

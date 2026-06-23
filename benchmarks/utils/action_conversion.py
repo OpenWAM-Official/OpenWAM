@@ -134,6 +134,7 @@ def eef20d_to_robocasa12d(
     rot_scale: float,
     base_motion: np.ndarray | None = None,
     control_mode: float = -1.0,
+    gripper_close_threshold: float = 0.05,
     clip: bool = True,
 ) -> np.ndarray:
     """Bridge the model's 20-D **absolute** EEF pose to RoboCasa's 12-D **OSC** action.
@@ -160,12 +161,18 @@ def eef20d_to_robocasa12d(
         rot_scale: robosuite OSC rotation ``output_max`` (radians mapped to action 1.0). Same caveat as ``pos_scale``.
         base_motion: (4,) base command; defaults to zeros (fixed-base subset — base is dropped at train time).
         control_mode: scalar; defaults to -1.0 (the near-constant value observed in the fixed-base data).
+        gripper_close_threshold: finger-separation (metres) below which the gripper is commanded CLOSED.
+            The model's gripper dim is finger separation (large=open, ~0.013–0.081); ``RoboCasaGymEnv``
+            binarizes ``gripper_close`` at 0.5 (``-1`` open / ``+1`` close), so a raw pass-through (as in
+            robotwin, whose env accepts the value directly) would never cross 0.5 and the gripper would
+            never close. We map separation -> {open=0, close=1}: ``close iff sep < threshold``. Default
+            0.05 sits between the empirical open (~0.078) and closed (~0.034) means; override per env.
         clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
 
-    NOTE: ``pos_scale`` / ``rot_scale`` and the ``control_mode`` / ``base_motion`` constants
-    are part of the env's OSC controller contract. They cannot be verified without a
-    RoboCasa365-trained checkpoint run in the real env (Phase 2); the math (delta + axis-angle
-    + ordering) here is unit-tested, but the scalar contract must be confirmed end-to-end.
+    NOTE: ``pos_scale`` / ``rot_scale``, the ``control_mode`` / ``base_motion`` constants, and the
+    gripper threshold are part of the env's controller contract. They cannot be fully verified without a
+    RoboCasa365-trained checkpoint run in the real env; the math (delta + axis-angle + ordering +
+    gripper binarization) here is unit-tested, but the scalar contract must be confirmed end-to-end.
     """
     act = np.asarray(action, dtype=np.float64).reshape(-1)
     if act.shape[0] != 20:
@@ -187,11 +194,15 @@ def eef20d_to_robocasa12d(
         pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
         rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
 
+    # Gripper: model dim is finger separation (large=open); env binarizes gripper_close at 0.5
+    # (-1 open / +1 close). Map separation -> command: close (1.0) iff separation < threshold, else open (0.0).
+    gripper_cmd = 1.0 if float(act[9]) < float(gripper_close_threshold) else 0.0
+
     base = np.zeros(4, np.float64) if base_motion is None else np.asarray(base_motion, np.float64).reshape(-1)
     if base.shape[0] != 4:
         raise ValueError(f"base_motion must be 4-D, got {base.shape[0]}")
     # SERVER / slice_action order: eef_pos, eef_rot, grip, base_motion, control_mode.
-    return np.concatenate([pos_cmd, rot_cmd, grip, base, [float(control_mode)]]).astype(np.float32)
+    return np.concatenate([pos_cmd, rot_cmd, [gripper_cmd], base, [float(control_mode)]]).astype(np.float32)
 
 
 def robotwin_endpose_to_eef20d(
@@ -221,3 +232,33 @@ def robotwin_endpose_to_eef20d(
     left = np.concatenate([left_ep[:3], quat_xyzw_to_rot6d(left_ep[3:]), left_grip[:1]], axis=-1)
     right = np.concatenate([right_ep[:3], quat_xyzw_to_rot6d(right_ep[3:]), right_grip[:1]], axis=-1)
     return np.concatenate([left, right], axis=-1).astype(np.float32)
+
+
+def robocasa_state_to_eef20d(
+    eef_pos_rel: np.ndarray,
+    eef_rot_rel_quat_xyzw: np.ndarray,
+    gripper_qpos: np.ndarray,
+) -> np.ndarray:
+    """Assemble the **20-D single-arm EEF proprio** from a RoboCasa365 obs, RAW (unnormalized).
+
+    Bit-identical to the dataloader's ``state_to_arm10`` + ``assemble_single_arm_left``
+    (``openwam.dataloader.robocasa365``): the eval client must send proprio in the SAME 20-D
+    representation the model was trained on (the env outputs a 16-D raw state; the client converts).
+    The server normalizes; send RAW physical units here. Right-arm 10 dims are zero-padded.
+
+        arm10 = [eef_pos_rel(3), rot6d(eef_rot_rel quat xyzw, 6), gripper_separation(1)]
+        gripper_separation = gripper_qpos[0] - gripper_qpos[1]   (finger width; large=open)
+    """
+    pos = np.asarray(eef_pos_rel, np.float32).reshape(-1)
+    quat = np.asarray(eef_rot_rel_quat_xyzw, np.float32).reshape(-1)
+    qpos = np.asarray(gripper_qpos, np.float32).reshape(-1)
+    if pos.shape[0] != 3 or quat.shape[0] != 4 or qpos.shape[0] != 2:
+        raise ValueError(
+            f"robocasa proprio dims: eef_pos_rel must be 3 (got {pos.shape[0]}), "
+            f"eef_rot_rel quat 4 (got {quat.shape[0]}), gripper_qpos 2 (got {qpos.shape[0]})"
+        )
+    grip = np.array([qpos[0] - qpos[1]], np.float32)
+    arm10 = np.concatenate([pos, quat_xyzw_to_rot6d(quat), grip], axis=-1)  # (10,)
+    out = np.zeros(20, np.float32)
+    out[:10] = arm10  # single-arm LEFT; right half stays 0 (masked at train time)
+    return out

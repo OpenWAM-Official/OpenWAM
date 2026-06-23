@@ -58,7 +58,14 @@ def test_pinned_robocasa_contract():
     assert adapter.ACTION_SLICES == _EXPECTED_ACTION_SLICES
     assert adapter.ACTION_DIM == 12
     assert adapter.DEFAULT_STATE_KEYS == _EXPECTED_STATE_KEYS
-    assert adapter.STATE_DIM == 16
+    # Proprio is sent as the 20-D single-arm EEF the model trains on (NOT the raw 16-D);
+    # built from eef_pos_rel + eef_rot_rel + gripper_qpos (base dropped).
+    assert adapter.STATE_DIM == 20
+    assert adapter.PROPRIO_EEF_KEYS == (
+        "state.end_effector_position_relative",
+        "state.end_effector_rotation_relative",
+        "state.gripper_qpos",
+    )
 
 
 def test_default_camera_mapping_matches_robocasa():
@@ -162,7 +169,8 @@ def test_policy_act_builds_payload_and_slices():
     assert p["images"]["left_wrist_camera"] is not None
     assert p["images"]["right_wrist_camera"] is None
     assert p["prompt"] == "open the drawer"
-    assert len(p["state"]) == 16
+    assert len(p["state"]) == 20  # 20-D EEF proprio (not raw 16-D)
+    assert p["state"][10:] == [0.0] * 10  # right arm zero-padded
 
     assert set(action_dict) == set(adapter.ACTION_SLICES)
     assert list(action_dict["action.base_motion"]) == [7, 8, 9, 10]
@@ -176,8 +184,9 @@ def test_policy_act_wrong_action_dim_raises():
 
 
 def test_policy_act_wrong_state_dim_raises_before_predict():
-    # state_dim mismatch must raise BEFORE the server is hit (predict not called)
-    policy = adapter.OpenWAMRoboCasa365Policy(_client=_NoPredictClient(), state_dim=20)
+    # state_dim mismatch must raise BEFORE the server is hit (predict not called).
+    # The client now sends 20-D EEF proprio; set an inconsistent expected dim to trip the guard.
+    policy = adapter.OpenWAMRoboCasa365Policy(_client=_NoPredictClient(), state_dim=14)
     with pytest.raises(ValueError, match="state dim"):
         policy.act(_make_obs(), "x")
 
@@ -208,7 +217,7 @@ def test_bridge_pos_delta_and_order():
     eef20d = np.zeros(20, np.float32)
     eef20d[0:3] = [0.025, 0.0, 0.0]      # absolute target pos
     eef20d[3:9] = _IDENT_R6D             # no rotation
-    eef20d[9] = 0.7                      # gripper
+    eef20d[9] = 0.7                      # gripper separation 0.7 (>>0.05) -> OPEN
     out = eef20d_to_robocasa12d(
         eef20d, proprio_eef_pos=[0.0, 0.0, 0.0], proprio_eef_rot6d=_IDENT_R6D,
         pos_scale=0.05, rot_scale=0.5,
@@ -216,11 +225,31 @@ def test_bridge_pos_delta_and_order():
     assert out.shape == (12,)
     assert out[0:3] == pytest.approx([0.5, 0.0, 0.0], abs=1e-5)   # eef_pos delta/scale
     assert out[3:6] == pytest.approx([0.0, 0.0, 0.0], abs=1e-5)   # eef_rot (identity)
-    assert out[6] == pytest.approx(0.7)                          # gripper
+    assert out[6] == pytest.approx(0.0)                          # gripper OPEN (sep 0.7 >= thresh)
     assert out[7:11] == pytest.approx([0.0, 0.0, 0.0, 0.0])      # base_motion default 0
     assert out[11] == pytest.approx(-1.0)                        # control_mode default -1
     # slices line up with the env adapter's ACTION_SLICES
     assert adapter.slice_action(out)["action.control_mode"][0] == pytest.approx(-1.0)
+
+
+def test_bridge_gripper_binarize_and_invert():
+    """Model gripper = finger separation (large=open); env binarizes gripper_close at 0.5
+    (-1 open/+1 close). Bridge must map small sep -> close (>=0.5), large sep -> open (<0.5)."""
+    from benchmarks.utils import eef20d_to_robocasa12d
+
+    def _grip(sep):
+        a = np.zeros(20, np.float32)
+        a[3:9] = _IDENT_R6D
+        a[9] = sep
+        out = eef20d_to_robocasa12d(a, proprio_eef_pos=[0, 0, 0], proprio_eef_rot6d=_IDENT_R6D,
+                                    pos_scale=0.05, rot_scale=0.5)
+        return float(out[6])
+
+    # default threshold 0.05: empirical closed-sep ~0.034 -> close; open-sep ~0.078 -> open
+    assert _grip(0.034) >= 0.5    # closing -> env reads >=0.5 -> close
+    assert _grip(0.078) < 0.5     # open -> env reads <0.5 -> open
+    # raw pass-through (the old bug) would give 0.034/0.078 — both <0.5 -> gripper NEVER closes
+    assert _grip(0.034) != pytest.approx(0.034)
 
 
 def test_bridge_pos_clipped_to_unit():
@@ -244,6 +273,23 @@ def test_bridge_rotation_axis_angle():
     out = eef20d_to_robocasa12d(eef20d, proprio_eef_pos=[0, 0, 0], proprio_eef_rot6d=_IDENT_R6D,
                                 pos_scale=0.05, rot_scale=np.pi / 2)
     assert out[3:6] == pytest.approx([0.0, 0.0, 1.0], abs=1e-4)
+
+
+def test_client_proprio_matches_dataloader_repr():
+    """The 20-D EEF proprio the client sends MUST match the dataloader's proprio
+    representation (state_to_arm10 + left-pad) so train and deploy agree."""
+    from openwam.dataloader.robocasa365 import state_to_arm10
+
+    obs = _make_obs()
+    sent = np.asarray(adapter.assemble_eef20d_proprio(obs), np.float32)
+    assert sent.shape == (20,)
+    state_row = np.zeros((1, 16), np.float32)
+    state_row[0, 7:10] = obs["state.end_effector_position_relative"]
+    state_row[0, 10:14] = obs["state.end_effector_rotation_relative"]
+    state_row[0, 14:16] = obs["state.gripper_qpos"]
+    arm10 = state_to_arm10(state_row)[0]
+    assert sent[:10] == pytest.approx(arm10, abs=1e-5)  # left-10 == dataloader arm10
+    assert (sent[10:] == 0).all()                       # right-10 zero-padded
 
 
 def test_policy_act_bridges_20d_when_scales_set():

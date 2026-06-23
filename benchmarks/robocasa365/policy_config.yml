@@ -31,15 +31,17 @@ right_wrist_camera_key: null
 # client-side rotation. Set 'rotate_180' only for checkpoints trained on raw frames.
 image_transform: none
 
-# Proprio: 16-D, concatenated in training order. state_dim is a fail-fast check
-# against the checkpoint config.
+# Proprio: the client converts the raw obs into the 20-D single-arm EEF proprio the model
+# trains on ([eef_pos3, rot6d6, grip1, <right10 zeros>]); base is dropped. state_dim is a
+# fail-fast check against the checkpoint config (must be 20). state_keys below are used only
+# for the debug breakdown display.
 state_keys:
   - state.base_position
   - state.base_rotation
   - state.end_effector_position_relative
   - state.end_effector_rotation_relative
   - state.gripper_qpos
-state_dim: 16
+state_dim: 20
 
 # Action: the env consumes a flat 12-D vector (eef_pos 3 + eef_rot 3 + gripper 1 +
 # base 4 + mode 1), sliced into the RoboCasaGymEnv action dict. A RoboCasa365Dataset-

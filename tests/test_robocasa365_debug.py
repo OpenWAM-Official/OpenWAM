@@ -92,7 +92,7 @@ def test_dump_obs_debug_robotwin_layout_and_meta(tmp_path):
     assert meta["server_step"] == 5
     assert meta["latency_ms"] == 12.3
     assert meta["prompt"] == "open the drawer"
-    assert len(meta["state"]) == 16
+    assert len(meta["state"]) == 20  # sent proprio is the 20-D EEF (not raw 16-D)
     assert meta["action"] == [float(i) for i in range(12)]
     # enhancements
     assert meta["action_sliced"]["action.base_motion"] == [7.0, 8.0, 9.0, 10.0]
@@ -100,7 +100,7 @@ def test_dump_obs_debug_robotwin_layout_and_meta(tmp_path):
     assert meta["state_breakdown"]["state.gripper_qpos"] == pytest.approx([0.01, 0.02])
     assert meta["image_slots"]["head_camera"] == [64, 64]
     assert meta["checks"] == {
-        "state_dim_is_16": True,
+        "state_dim_is_20": True,
         "head_and_wrist_present": True,
         "action_dim_is_12": True,
     }

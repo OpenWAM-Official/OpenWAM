@@ -23,7 +23,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from openwam.dataloader.robocasa365 import STATS_DIM, state_to_arm10
+from openwam.dataloader.robocasa365 import STATS_DIM, _expand_stats_to_20d, state_to_arm10
 from openwam.dataloader.transforms.normalize import compute_extended_stats
 
 
@@ -78,7 +78,9 @@ def compute_normalization_stats(data_root: str) -> dict:
     if len(eef["mean"]) != STATS_DIM:
         raise ValueError(f"computed arm dim {len(eef['mean'])} != {STATS_DIM}")
     print(f"  [stats] done: {total} timesteps over {len(chunks)} episodes, dim={STATS_DIM}")
-    return {"eef": eef, "num_timesteps": int(total)}
+    # Persist at the full 20-D action dim (left=arm, right=neutral) so the deploy normalizer
+    # can invert the model's 20-D output (the 10-D file was the deploy-break).
+    return {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
 
 
 def compute_multitask_stats(data_roots: list[str]) -> dict:
@@ -104,7 +106,9 @@ def compute_multitask_stats(data_roots: list[str]) -> dict:
     if len(eef["mean"]) != STATS_DIM:
         raise ValueError(f"computed arm dim {len(eef['mean'])} != {STATS_DIM}")
     print(f"  [multitask-stats] done: {total} timesteps over {len(data_roots)} buckets, dim={STATS_DIM}")
-    return {"eef": eef, "num_timesteps": int(total)}
+    # Persist at the full 20-D action dim (left=arm, right=neutral) so the deploy normalizer
+    # can invert the model's 20-D output (the 10-D file was the deploy-break).
+    return {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
 
 
 def main():
