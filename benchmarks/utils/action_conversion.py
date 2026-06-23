@@ -169,10 +169,12 @@ def eef20d_to_robocasa12d(
             0.05 sits between the empirical open (~0.078) and closed (~0.034) means; override per env.
         clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
 
-    NOTE: ``pos_scale`` / ``rot_scale``, the ``control_mode`` / ``base_motion`` constants, and the
-    gripper threshold are part of the env's controller contract. They cannot be fully verified without a
-    RoboCasa365-trained checkpoint run in the real env; the math (delta + axis-angle + ordering +
-    gripper binarization) here is unit-tested, but the scalar contract must be confirmed end-to-end.
+    ENV CONTRACT (MEASURED on the real robocasa/OpenDrawer env, PandaOmron / default_pandaomron.json):
+    the action convention is **delta** (zero action -> no EEF motion; constant action -> constant
+    per-step displacement), matching the (target-current)/scale here. Steady per-step motion per
+    action 1.0: ~0.0126 m (pos) / ~0.102 rad (rot) -> use as pos_scale/rot_scale. gripper command
+    g=1 closes (separation 0.078 open -> 0.006 closed), so threshold 0.05 straddles them. control_mode
+    -1 + base 0 hold the fixed base. (Probed via env.step with known actions; see e2e plan.)
     """
     act = np.asarray(action, dtype=np.float64).reshape(-1)
     if act.shape[0] != 20:

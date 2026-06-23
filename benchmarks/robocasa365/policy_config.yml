@@ -49,12 +49,14 @@ state_dim: 20
 # 12-D (see README "Action spaces"). A 12-D server action is passed through unchanged.
 action_dim: 12
 
-# OSC scaling for the 20-D -> 12-D bridge: the eval env's OSC_POSE controller
-# output_max (position metres / rotation radians that map to action magnitude 1.0).
-# REQUIRED only when the server returns 20-D; a 20-D action with these unset raises
-# (rather than emit wrong-magnitude motions). Read them from the env controller config.
-osc_pos_scale: null
-osc_rot_scale: null
+# OSC scaling for the 20-D -> 12-D bridge: metres / radians of steady per-step EEF motion
+# per action magnitude 1.0. MEASURED on the real robocasa/OpenDrawer env (PandaOmron,
+# default_pandaomron.json controller): action 0.5 -> ~0.0063 m/step and ~0.051 rad/step steady,
+# i.e. ~0.0126 m and ~0.102 rad per unit. The action convention is DELTA (zero action -> no
+# motion; constant action -> constant per-step displacement), matching the bridge's
+# (target-current)/scale. REQUIRED when the server returns 20-D (unset -> raises).
+osc_pos_scale: 0.0126
+osc_rot_scale: 0.102
 
 debug: false
 debug_dir: ./debug_robocasa365
