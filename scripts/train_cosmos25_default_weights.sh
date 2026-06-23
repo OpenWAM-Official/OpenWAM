@@ -43,6 +43,9 @@ REASON1_PATH="${REASON1_PATH:-/path/to/assets/Cosmos-Reason1-7B}"
 DATASET_DIR="${DATASET_DIR:-/path/to/RoboTwin2.0/dataset}"
 OUTPUT_PATH="${OUTPUT_PATH:-/path/to/checkpoints/cosmos25_base_posttrained_formal}"
 
+# wandb run name (override via env: RUN_NAME=my_run bash <this script>).
+RUN_NAME="${RUN_NAME:-cosmos25_base_posttrained_formal}"
+
 bash scripts/train.sh \
   model/video_backbone=cosmos25 \
   model.video_backbone.model_path="${COSMOS_MODEL_PATH}" \
@@ -63,4 +66,5 @@ bash scripts/train.sh \
   training.keep_last_k_ckpts=2 \
   training.dataset_num_workers=4 \
   training.output_path="${OUTPUT_PATH}" \
+  project.wandb.run_name="${RUN_NAME}" \
   "$@"
