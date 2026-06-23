@@ -56,7 +56,7 @@ bash scripts/train.sh \
   dataloader.task_name=null \
   dataloader.val_ratio=0.0 \
   training.video_lr=1e-4 \
-  training.batch_size=2 \
+  training.batch_size=24 \
   training.gradient_accumulation_steps=1 \
   training.num_epochs=5 \
   training.save_steps=2000 \
