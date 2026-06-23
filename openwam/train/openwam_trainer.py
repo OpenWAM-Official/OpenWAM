@@ -29,6 +29,11 @@ from openwam.train.utils.checkpointing import (
     save_normalization_stats,
 )
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
+from openwam.train.utils.training_utils import (
+    build_cosine_scheduler,
+    init_wandb,
+    log_parameter_counts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -216,42 +221,8 @@ class OpenWAMTrainer(BaseTrainer):
         self._current_step = 0
         self._last_loss_components = {}
 
-        # Print param counts (total + trainable, per backbone). Use print()
-        # rather than logger so it survives Hydra's default logging filter,
-        # and gate explicitly on rank-0 instead of relying on train.py's
-        # global ``builtins.print = noop`` on non-main ranks (that suppression
-        # is launch-flow specific; the explicit guard keeps this correct if
-        # the trainer is ever invoked from a different launcher or subprocess).
         is_main = self.accelerator is None or self.accelerator.is_main_process
-        if is_main:
-
-            def _count(module):
-                if module is None:
-                    return 0, 0
-                total = sum(p.numel() for p in module.parameters())
-                trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
-                return total, trainable
-
-            bb_counts = {name: _count(module) for name, module in self.architecture.backbones.items()}
-            extra_counts = {}
-            for name, module in self.architecture.named_children():
-                if name in bb_counts:
-                    continue
-                total, trainable = _count(module)
-                if total:
-                    extra_counts[name] = (total, trainable)
-            arch_total = sum(total for total, _ in bb_counts.values()) + sum(
-                total for total, _ in extra_counts.values()
-            )
-            arch_train = sum(train for _, train in bb_counts.values()) + sum(
-                train for _, train in extra_counts.values()
-            )
-            print("=" * 60)
-            print("Parameter counts")
-            for name, (total, trainable) in {**bb_counts, **extra_counts}.items():
-                print(f"  {name:<15}: total={total / 1e6:7.1f}M  trainable={trainable / 1e6:7.1f}M")
-            print(f"  Architecture  : total={arch_total / 1e6:7.1f}M  trainable={arch_train / 1e6:7.1f}M")
-            print("=" * 60, flush=True)
+        log_parameter_counts(self.architecture, is_main=is_main)
 
     @staticmethod
     def _wire_sampler_seed(dataloader, run_seed: int) -> None:
@@ -363,34 +334,6 @@ class OpenWAMTrainer(BaseTrainer):
             "decoder": result.get("loss_decoder", torch.tensor(0.0)),
         }
 
-    def _init_wandb(self):
-        """Initialize wandb run from project config. Returns the run or None."""
-        wandb_cfg = self.cfg.project.get("wandb", None)
-        if wandb_cfg is None:
-            return None
-        project = getattr(wandb_cfg, "project", None)
-        if not project:
-            return None
-        try:
-            import wandb
-        except ImportError:
-            logger.warning("wandb not installed, skipping wandb logging")
-            return None
-
-        run_name = getattr(wandb_cfg, "run_name", None)
-        entity = getattr(wandb_cfg, "entity", None)
-        from omegaconf import OmegaConf
-
-        run = wandb.init(
-            project=project,
-            name=run_name,
-            entity=entity,
-            config=OmegaConf.to_container(self.cfg, resolve=True),
-            resume="allow",
-        )
-        logger.info("wandb initialized: %s/%s", project, run.name)
-        return run
-
     def build_optimizer(self) -> torch.optim.Optimizer:
         """Build the optimizer. Override to use a different optimizer."""
         t = self.cfg.training
@@ -437,39 +380,11 @@ class OpenWAMTrainer(BaseTrainer):
     def build_lr_scheduler(self, optimizer, total_opt_steps: int, debug: bool = False):
         """Build the LR scheduler. Returns scheduler or None. Override for custom schedules."""
         t = self.cfg.training
-        lr = float(t.learning_rate)
         lr_scheduler_type = getattr(t, "lr_scheduler", None)
         if debug:
             return None
         if lr_scheduler_type == "cosine":
-            from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-
-            warmup_ratio = float(getattr(t, "warmup_ratio", 0.05))
-            lr_min_ratio = float(getattr(t, "lr_min_ratio", 0.01))
-            warmup_steps = int(total_opt_steps * warmup_ratio)
-            cosine_steps = max(total_opt_steps - warmup_steps, 1)
-            warmup_sched = LinearLR(
-                optimizer,
-                start_factor=1.0 / max(warmup_steps, 1),
-                total_iters=warmup_steps,
-            )
-            cosine_sched = CosineAnnealingLR(
-                optimizer,
-                T_max=cosine_steps,
-                eta_min=lr * lr_min_ratio,
-            )
-            scheduler = SequentialLR(
-                optimizer,
-                schedulers=[warmup_sched, cosine_sched],
-                milestones=[warmup_steps],
-            )
-            logger.info(
-                "LR scheduler: cosine | total_opt_steps=%d warmup=%d eta_min=%.2e",
-                total_opt_steps,
-                warmup_steps,
-                lr * lr_min_ratio,
-            )
-            return scheduler
+            return build_cosine_scheduler(optimizer, total_opt_steps=total_opt_steps, cfg=self.cfg)
         return None
 
     def on_train_begin(self, *, output_path: str, total_steps: int, **ctx):
@@ -805,7 +720,7 @@ class OpenWAMTrainer(BaseTrainer):
 
         # Initialize wandb (skip in debug mode; rank 0 only for multi-GPU)
         _is_main = self.accelerator is None or self.accelerator.is_main_process
-        wandb_run = None if (debug or not _is_main) else self._init_wandb()
+        wandb_run = None if (debug or not _is_main) else init_wandb(self.cfg)
 
         from tqdm import tqdm
 
