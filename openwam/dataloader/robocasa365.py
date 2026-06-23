@@ -578,6 +578,12 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             for tn, dr in roots
         ]
         self._cum = np.cumsum([0] + [len(d) for d in self._datasets]).astype(np.int64)
+        # Surface the resolved stats path so the trainer's save_normalization_stats() copies it
+        # into the checkpoint dir — deploy's _build_normalizer REQUIRES normalization_stats.npy
+        # there (raises FileNotFoundError if missing). Mirrors MultiTaskRoboTwinDataset; delegates
+        # to the sub-dataset (single bucket auto-resolves its own path; multi shares the pooled one)
+        # exactly like the normalization_stats property below.
+        self.normalization_stats_path = self._datasets[0].normalization_stats_path if self._datasets else None
 
     @staticmethod
     def _resolve_shared_stats(dataset_dir, task_name, roots, explicit, norm):

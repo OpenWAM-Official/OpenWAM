@@ -234,6 +234,27 @@ class TestMultiAndRegistry:
         assert s["action"].shape == (32, EEF_DIM)
         assert s["proprio"].shape == (1, EEF_DIM)
 
+    def test_multi_surfaces_normalization_stats_path(self, tmp_path):
+        # Regression: the trainer's save_normalization_stats() reads
+        # dataset.normalization_stats_path off the REGISTERED (multi-task) wrapper to copy
+        # normalization_stats.npy into the checkpoint dir, which deploy's _build_normalizer
+        # REQUIRES (raises FileNotFoundError if absent). The wrapper must surface the
+        # sub-dataset's resolved path — not just expose it on the inner RoboCasa365Dataset.
+        b = make_robocasa_bucket(tmp_path)
+        with _mock_video_decoder():
+            ds = MultiTaskRoboCasa365Dataset(
+                dataset_dir=str(b), task_name="OpenDrawer",
+                multiview=False, height=64, width=96, normalize_mode="min-max",
+            )
+            _ = ds[0]
+        assert ds.normalization_stats_path is not None
+        assert Path(ds.normalization_stats_path).exists()
+        # exactly what deploy reads back: 20-D stats under the 'eef' key
+        from openwam.dataloader.transforms.normalize import load_mode_stats
+
+        eef = load_mode_stats(ds.normalization_stats_path, "eef")
+        assert eef is not None and len(eef["min"]) == EEF_DIM
+
     def test_multi_root_mode_discovers_buckets(self, tmp_path):
         # Two task dirs under a common root -> root-mode discovery.
         make_robocasa_bucket(tmp_path / "taskA")
