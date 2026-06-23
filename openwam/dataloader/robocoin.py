@@ -278,7 +278,10 @@ class MultiRobotCOINDataset(MultiLeRobotV3Reader):
 
     @property
     def action_dim(self):
-        return _ACTION_DIM
+
+
+
+        return self._buckets[0].action_dim if self._buckets else _ACTION_DIM
 
     @classmethod
     def from_config(cls, config, split: str = "train"):

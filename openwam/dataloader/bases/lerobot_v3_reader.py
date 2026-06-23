@@ -80,6 +80,7 @@ from openwam.dataloader.utils.lerobotv3 import (
     validate_video_sampling,
 )
 from openwam.dataloader.utils.normalization import materialize_eef_stats
+from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
 from openwam.dataloader.utils.video_io import decode_video_frames as _decode_video_frames
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,14 @@ class LeRobotV3Reader(BaseDataset):
         dataset_id: Optional[str] = None,
         target_camera: Optional[str] = None,
         camera_layout: Optional[List[str]] = None,
+        # Unified action space. unify_action=True scatters this reader's raw
+        # ACTION_DIM-wide action/proprio into a UNIFY_DIM-wide vector and marks
+        # only the mapped dims valid. unify_action_map is the yaml spec (see
+        # openwam.dataloader.utils.unify_action); None + unify_action=True maps
+        # the raw dims in order (0..raw_dim-1). The unified width is the global
+        # UNIFY_DIM constant (not per-dataset configurable).
+        unify_action: bool = False,
+        unify_action_map: Optional[Any] = None,
         # Optional data-budget knobs (None = use full bucket; the default
         # path is byte-identical to the pre-budget behavior).
         max_hours: Optional[float] = None,
@@ -168,6 +177,35 @@ class LeRobotV3Reader(BaseDataset):
         self._camera_layout_param = list(camera_layout) if camera_layout else None
         self._max_hours = max_hours
         self._subsample_seed = int(subsample_seed)
+
+        # ── unified action space ──────────────────────────────────────────
+        # _raw_action_dim is what this reader's _action_20d/_proprio_20d emit
+        # (the class ACTION_DIM). When unify is on, the public ACTION_DIM (and
+        # thus the finalized action/proprio width + downstream model action_dim)
+        # becomes unify_dim, and _finalize_* scatters raw -> unified via
+        # _unify_dst_index. Off (default) → byte-identical to before.
+        self._raw_action_dim = int(type(self).ACTION_DIM)
+        self._unify = bool(unify_action)
+        self._unify_dim = int(UNIFY_DIM)
+        self._unify_dst_index: Optional[np.ndarray] = None
+        if self._unify:
+            if unify_action_map is None:
+                # No spec → identity map: raw dims 0..raw_dim-1 in order.
+                # Single-list form (top-level ints), NOT [[...]] which the
+                # parser would read as one malformed src->dst pair.
+                spec = list(range(self._raw_action_dim))
+            else:
+                spec = unify_action_map
+            self._unify_dst_index = parse_unify_spec(spec, self._unify_dim)
+            if self._unify_dst_index.shape[0] != self._raw_action_dim:
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): unify_action_map maps "
+                    f"{self._unify_dst_index.shape[0]} source dims but this reader emits "
+                    f"{self._raw_action_dim}-D action. They must match."
+                )
+            # Instance attr shadows the class ACTION_DIM so finalized payloads,
+            # the action_dim property, and the model action head are all unify_dim.
+            self.ACTION_DIM = self._unify_dim
 
         # Rate-limited failure counters for _safe_get / wrist decode.
         self._fail_count = 0
@@ -264,6 +302,22 @@ class LeRobotV3Reader(BaseDataset):
 
         # ── subclass hook ─────────────────────────────────────────────────
         self._post_init(info)
+
+        # ── unified per-dim validity mask (static) ────────────────────────
+        # Honors the raw ACTION_DIM_MASK: single-arm OXE / RoboMIND zero-pad
+        # the right-arm half of the 20-D EEF, which must stay masked out even
+        # after the scatter — a unified slot is valid iff its source raw dim
+        # was valid. Built HERE (not in the unify block above) because a
+        # reader's instance ACTION_DIM_MASK may be set in _resolve_cameras
+        # (RoboMIND sets it per-embodiment), which runs after that block.
+        self._unify_dim_mask: Optional[np.ndarray] = None
+        if self._unify:
+            self._unify_dim_mask = np.zeros(self._unify_dim, dtype=bool)
+            raw_mask = self.ACTION_DIM_MASK
+            if raw_mask is None:
+                self._unify_dim_mask[self._unify_dst_index] = True
+            else:
+                self._unify_dim_mask[self._unify_dst_index] = np.asarray(raw_mask, dtype=bool)
 
         logger.info(
             "%s(%s, %s): %d eps, %d windows, fps=%.1f, multiview=%s, normalize=%s, supervision=%s",
@@ -484,38 +538,63 @@ class LeRobotV3Reader(BaseDataset):
         """Pad an action payload to ``(T_action, ACTION_DIM)`` + build its 2-D mask.
 
         ``action_20d is None`` → all-zero action + all-False mask (video-only
-        / disabled supervision).
+        / disabled supervision). When unify is on, the raw ``_raw_action_dim``
+        payload is scattered into ``unify_dim`` slots (mask follows the mapped
+        dims) — this happens AFTER normalization (``action_20d`` is already
+        normalized by ``_action_20d``).
         """
         T_action = self._num_frames - 1
-        action = np.zeros((T_action, self.ACTION_DIM), dtype=np.float32)
+        width = self._raw_action_dim  # fill at raw width first; unify-scatter below
+        action = np.zeros((T_action, width), dtype=np.float32)
         n_valid = 0
         if action_20d is not None:
             n_valid = min(actual_raw_len, T_action)
             if n_valid > 0:
                 action[:n_valid] = action_20d[:n_valid]
+
+        if self._unify:
+            # (T, raw) -> (T, unify_dim). The dim mask is the precomputed
+            # ACTION_DIM_MASK-honoring one (map_to_unify's own mask would mark
+            # every mapped slot valid, leaking single-arm right-arm padding).
+            action, _ = map_to_unify(action, self._unify_dst_index, self._unify_dim)
+            dim_mask = self._unify_dim_mask
+        else:
+            dim_mask = self.ACTION_DIM_MASK
+
         action_mask = build_action_mask_2d(
             T_action=T_action,
             action_dim=self.ACTION_DIM,
             n_valid_time=n_valid if self._enable_action_supervision else 0,
-            dim_mask=self.ACTION_DIM_MASK,
+            dim_mask=dim_mask,
         )
         return action, action_mask
 
     def _finalize_proprio(self, proprio_20d: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         """Build ``(1, ACTION_DIM)`` proprio + its 2-D mask.
 
-        ``proprio_20d is None`` → all-zero proprio + all-False mask.
+        ``proprio_20d is None`` → all-zero proprio + all-False mask. When unify
+        is on, the raw proprio is scattered into ``unify_dim`` slots (same map
+        as the action), after normalization.
         """
         if proprio_20d is None:
             proprio = np.zeros((1, self.ACTION_DIM), dtype=np.float32)
             mask = build_proprio_mask_2d(action_dim=self.ACTION_DIM, enabled=False)
             return proprio, mask
+
+        proprio = np.asarray(proprio_20d, dtype=np.float32)
+        if self._unify:
+            # Same scatter + ACTION_DIM_MASK-honoring mask as _finalize_action.
+            proprio, _ = map_to_unify(proprio, self._unify_dst_index, self._unify_dim)
+            dim_mask = self._unify_dim_mask
+        else:
+            dim_mask = self.ACTION_DIM_MASK
+
         mask = build_proprio_mask_2d(
             action_dim=self.ACTION_DIM,
             enabled=self._enable_action_supervision,
-            dim_mask=self.ACTION_DIM_MASK,
+            dim_mask=dim_mask,
         )
-        return np.asarray(proprio_20d, dtype=np.float32), mask
+        return proprio, mask
 
     # ----- video ------------------------------------------------------------
 
@@ -641,6 +720,8 @@ class LeRobotV3Reader(BaseDataset):
         "enable_action_supervision",
         "target_camera",
         "camera_layout",
+        "unify_action",
+        "unify_action_map",
     )
 
     @classmethod
