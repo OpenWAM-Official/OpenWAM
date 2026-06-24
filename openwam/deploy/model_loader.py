@@ -147,6 +147,23 @@ def load_from_checkpoint_dir(
                 reason1_artifact_dir,
                 prev_path,
             )
+        # Symmetric with the Reason1 clearing above: when the ckpt carries a VAE
+        # state component, its weights live in the unified safetensors (via
+        # ``_vae_inner``), so any training-time ``vae_path`` must be cleared.
+        # Otherwise ``build_cosmos25_pipeline``'s deploy guard
+        # (``ckpt_dir is not None and vae_path_override is None``) stays False and
+        # ``_resolve_vae_path`` raises FileNotFoundError on a host lacking the
+        # original path, before weights ever load.
+        has_vae_state_component = any(
+            isinstance(c, dict) and c.get("attr") == "vae" for c in (vb_cfg_dict.get("components") or [])
+        )
+        if has_vae_state_component and vb_cfg_dict.get("vae_path") is not None:
+            prev_vae_path = vb_cfg_dict.get("vae_path")
+            vb_cfg_dict["vae_path"] = None
+            logger.info(
+                "Using self-contained VAE weights from checkpoint (clearing external vae_path=%r)",
+                prev_vae_path,
+            )
         vb_params["_source"] = vb_cfg_dict
         vb_params["_ckpt_dir"] = ckpt_dir
     else:

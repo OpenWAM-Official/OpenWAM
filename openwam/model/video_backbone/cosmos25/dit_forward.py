@@ -25,6 +25,9 @@ import torch
 from torch import Tensor
 
 from openwam.model.video_backbone.base import BlockLoopState
+from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import (
+    gradient_checkpoint_forward,
+)
 
 
 def prepare_block_loop(
@@ -124,7 +127,16 @@ def prepare_block_loop(
 
 def run_block(net: Any, block_id: int, state: BlockLoopState) -> BlockLoopState:
     block = net.blocks[block_id]
-    state.hidden_states = block(
+    # Wrap the block in the shared activation-checkpoint helper (mirrors
+    # ``wan_backbone.run_block``). When both flags are False this is a plain
+    # ``block(*args, **kwargs)``, so the non-checkpointed path is byte-identical;
+    # when ``training.use_gradient_checkpointing`` is on (the train.yaml default)
+    # the 28-block 2B DiT actually trades compute for activation memory instead
+    # of silently materialising every block's activations.
+    state.hidden_states = gradient_checkpoint_forward(
+        block,
+        state.use_gradient_checkpointing,
+        state.use_gradient_checkpointing_offload,
         state.hidden_states,
         state.extras["t_embedding_B_T_D"],
         state.context,

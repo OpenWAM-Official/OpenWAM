@@ -93,6 +93,23 @@ _COSMOS25_2B_GEOMETRY = dict(
     context_dim=1024,
 )
 
+# The geometry the backbone probes (above) and the net actually constructed
+# from ``_COSMOS25_2B_NET_KWARGS`` are two independent hard-coded specs; guard
+# against silent drift between them at import time (cheap; both are plain dicts).
+assert _COSMOS25_2B_GEOMETRY["dim"] == _COSMOS25_2B_NET_KWARGS["model_channels"], (
+    "cosmos25 2B geometry dim != net model_channels"
+)
+assert _COSMOS25_2B_GEOMETRY["num_heads"] == _COSMOS25_2B_NET_KWARGS["num_heads"], (
+    "cosmos25 2B geometry num_heads != net num_heads"
+)
+assert (
+    _COSMOS25_2B_GEOMETRY["head_dim"]
+    == _COSMOS25_2B_NET_KWARGS["model_channels"] // _COSMOS25_2B_NET_KWARGS["num_heads"]
+), "cosmos25 2B geometry head_dim != model_channels // num_heads"
+assert _COSMOS25_2B_GEOMETRY["num_layers"] == _COSMOS25_2B_NET_KWARGS["num_blocks"], (
+    "cosmos25 2B geometry num_layers != net num_blocks"
+)
+
 
 def import_cosmos_predict2():
     """Import the upstream ``cosmos_predict2`` package, with a clear error message."""

@@ -358,17 +358,20 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
     )
 
 
-def _backbone_with_reason1(has_reason1: bool):
-    """A fake Cosmos25VideoBackbone whose ``_pipe`` reports Reason1 presence.
+def _backbone_with_reason1(has_reason1: bool, has_vae: bool = True):
+    """A fake Cosmos25VideoBackbone reporting Reason1 / VAE presence.
 
-    ``save_deploy_assets`` reads ``self.text_encoder`` as the ground truth
-    for whether Reason1 weights are in the checkpoint.
+    ``save_deploy_assets`` reads ``self.text_encoder`` / ``self.vae`` as the
+    ground truth for whether those weights are in the checkpoint. Defaults to a
+    configured VAE (the normal ``vae: wan2pt1`` case); pass ``has_vae=False`` to
+    model a ``vae: none`` training run.
     """
 
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     bb = Cosmos25VideoBackbone.__new__(Cosmos25VideoBackbone)
     bb.text_encoder = object() if has_reason1 else None
+    bb.vae = object() if has_vae else None
     return bb
 
 
@@ -441,6 +444,28 @@ def test_save_deploy_assets_cache_only_emits_vae_only_and_no_copy(tmp_path):
     attrs = {c["attr"] for c in comps}
     assert attrs == {"vae"}  # text_encoder marker NOT emitted
     assert not (output_dir / "reason1").exists()  # nothing copied
+
+
+def test_save_deploy_assets_vae_none_omits_vae_component(tmp_path):
+    """Regression for the VAE gate: a ``vae: none`` run (``self.vae is None``,
+    so ``_vae_inner`` is never registered) must NOT emit the vae component —
+    otherwise the saved config references a sub_module absent from the
+    state_dict. With no reason1 and no vae, no components remain."""
+    from omegaconf import OmegaConf
+
+    model_path = tmp_path / "cosmos_bundle"
+    model_path.mkdir()
+    output_dir = tmp_path / "ckpt_out"
+    output_dir.mkdir()
+
+    cfg = OmegaConf.create(
+        {"model": {"video_backbone": {"model_path": str(model_path), "vae": "none", "text_encoder": "none"}}}
+    )
+
+    _backbone_with_reason1(False, has_vae=False).save_deploy_assets(str(output_dir), cfg)
+
+    comps = OmegaConf.to_container(cfg.model.video_backbone.components, resolve=True)
+    assert [c["attr"] for c in comps] == []  # neither vae nor text_encoder emitted
 
 
 def test_save_deploy_assets_accepts_plain_dict_cfg(tmp_path):

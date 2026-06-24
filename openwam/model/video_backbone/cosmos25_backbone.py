@@ -635,7 +635,10 @@ class Cosmos25VideoBackbone(VideoBackbone):
         Reason1 structural JSONs into ``<output_dir>/reason1/`` — ONLY when a live
         Reason1 encoder is part of this checkpoint (``self.text_encoder`` set, so
         its weights ride the safetensors via ``_reason1_inner``). The VAE
-        component is always emitted. No-op when ``model_path`` is unreadable.
+        component is emitted only when a VAE is configured (``self.vae`` set);
+        under ``vae: none`` no ``_vae_inner`` is registered, so emitting the spec
+        would leave the saved config internally inconsistent. No-op when
+        ``model_path`` is unreadable.
         """
         from omegaconf import DictConfig, OmegaConf, open_dict
 
@@ -657,7 +660,17 @@ class Cosmos25VideoBackbone(VideoBackbone):
             return
 
         has_reason1 = getattr(self, "text_encoder", None) is not None
-        components = [c for c in specs["components"] if c.get("attr") != "text_encoder" or has_reason1]
+        has_vae = getattr(self, "vae", None) is not None
+
+        def _keep_component(c) -> bool:
+            attr = c.get("attr")
+            if attr == "text_encoder":
+                return has_reason1
+            if attr == "vae":
+                return has_vae
+            return True
+
+        components = [c for c in specs["components"] if _keep_component(c)]
 
         if "components" not in oc.model.video_backbone:
             with open_dict(oc):
