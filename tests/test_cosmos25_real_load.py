@@ -65,7 +65,7 @@ def test_real_load_block_loop_preserves_shape(sac_mode):
     assert vb.text_dim == 1024  # Cosmos25 context dim, exposed via the base text_dim property
 
     # Confirm SAC wrap state matches the config.
-    net = vb._pipe.net
+    net = vb.dit
     block0 = net.blocks[0]
     is_sac_wrapped = hasattr(block0, "_checkpoint_wrapped_module")
     if sac_mode == "none":
@@ -121,7 +121,7 @@ def test_real_vae_load_and_shape_round_trip():
         pytest.skip(f"tokenizer.pth missing at {ASSET_PATH}.")
 
     vb = _build_backbone_with_real_vae()
-    vae = vb._pipe.vae
+    vae = vb.vae
     assert vae is not None, "vae='wan2pt1' should populate the wrapper VAE slot"
 
     # T_pix=5 → T_lat = 1 + (5-1)//4 = 2; spatial 64→8 (stride 8); z_dim=16.

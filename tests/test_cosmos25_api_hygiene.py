@@ -43,7 +43,7 @@ def test_inference_and_deploy_are_wired_not_stubs():
     import pytest
 
     bb = Cosmos25VideoBackbone.__new__(Cosmos25VideoBackbone)
-    bb._pipe = object()  # no `text_encoder` attr → no live source
+    bb.text_encoder = None  # no live source → inference gate raises
 
     # Inference now reaches the real no-prompt-source gate (ValueError), not the
     # old NotImplementedError stub.

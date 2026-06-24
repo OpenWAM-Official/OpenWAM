@@ -336,10 +336,10 @@ class _FakeFinalLayer(nn.Module):
 
 
 def _build_rich_wrapper(num_blocks=2):
-    from openwam.model.video_backbone.cosmos25.pipeline_wrapper import Cosmos25PipelineWrapper
+    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     net = _RichFakeMiniDIT(dim=16, num_blocks=num_blocks, n_heads=4, ctx_dim_post=12, ctx_dim_pre=24)
-    return Cosmos25PipelineWrapper(
+    return Cosmos25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=None,
@@ -361,13 +361,13 @@ def test_wrapper_pre_post_attn_dispatch_round_trip():
     context = torch.randn(1, 4, 12)
     timestep = torch.randint(0, 1000, (1,))
 
-    state_mono = wrapper.prepare_block_loop(input_latents=latents, context=context, timestep=timestep)
-    state_split = wrapper.prepare_block_loop(input_latents=latents, context=context, timestep=timestep)
+    state_mono = wrapper.prepare(input_latents=latents, context=context, timestep=timestep)
+    state_split = wrapper.prepare(input_latents=latents, context=context, timestep=timestep)
 
     state_mono = wrapper.run_block(0, state_mono)
 
     q, k, v, post_state = wrapper.pre_attn_at_layer(0, state_split)
-    block = wrapper.net.blocks[0]
+    block = wrapper.dit.blocks[0]
     q_4d = rearrange(q, "b s (h d) -> b s h d", h=block.self_attn.n_heads, d=block.self_attn.head_dim)
     k_4d = rearrange(k, "b s (h d) -> b s h d", h=block.self_attn.n_heads, d=block.self_attn.head_dim)
     v_4d = rearrange(v, "b s (h d) -> b s h d", h=block.self_attn.n_heads, d=block.self_attn.head_dim)
@@ -383,9 +383,9 @@ def test_adapter_pre_post_attn_delegate_to_wrapper():
 
     wrapper = _build_rich_wrapper(num_blocks=1)
     backbone = Cosmos25VideoBackbone(
-        wrapper, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
+        net=wrapper.dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
-    state = wrapper.prepare_block_loop(
+    state = wrapper.prepare(
         input_latents=torch.randn(1, 16, 2, 4, 4),
         context=torch.randn(1, 4, 12),
         timestep=torch.randint(0, 1000, (1,)),
@@ -393,7 +393,7 @@ def test_adapter_pre_post_attn_delegate_to_wrapper():
     q, k, v, post_state = backbone.pre_attn_at_layer(0, state)
     # Q/K/V shape matches the driver contract: (B, T·H·W, H·D)
     assert q.shape == (1, 2 * 2 * 2, 16) and k.shape == q.shape and v.shape == q.shape
-    block = wrapper.net.blocks[0]
+    block = wrapper.dit.blocks[0]
     q_4d = rearrange(q, "b s (h d) -> b s h d", h=block.self_attn.n_heads, d=block.self_attn.head_dim)
     k_4d = rearrange(k, "b s (h d) -> b s h d", h=block.self_attn.n_heads, d=block.self_attn.head_dim)
     v_4d = rearrange(v, "b s (h d) -> b s h d", h=block.self_attn.n_heads, d=block.self_attn.head_dim)
@@ -412,7 +412,7 @@ def test_v2v_mask_bidirectional():
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     backbone = Cosmos25VideoBackbone(
-        _build_rich_wrapper(num_blocks=1), dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
+        net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     backbone.video_attention_mask_mode = "bidirectional"
     mask = backbone.build_video_to_video_mask(video_seq_len=8, video_tokens_per_frame=4, device=torch.device("cpu"))
@@ -424,7 +424,7 @@ def test_v2v_mask_per_frame_causal():
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     backbone = Cosmos25VideoBackbone(
-        _build_rich_wrapper(num_blocks=1), dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
+        net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     backbone.video_attention_mask_mode = "per_frame_causal"
     # 2 frames × 4 tokens-per-frame = 8 total. Frame 0 sees only itself,
@@ -441,7 +441,7 @@ def test_v2v_mask_first_frame_causal():
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     backbone = Cosmos25VideoBackbone(
-        _build_rich_wrapper(num_blocks=1), dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
+        net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     backbone.video_attention_mask_mode = "first_frame_causal"
     mask = backbone.build_video_to_video_mask(video_seq_len=8, video_tokens_per_frame=4, device=torch.device("cpu"))
@@ -455,7 +455,7 @@ def test_v2v_mask_default_is_bidirectional():
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     backbone = Cosmos25VideoBackbone(
-        _build_rich_wrapper(num_blocks=1), dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
+        net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     # Property defaults to bidirectional without explicit setter.
     assert backbone.video_attention_mask_mode == "bidirectional"
@@ -465,7 +465,7 @@ def test_v2v_mask_rejects_unknown_mode():
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     backbone = Cosmos25VideoBackbone(
-        _build_rich_wrapper(num_blocks=1), dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
+        net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     backbone.video_attention_mask_mode = "bogus_mode"
     with pytest.raises(ValueError, match="bogus_mode"):
@@ -492,7 +492,7 @@ def test_mot_driver_runs_through_cosmos25_5d_state():
 
     wrapper = _build_rich_wrapper(num_blocks=2)
     backbone = Cosmos25VideoBackbone(
-        wrapper, dim=16, num_layers=2, num_heads=4, head_dim=4, context_dim=12, freeze=False
+        net=wrapper.dit, dim=16, num_layers=2, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
 
     cfg = {
@@ -516,7 +516,7 @@ def test_mot_driver_runs_through_cosmos25_5d_state():
     driver = arch.build_mot_driver()
     arch.eval()
 
-    state = wrapper.prepare_block_loop(
+    state = wrapper.prepare(
         input_latents=torch.randn(1, 16, 2, 4, 4),
         context=torch.randn(1, 4, 12),
         timestep=torch.randint(0, 1000, (1,)),
@@ -558,7 +558,7 @@ def test_cosmos25_joint_self_attn_auto_compile_is_safe_noop():
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     backbone = Cosmos25VideoBackbone(
-        _build_rich_wrapper(num_blocks=1), dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
+        net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     assert backbone.supports_generic_mot_compile is False
     assert "Cosmos25" in _mot_loop_compile_skip_reason(backbone)
@@ -620,7 +620,7 @@ def test_real_block_split_matches_monolithic():
     except FileNotFoundError as exc:
         pytest.skip(f"Cosmos checkpoint missing: {exc}")
 
-    block = wrapper.net.blocks[0].eval()
+    block = wrapper.dit.blocks[0].eval()
     device = next(block.parameters()).device
     dtype = next(block.parameters()).dtype
 
@@ -637,7 +637,7 @@ def test_real_block_split_matches_monolithic():
     cond_mask = torch.zeros(B, 1, T, H * 2, W * 2, dtype=dtype, device=device)
     pad_mask = torch.zeros(B, 1, H * 2, W * 2, dtype=dtype, device=device)
     x_in = torch.cat([latent, cond_mask], dim=1)
-    _x5d, rope_emb_L_1_1_D, _extra = wrapper.net.prepare_embedded_sequence(x_in, fps=None, padding_mask=pad_mask)
+    _x5d, rope_emb_L_1_1_D, _extra = wrapper.dit.prepare_embedded_sequence(x_in, fps=None, padding_mask=pad_mask)
 
     with torch.no_grad():
         y_mono = block(

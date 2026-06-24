@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 
 from openwam.model.video_backbone.cosmos25 import CosmosFlowSchedulerAdapter
-from openwam.model.video_backbone.cosmos25.pipeline_wrapper import Cosmos25PipelineWrapper
+from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
 
@@ -51,7 +51,7 @@ class _FakeVAE:
 
 
 def _build_cosmos_backbone() -> Cosmos25VideoBackbone:
-    pipe = Cosmos25PipelineWrapper(
+    pipe = Cosmos25VideoBackbone(
         net=_ParamOnlyNet(),
         vae=_FakeVAE(),
         text_encoder=None,
@@ -63,7 +63,10 @@ def _build_cosmos_backbone() -> Cosmos25VideoBackbone:
         flow_shift=5.0,
     )
     return Cosmos25VideoBackbone(
-        pipeline=pipe,
+        net=pipe.dit,
+        vae=getattr(pipe, "vae", None),
+        text_encoder=getattr(pipe, "text_encoder", None),
+        flow_shift=pipe._flow_shift,
         dim=2048,
         num_layers=28,
         num_heads=16,

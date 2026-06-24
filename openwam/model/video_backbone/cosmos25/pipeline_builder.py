@@ -1,6 +1,6 @@
 """Lazy loader for the Cosmos-Predict2.5 pipeline.
 
-Builds a :class:`Cosmos25PipelineWrapper` from the ``cosmos_predict2`` package
+Builds a :class:`Cosmos25VideoBackbone` from the ``cosmos_predict2`` package
 installed off the ``third_party/cosmos-predict2.5`` submodule, hides the
 upstream ``MinimalV1LVGDiT`` config
 behind a stable signature, and lets :meth:`Cosmos25VideoBackbone.from_pretrained`
@@ -140,7 +140,7 @@ def _build_cosmos25_vae(vae_pth: Optional[Path], *, device, dtype):
     - ``vae_pth is None`` → build an empty shell via upstream's
       ``_video_vae(pretrained_path=None)`` → ``WanVAE_.to_empty()`` path
       (``wan2pt1.py:619-623``). The shell's inner ``WanVAE_`` is registered
-      as a sub-module of ``Cosmos25PipelineWrapper`` (see its ``__init__``),
+      as a sub-module of ``Cosmos25VideoBackbone`` (see its ``__init__``),
       so the architecture's ``load_checkpoint`` populates its weights from the
       unified safetensors. Used at deploy time when ``ckpt_dir`` carries the
       saved state.
@@ -278,7 +278,7 @@ def build_cosmos25_pipeline(
     ckpt_dir: Optional[str] = None,
     **_unused,
 ):
-    """Construct a :class:`Cosmos25PipelineWrapper` from *source*.
+    """Construct a :class:`Cosmos25VideoBackbone` from *source*.
 
     ``source`` is either:
       - a model directory ``str`` / ``Path`` (e.g. ``/path/to/assets/Cosmos-Predict2.5-2B``),
@@ -360,7 +360,7 @@ def build_cosmos25_pipeline(
             "Cosmos-Reason1-7B bundle root, e.g. /path/to/assets/Cosmos-Reason1-7B."
         )
     # §14.7 — CFG dropout for the live encoder path. The actual substitution
-    # happens in `Cosmos25PipelineWrapper.preprocess_input`; we validate the
+    # happens in `Cosmos25VideoBackbone.preprocess_input`; we validate the
     # range + flag dead-config combinations here so a user misconfiguration
     # fails before any 5 GB DiT load. The cache path uses the separate
     # `dataloader.text_embedding_dropout` knob — these are intentionally
@@ -405,7 +405,7 @@ def build_cosmos25_pipeline(
         SACConfig,
     )
 
-    from openwam.model.video_backbone.cosmos25.pipeline_wrapper import Cosmos25PipelineWrapper
+    import types
 
     if name not in ("cosmos25_predict_2b",):
         raise NotImplementedError(
@@ -425,7 +425,7 @@ def build_cosmos25_pipeline(
         **_COSMOS25_2B_NET_KWARGS,
     )
     # Deploy path (`ckpt_dir` non-None): the DiT params live inside the saved
-    # safetensors (`Cosmos25PipelineWrapper.net` is a registered nn.Module
+    # safetensors (`Cosmos25VideoBackbone.net` is a registered nn.Module
     # child of the wrapper, so its state goes through OpenWAM's unified
     # save/load like any other dual_system / shared_backbone weight). We
     # therefore skip the eager `*_ema_bf16.pt` load and let
@@ -496,7 +496,19 @@ def build_cosmos25_pipeline(
             logger.info("Cosmos VAE: loading %s from %s", vae_choice, vae_pth)
             vae_obj = _build_cosmos25_vae(vae_pth, device=device, dtype=torch.bfloat16)
 
-    wrapper = Cosmos25PipelineWrapper(
+    # Deploy path: ``_reason1_inner`` (and the empty VAE shell) live on the
+    # ``meta`` device until ``arch.load_checkpoint`` materialises them. A
+    # ``.to(device)`` there would recurse into the meta shell and crash
+    # ("Cannot copy out of meta tensor; no data!"). So only move the DiT on the
+    # TRAINING path (``ckpt_dir`` None); the deploy loader calls
+    # ``set_dtype_device`` after ``load_checkpoint`` populates real weights.
+    if device is not None and ckpt_dir is None:
+        net = net.to(device)
+
+    # Lightweight holder (no nn.Module wrapper). ``Cosmos25VideoBackbone.from_pretrained``
+    # drains it into flat children (Wan holder-drain parity). Carries the five
+    # geometry fields ``_probe_pipeline_geometry`` reads.
+    return types.SimpleNamespace(
         net=net,
         vae=vae_obj,
         text_encoder=text_encoder_obj,
@@ -505,15 +517,6 @@ def build_cosmos25_pipeline(
         text_dropout_seed=text_dropout_seed,
         **_COSMOS25_2B_GEOMETRY,
     )
-    # Deploy path: ``_reason1_inner`` lives on the ``meta`` device until
-    # ``arch.load_checkpoint`` materialises it from the unified safetensors.
-    # ``wrapper.to(device)`` would recurse into the meta shell and crash
-    # ("Cannot copy out of meta tensor; no data!"). Skip the move on this
-    # branch — the deploy loader calls ``set_dtype_device`` after
-    # ``load_checkpoint`` populates real weights.
-    if device is not None and ckpt_dir is None:
-        wrapper = wrapper.to(device)
-    return wrapper
 
 
 __all__ = ["build_cosmos25_pipeline", "import_cosmos_predict2"]

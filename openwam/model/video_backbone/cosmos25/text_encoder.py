@@ -12,7 +12,7 @@ post-projection tensor the offline cache would deliver.
 
 Why a plain Python class (NOT an ``nn.Module``)?
 
-- ``Cosmos25PipelineWrapper`` stores us as ``self.text_encoder = <instance>``.
+- ``Cosmos25VideoBackbone`` stores us as ``self.text_encoder = <instance>``.
   Mirroring the ``Wan2pt1VAEInterface`` precedent, the wrapper reaches in for
   our ``self.model`` (the inner ``Qwen2_5_VLForConditionalGeneration``
   ``nn.Module``) and registers it as ``_reason1_inner``. Result: our 16 GB of

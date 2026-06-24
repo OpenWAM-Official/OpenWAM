@@ -4,9 +4,10 @@
 # DiT geometry auto-derived (context_dim=1024). Variants: joint_cross_attn /
 # joint_self_attn; idm is NOT supported (adapter raises NotImplementedError).
 #
-# Freeze policy lives in the model freeze list (configs/model/dual_system.yaml; pins _pipe._vae_inner +
-# _pipe._reason1_inner; the DiT `_pipe.net` is TRAINABLE by default). Don't add
-# a `freeze:` knob here — uncomment `_pipe.net` in an override yaml instead.
+# Freeze policy lives in the model freeze list (the train launcher pins
+# video_backbone._vae_inner + video_backbone._reason1_inner; the DiT `dit` is
+# TRAINABLE by default). Don't add a `freeze:` knob here — add `video_backbone.dit`
+# to the freeze list in an override instead.
 #
 # REQUIRED override when switching to Cosmos25 (context_dim=1024, not Wan's 4096):
 #   model.action_backbone.text_dim=1024     # else the action context-embed shape-crashes

@@ -32,7 +32,9 @@ class _FakeCosmosPipeline:
 def _build_backbone(**overrides) -> Cosmos25VideoBackbone:
     pipe = _FakeCosmosPipeline()
     kwargs = dict(
-        pipeline=pipe,
+        net=pipe,
+        vae=None,
+        text_encoder=None,
         dim=pipe.dim,
         num_layers=pipe.num_layers,
         num_heads=pipe.num_heads,
@@ -100,7 +102,11 @@ def test_ref_images_forwarded_to_wrapper():
     fires from the adapter itself (the old gate is gone).
     """
     bb = _build_backbone()
-    try:
+    import pytest
+
+    # No VAE configured → generic VAE error; the point is no reference-image/
+    # first_frame-specific rejection fires.
+    with pytest.raises((NotImplementedError, RuntimeError, ValueError)) as exc_info:
         bb.preprocess_input_for_train(frames=[], text=[], ref_images=[object()])
-    except NotImplementedError as exc:
-        assert "reference-image" not in str(exc) and "first_frame_image" not in str(exc)
+    msg = str(exc_info.value)
+    assert "reference-image" not in msg and "first_frame_image" not in msg

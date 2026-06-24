@@ -26,7 +26,7 @@ from openwam.dataloader.transforms.text_embedding_cache import bucketed_cache_pa
 from openwam.model.architectures.base import _combine_cfg, _expand_inputs_for_cfg
 from openwam.model.video_backbone.cosmos25 import CosmosFlowSchedulerAdapter
 from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
-from openwam.model.video_backbone.cosmos25.pipeline_wrapper import Cosmos25PipelineWrapper
+from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
 from dataclasses import dataclass
 from typing import Any
@@ -423,7 +423,7 @@ def _build_cache_only_backbone() -> Cosmos25VideoBackbone:
     path; the adapter fabricates a shape-correct ``input_latents`` placeholder
     from the explicit ``num_frames / height / width`` kwargs at inference time.
     """
-    pipe = Cosmos25PipelineWrapper(
+    pipe = Cosmos25VideoBackbone(
         net=_ParamOnlyNet(),
         vae=None,
         text_encoder=None,
@@ -435,7 +435,10 @@ def _build_cache_only_backbone() -> Cosmos25VideoBackbone:
         flow_shift=5.0,
     )
     return Cosmos25VideoBackbone(
-        pipeline=pipe,
+        net=pipe.dit,
+        vae=getattr(pipe, "vae", None),
+        text_encoder=getattr(pipe, "text_encoder", None),
+        flow_shift=pipe._flow_shift,
         dim=2048,
         num_layers=28,
         num_heads=16,
@@ -612,7 +615,7 @@ def test_cosmos25_adapter_live_encoder_uncond_context():
             return self.crossattn_proj_module(x)
 
     encoder = _FakeTextEncoder()
-    pipe = Cosmos25PipelineWrapper(
+    pipe = Cosmos25VideoBackbone(
         net=_FakeProjNet(),
         vae=None,
         text_encoder=encoder,
@@ -624,7 +627,10 @@ def test_cosmos25_adapter_live_encoder_uncond_context():
         flow_shift=5.0,
     )
     vb = Cosmos25VideoBackbone(
-        pipeline=pipe,
+        net=pipe.dit,
+        vae=getattr(pipe, "vae", None),
+        text_encoder=getattr(pipe, "text_encoder", None),
+        flow_shift=pipe._flow_shift,
         dim=2048,
         num_layers=28,
         num_heads=16,

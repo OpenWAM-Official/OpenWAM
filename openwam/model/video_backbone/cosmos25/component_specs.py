@@ -3,7 +3,7 @@
 Unlike Wan, Cosmos25 does **not** copy any tokenizer / processor directory
 next to the checkpoint *for the DiT path*. The DiT (``MinimalV1LVGDiT``, ~3.9
 GB) and VAE (``Wan2pt1VAEInterface``'s inner ``WanVAE_``, ~485 MB) are
-registered as ``nn.Module`` children of :class:`Cosmos25PipelineWrapper`, so
+registered as ``nn.Module`` children of :class:`Cosmos25VideoBackbone`, so
 their params flow through the architecture's unified ``state_dict`` and are
 saved into the same safetensors as every other dual_system / shared_backbone
 weight.
@@ -114,7 +114,7 @@ def generate_cosmos25_component_specs(model_path: str) -> Optional[dict]:
     """Return component specs for the deploy loader's ``_ckpt_dir`` threading.
 
     The cosmos25 ``state_dict`` already carries DiT + VAE + Reason1 weights
-    (registered as ``nn.Module`` children of :class:`Cosmos25PipelineWrapper`
+    (registered as ``nn.Module`` children of :class:`Cosmos25VideoBackbone`
     via ``net``, ``_vae_inner``, and ``_reason1_inner`` respectively).
 
     Returns ``None`` only when ``model_path`` is missing or unreadable, so
@@ -142,7 +142,7 @@ def copy_cosmos25_artifacts(output_dir: str, model_path_or_cfg: Any) -> None:
     """Copy the small Reason1 tokenizer/config JSON files into ``<output_dir>/reason1/``.
 
     Reason1 model weights ride into the unified safetensors via
-    ``Cosmos25PipelineWrapper._reason1_inner``; only the small structural
+    ``Cosmos25VideoBackbone._reason1_inner``; only the small structural
     files (~10 MB total) need to live next to the checkpoint so
     :meth:`Reason1LiveTextEncoder.from_empty` can rebuild a meta-device shell
     on a deploy host that doesn't have the original Cosmos-Reason1 bundle.

@@ -5,12 +5,12 @@ the weights it owns: **everything goes into the unified safetensors**, no
 external file copy. Reviewer @d-finite's original complaint
 (`tokenizer.pth` unreachable on a deploy host without `/path/to`) is
 addressed by registering the upstream `Wan2pt1VAEInterface`'s inner
-`WanVAE_` nn.Module as a child of `Cosmos25PipelineWrapper` so its params
+`WanVAE_` nn.Module as a child of `Cosmos25VideoBackbone` so its params
 flow through `state_dict()`.
 
 These tests pin three guarantees:
 
-1. `Cosmos25PipelineWrapper.__init__` registers `vae.model.model` under
+1. `Cosmos25VideoBackbone.__init__` registers `vae.model.model` under
    ``_vae_inner`` whenever a VAE is supplied, so its params join the
    wrapper's `state_dict()`.
 2. The architecture's full save → load roundtrip restores those weights
@@ -36,7 +36,7 @@ from openwam.model.video_backbone.cosmos25.component_specs import (
     copy_cosmos25_artifacts,
     generate_cosmos25_component_specs,
 )
-from openwam.model.video_backbone.cosmos25.pipeline_wrapper import Cosmos25PipelineWrapper
+from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
 # ----------------------------------------------------------------------
 # Fake Wan2pt1VAEInterface mirrors the shape we register in __init__.
@@ -77,8 +77,8 @@ class _ParamNet(nn.Module):
         self.w = nn.Parameter(torch.zeros(1))
 
 
-def _make_wrapper(vae) -> Cosmos25PipelineWrapper:
-    return Cosmos25PipelineWrapper(
+def _make_wrapper(vae) -> Cosmos25VideoBackbone:
+    return Cosmos25VideoBackbone(
         net=_ParamNet(),
         vae=vae,
         text_encoder=None,
@@ -214,7 +214,7 @@ def test_generate_cosmos25_component_specs_emits_marker_when_model_path_valid(tm
 
 def test_pipeline_wrapper_state_dict_contains_reason1_even_when_cache_wins():
     """Cache training still needs Reason1 registered so saves are deploy self-contained."""
-    wrapper = Cosmos25PipelineWrapper(
+    wrapper = Cosmos25VideoBackbone(
         net=_ParamNet(),
         vae=None,
         text_encoder=_FakeReason1(),
@@ -361,7 +361,7 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
 def _backbone_with_reason1(has_reason1: bool):
     """A fake Cosmos25VideoBackbone whose ``_pipe`` reports Reason1 presence.
 
-    ``save_deploy_assets`` reads ``self._pipe.text_encoder`` as the ground truth
+    ``save_deploy_assets`` reads ``self.text_encoder`` as the ground truth
     for whether Reason1 weights are in the checkpoint.
     """
     import types
@@ -369,7 +369,7 @@ def _backbone_with_reason1(has_reason1: bool):
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
     bb = Cosmos25VideoBackbone.__new__(Cosmos25VideoBackbone)
-    bb._pipe = types.SimpleNamespace(text_encoder=object() if has_reason1 else None)
+    bb.text_encoder = object() if has_reason1 else None
     return bb
 
 

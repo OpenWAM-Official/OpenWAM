@@ -18,7 +18,7 @@ from openwam.model.video_backbone.cosmos25._vae_utils import (
     _vae_inner_module,
 )
 from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
-from openwam.model.video_backbone.cosmos25.pipeline_wrapper import Cosmos25PipelineWrapper
+from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
 
 class _FakeWanVAE:
@@ -53,7 +53,7 @@ class _ParamNet(nn.Module):
 
 
 def _build_backbone_with_fake_vae(*, freeze: bool) -> Cosmos25VideoBackbone:
-    pipe = Cosmos25PipelineWrapper(
+    pipe = Cosmos25VideoBackbone(
         net=_ParamNet(),
         vae=_FakeWan2pt1Interface(),
         text_encoder=None,
@@ -65,7 +65,10 @@ def _build_backbone_with_fake_vae(*, freeze: bool) -> Cosmos25VideoBackbone:
         flow_shift=5.0,
     )
     return Cosmos25VideoBackbone(
-        pipeline=pipe,
+        net=pipe.dit,
+        vae=getattr(pipe, "vae", None),
+        text_encoder=getattr(pipe, "text_encoder", None),
+        flow_shift=pipe._flow_shift,
         dim=2048,
         num_layers=28,
         num_heads=16,
@@ -86,18 +89,18 @@ def test_vae_inner_module_helper_returns_the_real_module():
 
 def test_freeze_walks_fake_vae_inner_module_params():
     bb = _build_backbone_with_fake_vae(freeze=True)
-    inner = _vae_inner_module(bb._pipe.vae)
+    inner = _vae_inner_module(bb.vae)
     assert inner is not None
     for p in inner.parameters():
         assert p.requires_grad is False, f"freeze missed VAE param {p.shape}"
     # And the net params are frozen too (existing contract).
-    for p in bb._pipe.net.parameters():
+    for p in bb.dit.parameters():
         assert p.requires_grad is False
 
 
 def test_unfrozen_backbone_leaves_fake_vae_params_trainable():
     bb = _build_backbone_with_fake_vae(freeze=False)
-    inner = _vae_inner_module(bb._pipe.vae)
+    inner = _vae_inner_module(bb.vae)
     assert inner is not None
     # default Linear params start with requires_grad=True; freeze=False MUST NOT touch them.
     for p in inner.parameters():
@@ -108,7 +111,7 @@ def test_set_dtype_device_moves_inner_module_and_mean_std_tensors():
     bb = _build_backbone_with_fake_vae(freeze=True)
     bb.set_dtype_device(torch.bfloat16, torch.device("cpu"))
 
-    iface = bb._pipe.vae
+    iface = bb.vae
     inner = _vae_inner_module(iface)
     assert inner is not None
     for p in inner.parameters():

@@ -13,7 +13,7 @@
 #   - the raw context width is `model.architecture.text_dim` (the action backbone
 #     no longer owns it), and
 #   - the freeze list lives in `configs/model/dual_system.yaml` with Wan-style
-#     paths, so Cosmos's `_pipe._vae_inner` / `_pipe._reason1_inner` must be
+#     paths, so Cosmos's `_vae_inner` / `_reason1_inner` must be
 #     pinned explicitly (the default Wan paths silently no-op on Cosmos).
 #
 # Launch (single node, auto-detects GPUs):
@@ -53,7 +53,7 @@ bash scripts/train.sh \
   model.video_backbone.text_encoder=reason1_live \
   model.video_backbone.text_encoder_path="${REASON1_PATH}" \
   '++model.architecture.text_dim=1024' \
-  'model.freeze=[video_backbone._pipe._vae_inner,video_backbone._pipe._reason1_inner]' \
+  'model.freeze=[video_backbone._vae_inner,video_backbone._reason1_inner]' \
   dataloader.dataset_dir="${DATASET_DIR}" \
   dataloader.variant=both \
   dataloader.task_name=null \

@@ -1,4 +1,4 @@
-"""CPU smoke for Cosmos25PipelineWrapper.
+"""CPU smoke for Cosmos25VideoBackbone.
 
 Builds the wrapper around a hand-rolled fake ``net`` that mimics just the
 public surface of upstream ``MinimalV1LVGDiT`` (``prepare_embedded_sequence``,
@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 from openwam.model.video_backbone.base import BlockLoopState
-from openwam.model.video_backbone.cosmos25.pipeline_wrapper import Cosmos25PipelineWrapper
+from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
 
 class _FakeBlock(nn.Module):
@@ -134,7 +134,7 @@ class _FakeTEmbedder(nn.Module):
 def fake_wrapper():
     torch.manual_seed(0)
     net = _FakeMiniDIT(dim=32, num_blocks=4, patch_spatial=2, patch_temporal=1, out_channels=16)
-    return Cosmos25PipelineWrapper(
+    return Cosmos25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=None,
@@ -159,13 +159,13 @@ def test_wrapper_attributes_propagate(fake_wrapper):
     assert fake_wrapper.num_layers == 4
     assert fake_wrapper.num_heads == 4
     assert fake_wrapper.head_dim == 8
-    assert fake_wrapper.context_dim == 24
-    assert fake_wrapper.flow_shift == 3.0
+    assert fake_wrapper.text_dim == 24  # context_dim exposed via base text_dim property
+    assert fake_wrapper._flow_shift == 3.0  # private on the backbone
 
 
 def test_prepare_run_finalize_shape_conservation(fake_wrapper):
     latents, context, timestep = _make_inputs()
-    state = fake_wrapper.prepare_block_loop(input_latents=latents, context=context, timestep=timestep)
+    state = fake_wrapper.prepare(input_latents=latents, context=context, timestep=timestep)
     assert isinstance(state, BlockLoopState)
     # Cosmos-specific extras are populated
     assert "t_embedding_B_T_D" in state.extras
@@ -180,7 +180,7 @@ def test_prepare_run_finalize_shape_conservation(fake_wrapper):
         state = fake_wrapper.run_block(i, state)
     assert state.hidden_states.shape == (B, f, h, w, D)
 
-    out = fake_wrapper.finalize_block_loop(state)
+    out = fake_wrapper.finalize(state)
     # finalize produces (B, C, T, H, W) at input latent resolution
     assert out.shape == latents.shape
 
@@ -188,7 +188,7 @@ def test_prepare_run_finalize_shape_conservation(fake_wrapper):
 def test_prepare_auto_fills_condition_and_padding_masks(fake_wrapper):
     latents, context, timestep = _make_inputs()
     # Don't pass condition_mask / padding_mask — wrapper must synthesize zeros.
-    state = fake_wrapper.prepare_block_loop(input_latents=latents, context=context, timestep=timestep)
+    state = fake_wrapper.prepare(input_latents=latents, context=context, timestep=timestep)
     assert state.hidden_states.shape[-1] == fake_wrapper.dim
 
 
@@ -197,12 +197,12 @@ def test_crossattn_projection_only_when_dim_matches_pre(fake_wrapper):
     pre-projection dim (64), and pass post-projection (24) through unchanged."""
     latents, _post, timestep = _make_inputs()
     pre_ctx = torch.randn(1, 8, 64)
-    state_pre = fake_wrapper.prepare_block_loop(input_latents=latents, context=pre_ctx, timestep=timestep)
+    state_pre = fake_wrapper.prepare(input_latents=latents, context=pre_ctx, timestep=timestep)
     # After projection: (B, L, 24)
     assert state_pre.context.shape[-1] == 24
 
     post_ctx = torch.randn(1, 8, 24)
-    state_post = fake_wrapper.prepare_block_loop(input_latents=latents, context=post_ctx, timestep=timestep)
+    state_post = fake_wrapper.prepare(input_latents=latents, context=post_ctx, timestep=timestep)
     assert state_post.context.shape[-1] == 24
     # The 1D check is on the projection NOT firing: post_ctx should be the same tensor
     # (object-identity if no projection was applied).
@@ -215,9 +215,9 @@ def test_preprocess_input_rejects_vace(fake_wrapper):
     # Dataset always emits a list (possibly all-None for "no data"); rejection
     # must trigger only when an actual entry is non-None.
     with pytest.raises(NotImplementedError, match="VACE"):
-        fake_wrapper.preprocess_input(input_latents=latents, pre_encoded_text=pre_text, vace_videos=[object()])
+        fake_wrapper._preprocess_input(input_latents=latents, pre_encoded_text=pre_text, vace_videos=[object()])
     # All-None VACE list passes through (RoboTwin's default).
-    out = fake_wrapper.preprocess_input(input_latents=latents, pre_encoded_text=pre_text, vace_videos=[None])
+    out = fake_wrapper._preprocess_input(input_latents=latents, pre_encoded_text=pre_text, vace_videos=[None])
     assert "input_latents" in out
 
 
@@ -232,13 +232,13 @@ def test_preprocess_input_passes_through_when_ref_images_absent(fake_wrapper):
     """
     latents = torch.randn(1, 16, 2, 4, 4)
     pre_text = torch.randn(1, 8, 24)
-    out_none = fake_wrapper.preprocess_input(
+    out_none = fake_wrapper._preprocess_input(
         input_latents=latents, pre_encoded_text=pre_text, ref_images=None
     )
     assert "input_latents" in out_none
     assert "first_frame_latents" not in out_none
     assert "condition_mask" not in out_none
-    out_listed_none = fake_wrapper.preprocess_input(
+    out_listed_none = fake_wrapper._preprocess_input(
         input_latents=latents, pre_encoded_text=pre_text, ref_images=[None]
     )
     assert "first_frame_latents" not in out_listed_none
@@ -247,13 +247,13 @@ def test_preprocess_input_passes_through_when_ref_images_absent(fake_wrapper):
 def test_preprocess_input_requires_text_source(fake_wrapper):
     latents = torch.randn(1, 16, 2, 4, 4)
     with pytest.raises(ValueError, match="pre_encoded_text"):
-        fake_wrapper.preprocess_input(input_latents=latents)
+        fake_wrapper._preprocess_input(input_latents=latents)
 
 
 def test_preprocess_input_returns_required_keys(fake_wrapper):
     latents = torch.randn(1, 16, 2, 4, 4)
     pre_text = torch.randn(1, 8, 24)
-    out = fake_wrapper.preprocess_input(input_latents=latents, pre_encoded_text=pre_text)
+    out = fake_wrapper._preprocess_input(input_latents=latents, pre_encoded_text=pre_text)
     assert set(out) >= {"input_latents", "context", "context_mask", "seq_lens", "num_frames", "height", "width"}
     assert out["num_frames"] == 2 and out["height"] == 4 and out["width"] == 4
     assert out["seq_lens"].tolist() == [8]
@@ -312,9 +312,9 @@ def _make_pil_video(B: int, T: int, H: int, W: int):
     ]
 
 
-def _wrapper_with_fake_vae() -> Cosmos25PipelineWrapper:
+def _wrapper_with_fake_vae() -> Cosmos25VideoBackbone:
     net = _FakeMiniDIT(dim=32, num_blocks=4)
-    return Cosmos25PipelineWrapper(
+    return Cosmos25VideoBackbone(
         net=net,
         vae=_FakeVAEInterface(),
         text_encoder=None,
@@ -331,7 +331,7 @@ def test_preprocess_input_with_fake_vae_returns_real_latents():
     wrapper = _wrapper_with_fake_vae()
     pre_text = torch.randn(1, 8, 24)
     frames = _make_pil_video(B=1, T=5, H=64, W=64)
-    out = wrapper.preprocess_input(frames=frames, text=None, pre_encoded_text=pre_text)
+    out = wrapper._preprocess_input(frames=frames, text=None, pre_encoded_text=pre_text)
 
     # Wan2pt1 stride: T_lat = 1 + (5-1)//4 = 2; H_lat=8; W_lat=8; C_z=16.
     assert out["input_latents"].shape == (1, 16, 2, 8, 8)
@@ -389,7 +389,7 @@ class _FakeLiveTextEncoder:
 
 def _wrapper_with_fake_live_encoder():
     net = _FakeMiniDIT(dim=32, num_blocks=4)  # ctx_dim_pre=64, ctx_dim_post=24
-    return Cosmos25PipelineWrapper(
+    return Cosmos25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=_FakeLiveTextEncoder(L=8, ctx_dim_pre=64),
@@ -415,7 +415,7 @@ def test_preprocess_input_uses_live_text_encoder_when_text_provided():
     wrapper = _wrapper_with_fake_live_encoder()
     latents = torch.randn(1, 16, 2, 4, 4)
 
-    out = wrapper.preprocess_input(input_latents=latents, text=["pick up the block"])
+    out = wrapper._preprocess_input(input_latents=latents, text=["pick up the block"])
 
     # The fake encoder records each call so we can confirm the dispatch.
     assert wrapper.text_encoder.calls == [["pick up the block"]], (
@@ -443,7 +443,7 @@ def test_preprocess_input_pre_encoded_text_wins_over_text():
     latents = torch.randn(1, 16, 2, 4, 4)
     pre_text = torch.randn(1, 12, 24)  # already post-projection (dim=24 matches ctx_dim_post)
 
-    out = wrapper.preprocess_input(input_latents=latents, text=["pick up the block"], pre_encoded_text=pre_text)
+    out = wrapper._preprocess_input(input_latents=latents, text=["pick up the block"], pre_encoded_text=pre_text)
 
     assert wrapper.text_encoder.calls == [], (
         "Live encoder must be silently skipped when `pre_encoded_text` is supplied. "
@@ -457,9 +457,9 @@ def test_preprocess_input_pre_encoded_text_wins_over_text():
 # ----------------------------------------------------------------------
 
 
-def _wrapper_with_dropout(*, p: float, seed=None) -> Cosmos25PipelineWrapper:
+def _wrapper_with_dropout(*, p: float, seed=None) -> Cosmos25VideoBackbone:
     net = _FakeMiniDIT(dim=32, num_blocks=4)
-    return Cosmos25PipelineWrapper(
+    return Cosmos25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=_FakeLiveTextEncoder(L=8, ctx_dim_pre=64),
@@ -483,7 +483,7 @@ def test_text_dropout_training_substitutes_empty_strings():
     assert wrapper.training, "fresh nn.Module is in training mode by default"
     latents = torch.randn(2, 16, 2, 4, 4)
 
-    wrapper.preprocess_input(input_latents=latents, text=["pick up the block", "stack the red cube"])
+    wrapper._preprocess_input(input_latents=latents, text=["pick up the block", "stack the red cube"])
 
     assert wrapper.text_encoder.calls == [["", ""]], (
         f"All prompts must be replaced with '' under p=1.0 + training; got {wrapper.text_encoder.calls}"
@@ -499,7 +499,7 @@ def test_text_dropout_eval_passthrough():
     wrapper.eval()
     latents = torch.randn(2, 16, 2, 4, 4)
 
-    wrapper.preprocess_input(input_latents=latents, text=["pick up the block", "stack the red cube"])
+    wrapper._preprocess_input(input_latents=latents, text=["pick up the block", "stack the red cube"])
 
     assert wrapper.text_encoder.calls == [["pick up the block", "stack the red cube"]], (
         f"Eval mode must pass prompts through unchanged regardless of p; got {wrapper.text_encoder.calls}"
@@ -515,8 +515,8 @@ def test_text_dropout_seed_reproducible():
 
     w1 = _wrapper_with_dropout(p=0.5, seed=42)
     w2 = _wrapper_with_dropout(p=0.5, seed=42)
-    w1.preprocess_input(input_latents=latents, text=list(prompts))
-    w2.preprocess_input(input_latents=latents, text=list(prompts))
+    w1._preprocess_input(input_latents=latents, text=list(prompts))
+    w2._preprocess_input(input_latents=latents, text=list(prompts))
 
     assert w1.text_encoder.calls == w2.text_encoder.calls, "Same seed must yield identical substitution pattern."
     # Sanity check: with p=0.5 over 32 samples the pattern should be
@@ -534,7 +534,7 @@ def test_text_dropout_p_zero_passthrough():
     assert wrapper.training
     latents = torch.randn(2, 16, 2, 4, 4)
 
-    wrapper.preprocess_input(input_latents=latents, text=["pick up the block", "stack the red cube"])
+    wrapper._preprocess_input(input_latents=latents, text=["pick up the block", "stack the red cube"])
 
     assert wrapper.text_encoder.calls == [["pick up the block", "stack the red cube"]]
 
@@ -555,9 +555,9 @@ def test_text_dropout_p_out_of_range_rejected():
         flow_shift=5.0,
     )
     with pytest.raises(ValueError, match=r"text_dropout_p"):
-        Cosmos25PipelineWrapper(text_dropout_p=1.5, **common)
+        Cosmos25VideoBackbone(text_dropout_p=1.5, **common)
     with pytest.raises(ValueError, match=r"text_dropout_p"):
-        Cosmos25PipelineWrapper(text_dropout_p=-0.1, **common)
+        Cosmos25VideoBackbone(text_dropout_p=-0.1, **common)
 
 
 # ----------------------------------------------------------------------
@@ -595,7 +595,7 @@ def test_reason1_inner_appears_in_state_dict():
     external Cosmos-Reason1 bundle (the pre-fix behaviour)."""
     net = _FakeMiniDIT(dim=32, num_blocks=4)
     encoder = _FakeReason1WithInnerModule()
-    wrapper = Cosmos25PipelineWrapper(
+    wrapper = Cosmos25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=encoder,
@@ -628,7 +628,7 @@ def test_reason1_no_inner_module_means_no_registration():
     — there is nothing to register."""
     net = _FakeMiniDIT(dim=32, num_blocks=4)
     encoder = _FakeReason1WithoutInnerModule()
-    wrapper = Cosmos25PipelineWrapper(
+    wrapper = Cosmos25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=encoder,
@@ -652,7 +652,7 @@ def test_reason1_inner_state_dict_roundtrip():
     save/load round trip exercised at training time."""
     net1 = _FakeMiniDIT(dim=32, num_blocks=4)
     enc1 = _FakeReason1WithInnerModule()
-    w1 = Cosmos25PipelineWrapper(
+    w1 = Cosmos25VideoBackbone(
         net=net1,
         vae=None,
         text_encoder=enc1,
@@ -669,7 +669,7 @@ def test_reason1_inner_state_dict_roundtrip():
 
     net2 = _FakeMiniDIT(dim=32, num_blocks=4)
     enc2 = _FakeReason1WithInnerModule()
-    w2 = Cosmos25PipelineWrapper(
+    w2 = Cosmos25VideoBackbone(
         net=net2,
         vae=None,
         text_encoder=enc2,
