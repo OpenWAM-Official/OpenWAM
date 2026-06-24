@@ -45,7 +45,13 @@ def compare(main_csv, refactor_csv):
         print("FAIL: CSV 为空,没有可比对的步")
         return 1
 
-    cols = [c for c in a[0].keys() if c not in NON_DETERMINISTIC]
+    # 仅比对两个 CSV 都有的确定性列。模式差异(latent vs 非 latent)会改变
+    # loss_action/loss_decoder 列的存在性,取交集自动对齐;打印不对称列以免静默漏比。
+    only_a = [c for c in a[0] if c not in b[0] and c not in NON_DETERMINISTIC]
+    only_b = [c for c in b[0] if c not in a[0] and c not in NON_DETERMINISTIC]
+    if only_a or only_b:
+        print(f"NOTE: 列不对称(模式差异),仅比交集。main独有={only_a} refactor独有={only_b}")
+    cols = [c for c in a[0].keys() if c not in NON_DETERMINISTIC and c in b[0]]
     for i, (ra, rb) in enumerate(zip(a, b)):
         for c in cols:
             if ra.get(c) != rb.get(c):
