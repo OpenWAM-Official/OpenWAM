@@ -5,7 +5,8 @@ Expert + frozen Qwen3-VL. Loss = video + action only; understanding is trained
 through those supervised streams.
 """
 
-from typing import Optional, Tuple
+import logging
+from typing import Callable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -21,7 +22,15 @@ from openwam.model.architectures.tri_system.und_expert import (
 )
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
+from openwam.model.compile_options import (
+    compile_mode,
+    section_enabled,
+    torch_compile_kwargs,
+    tri_system_compile_cfg,
+)
 from openwam.model.vlm_backbone import build_vlm_backbone
+
+logger = logging.getLogger(__name__)
 
 
 def _cfg_get(cfg, key, default=None):
@@ -82,6 +91,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         self.understanding_expert = None
         self._mot_driver = None
         self._mot_driver_kwargs: dict = {}
+        self._compiled_mot_run_joint_loop: Optional[Callable[..., Tuple[object, object, object]]] = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -184,6 +194,42 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             result["vlm_backbone"] = self.vlm_backbone
         return result
 
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Compile the eval-time trimodal MoT loop when requested."""
+
+        super().apply_compile_optimizations(compile_cfg)
+        self._compiled_mot_run_joint_loop = None
+        mode = compile_mode(compile_cfg, default="none", strict=True)
+        if mode in (None, "none"):
+            return
+
+        section = tri_system_compile_cfg(compile_cfg)
+        if not section_enabled(section, default=True):
+            logger.info("tri-system MoT compile disabled by config; running eager.")
+            return
+        if self.video_backbone is None or self.action_backbone is None or self.understanding_expert is None:
+            logger.warning("tri-system MoT compile requested before backbones are ready; running eager.")
+            return
+
+        driver = self._mot_driver or self.build_mot_driver()
+
+        def _run_joint_loop(vstate, astate, ustate, attn_mask):
+            return driver.run_joint_loop_for_compile(
+                vstate,
+                astate,
+                ustate,
+                attn_mask=attn_mask,
+            )
+
+        kwargs = torch_compile_kwargs(section, default_mode="reduce-overhead")
+        try:
+            self._compiled_mot_run_joint_loop = torch.compile(_run_joint_loop, **kwargs)
+        except Exception as exc:  # pragma: no cover - defensive setup fallback
+            self._compiled_mot_run_joint_loop = None
+            logger.warning("tri-system MoT torch.compile setup failed; running eager: %s", exc)
+            return
+        logger.info("Enabled tri-system MoT compile with torch.compile kwargs=%s", kwargs)
+
     def freeze_modules(self, names: list[str]) -> list[str]:
         rejected = self._NEVER_FREEZE & set(names)
         if rejected:
@@ -276,7 +322,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             vlm_attention_mask = vlm_inputs.get("attention_mask")
         if vlm_hidden is None and vlm_inputs is not None:
             vlm_hidden = self.vlm_backbone.extract_features(vlm_inputs)
-        result = super().generate(
+        return super().generate(
             schedule,
             prompt,
             first_frame_image=first_frame_image,
@@ -284,7 +330,6 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             vlm_attention_mask=vlm_attention_mask,
             **kwargs,
         )
-        return result
 
     def forward(
         self,
@@ -364,13 +409,42 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         driver = self._mot_driver
         if driver is None:
             driver = self.build_mot_driver()
-        vstate, astate, ustate = driver.run_joint_loop(
-            vstate,
-            astate,
-            ustate,
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        )
+        compiled_loop = getattr(self, "_compiled_mot_run_joint_loop", None)
+        if compiled_loop is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
+            try:
+                if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                    torch.compiler.cudagraph_mark_step_begin()
+                video_tokens_per_frame = driver._video_tokens_per_frame(vstate)
+                s_video = int(vstate.grid_frames) * video_tokens_per_frame
+                s_action = driver._get_action_tokens(astate).shape[1]
+                s_understanding = ustate.und_tokens.shape[1]
+                attn_mask = driver._build_attention_mask(
+                    s_video=s_video,
+                    s_action=s_action,
+                    s_understanding=s_understanding,
+                    video_tokens_per_frame=video_tokens_per_frame,
+                    device=vstate.hidden_states.device,
+                    und_mask=getattr(ustate, "und_mask", None),
+                )
+                vstate, astate, ustate = compiled_loop(vstate, astate, ustate, attn_mask)
+            except Exception as exc:
+                self._compiled_mot_run_joint_loop = None
+                logger.warning("tri-system compiled MoT loop failed; falling back to eager: %s", exc)
+                vstate, astate, ustate = driver.run_joint_loop(
+                    vstate,
+                    astate,
+                    ustate,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                )
+        else:
+            vstate, astate, ustate = driver.run_joint_loop(
+                vstate,
+                astate,
+                ustate,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            )
 
         return vb.finalize(vstate), ab.extract_prediction(astate)
 

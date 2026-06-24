@@ -91,7 +91,7 @@ class TestDeploymentYaml:
 
         cfg = self._load()
         assert OmegaConf.select(cfg, "optimization.compile") is not None
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "auto"
+        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
         assert OmegaConf.select(cfg, "optimization.compile.self_attn.torch_mode") == "default"
         assert OmegaConf.select(cfg, "optimization.compile.self_attn.dynamic") is False
         assert OmegaConf.select(cfg, "optimization.compile.cross_attn.torch_mode") == "default"
@@ -635,13 +635,13 @@ class TestJointEngineCompileFlags:
 
         mock_compile.assert_not_called()
 
-    def test_base_architecture_auto_compile_is_eager(self):
+    def test_architecture_auto_compile_respects_disabled_fast_path(self):
         from omegaconf import OmegaConf
 
         from tests.test_openwam_trainer import _make_tiny_arch
 
         arch = _make_tiny_arch()
-        cfg = OmegaConf.create({"mode": "auto"})
+        cfg = OmegaConf.create({"mode": "auto", "cross_attn": {"enabled": False}})
 
         with patch("torch.compile") as mock_compile:
             arch.apply_compile_optimizations(cfg)

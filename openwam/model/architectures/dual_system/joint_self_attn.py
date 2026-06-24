@@ -13,7 +13,7 @@ no parameters; ``forward`` delegates the per-layer loop to it.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -24,6 +24,12 @@ from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriv
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
+from openwam.model.compile_options import (
+    compile_mode,
+    section_enabled,
+    self_attn_compile_cfg,
+    torch_compile_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +48,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         super().__init__(cfg)
         self._mot_driver: DualSystemMoTDriver | None = None
         self._mot_driver_kwargs: dict = {}
+        self._compiled_mot_run_joint_loop: Optional[Callable[..., Tuple[object, object]]] = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -120,6 +127,42 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         """The MoT joint-attention driver (None if the architecture wasn't fully built)."""
         return self._mot_driver
 
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Compile the eval-time MoT joint loop when requested."""
+
+        super().apply_compile_optimizations(compile_cfg)
+        self._compiled_mot_run_joint_loop = None
+        mode = compile_mode(compile_cfg, default="none", strict=True)
+        if mode in (None, "none"):
+            return
+
+        section = self_attn_compile_cfg(compile_cfg)
+        if not section_enabled(section, default=True):
+            logger.info("dual self-attn MoT compile disabled by config; running eager.")
+            return
+        if self.video_backbone is None or self.action_backbone is None:
+            logger.warning("dual self-attn MoT compile requested before backbones are ready; running eager.")
+            return
+
+        driver = self._mot_driver or self.build_mot_driver()
+
+        def _run_joint_loop(vstate, astate):
+            return driver.run_joint_loop(
+                vstate,
+                astate,
+                use_gradient_checkpointing=False,
+                use_gradient_checkpointing_offload=False,
+            )
+
+        kwargs = torch_compile_kwargs(section, default_mode="reduce-overhead")
+        try:
+            self._compiled_mot_run_joint_loop = torch.compile(_run_joint_loop, **kwargs)
+        except Exception as exc:  # pragma: no cover - defensive setup fallback
+            self._compiled_mot_run_joint_loop = None
+            logger.warning("dual self-attn MoT torch.compile setup failed; running eager: %s", exc)
+            return
+        logger.info("Enabled dual self-attn MoT compile with torch.compile kwargs=%s", kwargs)
+
     def forward(
         self,
         noisy_actions: Optional[Tensor],
@@ -179,12 +222,26 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
-        vstate, astate = driver.run_joint_loop(
-            vstate,
-            astate,
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        )
+        compiled_loop = getattr(self, "_compiled_mot_run_joint_loop", None)
+        if compiled_loop is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
+            try:
+                vstate, astate = compiled_loop(vstate, astate)
+            except Exception as exc:
+                self._compiled_mot_run_joint_loop = None
+                logger.warning("dual self-attn compiled MoT loop failed; falling back to eager: %s", exc)
+                vstate, astate = driver.run_joint_loop(
+                    vstate,
+                    astate,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                )
+        else:
+            vstate, astate = driver.run_joint_loop(
+                vstate,
+                astate,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            )
         return vb.finalize(vstate), ab.extract_prediction(astate)
 
 

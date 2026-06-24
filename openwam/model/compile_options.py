@@ -79,13 +79,18 @@ def compile_mode(compile_cfg: Any, default: str | None = None, *, strict: bool =
     return default
 
 
-def _fast_path_compile_cfg(compile_cfg: Any, section_name: str) -> SimpleNamespace:
+def _fast_path_compile_cfg(
+    compile_cfg: Any,
+    section_name: str,
+    *,
+    default_torch_mode: str = "reduce-overhead",
+) -> SimpleNamespace:
     """Resolve an architecture-specific fixed-shape compile section."""
 
     section = cfg_namespace(cfg_get(compile_cfg, section_name, None))
     section_enabled_value = cfg_get(section, "enabled", None)
     if cfg_get(section, "torch_mode", None) is None:
-        section.torch_mode = "reduce-overhead"
+        section.torch_mode = default_torch_mode
     if cfg_get(section, "dynamic", None) is None:
         section.dynamic = False
     section.enabled = as_bool(section_enabled_value, default=True)
@@ -144,6 +149,17 @@ def tri_system_compile_cfg(compile_cfg: Any) -> Any:
     return _fast_path_compile_cfg(compile_cfg, "tri_system")
 
 
+def wan_blocks_compile_cfg(compile_cfg: Any) -> Any:
+    """Return the Wan per-block compile section.
+
+    Per-block Wan compile intentionally defaults to ``torch_mode=default``.
+    ``reduce-overhead`` can use CUDAGraphs at this boundary, where block outputs
+    are consumed by later blocks and can hit output lifetime errors.
+    """
+
+    return _fast_path_compile_cfg(compile_cfg, "wan_blocks", default_torch_mode="default")
+
+
 def section_enabled(cfg: Any, default: bool = False) -> bool:
     """Return whether a compile section is enabled."""
 
@@ -177,4 +193,5 @@ __all__ = [
     "self_attn_compile_cfg",
     "torch_compile_kwargs",
     "tri_system_compile_cfg",
+    "wan_blocks_compile_cfg",
 ]
