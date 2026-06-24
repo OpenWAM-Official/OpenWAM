@@ -205,6 +205,27 @@ class TestNormalize:
         assert ds.normalization_stats is None
         assert sample["action"].shape == (32, EEF_DIM)
 
+    def test_static_window_flagged(self, tmp_path, monkeypatch):
+        # _build_sample must flag a no-motion window as static (the input the train-time resampler
+        # uses to skip "hasn't-started-moving" windows; mirrors robotwin's filter_static_segments).
+        b = make_robocasa_bucket(tmp_path)
+        with _mock_video_decoder():
+            ds = RoboCasa365Dataset(
+                data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+                normalize_mode=None, static_segment_threshold=1e-4,
+            )
+            base = np.zeros((1, 16), np.float32)
+            base[0, 7:10] = [0.1, 0.2, 0.3]
+            base[0, 10:14] = [0.0, 0.0, 0.0, 1.0]  # valid identity quaternion (xyzw)
+            base[0, 14:16] = [0.04, 0.0]
+            static = np.repeat(base, ds.num_frames, axis=0)
+            monkeypatch.setattr(ds, "_read_state", lambda ep, s, e: static[: e - s].copy())
+            assert ds._build_sample(0, 0)["_is_static"] is True
+            moving = static.copy()
+            moving[1, 7] += 0.05  # 5 cm EEF jump at step 1 -> not static
+            monkeypatch.setattr(ds, "_read_state", lambda ep, s, e: moving[: e - s].copy())
+            assert ds._build_sample(0, 0)["_is_static"] is False
+
     def test_deploy_stats_roundtrip_20d(self, tmp_path):
         """The DEPLOY round-trip (the N1/S1 bug): the persisted stats are 20-D and keyed
         'eef', so the deploy normalizer (load_mode_stats + Normalizer) inverts the model's

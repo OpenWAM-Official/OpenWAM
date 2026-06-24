@@ -207,6 +207,9 @@ class RoboCasa365Dataset(BaseDataset):
         camera_layout: Optional[list] = None,
         temporal_compression: int = 4,
         causal_temporal: bool = True,
+        filter_static_segments: bool = True,
+        static_segment_threshold: float = 1e-4,
+        max_static_retry: int = 3,
         **_unused,
     ):
         super().__init__()
@@ -228,6 +231,11 @@ class RoboCasa365Dataset(BaseDataset):
             )
         self.repeat = int(repeat)
         self.split = split
+        # Static-segment filtering (mirrors robotwin): resample train windows that "haven't
+        # started moving" so the model isn't taught to output ~zero motion.
+        self._filter_static_segments = bool(filter_static_segments)
+        self._static_segment_threshold = float(static_segment_threshold)
+        self._max_static_retry = int(max_static_retry)
         self.window_stride = max(1, int(window_stride))
         self.video_stride = max(1, int(video_stride))
         if (self.num_frames - 1) % self.video_stride != 0:
@@ -461,6 +469,9 @@ class RoboCasa365Dataset(BaseDataset):
 
         state = self._read_state(ep_global, start, actual_end)  # (actual_len, 16)
         arm10 = state_to_arm10(state)  # (actual_len, 10), raw
+        # Static-window flag (mirrors robotwin): max-abs of the first RAW EEF step. actual_len>=2 is
+        # guaranteed above, so arm10[1]-arm10[0] is a real first step. __getitem__ resamples these at train.
+        is_static = bool(np.max(np.abs(arm10[1] - arm10[0])) < self._static_segment_threshold)
         frames = self._read_video(ep_global, start, actual_end)
 
         # pad arm10 to the full window with the last real row
@@ -498,14 +509,28 @@ class RoboCasa365Dataset(BaseDataset):
             "start_frame": start,
             "episode_length": ep_len,
             "task_name": self.task_name,
+            "_is_static": is_static,
         }
 
     def __getitem__(self, idx):
         if self._val_samples is not None:
             local_idx, start = self._val_samples[idx]
-        else:
-            local_idx, start = self._window_index[idx]
-        return self._build_sample(local_idx, start)
+            return self._build_sample(local_idx, start)
+        local_idx, start = self._window_index[idx]
+        sample = self._build_sample(local_idx, start)
+        # Training-only: resample away from a static window (keep val deterministic). Mirrors robotwin.
+        if (
+            self._filter_static_segments
+            and self.split == "train"
+            and sample.get("_is_static")
+            and len(self._window_index) > 1
+        ):
+            for _ in range(self._max_static_retry):
+                li, st = self._window_index[random.randint(0, len(self._window_index) - 1)]
+                sample = self._build_sample(li, st)
+                if not sample.get("_is_static"):
+                    break
+        return sample
 
 
 class MultiTaskRoboCasa365Dataset(BaseDataset):
@@ -543,6 +568,9 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             camera_layout=list(cam_layout) if cam_layout is not None else None,
             temporal_compression=int(get_cfg(config, "temporal_compression", 4)),
             causal_temporal=bool(get_cfg(config, "causal_temporal", True)),
+            filter_static_segments=bool(get_cfg(config, "filter_static_segments", True)),
+            static_segment_threshold=float(get_cfg(config, "static_segment_threshold", 1e-4)),
+            max_static_retry=int(get_cfg(config, "max_static_retry", 3)),
             seed=int(get_cfg(config, "seed", 42)),
         )
 

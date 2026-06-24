@@ -94,6 +94,25 @@ def _make_env(cfg: dict):
     )
 
 
+def _resolve_max_steps(cfg: dict) -> int:
+    """Per-task eval horizon: a step_limits.yml override for the task, else cfg['max_steps'] (500).
+
+    Mirrors robotwin's per-task step_lim overrides — a single global max_steps under-/over-runs
+    tasks of different lengths. The env still terminates early on done/truncated, so this is a cap.
+    """
+    import os
+
+    task = cfg.get("task", "OpenDrawer")
+    default = int(cfg.get("max_steps", 500))
+    path = os.path.join(os.path.dirname(__file__), "step_limits.yml")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            overrides = yaml.safe_load(f) or {}
+        if task in overrides:
+            return int(overrides[task])
+    return default
+
+
 def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
     return OpenWAMRoboCasa365Policy(
         host=cfg.get("host", "127.0.0.1"),
@@ -146,8 +165,9 @@ def _rollout(env, policy, *, num_trials: int, max_steps: int, seed: int) -> int:
 
 def run_eval(cfg: dict) -> int:
     num_trials = int(cfg.get("num_trials", 5))
-    max_steps = int(cfg.get("max_steps", 500))
+    max_steps = _resolve_max_steps(cfg)
     seed = int(cfg.get("seed", 0))
+    print(f"[eval] task={cfg.get('task')} max_steps={max_steps} (per-task step_limits.yml or cfg default)")
 
     # Nested try/finally so the already-connected policy is closed even if
     # _make_env raises (e.g. robocasa not installed), and so a failing

@@ -43,6 +43,14 @@ split: train
 val_ratio: 0.0                    # fraction of episodes reserved for validation
 seed: 42
 
+# ── Static-segment filtering (mirrors robotwin) ──────────────────────────────
+# Train-only: resample windows that "haven't started moving" (first raw EEF step's
+# max-abs < threshold) so the model isn't taught to output ~zero motion. Val stays
+# deterministic; no-op when there is only one window.
+filter_static_segments: true
+static_segment_threshold: 1.0e-4  # max-abs of the first arm10 step below which a window is static
+max_static_retry: 3               # resample attempts before keeping a static window
+
 # ── Action / proprio (single-arm 20-D EEF) ──────────────────────────────────
 # RoboCasa365 is single-arm: action & proprio are BOTH the absolute EEF pose from
 # observation.state — eef_pos(3) + eef_rot(quat→rot6d, 6) + gripper(1) → the LEFT

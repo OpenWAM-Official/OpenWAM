@@ -36,6 +36,8 @@ arm's real wrist) → `left_wrist_camera`. The single arm has no 2nd wrist, so
 | `openwam2robocasa365_interface.py` | WS adapter: `RoboCasaGymEnv` obs → OpenWAM payload; server action → env 12-D action dict (20-D EEF bridged via `eef20d_to_robocasa12d`, 12-D passed through). |
 | `single_eval.py` | Run one RoboCasa365 task against an OpenWAM server. |
 | `single_eval.sh` | Shell wrapper; patches host/port/task/split at runtime. |
+| `multi_eval.sh` | Evaluate a list of tasks / `all` (from `fixed_base_tasks.json`) / a task-file; aggregates per-task success into a CSV. |
+| `step_limits.yml` | Per-task eval horizon overrides (robotwin-style `ceil(avg/32)*32`); unlisted tasks fall back to the config `max_steps`. |
 | `smoke_robocasa365.py` | Preflight: `import` / `env` / `roundtrip` checks. |
 | `run_smoke.sh` | Smoke launcher. |
 | `policy_config.yml` | Eval client config template. |
@@ -148,6 +150,38 @@ ROBOCASA365_PYTHON=/path/to/robocasa365/env/bin/python \
 ```
 Args: `<task> <split> <port> <host>`. Use `POLICY_CONFIG_PATH=/path/to/custom.yml`
 for a copied config. Headless rendering uses `MUJOCO_GL=egl`.
+
+## Multi-task evaluation
+
+```bash
+# named tasks
+ROBOCASA365_PYTHON=/path/to/env/bin/python \
+  bash benchmarks/robocasa365/multi_eval.sh --split target --port 8848 OpenDrawer CloseDrawer
+# every fixed-base task (from fixed_base_tasks.json)
+ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/multi_eval.sh all
+# from a task-list file (one task per line, `#` comments)
+ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/multi_eval.sh my_tasks.txt
+```
+Tasks run sequentially; per-task `Success rate` lines are aggregated into
+`results_robocasa365/summary_<split>.csv`.
+
+## Per-task step limits
+
+`single_eval.py` resolves the rollout horizon from `step_limits.yml` (per-task override),
+falling back to `max_steps` in the policy config (default 500) for unlisted tasks; the env's
+own `done`/`truncated` still ends an episode early. Values follow robotwin's
+`ceil(avg_episode_len / 32) * 32` — seed a new task by computing its mean episode length over
+`data/chunk-*/episode_*.parquet`.
+
+## Known limitations
+
+- **Only `OpenDrawer` is validated end-to-end** (train → deploy → real-sim). The other
+  fixed-base tasks share the obs/action contract but are unverified.
+- **No parallel / distributed eval** (cf. robotwin's `parallel_eval.sh` / DLC path) — tasks
+  run sequentially.
+- **OSC scales + gripper threshold** in `policy_config.yml` were measured on `OpenDrawer` /
+  `default_pandaomron.json`; re-verify for other tasks/controllers.
+- `step_limits.yml` is seeded only for tasks whose data is local; add the rest as needed.
 
 ## Contract notes
 
