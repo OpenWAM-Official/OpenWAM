@@ -654,18 +654,17 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     # --- Checkpoint save / load ---
 
-    def save_checkpoint(self, path: str) -> None:
-        """Save architecture state to safetensors.
+    def save_checkpoint(self, path: str, *, state_dict: dict | None = None) -> None:
+        """Save architecture state to safetensors. VLM params excluded (saved separately).
 
-        VLM backbone parameters are excluded — the VLM checkpoint is saved
-        as a separate directory by the trainer. This avoids tied-weight
-        deduplication complexity and keeps the file small.
+        ``state_dict`` defaults to ``self.state_dict()`` (deploy export); the
+        trainer passes a gathered state_dict (ZeRO/DDP all-gather) instead.
         """
         from safetensors.torch import save_file
 
-        state_dict = self.state_dict()
-        if getattr(self, "vlm_backbone", None) is not None:
-            state_dict = _exclude_vlm_from_state_dict(state_dict)
+        if state_dict is None:
+            state_dict = self.state_dict()
+        state_dict = _exclude_vlm_from_state_dict(state_dict)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         save_file(state_dict, path)
 

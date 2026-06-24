@@ -25,7 +25,14 @@ import os
 import torch
 from omegaconf import DictConfig
 
-from openwam.train.utils.checkpointing import manage_checkpoints, save_config, save_normalization_stats
+from openwam.train.utils.checkpointing import (
+    finalize_keep_weights_only,
+    find_latest_accel_state,
+    find_latest_weights,
+    manage_checkpoints,
+    save_config,
+    save_normalization_stats,
+)
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
 from openwam.train.utils.training_utils import (
@@ -138,7 +145,11 @@ class OpenWAMTrainer:
         log_parameter_counts(self.architecture, is_main=is_main)
 
     def train(self, num_epochs: int = None, max_steps: int = None):
-        """Run the training loop (HuggingFace Accelerate distributed)."""
+        """Run the training loop (HuggingFace Accelerate distributed).
+
+        Three entry modes (train.yaml finetune/resume fields): fresh, finetune warm-start
+        (load weights before prepare), or resume (load full state after prepare).
+        """
         t = self.cfg.training
         num_epochs = num_epochs or int(t.num_epochs)
         max_steps = max_steps or getattr(t, "max_steps", None)
@@ -150,6 +161,9 @@ class OpenWAMTrainer:
             max_steps = 20
             save_steps_override = 10
             logger.info("DEBUG mode: max_steps=20, save@10, constant LR")
+
+        # Entry validation (all ranks): finetune and resume are mutually exclusive.
+        finetune_path, resume_path = self._resolve_checkpoint_paths()
 
         optimizer = self.build_optimizer()
         dataloader = self.build_dataloader(batch_size)
@@ -169,8 +183,19 @@ class OpenWAMTrainer:
                 save_steps = int(save_steps)
         keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
 
-        output_path = self._setup_output_dir(debug)
-        optimizer, dataloader, scheduler = self._prepare_accelerate(optimizer, dataloader, scheduler)
+        # Finetune warm-start: load weights into the bare architecture BEFORE prepare
+        # (real-device in-place copy, ZeRO-agnostic). The step counter stays at 0.
+        if finetune_path is not None:
+            self._load_finetune_weights(finetune_path)
+
+        output_path, resume_state_dir = self.setup_output_dir(debug, resume_path)
+        optimizer, dataloader, scheduler = self.prepare_accelerate(optimizer, dataloader, scheduler)
+
+        # Make the scheduler restorable by save_state/load_state WITHOUT wrapping it in
+        # AcceleratedScheduler (which would step it num_processes× and bend the LR curve).
+        # DeepSpeed already prepared the scheduler, so registering again would double-count.
+        if scheduler is not None and not self._use_deepspeed():
+            self.accelerator.register_for_checkpointing(scheduler)
 
         if self._run_seed is not None:
             wire_sampler_seed(dataloader, int(self._run_seed))
@@ -190,8 +215,21 @@ class OpenWAMTrainer:
 
         opt_step = 0
         global_step = 0
+        start_epoch = 0
+        skip_first = 0
+
+        # Resume: restore full state AFTER prepare, then map global_step -> (epoch, skip).
+        if resume_state_dir is not None:
+            global_step, opt_step, start_epoch, skip_first = self._resume_if_configured(
+                resume_state_dir, dataloader, grad_accum
+            )
+            if start_epoch >= num_epochs:
+                logger.info("[resume] global_step=%d already covers num_epochs=%d; finishing.", global_step, num_epochs)
+                self._finish_training(output_path, global_step, save_steps, is_main, wandb_run)
+                return
+
         _step_t0 = _time.monotonic()
-        pbar = tqdm(total=total_steps, desc="Training", unit="step")
+        pbar = tqdm(total=total_steps, desc="Training", unit="step", initial=min(global_step, total_steps))
 
         self._vram.begin()
         assert self.accelerator is not None, "OpenWAMTrainer requires an Accelerator"
@@ -200,12 +238,19 @@ class OpenWAMTrainer:
         # reproducible across runs and ZeRO stages: same (rank, step) -> same RNG,
         # different ranks at the same step keep in-batch timestep diversity.
         # Gated on _run_seed so unseeded production runs stay fully stochastic.
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             if hasattr(dataloader, "set_epoch"):
                 dataloader.set_epoch(epoch)
             if hasattr(self.dataset, "set_epoch"):
                 self.dataset.set_epoch(epoch)
-            for batch in dataloader:
+            # On the resumed epoch, skip the batches already consumed before the checkpoint.
+            if epoch == start_epoch and skip_first > 0:
+                from accelerate import skip_first_batches
+
+                epoch_iter = skip_first_batches(dataloader, skip_first)
+            else:
+                epoch_iter = dataloader
+            for batch in epoch_iter:
                 if self._run_seed is not None:
                     step_seed = per_step_seed(self._run_seed, rank=self._rank, step=global_step)
                     torch.manual_seed(step_seed)
@@ -240,7 +285,7 @@ class OpenWAMTrainer:
                 need_mem_detail = (wandb_run is not None) or bool(debug)
                 mem_stats = self._vram.record(need_detail=need_mem_detail)
 
-                self._log_step(
+                self.log_step(
                     metrics=metrics,
                     global_step=global_step,
                     opt_step=opt_step,
@@ -255,20 +300,20 @@ class OpenWAMTrainer:
                     output_path=output_path,
                 )
 
+                # save_steps: write both lines (weights + full state), then prune in lockstep.
                 if save_steps is not None and global_step > 0 and global_step % save_steps == 0:
-                    self._save_checkpoint_files(output_path, global_step, keep_last_k, final=False)
+                    self.save_checkpoint_files(output_path, global_step, final=False)
+                    self.save_full_state(output_path, global_step, opt_step, epoch)
+                    if is_main:
+                        manage_checkpoints(output_path, keep_last_k)
 
                 if max_steps and global_step >= max_steps:
                     pbar.close()
-                    self._vram.write_summary(
-                        global_step=global_step, output_path=output_path, is_main=is_main, wandb_run=wandb_run
-                    )
+                    self._finish_training(output_path, global_step, save_steps, is_main, wandb_run)
                     return
 
         pbar.close()
-        if save_steps:
-            self._save_checkpoint_files(output_path, global_step, keep_last_k, final=True)
-        self._vram.write_summary(global_step=global_step, output_path=output_path, is_main=is_main, wandb_run=wandb_run)
+        self._finish_training(output_path, global_step, save_steps, is_main, wandb_run)
 
     # ---- Contract: loss / optimizer / checkpoint I/O ----
     def compute_loss(self, batch) -> dict:
@@ -324,38 +369,6 @@ class OpenWAMTrainer:
         params = self.get_trainable_parameters()
         return torch.optim.AdamW(params, lr=lr, weight_decay=float(t.weight_decay), betas=betas)
 
-    def save_checkpoint(self, path: str):
-        """Export architecture state to safetensors. Safe under ZeRO-1/2, DDP, single-process.
-
-        ALL ranks must call this together (``get_state_dict`` is a DeepSpeed
-        collective); only rank 0 writes the file. VLM backbone params are
-        excluded — the VLM checkpoint is saved as a separate directory.
-        """
-        from safetensors.torch import save_file
-
-        from openwam.model.architectures.base import _exclude_vlm_from_state_dict
-
-        if self.accelerator is not None:
-            state_dict = self.accelerator.get_state_dict(self.architecture)
-            if not self.accelerator.is_main_process:
-                return
-        else:
-            state_dict = self.architecture.state_dict()
-
-        state_dict = _exclude_vlm_from_state_dict(state_dict)
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        save_file(state_dict, path)
-
-    def load_checkpoint(self, path: str, strict: bool = True):
-        """Load a checkpoint into the *unwrapped* architecture (flat safetensors,
-        not DeepSpeed's sharded layout). Tolerates missing vlm_backbone.* keys.
-        ``strict`` defaults True so a renamed state-dict raises rather than
-        dropping weights silently."""
-        unwrapped = (
-            self.accelerator.unwrap_model(self.architecture) if self.accelerator is not None else self.architecture
-        )
-        unwrapped.load_checkpoint(path, strict=strict)
-
     # ---- Training-loop helpers (in call order) ----
     def build_dataloader(self, batch_size: int) -> torch.utils.data.DataLoader:
         """Build the training DataLoader.
@@ -388,10 +401,29 @@ class OpenWAMTrainer:
             return build_cosine_scheduler(optimizer, total_opt_steps=total_opt_steps, cfg=self.cfg)
         return None
 
-    def _setup_output_dir(self, debug: bool) -> str:
-        """Create the rank-0 run dir (timestamped), save deploy assets, broadcast the path."""
+    def setup_output_dir(self, debug: bool, resume_path: str | None) -> tuple[str, str | None]:
+        """Locate/create the run dir and resolve the resume state dir.
+
+        With a usable resume state the run dir is REUSED (assets/config/norm already
+        present); otherwise rank-0 creates a fresh timestamped dir and broadcasts it.
+        All ranks resolve ``resume_state_dir`` independently (shared FS, deterministic),
+        so a missing-state error raises on every rank without deadlocking the broadcast.
+        Returns ``(output_path, resume_state_dir)``.
+        """
         base_output_path = getattr(self.cfg.training, "output_path", "./models")
         is_main = self.accelerator is None or self.accelerator.is_main_process
+
+        resume_state_dir = find_latest_accel_state(resume_path) if resume_path else None
+        if resume_path and resume_state_dir is None:
+            raise FileNotFoundError(
+                f"resume_ckpt_path={resume_path} has no usable accel_state_step_*; a finished "
+                f"run keeps only weights — use finetune_ckpt_path to warm-start instead."
+            )
+        if resume_state_dir is not None:
+            output_path = os.path.dirname(resume_state_dir)
+            logger.info("[resume] reusing run dir %s (state=%s)", output_path, os.path.basename(resume_state_dir))
+            return output_path, resume_state_dir
+
         if is_main:
             from datetime import datetime
 
@@ -400,9 +432,8 @@ class OpenWAMTrainer:
                 run_dir_name += "_debug"
             output_path = os.path.join(base_output_path, run_dir_name)
             os.makedirs(output_path, exist_ok=True)
-            # Make the checkpoint self-contained for deploy: each backbone saves its
-            # own assets, then config + action stats. Runs BEFORE save_config so
-            # config.yaml carries the backbones' merged reconstruction specs.
+            # Self-contained deploy: backbones save assets, then config + action stats.
+            # BEFORE save_config so config.yaml carries the merged reconstruction specs.
             self.architecture.save_assets_for_deployment(output_path, self.cfg)
             save_config(output_path, self.cfg)
             if self.dataset is not None:
@@ -416,15 +447,18 @@ class OpenWAMTrainer:
             dist.broadcast_object_list(path_list, src=0)
             output_path = path_list[0]
         logger.info("Checkpoints will be saved to %s", output_path)
-        return output_path
+        return output_path, None
 
-    def _prepare_accelerate(self, optimizer, dataloader, scheduler):
-        """Wrap architecture/optimizer/dataloader with accelerate (DeepSpeed or DDP)."""
-        use_deepspeed = (
+    def _use_deepspeed(self) -> bool:
+        return (
             self.accelerator is not None
             and hasattr(self.accelerator, "distributed_type")
             and str(self.accelerator.distributed_type).endswith("DEEPSPEED")
         )
+
+    def prepare_accelerate(self, optimizer, dataloader, scheduler):
+        """Wrap architecture/optimizer/dataloader with accelerate (DeepSpeed or DDP)."""
+        use_deepspeed = self._use_deepspeed()
         if use_deepspeed:
             prepare_args = [self.architecture, optimizer, dataloader]
             if scheduler is not None:
@@ -435,21 +469,20 @@ class OpenWAMTrainer:
             # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
             self.architecture.set_dtype_device(self.architecture.dtype, self.accelerator.device)
             self.architecture.move_frozen_to_device(self.accelerator.device)
-            self._move_latent_to_device(self.accelerator.device)
+            if self.latent_action_provider is not None:
+                self.latent_action_provider.to(self.accelerator.device)
+                self.latent_action_provider.device = torch.device(self.accelerator.device)
             logger.info("DeepSpeed: architecture wrapped, device=%s", self.accelerator.device)
         elif self.accelerator is not None:
             self.architecture, optimizer, dataloader = self.accelerator.prepare(
                 self.architecture, optimizer, dataloader
             )
-            self._move_latent_to_device(self.accelerator.device)
+            if self.latent_action_provider is not None:
+                self.latent_action_provider.to(self.accelerator.device)
+                self.latent_action_provider.device = torch.device(self.accelerator.device)
         return optimizer, dataloader, scheduler
 
-    def _move_latent_to_device(self, device) -> None:
-        if self.latent_action_provider is not None:
-            self.latent_action_provider.to(device)
-            self.latent_action_provider.device = torch.device(device)
-
-    def _log_step(
+    def log_step(
         self,
         *,
         metrics,
@@ -465,12 +498,13 @@ class OpenWAMTrainer:
         debug,
         output_path,
     ) -> None:
-        """Update progress bar, log to wandb, and (debug) write the loss-history CSV row.
-
-        Loss streams come from ``_loss_labels()`` so non-latent mode shows only the
-        real action loss (no dead decoder column).
-        """
-        labels = self._loss_labels()
+        """Update progress bar, log to wandb, and (debug) write the loss-history CSV row."""
+        # Latent mode: action stream=latent action, decoder MSE=real action loss; non-latent has no decoder column.
+        labels = (
+            [("latent_action", "loss_action"), ("action", "loss_decoder")]
+            if self.latent_action_enabled
+            else [("action", "loss_action")]
+        )
         loss_total = metrics["loss_total"]
         loss_video = metrics["loss_video"]
         grad_norm = metrics["grad_norm"]
@@ -539,31 +573,131 @@ class OpenWAMTrainer:
                 mem_stats=mem_stats,
             )
 
-    def _loss_labels(self) -> list[tuple[str, str]]:
-        """(display_name, metrics_key) pairs for the action/decoder loss streams.
+    def save_checkpoint_files(self, output_path: str, global_step: int, *, final: bool) -> None:
+        """Write the weights safetensors (the deploy artifact).
 
-        Latent mode: the action stream predicts the LATENT action, and the decoder
-        MSE is the REAL action loss. Non-latent: only the real action stream (the
-        decoder is unused, so it gets no label/column).
+        ALL ranks enter ``get_state_dict`` (ZeRO all-gather collective); only rank-0
+        unwraps and writes. Pruning is the caller's job, run after the full state is
+        also written so the two lines stay in lockstep.
         """
-        if self.latent_action_enabled:
-            return [("latent_action", "loss_action"), ("action", "loss_decoder")]
-        return [("action", "loss_action")]
-
-    def _save_checkpoint_files(self, output_path: str, global_step: int, keep_last_k: int, *, final: bool) -> None:
-        """ALL ranks enter save_checkpoint (DeepSpeed collective); only rank-0 writes IO + prunes."""
         from tqdm import tqdm
 
-        is_main = self.accelerator is None or self.accelerator.is_main_process
         ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
-        tag = "final " if final else ""
+        is_main = self.accelerator is None or self.accelerator.is_main_process
         if is_main:
-            msg = f"[checkpoint] Saving {tag}step {global_step} -> {ckpt_path}"
+            msg = f"[checkpoint] Saving {'final ' if final else ''}step {global_step} -> {ckpt_path}"
             logger.info(msg)
             tqdm.write(msg)
-        self.save_checkpoint(ckpt_path)
+        if self.accelerator is not None:
+            state_dict = self.accelerator.get_state_dict(self.architecture)
+            if not self.accelerator.is_main_process:
+                return
+            self.accelerator.unwrap_model(self.architecture).save_checkpoint(ckpt_path, state_dict=state_dict)
+        else:
+            self.architecture.save_checkpoint(ckpt_path)
+        msg = f"[checkpoint] Saved{' final' if final else ''}: {ckpt_path}"
+        logger.info(msg)
+        tqdm.write(msg)
+
+    def save_full_state(self, output_path: str, global_step: int, opt_step: int, epoch: int) -> str | None:
+        """Write full Accelerate state to ``accel_state_step_N/`` for resume.
+
+        ALL ranks enter (DeepSpeed shards optimizer state per-rank). rank-0 writes the
+        ``trainer_state.json`` marker last (atomic) so a half-written dir is never picked
+        by ``find_latest_accel_state``. Returns the dir on rank-0, else None.
+        """
+        if self.accelerator is None:
+            return None
+        import json
+
+        state_dir = os.path.join(output_path, f"accel_state_step_{global_step}")
+        if self.accelerator.is_main_process:
+            os.makedirs(state_dir, exist_ok=True)
+        self.accelerator.wait_for_everyone()
+        self.accelerator.save_state(state_dir)
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            meta = {"global_step": int(global_step), "opt_step": int(opt_step), "epoch": int(epoch)}
+            meta_path = os.path.join(state_dir, "trainer_state.json")
+            tmp_path = meta_path + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(meta, f)
+            os.replace(tmp_path, meta_path)
+            return state_dir
+        return None
+
+    def load_full_state(self, state_dir: str) -> dict:
+        """Restore optimizer/scheduler/RNG/model from ``state_dir`` (call AFTER prepare).
+
+        Returns the ``trainer_state.json`` contents (global_step / opt_step / epoch).
+        """
+        import json
+
+        assert self.accelerator is not None, "load_full_state requires an Accelerator"
+        self.accelerator.load_state(state_dir)
+        meta_path = os.path.join(state_dir, "trainer_state.json")
+        if os.path.isfile(meta_path):
+            with open(meta_path) as f:
+                return json.load(f)
+        return {"global_step": 0, "opt_step": 0, "epoch": 0}
+
+    def _resolve_checkpoint_paths(self) -> tuple[str | None, str | None]:
+        """Read finetune/resume path fields and enforce mutual exclusion (all ranks)."""
+        t = self.cfg.training
+        finetune_path = cfg_get(t, "finetune_ckpt_path", None)
+        resume_path = cfg_get(t, "resume_ckpt_path", None)
+        if finetune_path and resume_path:
+            raise ValueError("finetune_ckpt_path and resume_ckpt_path are mutually exclusive; set at most one.")
+        return (finetune_path or None), (resume_path or None)
+
+    def _load_finetune_weights(self, finetune_path: str) -> None:
+        """Warm-start: load the latest weights from a training dir into the bare architecture.
+
+        Runs BEFORE ``accelerate.prepare`` (real-device params, in-place copy, ZeRO-agnostic);
+        tolerates missing vlm keys. The step counter stays at 0 (not a resume).
+        """
+        weights = find_latest_weights(finetune_path)
+        logger.info("[finetune] loading pretrained weights: %s", weights)
+        self.architecture.load_checkpoint(weights)
+
+    def _resume_if_configured(self, resume_state_dir: str, dataloader, grad_accum: int) -> tuple[int, int, int, int]:
+        """Load full state (after prepare) and map global_step -> (start_epoch, skip_first_batches).
+
+        ``skip`` is rounded down to a grad_accum boundary so the first optimizer step after
+        resume sees a full accumulation cycle. Returns (global_step, opt_step, start_epoch, skip).
+        """
+        is_main = self.accelerator is None or self.accelerator.is_main_process
         if is_main:
-            msg = f"[checkpoint] Saved{' final' if final else ''}: {ckpt_path}"
-            logger.info(msg)
-            tqdm.write(msg)
-            manage_checkpoints(output_path, keep_last_k)
+            logger.info("[resume] loading Accelerate state from %s", resume_state_dir)
+        meta = self.load_full_state(resume_state_dir)
+        global_step = int(meta.get("global_step", 0))
+        opt_step = int(meta.get("opt_step", global_step))
+        batches_per_epoch = max(len(dataloader), 1)
+        start_epoch = global_step // batches_per_epoch
+        skip = global_step % batches_per_epoch
+        if grad_accum > 1 and skip % grad_accum != 0:
+            skip = (skip // grad_accum) * grad_accum
+        if is_main:
+            logger.info(
+                "[resume] resumed at global_step=%d opt_step=%d epoch=%d skip_first=%d",
+                global_step,
+                opt_step,
+                start_epoch,
+                skip,
+            )
+        return global_step, opt_step, start_epoch, skip
+
+    def _finish_training(self, output_path: str, global_step: int, save_steps, is_main: bool, wandb_run) -> None:
+        """Unified teardown for every exit path: final weights, drop resume state, VRAM summary.
+
+        Falsy ``save_steps`` = a profiling/no-write run, so no final artifact (matches the
+        periodic-save gating). After the final weights land, ``finalize_keep_weights_only``
+        removes every ``accel_state_step_*`` and all but the final weights (rank-0, post-barrier).
+        """
+        if save_steps:
+            self.save_checkpoint_files(output_path, global_step, final=True)
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
+        if is_main:
+            finalize_keep_weights_only(output_path)
+        self._vram.write_summary(global_step=global_step, output_path=output_path, is_main=is_main, wandb_run=wandb_run)
