@@ -18,7 +18,6 @@ from openwam.model.video_backbone.cosmos25._vae_utils import (
     _vae_inner_module,
 )
 from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
 
 class _FakeWanVAE:

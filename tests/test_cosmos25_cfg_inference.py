@@ -16,7 +16,9 @@ The GPU smoke for end-to-end deploy round-trip lives in
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -26,10 +28,6 @@ from openwam.dataloader.transforms.text_embedding_cache import bucketed_cache_pa
 from openwam.model.architectures.base import _combine_cfg, _expand_inputs_for_cfg
 from openwam.model.video_backbone.cosmos25 import CosmosFlowSchedulerAdapter
 from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
-
-from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass
@@ -455,7 +453,7 @@ def test_cosmos25_adapter_cfg_scale_1_no_uncond_context():
     to decide whether to combine."""
     vb = _build_cache_only_backbone()
     cond_cache = torch.randn(1, 16, 1024)
-    inputs_shared = _call(vb, 
+    inputs_shared = _call(vb,
         InferenceInputs(
             prompt="smoke",
             num_frames=13,
@@ -486,7 +484,7 @@ def test_cosmos25_adapter_uncond_pre_encoded_text_2d_broadcast():
     cond_cache = torch.randn(1, 16, 1024)
     # Shape (16, 1024) — what empty.safetensors looks like for Cosmos2.5-2B.
     empty_2d = torch.full((16, 1024), -0.5)
-    inputs_shared = _call(vb, 
+    inputs_shared = _call(vb,
         InferenceInputs(
             prompt="smoke",
             cfg_scale=1.5,
@@ -508,7 +506,7 @@ def test_cosmos25_adapter_cfg_requires_uncond_source():
     vb = _build_cache_only_backbone()
     cond_cache = torch.randn(1, 16, 1024)
     with pytest.raises(ValueError, match="cfg_scale > 1.0 requires"):
-        _call(vb, 
+        _call(vb,
             InferenceInputs(
                 prompt="smoke",
                 cfg_scale=1.5,
@@ -641,7 +639,7 @@ def test_cosmos25_adapter_live_encoder_uncond_context():
     )
 
     cond_cache = torch.zeros(1, 16, 1024)
-    inputs_shared = _call(vb, 
+    inputs_shared = _call(vb,
         InferenceInputs(
             prompt="real prompt",
             pre_encoded_text=cond_cache,

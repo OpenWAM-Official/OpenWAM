@@ -397,6 +397,8 @@ def build_cosmos25_pipeline(
 
     import_cosmos_predict2()
     # Late imports keep CPU CI green without the [cosmos25] extra.
+    import types
+
     from cosmos_predict2._src.predict2.networks.minimal_v1_lvg_dit import (  # type: ignore[import-not-found]
         MinimalV1LVGDiT,
     )
@@ -404,8 +406,6 @@ def build_cosmos25_pipeline(
         CheckpointMode,
         SACConfig,
     )
-
-    import types
 
     if name not in ("cosmos25_predict_2b",):
         raise NotImplementedError(

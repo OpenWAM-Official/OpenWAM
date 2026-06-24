@@ -26,7 +26,6 @@ import torch.nn as nn
 
 from openwam.model.video_backbone.cosmos25 import CosmosFlowSchedulerAdapter
 from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
 
 class _ParamOnlyNet(nn.Module):

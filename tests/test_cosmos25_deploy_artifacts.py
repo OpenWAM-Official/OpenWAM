@@ -364,7 +364,6 @@ def _backbone_with_reason1(has_reason1: bool):
     ``save_deploy_assets`` reads ``self.text_encoder`` as the ground truth
     for whether Reason1 weights are in the checkpoint.
     """
-    import types
 
     from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
 
