@@ -3,8 +3,10 @@
 # Template: single_eval.sh patches host/port/task/split at runtime; copy this and
 # set POLICY_CONFIG_PATH=/path/to/custom.yml to override the rest. The OpenWAM
 # server reads the checkpoint's config.yaml and does all preprocessing / multi-view
-# composition / prompt wrapping / action denormalization. The client only forwards
-# raw frames + a 16-D state and gets a 12-D action back.
+# composition / prompt wrapping / action denormalization. The client forwards raw frames
+# + a 20-D single-arm EEF proprio (converted from the env's 16-D state); the server returns
+# a 20-D EEF action, which the client bridges to the env's 12-D action (a 12-D server action
+# is passed through unchanged).
 
 host: 127.0.0.1
 port: 8848

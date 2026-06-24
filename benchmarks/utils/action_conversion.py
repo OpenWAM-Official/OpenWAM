@@ -182,15 +182,21 @@ def eef20d_to_robocasa12d(
     cur_pos = np.asarray(proprio_eef_pos, np.float64).reshape(-1)
     if cur_pos.shape[0] != 3:
         raise ValueError(f"proprio_eef_pos must be 3-D, got {cur_pos.shape[0]}")
+    if not (float(pos_scale) > 0.0 and float(rot_scale) > 0.0):
+        raise ValueError(
+            f"pos_scale and rot_scale must be > 0 (got pos={pos_scale}, rot={rot_scale}); a "
+            "non-positive scale would silently mask a misconfigured OSC controller (clamping it "
+            "to ~0 emits huge/garbage deltas). Set them from the eval env's OSC_POSE output_max."
+        )
     tgt_pos, tgt_r6d, grip = act[0:3], act[3:9], act[9:10]
 
     # Position: absolute target -> scaled OSC delta.
-    pos_cmd = (tgt_pos - cur_pos) / max(float(pos_scale), 1e-8)
+    pos_cmd = (tgt_pos - cur_pos) / float(pos_scale)
 
     # Rotation: relative rotation R_target @ R_current^-1 -> axis-angle -> scaled.
     R_t = _rot6d_to_matrix(tgt_r6d)
     R_c = _rot6d_to_matrix(np.asarray(proprio_eef_rot6d, np.float64).reshape(-1))
-    rot_cmd = _matrix_to_axis_angle(R_t @ R_c.T).astype(np.float64) / max(float(rot_scale), 1e-8)
+    rot_cmd = _matrix_to_axis_angle(R_t @ R_c.T).astype(np.float64) / float(rot_scale)
 
     if clip:
         pos_cmd = np.clip(pos_cmd, -1.0, 1.0)

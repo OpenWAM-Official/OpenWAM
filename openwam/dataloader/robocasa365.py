@@ -3,7 +3,7 @@
 Bespoke ``BaseDataset`` that reads the RAW downloaded RoboCasa365 LeRobot **v2.1**
 buckets directly (per-episode ``data/chunk-*/episode_*.parquet`` + per-episode
 ``videos/chunk-*/<cam>/episode_*.mp4`` + ``meta/episodes.jsonl``). Structurally a
-faithful dual of ``robotwin_dataset.py`` (which reads raw RoboTwin HDF5): same
+faithful dual of ``robotwin.py`` (which reads raw RoboTwin HDF5): same
 window enumeration, multiview L-shape, per-task stats, ``Single`` + ``Multi`` pair.
 ``dataset_dir`` points at the data exactly as downloaded — **no migration /
 conversion / overlay**.

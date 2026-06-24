@@ -58,12 +58,35 @@ def _parse_optional_int(value, field_name: str):
     return parsed
 
 
+def _assert_fixed_base(task: str) -> None:
+    """Reject tasks outside the fixed-base manifest.
+
+    The RoboCasa365 bench is scoped to the fixed-base (``moma_required=No``) subset and the
+    20-D->12-D bridge drops base motion (``base_motion=0``). Evaluating a mobile-base task here
+    would silently mis-drive it with a frozen base, so fail fast instead — the same enforcement the
+    dataloader applies to root-mode discovery.
+    """
+    import json
+    import os
+
+    manifest = os.path.join(os.path.dirname(__file__), "fixed_base_tasks.json")
+    with open(manifest, encoding="utf-8") as f:
+        names = {t["name"] for t in json.load(f).get("tasks", [])}
+    if task not in names:
+        raise ValueError(
+            f"task {task!r} is not in the fixed-base manifest ({len(names)} tasks: "
+            f"{manifest}). The bridge assumes a fixed base (base_motion=0); pick a fixed-base "
+            "task or extend the manifest."
+        )
+
+
 def _make_env(cfg: dict):
     import gymnasium as gym
     import robocasa  # noqa: F401  (registers robosuite envs)
     import robocasa.wrappers.gym_wrapper  # noqa: F401  (registers robocasa/<Task> gym ids)
 
     task = cfg.get("task", "OpenDrawer")
+    _assert_fixed_base(task)
     return gym.make(
         f"robocasa/{task}",
         split=cfg.get("split", "target"),
@@ -103,7 +126,12 @@ def _rollout(env, policy, *, num_trials: int, max_steps: int, seed: int) -> int:
     successes = 0
     for trial in range(num_trials):
         obs, info = env.reset(seed=seed + trial)
-        instruction = obs.get("annotation.human.task_description", "")
+        if "annotation.human.task_description" not in obs:
+            raise KeyError(
+                "reset obs has no 'annotation.human.task_description'; refusing to send an empty "
+                f"prompt to the policy. Got keys: {sorted(obs)}. Check the env's annotation key."
+            )
+        instruction = obs["annotation.human.task_description"]
         policy.reset()
         success = bool(info.get("success", False))
         for _ in range(max_steps):

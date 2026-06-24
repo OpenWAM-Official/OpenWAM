@@ -131,6 +131,20 @@ class TestGetItem:
         assert s["action"][:, :10].abs().sum() > 0  # left arm real
         assert (s["action"][:, 10:] == 0).all()  # right arm zero-padded
 
+    def test_arm10_pins_known_pose(self):
+        # Value-pin the absolute-pose contract (not just shape): a known 16-D state -> exact arm10,
+        # so a silent change to the slicing / quat-convention / gripper formula is caught.
+        from openwam.dataloader.robocasa365 import state_to_arm10
+
+        st = np.zeros((1, 16), np.float32)
+        st[0, 7:10] = [0.1, -0.2, 0.3]  # eef_pos_rel
+        st[0, 10:14] = [0.0, 0.0, 0.0, 1.0]  # identity quaternion (xyzw)
+        st[0, 14:16] = [0.05, 0.01]  # gripper qpos -> separation 0.04
+        a = state_to_arm10(st)[0]
+        assert a[:3] == pytest.approx([0.1, -0.2, 0.3])
+        assert a[3:9] == pytest.approx([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])  # identity rotation -> rot6d
+        assert a[9] == pytest.approx(0.04)  # finger separation = qpos[0] - qpos[1]
+
     def test_proprio_20d_left_filled_right_zero(self, tmp_path):
         s = self._sample(tmp_path, multiview=False, height=64, width=96)
         assert s["proprio"].shape == (1, EEF_DIM)
@@ -173,8 +187,14 @@ class TestNormalize:
                 data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96, normalize_mode="min-max"
             )
             s = ds[0]
-        deno = ds.denormalize_action(s["action"].numpy())
-        assert deno.shape == s["action"].shape
+        # Real inverse check: s["action"] is NORMALIZED. denormalize -> raw, then re-normalize with
+        # the same stats must recover the normalized action (a tautological shape-only check could
+        # not catch a broken inverse transform).
+        from openwam.dataloader.utils.normalization import apply_normalization
+
+        deno = ds.denormalize_action(s["action"].numpy())  # normalized -> raw physical
+        reno = apply_normalization(deno, ds.normalization_stats, "min-max")  # raw -> normalized
+        assert reno[:, :10] == pytest.approx(s["action"].numpy()[:, :10], abs=1e-4)
         assert (deno[:, 10:] == 0).all()  # right arm stays zero
 
     def test_null_passthrough(self, tmp_path):

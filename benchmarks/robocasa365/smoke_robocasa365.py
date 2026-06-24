@@ -46,6 +46,9 @@ def env_smoke(task: str, split: str, steps: int) -> None:
     try:
         obs, info = env.reset(seed=0)
         zero_action = {key: np.zeros(end - start, dtype=np.float32) for key, (start, end) in ACTION_SLICES.items()}
+        # Hold the documented fixed-base constant control_mode=-1 (the bridge's value); a zero here
+        # binarizes to -1 at the env's 0.5 threshold too, but -1 keeps the smoke consistent with the bridge.
+        zero_action["action.control_mode"][:] = -1.0
         reward = done = None
         for _ in range(steps):
             obs, reward, done, truncated, info = env.step(zero_action)
