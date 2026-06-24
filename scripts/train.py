@@ -127,9 +127,9 @@ def _train_openwam(cfg: DictConfig) -> None:
     # Seed Python random / numpy / torch BEFORE dataset construction so that
     # any reader-time randomness (e.g. MixtureDataset index_map shuffle when
     # seed isn't explicitly set, lerobot splits, etc.) is reproducible.
-    # OpenWAMTrainer.__init__ also calls seed_everything later for model
-    # init, which is idempotent. Null cfg.project.seed = production
-    # stochastic run, so we skip seeding entirely in that case.
+    # OpenWAMTrainer.__init__ re-seeds via seed_process for model init using the
+    # same RANK_OFFSET rank stride (cudnn stays as configured here). Null
+    # cfg.project.seed = production stochastic run, so we skip seeding here.
     project_seed = OmegaConf.select(cfg, "project.seed", default=None)
     if project_seed is not None:
         rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))

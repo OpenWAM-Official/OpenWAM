@@ -834,11 +834,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
         reconstruction specs into ``cfg`` (so deploy rebuilds the module
         skeletons from ``config.yaml`` without the training-time ``model_path``)
         and copies its artifact files (tokenizer / processor) into ``output_dir``.
-        Backbone types that ship no deploy assets simply don't define the hook.
+        Every backbone base declares the hook (default no-op), so no probing here.
         """
         for bb in self.backbones.values():
-            if hasattr(bb, "save_deploy_assets"):
-                bb.save_deploy_assets(output_dir, cfg)
+            bb.save_deploy_assets(output_dir, cfg)
 
     # --- Training: preprocessing ---
 

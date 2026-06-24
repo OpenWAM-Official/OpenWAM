@@ -121,6 +121,11 @@ class SharedActionBackbone(nn.Module, ABC):
         """Move action backbone params/buffers to (dtype, device)."""
         self.to(dtype=dtype, device=device)
 
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Default no-op: action weights are fully captured by the safetensors
+        checkpoint, no external artifacts to copy. Part of the architecture's
+        deploy-asset hook contract."""
+
     @property
     def action_dim(self) -> int:
         return self._action_dim
@@ -192,6 +197,11 @@ class ActionDiTBackbone(nn.Module, ABC):
     def set_dtype_device(self, dtype, device) -> None:
         """Move action backbone params/buffers to (dtype, device)."""
         self.to(dtype=dtype, device=device)
+
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Default no-op: action weights are fully captured by the safetensors
+        checkpoint, no external artifacts to copy. Part of the architecture's
+        deploy-asset hook contract."""
 
     @property
     def uses_proprioception(self) -> bool:

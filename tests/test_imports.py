@@ -74,10 +74,10 @@ def test_import_inference_init():
 
 
 def test_import_training_base():
-    from openwam.train.base import BaseTrainer  # noqa: F401
+    from openwam.train.openwam_trainer import OpenWAMTrainer  # noqa: F401
 
-    assert hasattr(BaseTrainer, "compute_loss")
-    assert hasattr(BaseTrainer, "train")
+    assert hasattr(OpenWAMTrainer, "compute_loss")
+    assert hasattr(OpenWAMTrainer, "train")
 
 
 def test_import_training_optimizer_groups():
@@ -85,10 +85,7 @@ def test_import_training_optimizer_groups():
 
 
 def test_import_training_init():
-    from openwam.train import (  # noqa: F401
-        BaseTrainer,
-        OpenWAMTrainer,
-    )
+    from openwam.train import OpenWAMTrainer  # noqa: F401
 
 
 def test_import_action_dit():

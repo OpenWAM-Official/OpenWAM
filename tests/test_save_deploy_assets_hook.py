@@ -1,5 +1,6 @@
 """BaseWAMArchitecture.save_assets_for_deployment dispatches save_deploy_assets
-to every backbone that implements it.
+to every backbone unconditionally — each backbone base declares the hook
+(default no-op), so there is no hasattr probing.
 
 Lets different backbones (Wan component specs + tokenizer, future ones) ship
 their own deploy assets without the trainer importing them directly.
@@ -42,10 +43,13 @@ def test_dispatch_to_all_backbones(tmp_path):
     assert ab.calls == [(str(tmp_path), cfg)]
 
 
-def test_backbone_without_hook_is_skipped(tmp_path):
-    arch = _ConcreteArch(cfg=None)
-    arch.video_backbone = nn.Linear(1, 1)  # no save_deploy_assets attribute
-    arch.action_backbone = _RecordingBackbone()
+def test_all_backbone_bases_declare_hook():
+    """Direction-A contract: every backbone base declares save_deploy_assets on
+    itself (default no-op), so the dispatcher calls it unconditionally rather than
+    probing with hasattr. ``vars`` (not hasattr) catches a root that forgot it."""
+    from openwam.model.action_backbone.base import ActionDiTBackbone, SharedActionBackbone
+    from openwam.model.video_backbone.base import VideoBackbone
+    from openwam.model.vlm_backbone.base import VlmBackbone
 
-    arch.save_assets_for_deployment(str(tmp_path), cfg={})
-    assert arch.action_backbone.calls == [(str(tmp_path), {})]
+    for base in (VideoBackbone, SharedActionBackbone, ActionDiTBackbone, VlmBackbone):
+        assert "save_deploy_assets" in vars(base), f"{base.__name__} must declare the no-op hook"

@@ -12,10 +12,12 @@ runs keep their stochasticity.
 
 Helpers:
 
-- ``seed_everything`` seeds Python ``random``, NumPy and PyTorch (CPU + CUDA)
-  global RNGs and turns on cudnn-deterministic. Run once at trainer
-  construction *before* the model and dataset are built so DiT weight init
-  and any other module-construction-time randomness become deterministic.
+- ``seed_process`` seeds Python ``random``, NumPy and PyTorch (CPU + CUDA)
+  global RNGs for the local rank, leaving cudnn/cuBLAS untouched — the trainer
+  uses it for per-process model-init seeding without disabling autotuning.
+- ``seed_everything`` is ``seed_process`` plus cudnn-deterministic + a fixed
+  cuBLAS workspace. Run once at trainer construction *before* the model and
+  dataset are built so DiT weight init becomes deterministic.
 - ``dataloader_worker_init_fn`` is the ``worker_init_fn`` for
   ``DataLoader``; it seeds Python ``random`` and NumPy inside each worker
   process from PyTorch's auto-derived ``info.seed`` (which advances per
@@ -33,11 +35,14 @@ Helpers:
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 # Each rank gets its own RNG stream by adding ``RANK_OFFSET * rank`` to the
 # base seed.  Large enough that the per-step counter used in ``per_step_seed``
@@ -47,14 +52,31 @@ import torch
 RANK_OFFSET: int = 1_000_000
 
 
-def seed_everything(seed: int, *, rank: int = 0) -> None:
-    """Seed Python random / numpy / torch (CPU + CUDA) for reproducible runs.
+def seed_process(seed: int, *, rank: int = 0) -> None:
+    """Seed Python / NumPy / torch (CPU + CUDA) RNGs for ``rank``, WITHOUT touching
+    cudnn or cuBLAS.
 
-    Sets ``torch.backends.cudnn.deterministic = True``, disables cudnn
-    benchmark, and (when CUDA is available) configures the cuBLAS workspace
-    so deterministic matmul kernels can be selected.  Must be invoked
-    *before* model construction so that DiT weight initialisation lands in
-    deterministic territory.
+    Ranks get disjoint streams via ``RANK_OFFSET`` — the same stride
+    ``per_step_seed`` uses — so a process's init-time and per-step seeds share one
+    rank window. Deliberately leaves cudnn/cuBLAS alone (keeps autotuning + FSDP /
+    fused-attention compat); callers that also want deterministic matmul kernels
+    use ``seed_everything`` instead.
+    """
+    rank_seed = int(seed) + RANK_OFFSET * int(rank)
+    random.seed(rank_seed)
+    np.random.seed(rank_seed % (2**32 - 1))
+    torch.manual_seed(rank_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(rank_seed)
+
+
+def seed_everything(seed: int, *, rank: int = 0) -> None:
+    """``seed_process`` plus cudnn-deterministic and a fixed cuBLAS workspace.
+
+    Adds ``torch.backends.cudnn.deterministic = True``, disables cudnn benchmark,
+    and (when CUDA is available) pins the cuBLAS workspace so deterministic matmul
+    kernels can be selected. Must run *before* model construction so DiT weight
+    initialisation lands in deterministic territory.
 
     Note: we deliberately do *not* call ``torch.use_deterministic_algorithms``
     because several FSDP / attention paths used in training fall back to
@@ -64,14 +86,9 @@ def seed_everything(seed: int, *, rank: int = 0) -> None:
     bounds residual non-determinism to bf16 reduction noise (small across a
     short validation run).
     """
-    rank_seed = int(seed) + RANK_OFFSET * int(rank)
-    random.seed(rank_seed)
-    np.random.seed(rank_seed % (2**32 - 1))
-    torch.manual_seed(rank_seed)
+    seed_process(seed, rank=rank)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(rank_seed)
-        # Required for deterministic cuBLAS matmul (CUDA >= 10.2). Setting
-        # this once at process startup is sufficient.
+        # Required for deterministic cuBLAS matmul (CUDA >= 10.2); set once at startup.
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -120,3 +137,29 @@ def per_step_seed(seed: int, *, rank: int = 0, step: int = 0) -> int:
     overlap window is pushed past any step count you care about.
     """
     return int(seed) + RANK_OFFSET * int(rank) + int(step)
+
+
+def wire_sampler_seed(dataloader, run_seed: int) -> None:
+    """Tie the (possibly wrapped) DistributedSampler's ``seed`` to ``run_seed``.
+
+    Without this, ``accelerator.prepare``'s auto-wrapped DistributedSampler keeps
+    the upstream default ``seed=0`` and per-epoch shuffle order is identical
+    regardless of ``cfg.project.seed``. Walks both ``dataloader.sampler`` and
+    ``dataloader.batch_sampler.sampler``; warns if no seedable sampler is reachable.
+    """
+    sampler = getattr(dataloader, "sampler", None)
+    if sampler is None:
+        batch_sampler = getattr(dataloader, "batch_sampler", None)
+        sampler = getattr(batch_sampler, "sampler", None) if batch_sampler is not None else None
+    if sampler is not None and hasattr(sampler, "seed"):
+        old = sampler.seed
+        sampler.seed = int(run_seed)
+        logger.info("%s.seed wired to cfg.project.seed: %s -> %d", type(sampler).__name__, old, run_seed)
+    else:
+        logger.warning(
+            "cfg.project.seed=%d is set but the prepared dataloader has no sampler with a "
+            "``.seed`` attribute (found %s). Per-epoch shuffle order falls back to the library "
+            "default and will NOT vary with cfg.project.seed.",
+            run_seed,
+            type(sampler).__name__ if sampler is not None else "None",
+        )
