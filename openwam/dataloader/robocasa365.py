@@ -208,7 +208,7 @@ class RoboCasa365Dataset(BaseDataset):
         temporal_compression: int = 4,
         causal_temporal: bool = True,
         filter_static_segments: bool = True,
-        static_segment_threshold: float = 1e-4,
+        static_segment_threshold: float = 1e-5,
         max_static_retry: int = 3,
         **_unused,
     ):
@@ -469,9 +469,6 @@ class RoboCasa365Dataset(BaseDataset):
 
         state = self._read_state(ep_global, start, actual_end)  # (actual_len, 16)
         arm10 = state_to_arm10(state)  # (actual_len, 10), raw
-        # Static-window flag (mirrors robotwin): max-abs of the first RAW EEF step. actual_len>=2 is
-        # guaranteed above, so arm10[1]-arm10[0] is a real first step. __getitem__ resamples these at train.
-        is_static = bool(np.max(np.abs(arm10[1] - arm10[0])) < self._static_segment_threshold)
         frames = self._read_video(ep_global, start, actual_end)
 
         # pad arm10 to the full window with the last real row
@@ -485,6 +482,10 @@ class RoboCasa365Dataset(BaseDataset):
         eef20d = apply_normalization(assemble_single_arm_left(arm10), self._stats, self.normalize_mode)
         proprio = eef20d[0:1].astype(np.float32)
         action = eef20d[1 : self.num_frames].astype(np.float32)
+        # Static-window flag (faithful dual of robotwin): first action step vs proprio, in the SAME
+        # representation the model sees (normalized when enabled), so a single threshold is
+        # dimensionally consistent. actual_len>=2 is guaranteed above; __getitem__ resamples at train.
+        is_static = bool(np.max(np.abs(action[0] - proprio[0])) < self._static_segment_threshold)
 
         video_mask = torch.tensor([start + i < actual_end for i in self._video_sample_indices], dtype=torch.bool)
         n_valid_action = max(0, min(actual_len - 1, self.num_action_steps))
@@ -569,7 +570,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             temporal_compression=int(get_cfg(config, "temporal_compression", 4)),
             causal_temporal=bool(get_cfg(config, "causal_temporal", True)),
             filter_static_segments=bool(get_cfg(config, "filter_static_segments", True)),
-            static_segment_threshold=float(get_cfg(config, "static_segment_threshold", 1e-4)),
+            static_segment_threshold=float(get_cfg(config, "static_segment_threshold", 1e-5)),
             max_static_retry=int(get_cfg(config, "max_static_retry", 3)),
             seed=int(get_cfg(config, "seed", 42)),
         )

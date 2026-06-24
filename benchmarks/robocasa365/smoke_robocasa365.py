@@ -95,7 +95,7 @@ def main(argv=None) -> int:
     parser.add_argument("--steps", type=int, default=int(os.environ.get("ROBOCASA365_SMOKE_STEPS", "1")))
     parser.add_argument("--host", default=os.environ.get("ROBOCASA365_POLICY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("ROBOCASA365_PORT", "8848")))
-    parser.add_argument("--state-dim", type=int, default=16)
+    parser.add_argument("--state-dim", type=int, default=20)  # 20-D EEF proprio the server expects; the env's raw 16-D state is converted client-side
     args = parser.parse_args(argv)
 
     if args.mode == "import":

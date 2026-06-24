@@ -34,7 +34,8 @@ def _make_obs():
 
 
 # --- Pinned RoboCasa365 contract (guardrail vs accidental drift; CI-safe) ---
-# Ground truth from upstream — re-verify against these if upstream changes:
+# Transcribed from upstream (NOT vendored here, so this is a drift guardrail, not an independent
+# check) — re-verify by hand against these if upstream changes:
 #   robocasa/robocasa/wrappers/gym_wrapper.py  PandaOmronKeyConverter.{unmap_action, map_obs}
 #   robocasa/robocasa/scripts/dataset_scripts/convert_hdf5_lerobot.py
 #   starVLA examples/Robocasa_365/eval_files/model2robocasa365_interface.py

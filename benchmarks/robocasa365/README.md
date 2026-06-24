@@ -7,7 +7,8 @@ while the OpenWAM model, checkpoint, preprocessing and action denormalization
 stay server-side.
 
 RoboCasa365 is the single-arm **PandaOmron** (Franka arm + holonomic mobile base)
-kitchen benchmark: a 12-D OSC action, a 16-D proprio state, and 3 cameras at
+kitchen benchmark: a 12-D OSC action, a 16-D raw proprio state (converted client-side to
+the model's 20-D EEF), and 3 cameras at
 256×256 (2 third-person `agentview` + 1 `eye_in_hand` wrist). We send **two real
 views** — `agentview_left` (3rd-person) → `head_camera` and `eye_in_hand` (the
 arm's real wrist) → `left_wrist_camera`. The single arm has no 2nd wrist, so
@@ -100,8 +101,8 @@ live in a **separate** env (like RoboTwin's `robotwin` env / LIBERO's
    export ROBOCASA365_PYTHON=/path/to/robocasa365/env/bin/python
    ```
 3. Match the checkpoint's action/state config in `policy_config.yml`:
-   - `state_dim: 16` — the PandaOmron proprio layout; a fail-fast check against the
-     checkpoint's training config.
+   - `state_dim: 20` — the model's 20-D EEF proprio; a fail-fast check against the
+     checkpoint's training config. (The env's raw 16-D state is converted client-side.)
    - The model emits the repo-standard **20-D EEF**; the client bridges it to the env's
      **12-D OSC**. Set `osc_pos_scale` / `osc_rot_scale` to the eval env's OSC_POSE
      `output_max` (position metres / rotation radians mapped to action 1.0) — a 20-D
@@ -139,7 +140,7 @@ the obs → payload → action mapping:
   `image_transform: none` because `RoboCasaGymEnv` already flips them).
 - `meta.json` — `episode` / `step` / `prompt` / `state` / `action` / `server_step`
   / `latency_ms` (robotwin fields) plus a per-key `state_breakdown`, the 12-D
-  `action_sliced` into env keys, and a `checks` block (`state_dim_is_16`,
+  `action_sliced` into env keys, and a `checks` block (`state_dim_is_20`,
   `head_and_wrist_present`, `action_dim_is_12`).
 
 ## Single-task evaluation
@@ -192,7 +193,8 @@ own `done`/`truncated` still ends an episode early. Values follow robotwin's
   training must use the same 2-view layout.
 - **No client resize / flip**: frames go full resolution; `RoboCasaGymEnv` already
   flips them upright (`image_transform: none`).
-- **State / action are raw physical units**: the server (de)normalizes. The 16-D
-  state order must match the checkpoint's training config. The action is 20-D EEF
+- **State / action are raw physical units**: the server (de)normalizes. The client converts
+  the env's raw 16-D state to the model's 20-D EEF proprio, which must match the checkpoint's
+  training config. The action is 20-D EEF
   out of the model, bridged to the env's 12-D OSC client-side (see the action-spaces
   note above); the 12-D layout/order must match `RoboCasaGymEnv`.
