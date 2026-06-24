@@ -3,7 +3,7 @@
 Call order — core skeleton only:
 
   __init__():  seed -> build_architecture -> freeze -> init_schedulers
-               -> [latent setup] -> [load action stats] -> log param counts
+               -> [latent setup] -> log param counts
   train():     build optimizer/dataloader/scheduler -> setup output dir
                -> accelerate prepare -> loop{ compute_loss -> backward/clip/step
                -> reduce metrics -> record vram -> log step -> maybe save ckpt }
@@ -22,7 +22,6 @@ import logging
 import math
 import os
 
-import numpy as np
 import torch
 from omegaconf import DictConfig
 
@@ -104,7 +103,6 @@ class OpenWAMTrainer:
         freeze_list = list(getattr(m, "freeze", []))
         for name in self.architecture.freeze_modules(freeze_list):
             logger.info("Frozen: %s", name)
-        self._warn_unfrozen_external_encoder(freeze_list)
 
         # Initialize all schedulers (video + action) inside architecture
         self.architecture.init_training_schedulers(1000)
@@ -117,11 +115,13 @@ class OpenWAMTrainer:
         self.latent_action_enabled = latent_action_enabled(cfg)
 
         if self.latent_action_enabled:
-            self._setup_latent_action(cfg)
+            from openwam.model.action_backbone.latent_encoder import build_latent_action_provider
 
-        # Load action stats
-        if dataset is not None and self.lambda_action > 0 and not self.latent_action_enabled:
-            self._load_normalization_stats(dataset)
+            self.latent_action_provider = build_latent_action_provider(
+                cfg.model.action_backbone.latent_encoder,
+                device=self.architecture.device,
+                dtype=self.architecture.dtype,
+            )
 
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.
@@ -355,75 +355,6 @@ class OpenWAMTrainer:
             self.accelerator.unwrap_model(self.architecture) if self.accelerator is not None else self.architecture
         )
         unwrapped.load_checkpoint(path, strict=strict)
-
-    # ---- Construction helpers ----
-    def _setup_latent_action(self, cfg: DictConfig) -> None:
-        """Validate latent-action config and build the latent action provider."""
-        latent_cfg = cfg.model.action_backbone.latent_encoder
-        output_cfg = cfg_get(latent_cfg, "output")
-        action_dim = int(cfg_get(output_cfg, "action_dim", 0) or 0)
-        token_dim = int(cfg_get(output_cfg, "token_dim", action_dim) or 0)
-        arch_cfg = getattr(cfg.model, "architecture", None)
-        cfg_uses_proprio = bool(cfg_get(arch_cfg, "use_proprioception", False))
-        if cfg_uses_proprio or bool(getattr(self.architecture, "uses_proprioception", False)):
-            raise ValueError(
-                "model.action_backbone.type=latent requires model.architecture.use_proprioception=false "
-                "for latent-action pretraining."
-            )
-        if action_dim <= 0:
-            raise ValueError("model.action_backbone.latent_encoder.output.action_dim must be a positive integer.")
-        if token_dim != action_dim:
-            raise ValueError(
-                f"model.action_backbone.latent_encoder.output.token_dim={token_dim} must match "
-                f"output.action_dim={action_dim}."
-            )
-        if int(self.architecture.action_dim) != action_dim:
-            raise ValueError(
-                f"model.action_backbone.latent_encoder.output.action_dim={action_dim} does not match "
-                f"architecture.action_dim={self.architecture.action_dim}."
-            )
-        if self.lambda_action <= 0:
-            raise ValueError("model.action_backbone.type=latent requires training.lambda_action > 0.")
-        from openwam.model.action_backbone.latent_encoder import build_latent_action_provider
-
-        self.latent_action_provider = build_latent_action_provider(
-            latent_cfg,
-            device=self.architecture.device,
-            dtype=self.architecture.dtype,
-        )
-
-    def _load_normalization_stats(self, dataset):
-        """Load action normalization stats from dataset into architecture buffers."""
-        stats = getattr(dataset, "normalization_stats", None)
-        if callable(stats):
-            stats = stats()
-
-        if stats is None:
-            return
-
-        mean = torch.from_numpy(stats["mean"].astype(np.float32))
-        std = torch.from_numpy(np.maximum(stats["std"].astype(np.float32), 1e-3))
-        self.architecture.action_mean.copy_(mean)
-        self.architecture.action_std.copy_(std)
-        logger.info("Loaded action stats into architecture buffers from dataset")
-
-    def _warn_unfrozen_external_encoder(self, freeze_list: list[str]) -> None:
-        """Warn if an irreversible external encoder (V-JEPA 2.1 / DINOv3, no pixel
-        decode) is left trainable. Such encoders are almost always pretrained-and-
-        frozen; a missing freeze entry silently wastes GPU on a trainable ViT."""
-        external_encoder = getattr(self.architecture, "external_encoder", None)
-        if external_encoder is None or external_encoder.properties.pixel_decode:
-            return
-        if any(
-            p == "video_backbone.video_encoder" or p.startswith("video_backbone.video_encoder.") for p in freeze_list
-        ):
-            return
-        logger.warning(
-            "external encoder %s is not in freeze_modules; ViT is fully trainable. "
-            "Add 'video_backbone.video_encoder' to your model freeze list "
-            "if you intended to freeze the ViT backbone.",
-            type(external_encoder).__name__,
-        )
 
     # ---- Training-loop helpers (in call order) ----
     def build_dataloader(self, batch_size: int) -> torch.utils.data.DataLoader:

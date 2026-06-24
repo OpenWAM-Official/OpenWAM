@@ -492,18 +492,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             self.action_backbone is not None and self.action_backbone.uses_proprioception
         )
 
-    @property
-    def action_mean(self) -> Tensor:
-        if self.action_backbone is not None:
-            return self.action_backbone.action_mean
-        return torch.zeros(self.action_dim)
-
-    @property
-    def action_std(self) -> Tensor:
-        if self.action_backbone is not None:
-            return self.action_backbone.action_std
-        return torch.ones(self.action_dim)
-
     # --- Proprio-as-context conditioning ---
 
     def _init_proprio_context(self, cfg, *, text_dim: int = 4096) -> None:

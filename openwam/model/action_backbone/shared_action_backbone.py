@@ -40,7 +40,6 @@ class SharedVanillaActionBackbone(SharedActionBackbone):
     Holds (via :class:`SharedActionBackbone`):
       - ``input_proj``: action_dim -> video_dim (fuses timestep)
       - ``action_output_head``: video_dim -> decoder_hidden_dim -> action_dim
-      - ``action_mean`` / ``action_std`` persistent buffers
       - ``scheduler``: ActionScheduler
 
     No expert FFN — the raw shared DiT learns the modality boundary itself.

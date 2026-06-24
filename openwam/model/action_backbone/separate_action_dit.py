@@ -489,10 +489,6 @@ class ActionDiT(ActionDiTBackbone):
 
             self.latent_action_decoder = build_latent_action_decoder(latent_decoder, latent_dim=action_dim)
 
-        # Action normalization stats (saved as persistent buffers for checkpoint)
-        self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
-        self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
-
     # ------------------------------------------------------------------
     # ActionDiTBackbone interface
     # ------------------------------------------------------------------
