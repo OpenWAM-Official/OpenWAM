@@ -39,14 +39,29 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import argparse
 import json
 import os
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
-from openwam.dataloader.robocoin import _eef14_to_eef20
+from openwam.dataloader.robocoin import _eef14_to_eef20, _finger_indices
 
 
 
@@ -164,7 +179,10 @@ def discover_datasets_by_robot_type(root: str) -> dict:
             continue
         with open(info_path) as f:
             info = json.load(f)
-        rtype = info.get("robot_type", "unknown")
+
+
+
+        rtype = str(info.get("robot_type", "unknown"))
         groups.setdefault(rtype, []).append(os.path.join(root, name))
     return groups
 
@@ -175,6 +193,33 @@ _NEEDED_COLS = [
     "eef_sim_pose_state",
     "gripper_open_scale_state",
 ]
+_EEF_COLS = ["eef_sim_pose_action", "eef_sim_pose_state"]
+_GRIP_COLS = ("gripper_open_scale_action", "gripper_open_scale_state")
+
+_HAND_RAW_COLS = ["action", "observation.state"]
+
+
+def _dataset_finger_layout(ds_dir: str):
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+    try:
+        with open(os.path.join(ds_dir, "meta", "info.json")) as f:
+            feats = json.load(f).get("features", {})
+    except (OSError, ValueError):
+        return None
+    if all(c in feats for c in _GRIP_COLS):
+        return None
+    aL, aR = _finger_indices(feats.get("action", {}))
+    sL, sR = _finger_indices(feats.get("observation.state", {}))
+    kL, kR = len(aL), len(aR)
+    if not (0 < kL <= 22 and 0 < kR <= 22 and len(sL) == kL and len(sR) == kR):
+        return None
+    return (aL + aR, sL + sR, kL, kR)
 
 
 def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
@@ -185,12 +230,35 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
 
 
 
+
+
+
+
+
+
+
     acc = Accumulator(dim=20)
     total_files = 0
+    grip_files = 0
+
+    hand_acc = None
+    hand_dims = None
+    hand_files = 0
+
     for ds_dir in dataset_dirs:
         data_dir = os.path.join(ds_dir, "data")
         if not os.path.isdir(data_dir):
             continue
+
+        layout = _dataset_finger_layout(ds_dir)
+        if layout is not None:
+            idx_act_lr, idx_state_lr, kL, kR = layout
+            if hand_acc is None:
+                hand_dims = (kL, kR)
+                hand_acc = Accumulator(dim=kL + kR)
+            elif hand_dims != (kL, kR):
+                print(f"  Warning: {ds_dir} finger DOF {(kL, kR)} != {hand_dims}; skipping its finger stats")
+                layout = None
         for chunk in sorted(os.listdir(data_dir)):
             chunk_path = os.path.join(data_dir, chunk)
             if not os.path.isdir(chunk_path):
@@ -200,27 +268,67 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
                     continue
                 fpath = os.path.join(chunk_path, fname)
                 try:
-                    df = pd.read_parquet(fpath, columns=_NEEDED_COLS)
+
+
+
+
+
+                    present = set(pq.ParquetFile(fpath).schema_arrow.names)
+                    has_grip = all(c in present for c in _GRIP_COLS)
+                    cols = list(_NEEDED_COLS) if has_grip else list(_EEF_COLS)
+                    if layout is not None:
+                        cols = cols + _HAND_RAW_COLS
+                    df = pd.read_parquet(fpath, columns=cols)
+
                     eef_a = np.stack(df["eef_sim_pose_action"].values).astype(np.float32)
-                    grip_a = np.stack(df["gripper_open_scale_action"].values).astype(np.float32)
-                    action_20d = _eef14_to_eef20(eef_a, grip_a)
-
                     eef_s = np.stack(df["eef_sim_pose_state"].values).astype(np.float32)
-                    grip_s = np.stack(df["gripper_open_scale_state"].values).astype(np.float32)
-                    state_20d = _eef14_to_eef20(eef_s, grip_s)
+                    if has_grip:
+                        grip_a = np.stack(df["gripper_open_scale_action"].values).astype(np.float32)
+                        grip_s = np.stack(df["gripper_open_scale_state"].values).astype(np.float32)
+                    else:
+                        grip_a = np.zeros((len(eef_a), 2), dtype=np.float32)
+                        grip_s = np.zeros((len(eef_s), 2), dtype=np.float32)
 
-                    pooled = np.concatenate([action_20d, state_20d], axis=0)
-                    acc.update_batch(pooled)
+                    action_20d = _eef14_to_eef20(eef_a, grip_a)
+                    state_20d = _eef14_to_eef20(eef_s, grip_s)
+                    acc.update_batch(np.concatenate([action_20d, state_20d], axis=0))
                     total_files += 1
+                    grip_files += int(has_grip)
+
+
+                    if layout is not None:
+                        act_arr = np.stack(df["action"].values).astype(np.float32)
+                        state_arr = np.stack(df["observation.state"].values).astype(np.float32)
+                        fingers = np.concatenate(
+                            [act_arr[:, idx_act_lr], state_arr[:, idx_state_lr]], axis=0
+                        )
+                        hand_acc.update_batch(fingers)
+                        hand_files += 1
                 except Exception as e:
                     print(f"  Warning: skipping {fpath}: {e}")
+
     stats = acc.finalize()
     stats["num_timesteps"] = int(acc.count)
     stats["num_datasets"] = len(dataset_dirs)
     stats["num_files"] = total_files
     stats["robot_type"] = rtype
     stats["pool"] = "action+state"
-    return stats
+
+
+
+    stats["grip_present"] = total_files > 0 and grip_files == total_files
+
+    result = {"eef": stats}
+    if hand_acc is not None and hand_acc.count > 0:
+        hand = hand_acc.finalize()
+        hand["dof_left"] = hand_dims[0]
+        hand["dof_right"] = hand_dims[1]
+        hand["num_timesteps"] = int(hand_acc.count)
+        hand["num_files"] = hand_files
+        hand["pool"] = "action+state"
+        hand["layout"] = "left_fingers + right_fingers"
+        result["hand"] = hand
+    return result
 
 
 def main():
@@ -241,17 +349,21 @@ def main():
         ds_list = groups[rtype]
         print(f"\n{'=' * 60}")
         print(f"Computing stats for {rtype} ({len(ds_list)} datasets)...")
-        stats = compute_stats_for_robot_type(rtype, ds_list)
+        result = compute_stats_for_robot_type(rtype, ds_list)
+        stats = result["eef"]
 
         out_path = os.path.join(out_dir, f"stats_{rtype}.json")
         with open(out_path, "w") as f:
-            json.dump({"eef": stats}, f, indent=2)
+            json.dump(result, f, indent=2)
 
         print(f"  timesteps: {stats['num_timesteps']:,}")
         print(f"  mean[:5]: {stats['mean'][:5]}")
         print(f"  std[:5]:  {stats['std'][:5]}")
         print(f"  min[:5]:  {stats['min'][:5]}")
         print(f"  max[:5]:  {stats['max'][:5]}")
+        if "hand" in result:
+            h = result["hand"]
+            print(f"  hand: dof L/R={h['dof_left']}/{h['dof_right']}, timesteps={h['num_timesteps']:,}")
         print(f"  Saved to: {out_path}")
 
 

@@ -38,12 +38,34 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 from __future__ import annotations
 
 import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -69,6 +91,67 @@ _NEEDED_COLS = (
 
 
 
+_BASE_COLS = (
+    "task_index",
+    "eef_sim_pose_action",
+    "eef_sim_pose_state",
+)
+_GRIP_COLS = ("gripper_open_scale_action", "gripper_open_scale_state")
+
+
+
+
+
+_DEX_UNIFY_COLS = (
+    "task_index",
+    "eef_sim_pose_action",
+    "eef_sim_pose_state",
+    "action",
+    "observation.state",
+)
+
+
+
+
+GRIP_EXCLUDED_DIM_MASK = np.ones(_ACTION_DIM, dtype=bool)
+GRIP_EXCLUDED_DIM_MASK[9] = False
+GRIP_EXCLUDED_DIM_MASK[19] = False
+
+
+def _finger_indices(feature: dict):
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+    names = feature.get("names")
+    if isinstance(names, dict):
+        names = names.get("motors")
+    names = names or []
+    left = [i for i, x in enumerate(names) if str(x).startswith("left_hand_joint")]
+    right = [i for i, x in enumerate(names) if str(x).startswith("right_hand_joint")]
+    return left, right
+
+
+def _build_dex_unify_map(k_left: int, k_right: int):
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+    return (
+        list(range(0, 3))
+        + list(range(3, 9))
+        + list(range(10, 10 + k_left))
+        + list(range(32, 35))
+        + list(range(35, 41))
+        + list(range(42, 42 + k_right))
+    )
+
+
+
 _eef14_to_eef20 = eef14_to_eef20
 
 
@@ -87,16 +170,25 @@ HEAD_CAMERA_PRIORITY = [
     "observation.images.cam_front_rgb",
     "observation.images.cam_front_chest_rgb",
     "observation.images.cam_chest_rgb",
+
+
+    "observation.images.camera_head_rgb",
+    "observation.images.cam_left_high",
+    "observation.images.ego_view",
 ]
 
 WRIST_LEFT_CANDIDATES = [
     "observation.images.cam_left_wrist_rgb",
     "observation.images.cam_left_wrist_rgb_rgb",
+    "observation.images.camera_left_wrist_rgb",
+    "observation.images.cam_left_wrist",
 ]
 
 WRIST_RIGHT_CANDIDATES = [
     "observation.images.cam_right_wrist_rgb",
     "observation.images.cam_right_wrist_rgb_rgb",
+    "observation.images.camera_right_wrist_rgb",
+    "observation.images.cam_right_wrist",
 ]
 
 
@@ -150,13 +242,74 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 
+    def __init__(self, dataset_dir, *, unify_action: bool = False, unify_action_map=None, **kwargs):
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+        self._dex_unify = False
+        self._k_left = 0
+        self._k_right = 0
+        if unify_action:
+            try:
+                with open(Path(dataset_dir) / "meta" / "info.json") as f:
+                    features = json.load(f).get("features", {})
+            except (OSError, ValueError):
+                features = {}
+            has_grip = all(c in features for c in _GRIP_COLS)
+            has_eef = "eef_sim_pose_action" in features
+            if has_eef and not has_grip:
+                aL, aR = _finger_indices(features.get("action", {}))
+                sL, sR = _finger_indices(features.get("observation.state", {}))
+                kL, kR = len(aL), len(aR)
+
+                if 0 < kL <= 22 and 0 < kR <= 22 and len(sL) == kL and len(sR) == kR:
+                    self._dex_unify = True
+                    self._k_left, self._k_right = kL, kR
+                    self._fidx_act = (np.asarray(aL, dtype=np.int64), np.asarray(aR, dtype=np.int64))
+                    self._fidx_state = (np.asarray(sL, dtype=np.int64), np.asarray(sR, dtype=np.int64))
+
+
+                    self.ACTION_DIM = 18 + kL + kR
+                    unify_action_map = _build_dex_unify_map(kL, kR)
+        super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
+
+
+
     def _resolve_cameras(self, info: dict):
         """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
         features = info.get("features", {})
         head, left_wrist, right_wrist = _resolve_robocoin_cameras(features)
         if head is None:
             raise ValueError(f"No head camera found in {self._dataset_id}")
         self._robot_type = info.get("robot_type", "unknown")
+        self._has_grip = all(c in features for c in _GRIP_COLS)
+        if self._has_grip:
+            self.NEEDED_COLS = _NEEDED_COLS
+        elif self._dex_unify:
+
+
+
+            self.NEEDED_COLS = _DEX_UNIFY_COLS
+        else:
+
+            self.NEEDED_COLS = _BASE_COLS
+            self.ACTION_DIM_MASK = GRIP_EXCLUDED_DIM_MASK
         return head, left_wrist, right_wrist
 
     def _add_data_offsets(self, eps) -> None:
@@ -219,14 +372,32 @@ class RoboCOINDataset(LeRobotV3Reader):
             )
         with open(stats_path) as f:
             raw = json.load(f)
-        eef = raw.get("eef", {})
-        return materialize_eef_stats(
-            eef,
+        eef_stats = materialize_eef_stats(
+            raw.get("eef", {}),
             self._normalize_mode,
             dim=_ACTION_DIM,
             strict_minmax=False,
             source_hint=f"{stats_path}: eef.* — re-run python -m openwam.dataloader.utils.stats_computation.robocoin_stats_computation",
         )
+        if not self._dex_unify:
+            return eef_stats
+
+
+        hand_raw = raw.get("hand")
+        if not hand_raw:
+            raise FileNotFoundError(
+                f"unify_action + dexterous-hand bucket {self._dataset_id} needs a 'hand' stats "
+                f"block in {stats_path}; re-run robocoin_stats_computation (it now emits hand stats)."
+            )
+        kL, kR = self._k_left, self._k_right
+        hand_stats = materialize_eef_stats(
+            hand_raw, self._normalize_mode, dim=kL + kR, strict_minmax=False, source_hint=f"{stats_path}: hand.*"
+        )
+        combined = {}
+        for k in ("mean", "std", "min", "max", "q01", "q99"):
+            e, h = eef_stats[k], hand_stats[k]
+            combined[k] = np.concatenate([e[0:9], h[0:kL], e[10:19], h[kL : kL + kR]]).astype(np.float32)
+        return combined
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -238,14 +409,47 @@ class RoboCOINDataset(LeRobotV3Reader):
 
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
 
+    def _grip_or_zeros(self, win, col: str, n: int) -> np.ndarray:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+        if self._has_grip:
+            return np.stack(win[col].values[:n]).astype(np.float32)
+        return np.zeros((n, 2), dtype=np.float32)
+
+    def _dex_raw(self, eef12: np.ndarray, raw_arr: np.ndarray, fidx) -> np.ndarray:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+        pose20 = eef14_to_eef20(eef12, np.zeros((len(eef12), 2), dtype=np.float32))
+        l_pose, r_pose = pose20[:, 0:9], pose20[:, 10:19]
+        fL, fR = fidx
+        l_fing = raw_arr[:, fL].astype(np.float32)
+        r_fing = raw_arr[:, fR].astype(np.float32)
+        raw = np.concatenate([l_pose, l_fing, r_pose, r_fing], axis=-1)
+        return self._normalize_array(raw)
+
     def _action_20d(self, win) -> np.ndarray:
         eef_action = np.stack(win["eef_sim_pose_action"].values).astype(np.float32)
-        grip_action = np.stack(win["gripper_open_scale_action"].values).astype(np.float32)
+        if self._dex_unify:
+            raw_arr = np.stack(win["action"].values).astype(np.float32)
+            return self._dex_raw(eef_action, raw_arr, self._fidx_act)
+        grip_action = self._grip_or_zeros(win, "gripper_open_scale_action", len(eef_action))
         return self._normalize_array(eef14_to_eef20(eef_action, grip_action))
 
     def _proprio_20d(self, win) -> np.ndarray:
         eef_state = np.stack(win["eef_sim_pose_state"].values[:1]).astype(np.float32)
-        grip_state = np.stack(win["gripper_open_scale_state"].values[:1]).astype(np.float32)
+        if self._dex_unify:
+            raw_arr = np.stack(win["observation.state"].values[:1]).astype(np.float32)
+            return self._dex_raw(eef_state, raw_arr, self._fidx_state)
+        grip_state = self._grip_or_zeros(win, "gripper_open_scale_state", len(eef_state))
         return self._normalize_array(eef14_to_eef20(eef_state, grip_state))
 
     @property

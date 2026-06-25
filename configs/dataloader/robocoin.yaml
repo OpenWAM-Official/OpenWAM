@@ -1,6 +1,6 @@
 type: robocoin
 
-dataset_dir: /path/to/RoboCOIN
+dataset_dir: /path/to/datasets/RoboCOIN
 
 num_frames: 33
 video_stride: 4
@@ -12,6 +12,7 @@ width: 320
 multiview: true
 
 split: train
+
 
 normalize_mode: quantile
 
