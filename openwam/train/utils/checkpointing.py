@@ -121,9 +121,11 @@ def find_latest_weights(run_dir: str) -> str:
 def find_latest_accel_state(run_dir: str) -> str | None:
     """Return the highest-step *usable* ``accel_state_step_N/`` in *run_dir*, or None.
 
-    Usable = has both ``trainer_state.json`` and at least one ``random_states_*.pkl``
-    (the latter proves the collective ``save_state`` actually ran, not just a mkdir
-    from a crash). Half-written dirs are skipped.
+    Usable = ``trainer_state.json`` present. ``save_full_state`` writes that marker
+    atomically AFTER ``accelerator.save_state`` returns, so its presence proves the
+    (possibly large / sharded) state finished writing. DeepSpeed's ``save_state``
+    writes a ``pytorch_model/`` dir and no ``random_states_*.pkl``, so the marker —
+    not RNG files — is the completion signal. Half-written dirs lack it and are skipped.
     """
     if not run_dir or not os.path.isdir(run_dir):
         return None
@@ -133,9 +135,6 @@ def find_latest_accel_state(run_dir: str) -> str | None:
             continue
         state_dir = os.path.join(run_dir, name)
         if not os.path.isfile(os.path.join(state_dir, "trainer_state.json")):
-            continue
-        if not _glob.glob(os.path.join(state_dir, "random_states_*.pkl")):
-            logger.warning("[resume] skipping incomplete state dir (no random_states_*.pkl): %s", state_dir)
             continue
         step = _step_num(name, "accel_state_step_")
         if best is None or step > best[0]:
