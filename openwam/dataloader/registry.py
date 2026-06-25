@@ -75,6 +75,7 @@ def list_registered_datasets():
 def _register_builtins():
     """Register all built-in dataset classes."""
     from openwam.dataloader.egodex import EgoDexDataset
+    from openwam.dataloader.ebench import EBenchDataset
     from openwam.dataloader.mixture import MixtureDataset
     from openwam.dataloader.oxe_bcz import OxeBczDataset
     from openwam.dataloader.oxe_bridge import OxeBridgeDataset
@@ -89,6 +90,7 @@ def _register_builtins():
     register_dataset("robocoin")(MultiRobotCOINDataset)
     register_dataset("robomind")(RoboMINDDataset)
     register_dataset("egodex")(EgoDexDataset)
+    register_dataset("ebench")(EBenchDataset)
     register_dataset("oxe_bcz")(OxeBczDataset)
     register_dataset("oxe_bridge")(OxeBridgeDataset)
     register_dataset("oxe_rt1")(OxeRt1Dataset)

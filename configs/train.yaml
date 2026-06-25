@@ -51,6 +51,8 @@ training:
 
   # --- Checkpoint ---
   output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output
+  pretrained_checkpoint_path: null # Optional full-model checkpoint to load before optimizer/accelerate prepare (SFT)
+  pretrained_checkpoint_strict: true # Strict load; keep true when checkpoint/model action_dim both match
   save_steps: 2000                # Save checkpoint every N steps
   keep_last_k_ckpts: 1           # Rolling window: keep only the last K checkpoints
 

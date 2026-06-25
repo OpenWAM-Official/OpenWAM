@@ -1,4 +1,5 @@
 from openwam.dataloader.bases import BaseDataset
+from openwam.dataloader.ebench import EBenchDataset, MultiEBenchDataset
 from openwam.dataloader.egodex import EgoDexDataset
 from openwam.dataloader.registry import (
     DATASET_REGISTRY,
@@ -22,6 +23,8 @@ __all__ = [
     "RoboTwinDataset",
     "MultiTaskRoboTwinDataset",
     "EgoDexDataset",
+    "EBenchDataset",
+    "MultiEBenchDataset",
     "DATASET_REGISTRY",
     "register_dataset",
     "build_dataset",

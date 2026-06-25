@@ -109,6 +109,7 @@ class OpenWAMTrainer(BaseTrainer):
             resolved_arch.canonical.framework,
             resolved_arch.canonical.variant,
         )
+        self._validate_dataset_model_dims(dataset, cfg)
 
         # Device placement: skip .to(device) when initialize_model_on_cpu + DeepSpeed,
         # because DeepSpeed's prepare() will handle the move.
@@ -154,6 +155,16 @@ class OpenWAMTrainer(BaseTrainer):
 
         # Initialize all schedulers (video + action) inside architecture
         self.architecture.init_training_schedulers(1000)
+
+        pretrained_checkpoint_path = _cfg_get(t, "pretrained_checkpoint_path", None)
+        if pretrained_checkpoint_path not in (None, "", "null"):
+            pretrained_checkpoint_strict = bool(_cfg_get(t, "pretrained_checkpoint_strict", True))
+            self.architecture.load_checkpoint(str(pretrained_checkpoint_path), strict=pretrained_checkpoint_strict)
+            logger.info(
+                "Loaded pretrained checkpoint for SFT: %s (strict=%s)",
+                pretrained_checkpoint_path,
+                pretrained_checkpoint_strict,
+            )
 
         # Loss weights from the training config
         self.lambda_video = float(t.lambda_video)
@@ -252,6 +263,35 @@ class OpenWAMTrainer(BaseTrainer):
                 print(f"  {name:<15}: total={total / 1e6:7.1f}M  trainable={trainable / 1e6:7.1f}M")
             print(f"  Architecture  : total={arch_total / 1e6:7.1f}M  trainable={arch_train / 1e6:7.1f}M")
             print("=" * 60, flush=True)
+
+    def _validate_dataset_model_dims(self, dataset, cfg: DictConfig) -> None:
+        """Fail fast when a dataloader's action/state width mismatches the model."""
+        if dataset is None:
+            return
+
+        dataset_action_dim = getattr(dataset, "action_dim", None)
+        if dataset_action_dim is not None and int(dataset_action_dim) != int(self.architecture.action_dim):
+            raise ValueError(
+                f"Dataset action_dim={int(dataset_action_dim)} but model.architecture.action_dim="
+                f"{int(self.architecture.action_dim)}. Override model.architecture.action_dim to match "
+                "the dataloader, e.g. 80 for dataloader=ebench."
+            )
+
+        arch_cfg = getattr(getattr(cfg, "model", None), "architecture", None)
+        cfg_uses_proprio = bool(_cfg_get(arch_cfg, "use_proprioception", False))
+        arch_uses_proprio = bool(getattr(self.architecture, "uses_proprioception", False))
+        if not (cfg_uses_proprio or arch_uses_proprio):
+            return
+
+        dataset_state_dim = getattr(dataset, "state_dim", dataset_action_dim)
+        if dataset_state_dim is None:
+            return
+        cfg_state_dim = int(_cfg_get(arch_cfg, "state_dim", getattr(self.architecture, "proprio_dim", 0)) or 0)
+        if cfg_state_dim and int(dataset_state_dim) != cfg_state_dim:
+            raise ValueError(
+                f"Dataset state_dim={int(dataset_state_dim)} but model.architecture.state_dim={cfg_state_dim}. "
+                "Override model.architecture.state_dim to match the dataloader, e.g. 80 for dataloader=ebench."
+            )
 
     @staticmethod
     def _wire_sampler_seed(dataloader, run_seed: int) -> None:
