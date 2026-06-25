@@ -1,19 +1,18 @@
-"""比对两次 seeded debug 训练的 loss-history CSV(train 重构 golden 门)。
+"""Compare two seeded debug-run loss-history CSVs (the train-refactor golden gate).
 
-train 重构的"与 main 行为一致"判据:固定 ``cfg.project.seed`` + ``training.debug=true``
-跑出的 ``debug_loss_history.csv``,重构前后在确定性列上逐值一致。
+"Behaves like main" criterion: with a fixed ``cfg.project.seed`` and
+``training.debug=true``, the ``debug_loss_history.csv`` produced before and after
+the refactor must match value-for-value on the deterministic columns.
 
-只比对确定性列,排除依赖 wall-clock / 显存分配器的列(它们永不 bit-identical):
-    steps_per_sec, mem_alloc_gb, mem_reserved_gb,
-    step_peak_alloc_gb, step_peak_reserved_gb, run_peak_alloc_gb, run_peak_reserved_gb
+Only deterministic columns are compared; ``steps_per_sec`` (wall-clock dependent,
+never bit-identical) is excluded. Comparison is on the raw CSV strings (the trainer
+writes ``%.10g``, byte-identical on the deterministic path), so no atol is needed.
+Latent mode renames the loss_action / loss_decoder columns, but both runs share a
+config, so intersecting on column name realigns them automatically.
 
-逐值按 CSV 写出的原始字符串比对(trainer 用 ``%.10g`` 写,确定性路径下应逐字符一致),
-故无需 atol —— 任何差异都暴露。latent 模式下 loss_action/loss_decoder 列名会变,
-但前后同 config 故列名一致,按列名取交集即可自动对齐。
-
-用法:
+Usage:
     python tests/train_refactor/compare_loss_history.py baseline.csv candidate.csv
-退出码 0 = 逐值一致;1 = 有差异(打印首处)。
+Exit 0 = identical; 1 = mismatch (first one printed).
 """
 
 import csv
@@ -21,12 +20,6 @@ import sys
 
 NON_DETERMINISTIC = {
     "steps_per_sec",
-    "mem_alloc_gb",
-    "mem_reserved_gb",
-    "step_peak_alloc_gb",
-    "step_peak_reserved_gb",
-    "run_peak_alloc_gb",
-    "run_peak_reserved_gb",
 }
 
 
@@ -39,25 +32,29 @@ def compare(main_csv, refactor_csv):
     a = _read(main_csv)
     b = _read(refactor_csv)
     if len(a) != len(b):
-        print(f"FAIL: 行数不同 main={len(a)} refactor={len(b)}")
+        print(f"FAIL: row count differs main={len(a)} refactor={len(b)}")
         return 1
     if not a:
-        print("FAIL: CSV 为空,没有可比对的步")
+        print("FAIL: empty CSV, no steps to compare")
         return 1
 
-    # 仅比对两个 CSV 都有的确定性列。模式差异(latent vs 非 latent)会改变
-    # loss_action/loss_decoder 列的存在性,取交集自动对齐;打印不对称列以免静默漏比。
+    # Compare only deterministic columns present in both CSVs. Mode differences
+    # (latent vs non-latent) change whether loss_action/loss_decoder exist; the
+    # intersection realigns them, and asymmetric columns are printed to avoid a
+    # silent skip.
     only_a = [c for c in a[0] if c not in b[0] and c not in NON_DETERMINISTIC]
     only_b = [c for c in b[0] if c not in a[0] and c not in NON_DETERMINISTIC]
     if only_a or only_b:
-        print(f"NOTE: 列不对称(模式差异),仅比交集。main独有={only_a} refactor独有={only_b}")
+        print(
+            f"NOTE: asymmetric columns (mode diff), comparing intersection. main-only={only_a} refactor-only={only_b}"
+        )
     cols = [c for c in a[0].keys() if c not in NON_DETERMINISTIC and c in b[0]]
     for i, (ra, rb) in enumerate(zip(a, b)):
         for c in cols:
             if ra.get(c) != rb.get(c):
-                print(f"FAIL: 行{i} 列'{c}' 不一致: main={ra.get(c)!r} refactor={rb.get(c)!r}")
+                print(f"FAIL: row {i} col '{c}' differs: main={ra.get(c)!r} refactor={rb.get(c)!r}")
                 return 1
-    print(f"OK: {len(a)} 步在 {len(cols)} 个确定性列上逐值一致 ({cols})")
+    print(f"OK: {len(a)} steps identical across {len(cols)} deterministic columns ({cols})")
     return 0
 
 

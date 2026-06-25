@@ -1,7 +1,7 @@
-"""Stateless trainer helpers + VRAM tracker.
+"""Stateless trainer helpers.
 
-纯计算/IO,无训练状态(config 取值、参数报告、LR 调度、wandb、跨 rank 规约、debug CSV 写);
-``VramTracker`` 持有 run 级显存峰值状态。
+Pure compute / IO with no training state: config access, parameter reporting,
+LR scheduling, wandb, cross-rank reduction, debug-CSV writing.
 """
 
 import logging
@@ -158,7 +158,6 @@ def write_debug_loss_row(
     epoch,
     lr,
     steps_per_sec,
-    mem_stats,
 ) -> None:
     """Append one row to debug_loss_history.csv (writes the header on first call).
 
@@ -171,85 +170,8 @@ def write_debug_loss_row(
     label_vals = ",".join(f"{metrics[key]:.10g}" for _, key in labels)
     with open(loss_log_path, "a", encoding="utf-8") as f:
         if write_header:
-            f.write(
-                f"step,opt_step,epoch,loss,loss_video,{label_cols},"
-                "grad_norm,lr,steps_per_sec,"
-                "mem_alloc_gb,mem_reserved_gb,step_peak_alloc_gb,step_peak_reserved_gb,"
-                "run_peak_alloc_gb,run_peak_reserved_gb\n"
-            )
+            f.write(f"step,opt_step,epoch,loss,loss_video,{label_cols},grad_norm,lr,steps_per_sec\n")
         f.write(
             f"{global_step},{opt_step},{epoch},{metrics['loss_total']:.10g},{metrics['loss_video']:.10g},{label_vals},"
-            f"{metrics['grad_norm']:.10g},{lr:.10g},{steps_per_sec:.10g},"
-            f"{mem_stats.get('mem_alloc_gb', float('nan')):.6g},"
-            f"{mem_stats.get('mem_reserved_gb', float('nan')):.6g},"
-            f"{mem_stats.get('step_peak_alloc_gb', float('nan')):.6g},"
-            f"{mem_stats.get('step_peak_reserved_gb', float('nan')):.6g},"
-            f"{mem_stats.get('run_peak_alloc_gb', float('nan')):.6g},"
-            f"{mem_stats.get('run_peak_reserved_gb', float('nan')):.6g}\n"
+            f"{metrics['grad_norm']:.10g},{lr:.10g},{steps_per_sec:.10g}\n"
         )
-
-
-class VramTracker:
-    """Tracks run-level peak VRAM across the training loop.
-
-    ``begin`` resets counters AFTER accelerate.prepare so init-time allocations
-    (params / optimizer state / ZeRO shards) aren't counted in the run-level peak.
-    """
-
-    def __init__(self):
-        self.run_peak_alloc_gb = 0.0
-        self.run_peak_reserved_gb = 0.0
-
-    def begin(self) -> None:
-        self.run_peak_alloc_gb = 0.0
-        self.run_peak_reserved_gb = 0.0
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-
-    def record(self, *, need_detail: bool) -> dict:
-        """Update run-level peak; with need_detail also read live usage, reset the
-        per-step peak, and return a dict for wandb / debug-CSV. Empty dict on CPU
-        or when need_detail=False."""
-        if not torch.cuda.is_available():
-            return {}
-        peak_alloc_gb = float(torch.cuda.max_memory_allocated()) / 1e9
-        peak_reserved_gb = float(torch.cuda.max_memory_reserved()) / 1e9
-        self.run_peak_alloc_gb = max(self.run_peak_alloc_gb, peak_alloc_gb)
-        self.run_peak_reserved_gb = max(self.run_peak_reserved_gb, peak_reserved_gb)
-        if not need_detail:
-            return {}
-        alloc_gb = float(torch.cuda.memory_allocated()) / 1e9
-        reserved_gb = float(torch.cuda.memory_reserved()) / 1e9
-        torch.cuda.reset_peak_memory_stats()
-        return {
-            "mem_alloc_gb": alloc_gb,
-            "mem_reserved_gb": reserved_gb,
-            "step_peak_alloc_gb": peak_alloc_gb,
-            "step_peak_reserved_gb": peak_reserved_gb,
-            "run_peak_alloc_gb": self.run_peak_alloc_gb,
-            "run_peak_reserved_gb": self.run_peak_reserved_gb,
-        }
-
-    def write_summary(self, *, global_step, output_path, is_main, wandb_run) -> None:
-        """Log run-level peak to memory_summary.csv + wandb; finish the wandb run."""
-        run_peak_alloc = self.run_peak_alloc_gb
-        run_peak_reserved = self.run_peak_reserved_gb
-        if torch.cuda.is_available() and (run_peak_alloc > 0.0 or run_peak_reserved > 0.0):
-            if is_main:
-                summary = f"[memory] run peak alloc={run_peak_alloc:.2f}GB reserved={run_peak_reserved:.2f}GB (rank0)"
-                logger.info(summary)
-                print(summary, flush=True)
-                if output_path:
-                    summary_path = os.path.join(output_path, "memory_summary.csv")
-                    write_header = not os.path.exists(summary_path)
-                    with open(summary_path, "a", encoding="utf-8") as f:
-                        if write_header:
-                            f.write("global_step,run_peak_alloc_gb,run_peak_reserved_gb\n")
-                        f.write(f"{global_step},{run_peak_alloc:.6g},{run_peak_reserved:.6g}\n")
-            if wandb_run is not None:
-                wandb_run.log(
-                    {"memory/run_peak_alloc_gb": run_peak_alloc, "memory/run_peak_reserved_gb": run_peak_reserved},
-                    step=global_step,
-                )
-        if wandb_run is not None:
-            wandb_run.finish()

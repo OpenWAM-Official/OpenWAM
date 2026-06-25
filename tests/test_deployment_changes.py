@@ -22,30 +22,24 @@ sys.path.insert(0, str(PROJECT_ROOT / "third_party"))
 # ---------------------------------------------------------------------------
 
 
-class TestAccelerateYamlMixedPrecision:
-    """``cfg.accelerate.mixed_precision`` is the sole source of truth.
+class TestTrainingMixedPrecision:
+    """``cfg.training.mixed_precision`` is the sole source of truth.
 
-    ``cfg.training.mixed_precision`` was removed; both training and deploy
-    must read from the accelerate yaml that ``configs/train.yaml`` composes
-    from (default: ``accelerate/deepspeed_zero2.yaml``).
+    ``configs/accelerate`` was removed; both training (``_build_accelerator``)
+    and deploy (``model_loader``) read ``training.mixed_precision`` directly.
     """
 
-    def test_training_field_removed(self):
+    def test_training_field_present(self):
         from omegaconf import OmegaConf
 
         cfg = OmegaConf.load(PROJECT_ROOT / "configs" / "train.yaml")
-        assert OmegaConf.select(cfg, "training.mixed_precision") is None, (
-            "training.mixed_precision should be removed; accelerate.mixed_precision is now the only source"
-        )
-
-    @pytest.mark.parametrize("stage", ["deepspeed_zero1", "deepspeed_zero2"])
-    def test_accelerate_field_exists(self, stage):
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.load(PROJECT_ROOT / "configs" / "accelerate" / f"{stage}.yaml")
-        mp = OmegaConf.select(cfg, "mixed_precision")
-        assert mp is not None, f"mixed_precision missing from {stage}.yaml"
+        mp = OmegaConf.select(cfg, "training.mixed_precision")
         assert mp == "bf16", f"Expected 'bf16', got {mp!r}"
+
+    def test_accelerate_group_removed(self):
+        assert not (PROJECT_ROOT / "configs" / "accelerate").exists(), (
+            "configs/accelerate should be gone; DeepSpeed settings now live in train.yaml"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -688,18 +682,18 @@ class TestModelLoaderDtype:
         dtype = _DTYPE_MAP.get(str(_mp).strip().lower(), torch.bfloat16)
         assert dtype == torch.bfloat16
 
-    def test_dtype_read_from_accelerate_cfg(self):
+    def test_dtype_read_from_training_cfg(self):
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.create({"accelerate": {"mixed_precision": "fp16"}})
-        _mp = OmegaConf.select(cfg, "accelerate.mixed_precision", default="bf16")
+        cfg = OmegaConf.create({"training": {"mixed_precision": "fp16"}})
+        _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")
         assert _mp == "fp16"
 
     def test_dtype_defaults_to_bf16_when_missing(self):
         from omegaconf import OmegaConf
 
-        cfg = OmegaConf.create({})  # no accelerate.mixed_precision
-        _mp = OmegaConf.select(cfg, "accelerate.mixed_precision", default="bf16")
+        cfg = OmegaConf.create({})  # no training.mixed_precision
+        _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")
         assert _mp == "bf16"
 
 

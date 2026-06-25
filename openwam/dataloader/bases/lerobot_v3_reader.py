@@ -77,7 +77,6 @@ from openwam.dataloader.utils.lerobotv3 import (
     parse_info_json,
     resolve_prompt_by_episode,
     subsample_episodes_by_hours,
-    validate_video_sampling,
 )
 from openwam.dataloader.utils.normalization import materialize_eef_stats
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
@@ -232,9 +231,12 @@ class LeRobotV3Reader(BaseDataset):
             self._camera_layout = [self._head_camera]
 
         # ── video sub-sampling ────────────────────────────────────────────
-        self._video_sample_indices, self._num_video_frames = validate_video_sampling(
-            self._num_frames, self._video_stride
-        )
+        # video_stride takes every Nth frame within the window. num_video_frames
+        # is whatever that yields; for clean encoder temporal downsampling it
+        # should match the encoder's contract (Wan VAE: (num_video_frames - 1) % 4
+        # == 0) — NOT enforced here, a mismatch surfaces downstream at encode time.
+        self._video_sample_indices = np.arange(0, self._num_frames, self._video_stride, dtype=np.int64)
+        self._num_video_frames = int(self._video_sample_indices.size)
 
         # ── episodes + offsets + split ────────────────────────────────────
         eps = load_episodes_parquet(self._dataset_dir)

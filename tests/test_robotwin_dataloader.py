@@ -471,29 +471,6 @@ def test_video_stride_does_not_affect_action_length():
         assert sample["proprio_mask"].shape == (1, 14)
 
 
-def test_invalid_video_stride_rejected():
-    """(num_frames - 1) must be divisible by video_stride; else ValueError."""
-    from openwam.dataloader.robotwin import RoboTwinDataset
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _create_mock_episode(os.path.join(tmpdir, "episode0.hdf5"), T=20, seed=0)
-        # num_frames=10, video_stride=4 → (10-1) % 4 == 1, invalid
-        try:
-            RoboTwinDataset(
-                data_root=tmpdir,
-                num_frames=10,
-                video_stride=4,
-                height=32,
-                width=32,
-                action_mode="joint",
-                val_ratio=0.0,
-            )
-        except ValueError as e:
-            assert "divisible" in str(e)
-        else:
-            raise AssertionError("Expected ValueError for (num_frames-1) not divisible by video_stride")
-
-
 def test_joint_mode_minmax_normalization():
     """Joint mode applies min-max normalization to joints and binary to grippers."""
     from openwam.dataloader.robotwin import RoboTwinDataset
