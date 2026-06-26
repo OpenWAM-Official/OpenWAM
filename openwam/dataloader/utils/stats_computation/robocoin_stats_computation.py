@@ -54,6 +54,14 @@
 
 
 
+
+
+
+
+
+
+
+
 import argparse
 import json
 import os
@@ -176,6 +184,32 @@ class Accumulator:
         }
 
 
+
+
+
+
+
+
+
+
+
+ROT6D_DIMS = (3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 18)
+
+
+def _pin_rot6d_identity(stats: dict) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+    ident = {"min": -1.0, "max": 1.0, "q01": -1.0, "q99": 1.0, "mean": 0.0, "std": 1.0}
+    for key, val in ident.items():
+        for i in ROT6D_DIMS:
+            stats[key][i] = val
+
+
 def discover_datasets_by_robot_type(root: str) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
     groups = {}
@@ -250,7 +284,7 @@ def _classify_dataset(ds_dir: str):
     return "other", None
 
 
-def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
+def compute_stats_for_robot_type(rtype: str, dataset_dirs: list, rot6d_identity: bool = True) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -365,6 +399,9 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
                     print(f"  Warning: skipping {fpath}: {e}")
 
     stats = acc.finalize()
+    if rot6d_identity:
+
+        _pin_rot6d_identity(stats)
     stats["num_timesteps"] = int(acc.count)
     stats["num_datasets"] = len(dataset_dirs)
     stats["num_files"] = total_files
@@ -398,6 +435,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_dir", required=True)
     parser.add_argument("--robot_type", default=None, help="Compute stats for a single robot type only")
+    parser.add_argument(
+        "--no-rot6d-identity",
+        action="store_true",
+        help="Disable pinning rot6d stats to identity (rot6d would then be per-dim normalized "
+        "like pos/gripper — generally undesirable; see _pin_rot6d_identity).",
+    )
     args = parser.parse_args()
 
     groups = discover_datasets_by_robot_type(args.dataset_dir)
@@ -412,7 +455,7 @@ def main():
         ds_list = groups[rtype]
         print(f"\n{'=' * 60}")
         print(f"Computing stats for {rtype} ({len(ds_list)} datasets)...")
-        result = compute_stats_for_robot_type(rtype, ds_list)
+        result = compute_stats_for_robot_type(rtype, ds_list, rot6d_identity=not args.no_rot6d_identity)
         stats = result["eef"]
 
         out_path = os.path.join(out_dir, f"stats_{rtype}.json")
