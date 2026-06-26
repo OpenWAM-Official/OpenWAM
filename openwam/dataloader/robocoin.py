@@ -133,6 +133,34 @@ def _finger_indices(feature: dict):
     return left, right
 
 
+
+MAX_HAND_DOF = 22
+
+
+def dex_finger_layout(features: dict):
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+    has_grip = all(c in features for c in _GRIP_COLS)
+    if has_grip or "eef_sim_pose_action" not in features:
+        return None
+    aL, aR = _finger_indices(features.get("action", {}))
+    sL, sR = _finger_indices(features.get("observation.state", {}))
+    kL, kR = len(aL), len(aR)
+    if not (0 < kL <= MAX_HAND_DOF and 0 < kR <= MAX_HAND_DOF and len(sL) == kL and len(sR) == kR):
+        return None
+    return aL, aR, sL, sR
+
+
 def _build_dex_unify_map(k_left: int, k_right: int):
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -262,22 +290,31 @@ class RoboCOINDataset(LeRobotV3Reader):
                     features = json.load(f).get("features", {})
             except (OSError, ValueError):
                 features = {}
-            has_grip = all(c in features for c in _GRIP_COLS)
-            has_eef = "eef_sim_pose_action" in features
-            if has_eef and not has_grip:
+            layout = dex_finger_layout(features)
+            if layout is not None:
+                aL, aR, sL, sR = layout
+                kL, kR = len(aL), len(aR)
+                self._dex_unify = True
+                self._k_left, self._k_right = kL, kR
+                self._fidx_act = (np.asarray(aL, dtype=np.int64), np.asarray(aR, dtype=np.int64))
+                self._fidx_state = (np.asarray(sL, dtype=np.int64), np.asarray(sR, dtype=np.int64))
+
+
+                self.ACTION_DIM = 18 + kL + kR
+                unify_action_map = _build_dex_unify_map(kL, kR)
+            elif "eef_sim_pose_action" in features and not all(c in features for c in _GRIP_COLS):
+
+
+
+
                 aL, aR = _finger_indices(features.get("action", {}))
                 sL, sR = _finger_indices(features.get("observation.state", {}))
-                kL, kR = len(aL), len(aR)
-
-                if 0 < kL <= 22 and 0 < kR <= 22 and len(sL) == kL and len(sR) == kR:
-                    self._dex_unify = True
-                    self._k_left, self._k_right = kL, kR
-                    self._fidx_act = (np.asarray(aL, dtype=np.int64), np.asarray(aR, dtype=np.int64))
-                    self._fidx_state = (np.asarray(sL, dtype=np.int64), np.asarray(sR, dtype=np.int64))
-
-
-                    self.ACTION_DIM = 18 + kL + kR
-                    unify_action_map = _build_dex_unify_map(kL, kR)
+                logger.warning(
+                    "RoboCOIN %s: dexterous-hand bucket (pose, no gripper) but finger layout "
+                    "failed the gate (action L/R=%d/%d, state L/R=%d/%d, max=%d); falling back "
+                    "to pose-only under unify_action (fingers dropped).",
+                    dataset_dir, len(aL), len(aR), len(sL), len(sR), MAX_HAND_DOF,
+                )
         super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
 
 

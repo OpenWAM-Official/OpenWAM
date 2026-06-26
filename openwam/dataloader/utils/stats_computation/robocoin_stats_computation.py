@@ -61,7 +61,12 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from openwam.dataloader.robocoin import _eef14_to_eef20, _finger_indices
+from openwam.dataloader.robocoin import (
+    MAX_HAND_DOF,
+    _eef14_to_eef20,
+    _finger_indices,
+    dex_finger_layout,
+)
 
 
 
@@ -199,8 +204,15 @@ _GRIP_COLS = ("gripper_open_scale_action", "gripper_open_scale_state")
 _HAND_RAW_COLS = ["action", "observation.state"]
 
 
-def _dataset_finger_layout(ds_dir: str):
+def _classify_dataset(ds_dir: str):
     """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
 
 
 
@@ -211,15 +223,22 @@ def _dataset_finger_layout(ds_dir: str):
         with open(os.path.join(ds_dir, "meta", "info.json")) as f:
             feats = json.load(f).get("features", {})
     except (OSError, ValueError):
-        return None
+        return "other", None
     if all(c in feats for c in _GRIP_COLS):
-        return None
-    aL, aR = _finger_indices(feats.get("action", {}))
-    sL, sR = _finger_indices(feats.get("observation.state", {}))
-    kL, kR = len(aL), len(aR)
-    if not (0 < kL <= 22 and 0 < kR <= 22 and len(sL) == kL and len(sR) == kR):
-        return None
-    return (aL + aR, sL + sR, kL, kR)
+        return "grip", None
+    layout = dex_finger_layout(feats)
+    if layout is not None:
+        aL, aR, sL, sR = layout
+        return "dex", (aL + aR, sL + sR, len(aL), len(aR))
+    if "eef_sim_pose_action" in feats:
+        aL, aR = _finger_indices(feats.get("action", {}))
+        sL, sR = _finger_indices(feats.get("observation.state", {}))
+        print(
+            f"  Warning: {ds_dir} looks dexterous-hand (pose, no gripper) but finger layout "
+            f"failed the gate (action L/R={len(aL)}/{len(aR)}, state L/R={len(sL)}/{len(sR)}, "
+            f"max={MAX_HAND_DOF}); no finger stats emitted."
+        )
+    return "other", None
 
 
 def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
@@ -245,12 +264,29 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
     hand_dims = None
     hand_files = 0
 
+
+
+
+
+    grip_example = None
+    dex_example = None
+
     for ds_dir in dataset_dirs:
         data_dir = os.path.join(ds_dir, "data")
         if not os.path.isdir(data_dir):
             continue
-
-        layout = _dataset_finger_layout(ds_dir)
+        kind, layout = _classify_dataset(ds_dir)
+        if kind == "grip":
+            grip_example = grip_example or ds_dir
+        elif kind == "dex":
+            dex_example = dex_example or ds_dir
+        if grip_example and dex_example:
+            raise ValueError(
+                f"robot_type {rtype!r} mixes a grippered dataset ({grip_example}) with a "
+                f"dexterous-hand dataset ({dex_example}). They share one 20-D 'eef' stats block, "
+                f"so the dex zero-filled gripper slots (9/19) would corrupt the grippered reader's "
+                f"gripper normalization. Split these into distinct robot_types."
+            )
         if layout is not None:
             idx_act_lr, idx_state_lr, kL, kR = layout
             if hand_acc is None:
