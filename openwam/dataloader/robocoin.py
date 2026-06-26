@@ -390,9 +390,29 @@ class RoboCOINDataset(LeRobotV3Reader):
                 f"block in {stats_path}; re-run robocoin_stats_computation (it now emits hand stats)."
             )
         kL, kR = self._k_left, self._k_right
+
+
+
+
+
+        dof_l, dof_r = hand_raw.get("dof_left"), hand_raw.get("dof_right")
+        if (dof_l is not None and dof_l != kL) or (dof_r is not None and dof_r != kR):
+            raise ValueError(
+                f"unify_action + dexterous-hand bucket {self._dataset_id}: 'hand' stats DOF "
+                f"(left={dof_l}, right={dof_r}) in {stats_path} != this bucket's finger DOF "
+                f"(left={kL}, right={kR}). The per-robot-type 'hand' block is locked to the first "
+                f"dataset's DOF; re-run robocoin_stats_computation (it now hard-fails on mixed DOF), "
+                f"or split mismatched datasets into distinct robot_types."
+            )
         hand_stats = materialize_eef_stats(
             hand_raw, self._normalize_mode, dim=kL + kR, strict_minmax=False, source_hint=f"{stats_path}: hand.*"
         )
+        if hand_stats["mean"].shape[0] != kL + kR:
+            raise ValueError(
+                f"unify_action + dexterous-hand bucket {self._dataset_id}: 'hand' stats width "
+                f"{hand_stats['mean'].shape[0]} in {stats_path} != expected kL+kR={kL + kR}. "
+                f"Re-run robocoin_stats_computation."
+            )
         combined = {}
         for k in ("mean", "std", "min", "max", "q01", "q99"):
             e, h = eef_stats[k], hand_stats[k]

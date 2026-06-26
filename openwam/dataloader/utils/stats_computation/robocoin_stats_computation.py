@@ -257,8 +257,17 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
                 hand_dims = (kL, kR)
                 hand_acc = Accumulator(dim=kL + kR)
             elif hand_dims != (kL, kR):
-                print(f"  Warning: {ds_dir} finger DOF {(kL, kR)} != {hand_dims}; skipping its finger stats")
-                layout = None
+
+
+
+
+
+                raise ValueError(
+                    f"robot_type {rtype!r} has heterogeneous dexterous-hand finger DOF: "
+                    f"{ds_dir} has {(kL, kR)} but an earlier dataset had {hand_dims}. "
+                    f"A per-robot-type 'hand' stats block cannot describe both; the reader "
+                    f"slices it by each bucket's own kL/kR. Split these into distinct robot_types."
+                )
         for chunk in sorted(os.listdir(data_dir)):
             chunk_path = os.path.join(data_dir, chunk)
             if not os.path.isdir(chunk_path):
