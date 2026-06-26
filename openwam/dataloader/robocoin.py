@@ -416,6 +416,18 @@ class RoboCOINDataset(LeRobotV3Reader):
             strict_minmax=False,
             source_hint=f"{stats_path}: eef.* — re-run python -m openwam.dataloader.utils.stats_computation.robocoin_stats_computation",
         )
+
+
+
+
+
+        for k in ("mean", "std", "min", "max", "q01", "q99"):
+            if eef_stats[k].shape[0] != _ACTION_DIM:
+                raise ValueError(
+                    f"RoboCOIN bucket {self._dataset_id}: 'eef' stats '{k}' width "
+                    f"{eef_stats[k].shape[0]} in {stats_path} != expected {_ACTION_DIM}. "
+                    f"Re-run robocoin_stats_computation."
+                )
         if not self._dex_unify:
             return eef_stats
 
