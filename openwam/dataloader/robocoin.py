@@ -134,7 +134,10 @@ def _finger_indices(feature: dict):
 
 
 
-MAX_HAND_DOF = 22
+
+
+
+MAX_HAND_DOF = 24
 
 
 def dex_finger_layout(features: dict):
@@ -169,13 +172,18 @@ def _build_dex_unify_map(k_left: int, k_right: int):
 
 
 
+
+
+    l_hand = 10
+    r_pos = l_hand + MAX_HAND_DOF
+    r_hand = r_pos + 10
     return (
         list(range(0, 3))
         + list(range(3, 9))
-        + list(range(10, 10 + k_left))
-        + list(range(32, 35))
-        + list(range(35, 41))
-        + list(range(42, 42 + k_right))
+        + list(range(l_hand, l_hand + k_left))
+        + list(range(r_pos, r_pos + 3))
+        + list(range(r_pos + 3, r_pos + 9))
+        + list(range(r_hand, r_hand + k_right))
     )
 
 
