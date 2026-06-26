@@ -21,6 +21,7 @@ Usage:
     trainer.train()
 """
 
+import itertools
 import logging
 import math
 import os
@@ -154,7 +155,8 @@ class OpenWAMTrainer:
         (load weights before prepare), or resume (load full state after prepare).
         """
         t = self.cfg.training
-        num_epochs = num_epochs or int(t.num_epochs)
+        num_epochs = num_epochs or cfg_get(t, "num_epochs", None)
+        num_epochs = int(num_epochs) if num_epochs is not None else None
         max_steps = max_steps or getattr(t, "max_steps", None)
         batch_size = int(t.batch_size)
         grad_accum = int(t.gradient_accumulation_steps)
@@ -164,6 +166,13 @@ class OpenWAMTrainer:
             max_steps = 20
             save_steps_override = 10
             logger.info("DEBUG mode: max_steps=20, save@10, constant LR")
+
+        # num_epochs=null means step-only training: max_steps is the sole stop condition.
+        if num_epochs is None and not max_steps:
+            raise ValueError(
+                "training.num_epochs and training.max_steps are both unset; "
+                "set num_epochs, or set max_steps for step-only training."
+            )
 
         # Entry validation (all ranks): finetune and resume are mutually exclusive.
         finetune_path = cfg_get(t, "finetune_ckpt_path", None) or None
@@ -176,9 +185,14 @@ class OpenWAMTrainer:
         max_grad_norm = float(t.max_grad_norm) if getattr(t, "max_grad_norm", None) else None
 
         steps_per_epoch = math.ceil(len(dataloader) / grad_accum)
-        total_opt_steps = steps_per_epoch * num_epochs
-        if max_steps:
-            total_opt_steps = min(total_opt_steps, max_steps)
+        # max_steps counts micro-steps (global_step); convert to optimizer steps for the LR horizon.
+        max_opt_steps = math.ceil(max_steps / grad_accum) if max_steps else None
+        if num_epochs is not None:
+            total_opt_steps = steps_per_epoch * num_epochs
+            if max_opt_steps:
+                total_opt_steps = min(total_opt_steps, max_opt_steps)
+        else:
+            total_opt_steps = max_opt_steps
         scheduler = self.build_lr_scheduler(optimizer, total_opt_steps, debug=debug)
 
         if debug:
@@ -209,9 +223,12 @@ class OpenWAMTrainer:
 
         from tqdm import tqdm
 
-        total_steps = len(dataloader) * num_epochs
-        if max_steps:
-            total_steps = min(total_steps, max_steps)
+        if num_epochs is not None:
+            total_steps = len(dataloader) * num_epochs
+            if max_steps:
+                total_steps = min(total_steps, max_steps)
+        else:
+            total_steps = max_steps
 
         import time as _time
 
@@ -225,8 +242,11 @@ class OpenWAMTrainer:
             global_step, opt_step, start_epoch, skip_first = self.resume_if_configured(
                 resume_state_dir, dataloader, grad_accum
             )
-            if start_epoch >= num_epochs:
-                logger.info("[resume] global_step=%d already covers num_epochs=%d; finishing.", global_step, num_epochs)
+            already_done = (num_epochs is not None and start_epoch >= num_epochs) or (
+                max_steps and global_step >= max_steps
+            )
+            if already_done:
+                logger.info("[resume] global_step=%d already complete; finishing.", global_step)
                 self.finish_training(output_path, global_step, save_steps, is_main, wandb_run)
                 return
 
@@ -239,7 +259,8 @@ class OpenWAMTrainer:
         # reproducible across runs and ZeRO stages: same (rank, step) -> same RNG,
         # different ranks at the same step keep in-batch timestep diversity.
         # Gated on _run_seed so unseeded production runs stay fully stochastic.
-        for epoch in range(start_epoch, num_epochs):
+        epochs = itertools.count(start_epoch) if num_epochs is None else range(start_epoch, num_epochs)
+        for epoch in epochs:
             if hasattr(dataloader, "set_epoch"):
                 dataloader.set_epoch(epoch)
             if hasattr(self.dataset, "set_epoch"):
@@ -298,7 +319,7 @@ class OpenWAMTrainer:
                 )
 
                 # save_steps: write both lines (weights + full state), then prune in lockstep.
-                if save_steps is not None and global_step > 0 and global_step % save_steps == 0:
+                if save_steps and global_step > 0 and global_step % save_steps == 0:
                     save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
                     save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
                     if is_main:
