@@ -461,6 +461,17 @@ def build_multibucket(
     buckets = [r for r in results if r is not None and len(r) > 0]
     if not buckets:
         raise RuntimeError(f"All {source_name} buckets failed to load")
+    # _build_one swallows per-bucket construction errors (missing/corrupt data,
+    # and — for RoboCOIN — stats-integrity validation raised in _load_stats) into
+    # a warning + None, so a misconfigured bucket is dropped rather than aborting
+    # the run. Surface the dropped set explicitly so that silent data loss (e.g. a
+    # whole robot_type lost to a stale stats file) is visible, not buried.
+    dropped = [sub.name for sub, r in zip(sub_dirs, results) if r is None or len(r) == 0]
+    if dropped:
+        logger.warning(
+            "%s: dropped %d / %d bucket(s) during load (construction failed or empty): %s",
+            source_name, len(dropped), len(sub_dirs), ", ".join(sorted(dropped)),
+        )
     logger.info("%s: loaded %d / %d buckets", source_name, len(buckets), len(sub_dirs))
     return wrapper_cls(buckets)
 

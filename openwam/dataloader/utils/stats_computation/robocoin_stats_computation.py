@@ -220,6 +220,10 @@ def _classify_dataset(ds_dir: str):
 
 
 
+
+
+
+
     try:
         with open(os.path.join(ds_dir, "meta", "info.json")) as f:
             feats = json.load(f).get("features", {})
@@ -232,6 +236,9 @@ def _classify_dataset(ds_dir: str):
         aL, aR, sL, sR = layout
         return "dex", (aL + aR, sL + sR, len(aL), len(aR))
     if "eef_sim_pose_action" in feats:
+
+
+
         aL, aR = _finger_indices(feats.get("action", {}))
         sL, sR = _finger_indices(feats.get("observation.state", {}))
         print(
@@ -239,6 +246,7 @@ def _classify_dataset(ds_dir: str):
             f"failed the gate (action L/R={len(aL)}/{len(aR)}, state L/R={len(sL)}/{len(sR)}, "
             f"max={MAX_HAND_DOF}); no finger stats emitted."
         )
+        return "nogrip", None
     return "other", None
 
 
@@ -269,8 +277,10 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
 
 
 
+
+
     grip_example = None
-    dex_example = None
+    nogrip_example = None
 
     for ds_dir in dataset_dirs:
         data_dir = os.path.join(ds_dir, "data")
@@ -279,14 +289,15 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list) -> dict:
         kind, layout = _classify_dataset(ds_dir)
         if kind == "grip":
             grip_example = grip_example or ds_dir
-        elif kind == "dex":
-            dex_example = dex_example or ds_dir
-        if grip_example and dex_example:
+        elif kind in ("dex", "nogrip"):
+            nogrip_example = nogrip_example or ds_dir
+        if grip_example and nogrip_example:
             raise ValueError(
                 f"robot_type {rtype!r} mixes a grippered dataset ({grip_example}) with a "
-                f"dexterous-hand dataset ({dex_example}). They share one 20-D 'eef' stats block, "
-                f"so the dex zero-filled gripper slots (9/19) would corrupt the grippered reader's "
-                f"gripper normalization. Split these into distinct robot_types."
+                f"no-gripper (dexterous-hand) dataset ({nogrip_example}). They share one 20-D "
+                f"'eef' stats block, so the no-gripper zero-filled gripper slots (9/19) would "
+                f"corrupt the grippered reader's gripper normalization. Split these into distinct "
+                f"robot_types."
             )
         if layout is not None:
             idx_act_lr, idx_state_lr, kL, kR = layout
