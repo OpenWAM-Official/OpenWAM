@@ -249,6 +249,14 @@ class OpenWAMTrainer:
                 logger.info("[resume] global_step=%d already complete; finishing.", global_step)
                 self.finish_training(output_path, global_step, save_steps, is_main, wandb_run)
                 return
+            if skip_first > 0 and self._run_seed is None:
+                logger.warning(
+                    "[resume] mid-epoch resume (skip_first=%d) without project.seed: DataLoader "
+                    "shuffle is non-reproducible, so the resumed epoch's batch order differs from "
+                    "the original run — samples may be silently re-fed or skipped. Set project.seed "
+                    "for faithful mid-epoch resume.",
+                    skip_first,
+                )
 
         _step_t0 = _time.monotonic()
         pbar = tqdm(total=total_steps, desc="Training", unit="step", initial=min(global_step, total_steps))
@@ -455,8 +463,11 @@ class OpenWAMTrainer:
             logger.info("[resume] loading Accelerate state from %s", resume_state_dir)
         meta = load_full_state(self.accelerator, resume_state_dir)
         global_step = int(meta.get("global_step", 0))
-        opt_step = int(meta.get("opt_step", global_step))
-        start_epoch, skip = compute_resume_position(global_step, len(dataloader), grad_accum)
+        # Align global_step to the grad_accum boundary skip was floored to, then derive
+        # opt_step from it — otherwise floored-off batches re-train and per-step seeds
+        # (keyed on global_step) drift. No-op at grad_accum=1.
+        start_epoch, skip, global_step = compute_resume_position(global_step, len(dataloader), grad_accum)
+        opt_step = global_step // grad_accum
         if is_main:
             logger.info(
                 "[resume] resumed at global_step=%d opt_step=%d epoch=%d skip_first=%d",

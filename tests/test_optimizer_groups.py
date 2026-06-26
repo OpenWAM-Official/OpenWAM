@@ -101,6 +101,25 @@ def test_other_modules_ride_base_lr_not_video_lr():
     assert id(trainer.architecture.video_backbone._pipe.dit.weight) in video_ids
 
 
+def test_action_params_land_in_action_lr_group():
+    """The action override LR lands on the group carrying the action backbone params —
+    guards against action params being silently routed into the base/other group."""
+    from openwam.train.utils.optimizer_groups import build_trainable_parameters
+
+    trainer = _FakeTrainer()
+    groups = build_trainable_parameters(trainer, action_lr=1e-4, video_lr=5e-5)
+    arch = trainer.architecture
+
+    action_groups = [g for g in groups if g.get("lr") == 1e-4]
+    assert action_groups, "action LR group missing"
+    action_ids = {id(p) for g in action_groups for p in g["params"]}
+    assert id(arch.action_backbone.proj.weight) in action_ids
+    assert id(arch.action_backbone.proj.bias) in action_ids
+    # And action params must NOT leak into the video_lr group.
+    video_ids = {id(p) for g in groups if g.get("lr") == 5e-5 for p in g["params"]}
+    assert id(arch.action_backbone.proj.weight) not in video_ids
+
+
 def test_freeze_is_the_sole_gate_for_action_branch():
     """A frozen action_backbone (requires_grad=False) contributes no params —
     freeze is the single source of truth for trainability."""
