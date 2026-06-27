@@ -1,0 +1,55 @@
+type: behavior
+
+# ── Dataset root ────────────────────────────────────────────────────────────
+# BEHAVIOR-1K 2025-challenge demos (LeRobot v2.1, robot R1Pro). One parquet per
+# episode under data/task-{chunk:04d}/episode_{idx:08d}.parquet + meta/episodes.jsonl.
+# Only RGB videos are read (head + 2 wrists); depth / seg streams are ignored.
+# Episodes whose parquet is not on disk (partial download) are auto-skipped.
+dataset_dir: /path/to/datasets/behaviour-1k
+
+# ── Window / stride ─────────────────────────────────────────────────────────
+# Match robocoin / robotwin so a mixture batch collates without per-source resize.
+# 33 frames, stride 4 → 9 video frames; (num_video_frames - 1) % 4 == 0 (Wan VAE).
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+# ── Image size / multiview ──────────────────────────────────────────────────
+# multiview=true → L-shape canvas (head 256x320 top, L/R wrist 128x160 bottom);
+# height MUST be 384, width 320. Head cam = observation.images.rgb.head (720^2),
+# wrists = observation.images.rgb.{left,right}_wrist (480^2).
+height: 384
+width: 320
+multiview: true
+
+# ── Action normalization ────────────────────────────────────────────────────
+# Loads meta/stats_R1Pro.json (eef 20-D + base_vel 3-D). rot6d dims are pinned to
+# identity in the stats file (no normalization), matching robocoin. Generate via:
+#   python -m openwam.dataloader.utils.stats_computation.behavior_stats_computation \
+#       --dataset_dir <dataset_dir>
+#   null / "none" → no normalization (raw values)
+#   "min-max" / "z-score" / "quantile" (default — same as robocoin)
+normalize_mode: quantile
+
+# ── Action / proprio supervision ────────────────────────────────────────────
+enable_action_supervision: true
+
+# ── Unified 80-D action space (cross-robot shared head) ─────────────────────
+# unify_action=true scatters the raw 23-D vector into the shared 80-D space; the
+# per-dim mask keeps unmapped (dexterous + reserved) slots out of the loss.
+# 80-D semantic layout (== robocoin.yaml):
+#   [ 0: 3) L eef xyz   [ 3: 9) L eef rot6d   [ 9]    L gripper
+#   [10:34) L hand(24)  [34:37) R eef xyz     [37:43) R eef rot6d
+#   [43]    R gripper   [44:68) R hand(24)    [68:80) reserved(12)
+# R1Pro has parallel grippers (no dexterous hand) → the 24 hand dims/arm stay 0 +
+# masked. The mobile base occupies the reserved region: base velocity [vx,vy,vyaw]
+# → slots [68:71) (Ilia Larchenko's design); [71:80) stay reserved + masked.
+# Raw 23-D layout: [L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3];
+# the map below scatters raw 0-9 → L (0-9), 10-19 → R (34-43), 20-22 → base (68-70).
+# action_dim becomes 80 → set model.architecture.action_dim=80 state_dim=80.
+unify_action: true
+unify_action_map: ["0-9", "34-43", "68-70"]
+
+# ── Data budget (optional) ──────────────────────────────────────────────────
+# null = full dataset; positive float = subsample episodes to ~N hours of footage.
+total_hours: null

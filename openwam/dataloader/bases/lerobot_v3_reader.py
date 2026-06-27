@@ -262,13 +262,11 @@ class LeRobotV3Reader(BaseDataset):
         self._video_sample_indices = np.arange(0, self._num_frames, self._video_stride, dtype=np.int64)
         self._num_video_frames = int(self._video_sample_indices.size)
 
-        # ── episodes + offsets + split ────────────────────────────────────
-        eps = load_episodes_parquet(self._dataset_dir)
-        self._add_episode_offsets(eps)
-        info_splits = info.get("splits", {}) or {}
-        self._eps_df = apply_info_splits(
-            eps, split, info_splits, source_name=f"{self.DATASET_NAME}({self._dataset_id})"
-        )
+        # ── episodes + offsets + split (hook) ─────────────────────────────
+        # _build_episode_index is overridable so non-v3 on-disk layouts (e.g.
+        # LeRobot v2.1: per-episode parquet + meta/episodes.jsonl) can supply
+        # the same eps DataFrame contract without reimplementing __init__.
+        self._eps_df = self._build_episode_index(info)
 
         # ── optional episode-level subsample to fit a per-bucket hour budget ──
         if self._max_hours is not None:
@@ -374,6 +372,25 @@ class LeRobotV3Reader(BaseDataset):
     def _add_data_offsets(self, eps: pd.DataFrame) -> None:
         """Set ``eps['_data_row_offset']`` (generic LeRobot v3 groupby-cumsum)."""
         eps["_data_row_offset"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
+
+    def _build_episode_index(self, info: dict) -> pd.DataFrame:
+        """Load + offset + split the episodes table. LeRobot v3 default.
+
+        Returns the split-filtered episodes DataFrame the rest of ``__init__``
+        consumes. It MUST carry: ``length``, ``episode_index``,
+        ``data/chunk_index``, ``data/file_index``, ``_data_row_offset``, and for
+        every resolved camera ``videos/<cam>/chunk_index`` /
+        ``videos/<cam>/file_index`` / ``_video_frame_offset/<cam>``.
+
+        Override for non-v3 on-disk layouts (e.g. LeRobot v2.1: one parquet per
+        episode + ``meta/episodes.jsonl`` instead of ``meta/episodes/*.parquet``).
+        """
+        eps = load_episodes_parquet(self._dataset_dir)
+        self._add_episode_offsets(eps)
+        info_splits = info.get("splits", {}) or {}
+        return apply_info_splits(
+            eps, self._split, info_splits, source_name=f"{self.DATASET_NAME}({self._dataset_id})"
+        )
 
     def _train_min_window_len(self) -> int:
         """Min episode length to yield a train window. 1 = any single labeled step."""
