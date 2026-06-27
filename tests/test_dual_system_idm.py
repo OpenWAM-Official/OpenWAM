@@ -549,7 +549,6 @@ def test_idm_video_cache_matches_joint_loop():
         astate_cache,
         video_kv_cache=video_kv_cache,
         video_seq_len=int(vstate_cache.hidden_states.shape[1]),
-        video_tokens_per_frame=driver._video_tokens_per_frame(vstate_cache),
     )
     pred_cache = arch.action_backbone.extract_prediction(astate_cache)
 

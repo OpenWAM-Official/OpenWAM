@@ -126,6 +126,26 @@ def _make_tiny_trimodal_components(num_layers=2, dim=32, num_heads=4, action_dim
     return vb, ab, ub
 
 
+def _make_forward_tri_arch(vb, ab, ub):
+    """Minimal tri arch wired from pre-built components for full-``forward()``
+    tests: no VLM backbone, MoT driver without mixed-attn checkpointing."""
+    from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
+
+    class _Arch(TriSystemJointSelfAttnArchitecture):
+        device = torch.device("cpu")
+
+        def __init__(self):
+            nn.Module.__init__(self)
+            self.video_backbone = vb
+            self.action_backbone = ab
+            self.understanding_expert = ub
+            self.vlm_backbone = None
+            self._proprio_context = None
+            self._mot_driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
+
+    return _Arch()
+
+
 def test_tri_system_action_pre_post_round_trip():
     torch.manual_seed(0)
     vb, ab, _ = _make_tiny_trimodal_components()
@@ -759,21 +779,7 @@ def test_tri_system_forward_rejects_vlm_hidden_batch_mismatch():
     # Monkeypatch vb.prepare to return our pre-built vstate
     vb.prepare = lambda **kw: vstate  # noqa: ARG005
 
-    from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
-
-    class _Arch(TriSystemJointSelfAttnArchitecture):
-        device = torch.device("cpu")
-
-        def __init__(self):
-            nn.Module.__init__(self)
-            self.video_backbone = vb
-            self.action_backbone = ab
-            self.understanding_expert = ub
-            self.vlm_backbone = None
-            self._proprio_context = None
-            self._mot_driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
-
-    arch = _Arch()
+    arch = _make_forward_tri_arch(vb, ab, ub)
     # batch=1 vlm_hidden vs batch=2 video state — mismatch.
     # ``context`` and ``context_mask`` go via **pipeline_inputs and are
     # extracted as ``action_context`` inside forward().
@@ -797,21 +803,7 @@ def test_tri_system_forward_applies_vace_hints_not_rejected():
     vb, ab, ub = _make_tiny_trimodal_components()
     dit = vb.dit  # noqa: SLF001
 
-    from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
-
-    class _Arch(TriSystemJointSelfAttnArchitecture):
-        device = torch.device("cpu")
-
-        def __init__(self):
-            nn.Module.__init__(self)
-            self.video_backbone = vb
-            self.action_backbone = ab
-            self.understanding_expert = ub
-            self.vlm_backbone = None
-            self._proprio_context = None
-            self._mot_driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
-
-    arch = _Arch()
+    arch = _make_forward_tri_arch(vb, ab, ub)
 
     torch.manual_seed(0)
     fwd_kwargs = dict(

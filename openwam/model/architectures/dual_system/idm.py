@@ -204,7 +204,6 @@ class IDMMoTDriver(DualSystemMoTDriver):
         *,
         video_kv_cache: list[dict[str, Tensor]],
         video_seq_len: int,
-        video_tokens_per_frame: int,  # noqa: ARG002 — kept for caller API symmetry; Stage-2 mask is all-ones
     ):
         """Run only the action branch, attending to cached frozen-video K/V."""
         if len(video_kv_cache) != self.num_layers:
@@ -295,10 +294,10 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             shift_action=cfg.get("shift_action"),
         )
 
-        # IDM ignores attention_mask_mode entirely: training uses a hardcoded
-        # teacher-forcing mask and Stage 2 a video-all-visible mask, neither a
-        # cross-modal mode. attention_mask_mode is not forwarded to the driver;
-        # IDM never calls _build_attention_mask, so the driver default is inert.
+        # IDM ignores attention_mask_mode: it never depends on the cross-modal
+        # mode. Stage-2 cached-action attention is all-ones (built in
+        # run_action_with_video_cache); teacher-forcing/prefill build their own
+        # submasks. So attention_mask_mode is not forwarded to the driver.
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(cfg.get("mot_checkpoint_mixed_attn", True)),
             "video_attention_mask_mode": str(cfg.get("video_attention_mask_mode", "first_frame_causal")),
@@ -912,7 +911,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         if driver is None:
             driver = self.build_mot_driver()
         video_seq_len = int(cond_vstate.hidden_states.shape[1])
-        video_tokens_per_frame = driver._video_tokens_per_frame(cond_vstate)
         video_kv_cache, _ = driver.prefill_video_cache(cond_vstate)
 
         for i in tqdm(range(len(schedule) - 1), desc="IDM Stage 2: Action"):
@@ -938,7 +936,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
                 astate,
                 video_kv_cache=video_kv_cache,
                 video_seq_len=video_seq_len,
-                video_tokens_per_frame=video_tokens_per_frame,
             )
             action_noise_pred = ab.extract_prediction(astate)
 
