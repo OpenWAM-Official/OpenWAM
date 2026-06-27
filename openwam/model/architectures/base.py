@@ -1447,9 +1447,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
-        # CFG / pre-encoded-text / tile knobs are not forwarded: Wan does no CFG
-        # at inference and uses its own native tiling grid; CFG is handled by the
-        # denoising loop below via ``cfg_scale_f`` / ``cfg_merge``.
+        # CFG / pre-encoded-text knobs ARE forwarded so a CFG-capable backbone
+        # (Cosmos25) can materialise ``inputs_shared['uncond_context']`` from its
+        # own encoder/cache; the denoising loop below then applies CFG via
+        # ``cfg_scale_f`` / ``cfg_merge``. Wan does no CFG at inference and
+        # swallows these via ``**kw``, so its behaviour is unchanged.
         inputs_shared = vb.preprocess_input_for_inference(
             prompt=prompt,
             vace_video=vace_video,
@@ -1463,6 +1465,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
             tiled=tiled,
             vace_cache=vace_cache,
             prompt_embed_cache=prompt_embed_cache,
+            cfg_scale=cfg_scale,
+            cfg_merge=cfg_merge,
+            pre_encoded_text=pre_encoded_text,
+            uncond_pre_encoded_text=uncond_pre_encoded_text,
         )
 
         if profile:
