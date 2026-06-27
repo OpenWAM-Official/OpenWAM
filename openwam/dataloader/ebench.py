@@ -24,9 +24,9 @@ slots ``[64:67)``. The emitted action/proprio masks are ``(T, 80)`` and
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
-import functools
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
