@@ -293,8 +293,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             shift_action=cfg.get("shift_action"),
-            action_type=cfg.get("type", "explicit"),
-            latent_decoder=cfg.get("latent_decoder"),
         )
 
         # IDM ignores attention_mask_mode entirely: training uses a hardcoded
