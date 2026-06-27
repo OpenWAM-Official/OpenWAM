@@ -319,11 +319,14 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
 
         # Same 4D + clean-prefix-aligned t_mod opt-in as the dual_system /
         # shared_backbone forwards. TI2V fires its own branch first so these
-        # kwargs are inert there; VACE is rejected later in the joint loop
-        # (``raise NotImplementedError("tri_system + VACE not supported")``),
-        # so the practical effect is the I2V case — broadcast to 4D,
-        # ``first_frame_latents`` absent so the clean-prefix zeroing is a
-        # no-op (mathematically equivalent to the prior 3D path).
+        # kwargs are inert there. VACE and I2V both work here: VACE routes its
+        # condition through ``vace_context`` → per-video-block ``vace_hints``
+        # (applied in ``post_attn_at_layer`` → ``apply_post_block_residuals``,
+        # the same path dual_system uses; the video vstate is video-only so the
+        # hint spans the full video slice); I2V rides the ``y`` channel + CLIP
+        # context built in ``vb.prepare()``. Neither changes the video token
+        # count, so the trimodal mask is unaffected. ``first_frame_latents`` is
+        # absent for both, so the clean-prefix zeroing is a no-op.
         pipeline_inputs.setdefault("force_per_token_t_mod", True)
         pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(
@@ -337,8 +340,6 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
                 vstate = vb.run_block(block_id, vstate)
             return vb.finalize(vstate), None
 
-        if vstate.vace_hints is not None:
-            raise NotImplementedError("tri_system + VACE not supported")
         if vlm_hidden is None and vlm_inputs is None:
             raise ValueError("tri_system forward with actions requires `vlm_inputs` or cached `vlm_hidden`.")
 
