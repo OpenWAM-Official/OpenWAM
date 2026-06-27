@@ -1,10 +1,10 @@
 # Shared-Backbone WAM: action tokens concatenated into the video DiT sequence.
 # Variant via `architecture.variant`: vanilla (plain shared DiT) | moe (+ expert
 # FFN on action tokens). Action tokens project directly to video_backbone.dim.
-# Video backbone from the `video_backbone` group (default Wan22).
+# Video backbone from the `video_backbone` group (default Wan2.2-TI2V-5B).
 
 defaults:
-  - video_backbone: wan22             # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21
+  - video_backbone: wan22_ti2v_5b     # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos25
   - action_backbone: shared_action_backbone
   - _self_
 

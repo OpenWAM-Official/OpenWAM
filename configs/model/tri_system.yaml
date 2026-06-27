@@ -1,10 +1,10 @@
 # Tri-system: video DiT + ActionDiT + Understanding Expert (Qwen3-VL). Reuses
 # the dual-system joint_self_attn action backbone + understanding tokens as a
 # third mixed-attention stream. Only joint_self_attn is supported.
-# Video backbone from the Hydra `video_backbone` group (default Wan22 TI2V-5B).
+# Video backbone from the Hydra `video_backbone` group (default Wan2.2-TI2V-5B).
 
 defaults:
-  - video_backbone: wan22         # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21
+  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos25
   - action_backbone: separate_action_dit # ActionDiT (dual/tri only support ActionDiT)
   - vlm_backbone: qwen3_vl_2b      # Qwen3-VL understanding backbone (tri only)
   - _self_
