@@ -217,7 +217,10 @@ class IDMMoTDriver(DualSystemMoTDriver):
         # action token. That is exactly the action-query rows of the
         # action_sees_video joint mask (a→v all-True, a→a all-True; dual_system
         # carries no readonly tail), which reduces to an all-ones mask — built
-        # directly so IDM stays free of attention_mask_mode.
+        # directly so IDM stays free of attention_mask_mode. Shape
+        # (s_action, video_seq_len + s_action) is intentionally identical to the
+        # a-query row slice of MoTDriver._build_attention_mask, so the cached
+        # Stage-2 path and the joint-loop path stay byte-equivalent.
         action_mask = torch.ones(
             (s_action, int(video_seq_len) + s_action),
             dtype=torch.bool,
