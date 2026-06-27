@@ -34,11 +34,6 @@ Functions
     train to the full eps_df and val to empty. Raises with a clear
     message on malformed split specs.
 
-- validate_video_sampling(num_frames, video_stride, *, vae_modulus=4)
-    Enforce ``(num_frames - 1) % video_stride == 0`` and the Wan VAE
-    ``(num_video_frames - 1) % vae_modulus == 0`` constraint. Returns
-    ``(video_sample_indices, num_video_frames)``.
-
 - water_fill_hours(bucket_hours, total_budget)
     Allocate ``total_budget`` hours across N buckets via water-filling.
     Each bucket gets at most its own ``bucket_hours[i]``; surplus from
@@ -60,7 +55,7 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -167,38 +162,6 @@ def apply_info_splits(
         )
         return sel
     return eps_df.reset_index(drop=True) if split == "train" else eps_df.iloc[0:0].reset_index(drop=True)
-
-
-def validate_video_sampling(
-    num_frames: int,
-    video_stride: int,
-    *,
-    vae_modulus: int = 4,
-) -> Tuple[np.ndarray, int]:
-    """Validate the two video-sub-sampling constraints; return indices + count.
-
-    Returns:
-        video_sample_indices: np.int64 array of within-window positions to
-            sample from each video, e.g. arange(0, num_frames, video_stride).
-        num_video_frames: int, length of the array above.
-
-    Raises ValueError if either constraint is violated.
-    """
-    if (num_frames - 1) % video_stride != 0:
-        valid = [s for s in range(1, num_frames) if (num_frames - 1) % s == 0]
-        raise ValueError(
-            f"(num_frames - 1) must be divisible by video_stride. "
-            f"Got num_frames={num_frames}, video_stride={video_stride}. "
-            f"Valid strides for num_frames={num_frames}: {valid}"
-        )
-    indices = np.arange(0, num_frames, video_stride, dtype=np.int64)
-    n = int(indices.size)
-    if (n - 1) % vae_modulus != 0:
-        raise ValueError(
-            f"After video_stride sub-sampling, num_video_frames={n} "
-            f"violates (num_video_frames - 1) % {vae_modulus} == 0 (Wan VAE)."
-        )
-    return indices, n
 
 
 def water_fill_hours(bucket_hours: List[float], total_budget: float) -> List[float]:
@@ -470,7 +433,6 @@ __all__ = [
     "load_episodes_parquet",
     "compute_file_local_offsets",
     "apply_info_splits",
-    "validate_video_sampling",
     "water_fill_hours",
     "subsample_episodes_by_hours",
     "quick_bucket_hours",

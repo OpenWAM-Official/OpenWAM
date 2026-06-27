@@ -16,9 +16,8 @@ stream through genuinely different contracts and share no common base:
 
 Both roots inherit ``nn.Module, ABC`` directly — concrete subclasses inherit so
 the state_dict lives at ``action_backbone.<param>`` with no wrapping prefix. The
-common members (scheduler, shift-action, set_dtype_device, action_mean/std
-buffer contract) are written once in each root; the duplication is the price of
-the two families being independent.
+common members (scheduler, shift-action, set_dtype_device) are written once in
+each root; the duplication is the price of the two families being independent.
 """
 
 from __future__ import annotations
@@ -49,16 +48,9 @@ class SharedActionBackbone(nn.Module, ABC):
         encode_state(proprio)     -> state token | None
         decode(action_tail)             -> action_prediction
 
-    Shared action I/O (``input_proj`` / ``state_encoder`` / ``action_output_head``
-    / normalization buffers) is created by two ordered helpers so subclasses can
-    interleave their own modules (e.g. MoE's expert blocks) without perturbing
-    parameter-init order.
-
-    Buffer contract: every concrete backbone registers the persistent
-    denormalization buffers ``action_mean`` / ``action_std`` (shape
-    ``(action_dim,)``) — ``nn.Module.__getattr__`` exposes them as attributes,
-    so the architecture reads ``action_backbone.action_mean`` / ``.action_std``
-    through this contract rather than reaching into a subclass.
+    Shared action I/O (``input_proj`` / ``state_encoder`` / ``action_output_head``)
+    is created by two ordered helpers so subclasses can interleave their own
+    modules (e.g. MoE's expert blocks) without perturbing parameter-init order.
     """
 
     def __init__(
@@ -89,10 +81,8 @@ class SharedActionBackbone(nn.Module, ABC):
         self.state_encoder = StateEncoder(self.state_dim, self._video_dim) if self._use_proprioception else None
 
     def _init_action_output(self) -> None:
-        """Create the action output head + normalization buffers (last init step)."""
+        """Create the action output head (last init step)."""
         self.action_output_head = ActionOutputMLP(self._video_dim, self._action_decoder_hidden_dim, self._action_dim)
-        self.register_buffer("action_mean", torch.zeros(self._action_dim), persistent=True)
-        self.register_buffer("action_std", torch.ones(self._action_dim), persistent=True)
 
     @property
     def shift_action(self):
@@ -120,6 +110,11 @@ class SharedActionBackbone(nn.Module, ABC):
     def set_dtype_device(self, dtype, device) -> None:
         """Move action backbone params/buffers to (dtype, device)."""
         self.to(dtype=dtype, device=device)
+
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Default no-op: action weights are fully captured by the safetensors
+        checkpoint, no external artifacts to copy. Part of the architecture's
+        deploy-asset hook contract."""
 
     @property
     def action_dim(self) -> int:
@@ -158,9 +153,6 @@ class ActionDiTBackbone(nn.Module, ABC):
     either by bridge cross-attention (``forward``) or by the MoT joint
     self-attention loop. Both coupling paths plus the geometry the MoT driver
     validates against the video backbone are declared abstract here.
-
-    Buffer contract: registers ``action_mean`` / ``action_std`` (shape
-    ``(action_dim,)``) — same denormalization contract as SharedActionBackbone.
     """
 
     def __init__(self):
@@ -192,6 +184,11 @@ class ActionDiTBackbone(nn.Module, ABC):
     def set_dtype_device(self, dtype, device) -> None:
         """Move action backbone params/buffers to (dtype, device)."""
         self.to(dtype=dtype, device=device)
+
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Default no-op: action weights are fully captured by the safetensors
+        checkpoint, no external artifacts to copy. Part of the architecture's
+        deploy-asset hook contract."""
 
     @property
     def uses_proprioception(self) -> bool:

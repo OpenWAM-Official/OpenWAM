@@ -76,7 +76,8 @@ npu = ["torch==2.7.1+cpu", "torch-npu==2.7.1", "torchvision==0.22.1+cpu"]
 #     git submodule update --init third_party/cosmos-predict2.5
 #     bash scripts/install_cosmos25.sh
 cosmos25 = []
-# Dev / test toolchain — pytest is referenced by Makefile (`make test`) and tests/conftest.py; ruff drives `make lint` / `make format`.
+# Dev / test toolchain — pytest is referenced by Makefile (`make test`) and
+# tests/conftest.py; ruff drives `make lint` / `make format`.
 # Kept out of the base dependencies so non-dev installs stay slim.
 dev = [
     "pytest>=8,<10",

@@ -492,18 +492,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             self.action_backbone is not None and self.action_backbone.uses_proprioception
         )
 
-    @property
-    def action_mean(self) -> Tensor:
-        if self.action_backbone is not None:
-            return self.action_backbone.action_mean
-        return torch.zeros(self.action_dim)
-
-    @property
-    def action_std(self) -> Tensor:
-        if self.action_backbone is not None:
-            return self.action_backbone.action_std
-        return torch.ones(self.action_dim)
-
     # --- Proprio-as-context conditioning ---
 
     def _init_proprio_context(self, cfg, *, text_dim: int = 4096) -> None:
@@ -666,18 +654,17 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     # --- Checkpoint save / load ---
 
-    def save_checkpoint(self, path: str) -> None:
-        """Save architecture state to safetensors.
+    def save_checkpoint(self, path: str, *, state_dict: dict | None = None) -> None:
+        """Save architecture state to safetensors. VLM params excluded (saved separately).
 
-        VLM backbone parameters are excluded — the VLM checkpoint is saved
-        as a separate directory by the trainer. This avoids tied-weight
-        deduplication complexity and keeps the file small.
+        ``state_dict`` defaults to ``self.state_dict()`` (deploy export); the
+        trainer passes a gathered state_dict (ZeRO/DDP all-gather) instead.
         """
         from safetensors.torch import save_file
 
-        state_dict = self.state_dict()
-        if getattr(self, "vlm_backbone", None) is not None:
-            state_dict = _exclude_vlm_from_state_dict(state_dict)
+        if state_dict is None:
+            state_dict = self.state_dict()
+        state_dict = _exclude_vlm_from_state_dict(state_dict)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         save_file(state_dict, path)
 
@@ -834,11 +821,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
         reconstruction specs into ``cfg`` (so deploy rebuilds the module
         skeletons from ``config.yaml`` without the training-time ``model_path``)
         and copies its artifact files (tokenizer / processor) into ``output_dir``.
-        Backbone types that ship no deploy assets simply don't define the hook.
+        Every backbone base declares the hook (default no-op), so no probing here.
         """
         for bb in self.backbones.values():
-            if hasattr(bb, "save_deploy_assets"):
-                bb.save_deploy_assets(output_dir, cfg)
+            bb.save_deploy_assets(output_dir, cfg)
 
     # --- Training: preprocessing ---
 

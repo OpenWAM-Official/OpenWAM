@@ -5,19 +5,16 @@ import logging
 import os
 import re
 
-import torch
-
 logger = logging.getLogger(__name__)
+
+
+# --- Deploy assets (write-once) ---
 
 
 def save_config(output_dir: str, cfg):
     """Save Hydra DictConfig as config.yaml in the checkpoint directory.
 
     Only written once (skipped if the file already exists).
-
-    Args:
-        output_dir: Checkpoint directory.
-        cfg: Hydra DictConfig to serialize.
     """
     config_path = os.path.join(output_dir, "config.yaml")
     if os.path.exists(config_path):
@@ -32,13 +29,10 @@ def save_config(output_dir: str, cfg):
 def save_normalization_stats(output_dir: str, dataset) -> None:
     """Copy the dataset's resolved action-stats .npy into the checkpoint dir.
 
-    Written once (skipped if ``normalization_stats.npy`` already exists in
-    *output_dir*).  Silently no-ops when the dataset has no stats path
-    (e.g. normalization disabled or unsupported dataset type).
-
-    The copied file preserves the nested ``{"joint": ..., "eef": ...}``
-    schema so deployment can pick whichever sub-dict matches the saved
-    config's ``action_mode``.
+    Written once (skipped if ``normalization_stats.npy`` already exists). Silently
+    no-ops when the dataset has no stats path. The copied file preserves the nested
+    ``{"joint": ..., "eef": ...}`` schema so deployment can pick the sub-dict
+    matching the saved config's ``action_mode``.
     """
     import shutil
 
@@ -68,158 +62,199 @@ def save_normalization_stats(output_dir: str, dataset) -> None:
     logger.info("[normalizer] Copied action stats into checkpoint dir:\n  src: %s\n  dst: %s", src, dst)
 
 
-_MIXED_PRECISION_TO_DTYPE = {
-    "bf16": torch.bfloat16,
-    "fp16": torch.float16,
-    "no": torch.float32,
-}
+# --- Checkpoint I/O (read/write training state) ---
 
 
-def _parse_dtype(mixed_precision: str) -> torch.dtype:
-    dtype = _MIXED_PRECISION_TO_DTYPE.get(str(mixed_precision).strip().lower())
-    if dtype is None:
-        raise ValueError(
-            f"Unknown mixed_precision={mixed_precision!r}. Expected one of: {list(_MIXED_PRECISION_TO_DTYPE)}"
-        )
-    return dtype
+def save_weights(accelerator, architecture, output_path: str, global_step: int, *, final: bool) -> None:
+    """Write the weights safetensors (the deploy artifact).
 
-
-_MISSING_MIXED_PRECISION = object()
-
-
-def save_trainable_checkpoint(
-    path: str,
-    action_backbone: torch.nn.Module,
-    pipe,
-    lambda_action: float,
-    mixed_precision=_MISSING_MIXED_PRECISION,
-):
-    """Export full model state dict to safetensors or .pt.
-
-    Args:
-        path: Output file path (``.safetensors`` or ``.pt``).
-        action_backbone: Action backbone (``ActionDiT`` / ``SharedMoEActionBackbone`` / ``SharedVanillaActionBackbone``).
-        pipe: WanVideoPipeline instance.
-        lambda_action: Action loss weight (unused, kept for API compat).
-        mixed_precision: ``"bf16"`` / ``"fp16"`` / ``"no"`` — target dtype for
-            floating-point tensors. If omitted, defaults to ``"bf16"`` with
-            a WARNING so the dtype decision is explicit.
+    ALL ranks enter ``get_state_dict`` (ZeRO all-gather collective); only rank-0
+    unwraps and writes. Pruning is the caller's job, run after the full state is
+    also written so the two lines stay in lockstep.
     """
-    if mixed_precision is _MISSING_MIXED_PRECISION:
-        logger.warning("save_trainable_checkpoint: mixed_precision not provided, defaulting to 'bf16'")
-        mixed_precision = "bf16"
-    target_dtype = _parse_dtype(mixed_precision)
-    state_dict = {}
+    from tqdm import tqdm
 
-    def _maybe_cast(t: torch.Tensor) -> torch.Tensor:
-        return t.to(dtype=target_dtype) if t.is_floating_point() else t
-
-    def _non_persistent_names(root) -> set[str]:
-        """Fully-qualified names of non-persistent buffers to skip on save.
-
-        ``named_buffers`` yields non-persistent buffers (e.g. RoPE freqs)
-        too — and complex dtypes like ``complex64`` are not supported by
-        safetensors. Falls back to an empty set for plain objects that
-        don't expose ``named_modules`` (test mocks).
-        """
-        if not hasattr(root, "named_modules"):
-            return set()
-        names: set[str] = set()
-        for mod_prefix, submodule in root.named_modules():
-            nonp = getattr(submodule, "_non_persistent_buffers_set", set())
-            for bname in nonp:
-                names.add(f"{mod_prefix}.{bname}" if mod_prefix else bname)
-        return names
-
-    # action backbone: all parameters + persistent buffers
-    for name, param in action_backbone.named_parameters():
-        state_dict[f"action_backbone.{name}"] = _maybe_cast(param.data)
-    skip_action = _non_persistent_names(action_backbone)
-    for name, buf in action_backbone.named_buffers():
-        if name in skip_action:
-            continue
-        state_dict[f"action_backbone.{name}"] = _maybe_cast(buf)
-
-    # Video pipeline: all parameters + persistent buffers
-    for name, param in pipe.named_parameters():
-        state_dict[name] = _maybe_cast(param.data)
-    skip_pipe = _non_persistent_names(pipe)
-    for name, buf in pipe.named_buffers():
-        if name in skip_pipe:
-            continue
-        state_dict[name] = _maybe_cast(buf)
-
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    if path.endswith(".safetensors"):
-        from safetensors.torch import save_file
-
-        save_file(state_dict, path)
-    else:
-        torch.save(state_dict, path)
-
-    logger.info(
-        "Saved checkpoint to %s (%d keys, dtype=%s)",
-        path,
-        len(state_dict),
-        target_dtype,
-    )
+    ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
+    if accelerator.is_main_process:
+        msg = f"[checkpoint] Saving {'final ' if final else ''}step {global_step} -> {ckpt_path}"
+        logger.info(msg)
+        tqdm.write(msg)
+    state_dict = accelerator.get_state_dict(architecture)
+    if not accelerator.is_main_process:
+        return
+    accelerator.unwrap_model(architecture).save_checkpoint(ckpt_path, state_dict=state_dict)
+    msg = f"[checkpoint] Saved{' final' if final else ''}: {ckpt_path}"
+    logger.info(msg)
+    tqdm.write(msg)
 
 
-def load_trainable_checkpoint(
-    path: str,
-    action_backbone: torch.nn.Module,
-    pipe,
-):
-    """Load a checkpoint into action_backbone and pipeline.
+def save_full_state(accelerator, output_path: str, global_step: int, opt_step: int, epoch: int) -> None:
+    """Write full Accelerate state to ``accel_state_step_N/`` for resume.
 
-    Keys prefixed with ``action_backbone.`` are loaded into the action model;
-    all other keys are loaded into the pipeline.
-
-    Args:
-        path: Checkpoint file path (``.safetensors`` or ``.pt``).
-        action_backbone: Action backbone to load weights into.
-        pipe: WanVideoPipeline to load weights into.
+    ALL ranks enter (DeepSpeed shards optimizer state per-rank). rank-0 writes the
+    ``trainer_state.json`` marker last (atomic) so a half-written dir is never picked
+    by ``find_latest_accel_state``.
     """
-    if path.endswith(".safetensors"):
-        from safetensors.torch import load_file
+    import json
 
-        state_dict = load_file(path)
-    else:
-        state_dict = torch.load(path, map_location="cpu")
+    state_dir = os.path.join(output_path, f"accel_state_step_{global_step}")
+    if accelerator.is_main_process:
+        os.makedirs(state_dir, exist_ok=True)
+    accelerator.wait_for_everyone()
+    accelerator.save_state(state_dir)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        meta = {"global_step": int(global_step), "opt_step": int(opt_step), "epoch": int(epoch)}
+        meta_path = os.path.join(state_dir, "trainer_state.json")
+        tmp_path = meta_path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(meta, f)
+        os.replace(tmp_path, meta_path)
 
-    action_keys = {k: v for k, v in state_dict.items() if k.startswith("action_backbone.")}
-    if action_keys:
-        cleaned = {k.removeprefix("action_backbone."): v for k, v in action_keys.items()}
-        action_backbone.load_state_dict(cleaned, strict=False)
 
-    pipe_keys = {k: v for k, v in state_dict.items() if not k.startswith("action_backbone.")}
-    if pipe_keys:
-        pipe.load_state_dict(pipe_keys, strict=False)
+def load_full_state(accelerator, state_dir: str) -> dict:
+    """Restore optimizer/scheduler/RNG/model from ``state_dir`` (call AFTER prepare).
 
-    logger.info("Loaded checkpoint from %s", path)
+    Returns the ``trainer_state.json`` contents (global_step / opt_step / epoch).
+    """
+    import json
+
+    accelerator.load_state(state_dir)
+    meta_path = os.path.join(state_dir, "trainer_state.json")
+    if os.path.isfile(meta_path):
+        with open(meta_path) as f:
+            return json.load(f)
+    return {"global_step": 0, "opt_step": 0, "epoch": 0}
+
+
+# --- Discovery (locate latest step) ---
+
+
+def step_num(path: str, prefix: str = "checkpoint_step_") -> int:
+    m = re.search(rf"{prefix}(\d+)", path)
+    return int(m.group(1)) if m else 0
+
+
+def find_latest_weights(run_dir: str) -> str:
+    """Return the highest-step ``checkpoint_step_N.safetensors`` in *run_dir*.
+
+    Used by the finetune path. Malformed names are skipped; step-0-only triggers
+    a warning (likely a crash before the first real save).
+    """
+    files = _glob.glob(os.path.join(run_dir, "checkpoint_step_*.safetensors"))
+    if not files:
+        raise FileNotFoundError(f"No checkpoint_step_*.safetensors found in {run_dir}")
+    step_re = re.compile(r"checkpoint_step_(\d+)\.safetensors$")
+    numbered: list[tuple[int, str]] = []
+    for f in files:
+        m = step_re.search(os.path.basename(f))
+        if m is not None:
+            numbered.append((int(m.group(1)), f))
+        else:
+            logger.warning("Skipping malformed checkpoint name: %s", f)
+    if not numbered:
+        raise FileNotFoundError(f"No file in {run_dir} matches checkpoint_step_<int>.safetensors")
+    numbered.sort(key=lambda p: p[0])
+    latest_step, latest_path = numbered[-1]
+    if latest_step == 0:
+        logger.warning("Latest checkpoint in %s is step 0 (%s); verify before finetune.", run_dir, latest_path)
+    return latest_path
+
+
+def find_latest_accel_state(run_dir: str) -> str | None:
+    """Return the highest-step *usable* ``accel_state_step_N/`` in *run_dir*, or None.
+
+    Usable = ``trainer_state.json`` present. ``save_full_state`` writes that marker
+    atomically AFTER ``accelerator.save_state`` returns, so its presence proves the
+    (possibly large / sharded) state finished writing. DeepSpeed's ``save_state``
+    writes a ``pytorch_model/`` dir and no ``random_states_*.pkl``, so the marker —
+    not RNG files — is the completion signal. Half-written dirs lack it and are skipped.
+    """
+    if not run_dir or not os.path.isdir(run_dir):
+        return None
+    best: tuple[int, str] | None = None
+    for name in os.listdir(run_dir):
+        if not name.startswith("accel_state_step_"):
+            continue
+        state_dir = os.path.join(run_dir, name)
+        if not os.path.isfile(os.path.join(state_dir, "trainer_state.json")):
+            continue
+        step = step_num(name, "accel_state_step_")
+        if best is None or step > best[0]:
+            best = (step, state_dir)
+    return best[1] if best else None
+
+
+# --- Resume position (pure math) ---
+
+
+def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum: int) -> tuple[int, int, int]:
+    """Map a resumed ``global_step`` to ``(start_epoch, skip_first_batches, aligned_global_step)``.
+
+    ``skip`` is floored to a grad_accum boundary so the first optimizer step after
+    resume sees a full accumulation cycle; ``aligned_global_step`` pulls ``global_step``
+    back to that same boundary so the floored-off batches are not re-trained and the
+    per-step seed (keyed on global_step) stays matched. No-op at grad_accum=1.
+    """
+    batches_per_epoch = max(batches_per_epoch, 1)
+    start_epoch = global_step // batches_per_epoch
+    skip = global_step % batches_per_epoch
+    if grad_accum > 1 and skip % grad_accum != 0:
+        skip = (skip // grad_accum) * grad_accum
+    aligned_global_step = start_epoch * batches_per_epoch + skip
+    return start_epoch, skip, aligned_global_step
+
+
+# --- Retention / finalize (prune) ---
 
 
 def manage_checkpoints(output_dir: str, keep_last_k: int):
-    """Delete old checkpoints, keeping only the most recent *keep_last_k*.
+    """Keep only the most recent *keep_last_k* checkpoints.
 
-    Looks for files matching ``checkpoint_step_*`` in *output_dir*
-    and removes the oldest ones.
-
-    Args:
-        output_dir: Directory containing checkpoint files.
-        keep_last_k: Number of most recent checkpoints to keep.
+    Prunes ``checkpoint_step_*`` (weights, files) and ``accel_state_step_*``
+    (resume state, dirs) in lockstep so a kept weights file always retains its
+    sibling state dir.
     """
-    pattern = os.path.join(output_dir, "checkpoint_step_*")
-    files = _glob.glob(pattern)
+    import shutil
 
-    # Sort numerically by step number
-    def _step_num(path):
-        m = re.search(r"checkpoint_step_(\d+)", path)
-        return int(m.group(1)) if m else 0
-
-    files.sort(key=_step_num)
+    files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*"))
+    files.sort(key=lambda p: step_num(p, "checkpoint_step_"))
     while len(files) > keep_last_k:
         old = files.pop(0)
         if os.path.isfile(old):
             os.remove(old)
             logger.info("Removed old checkpoint: %s", old)
+
+    state_dirs = [p for p in _glob.glob(os.path.join(output_dir, "accel_state_step_*")) if os.path.isdir(p)]
+    state_dirs.sort(key=lambda p: step_num(p, "accel_state_step_"))
+    while len(state_dirs) > keep_last_k:
+        old = state_dirs.pop(0)
+        try:
+            shutil.rmtree(old)
+            logger.info("Removed old accelerate state dir: %s", old)
+        except OSError as e:
+            logger.warning("Failed to remove old accelerate state dir %s: %s", old, e)
+
+
+def finalize_keep_weights_only(output_dir: str):
+    """Training-complete cleanup: drop all resume state, keep only the final weights.
+
+    Removes every ``accel_state_step_*`` dir and every ``checkpoint_step_*.safetensors``
+    except the highest step. Rank-0 only — caller must guard.
+    """
+    import shutil
+
+    for d in _glob.glob(os.path.join(output_dir, "accel_state_step_*")):
+        if os.path.isdir(d):
+            try:
+                shutil.rmtree(d)
+                logger.info("Removed accelerate state dir: %s", d)
+            except OSError as e:
+                logger.warning("Failed to remove accelerate state dir %s: %s", d, e)
+
+    files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*.safetensors"))
+    files.sort(key=lambda p: step_num(p, "checkpoint_step_"))
+    for old in files[:-1]:
+        if os.path.isfile(old):
+            os.remove(old)
+            logger.info("Removed non-final checkpoint: %s", old)

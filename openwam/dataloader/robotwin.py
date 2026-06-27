@@ -281,28 +281,6 @@ def _resolve_prompt(
     return format_prompt_for_inference(base_prompt)
 
 
-def _check_temporal_divisibility(num_video_frames: int, temporal_compression: int, causal_temporal: bool) -> None:
-    """Validate ``num_video_frames`` against the encoder's temporal contract.
-
-    Threaded from ``configs/model/*.yaml`` →
-    ``openwam.train.utils.temporal_contract.apply_temporal_contract_bridge``
-    (invoked by ``scripts/train.py``) → dataset cfg. Kept
-    as a free function so tests can exercise the branching rule without
-    instantiating the full dataset (which requires real episode HDF5 files).
-    """
-    tc = int(temporal_compression)
-    if causal_temporal:
-        if (num_video_frames - 1) % tc != 0:
-            raise ValueError(
-                f"num_video_frames={num_video_frames} violates (N-1) % {tc} == 0 (required by causal encoder)."
-            )
-    else:
-        if num_video_frames % tc != 0:
-            raise ValueError(
-                f"num_video_frames={num_video_frames} violates N % {tc} == 0 (required by non-causal encoder)."
-            )
-
-
 class RoboTwinDataset(BaseDataset):
     """RoboTwin 2.0 HDF5 dataset for bimanual robot video-action training.
 
@@ -352,8 +330,6 @@ class RoboTwinDataset(BaseDataset):
         max_static_retry: int = 3,
         text_embedding_cache_dir: Optional[str] = None,
         text_embedding_dropout: float = 0.0,
-        temporal_compression: int = 4,
-        causal_temporal: bool = True,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
     ):
@@ -363,8 +339,6 @@ class RoboTwinDataset(BaseDataset):
         self.action_mode = action_mode
         self._unify_action = bool(unify_action)
         self._unify_action_map = unify_action_map
-        self.temporal_compression = int(temporal_compression)
-        self.causal_temporal = bool(causal_temporal)
         self.normalize_mode = normalize_mode if normalize_mode not in ("", "none", "null") else None
         self._filter_static_segments = bool(filter_static_segments)
         self._static_segment_threshold = float(static_segment_threshold)
@@ -399,27 +373,15 @@ class RoboTwinDataset(BaseDataset):
         self.target_camera = target_camera
         self.window_stride = max(1, window_stride)
         self.video_stride = max(1, video_stride)
-        if (self.num_frames - 1) % self.video_stride != 0:
-            valid = [s for s in range(1, self.num_frames) if (self.num_frames - 1) % s == 0]
-            raise ValueError(
-                f"(num_frames - 1) must be divisible by video_stride. "
-                f"Got num_frames={self.num_frames}, video_stride={self.video_stride}. "
-                f"Valid strides for num_frames={self.num_frames}: {valid}"
-            )
+        # video_stride sub-samples frames within each window:
+        # range(0, num_frames, video_stride). num_video_frames is whatever that
+        # yields. For clean encoder temporal downsampling it should match the
+        # encoder's contract (Wan VAE causal: (num_video_frames - 1) % 4 == 0;
+        # non-causal: num_video_frames % tc == 0) — NOT enforced here; a mismatch
+        # surfaces downstream at encode time.
         self._raw_window_len = self.num_frames
         self._video_sample_indices = list(range(0, self.num_frames, self.video_stride))
         self.num_video_frames = len(self._video_sample_indices)
-        # Encoder temporal downsampling divisibility check. The contract is
-        # threaded from the encoder spec via ``configs/model/*.yaml`` →
-        # ``openwam.train.utils.temporal_contract.apply_temporal_contract_bridge``
-        # (invoked by ``scripts/train.py``) → dataloader cfg. Defaults preserve
-        # the historical Wan VAE rule.
-        #   causal_temporal=True : first frame is its own latent token, so the
-        #     remaining ``num_video_frames - 1`` frames must be divisible by
-        #     ``temporal_compression`` (Wan VAE = 4, V-JEPA 2.1 = 2).
-        #   causal_temporal=False: uniform tubelets, so ``num_video_frames``
-        #     itself must be divisible by ``temporal_compression``.
-        _check_temporal_divisibility(self.num_video_frames, self.temporal_compression, self.causal_temporal)
         self.multiview = bool(multiview)
         if self.multiview:
             if camera_layout is None:
@@ -927,9 +889,7 @@ class RoboTwinDataset(BaseDataset):
         # mapped slots; unmapped slots stay 0 and are masked out below.
         unify_dim_mask = None
         if self._unify_dst_index is not None:
-            raw_actions, unify_dim_mask = map_to_unify(
-                raw_actions.astype(np.float32), self._unify_dst_index, UNIFY_DIM
-            )
+            raw_actions, unify_dim_mask = map_to_unify(raw_actions.astype(np.float32), self._unify_dst_index, UNIFY_DIM)
 
         # Video: subsampled. State/action: raw rate.
         sampled_video = [raw_frames[i] for i in self._video_sample_indices]
@@ -1125,8 +1085,6 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             max_static_retry=int(_get("max_static_retry", 3)),
             text_embedding_cache_dir=_get("text_embedding_cache_dir", None),
             text_embedding_dropout=float(_get("text_embedding_dropout", 0.0)),
-            temporal_compression=int(_get("temporal_compression", 4)),
-            causal_temporal=bool(_get("causal_temporal", True)),
             unify_action=bool(_get("unify_action", False)),
             unify_action_map=_get("unify_action_map", None),
         )

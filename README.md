@@ -156,7 +156,7 @@ Available groups: `wan22` (Wan2.2-TI2V-5B, default), `wan21` (VACE-1.3B / I2V-14
 
 > `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`. Override **both** together; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
 
-Distributed training configs in `configs/accelerate/`: `deepspeed_zero1.yaml`, `deepspeed_zero2.yaml`.
+Distributed training uses DeepSpeed ZeRO; the stage is set via `training.zero_stage` in `train.yaml` (default 2, e.g. `training.zero_stage=1`).
 
 ### 2. Deployment
 

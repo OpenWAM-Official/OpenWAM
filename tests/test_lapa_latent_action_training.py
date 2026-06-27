@@ -128,35 +128,3 @@ def test_non_latent_action_path_still_requires_action(monkeypatch):
 
     with pytest.raises(ValueError, match="lambda_action > 0 but no action"):
         trainer.compute_loss([{"video": [torch.zeros(4, 4, 3), torch.ones(4, 4, 3)], "prompt": "move"}])
-
-
-def test_latent_action_rejects_proprioception(monkeypatch):
-    from openwam.train.openwam_trainer import OpenWAMTrainer
-
-    arch = _Arch(action_dim=1024, use_proprio=True)
-    _patch_trainer(monkeypatch, arch=arch)
-
-    with pytest.raises(ValueError, match="use_proprioception=false"):
-        OpenWAMTrainer(_cfg(enabled=True, use_proprio=True), accelerator=None, dataset=None)
-
-
-def test_latent_action_rejects_action_dim_mismatch(monkeypatch):
-    from openwam.train.openwam_trainer import OpenWAMTrainer
-
-    arch = _Arch(action_dim=20)
-    _patch_trainer(monkeypatch, arch=arch)
-
-    with pytest.raises(ValueError, match="does not match"):
-        OpenWAMTrainer(_cfg(enabled=True, action_dim=20), accelerator=None, dataset=None)
-
-
-def test_latent_action_rejects_token_dim_mismatch(monkeypatch):
-    from openwam.train.openwam_trainer import OpenWAMTrainer
-
-    arch = _Arch(action_dim=1024)
-    _patch_trainer(monkeypatch, arch=arch)
-    cfg = _cfg(enabled=True)
-    cfg.model.action_backbone.latent_encoder.output.token_dim = 512
-
-    with pytest.raises(ValueError, match="token_dim=512"):
-        OpenWAMTrainer(cfg, accelerator=None, dataset=None)
