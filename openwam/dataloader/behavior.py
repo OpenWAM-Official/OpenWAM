@@ -47,7 +47,7 @@ import numpy as np
 import pandas as pd
 
 from openwam.dataloader.bases import LeRobotV3Reader
-from openwam.dataloader.utils.eef import quat_xyzw_to_rot6d
+from openwam.dataloader.utils.eef import EEF_DIM, assert_unit_quaternion, quat_xyzw_to_rot6d
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 
 logger = logging.getLogger(__name__)
@@ -64,9 +64,12 @@ _ACT_LGRIP = 14
 _ACT_RGRIP = 22
 
 # Raw pre-scatter width: EEF 20 (pos3+rot6d6+grip1 ×2) + base velocity 3.
-_RAW_DIM = 23
-_EEF_DIM = 20
+# _EEF_DIM is the shared bimanual EEF width (== utils.eef.EEF_DIM, as RoboCOIN
+# imports it) so the 20-D block stays in lockstep with the sibling readers; the
+# +3 base velocity and the resulting raw 23 are the BEHAVIOR-specific deltas.
+_EEF_DIM = EEF_DIM
 _BASE_DIM = 3
+_RAW_DIM = _EEF_DIM + _BASE_DIM
 
 # R1Pro RGB camera feature keys (depth / seg_instance are intentionally ignored).
 _HEAD_CAMERA = "observation.images.rgb.head"
@@ -256,14 +259,16 @@ class BehaviorDataset(LeRobotV3Reader):
         if len(vals) == 0:
             return  # 0-row episode parquet — nothing to sanity-check
         st = np.stack(vals)
+        # Reuse the shared unit-norm check (same helper RT-1 uses in its _post_init),
+        # re-raising with the BEHAVIOR offset context so a layout change is actionable.
         for sl, name in ((_L_EEF_QUAT, "left"), (_R_EEF_QUAT, "right")):
-            norms = np.linalg.norm(st[:, sl].astype(np.float64), axis=-1)
-            if np.abs(norms - 1.0).max() > 0.05:
+            try:
+                assert_unit_quaternion(st[:, sl], tol=0.05, sample_n=len(st))
+            except ValueError as e:
                 raise ValueError(
-                    f"BEHAVIOR({self._dataset_id}): {name} eef quat at state[{sl.start}:{sl.stop}] is not "
-                    f"unit-norm (max|‖q‖-1|={np.abs(norms - 1.0).max():.3f}); observation.state layout may "
-                    "have changed — re-verify the EEF offsets."
-                )
+                    f"BEHAVIOR({self._dataset_id}): {name} eef quat at state[{sl.start}:{sl.stop}] failed the "
+                    f"unit-norm check ({e}); observation.state layout may have changed — re-verify the EEF offsets."
+                ) from e
 
     def _load_stats(self, info: dict):
         """Load ``meta/stats_R1Pro.json`` → combined 23-D (eef20 + base_vel3) stats.
