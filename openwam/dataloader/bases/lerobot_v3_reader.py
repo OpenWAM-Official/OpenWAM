@@ -388,9 +388,7 @@ class LeRobotV3Reader(BaseDataset):
         eps = load_episodes_parquet(self._dataset_dir)
         self._add_episode_offsets(eps)
         info_splits = info.get("splits", {}) or {}
-        return apply_info_splits(
-            eps, self._split, info_splits, source_name=f"{self.DATASET_NAME}({self._dataset_id})"
-        )
+        return apply_info_splits(eps, self._split, info_splits, source_name=f"{self.DATASET_NAME}({self._dataset_id})")
 
     def _train_min_window_len(self) -> int:
         """Min episode length to yield a train window. 1 = any single labeled step."""
@@ -593,10 +591,15 @@ class LeRobotV3Reader(BaseDataset):
         width = self._raw_action_dim  # fill at raw width first; unify-scatter below
         action = np.zeros((T_action, width), dtype=np.float32)
         n_valid = 0
+        n_supervised = 0
         if action_20d is not None:
             n_valid = min(actual_raw_len, T_action)
             if n_valid > 0:
                 action[:n_valid] = action_20d[:n_valid]
+            # Steps with a REAL supervised target. Default == n_valid (row-aligned
+            # readers); a reader that shifts the target +1 frame overrides
+            # _n_supervised_action_steps so its clamped final boundary step is masked.
+            n_supervised = min(self._n_supervised_action_steps(actual_raw_len), T_action)
 
         if self._unify:
             # (T, raw) -> (T, unify_dim). The dim mask is the precomputed
@@ -610,10 +613,23 @@ class LeRobotV3Reader(BaseDataset):
         action_mask = build_action_mask_2d(
             T_action=T_action,
             action_dim=self.ACTION_DIM,
-            n_valid_time=n_valid if self._enable_action_supervision else 0,
+            n_valid_time=n_supervised if self._enable_action_supervision else 0,
             dim_mask=dim_mask,
         )
         return action, action_mask
+
+    def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
+        """Number of action steps in the window that carry a REAL supervised target.
+
+        Default: every row present (``actual_raw_len``) — row-aligned readers read
+        the action at row ``t`` directly, so all rows are real. A reader that builds
+        the target by shifting the achieved pose +1 frame (so the last row of a
+        boundary window is a clamped / fabricated target) overrides this to drop
+        that final step (e.g. ``actual_raw_len`` if the window is full, else
+        ``actual_raw_len - 1``). The result is min-capped to ``T_action`` by the
+        caller, so the default reproduces the previous ``n_valid`` exactly.
+        """
+        return actual_raw_len
 
     def _finalize_proprio(self, proprio_20d: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         """Build ``(1, ACTION_DIM)`` proprio + its 2-D mask.

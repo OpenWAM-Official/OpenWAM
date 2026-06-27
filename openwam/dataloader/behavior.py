@@ -48,7 +48,6 @@ import pandas as pd
 
 from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.eef import quat_xyzw_to_rot6d
-from openwam.dataloader.utils.lerobotv3 import apply_info_splits
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 
 logger = logging.getLogger(__name__)
@@ -142,15 +141,21 @@ class BehaviorDataset(LeRobotV3Reader):
         records = []
         prompts = {}
         with open(eps_path) as f:
-            for line in f:
+            for lineno, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                d = json.loads(line)
-                ei = int(d["episode_index"])
-                records.append((ei, int(d["length"])))
+                try:
+                    d = json.loads(line)
+                    ei = int(d["episode_index"])
+                    n = int(d["length"])
+                except (ValueError, KeyError, TypeError) as e:
+                    raise ValueError(
+                        f"BEHAVIOR({self._dataset_id}): malformed meta/episodes.jsonl line {lineno}: {e}"
+                    ) from e
+                records.append((ei, n))
                 tasks = d.get("tasks") or []
-                prompts[ei] = tasks[0].strip() if tasks else ""
+                prompts[ei] = str(tasks[0]).strip() if tasks else ""
         self._ep_prompt = prompts  # consumed by _load_prompts
 
         # Keep only episodes whose data parquet AND head video are both on disk
@@ -189,13 +194,17 @@ class BehaviorDataset(LeRobotV3Reader):
             cols[self._video_offset_col(cam)] = zeros
         df = pd.DataFrame(cols)
 
-        # Honor info.json[splits] exactly like the v3 default (apply_info_splits):
-        # train → all on-disk episodes, a declared split → its episode_index range,
-        # any *undeclared* non-train split → empty. Without this a split="val" loader
-        # would silently serve the whole training set (the dataset declares only a
-        # train split), diverging from every sibling reader's "empty val" contract.
-        info_splits = info.get("splits", {}) or {}
-        df = apply_info_splits(df, self._split, info_splits, source_name=f"BEHAVIOR({self._dataset_id})")
+        # BEHAVIOR-1K declares only splits.train (== all episodes) and its
+        # episode_index is NOT 0-contiguous: it is ``task * chunks_size + local``
+        # (real range 10 .. 493000 across 50 tasks). So info.json's ``"0:10000"`` is
+        # a POSITIONAL count (0:total_episodes = all), NOT an episode_index window —
+        # routing it through apply_info_splits (which filters episode_index ∈ [0,N))
+        # would silently keep only task-0000 (~1/50th of the data). The dataset has
+        # no real train/val partition, so: train → all on-disk episodes; any other
+        # split → empty (matching every sibling reader's "empty val" contract, so a
+        # val loader can't silently leak the training set).
+        if self._split != "train":
+            df = df.iloc[0:0].reset_index(drop=True)
 
         # The episode_annotated resolver does NOT guard emptiness (unlike the
         # task_index path, which raises). Fail fast here so a blank-`tasks` episode
@@ -231,27 +240,30 @@ class BehaviorDataset(LeRobotV3Reader):
         self._video_path_template = "videos/task-{chunk_index:04d}/{video_key}/episode_{file_index:08d}.mp4"
         if len(self._eps_df) == 0:
             return  # empty split (e.g. val on a train-only dataset) — nothing to check
-        # Fail fast if a future re-upload changes the state packing.
-        try:
-            ep0 = int(self._eps_df["episode_index"].iloc[0])
-            chunk0 = int(self._eps_df["data/chunk_index"].iloc[0])
-            path = self._dataset_dir / self._data_path_template.format(chunk_index=chunk0, file_index=ep0)
-            import pyarrow.parquet as pq
+        # Fail fast if a future re-upload changes the state packing. The READ is
+        # best-effort (a missing / corrupt / 0-row first episode under a partial
+        # download just skips the optional check); a successful read that violates
+        # the unit-norm invariant raises.
+        ep0 = int(self._eps_df["episode_index"].iloc[0])
+        chunk0 = int(self._eps_df["data/chunk_index"].iloc[0])
+        path = self._dataset_dir / self._data_path_template.format(chunk_index=chunk0, file_index=ep0)
+        import pyarrow.parquet as pq
 
+        try:
             vals = pq.read_table(path, columns=["observation.state"]).to_pandas()["observation.state"].values[:64]
-            if len(vals) == 0:
-                return  # 0-row episode parquet — nothing to sanity-check
-            st = np.stack(vals)
-            for sl, name in ((_L_EEF_QUAT, "left"), (_R_EEF_QUAT, "right")):
-                norms = np.linalg.norm(st[:, sl].astype(np.float64), axis=-1)
-                if np.abs(norms - 1.0).max() > 0.05:
-                    raise ValueError(
-                        f"BEHAVIOR({self._dataset_id}): {name} eef quat at state[{sl.start}:{sl.stop}] is not "
-                        f"unit-norm (max|‖q‖-1|={np.abs(norms - 1.0).max():.3f}); observation.state layout may "
-                        "have changed — re-verify the EEF offsets."
-                    )
-        except FileNotFoundError:
-            pass  # episode file not present yet (partial download) — skip the check
+        except Exception:  # noqa: BLE001 — absent/corrupt first episode (partial download): skip optional check
+            return
+        if len(vals) == 0:
+            return  # 0-row episode parquet — nothing to sanity-check
+        st = np.stack(vals)
+        for sl, name in ((_L_EEF_QUAT, "left"), (_R_EEF_QUAT, "right")):
+            norms = np.linalg.norm(st[:, sl].astype(np.float64), axis=-1)
+            if np.abs(norms - 1.0).max() > 0.05:
+                raise ValueError(
+                    f"BEHAVIOR({self._dataset_id}): {name} eef quat at state[{sl.start}:{sl.stop}] is not "
+                    f"unit-norm (max|‖q‖-1|={np.abs(norms - 1.0).max():.3f}); observation.state layout may "
+                    "have changed — re-verify the EEF offsets."
+                )
 
     def _load_stats(self, info: dict):
         """Load ``meta/stats_R1Pro.json`` → combined 23-D (eef20 + base_vel3) stats.
@@ -300,6 +312,13 @@ class BehaviorDataset(LeRobotV3Reader):
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
 
     # ----- action / proprio -------------------------------------------------
+
+    def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
+        """We shift the EEF target +1 frame (``eef_next``). The last row of a window
+        is a real target only when a later frame exists; at an episode boundary
+        (``actual_raw_len < num_frames``) it is clamped to the current pose (a
+        fabricated zero-motion target) → exclude it from the supervised mask."""
+        return actual_raw_len if actual_raw_len >= self._num_frames else actual_raw_len - 1
 
     def _action_20d(self, win) -> np.ndarray:
         """Raw ``(actual_raw_len, 23)`` action: next-frame EEF pose + grip/base cmd at t."""

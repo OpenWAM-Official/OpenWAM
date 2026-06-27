@@ -110,7 +110,7 @@ def _write_episodes_jsonl(bucket: Path, episodes: list[int]) -> None:
             f.write(json.dumps({"episode_index": ep, "length": EP_LENGTH, "tasks": [f"do task {ep}"]}) + "\n")
 
 
-def _write_info(bucket: Path) -> None:
+def _write_info(bucket: Path, *, splits: dict | None = None) -> None:
     (bucket / "meta").mkdir(parents=True, exist_ok=True)
     info = {
         "fps": FPS,
@@ -127,6 +127,8 @@ def _write_info(bucket: Path) -> None:
             "action": {"dtype": "float32", "shape": [ACTION_DIM]},
         },
     }
+    if splits is not None:
+        info["splits"] = splits
     (bucket / "meta" / "info.json").write_text(json.dumps(info))
 
 
@@ -253,20 +255,27 @@ class TestGetItem:
         assert s["video"][0].size == (320, 384)  # PIL (W, H)
 
     def test_end_of_episode_single_frame_window(self, tmp_path):
-        # Last start of ep 0 → a 1-frame window (actual_raw_len==1): exercises the
-        # no-shift branch of _action_20d (len(eef)==1) + the padded/masked tail.
+        # Last start of ep 0 → a 1-frame window (actual_raw_len==1): the +1 EEF shift
+        # has no next frame, so there are ZERO supervised action steps (the clamped
+        # target must NOT be marked valid). Proprio (current frame) is still valid.
         b = make_behavior_bucket(tmp_path, n_episodes=1)  # ep 0 yields EP_LENGTH starts
         with _mock_video_decoder():
             s = _make_ds(b)[EP_LENGTH - 1]
         a = s["action"].numpy()
         assert a.shape == (32, 80)
         assert np.isfinite(a).all()
-        am = s["action_mask"].numpy()
-        # exactly one real action step; its mapped dims are valid, later steps masked.
-        assert am[0, EXPECTED_VALID].all()
-        assert not am[1:].any()
-        # proprio is the current frame → always valid on the mapped dims.
+        assert not s["action_mask"].numpy().any()  # no real next-frame target exists
         assert s["proprio_mask"].numpy()[0, EXPECTED_VALID].all()
+
+    def test_end_of_episode_two_frame_window_masks_clamped_step(self, tmp_path):
+        # 2-frame boundary window (actual_raw_len==2): step 0 is a real transition
+        # (eef target = next frame), step 1's target is clamped → must be masked.
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder():
+            s = _make_ds(b)[EP_LENGTH - 2]
+        am = s["action_mask"].numpy()
+        assert am[0, EXPECTED_VALID].all()  # first transition is a real target
+        assert not am[1:].any()  # clamped final step is masked out
 
 
 # ── prompts -------------------------------------------------------------------
@@ -305,6 +314,24 @@ class TestSplit:
             val = _make_ds(b, split="val")
         assert len(train) > 0
         assert len(val) == 0
+
+    def test_declared_train_split_keeps_all_noncontiguous_episodes(self, tmp_path):
+        # Mirror the REAL dataset: info.json declares splits.train="0:N" (a positional
+        # count) while episode_index is non-contiguous (task*chunks_size + local). The
+        # train split must keep ALL on-disk episodes — NOT range-filter by
+        # episode_index value (which would drop ~every task but task-0000).
+        bucket = tmp_path / "behaviour-1k"
+        bucket.mkdir(parents=True, exist_ok=True)
+        idxs = [10, CHUNKS_SIZE + 10, 2 * CHUNKS_SIZE + 10]  # tasks 0, 1, 2 (local 10)
+        _write_info(bucket, splits={"train": f"0:{len(idxs)}"})
+        _write_episodes_jsonl(bucket, idxs)
+        for ep in idxs:
+            _write_episode_parquet(bucket, ep)
+            _write_episode_videos(bucket, ep)
+        with _mock_video_decoder():
+            ds = _make_ds(bucket, split="train")
+        assert sorted(ds._eps_df["episode_index"].tolist()) == idxs  # all 3 tasks kept
+        assert ds._eps_df["data/chunk_index"].tolist() == [0, 1, 2]  # chunk = idx // chunks_size
 
 
 # ── normalization -------------------------------------------------------------
