@@ -171,10 +171,14 @@ class OpenWAMTrainer:
         dataloader = self.build_dataloader(batch_size)
         max_grad_norm = float(t.max_grad_norm) if getattr(t, "max_grad_norm", None) else None
 
+        n_proc = self.accelerator.num_processes
         steps_per_epoch = math.ceil(len(dataloader) / grad_accum)
         # max_steps counts micro-steps (global_step); convert to optimizer steps for the LR horizon.
         max_opt_steps = math.ceil(max_steps / grad_accum) if max_steps else None
         if num_epochs is not None:
+            # prepare() shards the dataloader ~1/n_proc; fold that in so total_opt_steps is the
+            # per-process optimizer steps the loop actually runs (same unit as max_opt_steps).
+            steps_per_epoch = math.ceil(steps_per_epoch / n_proc)
             total_opt_steps = steps_per_epoch * num_epochs
             if max_opt_steps:
                 total_opt_steps = min(total_opt_steps, max_opt_steps)
@@ -370,7 +374,9 @@ class OpenWAMTrainer:
         if debug:
             return None
         if getattr(t, "lr_scheduler", None) == "cosine":
-            return build_cosine_scheduler(optimizer, total_opt_steps=total_opt_steps, cfg=self.cfg)
+            return build_cosine_scheduler(
+                optimizer, total_opt_steps=total_opt_steps, cfg=self.cfg, num_processes=self.accelerator.num_processes
+            )
         return None
 
     # (6) Called by train() — locate/create the run dir and resolve the resume state dir.

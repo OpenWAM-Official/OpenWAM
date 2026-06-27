@@ -3,9 +3,12 @@
 Pure compute + IO — no GPU, no real Accelerator.
 """
 
+import types
+
 import torch
 
 from openwam.train.utils.training_utils import (
+    build_cosine_scheduler,
     reduce_step_metrics,
     write_debug_loss_row,
 )
@@ -36,6 +39,39 @@ def test_reduce_step_metrics_num_processes_one_uses_fast_path():
     losses["total"] = torch.tensor(1.0)
     out = reduce_step_metrics(_SingleProc(), losses, torch.tensor(0.0))
     assert out["loss_total"] == 1.0
+
+
+# --- build_cosine_scheduler (num_processes scaling) ---
+
+
+def _cosine_cfg(lr=1e-4, warmup_ratio=0.1, lr_min_ratio=0.01):
+    training = types.SimpleNamespace(learning_rate=lr, warmup_ratio=warmup_ratio, lr_min_ratio=lr_min_ratio)
+    return types.SimpleNamespace(training=training)
+
+
+def _build(total_opt_steps, num_processes, lr=1e-4, warmup_ratio=0.1, lr_min_ratio=0.01):
+    opt = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=lr)
+    cfg = _cosine_cfg(lr=lr, warmup_ratio=warmup_ratio, lr_min_ratio=lr_min_ratio)
+    return build_cosine_scheduler(opt, total_opt_steps=total_opt_steps, cfg=cfg, num_processes=num_processes)
+
+
+def test_cosine_scheduler_scales_horizons_by_num_processes():
+    # warmup_ratio=0.1 -> warmup=100, cosine=900; AcceleratedScheduler steps n times per opt step,
+    # so inner horizons must be multiplied by n to land on the right opt step.
+    sched = _build(total_opt_steps=1000, num_processes=8)
+    warmup, cosine = sched._schedulers
+    assert warmup.total_iters == 100 * 8
+    assert cosine.T_max == 900 * 8
+    assert sched._milestones == [100 * 8]
+    assert cosine.eta_min == 1e-4 * 0.01
+
+
+def test_cosine_scheduler_single_process_is_unscaled():
+    sched = _build(total_opt_steps=1000, num_processes=1)
+    warmup, cosine = sched._schedulers
+    assert warmup.total_iters == 100
+    assert cosine.T_max == 900
+    assert sched._milestones == [100]
 
 
 # --- write_debug_loss_row ---
