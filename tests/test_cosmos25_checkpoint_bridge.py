@@ -1,10 +1,11 @@
-"""Checkpoint compatibility lock for the `_pipe` → flat refactor.
+"""Flat checkpoint round-trip lock for ``Cosmos25VideoBackbone``.
 
-An earlier layout nested everything under a `_pipe.` wrapper child
-(`_pipe.net.* / _pipe._vae_inner.* / _pipe._reason1_inner.*`). The backbone now
-holds flat children (`dit.* / _vae_inner.* / _reason1_inner.*`) and a
-`_register_load_state_dict_pre_hook` remaps legacy keys so old checkpoints still
-strict-load. These tests pin both halves of that contract.
+The backbone holds flat named children (``dit.*`` / ``vae.*`` / ``reason1.*``):
+the DiT directly, plus the inner ``nn.Module`` of the (plain-object) VAE and
+Reason1 facades registered under the clean child names so their weights enter
+the unified ``state_dict``. These tests pin that the flat layout saves/loads
+strict, including the ``assign=True`` deploy path and the architecture's
+``video_backbone.``-prefixed unified load.
 """
 
 from __future__ import annotations
@@ -52,89 +53,64 @@ def _build(seed: int) -> Cosmos25VideoBackbone:
     )
 
 
-def _to_legacy_pipe_layout(flat_sd: dict) -> dict:
-    """flat (`dit.* / _vae_inner.* / _reason1_inner.*`) → legacy (`_pipe.*`)."""
-    legacy = {}
-    for k, v in flat_sd.items():
-        if k.startswith("dit."):
-            legacy["_pipe.net." + k[len("dit.") :]] = v
-        elif k.startswith("_vae_inner.") or k.startswith("_reason1_inner."):
-            legacy["_pipe." + k] = v
-        else:
-            legacy[k] = v
-    return legacy
-
-
-def test_fresh_save_has_no_pipe_keys():
+def test_fresh_save_has_flat_keys():
     bb = _build(0)
     keys = list(bb.state_dict().keys())
     assert keys, "state_dict unexpectedly empty"
-    assert not any(k.startswith("_pipe") for k in keys), f"stale _pipe keys: {keys}"
-    # The flat children are present.
+    # The flat children are present under their clean child names...
     assert any(k.startswith("dit.") for k in keys)
-    assert any(k.startswith("_vae_inner.") for k in keys)
-    assert any(k.startswith("_reason1_inner.") for k in keys)
+    assert any(k.startswith("vae.") for k in keys)
+    assert any(k.startswith("reason1.") for k in keys)
+    # ...and no stale wrapper / inner-suffix prefixes leak through.
+    assert not any(k.startswith("_pipe") for k in keys), f"stale _pipe keys: {keys}"
+    assert not any("_vae_inner" in k or "_reason1_inner" in k for k in keys), keys
 
 
-def test_legacy_pipe_checkpoint_strict_loads_into_flat_backbone():
-    """A checkpoint saved under the OLD `_pipe.*` prefixes loads strict via the
-    pre-hook, and the weights actually transfer."""
+def test_flat_checkpoint_roundtrip():
+    """The flat layout round-trips strict and the weights actually transfer."""
     src = _build(1)
-    legacy_sd = _to_legacy_pipe_layout({k: v.clone() for k, v in src.state_dict().items()})
-    assert all(k.startswith("_pipe.") for k in legacy_sd if not k.endswith("_extra_state"))
+    flat_sd = {k: v.clone() for k, v in src.state_dict().items()}
 
     dst = _build(2)  # different random init
-    incompatible = dst.load_state_dict(legacy_sd, strict=True)
+    incompatible = dst.load_state_dict(flat_sd, strict=True)
     assert not incompatible.missing_keys, incompatible.missing_keys
     assert not incompatible.unexpected_keys, incompatible.unexpected_keys
 
-    # Weights transferred: the flat children now match the source.
+    # Weights transferred for every flat child.
     torch.testing.assert_close(dst.dit.w, src.dit.w)
-    torch.testing.assert_close(dst._vae_inner.weight, src._vae_inner.weight)
-    torch.testing.assert_close(dst._reason1_inner.weight, src._reason1_inner.weight)
+    torch.testing.assert_close(dst.vae.weight, src.vae.weight)
+    torch.testing.assert_close(dst.reason1.weight, src.reason1.weight)
 
 
-def test_flat_checkpoint_still_loads():
-    """The new flat layout round-trips normally (the pre-hook is a no-op on it)."""
+def test_flat_load_with_assign_true_deploy_path():
+    """Deploy materialises a meta-device shell and loads with ``assign=True``."""
     src = _build(3)
     flat_sd = {k: v.clone() for k, v in src.state_dict().items()}
     dst = _build(4)
-    incompatible = dst.load_state_dict(flat_sd, strict=True)
-    assert not incompatible.missing_keys and not incompatible.unexpected_keys
+    inc = dst.load_state_dict(flat_sd, strict=True, assign=True)
+    assert not inc.missing_keys and not inc.unexpected_keys
     torch.testing.assert_close(dst.dit.w, src.dit.w)
+    torch.testing.assert_close(dst.reason1.weight, src.reason1.weight)
 
 
 class _Parent(nn.Module):
-    """Mimics the architecture holding the backbone as `video_backbone`, so the
-    pre-hook fires with the production `video_backbone.` prefix (not empty)."""
+    """Mimics the architecture holding the backbone as ``video_backbone``, so the
+    load runs under the production ``video_backbone.`` prefix (not empty)."""
 
     def __init__(self, bb: Cosmos25VideoBackbone) -> None:
         super().__init__()
         self.video_backbone = bb
 
 
-def test_legacy_load_under_video_backbone_prefix():
-    """The remap must work under the real `video_backbone.` load prefix (the
-    architecture's unified load), not just the standalone empty-prefix case."""
+def test_flat_load_under_video_backbone_prefix():
+    """The flat layout strict-loads under the real ``video_backbone.`` load
+    prefix (the architecture's unified load), not just the standalone case."""
     src = _build(5)
-    legacy = _to_legacy_pipe_layout({k: v.clone() for k, v in src.state_dict().items()})
-    prefixed = {"video_backbone." + k: v for k, v in legacy.items()}
-    assert all(k.startswith("video_backbone._pipe.") for k in prefixed if not k.endswith("_extra_state"))
+    prefixed = {"video_backbone." + k: v.clone() for k, v in src.state_dict().items()}
 
     parent = _Parent(_build(6))
     inc = parent.load_state_dict(prefixed, strict=True)
     assert not inc.missing_keys, inc.missing_keys
     assert not inc.unexpected_keys, inc.unexpected_keys
     torch.testing.assert_close(parent.video_backbone.dit.w, src.dit.w)
-    torch.testing.assert_close(parent.video_backbone._reason1_inner.weight, src._reason1_inner.weight)
-
-
-def test_legacy_load_with_assign_true_deploy_path():
-    """Deploy materialises a meta-device shell and loads with assign=True; the
-    legacy remap must survive that path too."""
-    src = _build(7)
-    legacy = _to_legacy_pipe_layout({k: v.clone() for k, v in src.state_dict().items()})
-    dst = _build(8)
-    inc = dst.load_state_dict(legacy, strict=True, assign=True)
-    assert not inc.missing_keys and not inc.unexpected_keys
-    torch.testing.assert_close(dst.dit.w, src.dit.w)
+    torch.testing.assert_close(parent.video_backbone.reason1.weight, src.reason1.weight)

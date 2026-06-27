@@ -335,8 +335,8 @@ def test_preprocess_input_with_fake_vae_returns_real_latents():
 
     # Wan2pt1 stride: T_lat = 1 + (5-1)//4 = 2; H_lat=8; W_lat=8; C_z=16.
     assert out["input_latents"].shape == (1, 16, 2, 8, 8)
-    assert wrapper.vae.encode_calls == 1
-    assert wrapper.vae.decode_calls == 0
+    assert wrapper._vae_iface.encode_calls == 1
+    assert wrapper._vae_iface.decode_calls == 0
     assert torch.isfinite(out["input_latents"]).all()
 
 
@@ -347,7 +347,7 @@ def test_decode_video_returns_pil_list():
     latents = torch.randn(1, 16, 2, 4, 4)
     frames = wrapper.decode_video(latents)
 
-    assert wrapper.vae.decode_calls == 1
+    assert wrapper._vae_iface.decode_calls == 1
     assert isinstance(frames, list)
     # T_pix = (2 - 1) * 4 + 1 = 5
     assert len(frames) == 5
@@ -562,7 +562,7 @@ def test_text_dropout_p_out_of_range_rejected():
 
 # ----------------------------------------------------------------------
 # Reason1 state-dict registration (Reason1LiveTextEncoder is a plain Python
-# class; its inner ``nn.Module`` must be registered as ``_reason1_inner`` on
+# class; its inner ``nn.Module`` must be registered as ``reason1`` on
 # the wrapper so its weights ride into the unified safetensors).
 # ----------------------------------------------------------------------
 
@@ -575,7 +575,7 @@ class _FakeReason1WithInnerModule:
     def __init__(self) -> None:
         # A tiny stand-in for Qwen2.5-VL — what matters is that it is an
         # actual ``nn.Module`` with at least one parameter that should turn
-        # up under the ``_reason1_inner.`` prefix in ``state_dict()``.
+        # up under the ``reason1.`` prefix in ``state_dict()``.
         self.model = nn.Linear(4, 4)
 
 
@@ -588,9 +588,9 @@ class _FakeReason1WithoutInnerModule:
         self.tokenizer = object()
 
 
-def test_reason1_inner_appears_in_state_dict():
+def testreason1_appears_in_state_dict():
     """The wrapper must register a Reason1-shaped encoder's inner
-    ``nn.Module`` as ``_reason1_inner`` so its parameters flow into the
+    ``nn.Module`` as ``reason1`` so its parameters flow into the
     unified safetensors. Without this, deploy hosts would still need an
     external Cosmos-Reason1 bundle (the pre-fix behaviour)."""
     net = _FakeMiniDIT(dim=32, num_blocks=4)
@@ -608,14 +608,14 @@ def test_reason1_inner_appears_in_state_dict():
     )
 
     state_keys = list(wrapper.state_dict().keys())
-    reason1_keys = [k for k in state_keys if k.startswith("_reason1_inner.")]
+    reason1_keys = [k for k in state_keys if k.startswith("reason1.")]
     assert reason1_keys, (
-        f"Expected `_reason1_inner.*` keys in wrapper.state_dict(); got prefixes "
+        f"Expected `reason1.*` keys in wrapper.state_dict(); got prefixes "
         f"{sorted({k.split('.', 1)[0] for k in state_keys})}"
     )
     # The inner module is reachable as an attribute (single registration
     # point — the same object as ``encoder.model``).
-    assert wrapper._reason1_inner is encoder.model
+    assert wrapper.reason1 is encoder.model
     # And it is the ONLY registration path for that module — no duplicate
     # via ``self.text_encoder`` (which is a plain attribute, not an
     # ``nn.Module``, so it does not enter ``_modules``).
@@ -624,7 +624,7 @@ def test_reason1_inner_appears_in_state_dict():
 
 def test_reason1_no_inner_module_means_no_registration():
     """Encoders without a ``self.model`` ``nn.Module`` (e.g. callable-only
-    test shims) must not crash, and must not add a ``_reason1_inner`` entry
+    test shims) must not crash, and must not add a ``reason1`` entry
     — there is nothing to register."""
     net = _FakeMiniDIT(dim=32, num_blocks=4)
     encoder = _FakeReason1WithoutInnerModule()
@@ -640,12 +640,12 @@ def test_reason1_no_inner_module_means_no_registration():
         flow_shift=5.0,
     )
 
-    assert "_reason1_inner" not in wrapper._modules
+    assert "reason1" not in wrapper._modules
     state_keys = list(wrapper.state_dict().keys())
-    assert not any(k.startswith("_reason1_inner.") for k in state_keys)
+    assert not any(k.startswith("reason1.") for k in state_keys)
 
 
-def test_reason1_inner_state_dict_roundtrip():
+def testreason1_state_dict_roundtrip():
     """Round-trip the wrapper's ``state_dict`` through a fresh wrapper of
     the same shape and confirm the Reason1 inner module's weights match
     bit-for-bit. This is the unit-test analogue of the safetensors
@@ -684,4 +684,4 @@ def test_reason1_inner_state_dict_roundtrip():
     assert not torch.equal(enc2.model.weight, src_weight)
     missing, unexpected = w2.load_state_dict(sd, strict=True)
     assert not missing and not unexpected
-    assert torch.equal(w2._reason1_inner.weight, src_weight)
+    assert torch.equal(w2.reason1.weight, src_weight)

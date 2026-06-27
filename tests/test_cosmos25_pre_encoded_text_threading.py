@@ -63,7 +63,7 @@ def _build_cosmos_backbone() -> Cosmos25VideoBackbone:
     )
     return Cosmos25VideoBackbone(
         net=pipe.dit,
-        vae=getattr(pipe, "vae", None),
+        vae=getattr(pipe, "_vae_iface", None),
         text_encoder=getattr(pipe, "text_encoder", None),
         flow_shift=pipe._flow_shift,
         dim=2048,

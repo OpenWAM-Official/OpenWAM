@@ -5,7 +5,7 @@
 # joint_self_attn; idm is NOT supported (adapter raises NotImplementedError).
 #
 # Freeze policy lives in the model freeze list (the train launcher pins
-# video_backbone._vae_inner + video_backbone._reason1_inner; the DiT `dit` is
+# video_backbone.vae + video_backbone.reason1; the DiT `dit` is
 # TRAINABLE by default). Don't add a `freeze:` knob here — add `video_backbone.dit`
 # to the freeze list in an override instead.
 #

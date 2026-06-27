@@ -16,21 +16,19 @@ Public surface: **only** the methods/properties already declared on
 
 Plain-object reality (upstream-imposed): the VAE (``Wan2pt1VAEInterface``) and
 Reason1 encoder (``Reason1LiveTextEncoder``) are plain Python objects, not
-``nn.Module`` — so their inner ``nn.Module`` s are registered as
-``self._vae_inner`` / ``self._reason1_inner`` (to enter the unified state_dict)
-and moved explicitly in :meth:`set_dtype_device` via ``cosmos25/_vae_utils.py``.
-
-Checkpoint compatibility: an earlier layout nested everything under a
-``_pipe.`` wrapper child (``_pipe.net.*`` / ``_pipe._vae_inner.*`` /
-``_pipe._reason1_inner.*``). A ``load_state_dict`` pre-hook remaps those legacy
-keys to the flat layout (``dit.*`` / ``_vae_inner.*`` / ``_reason1_inner.*``) so
-old checkpoints still load; fresh saves use the flat layout.
+``nn.Module``. The callable facade is kept as a plain attribute
+(``self._vae_iface`` / ``self.text_encoder``) for encode/decode + dtype/device
+tracking, while the inner ``nn.Module`` is registered under the clean child
+name (``self.vae`` / ``self.reason1``) so its weights enter the unified
+state_dict (``vae.*`` / ``reason1.*``). Identity is preserved, so the facade's
+``iface.model.model`` still resolves to the same tensors. The inner modules are
+moved explicitly in :meth:`set_dtype_device` via ``cosmos25/_vae_utils.py``.
 
 Scope: ``dual_system`` + ``joint_cross_attn`` / ``joint_self_attn``. VACE is
 rejected; IDM stays T2V-only. Freeze policy is owned by the training-strategy /
 model freeze list, reached via native ``nn.Module.get_submodule`` dotted paths
-(``dit`` / ``_vae_inner`` / ``_reason1_inner``). The ``freeze`` kwarg here is
-retained for tests / direct programmatic use and defaults to ``False``.
+(``dit`` / ``vae`` / ``reason1``). The ``freeze`` kwarg here is retained for
+tests / direct programmatic use and defaults to ``False``.
 """
 
 from __future__ import annotations
@@ -93,15 +91,15 @@ class Cosmos25VideoBackbone(VideoBackbone):
         # encode/decode + dtype/device tracking) but register the inner nn.Module
         # so its weights ride the unified state_dict. Identity is preserved, so
         # the facade's `iface.model.model` still resolves to the same tensors.
-        self.vae = vae
+        self._vae_iface = vae
         inner_vae = _vae_inner_module(vae)
         if inner_vae is not None:
-            self._vae_inner = inner_vae
+            self.vae = inner_vae
         self.text_encoder = text_encoder
         if text_encoder is not None:
             te_inner = getattr(text_encoder, "model", None)
             if isinstance(te_inner, nn.Module):
-                self._reason1_inner = te_inner
+                self.reason1 = te_inner
 
         # --- Geometry + scheduler ---
         self._dim = int(dim)
@@ -127,29 +125,8 @@ class Cosmos25VideoBackbone(VideoBackbone):
 
         self._freeze = bool(freeze)
         if self._freeze:
-            for p in self.parameters():  # dit + _vae_inner + _reason1_inner
+            for p in self.parameters():  # dit + vae + reason1
                 p.requires_grad_(False)
-
-        # Backward-compat: load legacy `_pipe.*`-prefixed checkpoints into the
-        # flat layout. Registered last so the flat children already exist.
-        self._register_load_state_dict_pre_hook(self._remap_legacy_pipe_keys)
-
-    # ------------------------------------------------------------------
-    # Checkpoint bridge
-    # ------------------------------------------------------------------
-
-    def _remap_legacy_pipe_keys(self, state_dict, prefix, *args) -> None:
-        """Rewrite legacy ``<prefix>_pipe.*`` keys to the flat layout in place.
-
-        ``_pipe.net.*`` → ``dit.*`` ; ``_pipe._vae_inner.*`` / ``_pipe._reason1_inner.*``
-        keep their child name (only the ``_pipe.`` host segment is dropped).
-        """
-        legacy = prefix + "_pipe."
-        for key in [k for k in state_dict if k.startswith(legacy)]:
-            rest = key[len(legacy) :]
-            if rest.startswith("net."):
-                rest = "dit." + rest[len("net.") :]
-            state_dict[prefix + rest] = state_dict.pop(key)
 
     # ------------------------------------------------------------------
     # Construction
@@ -332,7 +309,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
     ) -> dict:
         """VAE-encode frames (or accept latents) + encode text → training/inference dict.
 
-        Reads ``self.dit`` (for ``crossattn_proj``), ``self.vae``,
+        Reads ``self.dit`` (for ``crossattn_proj``), ``self._vae_iface``,
         ``self.text_encoder``, and the live-path CFG-dropout state
         (``self.training`` / ``self.text_dropout_p`` / ``self._text_dropout_rng``).
         Relocated verbatim from the former pipeline wrapper.
@@ -348,7 +325,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
                 raise ValueError(
                     "Cosmos25VideoBackbone._preprocess_input requires either `input_latents` or `frames`."
                 )
-            if self.vae is None:
+            if self._vae_iface is None:
                 raise RuntimeError(
                     "Cosmos25 VAE is not configured. Set `video_backbone.vae: wan2pt1` "
                     "(default; loads `<model_path>/tokenizer.pth`)."
@@ -406,7 +383,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
             and all(r is not None for r in ref_images)
         )
         if ref_active:
-            if self.vae is None:
+            if self._vae_iface is None:
                 raise RuntimeError(
                     "Cosmos25VideoBackbone._preprocess_input received `ref_images` but no VAE is "
                     "configured. Set `video_backbone.vae: wan2pt1` to enable TI2V."
@@ -430,19 +407,19 @@ class Cosmos25VideoBackbone(VideoBackbone):
 
     def _encode_frames(self, frames: Any) -> Tensor:
         """PIL frames → bf16 ``(B, 16, T_lat, H/8, W/8)`` Wan2pt1 latents."""
-        if self.vae is None:
+        if self._vae_iface is None:
             raise RuntimeError("Cosmos25VideoBackbone._encode_frames called without a configured VAE.")
         video = _pil_video_to_tensor(frames)
-        video = video.to(device=_vae_device(self.vae), dtype=torch.bfloat16)
-        return self.vae.encode(video)
+        video = video.to(device=_vae_device(self._vae_iface), dtype=torch.bfloat16)
+        return self._vae_iface.encode(video)
 
     def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:
-        if self.vae is None:
+        if self._vae_iface is None:
             raise NotImplementedError(
                 "Cosmos25VideoBackbone.decode_video requires a configured VAE. Set `video_backbone.vae: wan2pt1`."
             )
         _ = tiled  # Wan2pt1VAEInterface.decode has no `tiled`; internal temporal_window=4.
-        video = self.vae.decode(latents.to(device=_vae_device(self.vae)))
+        video = self._vae_iface.decode(latents.to(device=_vae_device(self._vae_iface)))
         return _video_tensor_to_pil(video)
 
     def preprocess_input_for_inference(self, **kw) -> dict:
@@ -534,7 +511,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         """Encode the inference-time first frame and write the TI2V keys."""
         if first_frame_image is None:
             return
-        if self.vae is None:
+        if self._vae_iface is None:
             raise RuntimeError(
                 "Cosmos25VideoBackbone.preprocess_input_for_inference received `first_frame_image` "
                 "but no VAE is configured. Ensure `video_backbone.vae: wan2pt1`."
@@ -614,12 +591,12 @@ class Cosmos25VideoBackbone(VideoBackbone):
     def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
         self._dtype = dtype
         self._device = device
-        # nn.Module.to(...) walks the flat children (dit / _vae_inner / _reason1_inner).
+        # nn.Module.to(...) walks the flat children (dit / vae / reason1).
         self.to(dtype=dtype, device=device)
         # The plain-object VAE / Reason1 facades are not nn.Modules, so move them
         # explicitly (incl. the wan2pt1 mean/std + scale-list stale-device fix).
-        if self.vae is not None:
-            _move_cosmos_vae(self.vae, dtype=dtype, device=device)
+        if self._vae_iface is not None:
+            _move_cosmos_vae(self._vae_iface, dtype=dtype, device=device)
         if self.text_encoder is not None and not isinstance(self.text_encoder, nn.Module):
             _move_cosmos_reason1(self.text_encoder, dtype=dtype, device=device)
 
@@ -634,10 +611,10 @@ class Cosmos25VideoBackbone(VideoBackbone):
         ``cfg.model.video_backbone.components`` (only when absent). (2) Copy the
         Reason1 structural JSONs into ``<output_dir>/reason1/`` — ONLY when a live
         Reason1 encoder is part of this checkpoint (``self.text_encoder`` set, so
-        its weights ride the safetensors via ``_reason1_inner``). The VAE
-        component is emitted only when a VAE is configured (``self.vae`` set);
-        under ``vae: none`` no ``_vae_inner`` is registered, so emitting the spec
-        would leave the saved config internally inconsistent. No-op when
+        its weights ride the safetensors via ``reason1``). The VAE
+        component is emitted only when the ``vae`` child is registered (a VAE was
+        configured); under ``vae: none`` no ``vae`` child exists, so emitting the
+        spec would leave the saved config internally inconsistent. No-op when
         ``model_path`` is unreadable.
         """
         from omegaconf import DictConfig, OmegaConf, open_dict

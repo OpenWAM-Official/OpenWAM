@@ -15,7 +15,7 @@ Why a plain Python class (NOT an ``nn.Module``)?
 - ``Cosmos25VideoBackbone`` stores us as ``self.text_encoder = <instance>``.
   Mirroring the ``Wan2pt1VAEInterface`` precedent, the wrapper reaches in for
   our ``self.model`` (the inner ``Qwen2_5_VLForConditionalGeneration``
-  ``nn.Module``) and registers it as ``_reason1_inner``. Result: our 16 GB of
+  ``nn.Module``) and registers it as ``reason1``. Result: our 16 GB of
   weights DO flow into the unified state_dict / safetensors via that single
   registered child — but the wrapper class itself stays a plain attribute so
   the tokenizer + dtype/device tracking don't trip ``__setattr__`` or

@@ -65,7 +65,7 @@ def _build_backbone_with_fake_vae(*, freeze: bool) -> Cosmos25VideoBackbone:
     )
     return Cosmos25VideoBackbone(
         net=pipe.dit,
-        vae=getattr(pipe, "vae", None),
+        vae=getattr(pipe, "_vae_iface", None),
         text_encoder=getattr(pipe, "text_encoder", None),
         flow_shift=pipe._flow_shift,
         dim=2048,
@@ -88,7 +88,7 @@ def test_vae_inner_module_helper_returns_the_real_module():
 
 def test_freeze_walks_fake_vae_inner_module_params():
     bb = _build_backbone_with_fake_vae(freeze=True)
-    inner = _vae_inner_module(bb.vae)
+    inner = bb.vae  # registered inner nn.Module (facade lives on bb._vae_iface)
     assert inner is not None
     for p in inner.parameters():
         assert p.requires_grad is False, f"freeze missed VAE param {p.shape}"
@@ -99,7 +99,7 @@ def test_freeze_walks_fake_vae_inner_module_params():
 
 def test_unfrozen_backbone_leaves_fake_vae_params_trainable():
     bb = _build_backbone_with_fake_vae(freeze=False)
-    inner = _vae_inner_module(bb.vae)
+    inner = bb.vae  # registered inner nn.Module (facade lives on bb._vae_iface)
     assert inner is not None
     # default Linear params start with requires_grad=True; freeze=False MUST NOT touch them.
     for p in inner.parameters():
@@ -110,8 +110,8 @@ def test_set_dtype_device_moves_inner_module_and_mean_std_tensors():
     bb = _build_backbone_with_fake_vae(freeze=True)
     bb.set_dtype_device(torch.bfloat16, torch.device("cpu"))
 
-    iface = bb.vae
-    inner = _vae_inner_module(iface)
+    iface = bb._vae_iface
+    inner = bb.vae
     assert inner is not None
     for p in inner.parameters():
         assert p.dtype == torch.bfloat16

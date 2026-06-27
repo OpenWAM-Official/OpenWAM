@@ -434,7 +434,7 @@ def _build_cache_only_backbone() -> Cosmos25VideoBackbone:
     )
     return Cosmos25VideoBackbone(
         net=pipe.dit,
-        vae=getattr(pipe, "vae", None),
+        vae=getattr(pipe, "_vae_iface", None),
         text_encoder=getattr(pipe, "text_encoder", None),
         flow_shift=pipe._flow_shift,
         dim=2048,
@@ -626,7 +626,7 @@ def test_cosmos25_adapter_live_encoder_uncond_context():
     )
     vb = Cosmos25VideoBackbone(
         net=pipe.dit,
-        vae=getattr(pipe, "vae", None),
+        vae=getattr(pipe, "_vae_iface", None),
         text_encoder=getattr(pipe, "text_encoder", None),
         flow_shift=pipe._flow_shift,
         dim=2048,

@@ -355,7 +355,7 @@ def build_cosmos25_pipeline(
     text_encoder_path_raw = _cfg_get(vb_cfg, "text_encoder_path", None)
     # On the training path (``ckpt_dir is None``), ``text_encoder_path`` tells
     # the builder where to load Reason1 so it can be registered under
-    # ``_reason1_inner`` and saved into the unified safetensors. This applies
+    # ``reason1`` and saved into the unified safetensors. This applies
     # even when the run consumes offline ``pre_encoded_text`` caches. On the
     # deploy path (``ckpt_dir`` non-None), weights flow from safetensors and
     # the loader points ``from_empty`` at ``<ckpt_dir>/reason1/`` structural
@@ -471,7 +471,7 @@ def build_cosmos25_pipeline(
 
         # Deploy path (``ckpt_dir`` non-None and no explicit path override):
         # build a meta-device shell — the inner Qwen module is registered as
-        # ``_reason1_inner`` on the wrapper (see ``pipeline_wrapper.py``), so
+        # ``reason1`` on the wrapper (see ``pipeline_wrapper.py``), so
         # ``arch.load_checkpoint`` will populate its weights from the unified
         # safetensors. Only the small structural files
         # (``config.json`` + ``tokenizer.json``) need to exist on the deploy
@@ -496,7 +496,7 @@ def build_cosmos25_pipeline(
     vae_obj = None
     if vae_choice != "none":
         # Deploy path (``ckpt_dir`` non-None): the saved safetensors carries
-        # the VAE state (it's registered as ``_vae_inner`` on the wrapper, see
+        # the VAE state (it's registered as ``vae`` on the wrapper, see
         # ``pipeline_wrapper.py::__init__``). Build an empty shell so we don't
         # require ``tokenizer.pth`` to be reachable on the deploy host; the
         # architecture's ``load_checkpoint`` will populate the weights.
@@ -513,7 +513,7 @@ def build_cosmos25_pipeline(
             logger.info("Cosmos VAE: loading %s from %s", vae_choice, vae_pth)
             vae_obj = _build_cosmos25_vae(vae_pth, device=device, dtype=torch.bfloat16)
 
-    # Deploy path: ``_reason1_inner`` (and the empty VAE shell) live on the
+    # Deploy path: ``reason1`` (and the empty VAE shell) live on the
     # ``meta`` device until ``arch.load_checkpoint`` materialises them. A
     # ``.to(device)`` there would recurse into the meta shell and crash
     # ("Cannot copy out of meta tensor; no data!"). So only move the DiT on the

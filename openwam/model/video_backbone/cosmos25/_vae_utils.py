@@ -76,7 +76,7 @@ def _move_cosmos_reason1(te: Any, *, dtype: torch.dtype, device: torch.device) -
 
     Mirrors :func:`_move_cosmos_vae` — the encoder facade is intentionally not
     an ``nn.Module``. The wrapper separately registers the inner Qwen module as
-    ``_reason1_inner`` so the weights still enter ``state_dict()``, but
+    ``reason1`` so the weights still enter ``state_dict()``, but
     dtype/device bookkeeping lives on the facade. Delegate to the encoder's own
     ``to`` shim to keep both in sync.
     """

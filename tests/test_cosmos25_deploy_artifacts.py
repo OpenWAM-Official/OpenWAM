@@ -11,7 +11,7 @@ flow through `state_dict()`.
 These tests pin three guarantees:
 
 1. `Cosmos25VideoBackbone.__init__` registers `vae.model.model` under
-   ``_vae_inner`` whenever a VAE is supplied, so its params join the
+   ``vae`` whenever a VAE is supplied, so its params join the
    wrapper's `state_dict()`.
 2. The architecture's full save → load roundtrip restores those weights
    bit-for-bit even when the second wrapper is built with an empty VAE
@@ -21,7 +21,7 @@ These tests pin three guarantees:
    ``copy_cosmos25_artifacts`` copies Reason1 structural JSONs.
 
 The Reason1 text encoder (~16 GB) is also registered under
-``_reason1_inner`` so cache-mode and live-mode checkpoints both carry it in
+``reason1`` so cache-mode and live-mode checkpoints both carry it in
 the unified safetensors.
 """
 
@@ -101,46 +101,46 @@ class _FakeReason1:
 # ----------------------------------------------------------------------
 
 
-def test_pipeline_wrapper_registers_vae_inner_module():
+def test_pipeline_wrapper_registersvae_module():
     """``__setattr__`` of an nn.Module attribute adds the inner ``WanVAE_``
-    under ``_modules['_vae_inner']``, so its params join ``state_dict``."""
+    under ``_modules['vae']``, so its params join ``state_dict``."""
     iface = _FakeWan2pt1Interface()
     wrapper = _make_wrapper(iface)
 
     # Reference identity preserved — upstream call sites that read
     # ``iface.model.model.encode(...)`` keep working bit-for-bit.
-    assert wrapper._vae_inner is iface.model.model
+    assert wrapper.vae is iface.model.model
 
-    # `_vae_inner` appears in `_modules`, not just `__dict__`.
-    assert "_vae_inner" in wrapper._modules
-    assert wrapper._modules["_vae_inner"] is iface.model.model
+    # `vae` appears in `_modules`, not just `__dict__`.
+    assert "vae" in wrapper._modules
+    assert wrapper._modules["vae"] is iface.model.model
 
-    # ``vae`` itself is still reachable as a plain attribute (upstream
-    # interface methods like ``vae.encode`` need it).
-    assert wrapper.vae is iface
+    # The facade itself is still reachable as a plain attribute (upstream
+    # interface methods like ``_vae_iface.encode`` need it).
+    assert wrapper._vae_iface is iface
 
 
-def test_pipeline_wrapper_state_dict_contains_vae_inner_params():
+def test_pipeline_wrapper_state_dict_containsvae_params():
     """All VAE inner-module params appear in ``state_dict`` under the
-    ``_vae_inner.*`` prefix, paving the way for them to flow into the
+    ``vae.*`` prefix, paving the way for them to flow into the
     unified safetensors that ``BaseWAMArchitecture.save_checkpoint`` writes."""
     iface = _FakeWan2pt1Interface()
     wrapper = _make_wrapper(iface)
 
     keys = list(wrapper.state_dict().keys())
-    vae_keys = [k for k in keys if k.startswith("_vae_inner.")]
-    assert vae_keys, f"_vae_inner.* keys missing from state_dict. All keys: {keys}"
+    vae_keys = [k for k in keys if k.startswith("vae.")]
+    assert vae_keys, f"vae.* keys missing from state_dict. All keys: {keys}"
     # The fake VAE is `nn.Linear(4, 4)` → weight + bias.
-    assert "_vae_inner.weight" in vae_keys
-    assert "_vae_inner.bias" in vae_keys
+    assert "vae.weight" in vae_keys
+    assert "vae.bias" in vae_keys
 
 
 def test_pipeline_wrapper_no_vae_attached_when_none():
-    """``vae=None`` (e.g. pre-encoded latents path) leaves ``_vae_inner`` unset
+    """``vae=None`` (e.g. pre-encoded latents path) leaves ``vae`` unset
     so ``state_dict`` has no stale VAE keys."""
     wrapper = _make_wrapper(vae=None)
-    assert "_vae_inner" not in wrapper._modules
-    assert not any(k.startswith("_vae_inner") for k in wrapper.state_dict().keys())
+    assert "vae" not in wrapper._modules
+    assert not any(k.startswith("vae") for k in wrapper.state_dict().keys())
 
 
 # ----------------------------------------------------------------------
@@ -227,7 +227,7 @@ def test_pipeline_wrapper_state_dict_contains_reason1_even_when_cache_wins():
     )
 
     state_keys = list(wrapper.state_dict().keys())
-    assert any(k.startswith("_reason1_inner.") for k in state_keys)
+    assert any(k.startswith("reason1.") for k in state_keys)
 
 
 def test_generate_cosmos25_component_specs_returns_none_for_missing_path():
@@ -371,7 +371,13 @@ def _backbone_with_reason1(has_reason1: bool, has_vae: bool = True):
 
     bb = Cosmos25VideoBackbone.__new__(Cosmos25VideoBackbone)
     bb.text_encoder = object() if has_reason1 else None
-    bb.vae = object() if has_vae else None
+    # ``save_deploy_assets`` gates the vae component on the registered ``vae``
+    # child (present iff its weights are in the state_dict). Mirror the real
+    # class: leave the attr absent for ``vae: none``. Use a plain ``object()``
+    # sentinel (not an nn.Module) so the assignment doesn't trip the "assign
+    # module before Module.__init__()" guard on this ``__new__``'d shell.
+    if has_vae:
+        bb.vae = object()  # type: ignore[assignment]
     return bb
 
 
@@ -407,8 +413,8 @@ def test_save_deploy_assets_merges_components_and_copies_reason1(tmp_path):
     # 1. components merged into cfg with the two state_dict sub_module markers.
     comps = OmegaConf.to_container(cfg.model.video_backbone.components, resolve=True)
     attrs = {c["attr"]: c for c in comps}
-    assert attrs["vae"]["sub_module"] == "_vae_inner"
-    assert attrs["text_encoder"]["sub_module"] == "_reason1_inner"
+    assert attrs["vae"]["sub_module"] == "vae"
+    assert attrs["text_encoder"]["sub_module"] == "reason1"
 
     # 2. Reason1 structural JSONs copied next to the checkpoint.
     assert (output_dir / "reason1" / "config.json").is_file()
@@ -448,7 +454,7 @@ def test_save_deploy_assets_cache_only_emits_vae_only_and_no_copy(tmp_path):
 
 def test_save_deploy_assets_vae_none_omits_vae_component(tmp_path):
     """Regression for the VAE gate: a ``vae: none`` run (``self.vae is None``,
-    so ``_vae_inner`` is never registered) must NOT emit the vae component —
+    so ``vae`` is never registered) must NOT emit the vae component —
     otherwise the saved config references a sub_module absent from the
     state_dict. With no reason1 and no vae, no components remain."""
     from omegaconf import OmegaConf

@@ -9,8 +9,8 @@ saved into the same safetensors as every other dual_system / shared_backbone
 weight.
 
 The Cosmos-Reason1-7B text encoder (~16 GB Qwen2.5-VL) **also** flows through
-the unified safetensors via the ``_reason1_inner`` registration on the
-wrapper (see ``pipeline_wrapper.py`` for the trick mirroring ``_vae_inner``).
+the unified safetensors via the ``reason1`` registration on the
+wrapper (see ``pipeline_wrapper.py`` for the trick mirroring ``vae``).
 The only artifacts copied alongside the checkpoint are the small JSON/
 tokenizer files Qwen2.5-VL needs to bootstrap its structure at deploy time
 (``config.json``, ``tokenizer.json``, etc., totalling ~10 MB) — see
@@ -115,7 +115,7 @@ def generate_cosmos25_component_specs(model_path: str) -> Optional[dict]:
 
     The cosmos25 ``state_dict`` already carries DiT + VAE + Reason1 weights
     (registered as ``nn.Module`` children of :class:`Cosmos25VideoBackbone`
-    via ``net``, ``_vae_inner``, and ``_reason1_inner`` respectively).
+    via ``net``, ``vae``, and ``reason1`` respectively).
 
     Returns ``None`` only when ``model_path`` is missing or unreadable, so
     fake-pipeline tests and offline build paths bypass the deploy gate.
@@ -132,8 +132,8 @@ def generate_cosmos25_component_specs(model_path: str) -> Optional[dict]:
     # the ``sub_module`` key.
     return {
         "components": [
-            {"attr": "vae", "source": "state_dict", "sub_module": "_vae_inner"},
-            {"attr": "text_encoder", "source": "state_dict", "sub_module": "_reason1_inner"},
+            {"attr": "vae", "source": "state_dict", "sub_module": "vae"},
+            {"attr": "text_encoder", "source": "state_dict", "sub_module": "reason1"},
         ]
     }
 
@@ -142,7 +142,7 @@ def copy_cosmos25_artifacts(output_dir: str, model_path_or_cfg: Any) -> None:
     """Copy the small Reason1 tokenizer/config JSON files into ``<output_dir>/reason1/``.
 
     Reason1 model weights ride into the unified safetensors via
-    ``Cosmos25VideoBackbone._reason1_inner``; only the small structural
+    ``Cosmos25VideoBackbone.reason1``; only the small structural
     files (~10 MB total) need to live next to the checkpoint so
     :meth:`Reason1LiveTextEncoder.from_empty` can rebuild a meta-device shell
     on a deploy host that doesn't have the original Cosmos-Reason1 bundle.
