@@ -32,7 +32,6 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
-from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +204,6 @@ class IDMMoTDriver(DualSystemMoTDriver):
         *,
         video_kv_cache: list[dict[str, Tensor]],
         video_seq_len: int,
-        video_tokens_per_frame: int,
     ):
         """Run only the action branch, attending to cached frozen-video K/V."""
         if len(video_kv_cache) != self.num_layers:
@@ -215,13 +213,19 @@ class IDMMoTDriver(DualSystemMoTDriver):
             raise RuntimeError("IDM cached action path requires ActionDiT.prepare_state payload.")
 
         s_action = int(payload.x_action.shape[1])
-        joint_mask = self._build_attention_mask(
-            s_video=int(video_seq_len),
-            s_action=s_action,
-            video_tokens_per_frame=int(video_tokens_per_frame),
+        # Stage-2 action mask: action attends every frozen-video token + every
+        # action token. That is exactly the action-query rows of the
+        # action_sees_video joint mask (a→v all-True, a→a all-True; dual_system
+        # carries no readonly tail), which reduces to an all-ones mask — built
+        # directly so IDM stays free of attention_mask_mode. Shape
+        # (s_action, video_seq_len + s_action) is intentionally identical to the
+        # a-query row slice of MoTDriver._build_attention_mask, so the cached
+        # Stage-2 path and the joint-loop path stay byte-equivalent.
+        action_mask = torch.ones(
+            (s_action, int(video_seq_len) + s_action),
+            dtype=torch.bool,
             device=payload.x_action.device,
         )
-        action_mask = joint_mask[video_seq_len : video_seq_len + s_action, :]
 
         for layer_id in range(self.num_layers):
             q_a, k_a, v_a, apost = self.ab.pre_attn_at_layer(layer_id, astate)
@@ -291,20 +295,14 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             shift_action=cfg.get("shift_action"),
-            action_type=cfg.get("type", "explicit"),
-            latent_decoder=cfg.get("latent_decoder"),
         )
 
-        attention_mask_mode = str(cfg.get("attention_mask_mode", ACTION_SEES_VIDEO))
-        if attention_mask_mode != ACTION_SEES_VIDEO:
-            raise ValueError(
-                "DualSystem IDM fixes attention_mask_mode='action_sees_video' to preserve FastWAM-IDM "
-                "train/inference mask semantics. Do not set attention_mask_mode for variant='idm'."
-            )
-
+        # IDM ignores attention_mask_mode: it never depends on the cross-modal
+        # mode. Stage-2 cached-action attention is all-ones (built in
+        # run_action_with_video_cache); teacher-forcing/prefill build their own
+        # submasks. So attention_mask_mode is not forwarded to the driver.
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(cfg.get("mot_checkpoint_mixed_attn", True)),
-            "attention_mask_mode": ACTION_SEES_VIDEO,
             "video_attention_mask_mode": str(cfg.get("video_attention_mask_mode", "first_frame_causal")),
         }
 
@@ -916,7 +914,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         if driver is None:
             driver = self.build_mot_driver()
         video_seq_len = int(cond_vstate.hidden_states.shape[1])
-        video_tokens_per_frame = driver._video_tokens_per_frame(cond_vstate)
         video_kv_cache, _ = driver.prefill_video_cache(cond_vstate)
 
         for i in tqdm(range(len(schedule) - 1), desc="IDM Stage 2: Action"):
@@ -942,7 +939,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
                 astate,
                 video_kv_cache=video_kv_cache,
                 video_seq_len=video_seq_len,
-                video_tokens_per_frame=video_tokens_per_frame,
             )
             action_noise_pred = ab.extract_prediction(astate)
 

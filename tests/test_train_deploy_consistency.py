@@ -90,7 +90,6 @@ def test_idm_train_action_matches_deploy_stage2():
         astate_deploy,
         video_kv_cache=kv_cache,
         video_seq_len=int(vstate_cond_deploy.hidden_states.shape[1]),
-        video_tokens_per_frame=driver._video_tokens_per_frame(vstate_cond_deploy),
     )
     pred_deploy = arch.action_backbone.extract_prediction(astate_deploy)
 
@@ -477,7 +476,6 @@ def test_idm_train_deploy_consistency_gpu():
         astate_deploy,
         video_kv_cache=kv_cache,
         video_seq_len=int(vstate_cond_deploy.hidden_states.shape[1]),
-        video_tokens_per_frame=driver._video_tokens_per_frame(vstate_cond_deploy),
     )
     pred_deploy = arch.action_backbone.extract_prediction(astate_deploy)
     assert torch.allclose(pred_train, pred_deploy, atol=1e-5, rtol=1e-5)
