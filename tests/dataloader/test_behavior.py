@@ -252,6 +252,22 @@ class TestGetItem:
         assert len(s["video"]) == 9  # (33-1)//4 + 1
         assert s["video"][0].size == (320, 384)  # PIL (W, H)
 
+    def test_end_of_episode_single_frame_window(self, tmp_path):
+        # Last start of ep 0 → a 1-frame window (actual_raw_len==1): exercises the
+        # no-shift branch of _action_20d (len(eef)==1) + the padded/masked tail.
+        b = make_behavior_bucket(tmp_path, n_episodes=1)  # ep 0 yields EP_LENGTH starts
+        with _mock_video_decoder():
+            s = _make_ds(b)[EP_LENGTH - 1]
+        a = s["action"].numpy()
+        assert a.shape == (32, 80)
+        assert np.isfinite(a).all()
+        am = s["action_mask"].numpy()
+        # exactly one real action step; its mapped dims are valid, later steps masked.
+        assert am[0, EXPECTED_VALID].all()
+        assert not am[1:].any()
+        # proprio is the current frame → always valid on the mapped dims.
+        assert s["proprio_mask"].numpy()[0, EXPECTED_VALID].all()
+
 
 # ── prompts -------------------------------------------------------------------
 
@@ -264,6 +280,31 @@ class TestPrompt:
             assert ds[0]["prompt"] == "do task 0"
             # ep 0 yields EP_LENGTH windows (train min len 1) → idx EP_LENGTH starts ep 1
             assert ds[EP_LENGTH]["prompt"] == "do task 1"
+
+    def test_empty_prompt_raises(self, tmp_path):
+        # A served episode with blank `tasks` must fail fast (episode_annotated
+        # resolver does not guard emptiness on its own).
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with open(b / "meta" / "episodes.jsonl", "w") as f:
+            f.write(json.dumps({"episode_index": 0, "length": EP_LENGTH, "tasks": []}) + "\n")
+            f.write(json.dumps({"episode_index": 1, "length": EP_LENGTH, "tasks": ["do task 1"]}) + "\n")
+        with _mock_video_decoder(), pytest.raises(ValueError, match="empty 'tasks' prompt"):
+            _make_ds(b)
+
+
+# ── split semantics -----------------------------------------------------------
+
+
+class TestSplit:
+    def test_val_split_is_empty_no_leak(self, tmp_path):
+        # info.json declares no val split → train serves all episodes, val is empty
+        # (must NOT silently leak the training set into a val loader).
+        b = make_behavior_bucket(tmp_path, n_episodes=3)
+        with _mock_video_decoder():
+            train = _make_ds(b, split="train")
+            val = _make_ds(b, split="val")
+        assert len(train) > 0
+        assert len(val) == 0
 
 
 # ── normalization -------------------------------------------------------------

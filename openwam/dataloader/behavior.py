@@ -48,6 +48,7 @@ import pandas as pd
 
 from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.eef import quat_xyzw_to_rot6d
+from openwam.dataloader.utils.lerobotv3 import apply_info_splits
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 
 logger = logging.getLogger(__name__)
@@ -187,7 +188,32 @@ class BehaviorDataset(LeRobotV3Reader):
             cols[f"videos/{cam}/file_index"] = ep_idx
             cols[self._video_offset_col(cam)] = zeros
         df = pd.DataFrame(cols)
-        logger.info("BEHAVIOR(%s): %d episodes on disk (of %d in jsonl)", self._dataset_id, len(df), len(prompts))
+
+        # Honor info.json[splits] exactly like the v3 default (apply_info_splits):
+        # train → all on-disk episodes, a declared split → its episode_index range,
+        # any *undeclared* non-train split → empty. Without this a split="val" loader
+        # would silently serve the whole training set (the dataset declares only a
+        # train split), diverging from every sibling reader's "empty val" contract.
+        info_splits = info.get("splits", {}) or {}
+        df = apply_info_splits(df, self._split, info_splits, source_name=f"BEHAVIOR({self._dataset_id})")
+
+        # The episode_annotated resolver does NOT guard emptiness (unlike the
+        # task_index path, which raises). Fail fast here so a blank-`tasks` episode
+        # can't feed an empty prompt into the model.
+        blank = [int(ei) for ei in df["episode_index"].tolist() if not prompts.get(int(ei), "").strip()]
+        if blank:
+            raise ValueError(
+                f"BEHAVIOR({self._dataset_id}): {len(blank)} served episode(s) have an empty 'tasks' prompt "
+                f"in meta/episodes.jsonl (e.g. {blank[:5]}); per-episode prompts must be non-empty."
+            )
+        logger.info(
+            "BEHAVIOR(%s): %d episodes (split=%s; %d on disk, %d in jsonl)",
+            self._dataset_id,
+            len(df),
+            self._split,
+            len(records),
+            len(prompts),
+        )
         return df
 
     def _load_prompts(self) -> None:
@@ -203,6 +229,8 @@ class BehaviorDataset(LeRobotV3Reader):
         # _read_data_file_uncached / _decode_one_camera work unchanged.
         self._data_path_template = "data/task-{chunk_index:04d}/episode_{file_index:08d}.parquet"
         self._video_path_template = "videos/task-{chunk_index:04d}/{video_key}/episode_{file_index:08d}.mp4"
+        if len(self._eps_df) == 0:
+            return  # empty split (e.g. val on a train-only dataset) — nothing to check
         # Fail fast if a future re-upload changes the state packing.
         try:
             ep0 = int(self._eps_df["episode_index"].iloc[0])
@@ -210,9 +238,10 @@ class BehaviorDataset(LeRobotV3Reader):
             path = self._dataset_dir / self._data_path_template.format(chunk_index=chunk0, file_index=ep0)
             import pyarrow.parquet as pq
 
-            st = np.stack(
-                pq.read_table(path, columns=["observation.state"]).to_pandas()["observation.state"].values[:64]
-            )
+            vals = pq.read_table(path, columns=["observation.state"]).to_pandas()["observation.state"].values[:64]
+            if len(vals) == 0:
+                return  # 0-row episode parquet — nothing to sanity-check
+            st = np.stack(vals)
             for sl, name in ((_L_EEF_QUAT, "left"), (_R_EEF_QUAT, "right")):
                 norms = np.linalg.norm(st[:, sl].astype(np.float64), axis=-1)
                 if np.abs(norms - 1.0).max() > 0.05:
