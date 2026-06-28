@@ -16,7 +16,7 @@ from torch import nn
 from openwam.dataloader.transforms.normalize import Normalizer
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
 from openwam.deploy.engine import JointInferenceEngine
-from openwam.deploy.model_loader import _UnifyAwareNormalizer, _build_normalizer, _infer_raw_dim
+from openwam.deploy.model_loader import _build_normalizer, _infer_raw_dim, _UnifyAwareNormalizer
 from openwam.model.architectures.base import BaseWAMArchitecture
 
 # --- Helper: build a realistic stats dict for a 20D eef action ---
