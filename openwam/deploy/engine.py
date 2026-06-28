@@ -277,8 +277,7 @@ class JointInferenceEngine(BaseInferenceEngine):
 
     def _backbone_has_live_text_encoder(self) -> bool:
         vb = getattr(self.architecture, "video_backbone", None)
-        pipe = getattr(vb, "_pipe", None)
-        return getattr(pipe, "text_encoder", None) is not None
+        return getattr(vb, "text_encoder", None) is not None
 
     def _resolve_uncond_pre_encoded_text(self) -> Optional[torch.Tensor]:
         """Find the unconditional embedding once at engine init.

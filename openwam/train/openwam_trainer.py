@@ -47,7 +47,6 @@ from openwam.train.utils.training_utils import (
     build_cosine_scheduler,
     cfg_get,
     init_wandb,
-    latent_action_enabled,
     log_parameter_counts,
     reduce_step_metrics,
     write_debug_loss_row,
@@ -119,18 +118,6 @@ class OpenWAMTrainer:
         # Loss weights from the training config
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)
-        self.lambda_decoder = float(cfg_get(t, "lambda_decoder", 0.0))
-        self.latent_action_provider = None
-        self.latent_action_enabled = latent_action_enabled(cfg)
-
-        if self.latent_action_enabled:
-            from openwam.model.action_backbone.latent_encoder import build_latent_action_provider
-
-            self.latent_action_provider = build_latent_action_provider(
-                cfg.model.action_backbone.latent_encoder,
-                device=self.architecture.device,
-                dtype=self.architecture.dtype,
-            )
 
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.
@@ -184,10 +171,14 @@ class OpenWAMTrainer:
         dataloader = self.build_dataloader(batch_size)
         max_grad_norm = float(t.max_grad_norm) if getattr(t, "max_grad_norm", None) else None
 
+        n_proc = self.accelerator.num_processes
         steps_per_epoch = math.ceil(len(dataloader) / grad_accum)
         # max_steps counts micro-steps (global_step); convert to optimizer steps for the LR horizon.
         max_opt_steps = math.ceil(max_steps / grad_accum) if max_steps else None
         if num_epochs is not None:
+            # prepare() shards the dataloader ~1/n_proc; fold that in so total_opt_steps is the
+            # per-process optimizer steps the loop actually runs (same unit as max_opt_steps).
+            steps_per_epoch = math.ceil(steps_per_epoch / n_proc)
             total_opt_steps = steps_per_epoch * num_epochs
             if max_opt_steps:
                 total_opt_steps = min(total_opt_steps, max_opt_steps)
@@ -383,7 +374,9 @@ class OpenWAMTrainer:
         if debug:
             return None
         if getattr(t, "lr_scheduler", None) == "cosine":
-            return build_cosine_scheduler(optimizer, total_opt_steps=total_opt_steps, cfg=self.cfg)
+            return build_cosine_scheduler(
+                optimizer, total_opt_steps=total_opt_steps, cfg=self.cfg, num_processes=self.accelerator.num_processes
+            )
         return None
 
     # (6) Called by train() — locate/create the run dir and resolve the resume state dir.
@@ -446,9 +439,6 @@ class OpenWAMTrainer:
         # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
         self.architecture.set_dtype_device(self.architecture.dtype, self.accelerator.device)
         self.architecture.move_frozen_to_device(self.accelerator.device)
-        if self.latent_action_provider is not None:
-            self.latent_action_provider.to(self.accelerator.device)
-            self.latent_action_provider.device = torch.device(self.accelerator.device)
         logger.info("DeepSpeed: architecture wrapped, device=%s", self.accelerator.device)
         return optimizer, dataloader, scheduler
 
@@ -478,32 +468,20 @@ class OpenWAMTrainer:
             )
         return global_step, opt_step, start_epoch, skip
 
-    # (9) Called each step in train()'s loop — joint video-action loss dict (total/video/action/decoder).
+    # (9) Called each step in train()'s loop — joint video-action loss dict (total/video/action).
     def compute_loss(self, batch) -> dict:
-        """Compute joint video-action loss. Returns dict: total/video/action/decoder."""
+        """Compute joint video-action loss. Returns dict: total/video/action."""
         if not isinstance(batch, list):
             batch = [batch]
 
-        # Latent mode keeps the real action + action_mask (collected by
-        # prepare_inputs) as the decoder's supervision; only ActionDiT's
-        # ``actions`` is swapped to the latent target (which has no pad mask).
         inputs = self.architecture.prepare_inputs(batch)
-        if self.latent_action_enabled:
-            if self.latent_action_provider is None:
-                raise RuntimeError("model.action_backbone.type=latent but latent_action_provider is not initialized.")
-            inputs["decoder_target"] = inputs.get("actions")
-            inputs["decoder_action_is_pad"] = inputs.get("action_is_pad")
-            inputs["action_is_pad"] = None
-            videos = [sample["video"] for sample in batch]
-            inputs["actions"] = self.latent_action_provider(videos)
-        elif self.lambda_action > 0 and inputs.get("actions") is None:
+        if self.lambda_action > 0 and inputs.get("actions") is None:
             raise ValueError("lambda_action > 0 but no action in data.")
 
         result = self.architecture.compute_loss(
             **inputs,
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
-            lambda_decoder=self.lambda_decoder,
             current_step=self._current_step,
         )
 
@@ -511,7 +489,6 @@ class OpenWAMTrainer:
             "total": result["loss"],
             "video": result.get("loss_video", torch.tensor(0.0)),
             "action": result.get("loss_action", torch.tensor(0.0)),
-            "decoder": result.get("loss_decoder", torch.tensor(0.0)),
         }
 
     # (10) Called each step in train()'s loop — progress bar, wandb log, debug loss-history CSV.
@@ -531,12 +508,7 @@ class OpenWAMTrainer:
         output_path,
     ) -> None:
         """Update progress bar, log to wandb, and (debug) write the loss-history CSV row."""
-        # Latent mode: action stream=latent action, decoder MSE=real action loss; non-latent has no decoder column.
-        labels = (
-            [("latent_action", "loss_action"), ("action", "loss_decoder")]
-            if self.latent_action_enabled
-            else [("action", "loss_action")]
-        )
+        labels = [("action", "loss_action")]
         loss_total = metrics["loss_total"]
         loss_video = metrics["loss_video"]
         grad_norm = metrics["grad_norm"]

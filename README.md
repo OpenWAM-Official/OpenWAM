@@ -33,13 +33,12 @@ OpenWAM/
 │   ├── dataloader/    # Dataset adapters (RoboTwin), transforms, processors, registry
 │   ├── model/
 │   │   ├── architectures/    # WAM families: dual_system, shared_backbone, tri_system
-│   │   ├── action_backbone/  # ActionBackbone ABCs, separate ActionDiT, shared action backbone,
-│   │   │                     #   latent action encoder/decoder, scheduler
+│   │   ├── action_backbone/  # ActionBackbone ABCs, separate ActionDiT, shared action backbone, scheduler
 │   │   ├── video_backbone/   # VideoBackbone ABC, Wan backbones, encoder/ (VAE / DINOv3 / V-JEPA 2.1)
 │   │   └── vlm_backbone/     # VlmBackbone ABC, Qwen3-VL backbone
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
 │   └── deploy/        # Policy server, model loader, inference engine, executors, optimizations
-├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests, SVAE / LAPA tooling
+├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests, SVAE tooling
 ├── configs/           # Hydra configs for model, dataloader, accelerate, deploy
 ├── tests/             # Unit tests
 ├── benchmarks/
@@ -144,17 +143,16 @@ Drop `training.debug=true` for a full run. Loss weights (`lambda_video` / `lambd
 
 **Architecture** is picked via `model=<framework>` (`dual_system` | `shared_backbone` | `tri_system`) and `model.architecture.variant` (see the [Architectures](#architectures) table).
 
-**Video backbone** is a Hydra group composed under each framework yaml (default `wan22`). Switch via `model/video_backbone=`:
+**Video backbone** is a Hydra group composed under each framework yaml (default `wan22_ti2v_5b`). Switch via `model/video_backbone=`:
 
 ```bash
 bash scripts/train.sh model=dual_system \
-    model/video_backbone=wan21 \
-    model.video_backbone.model_path=/path/to/Wan2.1-VACE-1.3B
+    model/video_backbone=wan21_vace_1_3b
 ```
 
-Available groups: `wan22` (Wan2.2-TI2V-5B, default), `wan21` (VACE-1.3B / I2V-14B), `cosmos25`. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
+Available groups: `wan22_ti2v_5b` (Wan2.2-TI2V-5B, default), `wan21_vace_1_3b` (Wan2.1-VACE-1.3B), `wan21_i2v_14b_480p` (Wan2.1-I2V-14B-480P), `cosmos25`. Each group ships its own `model_path`; override `model.video_backbone.model_path=` only to point at a different weights dir. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
 
-> `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`. Override **both** together; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
+> `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`, which each group already ships. When you point `model_path` at an off-default weights dir, keep `name` consistent with it; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
 
 Distributed training uses DeepSpeed ZeRO; the stage is set via `training.zero_stage` in `train.yaml` (default 2, e.g. `training.zero_stage=1`).
 

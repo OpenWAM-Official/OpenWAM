@@ -126,6 +126,26 @@ def _make_tiny_trimodal_components(num_layers=2, dim=32, num_heads=4, action_dim
     return vb, ab, ub
 
 
+def _make_forward_tri_arch(vb, ab, ub):
+    """Minimal tri arch wired from pre-built components for full-``forward()``
+    tests: no VLM backbone, MoT driver without mixed-attn checkpointing."""
+    from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
+
+    class _Arch(TriSystemJointSelfAttnArchitecture):
+        device = torch.device("cpu")
+
+        def __init__(self):
+            nn.Module.__init__(self)
+            self.video_backbone = vb
+            self.action_backbone = ab
+            self.understanding_expert = ub
+            self.vlm_backbone = None
+            self._proprio_context = None
+            self._mot_driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
+
+    return _Arch()
+
+
 def test_tri_system_action_pre_post_round_trip():
     torch.manual_seed(0)
     vb, ab, _ = _make_tiny_trimodal_components()
@@ -759,21 +779,7 @@ def test_tri_system_forward_rejects_vlm_hidden_batch_mismatch():
     # Monkeypatch vb.prepare to return our pre-built vstate
     vb.prepare = lambda **kw: vstate  # noqa: ARG005
 
-    from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
-
-    class _Arch(TriSystemJointSelfAttnArchitecture):
-        device = torch.device("cpu")
-
-        def __init__(self):
-            nn.Module.__init__(self)
-            self.video_backbone = vb
-            self.action_backbone = ab
-            self.understanding_expert = ub
-            self.vlm_backbone = None
-            self._proprio_context = None
-            self._mot_driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
-
-    arch = _Arch()
+    arch = _make_forward_tri_arch(vb, ab, ub)
     # batch=1 vlm_hidden vs batch=2 video state — mismatch.
     # ``context`` and ``context_mask`` go via **pipeline_inputs and are
     # extracted as ``action_context`` inside forward().
@@ -786,6 +792,61 @@ def test_tri_system_forward_rejects_vlm_hidden_batch_mismatch():
             vlm_hidden=torch.randn(1, 5, ub.cfg.vlm_input_dim),
             vlm_attention_mask=torch.ones(1, 5, dtype=torch.bool),
         )
+
+
+def test_tri_system_forward_applies_vace_hints_not_rejected():
+    """tri_system + VACE: a vstate carrying ``vace_hints`` must no longer raise
+    (the old ``NotImplementedError("tri_system + VACE not supported")`` guard is
+    gone) and the per-video-block hint residual must reach the output via the
+    shared ``post_attn_at_layer`` → ``apply_post_block_residuals`` path.
+    """
+    vb, ab, ub = _make_tiny_trimodal_components()
+    dit = vb.dit  # noqa: SLF001
+
+    arch = _make_forward_tri_arch(vb, ab, ub)
+
+    torch.manual_seed(0)
+    fwd_kwargs = dict(
+        noisy_actions=torch.randn(2, 4, ab.action_dim),
+        action_timestep=torch.tensor([10.0, 20.0]),
+        context=torch.randn(2, 3, ab.text_dim),
+        context_mask=torch.ones(2, 3, dtype=torch.bool),
+        vlm_hidden=torch.randn(2, 5, ub.cfg.vlm_input_dim),
+        vlm_attention_mask=torch.ones(2, 5, dtype=torch.bool),
+    )
+    # seq_len = grid 1*2*3 = 6, dim = 32 (tiny components defaults).
+    hint = torch.randn(2, 6, 32)
+
+    class _StubVace:
+        # Block 0 receives hint[0]; mirrors WanVACE.vace_layers_mapping.
+        vace_layers_mapping = {0: 0}
+
+    # The tiny mock DiT head is ``Identity`` (cannot consume the time embedding),
+    # so bypass the real head+unpatchify; we only need the post-MoT video hidden
+    # states (which carry the VACE residual) to compare base vs vace.
+    vb.finalize = lambda state: state.hidden_states  # noqa: ARG005
+
+    def _fresh_state(*, with_vace):
+        # Re-seed so the base vstate (hidden_states/time_mod/context/time_embed)
+        # is identical across the two runs — only ``vace_hints`` differs.
+        torch.manual_seed(1)
+        state = _make_tiny_video_state(dit, batch=2)
+        if with_vace:
+            state.vace_hints = [hint.clone()]
+            state.extras["vace"] = _StubVace()
+        return state
+
+    vb.prepare = lambda **kw: _fresh_state(with_vace=False)  # noqa: ARG005
+    v_base, a_base = arch.forward(**fwd_kwargs)
+    assert torch.isfinite(v_base).all() and torch.isfinite(a_base).all()
+
+    vb.prepare = lambda **kw: _fresh_state(with_vace=True)  # noqa: ARG005
+    v_vace, a_vace = arch.forward(**fwd_kwargs)  # must NOT raise NotImplementedError
+    assert torch.isfinite(v_vace).all() and torch.isfinite(a_vace).all()
+    # The VACE residual at block 0 must propagate to the video output (and, via
+    # trimodal joint attention, to the action output).
+    assert not torch.equal(v_base, v_vace), "vace_hints did not affect the video output — hint not applied"
+    assert not torch.equal(a_base, a_vace), "vace_hints did not affect the action output via joint attention"
 
 
 def test_und_mask_baseline_no_mask_unchanged():

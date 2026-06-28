@@ -1,0 +1,7 @@
+# Wan2.1-I2V-14B-480P video backbone (cfg.model.video_backbone.*): fixed pretrained
+# baseline — no external encoder, no from_scratch. 480x832, first-frame conditioned.
+
+name: wan21_i2v_14b_480p
+model_path: /path/to/Wan2.1-I2V-14B-480P  # [Required] weights dir
+
+shift_video: 5.0       # Flow-matching α-shift (VIDEO scheduler); single source of truth for train + inference

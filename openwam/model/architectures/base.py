@@ -619,7 +619,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         proprio_encoder = getattr(self, "proprio_encoder", None)
         if proprio_encoder is not None:
             proprio_encoder.to(dtype=dtype, device=device)
-        # action_backbone owns its latent decoder; its set_dtype_device moves it.
         for bb in self.backbones.values():
             bb.set_dtype_device(dtype, device)
 
@@ -910,9 +909,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 action = action.to(dtype=_dtype, device=_device).unsqueeze(0)
             all_actions.append(action)
 
-            # Carry proprio whenever the sample provides it — both the main-stream
-            # proprio-context path and the latent decoder consume it downstream,
-            # so the bridge into ``inputs`` is not gated on a single consumer's flag.
+            # Carry proprio whenever the sample provides it — the main-stream
+            # proprio-context path consumes it downstream, so the bridge into
+            # ``inputs`` is not gated on a single consumer's flag.
             proprio = sample.get("proprio")
             if proprio is not None:
                 if isinstance(proprio, np.ndarray):
@@ -1014,9 +1013,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         }
 
         # Bridge proprio into inputs whenever the batch carries it (not gated on
-        # uses_proprioception): the main-stream proprio-context path AND the
-        # latent decoder both read inputs["proprio"]. Consumers that don't need
-        # it simply ignore it.
+        # uses_proprioception): the main-stream proprio-context path reads
+        # inputs["proprio"]. Consumers that don't need it simply ignore it.
         if all_proprios[0] is not None:
             inputs["proprio"] = torch.stack(all_proprios, dim=0).contiguous()
             # Reconcile mixed 1-D (1,) / 2-D (1, D) proprio_masks before stacking:
@@ -1076,7 +1074,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         actions: Optional[torch.Tensor] = None,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
-        lambda_decoder: float = 0.0,
         current_step: int = 0,
         decoupled_sampler=None,
         action_timestep_per_token: bool = False,
@@ -1111,15 +1108,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         action_scheduler = self.action_backbone.scheduler
         _dtype = self.dtype
         _device = self.device
-
-        # End-to-end decoder reconstructs the latent from ActionDiT's velocity
-        # prediction, which only exists when the action stream runs.
-        has_decoder = getattr(self.action_backbone, "has_latent_decoder", False)
-        if has_decoder and lambda_decoder > 0 and lambda_action <= 0:
-            raise ValueError(
-                "Latent decoder (lambda_decoder>0) trains end-to-end on ActionDiT's predicted "
-                "latent and requires lambda_action>0 (the action/latent stream must run)."
-            )
 
         if actions is None:
             actions = inputs.pop("actions", None)
@@ -1204,9 +1192,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # MoT design, attention itself does not consume sample-level padding.
         forward_inputs.pop("action_is_pad", None)
         forward_inputs.pop("video_is_pad", None)
-        # Decoder-only supervision tensors must not leak into the forward pass.
-        forward_inputs.pop("decoder_target", None)
-        forward_inputs.pop("decoder_action_is_pad", None)
 
         # Route per-sample proprio_mask through pipeline_inputs to
         # ``_append_proprio_context_token``. Internal-only key; pop'd there.
@@ -1261,27 +1246,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             "loss_video": lambda_video * loss_video.detach(),
             "loss_action": lambda_action * loss_action.detach(),
         }
-
-        # --- Latent->action decoder loss (latent mode only, end-to-end) ---
-        # Decoder consumes the clean latent RECONSTRUCTED from ActionDiT's own
-        # velocity prediction: x0 = noisy - sigma * velocity_pred. This carries a
-        # gradient back into ActionDiT, so the decoder MSE jointly optimizes the
-        # latent representation (true end-to-end). It also matches deployment,
-        # where ActionDiT denoises to a clean latent before the decoder runs.
-        # Full action_is_pad -> loss 0 -> no decoder/ActionDiT gradient.
-        if lambda_decoder > 0 and self.action_backbone is not None:
-            decoder_target = inputs.get("decoder_target")
-            if decoder_target is not None:
-                latent_x0 = noisy_actions - a_sigma_bc * action_noise_pred
-                # proprio is already in the dataloader's normalized space
-                # (same space as decoder_target); the decoder ignores it unless
-                # it was built with use_proprioception.
-                decoded = self.action_backbone.decode_latent_to_action(latent_x0, proprio)
-                if decoded is not None:
-                    decoder_target = decoder_target.to(dtype=_dtype, device=_device)
-                    loss_decoder = self._masked_mse(decoded, decoder_target, inputs.get("decoder_action_is_pad"))
-                    result["loss"] = result["loss"] + lambda_decoder * loss_decoder
-                    result["loss_decoder"] = (lambda_decoder * loss_decoder).detach()
 
         return result
 
@@ -1402,27 +1366,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         per_sample = per_step.sum(dim=1) / valid_count
         return (per_sample * tw).mean()
 
-    @staticmethod
-    def _masked_mse(pred, target, is_pad):
-        """Unweighted MSE over valid (non-pad) elements; full pad -> 0.
-
-        Used by the latent->action decoder. ``is_pad`` may be None, (B, T), or
-        (B, T, D); a (B, T) mask broadcasts across the action dim.
-        """
-        import torch.nn.functional as F
-
-        per_element = F.mse_loss(pred.float(), target.float(), reduction="none")
-        if is_pad is None:
-            return per_element.mean()
-        valid = (~is_pad.to(device=per_element.device, dtype=torch.bool)).float()
-        if valid.shape != per_element.shape:
-            if valid.ndim == 3:
-                valid = (valid > 0).any(dim=-1, keepdim=True).float().expand_as(per_element)
-            elif valid.ndim == 2:
-                valid = valid.unsqueeze(-1).expand_as(per_element)
-        weighted = per_element * valid
-        return weighted.sum() / valid.sum().clamp(min=1.0)
-
     # --- Inference: generation ---
 
     @torch.no_grad()
@@ -1504,9 +1447,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
-        # CFG / pre-encoded-text / tile knobs are not forwarded: Wan does no CFG
-        # at inference and uses its own native tiling grid; CFG is handled by the
-        # denoising loop below via ``cfg_scale_f`` / ``cfg_merge``.
+        # CFG / pre-encoded-text knobs ARE forwarded so a CFG-capable backbone
+        # (Cosmos25) can materialise ``inputs_shared['uncond_context']`` from its
+        # own encoder/cache; the denoising loop below then applies CFG via
+        # ``cfg_scale_f`` / ``cfg_merge``. Wan does no CFG at inference and
+        # swallows these via ``**kw``, so its behaviour is unchanged.
         inputs_shared = vb.preprocess_input_for_inference(
             prompt=prompt,
             vace_video=vace_video,
@@ -1520,6 +1465,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
             tiled=tiled,
             vace_cache=vace_cache,
             prompt_embed_cache=prompt_embed_cache,
+            cfg_scale=cfg_scale,
+            cfg_merge=cfg_merge,
+            pre_encoded_text=pre_encoded_text,
+            uncond_pre_encoded_text=uncond_pre_encoded_text,
         )
 
         if profile:
@@ -1645,15 +1594,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             video_frames = vb.decode_video(inputs_shared["latents"], tiled=tiled)
         else:
             video_frames = None
-
-        # Latent mode: ActionDiT denoised to a clean latent (schedule ends at
-        # sigma_a=0, denoise_schedule.py); decode it to real (still-normalized)
-        # actions, conditioned on the already-normalized proprio when the decoder
-        # uses it. Explicit mode has no decoder and skips this. Both then
-        # unnormalize back to physical units.
-        if getattr(self.action_backbone, "has_latent_decoder", False):
-            decode_proprio = proprio.to(device=device, dtype=dtype) if proprio is not None else None
-            action_latents = self.action_backbone.decode_latent_to_action(action_latents, decode_proprio)
 
         actions = action_latents.squeeze(0).float().cpu().numpy()
         normalizer = getattr(self, "normalizer", None)
