@@ -27,6 +27,7 @@ from openwam.dataloader.behavior import (
     _ACT_BASE,
     _ACT_LGRIP,
     _ACT_RGRIP,
+    _ACT_TRUNK,
     _L_EEF_POS,
     _L_EEF_QUAT,
     _R_EEF_POS,
@@ -45,9 +46,10 @@ LWRIST = "observation.images.rgb.left_wrist"
 RWRIST = "observation.images.rgb.right_wrist"
 CAMS = (HEAD, LWRIST, RWRIST)
 # Unified slots that carry real data: L eef+grip [0:10), R eef+grip [34:44),
-# base velocity [68:71). Everything else (dex hands, reserved tail) is masked.
-EXPECTED_VALID = list(range(0, 10)) + list(range(34, 44)) + list(range(68, 71))
-UNIFY_MAP = ["0-9", "34-43", "68-70"]
+# base velocity [68:71), trunk [71:75). Everything else (dex hands, reserved
+# tail [75:80)) is masked.
+EXPECTED_VALID = list(range(0, 10)) + list(range(34, 44)) + list(range(68, 71)) + list(range(71, 75))
+UNIFY_MAP = ["0-9", "34-43", "68-70", "71-74"]
 
 
 def _unit_quats(rng: np.random.RandomState, n: int) -> np.ndarray:
@@ -76,6 +78,7 @@ def _make_action(rng: np.random.RandomState, n: int) -> np.ndarray:
     """``(n, 23)`` action: base velocity at [0:3], binary {-1,+1} grippers."""
     action = rng.uniform(-1, 1, size=(n, ACTION_DIM)).astype(np.float32)
     action[:, _ACT_BASE] = rng.uniform(-0.3, 0.3, size=(n, 3))  # base vel
+    action[:, _ACT_TRUNK] = rng.uniform(-0.4, 0.4, size=(n, 4))  # torso joints
     action[:, _ACT_LGRIP] = rng.choice([-1.0, 1.0], size=n)
     action[:, _ACT_RGRIP] = rng.choice([-1.0, 1.0], size=n)
     return action
@@ -236,7 +239,7 @@ class TestGetItem:
         a = s["action"].numpy()
         assert (a[:, 10:34] == 0).all()  # L hand
         assert (a[:, 44:68] == 0).all()  # R hand
-        assert (a[:, 71:80] == 0).all()  # reserved tail
+        assert (a[:, 75:80] == 0).all()  # reserved tail (trunk now fills 71:75)
         assert np.isfinite(a).all()
 
     def test_base_velocity_present(self, tmp_path):
@@ -246,6 +249,15 @@ class TestGetItem:
         base = s["action"].numpy()[:, 68:71]
         assert np.isfinite(base).all()
         assert np.abs(base).sum() > 0  # base velocity actually written
+
+    def test_trunk_present(self, tmp_path):
+        # Native action[3:7] (4 torso joints) is scattered into reserved [71:75).
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            s = _make_ds(b)[0]
+        trunk = s["action"].numpy()[:, 71:75]
+        assert np.isfinite(trunk).all()
+        assert np.abs(trunk).sum() > 0  # trunk joints actually written
 
     def test_multiview_canvas_size(self, tmp_path):
         b = make_behavior_bucket(tmp_path, n_episodes=2)
@@ -502,11 +514,12 @@ class TestStatsScript:
 
         b = make_behavior_bucket(tmp_path, n_episodes=3)
         result = compute_behavior_stats(b)
-        assert set(result) == {"eef", "base_vel"}
-        eef, base = result["eef"], result["base_vel"]
+        assert set(result) == {"eef", "base_vel", "trunk"}
+        eef, base, trunk = result["eef"], result["base_vel"], result["trunk"]
         for k in ("mean", "std", "min", "max", "q01", "q99"):
             assert len(eef[k]) == 20
             assert len(base[k]) == 3
+            assert len(trunk[k]) == 4
         # rot6d dims (3:9 / 13:19) pinned to identity
         assert eef["rot6d_identity"] is True
         for i in (3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 18):
@@ -516,6 +529,9 @@ class TestStatsScript:
         # base velocity is NOT pinned (real stats from data)
         assert "rot6d_identity" not in base
         assert base["layout"] == "vx,vy,vyaw"
+        # trunk (torso joints) is NOT pinned either
+        assert "rot6d_identity" not in trunk
+        assert trunk["layout"] == "torso_joint_abs"
 
     def test_no_rot6d_identity_flag(self, tmp_path):
         from openwam.dataloader.utils.stats_computation.behavior_stats_computation import compute_behavior_stats

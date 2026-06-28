@@ -23,11 +23,11 @@ exactly like a standard RoboCOIN bucket, with two deltas:
 
 Unified 80-D layout (== robocoin.yaml): L[0:34] xyz3+rot6d6+grip1+dex24,
 R[34:68] same, reserved[68:80]. R1Pro has parallel grippers (no dexterous hand),
-so the 24 dex dims/arm are zero-padded + loss-masked; only L[0:10], R[34:44] and
-base[68:71] carry real data.
+so the 24 dex dims/arm are zero-padded + loss-masked; only L[0:10], R[34:44],
+base[68:71] and trunk[71:75] carry real data.
 
-Raw 23-D pre-scatter vector (action & proprio):
-  [L_pos(3), L_rot6d(6), L_grip(1), R_pos(3), R_rot6d(6), R_grip(1), base_vel(3)]
+Raw 27-D pre-scatter vector (action & proprio):
+  [L_pos(3), L_rot6d(6), L_grip(1), R_pos(3), R_rot6d(6), R_grip(1), base_vel(3), trunk(4)]
 
 Action/state temporal alignment:
   The EEF *action target* at window step t is the NEXT-frame achieved pose
@@ -61,16 +61,18 @@ _R_EEF_POS = slice(225, 228)
 _R_EEF_QUAT = slice(228, 232)  # xyzw
 # ── action[23] layout (OmniGibson ACTION_QPOS_INDICES['R1Pro']) ──
 _ACT_BASE = slice(0, 3)  # [vx, vy, vyaw] base-frame velocity
+_ACT_TRUNK = slice(3, 7)  # 4 absolute torso joint targets
 _ACT_LGRIP = 14
 _ACT_RGRIP = 22
 
-# Raw pre-scatter width: EEF 20 (pos3+rot6d6+grip1 ×2) + base velocity 3.
+# Raw pre-scatter width: EEF 20 (pos3+rot6d6+grip1 ×2) + base velocity 3 + trunk 4.
 # _EEF_DIM is the shared bimanual EEF width (== utils.eef.EEF_DIM, as RoboCOIN
 # imports it) so the 20-D block stays in lockstep with the sibling readers; the
-# +3 base velocity and the resulting raw 23 are the BEHAVIOR-specific deltas.
+# +3 base velocity, +4 trunk and the resulting raw 27 are the BEHAVIOR-specific deltas.
 _EEF_DIM = EEF_DIM
 _BASE_DIM = 3
-_RAW_DIM = _EEF_DIM + _BASE_DIM
+_TRUNK_DIM = 4
+_RAW_DIM = _EEF_DIM + _BASE_DIM + _TRUNK_DIM
 
 # R1Pro RGB camera feature keys (depth / seg_instance are intentionally ignored).
 _HEAD_CAMERA = "observation.images.rgb.head"
@@ -93,10 +95,14 @@ def _state_to_eef18(state: np.ndarray) -> np.ndarray:
     return np.concatenate([l_pos, l_rot6d, r_pos, r_rot6d], axis=-1).astype(np.float32)
 
 
-def _assemble_raw23(eef18: np.ndarray, l_grip: np.ndarray, r_grip: np.ndarray, base: np.ndarray) -> np.ndarray:
-    """Interleave grippers + base into the canonical raw 23-D layout
-    ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3]``."""
-    return np.concatenate([eef18[:, 0:9], l_grip, eef18[:, 9:18], r_grip, base], axis=-1).astype(np.float32)
+def _assemble_raw(
+    eef18: np.ndarray, l_grip: np.ndarray, r_grip: np.ndarray, base: np.ndarray, trunk: np.ndarray
+) -> np.ndarray:
+    """Interleave grippers + base + trunk into the canonical raw 27-D layout
+    ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]``."""
+    return np.concatenate(
+        [eef18[:, 0:9], l_grip, eef18[:, 9:18], r_grip, base, trunk], axis=-1
+    ).astype(np.float32)
 
 
 class BehaviorDataset(LeRobotV3Reader):
@@ -104,13 +110,13 @@ class BehaviorDataset(LeRobotV3Reader):
 
     DATASET_NAME = "BEHAVIOR"
     NEEDED_COLS = _NEEDED_COLS
-    # Raw pre-scatter width (eef20 + base3). With unify_action=True the public
-    # ACTION_DIM becomes UNIFY_DIM (80); _raw_action_dim stays 23 (read from this
-    # instance attr by the base before it resets ACTION_DIM → see base __init__).
+    # Raw pre-scatter width (eef20 + base3 + trunk4). With unify_action=True the
+    # public ACTION_DIM becomes UNIFY_DIM (80); _raw_action_dim stays 27 (read from
+    # this instance attr by the base before it resets ACTION_DIM → see base __init__).
     ACTION_DIM = _RAW_DIM
-    # All 23 raw dims are real → leave ACTION_DIM_MASK None; under unify the
+    # All 27 raw dims are real → leave ACTION_DIM_MASK None; under unify the
     # scattered _unify_dim_mask marks exactly the mapped slots {0:10, 34:44,
-    # 68:71} valid and everything else (dex, reserved tail) masked.
+    # 68:71, 71:75} valid and everything else (dex, reserved tail) masked.
     ACTION_DIM_MASK = None
     # Prompt is per-episode in meta/episodes.jsonl (no tasks.parquet).
     PROMPT_SOURCE = "episode_annotated"
@@ -272,11 +278,11 @@ class BehaviorDataset(LeRobotV3Reader):
                 ) from e
 
     def _load_stats(self, info: dict):
-        """Load ``meta/stats_R1Pro.json`` → combined 23-D (eef20 + base_vel3) stats.
+        """Load ``meta/stats_R1Pro.json`` → combined 27-D (eef20 + base_vel3 + trunk4) stats.
 
         Mirrors RoboCOIN's per-robot-type stats, with rot6d pinned to identity in
-        the stats file (see behavior_stats_computation). The base velocity block is
-        a BEHAVIOR-specific addition (no rot6d pin; real stats)."""
+        the stats file (see behavior_stats_computation). The base velocity + trunk
+        blocks are BEHAVIOR-specific additions (no rot6d pin; real stats)."""
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             return None
         stats_path = self._dataset_dir / "meta" / "stats_R1Pro.json"
@@ -302,15 +308,22 @@ class BehaviorDataset(LeRobotV3Reader):
             strict_minmax=False,
             source_hint=f"{stats_path}: base_vel.*",
         )
+        trunk = materialize_eef_stats(
+            raw.get("trunk", {}),
+            self._normalize_mode,
+            dim=_TRUNK_DIM,
+            strict_minmax=False,
+            source_hint=f"{stats_path}: trunk.*",
+        )
         keys = ("mean", "std", "min", "max", "q01", "q99")
-        for blk, name, dim in ((eef, "eef", _EEF_DIM), (base, "base_vel", _BASE_DIM)):
+        for blk, name, dim in ((eef, "eef", _EEF_DIM), (base, "base_vel", _BASE_DIM), (trunk, "trunk", _TRUNK_DIM)):
             for k in keys:
                 if blk[k].shape[0] != dim:
                     raise ValueError(
                         f"BEHAVIOR({self._dataset_id}): '{name}' stats '{k}' width {blk[k].shape[0]} "
                         f"in {stats_path} != expected {dim}. Re-run behavior_stats_computation."
                     )
-        combined = {k: np.concatenate([eef[k], base[k]]).astype(np.float32) for k in keys}
+        combined = {k: np.concatenate([eef[k], base[k], trunk[k]]).astype(np.float32) for k in keys}
         # Emit the deploy-side normalizer artifact (in the FINAL action space the
         # model emits) so a trained checkpoint can un-normalize actions back to
         # physical units. The trainer copies normalization_stats_path into the
@@ -376,28 +389,33 @@ class BehaviorDataset(LeRobotV3Reader):
         return actual_raw_len if actual_raw_len >= self._num_frames else actual_raw_len - 1
 
     def _action_20d(self, win) -> np.ndarray:
-        """Raw ``(actual_raw_len, 23)`` action: next-frame EEF pose + grip/base cmd at t."""
+        """Raw ``(actual_raw_len, 27)`` action: next-frame EEF pose + grip/base/trunk cmd at t."""
         state = np.stack(win["observation.state"].values).astype(np.float32)  # (L, 256)
-        action = np.stack(win["action"].values).astype(np.float32)  # (L, 23)
+        action = np.stack(win["action"].values).astype(np.float32)  # (L, 23) native
         eef = _state_to_eef18(state)  # (L, 18) current-frame poses
         # action target = next-frame achieved pose (shift +1; clamp the last step,
         # which T_action = num_frames-1 drops for a full window anyway).
         eef_next = np.concatenate([eef[1:], eef[-1:]], axis=0) if len(eef) > 1 else eef
-        raw = _assemble_raw23(
+        raw = _assemble_raw(
             eef_next,
             action[:, _ACT_LGRIP : _ACT_LGRIP + 1],
             action[:, _ACT_RGRIP : _ACT_RGRIP + 1],
             action[:, _ACT_BASE],
+            action[:, _ACT_TRUNK],
         )
         return self._normalize_array(raw)
 
     def _proprio_20d(self, win) -> np.ndarray:
-        """Raw ``(1, 23)`` proprio: current-frame (t=0) EEF pose + grip/base cmd."""
+        """Raw ``(1, 27)`` proprio: current-frame (t=0) EEF pose + grip/base/trunk cmd."""
         state = np.stack(win["observation.state"].values[:1]).astype(np.float32)  # (1, 256)
-        action = np.stack(win["action"].values[:1]).astype(np.float32)  # (1, 23)
+        action = np.stack(win["action"].values[:1]).astype(np.float32)  # (1, 23) native
         eef = _state_to_eef18(state)  # (1, 18)
-        raw = _assemble_raw23(
-            eef, action[:, _ACT_LGRIP : _ACT_LGRIP + 1], action[:, _ACT_RGRIP : _ACT_RGRIP + 1], action[:, _ACT_BASE]
+        raw = _assemble_raw(
+            eef,
+            action[:, _ACT_LGRIP : _ACT_LGRIP + 1],
+            action[:, _ACT_RGRIP : _ACT_RGRIP + 1],
+            action[:, _ACT_BASE],
+            action[:, _ACT_TRUNK],
         )
         return self._normalize_array(raw)
 

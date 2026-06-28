@@ -37,7 +37,7 @@ color_jitter:
   hue: 0.0
 
 # ── Action normalization ────────────────────────────────────────────────────
-# Loads meta/stats_R1Pro.json (eef 20-D + base_vel 3-D). rot6d dims are pinned to
+# Loads meta/stats_R1Pro.json (eef 20-D + base_vel 3-D + trunk 4-D). rot6d dims are pinned to
 # identity in the stats file (no normalization), matching robocoin. Generate via:
 #   python -m openwam.dataloader.utils.stats_computation.behavior_stats_computation \
 #       --dataset_dir <dataset_dir>
@@ -56,13 +56,15 @@ enable_action_supervision: true
 #   [10:34) L hand(24)  [34:37) R eef xyz     [37:43) R eef rot6d
 #   [43]    R gripper   [44:68) R hand(24)    [68:80) reserved(12)
 # R1Pro has parallel grippers (no dexterous hand) → the 24 hand dims/arm stay 0 +
-# masked. The mobile base occupies the reserved region: base velocity [vx,vy,vyaw]
-# → slots [68:71) (Ilia Larchenko's design); [71:80) stay reserved + masked.
-# Raw 23-D layout: [L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3];
-# the map below scatters raw 0-9 → L (0-9), 10-19 → R (34-43), 20-22 → base (68-70).
+# masked. The reserved region holds the mobile base + torso: base velocity
+# [vx,vy,vyaw] → [68:71) (Ilia Larchenko's design), torso 4 abs joints → [71:75);
+# [75:80) stay reserved + masked.
+# Raw 27-D layout: [L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4];
+# the map scatters raw 0-9 → L (0-9), 10-19 → R (34-43), 20-22 → base (68-70),
+# 23-26 → trunk (71-74).
 # action_dim becomes 80 → set model.architecture.action_dim=80 state_dim=80.
 unify_action: true
-unify_action_map: ["0-9", "34-43", "68-70"]
+unify_action_map: ["0-9", "34-43", "68-70", "71-74"]
 
 # ── Deploy normalizer selector (training-inert) ─────────────────────────────
 # The reader writes meta/normalization_stats.npy in the unified 80-D space and

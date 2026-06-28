@@ -7,8 +7,8 @@ grouping: one ``meta/stats_R1Pro.json`` is written for the whole dataset (named
 by ``info.json``'s ``robot_type``, which the reader hardcodes).
 
 The reader (:class:`~openwam.dataloader.behavior.BehaviorDataset`) emits a raw
-23-D vector ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3]``
-split into two stats blocks:
+27-D vector ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]``
+split into three stats blocks:
 
   * ``eef``      — 20-D ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1]``.
                    Same layout RoboCOIN normalizes, so we **reuse its
@@ -20,6 +20,9 @@ split into two stats blocks:
   * ``base_vel`` — 3-D ``[vx, vy, vyaw]`` base-frame velocity (Larchenko's mobile
                    base design). A BEHAVIOR-specific block with **real** stats —
                    NOT pinned (it's a genuine velocity, not a rotation basis).
+  * ``trunk``    — 4-D absolute torso joint targets (native ``action[3:7]``). Like
+                   ``base_vel``, a BEHAVIOR-specific block with **real** stats —
+                   NOT pinned (genuine joint angles).
 
 Every row contributes one 20-D EEF point (pose from ``observation.state`` quats
 at frame t + gripper command from ``action`` at t) and one 3-D base point
@@ -29,8 +32,8 @@ distribution of state poses, so pooling current-frame poses is the correct,
 simplest stat — exactly as RoboCOIN pools its action+state streams (shared
 schema / frame / units).
 
-To guarantee zero layout drift, the EEF + base vectors are built with the
-reader's own helpers (``_state_to_eef18`` / ``_assemble_raw23``); the stats are
+To guarantee zero layout drift, the EEF + base + trunk vectors are built with the
+reader's own helpers (``_state_to_eef18`` / ``_assemble_raw``); the stats are
 literally computed over the same numbers the reader feeds the model (pre-scatter,
 pre-normalization).
 
@@ -41,7 +44,9 @@ Output schema (``meta/stats_R1Pro.json``)::
                    "q01":[..20], "q99":[..20], "num_timesteps":N, "num_files":M,
                    "robot_type":"R1Pro", "rot6d_identity":true},
       "base_vel": {"mean":[..3], ..., "q01":[..3], "q99":[..3],
-                   "num_timesteps":N, "layout":"vx,vy,vyaw"}
+                   "num_timesteps":N, "layout":"vx,vy,vyaw"},
+      "trunk":    {"mean":[..4], ..., "q01":[..4], "q99":[..4],
+                   "num_timesteps":N, "layout":"torso_joint_abs"}
     }
 
 mean/std/min/max are exact (streamed over every row); q01/q99 come from a bounded
@@ -66,9 +71,11 @@ from openwam.dataloader.behavior import (
     _ACT_BASE,
     _ACT_LGRIP,
     _ACT_RGRIP,
+    _ACT_TRUNK,
     _BASE_DIM,
     _EEF_DIM,
-    _assemble_raw23,
+    _TRUNK_DIM,
+    _assemble_raw,
     _state_to_eef18,
 )
 
@@ -94,26 +101,30 @@ def _iter_episode_parquets(dataset_dir: Path):
             yield fpath
 
 
-def _rows_to_eef20_base3(state: np.ndarray, action: np.ndarray):
-    """``(T,256)`` state + ``(T,23)`` action → ``(T,20)`` eef + ``(T,3)`` base.
+def _rows_to_blocks(state: np.ndarray, action: np.ndarray):
+    """``(T,256)`` state + ``(T,23)`` action → ``(T,20)`` eef + ``(T,3)`` base + ``(T,4)`` trunk.
 
     Built via the reader's own helpers: eef18 = ``_state_to_eef18`` (state quats),
-    then ``_assemble_raw23`` interleaves the gripper commands + base velocity into
-    the canonical raw-23 layout, which splits cleanly as ``[:20]`` (eef) / ``[20:]``
-    (base). This is exactly the pre-normalization vector the reader scatters.
+    then ``_assemble_raw`` interleaves the gripper commands + base velocity + trunk
+    joints into the canonical raw-27 layout, which splits cleanly as ``[:20]`` (eef)
+    / ``[20:23]`` (base) / ``[23:27]`` (trunk). This is exactly the pre-normalization
+    vector the reader scatters.
     """
     eef18 = _state_to_eef18(state)
     l_grip = action[:, _ACT_LGRIP : _ACT_LGRIP + 1]
     r_grip = action[:, _ACT_RGRIP : _ACT_RGRIP + 1]
     base = action[:, _ACT_BASE]
-    raw23 = _assemble_raw23(eef18, l_grip, r_grip, base)
-    return raw23[:, :_EEF_DIM], raw23[:, _EEF_DIM : _EEF_DIM + _BASE_DIM]
+    trunk = action[:, _ACT_TRUNK]
+    raw = _assemble_raw(eef18, l_grip, r_grip, base, trunk)
+    e, b = _EEF_DIM, _BASE_DIM
+    return raw[:, :e], raw[:, e : e + b], raw[:, e + b : e + b + _TRUNK_DIM]
 
 
 def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> dict:
-    """Stream every episode parquet → ``{"eef": <20-D>, "base_vel": <3-D>}`` stats."""
+    """Stream every episode parquet → ``{"eef": <20-D>, "base_vel": <3-D>, "trunk": <4-D>}`` stats."""
     eef_acc = Accumulator(dim=_EEF_DIM)
     base_acc = Accumulator(dim=_BASE_DIM)
+    trunk_acc = Accumulator(dim=_TRUNK_DIM)
     n_files = 0
 
     for fpath in _iter_episode_parquets(dataset_dir):
@@ -121,9 +132,10 @@ def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> di
             df = pq.read_table(fpath, columns=_NEEDED_COLS).to_pandas()
             state = np.stack(df["observation.state"].values).astype(np.float32)
             action = np.stack(df["action"].values).astype(np.float32)
-            eef20, base3 = _rows_to_eef20_base3(state, action)
+            eef20, base3, trunk4 = _rows_to_blocks(state, action)
             eef_acc.update_batch(eef20)
             base_acc.update_batch(base3)
+            trunk_acc.update_batch(trunk4)
             n_files += 1
         except Exception as e:  # noqa: BLE001 — skip a corrupt shard, keep going
             print(f"  Warning: skipping {fpath}: {e}")
@@ -145,7 +157,12 @@ def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> di
     base["num_files"] = n_files
     base["layout"] = "vx,vy,vyaw"
 
-    return {"eef": eef, "base_vel": base}
+    trunk = trunk_acc.finalize()  # NOT pinned — real torso-joint stats
+    trunk["num_timesteps"] = int(trunk_acc.count)
+    trunk["num_files"] = n_files
+    trunk["layout"] = "torso_joint_abs"
+
+    return {"eef": eef, "base_vel": base, "trunk": trunk}
 
 
 def main():
@@ -174,7 +191,7 @@ def main():
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
 
-    eef, base = result["eef"], result["base_vel"]
+    eef, base, trunk = result["eef"], result["base_vel"], result["trunk"]
     print(f"\nBEHAVIOR-1K stats ({eef['num_files']} episode files):")
     print(f"  eef timesteps: {eef['num_timesteps']:,}")
     print(f"  eef pos  mean[:3]: {[round(x, 4) for x in eef['mean'][:3]]}")
@@ -182,6 +199,7 @@ def main():
     print(f"  eef rot6d pinned identity: {eef['rot6d_identity']}")
     print(f"  base_vel mean: {[round(x, 5) for x in base['mean']]}")
     print(f"  base_vel q01/q99: {[round(x, 4) for x in base['q01']]} / {[round(x, 4) for x in base['q99']]}")
+    print(f"  trunk    mean: {[round(x, 4) for x in trunk['mean']]}")
     print(f"  Saved to: {out_path}")
 
 
