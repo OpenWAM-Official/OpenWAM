@@ -46,20 +46,32 @@ class IndependentTimestepSampler:
     Args:
         num_train_timesteps: Training timestep resolution (matches the
             schedulers' ``num_train_timesteps``; default 1000).
-        seed: Optional RNG seed for reproducible draws. ``None`` uses the
-            ambient global RNG state (fresh draw each call).
+        seed: Optional RNG seed. ``None`` (default) uses the ambient global
+            RNG, which the trainer already seeds from ``project.seed`` -- so
+            the default is reproducible and varied per step. A non-``None``
+            seed builds a private generator that advances across steps
+            (reproducible run, distinct per-step draws).
     """
 
     def __init__(self, num_train_timesteps: int = DEFAULT_NUM_TRAIN_TIMESTEPS, seed: Optional[int] = None):
         self.num_train_timesteps = int(num_train_timesteps)
-        self._seed = seed
+        self._seed = None if seed is None else int(seed)
+        # Per-device persistent generators. Seeded ONCE on first use and reused
+        # (advancing) across calls, so a fixed seed yields a reproducible run
+        # whose per-step draws still differ. Re-seeding every call would make
+        # every training step sample identical timesteps (degenerate).
+        self._generators: dict[str, torch.Generator] = {}
 
     def _generator(self, device) -> Optional[torch.Generator]:
         if self._seed is None:
-            return None
-        g = torch.Generator(device=device)
-        g.manual_seed(int(self._seed))
-        return g
+            return None  # ambient global RNG (already seeded by the trainer run seed)
+        key = str(device)
+        gen = self._generators.get(key)
+        if gen is None:
+            gen = torch.Generator(device=device)
+            gen.manual_seed(self._seed)
+            self._generators[key] = gen
+        return gen
 
     def sample_timesteps(
         self,
