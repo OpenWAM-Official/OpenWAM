@@ -5,7 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-COMPILE_MODES = ("auto", "none")
+_TRUE_VALUES = {"1", "true", "yes", "on", "enable", "enabled"}
+_FALSE_VALUES = {"0", "false", "no", "off", "disable", "disabled"}
 
 
 def cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
@@ -56,23 +57,49 @@ def cfg_namespace(cfg: Any, **overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**data)
 
 
-def normalize_compile_mode(value: Any) -> str:
-    """Normalize and validate the public compile mode spelling."""
+def normalize_compile_enabled(value: Any) -> bool:
+    """Normalize and validate the public compile enabled flag."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ValueError(f"Unknown compile enabled value '{value}'. Choose true or false.")
+
+
+def _legacy_mode_enabled(value: Any) -> bool:
+    """Map the pre-merge mode spelling to the enabled flag."""
 
     normalized = str(value).strip().lower().replace("-", "_")
-    if normalized not in COMPILE_MODES:
-        raise ValueError(f"Unknown compile mode '{value}'. Choose from: {', '.join(COMPILE_MODES)}")
-    return normalized
+    if normalized == "auto":
+        return True
+    if normalized == "none":
+        return False
+    raise ValueError(f"Unknown legacy compile mode '{value}'. Choose from: auto, none")
 
 
-def compile_mode(compile_cfg: Any, default: str | None = None, *, strict: bool = False) -> str | None:
-    """Return the high-level compile mode when one is configured."""
+def compile_enabled(compile_cfg: Any, default: bool = False, *, strict: bool = False) -> bool:
+    """Return whether high-level deploy compile is enabled."""
 
-    value = cfg_get(compile_cfg, "mode", default)
+    value = cfg_get(compile_cfg, "enabled", None)
     if value is None:
-        return None
+        mode = cfg_get(compile_cfg, "mode", None)
+        if mode is None:
+            value = default
+        else:
+            try:
+                return _legacy_mode_enabled(mode)
+            except ValueError:
+                if strict:
+                    raise
+                return default
     try:
-        return normalize_compile_mode(value)
+        return normalize_compile_enabled(value)
     except ValueError:
         if strict:
             raise
@@ -100,7 +127,7 @@ def _fast_path_compile_cfg(
 def self_attn_compile_cfg(compile_cfg: Any) -> Any:
     """Return the narrow self-attention compile section.
 
-    ``optimization.compile.mode=auto`` lets ``dual_system_self_attn`` select
+    ``optimization.compile.enabled=true`` lets ``dual_system_self_attn`` select
     the existing MoT-loop helper. The section name remains explicit so the
     helper can keep its own torch.compile options.
     """
@@ -181,14 +208,13 @@ def torch_compile_kwargs(compile_cfg: Any, *, default_mode: str | None = None) -
 
 
 __all__ = [
-    "COMPILE_MODES",
     "as_bool",
-    "compile_mode",
+    "compile_enabled",
     "cross_attn_compile_cfg",
     "cfg_get",
     "cfg_namespace",
     "idm_compile_cfg",
-    "normalize_compile_mode",
+    "normalize_compile_enabled",
     "section_enabled",
     "self_attn_compile_cfg",
     "torch_compile_kwargs",

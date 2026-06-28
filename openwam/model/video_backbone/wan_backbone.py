@@ -25,7 +25,7 @@ from einops import rearrange
 from torch import Tensor
 
 from openwam.model.compile_options import (
-    compile_mode,
+    compile_enabled,
     section_enabled,
     torch_compile_kwargs,
     wan_blocks_compile_cfg,
@@ -264,8 +264,7 @@ class WanBase(VideoBackbone):
         self._wan_blocks_compile_enabled = False
         self._wan_blocks_compile_kwargs = None
 
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode in (None, "none"):
+        if not compile_enabled(compile_cfg, default=False, strict=True):
             return
 
         section = wan_blocks_compile_cfg(compile_cfg)

@@ -23,7 +23,7 @@ from openwam.model.architectures.tri_system.und_expert import (
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
 from openwam.model.compile_options import (
-    compile_mode,
+    compile_enabled,
     section_enabled,
     torch_compile_kwargs,
     tri_system_compile_cfg,
@@ -199,8 +199,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
 
         super().apply_compile_optimizations(compile_cfg)
         self._compiled_mot_run_joint_loop = None
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode in (None, "none"):
+        if not compile_enabled(compile_cfg, default=False, strict=True):
             return
 
         section = tri_system_compile_cfg(compile_cfg)

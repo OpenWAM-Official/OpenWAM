@@ -51,7 +51,6 @@ from typing import Optional
 from openwam.deploy.obs_preprocess import ObsPreprocessor, ObsValidationError
 
 logger = logging.getLogger(__name__)
-_COMPILE_MODES = ("auto", "none")
 
 # --- WebSocket message protocol (single source of truth for the server) ---
 # Benchmark clients keep their own mirror in benchmarks/utils/transport.py;
@@ -86,31 +85,37 @@ def _infer_video_num_frames(dl) -> int:
     return (raw_frames - 1) // video_stride + 1
 
 
-def _normalize_compile_mode_in_cfg(cfg) -> None:
-    """Keep package and script entrypoints aligned on compile-mode validation."""
+def _normalize_compile_enabled_in_cfg(cfg) -> None:
+    """Keep package and script entrypoints aligned on compile-enabled validation."""
     from omegaconf import OmegaConf
 
-    from openwam.model.compile_options import normalize_compile_mode
+    from openwam.model.compile_options import compile_enabled, normalize_compile_enabled
 
-    mode = OmegaConf.select(cfg, "optimization.compile.mode", default=None)
-    if mode is not None:
-        OmegaConf.update(cfg, "optimization.compile.mode", normalize_compile_mode(mode), merge=False)
+    enabled = OmegaConf.select(cfg, "optimization.compile.enabled", default=None)
+    if enabled is not None:
+        OmegaConf.update(cfg, "optimization.compile.enabled", normalize_compile_enabled(enabled), merge=False)
+        return
+    compile_cfg = OmegaConf.select(cfg, "optimization.compile", default=None)
+    if compile_cfg is not None:
+        OmegaConf.update(cfg, "optimization.compile.enabled", compile_enabled(compile_cfg, strict=True), merge=False)
 
 
-def _apply_compile_mode_override(cfg, compile_mode: Optional[str]) -> None:
-    """Apply a named CLI compile-mode override, then normalize the config."""
+def _apply_compile_enabled_override(cfg, compile_enabled: Optional[bool]) -> None:
+    """Apply a CLI compile-enabled override, then normalize the config."""
     from omegaconf import OmegaConf
 
-    if compile_mode is not None:
-        OmegaConf.update(cfg, "optimization.compile.mode", compile_mode, merge=False)
-    _normalize_compile_mode_in_cfg(cfg)
+    if compile_enabled is not None:
+        OmegaConf.update(cfg, "optimization.compile.enabled", compile_enabled, merge=False)
+    _normalize_compile_enabled_in_cfg(cfg)
 
 
-def _normalize_compile_mode_arg(value: str) -> str:
-    normalized = str(value).strip().lower().replace("-", "_")
-    if normalized not in _COMPILE_MODES:
-        raise argparse.ArgumentTypeError(f"Unknown compile mode '{value}'. Choose from: {', '.join(_COMPILE_MODES)}")
-    return normalized
+def _normalize_compile_enabled_arg(value: str) -> bool:
+    from openwam.model.compile_options import normalize_compile_enabled
+
+    try:
+        return normalize_compile_enabled(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 class PolicyServer:
@@ -324,7 +329,7 @@ def build_server_from_config(
 
     training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name)
     deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
-    _normalize_compile_mode_in_cfg(deploy_cfg)
+    _normalize_compile_enabled_in_cfg(deploy_cfg)
     merged = merge_deploy_cfg(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=merged, architecture=architecture)
     return PolicyServer(engine=engine, cfg=merged)
@@ -422,11 +427,10 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Override schedule type (only 'sync' is supported)",
     )
     parser.add_argument(
-        "--compile-mode",
-        type=_normalize_compile_mode_arg,
-        choices=_COMPILE_MODES,
+        "--compile-enabled",
+        type=_normalize_compile_enabled_arg,
         default=None,
-        help="Override compile strategy: auto or none.",
+        help="Enable architecture-specific compile fast paths: true or false.",
     )
     parser.add_argument(
         "--execution-mode",
@@ -505,7 +509,7 @@ def main(argv: Optional[list[str]] = None):
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
 
     cfg = _apply_inference_overrides(cfg, args)
-    _apply_compile_mode_override(cfg, args.compile_mode)
+    _apply_compile_enabled_override(cfg, args.compile_enabled)
     try:
         cfg = _apply_execution_cli_overrides(cfg, args)
     except ValueError as exc:

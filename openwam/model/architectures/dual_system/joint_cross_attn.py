@@ -19,7 +19,7 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import _cfg_get, register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.compile_options import (
-    compile_mode,
+    compile_enabled,
     cross_attn_compile_cfg,
     section_enabled,
     torch_compile_kwargs,
@@ -112,8 +112,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
 
         super().apply_compile_optimizations(compile_cfg)
         self._compiled_action_forward = None
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode in (None, "none"):
+        if not compile_enabled(compile_cfg, default=False, strict=True):
             return
 
         section = cross_attn_compile_cfg(compile_cfg)

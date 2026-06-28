@@ -33,7 +33,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from openwam.model.compile_options import compile_mode
+from openwam.model.compile_options import compile_enabled
 
 
 def _wrap_single_forward(module: nn.Module) -> None:
@@ -1681,17 +1681,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     def apply_compile_optimizations(self, compile_cfg) -> None:
         """Apply architecture-specific deploy-time compile optimizations."""
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode in (None, "auto", "none"):
-            vb_compile = getattr(getattr(self, "video_backbone", None), "apply_compile_optimizations", None)
-            if callable(vb_compile):
-                vb_compile(compile_cfg)
-            return
-        logger.warning(
-            "torch.compile mode '%s' is not implemented for %s; running eager.",
-            mode,
-            type(self).__name__,
-        )
+        _ = compile_enabled(compile_cfg, default=False, strict=True)
+        vb_compile = getattr(getattr(self, "video_backbone", None), "apply_compile_optimizations", None)
+        if callable(vb_compile):
+            vb_compile(compile_cfg)
 
     @abstractmethod
     def forward(
