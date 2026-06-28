@@ -736,6 +736,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
         current_step: int = 0,
+        decoupled_sampler=None,
         **inputs,
     ) -> dict:
         """IDM training loss with three branches and teacher-forcing mask.
@@ -743,6 +744,12 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         Branch A: noisy video (denoising target)
         Branch B: noisy action (denoising target)
         Branch C: teacher-forcing cond video (condition for action, optionally noised)
+
+        ``decoupled_sampler`` (optional) overrides the Branch A/B video and
+        action timestep draws with an independent per-stream sampler
+        (UWM-style; mirrors ``BaseWAMArchitecture.compute_loss``). ``None``
+        keeps the legacy ``torch.randint`` path bit-for-bit. The Branch C
+        cond-video augmentation timestep is intentionally left unaffected.
         """
         vb = self.video_backbone
         ab = self.action_backbone
@@ -761,7 +768,18 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         B = input_latents.shape[0]
 
         # ---- Branch A: noisy video (denoising target) ----
-        video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
+        # Optional decoupled sampler (UWM-style independent timesteps); None
+        # keeps the legacy torch.randint draw bit-for-bit. Mirrors
+        # BaseWAMArchitecture.compute_loss.
+        if decoupled_sampler is not None:
+            video_t, decoupled_action_t = decoupled_sampler.sample_timesteps(B, current_step=current_step, device="cpu")
+            num_ts = len(vb.scheduler.timesteps)
+            video_timestep_ids = (
+                (video_t / decoupled_sampler.num_train_timesteps * num_ts).long().clamp(min_tb, max_tb - 1)
+            )
+        else:
+            decoupled_action_t = None
+            video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
 
         video_timesteps = vb.scheduler.timesteps[video_timestep_ids].to(dtype=_dtype, device=_device)
         video_sigmas = vb.scheduler.sigmas[video_timestep_ids].to(dtype=_dtype, device=_device)
@@ -780,7 +798,13 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         action_timesteps = None
         action_timestep_ids = None
         if lambda_action > 0 and actions is not None:
-            action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
+            if decoupled_action_t is not None:
+                num_ts_a = len(action_scheduler.timesteps)
+                action_timestep_ids = (
+                    (decoupled_action_t / decoupled_sampler.num_train_timesteps * num_ts_a).long().clamp(0, num_ts_a - 1)
+                )
+            else:
+                action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
 
             action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(dtype=_dtype, device=_device)
             action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(dtype=_dtype, device=_device)

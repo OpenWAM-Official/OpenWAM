@@ -47,6 +47,15 @@ training:
   max_timestep_boundary: 1.0      # Upper bound (fraction of total timesteps)
   min_timestep_boundary: 0.0      # Lower bound (fraction of total timesteps)
 
+  # --- Flow matching timestep sampling (video & action) ---
+  timestep_sampling: default      # default = per-stream torch.randint over the shifted
+                                  #   grid (legacy, unchanged).
+                                  # independent_uniform_shift = per-stream independent
+                                  #   uniform + α-shift draw (UWM-style; train-time
+                                  #   counterpart of inference schedule_type=independent).
+  timestep_sampling_seed: null    # independent_uniform_shift only: RNG seed for
+                                  #   reproducible draws; null = fresh each step.
+
   # --- Checkpoint ---
   output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output
   save_steps: 2000                # Save checkpoint every N steps (0 or null = disable saving)

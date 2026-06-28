@@ -119,6 +119,26 @@ class OpenWAMTrainer:
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)
 
+        # Optional decoupled timestep sampler (training.timestep_sampling).
+        # None keeps compute_loss's legacy torch.randint path (default,
+        # bit-identical to upstream). "independent_uniform_shift" routes
+        # per-stream independent uniform timesteps through the decoupled_sampler
+        # hook (UWM-style; the training-time counterpart to the deploy
+        # schedule_type="independent"). See
+        # openwam.model.architectures.utils.timestep_sampling.
+        from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
+
+        self._timestep_sampler = build_timestep_sampler(
+            cfg_get(t, "timestep_sampling", None),
+            num_train_timesteps=1000,
+            seed=cfg_get(t, "timestep_sampling_seed", None),
+        )
+        if self._timestep_sampler is not None and self._rank == 0:
+            logger.info(
+                "Training timestep sampling: independent_uniform_shift (seed=%s)",
+                cfg_get(t, "timestep_sampling_seed", None),
+            )
+
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.
         self.architecture.set_training_runtime(
@@ -483,6 +503,7 @@ class OpenWAMTrainer:
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
             current_step=self._current_step,
+            decoupled_sampler=self._timestep_sampler,
         )
 
         return {

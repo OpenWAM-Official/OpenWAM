@@ -10,7 +10,12 @@ server:
 inference:
   denoise_steps: 10           # Denoising steps (FastWAM-Joint default)
   schedule_type: sync         # Within one denoise pass: how video/action timesteps advance.
-                              #   Only "sync" (both streams lockstep). NOT execution_mode below.
+                              #   sync        = both streams lockstep (default).
+                              #   independent = per-stream randomly sampled timesteps
+                              #     (independent uniform + α-shift; UWM/LatentForcing style).
+                              #   NOT execution_mode below.
+  schedule_seed: null         # "independent" only: RNG seed for a reproducible random
+                              #   schedule; null = fresh draw each request.
 
   execution_mode: sync        # sync | async — Sync/AsyncInferenceExecutor
   execution_horizon: null     # async only: actions per chunk; null = policy.execute_horizon

@@ -361,6 +361,9 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): for action_only mode
                 - schedule_type (str, optional): override schedule type
+                  ("sync" lockstep | "independent" per-stream random timesteps)
+                - schedule_seed (int, optional): RNG seed for the "independent"
+                  schedule, making the sampled (t_v, t_a) trajectory reproducible
                 - denoise_steps (int, optional): override num denoising steps
 
         Returns:
@@ -368,9 +371,14 @@ class JointInferenceEngine(BaseInferenceEngine):
         """
         inf_cfg = self.cfg.inference
 
-        # Build schedule (only "sync" is supported; make_schedule raises on anything else)
+        # Build schedule: "sync" (lockstep) or "independent" (per-stream
+        # randomly sampled timesteps); make_schedule raises on anything else.
         schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
+        # ``schedule_seed`` only matters for schedule_type="independent": it
+        # makes the randomly sampled (t_v, t_a) trajectory reproducible.
+        # ``None`` (default) draws a fresh trajectory each request.
+        schedule_seed = conditions.get("schedule_seed", getattr(inf_cfg, "schedule_seed", None))
         # Single source of truth for each stream's α-shift is the backbone
         # property — ``action_backbone.shift_action`` and
         # ``video_backbone.shift_video`` — set via the model yaml and saved in
@@ -396,6 +404,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             num_steps=denoise_steps,
             shift=shift,
             shift_video=shift_video,
+            seed=schedule_seed,
         )
 
         # Reset dit cache for each generation
