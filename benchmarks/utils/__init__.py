@@ -40,9 +40,13 @@ The wire contract (message types) lives in ``benchmarks/utils/transport.py``
 
 from benchmarks.utils.action_conversion import (
     eef20d_to_ee16d,
+    quat_xyzw_to_axis_angle,
     quat_xyzw_to_rot6d,
+    r1pro_proprio_to_unified80d,
     robotwin_endpose_to_eef20d,
+    rot6d_to_axis_angle,
     rot6d_to_quat_xyzw,
+    unified80d_to_r1pro_action,
 )
 from benchmarks.utils.client import (
     ServerError,
@@ -60,8 +64,12 @@ __all__ = [
     "eef20d_to_ee16d",
     "encode_numpy_b64",
     "encode_path_b64",
+    "quat_xyzw_to_axis_angle",
     "quat_xyzw_to_rot6d",
+    "r1pro_proprio_to_unified80d",
     "robotwin_endpose_to_eef20d",
+    "rot6d_to_axis_angle",
     "rot6d_to_quat_xyzw",
     "server_error_from_body",
+    "unified80d_to_r1pro_action",
 ]

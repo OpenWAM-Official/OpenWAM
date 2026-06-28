@@ -11,9 +11,9 @@ exactly like a standard RoboCOIN bucket, with two deltas:
      1st-place challenge solution (I. Larchenko), the base action is a 3-D
      base-frame velocity ``[vx, vy, vyaw]`` (NOT a pose delta). It occupies the
      unified reserved slots ``[68:71)``; the rest of the reserved tail stays
-     masked. This is the one thing RoboCOIN's grippered path does not populate —
-     wired here via the unify map ``["0-9", "34-43", "68-70"]`` (raw dims 20:23 →
-     unified 68:70).
+     masked. This and the torso are what RoboCOIN's grippered path does not
+     populate — wired here via the unify map ``["0-9", "34-43", "68-70", "71-74"]``:
+     base raw dims 20:22 → unified 68:70, torso raw dims 23:26 → unified 71:74.
   2. **EEF source + format.** RoboCOIN reads pre-computed ``eef_sim_pose_*``
      (euler) columns; BEHAVIOR has none. The per-arm EEF pose is read from the
      256-D ``observation.state`` (xyzw quaternions, base frame) and the dataset
@@ -33,8 +33,9 @@ Action/state temporal alignment:
   The EEF *action target* at window step t is the NEXT-frame achieved pose
   ``eef(state[t+1])`` (shifted +1, last step clamped → T_action = num_frames-1
   targets, matching the other readers). The gripper command (``action[:,14/22]``,
-  binary {-1,+1}, +1=open) and base velocity (``action[:,0:3]``) are taken at t
-  (row-aligned commands). Proprio is the current-frame (t=0) pose + commands.
+  binary {-1,+1}, +1=open), base velocity (``action[:,0:3]``) and torso joints
+  (``action[:,3:7]``) are taken at t (row-aligned commands). Proprio is the
+  current-frame (t=0) pose + commands.
 """
 
 from __future__ import annotations
@@ -375,7 +376,7 @@ class BehaviorDataset(LeRobotV3Reader):
         self.normalization_stats_path = str(out)
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
-        """Apply per-bucket normalization to a ``(..., 23)`` raw vector (no-op when
+        """Apply per-bucket normalization to a ``(..., 27)`` raw vector (no-op when
         normalize_mode is null / stats absent)."""
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
 
