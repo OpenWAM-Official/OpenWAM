@@ -209,7 +209,12 @@ class ObsPreprocessor:
         # --- Prompt wrapping (must match training-time _get_prompt byte-for-byte) ---
         obs["prompt"] = format_prompt_for_inference(obs.get("prompt", "") or "")
 
-        # --- Proprio state passthrough (no dim validation; accept any width) ---
+        # --- Proprio state passthrough ---
+        # State-dim validation is intentionally NOT enforced: unify_action ckpts send RAW
+        # proprio (pre-unify, width != state_dim) which the normalizer scatters to UNIFY_DIM,
+        # so a fixed state_dim check would wrongly reject valid states. Tradeoff: a wrong-width
+        # state on a non-unify ckpt no longer fails here with a friendly message — it surfaces
+        # downstream (Normalizer broadcast / model). Deliberate: accept proprio of any width.
         if "state" in obs and obs["state"] is not None:
             try:
                 state = np.asarray(obs["state"], dtype=np.float32).reshape(-1)

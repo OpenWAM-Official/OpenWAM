@@ -337,7 +337,7 @@ class _UnifyAwareNormalizer:
             return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
         arr = self._unmap_from_unify(arr, self._dst_index)   # (..., unify_dim) -> (..., raw)
         if self._inner is None:
-            return np.asarray(arr).copy()
+            return arr            # gather (advanced indexing) already returns a fresh array
         return self._inner.unnormalize(arr)
 
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
@@ -382,7 +382,10 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
 
     from openwam.dataloader.utils.unify_action import UNIFY_DIM, parse_unify_spec
 
-    unify_dim = int(OmegaConf.select(cfg, "dataloader.unify_dim", default=UNIFY_DIM))
+    # Use the shared UNIFY_DIM constant — the train-side reader hardcodes it too and never
+    # reads a `dataloader.unify_dim` key, so deploy must not either (a config-only value would
+    # silently diverge from train's hardcoded width).
+    unify_dim = UNIFY_DIM
     spec = OmegaConf.select(cfg, "dataloader.unify_action_map", default=None)
     if spec is None:
         raw_dim = _infer_raw_dim(inner)
