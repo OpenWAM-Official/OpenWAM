@@ -119,7 +119,7 @@ def load_from_checkpoint_dir(
         logger.info("Using config-embedded component specs for video-backbone construction")
         vb_cfg_dict = OmegaConf.to_container(cfg.model.video_backbone, resolve=True)
         # Cosmos25 Reason1 self-containment: when the ckpt was saved with the
-        # ``_reason1_inner`` registration enabled, its weights live in the
+        # ``reason1`` registration enabled, its weights live in the
         # unified safetensors and the small structural artifacts
         # (config.json + tokenizer.json) live under ``<ckpt_dir>/reason1/``.
         # Clearing ``text_encoder_path`` on that branch makes
@@ -146,6 +146,23 @@ def load_from_checkpoint_dir(
                 "Using self-contained Reason1 artifacts from %s (clearing external text_encoder_path=%r)",
                 reason1_artifact_dir,
                 prev_path,
+            )
+        # Symmetric with the Reason1 clearing above: when the ckpt carries a VAE
+        # state component, its weights live in the unified safetensors (via
+        # ``vae``), so any training-time ``vae_path`` must be cleared.
+        # Otherwise ``build_cosmos25_pipeline``'s deploy guard
+        # (``ckpt_dir is not None and vae_path_override is None``) stays False and
+        # ``_resolve_vae_path`` raises FileNotFoundError on a host lacking the
+        # original path, before weights ever load.
+        has_vae_state_component = any(
+            isinstance(c, dict) and c.get("attr") == "vae" for c in (vb_cfg_dict.get("components") or [])
+        )
+        if has_vae_state_component and vb_cfg_dict.get("vae_path") is not None:
+            prev_vae_path = vb_cfg_dict.get("vae_path")
+            vb_cfg_dict["vae_path"] = None
+            logger.info(
+                "Using self-contained VAE weights from checkpoint (clearing external vae_path=%r)",
+                prev_vae_path,
             )
         vb_params["_source"] = vb_cfg_dict
         vb_params["_ckpt_dir"] = ckpt_dir

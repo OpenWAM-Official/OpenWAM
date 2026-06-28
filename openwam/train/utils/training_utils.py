@@ -21,11 +21,6 @@ def cfg_get(cfg, key: str, default=None):
     return getattr(cfg, key, default)
 
 
-def latent_action_enabled(cfg) -> bool:
-    action_cfg = cfg_get(getattr(cfg, "model", None), "action_backbone", None)
-    return cfg_get(action_cfg, "type", "explicit") == "latent"
-
-
 def log_parameter_counts(architecture, *, is_main: bool) -> None:
     """Print per-backbone total/trainable param counts (rank-0 only).
 
@@ -61,19 +56,26 @@ def log_parameter_counts(architecture, *, is_main: bool) -> None:
     print("=" * 60, flush=True)
 
 
-def build_cosine_scheduler(optimizer, *, total_opt_steps: int, cfg):
-    """Linear-warmup + cosine-anneal LR schedule."""
+def build_cosine_scheduler(optimizer, *, total_opt_steps: int, cfg, num_processes: int = 1):
+    """Linear-warmup + cosine-anneal LR schedule.
+
+    total_opt_steps is in per-process optimizer steps; prepare() wraps the scheduler in
+    AcceleratedScheduler which advances it num_processes times per opt step, so scale the
+    horizons by num_processes to cancel that out.
+    """
     from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
     t = cfg.training
     lr = float(t.learning_rate)
     warmup_ratio = float(getattr(t, "warmup_ratio", 0.05))
     lr_min_ratio = float(getattr(t, "lr_min_ratio", 0.01))
+    n = max(int(num_processes), 1)
     warmup_steps = int(total_opt_steps * warmup_ratio)
     cosine_steps = max(total_opt_steps - warmup_steps, 1)
-    warmup_sched = LinearLR(optimizer, start_factor=1.0 / max(warmup_steps, 1), total_iters=warmup_steps)
-    cosine_sched = CosineAnnealingLR(optimizer, T_max=cosine_steps, eta_min=lr * lr_min_ratio)
-    scheduler = SequentialLR(optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps])
+    warmup_iters = warmup_steps * n
+    warmup_sched = LinearLR(optimizer, start_factor=1.0 / max(warmup_iters, 1), total_iters=warmup_iters)
+    cosine_sched = CosineAnnealingLR(optimizer, T_max=cosine_steps * n, eta_min=lr * lr_min_ratio)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_iters])
     logger.info(
         "LR scheduler: cosine | total_opt_steps=%d warmup=%d eta_min=%.2e",
         total_opt_steps,
@@ -125,7 +127,6 @@ def reduce_step_metrics(accelerator, losses: dict, grad_norm) -> dict:
                 loss.detach().float().item(),
                 _f(losses["video"]),
                 _f(losses["action"]),
-                _f(losses["decoder"]),
                 grad_norm.item(),
             ],
             device=loss.device,
@@ -136,14 +137,12 @@ def reduce_step_metrics(accelerator, losses: dict, grad_norm) -> dict:
             "loss_total": g[0].item(),
             "loss_video": g[1].item(),
             "loss_action": g[2].item(),
-            "loss_decoder": g[3].item(),
-            "grad_norm": g[4].item(),
+            "grad_norm": g[3].item(),
         }
     return {
         "loss_total": loss.detach().item(),
         "loss_video": _f(losses["video"]),
         "loss_action": _f(losses["action"]),
-        "loss_decoder": _f(losses["decoder"]),
         "grad_norm": grad_norm.item(),
     }
 
@@ -161,8 +160,7 @@ def write_debug_loss_row(
 ) -> None:
     """Append one row to debug_loss_history.csv (writes the header on first call).
 
-    Loss columns follow ``labels`` = ``[(display_name, metrics_key)]``, so they
-    vary with mode (e.g. latent adds a ``loss_latent_action`` column).
+    Loss columns follow ``labels`` = ``[(display_name, metrics_key)]``.
     """
     loss_log_path = os.path.join(output_path, "debug_loss_history.csv")
     write_header = not os.path.exists(loss_log_path)

@@ -705,9 +705,9 @@ def test_all_variants_load_and_run(registry_name, cfg, expected_selected_count):
 # ---------------------------------------------------------------------------
 # 6. Hydra defaults composition smoke
 # ---------------------------------------------------------------------------
-# Each framework yaml inlines its `video_backbone:` block (with default
+# Each framework yaml selects its `video_backbone:` via a Hydra group (default
 # wan22_ti2v_5b). Production scripts/train.py runs under ``@hydra.main``, so
-# we verify the inline default composes and that the standard CLI override
+# we verify the default group composes and that the standard CLI override
 # pattern (``model.video_backbone.name=...``) still reshapes the cfg.
 # Existing tri_system smoke tests (test_tri_system_smoke.py:307, :419)
 # ``OmegaConf.load`` the yaml directly and don't exercise compose, so this
@@ -731,16 +731,15 @@ _BACKBONE_DUMMY_MODEL_PATH = {
 @pytest.mark.parametrize("backbone", _BACKBONES)
 def test_framework_backbone_hydra_compose(framework, backbone):
     """All 9 framework × video_backbone pairs must Hydra-compose cleanly via
-    the production CLI override pattern — both ``model.video_backbone.name``
-    AND ``model.video_backbone.model_path`` overridden together — and both
-    fields must reach the composed cfg unchanged.
+    the field-override pattern — ``model.video_backbone.name`` AND
+    ``model.video_backbone.model_path`` overridden together — with both fields
+    reaching the composed cfg unchanged.
 
-    The inline-block design (PR #59) drops the implicit name→model_path
-    coupling that the old Hydra group provided, so production users must
-    override both fields together (see README + each framework yaml). This
-    test pins that pattern instead of only overriding ``name``, which would
-    leave ``model_path`` pointing at the default wan22 entry and silently
-    load the wrong backbone at training time.
+    Each framework yaml selects the backbone via a Hydra group whose file ships
+    both ``name`` and ``model_path``. This test pins the field-override path
+    used for ablations that point at an off-default weights dir, verifying the
+    override reaches the composed cfg instead of silently keeping the default
+    group's ``model_path``.
     """
     import os
 
@@ -759,7 +758,7 @@ def test_framework_backbone_hydra_compose(framework, backbone):
     vb = cfg.model.get("video_backbone")
     assert vb is not None, (
         f"{framework} × {backbone}: cfg.model.video_backbone missing after "
-        f"compose — inline `video_backbone:` block is broken"
+        f"compose — `video_backbone` group did not compose"
     )
     assert vb.name == backbone, (
         f"{framework} × {backbone}: composed video_backbone.name={vb.name!r}, expected {backbone!r}"
@@ -775,7 +774,7 @@ def test_framework_backbone_hydra_compose(framework, backbone):
 @pytest.mark.parametrize("framework", _FRAMEWORKS)
 def test_framework_default_backbone_is_wan22_ti2v_5b(framework):
     """Without any explicit ``model.video_backbone.*`` override, every
-    framework yaml's inline ``video_backbone:`` block must default to
+    framework yaml's ``video_backbone`` group must default to
     ``wan22_ti2v_5b`` — that's the documented default backbone.
     """
     import os

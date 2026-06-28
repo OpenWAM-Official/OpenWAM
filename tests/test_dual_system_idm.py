@@ -90,27 +90,29 @@ def test_idm_legacy_cond_noise_key_still_works():
     assert arch.video_cond_noise_prob == 0.25
 
 
-def test_idm_rejects_non_joint_attention_mask_mode():
-    """IDM fixes its joint inference mask to match FastWAM-IDM semantics."""
-    import pytest
+def test_idm_ignores_attention_mask_mode():
+    """IDM owns its teacher-forcing / Stage-2 masks and ignores attention_mask_mode.
 
+    A stale cross-modal mode (previously a hard error) must now construct fine
+    and be dropped — never forwarded to the driver kwargs.
+    """
     from openwam.model import build_architecture
 
-    with pytest.raises(ValueError, match="attention_mask_mode='action_sees_video'"):
-        build_architecture(
-            "dual_system_idm",
-            {
-                "framework": "dual_system",
-                "variant": "idm",
-                "action_dim": 7,
-                "dim": 64,
-                "ffn_dim": 128,
-                "num_heads": 4,
-                "video_dim": 64,
-                "bridge_layers": (0, 2),
-                "attention_mask_mode": "mutual",
-            },
-        )
+    arch = build_architecture(
+        "dual_system_idm",
+        {
+            "framework": "dual_system",
+            "variant": "idm",
+            "action_dim": 7,
+            "dim": 64,
+            "ffn_dim": 128,
+            "num_heads": 4,
+            "video_dim": 64,
+            "bridge_layers": (0, 2),
+            "attention_mask_mode": "mutual",
+        },
+    )
+    assert "attention_mask_mode" not in arch._mot_driver_kwargs
 
 
 def test_idm_action_dit_roundtrip():
@@ -547,7 +549,6 @@ def test_idm_video_cache_matches_joint_loop():
         astate_cache,
         video_kv_cache=video_kv_cache,
         video_seq_len=int(vstate_cache.hidden_states.shape[1]),
-        video_tokens_per_frame=driver._video_tokens_per_frame(vstate_cache),
     )
     pred_cache = arch.action_backbone.extract_prediction(astate_cache)
 

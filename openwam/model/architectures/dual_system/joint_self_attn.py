@@ -74,8 +74,6 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             shift_action=cfg.get("shift_action"),
-            action_type=cfg.get("type", "explicit"),
-            latent_decoder=cfg.get("latent_decoder"),
         )
 
         # MoT driver is built once both backbones are available. The video
