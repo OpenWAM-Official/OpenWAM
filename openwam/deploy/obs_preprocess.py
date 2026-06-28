@@ -9,7 +9,6 @@ be unit-tested without a GPU or a live engine.
 import base64
 import io
 import logging
-from typing import Optional
 
 import numpy as np
 
@@ -65,21 +64,6 @@ def _resolve_requires_proprio(cfg, engine) -> bool:
     return False
 
 
-def _resolve_expected_state_dim(cfg, engine) -> Optional[int]:
-    for path in ("model.architecture.state_dim", "model.params.state_dim"):
-        value = _cfg_select(cfg, path, None)
-        if value not in (None, "", "none", "null"):
-            dim = int(value)
-            return dim if dim > 0 else None
-
-    arch = getattr(engine, "architecture", None)
-    value = getattr(arch, "proprio_dim", None) if arch is not None else None
-    if value not in (None, "", "none", "null"):
-        dim = int(value)
-        return dim if dim > 0 else None
-    return None
-
-
 class ObsPreprocessor:
     """Validate + preprocess a client obs payload against a fixed view config.
 
@@ -101,14 +85,12 @@ class ObsPreprocessor:
         img_height: int,
         img_width: int,
         requires_proprio: bool = False,
-        expected_state_dim: Optional[int] = None,
     ):
         self.multiview = bool(multiview)
         self.camera_layout = list(camera_layout)
         self.img_height = int(img_height)
         self.img_width = int(img_width)
         self.requires_proprio = bool(requires_proprio)
-        self.expected_state_dim = expected_state_dim
 
     @classmethod
     def from_cfg(cls, cfg, engine=None) -> "ObsPreprocessor":
@@ -133,7 +115,6 @@ class ObsPreprocessor:
             img_height=int(_h if _h is not None else 384),
             img_width=int(_w if _w is not None else 320),
             requires_proprio=_resolve_requires_proprio(cfg, engine),
-            expected_state_dim=_resolve_expected_state_dim(cfg, engine),
         )
 
     def preprocess(self, obs: dict) -> dict:
@@ -228,22 +209,16 @@ class ObsPreprocessor:
         # --- Prompt wrapping (must match training-time _get_prompt byte-for-byte) ---
         obs["prompt"] = format_prompt_for_inference(obs.get("prompt", "") or "")
 
-        # --- Proprio state validation ---
+        # --- Proprio state passthrough (no dim validation; accept any width) ---
         if "state" in obs and obs["state"] is not None:
             try:
                 state = np.asarray(obs["state"], dtype=np.float32).reshape(-1)
             except (TypeError, ValueError) as exc:
                 raise ObsValidationError(f"state must be a flat numeric list/array ({exc})") from exc
-            if self.expected_state_dim is not None and state.size != self.expected_state_dim:
-                raise ObsValidationError(
-                    f"state dimension mismatch: expected {self.expected_state_dim}, got {state.size}. "
-                    "Check the client action_type/state_dim against the checkpoint config."
-                )
             obs["state"] = state
         elif self.requires_proprio:
-            expected = f" length {self.expected_state_dim}" if self.expected_state_dim is not None else ""
             raise ObsValidationError(
-                f"this checkpoint requires obs['state']{expected}; "
+                "this checkpoint requires obs['state']; "
                 "send raw proprio state for proprio-conditioned checkpoints."
             )
 

@@ -11,6 +11,7 @@ import os
 import re
 from typing import Optional, Tuple
 
+import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
@@ -223,8 +224,8 @@ def load_from_checkpoint_dir(
     return cfg, architecture
 
 
-def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
-    """Build the normalizer for both deploy directions, or ``None`` if disabled.
+def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
+    """Build the RAW-space normalizer for both deploy directions, or ``None`` if disabled.
 
     The returned ``Normalizer`` serves both: ``normalize`` maps the input
     proprio state into training space, ``unnormalize`` maps the output action
@@ -293,3 +294,113 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
         stats_path,
     )
     return normalizer
+
+
+class _UnifyAwareNormalizer:
+    """Deploy-time normalizer that inverts the train-time ``normalize -> map_to_unify``.
+
+    ckpts trained with ``dataloader.unify_action=true`` emit/consume UNIFY_DIM
+    (e.g. 80-D) vectors, but the normalization stats live in RAW action space
+    (the Normalizer ran BEFORE the unify scatter — robotwin.py). So the correct
+    deploy directions are, mirroring ``RoboTwinDataset.denormalize_action``:
+
+      * ``unnormalize`` (model action OUT): gather UNIFY_DIM → raw, THEN unnormalize.
+      * ``normalize``   (proprio IN):       normalize raw, THEN scatter raw → UNIFY_DIM.
+
+    ``inner`` may be ``None`` (unify on but ``normalize_mode=null``): then only the
+    gather/scatter is applied (no (un)normalize) — still required, since the model
+    is in unified space regardless of whether normalization was on.
+
+    Duck-typed to the ``Normalizer`` surface ``base.py`` uses (``.unnormalize`` /
+    ``.normalize``), so ``base.py`` needs no change.
+    """
+
+    def __init__(self, inner, dst_index: np.ndarray, unify_dim: int):
+        from openwam.dataloader.utils.unify_action import map_to_unify, unmap_from_unify
+
+        self._inner = inner
+        self._dst_index = np.asarray(dst_index, dtype=np.int64)
+        self._unify_dim = int(unify_dim)
+        self._map_to_unify = map_to_unify
+        self._unmap_from_unify = unmap_from_unify
+
+    # action OUT: model emits (..., unify_dim) normalized-unified → physical raw.
+    def unnormalize(self, x):
+        arr = np.asarray(x)
+        if arr.shape[-1] != self._unify_dim:
+            # Defensive: already raw width (e.g. a non-unified head) → don't gather.
+            logger.warning(
+                "[normalizer/unify] unnormalize got last-dim %d != unify_dim %d; "
+                "skipping gather (passing through).",
+                arr.shape[-1], self._unify_dim,
+            )
+            return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
+        arr = self._unmap_from_unify(arr, self._dst_index)   # (..., unify_dim) -> (..., raw)
+        if self._inner is None:
+            return np.asarray(arr).copy()
+        return self._inner.unnormalize(arr)
+
+    # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
+    def normalize(self, x):
+        arr = np.asarray(x)
+        if self._inner is not None:
+            arr = self._inner.normalize(arr)
+        unified, _mask = self._map_to_unify(arr, self._dst_index, self._unify_dim)
+        return unified
+
+    # Expose inner stats for callers that introspect (best-effort).
+    @property
+    def stats(self):
+        return getattr(self._inner, "stats", {}) if self._inner is not None else {}
+
+
+def _infer_raw_dim(inner) -> Optional[int]:
+    """Best-effort raw action width from an inner Normalizer's stats (for identity maps)."""
+    if inner is None:
+        return None
+    stats = getattr(inner, "stats", {}) or {}
+    for k in ("mean", "q01", "min"):
+        v = stats.get(k)
+        if v is not None:
+            return int(np.asarray(v).shape[0])
+    return None
+
+
+def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
+    """Build the deploy normalizer, wrapping for ``unify_action`` when the ckpt used it.
+
+    Non-unify ckpts: identical to upstream (returns the raw-space Normalizer or None).
+    Unify ckpts: wrap in :class:`_UnifyAwareNormalizer` so the model's UNIFY_DIM output
+    is gathered back to raw dims BEFORE unnormalize (and proprio scattered AFTER
+    normalize) — the exact inverse of the train-time transform.
+    """
+    inner = _build_inner_normalizer(cfg, ckpt_dir)
+
+    unify_on = bool(OmegaConf.select(cfg, "dataloader.unify_action", default=False))
+    if not unify_on:
+        return inner
+
+    from openwam.dataloader.utils.unify_action import UNIFY_DIM, parse_unify_spec
+
+    unify_dim = int(OmegaConf.select(cfg, "dataloader.unify_dim", default=UNIFY_DIM))
+    spec = OmegaConf.select(cfg, "dataloader.unify_action_map", default=None)
+    if spec is None:
+        raw_dim = _infer_raw_dim(inner)
+        if raw_dim is None:
+            raise ValueError(
+                "[normalizer/unify] unify_action=True but dataloader.unify_action_map is missing "
+                "AND raw dim can't be inferred (no normalization stats). Add unify_action_map to "
+                "config.yaml (mirrors the reader's identity-map fallback)."
+            )
+        spec = list(range(raw_dim))  # identity, mirrors robotwin.py reader fallback
+
+    dst_index = parse_unify_spec(spec, unify_dim)
+    logger.info(
+        "[normalizer/unify] unify_action ON: model emits %d-D unified actions → deploy gathers back "
+        "to %d raw dims (dst_index len=%d) %s unnormalize. Mirrors RoboTwinDataset.denormalize_action.",
+        unify_dim,
+        dst_index.shape[0],
+        dst_index.shape[0],
+        "then" if inner is not None else "(no stats, gather-only:)",
+    )
+    return _UnifyAwareNormalizer(inner, dst_index, unify_dim)
