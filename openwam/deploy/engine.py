@@ -294,7 +294,7 @@ class JointInferenceEngine(BaseInferenceEngine):
                     f"inference.cfg_scale={self._cfg_scale} > 1.0 with "
                     f"text_embedding_cache_dir={self._text_embedding_cache_dir} but "
                     f"{empty_path} does not exist. Re-run precompute "
-                    f"(docs/cosmos_predict25_backbone.md §10.4 step ②) so the empty embedding "
+                    f"so the empty embedding "
                     f"lands alongside per-prompt caches, or unset "
                     f"inference.text_embedding_cache_dir to fall back to the live encoder."
                 )

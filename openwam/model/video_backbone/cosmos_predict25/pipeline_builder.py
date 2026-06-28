@@ -36,8 +36,8 @@ _COSMOS25_VAE_FILENAME = "tokenizer.pth"
 _VAE_CHOICES = {"none", "wan2pt1"}
 
 # Text encoder choices. "none" = caller passes `pre_encoded_text` (offline
-# cache path, see docs/cosmos_predict25_backbone.md §10). "reason1_live" = construct
-# a Cosmos-Reason1-7B encoder inline and run it per training step (§14).
+# cache path). "reason1_live" = construct a Cosmos-Reason1-7B encoder inline
+# and run it per training step.
 _TEXT_ENCODER_CHOICES = {"none", "reason1_live"}
 
 
@@ -397,7 +397,7 @@ def build_cosmos_predict25_pipeline(
             "video_backbone.text_encoder_dropout > 0 requires "
             "text_encoder=reason1_live (dead config otherwise). For the "
             "offline-cache path use `dataloader.text_embedding_dropout` "
-            "instead (see docs/cosmos_predict25_backbone.md §10 / §14.7)."
+            "instead."
         )
     text_dropout_seed = _cfg_get(vb_cfg, "text_encoder_dropout_seed", None)
     if text_dropout_seed is not None:

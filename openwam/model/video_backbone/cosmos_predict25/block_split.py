@@ -20,8 +20,7 @@ Both halves call upstream submodules directly
 ``block.cross_attn``, ``block.mlp``). This keeps the split numerically
 equivalent to the monolithic forward (locked in by the GPU parity test in
 ``tests/test_cosmos_predict25_joint_self_attn.py``) but pins us to the upstream
-attribute names. The parity test is the canary for any submodule pin bump —
-see ``docs/cosmos_predict25_backbone.md §17``.
+attribute names. The parity test is the canary for any submodule pin bump.
 
 The ``use_wan_fp32_strategy`` autocast branch on the upstream block
 (line 1270) is intentionally omitted: the 2B Stage-c config sets

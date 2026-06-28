@@ -447,7 +447,7 @@ def test_preprocess_input_pre_encoded_text_wins_over_text():
 
     assert wrapper.text_encoder.calls == [], (
         "Live encoder must be silently skipped when `pre_encoded_text` is supplied. "
-        "Cache wins per-sample (docs/cosmos_predict25_backbone.md §14)."
+        "Cache wins per-sample."
     )
     assert torch.equal(out["context"], pre_text), "Cached embedding must flow through unchanged."
 
