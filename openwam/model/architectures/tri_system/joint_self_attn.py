@@ -132,7 +132,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         # Default the action-side raw context width to the loaded backbone's
         # text_dim (Wan T5-XXL=4096, Cosmos-Predict2.5=1024); explicit cfg/CLI
         # still wins. Falls back to 4096 when the backbone doesn't expose it.
-        text_dim = int(_cfg_get(cfg, "text_dim", self.video_backbone.text_dim or 4096))
+        text_dim = int(_cfg_get(cfg, "text_dim", getattr(self.video_backbone, "text_dim", None) or 4096))
 
         # Bridge layers — which video DiT layers participate in joint attention.
         # For ``joint_self_attn`` variant the MoT driver requires

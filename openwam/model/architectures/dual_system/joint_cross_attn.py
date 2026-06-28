@@ -62,7 +62,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         # Default the action-side raw context width to the loaded backbone's
         # text_dim (Wan T5-XXL=4096, Cosmos-Predict2.5=1024); explicit cfg/CLI
         # still wins. Falls back to 4096 when the backbone doesn't expose it.
-        _vb_text_dim = self.video_backbone.text_dim if self.video_backbone is not None else None
+        _vb_text_dim = getattr(self.video_backbone, "text_dim", None)
         text_dim = int(self._cfg_get(cfg, "text_dim", _vb_text_dim or 4096))
         self._init_proprio_context(cfg, text_dim=text_dim)
         self._detach_bridge = bool(cfg.get("detach_bridge", False))
