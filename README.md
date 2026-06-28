@@ -189,7 +189,8 @@ server: { host: "0.0.0.0", port: 8848 }
 
 inference:
   denoise_steps: 10       # denoising steps (FastWAM-Joint default)
-  schedule_type: sync     # only "sync" supported (video/action timesteps lockstep)
+  schedule_type: sync     # sync (video/action lockstep) | independent (per-stream random timesteps)
+  schedule_seed: null     # independent only: RNG seed for a reproducible random schedule
   execution_mode: sync    # sync | async
   execution_horizon: null # async only: actions per chunk (null = policy default)
   inference_delay_steps: null
