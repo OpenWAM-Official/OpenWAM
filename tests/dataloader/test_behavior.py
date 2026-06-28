@@ -428,6 +428,71 @@ class TestDeployNormalizer:
         np.testing.assert_allclose(recovered[m], raw80[m], atol=1e-4)
 
 
+# ── color jitter (train-split video augmentation) -----------------------------
+
+
+class TestColorJitter:
+    """Load-time color jitter is built by the shared base reader from the yaml
+    `color_jitter` switch — enabled on train only, never on val/eval."""
+
+    _CJ = {"brightness": 0.2, "contrast": 0.2, "saturation": 0.2, "hue": 0.0}
+
+    def test_enabled_on_train_split(self, tmp_path):
+        from openwam.dataloader.transforms.video import VideoColorJitter
+
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            ds = _make_ds(b, color_jitter=self._CJ, split="train")
+            # jitter does not change the served clip's shape (it runs in __getitem__)
+            s = ds[0]
+        assert isinstance(ds._color_jitter, VideoColorJitter)
+        assert (
+            ds._color_jitter.brightness,
+            ds._color_jitter.contrast,
+            ds._color_jitter.saturation,
+            ds._color_jitter.hue,
+        ) == (0.2, 0.2, 0.2, 0.0)
+        assert len(s["video"]) == 9
+        assert s["video"][0].size == (320, 384)
+
+    def test_disabled_on_val_split(self, tmp_path):
+        # Augmentation must never touch val/eval video (deterministic eval).
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            ds = _make_ds(b, color_jitter=self._CJ, split="val")
+        assert ds._color_jitter is None
+
+    def test_disabled_when_absent(self, tmp_path):
+        # Omitted / null switch → no jitter (video byte-identical to before).
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            ds_absent = _make_ds(b)
+            ds_null = _make_ds(b, color_jitter=None)
+            ds_false = _make_ds(b, color_jitter=False)
+        assert ds_absent._color_jitter is None
+        assert ds_null._color_jitter is None
+        assert ds_false._color_jitter is None
+
+    def test_from_config_threads_color_jitter(self, tmp_path):
+        # The yaml `color_jitter:` block reaches the reader through from_config.
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        cfg = {
+            "type": "behavior",
+            "dataset_dir": str(b),
+            "multiview": True,
+            "height": 384,
+            "width": 320,
+            "normalize_mode": None,
+            "unify_action": True,
+            "unify_action_map": UNIFY_MAP,
+            "color_jitter": self._CJ,
+        }
+        with _mock_video_decoder():
+            ds = BehaviorDataset.from_config(cfg, split="train")
+        assert ds._color_jitter is not None
+        assert ds._color_jitter.brightness == 0.2
+
+
 # ── stats-computation script --------------------------------------------------
 
 

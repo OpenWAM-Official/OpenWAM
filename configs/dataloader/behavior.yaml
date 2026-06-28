@@ -22,6 +22,20 @@ height: 384
 width: 320
 multiview: true
 
+# ── Video color jitter (optional, TRAIN split only) ─────────────────────────
+# Load-time color jitter the reader applies to each decoded clip with the SAME
+# random factors across all frames (temporal consistency), TRAIN split only — so
+# val / deploy video stays byte-identical. This block is the on/off switch:
+# present (a dict) → enabled; comment it out, or set to null / false → disabled.
+# Strengths are the max ± fractional change per channel; hue is a no-op in PIL
+# mode (kept for API parity → leave 0.0). Applied to the assembled L-shape canvas
+# after multiview composition (same reader hook robocoin uses).
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
+
 # ── Action normalization ────────────────────────────────────────────────────
 # Loads meta/stats_R1Pro.json (eef 20-D + base_vel 3-D). rot6d dims are pinned to
 # identity in the stats file (no normalization), matching robocoin. Generate via:
