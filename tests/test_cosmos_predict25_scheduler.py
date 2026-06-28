@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from openwam.model.video_backbone.cosmos25.scheduler import CosmosFlowSchedulerAdapter
+from openwam.model.video_backbone.cosmos_predict25.scheduler import CosmosFlowSchedulerAdapter
 
 
 def test_set_timesteps_training_populates_all_fields():
@@ -20,12 +20,12 @@ def test_set_timesteps_training_populates_all_fields():
     assert sch.training is True
 
 
-def test_default_flow_shift_is_cosmos_upstream_value():
+def test_default_shift_video_is_cosmos_upstream_value():
     """Default must match upstream
     cosmos_predict2/_src/predict2/models/text2world_model_rectified_flow.py:99
     (`shift: int = 5`)."""
     sch = CosmosFlowSchedulerAdapter()
-    assert sch.flow_shift == 5.0
+    assert sch.shift_video == 5.0
 
 
 def test_training_weights_are_uniform():
@@ -64,9 +64,9 @@ def test_training_target_is_noise_minus_sample():
     assert torch.allclose(target, noise - sample)
 
 
-def test_flow_shift_changes_sigmas():
-    sch_low = CosmosFlowSchedulerAdapter(flow_shift=1.0)
-    sch_high = CosmosFlowSchedulerAdapter(flow_shift=5.0)
+def test_shift_video_changes_sigmas():
+    sch_low = CosmosFlowSchedulerAdapter(shift_video=1.0)
+    sch_high = CosmosFlowSchedulerAdapter(shift_video=5.0)
     sch_low.set_timesteps(num_inference_steps=20, training=False)
     sch_high.set_timesteps(num_inference_steps=20, training=False)
     # shift=1 collapses to identity; shift=5 pushes sigmas toward 1.

@@ -3,8 +3,8 @@
 Covers the path-resolution + config-validation seam between the user-facing
 ``video_backbone.vae`` / ``video_backbone.vae_path`` knobs and the actual
 upstream tokenizer load. The real ``Wan2pt1VAEInterface`` construction is
-gated by the lazy upstream import and lives behind ``_build_cosmos25_vae``;
-that path is exercised on GPU by ``tests/test_cosmos25_real_load.py``.
+gated by the lazy upstream import and lives behind ``_build_cosmos_predict25_vae``;
+that path is exercised on GPU by ``tests/test_cosmos_predict25_real_load.py``.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from openwam.model.video_backbone.cosmos25 import pipeline_builder
-from openwam.model.video_backbone.cosmos25.pipeline_builder import (
+from openwam.model.video_backbone.cosmos_predict25 import pipeline_builder
+from openwam.model.video_backbone.cosmos_predict25.pipeline_builder import (
     _COSMOS25_VAE_FILENAME,
     _VAE_CHOICES,
     _resolve_vae_path,
@@ -57,8 +57,8 @@ def test_resolve_vae_path_missing_file_raises_clear_error(tmp_path: Path):
     assert "vae: none" in message
 
 
-def test_build_cosmos25_vae_is_a_module_attribute():
-    """Smoke: ``_build_cosmos25_vae`` is importable without triggering the
+def test_build_cosmos_predict25_vae_is_a_module_attribute():
+    """Smoke: ``_build_cosmos_predict25_vae`` is importable without triggering the
     upstream ``cosmos_predict2`` import (the import happens inside the
     function body, not at module-load time)."""
-    assert callable(pipeline_builder._build_cosmos25_vae)
+    assert callable(pipeline_builder._build_cosmos_predict25_vae)

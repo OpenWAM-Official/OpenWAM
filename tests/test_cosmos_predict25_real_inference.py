@@ -3,9 +3,9 @@
 Exercises ``preprocess_input_for_inference`` (T2V + CFG) on real weights and
 feeds its ``inputs_shared`` through the real DiT block loop, then checks the
 ``save_deploy_assets`` cache-only path doesn't crash. Complements
-``test_cosmos25_real_load.py`` (the train/forward chain).
+``test_cosmos_predict25_real_load.py`` (the train/forward chain).
 
-Skip conditions identical to ``test_cosmos25_real_load.py``.
+Skip conditions identical to ``test_cosmos_predict25_real_load.py``.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _skip_unless_runnable():
     try:
         import cosmos_predict2  # noqa: F401
     except ImportError:
-        pytest.skip("cosmos_predict2 not installed; run scripts/install_cosmos25.sh first.")
+        pytest.skip("cosmos_predict2 not installed; run scripts/install_cosmos_predict25.sh first.")
 
 
 def _build_backbone():
@@ -37,7 +37,7 @@ def _build_backbone():
 
     cfg = {
         "video_backbone": {
-            "name": "cosmos25_predict_2b",
+            "name": "cosmos_predict25_2b",
             "model_path": str(ASSET_PATH),
             "model_variant": "base/post-trained",
             "text_encoder": "none",
@@ -45,7 +45,7 @@ def _build_backbone():
             "sac_mode": "none",
         }
     }
-    vb = build_video_backbone("cosmos25_predict_2b", cfg)
+    vb = build_video_backbone("cosmos_predict25_2b", cfg)
     vb.set_dtype_device(torch.bfloat16, torch.device("cuda:0"))
     return vb
 

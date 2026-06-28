@@ -4,7 +4,7 @@
 When a dataloader/transform attaches a cached Reason1 embedding to each
 sample dict under the ``pre_encoded_text`` key, the architecture must
 stack it across the batch and forward it as a kwarg to ``preprocess`` so
-the Cosmos25 wrapper uses the cache. This file exercises:
+the CosmosPredict25 wrapper uses the cache. This file exercises:
 
 * Real cached tensor flows through unchanged (``inputs["context"]``
   is the supplied embedding, not a freshly randomized one).
@@ -24,8 +24,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from openwam.model.video_backbone.cosmos25 import CosmosFlowSchedulerAdapter
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+from openwam.model.video_backbone.cosmos_predict25 import CosmosFlowSchedulerAdapter
+from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
 
 class _ParamOnlyNet(nn.Module):
@@ -49,8 +49,8 @@ class _FakeVAE:
         return torch.randn(B, 3, (T_lat - 1) * 4 + 1, H_lat * 8, W_lat * 8, dtype=latents.dtype, device=latents.device)
 
 
-def _build_cosmos_backbone() -> Cosmos25VideoBackbone:
-    pipe = Cosmos25VideoBackbone(
+def _build_cosmos_backbone() -> CosmosPredict25VideoBackbone:
+    pipe = CosmosPredict25VideoBackbone(
         net=_ParamOnlyNet(),
         vae=_FakeVAE(),
         text_encoder=None,
@@ -59,19 +59,19 @@ def _build_cosmos_backbone() -> Cosmos25VideoBackbone:
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=pipe.dit,
         vae=getattr(pipe, "_vae_iface", None),
         text_encoder=getattr(pipe, "text_encoder", None),
-        flow_shift=pipe._flow_shift,
+        shift_video=pipe._shift_video,
         dim=2048,
         num_layers=28,
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        scheduler=CosmosFlowSchedulerAdapter(flow_shift=5.0),
+        scheduler=CosmosFlowSchedulerAdapter(shift_video=5.0),
         freeze=True,
     )
 

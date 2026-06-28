@@ -152,7 +152,7 @@ bash scripts/train.sh model=dual_system \
     model.video_backbone.model_path=/path/to/Wan2.1-VACE-1.3B
 ```
 
-Available groups: `wan22` (Wan2.2-TI2V-5B, default), `wan21` (VACE-1.3B / I2V-14B), `cosmos25`. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
+Available groups: `wan22` (Wan2.2-TI2V-5B, default), `wan21` (VACE-1.3B / I2V-14B), `cosmos_predict25`. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
 
 > `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`. Override **both** together; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
 

@@ -1,4 +1,4 @@
-"""CPU smoke for Cosmos25VideoBackbone.
+"""CPU smoke for CosmosPredict25VideoBackbone.
 
 Builds the wrapper around a hand-rolled fake ``net`` that mimics just the
 public surface of upstream ``MinimalV1LVGDiT`` (``prepare_embedded_sequence``,
@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 from openwam.model.video_backbone.base import BlockLoopState
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
 
 class _FakeBlock(nn.Module):
@@ -134,7 +134,7 @@ class _FakeTEmbedder(nn.Module):
 def fake_wrapper():
     torch.manual_seed(0)
     net = _FakeMiniDIT(dim=32, num_blocks=4, patch_spatial=2, patch_temporal=1, out_channels=16)
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=None,
@@ -143,7 +143,7 @@ def fake_wrapper():
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=3.0,
+        shift_video=3.0,
     )
 
 
@@ -160,7 +160,7 @@ def test_wrapper_attributes_propagate(fake_wrapper):
     assert fake_wrapper.num_heads == 4
     assert fake_wrapper.head_dim == 8
     assert fake_wrapper.text_dim == 24  # context_dim exposed via base text_dim property
-    assert fake_wrapper._flow_shift == 3.0  # private on the backbone
+    assert fake_wrapper._shift_video == 3.0  # private on the backbone
 
 
 def test_prepare_run_finalize_shape_conservation(fake_wrapper):
@@ -312,9 +312,9 @@ def _make_pil_video(B: int, T: int, H: int, W: int):
     ]
 
 
-def _wrapper_with_fake_vae() -> Cosmos25VideoBackbone:
+def _wrapper_with_fake_vae() -> CosmosPredict25VideoBackbone:
     net = _FakeMiniDIT(dim=32, num_blocks=4)
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=net,
         vae=_FakeVAEInterface(),
         text_encoder=None,
@@ -323,7 +323,7 @@ def _wrapper_with_fake_vae() -> Cosmos25VideoBackbone:
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
 
 
@@ -389,7 +389,7 @@ class _FakeLiveTextEncoder:
 
 def _wrapper_with_fake_live_encoder():
     net = _FakeMiniDIT(dim=32, num_blocks=4)  # ctx_dim_pre=64, ctx_dim_post=24
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=_FakeLiveTextEncoder(L=8, ctx_dim_pre=64),
@@ -398,7 +398,7 @@ def _wrapper_with_fake_live_encoder():
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
 
 
@@ -447,7 +447,7 @@ def test_preprocess_input_pre_encoded_text_wins_over_text():
 
     assert wrapper.text_encoder.calls == [], (
         "Live encoder must be silently skipped when `pre_encoded_text` is supplied. "
-        "Cache wins per-sample (docs/cosmos25_backbone.md §14)."
+        "Cache wins per-sample (docs/cosmos_predict25_backbone.md §14)."
     )
     assert torch.equal(out["context"], pre_text), "Cached embedding must flow through unchanged."
 
@@ -457,9 +457,9 @@ def test_preprocess_input_pre_encoded_text_wins_over_text():
 # ----------------------------------------------------------------------
 
 
-def _wrapper_with_dropout(*, p: float, seed=None) -> Cosmos25VideoBackbone:
+def _wrapper_with_dropout(*, p: float, seed=None) -> CosmosPredict25VideoBackbone:
     net = _FakeMiniDIT(dim=32, num_blocks=4)
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=_FakeLiveTextEncoder(L=8, ctx_dim_pre=64),
@@ -468,7 +468,7 @@ def _wrapper_with_dropout(*, p: float, seed=None) -> Cosmos25VideoBackbone:
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=5.0,
+        shift_video=5.0,
         text_dropout_p=p,
         text_dropout_seed=seed,
     )
@@ -552,12 +552,12 @@ def test_text_dropout_p_out_of_range_rejected():
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
     with pytest.raises(ValueError, match=r"text_dropout_p"):
-        Cosmos25VideoBackbone(text_dropout_p=1.5, **common)
+        CosmosPredict25VideoBackbone(text_dropout_p=1.5, **common)
     with pytest.raises(ValueError, match=r"text_dropout_p"):
-        Cosmos25VideoBackbone(text_dropout_p=-0.1, **common)
+        CosmosPredict25VideoBackbone(text_dropout_p=-0.1, **common)
 
 
 # ----------------------------------------------------------------------
@@ -595,7 +595,7 @@ def testreason1_appears_in_state_dict():
     external Cosmos-Reason1 bundle (the pre-fix behaviour)."""
     net = _FakeMiniDIT(dim=32, num_blocks=4)
     encoder = _FakeReason1WithInnerModule()
-    wrapper = Cosmos25VideoBackbone(
+    wrapper = CosmosPredict25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=encoder,
@@ -604,7 +604,7 @@ def testreason1_appears_in_state_dict():
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
 
     state_keys = list(wrapper.state_dict().keys())
@@ -628,7 +628,7 @@ def test_reason1_no_inner_module_means_no_registration():
     — there is nothing to register."""
     net = _FakeMiniDIT(dim=32, num_blocks=4)
     encoder = _FakeReason1WithoutInnerModule()
-    wrapper = Cosmos25VideoBackbone(
+    wrapper = CosmosPredict25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=encoder,
@@ -637,7 +637,7 @@ def test_reason1_no_inner_module_means_no_registration():
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
 
     assert "reason1" not in wrapper._modules
@@ -652,7 +652,7 @@ def testreason1_state_dict_roundtrip():
     save/load round trip exercised at training time."""
     net1 = _FakeMiniDIT(dim=32, num_blocks=4)
     enc1 = _FakeReason1WithInnerModule()
-    w1 = Cosmos25VideoBackbone(
+    w1 = CosmosPredict25VideoBackbone(
         net=net1,
         vae=None,
         text_encoder=enc1,
@@ -661,7 +661,7 @@ def testreason1_state_dict_roundtrip():
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
     # Capture the source weights, then build a second wrapper and load.
     src_weight = enc1.model.weight.detach().clone()
@@ -669,7 +669,7 @@ def testreason1_state_dict_roundtrip():
 
     net2 = _FakeMiniDIT(dim=32, num_blocks=4)
     enc2 = _FakeReason1WithInnerModule()
-    w2 = Cosmos25VideoBackbone(
+    w2 = CosmosPredict25VideoBackbone(
         net=net2,
         vae=None,
         text_encoder=enc2,
@@ -678,7 +678,7 @@ def testreason1_state_dict_roundtrip():
         num_heads=4,
         head_dim=8,
         context_dim=24,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
     # Sanity check: independently initialised, weights must differ.
     assert not torch.equal(enc2.model.weight, src_weight)

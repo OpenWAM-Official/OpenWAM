@@ -1,4 +1,4 @@
-"""Cosmos25 Block decomposition for joint self-attention (§17).
+"""CosmosPredict25 Block decomposition for joint self-attention (§17).
 
 The upstream ``Block.forward``
 (``third_party/cosmos-predict2.5/cosmos_predict2/_src/predict2/networks/minimal_v4_dit.py:1257``)
@@ -19,9 +19,9 @@ Both halves call upstream submodules directly
 ``block.self_attn.{compute_qkv, output_proj, output_dropout}``,
 ``block.cross_attn``, ``block.mlp``). This keeps the split numerically
 equivalent to the monolithic forward (locked in by the GPU parity test in
-``tests/test_cosmos25_joint_self_attn.py``) but pins us to the upstream
+``tests/test_cosmos_predict25_joint_self_attn.py``) but pins us to the upstream
 attribute names. The parity test is the canary for any submodule pin bump —
-see ``docs/cosmos25_backbone.md §17``.
+see ``docs/cosmos_predict25_backbone.md §17``.
 
 The ``use_wan_fp32_strategy`` autocast branch on the upstream block
 (line 1270) is intentionally omitted: the 2B Stage-c config sets
@@ -42,7 +42,7 @@ def _compute_modulation(block, emb_B_T_D: Tensor, adaln_lora_B_T_3D: Optional[Te
 
     Mirrors upstream lines 1271-1301: three sublayers (self-attn / cross-attn /
     MLP), each producing ``(shift, scale, gate)`` chunks. With
-    ``use_adaln_lora=True`` (the only path Cosmos25-2B uses today), the LoRA
+    ``use_adaln_lora=True`` (the only path CosmosPredict25-2B uses today), the LoRA
     output is summed with ``adaln_lora_B_T_3D`` BEFORE chunking.
     """
     if getattr(block, "use_adaln_lora", False):

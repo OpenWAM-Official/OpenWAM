@@ -11,7 +11,7 @@ defaults:
 # Frozen pretrained components (freeze_modules walks each via get_submodule;
 # missing paths silently skipped — image_encoder None on TI2V/VACE, _encoder
 # only on the from_scratch external-encoder path). The list spans backbones:
-# `text_encoder`/`vae` are Wan; `reason1` is the Cosmos25 text-encoder child
+# `text_encoder`/`vae` are Wan; `reason1` is the CosmosPredict25 text-encoder child
 # (Cosmos `vae` is also a real child, so the same `video_backbone.vae` entry
 # covers it). Each no-ops on backbones that lack the path.
 freeze:

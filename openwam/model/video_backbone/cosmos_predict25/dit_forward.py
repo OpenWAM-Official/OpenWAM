@@ -2,7 +2,7 @@
 
 Mirrors ``openwam/model/video_backbone/wan/dit_forward.py``: the per-block
 orchestration of the upstream Cosmos DiT (``MinimalV1LVGDiT`` / ``MiniTrainDIT``)
-lives here as free functions taking ``(net, ...)``, so ``Cosmos25VideoBackbone``
+lives here as free functions taking ``(net, ...)``, so ``CosmosPredict25VideoBackbone``
 stays a thin flat adapter (no wrapper nn.Module). Each function replicates a
 slice of ``MiniTrainDIT.forward`` that the backbone's ``prepare`` / ``run_block``
 / ``finalize`` / ``pre_attn_at_layer`` / ``post_attn_at_layer`` delegate to.
@@ -55,7 +55,7 @@ def prepare_block_loop(
     x_in = latents if latents is not None else input_latents
     if x_in is None:
         raise ValueError(
-            "cosmos25.dit_forward.prepare_block_loop requires either `latents` "
+            "cosmos_predict25.dit_forward.prepare_block_loop requires either `latents` "
             "(preferred, noised at training time) or `input_latents`."
         )
     B, _C, T_lat, H_lat, W_lat = x_in.shape
@@ -152,7 +152,7 @@ def pre_attn_at_layer(net: Any, block_id: int, state: BlockLoopState):
 
     Returns ``(q, k, v, post_state)`` with Q/K/V at ``(B, T·H·W, H·D)``.
     """
-    from openwam.model.video_backbone.cosmos25.block_split import pre_self_attn
+    from openwam.model.video_backbone.cosmos_predict25.block_split import pre_self_attn
 
     block = net.blocks[block_id]
     return pre_self_attn(
@@ -176,7 +176,7 @@ def post_attn_at_layer(
     The ``block_id`` arg is part of the Wan-compatible hook signature but unused
     here (the block ref lives in ``post_state``).
     """
-    from openwam.model.video_backbone.cosmos25.block_split import post_self_attn
+    from openwam.model.video_backbone.cosmos_predict25.block_split import post_self_attn
 
     _ = block_id
     state.hidden_states = post_self_attn(attn_out, state.context, post_state)

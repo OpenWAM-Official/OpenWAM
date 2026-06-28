@@ -452,7 +452,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Additional OmegaConf dotlist overrides, e.g. model/video_backbone=cosmos25",
+        help="Additional OmegaConf dotlist overrides, e.g. model/video_backbone=cosmos_predict25",
     )
     return parser
 

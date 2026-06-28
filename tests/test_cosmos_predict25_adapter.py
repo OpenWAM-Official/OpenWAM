@@ -10,8 +10,8 @@ import pytest
 import torch
 
 from openwam.model.video_backbone.base import BlockLoopState
-from openwam.model.video_backbone.cosmos25 import CosmosFlowSchedulerAdapter
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+from openwam.model.video_backbone.cosmos_predict25 import CosmosFlowSchedulerAdapter
+from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
 
 class _FakeCosmosPipeline:
@@ -29,7 +29,7 @@ class _FakeCosmosPipeline:
     context_dim = 2048
 
 
-def _build_backbone(**overrides) -> Cosmos25VideoBackbone:
+def _build_backbone(**overrides) -> CosmosPredict25VideoBackbone:
     pipe = _FakeCosmosPipeline()
     kwargs = dict(
         net=pipe,
@@ -40,11 +40,11 @@ def _build_backbone(**overrides) -> Cosmos25VideoBackbone:
         num_heads=pipe.num_heads,
         head_dim=pipe.head_dim,
         context_dim=pipe.context_dim,
-        scheduler=CosmosFlowSchedulerAdapter(flow_shift=3.0),
+        scheduler=CosmosFlowSchedulerAdapter(shift_video=3.0),
         freeze=True,
     )
     kwargs.update(overrides)
-    return Cosmos25VideoBackbone(**kwargs)
+    return CosmosPredict25VideoBackbone(**kwargs)
 
 
 def test_properties_match_pipeline_geometry():

@@ -118,12 +118,12 @@ def load_from_checkpoint_dir(
     if vb_components is not None:
         logger.info("Using config-embedded component specs for video-backbone construction")
         vb_cfg_dict = OmegaConf.to_container(cfg.model.video_backbone, resolve=True)
-        # Cosmos25 Reason1 self-containment: when the ckpt was saved with the
+        # CosmosPredict25 Reason1 self-containment: when the ckpt was saved with the
         # ``reason1`` registration enabled, its weights live in the
         # unified safetensors and the small structural artifacts
         # (config.json + tokenizer.json) live under ``<ckpt_dir>/reason1/``.
         # Clearing ``text_encoder_path`` on that branch makes
-        # ``build_cosmos25_pipeline`` take its deploy/empty-shell path
+        # ``build_cosmos_predict25_pipeline`` take its deploy/empty-shell path
         # (``pipeline_builder.py`` Reason1 construction site). For old ckpts
         # without the ``reason1/`` artifact dir we leave the original
         # ``text_encoder_path`` intact so the live encoder still loads from
@@ -150,7 +150,7 @@ def load_from_checkpoint_dir(
         # Symmetric with the Reason1 clearing above: when the ckpt carries a VAE
         # state component, its weights live in the unified safetensors (via
         # ``vae``), so any training-time ``vae_path`` must be cleared.
-        # Otherwise ``build_cosmos25_pipeline``'s deploy guard
+        # Otherwise ``build_cosmos_predict25_pipeline``'s deploy guard
         # (``ckpt_dir is not None and vae_path_override is None``) stays False and
         # ``_resolve_vae_path`` raises FileNotFoundError on a host lacking the
         # original path, before weights ever load.
@@ -170,9 +170,9 @@ def load_from_checkpoint_dir(
         model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
         if model_path is not None:
             vb_name = str(OmegaConf.select(cfg, "model.video_backbone.name", default=""))
-            if vb_name.startswith("cosmos25_"):
+            if vb_name.startswith("cosmos_predict25_"):
                 # Cosmos carries fields the path-only string source would
-                # lose: `flow_shift`, `model_variant`, `text_encoder`.
+                # lose: `shift_video`, `model_variant`, `text_encoder`.
                 # `from_pretrained` accepts a dict natively (via
                 # `_video_backbone_cfg`). Wan never hits this branch.
                 vb_params["_source"] = {k: v for k, v in vb_params.items() if not str(k).startswith("_")}

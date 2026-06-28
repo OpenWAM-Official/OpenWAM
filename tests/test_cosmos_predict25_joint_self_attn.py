@@ -1,4 +1,4 @@
-"""Joint self-attention support for the Cosmos25 video backbone (§17).
+"""Joint self-attention support for the CosmosPredict25 video backbone (§17).
 
 Two layers of coverage:
 
@@ -10,7 +10,7 @@ Two layers of coverage:
   end-to-end on a 5D state to lock in the dispatch wiring.
 
 * **GPU** — ``test_real_block_split_matches_monolithic`` loads the real
-  Cosmos25-2B post-trained DiT, runs one block both ways (monolithic vs
+  CosmosPredict25-2B post-trained DiT, runs one block both ways (monolithic vs
   pre + attn_op + post), and asserts ``allclose(atol=1e-3)`` at bf16. This is
   the parity canary for any submodule pin bump — if upstream renames any
   attribute the test goes red.
@@ -222,7 +222,7 @@ def test_block_split_matches_monolithic_cpu():
     ``output_proj`` + residual + cross-attn + MLP. Run in float32 with
     ``atol=1e-5`` so the test catches arithmetic drift, not bf16 noise.
     """
-    from openwam.model.video_backbone.cosmos25.block_split import post_self_attn, pre_self_attn
+    from openwam.model.video_backbone.cosmos_predict25.block_split import post_self_attn, pre_self_attn
 
     block = _RichCosmosBlock(x_dim=16, context_dim=12, n_heads=4)
     block.eval()
@@ -248,7 +248,7 @@ def test_block_split_matches_monolithic_cpu():
 
 def test_block_split_pre_returns_3d_qkv_with_heads_inlined():
     """Pre half must return Q/K/V as ``(B, S, H·D)`` flat — that's the MoT contract."""
-    from openwam.model.video_backbone.cosmos25.block_split import pre_self_attn
+    from openwam.model.video_backbone.cosmos_predict25.block_split import pre_self_attn
 
     block = _RichCosmosBlock(x_dim=16, context_dim=12, n_heads=4)
     x, emb, adaln_lora, _ = _make_rich_block_inputs(B=2, T=2, H=2, W=3, D=16)
@@ -268,7 +268,7 @@ def test_block_split_pre_returns_3d_qkv_with_heads_inlined():
 
 
 class _RichFakeMiniDIT(nn.Module):
-    """Like ``_FakeMiniDIT`` in ``test_cosmos25_pipeline_wrapper.py`` but with
+    """Like ``_FakeMiniDIT`` in ``test_cosmos_predict25_pipeline_wrapper.py`` but with
     ``_RichCosmosBlock`` blocks so the split hooks have real submodules to call.
     """
 
@@ -336,10 +336,10 @@ class _FakeFinalLayer(nn.Module):
 
 
 def _build_rich_wrapper(num_blocks=2):
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
     net = _RichFakeMiniDIT(dim=16, num_blocks=num_blocks, n_heads=4, ctx_dim_post=12, ctx_dim_pre=24)
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=net,
         vae=None,
         text_encoder=None,
@@ -348,7 +348,7 @@ def _build_rich_wrapper(num_blocks=2):
         num_heads=4,
         head_dim=4,
         context_dim=12,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
 
 
@@ -378,11 +378,11 @@ def test_wrapper_pre_post_attn_dispatch_round_trip():
 
 
 def test_adapter_pre_post_attn_delegate_to_wrapper():
-    """``Cosmos25VideoBackbone.pre_attn_at_layer`` must round-trip through the wrapper."""
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    """``CosmosPredict25VideoBackbone.pre_attn_at_layer`` must round-trip through the wrapper."""
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
     wrapper = _build_rich_wrapper(num_blocks=1)
-    backbone = Cosmos25VideoBackbone(
+    backbone = CosmosPredict25VideoBackbone(
         net=wrapper.dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     state = wrapper.prepare(
@@ -404,14 +404,14 @@ def test_adapter_pre_post_attn_delegate_to_wrapper():
 
 
 # ----------------------------------------------------------------------
-# CPU: v↔v mask modes on Cosmos25VideoBackbone.
+# CPU: v↔v mask modes on CosmosPredict25VideoBackbone.
 # ----------------------------------------------------------------------
 
 
 def test_v2v_mask_bidirectional():
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
-    backbone = Cosmos25VideoBackbone(
+    backbone = CosmosPredict25VideoBackbone(
         net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     backbone.video_attention_mask_mode = "bidirectional"
@@ -421,9 +421,9 @@ def test_v2v_mask_bidirectional():
 
 
 def test_v2v_mask_per_frame_causal():
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
-    backbone = Cosmos25VideoBackbone(
+    backbone = CosmosPredict25VideoBackbone(
         net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     backbone.video_attention_mask_mode = "per_frame_causal"
@@ -438,9 +438,9 @@ def test_v2v_mask_per_frame_causal():
 
 
 def test_v2v_mask_first_frame_causal():
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
-    backbone = Cosmos25VideoBackbone(
+    backbone = CosmosPredict25VideoBackbone(
         net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     backbone.video_attention_mask_mode = "first_frame_causal"
@@ -452,9 +452,9 @@ def test_v2v_mask_first_frame_causal():
 
 
 def test_v2v_mask_default_is_bidirectional():
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
-    backbone = Cosmos25VideoBackbone(
+    backbone = CosmosPredict25VideoBackbone(
         net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     # Property defaults to bidirectional without explicit setter.
@@ -462,9 +462,9 @@ def test_v2v_mask_default_is_bidirectional():
 
 
 def test_v2v_mask_rejects_unknown_mode():
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
-    backbone = Cosmos25VideoBackbone(
+    backbone = CosmosPredict25VideoBackbone(
         net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     backbone.video_attention_mask_mode = "bogus_mode"
@@ -473,25 +473,25 @@ def test_v2v_mask_rejects_unknown_mode():
 
 
 # ----------------------------------------------------------------------
-# CPU: MoT driver runs end-to-end through Cosmos25VideoBackbone with the
+# CPU: MoT driver runs end-to-end through CosmosPredict25VideoBackbone with the
 # `_RichCosmosBlock` fakes — locks in the s_video = f*h*w fix on the driver
-# (state.hidden_states is 5D for Cosmos25, so the old `vstate.hidden_states.shape[1]` would have
+# (state.hidden_states is 5D for CosmosPredict25, so the old `vstate.hidden_states.shape[1]` would have
 # returned T instead of T*H*W).
 # ----------------------------------------------------------------------
 
 
-def test_mot_driver_runs_through_cosmos25_5d_state():
+def test_mot_driver_runs_through_cosmos_predict25_5d_state():
     """End-to-end: build DualSystemSelfAttnArchitecture pointing at a
-    Cosmos25VideoBackbone backed by ``_RichCosmosBlock``, and run one full
+    CosmosPredict25VideoBackbone backed by ``_RichCosmosBlock``, and run one full
     layer of joint mixed attention. This regression-tests the
     ``mot_driver.py::run_joint_loop`` s_video fix (formerly
     ``vstate.hidden_states.shape[1]`` which gives ``T`` for Cosmos's 5D state).
     """
     from openwam.model import build_architecture
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
     wrapper = _build_rich_wrapper(num_blocks=2)
-    backbone = Cosmos25VideoBackbone(
+    backbone = CosmosPredict25VideoBackbone(
         net=wrapper.dit, dim=16, num_layers=2, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
 
@@ -547,21 +547,21 @@ def test_mot_driver_runs_through_cosmos25_5d_state():
     "also imports action_backbone.joint_action_dit (here it's separate_action_dit). Not portable "
     "without porting that whole feature; out of scope for the backbone port."
 )
-def test_cosmos25_joint_self_attn_auto_compile_is_safe_noop():
-    """Cosmos25 needs a dedicated helper because dynamic tensors live in extras."""
+def test_cosmos_predict25_joint_self_attn_auto_compile_is_safe_noop():
+    """CosmosPredict25 needs a dedicated helper because dynamic tensors live in extras."""
 
     from openwam.model.action_backbone.joint_action_dit import ActionDiT
     from openwam.model.architectures.dual_system.joint_self_attn import (
         DualSystemSelfAttnArchitecture,
         _mot_loop_compile_skip_reason,
     )
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
-    backbone = Cosmos25VideoBackbone(
+    backbone = CosmosPredict25VideoBackbone(
         net=_build_rich_wrapper(num_blocks=1).dit, dim=16, num_layers=1, num_heads=4, head_dim=4, context_dim=12, freeze=False
     )
     assert backbone.supports_generic_mot_compile is False
-    assert "Cosmos25" in _mot_loop_compile_skip_reason(backbone)
+    assert "CosmosPredict25" in _mot_loop_compile_skip_reason(backbone)
     arch = DualSystemSelfAttnArchitecture()
     arch.video_backbone = backbone
     arch.action_backbone = ActionDiT(
@@ -586,7 +586,7 @@ def test_cosmos25_joint_self_attn_auto_compile_is_safe_noop():
 
 @pytest.mark.gpu
 def test_real_block_split_matches_monolithic():
-    """Numerical parity on a real Cosmos25-2B block: ``pre + attn_op + post``
+    """Numerical parity on a real CosmosPredict25-2B block: ``pre + attn_op + post``
     must reproduce ``block(...)`` within bf16 noise.
 
     This is the canary for any submodule pin bump: if upstream renames any
@@ -596,14 +596,14 @@ def test_real_block_split_matches_monolithic():
     ``block_split.py`` for the new layout.
     """
     if not torch.cuda.is_available():
-        pytest.skip("requires CUDA + Cosmos25 install")
+        pytest.skip("requires CUDA + CosmosPredict25 install")
     try:
         import cosmos_predict2  # noqa: F401
     except ImportError:
-        pytest.skip("cosmos_predict2 not installed; run scripts/install_cosmos25.sh first.")
+        pytest.skip("cosmos_predict2 not installed; run scripts/install_cosmos_predict25.sh first.")
 
-    from openwam.model.video_backbone.cosmos25.block_split import post_self_attn, pre_self_attn
-    from openwam.model.video_backbone.cosmos25.pipeline_builder import build_cosmos25_pipeline
+    from openwam.model.video_backbone.cosmos_predict25.block_split import post_self_attn, pre_self_attn
+    from openwam.model.video_backbone.cosmos_predict25.pipeline_builder import build_cosmos_predict25_pipeline
 
     cfg = {
         "video_backbone": {
@@ -611,12 +611,12 @@ def test_real_block_split_matches_monolithic():
             "model_variant": "base/post-trained",
             "text_encoder": "none",
             "vae": "none",  # parity test doesn't need VAE
-            "flow_shift": 5.0,
+            "shift_video": 5.0,
             "sac_mode": "none",
         }
     }
     try:
-        wrapper = build_cosmos25_pipeline(cfg, device="cuda:0")
+        wrapper = build_cosmos_predict25_pipeline(cfg, device="cuda:0")
     except FileNotFoundError as exc:
         pytest.skip(f"Cosmos checkpoint missing: {exc}")
 

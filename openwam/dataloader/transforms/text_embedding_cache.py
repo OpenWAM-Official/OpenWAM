@@ -1,6 +1,6 @@
 """Load pre-computed text embeddings from disk and attach to dataset samples.
 
-The Cosmos25 backbone consumes a ``pre_encoded_text`` tensor on each sample
+The CosmosPredict25 backbone consumes a ``pre_encoded_text`` tensor on each sample
 (``(L, D)`` bf16; ``D=1024`` post-projection for Cosmos-Predict2.5 2B). Live
 encoding with Cosmos-Reason1 7B during training is expensive; instead we
 pre-compute once per unique caption (``python -m openwam.dataloader.reason1_

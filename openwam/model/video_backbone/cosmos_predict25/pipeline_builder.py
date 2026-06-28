@@ -1,15 +1,15 @@
 """Lazy loader for the Cosmos-Predict2.5 pipeline.
 
-Builds a :class:`Cosmos25VideoBackbone` from the ``cosmos_predict2`` package
+Builds a :class:`CosmosPredict25VideoBackbone` from the ``cosmos_predict2`` package
 installed off the ``third_party/cosmos-predict2.5`` submodule, hides the
 upstream ``MinimalV1LVGDiT`` config
-behind a stable signature, and lets :meth:`Cosmos25VideoBackbone.from_pretrained`
+behind a stable signature, and lets :meth:`CosmosPredict25VideoBackbone.from_pretrained`
 treat the result as a duck-typed pipeline. The whole upstream import graph is
 deferred until the function is called so CPU-only CI keeps working.
 
 Currently supports the 2B base / post-trained / distilled variants. The 14B
 variant is registered for naming but does not have its config baked in yet
-(probe its checkpoint with ``scripts/install_cosmos25.sh``-installed Python
+(probe its checkpoint with ``scripts/install_cosmos_predict25.sh``-installed Python
 when the weights land).
 """
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _COSMOS_INSTALL_HINT = (
     "Cosmos-Predict2.5 dependencies are not installed. Initialise the submodule "
     "(`git submodule update --init third_party/cosmos-predict2.5`) and then run "
-    "`bash scripts/install_cosmos25.sh`."
+    "`bash scripts/install_cosmos_predict25.sh`."
 )
 
 # Phase 4 VAE wiring. The Cosmos-Predict2.5 bundle ships its tokenizer weights
@@ -36,7 +36,7 @@ _COSMOS25_VAE_FILENAME = "tokenizer.pth"
 _VAE_CHOICES = {"none", "wan2pt1"}
 
 # Text encoder choices. "none" = caller passes `pre_encoded_text` (offline
-# cache path, see docs/cosmos25_backbone.md §10). "reason1_live" = construct
+# cache path, see docs/cosmos_predict25_backbone.md §10). "reason1_live" = construct
 # a Cosmos-Reason1-7B encoder inline and run it per training step (§14).
 _TEXT_ENCODER_CHOICES = {"none", "reason1_live"}
 
@@ -78,13 +78,13 @@ _COSMOS25_2B_NET_KWARGS: dict = dict(
     # released checkpoints were saved WITHOUT the wrapper, so wrapping at
     # __init__ time produces 56 missing `_extra_state` keys on strict=False
     # load. We always construct with mode=NONE and then re-apply SAC after
-    # weight loading via the `sac_mode` config knob (see build_cosmos25_pipeline).
+    # weight loading via the `sac_mode` config knob (see build_cosmos_predict25_pipeline).
     # SACConfig objects are constructed lazily inside the builder so this
     # module stays importable on CPU CI.
 )
 
-# Exposed geometry that build_cosmos25_pipeline attaches to the wrapper so
-# Cosmos25VideoBackbone._probe_pipeline_geometry can read them off.
+# Exposed geometry that build_cosmos_predict25_pipeline attaches to the wrapper so
+# CosmosPredict25VideoBackbone._probe_pipeline_geometry can read them off.
 _COSMOS25_2B_GEOMETRY = dict(
     dim=2048,
     num_layers=28,
@@ -97,17 +97,17 @@ _COSMOS25_2B_GEOMETRY = dict(
 # from ``_COSMOS25_2B_NET_KWARGS`` are two independent hard-coded specs; guard
 # against silent drift between them at import time (cheap; both are plain dicts).
 assert _COSMOS25_2B_GEOMETRY["dim"] == _COSMOS25_2B_NET_KWARGS["model_channels"], (
-    "cosmos25 2B geometry dim != net model_channels"
+    "cosmos_predict25 2B geometry dim != net model_channels"
 )
 assert _COSMOS25_2B_GEOMETRY["num_heads"] == _COSMOS25_2B_NET_KWARGS["num_heads"], (
-    "cosmos25 2B geometry num_heads != net num_heads"
+    "cosmos_predict25 2B geometry num_heads != net num_heads"
 )
 assert (
     _COSMOS25_2B_GEOMETRY["head_dim"]
     == _COSMOS25_2B_NET_KWARGS["model_channels"] // _COSMOS25_2B_NET_KWARGS["num_heads"]
-), "cosmos25 2B geometry head_dim != model_channels // num_heads"
+), "cosmos_predict25 2B geometry head_dim != model_channels // num_heads"
 assert _COSMOS25_2B_GEOMETRY["num_layers"] == _COSMOS25_2B_NET_KWARGS["num_blocks"], (
-    "cosmos25 2B geometry num_layers != net num_blocks"
+    "cosmos_predict25 2B geometry num_layers != net num_blocks"
 )
 
 
@@ -130,9 +130,9 @@ def _resolve_vae_path(model_path: Path, override: Optional[str]) -> Path:
     is missing.
 
     Deploy-time builds (signalled by a non-``None`` ``ckpt_dir`` in
-    :func:`build_cosmos25_pipeline`) skip this helper entirely and build an
+    :func:`build_cosmos_predict25_pipeline`) skip this helper entirely and build an
     empty VAE shell via ``vae_pth=None`` — weights then load from the
-    architecture's unified safetensors. See :func:`_build_cosmos25_vae`.
+    architecture's unified safetensors. See :func:`_build_cosmos_predict25_vae`.
     """
     if override is not None:
         candidate = Path(override)
@@ -148,7 +148,7 @@ def _resolve_vae_path(model_path: Path, override: Optional[str]) -> Path:
     return candidate
 
 
-def _build_cosmos25_vae(vae_pth: Optional[Path], *, device, dtype):
+def _build_cosmos_predict25_vae(vae_pth: Optional[Path], *, device, dtype):
     """Construct a frozen ``Wan2pt1VAEInterface``.
 
     Two modes:
@@ -157,7 +157,7 @@ def _build_cosmos25_vae(vae_pth: Optional[Path], *, device, dtype):
     - ``vae_pth is None`` → build an empty shell via upstream's
       ``_video_vae(pretrained_path=None)`` → ``WanVAE_.to_empty()`` path
       (``wan2pt1.py:619-623``). The shell's inner ``WanVAE_`` is registered
-      as a sub-module of ``Cosmos25VideoBackbone`` (see its ``__init__``),
+      as a sub-module of ``CosmosPredict25VideoBackbone`` (see its ``__init__``),
       so the architecture's ``load_checkpoint`` populates its weights from the
       unified safetensors. Used at deploy time when ``ckpt_dir`` carries the
       saved state.
@@ -181,7 +181,7 @@ def _build_cosmos25_vae(vae_pth: Optional[Path], *, device, dtype):
     # Upstream defaults to device="cuda" in WanVAE.__init__ (line 710); even
     # if we're targeting a different device the mean/std tensors and inner
     # nn.Module need to be moved explicitly. Reuse the shared VAE helper.
-    from openwam.model.video_backbone.cosmos25._vae_utils import _move_cosmos_vae
+    from openwam.model.video_backbone.cosmos_predict25._vae_utils import _move_cosmos_vae
 
     _move_cosmos_vae(iface, dtype=dtype, device=target_device)
     return iface
@@ -258,7 +258,7 @@ def _load_state_dict_into_net(net, ckpt_path: Path) -> Tuple[list, list]:
     ``net.`` (689 keys for the 2B). TE's ``RMSNorm`` modules carry an
     ``_extra_state`` entry containing RNG / FP8 metadata — these load fine via
     TE's deserializer when the real ``transformer_engine`` is installed (see
-    ``scripts/install_cosmos25.sh``).
+    ``scripts/install_cosmos_predict25.sh``).
     """
     import torch
 
@@ -288,24 +288,24 @@ def _load_state_dict_into_net(net, ckpt_path: Path) -> Tuple[list, list]:
     return missing, unexpected
 
 
-def build_cosmos25_pipeline(
+def build_cosmos_predict25_pipeline(
     source: Any,
     *,
     device: Optional[str] = None,
     ckpt_dir: Optional[str] = None,
     **_unused,
 ):
-    """Construct a :class:`Cosmos25VideoBackbone` from *source*.
+    """Construct a :class:`CosmosPredict25VideoBackbone` from *source*.
 
     ``source`` is either:
       - a model directory ``str`` / ``Path`` (e.g. ``/path/to/assets/Cosmos-Predict2.5-2B``),
       - a Hydra ``DictConfig`` carrying ``video_backbone.{model_path, model_variant,
-        text_encoder, flow_shift}``,
+        text_encoder, shift_video}``,
       - a plain dict with the same shape.
 
     Returns the wrapper with ``dim`` / ``num_layers`` / ``num_heads`` / ``head_dim``
     / ``context_dim`` attached as attributes so that
-    :meth:`Cosmos25VideoBackbone._probe_pipeline_geometry` succeeds.
+    :meth:`CosmosPredict25VideoBackbone._probe_pipeline_geometry` succeeds.
     """
     # Validate user-facing config before importing the upstream package so
     # `sac_mode=foo` raises a clear ValueError on CPU CI too, not just on hosts
@@ -315,11 +315,11 @@ def build_cosmos25_pipeline(
     # ``model_path`` is required for the *training* bootstrap (DiT
     # ``*_ema_bf16.pt`` + VAE ``tokenizer.pth``). On the deploy path
     # (``ckpt_dir`` non-None) both come from the unified safetensors instead,
-    # so ``model_path`` is optional — this is what makes a cosmos25 checkpoint
+    # so ``model_path`` is optional — this is what makes a cosmos_predict25 checkpoint
     # truly portable to a host without ``/path/to/assets/...`` access.
     if model_path_raw is None and ckpt_dir is None:
         raise ValueError(
-            "build_cosmos25_pipeline requires `video_backbone.model_path` to be set "
+            "build_cosmos_predict25_pipeline requires `video_backbone.model_path` to be set "
             "(point it at the Cosmos-Predict2.5 bundle root, e.g. "
             "/path/to/assets/Cosmos-Predict2.5-2B)."
         )
@@ -327,7 +327,7 @@ def build_cosmos25_pipeline(
     variant = str(_cfg_get(vb_cfg, "model_variant", "base/post-trained"))
     text_encoder_choice = str(_cfg_get(vb_cfg, "text_encoder", "none")).lower()
     requested_text_encoder_choice = text_encoder_choice
-    flow_shift = float(_cfg_get(vb_cfg, "flow_shift", 5.0))
+    shift_video = float(_cfg_get(vb_cfg, "shift_video", 5.0))
     sac_mode_raw = str(_cfg_get(vb_cfg, "sac_mode", "none")).lower()
     _valid_sac_modes = {"none", "mm_only", "block_wise"}
     if sac_mode_raw not in _valid_sac_modes:
@@ -371,13 +371,13 @@ def build_cosmos25_pipeline(
     if text_encoder_choice == "reason1_live" and text_encoder_path_raw is None and ckpt_dir is None:
         raise ValueError(
             "video_backbone.text_encoder_path is required when "
-            "text_encoder=reason1_live on the training path, and Cosmos25 "
+            "text_encoder=reason1_live on the training path, and CosmosPredict25 "
             "checkpoints now save Reason1 into safetensors whenever a "
             "text_encoder_path is available. Point text_encoder_path at the "
             "Cosmos-Reason1-7B bundle root, e.g. /path/to/assets/Cosmos-Reason1-7B."
         )
     # §14.7 — CFG dropout for the live encoder path. The actual substitution
-    # happens in `Cosmos25VideoBackbone.preprocess_input`; we validate the
+    # happens in `CosmosPredict25VideoBackbone.preprocess_input`; we validate the
     # range + flag dead-config combinations here so a user misconfiguration
     # fails before any 5 GB DiT load. The cache path uses the separate
     # `dataloader.text_embedding_dropout` knob — these are intentionally
@@ -397,7 +397,7 @@ def build_cosmos25_pipeline(
             "video_backbone.text_encoder_dropout > 0 requires "
             "text_encoder=reason1_live (dead config otherwise). For the "
             "offline-cache path use `dataloader.text_embedding_dropout` "
-            "instead (see docs/cosmos25_backbone.md §10 / §14.7)."
+            "instead (see docs/cosmos_predict25_backbone.md §10 / §14.7)."
         )
     text_dropout_seed = _cfg_get(vb_cfg, "text_encoder_dropout_seed", None)
     if text_dropout_seed is not None:
@@ -408,12 +408,12 @@ def build_cosmos25_pipeline(
                 f"video_backbone.text_encoder_dropout_seed={text_dropout_seed!r} must be an integer or null."
             ) from exc
     vae_path_override = _cfg_get(vb_cfg, "vae_path", None)
-    name = str(_cfg_get(vb_cfg, "name", "cosmos25_predict_2b"))
+    name = str(_cfg_get(vb_cfg, "name", "cosmos_predict25_2b"))
 
     import torch
 
     import_cosmos_predict2()
-    # Late imports keep CPU CI green without the [cosmos25] extra.
+    # Late imports keep CPU CI green without the [cosmos_predict25] extra.
     import types
 
     from cosmos_predict2._src.predict2.networks.minimal_v1_lvg_dit import (  # type: ignore[import-not-found]
@@ -424,9 +424,9 @@ def build_cosmos25_pipeline(
         SACConfig,
     )
 
-    if name not in ("cosmos25_predict_2b",):
+    if name not in ("cosmos_predict25_2b",):
         raise NotImplementedError(
-            f"build_cosmos25_pipeline only handles `cosmos25_predict_2b` today; "
+            f"build_cosmos_predict25_pipeline only handles `cosmos_predict25_2b` today; "
             f"got name={name!r}. The 14B config is registered but not wired up yet."
         )
 
@@ -442,7 +442,7 @@ def build_cosmos25_pipeline(
         **_COSMOS25_2B_NET_KWARGS,
     )
     # Deploy path (`ckpt_dir` non-None): the DiT params live inside the saved
-    # safetensors (`Cosmos25VideoBackbone.net` is a registered nn.Module
+    # safetensors (`CosmosPredict25VideoBackbone.net` is a registered nn.Module
     # child of the wrapper, so its state goes through OpenWAM's unified
     # save/load like any other dual_system / shared_backbone weight). We
     # therefore skip the eager `*_ema_bf16.pt` load and let
@@ -467,7 +467,7 @@ def build_cosmos25_pipeline(
         # Lazy import — `text_encoder.py` pulls in `transformers` only when
         # this branch fires, so the `text_encoder: none` path stays
         # importable even without the Qwen-VL classes installed.
-        from openwam.model.video_backbone.cosmos25.text_encoder import Reason1LiveTextEncoder
+        from openwam.model.video_backbone.cosmos_predict25.text_encoder import Reason1LiveTextEncoder
 
         # Deploy path (``ckpt_dir`` non-None and no explicit path override):
         # build a meta-device shell — the inner Qwen module is registered as
@@ -507,11 +507,11 @@ def build_cosmos25_pipeline(
         # training-bootstrap path).
         if ckpt_dir is not None and vae_path_override is None:
             logger.info("Cosmos VAE: building empty shell (deploy path; weights from unified safetensors)")
-            vae_obj = _build_cosmos25_vae(None, device=device, dtype=torch.bfloat16)
+            vae_obj = _build_cosmos_predict25_vae(None, device=device, dtype=torch.bfloat16)
         else:
             vae_pth = _resolve_vae_path(model_path, vae_path_override)
             logger.info("Cosmos VAE: loading %s from %s", vae_choice, vae_pth)
-            vae_obj = _build_cosmos25_vae(vae_pth, device=device, dtype=torch.bfloat16)
+            vae_obj = _build_cosmos_predict25_vae(vae_pth, device=device, dtype=torch.bfloat16)
 
     # Deploy path: ``reason1`` (and the empty VAE shell) live on the
     # ``meta`` device until ``arch.load_checkpoint`` materialises them. A
@@ -522,18 +522,18 @@ def build_cosmos25_pipeline(
     if device is not None and ckpt_dir is None:
         net = net.to(device)
 
-    # Lightweight holder (no nn.Module wrapper). ``Cosmos25VideoBackbone.from_pretrained``
+    # Lightweight holder (no nn.Module wrapper). ``CosmosPredict25VideoBackbone.from_pretrained``
     # drains it into flat children (Wan holder-drain parity). Carries the five
     # geometry fields ``_probe_pipeline_geometry`` reads.
     return types.SimpleNamespace(
         net=net,
         vae=vae_obj,
         text_encoder=text_encoder_obj,
-        flow_shift=flow_shift,
+        shift_video=shift_video,
         text_dropout_p=text_dropout_p,
         text_dropout_seed=text_dropout_seed,
         **_COSMOS25_2B_GEOMETRY,
     )
 
 
-__all__ = ["build_cosmos25_pipeline", "import_cosmos_predict2"]
+__all__ = ["build_cosmos_predict25_pipeline", "import_cosmos_predict2"]
