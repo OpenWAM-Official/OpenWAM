@@ -135,19 +135,22 @@ def robotwin_endpose_to_eef20d(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BEHAVIOR-1K / R1Pro (unified 80-D ↔ OmniGibson controllers)
+# BEHAVIOR-1K / R1Pro (RAW-27 ↔ OmniGibson controllers)
 #
-# The OpenWAM policy server serves the unified 80-D action when the BEHAVIOR
-# checkpoint is trained with ``action_mode=unified`` (== robocoin.yaml layout).
-# The server returns it already DENORMALIZED to physical units. The OmniGibson
-# R1Pro robot consumes a flat per-controller action vector concatenated in the
-# robot's ``_raw_controller_order``::
+# The OpenWAM policy server serves a BEHAVIOR checkpoint trained with
+# ``action_mode=unified`` (== robocoin.yaml layout). The model emits the unified
+# 80-D action, but the deploy server's ``_UnifyAwareNormalizer`` (PR #17) gathers
+# it back to the reader's RAW-27 layout and unnormalizes there — so the server
+# RETURNS and EXPECTS the RAW-27 vector (physical units)::
 #
-#     [base, trunk, arm_left, gripper_left, arm_right, gripper_right]
+#     [ L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4 ]
 #
-# With the submission controller config (``benchmarks/behavior/configs/r1pro.yaml``)
-# the arms are ``InverseKinematicsController, mode=absolute_pose`` (6-D each:
-# base-frame xyz + absolute axis-angle), so the executed vector is 21-D::
+# The OmniGibson R1Pro robot consumes a flat per-controller action vector in the
+# robot's ``_raw_controller_order`` = [base, trunk, arm_left, gripper_left,
+# arm_right, gripper_right]. With the submission controller config
+# (``benchmarks/behavior/configs/r1pro.yaml``) the arms are
+# ``InverseKinematicsController, mode=absolute_pose`` (6-D each: base-frame xyz +
+# absolute axis-angle), so the executed vector is 21-D::
 #
 #     [ base(3), trunk(4), armL_pos3+aa3 (6), gripL(1), armR_pos3+aa3 (6), gripR(1) ]
 #
@@ -157,16 +160,17 @@ def robotwin_endpose_to_eef20d(
 # clipped to the [-1, 1] normalized input range as a guard.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Unified 80-D slot layout (mirrors configs/dataloader/behavior.yaml).
-_U_L_POS = slice(0, 3)
-_U_L_ROT6D = slice(3, 9)
-_U_L_GRIP = 9
-_U_R_POS = slice(34, 37)
-_U_R_ROT6D = slice(37, 43)
-_U_R_GRIP = 43
-_U_BASE = slice(68, 71)  # [vx, vy, vyaw] base-frame velocity
-_U_TRUNK = slice(71, 75)  # 4 absolute torso joint commands
-UNIFIED_ACTION_DIM = 80
+# RAW-27 layout (the reader's pre-scatter vector == what the deploy server
+# returns/expects after the _UnifyAwareNormalizer gather).
+_R_L_POS = slice(0, 3)
+_R_L_ROT6D = slice(3, 9)
+_R_L_GRIP = 9
+_R_R_POS = slice(10, 13)
+_R_R_ROT6D = slice(13, 19)
+_R_R_GRIP = 19
+_R_BASE = slice(20, 23)  # [vx, vy, vyaw] base-frame velocity
+_R_TRUNK = slice(23, 27)  # 4 absolute torso joint commands
+R1PRO_RAW_DIM = 27
 # Executed R1Pro vector width with IK absolute_pose arms.
 R1PRO_IK_ACTION_DIM = 21
 
@@ -207,10 +211,13 @@ def rot6d_to_axis_angle(r6d: np.ndarray) -> np.ndarray:
     return quat_xyzw_to_axis_angle(rot6d_to_quat_xyzw(np.asarray(r6d, dtype=np.float64).reshape(-1)))
 
 
-def unified80d_to_r1pro_action(action: np.ndarray, *, clip_passthrough: bool = True) -> np.ndarray:
-    """Convert a denormalized unified 80-D action → the 21-D R1Pro IK vector.
+def raw27_to_r1pro_action(action: np.ndarray, *, clip_passthrough: bool = True) -> np.ndarray:
+    """Convert a denormalized RAW-27 action → the 21-D R1Pro IK vector.
 
-    Layout out (== ``_raw_controller_order`` with IK absolute_pose arms)::
+    Input is the reader's raw layout (== what the deploy server returns after the
+    _UnifyAwareNormalizer gather): ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6,
+    R_grip1, base3, trunk4]``. Output (== ``_raw_controller_order`` with IK
+    absolute_pose arms)::
 
         [ base(3), trunk(4), armL_xyz(3)+aa(3), gripL(1), armR_xyz(3)+aa(3), gripR(1) ]
 
@@ -221,16 +228,16 @@ def unified80d_to_r1pro_action(action: np.ndarray, *, clip_passthrough: bool = T
     i.e. raw metric pose + axis-angle).
     """
     a = np.asarray(action, dtype=np.float32).reshape(-1)
-    if a.shape[0] != UNIFIED_ACTION_DIM:
-        raise ValueError(f"expected unified action of width {UNIFIED_ACTION_DIM}, got {a.shape[0]}")
+    if a.shape[0] != R1PRO_RAW_DIM:
+        raise ValueError(f"expected raw action of width {R1PRO_RAW_DIM}, got {a.shape[0]}")
 
-    arm_left = np.concatenate([a[_U_L_POS], rot6d_to_axis_angle(a[_U_L_ROT6D])]).astype(np.float32)
-    arm_right = np.concatenate([a[_U_R_POS], rot6d_to_axis_angle(a[_U_R_ROT6D])]).astype(np.float32)
+    arm_left = np.concatenate([a[_R_L_POS], rot6d_to_axis_angle(a[_R_L_ROT6D])]).astype(np.float32)
+    arm_right = np.concatenate([a[_R_R_POS], rot6d_to_axis_angle(a[_R_R_ROT6D])]).astype(np.float32)
 
-    base = a[_U_BASE]
-    trunk = a[_U_TRUNK]
-    grip_l = a[_U_L_GRIP : _U_L_GRIP + 1]
-    grip_r = a[_U_R_GRIP : _U_R_GRIP + 1]
+    base = a[_R_BASE]
+    trunk = a[_R_TRUNK]
+    grip_l = a[_R_L_GRIP : _R_L_GRIP + 1]
+    grip_r = a[_R_R_GRIP : _R_R_GRIP + 1]
     if clip_passthrough:
         base = np.clip(base, -1.0, 1.0)
         trunk = np.clip(trunk, -1.0, 1.0)
@@ -246,7 +253,7 @@ def unified80d_to_r1pro_action(action: np.ndarray, *, clip_passthrough: bool = T
 # validated offsets (openwam/dataloader/behavior.py) — VERIFIED on real data.
 # base_vel / trunk / gripper are sourced from the ACTION command at train time
 # (not the state), so their state-side offsets must be CONFIRMED on a sim box;
-# ``None`` → that unified block is zero-filled (the model leans on EEF + vision).
+# ``None`` → that raw block is zero-filled (the model leans on EEF + vision).
 R1PRO_PROPRIO_OFFSETS = {
     "l_pos": slice(186, 189),  # verified
     "l_quat": slice(189, 193),  # verified (xyzw, unit-norm checked by the reader)
@@ -259,15 +266,16 @@ R1PRO_PROPRIO_OFFSETS = {
 }
 
 
-def r1pro_proprio_to_unified80d(proprio: np.ndarray, offsets: dict | None = None) -> np.ndarray:
-    """Assemble the unified 80-D proprio (physical units) from R1Pro 256-D proprio.
+def r1pro_proprio_to_raw27(proprio: np.ndarray, offsets: dict | None = None) -> np.ndarray:
+    """Assemble the RAW-27 proprio (physical units) from R1Pro 256-D proprio.
 
-    Scatters the EEF pose (xyz + rot6d from the state quaternion) and the
-    base/trunk/gripper proprio into the same unified slots the dataloader uses,
-    so the OpenWAM server's deploy normalizer (built over the unified 80-D stats)
-    consumes it unchanged. Blocks whose ``offsets`` entry is ``None`` stay zero.
+    Builds the reader's raw layout ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6,
+    R_grip1, base3, trunk4]`` (EEF pose = xyz + rot6d from the state quaternion).
+    The OpenWAM server's _UnifyAwareNormalizer normalizes this raw proprio and
+    scatters it into the unified space the model wants — so the bridge sends RAW,
+    NOT unified. Blocks whose ``offsets`` entry is ``None`` stay zero.
 
-    Returns an un-normalized ``(80,)`` float32 vector (the server normalizes it).
+    Returns an un-normalized ``(27,)`` float32 vector (the server normalizes it).
     """
     p = np.asarray(proprio, dtype=np.float32).reshape(-1)
     off = dict(R1PRO_PROPRIO_OFFSETS if offsets is None else offsets)
@@ -281,13 +289,15 @@ def r1pro_proprio_to_unified80d(proprio: np.ndarray, offsets: dict | None = None
             raise ValueError(f"proprio offset {name!r}={sl} yielded width {v.shape[0]}, expected {width}")
         return v
 
-    out = np.zeros(UNIFIED_ACTION_DIM, dtype=np.float32)
-    out[_U_L_POS] = _blk("l_pos", 3)
-    out[_U_L_ROT6D] = quat_xyzw_to_rot6d(_blk("l_quat", 4))
-    out[_U_R_POS] = _blk("r_pos", 3)
-    out[_U_R_ROT6D] = quat_xyzw_to_rot6d(_blk("r_quat", 4))
-    out[_U_BASE] = _blk("base_vel", 3)
-    out[_U_TRUNK] = _blk("trunk", 4)
-    out[_U_L_GRIP] = _blk("l_grip", 1)[0]
-    out[_U_R_GRIP] = _blk("r_grip", 1)[0]
-    return out
+    return np.concatenate(
+        [
+            _blk("l_pos", 3),
+            quat_xyzw_to_rot6d(_blk("l_quat", 4)),
+            _blk("l_grip", 1),
+            _blk("r_pos", 3),
+            quat_xyzw_to_rot6d(_blk("r_quat", 4)),
+            _blk("r_grip", 1),
+            _blk("base_vel", 3),
+            _blk("trunk", 4),
+        ]
+    ).astype(np.float32)

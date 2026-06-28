@@ -4,7 +4,7 @@
 # The bridge is the north-facing openpi-protocol WebSocket server that
 # OmniGibson's `eval.py policy=websocket` connects to; it forwards to an
 # already-running OpenWAM policy server (south, default 8848) and converts the
-# unified 80-D action into the R1Pro 21-D IK controller vector.
+# server's RAW-27 action into the R1Pro 21-D IK controller vector.
 #
 # Usage:
 #   bash run_bridge.sh [--port 8000] [--south-host 127.0.0.1] [--south-port 8848] \

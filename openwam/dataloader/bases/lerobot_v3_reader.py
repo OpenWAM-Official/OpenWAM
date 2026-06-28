@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
@@ -121,6 +122,15 @@ class LeRobotV3Reader(BaseDataset):
     STATS_FILENAME: ClassVar[Optional[str]] = None
     STATS_DIM: ClassVar[int] = EEF_DIM
     STATS_STRICT_MINMAX: ClassVar[bool] = False
+    # Deploy denormalizer artifact (meta/normalization_stats.npy). A reader that
+    # serves a unified action and wants a deployable checkpoint sets this to the
+    # action_mode key its RAW stats are stored under, and calls
+    # ``_write_deploy_normalizer_stats(combined, keys)`` from its ``_load_stats``.
+    # At deploy the policy server's ``_UnifyAwareNormalizer`` gathers the model's
+    # unified output back to raw dims, THEN unnormalizes with these RAW stats —
+    # so the artifact is authored in RAW space (NOT scattered). None → no deploy
+    # stats written (default).
+    DEPLOY_ACTION_MODE: ClassVar[Optional[str]] = None
     # Default normalize_mode when the caller doesn't pass one. OXE readers
     # override to "quantile" (their historical default); RoboCOIN/EgoDex keep
     # None (no in-reader normalization unless a config opts in).
@@ -229,6 +239,10 @@ class LeRobotV3Reader(BaseDataset):
             # Instance attr shadows the class ACTION_DIM so finalized payloads,
             # the action_dim property, and the model action head are all unify_dim.
             self.ACTION_DIM = self._unify_dim
+
+        # Deploy denormalizer artifact path (set by _write_deploy_normalizer_stats
+        # when a reader emits meta/normalization_stats.npy; None otherwise).
+        self.normalization_stats_path: Optional[str] = None
 
         # Rate-limited failure counters for _safe_get / wrist decode.
         self._fail_count = 0
@@ -460,6 +474,38 @@ class LeRobotV3Reader(BaseDataset):
             strict_minmax=self.STATS_STRICT_MINMAX,
             source_hint=str(stats_path),
         )
+
+    def _write_deploy_normalizer_stats(self, combined: dict, keys) -> None:
+        """Write ``meta/normalization_stats.npy`` — the deploy denormalizer artifact.
+
+        ``combined`` is this reader's RAW-space per-mode stats (the values the
+        reader normalizes against, BEFORE the unify scatter). The model emits the
+        unified action; at deploy the policy server's ``_UnifyAwareNormalizer``
+        gathers that unified output back to raw dims, THEN unnormalizes with these
+        RAW stats — so the artifact is authored in RAW space (NOT scattered to the
+        unified width). Schema is the nested ``{DEPLOY_ACTION_MODE: {mean, std, min,
+        max, q01, q99}}`` that ``load_mode_stats`` / ``_build_normalizer`` consume
+        unchanged. Shared by every reader that serves the unified action: set
+        ``DEPLOY_ACTION_MODE`` and call this from ``_load_stats``.
+        """
+        if self.DEPLOY_ACTION_MODE is None:
+            raise ValueError(
+                f"{self.DATASET_NAME}: _write_deploy_normalizer_stats called but DEPLOY_ACTION_MODE is None; "
+                "set it on the reader class to the action_mode key the deploy stats are stored under."
+            )
+        payload = {self.DEPLOY_ACTION_MODE: {k: np.asarray(combined[k], dtype=np.float32) for k in keys}}
+        out = self._dataset_dir / "meta" / "normalization_stats.npy"
+        # Atomic write (unique temp + replace) so concurrent per-rank constructors
+        # never observe a half-written file. The temp name ends in '.npy' so
+        # np.save does not append a second '.npy' suffix.
+        tmp = out.with_name(f".{out.stem}.{os.getpid()}.npy")
+        try:
+            np.save(tmp, payload, allow_pickle=True)
+            tmp.replace(out)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+        self.normalization_stats_path = str(out)
 
     def _action_20d(self, win: pd.DataFrame) -> Optional[np.ndarray]:
         """Return normalized ``(actual_raw_len, ACTION_DIM)`` action, or None (disabled)."""

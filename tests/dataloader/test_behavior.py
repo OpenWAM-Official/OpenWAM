@@ -386,8 +386,10 @@ class TestNormalize:
 
 
 class TestDeployNormalizer:
-    """The reader emits meta/normalization_stats.npy (unified 80-D) so a trained
-    checkpoint can un-normalize actions back to physical units at deploy time."""
+    """The reader emits meta/normalization_stats.npy in RAW-27 action space. At
+    deploy the policy server wraps the RAW Normalizer in _UnifyAwareNormalizer
+    (PR #17): it gathers the model's 80-D unified output back to the 27 raw dims,
+    THEN unnormalizes — so the artifact is authored in RAW space, not scattered."""
 
     def test_quantile_registered_in_deploy_mode_map(self):
         # Deploy must recognize the reader-family default 'quantile' (→ q99), else
@@ -406,38 +408,42 @@ class TestDeployNormalizer:
         raw = np.load(ds.normalization_stats_path, allow_pickle=True).item()
         assert set(raw) == {"unified"}  # action_mode key from behavior.yaml
         stats = raw["unified"]
+        # RAW-27 stats (eef20 + base3 + trunk4); the deploy _UnifyAwareNormalizer
+        # gathers the model's 80-D output back to these 27 raw dims first.
         for k in ("mean", "std", "min", "max", "q01", "q99"):
-            assert stats[k].shape == (UNIFY_DIM,)  # 80-D, the served action width
-        # Unmapped slots (dex hands, reserved tail) are identity fills → deploy
-        # normalizer is a pure pass-through there.
-        unmapped = [i for i in range(UNIFY_DIM) if i not in EXPECTED_VALID]
-        assert (stats["q01"][unmapped] == -1.0).all()
-        assert (stats["q99"][unmapped] == 1.0).all()
-        assert (stats["mean"][unmapped] == 0.0).all()
-        assert (stats["std"][unmapped] == 1.0).all()
+            assert stats[k].shape == (27,)
+        # rot6d raw dims (3:9 / 13:19) pinned to identity in the stats file.
+        for i in (3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 18):
+            assert stats["q01"][i] == -1.0 and stats["q99"][i] == 1.0
+            assert stats["mean"][i] == 0.0 and stats["std"][i] == 1.0
 
-    def test_deploy_normalize_matches_reader(self, tmp_path):
-        # The deploy Normalizer built from the .npy reproduces the reader's own
-        # normalization EXACTLY (train ↔ deploy consistency), so its inverse is the
-        # correct un-normalization of the model's actions.
+    def test_deploy_unify_normalizer_matches_reader(self, tmp_path):
+        # The deploy _UnifyAwareNormalizer built from the RAW .npy + the unify map
+        # reproduces the reader's own normalization (train ↔ deploy consistency):
+        #   proprio IN : normalize raw → scatter raw→80 == the reader's normalized 80-D
+        #   action OUT : gather 80→raw → unnormalize == the reader's raw physical action
         from openwam.dataloader.transforms.normalize import Normalizer, load_mode_stats
+        from openwam.dataloader.utils.unify_action import parse_unify_spec, unmap_from_unify
+        from openwam.deploy.model_loader import _UnifyAwareNormalizer
 
         b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
         with _mock_video_decoder():
-            raw80 = _make_ds(b, normalize_mode=None)[0]["action"].numpy()  # un-normalized
+            raw80 = _make_ds(b, normalize_mode=None)[0]["action"].numpy()  # un-normalized 80-D
             ds = _make_ds(b, normalize_mode="quantile")
-            norm80 = ds[0]["action"].numpy()  # reader-normalized
-        mode_stats = load_mode_stats(ds.normalization_stats_path, "unified")
-        normalizer = Normalizer(mode="q99", stats=mode_stats)
-        # deploy-normalize(raw) == reader's normalized action, on every dim
-        np.testing.assert_allclose(normalizer.normalize(raw80), norm80, atol=1e-5)
-        # and unnormalize inverts it on the mapped (non-clipped) dims
-        recovered = normalizer.unnormalize(norm80)
-        inside = np.abs(norm80) < 1.0 - 1e-3  # exclude quantile-clipped entries
-        m = np.zeros_like(norm80, dtype=bool)
-        m[:, EXPECTED_VALID] = True
-        m &= inside
-        np.testing.assert_allclose(recovered[m], raw80[m], atol=1e-4)
+            norm80 = ds[0]["action"].numpy()  # reader-normalized 80-D
+        mode_stats = load_mode_stats(ds.normalization_stats_path, "unified")  # RAW-27
+        assert mode_stats["mean"].shape == (27,)
+        dst_index = parse_unify_spec(UNIFY_MAP, UNIFY_DIM)
+        uan = _UnifyAwareNormalizer(Normalizer(mode="q99", stats=mode_stats), dst_index, UNIFY_DIM)
+
+        raw27 = unmap_from_unify(raw80, dst_index)  # (T, 27) un-normalized raw
+        # proprio IN: scatter-normalize(raw27) reproduces the reader's normalized 80-D action.
+        np.testing.assert_allclose(uan.normalize(raw27), norm80, atol=1e-5)
+        # action OUT: gather-unnormalize(norm80) inverts back to raw on non-clipped dims.
+        recovered27 = uan.unnormalize(norm80)
+        norm27 = unmap_from_unify(norm80, dst_index)
+        inside = np.abs(norm27) < 1.0 - 1e-3  # exclude quantile-clipped entries
+        np.testing.assert_allclose(recovered27[inside], raw27[inside], atol=1e-4)
 
 
 # ── color jitter (train-split video augmentation) -----------------------------

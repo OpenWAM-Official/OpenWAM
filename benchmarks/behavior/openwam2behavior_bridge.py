@@ -3,8 +3,10 @@
 OmniGibson's challenge eval driver (``omnigibson/learning/eval.py policy=websocket``)
 drives an **openpi** ``WebsocketClientPolicy`` (msgpack-numpy over WebSocket). The
 OpenWAM policy server, by contrast, speaks a JSON-over-WebSocket protocol (port
-8848) and serves the unified 80-D action. This module is the **bridge** between
-the two:
+8848). The model trains in the unified 80-D space, but the server's
+``_UnifyAwareNormalizer`` (PR #17) gathers the 80-D output back to the reader's
+RAW-27 layout and unnormalizes there — so it RETURNS and EXPECTS RAW-27. This
+module is the **bridge** between the two:
 
     OmniGibson ──(openpi msgpack-numpy)──▶  THIS bridge  ──(OpenWAM JSON-WS)──▶  OpenWAM 8848 server
        eval.py                              (north server)     WSPolicyClient        (model, unchanged)
@@ -12,11 +14,10 @@ the two:
 Per step the bridge:
 
   1. receives the openpi obs (R1Pro camera RGBs + 256-D proprio + ``task_id``),
-  2. forwards cameras + a synthesized prompt + the unified 80-D proprio to the
-     OpenWAM server (reusing ``benchmarks.utils`` exactly like the RoboTwin
-     adapter does),
-  3. converts the server's denormalized unified 80-D action into the R1Pro
-     21-D controller vector (IK ``absolute_pose`` arms), and
+  2. forwards cameras + a synthesized prompt + the RAW-27 proprio to the OpenWAM
+     server (reusing ``benchmarks.utils`` exactly like the RoboTwin adapter does),
+  3. converts the server's denormalized RAW-27 action into the R1Pro 21-D
+     controller vector (IK ``absolute_pose`` arms), and
   4. returns ``{"action": (21,)}`` — the single ready-to-execute native action.
 
 Wire contract with the OmniGibson client (verified against the challenge
@@ -61,9 +62,9 @@ from benchmarks.utils import (  # noqa: E402
     WSPolicyClient,
     build_payload,
     encode_numpy_b64,
-    r1pro_proprio_to_unified80d,
+    r1pro_proprio_to_raw27,
+    raw27_to_r1pro_action,
     transport,  # noqa: E402
-    unified80d_to_r1pro_action,
 )
 
 logger = logging.getLogger("behavior_bridge")
@@ -178,10 +179,12 @@ class BehaviorBridge:
         if proprio is None:
             raise KeyError(
                 f"send_state=True but obs has no {PROPRIO_KEY!r}. The BEHAVIOR checkpoint is "
-                "proprio-conditioned (state_dim=80); pass --no-send-state only for a non-proprio checkpoint."
+                "proprio-conditioned; pass --no-send-state only for a non-proprio checkpoint."
             )
-        unified = r1pro_proprio_to_unified80d(np.asarray(proprio, dtype=np.float32))
-        return [float(v) for v in unified]
+        # Send RAW-27 proprio; the server's _UnifyAwareNormalizer normalizes it and
+        # scatters it into the unified space the model wants (PR #17).
+        raw = r1pro_proprio_to_raw27(np.asarray(proprio, dtype=np.float32))
+        return [float(v) for v in raw]
 
     # ----- per-step inference ----------------------------------------------
 
@@ -201,8 +204,10 @@ class BehaviorBridge:
             state=state,
         )
         response = self._south.predict(payload)
-        action80 = np.asarray(response["action"], dtype=np.float32)
-        action21 = unified80d_to_r1pro_action(action80)
+        # Server returns the RAW-27 physical action (the _UnifyAwareNormalizer
+        # gathered the model's 80-D output back to raw before unnormalizing).
+        action_raw = np.asarray(response["action"], dtype=np.float32)
+        action21 = raw27_to_r1pro_action(action_raw)
         self._step += 1
         return {"action": action21}
 

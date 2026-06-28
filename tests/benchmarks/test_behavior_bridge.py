@@ -7,7 +7,7 @@ before a sim-capable box can validate the closed loop:
   1. the unified-80D ↔ R1Pro action / proprio conversions (pure numpy),
   2. the openpi-byte-compatible msgpack-numpy codec round-trip,
   3. the bridge dispatch contract (metadata-first, act→one reply, reset→no reply,
-     prompt resolution, 80-D state assembly, 21-D action out).
+     prompt resolution, RAW-27 state assembly, 21-D action out).
 """
 
 from __future__ import annotations
@@ -28,13 +28,13 @@ from benchmarks.behavior.openwam2behavior_bridge import (
 from benchmarks.utils import transport
 from benchmarks.utils.action_conversion import (
     R1PRO_IK_ACTION_DIM,
-    UNIFIED_ACTION_DIM,
+    R1PRO_RAW_DIM,
     quat_xyzw_to_axis_angle,
     quat_xyzw_to_rot6d,
-    r1pro_proprio_to_unified80d,
+    r1pro_proprio_to_raw27,
+    raw27_to_r1pro_action,
     rot6d_to_axis_angle,
     rot6d_to_quat_xyzw,
-    unified80d_to_r1pro_action,
 )
 
 
@@ -84,64 +84,64 @@ class TestAxisAngle:
             assert _same_rotation(rot6d_to_quat_xyzw(r6d), _axisangle_to_quat(aa))
 
 
-# ── conversions: unified 80-D → R1Pro 21-D action ────────────────────────────
+# ── conversions: RAW-27 → R1Pro 21-D action ──────────────────────────────────
 
 
-class TestUnifiedToR1Pro:
+class TestRaw27ToR1Pro:
     def _make_action(self, rng):
-        a = np.zeros(UNIFIED_ACTION_DIM, dtype=np.float32)
+        a = np.zeros(R1PRO_RAW_DIM, dtype=np.float32)
         a[0:3] = [0.4, -0.2, 0.3]  # L pos (metric, can exceed 1)
         a[3:9] = quat_xyzw_to_rot6d(_unit_quat(rng))  # L rot6d
         a[9] = 0.7  # L grip
-        a[34:37] = [0.5, 0.25, 0.31]  # R pos
-        a[37:43] = quat_xyzw_to_rot6d(_unit_quat(rng))  # R rot6d
-        a[43] = -0.9  # R grip
-        a[68:71] = [0.6, -0.4, 0.2]  # base vel
-        a[71:75] = [0.1, -0.3, 0.25, -0.15]  # trunk
+        a[10:13] = [0.5, 0.25, 0.31]  # R pos
+        a[13:19] = quat_xyzw_to_rot6d(_unit_quat(rng))  # R rot6d
+        a[19] = -0.9  # R grip
+        a[20:23] = [0.6, -0.4, 0.2]  # base vel
+        a[23:27] = [0.1, -0.3, 0.25, -0.15]  # trunk
         return a
 
     def test_shape_and_layout(self):
         rng = np.random.RandomState(2)
         a = self._make_action(rng)
-        out = unified80d_to_r1pro_action(a)
+        out = raw27_to_r1pro_action(a)
         assert out.shape == (R1PRO_IK_ACTION_DIM,) == (21,)
         # controller order [base3, trunk4, armL(pos3+aa3), gripL1, armR(pos3+aa3), gripR1]
-        np.testing.assert_allclose(out[0:3], a[68:71], atol=1e-6)  # base
-        np.testing.assert_allclose(out[3:7], a[71:75], atol=1e-6)  # trunk
+        np.testing.assert_allclose(out[0:3], a[20:23], atol=1e-6)  # base
+        np.testing.assert_allclose(out[3:7], a[23:27], atol=1e-6)  # trunk
         np.testing.assert_allclose(out[7:10], a[0:3], atol=1e-6)  # L arm pos (metric, unclipped)
         np.testing.assert_allclose(out[10:13], rot6d_to_axis_angle(a[3:9]), atol=1e-6)  # L arm aa
         assert out[13] == pytest.approx(0.7)  # L grip
-        np.testing.assert_allclose(out[14:17], a[34:37], atol=1e-6)  # R arm pos
-        np.testing.assert_allclose(out[17:20], rot6d_to_axis_angle(a[37:43]), atol=1e-6)  # R arm aa
+        np.testing.assert_allclose(out[14:17], a[10:13], atol=1e-6)  # R arm pos
+        np.testing.assert_allclose(out[17:20], rot6d_to_axis_angle(a[13:19]), atol=1e-6)  # R arm aa
         assert out[20] == pytest.approx(-0.9)  # R grip
 
     def test_passthrough_clipped_arms_not(self):
-        a = np.zeros(UNIFIED_ACTION_DIM, dtype=np.float32)
-        a[68:71] = [3.0, -2.0, 1.5]  # base out of range → clipped to [-1, 1]
-        a[71:75] = [5.0, -5.0, 0.2, -9.0]  # trunk → clipped
-        a[9], a[43] = 4.0, -4.0  # grippers → clipped
+        a = np.zeros(R1PRO_RAW_DIM, dtype=np.float32)
+        a[20:23] = [3.0, -2.0, 1.5]  # base out of range → clipped to [-1, 1]
+        a[23:27] = [5.0, -5.0, 0.2, -9.0]  # trunk → clipped
+        a[9], a[19] = 4.0, -4.0  # grippers → clipped
         a[0:3] = [2.5, -3.1, 4.2]  # L arm pos → NOT clipped (raw metric)
-        out = unified80d_to_r1pro_action(a)
+        out = raw27_to_r1pro_action(a)
         np.testing.assert_allclose(out[0:3], [1.0, -1.0, 1.0])  # base clipped
         np.testing.assert_allclose(out[3:7], [1.0, -1.0, 0.2, -1.0])  # trunk clipped
         assert out[13] == 1.0 and out[20] == -1.0  # grippers clipped
         np.testing.assert_allclose(out[7:10], [2.5, -3.1, 4.2], atol=1e-6)  # arm pos unclipped
 
     def test_no_clip_option(self):
-        a = np.zeros(UNIFIED_ACTION_DIM, dtype=np.float32)
-        a[68:71] = [3.0, -2.0, 1.5]
-        out = unified80d_to_r1pro_action(a, clip_passthrough=False)
+        a = np.zeros(R1PRO_RAW_DIM, dtype=np.float32)
+        a[20:23] = [3.0, -2.0, 1.5]
+        out = raw27_to_r1pro_action(a, clip_passthrough=False)
         np.testing.assert_allclose(out[0:3], [3.0, -2.0, 1.5], atol=1e-6)
 
     def test_wrong_width_raises(self):
-        with pytest.raises(ValueError, match="width 80"):
-            unified80d_to_r1pro_action(np.zeros(23, dtype=np.float32))
+        with pytest.raises(ValueError, match="width 27"):
+            raw27_to_r1pro_action(np.zeros(80, dtype=np.float32))
 
 
-# ── conversions: R1Pro 256-D proprio → unified 80-D ──────────────────────────
+# ── conversions: R1Pro 256-D proprio → RAW-27 ────────────────────────────────
 
 
-class TestProprioToUnified:
+class TestProprioToRaw27:
     def _make_proprio(self, rng):
         p = rng.uniform(-1, 1, size=256).astype(np.float32)
         p[186:189] = [0.41, -0.22, 0.33]  # L pos
@@ -154,22 +154,20 @@ class TestProprioToUnified:
     def test_shape_and_eef_placement(self):
         rng = np.random.RandomState(3)
         p = self._make_proprio(rng)
-        out = r1pro_proprio_to_unified80d(p)
-        assert out.shape == (UNIFIED_ACTION_DIM,)
+        out = r1pro_proprio_to_raw27(p)
+        assert out.shape == (R1PRO_RAW_DIM,)
         np.testing.assert_allclose(out[0:3], p[186:189], atol=1e-6)  # L pos
         np.testing.assert_allclose(out[3:9], quat_xyzw_to_rot6d(p[189:193]), atol=1e-5)  # L rot6d
-        np.testing.assert_allclose(out[34:37], p[225:228], atol=1e-6)  # R pos
-        np.testing.assert_allclose(out[37:43], quat_xyzw_to_rot6d(p[228:232]), atol=1e-5)  # R rot6d
-        np.testing.assert_allclose(out[71:75], p[236:240], atol=1e-6)  # trunk
+        np.testing.assert_allclose(out[10:13], p[225:228], atol=1e-6)  # R pos
+        np.testing.assert_allclose(out[13:19], quat_xyzw_to_rot6d(p[228:232]), atol=1e-5)  # R rot6d
+        np.testing.assert_allclose(out[23:27], p[236:240], atol=1e-6)  # trunk
 
     def test_unset_offsets_zero_filled(self):
-        # base_vel / grippers default to None offsets → those unified slots stay 0.
+        # base_vel / grippers default to None offsets → those raw slots stay 0.
         rng = np.random.RandomState(4)
-        out = r1pro_proprio_to_unified80d(self._make_proprio(rng))
-        assert (out[68:71] == 0).all()  # base vel (None offset)
-        assert out[9] == 0.0 and out[43] == 0.0  # grippers (None offset)
-        # dex + reserved-tail slots are always zero (never populated)
-        assert (out[10:34] == 0).all() and (out[44:68] == 0).all() and (out[75:80] == 0).all()
+        out = r1pro_proprio_to_raw27(self._make_proprio(rng))
+        assert (out[20:23] == 0).all()  # base vel (None offset)
+        assert out[9] == 0.0 and out[19] == 0.0  # grippers (None offset)
 
     def test_offset_override(self):
         rng = np.random.RandomState(5)
@@ -179,8 +177,8 @@ class TestProprioToUnified:
             l_pos=slice(186, 189), l_quat=slice(189, 193), r_pos=slice(225, 228), r_quat=slice(228, 232),
             trunk=slice(236, 240), base_vel=slice(250, 253), l_grip=None, r_grip=None,
         )
-        out = r1pro_proprio_to_unified80d(p, offsets=offs)
-        np.testing.assert_allclose(out[68:71], [0.1, 0.2, 0.3], atol=1e-6)
+        out = r1pro_proprio_to_raw27(p, offsets=offs)
+        np.testing.assert_allclose(out[20:23], [0.1, 0.2, 0.3], atol=1e-6)
 
 
 # ── msgpack-numpy codec (openpi byte layout) ─────────────────────────────────
@@ -219,22 +217,22 @@ class TestMsgpackCodec:
 
 
 class _FakeSouth:
-    """Stand-in for WSPolicyClient: records payloads, returns a canned 80-D action."""
+    """Stand-in for WSPolicyClient: records payloads, returns a canned RAW-27 action."""
 
     def __init__(self):
         self.payloads = []
         self.reset_calls = 0
-        self.action80 = np.zeros(80, dtype=np.float32)
-        self.action80[0:3] = [0.3, 0.1, 0.2]  # L pos
-        self.action80[3:9] = [1, 0, 0, 0, 1, 0]  # identity rot6d
-        self.action80[34:37] = [0.4, -0.1, 0.25]
-        self.action80[37:43] = [1, 0, 0, 0, 1, 0]
-        self.action80[68:71] = [0.2, -0.1, 0.05]
-        self.action80[71:75] = [0.1, 0.0, -0.1, 0.2]
+        self.action_raw = np.zeros(27, dtype=np.float32)
+        self.action_raw[0:3] = [0.3, 0.1, 0.2]  # L pos
+        self.action_raw[3:9] = [1, 0, 0, 0, 1, 0]  # L identity rot6d
+        self.action_raw[10:13] = [0.4, -0.1, 0.25]  # R pos
+        self.action_raw[13:19] = [1, 0, 0, 0, 1, 0]  # R identity rot6d
+        self.action_raw[20:23] = [0.2, -0.1, 0.05]  # base vel
+        self.action_raw[23:27] = [0.1, 0.0, -0.1, 0.2]  # trunk
 
     def predict(self, payload):
         self.payloads.append(payload)
-        return {"type": transport.ACTION, "action": self.action80.tolist()}
+        return {"type": transport.ACTION, "action": self.action_raw.tolist()}
 
     def reset(self):
         self.reset_calls += 1
@@ -288,7 +286,7 @@ class TestBridgeDispatch:
         assert payload["images"]["left_wrist_camera"] is not None
         assert payload["images"]["right_wrist_camera"] is not None
         assert payload["prompt"] == "turning on radio"  # task_id 0 de-underscored
-        assert len(payload["state"]) == 80  # unified proprio assembled
+        assert len(payload["state"]) == 27  # RAW-27 proprio assembled
 
     def test_reset_does_not_reply(self):
         south = _FakeSouth()

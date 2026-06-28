@@ -5,8 +5,10 @@ mirroring `benchmarks/robotwin/` but for OmniGibson's eval driver.
 
 OmniGibson's challenge eval driver speaks the **openpi** websocket protocol
 (msgpack-numpy); the OpenWAM policy server speaks **JSON-over-WebSocket** (port
-8848) and serves the unified 80-D action. This directory is the **bridge** that
-sits between them — so the OpenWAM server and checkpoint run **unchanged**.
+8848). The model trains in the unified 80-D space, but the server's
+`_UnifyAwareNormalizer` (PR #17) gathers its output back to the reader's **RAW-27**
+layout and unnormalizes there — so the wire carries RAW-27. This directory is the
+**bridge** between them — the OpenWAM server and checkpoint run **unchanged**.
 
 ```
 OmniGibson eval.py ──(openpi msgpack-numpy)──▶  bridge  ──(OpenWAM JSON-WS)──▶  OpenWAM server (8848)
@@ -27,36 +29,38 @@ OmniGibson conda env.
 | `run_bridge.sh` | Launch the bridge. |
 
 Pure-numpy conversions live in `benchmarks/utils/action_conversion.py`
-(`unified80d_to_r1pro_action`, `r1pro_proprio_to_unified80d`,
-`rot6d_to_axis_angle`); offline tests in `tests/benchmarks/test_behavior_bridge.py`.
+(`raw27_to_r1pro_action`, `r1pro_proprio_to_raw27`, `rot6d_to_axis_angle`);
+offline tests in `tests/benchmarks/test_behavior_bridge.py`.
 
 ## Action space
 
-The OpenWAM checkpoint predicts **end-effector poses** (unified 80-D, rot6d), so
-both arms use an `InverseKinematicsController` in `absolute_pose` mode and
-OmniGibson runs the IK. The executed R1Pro vector is **21-D**, in the robot's
-`_raw_controller_order` (grippers interleaved):
+The OpenWAM checkpoint predicts **end-effector poses** (rot6d), so both arms use
+an `InverseKinematicsController` in `absolute_pose` mode and OmniGibson runs the
+IK. The server returns the **RAW-27** action `[L_pos3, L_rot6d6, L_grip1, R_pos3,
+R_rot6d6, R_grip1, base3, trunk4]`; the bridge maps it to the executed R1Pro
+**21-D** vector, in the robot's `_raw_controller_order` (grippers interleaved):
 
 ```
 [ base(3), trunk(4), arm_left(6: xyz+axisangle), gripper_left(1),
   arm_right(6: xyz+axisangle), gripper_right(1) ]
 ```
 
-| Channel | Source (unified 80-D, denormalized) | Transform |
+| Channel | Source (RAW-27, denormalized) | Transform |
 |---|---|---|
-| `base` | `[68:71]` `[vx,vy,vyaw]` | pass-through, clip `[-1,1]` |
-| `trunk` | `[71:75]` 4 torso joints | pass-through, clip `[-1,1]` |
+| `base` | `[20:23]` `[vx,vy,vyaw]` | pass-through, clip `[-1,1]` |
+| `trunk` | `[23:27]` 4 torso joints | pass-through, clip `[-1,1]` |
 | `arm_left` | `[0:3]` xyz + `[3:9]` rot6d | xyz (metric) + rot6d→**axis-angle** (base frame) |
 | `gripper_left` | `[9]` | pass-through, clip `[-1,1]` |
-| `arm_right` | `[34:37]` xyz + `[37:43]` rot6d | xyz + rot6d→axis-angle |
-| `gripper_right` | `[43]` | pass-through, clip `[-1,1]` |
+| `arm_right` | `[10:13]` xyz + `[13:19]` rot6d | xyz + rot6d→axis-angle |
+| `gripper_right` | `[19]` | pass-through, clip `[-1,1]` |
 
 Only the arms change representation (the model outputs EEF, not joints).
 `base`/`trunk`/`gripper` are the model's own native recorded commands, fed to the
 demo controllers unchanged (those controllers keep `command_input_limits:
-default`). The proprio (`state`) sent south is the unified 80-D proprio
-assembled from the R1Pro 256-D `robot_r1::proprio` (EEF pose + base/trunk/gripper),
-which the OpenWAM server normalizes with the checkpoint's own stats.
+default`). The proprio (`state`) sent south is the **RAW-27** proprio assembled
+from the R1Pro 256-D `robot_r1::proprio` (EEF pose + base/trunk/gripper); the
+server's `_UnifyAwareNormalizer` normalizes it and scatters it into the unified
+space the model wants.
 
 ## Protocol (verified against the challenge `network_utils.py`)
 
