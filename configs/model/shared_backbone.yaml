@@ -1,10 +1,10 @@
 # Shared-Backbone WAM: action tokens concatenated into the video DiT sequence.
 # Variant via `architecture.variant`: vanilla (plain shared DiT) | moe (+ expert
 # FFN on action tokens). Action tokens project directly to video_backbone.dim.
-# Video backbone from the `video_backbone` group (default Wan22).
+# Video backbone from the `video_backbone` group (default Wan2.2-TI2V-5B).
 
 defaults:
-  - video_backbone: wan22             # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21
+  - video_backbone: wan22_ti2v_5b     # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25
   - action_backbone: shared_action_backbone
   - _self_
 
@@ -32,15 +32,20 @@ architecture:
   use_proprioception: true
   state_dim: 20
 
-  # Cross-modal visibility (video<->action). Two invariants: v<->v controlled by
-  # video_attention_mask_mode; a<->a always mutually visible. The state token (proprio)
-  # is a read-only tail: everyone attends to it, it attends only to itself. Modes:
-  #   mutual             video sees action (except first-frame rows), action sees all video
-  #   action_sees_video  video can't see action, action sees all video
-  #   video_sees_action  video sees action (except first-frame rows), action sees only first frame
-  #   isolated           video can't see action, action sees only first frame
+  # Cross-modal visibility (video<->action).
+  # Two invariants: v<->v controlled by video_attention_mask_mode; a<->a always mutually visible.
+  # The state token (proprio) is a read-only tail: everyone attends to it, it attends only to itself.
+  # Modes:
+  #   <mutual>             video sees action (except first-frame rows), action sees all video
+  #   <action_sees_video>  video can't see action, action sees all video
+  #   <video_sees_action>  video sees action (except first-frame rows), action sees only first frame
+  #   <isolated>           video can't see action, action sees only first frame
   attention_mask_mode: action_sees_video
-  video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
+  # v↔v visibility. Modes:
+  #   <bidirectional>       every frame attends every frame (no temporal order)
+  #   <per_frame_causal>    frame t attends frames 0..t; full attention within a frame
+  #   <first_frame_causal>  first frame attends only itself; all later frames attend everything
+  video_attention_mask_mode: first_frame_causal
 
   # moe only: which video DiT layers apply an expert FFN to action tokens
   # (vanilla ignores). Same schema/name as dual/tri_system bridge_layers.

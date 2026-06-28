@@ -92,9 +92,7 @@ def test_e2e_train_save_load_infer():
         infer_pred = arch2.action_backbone(infer_actions, infer_bridges, infer_timestep)
         assert infer_pred.shape == (B, T, action_dim)
 
-    # --- 8. Verify denormalization properties ---
-    assert arch2.action_mean.shape == (action_dim,)
-    assert arch2.action_std.shape == (action_dim,)
+    # --- 8. Verify action geometry properties ---
     assert arch2.action_dim == action_dim
     assert arch2.bridge_layers == (0,)
 

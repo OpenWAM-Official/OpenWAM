@@ -1426,7 +1426,7 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
     """End-to-end check for the ``from_scratch=true + encoder.name=wan_vae``
     path: starting from the yaml freeze list, walk the actual production
     code (``BaseWAMArchitecture.freeze_modules`` →
-    ``_pipe_named_parameters``) and verify ZERO encoder parameters survive
+    ``build_trainable_parameters``) and verify ZERO encoder parameters survive
     into the optimizer.
 
     Uses the real ``WanVideoVAEEncoder`` class (not a stub) wrapped around
@@ -1442,7 +1442,7 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
     from openwam.model.architectures.base import BaseWAMArchitecture
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
     from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
-    from openwam.train.utils.optimizer_groups import _pipe_named_parameters
+    from openwam.train.utils.optimizer_groups import build_trainable_parameters
 
     # 1) Real encoder + real backbone.
     vae_module = _FakeWanVAEModule(z_dim=16, upsampling_factor=8)
@@ -1453,11 +1453,11 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
     assert backbone.video_encoder is enc
 
     # 2) Stand-in architecture: only the bits freeze_modules /
-    #    _pipe_named_parameters touch. Cannot subclass BaseWAMArchitecture
+    #    build_trainable_parameters touch. Cannot subclass BaseWAMArchitecture
     #    directly because abstract methods (forward, generate, ...) demand
     #    full pipeline machinery. An ``nn.Module`` container with the
     #    right child name is enough — freeze_modules uses self.get_submodule,
-    #    and _pipe_named_parameters uses arch.named_children().
+    #    and build_trainable_parameters uses arch.get_trainable_modules().
     class _ArchContainer(nn.Module):
         def __init__(self, vb):
             super().__init__()
@@ -1489,18 +1489,19 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
     assert all(not p.requires_grad for p in enc_params), "freeze did not propagate to encoder._m.* parameters"
 
     # 6) Run the exact production optimizer-param collection path
-    #    (``_pipe_named_parameters``) and confirm ZERO encoder parameters
-    #    leak into the optimizer.
+    #    (``build_trainable_parameters``) and confirm ZERO encoder parameters
+    #    leak into the optimizer. The encoder lives under video_backbone, so a
+    #    regression dropping the requires_grad filter would surface its (frozen)
+    #    params here.
     class _ModelStub:
         architecture = arch
         lambda_action = 0  # excluded; not relevant here
 
-    pairs = _pipe_named_parameters(_ModelStub())
-    # Encoder parameter names appear as ``video_backbone.video_encoder._m.*`` in
-    # the production output (mod_name="video_backbone" + named_parameters
-    # path).
-    leaked = [name for name, _ in pairs if "video_encoder." in name]
-    assert leaked == [], f"Encoder parameters leaked into _pipe_named_parameters: {leaked[:5]}..."
+    optimizer_params = build_trainable_parameters(_ModelStub())
+    surfaced_ids = {id(p) for p in optimizer_params}
+    encoder_ids = {id(p) for p in enc.parameters()}
+    leaked = surfaced_ids & encoder_ids
+    assert not leaked, f"Encoder parameters leaked into the optimizer: {len(leaked)} param(s)"
 
     # 7) Sibling guard: encoder params are reachable from the backbone via
     #    backbone.named_parameters() (so the test isn't trivially passing

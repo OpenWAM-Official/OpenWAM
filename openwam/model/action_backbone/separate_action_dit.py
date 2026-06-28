@@ -384,8 +384,6 @@ class ActionDiT(ActionDiTBackbone):
         max_action_len: int = 1024,
         eps: float = 1e-6,
         shift_action: Optional[float] = None,
-        action_type: str = "explicit",
-        latent_decoder: Optional[dict] = None,
     ):
         super().__init__()
         if variant not in ("joint_cross_attn", *_MOT_VARIANTS):
@@ -479,20 +477,6 @@ class ActionDiT(ActionDiTBackbone):
         # FastWAM-compatible simple action decoder; no AdaLN and no zero init.
         self.action_decoder = nn.Linear(dim, action_dim)
 
-        # Latent->action decoder (latent mode only): decodes the predicted latent
-        # action into real actions. The architecture is decoder-agnostic — it asks
-        # via ``has_latent_decoder`` / ``decode_latent_to_action``. ``action_dim``
-        # here is the latent token_dim in latent mode, the decoder's latent_dim.
-        self.latent_action_decoder = None
-        if action_type == "latent" and latent_decoder is not None:
-            from openwam.model.action_backbone.latent_decoder import build_latent_action_decoder
-
-            self.latent_action_decoder = build_latent_action_decoder(latent_decoder, latent_dim=action_dim)
-
-        # Action normalization stats (saved as persistent buffers for checkpoint)
-        self.register_buffer("action_mean", torch.zeros(action_dim), persistent=True)
-        self.register_buffer("action_std", torch.ones(action_dim), persistent=True)
-
     # ------------------------------------------------------------------
     # ActionDiTBackbone interface
     # ------------------------------------------------------------------
@@ -500,17 +484,6 @@ class ActionDiT(ActionDiTBackbone):
     @property
     def uses_proprioception(self) -> bool:
         return False
-
-    @property
-    def has_latent_decoder(self) -> bool:
-        return self.latent_action_decoder is not None
-
-    def decode_latent_to_action(
-        self, latent: torch.Tensor, proprio: Optional[torch.Tensor] = None
-    ) -> Optional[torch.Tensor]:
-        if self.latent_action_decoder is None:
-            return None
-        return self.latent_action_decoder(latent, proprio)
 
     @property
     def num_heads(self) -> int:

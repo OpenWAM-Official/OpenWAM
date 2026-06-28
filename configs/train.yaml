@@ -1,5 +1,4 @@
 defaults:
-  - accelerate: deepspeed_zero2   # [Optional]: deepspeed_zero1, deepspeed_zero2(default)
   - model: dual_system            # [Optional]: dual_system(default), shared_backbone, tri_system
   - dataloader: robotwin          # [Optional]: robotwin(default)
   - _self_
@@ -15,8 +14,8 @@ training:
   max_grad_norm: 1.0              # Gradient clipping max norm
 
   # --- Schedule ---
-  num_epochs: 5                   # Total training epochs
-  max_steps: null                 # Early stop after N steps (null = no limit)
+  num_epochs: 5                   # Total training epochs (null = step-only, driven solely by max_steps)
+  max_steps: null                 # Early stop after N steps (null = no limit; required when num_epochs is null)
   batch_size: 24                   # Per-GPU batch size
   gradient_accumulation_steps: 1  # Accumulate N micro-batches before optimizer step
 
@@ -29,30 +28,33 @@ training:
   action_lr: null                 # Override LR for action model parameters
   video_lr: null                  # Override LR for video backbone parameters
 
+  # --- DeepSpeed / precision ---
+  mixed_precision: bf16           # bf16 / fp16 / no — training + deploy compute dtype
+  zero_stage: 2                   # DeepSpeed ZeRO stage: 1 or 2 (CLI override: training.zero_stage=1)
+
   # --- Memory optimization ---
-  use_gradient_checkpointing: true       # Trade compute for memory in DiT blocks
+  use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
+                                         # costs ~1 extra forward (standard term; cf. PyTorch/HF)
   use_gradient_checkpointing_offload: false  # Offload checkpointed activations to CPU
   initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
+  offload_optimizer_device: none         # DeepSpeed ZeRO optimizer-state offload: none / cpu / nvme
 
   # --- Loss weights ---
   lambda_video: 1.0               # Video flow-matching loss weight
   lambda_action: 1.0              # Action flow-matching loss weight
-  lambda_decoder: 0.0             # Latent->action decoder MSE weight (latent mode only; set >0 in post-train)
 
   # --- Flow matching timestep range ---
   max_timestep_boundary: 1.0      # Upper bound (fraction of total timesteps)
   min_timestep_boundary: 0.0      # Lower bound (fraction of total timesteps)
 
-  # --- LoRA ---
-  lora_base_model: null           # Pipeline sub-module to apply LoRA (e.g. "dit"); null = no LoRA
-  lora_target_modules: "q,k,v,o,ffn.0,ffn.2"  # Comma-separated target module names
-  lora_rank: 32                   # LoRA rank
-  lora_lr: null                   # Override LR for LoRA parameters
-
   # --- Checkpoint ---
   output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output
-  save_steps: 2000                # Save checkpoint every N steps
+  save_steps: 2000                # Save checkpoint every N steps (0 or null = disable saving)
   keep_last_k_ckpts: 1           # Rolling window: keep only the last K checkpoints
+
+  # --- Finetune / Resume (mutually exclusive; both point to a training output dir, latest step auto-selected) ---
+  finetune_ckpt_path: null   # non-null: warm-start from latest weights in this dir (step from 0, new output dir)
+  resume_ckpt_path: null     # non-null: resume full state from latest in this dir (output reuses this dir)
 
   # --- Data loading ---
   dataset_num_workers: 8          # DataLoader num_workers (0 = main process)

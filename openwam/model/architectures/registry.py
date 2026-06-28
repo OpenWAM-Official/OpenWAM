@@ -134,10 +134,8 @@ def resolve_architecture_config(
     params["variant"] = variant
     if action_cfg:
         # ``text_dim`` is architecture-owned (raw context shared by both streams);
-        # ``variant`` is resolved above; ``latent_encoder`` is trainer-side only.
-        # ``type`` + ``latent_decoder`` ARE forwarded so the architecture can build
-        # the latent->action decoder when type=latent.
-        _non_arch = {"text_dim", "variant", "latent_encoder"}
+        # ``variant`` is resolved above. Everything else forwards to the architecture.
+        _non_arch = {"text_dim", "variant"}
         params.update({k: v for k, v in action_cfg.items() if k not in _non_arch})
 
     vb_cfg = getattr(model_cfg, "video_backbone", None)

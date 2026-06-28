@@ -8,7 +8,7 @@
 # Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos_predict25.
 
 defaults:
-  - video_backbone: wan22         # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21 (VACE/I2V) | cosmos_predict25
+  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25
   - action_backbone: separate_action_dit # ActionDiT (dual/tri only support ActionDiT)
   - _self_
 

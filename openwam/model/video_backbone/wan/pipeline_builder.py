@@ -2,7 +2,7 @@
 
 Builds a WanVideoPipeline from Hydra config by auto-discovering model files
 (sharded safetensors, standalone safetensors, .pth), tokenizer, and optionally
-applying LoRA and gradient checkpointing.
+enabling gradient checkpointing.
 """
 
 import glob as _glob
@@ -166,8 +166,7 @@ def build_training_pipeline(cfg: DictConfig, *, skip_native_vae: bool = False):
 
     Auto-discovers model files in the directory specified by
     ``cfg.model.video_backbone.model_path``, groups sharded safetensors,
-    detects the tokenizer, applies LoRA if configured, and enables
-    gradient checkpointing.
+    detects the tokenizer, and enables gradient checkpointing.
 
     Args:
         cfg: Full Hydra config (reads ``cfg.training`` and
@@ -204,16 +203,6 @@ def build_training_pipeline(cfg: DictConfig, *, skip_native_vae: bool = False):
         torch_dtype=torch.bfloat16,
     )
 
-    # Apply LoRA if configured
-    lora_base_model = getattr(t, "lora_base_model", None)
-    if lora_base_model:
-        pipe = setup_lora(
-            pipe,
-            lora_base_model,
-            getattr(t, "lora_target_modules", None),
-            int(getattr(t, "lora_rank", 32)),
-        )
-
     # Gradient checkpointing — the holder is not an nn.Module, so walk each
     # loaded sub-module's own tree (was ``pipe.modules()`` on the old pipeline).
     if bool(t.use_gradient_checkpointing):
@@ -226,35 +215,5 @@ def build_training_pipeline(cfg: DictConfig, *, skip_native_vae: bool = False):
             for module in comp.modules():
                 if hasattr(module, "gradient_checkpointing_enable"):
                     module.gradient_checkpointing_enable()
-
-    return pipe
-
-
-def setup_lora(pipe, lora_base_model, lora_target_modules, lora_rank):
-    """Apply LoRA to a pipeline model via PEFT.
-
-    Args:
-        pipe: WanVideoPipeline instance.
-        lora_base_model: Name of the pipeline sub-module to wrap (e.g. ``"dit"``).
-        lora_target_modules: Comma-separated target module names.
-        lora_rank: LoRA rank.
-
-    Returns:
-        The pipeline with LoRA applied.
-    """
-    try:
-        from peft import LoraConfig, get_peft_model
-    except ImportError:
-        logger.warning("PEFT not available, skipping LoRA setup")
-        return pipe
-
-    if lora_base_model and hasattr(pipe, lora_base_model):
-        base_model = getattr(pipe, lora_base_model)
-        target_modules = lora_target_modules.split(",") if lora_target_modules else None
-        lora_config = LoraConfig(
-            r=lora_rank,
-            target_modules=target_modules,
-        )
-        setattr(pipe, lora_base_model, get_peft_model(base_model, lora_config))
 
     return pipe

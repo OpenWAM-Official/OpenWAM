@@ -40,3 +40,17 @@ normalize_mode: quantile
 
 # ── Action / proprio supervision toggle ─────────────────────────────────────
 enable_action_supervision: true
+
+# ── Unified 80-D action space (cross-robot shared head) ──────────────────────
+# unify_action=true scatters this reader's raw 20-D EEF into a shared 80-D
+# vector so heterogeneous robots train one action head. unify_action=false
+# (default) is byte-identical to the pre-unify reader. 80-D semantic layout:
+#   [ 0: 3) left  eef xyz     [ 3: 9) left  eef rot6d   [ 9]    left  gripper
+#   [10:34) left  hand (24)   [34:37) right eef xyz     [37:43) right eef rot6d
+#   [43]    right gripper     [44:68) right hand (24)   [68:80) reserved (12)
+# Map: raw left-arm 0-9 to unified 0-9, raw right-arm 10-19 to 34-43.
+# OXE is single-arm: the real arm lands in the LEFT slots (0-9, valid); the
+# zero-padded right half maps to 34-43 but stays masked out of the loss
+# (LEFT_ARM_DIM_MASK is honored through the scatter).
+unify_action: false
+unify_action_map: ["0-9", "34-43"]
