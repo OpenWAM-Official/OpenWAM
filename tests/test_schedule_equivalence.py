@@ -144,6 +144,70 @@ def test_independent_timestep_sampler_shapes_and_seed():
     assert torch.allclose(v1, v2) and torch.allclose(a1, a2)  # seed reproducible
 
 
+def test_make_schedule_variance_shift_structure():
+    from openwam.deploy.denoise_schedule import make_schedule
+
+    v, a = _two_stub_schedulers()
+    result = make_schedule("variance_shift", v, a, num_steps=20, lead="action", alpha=9.0)
+    assert len(result) == 21  # num_steps pairs + (0.0, 0.0) sentinel
+    assert result[-1] == (0.0, 0.0)
+
+
+def test_schedule_variance_shift_lead_is_cleaner_and_monotonic():
+    from openwam.deploy.denoise_schedule import schedule_variance_shift
+
+    v, a = _two_stub_schedulers()
+    result = schedule_variance_shift(v, a, num_steps=20, lead="action", alpha=9.0)
+    v_ts = [tv for tv, _ in result[:-1]]
+    a_ts = [ta for _, ta in result[:-1]]
+    assert v_ts == sorted(v_ts, reverse=True)
+    assert a_ts == sorted(a_ts, reverse=True)
+    # action leads -> action stays at lower-or-equal timestep (cleaner) every step
+    assert all(ta <= tv + 1e-9 for tv, ta in zip(v_ts, a_ts))
+    assert any(ta < tv - 1e-6 for tv, ta in zip(v_ts, a_ts))  # strictly leads somewhere
+
+
+def test_schedule_variance_shift_alpha1_is_diagonal():
+    from openwam.deploy.denoise_schedule import schedule_variance_shift
+
+    v, a = _two_stub_schedulers()
+    result = schedule_variance_shift(v, a, num_steps=16, lead="action", alpha=1.0, offset=0.0)
+    for tv, ta in result[:-1]:
+        assert abs(tv - ta) < 1e-9  # alpha=1, offset=0 -> both streams identical (sync diagonal)
+
+
+def test_schedule_variance_shift_lead_direction_flips():
+    from openwam.deploy.denoise_schedule import schedule_variance_shift
+
+    v, a = _two_stub_schedulers()
+    res_a = schedule_variance_shift(v, a, num_steps=12, lead="action", alpha=9.0)
+    res_v = schedule_variance_shift(v, a, num_steps=12, lead="video", alpha=9.0)
+    assert [tv for tv, _ in res_a] == [ta for _, ta in res_v]
+    assert [ta for _, ta in res_a] == [tv for tv, _ in res_v]
+
+
+def test_variance_shift_timestep_sampler():
+    import torch
+
+    from openwam.model.architectures.utils.timestep_sampling import (
+        VarianceShiftTimestepSampler,
+        build_timestep_sampler,
+    )
+
+    s = build_timestep_sampler("variance_shift", num_train_timesteps=1000, lead="action", alpha=9.0, seed=0)
+    assert isinstance(s, VarianceShiftTimestepSampler)
+
+    v_t, a_t = s.sample_timesteps(64, device="cpu")
+    assert v_t.shape == (64,) and a_t.shape == (64,)
+    # action leads -> cleaner -> higher grid-position value on average
+    assert float(a_t.mean()) > float(v_t.mean())
+
+    v2, a2 = build_timestep_sampler(
+        "variance_shift", lead="action", alpha=9.0, seed=0
+    ).sample_timesteps(64, device="cpu")
+    assert torch.allclose(v_t, v2) and torch.allclose(a_t, a2)  # seed reproducible
+
+
 def test_action_scheduler_is_action_scheduler_instance():
     """Architecture's action_scheduler must be an ActionScheduler (not FlowMatchScheduler)."""
     from openwam.model.action_backbone.scheduler import ActionScheduler

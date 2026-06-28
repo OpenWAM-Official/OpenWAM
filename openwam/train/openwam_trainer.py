@@ -132,10 +132,13 @@ class OpenWAMTrainer:
             cfg_get(t, "timestep_sampling", None),
             num_train_timesteps=1000,
             seed=cfg_get(t, "timestep_sampling_seed", None),
+            lead=cfg_get(t, "timestep_sampling_lead", "action"),
+            alpha=cfg_get(t, "timestep_sampling_alpha", 9.0),
         )
         if self._timestep_sampler is not None and self._rank == 0:
             logger.info(
-                "Training timestep sampling: independent_uniform_shift (seed=%s)",
+                "Training timestep sampling: %s (seed=%s)",
+                cfg_get(t, "timestep_sampling", None),
                 cfg_get(t, "timestep_sampling_seed", None),
             )
 

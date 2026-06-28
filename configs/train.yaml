@@ -53,8 +53,13 @@ training:
                                   # independent_uniform_shift = per-stream independent
                                   #   uniform + α-shift draw (UWM-style; train-time
                                   #   counterpart of inference schedule_type=independent).
-  timestep_sampling_seed: null    # independent_uniform_shift only: RNG seed for
-                                  #   reproducible draws; null = fresh each step.
+                                  # variance_shift = curve-correlated draw (one stream
+                                  #   leads via α-shift; train-time counterpart of
+                                  #   inference schedule_type=variance_shift).
+  timestep_sampling_seed: null    # independent_uniform_shift / variance_shift only: RNG
+                                  #   seed for reproducible draws; null = fresh each step.
+  timestep_sampling_lead: action  # variance_shift only: which stream denoises earlier (action | video)
+  timestep_sampling_alpha: 9.0    # variance_shift only: lead-curve strength (>1 leads; 1 = diagonal)
 
   # --- Checkpoint ---
   output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output

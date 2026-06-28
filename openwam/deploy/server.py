@@ -421,10 +421,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schedule-type",
         type=str,
-        choices=["sync", "independent"],
+        choices=["sync", "independent", "variance_shift"],
         default=None,
         dest="schedule_type",
-        help="Override inference.schedule_type: 'sync' (lockstep) or 'independent' (per-stream random timesteps)",
+        help="Override inference.schedule_type: 'sync' | 'independent' | 'variance_shift' (Latent-Forcing ordered)",
     )
     parser.add_argument(
         "--schedule-seed",
@@ -432,6 +432,28 @@ def _build_argparser() -> argparse.ArgumentParser:
         default=None,
         dest="schedule_seed",
         help="Override inference.schedule_seed: RNG seed for the 'independent' schedule (reproducible random timesteps)",
+    )
+    parser.add_argument(
+        "--vs-lead",
+        type=str,
+        choices=["action", "video"],
+        default=None,
+        dest="vs_lead",
+        help="Override inference.vs_lead (variance_shift only): which stream denoises earlier",
+    )
+    parser.add_argument(
+        "--vs-alpha",
+        type=float,
+        default=None,
+        dest="vs_alpha",
+        help="Override inference.vs_alpha (variance_shift only): lead-curve strength (>1 leads; 1 = diagonal)",
+    )
+    parser.add_argument(
+        "--vs-offset",
+        type=float,
+        default=None,
+        dest="vs_offset",
+        help="Override inference.vs_offset (variance_shift only): delay the lagging stream's start (0..1)",
     )
     parser.add_argument(
         "--compile-enabled",
@@ -497,6 +519,12 @@ def _apply_inference_overrides(cfg, args):
         OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
     if args.schedule_seed is not None:
         OmegaConf.update(cfg, "inference.schedule_seed", args.schedule_seed, merge=False)
+    if args.vs_lead is not None:
+        OmegaConf.update(cfg, "inference.vs_lead", args.vs_lead, merge=False)
+    if args.vs_alpha is not None:
+        OmegaConf.update(cfg, "inference.vs_alpha", args.vs_alpha, merge=False)
+    if args.vs_offset is not None:
+        OmegaConf.update(cfg, "inference.vs_offset", args.vs_offset, merge=False)
     return cfg
 
 

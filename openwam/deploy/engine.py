@@ -361,9 +361,16 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): for action_only mode
                 - schedule_type (str, optional): override schedule type
-                  ("sync" lockstep | "independent" per-stream random timesteps)
+                  ("sync" lockstep | "independent" per-stream random timesteps |
+                  "variance_shift" Latent-Forcing ordered curve/offset)
                 - schedule_seed (int, optional): RNG seed for the "independent"
                   schedule, making the sampled (t_v, t_a) trajectory reproducible
+                - vs_lead (str, optional): "variance_shift" only — which stream
+                  denoises earlier ("action" | "video")
+                - vs_alpha (float, optional): "variance_shift" only — lead-curve
+                  strength (>1 leads; 1 = sync diagonal)
+                - vs_offset (float, optional): "variance_shift" only — delay the
+                  lagging stream's start (0 = pure curve; >0 = piecewise offset)
                 - denoise_steps (int, optional): override num denoising steps
 
         Returns:
@@ -379,6 +386,12 @@ class JointInferenceEngine(BaseInferenceEngine):
         # makes the randomly sampled (t_v, t_a) trajectory reproducible.
         # ``None`` (default) draws a fresh trajectory each request.
         schedule_seed = conditions.get("schedule_seed", getattr(inf_cfg, "schedule_seed", None))
+        # ``variance_shift`` controls (Latent-Forcing-style ordered trajectory):
+        # which stream denoises earlier + curve strength + optional offset.
+        # Ignored by sync/independent.
+        vs_lead = conditions.get("vs_lead", getattr(inf_cfg, "vs_lead", "action"))
+        vs_alpha = conditions.get("vs_alpha", getattr(inf_cfg, "vs_alpha", 9.0))
+        vs_offset = conditions.get("vs_offset", getattr(inf_cfg, "vs_offset", 0.0))
         # Single source of truth for each stream's α-shift is the backbone
         # property — ``action_backbone.shift_action`` and
         # ``video_backbone.shift_video`` — set via the model yaml and saved in
@@ -405,6 +418,9 @@ class JointInferenceEngine(BaseInferenceEngine):
             shift=shift,
             shift_video=shift_video,
             seed=schedule_seed,
+            lead=vs_lead,
+            alpha=vs_alpha,
+            offset=vs_offset,
         )
 
         # Reset dit cache for each generation
