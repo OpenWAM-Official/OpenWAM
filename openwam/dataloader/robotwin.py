@@ -35,6 +35,7 @@ from openwam.dataloader.transforms.normalize import (
     load_mode_stats,
 )
 from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
+from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.unify_action import (
     UNIFY_DIM,
     map_to_unify,
@@ -332,6 +333,11 @@ class RoboTwinDataset(BaseDataset):
         text_embedding_dropout: float = 0.0,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
+        # Optional load-time video color jitter, applied consistently across a
+        # clip's frames and ONLY on the train split. None / False / {} → disabled
+        # (default; byte-identical to before). Truthy → enabled; a dict overrides
+        # the per-channel strengths {brightness, contrast, saturation, hue}.
+        color_jitter: Optional[Any] = None,
     ):
         super().__init__()
         self.robot = robot
@@ -343,6 +349,20 @@ class RoboTwinDataset(BaseDataset):
         self._filter_static_segments = bool(filter_static_segments)
         self._static_segment_threshold = float(static_segment_threshold)
         self._max_static_retry = int(max_static_retry)
+
+        # ── load-time video augmentation ──────────────────────────────────
+        # Color jitter is applied in __getitem__ to the decoded clip (same
+        # random factors across all frames, via VideoColorJitter). Built only
+        # for the train split; val / disabled keeps video byte-identical.
+        self._color_jitter = None
+        if color_jitter and split == "train":
+            cj_get = color_jitter.get if hasattr(color_jitter, "get") else (lambda k, d: d)
+            self._color_jitter = VideoColorJitter(
+                brightness=float(cj_get("brightness", 0.2)),
+                contrast=float(cj_get("contrast", 0.2)),
+                saturation=float(cj_get("saturation", 0.2)),
+                hue=float(cj_get("hue", 0.0)),
+            )
 
         if action_mode not in ("joint", "eef"):
             raise ValueError(f"action_mode must be 'joint' or 'eef', got '{action_mode}'")
@@ -988,6 +1008,11 @@ class RoboTwinDataset(BaseDataset):
                     break
 
         sample.pop("_is_static", None)
+        if self._color_jitter is not None:
+            # Same jitter factors across the whole clip (temporal consistency).
+            sample["video"] = self._color_jitter.apply({"video": sample["video"]})["video"]
+            # Keep the first-frame conditioning image in sync with the jittered clip.
+            sample["first_frame_image"] = [sample["video"][0]]
         if self._text_embedding_transform is not None:
             sample = self._text_embedding_transform.apply(sample)
         return sample
@@ -1087,6 +1112,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             text_embedding_dropout=float(_get("text_embedding_dropout", 0.0)),
             unify_action=bool(_get("unify_action", False)),
             unify_action_map=_get("unify_action_map", None),
+            color_jitter=_get("color_jitter", None),
         )
 
     def __init__(

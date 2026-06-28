@@ -107,3 +107,14 @@ text_embedding_cache_dir: null
 # CFG dropout — probability of substituting the empty-prompt embedding
 # instead of the real one (train only). 0.0 disables dropout.
 text_embedding_dropout: 0.0
+
+# ── Video augmentation (optional) ─────────────────────────────────────────────
+# color_jitter: load-time color jitter applied by the reader to each clip, with
+# the SAME random factors across all frames (temporal consistency), TRAIN split
+# only. Omit / null / false → disabled (default; video byte-identical). Provide
+# a dict to enable + set per-channel strengths (hue is a no-op in PIL mode).
+# color_jitter:
+#   brightness: 0.2
+#   contrast: 0.2
+#   saturation: 0.2
+#   hue: 0.0
