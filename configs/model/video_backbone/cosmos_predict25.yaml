@@ -9,9 +9,10 @@
 # TRAINABLE by default). Don't add a `freeze:` knob here — add `video_backbone.dit`
 # to the freeze list in an override instead.
 #
-# REQUIRED override when switching to Cosmos-Predict2.5 (context_dim=1024, not Wan's 4096):
-#   model.action_backbone.text_dim=1024     # else the action context-embed shape-crashes
-# joint_cross_attn ALSO needs (action stream is only 1024 wide):
+# Action-side context width (context_dim=1024, not Wan's 4096) now AUTO-DERIVES
+# from this backbone's text_dim — no `model.action_backbone.text_dim` override
+# needed (explicit cfg/CLI still wins).
+# joint_cross_attn still needs (action stream is only 1024 wide):
 #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
 # Do NOT add those for joint_self_attn — MoT needs per-layer 16×128 parity.
 

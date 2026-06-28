@@ -275,6 +275,57 @@ def test_dual_system_cross_attn_inherits_geometry_from_video_backbone():
     assert ab.head_dim == vb.head_dim == WAN_VIDEO_DIM // 4
 
 
+class _TextDim1024Backbone(_MockVideoBackbone):
+    """Cosmos-shaped mock: exposes a 1024 raw context width (Wan is 4096)."""
+
+    @property
+    def text_dim(self) -> int:
+        return 1024
+
+
+def _build_self_attn_with_backbone(backbone_cls, cfg_extra=None):
+    from openwam.model.architectures.dual_system.joint_self_attn import (
+        DualSystemSelfAttnArchitecture,
+    )
+
+    class _SelfAttnWithBackbone(DualSystemSelfAttnArchitecture):
+        def _init_video_backbone(self, _cfg):
+            # Attach BEFORE __init__'s vb-derived setdefault/derive block runs.
+            self.video_backbone = backbone_cls(dim=WAN_VIDEO_DIM, num_layers=WAN_NUM_LAYERS, num_heads=4)
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
+        "action_dim": ACTION_DIM,
+        "bridge_interval": 1,
+        "dim": WAN_VIDEO_DIM,
+        "ffn_dim": 4 * WAN_VIDEO_DIM,
+    }
+    cfg.update(cfg_extra or {})
+    return _SelfAttnWithBackbone(cfg=cfg)
+
+
+def test_text_dim_auto_derives_from_backbone():
+    """When ``text_dim`` is absent from cfg it defaults to the loaded backbone's
+    ``text_dim`` (Cosmos-Predict2.5=1024), removing the manual override footgun."""
+    arch = _build_self_attn_with_backbone(_TextDim1024Backbone)
+    assert arch.action_backbone.text_dim == 1024
+    assert arch.context_dim == 1024
+
+
+def test_text_dim_explicit_cfg_wins_over_backbone():
+    """An explicit cfg ``text_dim`` still overrides the backbone-derived default."""
+    arch = _build_self_attn_with_backbone(_TextDim1024Backbone, {"text_dim": 777})
+    assert arch.action_backbone.text_dim == 777
+
+
+def test_text_dim_falls_back_to_4096_when_backbone_silent():
+    """A backbone that doesn't expose ``text_dim`` (base property → None) keeps the
+    historical 4096 (Wan T5-XXL) fallback, so Wan behavior is unchanged."""
+    arch = _build_self_attn_with_backbone(_MockVideoBackbone)
+    assert arch.action_backbone.text_dim == 4096
+
+
 # ---------------------------------------------------------------------------
 # 2. dual_system_self_attn
 # ---------------------------------------------------------------------------
