@@ -370,6 +370,64 @@ class TestNormalize:
             _make_ds(b, normalize_mode="quantile")
 
 
+# ── deploy denormalizer artifact ---------------------------------------------
+
+
+class TestDeployNormalizer:
+    """The reader emits meta/normalization_stats.npy (unified 80-D) so a trained
+    checkpoint can un-normalize actions back to physical units at deploy time."""
+
+    def test_quantile_registered_in_deploy_mode_map(self):
+        # Deploy must recognize the reader-family default 'quantile' (→ q99), else
+        # _build_normalizer silently disables the normalizer on a real checkpoint.
+        from openwam.dataloader.transforms.normalize import YAML_TO_NORM_MODE
+
+        assert YAML_TO_NORM_MODE.get("quantile") == "q99"
+
+    def test_stats_npy_written_and_schema(self, tmp_path):
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        with _mock_video_decoder():
+            ds = _make_ds(b, normalize_mode="quantile")
+        # path exposed for the trainer's save_normalization_stats() copy
+        assert ds.normalization_stats_path is not None
+        assert Path(ds.normalization_stats_path).exists()
+        raw = np.load(ds.normalization_stats_path, allow_pickle=True).item()
+        assert set(raw) == {"unified"}  # action_mode key from behavior.yaml
+        stats = raw["unified"]
+        for k in ("mean", "std", "min", "max", "q01", "q99"):
+            assert stats[k].shape == (UNIFY_DIM,)  # 80-D, the served action width
+        # Unmapped slots (dex hands, reserved tail) are identity fills → deploy
+        # normalizer is a pure pass-through there.
+        unmapped = [i for i in range(UNIFY_DIM) if i not in EXPECTED_VALID]
+        assert (stats["q01"][unmapped] == -1.0).all()
+        assert (stats["q99"][unmapped] == 1.0).all()
+        assert (stats["mean"][unmapped] == 0.0).all()
+        assert (stats["std"][unmapped] == 1.0).all()
+
+    def test_deploy_normalize_matches_reader(self, tmp_path):
+        # The deploy Normalizer built from the .npy reproduces the reader's own
+        # normalization EXACTLY (train ↔ deploy consistency), so its inverse is the
+        # correct un-normalization of the model's actions.
+        from openwam.dataloader.transforms.normalize import Normalizer, load_mode_stats
+
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        with _mock_video_decoder():
+            raw80 = _make_ds(b, normalize_mode=None)[0]["action"].numpy()  # un-normalized
+            ds = _make_ds(b, normalize_mode="quantile")
+            norm80 = ds[0]["action"].numpy()  # reader-normalized
+        mode_stats = load_mode_stats(ds.normalization_stats_path, "unified")
+        normalizer = Normalizer(mode="q99", stats=mode_stats)
+        # deploy-normalize(raw) == reader's normalized action, on every dim
+        np.testing.assert_allclose(normalizer.normalize(raw80), norm80, atol=1e-5)
+        # and unnormalize inverts it on the mapped (non-clipped) dims
+        recovered = normalizer.unnormalize(norm80)
+        inside = np.abs(norm80) < 1.0 - 1e-3  # exclude quantile-clipped entries
+        m = np.zeros_like(norm80, dtype=bool)
+        m[:, EXPECTED_VALID] = True
+        m &= inside
+        np.testing.assert_allclose(recovered[m], raw80[m], atol=1e-4)
+
+
 # ── stats-computation script --------------------------------------------------
 
 

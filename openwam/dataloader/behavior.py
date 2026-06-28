@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 
 import numpy as np
@@ -309,7 +310,56 @@ class BehaviorDataset(LeRobotV3Reader):
                         f"BEHAVIOR({self._dataset_id}): '{name}' stats '{k}' width {blk[k].shape[0]} "
                         f"in {stats_path} != expected {dim}. Re-run behavior_stats_computation."
                     )
-        return {k: np.concatenate([eef[k], base[k]]).astype(np.float32) for k in keys}
+        combined = {k: np.concatenate([eef[k], base[k]]).astype(np.float32) for k in keys}
+        # Emit the deploy-side normalizer artifact (in the FINAL action space the
+        # model emits) so a trained checkpoint can un-normalize actions back to
+        # physical units. The trainer copies normalization_stats_path into the
+        # checkpoint dir; deploy's _build_normalizer reads it.
+        self._write_deploy_normalizer_stats(combined, keys)
+        return combined
+
+    # Identity fill for the deploy stats at every unmapped unified slot (dex hands,
+    # reserved tail): values chosen so Normalizer(q99 / min_max / mean_std) is a
+    # pure pass-through there (scale=1, offset=0), leaving those slots untouched.
+    _DEPLOY_IDENTITY_FILL = {"mean": 0.0, "std": 1.0, "min": -1.0, "max": 1.0, "q01": -1.0, "q99": 1.0}
+    # action_mode key under which the deploy stats are stored / looked up. BEHAVIOR
+    # serves the unified 80-D space (not robotwin's joint/eef) — configs/dataloader/
+    # behavior.yaml sets ``action_mode: unified`` so deploy selects this sub-dict.
+    DEPLOY_ACTION_MODE = "unified"
+
+    def _write_deploy_normalizer_stats(self, combined: dict, keys) -> None:
+        """Write ``meta/normalization_stats.npy`` (deploy denormalizer artifact).
+
+        ``combined`` is the reader's own ``_raw_action_dim``-wide stats. The model
+        emits ``ACTION_DIM``-wide actions (== unified 80-D when unify is on), so the
+        deploy stats are scattered into that space via the SAME unify map the
+        action/proprio use — mapped slots carry the real stats, every other slot
+        gets an identity (pass-through) fill. Schema mirrors robotwin's nested
+        ``{action_mode: {mean,std,min,max,q01,q99}}`` so ``load_mode_stats`` /
+        ``_build_normalizer`` consume it unchanged.
+        """
+        stats_full = {}
+        for k in keys:
+            if self._unify:
+                full = np.full(self.ACTION_DIM, self._DEPLOY_IDENTITY_FILL[k], dtype=np.float32)
+                full[self._unify_dst_index] = combined[k]
+            else:
+                full = combined[k].astype(np.float32)
+            stats_full[k] = full
+        payload = {self.DEPLOY_ACTION_MODE: stats_full}
+
+        out = self._dataset_dir / "meta" / "normalization_stats.npy"
+        # Atomic write (unique temp + replace) so concurrent per-rank constructors
+        # never observe a half-written file. The temp name ends in '.npy' so
+        # np.save does not append a second '.npy' suffix.
+        tmp = out.with_name(f".{out.stem}.{os.getpid()}.npy")
+        try:
+            np.save(tmp, payload, allow_pickle=True)
+            tmp.replace(out)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+        self.normalization_stats_path = str(out)
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
         """Apply per-bucket normalization to a ``(..., 23)`` raw vector (no-op when

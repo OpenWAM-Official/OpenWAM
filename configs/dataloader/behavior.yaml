@@ -50,6 +50,14 @@ enable_action_supervision: true
 unify_action: true
 unify_action_map: ["0-9", "34-43", "68-70"]
 
+# ── Deploy normalizer selector (training-inert) ─────────────────────────────
+# The reader writes meta/normalization_stats.npy in the unified 80-D space and
+# the trainer copies it into the checkpoint dir; at deploy, _build_normalizer
+# selects the stats sub-dict by this action_mode key to un-normalize the model's
+# actions back to physical units. The reader itself ignores this field (it keys
+# off unify_action); it exists only so the deployed checkpoint is self-contained.
+action_mode: unified
+
 # ── Data budget (optional) ──────────────────────────────────────────────────
 # null = full dataset; positive float = subsample episodes to ~N hours of footage.
 total_hours: null
