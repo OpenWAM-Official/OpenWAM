@@ -9,7 +9,7 @@ ffn_dim: 4096
 # truth for train + deploy.
 shift_action: 5.0
 
-# COSMOS25 dual_system joint_cross_attn only: pin 16×64=1024 (action stream is
+# Cosmos-Predict2.5 dual_system joint_cross_attn only: pin 16×64=1024 (action stream is
 # 1024 wide; auto-resolve's 16×128=2048 wastes attention compute). Struct mode
 # needs `+` for these absent fields:
 #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
