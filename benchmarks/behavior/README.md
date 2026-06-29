@@ -67,7 +67,9 @@ space the model wants.
 - **metadata**: on connect the bridge sends one msgpack frame `{}` (the client
   blocks on it in its constructor).
 - **act**: client sends the obs dict → bridge replies with exactly one msgpack
-  frame `{"action": (21,) float, "server_timing": {...}}`.
+  frame `{"action": (21,) float}`. (The official openpi server also attaches a
+  `"server_timing"` field; this bridge omits it, and the official client ignores
+  it when absent.)
 - **reset**: client sends `{"reset": True}` **fire-and-forget** (no `recv`) → the
   bridge resets south state and sends **nothing** back.
 - **error**: bridge sends a TEXT frame (traceback) then closes with code 1011.

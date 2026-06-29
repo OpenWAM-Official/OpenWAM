@@ -26,7 +26,9 @@ Wire contract with the OmniGibson client (verified against the challenge
   * metadata: the server sends ONE msgpack frame (``{}``) on connect, before the
     loop — the client blocks on it in ``__init__``.
   * ``act``: client sends the obs dict → server replies with exactly one msgpack
-    frame ``{"action": ndarray, "server_timing": {...}}``.
+    frame ``{"action": ndarray}``. (The official openpi server also attaches a
+    ``"server_timing"`` field; this bridge omits it, and the official client
+    ignores it when absent.)
   * ``reset``: client sends ``{"reset": True}`` **fire-and-forget** (no recv) →
     server resets south state and sends NOTHING back (preserves 1-send-1-recv on
     ``act`` only).

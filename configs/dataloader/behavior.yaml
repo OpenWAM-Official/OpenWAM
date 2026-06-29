@@ -18,6 +18,8 @@ window_stride: 1
 # multiview=true → L-shape canvas (head 256x320 top, L/R wrist 128x160 bottom);
 # height MUST be 384, width 320. Head cam = observation.images.rgb.head (720^2),
 # wrists = observation.images.rgb.{left,right}_wrist (480^2).
+# multiview=false → single ego (head) frame at (height, width); for a 256x320 ego
+# also set height to 256 (keep width 320), else the default 384 yields a 384x320 ego.
 height: 384
 width: 320
 multiview: true
@@ -49,7 +51,7 @@ normalize_mode: quantile
 enable_action_supervision: true
 
 # ── Unified 80-D action space (cross-robot shared head) ─────────────────────
-# unify_action=true scatters the raw 23-D vector into the shared 80-D space; the
+# unify_action=true scatters the raw 27-D vector into the shared 80-D space; the
 # per-dim mask keeps unmapped (dexterous + reserved) slots out of the loss.
 # 80-D semantic layout (== robocoin.yaml):
 #   [ 0: 3) L eef xyz   [ 3: 9) L eef rot6d   [ 9]    L gripper
@@ -67,11 +69,19 @@ unify_action: true
 unify_action_map: ["0-9", "34-43", "68-70", "71-74"]
 
 # ── Deploy normalizer selector (training-inert) ─────────────────────────────
-# The reader writes meta/normalization_stats.npy in the unified 80-D space and
-# the trainer copies it into the checkpoint dir; at deploy, _build_normalizer
-# selects the stats sub-dict by this action_mode key to un-normalize the model's
-# actions back to physical units. The reader itself ignores this field (it keys
-# off unify_action); it exists only so the deployed checkpoint is self-contained.
+# The reader writes meta/normalization_stats.npy in the raw-27 space (eef20 +
+# base3 + trunk4) and the trainer copies it into the checkpoint dir; at deploy,
+# _build_normalizer selects the stats sub-dict by this action_mode key to
+# un-normalize the model's actions back to physical units — the deploy side first
+# gathers the model's 80-D unified output back to raw-27, THEN denormalizes against
+# these stats (PR #17 _UnifyAwareNormalizer). The reader itself ignores this field
+# (it keys off unify_action); it exists only so the deployed checkpoint is
+# self-contained.
+# NOTE: this is NOT a representation switch like RoboTwin's action_mode={joint,eef}
+# — the reader ignores it for representation selection. A *joint* action mode is
+# N/A for BEHAVIOR: the dataset has no arm-qpos column (native action[23] carries
+# only base/trunk/gripper commands) and the R1Pro arms are EEF/IK-commanded, so EEF
+# (xyz+rot6d, wrapped to the unified-80 space here) is the only supported representation.
 action_mode: unified
 
 # ── Data budget (optional) ──────────────────────────────────────────────────
