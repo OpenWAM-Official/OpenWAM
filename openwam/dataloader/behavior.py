@@ -29,13 +29,36 @@ base[68:71] and trunk[71:75] carry real data.
 Raw 27-D pre-scatter vector (action & proprio):
   [L_pos(3), L_rot6d(6), L_grip(1), R_pos(3), R_rot6d(6), R_grip(1), base_vel(3), trunk(4)]
 
-Action/state temporal alignment:
+Action/state temporal alignment (eef/unified):
   The EEF *action target* at window step t is the NEXT-frame achieved pose
   ``eef(state[t+1])`` (shifted +1, last step clamped → T_action = num_frames-1
   targets, matching the other readers). The gripper command (``action[:,14/22]``,
   binary {-1,+1}, +1=open), base velocity (``action[:,0:3]``) and torso joints
   (``action[:,3:7]``) are taken at t (row-aligned commands). Proprio is the
   current-frame (t=0) pose + commands.
+
+Action modes (``action_mode`` in the yaml; selects the *representation*):
+  * ``unified`` (default) — EEF, scattered into the shared 80-D space when
+    ``unify_action: true`` (the colleague's unify-80d path; everything above).
+  * ``eef``     — the same raw 27-D EEF vector, but emitted directly (no unify
+    scatter), all dims visible.
+  * ``joint``   — raw 23-D ``[L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]``
+    read straight from the native ``action[23]`` JointController setpoints (the
+    7+7 arm-joint columns the eef path discards), row-aligned, all dims visible.
+    Incompatible with ``unify_action: true`` (the unified space is EEF-semantic).
+
+Dimension ordering & masks (family convention 「左臂+夹爪 / 右臂+夹爪 / 其他」):
+  Every mode orders dims as L-arm(+grip), R-arm(+grip), then the "其他" tail. The
+  tail is laid out **base(底盘) then trunk(腰)** — a fixed internal convention.
+  This is set-equivalent to the rubric's 「其他(腰部/移动底盘)」 (only the
+  within-tail order differs, base-first vs torso-first), and the same order is
+  kept byte-for-byte across the reader, ``stats_R1Pro.json``, the
+  ``unify_action_map`` and the deploy denormalizer, so it never has to be
+  re-derived and the choice is harmless. Masks: ``eef`` / ``joint`` emit every
+  dim visible (the no-mask joint/eef rule); ``unified`` instead follows the unify
+  rule — only the mapped slots are valid, the unmapped dexterous-hand + reserved
+  tail slots stay masked (this is the unified mode's own contract, not a
+  violation of the joint/eef "all visible" rule).
 """
 
 from __future__ import annotations
@@ -60,9 +83,17 @@ _L_EEF_QUAT = slice(189, 193)  # xyzw
 _R_EEF_POS = slice(225, 228)
 _R_EEF_QUAT = slice(228, 232)  # xyzw
 # ── action[23] layout (OmniGibson ACTION_QPOS_INDICES['R1Pro']) ──
+# Native recorded action = JointController setpoints, layout (validated on real
+# data, see _ACT_* slices): [base_vel3, trunk4, L_arm7, L_grip1, R_arm7, R_grip1].
+# The eef/unified path discards the 7+7 native arm-joint columns and reconstructs
+# an EEF pose from observation.state quaternions; the joint path reads them
+# directly (so BEHAVIOR *does* carry arm qpos — joint mode is a real, supported
+# representation, not "no data").
 _ACT_BASE = slice(0, 3)  # [vx, vy, vyaw] base-frame velocity
 _ACT_TRUNK = slice(3, 7)  # 4 absolute torso joint targets
+_ACT_LARM = slice(7, 14)  # 7 left-arm joint targets (joint mode only)
 _ACT_LGRIP = 14
+_ACT_RARM = slice(15, 22)  # 7 right-arm joint targets (joint mode only)
 _ACT_RGRIP = 22
 
 # Raw pre-scatter width: EEF 20 (pos3+rot6d6+grip1 ×2) + base velocity 3 + trunk 4.
@@ -73,6 +104,20 @@ _EEF_DIM = EEF_DIM
 _BASE_DIM = 3
 _TRUNK_DIM = 4
 _RAW_DIM = _EEF_DIM + _BASE_DIM + _TRUNK_DIM
+
+# Joint-mode raw width: arm block 16 ([L_arm7, L_grip1, R_arm7, R_grip1]) + base 3
+# + trunk 4 = 23, i.e. the native action[23] re-ordered to the family convention
+# 左臂+夹爪 / 右臂+夹爪 / 其他(底盘+腰). No rot6d, no mask (every dim is real).
+_ARM_JOINT_DIM = 16
+_JOINT_DIM = _ARM_JOINT_DIM + _BASE_DIM + _TRUNK_DIM
+
+# Multiview L-shape canvas size (head 256x320 top + L/R wrist 128x160 bottom =
+# 384x320). The base reader's assemble_multiview_layout scales to ANY (h, w), so a
+# wrong multiview size does not crash — it silently yields a non-standard canvas
+# that breaks mixture collation with robocoin/robotwin. _post_init hard-enforces
+# this size in multiview mode. Single-view (multiview=false) is unconstrained
+# (e.g. a 256x320 ego frame).
+_MULTIVIEW_H, _MULTIVIEW_W = 384, 320
 
 # R1Pro RGB camera feature keys (depth / seg_instance are intentionally ignored).
 _HEAD_CAMERA = "observation.images.rgb.head"
@@ -100,9 +145,26 @@ def _assemble_raw(
 ) -> np.ndarray:
     """Interleave grippers + base + trunk into the canonical raw 27-D layout
     ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]``."""
-    return np.concatenate(
-        [eef18[:, 0:9], l_grip, eef18[:, 9:18], r_grip, base, trunk], axis=-1
-    ).astype(np.float32)
+    return np.concatenate([eef18[:, 0:9], l_grip, eef18[:, 9:18], r_grip, base, trunk], axis=-1).astype(np.float32)
+
+
+def _assemble_arm_joint(l_arm: np.ndarray, l_grip: np.ndarray, r_arm: np.ndarray, r_grip: np.ndarray) -> np.ndarray:
+    """Interleave the native arm-joint targets + grippers into the 16-D arm block
+    ``[L_arm7, L_grip1, R_arm7, R_grip1]`` (joint mode)."""
+    return np.concatenate([l_arm, l_grip, r_arm, r_grip], axis=-1).astype(np.float32)
+
+
+def _assemble_joint(
+    l_arm: np.ndarray,
+    l_grip: np.ndarray,
+    r_arm: np.ndarray,
+    r_grip: np.ndarray,
+    base: np.ndarray,
+    trunk: np.ndarray,
+) -> np.ndarray:
+    """Joint-mode raw 23-D layout ``[L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]``
+    — the native ``action[23]`` re-ordered to the 左臂+夹爪 / 右臂+夹爪 / 其他 convention."""
+    return np.concatenate([_assemble_arm_joint(l_arm, l_grip, r_arm, r_grip), base, trunk], axis=-1).astype(np.float32)
 
 
 class BehaviorDataset(LeRobotV3Reader):
@@ -110,24 +172,79 @@ class BehaviorDataset(LeRobotV3Reader):
 
     DATASET_NAME = "BEHAVIOR"
     NEEDED_COLS = _NEEDED_COLS
-    # Raw pre-scatter width (eef20 + base3 + trunk4). With unify_action=True the
-    # public ACTION_DIM becomes UNIFY_DIM (80); _raw_action_dim stays 27 (read from
-    # this instance attr by the base before it resets ACTION_DIM → see base __init__).
+    # Raw pre-scatter width. eef/unified → 27 (eef20 + base3 + trunk4); joint → 23
+    # (arm16 + base3 + trunk4). Set per-instance in __init__ BEFORE super().__init__
+    # (the base reads self.ACTION_DIM into _raw_action_dim, then — under unify —
+    # resets the public ACTION_DIM to UNIFY_DIM 80). The class default is the eef
+    # width so the type-level attr stays meaningful.
     ACTION_DIM = _RAW_DIM
-    # All 27 raw dims are real → leave ACTION_DIM_MASK None; under unify the
-    # scattered _unify_dim_mask marks exactly the mapped slots {0:10, 34:44,
-    # 68:71, 71:75} valid and everything else (dex, reserved tail) masked.
+    # Every raw dim is real → leave ACTION_DIM_MASK None (all-visible mask in
+    # eef/joint mode). Under unify the scattered _unify_dim_mask marks exactly the
+    # mapped slots {0:10, 34:44, 68:71, 71:75} valid and masks the rest (dex, tail).
     ACTION_DIM_MASK = None
     # Prompt is per-episode in meta/episodes.jsonl (no tasks.parquet).
     PROMPT_SOURCE = "episode_annotated"
     DEFAULT_NORMALIZE_MODE = "quantile"
     # Tolerate any wrist-camera decode failure (→ black slot), mirroring RoboCOIN.
     WRIST_DECODE_TOLERATED = (Exception,)
-    # Deploy stats key (behavior.yaml sets action_mode=unified). _load_stats writes
-    # the RAW-27 stats under this key via the shared base _write_deploy_normalizer_stats;
-    # at deploy the server's _UnifyAwareNormalizer gathers the model's 80-D output back
-    # to raw THEN unnormalizes against them (PR #17).
+    # Deploy stats key. Set per-instance in __init__ to the literal action_mode
+    # ("unified"/"eef"/"joint") so the meta/normalization_stats.npy key the reader
+    # writes always equals cfg.dataloader.action_mode the deploy side reads back.
     DEPLOY_ACTION_MODE = "unified"
+
+    # from_config forwards these yaml keys to __init__; we extend the base set with
+    # action_mode (the base treats it as inert, BEHAVIOR uses it to pick the
+    # action representation).
+    CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("action_mode",)
+
+    def __init__(self, dataset_dir, *, action_mode: str = "unified", **kwargs):
+        """``action_mode`` selects the action/proprio *representation*. The three
+        modes are mutually exclusive — each pins ``unify_action`` (validated below),
+        so the representation, the emitted width, and the deploy stats key can never
+        silently disagree:
+
+          * ``"unified"`` (default) — EEF scattered into the shared 80-D space; the
+            colleague's unify-80d path. **Requires ``unify_action: true``.** RAW
+            pre-scatter width 27. **Unchanged** from before.
+          * ``"eef"`` — raw EEF 27-D ``[L_pos3,L_rot6d6,L_grip1,R_pos3,R_rot6d6,
+            R_grip1,base3,trunk4]``, all-visible mask. **Requires ``unify_action:
+            false``** (otherwise it would be ``unified``).
+          * ``"joint"`` — raw joint 23-D ``[L_arm7,L_grip1,R_arm7,R_grip1,base3,
+            trunk4]`` from the native ``action[23]`` JointController setpoints,
+            all-visible mask. **Requires ``unify_action: false``** (the unified space
+            is EEF-semantic — xyz+rot6d per arm — so joint angles cannot map into it).
+
+        Case-sensitive: the value is also the deploy ``normalization_stats.npy`` key
+        (== ``cfg.dataloader.action_mode`` read back at deploy), so an off-case value
+        like ``"Joint"`` is rejected rather than silently disabling normalization.
+        """
+        valid = ("unified", "eef", "joint")
+        am = "unified" if action_mode is None else action_mode
+        if am not in valid:
+            raise ValueError(
+                f"BEHAVIOR: action_mode must be one of {valid} (lowercase, case-sensitive), got {action_mode!r}."
+            )
+        # Representation: "unified" and "eef" both emit the EEF raw vector ("unified"
+        # additionally scatters to 80-D via the base); "joint" emits the native joint
+        # vector. Deploy stats key = the exact value (npy-key == cfg.action_mode invariant).
+        self._action_mode = "joint" if am == "joint" else "eef"
+        self.DEPLOY_ACTION_MODE = am
+        # Enforce the mode↔unify pairing so the three modes stay mutually exclusive
+        # (a user overriding only action_mode off the unify_action=true default yaml
+        # would otherwise get a representation that disagrees with the stats key).
+        unify_on = bool(kwargs.get("unify_action", False))
+        if am == "unified" and not unify_on:
+            raise ValueError(
+                "BEHAVIOR: action_mode='unified' requires unify_action=true (the 80-D EEF scatter). "
+                "For the raw EEF vector without scatter use action_mode='eef'."
+            )
+        if am in ("eef", "joint") and unify_on:
+            raise ValueError(
+                f"BEHAVIOR: action_mode={am!r} requires unify_action=false (no 80-D scatter) — "
+                f"the unified 80-D space is EEF-semantic. For the unified path use action_mode='unified'."
+            )
+        self.ACTION_DIM = _JOINT_DIM if am == "joint" else _RAW_DIM  # joint 23 / eef 27; base reads this
+        super().__init__(dataset_dir, **kwargs)
 
     # ----- hooks ------------------------------------------------------------
 
@@ -245,8 +362,20 @@ class BehaviorDataset(LeRobotV3Reader):
         self._episode_idx_to_text = getattr(self, "_ep_prompt", {})
 
     def _post_init(self, info: dict) -> None:
-        """Rewrite v2.1 path templates to the base's ``{chunk_index}/{file_index}``
-        placeholders, and sanity-check the (reverse-engineered) quat offsets."""
+        """Validate the multiview canvas size, rewrite v2.1 path templates to the
+        base's ``{chunk_index}/{file_index}`` placeholders, and sanity-check the
+        (reverse-engineered) quat offsets."""
+        # Multiview is the fixed L-shape canvas (head 256x320 + 2 wrists 128x160 =
+        # 384x320). assemble_multiview_layout scales to any (h, w) so a wrong size
+        # would not crash, just silently break mixture collation — so fail fast.
+        # Single-view (multiview=false) is unconstrained (e.g. a 256x320 ego frame).
+        if self._multiview and (self._height, self._width) != (_MULTIVIEW_H, _MULTIVIEW_W):
+            raise ValueError(
+                f"BEHAVIOR({self._dataset_id}): multiview mode requires height={_MULTIVIEW_H}, "
+                f"width={_MULTIVIEW_W} (the fixed L-shape canvas), got height={self._height}, "
+                f"width={self._width}. For an arbitrary-size single ego frame (e.g. 256x320) "
+                f"set multiview: false."
+            )
         # info.json templates use {episode_chunk}/{episode_index}; the base formats
         # with chunk_index=/file_index=. Our eps df sets chunk_index=task chunk,
         # file_index=episode_index, so renaming the placeholders makes the inherited
@@ -283,11 +412,13 @@ class BehaviorDataset(LeRobotV3Reader):
                 ) from e
 
     def _load_stats(self, info: dict):
-        """Load ``meta/stats_R1Pro.json`` → combined 27-D (eef20 + base_vel3 + trunk4) stats.
+        """Load ``meta/stats_R1Pro.json`` → combined raw stats for the active mode.
 
-        Mirrors RoboCOIN's per-robot-type stats, with rot6d pinned to identity in
-        the stats file (see behavior_stats_computation). The base velocity + trunk
-        blocks are BEHAVIOR-specific additions (no rot6d pin; real stats)."""
+        eef/unified → 27-D ``[eef20, base_vel3, trunk4]`` (rot6d pinned to identity
+        in the stats file, see behavior_stats_computation). joint → 23-D
+        ``[arm_joint16, base_vel3, trunk4]`` (no rot6d, no pin; ``arm_joint`` is the
+        BEHAVIOR-specific joint block). The base_vel + trunk blocks are shared by
+        both modes (same native columns)."""
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             return None
         stats_path = self._dataset_dir / "meta" / "stats_R1Pro.json"
@@ -299,13 +430,6 @@ class BehaviorDataset(LeRobotV3Reader):
             )
         with open(stats_path) as f:
             raw = json.load(f)
-        eef = materialize_eef_stats(
-            raw.get("eef", {}),
-            self._normalize_mode,
-            dim=_EEF_DIM,
-            strict_minmax=False,
-            source_hint=f"{stats_path}: eef.*",
-        )
         base = materialize_eef_stats(
             raw.get("base_vel", {}),
             self._normalize_mode,
@@ -321,41 +445,87 @@ class BehaviorDataset(LeRobotV3Reader):
             source_hint=f"{stats_path}: trunk.*",
         )
         keys = ("mean", "std", "min", "max", "q01", "q99")
-        for blk, name, dim in ((eef, "eef", _EEF_DIM), (base, "base_vel", _BASE_DIM), (trunk, "trunk", _TRUNK_DIM)):
+        if self._action_mode == "joint":
+            if "arm_joint" not in raw:
+                raise KeyError(
+                    f"BEHAVIOR({self._dataset_id}): action_mode='joint' needs the 'arm_joint' stats "
+                    f"block, absent from {stats_path}. Re-run behavior_stats_computation "
+                    f"--dataset_dir {self._dataset_dir} (it now emits arm_joint alongside eef)."
+                )
+            arm = materialize_eef_stats(
+                raw.get("arm_joint", {}),
+                self._normalize_mode,
+                dim=_ARM_JOINT_DIM,
+                strict_minmax=False,
+                source_hint=f"{stats_path}: arm_joint.*",
+            )
+            head, head_name, head_dim = arm, "arm_joint", _ARM_JOINT_DIM
+        else:
+            head = materialize_eef_stats(
+                raw.get("eef", {}),
+                self._normalize_mode,
+                dim=_EEF_DIM,
+                strict_minmax=False,
+                source_hint=f"{stats_path}: eef.*",
+            )
+            head_name, head_dim = "eef", _EEF_DIM
+        for blk, name, dim in (
+            (head, head_name, head_dim),
+            (base, "base_vel", _BASE_DIM),
+            (trunk, "trunk", _TRUNK_DIM),
+        ):
             for k in keys:
                 if blk[k].shape[0] != dim:
                     raise ValueError(
                         f"BEHAVIOR({self._dataset_id}): '{name}' stats '{k}' width {blk[k].shape[0]} "
                         f"in {stats_path} != expected {dim}. Re-run behavior_stats_computation."
                     )
-        combined = {k: np.concatenate([eef[k], base[k], trunk[k]]).astype(np.float32) for k in keys}
-        # Emit the deploy denormalizer artifact (meta/normalization_stats.npy) in
-        # RAW action space (eef20 + base3 + trunk4). At deploy the policy server's
-        # _UnifyAwareNormalizer gathers the model's 80-D unified output back to these
-        # 27 raw dims, THEN unnormalizes against them (PR #17). The trainer copies
-        # normalization_stats_path into the checkpoint dir. Driven by the shared base
-        # helper + DEPLOY_ACTION_MODE (no BEHAVIOR-specific scatter).
+        combined = {k: np.concatenate([head[k], base[k], trunk[k]]).astype(np.float32) for k in keys}
+        # Emit the deploy denormalizer artifact (meta/normalization_stats.npy) in RAW
+        # action space, keyed by DEPLOY_ACTION_MODE: eef/unified → 27-D (eef20 + base3
+        # + trunk4), joint → 23-D (arm_joint16 + base3 + trunk4). For the unified ckpt
+        # the policy server's _UnifyAwareNormalizer gathers the model's 80-D output back
+        # to the 27 raw dims THEN unnormalizes (PR #17); eef/joint deploy unnormalize the
+        # raw width directly (no scatter). The trainer copies normalization_stats_path
+        # into the checkpoint dir. Driven by the shared base helper + DEPLOY_ACTION_MODE.
         self._write_deploy_normalizer_stats(combined, keys)
         return combined
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
-        """Apply per-bucket normalization to a ``(..., 27)`` raw vector (no-op when
-        normalize_mode is null / stats absent)."""
+        """Apply per-bucket normalization to a raw vector — ``(..., 27)`` in eef/unified
+        mode, ``(..., 23)`` in joint mode (no-op when normalize_mode is null / stats
+        absent). Stats width matches via the action_mode branch in _load_stats."""
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
 
     # ----- action / proprio -------------------------------------------------
 
     def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
-        """We shift the EEF target +1 frame (``eef_next``). The last row of a window
-        is a real target only when a later frame exists; at an episode boundary
-        (``actual_raw_len < num_frames``) it is clamped to the current pose (a
-        fabricated zero-motion target) → exclude it from the supervised mask."""
+        """eef/unified mode shifts the EEF target +1 frame (``eef_next``): the last
+        row of a boundary window (``actual_raw_len < num_frames``) is clamped to the
+        current pose (a fabricated zero-motion target) → drop it from the supervised
+        mask. Joint mode reads the *native* command at t (row-aligned, no shift), so
+        every present row is a real target → fall back to the base default."""
+        if self._action_mode == "joint":
+            return super()._n_supervised_action_steps(actual_raw_len)
         return actual_raw_len if actual_raw_len >= self._num_frames else actual_raw_len - 1
 
     def _action_20d(self, win) -> np.ndarray:
-        """Raw ``(actual_raw_len, 27)`` action: next-frame EEF pose + grip/base/trunk cmd at t."""
-        state = np.stack(win["observation.state"].values).astype(np.float32)  # (L, 256)
+        """Raw normalized action: ``(actual_raw_len, 27)`` next-frame EEF pose +
+        grip/base/trunk cmd (eef/unified), or ``(actual_raw_len, 23)`` native
+        joint setpoints at t (joint)."""
         action = np.stack(win["action"].values).astype(np.float32)  # (L, 23) native
+        if self._action_mode == "joint":
+            # Native JointController setpoints at t (row-aligned command, no +1 shift).
+            raw = _assemble_joint(
+                action[:, _ACT_LARM],
+                action[:, _ACT_LGRIP : _ACT_LGRIP + 1],
+                action[:, _ACT_RARM],
+                action[:, _ACT_RGRIP : _ACT_RGRIP + 1],
+                action[:, _ACT_BASE],
+                action[:, _ACT_TRUNK],
+            )
+            return self._normalize_array(raw)
+        state = np.stack(win["observation.state"].values).astype(np.float32)  # (L, 256)
         eef = _state_to_eef18(state)  # (L, 18) current-frame poses
         # action target = next-frame achieved pose (shift +1; clamp the last step,
         # which T_action = num_frames-1 drops for a full window anyway).
@@ -370,9 +540,24 @@ class BehaviorDataset(LeRobotV3Reader):
         return self._normalize_array(raw)
 
     def _proprio_20d(self, win) -> np.ndarray:
-        """Raw ``(1, 27)`` proprio: current-frame (t=0) EEF pose + grip/base/trunk cmd."""
-        state = np.stack(win["observation.state"].values[:1]).astype(np.float32)  # (1, 256)
+        """Raw normalized proprio at the window start (t=0): ``(1, 27)`` current-frame
+        EEF pose + grip/base/trunk cmd (eef/unified), or ``(1, 23)`` native joint
+        setpoints (joint). The joint arm proprio uses the t=0 command as a proxy for
+        achieved qpos — consistent with how the eef path sources its base/trunk/grip
+        proprio from commands; achieved arm-qpos offsets in observation.state[256]
+        are not yet reverse-engineered."""
         action = np.stack(win["action"].values[:1]).astype(np.float32)  # (1, 23) native
+        if self._action_mode == "joint":
+            raw = _assemble_joint(
+                action[:, _ACT_LARM],
+                action[:, _ACT_LGRIP : _ACT_LGRIP + 1],
+                action[:, _ACT_RARM],
+                action[:, _ACT_RGRIP : _ACT_RGRIP + 1],
+                action[:, _ACT_BASE],
+                action[:, _ACT_TRUNK],
+            )
+            return self._normalize_array(raw)
+        state = np.stack(win["observation.state"].values[:1]).astype(np.float32)  # (1, 256)
         eef = _state_to_eef18(state)  # (1, 18)
         raw = _assemble_raw(
             eef,

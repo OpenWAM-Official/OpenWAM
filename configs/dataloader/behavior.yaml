@@ -15,11 +15,15 @@ video_stride: 4
 window_stride: 1
 
 # ── Image size / multiview ──────────────────────────────────────────────────
-# multiview=true → L-shape canvas (head 256x320 top, L/R wrist 128x160 bottom);
-# height MUST be 384, width 320. Head cam = observation.images.rgb.head (720^2),
-# wrists = observation.images.rgb.{left,right}_wrist (480^2).
-# multiview=false → single ego (head) frame at (height, width); for a 256x320 ego
-# also set height to 256 (keep width 320), else the default 384 yields a 384x320 ego.
+# Two modes:
+#   multiview: true  → L-shape canvas (head 256x320 top, L/R wrist 128x160 bottom).
+#       height MUST be 384 and width 320 (the fixed canvas) — the reader fails fast
+#       on any other size in multiview mode. A missing wrist stream is blacked out.
+#   multiview: false → single ego (head) frame at exactly (height, width), no canvas.
+#       For the spec's 256x320 single-view ego: set multiview: false, height: 256,
+#       width: 320 (wrist streams are ignored). Any (height, width) is allowed here.
+# Head cam = observation.images.rgb.head (720^2),
+# wrists    = observation.images.rgb.{left,right}_wrist (480^2).
 height: 384
 width: 320
 multiview: true
@@ -68,20 +72,37 @@ enable_action_supervision: true
 unify_action: true
 unify_action_map: ["0-9", "34-43", "68-70", "71-74"]
 
-# ── Deploy normalizer selector (training-inert) ─────────────────────────────
-# The reader writes meta/normalization_stats.npy in the raw-27 space (eef20 +
-# base3 + trunk4) and the trainer copies it into the checkpoint dir; at deploy,
-# _build_normalizer selects the stats sub-dict by this action_mode key to
-# un-normalize the model's actions back to physical units — the deploy side first
-# gathers the model's 80-D unified output back to raw-27, THEN denormalizes against
-# these stats (PR #17 _UnifyAwareNormalizer). The reader itself ignores this field
-# (it keys off unify_action); it exists only so the deployed checkpoint is
-# self-contained.
-# NOTE: this is NOT a representation switch like RoboTwin's action_mode={joint,eef}
-# — the reader ignores it for representation selection. A *joint* action mode is
-# N/A for BEHAVIOR: the dataset has no arm-qpos column (native action[23] carries
-# only base/trunk/gripper commands) and the R1Pro arms are EEF/IK-commanded, so EEF
-# (xyz+rot6d, wrapped to the unified-80 space here) is the only supported representation.
+# ── Action representation mode ──────────────────────────────────────────────
+# Selects the action/proprio representation the reader emits (BEHAVIOR's three
+# action modes). It ALSO names the meta/normalization_stats.npy stats sub-dict the
+# reader writes and the deploy side reads back (the two must match), so this value
+# is baked into the checkpoint config → self-contained deploy.
+#   unified — EEF (xyz+rot6d per arm), scattered into the shared 80-D space when
+#             unify_action: true (the default cross-robot path; raw 27 = eef20 +
+#             base3 + trunk4). At deploy _build_normalizer gathers the model's 80-D
+#             output back to raw-27 THEN denormalizes (PR #17 _UnifyAwareNormalizer).
+#   eef     — the same raw 27-D EEF vector emitted directly (no unify scatter),
+#             all dims visible. Set unify_action: false.
+#   joint   — raw 23-D [L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4] read
+#             straight from the native action[23] JointController setpoints
+#             (左臂+夹爪 / 右臂+夹爪 / 其他 order), all dims visible. Set
+#             unify_action: false (joint angles are NOT meaningful in the 80-D
+#             EEF-semantic unified space → joint + unify_action: true is rejected).
+#             Needs the 'arm_joint' stats block → re-run behavior_stats_computation.
+# NOTE: BEHAVIOR's native action[23] DOES carry 7+7 arm-joint columns
+# (action[7:14] / [15:22]); the eef/unified path deliberately discards them and
+# reconstructs an EEF pose from observation.state quaternions (then lets OmniGibson
+# IK recover joints at deploy). joint mode reads those native columns directly — so
+# all three modes are genuinely supported, joint is a design alternative not a
+# data gap. Mirrors RoboTwin's action_mode={joint,eef} switch (extended with the
+# unified-80d alias for the cross-robot default).
+#
+# Dim order (family convention 「左臂+夹爪 / 右臂+夹爪 / 其他」): every mode orders
+# dims L_arm(+grip) / R_arm(+grip) / 其他 tail. The 其他 tail is base(底盘) then
+# trunk(腰) — a fixed internal order, set-equal to the rubric's 「其他(腰部/移动底
+# 盘)」 (only the within-tail order differs), kept identical across reader + stats
+# + unify_action_map + deploy. Masks: joint/eef emit all dims visible (no mask);
+# unified follows the unify rule (only mapped slots valid, dex + reserved masked).
 action_mode: unified
 
 # ── Data budget (optional) ──────────────────────────────────────────────────

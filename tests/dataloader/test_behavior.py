@@ -25,9 +25,13 @@ from PIL import Image
 
 from openwam.dataloader.behavior import (
     _ACT_BASE,
+    _ACT_LARM,
     _ACT_LGRIP,
+    _ACT_RARM,
     _ACT_RGRIP,
     _ACT_TRUNK,
+    _ARM_JOINT_DIM,
+    _JOINT_DIM,
     _L_EEF_POS,
     _L_EEF_QUAT,
     _R_EEF_POS,
@@ -290,6 +294,74 @@ class TestGetItem:
         assert not am[1:].any()  # clamped final step is masked out
 
 
+# ── single-view (ego-only) vs multiview canvas --------------------------------
+
+
+class TestSingleView:
+    """multiview=false → a single ego (head) frame at exactly (height, width); the
+    spec's single-view mode is 256x320. multiview=true is locked to the 384x320
+    L-shape canvas (the reader rejects any other multiview size)."""
+
+    def test_single_view_256x320_ego(self, tmp_path):
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            ds = BehaviorDataset(
+                dataset_dir=str(b),
+                height=256,
+                width=320,
+                multiview=False,
+                unify_action=True,
+                unify_action_map=UNIFY_MAP,
+                normalize_mode=None,
+            )
+            s = ds[0]
+        assert ds._multiview is False
+        # plain ego frames, no L-shape canvas; PIL size is (W, H) = (320, 256)
+        assert len(s["video"]) == 9  # (33-1)//4 + 1, same window as multiview
+        assert all(f.size == (320, 256) for f in s["video"])
+
+    def test_single_view_from_config_256x320(self, tmp_path):
+        # The yaml single-view recipe (multiview:false + 256x320) threads through.
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        cfg = {
+            "type": "behavior",
+            "dataset_dir": str(b),
+            "multiview": False,
+            "height": 256,
+            "width": 320,
+            "normalize_mode": None,
+            "unify_action": True,
+            "unify_action_map": UNIFY_MAP,
+        }
+        with _mock_video_decoder():
+            ds = BehaviorDataset.from_config(cfg, split="train")
+            s = ds[0]
+        assert ds._multiview is False
+        assert s["video"][0].size == (320, 256)
+
+    def test_multiview_wrong_size_rejected(self, tmp_path):
+        # multiview is the fixed 384x320 L-shape canvas — any other size fails fast
+        # (a non-standard canvas would silently break mixture collation).
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder(), pytest.raises(ValueError, match="multiview mode requires height"):
+            BehaviorDataset(
+                dataset_dir=str(b),
+                height=256,
+                width=320,
+                multiview=True,
+                unify_action=True,
+                unify_action_map=UNIFY_MAP,
+                normalize_mode=None,
+            )
+
+    def test_multiview_default_size_ok(self, tmp_path):
+        # The 384x320 multiview default is unaffected by the size guard.
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            s = _make_ds(b)[0]
+        assert s["video"][0].size == (320, 384)
+
+
 # ── prompts -------------------------------------------------------------------
 
 
@@ -520,12 +592,13 @@ class TestStatsScript:
 
         b = make_behavior_bucket(tmp_path, n_episodes=3)
         result = compute_behavior_stats(b)
-        assert set(result) == {"eef", "base_vel", "trunk"}
-        eef, base, trunk = result["eef"], result["base_vel"], result["trunk"]
+        assert set(result) == {"eef", "base_vel", "trunk", "arm_joint"}
+        eef, base, trunk, arm = result["eef"], result["base_vel"], result["trunk"], result["arm_joint"]
         for k in ("mean", "std", "min", "max", "q01", "q99"):
             assert len(eef[k]) == 20
             assert len(base[k]) == 3
             assert len(trunk[k]) == 4
+            assert len(arm[k]) == _ARM_JOINT_DIM == 16
         # rot6d dims (3:9 / 13:19) pinned to identity
         assert eef["rot6d_identity"] is True
         for i in (3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 18):
@@ -538,6 +611,9 @@ class TestStatsScript:
         # trunk (torso joints) is NOT pinned either
         assert "rot6d_identity" not in trunk
         assert trunk["layout"] == "torso_joint_abs"
+        # arm_joint block: real stats, NOT pinned (no rot6d in joint mode)
+        assert "rot6d_identity" not in arm
+        assert arm["layout"] == "L_arm7,L_grip1,R_arm7,R_grip1"
 
     def test_no_rot6d_identity_flag(self, tmp_path):
         from openwam.dataloader.utils.stats_computation.behavior_stats_computation import compute_behavior_stats
@@ -580,3 +656,187 @@ class TestFromConfig:
             s = ds[0]
         assert s["action"].shape == (32, 80)
         assert s["proprio"].shape == (1, 80)
+
+
+# ── action modes: joint / eef / unified --------------------------------------
+
+
+def _make_joint_ds(bucket: Path, **kw):
+    """Joint-mode reader: action_mode=joint forces unify off (incompatible)."""
+    kw.setdefault("multiview", True)
+    kw.setdefault("normalize_mode", None)
+    kw["action_mode"] = "joint"
+    kw["unify_action"] = False
+    return BehaviorDataset(dataset_dir=str(bucket), height=384, width=320, **kw)
+
+
+class TestActionModes:
+    """BEHAVIOR's three action modes: unified (default, EEF→80-D), eef (raw 27),
+    joint (raw 23 from the native action[23] JointController setpoints)."""
+
+    def test_joint_shapes_and_all_visible_mask(self, tmp_path):
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            ds = _make_joint_ds(b)
+            s = ds[0]
+        assert ds.action_dim == _JOINT_DIM == 23
+        assert s["action"].shape == (32, 23)
+        assert s["proprio"].shape == (1, 23)
+        # joint/eef rule: NO mask — every dim visible on valid steps.
+        am = s["action_mask"].numpy()
+        assert am.shape == (32, 23)
+        assert am.all()  # all 23 dims valid on all 32 (< EP_LENGTH) steps
+        assert s["proprio_mask"].numpy().all()
+
+    def test_joint_layout_matches_native_action(self, tmp_path):
+        # raw-23 proprio (t=0) = [L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]
+        # built from native action row 0. Recompute the exact synthetic action
+        # (ep 0 → RandomState(100)) and compare value-for-value (normalize off).
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder():
+            p = _make_joint_ds(b)[0]["proprio"].numpy()[0]  # (23,)
+        # Replay the writer's rng: ep 0 uses RandomState(100), and _make_state
+        # consumes it BEFORE _make_action (shared rng) — so advance it identically.
+        rng = np.random.RandomState(100)
+        _make_state(rng, EP_LENGTH)
+        act0 = _make_action(rng, EP_LENGTH)[0]  # native (23,)
+        expected = np.concatenate(
+            [
+                act0[_ACT_LARM],  # 0:7   left arm
+                act0[_ACT_LGRIP : _ACT_LGRIP + 1],  # 7     left gripper
+                act0[_ACT_RARM],  # 8:15  right arm
+                act0[_ACT_RGRIP : _ACT_RGRIP + 1],  # 15    right gripper
+                act0[_ACT_BASE],  # 16:19 base velocity
+                act0[_ACT_TRUNK],  # 19:23 trunk
+            ]
+        ).astype(np.float32)
+        np.testing.assert_allclose(p, expected, rtol=0, atol=1e-6)
+        # grippers land at the interleaved joint-layout slots 7 and 15, binary {-1,+1}
+        assert p[7] in (-1.0, 1.0) and p[15] in (-1.0, 1.0)
+
+    def test_joint_action_is_row_aligned(self, tmp_path):
+        # Joint reads the native command at t (no +1 shift), so the window's step-0
+        # action equals the t=0 proprio (both = native row 0). (eef mode would differ:
+        # action[0] = eef(state[1]) vs proprio = eef(state[0]).)
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder():
+            s = _make_joint_ds(b)[0]
+        np.testing.assert_allclose(s["action"].numpy()[0], s["proprio"].numpy()[0], rtol=0, atol=1e-6)
+
+    def test_joint_uses_native_arm_columns_not_eef(self, tmp_path):
+        # Sanity: the joint arm block must come from action[7:14]/[15:22], NOT the
+        # EEF reconstruction — so it is unaffected by the observation.state quats.
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder():
+            p = _make_joint_ds(b)[0]["proprio"].numpy()[0]
+        rng = np.random.RandomState(100)
+        _make_state(rng, EP_LENGTH)  # advance rng as the writer did before _make_action
+        act0 = _make_action(rng, EP_LENGTH)[0]
+        np.testing.assert_allclose(p[0:7], act0[_ACT_LARM], rtol=0, atol=1e-6)
+        np.testing.assert_allclose(p[8:15], act0[_ACT_RARM], rtol=0, atol=1e-6)
+
+    def test_joint_plus_unify_rejected(self, tmp_path):
+        # joint requires unify_action=false (the 80-D space is EEF-semantic).
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder(), pytest.raises(ValueError, match="requires unify_action=false"):
+            BehaviorDataset(
+                dataset_dir=str(b),
+                height=384,
+                width=320,
+                action_mode="joint",
+                unify_action=True,
+                unify_action_map=UNIFY_MAP,
+            )
+
+    def test_eef_plus_unify_rejected(self, tmp_path):
+        # eef + unify_action=true would silently use the unified 80-D path while the
+        # deploy stats key says 'eef' → the mode contract rejects it.
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder(), pytest.raises(ValueError, match="requires unify_action=false"):
+            BehaviorDataset(
+                dataset_dir=str(b),
+                height=384,
+                width=320,
+                action_mode="eef",
+                unify_action=True,
+                unify_action_map=UNIFY_MAP,
+            )
+
+    def test_unified_without_unify_rejected(self, tmp_path):
+        # unified must pair with unify_action=true (else it is just raw eef).
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder(), pytest.raises(ValueError, match="requires unify_action=true"):
+            BehaviorDataset(dataset_dir=str(b), height=384, width=320, action_mode="unified", unify_action=False)
+
+    def test_invalid_action_mode_rejected(self, tmp_path):
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder(), pytest.raises(ValueError, match="action_mode must be one of"):
+            BehaviorDataset(dataset_dir=str(b), height=384, width=320, action_mode="bogus")
+
+    def test_offcase_action_mode_rejected(self, tmp_path):
+        # Case-sensitive: 'Joint' must NOT silently become 'joint' (deploy looks up
+        # the exact saved string → off-case would disable normalization).
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder(), pytest.raises(ValueError, match="action_mode must be one of"):
+            BehaviorDataset(dataset_dir=str(b), height=384, width=320, action_mode="Joint", unify_action=False)
+
+    def test_eef_mode_raw27_no_mask(self, tmp_path):
+        # action_mode=eef, unify off → raw 27-D EEF, all dims visible.
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            ds = BehaviorDataset(
+                dataset_dir=str(b),
+                height=384,
+                width=320,
+                action_mode="eef",
+                unify_action=False,
+                normalize_mode=None,
+                multiview=True,
+            )
+            s = ds[0]
+        assert ds.action_dim == 27
+        assert s["action"].shape == (32, 27)
+        assert s["proprio"].shape == (1, 27)
+        assert s["action_mask"].numpy().all()  # no mask
+
+    def test_unified_default_unchanged(self, tmp_path):
+        # Regression: action_mode=unified (the default) is byte-identical to before
+        # — EEF scattered into 80-D with the mapped-only mask.
+        b = make_behavior_bucket(tmp_path, n_episodes=2)
+        with _mock_video_decoder():
+            ds = _make_ds(b)  # unify_action=True, action_mode defaults to "unified"
+            s = ds[0]
+        assert ds.action_dim == UNIFY_DIM == 80
+        assert ds._action_mode == "eef"  # representation under unified IS eef
+        assert ds.DEPLOY_ACTION_MODE == "unified"
+        assert sorted(np.where(s["action_mask"].numpy()[0])[0].tolist()) == EXPECTED_VALID
+
+    def test_joint_normalization_loads_arm_joint_block(self, tmp_path):
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        with _mock_video_decoder():
+            ds = _make_joint_ds(b, normalize_mode="quantile")
+            s = ds[0]
+        assert ds._normalization_stats is not None
+        # combined joint stats are 23-D (arm_joint16 + base3 + trunk4)
+        assert ds._normalization_stats["mean"].shape[0] == 23
+        a = s["action"].numpy()
+        assert np.isfinite(a).all()
+        assert (np.abs(a) <= 1.0 + 1e-5).all()  # quantile clips all (no mask) dims
+
+    def test_joint_deploy_stats_key_is_joint(self, tmp_path):
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        with _mock_video_decoder():
+            ds = _make_joint_ds(b, normalize_mode="quantile")
+        raw = np.load(ds.normalization_stats_path, allow_pickle=True).item()
+        assert set(raw) == {"joint"}  # DEPLOY_ACTION_MODE == action_mode
+        assert len(raw["joint"]["mean"]) == 23
+
+    def test_joint_missing_arm_joint_block_raises(self, tmp_path):
+        # An eef-era stats file (no arm_joint block) must fail fast in joint mode.
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        stats_path = b / "meta" / "stats_R1Pro.json"
+        stats = json.loads(stats_path.read_text())
+        del stats["arm_joint"]
+        stats_path.write_text(json.dumps(stats))
+        with _mock_video_decoder(), pytest.raises(KeyError, match="arm_joint"):
+            _make_joint_ds(b, normalize_mode="quantile")
