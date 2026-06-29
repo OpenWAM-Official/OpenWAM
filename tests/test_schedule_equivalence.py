@@ -108,6 +108,22 @@ def test_schedule_independent_streams_decoupled():
     assert v_ts != a_ts
 
 
+def test_schedule_independent_anchors_endpoints():
+    """Endpoints anchored like sync: first sigma=1, last sigma=alpha_shift(1/ns)."""
+    from openwam.deploy.denoise_schedule import _alpha_shift, schedule_independent
+
+    v, a = _two_stub_schedulers()
+    ns, shift = 10, 5.0
+    result = schedule_independent(v, a, num_steps=ns, shift=shift, seed=3)
+    # first sigma == 1 for both streams (matches the sigma=1 initial latent)
+    assert abs(result[0][0] - 1000.0) < 1e-6
+    assert abs(result[0][1] - 1000.0) < 1e-6
+    # last real sigma == alpha_shift(1/ns) for both (matches sync's last step)
+    expected_last = _alpha_shift(1.0 / ns, shift) * 1000.0
+    assert abs(result[-2][0] - expected_last) < 1e-6
+    assert abs(result[-2][1] - expected_last) < 1e-6
+
+
 def test_build_timestep_sampler_default_is_none():
     from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
 

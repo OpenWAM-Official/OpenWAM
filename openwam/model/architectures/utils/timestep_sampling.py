@@ -15,10 +15,22 @@ stays purely uniform and never double-shifts. A ``seed`` makes the draw
 reproducible across runs.
 
 This is the training-time counterpart to the deploy-side
-``schedule_type="independent"`` schedule. Default training behavior is
-unchanged: the trainer only builds a sampler when ``training.timestep_sampling``
-selects one; otherwise ``compute_loss`` keeps its legacy ``torch.randint`` path
-bit-for-bit.
+``schedule_type="independent"`` / ``"variance_shift"`` schedules. Default
+training behavior is unchanged: the trainer only builds a sampler when
+``training.timestep_sampling`` selects one; otherwise ``compute_loss`` keeps its
+legacy ``torch.randint`` path bit-for-bit.
+
+Convention note (easy to trip on): the timesteps returned here are consumed by
+``compute_loss`` as GRID-INDEX positions in ``[0, num_train_timesteps]`` -- a
+*larger* returned value maps to a *higher* scheduler-grid index and thus a
+*lower* sigma (cleaner). This is the OPPOSITE direction to the deploy-side
+``openwam.deploy.denoise_schedule``, where a schedule entry IS the sigma value
+(smaller == cleaner). Both sides are internally consistent; mind the direction
+when comparing train vs inference code. ``VarianceShiftTimestepSampler`` only
+aligns the lead/lag *ordering* with the deploy ``variance_shift`` schedule --
+the exact distribution is the composition with the backbone grid's own
+alpha-shift and carries no ``offset``, so it is order-aligned, not strictly
+point-wise in-distribution.
 """
 
 from __future__ import annotations

@@ -94,12 +94,16 @@ def schedule_independent(
 ) -> Schedule:
     """Each stream follows its own independently sampled timestep trajectory.
 
-    For each stream we draw ``num_steps`` uniform samples in ``[0, 1]``,
-    alpha-shift them with that stream's shift (``shift_video`` for video
-    when set, otherwise ``shift``; ``shift`` for action), sort the
-    resulting sigmas descending, and scale by the scheduler's
-    ``num_train_timesteps`` to obtain the timestep series. Video and action
-    are drawn independently, so the two trajectories are decoupled -- the
+    For each stream we draw ``num_steps`` uniform samples, min-max rescale
+    them to span ``[1/num_steps, 1]`` (anchoring the endpoints to the same
+    range the ``sync`` grid uses -- first sigma == 1, last sigma ==
+    alpha_shift(1/num_steps)), alpha-shift with that stream's shift
+    (``shift_video`` for video when set, otherwise ``shift``; ``shift`` for
+    action), sort descending, and scale by the scheduler's
+    ``num_train_timesteps``. The interior keeps random spacing while the
+    endpoints match ``sync`` (so the sigma=1 initial latent and the final
+    ``(0,0)`` step are both well-posed). Video and action are drawn
+    independently, so the interior trajectories are decoupled -- the
     inference analogue of the independent per-modality timestep sampling
     used at training time (UWM arXiv:2504.02792; Latent Forcing
     arXiv:2602.11401).
@@ -126,9 +130,25 @@ def schedule_independent(
 
     def _stream(scheduler, stream_shift: float) -> List[float]:
         num_train = float(getattr(scheduler, "num_train_timesteps", 1000))
-        # Independent uniform draws, alpha-shifted, sorted high->low so the
-        # stream denoises monotonically from noise toward clean.
-        us = sorted((rng.random() for _ in range(num_steps)), reverse=True)
+        # Independent uniform draws, then min-max rescaled to span the same
+        # ``[1/num_steps, 1]`` range the deterministic ``sync`` grid uses. This
+        # anchors the endpoints: first sigma == alpha_shift(1) == 1 (matches the
+        # sigma=1 initial latent in BaseWAMArchitecture.generate) and last sigma
+        # == alpha_shift(1/num_steps) (so the final (0,0)-sentinel step matches
+        # sync's), while the interior keeps random spacing. Without anchoring,
+        # iid extremes never reach 1/0, leaving a start mismatch and an
+        # unbounded low-sigma gap that hurts quality at small num_steps.
+        us = sorted(rng.random() for _ in range(num_steps))  # ascending
+        lo = 1.0 / num_steps
+        if num_steps == 1:
+            us = [1.0]
+        else:
+            u_min, u_max = us[0], us[-1]
+            if u_max > u_min:
+                us = [lo + (u - u_min) / (u_max - u_min) * (1.0 - lo) for u in us]
+            else:  # degenerate (all draws equal): fall back to the linear grid
+                us = [lo + (1.0 - lo) * i / (num_steps - 1) for i in range(num_steps)]
+        us.sort(reverse=True)  # descending: sigma high -> low
         return [_alpha_shift(u, stream_shift) * num_train for u in us]
 
     v_ts = _stream(video_scheduler, sv)

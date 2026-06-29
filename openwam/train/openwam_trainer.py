@@ -128,9 +128,15 @@ class OpenWAMTrainer:
         # openwam.model.architectures.utils.timestep_sampling.
         from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
 
+        # num_train_timesteps from the action scheduler (matches the
+        # init_training_schedulers(1000) call above); fall back to 1000 for
+        # stub/mock architectures. compute_loss only uses this as a ratio
+        # (t / num_train * num_ts), so a mismatch would be harmless -- reading
+        # it keeps the sampler aligned with the backbone's actual grid.
+        _num_train_ts = int(getattr(getattr(self.architecture, "action_scheduler", None), "num_train_timesteps", 1000))
         self._timestep_sampler = build_timestep_sampler(
             cfg_get(t, "timestep_sampling", None),
-            num_train_timesteps=1000,
+            num_train_timesteps=_num_train_ts,
             seed=cfg_get(t, "timestep_sampling_seed", None),
             lead=cfg_get(t, "timestep_sampling_lead", "action"),
             alpha=cfg_get(t, "timestep_sampling_alpha", 9.0),
