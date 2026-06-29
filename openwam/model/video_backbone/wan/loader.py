@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 
 from openwam.model.video_backbone.wan.models.text_encoder import HuggingfaceTokenizer
-from openwam.model.video_backbone.wan.shared.core.device.npu_compatible_device import get_device_type
+from openwam.model.video_backbone.wan.shared.core.device.torch_device import get_device_type
 from openwam.model.video_backbone.wan.shared.diffusion import FlowMatchScheduler
 from openwam.model.video_backbone.wan.shared.models.model_loader import ModelPool
 

@@ -665,7 +665,7 @@ class RoboTwinDataset(BaseDataset):
             print(f"  Val: exhaustive windows ({len(self._window_index)} samples)")
 
         # ---- Optional pre-encoded text cache (e.g. Cosmos-Reason1 for the
-        # Cosmos25 backbone, pre-computed via
+        # CosmosPredict25 backbone, pre-computed via
         # ``openwam.dataloader.utils.stats_computation.reason1_embedding_computation``). When the
         # cache_dir is set, every sample dict will carry a
         # ``pre_encoded_text`` (L, D) tensor that the architecture threads to

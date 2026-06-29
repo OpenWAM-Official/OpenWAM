@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from openwam.model.video_backbone.base import BlockLoopState
-from openwam.model.video_backbone.cosmos25 import dit_forward
+from openwam.model.video_backbone.cosmos_predict25 import dit_forward
 
 
 class _CountingBlock(nn.Module):

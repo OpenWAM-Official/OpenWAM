@@ -59,7 +59,11 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
-        text_dim = int(self._cfg_get(cfg, "text_dim", 4096))  # Wan T5-XXL context width
+        # Default the action-side raw context width to the loaded backbone's
+        # text_dim (Wan T5-XXL=4096, Cosmos-Predict2.5=1024); explicit cfg/CLI
+        # still wins. Falls back to 4096 when the backbone doesn't expose it.
+        _vb_text_dim = getattr(self.video_backbone, "text_dim", None)
+        text_dim = int(self._cfg_get(cfg, "text_dim", _vb_text_dim or 4096))
         self._init_proprio_context(cfg, text_dim=text_dim)
 
         # FastWAM-Joint compat: action residual hidden_dim may differ from

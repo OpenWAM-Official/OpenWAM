@@ -1,24 +1,24 @@
-"""CPU unit tests for Cosmos25 deploy-artifact contract (Fix #2 v2).
+"""CPU unit tests for CosmosPredict25 deploy-artifact contract (Fix #2 v2).
 
-Cosmos25 follows the same convention as dual_system / shared_backbone for
+CosmosPredict25 follows the same convention as dual_system / shared_backbone for
 the weights it owns: **everything goes into the unified safetensors**, no
 external file copy. Reviewer @d-finite's original complaint
 (`tokenizer.pth` unreachable on a deploy host without `/path/to`) is
 addressed by registering the upstream `Wan2pt1VAEInterface`'s inner
-`WanVAE_` nn.Module as a child of `Cosmos25VideoBackbone` so its params
+`WanVAE_` nn.Module as a child of `CosmosPredict25VideoBackbone` so its params
 flow through `state_dict()`.
 
 These tests pin three guarantees:
 
-1. `Cosmos25VideoBackbone.__init__` registers `vae.model.model` under
+1. `CosmosPredict25VideoBackbone.__init__` registers `vae.model.model` under
    ``vae`` whenever a VAE is supplied, so its params join the
    wrapper's `state_dict()`.
 2. The architecture's full save → load roundtrip restores those weights
    bit-for-bit even when the second wrapper is built with an empty VAE
    shell (mimicking the deploy path where `tokenizer.pth` is absent).
-3. `generate_cosmos25_component_specs` emits a non-empty marker (gating
+3. `generate_cosmos_predict25_component_specs` emits a non-empty marker (gating
    ``deploy/model_loader.py:117-122``'s ``_ckpt_dir`` injection) and
-   ``copy_cosmos25_artifacts`` copies Reason1 structural JSONs.
+   ``copy_cosmos_predict25_artifacts`` copies Reason1 structural JSONs.
 
 The Reason1 text encoder (~16 GB) is also registered under
 ``reason1`` so cache-mode and live-mode checkpoints both carry it in
@@ -31,16 +31,16 @@ import pytest
 import torch
 import torch.nn as nn
 
-from openwam.model.video_backbone.cosmos25.component_specs import (
+from openwam.model.video_backbone.cosmos_predict25.component_specs import (
     _resolve_text_encoder_path,
-    copy_cosmos25_artifacts,
-    generate_cosmos25_component_specs,
+    copy_cosmos_predict25_artifacts,
+    generate_cosmos_predict25_component_specs,
 )
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
 # ----------------------------------------------------------------------
 # Fake Wan2pt1VAEInterface mirrors the shape we register in __init__.
-# Matches the structure used by `tests/test_cosmos25_vae_freeze_and_dtype_plumbing.py`.
+# Matches the structure used by `tests/test_cosmos_predict25_vae_freeze_and_dtype_plumbing.py`.
 # ----------------------------------------------------------------------
 
 
@@ -77,8 +77,8 @@ class _ParamNet(nn.Module):
         self.w = nn.Parameter(torch.zeros(1))
 
 
-def _make_wrapper(vae) -> Cosmos25VideoBackbone:
-    return Cosmos25VideoBackbone(
+def _make_wrapper(vae) -> CosmosPredict25VideoBackbone:
+    return CosmosPredict25VideoBackbone(
         net=_ParamNet(),
         vae=vae,
         text_encoder=None,
@@ -87,7 +87,7 @@ def _make_wrapper(vae) -> Cosmos25VideoBackbone:
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
 
 
@@ -153,7 +153,7 @@ def test_state_dict_roundtrip_loads_vae_weights_into_empty_shell():
 
     1. Train-time wrapper is built with real VAE weights.
     2. ``state_dict()`` is captured and used to populate a fresh wrapper
-       whose VAE was built with random weights (the cosmos25 equivalent of
+       whose VAE was built with random weights (the cosmos_predict25 equivalent of
        ``vae_pth=None`` empty shell).
     3. The two wrappers produce identical VAE inner outputs and the
        restored ``state_dict()`` matches the original entry for entry.
@@ -194,12 +194,12 @@ def test_state_dict_roundtrip_loads_vae_weights_into_empty_shell():
 # ----------------------------------------------------------------------
 
 
-def test_generate_cosmos25_component_specs_emits_marker_when_model_path_valid(tmp_path):
+def test_generate_cosmos_predict25_component_specs_emits_marker_when_model_path_valid(tmp_path):
     """A readable ``model_path`` yields a non-None spec — this is the gate
     that makes ``deploy/model_loader.py`` thread ``_ckpt_dir`` into the
-    adapter, which in turn flips ``build_cosmos25_pipeline`` into empty-shell
+    adapter, which in turn flips ``build_cosmos_predict25_pipeline`` into empty-shell
     deploy mode. The spec content documents that the VAE lives in state_dict."""
-    spec = generate_cosmos25_component_specs(str(tmp_path))
+    spec = generate_cosmos_predict25_component_specs(str(tmp_path))
     assert spec is not None
     assert "components" in spec
     assert spec["components"], "components list must be non-empty to trigger the deploy gate"
@@ -214,7 +214,7 @@ def test_generate_cosmos25_component_specs_emits_marker_when_model_path_valid(tm
 
 def test_pipeline_wrapper_state_dict_contains_reason1_even_when_cache_wins():
     """Cache training still needs Reason1 registered so saves are deploy self-contained."""
-    wrapper = Cosmos25VideoBackbone(
+    wrapper = CosmosPredict25VideoBackbone(
         net=_ParamNet(),
         vae=None,
         text_encoder=_FakeReason1(),
@@ -223,34 +223,34 @@ def test_pipeline_wrapper_state_dict_contains_reason1_even_when_cache_wins():
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
 
     state_keys = list(wrapper.state_dict().keys())
     assert any(k.startswith("reason1.") for k in state_keys)
 
 
-def test_generate_cosmos25_component_specs_returns_none_for_missing_path():
+def test_generate_cosmos_predict25_component_specs_returns_none_for_missing_path():
     """An unreadable ``model_path`` bypasses the deploy gate so fake-pipeline
     tests and offline build paths keep the legacy ``_source`` plumbing."""
-    assert generate_cosmos25_component_specs("/nonexistent/path/cosmos25") is None
-    assert generate_cosmos25_component_specs("") is None
-    assert generate_cosmos25_component_specs(None) is None  # type: ignore[arg-type]
+    assert generate_cosmos_predict25_component_specs("/nonexistent/path/cosmos_predict25") is None
+    assert generate_cosmos_predict25_component_specs("") is None
+    assert generate_cosmos_predict25_component_specs(None) is None  # type: ignore[arg-type]
 
 
 def test_resolve_text_encoder_path_keeps_empty_string_missing():
     assert _resolve_text_encoder_path("") is None
 
 
-def test_copy_cosmos25_artifacts_requires_reason1_path(tmp_path):
+def test_copy_cosmos_predict25_artifacts_requires_reason1_path(tmp_path):
     """Reason1 weights are in safetensors, but structural JSONs must be copied."""
     dst = tmp_path / "ckpt"
     dst.mkdir()
     with pytest.raises(RuntimeError, match="Reason1 artifact source"):
-        copy_cosmos25_artifacts(str(dst), "/anything/at/all")
+        copy_cosmos_predict25_artifacts(str(dst), "/anything/at/all")
 
 
-def test_copy_cosmos25_artifacts_copies_reason1_structural_files(tmp_path):
+def test_copy_cosmos_predict25_artifacts_copies_reason1_structural_files(tmp_path):
     src = tmp_path / "reason1_src"
     src.mkdir()
     (src / "config.json").write_text("{}")
@@ -258,7 +258,7 @@ def test_copy_cosmos25_artifacts_copies_reason1_structural_files(tmp_path):
     dst = tmp_path / "ckpt"
     dst.mkdir()
 
-    copy_cosmos25_artifacts(str(dst), str(src))
+    copy_cosmos_predict25_artifacts(str(dst), str(src))
 
     assert (dst / "reason1" / "config.json").is_file()
     assert (dst / "reason1" / "tokenizer.json").is_file()
@@ -279,7 +279,7 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
       - ``text_encoder`` is **not** ``reason1_live`` in the saved config
         (e.g. cache-mode training left it as ``none``), AND
       - ``components`` contains the ``attr: text_encoder, source: state_dict``
-        marker that ``generate_cosmos25_component_specs`` emits, AND
+        marker that ``generate_cosmos_predict25_component_specs`` emits, AND
       - ``<ckpt_dir>/reason1/`` artifact dir exists.
 
     Under those conditions deploy must clear ``text_encoder_path`` and
@@ -297,7 +297,7 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
                 "framework": "wam",
                 "variant": "shared_backbone_vanilla",
                 "video_backbone": {
-                    "name": "cosmos25_5b",
+                    "name": "cosmos_predict25_5b",
                     "text_encoder": "none",
                     "text_encoder_path": "/path/to/model",
                     "components": [
@@ -359,7 +359,7 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
 
 
 def _backbone_with_reason1(has_reason1: bool, has_vae: bool = True):
-    """A fake Cosmos25VideoBackbone reporting Reason1 / VAE presence.
+    """A fake CosmosPredict25VideoBackbone reporting Reason1 / VAE presence.
 
     ``save_deploy_assets`` reads ``self.text_encoder`` / ``self.vae`` as the
     ground truth for whether those weights are in the checkpoint. Defaults to a
@@ -367,9 +367,9 @@ def _backbone_with_reason1(has_reason1: bool, has_vae: bool = True):
     model a ``vae: none`` training run.
     """
 
-    from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
-    bb = Cosmos25VideoBackbone.__new__(Cosmos25VideoBackbone)
+    bb = CosmosPredict25VideoBackbone.__new__(CosmosPredict25VideoBackbone)
     bb.text_encoder = object() if has_reason1 else None
     # ``save_deploy_assets`` gates the vae component on the registered ``vae``
     # child (present iff its weights are in the state_dict). Mirror the real

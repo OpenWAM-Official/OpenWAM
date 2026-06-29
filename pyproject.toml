@@ -56,75 +56,33 @@ where = ["./"]
 include = ["openwam", "openwam.*"]
 
 [project.optional-dependencies]
-# CUDA backend. Re-declares torch/torchvision so [tool.uv.sources] can route
-# them to the cu128 index (a uv source `extra = "cuda"` requires the package
-# to appear in this extra). cu128 is required for Blackwell (sm_120) GPUs.
-# Install with: `uv sync --extra cuda --extra dev`.
+# CUDA backend. Explicit torch/torchvision pin for GPU hosts. Install the
+# matching CUDA wheels from PyTorch's index, e.g.:
+#   pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e '.[cuda,dev]'
+# cu128 is required for Blackwell (sm_120) GPUs.
 cuda = ["torch>=2.0.0,<3", "torchvision>=0.15,<1"]
-# NOTE: torch-npu==2.7.1 only publishes cp39/cp310/cp311 wheels, but this
-# project sets requires-python>=3.12, so it is gated to <3.12 to keep uv's
-# universal lock resolvable. On 3.12+ these extras install the +cpu torch but
-# NOT torch-npu — i.e. Ascend NPU support currently requires Python <3.12.
-npu_aarch64 = ["torch==2.7.1", "torch-npu==2.7.1; python_version < '3.12'", "torchvision==0.22.1"]
-npu = ["torch==2.7.1+cpu", "torch-npu==2.7.1; python_version < '3.12'", "torchvision==0.22.1+cpu"]
-# Cosmos-Predict2.5 video backbone (Cosmos25VideoBackbone).
+# Cosmos-Predict2.5 video backbone (CosmosPredict25VideoBackbone).
 #
-# The cosmos-oss / cosmos-cuda / cosmos-predict2 distributions live as a uv
-# workspace in the upstream repo and are not published on PyPI as standalone
-# wheels (cosmos-oss==0.1.0 resolves to "no matching distribution found").
-# We track upstream as a git submodule at third_party/cosmos-predict2.5/
-# (pinned to tag v1.5.2, commit 441b8974) and install it via
-# scripts/install_cosmos25.sh — pip does not support relative paths in
-# pyproject.toml dependencies, so this extra stays empty as documentation
-# only. CPU-only CI continues to pass without it because
-# openwam/model/video_backbone/cosmos25/ lazy-imports cosmos_predict2 inside
-# build_cosmos25_pipeline.
+# The cosmos-oss / cosmos-cuda / cosmos-predict2 distributions are not published
+# on PyPI as standalone wheels (cosmos-oss==0.1.0 resolves to "no matching
+# distribution found"). We track upstream as a git submodule at
+# third_party/cosmos-predict2.5/ (pinned to tag v1.5.2, commit 441b8974) and
+# install it via scripts/install_cosmos_predict25.sh — pip does not support
+# relative paths in pyproject.toml dependencies, so this extra stays empty as
+# documentation only. CPU-only CI continues to pass without it because
+# openwam/model/video_backbone/cosmos_predict25/ lazy-imports cosmos_predict2
+# inside build_cosmos_predict25_pipeline.
 #
 # To install on a CUDA host (also needs CUDA toolkit + cuDNN headers for
 # transformer-engine to compile):
 #     git submodule update --init third_party/cosmos-predict2.5
-#     bash scripts/install_cosmos25.sh
-cosmos25 = []
-# Dev / test toolchain — pytest is referenced by Makefile (`make test`) and
-# tests/conftest.py; ruff drives `make lint` / `make format`.
+#     bash scripts/install_cosmos_predict25.sh
+cosmos_predict25 = []
+# Dev / test toolchain — pytest is referenced by Makefile (`make test`) and tests/conftest.py; ruff drives `make lint` / `make format`.
 # Kept out of the base dependencies so non-dev installs stay slim.
 dev = [
     "pytest>=8,<10",
     "ruff>=0.4,<1",
-]
-
-# --- uv configuration -----------------------------------------------------
-# torch / torchvision ship as hardware-specific wheels that are NOT on PyPI:
-#   * base install targets CUDA GPU hosts            -> cu128 index
-#   * the `npu` extra pins `+cpu` local-version wheels -> pytorch-cpu index
-# `torch-npu` itself is on PyPI, so it resolves from the default index.
-# The two NPU extras are declared mutually conflicting so uv's universal lock
-# never tries to satisfy a `+cpu` and a `+cu128` torch at the same time.
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", extra = "npu" },
-    { index = "pytorch-cu128", extra = "cuda" },
-]
-torchvision = [
-    { index = "pytorch-cpu", extra = "npu" },
-    { index = "pytorch-cu128", extra = "cuda" },
-]
-
-[tool.uv]
-# The hardware backends are mutually exclusive; each routes torch to its own
-# index, so they cannot share one resolution.
-conflicts = [
-    [{ extra = "cuda" }, { extra = "npu" }, { extra = "npu_aarch64" }],
 ]
 
 [tool.setuptools]

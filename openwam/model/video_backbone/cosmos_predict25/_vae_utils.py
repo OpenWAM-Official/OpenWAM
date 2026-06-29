@@ -1,12 +1,12 @@
-"""Device/dtype movement helpers for the Cosmos25 plain-object submodules.
+"""Device/dtype movement helpers for the CosmosPredict25 plain-object submodules.
 
 ``Wan2pt1VAEInterface`` (the upstream Cosmos VAE wrapper) and
 :class:`Reason1LiveTextEncoder` are plain Python objects, not ``nn.Module`` s,
 so ``nn.Module.to(...)`` on the surrounding pipeline wrapper does not reach
-them. :meth:`Cosmos25VideoBackbone.set_dtype_device` calls the helpers here to
+them. :meth:`CosmosPredict25VideoBackbone.set_dtype_device` calls the helpers here to
 move their inner ``nn.Module`` plus the auxiliary tensors explicitly.
 
-Lives in its own module (rather than in ``cosmos25_backbone.py``) so both the
+Lives in its own module (rather than in ``cosmos_predict25_backbone.py``) so both the
 backbone and :mod:`pipeline_builder` can import it without an import cycle and
 without triggering the lazy ``cosmos_predict2`` import.
 """
@@ -90,7 +90,7 @@ def _move_cosmos_reason1(te: Any, *, dtype: torch.dtype, device: torch.device) -
 # ----------------------------------------------------------------------
 # Frame <-> tensor + VAE device helpers (relocated from the deleted
 # pipeline_wrapper.py). Kept here, not on the backbone, so they stay pure /
-# import-cycle-free (this module must NOT import cosmos25_backbone).
+# import-cycle-free (this module must NOT import cosmos_predict25_backbone).
 # ----------------------------------------------------------------------
 
 
@@ -98,7 +98,7 @@ def _pil_video_to_tensor(frames: Any) -> "torch.Tensor":
     """Convert ``list[list[PIL.Image]]`` → ``(B, 3, T, H, W)`` float in ``[-1, 1]``.
 
     uint8 RGB → ``float / 127.5 - 1``. Self-contained (no Wan imports) so
-    Cosmos25 works without the Wan backbone installed.
+    CosmosPredict25 works without the Wan backbone installed.
     """
     import numpy as np
 
@@ -127,7 +127,7 @@ def _video_tensor_to_pil(video: "torch.Tensor") -> list:
         raise ValueError(f"_video_tensor_to_pil expected (B, 3, T, H, W); got shape {tuple(video.shape)}.")
     if video.shape[0] != 1:
         raise NotImplementedError(
-            f"Cosmos25 decode currently supports B=1 only; got B={video.shape[0]}. Deploy paths call decode per-sample."
+            f"CosmosPredict25 decode currently supports B=1 only; got B={video.shape[0]}. Deploy paths call decode per-sample."
         )
     frame_uint8 = (
         ((video[0].float().clamp(-1.0, 1.0) + 1.0) * 127.5)

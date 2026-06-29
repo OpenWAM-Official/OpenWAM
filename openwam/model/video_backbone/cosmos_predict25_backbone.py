@@ -3,7 +3,7 @@
 Implements the :class:`VideoBackbone` contract (``base.py``) directly on the
 upstream Cosmos DiT, VAE, and Reason1 text encoder — **flat named children**,
 mirroring the Wan backbone (no wrapper indirection). The heavy DiT block-loop
-orchestration lives as stateless helpers in ``cosmos25/dit_forward.py`` (the
+orchestration lives as stateless helpers in ``cosmos_predict25/dit_forward.py`` (the
 analogue of ``wan/dit_forward.py``); this class delegates ``prepare`` /
 ``run_block`` / ``finalize`` / ``pre_attn_at_layer`` / ``post_attn_at_layer``
 to them, reading ``self.dit``.
@@ -22,7 +22,7 @@ tracking, while the inner ``nn.Module`` is registered under the clean child
 name (``self.vae`` / ``self.reason1``) so its weights enter the unified
 state_dict (``vae.*`` / ``reason1.*``). Identity is preserved, so the facade's
 ``iface.model.model`` still resolves to the same tensors. The inner modules are
-moved explicitly in :meth:`set_dtype_device` via ``cosmos25/_vae_utils.py``.
+moved explicitly in :meth:`set_dtype_device` via ``cosmos_predict25/_vae_utils.py``.
 
 Scope: ``dual_system`` + ``joint_cross_attn`` / ``joint_self_attn``. VACE is
 rejected; IDM stays T2V-only. Freeze policy is owned by the training-strategy /
@@ -43,8 +43,8 @@ import torch.nn as nn
 from torch import Tensor
 
 from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
-from openwam.model.video_backbone.cosmos25 import dit_forward
-from openwam.model.video_backbone.cosmos25._vae_utils import (
+from openwam.model.video_backbone.cosmos_predict25 import dit_forward
+from openwam.model.video_backbone.cosmos_predict25._vae_utils import (
     _move_cosmos_reason1,
     _move_cosmos_vae,
     _pil_video_to_tensor,
@@ -52,7 +52,7 @@ from openwam.model.video_backbone.cosmos25._vae_utils import (
     _vae_inner_module,
     _video_tensor_to_pil,
 )
-from openwam.model.video_backbone.cosmos25.scheduler import CosmosFlowSchedulerAdapter
+from openwam.model.video_backbone.cosmos_predict25.scheduler import CosmosFlowSchedulerAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ _COSMOS25_TEMPORAL_COMPRESSION: int = 4
 _COSMOS25_CAUSAL_TEMPORAL: bool = True
 
 
-class Cosmos25VideoBackbone(VideoBackbone):
+class CosmosPredict25VideoBackbone(VideoBackbone):
     """Wrap a Cosmos-Predict2.5 DiT/VAE/text-encoder behind the VideoBackbone ABC."""
 
     def __init__(
@@ -79,7 +79,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         head_dim: int,
         context_dim: int,
         scheduler: Optional[CosmosFlowSchedulerAdapter] = None,
-        flow_shift: float = 5.0,
+        shift_video: float = 5.0,
         text_dropout_p: float = 0.0,
         text_dropout_seed: Optional[int] = None,
         freeze: bool = False,
@@ -106,11 +106,11 @@ class Cosmos25VideoBackbone(VideoBackbone):
         self._num_layers = int(num_layers)
         self._num_heads = int(num_heads)
         self._head_dim = int(head_dim)
-        # Cosmos25's per-token text/context embedding dim (1024 for 2B, vs Wan's
+        # CosmosPredict25's per-token text/context embedding dim (1024 for 2B, vs Wan's
         # 4096). Exposed through the base ``text_dim`` property.
         self._context_dim = int(context_dim)
         self._scheduler = scheduler if scheduler is not None else CosmosFlowSchedulerAdapter()
-        self._flow_shift = float(flow_shift)
+        self._shift_video = float(shift_video)
 
         # --- §14.7 CFG dropout (live-encoder path) ---
         if not 0.0 <= float(text_dropout_p) <= 1.0:
@@ -133,20 +133,20 @@ class Cosmos25VideoBackbone(VideoBackbone):
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_pretrained(cls, source: Any, *, device=None, ckpt_dir=None, **kw) -> "Cosmos25VideoBackbone":
+    def from_pretrained(cls, source: Any, *, device=None, ckpt_dir=None, **kw) -> "CosmosPredict25VideoBackbone":
         """Build a backbone from a config / model dir.
 
-        Defers to :func:`cosmos25.pipeline_builder.build_cosmos25_pipeline`, which
+        Defers to :func:`cosmos_predict25.pipeline_builder.build_cosmos_predict25_pipeline`, which
         lazily imports ``cosmos_predict2`` and returns a lightweight holder
-        (net + vae + text_encoder + geometry + flow_shift). Drains it into flat
+        (net + vae + text_encoder + geometry + shift_video). Drains it into flat
         children (Wan holder-drain parity).
         """
-        from openwam.model.video_backbone.cosmos25.pipeline_builder import build_cosmos25_pipeline
+        from openwam.model.video_backbone.cosmos_predict25.pipeline_builder import build_cosmos_predict25_pipeline
 
         cfg_for_loader = _video_backbone_cfg(source)
-        flow_shift = float(_cfg_get(cfg_for_loader, "flow_shift", 5.0))
+        shift_video = float(_cfg_get(cfg_for_loader, "shift_video", 5.0))
 
-        holder = build_cosmos25_pipeline(source, device=device, ckpt_dir=ckpt_dir, **kw)
+        holder = build_cosmos_predict25_pipeline(source, device=device, ckpt_dir=ckpt_dir, **kw)
         dim, num_layers, num_heads, head_dim, context_dim = _probe_pipeline_geometry(holder)
         return cls(
             net=holder.net,
@@ -157,8 +157,8 @@ class Cosmos25VideoBackbone(VideoBackbone):
             num_heads=num_heads,
             head_dim=head_dim,
             context_dim=context_dim,
-            scheduler=CosmosFlowSchedulerAdapter(flow_shift=flow_shift),
-            flow_shift=float(getattr(holder, "flow_shift", flow_shift)),
+            scheduler=CosmosFlowSchedulerAdapter(shift_video=shift_video),
+            shift_video=float(getattr(holder, "shift_video", shift_video)),
             text_dropout_p=float(getattr(holder, "text_dropout_p", 0.0)),
             text_dropout_seed=getattr(holder, "text_dropout_seed", None),
         )
@@ -189,7 +189,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
 
     @property
     def text_dim(self) -> Optional[int]:
-        """Per-token text/context embedding dim (1024 for Cosmos25-2B)."""
+        """Per-token text/context embedding dim (1024 for CosmosPredict25-2B)."""
         return self._context_dim
 
     # ------------------------------------------------------------------
@@ -214,7 +214,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         """Build the video↔video block of the joint MoT attention mask.
 
         Mirrors the Wan backbone — the math only depends on
-        ``video_tokens_per_frame`` (= ``grid_height * grid_width`` for Cosmos25).
+        ``video_tokens_per_frame`` (= ``grid_height * grid_width`` for CosmosPredict25).
         """
         if video_seq_len <= 0:
             raise ValueError(f"video_seq_len must be positive, got {video_seq_len}")
@@ -249,7 +249,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         )
 
     # ------------------------------------------------------------------
-    # Three-step block loop — delegates to cosmos25/dit_forward.py
+    # Three-step block loop — delegates to cosmos_predict25/dit_forward.py
     # ------------------------------------------------------------------
 
     def prepare(self, **pipeline_inputs) -> BlockLoopState:
@@ -270,7 +270,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         """Pre half of one block — delegates to ``dit_forward.pre_attn_at_layer``."""
         if not hasattr(getattr(self, "dit", None), "blocks"):
             raise NotImplementedError(
-                "Cosmos25VideoBackbone.pre_attn_at_layer requires self.dit to expose `.blocks` "
+                "CosmosPredict25VideoBackbone.pre_attn_at_layer requires self.dit to expose `.blocks` "
                 "(the upstream Cosmos DiT block-split interface)."
             )
         return dit_forward.pre_attn_at_layer(self.dit, layer_id, state)
@@ -281,7 +281,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         """Post half of one block — delegates to ``dit_forward.post_attn_at_layer``."""
         if not hasattr(getattr(self, "dit", None), "blocks"):
             raise NotImplementedError(
-                "Cosmos25VideoBackbone.post_attn_at_layer requires self.dit to expose `.blocks` "
+                "CosmosPredict25VideoBackbone.post_attn_at_layer requires self.dit to expose `.blocks` "
                 "(the upstream Cosmos DiT block-split interface)."
             )
         return dit_forward.post_attn_at_layer(layer_id, state, attn_out, post_state)
@@ -316,18 +316,18 @@ class Cosmos25VideoBackbone(VideoBackbone):
         """
         if vace_videos is not None and any(v is not None for v in vace_videos):
             raise NotImplementedError(
-                "Cosmos25 MVP does not support VACE conditioning. Drop `vace_video` from the dataset "
-                "when training with the Cosmos25 backbone."
+                "CosmosPredict25 MVP does not support VACE conditioning. Drop `vace_video` from the dataset "
+                "when training with the CosmosPredict25 backbone."
             )
 
         if input_latents is None:
             if frames is None:
                 raise ValueError(
-                    "Cosmos25VideoBackbone._preprocess_input requires either `input_latents` or `frames`."
+                    "CosmosPredict25VideoBackbone._preprocess_input requires either `input_latents` or `frames`."
                 )
             if self._vae_iface is None:
                 raise RuntimeError(
-                    "Cosmos25 VAE is not configured. Set `video_backbone.vae: wan2pt1` "
+                    "CosmosPredict25 VAE is not configured. Set `video_backbone.vae: wan2pt1` "
                     "(default; loads `<model_path>/tokenizer.pth`)."
                 )
             input_latents = self._encode_frames(frames)
@@ -358,7 +358,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
                 context = net.crossattn_proj(context)
         else:
             raise ValueError(
-                "Cosmos25VideoBackbone._preprocess_input requires either `text` (with text_encoder) "
+                "CosmosPredict25VideoBackbone._preprocess_input requires either `text` (with text_encoder) "
                 "or `pre_encoded_text`."
             )
 
@@ -385,7 +385,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         if ref_active:
             if self._vae_iface is None:
                 raise RuntimeError(
-                    "Cosmos25VideoBackbone._preprocess_input received `ref_images` but no VAE is "
+                    "CosmosPredict25VideoBackbone._preprocess_input received `ref_images` but no VAE is "
                     "configured. Set `video_backbone.vae: wan2pt1` to enable TI2V."
                 )
             ref_clips = [r if isinstance(r, (list, tuple)) else [r] for r in ref_images]
@@ -408,7 +408,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
     def _encode_frames(self, frames: Any) -> Tensor:
         """PIL frames → bf16 ``(B, 16, T_lat, H/8, W/8)`` Wan2pt1 latents."""
         if self._vae_iface is None:
-            raise RuntimeError("Cosmos25VideoBackbone._encode_frames called without a configured VAE.")
+            raise RuntimeError("CosmosPredict25VideoBackbone._encode_frames called without a configured VAE.")
         video = _pil_video_to_tensor(frames)
         video = video.to(device=_vae_device(self._vae_iface), dtype=torch.bfloat16)
         return self._vae_iface.encode(video)
@@ -416,7 +416,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
     def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:
         if self._vae_iface is None:
             raise NotImplementedError(
-                "Cosmos25VideoBackbone.decode_video requires a configured VAE. Set `video_backbone.vae: wan2pt1`."
+                "CosmosPredict25VideoBackbone.decode_video requires a configured VAE. Set `video_backbone.vae: wan2pt1`."
             )
         _ = tiled  # Wan2pt1VAEInterface.decode has no `tiled`; internal temporal_window=4.
         video = self._vae_iface.decode(latents.to(device=_vae_device(self._vae_iface)))
@@ -446,12 +446,12 @@ class Cosmos25VideoBackbone(VideoBackbone):
         cfg_merge = kw.get("cfg_merge", False)
 
         if vace_video is not None:
-            raise NotImplementedError("Cosmos25VideoBackbone does not support VACE conditioning at inference yet.")
+            raise NotImplementedError("CosmosPredict25VideoBackbone does not support VACE conditioning at inference yet.")
         has_cache = pre_encoded_text is not None
         has_live = getattr(self, "text_encoder", None) is not None
         if not (has_cache or has_live):
             raise ValueError(
-                "Cosmos25VideoBackbone.preprocess_input_for_inference has no prompt source: pass "
+                "CosmosPredict25VideoBackbone.preprocess_input_for_inference has no prompt source: pass "
                 "`pre_encoded_text` (offline cache hit) or configure "
                 "`video_backbone.text_encoder=reason1_live`."
             )
@@ -491,7 +491,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         inputs_shared["vace_scale"] = 1.0
         inputs_shared["seed"] = int(seed)
         inputs_shared["tiled"] = bool(tiled)
-        inputs_shared["sigma_shift"] = float(shift) if shift is not None else float(self._flow_shift)
+        inputs_shared["sigma_shift"] = float(shift) if shift is not None else float(self._shift_video)
         inputs_shared["num_inference_steps"] = int(num_inference_steps)
         inputs_shared["cfg_scale"] = cfg_scale_f
         inputs_shared["cfg_merge"] = bool(cfg_merge)
@@ -513,7 +513,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
             return
         if self._vae_iface is None:
             raise RuntimeError(
-                "Cosmos25VideoBackbone.preprocess_input_for_inference received `first_frame_image` "
+                "CosmosPredict25VideoBackbone.preprocess_input_for_inference received `first_frame_image` "
                 "but no VAE is configured. Ensure `video_backbone.vae: wan2pt1`."
             )
         ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
@@ -540,7 +540,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
         if getattr(self, "text_encoder", None) is not None:
             return {**base, "text": prompt}
         raise RuntimeError(
-            "Cosmos25VideoBackbone._build_preprocess_kwargs reached the no-source branch despite "
+            "CosmosPredict25VideoBackbone._build_preprocess_kwargs reached the no-source branch despite "
             "the preprocess_input_for_inference gate. This is a bug."
         )
 
@@ -619,19 +619,19 @@ class Cosmos25VideoBackbone(VideoBackbone):
         """
         from omegaconf import DictConfig, OmegaConf, open_dict
 
-        from openwam.model.video_backbone.cosmos25.component_specs import (
-            copy_cosmos25_artifacts,
-            generate_cosmos25_component_specs,
+        from openwam.model.video_backbone.cosmos_predict25.component_specs import (
+            copy_cosmos_predict25_artifacts,
+            generate_cosmos_predict25_component_specs,
         )
 
         is_plain = not isinstance(cfg, DictConfig)
         oc = OmegaConf.create(cfg) if is_plain else cfg
 
         model_path = OmegaConf.select(oc, "model.video_backbone.model_path", default=None)
-        specs = generate_cosmos25_component_specs(str(model_path) if model_path is not None else "")
+        specs = generate_cosmos_predict25_component_specs(str(model_path) if model_path is not None else "")
         if specs is None:
             logger.info(
-                "[cosmos25] video_backbone.model_path not readable (%s); skipping deploy-asset save.",
+                "[cosmos_predict25] video_backbone.model_path not readable (%s); skipping deploy-asset save.",
                 model_path,
             )
             return
@@ -656,7 +656,7 @@ class Cosmos25VideoBackbone(VideoBackbone):
                 cfg["model"]["video_backbone"]["components"] = components
 
         if has_reason1:
-            copy_cosmos25_artifacts(output_dir, oc)
+            copy_cosmos_predict25_artifacts(output_dir, oc)
 
 
 # ----------------------------------------------------------------------
@@ -703,8 +703,8 @@ def _probe_pipeline_geometry(holder: Any) -> Tuple[int, int, int, int, int]:
     except AttributeError as exc:
         raise AttributeError(
             "Cosmos holder is missing one of {dim, num_layers, num_heads, head_dim, context_dim}. "
-            "Attach these in `pipeline_builder.build_cosmos25_pipeline`."
+            "Attach these in `pipeline_builder.build_cosmos_predict25_pipeline`."
         ) from exc
 
 
-__all__ = ["Cosmos25VideoBackbone"]
+__all__ = ["CosmosPredict25VideoBackbone"]

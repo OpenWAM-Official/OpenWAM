@@ -1,4 +1,4 @@
-"""Flat checkpoint round-trip lock for ``Cosmos25VideoBackbone``.
+"""Flat checkpoint round-trip lock for ``CosmosPredict25VideoBackbone``.
 
 The backbone holds flat named children (``dit.*`` / ``vae.*`` / ``reason1.*``):
 the DiT directly, plus the inner ``nn.Module`` of the (plain-object) VAE and
@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
 
 class _ParamNet(nn.Module):
@@ -39,9 +39,9 @@ class _FakeReason1:
         self.model = nn.Linear(3, 3)
 
 
-def _build(seed: int) -> Cosmos25VideoBackbone:
+def _build(seed: int) -> CosmosPredict25VideoBackbone:
     torch.manual_seed(seed)
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=_ParamNet(),
         vae=_FakeVAEInterface(),
         text_encoder=_FakeReason1(),
@@ -97,7 +97,7 @@ class _Parent(nn.Module):
     """Mimics the architecture holding the backbone as ``video_backbone``, so the
     load runs under the production ``video_backbone.`` prefix (not empty)."""
 
-    def __init__(self, bb: Cosmos25VideoBackbone) -> None:
+    def __init__(self, bb: CosmosPredict25VideoBackbone) -> None:
         super().__init__()
         self.video_backbone = bb
 

@@ -1,9 +1,9 @@
 """Component specs for Cosmos-Predict2.5 deploy.
 
-Unlike Wan, Cosmos25 does **not** copy any tokenizer / processor directory
+Unlike Wan, CosmosPredict25 does **not** copy any tokenizer / processor directory
 next to the checkpoint *for the DiT path*. The DiT (``MinimalV1LVGDiT``, ~3.9
 GB) and VAE (``Wan2pt1VAEInterface``'s inner ``WanVAE_``, ~485 MB) are
-registered as ``nn.Module`` children of :class:`Cosmos25VideoBackbone`, so
+registered as ``nn.Module`` children of :class:`CosmosPredict25VideoBackbone`, so
 their params flow through the architecture's unified ``state_dict`` and are
 saved into the same safetensors as every other dual_system / shared_backbone
 weight.
@@ -14,26 +14,26 @@ wrapper (see ``pipeline_wrapper.py`` for the trick mirroring ``vae``).
 The only artifacts copied alongside the checkpoint are the small JSON/
 tokenizer files Qwen2.5-VL needs to bootstrap its structure at deploy time
 (``config.json``, ``tokenizer.json``, etc., totalling ~10 MB) — see
-:func:`copy_cosmos25_artifacts`. They live under ``<ckpt_dir>/reason1/`` and
+:func:`copy_cosmos_predict25_artifacts`. They live under ``<ckpt_dir>/reason1/`` and
 are read by :meth:`Reason1LiveTextEncoder.from_empty` to construct an empty
 meta-device shell that :meth:`BaseWAMArchitecture.load_checkpoint` then
 populates from the unified safetensors.
 
 What this module does:
 
-- :func:`generate_cosmos25_component_specs` returns a non-None marker dict
-  whenever the cosmos25 path is in use. ``BaseWAMArchitecture.save_config``
+- :func:`generate_cosmos_predict25_component_specs` returns a non-None marker dict
+  whenever the cosmos_predict25 path is in use. ``BaseWAMArchitecture.save_config``
   forwards it onto ``model.video_backbone.components`` in the saved YAML,
   which is the gate (``deploy/model_loader.py:117-122``) that makes the
   deploy loader thread ``_ckpt_dir`` into the adapter's ``from_pretrained``.
-  ``build_cosmos25_pipeline`` then uses ``ckpt_dir is not None`` as the
+  ``build_cosmos_predict25_pipeline`` then uses ``ckpt_dir is not None`` as the
   signal to build empty DiT + VAE + Reason1 shells (skipping the
   ``model_path`` eager-load) and lets ``arch.load_checkpoint`` populate
   weights from the unified safetensors.
 
-- :func:`copy_cosmos25_artifacts` copies the Reason1 tokenizer/config JSON
+- :func:`copy_cosmos_predict25_artifacts` copies the Reason1 tokenizer/config JSON
   files into ``<output_dir>/reason1/``. Dispatched via
-  :meth:`Cosmos25VideoBackbone.copy_deploy_artifacts` from the
+  :meth:`CosmosPredict25VideoBackbone.copy_deploy_artifacts` from the
   :class:`BaseWAMArchitecture` dispatcher.
 """
 
@@ -98,7 +98,7 @@ def validate_reason1_artifact_source(model_path_or_cfg: Any) -> str:
     if _resolve_model_path(model_path_or_cfg):
         raise RuntimeError(
             "[component_specs] video_backbone.text_encoder_path not readable (%s); "
-            "Cosmos25 checkpoints must copy Reason1 structural artifacts into "
+            "CosmosPredict25 checkpoints must copy Reason1 structural artifacts into "
             "<ckpt_dir>/reason1/ so the safetensors-saved encoder can be "
             "rebuilt at deploy time. Set model.video_backbone.text_encoder_path "
             "to a readable Cosmos-Reason1-7B bundle." % te_path
@@ -110,11 +110,11 @@ def validate_reason1_artifact_source(model_path_or_cfg: Any) -> str:
     )
 
 
-def generate_cosmos25_component_specs(model_path: str) -> Optional[dict]:
+def generate_cosmos_predict25_component_specs(model_path: str) -> Optional[dict]:
     """Return component specs for the deploy loader's ``_ckpt_dir`` threading.
 
-    The cosmos25 ``state_dict`` already carries DiT + VAE + Reason1 weights
-    (registered as ``nn.Module`` children of :class:`Cosmos25VideoBackbone`
+    The cosmos_predict25 ``state_dict`` already carries DiT + VAE + Reason1 weights
+    (registered as ``nn.Module`` children of :class:`CosmosPredict25VideoBackbone`
     via ``net``, ``vae``, and ``reason1`` respectively).
 
     Returns ``None`` only when ``model_path`` is missing or unreadable, so
@@ -122,7 +122,7 @@ def generate_cosmos25_component_specs(model_path: str) -> Optional[dict]:
 
     Arguments:
         model_path: training-time path to the Cosmos asset bundle. Currently
-            only used as a "is this a real cosmos25 training run?" sanity
+            only used as a "is this a real cosmos_predict25 training run?" sanity
             check; the spec content does not capture any path-dependent state.
     """
     if not model_path or not os.path.isdir(model_path):
@@ -138,11 +138,11 @@ def generate_cosmos25_component_specs(model_path: str) -> Optional[dict]:
     }
 
 
-def copy_cosmos25_artifacts(output_dir: str, model_path_or_cfg: Any) -> None:
+def copy_cosmos_predict25_artifacts(output_dir: str, model_path_or_cfg: Any) -> None:
     """Copy the small Reason1 tokenizer/config JSON files into ``<output_dir>/reason1/``.
 
     Reason1 model weights ride into the unified safetensors via
-    ``Cosmos25VideoBackbone.reason1``; only the small structural
+    ``CosmosPredict25VideoBackbone.reason1``; only the small structural
     files (~10 MB total) need to live next to the checkpoint so
     :meth:`Reason1LiveTextEncoder.from_empty` can rebuild a meta-device shell
     on a deploy host that doesn't have the original Cosmos-Reason1 bundle.
@@ -190,8 +190,8 @@ def copy_cosmos25_artifacts(output_dir: str, model_path_or_cfg: Any) -> None:
 
 
 __all__ = [
-    "generate_cosmos25_component_specs",
-    "copy_cosmos25_artifacts",
+    "generate_cosmos_predict25_component_specs",
+    "copy_cosmos_predict25_artifacts",
     "validate_reason1_artifact_source",
     "_resolve_text_encoder_path",
 ]

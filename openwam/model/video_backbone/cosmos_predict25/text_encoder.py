@@ -1,4 +1,4 @@
-"""Live Cosmos-Reason1-7B text encoder for the Cosmos25 video backbone.
+"""Live Cosmos-Reason1-7B text encoder for the CosmosPredict25 video backbone.
 
 Mirrors the offline path in
 ``openwam.dataloader.reason1_embedding_computation`` (which writes a sha256-keyed
@@ -12,7 +12,7 @@ post-projection tensor the offline cache would deliver.
 
 Why a plain Python class (NOT an ``nn.Module``)?
 
-- ``Cosmos25VideoBackbone`` stores us as ``self.text_encoder = <instance>``.
+- ``CosmosPredict25VideoBackbone`` stores us as ``self.text_encoder = <instance>``.
   Mirroring the ``Wan2pt1VAEInterface`` precedent, the wrapper reaches in for
   our ``self.model`` (the inner ``Qwen2_5_VLForConditionalGeneration``
   ``nn.Module``) and registers it as ``reason1``. Result: our 16 GB of
@@ -20,7 +20,7 @@ Why a plain Python class (NOT an ``nn.Module``)?
   registered child — but the wrapper class itself stays a plain attribute so
   the tokenizer + dtype/device tracking don't trip ``__setattr__`` or
   ``state_dict()``.
-- ``Cosmos25VideoBackbone.get_submodule('text_encoder')`` already filters with
+- ``CosmosPredict25VideoBackbone.get_submodule('text_encoder')`` already filters with
   ``isinstance(attr, nn.Module)``, so returning ``None`` for us is the
   existing ABC-compliant behaviour (§12.3.2 ``base.py:417-424``).
 - DeepSpeed ZeRO-3 partitioning of the 16 GB frozen Qwen weights is avoided
@@ -233,7 +233,7 @@ class Reason1LiveTextEncoder:
         unified safetensors.
 
         ``artifact_dir`` is typically ``<ckpt_dir>/reason1/`` — populated by
-        :func:`openwam.model.video_backbone.cosmos25.component_specs.copy_cosmos25_artifacts`
+        :func:`openwam.model.video_backbone.cosmos_predict25.component_specs.copy_cosmos_predict25_artifacts`
         at training save time. Use the regular constructor (which loads
         weights from the full Cosmos-Reason1 bundle) on the training path.
         """
@@ -242,7 +242,7 @@ class Reason1LiveTextEncoder:
             raise FileNotFoundError(
                 f"Reason1 artifact dir not found at {artifact_dir}. Deploy "
                 "needs `<ckpt_dir>/reason1/` populated with config.json + "
-                "tokenizer.json (see copy_cosmos25_artifacts). Either save a "
+                "tokenizer.json (see copy_cosmos_predict25_artifacts). Either save a "
                 "ckpt with this change applied, or point `text_encoder_path` "
                 "at a full Cosmos-Reason1-7B bundle."
             )
@@ -292,7 +292,7 @@ class Reason1LiveTextEncoder:
     def to(self, *, dtype: torch.dtype = None, device: Any = None) -> "Reason1LiveTextEncoder":
         """Move the inner ``nn.Module`` + update cached dtype/device.
 
-        Called from ``Cosmos25VideoBackbone.set_dtype_device`` via
+        Called from ``CosmosPredict25VideoBackbone.set_dtype_device`` via
         ``adapter._move_cosmos_reason1``. Returns ``self`` to mirror
         ``nn.Module.to`` semantics.
         """

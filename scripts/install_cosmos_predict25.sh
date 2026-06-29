@@ -5,7 +5,7 @@
 #
 # Why not a pip extra? cosmos-oss is not on PyPI and pip cannot resolve a
 # relative file:// path in [project.optional-dependencies]. This script
-# replaces what `pip install -e '.[cosmos25]'` would do if it could.
+# replaces what `pip install -e '.[cosmos_predict25]'` would do if it could.
 #
 # Prerequisites on the host:
 #   - third_party/cosmos-predict2.5/ checked out (run `git submodule update
@@ -55,11 +55,11 @@ else
     TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0"
 fi
 
-echo "[install_cosmos25] venv:      ${PYBIN}"
-echo "[install_cosmos25] submodule: ${COSMOS_ROOT}"
-echo "[install_cosmos25] CUDA:      ${CUDA_HOME}"
-echo "[install_cosmos25] cuDNN:     ${CUDNN_INC}"
-echo "[install_cosmos25] SM list:   ${TORCH_CUDA_ARCH_LIST}"
+echo "[install_cosmos_predict25] venv:      ${PYBIN}"
+echo "[install_cosmos_predict25] submodule: ${COSMOS_ROOT}"
+echo "[install_cosmos_predict25] CUDA:      ${CUDA_HOME}"
+echo "[install_cosmos_predict25] cuDNN:     ${CUDNN_INC}"
+echo "[install_cosmos_predict25] SM list:   ${TORCH_CUDA_ARCH_LIST}"
 
 # 1) cosmos-cuda is a sentinel package that cosmos-oss.__init__ imports to
 #    confirm a CUDA extra was installed — it carries no code, just version.
@@ -91,7 +91,7 @@ NVTE_FRAMEWORK=pytorch \
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
     "${PYBIN}" -m pip install --no-build-isolation 'transformer-engine[pytorch]==2.7.0'
 
-# 6) Smoke import: this is what build_cosmos25_pipeline will need at runtime.
+# 6) Smoke import: this is what build_cosmos_predict25_pipeline will need at runtime.
 "${PYBIN}" - <<'PY'
 import cosmos_oss
 import cosmos_predict2
@@ -101,4 +101,4 @@ print(f"OK cosmos_predict2 v{cosmos_predict2.__about__.__version__} from {cosmos
 print(f"OK MiniTrainDIT, Block from {MiniTrainDIT.__module__}")
 PY
 
-echo "[install_cosmos25] done."
+echo "[install_cosmos_predict25] done."

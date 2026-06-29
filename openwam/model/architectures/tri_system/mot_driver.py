@@ -382,7 +382,7 @@ class TriSystemMoTDriver:
         # ``vstate.hidden_states.shape[1]`` is identical to ``f*tokens_per_frame`` for
         # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
         # backbones whose ``state.hidden_states`` is natively 5D ``(B, T, H, W, D)``
-        # (Cosmos25) ``shape[1]`` is just ``T`` — wrong. Going through f and
+        # (CosmosPredict25) ``shape[1]`` is just ``T`` — wrong. Going through f and
         # the shared ``compute_video_tokens_per_frame`` helper is the only
         # formulation that works for both layouts.
         s_video = int(vstate.grid_frames) * self._video_tokens_per_frame(vstate)

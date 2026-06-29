@@ -90,7 +90,7 @@ holdout_tasks: null
 #   Useful for testing generalization: train on clean_50, validate on randomized_500
 val_variant: null
 
-# --- Pre-computed text embedding cache (Cosmos-Reason1 for Cosmos25 backbone) ---
+# --- Pre-computed text embedding cache (Cosmos-Reason1 for CosmosPredict25 backbone) ---
 # Pre-compute once per unique caption with:
 #   python -m openwam.dataloader.utils.stats_computation.reason1_embedding_computation \
 #       --reason1-ckpt /path/to/Cosmos-Reason1-7B \

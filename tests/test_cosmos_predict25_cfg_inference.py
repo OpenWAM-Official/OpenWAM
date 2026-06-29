@@ -3,7 +3,7 @@
 Covers two layers:
 1. ``base.py`` module-level CFG math helpers (``_combine_cfg``,
    ``_expand_inputs_for_cfg``) — stateless, pure tensor ops.
-2. ``Cosmos25VideoBackbone.prepare_inputs_for_inference`` uncond
+2. ``CosmosPredict25VideoBackbone.prepare_inputs_for_inference`` uncond
    plumbing — exercises the cache > live precedence ladder and the
    ``cfg_scale > 1.0`` gate for ``uncond_context``. The adapter computes
    a shape-correct ``input_latents`` placeholder from the explicit
@@ -11,7 +11,7 @@ Covers two layers:
    configured VAE.
 
 The GPU smoke for end-to-end deploy round-trip lives in
-``tests/test_cosmos25_deploy_smoke.py``.
+``tests/test_cosmos_predict25_deploy_smoke.py``.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ import torch.nn as nn
 
 from openwam.dataloader.transforms.text_embedding_cache import bucketed_cache_path_for_sha, sha256_for_prompt
 from openwam.model.architectures.base import _combine_cfg, _expand_inputs_for_cfg
-from openwam.model.video_backbone.cosmos25 import CosmosFlowSchedulerAdapter
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+from openwam.model.video_backbone.cosmos_predict25 import CosmosFlowSchedulerAdapter
+from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
 
 @dataclass
@@ -405,7 +405,7 @@ def test_forward_with_cfg_rejects_missing_uncond_context():
 
 
 # ----------------------------------------------------------------------
-# Layer 2: Cosmos25 adapter uncond plumbing
+# Layer 2: CosmosPredict25 adapter uncond plumbing
 # ----------------------------------------------------------------------
 
 
@@ -415,13 +415,13 @@ class _ParamOnlyNet(nn.Module):
         self.w = nn.Parameter(torch.zeros(1))
 
 
-def _build_cache_only_backbone() -> Cosmos25VideoBackbone:
-    """Cosmos25 backbone with no VAE and no live encoder. Every test that
+def _build_cache_only_backbone() -> CosmosPredict25VideoBackbone:
+    """CosmosPredict25 backbone with no VAE and no live encoder. Every test that
     uses this fixture must supply ``pre_encoded_text`` via the deploy cache
     path; the adapter fabricates a shape-correct ``input_latents`` placeholder
     from the explicit ``num_frames / height / width`` kwargs at inference time.
     """
-    pipe = Cosmos25VideoBackbone(
+    pipe = CosmosPredict25VideoBackbone(
         net=_ParamOnlyNet(),
         vae=None,
         text_encoder=None,
@@ -430,24 +430,24 @@ def _build_cache_only_backbone() -> Cosmos25VideoBackbone:
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=pipe.dit,
         vae=getattr(pipe, "_vae_iface", None),
         text_encoder=getattr(pipe, "text_encoder", None),
-        flow_shift=pipe._flow_shift,
+        shift_video=pipe._shift_video,
         dim=2048,
         num_layers=28,
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        scheduler=CosmosFlowSchedulerAdapter(flow_shift=5.0),
+        scheduler=CosmosFlowSchedulerAdapter(shift_video=5.0),
         freeze=True,
     )
 
 
-def test_cosmos25_adapter_cfg_scale_1_no_uncond_context():
+def test_cosmos_predict25_adapter_cfg_scale_1_no_uncond_context():
     """Regression: `cfg_scale=1.0` (the default) MUST produce
     `uncond_context=None` — the denoising loop's CFG branch checks for None
     to decide whether to combine."""
@@ -469,7 +469,7 @@ def test_cosmos25_adapter_cfg_scale_1_no_uncond_context():
     assert inputs_shared["cfg_merge"] is False
 
 
-def test_cosmos25_adapter_rejects_cfg_scale_below_one():
+def test_cosmos_predict25_adapter_rejects_cfg_scale_below_one():
     """Negative / below-1 cfg_scale is meaningless; reject early at adapter."""
     vb = _build_cache_only_backbone()
     cond_cache = torch.randn(1, 16, 1024)
@@ -477,7 +477,7 @@ def test_cosmos25_adapter_rejects_cfg_scale_below_one():
         _call(vb, InferenceInputs(prompt="smoke", cfg_scale=0.5, pre_encoded_text=cond_cache))
 
 
-def test_cosmos25_adapter_uncond_pre_encoded_text_2d_broadcast():
+def test_cosmos_predict25_adapter_uncond_pre_encoded_text_2d_broadcast():
     """A caller-supplied `(L, D)` empty.safetensors is broadcast to `(B, L, D)`
     matching the cond context, no manual unsqueeze needed at the engine layer."""
     vb = _build_cache_only_backbone()
@@ -499,7 +499,7 @@ def test_cosmos25_adapter_uncond_pre_encoded_text_2d_broadcast():
     assert torch.all(uncond == -0.5)
 
 
-def test_cosmos25_adapter_cfg_requires_uncond_source():
+def test_cosmos_predict25_adapter_cfg_requires_uncond_source():
     """With `cfg_scale > 1.0` but no `uncond_pre_encoded_text` and no live
     text_encoder, the adapter must raise a clear ValueError (was previously
     a silent randn_like fallback)."""
@@ -516,7 +516,7 @@ def test_cosmos25_adapter_cfg_requires_uncond_source():
         )
 
 
-def test_cosmos25_adapter_no_prompt_source_raises_with_hint():
+def test_cosmos_predict25_adapter_no_prompt_source_raises_with_hint():
     """No cache, no live encoder → ValueError before the wrapper is even
     invoked."""
     vb = _build_cache_only_backbone()
@@ -524,9 +524,9 @@ def test_cosmos25_adapter_no_prompt_source_raises_with_hint():
         _call(vb, InferenceInputs(prompt="smoke"))
 
 
-def test_cosmos25_adapter_shift_passthrough_overrides_flow_shift():
+def test_cosmos_predict25_adapter_shift_passthrough_overrides_shift_video():
     """An explicit ``shift`` lands in ``inputs_shared['sigma_shift']``; absent it,
-    the backbone falls back to the wrapper's ``flow_shift``."""
+    the backbone falls back to the wrapper's ``shift_video``."""
     vb = _build_cache_only_backbone()
     cond_cache = torch.randn(1, 16, 1024)
 
@@ -534,7 +534,7 @@ def test_cosmos25_adapter_shift_passthrough_overrides_flow_shift():
     assert explicit["sigma_shift"] == pytest.approx(3.0)
 
     fallback = _call(vb, InferenceInputs(prompt="s", pre_encoded_text=cond_cache))  # shift=None
-    assert fallback["sigma_shift"] == pytest.approx(5.0)  # wrapper flow_shift default
+    assert fallback["sigma_shift"] == pytest.approx(5.0)  # wrapper shift_video default
 
 
 def test_generate_forwards_cfg_and_text_kwargs_to_backbone():
@@ -582,7 +582,7 @@ def test_generate_forwards_cfg_and_text_kwargs_to_backbone():
     assert captured["uncond_pre_encoded_text"] is uncond
 
 
-def test_cosmos25_adapter_live_encoder_uncond_context():
+def test_cosmos_predict25_adapter_live_encoder_uncond_context():
     """A configured live text_encoder produces uncond via ``text_encoder("")`` +
     ``crossattn_proj`` mirroring ``pipeline_wrapper.py:333-343``.
 
@@ -613,7 +613,7 @@ def test_cosmos25_adapter_live_encoder_uncond_context():
             return self.crossattn_proj_module(x)
 
     encoder = _FakeTextEncoder()
-    pipe = Cosmos25VideoBackbone(
+    pipe = CosmosPredict25VideoBackbone(
         net=_FakeProjNet(),
         vae=None,
         text_encoder=encoder,
@@ -622,19 +622,19 @@ def test_cosmos25_adapter_live_encoder_uncond_context():
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
-    vb = Cosmos25VideoBackbone(
+    vb = CosmosPredict25VideoBackbone(
         net=pipe.dit,
         vae=getattr(pipe, "_vae_iface", None),
         text_encoder=getattr(pipe, "text_encoder", None),
-        flow_shift=pipe._flow_shift,
+        shift_video=pipe._shift_video,
         dim=2048,
         num_layers=28,
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        scheduler=CosmosFlowSchedulerAdapter(flow_shift=5.0),
+        scheduler=CosmosFlowSchedulerAdapter(shift_video=5.0),
         freeze=False,  # let crossattn_proj_module's Linear stay trainable
     )
 

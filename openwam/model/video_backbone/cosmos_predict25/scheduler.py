@@ -8,14 +8,14 @@ public surface so both backbones look identical to the trainer.
 
 Defaults are calibrated against upstream Cosmos-Predict2.5:
 
-* ``flow_shift=5.0`` — matches
+* ``shift_video=5.0`` — matches
   ``cosmos_predict2/_src/predict2/models/text2world_model_rectified_flow.py:99``
   (``shift: int = 5``) and the released checkpoint family
   ``rectified_flow_shift5_high_sigma``.
 * Training target ``noise - sample`` (``v_t = x_0 - x_1`` in upstream) and
   noising ``x_t = (1-σ)·sample + σ·noise`` are identical to Wan's default
   fallback in ``BaseWAMArchitecture.compute_loss``, so
-  ``Cosmos25VideoBackbone`` does **not** override ``add_training_noise`` /
+  ``CosmosPredict25VideoBackbone`` does **not** override ``add_training_noise`` /
   ``training_target``.
 * Loss weighting is uniform — see ``_compute_training_weights`` below.
 """
@@ -31,14 +31,14 @@ class CosmosFlowSchedulerAdapter:
     """Wan-compatible flow-matching scheduler tuned for Cosmos-Predict2.5.
 
     Args:
-        flow_shift: Rectified-flow shift parameter. Default ``5.0`` matches
+        shift_video: Rectified-flow shift parameter. Default ``5.0`` matches
             Cosmos-Predict2.5 upstream (see module docstring).
         num_train_timesteps: Total training timestep budget (default 1000,
             matches Wan / FLUX / Cosmos conventions).
     """
 
-    def __init__(self, *, flow_shift: float = 5.0, num_train_timesteps: int = 1000):
-        self.flow_shift = float(flow_shift)
+    def __init__(self, *, shift_video: float = 5.0, num_train_timesteps: int = 1000):
+        self.shift_video = float(shift_video)
         self.num_train_timesteps = int(num_train_timesteps)
         self.timesteps: Optional[torch.Tensor] = None
         self.sigmas: Optional[torch.Tensor] = None
@@ -60,7 +60,7 @@ class CosmosFlowSchedulerAdapter:
         training: bool = False,
         **_: object,
     ) -> None:
-        shift_val = self.flow_shift if shift is None else float(shift)
+        shift_val = self.shift_video if shift is None else float(shift)
         self.sigmas = self._flow_match_sigmas(num_inference_steps, shift_val, denoising_strength)
         self.timesteps = self.sigmas * self.num_train_timesteps
         if training:

@@ -7,13 +7,13 @@ Wan2pt1 VAE and the ``preprocess_input_for_train`` full path.
 
 Skip conditions:
 - No CUDA available.
-- ``cosmos_predict2`` is not installed (run ``bash scripts/install_cosmos25.sh`` first).
+- ``cosmos_predict2`` is not installed (run ``bash scripts/install_cosmos_predict25.sh`` first).
 - The asset bundle at ``COSMOS25_ASSET_PATH`` (default
   ``/path/to/assets/Cosmos-Predict2.5-2B``) does not exist on the host.
 
 Annotated ``@pytest.mark.gpu``; explicit invocation:
 
-    .venv/bin/python -m pytest -q tests/test_cosmos25_real_load.py
+    .venv/bin/python -m pytest -q tests/test_cosmos_predict25_real_load.py
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def _skip_unless_runnable():
     try:
         import cosmos_predict2  # noqa: F401
     except ImportError:
-        pytest.skip("cosmos_predict2 not installed; run scripts/install_cosmos25.sh first.")
+        pytest.skip("cosmos_predict2 not installed; run scripts/install_cosmos_predict25.sh first.")
 
 
 @pytest.mark.parametrize("sac_mode", ["none", "mm_only"])
@@ -47,14 +47,14 @@ def test_real_load_block_loop_preserves_shape(sac_mode):
 
     cfg = {
         "video_backbone": {
-            "name": "cosmos25_predict_2b",
+            "name": "cosmos_predict25_2b",
             "model_path": str(ASSET_PATH),
             "model_variant": "base/post-trained",
             "text_encoder": "none",
             "sac_mode": sac_mode,
         }
     }
-    vb = build_video_backbone("cosmos25_predict_2b", cfg)
+    vb = build_video_backbone("cosmos_predict25_2b", cfg)
     vb.set_dtype_device(torch.bfloat16, torch.device("cuda:0"))
 
     # Geometry probed from the checkpoint.
@@ -62,7 +62,7 @@ def test_real_load_block_loop_preserves_shape(sac_mode):
     assert vb.num_layers == 28
     assert vb.num_heads == 16
     assert vb.head_dim == 128
-    assert vb.text_dim == 1024  # Cosmos25 context dim, exposed via the base text_dim property
+    assert vb.text_dim == 1024  # CosmosPredict25 context dim, exposed via the base text_dim property
 
     # Confirm SAC wrap state matches the config.
     net = vb.dit
@@ -101,7 +101,7 @@ def _build_backbone_with_real_vae():
 
     cfg = {
         "video_backbone": {
-            "name": "cosmos25_predict_2b",
+            "name": "cosmos_predict25_2b",
             "model_path": str(ASSET_PATH),
             "model_variant": "base/post-trained",
             "text_encoder": "none",
@@ -109,7 +109,7 @@ def _build_backbone_with_real_vae():
             "sac_mode": "none",
         }
     }
-    vb = build_video_backbone("cosmos25_predict_2b", cfg)
+    vb = build_video_backbone("cosmos_predict25_2b", cfg)
     vb.set_dtype_device(torch.bfloat16, torch.device("cuda:0"))
     return vb
 

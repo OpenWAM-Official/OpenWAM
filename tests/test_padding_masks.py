@@ -288,8 +288,8 @@ class TestLossMasking:
 #
 # Reviewer @wayrise flagged that `prepare_inputs` previously decided
 # ``skip_first`` purely from ``inputs.get("first_frame_latents")``. That
-# matched Wan TI2V / VACE / cosmos25 TI2V (those set the field) and
-# cosmos25 T2V (no FFL, no skip). But Wan I2V wires conditioning through
+# matched Wan TI2V / VACE / cosmos_predict25 TI2V (those set the field) and
+# cosmos_predict25 T2V (no FFL, no skip). But Wan I2V wires conditioning through
 # the ``y`` channel *without* setting ``first_frame_latents``, and a
 # future Wan T2V configuration would (silently) also lose its skip.
 #
@@ -389,7 +389,7 @@ class TestPrepareInputsSkipFirst:
         assert torch.equal(inputs["video_is_pad"][0].cpu(), expected)
 
     def test_per_batch_signal_still_wins_when_property_is_false(self):
-        """cosmos25 TI2V case: ``needs_first_frame_skip=False`` (TI2V is
+        """cosmos_predict25 TI2V case: ``needs_first_frame_skip=False`` (TI2V is
         data-driven on cosmos), but the batch carries ``first_frame_latents``.
         The OR clause must still trip skip_first."""
         vb = self._make_backbone(emit_first_frame_latents=True, needs_skip=False)

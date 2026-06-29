@@ -1,5 +1,5 @@
 """CPU smoke for Phase 4 VAE freeze + dtype/device propagation in
-``Cosmos25VideoBackbone``.
+``CosmosPredict25VideoBackbone``.
 
 ``Wan2pt1VAEInterface`` is not an ``nn.Module``, so the adapter has to
 explicitly walk the inner nn.Module + mean/std tensor attributes on every
@@ -12,12 +12,12 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from openwam.model.video_backbone.cosmos25 import CosmosFlowSchedulerAdapter
-from openwam.model.video_backbone.cosmos25._vae_utils import (
+from openwam.model.video_backbone.cosmos_predict25 import CosmosFlowSchedulerAdapter
+from openwam.model.video_backbone.cosmos_predict25._vae_utils import (
     _move_cosmos_vae,
     _vae_inner_module,
 )
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone
+from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
 
 
 class _FakeWanVAE:
@@ -51,8 +51,8 @@ class _ParamNet(nn.Module):
         self.w = nn.Parameter(torch.zeros(1))
 
 
-def _build_backbone_with_fake_vae(*, freeze: bool) -> Cosmos25VideoBackbone:
-    pipe = Cosmos25VideoBackbone(
+def _build_backbone_with_fake_vae(*, freeze: bool) -> CosmosPredict25VideoBackbone:
+    pipe = CosmosPredict25VideoBackbone(
         net=_ParamNet(),
         vae=_FakeWan2pt1Interface(),
         text_encoder=None,
@@ -61,19 +61,19 @@ def _build_backbone_with_fake_vae(*, freeze: bool) -> Cosmos25VideoBackbone:
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        flow_shift=5.0,
+        shift_video=5.0,
     )
-    return Cosmos25VideoBackbone(
+    return CosmosPredict25VideoBackbone(
         net=pipe.dit,
         vae=getattr(pipe, "_vae_iface", None),
         text_encoder=getattr(pipe, "text_encoder", None),
-        flow_shift=pipe._flow_shift,
+        shift_video=pipe._shift_video,
         dim=2048,
         num_layers=28,
         num_heads=16,
         head_dim=128,
         context_dim=1024,
-        scheduler=CosmosFlowSchedulerAdapter(flow_shift=5.0),
+        scheduler=CosmosFlowSchedulerAdapter(shift_video=5.0),
         freeze=freeze,
     )
 
