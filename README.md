@@ -189,11 +189,9 @@ server: { host: "0.0.0.0", port: 8848 }
 
 inference:
   denoise_steps: 10       # denoising steps (FastWAM-Joint default)
-  schedule_type: sync     # sync (lockstep) | independent (per-stream random) | variance_shift (Latent-Forcing ordered)
-  schedule_seed: null     # independent only: RNG seed for a reproducible random schedule
-  vs_lead: action         # variance_shift only: which stream denoises earlier (action | video)
+  schedule_type: sync     # sync (lockstep) | variance_shift (Latent-Forcing ordered; joint_self_attn ckpts)
+  vs_lead: action         # variance_shift only: which stream denoises first (action | video)
   vs_alpha: 9.0           # variance_shift only: lead-curve strength (>1 leads; 1 = sync diagonal)
-  vs_offset: 0.0          # variance_shift only: delay the lagging stream's start (0..1; 0 = pure curve)
   execution_mode: sync    # sync | async
   execution_horizon: null # async only: actions per chunk (null = policy default)
   inference_delay_steps: null

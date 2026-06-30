@@ -47,19 +47,11 @@ training:
   max_timestep_boundary: 1.0      # Upper bound (fraction of total timesteps)
   min_timestep_boundary: 0.0      # Lower bound (fraction of total timesteps)
 
-  # --- Flow matching timestep sampling (video & action) ---
-  timestep_sampling: default      # default = per-stream torch.randint over the shifted
-                                  #   grid (legacy, unchanged).
-                                  # independent_uniform_shift = per-stream independent
-                                  #   uniform + α-shift draw (UWM-style; train-time
-                                  #   counterpart of inference schedule_type=independent).
-                                  # variance_shift = curve-correlated draw (one stream
-                                  #   leads via α-shift; train-time counterpart of
-                                  #   inference schedule_type=variance_shift).
-  timestep_sampling_seed: null    # independent_uniform_shift / variance_shift only: RNG
-                                  #   seed for reproducible draws; null = fresh each step.
-  timestep_sampling_lead: action  # variance_shift only: which stream denoises earlier (action | video)
-  timestep_sampling_alpha: 9.0    # variance_shift only: lead-curve strength (>1 leads; 1 = diagonal)
+  # --- Flow matching timestep sampling (video & action; joint_self_attn only) ---
+  timestep_sampling: default      # <default>        per-stream timesteps; fills the (sigma_v, sigma_a) plane (baseline; all architectures)
+                                  # <variance_shift> shared progress, one stream leads denoising; joint_self_attn only, else raises
+  timestep_sampling_lead: video   # variance_shift only: which stream denoises first  <action> | <video>
+  timestep_sampling_alpha: 9.0    # variance_shift only: lead-curve strength  (>1 leads; 1 = diagonal = sync)
 
   # --- Checkpoint ---
   output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output
