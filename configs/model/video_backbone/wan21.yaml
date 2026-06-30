@@ -1,8 +1,0 @@
-# Wan2.1 family video backbone (VACE / I2V): fixed pretrained baseline — no
-# external encoder, no from_scratch (cfg.model.video_backbone.*).
-# Default wan21_vace_1_3b; for I2V override name + model_path.
-
-name: wan21_vace_1_3b   # wan21_vace_1_3b (480x832 / 720x1280) | wan21_i2v_14b_480p (480x832, first-frame)
-model_path: /path/to/Wan2.1-VACE-1.3B  # [Required] weights dir; must match `name`
-
-shift_video: 5.0       # Flow-matching α-shift (VIDEO scheduler); single source of truth for train + inference

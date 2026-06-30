@@ -58,7 +58,6 @@ def rope_apply_1d(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     """
     x_c = torch.view_as_complex(x.to(torch.float64).reshape(*x.shape[:-1], -1, 2))
     freqs = freqs.to(x_c.device).view(1, 1, x_c.shape[-2], x_c.shape[-1])
-    freqs = freqs.to(torch.complex64) if freqs.device.type == "npu" else freqs
     return torch.view_as_real(x_c * freqs).flatten(-2).to(x.dtype)
 
 

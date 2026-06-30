@@ -407,7 +407,7 @@ def _apply_freeze(pipe, trainer_attrs, freeze_list):
 
 
 def test_freeze_joint_strategy():
-    """joint.yaml: freeze text_encoder + vae; dit + action_dit remain trainable."""
+    """Joint strategy (dual_system.yaml): freeze text_encoder + vae; dit + action_dit remain trainable."""
     pipe = _MockPipeline()
     arch = _make_tiny_arch()
     action_dit = arch.action_backbone
@@ -422,12 +422,14 @@ def test_freeze_joint_strategy():
 
 
 def test_freeze_video_only_strategy():
-    """video_only.yaml: freeze text_encoder + vae + action_dit; dit trainable."""
+    """Video-only freeze strategy: freeze text_encoder + vae + action_dit; dit stays trainable."""
     pipe = _MockPipeline()
     arch = _make_tiny_arch()
     action_dit = arch.action_backbone
 
-    freeze_list = ["text_encoder", "vae", "action_dit"]  # from video_only.yaml
+    # Freeze the action backbone too → video-only training (no shipped yaml uses this;
+    # exercises the freeze mechanism for a hypothetical lambda_action=0 setup).
+    freeze_list = ["text_encoder", "vae", "action_dit"]
     _apply_freeze(pipe, {"action_dit": action_dit}, freeze_list)
 
     assert not any(p.requires_grad for p in pipe.text_encoder.parameters())
@@ -627,43 +629,6 @@ def test_save_checkpoint_excludes_vlm_backbone():
         saved = load_file(ckpt_path)
         assert not any(k.startswith("vlm_backbone.") for k in saved), "vlm_backbone params should be excluded"
         assert any(k.startswith("action_head.") for k in saved), "non-VLM params should be saved"
-
-        reloaded = _VLMArch()
-        reloaded.load_checkpoint(ckpt_path)
-        assert torch.equal(reloaded.action_head.weight, arch.action_head.weight)
-
-
-def test_trainer_checkpoint_excludes_vlm_backbone():
-    """Trainer save_checkpoint must exclude vlm_backbone params (saved separately)."""
-    from openwam.model.architectures.base import BaseWAMArchitecture
-    from openwam.train.openwam_trainer import OpenWAMTrainer
-
-    class _VLMArch(BaseWAMArchitecture):
-        def __init__(self):
-            super().__init__(cfg=None)
-            self.action_head = nn.Linear(16, 8)
-            self.vlm_backbone = nn.Linear(16, 32)
-
-        def forward(self, *args, **kwargs):  # pragma: no cover
-            raise NotImplementedError
-
-    arch = _VLMArch()
-    with torch.no_grad():
-        arch.action_head.weight.copy_(torch.randn_like(arch.action_head.weight))
-
-    trainer = object.__new__(OpenWAMTrainer)
-    trainer.accelerator = None
-    trainer.architecture = arch
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        ckpt_path = str(Path(tmpdir) / "trainer_vlm_ckpt.safetensors")
-        trainer.save_checkpoint(ckpt_path)
-
-        from safetensors.torch import load_file
-
-        saved = load_file(ckpt_path)
-        assert not any(k.startswith("vlm_backbone.") for k in saved)
-        assert any(k.startswith("action_head.") for k in saved)
 
         reloaded = _VLMArch()
         reloaded.load_checkpoint(ckpt_path)

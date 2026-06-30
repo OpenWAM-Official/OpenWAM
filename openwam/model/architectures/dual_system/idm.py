@@ -22,17 +22,24 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
+from einops import rearrange
 from torch import Tensor
 
+from openwam.model.action_backbone.components import rope_apply_1d
 from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
-from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
+from openwam.model.compile_options import (
+    compile_enabled,
+    idm_compile_cfg,
+    section_enabled,
+    torch_compile_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +212,6 @@ class IDMMoTDriver(DualSystemMoTDriver):
         *,
         video_kv_cache: list[dict[str, Tensor]],
         video_seq_len: int,
-        video_tokens_per_frame: int,
     ):
         """Run only the action branch, attending to cached frozen-video K/V."""
         if len(video_kv_cache) != self.num_layers:
@@ -215,13 +221,19 @@ class IDMMoTDriver(DualSystemMoTDriver):
             raise RuntimeError("IDM cached action path requires ActionDiT.prepare_state payload.")
 
         s_action = int(payload.x_action.shape[1])
-        joint_mask = self._build_attention_mask(
-            s_video=int(video_seq_len),
-            s_action=s_action,
-            video_tokens_per_frame=int(video_tokens_per_frame),
+        # Stage-2 action mask: action attends every frozen-video token + every
+        # action token. That is exactly the action-query rows of the
+        # action_sees_video joint mask (a→v all-True, a→a all-True; dual_system
+        # carries no readonly tail), which reduces to an all-ones mask — built
+        # directly so IDM stays free of attention_mask_mode. Shape
+        # (s_action, video_seq_len + s_action) is intentionally identical to the
+        # a-query row slice of MoTDriver._build_attention_mask, so the cached
+        # Stage-2 path and the joint-loop path stay byte-equivalent.
+        action_mask = torch.ones(
+            (s_action, int(video_seq_len) + s_action),
+            dtype=torch.bool,
             device=payload.x_action.device,
         )
-        action_mask = joint_mask[video_seq_len : video_seq_len + s_action, :]
 
         for layer_id in range(self.num_layers):
             q_a, k_a, v_a, apost = self.ab.pre_attn_at_layer(layer_id, astate)
@@ -238,6 +250,98 @@ class IDMMoTDriver(DualSystemMoTDriver):
             mixed_a = self._mixed_attention(q_a, k_cat, v_cat, action_mask)
             astate = self.ab.post_attn_at_layer(layer_id, astate, mixed_a.contiguous(), apost)
         return astate
+
+    def video_kv_cache_to_tuples(
+        self, video_kv_cache: list[dict[str, Tensor]]
+    ) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...]]:
+        """Convert the legacy list/dict K/V cache into compile-friendly tuples."""
+
+        if len(video_kv_cache) != self.num_layers:
+            raise ValueError(f"video_kv_cache must contain {self.num_layers} layers, got {len(video_kv_cache)}.")
+        return tuple(cache["k"] for cache in video_kv_cache), tuple(cache["v"] for cache in video_kv_cache)
+
+    def run_action_with_video_cache_tensor_loop(
+        self,
+        x_action: Tensor,
+        t_mod: Tensor,
+        action_freqs: Tensor,
+        context: Optional[Tensor],
+        context_mask: Optional[Tensor],
+        action_mask: Tensor,
+        video_k_tuple: tuple[Tensor, ...],
+        video_v_tuple: tuple[Tensor, ...],
+    ) -> Tensor:
+        """Tensor-only IDM action-cache loop for deploy-time compile.
+
+        The eager public path keeps the old ``ActionState`` and list/dict cache
+        contract. This helper mirrors the same block math with only tensors and
+        tuples at the boundary, which lets ``torch.compile`` capture the fixed
+        action-with-video-cache hot loop without specializing on mutable Python
+        state containers.
+        """
+
+        if len(video_k_tuple) != self.num_layers or len(video_v_tuple) != self.num_layers:
+            raise ValueError(
+                "video_k_tuple/video_v_tuple must contain one tensor per IDM layer, "
+                f"got {len(video_k_tuple)} and {len(video_v_tuple)} for {self.num_layers} layers."
+            )
+        if context is None and context_mask is not None:
+            raise ValueError("context_mask was provided but context is None.")
+
+        x = x_action
+        ab = self.ab
+
+        for layer_id, block in enumerate(ab.blocks):
+            chunks = (block.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=1)
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
+
+            residual_x = x
+            attn_input = block.self_attn_norm(residual_x) * (1 + scale_msa) + shift_msa
+
+            sa = block.self_attn
+            q = sa.norm_q(sa.q(attn_input))
+            k = sa.norm_k(sa.k(attn_input))
+            v = sa.v(attn_input)
+
+            q = rearrange(q, "b s (n d) -> b n s d", n=self.num_heads)
+            k = rearrange(k, "b s (n d) -> b n s d", n=self.num_heads)
+            v = rearrange(v, "b s (n d) -> b n s d", n=self.num_heads)
+            q = rope_apply_1d(q, action_freqs)
+            k = rope_apply_1d(k, action_freqs)
+
+            q_a = rearrange(q, "b n s d -> b s (n d)", n=self.num_heads)
+            k_a = rearrange(k, "b n s d -> b s (n d)", n=self.num_heads)
+            v_a = rearrange(v, "b n s d -> b s (n d)", n=self.num_heads)
+
+            k_video = video_k_tuple[layer_id]
+            v_video = video_v_tuple[layer_id]
+            if k_video.shape[0] != x.shape[0] or v_video.shape[0] != x.shape[0]:
+                raise ValueError(
+                    f"video K/V cache batch mismatch at layer {layer_id}: "
+                    f"x={x.shape[0]}, k={k_video.shape[0]}, v={v_video.shape[0]}."
+                )
+            k_cat = torch.cat([k_video, k_a], dim=1)
+            v_cat = torch.cat([v_video, v_a], dim=1)
+
+            mixed_a = self._mixed_attention(q_a, k_cat, v_cat, action_mask)
+            x = block.gate(residual_x, gate_msa, block.self_attn.o(mixed_a.contiguous()))
+
+            if context is not None:
+                text_mask = context_mask
+                if text_mask is not None:
+                    if text_mask.dim() == 2:
+                        text_mask = text_mask.unsqueeze(1).expand(-1, x.shape[1], -1)
+                    elif text_mask.dim() not in (3, 4):
+                        raise ValueError(
+                            "IDM action-cache context_mask must be [B, L], [B, T_action, L], "
+                            f"or broadcastable [B, heads, T_action, L], got {tuple(text_mask.shape)}"
+                        )
+                x = x + block.cross_attn(block.context_attn_norm(x), context, ctx_mask=text_mask)
+
+            mlp_input = block.ffn_norm(x) * (1 + scale_mlp) + shift_mlp
+            x = block.gate(x, gate_mlp, block.ffn(mlp_input))
+
+        return x
 
 
 @register_architecture(
@@ -262,6 +366,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         super().__init__(cfg)
         self._mot_driver: IDMMoTDriver | None = None
         self._mot_driver_kwargs: dict = {}
+        self._compiled_idm_action_cache_loop: Optional[Callable[..., Tensor]] = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -272,7 +377,11 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
-        text_dim = int(self._cfg_get(cfg, "text_dim", 4096))  # Wan T5-XXL context width
+        # Default the action-side raw context width to the loaded backbone's
+        # text_dim (Wan T5-XXL=4096, Cosmos-Predict2.5=1024); explicit cfg/CLI
+        # still wins. Falls back to 4096 when the backbone doesn't expose it.
+        _vb_text_dim = getattr(self.video_backbone, "text_dim", None)
+        text_dim = int(self._cfg_get(cfg, "text_dim", _vb_text_dim or 4096))
         self._init_proprio_context(cfg, text_dim=text_dim)
 
         action_dim_hidden = int(cfg.get("dim", 1024))
@@ -291,20 +400,14 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             shift_action=cfg.get("shift_action"),
-            action_type=cfg.get("type", "explicit"),
-            latent_decoder=cfg.get("latent_decoder"),
         )
 
-        attention_mask_mode = str(cfg.get("attention_mask_mode", ACTION_SEES_VIDEO))
-        if attention_mask_mode != ACTION_SEES_VIDEO:
-            raise ValueError(
-                "DualSystem IDM fixes attention_mask_mode='action_sees_video' to preserve FastWAM-IDM "
-                "train/inference mask semantics. Do not set attention_mask_mode for variant='idm'."
-            )
-
+        # IDM ignores attention_mask_mode: it never depends on the cross-modal
+        # mode. Stage-2 cached-action attention is all-ones (built in
+        # run_action_with_video_cache); teacher-forcing/prefill build their own
+        # submasks. So attention_mask_mode is not forwarded to the driver.
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(cfg.get("mot_checkpoint_mixed_attn", True)),
-            "attention_mask_mode": ACTION_SEES_VIDEO,
             "video_attention_mask_mode": str(cfg.get("video_attention_mask_mode", "first_frame_causal")),
         }
 
@@ -345,6 +448,58 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
     @property
     def mot_driver(self) -> IDMMoTDriver | None:
         return self._mot_driver
+
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Compile IDM's deploy-time action-cache hot loop when requested."""
+
+        super().apply_compile_optimizations(compile_cfg)
+        self._compiled_idm_action_cache_loop = None
+        if not compile_enabled(compile_cfg, default=False, strict=True):
+            return
+
+        section = idm_compile_cfg(compile_cfg)
+        if not section_enabled(section, default=True):
+            logger.info("IDM compile disabled by config; running eager.")
+            return
+        action_cache_section = section.action_cache
+        if not section_enabled(action_cache_section, default=True):
+            logger.info("IDM action-cache compile disabled by config; running eager action stage.")
+            return
+        if self.video_backbone is None or self.action_backbone is None:
+            logger.warning("IDM action-cache compile requested before backbones are ready; running eager.")
+            return
+
+        driver = self._mot_driver or self.build_mot_driver()
+
+        def _run_action_cache_loop(
+            x_action,
+            t_mod,
+            action_freqs,
+            context,
+            context_mask,
+            action_mask,
+            video_k_tuple,
+            video_v_tuple,
+        ):
+            return driver.run_action_with_video_cache_tensor_loop(
+                x_action,
+                t_mod,
+                action_freqs,
+                context,
+                context_mask,
+                action_mask,
+                video_k_tuple,
+                video_v_tuple,
+            )
+
+        kwargs = torch_compile_kwargs(action_cache_section, default_mode="reduce-overhead")
+        try:
+            self._compiled_idm_action_cache_loop = torch.compile(_run_action_cache_loop, **kwargs)
+        except Exception as exc:  # pragma: no cover - defensive setup fallback
+            self._compiled_idm_action_cache_loop = None
+            logger.warning("IDM action-cache torch.compile setup failed; running eager: %s", exc)
+            return
+        logger.info("Enabled IDM action-cache compile with torch.compile kwargs=%s", kwargs)
 
     # ------------------------------------------------------------------
     # Forward: dispatches between standard joint (inference fallback) and
@@ -916,8 +1071,34 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         if driver is None:
             driver = self.build_mot_driver()
         video_seq_len = int(cond_vstate.hidden_states.shape[1])
-        video_tokens_per_frame = driver._video_tokens_per_frame(cond_vstate)
         video_kv_cache, _ = driver.prefill_video_cache(cond_vstate)
+        compiled_action_cache_inputs = None
+        if getattr(self, "_compiled_idm_action_cache_loop", None) is not None:
+            video_k_tuple, video_v_tuple = driver.video_kv_cache_to_tuples(video_kv_cache)
+            action_seq_len = int(action_latents.shape[1])
+            action_mask = torch.ones(
+                (action_seq_len, video_seq_len + action_seq_len),
+                dtype=torch.bool,
+                device=action_latents.device,
+            )
+            action_context_dtype = ab._embed_actions(action_latents).dtype
+            action_context_emb, action_context_attn_mask = ab._prepare_context(
+                action_context,
+                action_context_mask,
+                batch_size=action_latents.shape[0],
+                seq_len=action_seq_len,
+                dtype=action_context_dtype,
+                device=action_latents.device,
+            )
+            action_freqs = ab._get_rope_freqs(action_seq_len).to(device=action_latents.device)
+            compiled_action_cache_inputs = (
+                video_k_tuple,
+                video_v_tuple,
+                action_mask,
+                action_context_emb,
+                action_context_attn_mask,
+                action_freqs,
+            )
 
         for i in tqdm(range(len(schedule) - 1), desc="IDM Stage 2: Action"):
             t_v, t_a = schedule[i]
@@ -932,19 +1113,51 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
             a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
 
-            astate = ab.prepare_state(
-                action_latents,
-                a_timestep,
-                context=action_context,
-                context_mask=action_context_mask,
-            )
-            astate = driver.run_action_with_video_cache(
-                astate,
-                video_kv_cache=video_kv_cache,
-                video_seq_len=video_seq_len,
-                video_tokens_per_frame=video_tokens_per_frame,
-            )
-            action_noise_pred = ab.extract_prediction(astate)
+            action_noise_pred = None
+            compiled_action_cache_loop = getattr(self, "_compiled_idm_action_cache_loop", None)
+            if compiled_action_cache_loop is not None and compiled_action_cache_inputs is not None:
+                (
+                    video_k_tuple,
+                    video_v_tuple,
+                    action_mask,
+                    action_context_emb,
+                    action_context_attn_mask,
+                    action_freqs,
+                ) = compiled_action_cache_inputs
+                try:
+                    x_action = ab._embed_actions(action_latents)
+                    prepared_timestep = ab._prepare_timestep(a_timestep, action_latents.shape[0])
+                    t_embed = ab.time_embedding(prepared_timestep)
+                    t_mod = ab.time_projection(t_embed)
+                    torch.compiler.cudagraph_mark_step_begin()
+                    x_action = compiled_action_cache_loop(
+                        x_action,
+                        t_mod,
+                        action_freqs,
+                        action_context_emb,
+                        action_context_attn_mask,
+                        action_mask,
+                        video_k_tuple,
+                        video_v_tuple,
+                    ).clone()
+                    action_noise_pred = ab.action_decoder(x_action)
+                except Exception as exc:
+                    self._compiled_idm_action_cache_loop = None
+                    logger.warning("IDM compiled action-cache loop failed; falling back to eager: %s", exc)
+
+            if action_noise_pred is None:
+                astate = ab.prepare_state(
+                    action_latents,
+                    a_timestep,
+                    context=action_context,
+                    context_mask=action_context_mask,
+                )
+                astate = driver.run_action_with_video_cache(
+                    astate,
+                    video_kv_cache=video_kv_cache,
+                    video_seq_len=video_seq_len,
+                )
+                action_noise_pred = ab.extract_prediction(astate)
 
             if action_noise_pred is not None:
                 action_latents = self.action_scheduler.flow_step(
@@ -961,7 +1174,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             video_frames = vb.decode_video(inputs_shared_with_proprio["latents"], tiled=tiled)
         else:
             video_frames = None
-
         actions_out = action_latents.squeeze(0).float().cpu().numpy()
         normalizer = getattr(self, "normalizer", None)
         if normalizer is not None:

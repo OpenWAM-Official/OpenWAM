@@ -34,11 +34,6 @@ Functions
     train to the full eps_df and val to empty. Raises with a clear
     message on malformed split specs.
 
-- validate_video_sampling(num_frames, video_stride, *, vae_modulus=4)
-    Enforce ``(num_frames - 1) % video_stride == 0`` and the Wan VAE
-    ``(num_video_frames - 1) % vae_modulus == 0`` constraint. Returns
-    ``(video_sample_indices, num_video_frames)``.
-
 - water_fill_hours(bucket_hours, total_budget)
     Allocate ``total_budget`` hours across N buckets via water-filling.
     Each bucket gets at most its own ``bucket_hours[i]``; surplus from
@@ -60,7 +55,7 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -167,38 +162,6 @@ def apply_info_splits(
         )
         return sel
     return eps_df.reset_index(drop=True) if split == "train" else eps_df.iloc[0:0].reset_index(drop=True)
-
-
-def validate_video_sampling(
-    num_frames: int,
-    video_stride: int,
-    *,
-    vae_modulus: int = 4,
-) -> Tuple[np.ndarray, int]:
-    """Validate the two video-sub-sampling constraints; return indices + count.
-
-    Returns:
-        video_sample_indices: np.int64 array of within-window positions to
-            sample from each video, e.g. arange(0, num_frames, video_stride).
-        num_video_frames: int, length of the array above.
-
-    Raises ValueError if either constraint is violated.
-    """
-    if (num_frames - 1) % video_stride != 0:
-        valid = [s for s in range(1, num_frames) if (num_frames - 1) % s == 0]
-        raise ValueError(
-            f"(num_frames - 1) must be divisible by video_stride. "
-            f"Got num_frames={num_frames}, video_stride={video_stride}. "
-            f"Valid strides for num_frames={num_frames}: {valid}"
-        )
-    indices = np.arange(0, num_frames, video_stride, dtype=np.int64)
-    n = int(indices.size)
-    if (n - 1) % vae_modulus != 0:
-        raise ValueError(
-            f"After video_stride sub-sampling, num_video_frames={n} "
-            f"violates (num_video_frames - 1) % {vae_modulus} == 0 (Wan VAE)."
-        )
-    return indices, n
 
 
 def water_fill_hours(bucket_hours: List[float], total_budget: float) -> List[float]:
@@ -461,6 +424,17 @@ def build_multibucket(
     buckets = [r for r in results if r is not None and len(r) > 0]
     if not buckets:
         raise RuntimeError(f"All {source_name} buckets failed to load")
+    # _build_one swallows per-bucket construction errors (missing/corrupt data,
+    # and — for RoboCOIN — stats-integrity validation raised in _load_stats) into
+    # a warning + None, so a misconfigured bucket is dropped rather than aborting
+    # the run. Surface the dropped set explicitly so that silent data loss (e.g. a
+    # whole robot_type lost to a stale stats file) is visible, not buried.
+    dropped = [sub.name for sub, r in zip(sub_dirs, results) if r is None or len(r) == 0]
+    if dropped:
+        logger.warning(
+            "%s: dropped %d / %d bucket(s) during load (construction failed or empty): %s",
+            source_name, len(dropped), len(sub_dirs), ", ".join(sorted(dropped)),
+        )
     logger.info("%s: loaded %d / %d buckets", source_name, len(buckets), len(sub_dirs))
     return wrapper_cls(buckets)
 
@@ -470,7 +444,6 @@ __all__ = [
     "load_episodes_parquet",
     "compute_file_local_offsets",
     "apply_info_splits",
-    "validate_video_sampling",
     "water_fill_hours",
     "subsample_episodes_by_hours",
     "quick_bucket_hours",

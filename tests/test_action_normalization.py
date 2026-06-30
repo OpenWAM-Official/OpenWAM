@@ -14,8 +14,9 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from openwam.dataloader.transforms.normalize import Normalizer
+from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
 from openwam.deploy.engine import JointInferenceEngine
-from openwam.deploy.model_loader import _build_normalizer
+from openwam.deploy.model_loader import _build_normalizer, _infer_raw_dim, _UnifyAwareNormalizer
 from openwam.model.architectures.base import BaseWAMArchitecture
 
 # --- Helper: build a realistic stats dict for a 20D eef action ---
@@ -239,7 +240,6 @@ class _TinyGenerateArchitecture(BaseWAMArchitecture):
             action_dim = 20
             scheduler = _TinyScheduler()
             uses_proprioception = False
-            has_latent_decoder = False
 
         self.action_backbone = _ActionBackbone()
 
@@ -278,60 +278,108 @@ def test_base_generate_unnormalizes_deploy_actions():
     np.testing.assert_allclose(result["actions"], expected, atol=1e-6)
 
 
-class _LatentDecoderActionBackbone(nn.Module):
-    """Stub action backbone exposing a latent->action decoder for generate()."""
+# --- _UnifyAwareNormalizer + unify dispatch (unify_action ckpts) ---
 
-    action_dim = 20  # latent token_dim in latent mode
-
-    def __init__(self, num_query, real_action_dim, proprio_dim=20):
-        super().__init__()
-        self.scheduler = _TinyScheduler()
-        self.uses_proprioception = False
-        self.num_query = num_query
-        self.real_action_dim = real_action_dim
-        self.proprio_dim = proprio_dim
-        self.seen_proprio = None
-
-    @property
-    def has_latent_decoder(self):
-        return True
-
-    def decode_latent_to_action(self, latent, proprio=None):
-        # Record proprio to assert it was routed in; emit a fixed (B, num_query,
-        # real_action_dim) so the test checks shape + unnormalize, not values.
-        self.seen_proprio = proprio
-        b = latent.shape[0]
-        base = torch.arange(self.num_query * self.real_action_dim, dtype=latent.dtype)
-        return base.view(1, self.num_query, self.real_action_dim).expand(b, -1, -1)
+_UNIFY_MAP = ["0-9", "32-41"]  # 20-D raw eef -> unified slots [0:10) + [32:42)
 
 
-class _TinyLatentGenerateArchitecture(_TinyGenerateArchitecture):
-    def __init__(self, normalizer, num_query, real_action_dim):
-        super().__init__(normalizer)
-        self.action_backbone = _LatentDecoderActionBackbone(num_query, real_action_dim)
+def _unify_dst():
+    return parse_unify_spec(_UNIFY_MAP, UNIFY_DIM)
 
 
-def test_base_generate_latent_decodes_then_unnormalizes():
-    """Latent mode: generate() decodes latent->action AND unnormalizes (same path as explicit)."""
-    num_query, real_action_dim = 5, 20
+def _clipped_raw(seed: int, n: int = 5):
     stats = _eef_stats_min_max()
-    normalizer = Normalizer(mode="min_max", stats=stats)
-    arch = _TinyLatentGenerateArchitecture(normalizer, num_query, real_action_dim)
+    raw = np.random.RandomState(seed).uniform(-0.5, 0.5, size=(n, 20)).astype(np.float32)
+    return np.clip(raw, stats["min"], stats["max"])
 
-    proprio = np.zeros(real_action_dim, dtype=np.float32)
-    result = arch.generate(
-        schedule=[(0.0, 1.0), (0.0, 0.0)],
-        prompt="",
-        num_frames=2,
-        decode_video=False,
-        seed=123,
-        proprio=torch.from_numpy(proprio),
+
+def test_unify_action_out_roundtrip():
+    """action OUT: raw -> train forward (normalize->scatter) -> deploy inverse (gather->unnormalize)."""
+    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
+    dst = _unify_dst()
+    raw = _clipped_raw(0)
+    unified, _ = map_to_unify(inner.normalize(raw), dst, UNIFY_DIM)  # what the model is trained on
+    recovered = _UnifyAwareNormalizer(inner, dst, UNIFY_DIM).unnormalize(unified)
+    assert recovered.shape == raw.shape
+    np.testing.assert_allclose(recovered, raw, atol=1e-5)
+
+
+def test_unify_proprio_in_matches_train_forward():
+    """proprio IN: wrapper.normalize(raw) == map_to_unify(inner.normalize(raw))."""
+    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
+    dst = _unify_dst()
+    raw = np.random.RandomState(1).uniform(-0.5, 0.5, size=(3, 20)).astype(np.float32)
+    expected, _ = map_to_unify(inner.normalize(raw), dst, UNIFY_DIM)
+    np.testing.assert_allclose(_UnifyAwareNormalizer(inner, dst, UNIFY_DIM).normalize(raw), expected, atol=1e-6)
+
+
+def test_unify_gather_only_when_inner_none():
+    """inner=None: unnormalize only gathers (80->raw), normalize only scatters (raw->80)."""
+    dst = _unify_dst()
+    w = _UnifyAwareNormalizer(None, dst, UNIFY_DIM)
+    raw = np.random.RandomState(2).uniform(-1, 1, size=(4, 20)).astype(np.float32)
+    unified, _ = map_to_unify(raw, dst, UNIFY_DIM)
+    np.testing.assert_allclose(w.unnormalize(unified), raw, atol=1e-6)
+    np.testing.assert_allclose(w.normalize(raw), unified, atol=1e-6)
+
+
+def test_unify_unnormalize_passthrough_when_not_unify_dim():
+    """Defensive branch: last-dim != unify_dim -> skip gather, delegate to inner.unnormalize."""
+    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
+    w = _UnifyAwareNormalizer(inner, _unify_dst(), UNIFY_DIM)
+    raw_width = np.random.RandomState(3).uniform(-1, 1, size=(2, 20)).astype(np.float32)  # 20 != 80
+    np.testing.assert_allclose(w.unnormalize(raw_width), inner.unnormalize(raw_width), atol=1e-6)
+
+
+def test_infer_raw_dim():
+    assert _infer_raw_dim(Normalizer(mode="min_max", stats=_eef_stats_min_max())) == 20
+    assert _infer_raw_dim(None) is None
+
+
+def test_build_normalizer_unify_off_returns_plain_inner(tmp_path):
+    _write_stats_file(tmp_path, mode_key="eef")
+    cfg = OmegaConf.create(
+        {"dataloader": {"normalize_mode": "min-max", "action_mode": "eef", "unify_action": False}}
     )
+    norm = _build_normalizer(cfg, str(tmp_path))
+    assert isinstance(norm, Normalizer) and not isinstance(norm, _UnifyAwareNormalizer)
 
-    # Decoded shape (num_query, real_action_dim), proprio was routed to the decoder.
-    assert result["actions"].shape == (num_query, real_action_dim)
-    assert arch.action_backbone.seen_proprio is not None
-    # Output went through unnormalize (decoder emits an arange; unnormalize maps it).
-    raw = torch.arange(num_query * real_action_dim, dtype=torch.float32).view(num_query, real_action_dim).numpy()
-    expected = normalizer.unnormalize(raw)
-    np.testing.assert_allclose(result["actions"], expected, atol=1e-5)
+
+def test_build_normalizer_unify_on_wraps_and_roundtrips(tmp_path):
+    _write_stats_file(tmp_path, mode_key="eef")
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "min-max",
+                "action_mode": "eef",
+                "unify_action": True,
+                "unify_action_map": _UNIFY_MAP,
+            }
+        }
+    )
+    norm = _build_normalizer(cfg, str(tmp_path))
+    assert isinstance(norm, _UnifyAwareNormalizer)
+    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
+    raw = _clipped_raw(7, n=4)
+    unified, _ = map_to_unify(inner.normalize(raw), _unify_dst(), UNIFY_DIM)
+    np.testing.assert_allclose(norm.unnormalize(unified), raw, atol=1e-5)
+
+
+def test_build_normalizer_unify_identity_map_fallback(tmp_path):
+    """unify on but no unify_action_map: raw dim inferred from stats (20) -> identity map 0..19."""
+    _write_stats_file(tmp_path, mode_key="eef")
+    cfg = OmegaConf.create(
+        {"dataloader": {"normalize_mode": "min-max", "action_mode": "eef", "unify_action": True}}
+    )
+    norm = _build_normalizer(cfg, str(tmp_path))
+    assert isinstance(norm, _UnifyAwareNormalizer)
+    assert norm._dst_index.tolist() == list(range(20))
+
+
+def test_build_normalizer_unify_no_map_no_stats_raises(tmp_path):
+    """unify on, no map, normalize disabled (no stats to infer raw dim) -> ValueError."""
+    cfg = OmegaConf.create(
+        {"dataloader": {"normalize_mode": None, "action_mode": "eef", "unify_action": True}}
+    )
+    with pytest.raises(ValueError, match="unify_action_map is missing"):
+        _build_normalizer(cfg, str(tmp_path))

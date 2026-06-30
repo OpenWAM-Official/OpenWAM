@@ -8,7 +8,8 @@ action gradients from flowing back into the video DiT.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+import logging
+from typing import Callable, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -17,6 +18,14 @@ from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import _cfg_get, register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.compile_options import (
+    compile_enabled,
+    cross_attn_compile_cfg,
+    section_enabled,
+    torch_compile_kwargs,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _cross_attn_options(cfg) -> dict:
@@ -42,6 +51,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
     def __init__(self, cfg=None):
         super().__init__(cfg)
         self._detach_bridge: bool = False
+        self._compiled_action_forward: Optional[Callable[..., Tensor]] = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -59,7 +69,11 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             cfg.setdefault("attn_head_dim", self.video_backbone.head_dim)
         bl = resolve_bridge_layers(cfg)
         video_dim = self._resolve_video_dim(cfg)
-        text_dim = int(self._cfg_get(cfg, "text_dim", 4096))  # Wan T5-XXL context width
+        # Default the action-side raw context width to the loaded backbone's
+        # text_dim (Wan T5-XXL=4096, Cosmos-Predict2.5=1024); explicit cfg/CLI
+        # still wins. Falls back to 4096 when the backbone doesn't expose it.
+        _vb_text_dim = getattr(self.video_backbone, "text_dim", None)
+        text_dim = int(self._cfg_get(cfg, "text_dim", _vb_text_dim or 4096))
         self._init_proprio_context(cfg, text_dim=text_dim)
         self._detach_bridge = bool(cfg.get("detach_bridge", False))
 
@@ -91,13 +105,84 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             shift_action=cfg.get("shift_action"),
-            action_type=cfg.get("type", "explicit"),
-            latent_decoder=cfg.get("latent_decoder"),
         )
 
     @property
     def detach_bridge(self) -> bool:
         return self._detach_bridge
+
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Compile the tensor-only action cross-attention helper when requested."""
+
+        super().apply_compile_optimizations(compile_cfg)
+        self._compiled_action_forward = None
+        if not compile_enabled(compile_cfg, default=False, strict=True):
+            return
+
+        section = cross_attn_compile_cfg(compile_cfg)
+        if not section_enabled(section, default=True):
+            logger.info("cross-attn action compile disabled by config; running eager.")
+            return
+        if self.action_backbone is None:
+            logger.warning("cross-attn action compile requested but action_backbone is None; running eager.")
+            return
+
+        kwargs = torch_compile_kwargs(section, default_mode="reduce-overhead")
+        try:
+            self._compiled_action_forward = torch.compile(self.action_backbone.forward_with_bridge_tuple, **kwargs)
+        except Exception as exc:  # pragma: no cover - defensive setup fallback
+            self._compiled_action_forward = None
+            logger.warning("cross-attn action torch.compile setup failed; running eager: %s", exc)
+            return
+        logger.info("Enabled cross-attn action compile with torch.compile kwargs=%s", kwargs)
+
+    def _predict_actions_from_bridges(
+        self,
+        noisy_actions: Tensor,
+        bridges: dict[int, Tensor],
+        action_timestep: Tensor,
+        *,
+        context: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
+        use_gradient_checkpointing: bool = False,
+        use_gradient_checkpointing_offload: bool = False,
+    ) -> Tensor:
+        """Predict actions from collected bridge tensors, using compile when active."""
+
+        ab = self.action_backbone
+        if ab is None:
+            raise RuntimeError("action_backbone is None — cannot predict cross-attn actions.")
+        compiled_forward = getattr(self, "_compiled_action_forward", None)
+        if (
+            compiled_forward is not None
+            and not use_gradient_checkpointing
+            and not use_gradient_checkpointing_offload
+        ):
+            bridge_tuple = ab.bridge_tuple_from_dict(bridges)
+            try:
+                torch.compiler.cudagraph_mark_step_begin()
+                return compiled_forward(
+                    noisy_actions,
+                    bridge_tuple,
+                    action_timestep,
+                    context=context,
+                    context_mask=context_mask,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                )
+            except Exception as exc:
+                self._compiled_action_forward = None
+                logger.warning("cross-attn compiled action forward failed; falling back to eager: %s", exc)
+
+        return ab(
+            noisy_actions,
+            bridges,
+            action_timestep,
+            context=context,
+            context_mask=context_mask,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+        )
 
     def forward(
         self,
@@ -164,7 +249,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
         if not bridges:
             return video_pred, None
 
-        action_pred = ab(
+        action_pred = self._predict_actions_from_bridges(
             noisy_actions,
             bridges,
             action_timestep,

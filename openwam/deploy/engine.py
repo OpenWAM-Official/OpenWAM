@@ -223,7 +223,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         self._prompt_embed_cache = _BoundedPromptEmbedCache(maxsize=cache_maxsize)
 
     def _init_cfg(self):
-        """Resolve Classifier-Free Guidance from cfg.inference (Cosmos25 only; cfg_scale=1.0 is a no-op).
+        """Resolve Classifier-Free Guidance from cfg.inference (CosmosPredict25 only; cfg_scale=1.0 is a no-op).
 
         When cfg_scale > 1.0 the uncond embedding is resolved once here:
         offline ``empty.safetensors`` if ``text_embedding_cache_dir`` is set,
@@ -277,8 +277,7 @@ class JointInferenceEngine(BaseInferenceEngine):
 
     def _backbone_has_live_text_encoder(self) -> bool:
         vb = getattr(self.architecture, "video_backbone", None)
-        pipe = getattr(vb, "_pipe", None)
-        return getattr(pipe, "text_encoder", None) is not None
+        return getattr(vb, "text_encoder", None) is not None
 
     def _resolve_uncond_pre_encoded_text(self) -> Optional[torch.Tensor]:
         """Find the unconditional embedding once at engine init.
@@ -286,7 +285,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         Mirrors the cond precedence: ``empty.safetensors`` in
         ``text_embedding_cache_dir`` wins; otherwise return ``None`` and rely
         on the backbone's live encoder via the adapter (``_build_uncond_context``
-        in cosmos25 adapter falls through to ``text_encoder("")``).
+        in cosmos_predict25 adapter falls through to ``text_encoder("")``).
         """
         if self._text_embedding_cache_dir is not None:
             empty_path = self._text_embedding_cache_dir / "empty.safetensors"
@@ -295,7 +294,7 @@ class JointInferenceEngine(BaseInferenceEngine):
                     f"inference.cfg_scale={self._cfg_scale} > 1.0 with "
                     f"text_embedding_cache_dir={self._text_embedding_cache_dir} but "
                     f"{empty_path} does not exist. Re-run precompute "
-                    f"(docs/cosmos25_backbone.md §10.4 step ②) so the empty embedding "
+                    f"so the empty embedding "
                     f"lands alongside per-prompt caches, or unset "
                     f"inference.text_embedding_cache_dir to fall back to the live encoder."
                 )
@@ -419,7 +418,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             )
         )
 
-        # §15 — Cosmos25 cache-mode pre_encoded_text resolution. Wan never
+        # §15 — CosmosPredict25 cache-mode pre_encoded_text resolution. Wan never
         # reads this kwarg (its preprocess_input_for_inference signature has no
         # `pre_encoded_text`); the architecture-level `generate()` only forwards
         # the kwarg to the backbone when it is non-None, so Wan stays untouched.

@@ -50,14 +50,14 @@ enable_action_supervision: true
 # unify_action=false (default) is byte-identical to the pre-unify reader.
 # 80-D semantic layout:
 #   [ 0: 3) left  eef xyz     [ 3: 9) left  eef rot6d   [ 9]    left  gripper
-#   [10:32) left  hand (22)   [32:35) right eef xyz     [35:41) right eef rot6d
-#   [41]    right gripper     [42:64) right hand (22)   [64:80) reserved (16)
-# Raw 20-D EEF layout → map: left-arm 0-9 to unified 0-9, right-arm 10-19 to 32-41.
+#   [10:34) left  hand (24)   [34:37) right eef xyz     [37:43) right eef rot6d
+#   [43]    right gripper     [44:68) right hand (24)   [68:80) reserved (12)
+# Raw 20-D EEF layout → map: left-arm 0-9 to unified 0-9, right-arm 10-19 to 34-43.
 # Works for both bucket kinds: single-arm (franka/ur/sim) keeps its right-arm
 # padding masked out even after the scatter (the per-dim ACTION_DIM_MASK is
 # honored), agilex dual-arm supervises all 20.
 unify_action: false
-unify_action_map: ["0-9", "32-41"]
+unify_action_map: ["0-9", "34-43"]
 
 # ── Normalization (decision A2) ──────────────────────────────────────────────
 # quantile (per-robot_type 20-D EEF stats) — aligns with OXE / RoboCOIN-quantile.

@@ -63,6 +63,7 @@ import torch
 
 from openwam.dataloader.bases.dataset import BaseDataset
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout
+from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.eef import (
     EEF_DIM,
     build_action_mask_2d,
@@ -77,7 +78,6 @@ from openwam.dataloader.utils.lerobotv3 import (
     parse_info_json,
     resolve_prompt_by_episode,
     subsample_episodes_by_hours,
-    validate_video_sampling,
 )
 from openwam.dataloader.utils.normalization import materialize_eef_stats
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
@@ -154,6 +154,11 @@ class LeRobotV3Reader(BaseDataset):
         # UNIFY_DIM constant (not per-dataset configurable).
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
+        # Optional load-time video color jitter, applied consistently across a
+        # clip's frames and ONLY on the train split. None / False / {} → disabled
+        # (default; byte-identical to before). Truthy → enabled; a dict overrides
+        # the per-channel strengths {brightness, contrast, saturation, hue}.
+        color_jitter: Optional[Any] = None,
         # Optional data-budget knobs (None = use full bucket; the default
         # path is byte-identical to the pre-budget behavior).
         max_hours: Optional[float] = None,
@@ -178,13 +183,31 @@ class LeRobotV3Reader(BaseDataset):
         self._max_hours = max_hours
         self._subsample_seed = int(subsample_seed)
 
+        # ── load-time video augmentation ──────────────────────────────────
+        # Color jitter is applied in _getitem_impl to the decoded clip (same
+        # random factors across all frames, via VideoColorJitter). Built only
+        # for the train split; val / disabled keeps video byte-identical.
+        self._color_jitter = None
+        if color_jitter and split == "train":
+            cj_get = color_jitter.get if hasattr(color_jitter, "get") else (lambda k, d: d)
+            self._color_jitter = VideoColorJitter(
+                brightness=float(cj_get("brightness", 0.1)),
+                contrast=float(cj_get("contrast", 0.1)),
+                saturation=float(cj_get("saturation", 0.1)),
+                hue=float(cj_get("hue", 0.0)),
+            )
+
         # ── unified action space ──────────────────────────────────────────
         # _raw_action_dim is what this reader's _action_20d/_proprio_20d emit
         # (the class ACTION_DIM). When unify is on, the public ACTION_DIM (and
         # thus the finalized action/proprio width + downstream model action_dim)
         # becomes unify_dim, and _finalize_* scatters raw -> unified via
         # _unify_dst_index. Off (default) → byte-identical to before.
-        self._raw_action_dim = int(type(self).ACTION_DIM)
+        # Instance attr (not type(self).ACTION_DIM) so a subclass can override the
+        # raw action width per bucket BEFORE super().__init__ — RoboCOIN sets a
+        # wider raw dim (pose + dexterous-hand fingers) for dex-hand buckets under
+        # unify. Defaults to the class ACTION_DIM, so existing readers are unchanged.
+        self._raw_action_dim = int(self.ACTION_DIM)
         self._unify = bool(unify_action)
         self._unify_dim = int(UNIFY_DIM)
         self._unify_dst_index: Optional[np.ndarray] = None
@@ -232,9 +255,12 @@ class LeRobotV3Reader(BaseDataset):
             self._camera_layout = [self._head_camera]
 
         # ── video sub-sampling ────────────────────────────────────────────
-        self._video_sample_indices, self._num_video_frames = validate_video_sampling(
-            self._num_frames, self._video_stride
-        )
+        # video_stride takes every Nth frame within the window. num_video_frames
+        # is whatever that yields; for clean encoder temporal downsampling it
+        # should match the encoder's contract (Wan VAE: (num_video_frames - 1) % 4
+        # == 0) — NOT enforced here, a mismatch surfaces downstream at encode time.
+        self._video_sample_indices = np.arange(0, self._num_frames, self._video_stride, dtype=np.int64)
+        self._num_video_frames = int(self._video_sample_indices.size)
 
         # ── episodes + offsets + split ────────────────────────────────────
         eps = load_episodes_parquet(self._dataset_dir)
@@ -518,6 +544,9 @@ class LeRobotV3Reader(BaseDataset):
         # 5) video — decode head (+ optional wrist) frames into the canvas
         real_local_indices = self._video_sample_indices[self._video_sample_indices < actual_raw_len]
         video = self._decode_window_video(row, ep_local, offset, real_local_indices, idx)
+        if self._color_jitter is not None:
+            # Same jitter factors across the whole clip (temporal consistency).
+            video = self._color_jitter.apply({"video": video})["video"]
         video_mask = torch.from_numpy(self._video_sample_indices < actual_raw_len)
 
         return {
@@ -722,6 +751,7 @@ class LeRobotV3Reader(BaseDataset):
         "camera_layout",
         "unify_action",
         "unify_action_map",
+        "color_jitter",
     )
 
     @classmethod

@@ -1,6 +1,6 @@
 type: robocoin
 
-dataset_dir: /path/to/RoboCOIN
+dataset_dir: /path/to/datasets/RoboCOIN
 
 num_frames: 33
 video_stride: 4
@@ -13,11 +13,12 @@ multiview: true
 
 split: train
 
+
 normalize_mode: quantile
 
 enable_action_supervision: true
 
 unify_action: false
-unify_action_map: ["0-9", "32-41"]
+unify_action_map: ["0-9", "34-43"]
 
 total_hours: null

@@ -2,7 +2,7 @@
 
 Engine-free / GPU-free: ObsPreprocessor is constructed from an explicit view config,
 so every obs-contract branch (single/multi view, missing cameras, bad base64,
-proprio dim) is covered without a checkpoint or a live server.
+proprio passthrough) is covered without a checkpoint or a live server.
 """
 
 import base64
@@ -27,25 +27,23 @@ def _jpeg_b64(h: int = 48, w: int = 64, seed: int = 0) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _single_view(*, state_dim=None, requires_proprio=False) -> ObsPreprocessor:
+def _single_view(*, requires_proprio=False) -> ObsPreprocessor:
     return ObsPreprocessor(
         multiview=False,
         camera_layout=["head_camera"],
         img_height=32,
         img_width=32,
         requires_proprio=requires_proprio,
-        expected_state_dim=state_dim,
     )
 
 
-def _multi_view(*, state_dim=None, requires_proprio=False) -> ObsPreprocessor:
+def _multi_view(*, requires_proprio=False) -> ObsPreprocessor:
     return ObsPreprocessor(
         multiview=True,
         camera_layout=list(DEFAULT_MULTIVIEW_CAMERA_LAYOUT),
         img_height=32,
         img_width=32,
         requires_proprio=requires_proprio,
-        expected_state_dim=state_dim,
     )
 
 
@@ -90,15 +88,16 @@ def test_multiview_requires_three_camera_layout():
         dec.preprocess({"images": {"head_camera": _jpeg_b64()}, "prompt": "x"})
 
 
-def test_state_dim_mismatch_raises():
-    with pytest.raises(ObsValidationError, match="state dimension mismatch"):
-        _single_view(state_dim=20).preprocess(
-            {"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(14))}
-        )
+def test_state_any_dim_passes_through():
+    # State-dim validation was removed: a state of any width is accepted and flattened.
+    obs = _single_view().preprocess(
+        {"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(14))}
+    )
+    assert isinstance(obs["state"], np.ndarray) and obs["state"].shape == (14,)
 
 
-def test_state_passthrough_when_dim_matches():
-    obs = _single_view(state_dim=20).preprocess(
+def test_state_passthrough():
+    obs = _single_view().preprocess(
         {"images": {"head_camera": _jpeg_b64()}, "prompt": "x", "state": list(range(20))}
     )
     assert isinstance(obs["state"], np.ndarray) and obs["state"].shape == (20,)
@@ -106,7 +105,7 @@ def test_state_passthrough_when_dim_matches():
 
 def test_requires_proprio_but_no_state_raises():
     with pytest.raises(ObsValidationError, match="requires obs"):
-        _single_view(requires_proprio=True, state_dim=20).preprocess(
+        _single_view(requires_proprio=True).preprocess(
             {"images": {"head_camera": _jpeg_b64()}, "prompt": "x"}
         )
 
@@ -126,7 +125,6 @@ def test_from_cfg_resolves_view_config():
     assert dec.camera_layout == ["a", "b", "c"]
     assert (dec.img_height, dec.img_width) == (384, 320)
     assert dec.requires_proprio is True
-    assert dec.expected_state_dim == 20
 
 
 # --- Pixel-level layout checks (migrated from test_policy_server_obs.py) ---
@@ -231,7 +229,7 @@ def test_decode_wraps_prompt():
 
 
 def test_state_accepts_nested_list_and_flattens():
-    obs = _single_view(state_dim=20).preprocess(
+    obs = _single_view().preprocess(
         {
             "images": {"head_camera": _jpeg_b64()},
             "prompt": "x",

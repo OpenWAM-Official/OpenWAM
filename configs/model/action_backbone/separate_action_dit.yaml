@@ -2,24 +2,14 @@
 # Geometry auto-resolves from video_backbone (num_layers/video_dim/num_heads/
 # attn_head_dim, hard head parity); dim/ffn_dim are free. Raw context width comes
 # from architecture.text_dim (shared with the video stream) — do NOT set it here.
-#
-# type=explicit (default): train the ActionDiT to predict real actions.
-# type=latent: latent-action pretraining via the latent_encoder subgroup; ALSO
-#   requires model.architecture.action_dim=<token_dim> (1024 for lapa_dinov3)
-#   and model.architecture.use_proprioception=false.
-defaults:
-  - latent_encoder: lapa_dinov3        # latent target provider (only consumed when type=latent)
-  - latent_decoder: cross_attn_query   # latent->action decoder (only consumed when type=latent)
-  - _self_
-
-type: explicit
+# The ActionDiT predicts real actions.
 dim: 1024
 ffn_dim: 4096
 # ACTION scheduler α-shift (symmetric to video shift_video); single source of
 # truth for train + deploy.
 shift_action: 5.0
 
-# COSMOS25 dual_system joint_cross_attn only: pin 16×64=1024 (action stream is
+# Cosmos-Predict2.5 dual_system joint_cross_attn only: pin 16×64=1024 (action stream is
 # 1024 wide; auto-resolve's 16×128=2048 wastes attention compute). Struct mode
 # needs `+` for these absent fields:
 #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64

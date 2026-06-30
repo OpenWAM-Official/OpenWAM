@@ -303,12 +303,12 @@ def test_wire_sampler_seed_patches_top_level_sampler(caplog: pytest.LogCaptureFi
     """Happy path: dataloader.sampler exposes ``seed`` -> patched, INFO logged."""
     import logging
 
-    from openwam.train.openwam_trainer import OpenWAMTrainer
+    from openwam.train.utils.seeding import wire_sampler_seed
 
     sampler = _FakeSamplerWithSeed(seed=0)
     dataloader = _FakeDataLoader(sampler=sampler)
-    with caplog.at_level(logging.INFO, logger="openwam.train.openwam_trainer"):
-        OpenWAMTrainer._wire_sampler_seed(dataloader, run_seed=42)
+    with caplog.at_level(logging.INFO, logger="openwam.train.utils.seeding"):
+        wire_sampler_seed(dataloader, run_seed=42)
     assert sampler.seed == 42
     assert any("wired to cfg.project.seed" in rec.message for rec in caplog.records)
     assert not any(rec.levelno >= logging.WARNING for rec in caplog.records)
@@ -319,12 +319,12 @@ def test_wire_sampler_seed_falls_through_to_batch_sampler(caplog: pytest.LogCapt
     ``dataloader.batch_sampler.sampler``. Mirrors accelerate's wrapping."""
     import logging
 
-    from openwam.train.openwam_trainer import OpenWAMTrainer
+    from openwam.train.utils.seeding import wire_sampler_seed
 
     inner = _FakeSamplerWithSeed(seed=0)
     dataloader = _FakeDataLoader(sampler=None, batch_sampler=_FakeBatchSampler(inner))
-    with caplog.at_level(logging.INFO, logger="openwam.train.openwam_trainer"):
-        OpenWAMTrainer._wire_sampler_seed(dataloader, run_seed=7)
+    with caplog.at_level(logging.INFO, logger="openwam.train.utils.seeding"):
+        wire_sampler_seed(dataloader, run_seed=7)
     assert inner.seed == 7
     assert not any(rec.levelno >= logging.WARNING for rec in caplog.records)
 
@@ -335,12 +335,12 @@ def test_wire_sampler_seed_warns_when_no_sampler_with_seed(caplog: pytest.LogCap
     pinned to the upstream default while believing project.seed took effect."""
     import logging
 
-    from openwam.train.openwam_trainer import OpenWAMTrainer
+    from openwam.train.utils.seeding import wire_sampler_seed
 
     # Case A: sampler exists but lacks ``.seed`` (e.g. plain RandomSampler).
     dataloader = _FakeDataLoader(sampler=_FakeSamplerNoSeed())
-    with caplog.at_level(logging.WARNING, logger="openwam.train.openwam_trainer"):
-        OpenWAMTrainer._wire_sampler_seed(dataloader, run_seed=42)
+    with caplog.at_level(logging.WARNING, logger="openwam.train.utils.seeding"):
+        wire_sampler_seed(dataloader, run_seed=42)
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, "Expected a WARNING when sampler has no .seed attribute"
     assert "_FakeSamplerNoSeed" in warnings[-1].message
@@ -348,8 +348,8 @@ def test_wire_sampler_seed_warns_when_no_sampler_with_seed(caplog: pytest.LogCap
 
     # Case B: no sampler at all (e.g. IterableDataset).
     dataloader = _FakeDataLoader(sampler=None, batch_sampler=None)
-    with caplog.at_level(logging.WARNING, logger="openwam.train.openwam_trainer"):
-        OpenWAMTrainer._wire_sampler_seed(dataloader, run_seed=42)
+    with caplog.at_level(logging.WARNING, logger="openwam.train.utils.seeding"):
+        wire_sampler_seed(dataloader, run_seed=42)
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, "Expected a WARNING when sampler is None"
     assert "None" in warnings[-1].message
@@ -362,14 +362,14 @@ def test_wire_sampler_seed_with_real_distributed_sampler(caplog: pytest.LogCaptu
     and what users would get if they passed seed=N to DistributedSampler."""
     import logging
 
-    from openwam.train.openwam_trainer import OpenWAMTrainer
+    from openwam.train.utils.seeding import wire_sampler_seed
 
     ds = _RNGSensitiveDataset(size=32)
     wired_sampler = DistributedSampler(ds, num_replicas=1, rank=0, shuffle=True, seed=0)
     dataloader = _FakeDataLoader(sampler=wired_sampler)
 
-    with caplog.at_level(logging.INFO, logger="openwam.train.openwam_trainer"):
-        OpenWAMTrainer._wire_sampler_seed(dataloader, run_seed=42)
+    with caplog.at_level(logging.INFO, logger="openwam.train.utils.seeding"):
+        wire_sampler_seed(dataloader, run_seed=42)
 
     reference = DistributedSampler(ds, num_replicas=1, rank=0, shuffle=True, seed=42)
     wired_sampler.set_epoch(0)
