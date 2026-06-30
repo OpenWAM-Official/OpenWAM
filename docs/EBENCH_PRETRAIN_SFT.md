@@ -56,7 +56,7 @@ EBench raw control is 19-D:
 [6:12]  right arm joints
 [12:14] left two-finger gripper
 [14:16] right two-finger gripper
-[16:19] base
+[16:19] base velocity command
 ```
 
 OpenWAM 80-D placement:
@@ -73,13 +73,13 @@ All EEF xyz/rot6d slots and unused hand/reserved slots stay zero and masked
 out. The action loss mask is `(T, 80)` and has 21 valid dimensions per valid
 timestep.
 
-Default base source is `action.base`, matching the EBench baseline clients:
-the model predicts chunk-level cumulative base values, and evaluation can turn
-them into per-step relative `base_motion` by subtracting adjacent predictions.
-For a delta-base ablation:
+The default base source is `action.base`, matching the EBench paper's mobile
+base interface: a 3-D velocity command `[vx, vy, yaw_rate]` for planar x/y
+motion and yaw rate. It is placed in the reserved 80-D slots `[64:67)`.
+For an ablation with EBench's alternate delta-base field:
 
 ```bash
-dataloader.action_key_variant=delta_base
+dataloader.base_action_source=delta
 ```
 
 ## Normalization

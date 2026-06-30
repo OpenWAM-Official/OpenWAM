@@ -4,7 +4,8 @@ EBench stores bimanual control in LeRobot-style per-episode parquet files:
 
   * ``action.joints``: 12 arm joints, left arm first then right arm
   * ``action.gripper``: 4 finger/gripper values, two per hand
-  * ``action.base`` / ``action.base_delta``: 3 mobile-base values
+  * ``action.base``: 3-D mobile-base velocity command ``[vx, vy, yaw_rate]``
+  * ``action.base_delta``: alternate delta base field kept for ablations
   * matching ``state.*`` keys for proprio
 
 OpenWAM's 80-D pretraining head has a semantic layout shared across robots:
@@ -17,8 +18,8 @@ OpenWAM's 80-D pretraining head has a semantic layout shared across robots:
 
 This reader maps EBench's physically meaningful dimensions into that space:
 arm joints and two-finger grippers go into hand slots, mean gripper values are
-also exposed in the scalar gripper slots, and base motion goes to reserved
-slots ``[64:67)``. The emitted action/proprio masks are ``(T, 80)`` and
+also exposed in the scalar gripper slots, and the base velocity command goes to
+reserved slots ``[64:67)``. The emitted action/proprio masks are ``(T, 80)`` and
 ``(1, 80)`` respectively, so only real EBench dimensions participate in loss.
 """
 
@@ -360,7 +361,8 @@ class EBenchDataset(BaseDataset):
         normalization_stats_path: Optional[str] = None,
         action_stats: Optional[dict] = None,
         state_stats: Optional[dict] = None,
-        action_key_variant: str = "absolute_base",
+        base_action_source: Optional[str] = None,
+        action_key_variant: Optional[str] = None,
         dataset_id: Optional[str] = None,
         **_unused: Any,
     ):
@@ -377,14 +379,25 @@ class EBenchDataset(BaseDataset):
         self._camera_layout = list(camera_layout or [target_camera, "video.left_camera_view", "video.right_camera_view"])
         self._normalize_mode = normalize_mode
         self.normalization_stats_path = normalization_stats_path
-        self._action_key_variant = action_key_variant
+        # Prefer the semantically named knob. Keep action_key_variant as a
+        # backwards-compatible alias for older PR comments / local scripts.
+        if base_action_source is None:
+            if action_key_variant == "delta_base":
+                base_action_source = "delta"
+            else:
+                base_action_source = "velocity"
+        if base_action_source == "absolute_base":
+            base_action_source = "velocity"
+        if base_action_source == "delta_base":
+            base_action_source = "delta"
+        self._base_action_source = base_action_source
 
-        if action_key_variant == "absolute_base":
+        if base_action_source == "velocity":
             self._action_keys = EBENCH_ACTION_KEYS
-        elif action_key_variant == "delta_base":
+        elif base_action_source == "delta":
             self._action_keys = EBENCH_ACTION_DELTA_BASE_KEYS
         else:
-            raise ValueError("EBench action_key_variant must be 'absolute_base' or 'delta_base'")
+            raise ValueError("EBench base_action_source must be 'velocity' or 'delta'")
         self._state_keys = EBENCH_STATE_KEYS
         self._data_columns = list(dict.fromkeys((*self._action_keys, *self._state_keys, "task_index")))
 
@@ -654,10 +667,20 @@ class EBenchDataset(BaseDataset):
 
         normalize_mode = _cfg_get(config, "normalize_mode", "z-score")
         stats_path = _cfg_get(config, "normalization_stats_path", None)
-        action_variant = _cfg_get(config, "action_key_variant", "absolute_base")
-        if action_variant not in ("absolute_base", "delta_base"):
-            raise ValueError("EBench action_key_variant must be 'absolute_base' or 'delta_base'")
-        action_keys = EBENCH_ACTION_KEYS if action_variant == "absolute_base" else EBENCH_ACTION_DELTA_BASE_KEYS
+        base_action_source = _cfg_get(config, "base_action_source", None)
+        action_variant = _cfg_get(config, "action_key_variant", None)
+        if base_action_source is None:
+            if action_variant == "delta_base":
+                base_action_source = "delta"
+            else:
+                base_action_source = "velocity"
+        if base_action_source in ("absolute_base",):
+            base_action_source = "velocity"
+        if base_action_source in ("delta_base",):
+            base_action_source = "delta"
+        if base_action_source not in ("velocity", "delta"):
+            raise ValueError("EBench base_action_source must be 'velocity' or 'delta'")
+        action_keys = EBENCH_ACTION_KEYS if base_action_source == "velocity" else EBENCH_ACTION_DELTA_BASE_KEYS
 
         action_stats = None
         state_stats = None
@@ -690,6 +713,7 @@ class EBenchDataset(BaseDataset):
             "normalization_stats_path": resolved_stats_path,
             "action_stats": action_stats,
             "state_stats": state_stats,
+            "base_action_source": base_action_source,
             "action_key_variant": action_variant,
         }
 

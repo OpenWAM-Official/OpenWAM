@@ -17,9 +17,9 @@ buckets: null
 #   action.joints[6:12] -> right hand slots 42:48
 #   action.gripper[0:2] -> left hand slots 16:18 and mean -> scalar slot 9
 #   action.gripper[2:4] -> right hand slots 48:50 and mean -> scalar slot 41
-#   action.base[0:3]    -> reserved slots 64:67
+#   action.base[0:3]    -> reserved slots 64:67 as [vx, vy, yaw_rate]
 action_mode: ebench80
-action_key_variant: absolute_base # absolute_base matches EBench baseline chunk output; delta_base uses action.base_delta
+base_action_source: velocity # velocity uses action.base; delta uses action.base_delta for ablations
 
 # --- Frame sampling ---
 num_frames: 33
