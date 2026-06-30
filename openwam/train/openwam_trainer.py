@@ -137,16 +137,11 @@ class OpenWAMTrainer:
         self._timestep_sampler = build_timestep_sampler(
             cfg_get(t, "timestep_sampling", None),
             num_train_timesteps=_num_train_ts,
-            seed=cfg_get(t, "timestep_sampling_seed", None),
             lead=cfg_get(t, "timestep_sampling_lead", "action"),
             alpha=cfg_get(t, "timestep_sampling_alpha", 9.0),
         )
         if self._timestep_sampler is not None and self._rank == 0:
-            logger.info(
-                "Training timestep sampling: %s (seed=%s)",
-                cfg_get(t, "timestep_sampling", None),
-                cfg_get(t, "timestep_sampling_seed", None),
-            )
+            logger.info("Training timestep sampling: %s", cfg_get(t, "timestep_sampling", None))
 
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.

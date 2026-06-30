@@ -154,7 +154,6 @@ class TestDeployConfigLoading:
             "schedule_type",
             "vs_lead",
             "vs_alpha",
-            "vs_offset",
             "shift",
             "compile_enabled",
             "execution_mode",

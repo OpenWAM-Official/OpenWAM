@@ -442,13 +442,6 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Override inference.vs_alpha (variance_shift only): lead-curve strength (>1 leads; 1 = diagonal)",
     )
     parser.add_argument(
-        "--vs-offset",
-        type=float,
-        default=None,
-        dest="vs_offset",
-        help="Override inference.vs_offset (variance_shift only): delay the lagging stream's start (0..1)",
-    )
-    parser.add_argument(
         "--compile-enabled",
         type=_normalize_compile_enabled_arg,
         default=None,
@@ -514,8 +507,6 @@ def _apply_inference_overrides(cfg, args):
         OmegaConf.update(cfg, "inference.vs_lead", args.vs_lead, merge=False)
     if args.vs_alpha is not None:
         OmegaConf.update(cfg, "inference.vs_alpha", args.vs_alpha, merge=False)
-    if args.vs_offset is not None:
-        OmegaConf.update(cfg, "inference.vs_offset", args.vs_offset, merge=False)
     return cfg
 
 

@@ -107,9 +107,9 @@ def test_schedule_variance_shift_alpha1_is_diagonal():
     from openwam.deploy.denoise_schedule import schedule_variance_shift
 
     v, a = _two_stub_schedulers()
-    result = schedule_variance_shift(v, a, num_steps=16, lead="action", alpha=1.0, offset=0.0)
+    result = schedule_variance_shift(v, a, num_steps=16, lead="action", alpha=1.0)
     for tv, ta in result[:-1]:
-        assert abs(tv - ta) < 1e-9  # alpha=1, offset=0 -> both streams identical (sync diagonal)
+        assert abs(tv - ta) < 1e-9  # alpha=1 -> both streams identical (sync diagonal)
 
 
 def test_schedule_variance_shift_lead_direction_flips():
@@ -130,18 +130,19 @@ def test_variance_shift_timestep_sampler():
         build_timestep_sampler,
     )
 
-    s = build_timestep_sampler("variance_shift", num_train_timesteps=1000, lead="action", alpha=9.0, seed=0)
+    s = build_timestep_sampler("variance_shift", num_train_timesteps=1000, lead="action", alpha=9.0)
     assert isinstance(s, VarianceShiftTimestepSampler)
 
+    torch.manual_seed(0)
     v_t, a_t = s.sample_timesteps(64, device="cpu")
     assert v_t.shape == (64,) and a_t.shape == (64,)
     # action leads -> cleaner -> higher grid-position value on average
     assert float(a_t.mean()) > float(v_t.mean())
 
-    v2, a2 = build_timestep_sampler("variance_shift", lead="action", alpha=9.0, seed=0).sample_timesteps(
-        64, device="cpu"
-    )
-    assert torch.allclose(v_t, v2) and torch.allclose(a_t, a2)  # seed reproducible
+    # Reproducible from the ambient global RNG (the trainer seeds it per step).
+    torch.manual_seed(0)
+    v2, a2 = s.sample_timesteps(64, device="cpu")
+    assert torch.allclose(v_t, v2) and torch.allclose(a_t, a2)
 
 
 def test_action_scheduler_is_action_scheduler_instance():

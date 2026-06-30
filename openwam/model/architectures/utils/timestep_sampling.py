@@ -17,11 +17,11 @@ Convention note (easy to trip on): the timesteps returned here are consumed by
 *lower* sigma (cleaner). This is the OPPOSITE direction to the deploy-side
 ``openwam.deploy.denoise_schedule``, where a schedule entry IS the sigma value
 (smaller == cleaner). Both sides are internally consistent; mind the direction
-when comparing train vs inference code. ``VarianceShiftTimestepSampler`` only
-aligns the lead/lag *ordering* with the deploy ``variance_shift`` schedule --
-the exact distribution is the composition with the backbone grid's own
-alpha-shift and carries no ``offset``, so it is order-aligned, not strictly
-point-wise in-distribution.
+when comparing train vs inference code. ``VarianceShiftTimestepSampler`` and
+the deploy ``variance_shift`` schedule both place each stream on
+``alpha_shift(1 - cleanness, shift_stream)`` -- the same grid -- so a
+variance_shift-trained checkpoint and its deploy schedule are point-wise
+in-distribution (up to the training grid's 1/num_train quantization).
 """
 
 from __future__ import annotations
@@ -45,15 +45,14 @@ class VarianceShiftTimestepSampler:
     arXiv:2602.11401).
 
     Implements the same ``decoupled_sampler`` contract; ``compute_loss`` maps
-    the returned timesteps onto the backbone sigma grid (which composes its own
-    alpha-shift -- the lead/lag *ordering* is preserved, the exact curve is the
-    composition).
+    the returned timesteps onto the backbone sigma grid
+    (``alpha_shift(1 - cleanness, shift)``), the same grid the deploy
+    ``variance_shift`` schedule rides -- so train and deploy match point-wise.
 
     Args:
         num_train_timesteps: Training timestep resolution (default 1000).
         lead: Which stream denoises earlier -- ``"action"`` or ``"video"``.
         alpha: Lead-curve strength (``>1`` leads; ``1`` = uniform/diagonal).
-        seed: Optional RNG seed (persistent generator; reproducible run).
     """
 
     def __init__(
@@ -62,26 +61,12 @@ class VarianceShiftTimestepSampler:
         *,
         lead: str = "action",
         alpha: float = 9.0,
-        seed: Optional[int] = None,
     ):
         if lead not in ("action", "video"):
             raise ValueError(f"variance_shift lead must be 'action' or 'video', got {lead!r}.")
         self.num_train_timesteps = int(num_train_timesteps)
         self._lead = lead
         self._alpha = float(alpha)
-        self._seed = None if seed is None else int(seed)
-        self._generators: dict[str, torch.Generator] = {}
-
-    def _generator(self, device) -> Optional[torch.Generator]:
-        if self._seed is None:
-            return None
-        key = str(device)
-        gen = self._generators.get(key)
-        if gen is None:
-            gen = torch.Generator(device=device)
-            gen.manual_seed(self._seed)
-            self._generators[key] = gen
-        return gen
 
     def sample_timesteps(
         self,
@@ -92,12 +77,13 @@ class VarianceShiftTimestepSampler:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Draw curve-correlated video and action timesteps for a batch.
 
-        One global ``u ~ Uniform(0,1)`` per sample; the lead stream takes
-        cleanness ``f_alpha(u) >= u`` (further denoised), the lag stream takes
-        ``u``. Returned as ``(video_t, action_t)`` per ``lead``.
+        One global ``u ~ Uniform(0,1)`` per sample (the ambient global RNG,
+        which the trainer seeds per step via ``per_step_seed`` so each rank
+        draws differently and reproducibly); the lead stream takes cleanness
+        ``f_alpha(u) >= u`` (further denoised), the lag stream takes ``u``.
+        Returned as ``(video_t, action_t)`` per ``lead``.
         """
-        gen = self._generator(device)
-        u = torch.rand(batch_size, generator=gen, device=device)
+        u = torch.rand(batch_size, device=device)
         a = self._alpha
         g_lead = (a * u) / (1.0 + (a - 1.0) * u)  # cleanness on the alpha-shift curve, >= u
         g_lag = u
@@ -112,7 +98,6 @@ def build_timestep_sampler(
     mode: Optional[str],
     *,
     num_train_timesteps: int = DEFAULT_NUM_TRAIN_TIMESTEPS,
-    seed: Optional[int] = None,
     lead: str = "action",
     alpha: float = 9.0,
 ):
@@ -124,7 +109,6 @@ def build_timestep_sampler(
             bit-identical to upstream).
             ``"variance_shift"`` -> :class:`VarianceShiftTimestepSampler`.
         num_train_timesteps: Forwarded to the sampler.
-        seed: Forwarded to the sampler (reproducible draws).
         lead: ``variance_shift`` only -- which stream denoises earlier.
         alpha: ``variance_shift`` only -- lead-curve strength.
 
@@ -137,7 +121,7 @@ def build_timestep_sampler(
     if normalized in ("", "default", "randint", "none", "null"):
         return None
     if normalized == "variance_shift":
-        return VarianceShiftTimestepSampler(num_train_timesteps=num_train_timesteps, lead=lead, alpha=alpha, seed=seed)
+        return VarianceShiftTimestepSampler(num_train_timesteps=num_train_timesteps, lead=lead, alpha=alpha)
     raise ValueError(
         f"Unknown training.timestep_sampling={mode!r}; expected 'default' (legacy randint) or 'variance_shift'."
     )
