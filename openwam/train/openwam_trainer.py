@@ -55,6 +55,19 @@ from openwam.train.utils.training_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _ensure_decoupled_sampler_supported(sampler, *, framework, variant):
+    """Decoupled timestep sampling (variance_shift) is only supported on the
+    joint_self_attn variant. Reject any other architecture up front: the other
+    variants would consume the sampler through paths never validated for it
+    (cross_attn is sequential; shared_backbone mixes both streams)."""
+    if sampler is not None and variant != "joint_self_attn":
+        raise ValueError(
+            f"training.timestep_sampling is only supported on the joint_self_attn variant; "
+            f"got framework={framework!r} variant={variant!r}. "
+            f"Use timestep_sampling=default for other architectures."
+        )
+
+
 class OpenWAMTrainer:
     """Joint video-action trainer for OpenWAM. See module docstring for call order.
 
@@ -139,6 +152,11 @@ class OpenWAMTrainer:
             num_train_timesteps=_num_train_ts,
             lead=cfg_get(t, "timestep_sampling_lead", "action"),
             alpha=cfg_get(t, "timestep_sampling_alpha", 9.0),
+        )
+        _ensure_decoupled_sampler_supported(
+            self._timestep_sampler,
+            framework=resolved_arch.canonical.framework,
+            variant=resolved_arch.canonical.variant,
         )
         if self._timestep_sampler is not None and self._rank == 0:
             logger.info("Training timestep sampling: %s", cfg_get(t, "timestep_sampling", None))
