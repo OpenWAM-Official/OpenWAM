@@ -361,10 +361,8 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): for action_only mode
                 - schedule_type (str, optional): override schedule type
-                  ("sync" lockstep | "independent" per-stream random timesteps |
-                  "variance_shift" Latent-Forcing ordered curve/offset)
-                - schedule_seed (int, optional): RNG seed for the "independent"
-                  schedule, making the sampled (t_v, t_a) trajectory reproducible
+                  ("sync" lockstep | "variance_shift" Latent-Forcing ordered
+                  curve/offset)
                 - vs_lead (str, optional): "variance_shift" only — which stream
                   denoises earlier ("action" | "video")
                 - vs_alpha (float, optional): "variance_shift" only — lead-curve
@@ -378,17 +376,13 @@ class JointInferenceEngine(BaseInferenceEngine):
         """
         inf_cfg = self.cfg.inference
 
-        # Build schedule: "sync" (lockstep) or "independent" (per-stream
-        # randomly sampled timesteps); make_schedule raises on anything else.
+        # Build schedule: "sync" (lockstep) or "variance_shift" (Latent-Forcing
+        # ordered trajectory); make_schedule raises on anything else.
         schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
-        # ``schedule_seed`` only matters for schedule_type="independent": it
-        # makes the randomly sampled (t_v, t_a) trajectory reproducible.
-        # ``None`` (default) draws a fresh trajectory each request.
-        schedule_seed = conditions.get("schedule_seed", getattr(inf_cfg, "schedule_seed", None))
         # ``variance_shift`` controls (Latent-Forcing-style ordered trajectory):
         # which stream denoises earlier + curve strength + optional offset.
-        # Ignored by sync/independent.
+        # Ignored by sync.
         vs_lead = conditions.get("vs_lead", getattr(inf_cfg, "vs_lead", "action"))
         vs_alpha = conditions.get("vs_alpha", getattr(inf_cfg, "vs_alpha", 9.0))
         vs_offset = conditions.get("vs_offset", getattr(inf_cfg, "vs_offset", 0.0))
@@ -417,7 +411,6 @@ class JointInferenceEngine(BaseInferenceEngine):
             num_steps=denoise_steps,
             shift=shift,
             shift_video=shift_video,
-            seed=schedule_seed,
             lead=vs_lead,
             alpha=vs_alpha,
             offset=vs_offset,

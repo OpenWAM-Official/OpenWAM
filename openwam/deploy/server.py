@@ -421,17 +421,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schedule-type",
         type=str,
-        choices=["sync", "independent", "variance_shift"],
+        choices=["sync", "variance_shift"],
         default=None,
         dest="schedule_type",
-        help="Override inference.schedule_type: 'sync' | 'independent' | 'variance_shift' (Latent-Forcing ordered)",
-    )
-    parser.add_argument(
-        "--schedule-seed",
-        type=int,
-        default=None,
-        dest="schedule_seed",
-        help="Override inference.schedule_seed: RNG seed for the 'independent' schedule (reproducible random timesteps)",
+        help="Override inference.schedule_type: 'sync' | 'variance_shift' (Latent-Forcing ordered)",
     )
     parser.add_argument(
         "--vs-lead",
@@ -517,8 +510,6 @@ def _apply_inference_overrides(cfg, args):
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.schedule_type is not None:
         OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
-    if args.schedule_seed is not None:
-        OmegaConf.update(cfg, "inference.schedule_seed", args.schedule_seed, merge=False)
     if args.vs_lead is not None:
         OmegaConf.update(cfg, "inference.vs_lead", args.vs_lead, merge=False)
     if args.vs_alpha is not None:

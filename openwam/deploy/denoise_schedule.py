@@ -10,20 +10,12 @@ timestep series via the duck-typed minimum interface:
 
 ``schedule_sync`` returns a list of ``(t_video, t_action)`` pairs
 describing the per-iteration noise levels for the joint denoising loop,
-terminated with a ``(0.0, 0.0)`` sentinel. ``schedule_independent``
-returns the same structure but draws each stream's trajectory from an
-independent random sampler.
+terminated with a ``(0.0, 0.0)`` sentinel.
 
-Three strategies are supported:
+Two strategies are supported:
 
 - ``sync``           — both streams advance in lockstep on their own
   deterministic timestep series (default; unchanged behavior).
-- ``independent``    — video and action timesteps are sampled
-  independently per stream (uniform -> alpha-shift -> sorted descending),
-  the inference analogue of the independent per-modality timestep
-  sampling used by Unified World Models (arXiv:2504.02792). The model is
-  trained on independent ``(sigma_v, sigma_a)`` samples, so a decoupled
-  inference trajectory stays in-distribution.
 - ``variance_shift`` — Latent-Forcing-style ordered trajectory: one
   stream denoises earlier than the other along an alpha-shift curve
   (``alpha``) and/or a linear ``offset`` (arXiv:2602.11401), with
@@ -36,8 +28,7 @@ git history; ``make_schedule`` raises ``NotImplementedError`` for them.
 
 from __future__ import annotations
 
-import random
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 Schedule = List[Tuple[float, float]]
 
@@ -81,79 +72,6 @@ def _alpha_shift(u: float, shift: float) -> float:
     formula identical preserves the train/inference alpha-shift contract.
     """
     return shift * u / (1.0 + (shift - 1.0) * u)
-
-
-def schedule_independent(
-    video_scheduler,
-    action_scheduler,
-    num_steps: int = 50,
-    shift: float = 5.0,
-    *,
-    shift_video: float = None,
-    seed: Optional[int] = None,
-) -> Schedule:
-    """Each stream follows its own independently sampled timestep trajectory.
-
-    For each stream we draw ``num_steps`` uniform samples, min-max rescale
-    them to span ``[1/num_steps, 1]`` (anchoring the endpoints to the same
-    range the ``sync`` grid uses -- first sigma == 1, last sigma ==
-    alpha_shift(1/num_steps)), alpha-shift with that stream's shift
-    (``shift_video`` for video when set, otherwise ``shift``; ``shift`` for
-    action), sort descending, and scale by the scheduler's
-    ``num_train_timesteps``. The interior keeps random spacing while the
-    endpoints match ``sync`` (so the sigma=1 initial latent and the final
-    ``(0,0)`` step are both well-posed). Video and action are drawn
-    independently, so the interior trajectories are decoupled -- the
-    inference analogue of the independent per-modality timestep sampling
-    used at training time (UWM arXiv:2504.02792; Latent Forcing
-    arXiv:2602.11401).
-
-    Each stream is monotonically decreasing and the schedule is terminated
-    with a ``(0.0, 0.0)`` sentinel, so the joint denoising loop in
-    ``BaseWAMArchitecture.generate`` consumes it exactly like ``sync``
-    (every supported architecture, unchanged).
-
-    Args:
-        video_scheduler: Video stream's scheduler (only its
-            ``num_train_timesteps`` attribute is read).
-        action_scheduler: Action stream's scheduler (only its
-            ``num_train_timesteps`` attribute is read).
-        num_steps: Number of denoising steps per stream.
-        shift: alpha-shift for the action stream (and the video stream
-            when ``shift_video`` is ``None``).
-        shift_video: Optional alpha-shift override for the video stream.
-        seed: Optional RNG seed for a reproducible schedule. ``None`` draws
-            a fresh nondeterministic trajectory each call.
-    """
-    sv = shift if shift_video is None else shift_video
-    rng = random.Random(seed)
-
-    def _stream(scheduler, stream_shift: float) -> List[float]:
-        num_train = float(getattr(scheduler, "num_train_timesteps", 1000))
-        # Independent uniform draws, then min-max rescaled to span the same
-        # ``[1/num_steps, 1]`` range the deterministic ``sync`` grid uses. This
-        # anchors the endpoints: first sigma == alpha_shift(1) == 1 (matches the
-        # sigma=1 initial latent in BaseWAMArchitecture.generate) and last sigma
-        # == alpha_shift(1/num_steps) (so the final (0,0)-sentinel step matches
-        # sync's), while the interior keeps random spacing. Without anchoring,
-        # iid extremes never reach 1/0, leaving a start mismatch and an
-        # unbounded low-sigma gap that hurts quality at small num_steps.
-        us = sorted(rng.random() for _ in range(num_steps))  # ascending
-        lo = 1.0 / num_steps
-        if num_steps == 1:
-            us = [1.0]
-        else:
-            u_min, u_max = us[0], us[-1]
-            if u_max > u_min:
-                us = [lo + (u - u_min) / (u_max - u_min) * (1.0 - lo) for u in us]
-            else:  # degenerate (all draws equal): fall back to the linear grid
-                us = [lo + (1.0 - lo) * i / (num_steps - 1) for i in range(num_steps)]
-        us.sort(reverse=True)  # descending: sigma high -> low
-        return [_alpha_shift(u, stream_shift) * num_train for u in us]
-
-    v_ts = _stream(video_scheduler, sv)
-    a_ts = _stream(action_scheduler, shift)
-    return [(v, a) for v, a in zip(v_ts, a_ts)] + [(0.0, 0.0)]
 
 
 def schedule_variance_shift(
@@ -227,7 +145,6 @@ def make_schedule(
     shift: float = 5.0,
     *,
     shift_video: float = None,
-    seed: Optional[int] = None,
     lead: str = "action",
     alpha: float = 9.0,
     offset: float = 0.0,
@@ -235,8 +152,7 @@ def make_schedule(
     """Dispatcher kept as the single entry point for building a schedule.
 
     Args:
-        strategy: ``"sync"`` (deterministic lockstep, default),
-            ``"independent"`` (per-stream randomly sampled timesteps), or
+        strategy: ``"sync"`` (deterministic lockstep, default) or
             ``"variance_shift"`` (Latent-Forcing ordered curve/offset). Any
             other value raises ``NotImplementedError`` (the removed
             video_leading/cascade/action_only strategies live in git
@@ -247,13 +163,11 @@ def make_schedule(
             ``architecture.action_scheduler``).
         num_steps: Denoising step count for both streams.
         shift: Global α-shift; used by the action scheduler always, and by
-            the video scheduler when ``shift_video`` is ``None`` (``sync`` /
-            ``independent`` only).
+            the video scheduler when ``shift_video`` is ``None`` (``sync``
+            only).
         shift_video: Optional override of the video α-shift only. Typically
             sourced from ``arch.video_backbone.shift_video`` so train and
-            inference sigma grids match (``sync`` / ``independent`` only).
-        seed: Reproducibility seed for ``strategy="independent"``; ignored by
-            the deterministic strategies. ``None`` samples a fresh trajectory.
+            inference sigma grids match (``sync`` only).
         lead: ``variance_shift`` only -- which stream denoises earlier
             (``"action"`` or ``"video"``).
         alpha: ``variance_shift`` only -- lead-curve strength (``>1`` leads;
@@ -265,15 +179,6 @@ def make_schedule(
         return schedule_sync(
             video_scheduler, action_scheduler, num_steps=num_steps, shift=shift, shift_video=shift_video
         )
-    if strategy == "independent":
-        return schedule_independent(
-            video_scheduler,
-            action_scheduler,
-            num_steps=num_steps,
-            shift=shift,
-            shift_video=shift_video,
-            seed=seed,
-        )
     if strategy == "variance_shift":
         return schedule_variance_shift(
             video_scheduler,
@@ -284,7 +189,7 @@ def make_schedule(
             offset=offset,
         )
     raise NotImplementedError(
-        f"schedule_type={strategy!r} is not supported; choose 'sync', 'independent', or 'variance_shift'. "
+        f"schedule_type={strategy!r} is not supported; choose 'sync' or 'variance_shift'. "
         "video_leading/cascade/action_only live in git history."
     )
 
@@ -292,7 +197,6 @@ def make_schedule(
 __all__ = [
     "Schedule",
     "schedule_sync",
-    "schedule_independent",
     "schedule_variance_shift",
     "make_schedule",
 ]

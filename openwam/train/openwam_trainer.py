@@ -121,10 +121,10 @@ class OpenWAMTrainer:
 
         # Optional decoupled timestep sampler (training.timestep_sampling).
         # None keeps compute_loss's legacy torch.randint path (default,
-        # bit-identical to upstream). "independent_uniform_shift" routes
-        # per-stream independent uniform timesteps through the decoupled_sampler
-        # hook (UWM-style; the training-time counterpart to the deploy
-        # schedule_type="independent"). See
+        # bit-identical to upstream). "variance_shift" routes curve-correlated
+        # per-stream timesteps through the decoupled_sampler hook
+        # (Latent-Forcing; the training-time counterpart to the deploy
+        # schedule_type="variance_shift"). See
         # openwam.model.architectures.utils.timestep_sampling.
         from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
 
