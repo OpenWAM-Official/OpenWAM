@@ -3,8 +3,9 @@
 #                     runs once with cross-attention to them.
 #   joint_self_attn:  MoTJointDriver runs one mixed self-attention per layer;
 #                     requires num_layers/num_heads/head_dim parity across backbones.
-#   idm:              teacher-forcing training + two-stage inference. Wan-only
-#                     (CosmosPredict25 raises NotImplementedError).
+#   idm:              teacher-forcing training + two-stage inference. Supported
+#                     on Wan and CosmosPredict25 (the backbone owns the
+#                     noisy/cond branch merge; Cosmos uses per-frame timesteps).
 # Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos_predict25.
 
 defaults:

@@ -264,6 +264,33 @@ class _CapturePrepareVideoBackbone(nn.Module):
             grid_width=w,
         )
 
+    def merge_idm_video_branches(self, noisy, cond):
+        """Wan-shaped merge: flat (B, L, D) hidden_states, 4D time_mod, rope_freqs."""
+        import copy
+
+        if noisy.time_mod.ndim != 4 or cond.time_mod.ndim != 4:
+            raise ValueError(
+                "IDM teacher-forcing requires token-wise video t_mod for noisy and cond branches; "
+                "ensure the video backbone is running in separated-timestep/fused-first-frame mode."
+            )
+        if (noisy.grid_height, noisy.grid_width) != (cond.grid_height, cond.grid_width):
+            raise ValueError("IDM teacher-forcing requires matching spatial token layout.")
+        s_noisy = int(noisy.hidden_states.shape[1])
+        s_cond = int(cond.hidden_states.shape[1])
+        merged = copy.copy(noisy)
+        merged.hidden_states = torch.cat([noisy.hidden_states, cond.hidden_states], dim=1)
+        merged.rope_freqs = torch.cat([noisy.rope_freqs, cond.rope_freqs], dim=0)
+        merged.time_mod = torch.cat([noisy.time_mod, cond.time_mod], dim=1)
+        return merged, s_noisy, s_cond
+
+    def split_idm_video_branches(self, merged, noisy, cond):
+        s_noisy = int(noisy.hidden_states.shape[1])
+        noisy.hidden_states = merged.hidden_states[:, :s_noisy]
+        cond.hidden_states = merged.hidden_states[:, s_noisy:]
+        noisy.time_mod = merged.time_mod[:, :s_noisy]
+        cond.time_mod = merged.time_mod[:, s_noisy:]
+        return noisy, cond
+
     def pre_attn_at_layer(self, layer_id, state):
         del layer_id
         return state.hidden_states, state.hidden_states, state.hidden_states, {"residual": state.hidden_states}
@@ -338,35 +365,30 @@ def test_idm_clean_cond_video_uses_zero_timestep():
 
 
 def test_idm_training_requires_tokenwise_video_t_mod():
-    """IDM should fail loudly if a backbone cannot represent noisy/cond timesteps in one sequence."""
+    """IDM should fail loudly if a backbone cannot represent noisy/cond timesteps in one sequence.
+
+    The check now lives in the backbone's ``merge_idm_video_branches`` (the
+    driver delegates branch concatenation to the backbone), so a non-4D
+    ``time_mod`` must raise there and propagate through the driver loop.
+    """
     from openwam.model.video_backbone.base import BlockLoopState
 
-    vb = MagicMock()
-    vb.num_layers = 1
-    vb.num_heads = 2
-    vb.head_dim = 4
-    vb.build_video_to_video_mask.return_value = torch.ones(2, 2, dtype=torch.bool)
+    vb = _CapturePrepareVideoBackbone()
+    arch = _make_idm_with_video(vb)
+    driver = arch._mot_driver
 
-    ab = MagicMock()
-    ab.num_layers = 1
-    ab.num_heads = 2
-    ab.head_dim = 4
-    driver = __import__("openwam.model.architectures.dual_system.idm", fromlist=["IDMMoTDriver"]).IDMMoTDriver(
-        vb,
-        ab,
-        mot_checkpoint_mixed_attn=False,
-    )
+    # 3D time_mod (not the token-wise 4D shape IDM requires).
     vstate = BlockLoopState(
-        hidden_states=torch.zeros(1, 2, 8),
-        time_mod=torch.zeros(1, 6, 8),
+        hidden_states=torch.zeros(1, 2, vb.dim),
+        time_mod=torch.zeros(1, 6, vb.dim),
         rope_freqs=torch.zeros(2, 1, 2),
-        context=torch.zeros(1, 1, 8),
+        context=torch.zeros(1, 1, vb.dim),
         grid_frames=2,
         grid_height=1,
         grid_width=1,
     )
     astate = MagicMock()
-    astate.payload.x_action = torch.zeros(1, 1, 8)
+    astate.payload.x_action = torch.zeros(1, 1, vb.dim)
 
     import pytest
 

@@ -224,6 +224,32 @@ class VideoBackbone(ABC, nn.Module):
         raise NotImplementedError(f"{type(self).__name__} does not support joint self-attention.")
 
     # ================================================================
+    # Optional: IDM teacher-forcing branch merge/split (default raise)
+    # ================================================================
+
+    def merge_idm_video_branches(
+        self, noisy: BlockLoopState, cond: BlockLoopState
+    ) -> Tuple[BlockLoopState, int, int]:
+        """Concatenate the IDM noisy + cond video branches into one state along
+        the frame/sequence axis for a single MoT pass.
+
+        Returns ``(merged, s_noisy_tokens, s_cond_tokens)`` where the two seq
+        lengths are **token counts** (``T·H·W``) — the granularity the
+        teacher-forcing attention mask is built at. The driver must not inspect
+        ``hidden_states.shape[1]`` (it is ``T`` for 5D-grid backbones), so the
+        merge implementation — which owns its own layout — returns them here.
+        Pair with :meth:`split_idm_video_branches`."""
+        raise NotImplementedError(f"{type(self).__name__} does not support IDM teacher-forcing.")
+
+    def split_idm_video_branches(
+        self, merged: BlockLoopState, noisy: BlockLoopState, cond: BlockLoopState
+    ) -> Tuple[BlockLoopState, BlockLoopState]:
+        """Inverse of :meth:`merge_idm_video_branches`: write the post-loop merged
+        ``hidden_states`` (and any per-branch fields) back onto the ``noisy`` and
+        ``cond`` states. Returns ``(noisy, cond)``."""
+        raise NotImplementedError(f"{type(self).__name__} does not support IDM teacher-forcing.")
+
+    # ================================================================
     # Optional: shared-token injection (default raise)
     # ================================================================
 

@@ -286,6 +286,24 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
             )
         return dit_forward.post_attn_at_layer(layer_id, state, attn_out, post_state)
 
+    # ------------------------------------------------------------------
+    # IDM teacher-forcing branch merge/split
+    # ------------------------------------------------------------------
+
+    def merge_idm_video_branches(self, noisy: BlockLoopState, cond: BlockLoopState):
+        """Concatenate the IDM noisy + cond branches — delegates to ``idm_merge``."""
+        from openwam.model.video_backbone.cosmos_predict25 import idm_merge
+
+        return idm_merge.merge_branches(noisy, cond)
+
+    def split_idm_video_branches(
+        self, merged: BlockLoopState, noisy: BlockLoopState, cond: BlockLoopState
+    ):
+        """Inverse of :meth:`merge_idm_video_branches` — delegates to ``idm_merge``."""
+        from openwam.model.video_backbone.cosmos_predict25 import idm_merge
+
+        return idm_merge.split_branches(merged, noisy, cond)
+
     # `inject_shared_tokens` / `extract_shared_tokens` fall through to the ABC
     # defaults, which already raise — shared-backbone variants are out of scope.
 
