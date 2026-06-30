@@ -257,6 +257,8 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         return dit_forward.prepare_block_loop(self.dit, **pipeline_inputs)
 
     def run_block(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
+        if state.extras.get("shared_mode"):
+            return self._run_block_shared(block_id, state)
         return dit_forward.run_block(self.dit, block_id, state)
 
     def finalize(self, state: BlockLoopState) -> Tensor:
@@ -304,8 +306,157 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
 
         return idm_merge.split_branches(merged, noisy, cond)
 
-    # `inject_shared_tokens` / `extract_shared_tokens` fall through to the ABC
-    # defaults, which already raise — shared-backbone variants are out of scope.
+    # ------------------------------------------------------------------
+    # Shared-backbone: action/state tokens ride the video DiT (3D mode)
+    # ------------------------------------------------------------------
+
+    def assert_ready_for_shared_tokens(self, state: BlockLoopState) -> None:
+        """Cosmos builds per-token modulation in :meth:`inject_shared_tokens` from
+        ``extras`` (not ``state.time_mod``), so the Wan 4D-``time_mod`` check does
+        not apply — no-op."""
+        return None
+
+    def _shared_token_emb(self, timestep: Tensor, n_tokens: int, batch_size: int) -> Tuple[Tensor, Tensor]:
+        """Per-token AdaLN emb + lora for ``n_tokens`` non-grid tokens at ``timestep``."""
+        ts = timestep.flatten()
+        if ts.numel() == 1:
+            ts = ts.expand(batch_size)
+        elif ts.numel() != batch_size:
+            raise ValueError(
+                f"shared-token timestep has {ts.numel()} elements; expected 1 or batch_size={batch_size}."
+            )
+        ts_tok = ts.view(batch_size, 1).expand(batch_size, n_tokens)
+        emb, lora = self.dit.t_embedder(ts_tok)
+        emb = self.dit.t_embedding_norm(emb)
+        return emb, lora
+
+    def inject_shared_tokens(
+        self,
+        state: BlockLoopState,
+        action_tokens: Tensor,
+        n_action: int,
+        *,
+        state_tokens: Optional[Tensor] = None,
+        n_state: int = 0,
+        timestep: Optional[Tensor] = None,
+    ) -> BlockLoopState:
+        """Flatten the 5D video grid to 3D and append ``[action][state]`` tokens.
+
+        Builds per-token AdaLN emb/lora (video per-frame emb expanded over H·W,
+        plus action/state emb from ``timestep``), extends the rope with identity
+        rows, and flips the state into ``shared_mode`` so :meth:`run_block`
+        dispatches to the 3D block forward. Pair with :meth:`extract_shared_tokens`.
+        """
+        from einops import rearrange
+
+        from openwam.model.video_backbone.cosmos_predict25 import shared_block
+
+        n_action = int(n_action or 0)
+        n_state = int(n_state or 0)
+        if state.extras.get("extra_per_block_pos_emb") is not None:
+            raise NotImplementedError(
+                "CosmosPredict25 shared-backbone supports only the rope position variant "
+                "(extra_per_block_pos_emb must be None)."
+            )
+        B = state.hidden_states.shape[0]
+        T, H, W = int(state.grid_frames), int(state.grid_height), int(state.grid_width)
+        tokens_per_frame = H * W
+        video_3d = rearrange(state.hidden_states, "b t h w d -> b (t h w) d")
+        dim = video_3d.shape[2]
+        if (n_action + n_state) > 0 and timestep is None:
+            raise ValueError("inject_shared_tokens requires `timestep` for action/state token modulation.")
+
+        pieces_x = [video_3d]
+        pieces_emb = [shared_block.expand_video_emb_to_tokens(state.extras["t_embedding_B_T_D"], T, tokens_per_frame)]
+        pieces_lora = [shared_block.expand_video_emb_to_tokens(state.extras["adaln_lora_B_T_3D"], T, tokens_per_frame)]
+
+        for n_tok, tokens, name in ((n_action, action_tokens, "action"), (n_state, state_tokens, "state")):
+            if not n_tok:
+                continue
+            if tokens is None:
+                raise ValueError(f"n_{name} > 0 requires {name}_tokens.")
+            if tokens.shape[0] != B or tokens.shape[1] != n_tok or tokens.shape[2] != dim:
+                raise ValueError(
+                    f"{name}_tokens shape {tuple(tokens.shape)} does not match "
+                    f"(B={B}, n_{name}={n_tok}, dim={dim})."
+                )
+            emb, lora = self._shared_token_emb(timestep, n_tok, B)
+            pieces_x.append(tokens.to(video_3d.dtype))
+            pieces_emb.append(emb)
+            pieces_lora.append(lora)
+
+        state.hidden_states = torch.cat(pieces_x, dim=1)
+        new_extras = dict(state.extras)
+        new_extras["shared_emb_B_S_D"] = torch.cat(pieces_emb, dim=1)
+        new_extras["shared_adaln_lora_B_S_3D"] = torch.cat(pieces_lora, dim=1)
+        new_extras["shared_rope"] = shared_block.extend_rope_with_shared_tokens(
+            state.extras["rope_emb_L_1_1_D"], n_action + n_state
+        )
+        new_extras["shared_mode"] = True
+        new_extras["shared_n_action"] = n_action
+        new_extras["shared_n_state"] = n_state
+        state.extras = new_extras
+        return state
+
+    def _run_block_shared(self, block_id: int, state: BlockLoopState) -> BlockLoopState:
+        from openwam.model.video_backbone.cosmos_predict25 import shared_block
+        from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import (
+            gradient_checkpoint_forward,
+        )
+
+        block = self.dit.blocks[block_id]
+        state.hidden_states = gradient_checkpoint_forward(
+            shared_block.run_block_3d,
+            state.use_gradient_checkpointing,
+            state.use_gradient_checkpointing_offload,
+            block,
+            state.hidden_states,
+            state.extras["shared_emb_B_S_D"],
+            state.extras["shared_adaln_lora_B_S_3D"],
+            state.extras["shared_rope"],
+            state.context,
+            state.extras.get("shared_attention_mask"),
+        )
+        return state
+
+    def extract_shared_tokens(
+        self, state: BlockLoopState, n_action: int, *, n_state: int = 0
+    ) -> Tuple[BlockLoopState, Tensor]:
+        """Slice the action tail off, restore the 5D video grid, leave shared mode."""
+        from einops import rearrange
+
+        n_action = int(n_action or 0)
+        n_state = int(n_state or 0)
+        T, H, W = int(state.grid_frames), int(state.grid_height), int(state.grid_width)
+        s_video = T * H * W
+        n_tail = n_action + n_state
+        total = state.hidden_states.shape[1]
+        if n_tail <= 0 or n_tail >= total:
+            raise ValueError(
+                f"extract_shared_tokens: n_action={n_action}, n_state={n_state} but sequence length is {total} "
+                "(was inject_shared_tokens called first with the same lengths?)."
+            )
+        if total - n_tail != s_video:
+            raise ValueError(
+                f"extract_shared_tokens: video token count {total - n_tail} != grid T·H·W={s_video} "
+                "(grid changed between inject and extract?)."
+            )
+        action_tokens = state.hidden_states[:, s_video : s_video + n_action, :]
+        video_3d = state.hidden_states[:, :s_video, :]
+        state.hidden_states = rearrange(video_3d, "b (t h w) d -> b t h w d", t=T, h=H, w=W)
+        new_extras = dict(state.extras)
+        for key in (
+            "shared_mode",
+            "shared_emb_B_S_D",
+            "shared_adaln_lora_B_S_3D",
+            "shared_rope",
+            "shared_attention_mask",
+            "shared_n_action",
+            "shared_n_state",
+        ):
+            new_extras.pop(key, None)
+        state.extras = new_extras
+        return state, action_tokens
 
     # ------------------------------------------------------------------
     # Preprocessing & decoding

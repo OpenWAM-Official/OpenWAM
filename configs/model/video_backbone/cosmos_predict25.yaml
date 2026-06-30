@@ -1,9 +1,10 @@
 # Cosmos-Predict2.5 2B video backbone (dual-system). Fields land in
 # cfg.model.video_backbone.* (group path matches the package). Switch backbone
 # on CLI: model/video_backbone=cosmos_predict25.
-# DiT geometry auto-derived (context_dim=1024). Variants: joint_cross_attn /
-# joint_self_attn / idm (idm uses per-frame timesteps + the backbone-owned
-# noisy/cond branch merge in cosmos_predict25.idm_merge).
+# DiT geometry auto-derived (context_dim=1024). Architectures: dual_system
+# (joint_cross_attn / joint_self_attn / idm) and shared_backbone (vanilla / moe,
+# via the flat 3D block forward in cosmos_predict25.shared_block). idm uses
+# per-frame timesteps + the backbone-owned merge in cosmos_predict25.idm_merge.
 #
 # Freeze policy lives in the model freeze list (the train launcher pins
 # video_backbone.vae + video_backbone.reason1; the DiT `dit` is

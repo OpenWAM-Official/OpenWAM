@@ -71,18 +71,28 @@ def test_self_attn_paths_raise_with_clear_message():
         bb.post_attn_at_layer(0, dummy_state, attn_out=torch.zeros(1, 4, bb.dim), post_state={})
 
 
-def test_shared_backbone_paths_raise():
+def test_shared_backbone_now_supported():
+    """Cosmos now supports shared-backbone (via the 3D block forward).
+
+    The inject/extract methods are overridden (no longer the raising ABC
+    default) and ``assert_ready_for_shared_tokens`` is a no-op (Cosmos carries
+    per-token modulation in ``extras``, not ``time_mod``). The full inject →
+    run → extract round-trip is covered in
+    ``test_cosmos_predict25_shared_backbone.py`` (needs a runnable DiT)."""
+    from openwam.model.video_backbone.base import VideoBackbone
+
     bb = _build_backbone()
-    dummy_state = BlockLoopState(
-        hidden_states=torch.zeros(1, 4, bb.dim),
-        time_mod=torch.zeros(1, 6, bb.dim),
-        rope_freqs=torch.zeros(4, bb.head_dim, dtype=torch.complex64),
-        context=torch.zeros(1, 1, bb.text_dim),
+    assert type(bb).inject_shared_tokens is not VideoBackbone.inject_shared_tokens
+    assert type(bb).extract_shared_tokens is not VideoBackbone.extract_shared_tokens
+    # No-op readiness check: must not raise the Wan 4D-time_mod requirement.
+    bb.assert_ready_for_shared_tokens(
+        BlockLoopState(
+            hidden_states=torch.zeros(1, 1, 1, 1, bb.dim),
+            time_mod=torch.zeros(()),
+            rope_freqs=torch.zeros(()),
+            context=torch.zeros(1, 1, bb.text_dim),
+        )
     )
-    with pytest.raises(NotImplementedError, match="shared-backbone"):
-        bb.inject_shared_tokens(dummy_state, torch.zeros(1, 2, bb.dim), 2)
-    with pytest.raises(NotImplementedError, match="shared-backbone"):
-        bb.extract_shared_tokens(dummy_state, 2)
 
 
 def test_vace_rejected_for_mvp():

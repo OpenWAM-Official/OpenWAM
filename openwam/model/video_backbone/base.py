@@ -273,6 +273,22 @@ class VideoBackbone(ABC, nn.Module):
         """Slice action/state tokens off the sequence tail. Returns ``(state, action_tokens)``."""
         raise NotImplementedError(f"{type(self).__name__} does not support shared-backbone.")
 
+    def assert_ready_for_shared_tokens(self, state: BlockLoopState) -> None:
+        """Validate the prepared state can carry action/state shared tokens.
+
+        Default (Wan): the per-token ``time_mod`` must be 4D so injected
+        action/state tokens get their own timestep instead of being silently
+        modulated by a global one. Backbones that carry per-token modulation
+        elsewhere (CosmosPredict25 builds it in ``inject_shared_tokens`` from
+        ``extras``) override this to a no-op."""
+        if state.time_mod.dim() != 4:
+            raise RuntimeError(
+                f"{type(self).__name__} shared-backbone requires the video backbone to run in per-token "
+                "t_mod mode (e.g. dit.seperated_timestep=True with fuse_vae_embedding_in_latents=True). "
+                f"Got vstate.time_mod with dim={state.time_mod.dim()}; action/state timestep would be "
+                "silently ignored otherwise."
+            )
+
     # ================================================================
     # Lifecycle: device/dtype (default moves all registered children)
     # ================================================================
