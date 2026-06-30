@@ -275,7 +275,12 @@ class PolicyServer:
                 logger.info("Client disconnected")
 
         async def serve():
-            async with websockets.serve(ws_handler, host, port, max_size=MAX_MESSAGE_BYTES):
+            # ping_interval=None: slow inference (notably torch.compile warmup on
+            # the first request) blocks this event loop past the 20s default ping
+            # deadline; keepalive pings would drop the connection mid-inference.
+            async with websockets.serve(
+                ws_handler, host, port, max_size=MAX_MESSAGE_BYTES, ping_interval=None
+            ):
                 logger.info("WebSocket server started on ws://%s:%d", host, port)
                 await asyncio.Future()  # run forever
 
