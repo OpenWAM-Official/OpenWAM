@@ -31,7 +31,7 @@ optimization:
     max_skips: 3              # Max consecutive skips before forcing recompute
 
   compile:
-    enabled: false             # true enables architecture-specific compile fast paths
+    enabled: true              # true enables architecture-specific compile fast paths
     self_attn:
       torch_mode: default
       dynamic: false           # Fixed-shape MoT-loop compile for dual_system_self_attn
