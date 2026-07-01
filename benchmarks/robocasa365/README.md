@@ -87,7 +87,14 @@ back to the env's 12-D OSC at eval time.
 
 RoboCasa / robosuite / MuJoCo conflict with the OpenWAM serving stack, so they
 live in a **separate** env (like RoboTwin's `robotwin` env / LIBERO's
-`LIBERO_PYTHON`). The client is torch-free (`websockets` + `numpy` + `Pillow`).
+`LIBERO_PYTHON`). The client is torch-free (`websockets>=15` + `numpy` + `Pillow`).
+
+> **`websockets>=15` is required** on the client. The transport disables keepalive
+> pings via `connect(..., ping_interval=None)` (so slow first-call inference / compile
+> warmup doesn't trip the 20s ping deadline), and `websockets.sync.client.connect`
+> only accepts `ping_interval` from 15.0 onward — older versions raise
+> `TypeError: ... unexpected keyword argument 'ping_interval'` at connect time. This is
+> a transport-layer requirement shared by all benchmark clients, not RoboCasa-specific.
 
 1. Create an isolated `robocasa365` env and install RoboCasa (pulls robosuite +
    MuJoCo):
