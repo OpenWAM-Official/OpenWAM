@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
@@ -9,6 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from openwam.model.vlm_backbone.base import VlmBackbone
+
+logger = logging.getLogger(__name__)
 
 
 class Qwen3VLBackbone(VlmBackbone):
@@ -202,3 +205,18 @@ class Qwen3VLBackbone(VlmBackbone):
             return_dict=True,
         )
         return outputs.last_hidden_state
+
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Copy the VLM checkpoint into the deploy dir so deploy is self-contained
+        (no dependency on the training-time checkpoint_path). Idempotent. Invoked by
+        the architecture's save_assets_for_deployment, same hook as video backbones."""
+        import os
+        import shutil
+
+        if not self._checkpoint_path:
+            return
+        dest = os.path.join(output_dir, "vlm_backbone")
+        if os.path.exists(dest):
+            return
+        shutil.copytree(self._checkpoint_path, dest)
+        logger.info("Copied VLM checkpoint to %s", dest)

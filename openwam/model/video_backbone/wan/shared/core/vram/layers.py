@@ -3,7 +3,7 @@ from typing import Union
 
 import torch
 
-from ..device import IS_NPU_AVAILABLE, get_device_name, parse_device_type
+from ..device import parse_device_type
 from .disk_map import DiskMap
 from .initialization import skip_model_initialization
 
@@ -65,7 +65,7 @@ class AutoTorchModule(torch.nn.Module):
         return r
 
     def check_free_vram(self):
-        device = self.computation_device if not IS_NPU_AVAILABLE else get_device_name()
+        device = self.computation_device
         gpu_mem_state = getattr(torch, self.computation_device_type).mem_get_info(device)
         used_memory = (gpu_mem_state[1] - gpu_mem_state[0]) / (1024**3)
         return used_memory < self.vram_limit

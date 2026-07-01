@@ -148,9 +148,7 @@ def main(cfg: DictConfig) -> None:
     from openwam.dataloader.registry import build_dataset
     from openwam.model.video_backbone.encoder import build_video_encoder
     from openwam.train.utils.seeding import dataloader_worker_init_fn, make_dataloader_generator
-    from openwam.train.utils.temporal_contract import apply_temporal_contract_bridge
 
-    apply_temporal_contract_bridge(cfg)
     dataset = build_dataset(cfg.dataloader, split="train")
 
     encoder_cfg = cfg.model.video_backbone.encoder

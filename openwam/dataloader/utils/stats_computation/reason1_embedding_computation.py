@@ -1,4 +1,4 @@
-"""Pre-compute Cosmos-Reason1-7B text embeddings for the Cosmos25 backbone.
+"""Pre-compute Cosmos-Reason1-7B text embeddings for the CosmosPredict25 backbone.
 
 For every unique RoboTwin caption (enumerated across all
 ``instructions/<task>/episode<N>.json`` files in ``seen`` and ``unseen``,

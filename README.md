@@ -144,17 +144,18 @@ Drop `training.debug=true` for a full run. Loss weights (`lambda_video` / `lambd
 
 **Architecture** is picked via `model=<framework>` (`dual_system` | `shared_backbone` | `tri_system`) and `model.architecture.variant` (see the [Architectures](#architectures) table).
 
-**Video backbone** is a Hydra group composed under each framework yaml (default `wan22`). Switch via `model/video_backbone=`:
+**Video backbone** is a Hydra group composed under each framework yaml (default `wan22_ti2v_5b`). Switch via `model/video_backbone=`:
 
 ```bash
 bash scripts/train.sh model=dual_system \
-    model/video_backbone=wan21 \
-    model.video_backbone.model_path=/path/to/Wan2.1-VACE-1.3B
+    model/video_backbone=wan21_vace_1_3b
 ```
 
-Available groups: `wan22` (Wan2.2-TI2V-5B, default), `wan21` (VACE-1.3B / I2V-14B), `cosmos25`. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
+Available groups: `wan22_ti2v_5b` (Wan2.2-TI2V-5B, default), `wan21_vace_1_3b` (Wan2.1-VACE-1.3B), `wan21_i2v_14b_480p` (Wan2.1-I2V-14B-480P), `cosmos_predict25`. Each group ships its own `model_path`; override `model.video_backbone.model_path=` only to point at a different weights dir. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
 
-> `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`. Override **both** together; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
+> **Wan:** `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`. Override **both** together; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
+>
+> **Cosmos-Predict2.5:** `name` is validated (only `cosmos_predict25_2b` today; others raise), and the weights are located by `model_path` (bundle root) **plus** `model_variant` (e.g. `base/post-trained`) — so for cosmos both `model_path` and `model_variant` are load-bearing, not `name`. The action-side `text_dim` auto-derives from the backbone (1024), so no manual override is needed.
 
 Distributed training configs in `configs/accelerate/`: `deepspeed_zero1.yaml`, `deepspeed_zero2.yaml`.
 

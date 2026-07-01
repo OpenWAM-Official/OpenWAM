@@ -275,6 +275,57 @@ def test_dual_system_cross_attn_inherits_geometry_from_video_backbone():
     assert ab.head_dim == vb.head_dim == WAN_VIDEO_DIM // 4
 
 
+class _TextDim1024Backbone(_MockVideoBackbone):
+    """Cosmos-shaped mock: exposes a 1024 raw context width (Wan is 4096)."""
+
+    @property
+    def text_dim(self) -> int:
+        return 1024
+
+
+def _build_self_attn_with_backbone(backbone_cls, cfg_extra=None):
+    from openwam.model.architectures.dual_system.joint_self_attn import (
+        DualSystemSelfAttnArchitecture,
+    )
+
+    class _SelfAttnWithBackbone(DualSystemSelfAttnArchitecture):
+        def _init_video_backbone(self, _cfg):
+            # Attach BEFORE __init__'s vb-derived setdefault/derive block runs.
+            self.video_backbone = backbone_cls(dim=WAN_VIDEO_DIM, num_layers=WAN_NUM_LAYERS, num_heads=4)
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
+        "action_dim": ACTION_DIM,
+        "bridge_interval": 1,
+        "dim": WAN_VIDEO_DIM,
+        "ffn_dim": 4 * WAN_VIDEO_DIM,
+    }
+    cfg.update(cfg_extra or {})
+    return _SelfAttnWithBackbone(cfg=cfg)
+
+
+def test_text_dim_auto_derives_from_backbone():
+    """When ``text_dim`` is absent from cfg it defaults to the loaded backbone's
+    ``text_dim`` (Cosmos-Predict2.5=1024), removing the manual override footgun."""
+    arch = _build_self_attn_with_backbone(_TextDim1024Backbone)
+    assert arch.action_backbone.text_dim == 1024
+    assert arch.context_dim == 1024
+
+
+def test_text_dim_explicit_cfg_wins_over_backbone():
+    """An explicit cfg ``text_dim`` still overrides the backbone-derived default."""
+    arch = _build_self_attn_with_backbone(_TextDim1024Backbone, {"text_dim": 777})
+    assert arch.action_backbone.text_dim == 777
+
+
+def test_text_dim_falls_back_to_4096_when_backbone_silent():
+    """A backbone that doesn't expose ``text_dim`` (base property → None) keeps the
+    historical 4096 (Wan T5-XXL) fallback, so Wan behavior is unchanged."""
+    arch = _build_self_attn_with_backbone(_MockVideoBackbone)
+    assert arch.action_backbone.text_dim == 4096
+
+
 # ---------------------------------------------------------------------------
 # 2. dual_system_self_attn
 # ---------------------------------------------------------------------------
@@ -705,9 +756,9 @@ def test_all_variants_load_and_run(registry_name, cfg, expected_selected_count):
 # ---------------------------------------------------------------------------
 # 6. Hydra defaults composition smoke
 # ---------------------------------------------------------------------------
-# Each framework yaml inlines its `video_backbone:` block (with default
+# Each framework yaml selects its `video_backbone:` via a Hydra group (default
 # wan22_ti2v_5b). Production scripts/train.py runs under ``@hydra.main``, so
-# we verify the inline default composes and that the standard CLI override
+# we verify the default group composes and that the standard CLI override
 # pattern (``model.video_backbone.name=...``) still reshapes the cfg.
 # Existing tri_system smoke tests (test_tri_system_smoke.py:307, :419)
 # ``OmegaConf.load`` the yaml directly and don't exercise compose, so this
@@ -731,16 +782,15 @@ _BACKBONE_DUMMY_MODEL_PATH = {
 @pytest.mark.parametrize("backbone", _BACKBONES)
 def test_framework_backbone_hydra_compose(framework, backbone):
     """All 9 framework × video_backbone pairs must Hydra-compose cleanly via
-    the production CLI override pattern — both ``model.video_backbone.name``
-    AND ``model.video_backbone.model_path`` overridden together — and both
-    fields must reach the composed cfg unchanged.
+    the field-override pattern — ``model.video_backbone.name`` AND
+    ``model.video_backbone.model_path`` overridden together — with both fields
+    reaching the composed cfg unchanged.
 
-    The inline-block design (PR #59) drops the implicit name→model_path
-    coupling that the old Hydra group provided, so production users must
-    override both fields together (see README + each framework yaml). This
-    test pins that pattern instead of only overriding ``name``, which would
-    leave ``model_path`` pointing at the default wan22 entry and silently
-    load the wrong backbone at training time.
+    Each framework yaml selects the backbone via a Hydra group whose file ships
+    both ``name`` and ``model_path``. This test pins the field-override path
+    used for ablations that point at an off-default weights dir, verifying the
+    override reaches the composed cfg instead of silently keeping the default
+    group's ``model_path``.
     """
     import os
 
@@ -759,7 +809,7 @@ def test_framework_backbone_hydra_compose(framework, backbone):
     vb = cfg.model.get("video_backbone")
     assert vb is not None, (
         f"{framework} × {backbone}: cfg.model.video_backbone missing after "
-        f"compose — inline `video_backbone:` block is broken"
+        f"compose — `video_backbone` group did not compose"
     )
     assert vb.name == backbone, (
         f"{framework} × {backbone}: composed video_backbone.name={vb.name!r}, expected {backbone!r}"
@@ -775,7 +825,7 @@ def test_framework_backbone_hydra_compose(framework, backbone):
 @pytest.mark.parametrize("framework", _FRAMEWORKS)
 def test_framework_default_backbone_is_wan22_ti2v_5b(framework):
     """Without any explicit ``model.video_backbone.*`` override, every
-    framework yaml's inline ``video_backbone:`` block must default to
+    framework yaml's ``video_backbone`` group must default to
     ``wan22_ti2v_5b`` — that's the documented default backbone.
     """
     import os

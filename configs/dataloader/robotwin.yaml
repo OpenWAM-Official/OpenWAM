@@ -6,6 +6,23 @@ robot: aloha-agilex              # robot embodiment name, maps to directory {rob
 variant: both                     # "clean_50", "randomized_500", or "both"
 action_mode: eef                  # "eef" (20D xyz+rot6d+grip, default) or "joint" (14D qpos)
 
+# ── Unified 80-D action space (cross-robot shared head) ──────────────────────
+# unify_action=true scatters this reader's raw action/proprio into a shared
+# 80-D vector so heterogeneous robots train one action head; the per-dim mask
+# keeps unmapped dims out of the loss. unify_action=false (default) is
+# byte-identical to the pre-unify reader. The 80-D semantic layout is:
+#   [ 0: 3) left  eef xyz     [ 3: 9) left  eef rot6d   [ 9]    left  gripper
+#   [10:34) left  hand (24)   [34:37) right eef xyz     [37:43) right eef rot6d
+#   [43]    right gripper     [44:68) right hand (24)   [68:80) reserved (12)
+# The map below is for action_mode: eef (20-D EEF), whose raw layout is
+#   raw [0:3) L xyz · [3:9) L rot6d · [9] L grip · [10:13) R xyz · [13:19) R rot6d · [19] R grip
+# → raw left-arm 0-9 to unified 0-9, raw right-arm 10-19 to unified 34-43.
+# NOTE: for action_mode: joint (14-D qpos) this map does NOT apply — joints have
+# no eef-xyz/rot6d slots in the 80-D layout; set a joint-appropriate map first.
+# Single-list form (source dims implied 0..19 in token order):
+unify_action: false
+unify_action_map: ["0-9", "34-43"]
+
 # --- Frame sampling ---
 # num_frames   = state/action window length in raw HDF5 frames.
 # video_stride = stride applied to video only; state and action stay at raw rate.
@@ -73,7 +90,7 @@ holdout_tasks: null
 #   Useful for testing generalization: train on clean_50, validate on randomized_500
 val_variant: null
 
-# --- Pre-computed text embedding cache (Cosmos-Reason1 for Cosmos25 backbone) ---
+# --- Pre-computed text embedding cache (Cosmos-Reason1 for CosmosPredict25 backbone) ---
 # Pre-compute once per unique caption with:
 #   python -m openwam.dataloader.utils.stats_computation.reason1_embedding_computation \
 #       --reason1-ckpt /path/to/Cosmos-Reason1-7B \

@@ -4,19 +4,23 @@
 #   joint_self_attn:  MoTJointDriver runs one mixed self-attention per layer;
 #                     requires num_layers/num_heads/head_dim parity across backbones.
 #   idm:              teacher-forcing training + two-stage inference. Wan-only
-#                     (Cosmos25 raises NotImplementedError).
-# Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos25.
+#                     (CosmosPredict25 raises NotImplementedError).
+# Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos_predict25.
 
 defaults:
-  - video_backbone: wan22         # default Wan22 TI2V-5B; CLI: model/video_backbone=wan21 (VACE/I2V) | cosmos25
+  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25
   - action_backbone: separate_action_dit # ActionDiT (dual/tri only support ActionDiT)
   - _self_
 
 # Frozen pretrained components (freeze_modules walks each via get_submodule;
 # missing paths silently skipped — image_encoder None on TI2V/VACE, _encoder
-# only on the from_scratch external-encoder path).
+# only on the from_scratch external-encoder path). The list spans backbones:
+# `text_encoder`/`vae` are Wan; `reason1` is the CosmosPredict25 text-encoder child
+# (Cosmos `vae` is also a real child, so the same `video_backbone.vae` entry
+# covers it). Each no-ops on backbones that lack the path.
 freeze:
   - video_backbone.text_encoder
+  - video_backbone.reason1
   - video_backbone.vae
   - video_backbone.image_encoder
   - video_backbone.video_encoder

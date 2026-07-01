@@ -208,3 +208,9 @@ sandbox/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/.wan_video.py.swp
 graphify-out/
+
+# Local Cosmos25 training launcher (not tracked; uses default pretrained weights)
+scripts/train_cosmos25_default_weights.sh
+
+# uv lockfile (not tracked; project does not pin a uv workflow)
+uv.lock

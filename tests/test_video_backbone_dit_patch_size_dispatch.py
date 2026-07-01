@@ -91,7 +91,7 @@ _F, _H, _W = 2, 8, 8
 @pytest.mark.parametrize(
     "patch_size,expected_div",
     [
-        ((1, 2, 2), 4),  # Wan native (and Cosmos25 native) — regression guard
+        ((1, 2, 2), 4),  # Wan native (and CosmosPredict25 native) — regression guard
         ((1, 1, 1), 1),  # ViT-style pre-patchified encoder, DiT 1st conv is channel proj
         ((1, 4, 4), 16),  # hypothetical 4x DiT patch
     ],

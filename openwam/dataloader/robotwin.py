@@ -14,7 +14,7 @@ import json
 import os
 import random
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import h5py
@@ -35,6 +35,12 @@ from openwam.dataloader.transforms.normalize import (
     load_mode_stats,
 )
 from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
+from openwam.dataloader.utils.unify_action import (
+    UNIFY_DIM,
+    map_to_unify,
+    parse_unify_spec,
+    unmap_from_unify,
+)
 
 _JOINT_ACTION_DIM = 14  # aloha-agilex qpos vector
 
@@ -275,28 +281,6 @@ def _resolve_prompt(
     return format_prompt_for_inference(base_prompt)
 
 
-def _check_temporal_divisibility(num_video_frames: int, temporal_compression: int, causal_temporal: bool) -> None:
-    """Validate ``num_video_frames`` against the encoder's temporal contract.
-
-    Threaded from ``configs/model/*.yaml`` →
-    ``openwam.train.utils.temporal_contract.apply_temporal_contract_bridge``
-    (invoked by ``scripts/train.py``) → dataset cfg. Kept
-    as a free function so tests can exercise the branching rule without
-    instantiating the full dataset (which requires real episode HDF5 files).
-    """
-    tc = int(temporal_compression)
-    if causal_temporal:
-        if (num_video_frames - 1) % tc != 0:
-            raise ValueError(
-                f"num_video_frames={num_video_frames} violates (N-1) % {tc} == 0 (required by causal encoder)."
-            )
-    else:
-        if num_video_frames % tc != 0:
-            raise ValueError(
-                f"num_video_frames={num_video_frames} violates N % {tc} == 0 (required by non-causal encoder)."
-            )
-
-
 class RoboTwinDataset(BaseDataset):
     """RoboTwin 2.0 HDF5 dataset for bimanual robot video-action training.
 
@@ -346,15 +330,15 @@ class RoboTwinDataset(BaseDataset):
         max_static_retry: int = 3,
         text_embedding_cache_dir: Optional[str] = None,
         text_embedding_dropout: float = 0.0,
-        temporal_compression: int = 4,
-        causal_temporal: bool = True,
+        unify_action: bool = False,
+        unify_action_map: Optional[Any] = None,
     ):
         super().__init__()
         self.robot = robot
         self.variant = variant
         self.action_mode = action_mode
-        self.temporal_compression = int(temporal_compression)
-        self.causal_temporal = bool(causal_temporal)
+        self._unify_action = bool(unify_action)
+        self._unify_action_map = unify_action_map
         self.normalize_mode = normalize_mode if normalize_mode not in ("", "none", "null") else None
         self._filter_static_segments = bool(filter_static_segments)
         self._static_segment_threshold = float(static_segment_threshold)
@@ -389,27 +373,15 @@ class RoboTwinDataset(BaseDataset):
         self.target_camera = target_camera
         self.window_stride = max(1, window_stride)
         self.video_stride = max(1, video_stride)
-        if (self.num_frames - 1) % self.video_stride != 0:
-            valid = [s for s in range(1, self.num_frames) if (self.num_frames - 1) % s == 0]
-            raise ValueError(
-                f"(num_frames - 1) must be divisible by video_stride. "
-                f"Got num_frames={self.num_frames}, video_stride={self.video_stride}. "
-                f"Valid strides for num_frames={self.num_frames}: {valid}"
-            )
+        # video_stride sub-samples frames within each window:
+        # range(0, num_frames, video_stride). num_video_frames is whatever that
+        # yields. For clean encoder temporal downsampling it should match the
+        # encoder's contract (Wan VAE causal: (num_video_frames - 1) % 4 == 0;
+        # non-causal: num_video_frames % tc == 0) — NOT enforced here; a mismatch
+        # surfaces downstream at encode time.
         self._raw_window_len = self.num_frames
         self._video_sample_indices = list(range(0, self.num_frames, self.video_stride))
         self.num_video_frames = len(self._video_sample_indices)
-        # Encoder temporal downsampling divisibility check. The contract is
-        # threaded from the encoder spec via ``configs/model/*.yaml`` →
-        # ``openwam.train.utils.temporal_contract.apply_temporal_contract_bridge``
-        # (invoked by ``scripts/train.py``) → dataloader cfg. Defaults preserve
-        # the historical Wan VAE rule.
-        #   causal_temporal=True : first frame is its own latent token, so the
-        #     remaining ``num_video_frames - 1`` frames must be divisible by
-        #     ``temporal_compression`` (Wan VAE = 4, V-JEPA 2.1 = 2).
-        #   causal_temporal=False: uniform tubelets, so ``num_video_frames``
-        #     itself must be divisible by ``temporal_compression``.
-        _check_temporal_divisibility(self.num_video_frames, self.temporal_compression, self.causal_temporal)
         self.multiview = bool(multiview)
         if self.multiview:
             if camera_layout is None:
@@ -554,9 +526,31 @@ class RoboTwinDataset(BaseDataset):
             print("  No scene_info.json found, active_arm will default to 'both'")
 
         # ---- Action normalization (unified for joint & eef via Normalizer) ----
-        self._action_dim_value = (
+        # _raw_action_dim_value = the width this reader's HDF5 path produces and
+        # the Normalizer operates on (14 joint / 20 eef). When unify is on, the
+        # PUBLIC _action_dim_value (model action head + finalized payloads)
+        # becomes UNIFY_DIM, with raw dims scattered via _unify_dst_index.
+        self._raw_action_dim_value = (
             EEF_ACTION_DIM if self.action_mode == "eef" else (self._action_dim_detected or _JOINT_ACTION_DIM)
         )
+        self._unify_dst_index: Optional[np.ndarray] = None
+        if self._unify_action:
+            if self._unify_action_map is None:
+                # No spec → identity map: raw dims 0..raw-1 in order (flat
+                # single-list form, NOT [[...]] which parses as one src->dst pair).
+                spec = list(range(self._raw_action_dim_value))
+            else:
+                spec = self._unify_action_map
+            self._unify_dst_index = parse_unify_spec(spec, UNIFY_DIM)
+            if self._unify_dst_index.shape[0] != self._raw_action_dim_value:
+                raise ValueError(
+                    f"RoboTwin unify_action_map maps {self._unify_dst_index.shape[0]} source dims "
+                    f"but action_mode={self.action_mode!r} produces {self._raw_action_dim_value}-D. "
+                    f"They must match."
+                )
+            self._action_dim_value = UNIFY_DIM
+        else:
+            self._action_dim_value = self._raw_action_dim_value
         self._normalizer = None  # Normalizer or None if disabled / stats missing
         self._mode_stats: Optional[dict] = None  # raw stats dict for the active mode
         self.normalization_stats_path: Optional[str] = None  # resolved path to the stats .npy file
@@ -613,7 +607,10 @@ class RoboTwinDataset(BaseDataset):
                         f"normalization DISABLED."
                     )
                 else:
-                    expected_dim = self._action_dim_value
+                    # Stats live in RAW action space (the Normalizer runs before
+                    # the unify scatter), so validate against _raw_action_dim_value
+                    # — NOT _action_dim_value, which is UNIFY_DIM when unify is on.
+                    expected_dim = self._raw_action_dim_value
                     got_dim = len(mode_stats["mean"])
                     if got_dim != expected_dim:
                         raise ValueError(
@@ -668,7 +665,7 @@ class RoboTwinDataset(BaseDataset):
             print(f"  Val: exhaustive windows ({len(self._window_index)} samples)")
 
         # ---- Optional pre-encoded text cache (e.g. Cosmos-Reason1 for the
-        # Cosmos25 backbone, pre-computed via
+        # CosmosPredict25 backbone, pre-computed via
         # ``openwam.dataloader.utils.stats_computation.reason1_embedding_computation``). When the
         # cache_dir is set, every sample dict will carry a
         # ``pre_encoded_text`` (L, D) tensor that the architecture threads to
@@ -697,14 +694,21 @@ class RoboTwinDataset(BaseDataset):
         return dict(self._mode_stats) if self._mode_stats is not None else None
 
     def denormalize_action(self, action) -> np.ndarray:
-        """Invert normalization for downstream inference / deployment.
+        """Invert the train-time action transform for inference / deployment.
 
-        If no normalizer is active (no stats / normalize_mode=None), returns
-        the input unchanged.
+        Mirrors the forward path in reverse: the model emits unified-space
+        actions, so we **un-unify first** (gather the UNIFY_DIM vector back to
+        the raw 14/20-D layout) and **then unnormalize** — the exact inverse of
+        ``normalize -> map_to_unify`` in ``_build_sample``.
+
+        If no normalizer is active (no stats / normalize_mode=None), only the
+        un-unify step applies (and is a no-op when unify is off).
         """
         arr = np.asarray(action) if not isinstance(action, np.ndarray) else action
+        if self._unify_dst_index is not None:
+            arr = unmap_from_unify(arr, self._unify_dst_index)  # (..., UNIFY_DIM) -> (..., raw)
         if self._normalizer is None:
-            return arr.copy()
+            return np.asarray(arr).copy()
         return self._normalizer.unnormalize(arr)
 
     def __len__(self):
@@ -879,6 +883,14 @@ class RoboTwinDataset(BaseDataset):
         if self._normalizer is not None:
             raw_actions = self._normalizer.normalize(raw_actions)
 
+        # Unify: scatter normalized (T, raw) -> (T, UNIFY_DIM) AFTER normalization
+        # (so unify operates in normalized space; the inverse un-unify in
+        # denormalize_action runs BEFORE unnormalize). _unify_dim_mask marks the
+        # mapped slots; unmapped slots stay 0 and are masked out below.
+        unify_dim_mask = None
+        if self._unify_dst_index is not None:
+            raw_actions, unify_dim_mask = map_to_unify(raw_actions.astype(np.float32), self._unify_dst_index, UNIFY_DIM)
+
         # Video: subsampled. State/action: raw rate.
         sampled_video = [raw_frames[i] for i in self._video_sample_indices]
         if not self.multiview:
@@ -892,8 +904,10 @@ class RoboTwinDataset(BaseDataset):
             dtype=torch.bool,
         )
         # 2-D action_mask (num_action_steps, action_dim): time × dim validity.
-        # RoboTwin is bimanual / joint-space single-tensor, every valid timestep
-        # has all dims real — dim_mask=None broadcasts True across action_dim.
+        # Without unify, RoboTwin is bimanual / single-tensor — every valid
+        # timestep has all dims real, so dim validity is all-True. With unify,
+        # dim validity = the scattered slots (unify_dim_mask); unmapped slots are
+        # masked out so they never enter the loss.
         time_validity = torch.tensor(
             [(t + 1) < actual_raw_len for t in range(self.num_action_steps)],
             dtype=torch.bool,
@@ -905,6 +919,10 @@ class RoboTwinDataset(BaseDataset):
             fill_value=bool(0 < actual_raw_len),
             dtype=torch.bool,
         )
+        if unify_dim_mask is not None:
+            dim_valid = torch.from_numpy(unify_dim_mask)  # (UNIFY_DIM,) bool
+            action_mask = action_mask & dim_valid.unsqueeze(0)
+            proprio_mask = proprio_mask & dim_valid.unsqueeze(0)
 
         # Step-0-only by design: drop "hasn't-started-yet" windows, not
         # tail windows where the first action label is padding.
@@ -1067,8 +1085,8 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             max_static_retry=int(_get("max_static_retry", 3)),
             text_embedding_cache_dir=_get("text_embedding_cache_dir", None),
             text_embedding_dropout=float(_get("text_embedding_dropout", 0.0)),
-            temporal_compression=int(_get("temporal_compression", 4)),
-            causal_temporal=bool(_get("causal_temporal", True)),
+            unify_action=bool(_get("unify_action", False)),
+            unify_action_map=_get("unify_action_map", None),
         )
 
     def __init__(

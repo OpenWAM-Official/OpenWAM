@@ -44,6 +44,21 @@ multiview: true
 # false → action_mask / proprio_mask all-False (video-only auxiliary source).
 enable_action_supervision: true
 
+# ── Unified 80-D action space (cross-robot shared head) ──────────────────────
+# unify_action=true scatters each bucket's raw 20-D EEF action/proprio into a
+# shared 80-D vector so heterogeneous robots train one action head.
+# unify_action=false (default) is byte-identical to the pre-unify reader.
+# 80-D semantic layout:
+#   [ 0: 3) left  eef xyz     [ 3: 9) left  eef rot6d   [ 9]    left  gripper
+#   [10:34) left  hand (24)   [34:37) right eef xyz     [37:43) right eef rot6d
+#   [43]    right gripper     [44:68) right hand (24)   [68:80) reserved (12)
+# Raw 20-D EEF layout → map: left-arm 0-9 to unified 0-9, right-arm 10-19 to 34-43.
+# Works for both bucket kinds: single-arm (franka/ur/sim) keeps its right-arm
+# padding masked out even after the scatter (the per-dim ACTION_DIM_MASK is
+# honored), agilex dual-arm supervises all 20.
+unify_action: false
+unify_action_map: ["0-9", "34-43"]
+
 # ── Normalization (decision A2) ──────────────────────────────────────────────
 # quantile (per-robot_type 20-D EEF stats) — aligns with OXE / RoboCOIN-quantile.
 # REQUIRES stats files at {root}/meta/stats_<robot_type>.json; generate first:

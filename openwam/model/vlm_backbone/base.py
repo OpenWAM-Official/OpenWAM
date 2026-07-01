@@ -57,3 +57,8 @@ class VlmBackbone(ABC, nn.Module):
         """Match the lightweight backbone interface used by BaseWAMArchitecture."""
         self.dtype = dtype
         self.to(dtype=dtype, device=device)
+
+    def save_deploy_assets(self, output_dir: str, cfg) -> None:
+        """Copy non-weight deploy artifacts into ``output_dir`` so deploy is
+        self-contained. Orchestrated by the architecture before ``config.yaml`` is
+        written, same hook as video backbones. Default no-op."""

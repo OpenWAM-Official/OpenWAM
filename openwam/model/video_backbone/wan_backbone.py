@@ -17,13 +17,19 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 from torch import Tensor
 
+from openwam.model.compile_options import (
+    compile_enabled,
+    section_enabled,
+    torch_compile_kwargs,
+    wan_blocks_compile_cfg,
+)
 from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
 from openwam.model.video_backbone.wan import action_tokens as wan_action_tokens
 from openwam.model.video_backbone.wan import conditioning as wan_conditioning
@@ -105,6 +111,9 @@ class WanBase(VideoBackbone):
         # The external-encoder subclass overrides these from its encoder spec.
         self._dit_patch_size = (1, 2, 2)
         self._temporal_compression, self._causal_temporal = 4, True
+        self._wan_blocks_compile_enabled = False
+        self._wan_blocks_compile_kwargs: dict | None = None
+        self._compiled_wan_blocks: dict[int, Callable[..., Tensor]] = {}
 
     # ================================================================
     # Internal properties
@@ -246,6 +255,94 @@ class WanBase(VideoBackbone):
         raise ValueError(
             f"Unsupported video_attention_mask_mode '{mode}'. "
             "Choose from: bidirectional, per_frame_causal, first_frame_causal."
+        )
+
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Enable lazy per-layer Wan ``DiTBlock.forward`` compile for deploy."""
+
+        self._compiled_wan_blocks.clear()
+        self._wan_blocks_compile_enabled = False
+        self._wan_blocks_compile_kwargs = None
+
+        if not compile_enabled(compile_cfg, default=False, strict=True):
+            return
+
+        section = wan_blocks_compile_cfg(compile_cfg)
+        if not section_enabled(section, default=True):
+            logger.info("Wan block compile disabled by config; running eager.")
+            return
+
+        kwargs = torch_compile_kwargs(section, default_mode="default")
+        self._wan_blocks_compile_kwargs = kwargs
+        self._wan_blocks_compile_enabled = True
+        logger.info("Enabled lazy Wan block compile with torch.compile kwargs=%s", kwargs)
+
+    def _compiled_wan_block(self, block_id: int, block: nn.Module) -> Callable[..., Tensor]:
+        compiled = self._compiled_wan_blocks.get(block_id)
+        if compiled is None:
+            compiled = torch.compile(block, **(self._wan_blocks_compile_kwargs or {}))
+            self._compiled_wan_blocks[block_id] = compiled
+        return compiled
+
+    def _run_wan_block(
+        self,
+        block_id: int,
+        block: nn.Module,
+        state: BlockLoopState,
+        block_context_mask: Optional[Tensor],
+        attn_mask: Optional[Tensor],
+    ) -> Tensor:
+        compile_allowed = (
+            self._wan_blocks_compile_enabled
+            and not state.use_gradient_checkpointing
+            and not state.use_gradient_checkpointing_offload
+        )
+        if compile_allowed:
+            try:
+                compiled = self._compiled_wan_block(block_id, block)
+                if attn_mask is not None:
+                    return compiled(
+                        state.hidden_states,
+                        state.context,
+                        state.time_mod,
+                        state.rope_freqs,
+                        block_context_mask,
+                        attn_mask,
+                    )
+                return compiled(
+                    state.hidden_states,
+                    state.context,
+                    state.time_mod,
+                    state.rope_freqs,
+                    block_context_mask,
+                )
+            except Exception as exc:
+                self._compiled_wan_blocks.clear()
+                self._wan_blocks_compile_enabled = False
+                logger.warning("Wan block torch.compile failed at block %s; falling back to eager: %s", block_id, exc)
+
+        if attn_mask is not None:
+            return gradient_checkpoint_forward(
+                block,
+                state.use_gradient_checkpointing,
+                state.use_gradient_checkpointing_offload,
+                state.hidden_states,
+                state.context,
+                state.time_mod,
+                state.rope_freqs,
+                block_context_mask,
+                attn_mask,
+            )
+
+        return gradient_checkpoint_forward(
+            block,
+            state.use_gradient_checkpointing,
+            state.use_gradient_checkpointing_offload,
+            state.hidden_states,
+            state.context,
+            state.time_mod,
+            state.rope_freqs,
+            block_context_mask,
         )
 
     # ================================================================
@@ -400,30 +497,11 @@ class WanBase(VideoBackbone):
                     .unsqueeze(1)
                     .expand(-1, state.hidden_states.shape[1], -1)
                 )
-            state.hidden_states = gradient_checkpoint_forward(
-                block,
-                state.use_gradient_checkpointing,
-                state.use_gradient_checkpointing_offload,
-                state.hidden_states,
-                state.context,
-                state.time_mod,
-                state.rope_freqs,
-                block_context_mask,
-                attn_mask,
-            )
+            state.hidden_states = self._run_wan_block(block_id, block, state, block_context_mask, attn_mask)
             wan_dit_forward.apply_post_block_residuals(block_id, state)
             return state
 
-        state.hidden_states = gradient_checkpoint_forward(
-            block,
-            state.use_gradient_checkpointing,
-            state.use_gradient_checkpointing_offload,
-            state.hidden_states,
-            state.context,
-            state.time_mod,
-            state.rope_freqs,
-            block_context_mask,
-        )
+        state.hidden_states = self._run_wan_block(block_id, block, state, block_context_mask, None)
 
         wan_dit_forward.apply_post_block_residuals(block_id, state)
         return state

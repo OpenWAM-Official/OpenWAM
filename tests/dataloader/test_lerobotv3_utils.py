@@ -1,8 +1,8 @@
 """Tests for openwam/dataloader/utils/lerobotv3.py helpers.
 
-Pure-function tests — no parquet IO needed for validate_video_sampling and
-apply_info_splits; compute_file_local_offsets uses a synthetic in-memory
-DataFrame matching the LeRobot v3 schema shape.
+Pure-function tests — no parquet IO needed for apply_info_splits;
+compute_file_local_offsets uses a synthetic in-memory DataFrame matching
+the LeRobot v3 schema shape.
 """
 
 from __future__ import annotations
@@ -15,38 +15,8 @@ from openwam.dataloader.utils.lerobotv3 import (
     apply_info_splits,
     compute_file_local_offsets,
     subsample_episodes_by_hours,
-    validate_video_sampling,
     water_fill_hours,
 )
-
-# ---------------------------------------------------------------------------
-# validate_video_sampling
-# ---------------------------------------------------------------------------
-
-
-class TestValidateVideoSampling:
-    def test_standard_33_4(self):
-        indices, n = validate_video_sampling(33, 4)
-        assert n == 9
-        assert list(indices) == [0, 4, 8, 12, 16, 20, 24, 28, 32]
-
-    def test_stride_misaligned_with_num_frames(self):
-        # (33 - 1) % 3 != 0 — should raise with list of valid strides.
-        with pytest.raises(ValueError, match=r"divisible by video_stride"):
-            validate_video_sampling(33, 3)
-
-    def test_violates_vae_constraint(self):
-        # 17 frames with stride 4 -> num_video_frames=5, (5-1)%4==0 -> valid.
-        # 17 frames with stride 2 -> num_video_frames=9, (9-1)%4==0 -> valid.
-        # Pick something violating: 13 frames with stride 4 -> num_video_frames=4,
-        # (4-1)%4=3 != 0.
-        with pytest.raises(ValueError, match=r"Wan VAE"):
-            validate_video_sampling(13, 4)
-
-    def test_returns_int64_array(self):
-        indices, _ = validate_video_sampling(33, 4)
-        assert indices.dtype == np.int64
-
 
 # ---------------------------------------------------------------------------
 # apply_info_splits

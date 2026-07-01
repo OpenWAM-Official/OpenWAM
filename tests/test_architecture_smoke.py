@@ -172,7 +172,7 @@ def _build_dispatch_arch_with_fakes():
 
 
 def test_build_mot_driver_dispatches_softmax_to_mot_driver():
-    """Default kernel routes to :class:`DualSystemMoTDriver` (Wan/Cosmos25 unaffected)."""
+    """Default kernel routes to :class:`DualSystemMoTDriver` (Wan/CosmosPredict25 unaffected)."""
     from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 
     arch = _build_dispatch_arch_with_fakes()

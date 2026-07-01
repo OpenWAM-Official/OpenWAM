@@ -2,21 +2,18 @@
 # ──────────────────────────────────────────────────────────────
 # OpenWAM Training — torchrun + Accelerate DeepSpeed
 #
-# DeepSpeed ZeRO stage is determined by train.yaml:
-#   defaults:
-#     - accelerate: deepspeed_zero2   ← change here
-#
-# Or override from CLI:
-#   bash scripts/run.sh accelerate=deepspeed_zero3
+# DeepSpeed ZeRO stage is set in train.yaml (training.zero_stage: 2),
+# or overridden from the CLI:
+#   bash scripts/train.sh training.zero_stage=1
 #
 # ── Single-node (auto-detect GPUs) ──
-#   bash scripts/run.sh
-#   bash scripts/run.sh training.learning_rate=5e-5
-#   NPROC_PER_NODE=4 bash scripts/run.sh
+#   bash scripts/train.sh
+#   bash scripts/train.sh training.learning_rate=5e-5
+#   NPROC_PER_NODE=4 bash scripts/train.sh
 #
 # ── Multi-node (env vars set by cloud scheduler) ──
-#   NNODES=2 NODE_RANK=0 MASTER_ADDR=192.0.2.1 bash scripts/run.sh
-#   NNODES=2 NODE_RANK=1 MASTER_ADDR=192.0.2.1 bash scripts/run.sh
+#   NNODES=2 NODE_RANK=0 MASTER_ADDR=192.0.2.1 bash scripts/train.sh
+#   NNODES=2 NODE_RANK=1 MASTER_ADDR=192.0.2.1 bash scripts/train.sh
 # ───────────────────────���──────────────────────────────────────
 set -euo pipefail
 cd "$(dirname "$0")/.."

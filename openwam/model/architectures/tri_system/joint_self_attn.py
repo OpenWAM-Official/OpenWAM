@@ -5,7 +5,8 @@ Expert + frozen Qwen3-VL. Loss = video + action only; understanding is trained
 through those supervised streams.
 """
 
-from typing import Optional, Tuple
+import logging
+from typing import Callable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -21,7 +22,15 @@ from openwam.model.architectures.tri_system.und_expert import (
 )
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
+from openwam.model.compile_options import (
+    compile_enabled,
+    section_enabled,
+    torch_compile_kwargs,
+    tri_system_compile_cfg,
+)
 from openwam.model.vlm_backbone import build_vlm_backbone
+
+logger = logging.getLogger(__name__)
 
 
 def _cfg_get(cfg, key, default=None):
@@ -82,6 +91,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         self.understanding_expert = None
         self._mot_driver = None
         self._mot_driver_kwargs: dict = {}
+        self._compiled_mot_run_joint_loop: Optional[Callable[..., Tuple[object, object, object]]] = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -129,7 +139,10 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         action_dim_hidden = int(_cfg_get(cfg, "dim", 1024))
         num_heads = int(_cfg_get(cfg, "num_heads", self.video_backbone.num_heads))
         attn_head_dim = int(_cfg_get(cfg, "attn_head_dim", self.video_backbone.head_dim))
-        text_dim = int(_cfg_get(cfg, "text_dim", 4096))  # Wan T5-XXL context width
+        # Default the action-side raw context width to the loaded backbone's
+        # text_dim (Wan T5-XXL=4096, Cosmos-Predict2.5=1024); explicit cfg/CLI
+        # still wins. Falls back to 4096 when the backbone doesn't expose it.
+        text_dim = int(_cfg_get(cfg, "text_dim", getattr(self.video_backbone, "text_dim", None) or 4096))
 
         # Bridge layers — which video DiT layers participate in joint attention.
         # For ``joint_self_attn`` variant the MoT driver requires
@@ -152,8 +165,6 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             attn_head_dim=attn_head_dim,
             text_dim=text_dim,
             shift_action=_cfg_get(cfg, "shift_action"),
-            action_type=_cfg_get(cfg, "type", "explicit"),
-            latent_decoder=_cfg_get(cfg, "latent_decoder"),
         )
         self._mot_driver_kwargs = {
             "mot_checkpoint_mixed_attn": bool(_cfg_get(cfg, "mot_checkpoint_mixed_attn", True)),
@@ -185,6 +196,41 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         if self.vlm_backbone is not None:
             result["vlm_backbone"] = self.vlm_backbone
         return result
+
+    def apply_compile_optimizations(self, compile_cfg) -> None:
+        """Compile the eval-time trimodal MoT loop when requested."""
+
+        super().apply_compile_optimizations(compile_cfg)
+        self._compiled_mot_run_joint_loop = None
+        if not compile_enabled(compile_cfg, default=False, strict=True):
+            return
+
+        section = tri_system_compile_cfg(compile_cfg)
+        if not section_enabled(section, default=True):
+            logger.info("tri-system MoT compile disabled by config; running eager.")
+            return
+        if self.video_backbone is None or self.action_backbone is None or self.understanding_expert is None:
+            logger.warning("tri-system MoT compile requested before backbones are ready; running eager.")
+            return
+
+        driver = self._mot_driver or self.build_mot_driver()
+
+        def _run_joint_loop(vstate, astate, ustate, attn_mask):
+            return driver.run_joint_loop_for_compile(
+                vstate,
+                astate,
+                ustate,
+                attn_mask=attn_mask,
+            )
+
+        kwargs = torch_compile_kwargs(section, default_mode="reduce-overhead")
+        try:
+            self._compiled_mot_run_joint_loop = torch.compile(_run_joint_loop, **kwargs)
+        except Exception as exc:  # pragma: no cover - defensive setup fallback
+            self._compiled_mot_run_joint_loop = None
+            logger.warning("tri-system MoT torch.compile setup failed; running eager: %s", exc)
+            return
+        logger.info("Enabled tri-system MoT compile with torch.compile kwargs=%s", kwargs)
 
     def freeze_modules(self, names: list[str]) -> list[str]:
         rejected = self._NEVER_FREEZE & set(names)
@@ -278,7 +324,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             vlm_attention_mask = vlm_inputs.get("attention_mask")
         if vlm_hidden is None and vlm_inputs is not None:
             vlm_hidden = self.vlm_backbone.extract_features(vlm_inputs)
-        result = super().generate(
+        return super().generate(
             schedule,
             prompt,
             first_frame_image=first_frame_image,
@@ -286,7 +332,6 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             vlm_attention_mask=vlm_attention_mask,
             **kwargs,
         )
-        return result
 
     def forward(
         self,
@@ -321,11 +366,14 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
 
         # Same 4D + clean-prefix-aligned t_mod opt-in as the dual_system /
         # shared_backbone forwards. TI2V fires its own branch first so these
-        # kwargs are inert there; VACE is rejected later in the joint loop
-        # (``raise NotImplementedError("tri_system + VACE not supported")``),
-        # so the practical effect is the I2V case — broadcast to 4D,
-        # ``first_frame_latents`` absent so the clean-prefix zeroing is a
-        # no-op (mathematically equivalent to the prior 3D path).
+        # kwargs are inert there. VACE and I2V both work here: VACE routes its
+        # condition through ``vace_context`` → per-video-block ``vace_hints``
+        # (applied in ``post_attn_at_layer`` → ``apply_post_block_residuals``,
+        # the same path dual_system uses; the video vstate is video-only so the
+        # hint spans the full video slice); I2V rides the ``y`` channel + CLIP
+        # context built in ``vb.prepare()``. Neither changes the video token
+        # count, so the trimodal mask is unaffected. ``first_frame_latents`` is
+        # absent for both, so the clean-prefix zeroing is a no-op.
         pipeline_inputs.setdefault("force_per_token_t_mod", True)
         pipeline_inputs.setdefault("zero_clean_prefix_t_mod", True)
         vstate = vb.prepare(
@@ -339,8 +387,6 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
                 vstate = vb.run_block(block_id, vstate)
             return vb.finalize(vstate), None
 
-        if vstate.vace_hints is not None:
-            raise NotImplementedError("tri_system + VACE not supported")
         if vlm_hidden is None and vlm_inputs is None:
             raise ValueError("tri_system forward with actions requires `vlm_inputs` or cached `vlm_hidden`.")
 
@@ -365,13 +411,42 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
         driver = self._mot_driver
         if driver is None:
             driver = self.build_mot_driver()
-        vstate, astate, ustate = driver.run_joint_loop(
-            vstate,
-            astate,
-            ustate,
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        )
+        compiled_loop = getattr(self, "_compiled_mot_run_joint_loop", None)
+        if compiled_loop is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
+            try:
+                if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                    torch.compiler.cudagraph_mark_step_begin()
+                video_tokens_per_frame = driver._video_tokens_per_frame(vstate)
+                s_video = int(vstate.grid_frames) * video_tokens_per_frame
+                s_action = driver._get_action_tokens(astate).shape[1]
+                s_understanding = ustate.und_tokens.shape[1]
+                attn_mask = driver._build_attention_mask(
+                    s_video=s_video,
+                    s_action=s_action,
+                    s_understanding=s_understanding,
+                    video_tokens_per_frame=video_tokens_per_frame,
+                    device=vstate.hidden_states.device,
+                    und_mask=getattr(ustate, "und_mask", None),
+                )
+                vstate, astate, ustate = compiled_loop(vstate, astate, ustate, attn_mask)
+            except Exception as exc:
+                self._compiled_mot_run_joint_loop = None
+                logger.warning("tri-system compiled MoT loop failed; falling back to eager: %s", exc)
+                vstate, astate, ustate = driver.run_joint_loop(
+                    vstate,
+                    astate,
+                    ustate,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                )
+        else:
+            vstate, astate, ustate = driver.run_joint_loop(
+                vstate,
+                astate,
+                ustate,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            )
 
         return vb.finalize(vstate), ab.extract_prediction(astate)
 

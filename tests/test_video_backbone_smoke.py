@@ -142,7 +142,7 @@ def test_wan_needs_first_frame_skip_truth_table():
 
 
 def test_video_backbone_abc_needs_first_frame_skip_default_false():
-    """The ABC default keeps every backbone that doesn't opt in OFF, so cosmos25
+    """The ABC default keeps every backbone that doesn't opt in OFF, so cosmos_predict25
     T2V (no override) treats ``latent[0]`` as a predicted frame in the loss."""
     from openwam.model.video_backbone.base import VideoBackbone
 
