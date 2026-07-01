@@ -620,7 +620,10 @@ def test_real_block_split_matches_monolithic():
     except FileNotFoundError as exc:
         pytest.skip(f"Cosmos checkpoint missing: {exc}")
 
-    block = wrapper.dit.blocks[0].eval()
+    # ``build_cosmos_predict25_pipeline`` returns a lightweight SimpleNamespace
+    # holder exposing the DiT as ``.net`` (not ``.dit`` — that attribute only
+    # exists on the drained CosmosPredict25VideoBackbone).
+    block = wrapper.net.blocks[0].eval()
     device = next(block.parameters()).device
     dtype = next(block.parameters()).dtype
 
@@ -637,7 +640,7 @@ def test_real_block_split_matches_monolithic():
     cond_mask = torch.zeros(B, 1, T, H * 2, W * 2, dtype=dtype, device=device)
     pad_mask = torch.zeros(B, 1, H * 2, W * 2, dtype=dtype, device=device)
     x_in = torch.cat([latent, cond_mask], dim=1)
-    _x5d, rope_emb_L_1_1_D, _extra = wrapper.dit.prepare_embedded_sequence(x_in, fps=None, padding_mask=pad_mask)
+    _x5d, rope_emb_L_1_1_D, _extra = wrapper.net.prepare_embedded_sequence(x_in, fps=None, padding_mask=pad_mask)
 
     with torch.no_grad():
         y_mono = block(
