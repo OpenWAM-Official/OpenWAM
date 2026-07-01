@@ -38,6 +38,9 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("-n", "--num-requests", type=int, default=50, help="Number of back-to-back predict requests.")
     parser.add_argument("--interval", type=float, default=0.0, help="Seconds to sleep between requests (default 0).")
     parser.add_argument("--reset-every", type=int, default=0, help="Reset the server every N requests (0 = never).")
+    parser.add_argument(
+        "--log-every", type=int, default=0, help="Print every k-th request (0 = ~10 evenly-spaced samples; 1 = every)."
+    )
     parser.add_argument("--head-camera", type=str, default=None, help="Path to head camera image (or use --test).")
     parser.add_argument("--left-wrist-camera", type=str, default=None, help="Optional path to left wrist camera image.")
     parser.add_argument(
@@ -83,6 +86,7 @@ def _report(label: str, xs: list[float]) -> None:
 
 def run_continuous(args, state) -> None:
     n = int(args.num_requests)
+    log_every = args.log_every if args.log_every > 0 else max(1, n // 10)
     print(f"Server: {args.server}  |  requests: {n}  reset-every: {args.reset_every}  interval: {args.interval}s")
     print("-" * 70)
 
@@ -114,8 +118,8 @@ def run_continuous(args, state) -> None:
             if isinstance(server_ms, (int, float)):
                 server_latencies.append(float(server_ms))
 
-            # Log the first, last, and ~10 evenly-spaced requests to keep output readable.
-            if i == 1 or i == n or i % max(1, n // 10) == 0:
+            # Log the first, last, and every log_every-th request (default: ~10 evenly-spaced).
+            if i == 1 or i == n or i % log_every == 0:
                 stail = f"  server={server_ms}ms" if server_ms is not None else ""
                 print(f"[{i:>4}/{n}] OK  client={client_ms:7.1f}ms{stail}  action_dim={len(action)}")
 
