@@ -30,6 +30,9 @@ training:
 
   # --- DeepSpeed / precision ---
   mixed_precision: bf16           # bf16 / fp16 / no — training + deploy compute dtype
+  use_deepspeed: true             # false = plain Accelerate (DDP, no ZeRO). REQUIRED for
+                                  # tri_system: DeepSpeed bf16 injects NaN into the trimodal
+                                  # MoT gradients (the model trains cleanly without DeepSpeed).
   zero_stage: 2                   # DeepSpeed ZeRO stage: 1 or 2 (CLI override: training.zero_stage=1)
 
   # --- Memory optimization ---
