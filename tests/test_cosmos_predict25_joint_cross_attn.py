@@ -13,14 +13,16 @@ in the architecture and the bridge cross-attention is permutation-invariant over
 the video-token axis. These CPU tests (on the ``_RichCosmosBlock`` fakes shared
 with the joint_self_attn suite) lock in:
 
-* the 5D→3D bridge flatten produces exactly ``grid_frames·grid_height·grid_width``
-  tokens, preserving the video hidden dim;
+* the production forward flattens each bridge's 5D grid to exactly
+  ``grid_frames·grid_height·grid_width`` tokens (asserted on an asymmetric grid),
+  preserving the video hidden dim (token *ordering* is inert — the bridge
+  cross-attn is permutation-invariant over the video-token axis — so it is not
+  asserted);
 * a full forward restores the 5D video prediction and yields a correctly-shaped
   action prediction;
-* the cross-attn isolation invariant — video runs to completion *before* the
-  action stream, so ``video_pred`` is invariant to ``noisy_actions`` while
-  ``action_pred`` responds to it (the property that makes bridge collection
-  sound on the 5D-grid backbone);
+* a structural guard on the action→video direction — video runs to completion
+  *before* the action stream, so ``video_pred`` is invariant to ``noisy_actions``
+  while ``action_pred`` responds to it (holds for any backbone, not Cosmos-specific);
 * the video-only path (``noisy_actions=None``) matches the full forward's video.
 
 A ``@pytest.mark.gpu`` test exercises the same invariants on real
@@ -65,8 +67,10 @@ def _make_cosmos_cross_attn(num_blocks=2, *, action_dim=3, text_dim=12):
 
 def _inputs(*, action_dim=3, action_len=5, seed=1):
     g = torch.Generator().manual_seed(seed)
-    # latents (1,16,2,4,4) → grid frames f=2 (temporal patch 1), h=w=2 (spatial patch 2).
-    latents = torch.randn(1, 16, 2, 4, 4, generator=g)
+    # Asymmetric latents (1,16,2,4,6) → grid frames f=2 (temporal patch 1),
+    # h=2, w=3 (spatial patch 2). Distinct f/h/w (2, 2, 3) with h·w=6 ≠ h+w=5 ≠ f
+    # so a wrong token-count formula can't coincide with the right one.
+    latents = torch.randn(1, 16, 2, 4, 6, generator=g)
     context = torch.randn(1, 4, 12, generator=g)
     noisy_actions = torch.randn(1, action_len, action_dim, generator=g)
     action_timestep = torch.tensor([0.3])
@@ -78,27 +82,38 @@ def _inputs(*, action_dim=3, action_len=5, seed=1):
 # ----------------------------------------------------------------------
 
 
-def test_bridge_flatten_5d_to_tokens():
-    """The 5D grid captured at a bridge layer flattens to ``(B, T·H·W, D)`` — the
-    exact reshape the architecture applies before the action cross-attn — and
-    preserves the video hidden dim (the bridge shape contract in
-    ``separate_action_dit`` last-dim check)."""
+def test_forward_flattens_bridge_grid_to_tokens():
+    """The architecture must flatten each bridge layer's 5D grid ``(B,T,H,W,D)``
+    into ``(B, T·H·W, D)`` before the action cross-attn. Exercise the *production*
+    flatten (``joint_cross_attn.py`` ``bridge.ndim == 5`` branch) by capturing the
+    bridge dict the arch actually feeds to ``_predict_actions_from_bridges`` and
+    asserting its token count (``grid_frames·H·W``, on an asymmetric grid so a
+    wrong count can't coincide) and hidden dim.
+
+    Note: only the token count + hidden dim are correctness-bearing here — the
+    action bridge cross-attn is permutation-invariant over the video-token axis
+    (no RoPE on the bridge keys), so token *ordering* is numerically inert and is
+    not asserted.
+    """
     arch, backbone = _make_cosmos_cross_attn(num_blocks=2)
-    latents, context, _, _ = _inputs()
+    latents, context, noisy_actions, a_ts = _inputs()
 
-    vstate = backbone.prepare(input_latents=latents, context=context, timestep=torch.tensor([0.5]))
-    vstate = backbone.run_block(0, vstate)
-    bridge = vstate.hidden_states
-    assert bridge.ndim == 5, "Cosmos DiT state should be a 5D grid (B,T,H,W,D)"
+    captured = {}
+    orig = arch._predict_actions_from_bridges
 
-    B, T, H, W, D = bridge.shape
-    assert (T, H, W) == (vstate.grid_frames, vstate.grid_height, vstate.grid_width)
-    assert D == backbone.dim  # bridge feature dim == video hidden dim (ActionDiT video_dim)
+    def _spy(noisy, bridges, *args, **kw):
+        captured["bridges"] = {k: v.shape for k, v in bridges.items()}
+        return orig(noisy, bridges, *args, **kw)
 
-    flat = bridge.reshape(B, T * H * W, D)
-    assert flat.shape == (B, T * H * W, D)
-    # Flatten must be a plain view over (T,H,W) — no reordering.
-    assert torch.equal(flat, bridge.reshape(B, -1, D))
+    arch._predict_actions_from_bridges = _spy
+    arch.forward(noisy_actions, a_ts, input_latents=latents, context=context, timestep=torch.tensor([0.5]))
+
+    f, h, w = 2, 2, 3  # from (…,2,4,6): temporal patch 1, spatial patch 2
+    assert captured["bridges"], "arch collected no bridges"
+    for layer_id, shape in captured["bridges"].items():
+        assert shape == (1, f * h * w, backbone.dim), (
+            f"bridge layer {layer_id} must be (B, grid_frames·H·W, dim) = (1, {f * h * w}, {backbone.dim}), got {tuple(shape)}"
+        )
 
 
 # ----------------------------------------------------------------------

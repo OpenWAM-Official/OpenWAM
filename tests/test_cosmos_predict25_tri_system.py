@@ -96,7 +96,6 @@ def _make_tri_arch(vb, *, action_dim=7, action_res_dim=24, und_dim=16, vlm_input
             self.action_backbone = ab
             self.understanding_expert = ub
             self.vlm_backbone = None
-            self._proprio_context = None
             self._mot_driver = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
 
     arch = _Arch()
@@ -111,7 +110,8 @@ def _make_tri_cosmos_fake(num_blocks=2, **kw):
 
 def _fwd_kwargs(vb, ab, ub, *, batch=2, action_len=4, und_len=5, und_mask=None, seed=0):
     g = torch.Generator().manual_seed(seed)
-    latents = torch.randn(1, 16, 2, 4, 4, generator=g).repeat(batch, 1, 1, 1, 1)
+    # Asymmetric grid (…,2,4,6) → frames=2, H=2, W=3 (distinct; h·w=6 ≠ h+w=5 ≠ frames).
+    latents = torch.randn(1, 16, 2, 4, 6, generator=g).repeat(batch, 1, 1, 1, 1)
     context = torch.randn(batch, 4, vb.text_dim, generator=g)
     if und_mask is None:
         und_mask = torch.ones(batch, und_len, dtype=torch.bool)
@@ -135,19 +135,24 @@ def _fwd_kwargs(vb, ab, ub, *, batch=2, action_len=4, und_len=5, und_mask=None, 
 def test_driver_counts_video_tokens_from_grid_not_frames():
     """The trimodal driver must size the video stream as
     ``grid_frames · grid_height · grid_width`` (the flattened token count), not
-    ``hidden_states.shape[1]`` — which is ``T`` for the 5D-grid Cosmos state."""
+    ``hidden_states.shape[1]`` — which is ``T`` for the 5D-grid Cosmos state.
+
+    Uses an asymmetric grid (frames=2, H=2, W=3) so the three plausible wrong
+    formulas are all distinguishable from the right one: ``h·w=6`` ≠ ``h+w=5`` ≠
+    ``frames=2`` ≠ ``shape[1]=T=2``.
+    """
     arch, vb, _, _ = _make_tri_cosmos_fake(num_blocks=2)
-    latents = torch.randn(2, 16, 2, 4, 4)
+    latents = torch.randn(2, 16, 2, 4, 6)
     vstate = vb.prepare(input_latents=latents, context=torch.randn(2, 4, vb.text_dim), timestep=torch.zeros(2))
 
     tpf = arch._mot_driver._video_tokens_per_frame(vstate)
     s_video = int(vstate.grid_frames) * tpf
 
     assert vstate.hidden_states.ndim == 5
-    assert (vstate.grid_frames, vstate.grid_height, vstate.grid_width) == (2, 2, 2)
-    assert tpf == vstate.grid_height * vstate.grid_width == 4
-    assert s_video == 8
-    # The bug this guards: shape[1] is T (== grid_frames == 2), not the 8 tokens.
+    assert (vstate.grid_frames, vstate.grid_height, vstate.grid_width) == (2, 2, 3)
+    assert tpf == vstate.grid_height * vstate.grid_width == 6  # not h+w=5
+    assert s_video == 12
+    # The bug this guards: shape[1] is T (== grid_frames == 2), not the 12 tokens.
     assert s_video != vstate.hidden_states.shape[1]
 
 
