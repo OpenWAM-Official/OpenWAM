@@ -6,8 +6,8 @@ OOM across requests, and -- with ``--reset-every`` -- periodic reset behaviour.
 Reuses the client contract and helpers from ``scripts/inference_single_test.py``.
 
 Usage:
-    # 50 back-to-back requests with fresh random images (no files needed)
-    python scripts/inference_continuous_test.py --test -n 50
+    # Back-to-back requests with fresh random images (no files needed; defaults: 128 requests, log every step)
+    python scripts/inference_continuous_test.py --test
 
     # Real head camera, 100 requests, reset every 20, 100 ms apart
     python scripts/inference_continuous_test.py \
@@ -35,11 +35,11 @@ from benchmarks.utils.transport import WSPolicyClient  # noqa: E402
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fire N back-to-back requests at the OpenWAM WebSocket policy server.")
     parser.add_argument("--server", type=str, default="ws://127.0.0.1:8848")
-    parser.add_argument("-n", "--num-requests", type=int, default=50, help="Number of back-to-back predict requests.")
+    parser.add_argument("-n", "--num-requests", type=int, default=128, help="Number of back-to-back predict requests.")
     parser.add_argument("--interval", type=float, default=0.0, help="Seconds to sleep between requests (default 0).")
     parser.add_argument("--reset-every", type=int, default=0, help="Reset the server every N requests (0 = never).")
     parser.add_argument(
-        "--log-every", type=int, default=0, help="Print every k-th request (0 = ~10 evenly-spaced samples; 1 = every)."
+        "--log-every", type=int, default=1, help="Print every k-th request (default 1 = every; 0 = ~10 evenly-spaced)."
     )
     parser.add_argument("--head-camera", type=str, default=None, help="Path to head camera image (or use --test).")
     parser.add_argument("--left-wrist-camera", type=str, default=None, help="Optional path to left wrist camera image.")
