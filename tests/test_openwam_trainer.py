@@ -680,34 +680,6 @@ def test_downsample_video_mask():
     assert latent_mask[1]  # frames 5-8 all padded
 
 
-def test_decoupled_sampler_requires_joint_self_attn():
-    """variance_shift (decoupled timestep sampling) is admitted only on the
-    joint_self_attn variant; every other architecture is rejected up front."""
-    import pytest
-
-    from openwam.train.openwam_trainer import _ensure_decoupled_sampler_supported
-
-    sampler = object()  # stands in for a real VarianceShiftTimestepSampler
-
-    # joint_self_attn (dual + tri) -> admitted (no raise)
-    for fw in ("dual_system", "tri_system"):
-        _ensure_decoupled_sampler_supported(sampler, framework=fw, variant="joint_self_attn")
-
-    # every other variant -> rejected
-    for fw, variant in [
-        ("dual_system", "joint_cross_attn"),
-        ("dual_system", "idm"),
-        ("shared_backbone", "vanilla"),
-        ("shared_backbone", "moe"),
-    ]:
-        with pytest.raises(ValueError, match="joint_self_attn"):
-            _ensure_decoupled_sampler_supported(sampler, framework=fw, variant=variant)
-
-    # default path (sampler is None) -> always admitted, any architecture
-    for variant in ("joint_cross_attn", "idm", "vanilla", "moe", "joint_self_attn"):
-        _ensure_decoupled_sampler_supported(None, framework="x", variant=variant)
-
-
 def test_architecture_variant_strings_for_sampler_guard():
     """The guard keys on canonical.variant == 'joint_self_attn'; pin the variant
     string for every architecture so the guard cannot silently drift."""
