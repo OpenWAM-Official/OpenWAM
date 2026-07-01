@@ -41,14 +41,13 @@ import glob
 import json
 import os
 import random
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 import torch
 
 from openwam.dataloader.bases import BaseDataset
-from openwam.dataloader.robotwin import _check_temporal_divisibility
 from openwam.dataloader.transforms.multiview import (
     assemble_multiview_layout,
     crop_and_resize,
@@ -65,6 +64,7 @@ from openwam.dataloader.utils.eef import (
     build_proprio_mask_2d,
 )
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
+from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec, unmap_from_unify
 from openwam.dataloader.utils.video_io import decode_video_frames
 
 # Phase-1 2-view mapping (also what the deploy server composes).
@@ -210,6 +210,8 @@ class RoboCasa365Dataset(BaseDataset):
         filter_static_segments: bool = True,
         static_segment_threshold: float = 1e-5,
         max_static_retry: int = 3,
+        unify_action: bool = False,
+        unify_action_map: Optional[Any] = None,
         **_unused,
     ):
         super().__init__()
@@ -236,6 +238,23 @@ class RoboCasa365Dataset(BaseDataset):
         self._filter_static_segments = bool(filter_static_segments)
         self._static_segment_threshold = float(static_segment_threshold)
         self._max_static_retry = int(max_static_retry)
+        # Unified 80-D action space (opt-in; mirrors the OXE single-arm base-reader path). When on,
+        # the normalized 20-D EEF is scattered into UNIFY_DIM and LEFT_ARM_DIM_MASK is honored through
+        # the scatter (right-arm slots stay masked out of the loss). Off (default) → 20-D as before.
+        self._unify_action = bool(unify_action)
+        self._unify_action_map = unify_action_map
+        self._unify_dst_index = None
+        self._unify_dim_mask = None
+        if self._unify_action:
+            spec = self._unify_action_map if self._unify_action_map is not None else list(range(EEF_DIM))
+            self._unify_dst_index = parse_unify_spec(spec, UNIFY_DIM)
+            if self._unify_dst_index.shape[0] != EEF_DIM:
+                raise ValueError(
+                    f"robocasa365 unify_action_map maps {self._unify_dst_index.shape[0]} source dims "
+                    f"but the EEF action is {EEF_DIM}-D; they must match."
+                )
+            self._unify_dim_mask = np.zeros(UNIFY_DIM, dtype=bool)
+            self._unify_dim_mask[self._unify_dst_index] = np.asarray(LEFT_ARM_DIM_MASK, dtype=bool)
         self.window_stride = max(1, int(window_stride))
         self.video_stride = max(1, int(video_stride))
         if (self.num_frames - 1) % self.video_stride != 0:
@@ -246,9 +265,10 @@ class RoboCasa365Dataset(BaseDataset):
             )
         self._video_sample_indices = list(range(0, self.num_frames, self.video_stride))
         self.num_video_frames = len(self._video_sample_indices)
-        # Encoder temporal-contract guard (mirrors robotwin): causal encoders need
-        # (num_video_frames - 1) % tc == 0; non-causal need num_video_frames % tc == 0.
-        _check_temporal_divisibility(self.num_video_frames, int(temporal_compression), bool(causal_temporal))
+        # Encoder temporal contract (mirrors robotwin/base reader, which no longer enforce this at
+        # runtime): for clean downsampling causal encoders want (num_video_frames - 1) % tc == 0,
+        # non-causal want num_video_frames % tc == 0 — documented, not enforced. temporal_compression
+        # / causal_temporal are accepted for config compatibility.
         self.multiview = bool(multiview)
         # Camera layout: head (top), wrist (bot-left), missing right (bot-right=black).
         self.camera_layout = list(camera_layout) if camera_layout else [HEAD_CAMERA, WRIST_CAMERA, _MISSING_RIGHT]
@@ -360,7 +380,7 @@ class RoboCasa365Dataset(BaseDataset):
 
     @property
     def action_dim(self) -> int:
-        return EEF_DIM
+        return UNIFY_DIM if self._unify_action else EEF_DIM
 
     @property
     def normalization_stats(self) -> Optional[dict]:
@@ -376,6 +396,10 @@ class RoboCasa365Dataset(BaseDataset):
         the left-10 are inverted with the real arm stats. Same contract as the deploy normalizer.
         """
         arr = np.asarray(action, dtype=np.float32)
+        # Un-unify first (inverse of the map_to_unify scatter in _build_sample), then unnormalize —
+        # the model emits UNIFY_DIM-wide actions when unify is on. No-op when unify is off.
+        if self._unify_dst_index is not None:
+            arr = unmap_from_unify(arr, self._unify_dst_index).astype(np.float32)  # (..., 80) -> (..., 20)
         if self._stats is None or self.normalize_mode is None:
             return arr.copy()
         s = self._stats
@@ -489,11 +513,20 @@ class RoboCasa365Dataset(BaseDataset):
 
         video_mask = torch.tensor([start + i < actual_end for i in self._video_sample_indices], dtype=torch.bool)
         n_valid_action = max(0, min(actual_len - 1, self.num_action_steps))
+        # Unified 80-D scatter (after normalization; is_static above used the 20-D). map_to_unify's
+        # own mask would mark every mapped slot valid, so use the LEFT_ARM_DIM_MASK-honoring
+        # _unify_dim_mask instead — otherwise the zero-padded right-arm slots leak into the loss.
+        if self._unify_dst_index is not None:
+            proprio, _ = map_to_unify(proprio, self._unify_dst_index, UNIFY_DIM)
+            action, _ = map_to_unify(action, self._unify_dst_index, UNIFY_DIM)
+            mask_dim, dim_mask = UNIFY_DIM, self._unify_dim_mask
+        else:
+            mask_dim, dim_mask = EEF_DIM, LEFT_ARM_DIM_MASK
         action_mask = torch.from_numpy(
-            build_action_mask_2d(self.num_action_steps, EEF_DIM, n_valid_action, dim_mask=LEFT_ARM_DIM_MASK)
+            build_action_mask_2d(self.num_action_steps, mask_dim, n_valid_action, dim_mask=dim_mask)
         )
         proprio_mask = torch.from_numpy(
-            build_proprio_mask_2d(EEF_DIM, enabled=actual_len > 0, dim_mask=LEFT_ARM_DIM_MASK)
+            build_proprio_mask_2d(mask_dim, enabled=actual_len > 0, dim_mask=dim_mask)
         )
 
         return {
@@ -572,6 +605,8 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             filter_static_segments=bool(get_cfg(config, "filter_static_segments", True)),
             static_segment_threshold=float(get_cfg(config, "static_segment_threshold", 1e-5)),
             max_static_retry=int(get_cfg(config, "max_static_retry", 3)),
+            unify_action=bool(get_cfg(config, "unify_action", False)),
+            unify_action_map=get_cfg(config, "unify_action_map", None),
             seed=int(get_cfg(config, "seed", 42)),
         )
 
@@ -674,7 +709,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
 
     @property
     def action_dim(self) -> int:
-        return EEF_DIM
+        return self._datasets[0].action_dim if self._datasets else EEF_DIM
 
     @property
     def normalization_stats(self) -> Optional[dict]:

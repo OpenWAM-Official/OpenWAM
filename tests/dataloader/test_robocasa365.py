@@ -104,12 +104,14 @@ class TestInit:
         with pytest.raises(ValueError, match="divisible by 32"):
             RoboCasa365Dataset(data_root=str(b), normalize_mode=None, multiview=False, height=100, width=96)
 
-    def test_bad_temporal_contract_raises(self, tmp_path):
-        # num_frames=9, video_stride=4 → 3 video frames; causal needs (3-1)%4==0 → fails.
+    def test_temporal_contract_not_enforced(self, tmp_path):
+        # main/robotwin no longer enforce the encoder temporal contract at runtime (documented only);
+        # a "mismatched" num_frames/video_stride must build without raising, not error out.
+        # num_frames=9, video_stride=4 → 3 video frames (would fail the old causal (3-1)%4==0 guard).
         b = make_robocasa_bucket(tmp_path)
-        with pytest.raises(ValueError, match="causal encoder"):
-            RoboCasa365Dataset(data_root=str(b), normalize_mode=None, multiview=False, height=64, width=96,
-                               num_frames=9, video_stride=4)
+        ds = RoboCasa365Dataset(data_root=str(b), normalize_mode=None, multiview=False, height=64, width=96,
+                                num_frames=9, video_stride=4)
+        assert ds.num_video_frames == 3
 
 
 class TestGetItem:
@@ -225,6 +227,39 @@ class TestNormalize:
             moving[1, 7] += 0.05  # 5 cm EEF jump at step 1 -> not static
             monkeypatch.setattr(ds, "_read_state", lambda ep, s, e: moving[: e - s].copy())
             assert ds._build_sample(0, 0)["_is_static"] is False
+
+    def test_unify_scatters_to_80d_left_valid_right_masked(self, tmp_path):
+        # unify_action=true scatters the 20-D EEF into the shared 80-D space; single-arm robocasa365
+        # lands the real arm in the LEFT eef slots (0-9, valid) and the zero-padded right half in
+        # 34-43, masked out of the loss (LEFT_ARM_DIM_MASK honored through the scatter).
+        from openwam.dataloader.utils.unify_action import UNIFY_DIM
+
+        b = make_robocasa_bucket(tmp_path)
+        with _mock_video_decoder():
+            ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                    width=96, normalize_mode="min-max", unify_action=True,
+                                    unify_action_map=["0-9", "34-43"])
+            s = ds[0]
+        assert ds.action_dim == UNIFY_DIM == 80
+        assert s["action"].shape == (32, UNIFY_DIM)
+        assert s["proprio"].shape == (1, UNIFY_DIM)
+        am = s["action_mask"].numpy()
+        assert am.shape == (32, UNIFY_DIM)
+        assert am[0, :10].all()          # left eef slots valid
+        assert not am[0, 10:].any()      # right eef (34-43) + all unmapped slots masked
+        pm = s["proprio_mask"].numpy()
+        assert pm[0, :10].all() and not pm[0, 10:].any()
+        # denormalize un-unifies (80 -> 20) then unnormalizes -> physical 20-D
+        assert ds.denormalize_action(s["action"].numpy()).shape == (32, EEF_DIM)
+
+    def test_unify_off_is_20d(self, tmp_path):
+        b = make_robocasa_bucket(tmp_path)
+        with _mock_video_decoder():
+            ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                    width=96, normalize_mode="min-max", unify_action=False)
+            s = ds[0]
+        assert ds.action_dim == EEF_DIM == 20
+        assert s["action"].shape == (32, EEF_DIM)
 
     def test_deploy_stats_roundtrip_20d(self, tmp_path):
         """The DEPLOY round-trip (the N1/S1 bug): the persisted stats are 20-D and keyed

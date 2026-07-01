@@ -70,3 +70,20 @@ action_mode: eef
 #  rejects it rather than let a checkpoint silently lose normalization at serve time.)
 normalize_mode: min-max
 normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resolve under each bucket
+
+# ── Unified 80-D action space (cross-robot shared head) ──────────────────────
+# unify_action=true scatters this reader's 20-D EEF into a shared UNIFY_DIM (80) vector so
+# heterogeneous robots train one action head; unify_action=false (default) is byte-identical to
+# the 20-D reader. Turn it on in the mixture/unified config (like robotwin/robocoin/oxe_bcz).
+# 80-D layout: [0:10) left eef (pos3+rot6d6+grip1)  [10:34) left hand  [34:44) right eef
+#              [44:68) right hand  [68:80) reserved. RoboCasa365 is single-arm: the real arm
+# lands in the LEFT eef slots (0-9, valid); the zero-padded right half maps to 34-43 but stays
+# masked out of the loss (LEFT_ARM_DIM_MASK is honored through the scatter).
+# REQUIRED when training with unify_action=true: also set the model head + proprio dims to 80, e.g.
+#   model.architecture.action_dim=80 model.architecture.state_dim=80
+# (the model config hardcodes 20 and does NOT auto-derive from the dataloader; same as robotwin).
+# Deploy needs no extra flag: model_loader reads unify_action/unify_action_map from the saved
+# config and wraps _UnifyAwareNormalizer (server gathers 80->20 out, scatters 20->80 proprio in),
+# so the eval client stays 20-D. Verified e2e: train(80-D) -> deploy -> real RoboCasa sim closes.
+unify_action: false
+unify_action_map: ["0-9", "34-43"]  # raw left-arm 0-9 → unified 0-9, raw right-arm 10-19 → 34-43
