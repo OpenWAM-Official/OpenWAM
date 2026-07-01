@@ -735,7 +735,6 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         actions: Optional[Tensor] = None,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
-        current_step: int = 0,
         decoupled_sampler=None,
         **inputs,
     ) -> dict:

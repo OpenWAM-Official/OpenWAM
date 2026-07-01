@@ -1074,7 +1074,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         actions: Optional[torch.Tensor] = None,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
-        current_step: int = 0,
         decoupled_sampler=None,
         **inputs,
     ) -> dict:
@@ -1095,7 +1094,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 be passed via ``inputs["actions"]``.
             lambda_video: Weight for video loss term.
             lambda_action: Weight for action loss term.
-            current_step: Current training step.
             decoupled_sampler: Optional DecoupledFlowMatchLoss.
             **inputs: Preprocessed video/text tensors plus forward-time flags.
 
@@ -1118,7 +1116,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         # --- Sample video timesteps ---
         if decoupled_sampler is not None:
-            video_t, decoupled_action_t = decoupled_sampler.sample_timesteps(B, current_step=current_step, device="cpu")
+            video_t, decoupled_action_t = decoupled_sampler.sample_timesteps(B, device="cpu")
             num_ts = len(vb.scheduler.timesteps)
             video_timestep_ids = (
                 (video_t / decoupled_sampler.num_train_timesteps * num_ts).long().clamp(min_tb, max_tb - 1)

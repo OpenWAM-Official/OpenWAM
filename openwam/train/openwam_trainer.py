@@ -69,7 +69,6 @@ class OpenWAMTrainer:
         self.cfg = cfg
         self.dataset = dataset
         self.accelerator = accelerator
-        self._current_step = 0
 
         # ---- Reproducible seed (FastWAM-style, yaml-driven) ----
         # Seed before build_architecture so DiT/ActionDiT weight init is
@@ -327,7 +326,6 @@ class OpenWAMTrainer:
                         optimizer.zero_grad()
                         opt_step += 1
 
-                self._current_step = global_step
                 global_step += 1
 
                 metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
@@ -516,7 +514,6 @@ class OpenWAMTrainer:
             **inputs,
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
-            current_step=self._current_step,
             decoupled_sampler=self._timestep_sampler,
         )
 

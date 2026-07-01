@@ -468,7 +468,6 @@ def test_single_batch_loss():
     result = arch.compute_loss(
         **inputs,
         actions=action_data,
-        current_step=0,
     )
 
     assert "loss" in result
@@ -492,7 +491,6 @@ def test_multi_batch_loss():
     result = arch.compute_loss(
         **inputs,
         actions=action_data,
-        current_step=0,
     )
 
     assert result["loss"].shape == ()
@@ -512,7 +510,6 @@ def test_video_only_loss():
         actions=None,
         lambda_video=1.0,
         lambda_action=0.0,
-        current_step=0,
     )
 
     assert result["loss"].item() > 0
@@ -532,7 +529,6 @@ def test_loss_backward():
     result = arch.compute_loss(
         **inputs,
         actions=action_data,
-        current_step=0,
     )
 
     result["loss"].backward()
@@ -563,7 +559,6 @@ def test_training_step():
         result = arch.compute_loss(
             **inputs,
             actions=action_data,
-            current_step=step,
         )
 
         optimizer.zero_grad()

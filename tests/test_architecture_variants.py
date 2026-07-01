@@ -105,7 +105,7 @@ def _run_compute_loss(arch):
         inputs["context"] = torch.randn(1, 4, text_dim)
         inputs["context_mask"] = torch.ones(1, 4, dtype=torch.bool)
         inputs["seq_lens"] = torch.tensor([4])
-    out = arch.compute_loss(**inputs, actions=actions, current_step=0)
+    out = arch.compute_loss(**inputs, actions=actions)
     return out
 
 
@@ -403,7 +403,7 @@ def test_shared_backbone_vanilla_with_proprio_requires_proprio():
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
 
     with pytest.raises(ValueError, match="proprio"):
-        arch.compute_loss(**inputs, actions=actions, current_step=0)
+        arch.compute_loss(**inputs, actions=actions)
 
 
 def test_shared_backbone_vanilla_with_proprio_validates_state_shape():
@@ -440,7 +440,7 @@ def test_shared_backbone_vanilla_with_proprio_broadcasts_single_state():
     inputs = _make_fake_loss_inputs(B=2, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
     inputs["proprio"] = torch.randn(1, ACTION_DIM)
 
-    out = arch.compute_loss(**inputs, actions=actions, current_step=0)
+    out = arch.compute_loss(**inputs, actions=actions)
     assert torch.isfinite(out["loss"])
 
 
@@ -461,7 +461,7 @@ def test_shared_backbone_vanilla_with_proprio_rejects_bad_batch_match():
     inputs["proprio"] = torch.randn(3, ACTION_DIM)
 
     with pytest.raises(ValueError, match="Batch mismatch"):
-        arch.compute_loss(**inputs, actions=actions, current_step=0)
+        arch.compute_loss(**inputs, actions=actions)
 
 
 def test_shared_backbone_vanilla_with_proprio_conditions_video_only_path():
@@ -602,7 +602,7 @@ def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
 
     with pytest.raises(ValueError, match="bridge_layers"):
-        arch.compute_loss(**inputs, actions=actions, current_step=0)
+        arch.compute_loss(**inputs, actions=actions)
 
 
 def test_shared_backbone_moe_explicit_expert_layers():

@@ -52,7 +52,7 @@ class VarianceShiftTimestepSampler:
     Args:
         num_train_timesteps: Training timestep resolution (default 1000).
         lead: Which stream denoises earlier -- ``"action"`` or ``"video"``.
-        alpha: Lead-curve strength (``>1`` leads; ``1`` = uniform/diagonal).
+        alpha: Lead-curve strength, must be ``>= 1`` (``>1`` leads; ``1`` = uniform/diagonal; ``<1`` inverts lead/lag).
     """
 
     def __init__(
@@ -72,7 +72,6 @@ class VarianceShiftTimestepSampler:
         self,
         batch_size: int,
         *,
-        current_step: int = 0,
         device="cpu",
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Draw curve-correlated video and action timesteps for a batch.

@@ -106,7 +106,7 @@ def schedule_variance_shift(
             ``num_train_timesteps`` attribute is read).
         num_steps: Number of denoising steps per stream.
         lead: Which stream denoises earlier -- ``"action"`` or ``"video"``.
-        alpha: Lead-curve strength (``>1`` leads; ``1`` = sync diagonal).
+        alpha: Lead-curve strength, must be ``>= 1`` (``>1`` leads; ``1`` = sync diagonal; ``<1`` inverts lead/lag).
         shift_video: alpha-shift for the video stream's sigma grid.
         shift_action: alpha-shift for the action stream's sigma grid.
     """
@@ -182,7 +182,7 @@ def make_schedule(
         )
     raise NotImplementedError(
         f"schedule_type={strategy!r} is not supported; choose 'sync' or 'variance_shift'. "
-        "video_leading/cascade/action_only live in git history."
+        "independent/video_leading/cascade/action_only live in git history."
     )
 
 
