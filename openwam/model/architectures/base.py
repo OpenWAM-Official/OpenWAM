@@ -1076,7 +1076,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         lambda_action: float = 1.0,
         current_step: int = 0,
         decoupled_sampler=None,
-        action_timestep_per_token: bool = False,
         **inputs,
     ) -> dict:
         """Compute joint video-action flow matching loss.
@@ -1098,7 +1097,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             lambda_action: Weight for action loss term.
             current_step: Current training step.
             decoupled_sampler: Optional DecoupledFlowMatchLoss.
-            action_timestep_per_token: Per-token action timestep sampling.
             **inputs: Preprocessed video/text tensors plus forward-time flags.
 
         Returns:
@@ -1117,11 +1115,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         max_tb = int(inputs.pop("max_timestep_boundary", 1) * len(vb.scheduler.timesteps))
         min_tb = int(inputs.pop("min_timestep_boundary", 0) * len(vb.scheduler.timesteps))
         B = inputs["input_latents"].shape[0]
-        if action_timestep_per_token:
-            raise ValueError(
-                "action_timestep_per_token=True is not supported in the FastWAM-compatible path; "
-                "action timestep must be per-sample [B]."
-            )
 
         # --- Sample video timesteps ---
         if decoupled_sampler is not None:
