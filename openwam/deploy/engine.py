@@ -380,7 +380,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
         # ``variance_shift`` controls (Latent-Forcing-style ordered trajectory):
         # which stream denoises earlier + curve strength. Ignored by sync.
-        vs_lead = conditions.get("vs_lead", getattr(inf_cfg, "vs_lead", "action"))
+        vs_lead = conditions.get("vs_lead", getattr(inf_cfg, "vs_lead", "video"))
         vs_alpha = conditions.get("vs_alpha", getattr(inf_cfg, "vs_alpha", 9.0))
         # Single source of truth for each stream's α-shift is the backbone
         # property — ``action_backbone.shift_action`` and

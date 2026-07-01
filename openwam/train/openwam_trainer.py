@@ -150,7 +150,7 @@ class OpenWAMTrainer:
         self._timestep_sampler = build_timestep_sampler(
             cfg_get(t, "timestep_sampling", None),
             num_train_timesteps=_num_train_ts,
-            lead=cfg_get(t, "timestep_sampling_lead", "action"),
+            lead=cfg_get(t, "timestep_sampling_lead", "video"),
             alpha=cfg_get(t, "timestep_sampling_alpha", 9.0),
         )
         _ensure_decoupled_sampler_supported(

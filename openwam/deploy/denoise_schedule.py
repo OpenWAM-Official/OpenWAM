@@ -79,7 +79,7 @@ def schedule_variance_shift(
     action_scheduler,
     num_steps: int = 50,
     *,
-    lead: str = "action",
+    lead: str = "video",
     alpha: float = 9.0,
     shift_video: float = 5.0,
     shift_action: float = 5.0,
@@ -115,8 +115,8 @@ def schedule_variance_shift(
     num_train_v = float(getattr(video_scheduler, "num_train_timesteps", 1000))
     num_train_a = float(getattr(action_scheduler, "num_train_timesteps", 1000))
 
-    v_sigmas: List[float] = []
-    a_sigmas: List[float] = []
+    v_ts: List[float] = []
+    a_ts: List[float] = []
     for k in range(num_steps):
         u = k / num_steps  # shared global progress in [0, 1)
         lead_cleanness = _alpha_shift(u, alpha)  # f_alpha(u) >= u: lead reaches clean earlier
@@ -126,11 +126,9 @@ def schedule_variance_shift(
         else:
             v_clean, a_clean = lag_cleanness, lead_cleanness
         # Each stream's sigma rides its own alpha-shift grid (matches training).
-        v_sigmas.append(_alpha_shift(1.0 - v_clean, shift_video))
-        a_sigmas.append(_alpha_shift(1.0 - a_clean, shift_action))
+        v_ts.append(_alpha_shift(1.0 - v_clean, shift_video) * num_train_v)
+        a_ts.append(_alpha_shift(1.0 - a_clean, shift_action) * num_train_a)
 
-    v_ts = [s * num_train_v for s in v_sigmas]
-    a_ts = [s * num_train_a for s in a_sigmas]
     return [(v, a) for v, a in zip(v_ts, a_ts)] + [(0.0, 0.0)]
 
 
@@ -142,7 +140,7 @@ def make_schedule(
     shift: float = 5.0,
     *,
     shift_video: float = None,
-    lead: str = "action",
+    lead: str = "video",
     alpha: float = 9.0,
 ) -> Schedule:
     """Dispatcher kept as the single entry point for building a schedule.
