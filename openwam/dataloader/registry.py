@@ -81,12 +81,14 @@ def _register_builtins():
     from openwam.dataloader.oxe_bridge import OxeBridgeDataset
     from openwam.dataloader.oxe_droid import OxeDroidDataset
     from openwam.dataloader.oxe_fractal import OxeFractalDataset
+    from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset
     from openwam.dataloader.robocoin import MultiRobotCOINDataset
     from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
     register_dataset("mixture")(MixtureDataset)
     register_dataset("behavior")(BehaviorDataset)
+    register_dataset("robocasa_gr1")(MultiRoboCasaGR1Dataset)
     register_dataset("robocoin")(MultiRobotCOINDataset)
     register_dataset("egodex")(EgoDexDataset)
     register_dataset("oxe_bcz")(OxeBczDataset)

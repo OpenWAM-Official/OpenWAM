@@ -1,0 +1,53 @@
+# OpenWAM RoboCasa GR1 tabletop benchmark client config.
+#
+# This file is a template. `single_eval.sh` patches host / port / env_id at
+# runtime; copy it and pass POLICY_CONFIG_PATH=/path/to/custom.yml for other
+# mappings.
+
+policy_name: openwam
+
+# OpenWAM policy server connection.
+host: "127.0.0.1"
+port: 8848
+request_timeout: 300
+
+# Official RoboCasa GR1 tabletop gym id. The repository registers all 24 tasks
+# under gr1_unified/* for GR1ArmsAndWaistFourierHands.
+env_id: "gr1_unified/PnPCupToDrawerClose_GR1ArmsAndWaistFourierHands_Env"
+num_episodes: 1
+max_steps: 720
+settle_steps: 0
+seed: 0
+fail_on_incomplete: false
+
+# Rendering. The official GrootRoboCasaEnv wrapper returns processed 256x256
+# RGB observations and already handles the RoboCasa image orientation.
+enable_render: true
+
+# Observation mapping to OpenWAM's fixed camera contract. The official GR1
+# tabletop dataset has one ego-view video stream by default.
+head_camera_key: video.ego_view_pad_res256_freq20
+left_wrist_camera_key: null
+right_wrist_camera_key: null
+prompt_key: annotation.human.coarse_action
+fallback_prompt_key: annotation.human.action.task_description
+
+# Proprioception. Leave state_keys null to preserve the observation insertion
+# order from GrootRoboCasaEnv. The official dataset card documents 44D
+# state/action, while the default gr1_unified arms+waist Fourier-hands gym env
+# currently reports 29D state/action through its action_space. Keep state_dim
+# null unless you have verified the exact checkpoint/env data contract.
+send_state: true
+state_keys: null
+state_dim: null
+
+# Action handling. Leave action_keys null to split the flat OpenWAM action using
+# env.action_space order. For GR1ArmsAndWaistFourierHands this maps to the
+# official GR00T action dict keys such as action.left_hand, action.right_hand,
+# action.left_arm, action.right_arm, and action.waist.
+action_keys: null
+action_indices: null
+action_clip: null
+
+debug: false
+debug_dir: "./debug_robocasa_gr1"
