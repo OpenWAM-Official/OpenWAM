@@ -152,6 +152,8 @@ class TestDeployConfigLoading:
             "port",
             "denoise_steps",
             "schedule_type",
+            "vs_lead",
+            "vs_alpha",
             "shift",
             "compile_enabled",
             "execution_mode",
@@ -186,6 +188,20 @@ class TestDeployConfigLoading:
 
         cfg = deploy._apply_inference_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.denoise_steps") == 20
+
+    def test_cli_schedule_overrides(self):
+        from omegaconf import OmegaConf
+
+        deploy = self._policy_server()
+
+        cfg = deploy._load_deploy_yaml()
+        args = self._blank_args()
+        args.schedule_type = "variance_shift"
+        args.vs_lead = "video"
+
+        cfg = deploy._apply_inference_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "inference.schedule_type") == "variance_shift"
+        assert OmegaConf.select(cfg, "inference.vs_lead") == "video"
 
     def test_cli_compile_enabled_false_disables_compile(self):
         from omegaconf import OmegaConf

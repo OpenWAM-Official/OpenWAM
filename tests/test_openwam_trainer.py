@@ -468,7 +468,6 @@ def test_single_batch_loss():
     result = arch.compute_loss(
         **inputs,
         actions=action_data,
-        current_step=0,
     )
 
     assert "loss" in result
@@ -492,7 +491,6 @@ def test_multi_batch_loss():
     result = arch.compute_loss(
         **inputs,
         actions=action_data,
-        current_step=0,
     )
 
     assert result["loss"].shape == ()
@@ -512,7 +510,6 @@ def test_video_only_loss():
         actions=None,
         lambda_video=1.0,
         lambda_action=0.0,
-        current_step=0,
     )
 
     assert result["loss"].item() > 0
@@ -532,7 +529,6 @@ def test_loss_backward():
     result = arch.compute_loss(
         **inputs,
         actions=action_data,
-        current_step=0,
     )
 
     result["loss"].backward()
@@ -563,7 +559,6 @@ def test_training_step():
         result = arch.compute_loss(
             **inputs,
             actions=action_data,
-            current_step=step,
         )
 
         optimizer.zero_grad()
@@ -678,3 +673,20 @@ def test_downsample_video_mask():
     assert latent_mask.shape[0] == 2
     assert not latent_mask[0]  # frames 1-4 valid
     assert latent_mask[1]  # frames 5-8 all padded
+
+
+def test_architecture_variant_strings_for_sampler_guard():
+    """The guard keys on canonical.variant == 'joint_self_attn'; pin the variant
+    string for every architecture so the guard cannot silently drift."""
+    import openwam.model.architectures  # noqa: F401  (run every @register_architecture)
+    from openwam.model.architectures.registry import normalize_architecture_spec
+
+    assert normalize_architecture_spec("dual_system_self_attn").variant == "joint_self_attn"
+    assert normalize_architecture_spec("tri_system_joint_self_attn").variant == "joint_self_attn"
+    for name in (
+        "dual_system_cross_attn",
+        "dual_system_idm",
+        "shared_backbone_vanilla",
+        "shared_backbone_moe",
+    ):
+        assert normalize_architecture_spec(name).variant != "joint_self_attn"

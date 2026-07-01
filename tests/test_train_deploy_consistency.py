@@ -528,3 +528,95 @@ def test_tri_system_train_deploy_consistency_gpu(monkeypatch):
             vlm_attention_mask=vlm_inputs["attention_mask"],
         )
     assert torch.allclose(a_train, a_deploy, atol=1e-5, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# variance_shift: training sampler grid-sigma ↔ deploy schedule sigma (direction B)
+# ---------------------------------------------------------------------------
+
+
+def _real_video_action_schedulers():
+    from openwam.model.action_backbone.scheduler import ActionScheduler
+    from openwam.model.video_backbone.wan.shared.diffusion import FlowMatchScheduler
+
+    return FlowMatchScheduler("Wan"), ActionScheduler()
+
+
+@pytest.mark.parametrize("lead", ["action", "video"])
+def test_variance_shift_alpha1_equals_sync(lead):
+    """alpha=1 variance_shift must reproduce the sync schedule exactly.
+
+    Direction B puts each stream on ``alpha_shift(1 - u, shift_stream)`` with
+    ``u = k/num_steps``; at ``alpha=1`` both streams take ``u``, which is what
+    ``set_timesteps_wan`` produces -- i.e. the sync schedule.
+    """
+    from openwam.deploy.denoise_schedule import make_schedule
+
+    v, a = _real_video_action_schedulers()
+    shift, num_steps = 5.0, 32
+    sync = make_schedule("sync", v, a, num_steps=num_steps, shift=shift)
+    vs = make_schedule("variance_shift", v, a, num_steps=num_steps, shift=shift, lead=lead, alpha=1.0)
+    assert len(sync) == len(vs)
+    for (sv, sa), (vv, va) in zip(sync, vs):
+        assert abs(sv - vv) < 1e-4 and abs(sa - va) < 1e-4
+
+
+@pytest.mark.parametrize("lead", ["action", "video"])
+@pytest.mark.parametrize("alpha", [3.0, 9.0])
+def test_variance_shift_deploy_matches_training_grid(lead, alpha):
+    """Deploy schedule sigma must match the training sampler's grid sigma.
+
+    Training: ``compute_loss`` maps the sampler's ``cleanness * num_train`` to
+    grid index ``(cleanness * num_ts).long()`` and reads ``scheduler.sigmas``.
+    Deploy: ``schedule_variance_shift`` computes ``alpha_shift(1 - cleanness,
+    shift)`` directly. The two agree up to the grid's 1/num_train quantization,
+    so max|Δσ| stays well under 6e-3.
+    """
+    from openwam.deploy.denoise_schedule import schedule_variance_shift
+
+    shift, num_train, num_steps = 5.0, 1000, 64
+    v, a = _real_video_action_schedulers()
+    v.set_timesteps(num_train, training=True, shift=shift)
+    a.set_timesteps(num_train, training=True, shift=shift)
+    v_grid = v.sigmas.float()
+    a_grid = a.sigmas.float()
+
+    sched = schedule_variance_shift(
+        v, a, num_steps=num_steps, lead=lead, alpha=alpha, shift_video=shift, shift_action=shift
+    )
+
+    max_dv = max_da = 0.0
+    for k, (tv, ta) in enumerate(sched[:-1]):
+        u = k / num_steps
+        lead_clean = (alpha * u) / (1.0 + (alpha - 1.0) * u)
+        if lead == "video":
+            v_clean, a_clean = lead_clean, u
+        else:
+            v_clean, a_clean = u, lead_clean
+        vi = min(int(v_clean * num_train), num_train - 1)
+        ai = min(int(a_clean * num_train), num_train - 1)
+        max_dv = max(max_dv, abs(float(v_grid[vi]) - tv / num_train))
+        max_da = max(max_da, abs(float(a_grid[ai]) - ta / num_train))
+    assert max_dv < 6e-3, f"video train↔deploy sigma max|Δ|={max_dv:.2e}"
+    assert max_da < 6e-3, f"action train↔deploy sigma max|Δ|={max_da:.2e}"
+
+
+def test_variance_shift_sampler_per_step_seed_diversity():
+    """Dropping the sampler seed is safe: the trainer's per_step_seed seeds the
+    global RNG, so each rank draws a different (reproducible) batch."""
+    from openwam.model.architectures.utils.timestep_sampling import VarianceShiftTimestepSampler
+    from openwam.train.utils.seeding import per_step_seed
+
+    sampler = VarianceShiftTimestepSampler(1000, lead="action", alpha=9.0)
+    run_seed, step = 1234, 5
+
+    torch.manual_seed(per_step_seed(run_seed, rank=0, step=step))
+    v0, a0 = sampler.sample_timesteps(32, device="cpu")
+    torch.manual_seed(per_step_seed(run_seed, rank=1, step=step))
+    v1, _ = sampler.sample_timesteps(32, device="cpu")
+    assert not torch.allclose(v0, v1), "different ranks must draw different timesteps"
+
+    # Same (run_seed, rank, step) reproduces the draw bit-for-bit.
+    torch.manual_seed(per_step_seed(run_seed, rank=0, step=step))
+    v0b, a0b = sampler.sample_timesteps(32, device="cpu")
+    assert torch.allclose(v0, v0b) and torch.allclose(a0, a0b)

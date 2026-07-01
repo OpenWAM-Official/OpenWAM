@@ -361,6 +361,12 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): for action_only mode
                 - schedule_type (str, optional): override schedule type
+                  ("sync" lockstep | "variance_shift" Latent-Forcing ordered
+                  curve)
+                - vs_lead (str, optional): "variance_shift" only — which stream
+                  denoises earlier ("action" | "video")
+                - vs_alpha (float, optional): "variance_shift" only — lead-curve
+                  strength (>1 leads; 1 = sync diagonal)
                 - denoise_steps (int, optional): override num denoising steps
 
         Returns:
@@ -368,9 +374,14 @@ class JointInferenceEngine(BaseInferenceEngine):
         """
         inf_cfg = self.cfg.inference
 
-        # Build schedule (only "sync" is supported; make_schedule raises on anything else)
+        # Build schedule: "sync" (lockstep) or "variance_shift" (Latent-Forcing
+        # ordered trajectory); make_schedule raises on anything else.
         schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
+        # ``variance_shift`` controls (Latent-Forcing-style ordered trajectory):
+        # which stream denoises earlier + curve strength. Ignored by sync.
+        vs_lead = conditions.get("vs_lead", getattr(inf_cfg, "vs_lead", "video"))
+        vs_alpha = conditions.get("vs_alpha", getattr(inf_cfg, "vs_alpha", 9.0))
         # Single source of truth for each stream's α-shift is the backbone
         # property — ``action_backbone.shift_action`` and
         # ``video_backbone.shift_video`` — set via the model yaml and saved in
@@ -396,6 +407,8 @@ class JointInferenceEngine(BaseInferenceEngine):
             num_steps=denoise_steps,
             shift=shift,
             shift_video=shift_video,
+            lead=vs_lead,
+            alpha=vs_alpha,
         )
 
         # Reset dit cache for each generation

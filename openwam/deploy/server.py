@@ -426,10 +426,25 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schedule-type",
         type=str,
-        choices=["sync"],
+        choices=["sync", "variance_shift"],
         default=None,
         dest="schedule_type",
-        help="Override schedule type (only 'sync' is supported)",
+        help="Override inference.schedule_type: 'sync' | 'variance_shift' (Latent-Forcing ordered)",
+    )
+    parser.add_argument(
+        "--vs-lead",
+        type=str,
+        choices=["action", "video"],
+        default=None,
+        dest="vs_lead",
+        help="Override inference.vs_lead (variance_shift only): which stream denoises earlier",
+    )
+    parser.add_argument(
+        "--vs-alpha",
+        type=float,
+        default=None,
+        dest="vs_alpha",
+        help="Override inference.vs_alpha (variance_shift only): lead-curve strength (>1 leads; 1 = diagonal)",
     )
     parser.add_argument(
         "--compile-enabled",
@@ -493,6 +508,10 @@ def _apply_inference_overrides(cfg, args):
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.schedule_type is not None:
         OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
+    if args.vs_lead is not None:
+        OmegaConf.update(cfg, "inference.vs_lead", args.vs_lead, merge=False)
+    if args.vs_alpha is not None:
+        OmegaConf.update(cfg, "inference.vs_alpha", args.vs_alpha, merge=False)
     return cfg
 
 
