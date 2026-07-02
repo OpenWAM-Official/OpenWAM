@@ -146,3 +146,12 @@ ignore = ["E501", "E741"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["openwam"]
+
+[tool.pytest.ini_options]
+# `gpu`-marked tests need a GPU + large pretrained weights (e.g. Wan2.2-TI2V-5B).
+# They self-skip when assets are absent, but on a box that HAS the weights they
+# would run in the core suite; the core `make test` gate deselects them via
+# `-m "not gpu"`. Run them explicitly with `make test-full` or `pytest -m gpu`.
+markers = [
+    "gpu: requires a GPU and large pretrained model weights (deselected from core `make test`)",
+]
