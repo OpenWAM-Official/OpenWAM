@@ -1,6 +1,8 @@
 """Tests for WAM Architecture registry and implementations."""
 
 import sys
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -124,6 +126,95 @@ def test_architecture_support_lists():
     assert "shared_backbone_moe" in supported
     assert get_architecture_support("shared_backbone_moe").status == "supported"
     assert get_architecture_support("shared_backbone_vanilla").status == "supported"
+
+
+def _make_tiny_wan_backbone_for_compile_test():
+    from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
+
+    class _Block(torch.nn.Module):
+        def forward(self, x, context, t_mod, freqs, context_mask=None, self_attn_mask=None):  # noqa: ARG002
+            return x + 1
+
+    class _Dit(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dim = 8
+            self.freq_dim = 4
+            self.fuse_vae_embedding_in_latents = False
+            self.has_image_input = False
+            self.blocks = torch.nn.ModuleList([_Block()])
+            self.text_embedding = torch.nn.Linear(8, 8)
+
+    holder = SimpleNamespace(
+        dit=_Dit(),
+        scheduler=None,
+        tokenizer=None,
+        height_division_factor=1,
+        width_division_factor=1,
+        time_division_factor=1,
+        time_division_remainder=0,
+        latent_spec=None,
+    )
+    return Wan22Ti2v(holder)
+
+
+def _tiny_wan_block_state(vb, *, use_gradient_checkpointing=False):
+    from openwam.model.video_backbone.base import BlockLoopState
+
+    return BlockLoopState(
+        hidden_states=torch.zeros(1, 2, 8),
+        time_mod=torch.zeros(1, 6, 8),
+        rope_freqs=torch.zeros(2, 1, 1),
+        context=torch.zeros(1, 3, 8),
+        context_mask=torch.ones(1, 3, dtype=torch.bool),
+        grid_frames=2,
+        grid_height=1,
+        grid_width=1,
+        use_gradient_checkpointing=use_gradient_checkpointing,
+        extras={"dit": vb.dit},
+    )
+
+
+def test_wan_backbone_compile_auto_lazily_compiles_run_block():
+    from omegaconf import OmegaConf
+
+    vb = _make_tiny_wan_backbone_for_compile_test()
+    cfg = OmegaConf.create({"mode": "auto", "wan_blocks": {}})
+    calls = {"compile": 0, "wrapped": 0}
+
+    def _identity_compile(fn, **kwargs):
+        calls["compile"] += 1
+        assert kwargs == {"dynamic": False, "mode": "default"}
+
+        def _wrapped(*args, **kw):
+            calls["wrapped"] += 1
+            return fn(*args, **kw)
+
+        return _wrapped
+
+    with patch("torch.compile", side_effect=_identity_compile):
+        vb.apply_compile_optimizations(cfg)
+        assert calls["compile"] == 0
+
+        state = _tiny_wan_block_state(vb)
+        state = vb.run_block(0, state)
+        state = vb.run_block(0, state)
+
+    assert calls == {"compile": 1, "wrapped": 2}
+    assert torch.equal(state.hidden_states, torch.full((1, 2, 8), 2.0))
+
+
+def test_wan_backbone_compile_skips_gradient_checkpointed_run_block():
+    from omegaconf import OmegaConf
+
+    vb = _make_tiny_wan_backbone_for_compile_test()
+    vb.apply_compile_optimizations(OmegaConf.create({"mode": "auto", "wan_blocks": {}}))
+
+    with patch("torch.compile") as mock_compile:
+        state = vb.run_block(0, _tiny_wan_block_state(vb, use_gradient_checkpointing=True))
+
+    mock_compile.assert_not_called()
+    assert torch.equal(state.hidden_states, torch.ones(1, 2, 8))
 
 
 def test_tri_system_rejects_vlm_freeze_in_model_config():
@@ -566,6 +657,63 @@ def test_action_dit_joint_cross_attn_uses_rope():
     assert out.shape == (2, 5, 7)
 
 
+def test_action_dit_rope_freqs_preserve_complex_dtype_on_dtype_to():
+    """ActionDiT RoPE cache must not be cast to real by dtype-only Module.to()."""
+    from openwam.model.action_backbone.separate_action_dit import ActionDiT
+
+    dit = ActionDiT(
+        action_dim=7,
+        dim=64,
+        ffn_dim=128,
+        num_heads=4,
+        num_layers=2,
+        video_dim=128,
+        bridge_layers=(0, 1),
+        variant="joint_cross_attn",
+    )
+    original_dtype = dit.freqs.dtype
+
+    dit.to(dtype=torch.bfloat16)
+
+    assert dit.freqs.dtype == original_dtype
+    assert dit.freqs.is_complex()
+    assert "freqs" not in dit.state_dict()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ActionDiT RoPE device migration check")
+def test_action_dit_rope_freqs_follow_cuda_to_without_dtype_cast():
+    """ActionDiT.to(cuda, bf16) should move RoPE freqs to CUDA but keep them complex."""
+    from openwam.model.action_backbone.separate_action_dit import ActionDiT
+
+    dit = ActionDiT(
+        action_dim=7,
+        dim=64,
+        ffn_dim=128,
+        num_heads=4,
+        num_layers=2,
+        video_dim=64,
+        bridge_layers=(0, 1),
+        variant="joint_self_attn",
+        text_dim=16,
+    ).to(device="cuda", dtype=torch.bfloat16)
+
+    assert dit.freqs.device.type == "cuda"
+    assert dit.freqs.is_complex()
+    assert dit.freqs.dtype.is_complex
+    assert "freqs" not in dit.state_dict()
+
+    context = torch.randn(2, 4, 16, device="cuda", dtype=torch.bfloat16)
+    context_mask = torch.ones(2, 4, dtype=torch.bool, device="cuda")
+    astate = dit.prepare_state(
+        torch.randn(2, 5, 7, device="cuda", dtype=torch.bfloat16),
+        torch.tensor([0.5, 0.8], device="cuda", dtype=torch.bfloat16),
+        context=context,
+        context_mask=context_mask,
+    )
+    assert astate.payload.action_freqs.device.type == "cuda"
+    assert astate.payload.action_freqs.is_complex()
+
+
 def test_action_dit_joint_self_attn_uses_only_rope():
     """joint_self_attn relies solely on RoPE (no learned absolute PE)."""
     from openwam.model.action_backbone.separate_action_dit import ActionDiT
@@ -759,6 +907,111 @@ def test_action_dit_cross_attn_bridge_tuple_matches_dict():
     assert torch.allclose(tuple_out, dict_out, atol=1e-6)
 
 
+def test_dual_system_joint_cross_attn_compile_none_stays_eager():
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+    with patch("torch.compile") as mock_compile:
+        arch.apply_compile_optimizations(OmegaConf.create({"mode": "none"}))
+
+    mock_compile.assert_not_called()
+    assert arch._compiled_action_forward is None
+
+
+def test_dual_system_joint_cross_attn_compile_auto_sets_action_forward():
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+
+    def _identity_compile(fn, **_kwargs):
+        return fn
+
+    cfg = OmegaConf.create(
+        {
+            "mode": "auto",
+            "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
+        }
+    )
+    with patch("torch.compile", side_effect=_identity_compile) as mock_compile:
+        arch.apply_compile_optimizations(cfg)
+
+    mock_compile.assert_called_once()
+    assert mock_compile.call_args.kwargs == {"dynamic": False, "mode": "reduce-overhead"}
+    assert arch._compiled_action_forward is not None
+
+
+def test_dual_system_joint_cross_attn_compiled_action_path_matches_eager():
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+    actions, bridges, timestep, context, context_mask = _dual_system_cross_attn_inputs(arch, 11)
+
+    with torch.no_grad():
+        eager_out = arch._predict_actions_from_bridges(
+            actions,
+            bridges,
+            timestep,
+            context=context,
+            context_mask=context_mask,
+        )
+
+    calls = {"n": 0}
+
+    def _counting_compile(fn, **_kwargs):
+        def _wrapped(*args, **kwargs):
+            calls["n"] += 1
+            return fn(*args, **kwargs)
+
+        return _wrapped
+
+    with patch("torch.compile", side_effect=_counting_compile):
+        arch.apply_compile_optimizations(OmegaConf.create({"mode": "auto", "cross_attn": {}}))
+
+    with torch.no_grad():
+        compiled_out = arch._predict_actions_from_bridges(
+            actions,
+            bridges,
+            timestep,
+            context=context,
+            context_mask=context_mask,
+        )
+
+    assert calls["n"] == 1
+    assert torch.allclose(compiled_out, eager_out, atol=1e-6)
+
+
+def test_dual_system_joint_cross_attn_compile_skips_checkpointed_path():
+    from omegaconf import OmegaConf
+
+    arch = _make_dual_system_cross_attn_fixture()
+    arch.action_backbone.eval()
+    actions, bridges, timestep, context, context_mask = _dual_system_cross_attn_inputs(arch, 11)
+    calls = {"n": 0}
+
+    def _counting_compile(fn, **_kwargs):
+        def _wrapped(*args, **kwargs):
+            calls["n"] += 1
+            return fn(*args, **kwargs)
+
+        return _wrapped
+
+    with patch("torch.compile", side_effect=_counting_compile):
+        arch.apply_compile_optimizations(OmegaConf.create({"mode": "auto", "cross_attn": {}}))
+
+    with torch.no_grad():
+        out = arch._predict_actions_from_bridges(
+            actions,
+            bridges,
+            timestep,
+            context=context,
+            context_mask=context_mask,
+            use_gradient_checkpointing=True,
+        )
+
+    assert calls["n"] == 0
+    assert out.shape == actions.shape
+
+
 def test_dual_system_joint_self_attn_creates_dit_state():
     """joint_self_attn populates ActionDiTState payload via prepare_state."""
     from openwam.model import build_architecture
@@ -783,6 +1036,193 @@ def test_dual_system_joint_self_attn_creates_dit_state():
     assert payload is not None
     assert payload.x_action.shape == (1, 5, 32)
     assert payload.action_freqs is not None
+
+
+def test_dual_system_joint_self_attn_compile_auto_sets_mot_loop():
+    from omegaconf import OmegaConf
+
+    from openwam.model import build_architecture
+    from tests.test_openwam_trainer import _MockVideoBackbone
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "bridge_layers": (0, 1),
+        "text_dim": 16,
+    }
+    arch = build_architecture("dual_system_self_attn", cfg)
+    arch.video_backbone = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
+    arch.build_mot_driver()
+
+    def _identity_compile(fn, **_kwargs):
+        return fn
+
+    with patch("torch.compile", side_effect=_identity_compile) as mock_compile:
+        arch.apply_compile_optimizations(OmegaConf.create({"mode": "auto", "self_attn": {}}))
+
+    mock_compile.assert_called_once()
+    assert mock_compile.call_args.kwargs == {"dynamic": False, "mode": "reduce-overhead"}
+    assert arch._compiled_mot_run_joint_loop is not None
+
+
+def test_dual_system_idm_compile_auto_sets_action_cache_loop():
+    from omegaconf import OmegaConf
+
+    from openwam.model import build_architecture
+    from tests.test_openwam_trainer import _MockVideoBackbone
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "idm",
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "bridge_layers": (0, 1),
+        "text_dim": 16,
+    }
+    arch = build_architecture("dual_system_idm", cfg)
+    arch.video_backbone = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
+    arch.build_mot_driver()
+
+    def _identity_compile(fn, **_kwargs):
+        return fn
+
+    with patch("torch.compile", side_effect=_identity_compile) as mock_compile:
+        arch.apply_compile_optimizations(OmegaConf.create({"mode": "auto", "idm": {"action_cache": {}}}))
+
+    mock_compile.assert_called_once()
+    assert mock_compile.call_args.kwargs == {"dynamic": False, "mode": "reduce-overhead"}
+    assert arch._compiled_idm_action_cache_loop is not None
+
+
+def test_dual_system_idm_action_cache_tensor_loop_matches_eager_full_mask_path():
+    from openwam.model import build_architecture
+    from openwam.model.video_backbone.base import BlockLoopState
+    from tests.test_openwam_trainer import _MockVideoBackbone
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "idm",
+        "action_dim": 7,
+        "dim": 32,
+        "ffn_dim": 64,
+        "num_heads": 4,
+        "video_dim": 32,
+        "bridge_layers": (0, 1),
+        "text_dim": 16,
+    }
+    arch = build_architecture("dual_system_idm", cfg)
+    arch.video_backbone = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
+    driver = arch.build_mot_driver()
+    arch.eval()
+
+    ab = arch.action_backbone
+    g = torch.Generator().manual_seed(123)
+    batch_size = 2
+    video_seq_len = 5
+    action_seq_len = 4
+    action_latents = torch.randn(batch_size, action_seq_len, ab.action_dim, generator=g)
+    action_timestep = torch.tensor([0.25, 0.75])
+    context = torch.randn(batch_size, 3, ab.text_dim, generator=g)
+    context_mask = torch.ones(batch_size, 3, dtype=torch.bool)
+    vstate = BlockLoopState(
+        hidden_states=torch.randn(batch_size, video_seq_len, 32, generator=g),
+        time_mod=torch.zeros(batch_size, video_seq_len, 6, 32),
+        rope_freqs=torch.zeros(video_seq_len, 1, 1),
+        context=torch.randn(batch_size, 4, 32, generator=g),
+        context_mask=torch.ones(batch_size, 4, dtype=torch.bool),
+        grid_frames=video_seq_len,
+        grid_height=1,
+        grid_width=1,
+        extras={},
+    )
+    video_kv_cache, _ = driver.prefill_video_cache(vstate)
+
+    with torch.no_grad():
+        eager_state = ab.prepare_state(
+            action_latents,
+            action_timestep,
+            context=context,
+            context_mask=context_mask,
+        )
+        eager_state = driver.run_action_with_video_cache(
+            eager_state,
+            video_kv_cache=video_kv_cache,
+            video_seq_len=video_seq_len,
+        )
+        eager_x = eager_state.payload.x_action
+        eager_pred = ab.extract_prediction(eager_state)
+
+        x_action = ab._embed_actions(action_latents)
+        prepared_timestep = ab._prepare_timestep(action_timestep, batch_size)
+        t_mod = ab.time_projection(ab.time_embedding(prepared_timestep))
+        action_freqs = ab._get_rope_freqs(action_seq_len).to(device=x_action.device)
+        context_emb, context_attn_mask = ab._prepare_context(
+            context,
+            context_mask,
+            batch_size=batch_size,
+            seq_len=action_seq_len,
+            dtype=x_action.dtype,
+            device=x_action.device,
+        )
+        video_k_tuple, video_v_tuple = driver.video_kv_cache_to_tuples(video_kv_cache)
+        action_mask = torch.ones(
+            (action_seq_len, video_seq_len + action_seq_len),
+            dtype=torch.bool,
+            device=x_action.device,
+        )
+        tensor_x = driver.run_action_with_video_cache_tensor_loop(
+            x_action,
+            t_mod,
+            action_freqs,
+            context_emb,
+            context_attn_mask,
+            action_mask,
+            video_k_tuple,
+            video_v_tuple,
+        )
+        tensor_pred = ab.action_decoder(tensor_x)
+
+    assert torch.allclose(tensor_x, eager_x, atol=1e-6)
+    assert torch.allclose(tensor_pred, eager_pred, atol=1e-6)
+
+
+def test_tri_system_joint_self_attn_compile_auto_sets_mot_loop():
+    from omegaconf import OmegaConf
+
+    from openwam.model.architectures.tri_system.joint_self_attn import TriSystemJointSelfAttnArchitecture
+
+    class _Driver:
+        def run_joint_loop(self, vstate, astate, ustate, **_kwargs):
+            raise AssertionError("eager tri-system loop should not run through the compiled wrapper")
+
+        def run_joint_loop_for_compile(self, vstate, astate, ustate, *, attn_mask):
+            assert attn_mask == "mask"
+            return vstate, astate, ustate
+
+    arch = TriSystemJointSelfAttnArchitecture(cfg=None)
+    arch.video_backbone = torch.nn.Module()
+    arch.action_backbone = torch.nn.Module()
+    arch.understanding_expert = torch.nn.Module()
+    arch._mot_driver = _Driver()
+
+    def _identity_compile(fn, **_kwargs):
+        return fn
+
+    with patch("torch.compile", side_effect=_identity_compile) as mock_compile:
+        arch.apply_compile_optimizations(OmegaConf.create({"mode": "auto", "tri_system": {}}))
+
+    mock_compile.assert_called_once()
+    assert mock_compile.call_args.kwargs == {"dynamic": False, "mode": "reduce-overhead"}
+    assert arch._compiled_mot_run_joint_loop is not None
+    assert arch._compiled_mot_run_joint_loop("v", "a", "u", "mask") == ("v", "a", "u")
 
 
 def test_moe_uses_expert_layers():

@@ -122,7 +122,7 @@ class ObsPreprocessor:
 
         On success the returned obs always has:
             obs["image"]  -> PIL.Image sized (img_width, img_height)
-            obs["prompt"] -> str wrapped with the FastWAM deploy template
+            obs["prompt"] -> str, forwarded verbatim from the client (empty -> "")
             obs["state"]  -> np.ndarray (when a state was sent)
 
         Raises :class:`ObsValidationError` on malformed payload.
@@ -132,7 +132,6 @@ class ObsPreprocessor:
         from openwam.dataloader.transforms.multiview import (
             assemble_multiview_layout,
             crop_and_resize,
-            format_prompt_for_inference,
         )
 
         def _as_pil(x, *, ctx: str) -> Image.Image:
@@ -206,8 +205,8 @@ class ObsPreprocessor:
                 out_w=self.img_width,
             )
 
-        # --- Prompt wrapping (must match training-time _get_prompt byte-for-byte) ---
-        obs["prompt"] = format_prompt_for_inference(obs.get("prompt", "") or "")
+        # --- Prompt passthrough (server is prompt-agnostic; normalize missing to "") ---
+        obs["prompt"] = obs.get("prompt", "") or ""
 
         # --- Proprio state passthrough ---
         # State-dim validation is intentionally NOT enforced: unify_action ckpts send RAW

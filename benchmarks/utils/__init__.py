@@ -1,9 +1,11 @@
 """Client-side toolkit for talking to an OpenWAM policy server.
 
 You do **not** need to know anything about the server — its model,
-preprocessing, multi-view composition, prompt wrapping, or checkpoint. Just
-speak the WebSocket protocol: send raw camera frames + a base prompt, get an
-action back already in physical units. The server does the rest.
+preprocessing, multi-view composition, or checkpoint. Just speak the WebSocket
+protocol: send raw camera frames + the prompt the model should see, get an
+action back already in physical units. The server does the rest — except prompt
+formatting: it forwards ``prompt`` verbatim, so wrap it in your benchmark's
+template first (RoboTwin does this in ``benchmarks/robotwin/prompt_template.py``).
 
 Quick start::
 
@@ -16,7 +18,7 @@ Quick start::
             payload = build_payload(
                 head=encode_numpy_b64(rgb_frame),        # head_camera is REQUIRED
                 # left_wrist=..., right_wrist=...,        # optional; server black-fills if absent
-                prompt="pick up the bottle",             # base prompt; server wraps it
+                prompt="pick up the bottle",             # sent verbatim; wrap it in your template first
                 state=list(proprio),                     # optional; required for proprio checkpoints
             )
             try:

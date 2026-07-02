@@ -105,7 +105,7 @@ def _run_compute_loss(arch):
         inputs["context"] = torch.randn(1, 4, text_dim)
         inputs["context_mask"] = torch.ones(1, 4, dtype=torch.bool)
         inputs["seq_lens"] = torch.tensor([4])
-    out = arch.compute_loss(**inputs, actions=actions, current_step=0)
+    out = arch.compute_loss(**inputs, actions=actions)
     return out
 
 
@@ -275,6 +275,57 @@ def test_dual_system_cross_attn_inherits_geometry_from_video_backbone():
     assert ab.head_dim == vb.head_dim == WAN_VIDEO_DIM // 4
 
 
+class _TextDim1024Backbone(_MockVideoBackbone):
+    """Cosmos-shaped mock: exposes a 1024 raw context width (Wan is 4096)."""
+
+    @property
+    def text_dim(self) -> int:
+        return 1024
+
+
+def _build_self_attn_with_backbone(backbone_cls, cfg_extra=None):
+    from openwam.model.architectures.dual_system.joint_self_attn import (
+        DualSystemSelfAttnArchitecture,
+    )
+
+    class _SelfAttnWithBackbone(DualSystemSelfAttnArchitecture):
+        def _init_video_backbone(self, _cfg):
+            # Attach BEFORE __init__'s vb-derived setdefault/derive block runs.
+            self.video_backbone = backbone_cls(dim=WAN_VIDEO_DIM, num_layers=WAN_NUM_LAYERS, num_heads=4)
+
+    cfg = {
+        "framework": "dual_system",
+        "variant": "joint_self_attn",
+        "action_dim": ACTION_DIM,
+        "bridge_interval": 1,
+        "dim": WAN_VIDEO_DIM,
+        "ffn_dim": 4 * WAN_VIDEO_DIM,
+    }
+    cfg.update(cfg_extra or {})
+    return _SelfAttnWithBackbone(cfg=cfg)
+
+
+def test_text_dim_auto_derives_from_backbone():
+    """When ``text_dim`` is absent from cfg it defaults to the loaded backbone's
+    ``text_dim`` (Cosmos-Predict2.5=1024), removing the manual override footgun."""
+    arch = _build_self_attn_with_backbone(_TextDim1024Backbone)
+    assert arch.action_backbone.text_dim == 1024
+    assert arch.context_dim == 1024
+
+
+def test_text_dim_explicit_cfg_wins_over_backbone():
+    """An explicit cfg ``text_dim`` still overrides the backbone-derived default."""
+    arch = _build_self_attn_with_backbone(_TextDim1024Backbone, {"text_dim": 777})
+    assert arch.action_backbone.text_dim == 777
+
+
+def test_text_dim_falls_back_to_4096_when_backbone_silent():
+    """A backbone that doesn't expose ``text_dim`` (base property → None) keeps the
+    historical 4096 (Wan T5-XXL) fallback, so Wan behavior is unchanged."""
+    arch = _build_self_attn_with_backbone(_MockVideoBackbone)
+    assert arch.action_backbone.text_dim == 4096
+
+
 # ---------------------------------------------------------------------------
 # 2. dual_system_self_attn
 # ---------------------------------------------------------------------------
@@ -403,7 +454,7 @@ def test_shared_backbone_vanilla_with_proprio_requires_proprio():
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
 
     with pytest.raises(ValueError, match="proprio"):
-        arch.compute_loss(**inputs, actions=actions, current_step=0)
+        arch.compute_loss(**inputs, actions=actions)
 
 
 def test_shared_backbone_vanilla_with_proprio_validates_state_shape():
@@ -440,7 +491,7 @@ def test_shared_backbone_vanilla_with_proprio_broadcasts_single_state():
     inputs = _make_fake_loss_inputs(B=2, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
     inputs["proprio"] = torch.randn(1, ACTION_DIM)
 
-    out = arch.compute_loss(**inputs, actions=actions, current_step=0)
+    out = arch.compute_loss(**inputs, actions=actions)
     assert torch.isfinite(out["loss"])
 
 
@@ -461,7 +512,7 @@ def test_shared_backbone_vanilla_with_proprio_rejects_bad_batch_match():
     inputs["proprio"] = torch.randn(3, ACTION_DIM)
 
     with pytest.raises(ValueError, match="Batch mismatch"):
-        arch.compute_loss(**inputs, actions=actions, current_step=0)
+        arch.compute_loss(**inputs, actions=actions)
 
 
 def test_shared_backbone_vanilla_with_proprio_conditions_video_only_path():
@@ -602,7 +653,7 @@ def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
 
     with pytest.raises(ValueError, match="bridge_layers"):
-        arch.compute_loss(**inputs, actions=actions, current_step=0)
+        arch.compute_loss(**inputs, actions=actions)
 
 
 def test_shared_backbone_moe_explicit_expert_layers():

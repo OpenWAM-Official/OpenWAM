@@ -33,12 +33,13 @@ OpenWAM/
 │   ├── dataloader/    # Dataset adapters (RoboTwin), transforms, processors, registry
 │   ├── model/
 │   │   ├── architectures/    # WAM families: dual_system, shared_backbone, tri_system
-│   │   ├── action_backbone/  # ActionBackbone ABCs, separate ActionDiT, shared action backbone, scheduler
+│   │   ├── action_backbone/  # ActionBackbone ABCs, separate ActionDiT, shared action backbone,
+│   │   │                     #   latent action encoder/decoder, scheduler
 │   │   ├── video_backbone/   # VideoBackbone ABC, Wan backbones, encoder/ (VAE / DINOv3 / V-JEPA 2.1)
 │   │   └── vlm_backbone/     # VlmBackbone ABC, Qwen3-VL backbone
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
 │   └── deploy/        # Policy server, model loader, inference engine, executors, optimizations
-├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests, SVAE tooling
+├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests, SVAE / LAPA tooling
 ├── configs/           # Hydra configs for model, dataloader, accelerate, deploy
 ├── tests/             # Unit tests
 ├── benchmarks/
@@ -150,11 +151,13 @@ bash scripts/train.sh model=dual_system \
     model/video_backbone=wan21_vace_1_3b
 ```
 
-Available groups: `wan22_ti2v_5b` (Wan2.2-TI2V-5B, default), `wan21_vace_1_3b` (Wan2.1-VACE-1.3B), `wan21_i2v_14b_480p` (Wan2.1-I2V-14B-480P), `cosmos25`. Each group ships its own `model_path`; override `model.video_backbone.model_path=` only to point at a different weights dir. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
+Available groups: `wan22_ti2v_5b` (Wan2.2-TI2V-5B, default), `wan21_vace_1_3b` (Wan2.1-VACE-1.3B), `wan21_i2v_14b_480p` (Wan2.1-I2V-14B-480P), `cosmos_predict25`. Each group ships its own `model_path`; override `model.video_backbone.model_path=` only to point at a different weights dir. ActionDiT geometry (`num_heads`, `head_dim`, `video_dim`, `num_layers`) is auto-resolved from the loaded backbone — no need to mirror it in the yaml; ActionDiT depth then follows `bridge_layers` / `bridge_interval`.
 
-> `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`, which each group already ships. When you point `model_path` at an off-default weights dir, keep `name` consistent with it; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
+> **Wan:** `video_backbone.name` only drives registry dispatch — the loaded weights are decided entirely by `video_backbone.model_path`. Override **both** together; the builder logs a WARNING (not an error) on a mismatched `(name, model_path)`.
+>
+> **Cosmos-Predict2.5:** `name` is validated (only `cosmos_predict25_2b` today; others raise), and the weights are located by `model_path` (bundle root) **plus** `model_variant` (e.g. `base/post-trained`) — so for cosmos both `model_path` and `model_variant` are load-bearing, not `name`. The action-side `text_dim` auto-derives from the backbone (1024), so no manual override is needed.
 
-Distributed training uses DeepSpeed ZeRO; the stage is set via `training.zero_stage` in `train.yaml` (default 2, e.g. `training.zero_stage=1`).
+Distributed training configs in `configs/accelerate/`: `deepspeed_zero1.yaml`, `deepspeed_zero2.yaml`.
 
 ### 2. Deployment
 
@@ -189,7 +192,9 @@ server: { host: "0.0.0.0", port: 8848 }
 
 inference:
   denoise_steps: 10       # denoising steps (FastWAM-Joint default)
-  schedule_type: sync     # only "sync" supported (video/action timesteps lockstep)
+  schedule_type: sync     # sync (lockstep) | variance_shift (Latent-Forcing ordered; joint_self_attn ckpts)
+  vs_lead: video          # variance_shift only: which stream denoises first (action | video)
+  vs_alpha: 9.0           # variance_shift only: lead-curve strength (>1 leads; 1 = sync diagonal)
   execution_mode: sync    # sync | async
   execution_horizon: null # async only: actions per chunk (null = policy default)
   inference_delay_steps: null
@@ -217,7 +222,7 @@ All flags are optional; yaml values apply when a flag is absent. Optimization se
 
 #### WebSocket messages
 
-- `{"type": "obs", ...}` — send 3-camera `images` dict, base prompt, optional raw `state`; receive an action in the checkpoint's deploy scale (unnormalized to physical units for normalized checkpoints).
+- `{"type": "obs", ...}` — send 3-camera `images` dict, the prompt (forwarded to the model verbatim; wrap per your checkpoint's template), optional raw `state`; receive an action in the checkpoint's deploy scale (unnormalized to physical units for normalized checkpoints).
 - `{"type": "reset"}` — reset policy state between episodes.
 - `{"type": "ping"}` — liveness check; server replies `{"type": "pong"}`.
 

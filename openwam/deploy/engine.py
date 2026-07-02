@@ -223,7 +223,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         self._prompt_embed_cache = _BoundedPromptEmbedCache(maxsize=cache_maxsize)
 
     def _init_cfg(self):
-        """Resolve Classifier-Free Guidance from cfg.inference (Cosmos25 only; cfg_scale=1.0 is a no-op).
+        """Resolve Classifier-Free Guidance from cfg.inference (CosmosPredict25 only; cfg_scale=1.0 is a no-op).
 
         When cfg_scale > 1.0 the uncond embedding is resolved once here:
         offline ``empty.safetensors`` if ``text_embedding_cache_dir`` is set,
@@ -285,7 +285,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         Mirrors the cond precedence: ``empty.safetensors`` in
         ``text_embedding_cache_dir`` wins; otherwise return ``None`` and rely
         on the backbone's live encoder via the adapter (``_build_uncond_context``
-        in cosmos25 adapter falls through to ``text_encoder("")``).
+        in cosmos_predict25 adapter falls through to ``text_encoder("")``).
         """
         if self._text_embedding_cache_dir is not None:
             empty_path = self._text_embedding_cache_dir / "empty.safetensors"
@@ -294,7 +294,7 @@ class JointInferenceEngine(BaseInferenceEngine):
                     f"inference.cfg_scale={self._cfg_scale} > 1.0 with "
                     f"text_embedding_cache_dir={self._text_embedding_cache_dir} but "
                     f"{empty_path} does not exist. Re-run precompute "
-                    f"(docs/cosmos25_backbone.md §10.4 step ②) so the empty embedding "
+                    f"so the empty embedding "
                     f"lands alongside per-prompt caches, or unset "
                     f"inference.text_embedding_cache_dir to fall back to the live encoder."
                 )
@@ -317,9 +317,22 @@ class JointInferenceEngine(BaseInferenceEngine):
         configured). When the cache dir IS set but the file is missing, we
         deliberately don't fall back silently — re-raise instead so the user
         notices the mismatch before model output drift goes undetected.
+
+        The empty prompt routes to ``empty.safetensors`` (matching the
+        training-side read path and the uncond resolver), not ``sha256("")`` —
+        the precompute stores the empty embedding under that fixed name.
         """
         if self._text_embedding_cache_dir is None:
             return None
+        if prompt == "":
+            empty_path = self._text_embedding_cache_dir / "empty.safetensors"
+            if not empty_path.exists():
+                raise FileNotFoundError(
+                    f"text_embedding_cache_dir is set but {empty_path} is missing "
+                    f"for the empty prompt. Re-run precompute so empty.safetensors "
+                    f"lands alongside the per-prompt caches."
+                )
+            return self._load_pre_encoded_text_safetensors(empty_path)
         sha = sha256_for_prompt(prompt)
         cache_path = Path(resolve_cache_path_for_sha(str(self._text_embedding_cache_dir), sha))
         if not cache_path.exists():
@@ -361,6 +374,12 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): for action_only mode
                 - schedule_type (str, optional): override schedule type
+                  ("sync" lockstep | "variance_shift" Latent-Forcing ordered
+                  curve)
+                - vs_lead (str, optional): "variance_shift" only — which stream
+                  denoises earlier ("action" | "video")
+                - vs_alpha (float, optional): "variance_shift" only — lead-curve
+                  strength (>1 leads; 1 = sync diagonal)
                 - denoise_steps (int, optional): override num denoising steps
 
         Returns:
@@ -368,9 +387,14 @@ class JointInferenceEngine(BaseInferenceEngine):
         """
         inf_cfg = self.cfg.inference
 
-        # Build schedule (only "sync" is supported; make_schedule raises on anything else)
+        # Build schedule: "sync" (lockstep) or "variance_shift" (Latent-Forcing
+        # ordered trajectory); make_schedule raises on anything else.
         schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
+        # ``variance_shift`` controls (Latent-Forcing-style ordered trajectory):
+        # which stream denoises earlier + curve strength. Ignored by sync.
+        vs_lead = conditions.get("vs_lead", getattr(inf_cfg, "vs_lead", "video"))
+        vs_alpha = conditions.get("vs_alpha", getattr(inf_cfg, "vs_alpha", 9.0))
         # Single source of truth for each stream's α-shift is the backbone
         # property — ``action_backbone.shift_action`` and
         # ``video_backbone.shift_video`` — set via the model yaml and saved in
@@ -396,6 +420,8 @@ class JointInferenceEngine(BaseInferenceEngine):
             num_steps=denoise_steps,
             shift=shift,
             shift_video=shift_video,
+            lead=vs_lead,
+            alpha=vs_alpha,
         )
 
         # Reset dit cache for each generation
@@ -418,7 +444,7 @@ class JointInferenceEngine(BaseInferenceEngine):
             )
         )
 
-        # §15 — Cosmos25 cache-mode pre_encoded_text resolution. Wan never
+        # §15 — CosmosPredict25 cache-mode pre_encoded_text resolution. Wan never
         # reads this kwarg (its preprocess_input_for_inference signature has no
         # `pre_encoded_text`); the architecture-level `generate()` only forwards
         # the kwarg to the backbone when it is non-None, so Wan stays untouched.

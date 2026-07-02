@@ -3,14 +3,14 @@
 For users wiring their own robot or benchmark to an OpenWAM policy server.
 
 **You don't need to know anything about the server** — its model, preprocessing,
-multi-view composition, prompt wrapping, or checkpoint. Just speak the WebSocket
+multi-view composition, or checkpoint. Just speak the WebSocket
 protocol below. Minimal client dependencies: `numpy`, `Pillow`, `websockets`
 (plus `opencv-python` if you decode camera frames yourself). The wire contract
 (message types) is mirrored on both sides: server constants in [`openwam/deploy/server.py`](../openwam/deploy/server.py), client constants in [`benchmarks/utils/transport.py`](utils/transport.py).
 
 ## 1. What the client sends
 
-One call per control step: three raw camera JPEGs + a base task prompt. Proprioceptive checkpoints also require a raw `state` vector whose length matches the checkpoint's `model.architecture.state_dim`.
+One call per control step: three raw camera JPEGs + the task `prompt` — the exact string the model should see (the server forwards it verbatim; wrap it in your checkpoint's template first). Proprioceptive checkpoints also require a raw `state` vector whose length matches the checkpoint's `model.architecture.state_dim`.
 
 ```json
 // obs message (Client → Server)
@@ -21,10 +21,12 @@ One call per control step: three raw camera JPEGs + a base task prompt. Proprioc
     "left_wrist_camera":  "<base64 JPEG>|null", // optional
     "right_wrist_camera": "<base64 JPEG>|null"  // optional
   },
-  "prompt": "pick up the red bottle",
+  "prompt": "pick up the red bottle",          // sent verbatim; wrap per your checkpoint's template
   "state":  [float, ...]                       // required when use_proprioception=true
 }
 ```
+
+> **Prompt formatting.** The server forwards `prompt` to the model **verbatim** — it does *not* wrap or reformat it. Send the exact string the model was trained on. Each benchmark owns its prompt template; for RoboTwin checkpoints, wrap the raw instruction with [`benchmarks/robotwin/prompt_template.py`](robotwin/prompt_template.py) (the RoboTwin eval adapter does this for you).
 
 Response (action message, Server → Client):
 
@@ -32,10 +34,9 @@ Response (action message, Server → Client):
 {"type": "action", "action": [float × 20 or 14], "step": int, "latency_ms": float}
 ```
 
-## 2. Four things you don't need to handle
+## 2. Three things you don't need to handle
 
 - **Image sizing / aspect ratio.** Server reads the checkpoint's `config.yaml` and resizes for you. Send the native camera output.
-- **Prompt format.** Pass the base task prompt (`"pick up the red bottle"`). Server wraps it with the training/deploy FastWAM template internally. Do **not** pre-wrap the prompt yourself.
 - **Action units.** For normalized checkpoints, the returned action is already denormalized to **physical units** (eef: xyz in meters, rot6d unitless, gripper 0-1; joint: radians). Feed it directly to your controller — do not multiply by any mean/std. If the checkpoint was trained with normalization disabled, deploy leaves actions and state in that raw training scale.
 - **Execution mode / chunking.** Whether the server runs the sync executor (buffer-and-replan) or the async one (background prefetch, `inference.execution_mode: async`) is invisible on the wire: the protocol is always one obs in, one action out.
 
@@ -103,7 +104,7 @@ with WSPolicyClient(ws_url, timeout=300.0, open_timeout=10.0) as client:
         head=head_b64,
         left_wrist=left_b64,
         right_wrist=right_b64,
-        prompt="pick up the red bottle",
+        prompt="pick up the red bottle",  # sent verbatim; wrap per your checkpoint's template first
         state=current_state,  # optional raw proprio; required for proprio-conditioned checkpoints
     )
     try:

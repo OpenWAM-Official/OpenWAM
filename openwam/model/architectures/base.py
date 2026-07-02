@@ -33,7 +33,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from openwam.model.compile_options import compile_mode
+from openwam.model.compile_options import compile_enabled
 
 
 def _wrap_single_forward(module: nn.Module) -> None:
@@ -958,7 +958,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             raise ValueError("Mixed reference images in batch: all samples must be consistent.")
 
         # Optional per-sample pre-encoded text embedding (e.g. Reason1 cached
-        # offline for the Cosmos25 backbone). Backbones that don't consume it
+        # offline for the CosmosPredict25 backbone). Backbones that don't consume it
         # (Wan) silently drop the kwarg via ``**kw``. All-or-nothing per batch;
         # uniform L required for fixed-shape stacking — padded variant deferred.
         pre_text_flags = [t is not None for t in all_pre_encoded_text]
@@ -1035,7 +1035,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             # ``latent[0]`` is a clean conditioning frame (and must be excluded
             # from the loss mask) when either:
             #   (a) the input batch carries ``first_frame_latents`` (Wan TI2V
-            #       / cosmos25 TI2V — per-batch signal), in which case
+            #       / cosmos_predict25 TI2V — per-batch signal), in which case
             #       ``base.compute_loss`` will clean-replace ``latents[:, :, 0:1]``
             #       on every step; or
             #   (b) the backbone's *configuration* always reserves ``latent[0]``
@@ -1048,7 +1048,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             # Wan VACE: first-frame condition rides on ``vace_context``;
             # video latents are fully noised, ``latent[0]`` enters the loss
             # as a predicted frame. NOT in the skip list.
-            # Cosmos25 T2V: no first-frame conditioning at all — both
+            # CosmosPredict25 T2V: no first-frame conditioning at all — both
             # signals off.
             skip_first = inputs.get("first_frame_latents") is not None or self.video_backbone.needs_first_frame_skip
             # Pass the backbone's temporal_compression so the tail-grouping
@@ -1074,9 +1074,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         actions: Optional[torch.Tensor] = None,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
-        current_step: int = 0,
         decoupled_sampler=None,
-        action_timestep_per_token: bool = False,
         **inputs,
     ) -> dict:
         """Compute joint video-action flow matching loss.
@@ -1096,9 +1094,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 be passed via ``inputs["actions"]``.
             lambda_video: Weight for video loss term.
             lambda_action: Weight for action loss term.
-            current_step: Current training step.
             decoupled_sampler: Optional DecoupledFlowMatchLoss.
-            action_timestep_per_token: Per-token action timestep sampling.
             **inputs: Preprocessed video/text tensors plus forward-time flags.
 
         Returns:
@@ -1117,15 +1113,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
         max_tb = int(inputs.pop("max_timestep_boundary", 1) * len(vb.scheduler.timesteps))
         min_tb = int(inputs.pop("min_timestep_boundary", 0) * len(vb.scheduler.timesteps))
         B = inputs["input_latents"].shape[0]
-        if action_timestep_per_token:
-            raise ValueError(
-                "action_timestep_per_token=True is not supported in the FastWAM-compatible path; "
-                "action timestep must be per-sample [B]."
-            )
 
         # --- Sample video timesteps ---
         if decoupled_sampler is not None:
-            video_t, decoupled_action_t = decoupled_sampler.sample_timesteps(B, current_step=current_step, device="cpu")
+            video_t, decoupled_action_t = decoupled_sampler.sample_timesteps(B, device="cpu")
             num_ts = len(vb.scheduler.timesteps)
             video_timestep_ids = (
                 (video_t / decoupled_sampler.num_train_timesteps * num_ts).long().clamp(min_tb, max_tb - 1)
@@ -1258,10 +1249,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         n_skip = 0
         if inputs.get("first_frame_latents") is not None:
-            # TI2V (Wan + cosmos25): trim the leading clean conditioning
+            # TI2V (Wan + cosmos_predict25): trim the leading clean conditioning
             # latent(s) from the loss. Wan adapter emits
             # ``num_clean_prefix_frames=0`` (one implicit conditioning latent
-            # at index 0); cosmos25 wrapper emits ``num_clean_prefix_frames=1``
+            # at index 0); cosmos_predict25 wrapper emits ``num_clean_prefix_frames=1``
             # (explicit count). Both should drop exactly the conditioning
             # latent(s), so use ``max(prefix, 1)``. VACE never enters this
             # branch — its conditioning rides on ``vace_context``, the video
@@ -1423,7 +1414,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # Defensive: deploy/model_loader.py:161 already flips eval at load,
         # but ad-hoc callers (notebooks, mid-training eval callbacks) might
         # invoke `generate()` without going through that path. Idempotent
-        # — guards CFG dropout (e.g. Cosmos25 §14.7) and any other
+        # — guards CFG dropout (e.g. CosmosPredict25 §14.7) and any other
         # training-only behavior from firing during inference.
         self.eval()
 
@@ -1448,7 +1439,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
         # CFG / pre-encoded-text knobs ARE forwarded so a CFG-capable backbone
-        # (Cosmos25) can materialise ``inputs_shared['uncond_context']`` from its
+        # (CosmosPredict25) can materialise ``inputs_shared['uncond_context']`` from its
         # own encoder/cache; the denoising loop below then applies CFG via
         # ``cfg_scale_f`` / ``cfg_merge``. Wan does no CFG at inference and
         # swallows these via ``**kw``, so its behaviour is unchanged.
@@ -1681,14 +1672,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     def apply_compile_optimizations(self, compile_cfg) -> None:
         """Apply architecture-specific deploy-time compile optimizations."""
-        mode = compile_mode(compile_cfg, default="none", strict=True)
-        if mode in (None, "auto", "none"):
-            return
-        logger.warning(
-            "torch.compile mode '%s' is not implemented for %s; running eager.",
-            mode,
-            type(self).__name__,
-        )
+        _ = compile_enabled(compile_cfg, default=False, strict=True)
+        vb_compile = getattr(getattr(self, "video_backbone", None), "apply_compile_optimizations", None)
+        if callable(vb_compile):
+            vb_compile(compile_cfg)
 
     @abstractmethod
     def forward(
@@ -1737,7 +1724,7 @@ _CFG_BATCH_AXIS_KEYS: tuple = (
     "first_frame_latents",
     "seq_lens",
     "context_mask",
-    # cosmos25 TI2V emits ``condition_mask`` of shape (B, 1, T_lat, H_lat, W_lat)
+    # cosmos_predict25 TI2V emits ``condition_mask`` of shape (B, 1, T_lat, H_lat, W_lat)
     # in ``_finalize_ti2v_inputs`` and the wrapper cats it to ``x_in`` along
     # dim=1; cfg_merge=True must double B here or that cat shape-mismatches.
     "condition_mask",

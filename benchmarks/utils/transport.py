@@ -74,7 +74,21 @@ class WSPolicyClient:
                 "WebSocket transport needs websockets>=12 (websockets.sync). Install with: pip install -U websockets"
             ) from exc
         # max_size=None: multi-camera base64 obs routinely exceed the 1 MB default.
-        self._ws = connect(self.ws_url, max_size=None, compression=self.compression, open_timeout=self.open_timeout)
+        # ping_interval=None: disable keepalive pings. Slow inference (esp. the
+        # torch.compile warmup on the first call) blocks the server event loop
+        # well past the 20s default ping deadline, which would otherwise drop the
+        # connection mid-inference. Liveness is bounded by recv(timeout=self.timeout).
+        # proxy=None: never route loopback/intranet inference traffic through
+        # HTTP(S)_PROXY / ALL_PROXY. websockets>=15 reads these env vars by
+        # default, which breaks direct ws://127.0.0.1 connections behind a proxy.
+        self._ws = connect(
+            self.ws_url,
+            max_size=None,
+            compression=self.compression,
+            open_timeout=self.open_timeout,
+            ping_interval=None,
+            proxy=None,
+        )
 
     def _roundtrip(self, message: dict, *, reconnect: bool = True) -> dict:
         body = json.dumps(message)

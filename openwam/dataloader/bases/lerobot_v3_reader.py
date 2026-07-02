@@ -1,7 +1,7 @@
 """Unified single-bucket LeRobot v3 reader base.
 
 One base class for every LeRobot v3 single-bucket reader in this package —
-the 4 OXE readers (BC-Z / Bridge / RT-1 / DROID), RoboCOIN, and EgoDex are
+the 4 OXE readers (BC-Z / Bridge / Fractal / DROID), RoboCOIN, and EgoDex are
 all **direct, equal subclasses** of :class:`LeRobotV3Reader`. There is no
 per-family intermediate base; the differences between readers are expressed
 through a small set of hook methods + class attributes, and the genuinely
@@ -342,12 +342,12 @@ class LeRobotV3Reader(BaseDataset):
         self._post_init(info)
 
         # ── unified per-dim validity mask (static) ────────────────────────
-        # Honors the raw ACTION_DIM_MASK: single-arm OXE / RoboMIND zero-pad
+        # Honors the raw ACTION_DIM_MASK: single-arm OXE zero-pads
         # the right-arm half of the 20-D EEF, which must stay masked out even
         # after the scatter — a unified slot is valid iff its source raw dim
         # was valid. Built HERE (not in the unify block above) because a
         # reader's instance ACTION_DIM_MASK may be set in _resolve_cameras
-        # (RoboMIND sets it per-embodiment), which runs after that block.
+        # (some readers set it per-embodiment), which runs after that block.
         self._unify_dim_mask: Optional[np.ndarray] = None
         if self._unify:
             self._unify_dim_mask = np.zeros(self._unify_dim, dtype=bool)
@@ -516,7 +516,7 @@ class LeRobotV3Reader(BaseDataset):
         return None
 
     def _post_init(self, info: dict) -> None:
-        """Optional one-time per-dataset setup (e.g. RT-1 quat sanity check)."""
+        """Optional one-time per-dataset setup (e.g. Fractal quat sanity check)."""
 
     @classmethod
     def _multibucket_wrapper(cls):

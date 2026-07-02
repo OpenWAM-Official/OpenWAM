@@ -4,11 +4,12 @@ Provides a network-accessible policy server that wraps WAMPolicy with
 receding-horizon execution. Robot controllers connect over a single
 persistent WebSocket.
 
-The client is thin on purpose: it always sends raw per-camera JPEGs plus a
-base task prompt. Image composition and resize happen server-side, driven by
-the saved training config (``cfg.dataloader.multiview`` / ``camera_layout`` /
-``height`` / ``width``); the prompt is wrapped with the FastWAM deploy
-template.
+The client is thin on purpose: it always sends raw per-camera JPEGs plus the
+task prompt. Image composition and resize happen server-side, driven by the
+saved training config (``cfg.dataloader.multiview`` / ``camera_layout`` /
+``height`` / ``width``). The server is prompt-agnostic — it forwards the prompt
+to the model verbatim; each benchmark client owns whatever prompt template its
+checkpoints were trained with.
 
 Protocol (unified — same shape for single-view and multi-view checkpoints):
     Client → {
@@ -19,7 +20,7 @@ Protocol (unified — same shape for single-view and multi-view checkpoints):
             "left_wrist_camera":  <base64_jpeg>|null,  # optional
             "right_wrist_camera": <base64_jpeg>|null   # optional
         },
-        "prompt": "<base task prompt>",
+        "prompt": "<prompt fed to the model verbatim>",
         "state":  [floats]                             # optional proprio
     }
 
@@ -27,7 +28,7 @@ Server-side behavior:
 - ``multiview=False``: ignores wrist fields, crop+resize ``head_camera``.
 - ``multiview=True``:  black-fills missing/None wrists, then composes the
   L-shape layout defined by ``camera_layout``.
-- ``prompt`` is always re-wrapped via ``format_prompt_for_inference``.
+- ``prompt`` is forwarded to the model verbatim (no server-side wrapping).
 
 Messages:
     obs   → {"type": "action", "action": [floats], "step": int, "latency_ms": float}
@@ -51,7 +52,6 @@ from typing import Optional
 from openwam.deploy.obs_preprocess import ObsPreprocessor, ObsValidationError
 
 logger = logging.getLogger(__name__)
-_COMPILE_MODES = ("auto", "none")
 
 # --- WebSocket message protocol (single source of truth for the server) ---
 # Benchmark clients keep their own mirror in benchmarks/utils/transport.py;
@@ -86,31 +86,37 @@ def _infer_video_num_frames(dl) -> int:
     return (raw_frames - 1) // video_stride + 1
 
 
-def _normalize_compile_mode_in_cfg(cfg) -> None:
-    """Keep package and script entrypoints aligned on compile-mode validation."""
+def _normalize_compile_enabled_in_cfg(cfg) -> None:
+    """Keep package and script entrypoints aligned on compile-enabled validation."""
     from omegaconf import OmegaConf
 
-    from openwam.model.compile_options import normalize_compile_mode
+    from openwam.model.compile_options import compile_enabled, normalize_compile_enabled
 
-    mode = OmegaConf.select(cfg, "optimization.compile.mode", default=None)
-    if mode is not None:
-        OmegaConf.update(cfg, "optimization.compile.mode", normalize_compile_mode(mode), merge=False)
+    enabled = OmegaConf.select(cfg, "optimization.compile.enabled", default=None)
+    if enabled is not None:
+        OmegaConf.update(cfg, "optimization.compile.enabled", normalize_compile_enabled(enabled), merge=False)
+        return
+    compile_cfg = OmegaConf.select(cfg, "optimization.compile", default=None)
+    if compile_cfg is not None:
+        OmegaConf.update(cfg, "optimization.compile.enabled", compile_enabled(compile_cfg, strict=True), merge=False)
 
 
-def _apply_compile_mode_override(cfg, compile_mode: Optional[str]) -> None:
-    """Apply a named CLI compile-mode override, then normalize the config."""
+def _apply_compile_enabled_override(cfg, compile_enabled: Optional[bool]) -> None:
+    """Apply a CLI compile-enabled override, then normalize the config."""
     from omegaconf import OmegaConf
 
-    if compile_mode is not None:
-        OmegaConf.update(cfg, "optimization.compile.mode", compile_mode, merge=False)
-    _normalize_compile_mode_in_cfg(cfg)
+    if compile_enabled is not None:
+        OmegaConf.update(cfg, "optimization.compile.enabled", compile_enabled, merge=False)
+    _normalize_compile_enabled_in_cfg(cfg)
 
 
-def _normalize_compile_mode_arg(value: str) -> str:
-    normalized = str(value).strip().lower().replace("-", "_")
-    if normalized not in _COMPILE_MODES:
-        raise argparse.ArgumentTypeError(f"Unknown compile mode '{value}'. Choose from: {', '.join(_COMPILE_MODES)}")
-    return normalized
+def _normalize_compile_enabled_arg(value: str) -> bool:
+    from openwam.model.compile_options import normalize_compile_enabled
+
+    try:
+        return normalize_compile_enabled(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 class PolicyServer:
@@ -165,8 +171,9 @@ class PolicyServer:
             obs: Observation dict with ``images`` (dict of camera name →
                 base64 JPEG / bytes / PIL.Image, with ``head_camera`` required
                 and ``left_wrist_camera`` / ``right_wrist_camera`` optional),
-                a base ``prompt`` (str), and optional ``state`` (list of floats).
-                Server does all preprocessing and prompt wrapping internally.
+                the ``prompt`` (str, forwarded to the model verbatim), and
+                optional ``state`` (list of floats). Server does all image
+                preprocessing internally; prompt wrapping is the client's job.
 
         Returns:
             dict with "action" (list of floats in physical units),
@@ -270,7 +277,12 @@ class PolicyServer:
                 logger.info("Client disconnected")
 
         async def serve():
-            async with websockets.serve(ws_handler, host, port, max_size=MAX_MESSAGE_BYTES):
+            # ping_interval=None: slow inference (notably torch.compile warmup on
+            # the first request) blocks this event loop past the 20s default ping
+            # deadline; keepalive pings would drop the connection mid-inference.
+            async with websockets.serve(
+                ws_handler, host, port, max_size=MAX_MESSAGE_BYTES, ping_interval=None
+            ):
                 logger.info("WebSocket server started on ws://%s:%d", host, port)
                 await asyncio.Future()  # run forever
 
@@ -324,7 +336,7 @@ def build_server_from_config(
 
     training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name)
     deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
-    _normalize_compile_mode_in_cfg(deploy_cfg)
+    _normalize_compile_enabled_in_cfg(deploy_cfg)
     merged = merge_deploy_cfg(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=merged, architecture=architecture)
     return PolicyServer(engine=engine, cfg=merged)
@@ -416,17 +428,31 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schedule-type",
         type=str,
-        choices=["sync"],
+        choices=["sync", "variance_shift"],
         default=None,
         dest="schedule_type",
-        help="Override schedule type (only 'sync' is supported)",
+        help="Override inference.schedule_type: 'sync' | 'variance_shift' (Latent-Forcing ordered)",
     )
     parser.add_argument(
-        "--compile-mode",
-        type=_normalize_compile_mode_arg,
-        choices=_COMPILE_MODES,
+        "--vs-lead",
+        type=str,
+        choices=["action", "video"],
         default=None,
-        help="Override compile strategy: auto or none.",
+        dest="vs_lead",
+        help="Override inference.vs_lead (variance_shift only): which stream denoises earlier",
+    )
+    parser.add_argument(
+        "--vs-alpha",
+        type=float,
+        default=None,
+        dest="vs_alpha",
+        help="Override inference.vs_alpha (variance_shift only): lead-curve strength (>1 leads; 1 = diagonal)",
+    )
+    parser.add_argument(
+        "--compile-enabled",
+        type=_normalize_compile_enabled_arg,
+        default=None,
+        help="Enable architecture-specific compile fast paths: true or false.",
     )
     parser.add_argument(
         "--execution-mode",
@@ -452,7 +478,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Additional OmegaConf dotlist overrides, e.g. model/video_backbone=cosmos25",
+        help="Additional OmegaConf dotlist overrides, e.g. model/video_backbone=cosmos_predict25",
     )
     return parser
 
@@ -484,6 +510,10 @@ def _apply_inference_overrides(cfg, args):
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.schedule_type is not None:
         OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
+    if args.vs_lead is not None:
+        OmegaConf.update(cfg, "inference.vs_lead", args.vs_lead, merge=False)
+    if args.vs_alpha is not None:
+        OmegaConf.update(cfg, "inference.vs_alpha", args.vs_alpha, merge=False)
     return cfg
 
 
@@ -505,7 +535,7 @@ def main(argv: Optional[list[str]] = None):
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
 
     cfg = _apply_inference_overrides(cfg, args)
-    _apply_compile_mode_override(cfg, args.compile_mode)
+    _apply_compile_enabled_override(cfg, args.compile_enabled)
     try:
         cfg = _apply_execution_cli_overrides(cfg, args)
     except ValueError as exc:

@@ -69,7 +69,6 @@ class OpenWAMTrainer:
         self.cfg = cfg
         self.dataset = dataset
         self.accelerator = accelerator
-        self._current_step = 0
 
         # ---- Reproducible seed (FastWAM-style, yaml-driven) ----
         # Seed before build_architecture so DiT/ActionDiT weight init is
@@ -118,6 +117,40 @@ class OpenWAMTrainer:
         # Loss weights from the training config
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)
+
+        # Optional decoupled timestep sampler (training.timestep_sampling).
+        # None keeps compute_loss's legacy torch.randint path (default,
+        # bit-identical to upstream). "variance_shift" routes curve-correlated
+        # per-stream timesteps through the decoupled_sampler hook
+        # (Latent-Forcing; the training-time counterpart to the deploy
+        # schedule_type="variance_shift"). See
+        # openwam.model.architectures.utils.timestep_sampling.
+        from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
+
+        # num_train_timesteps from the action scheduler (matches the
+        # init_training_schedulers(1000) call above); fall back to 1000 for
+        # stub/mock architectures. compute_loss only uses this as a ratio
+        # (t / num_train * num_ts), so a mismatch would be harmless -- reading
+        # it keeps the sampler aligned with the backbone's actual grid.
+        _num_train_ts = int(getattr(getattr(self.architecture, "action_scheduler", None), "num_train_timesteps", 1000))
+        self._timestep_sampler = build_timestep_sampler(
+            cfg_get(t, "timestep_sampling", None),
+            num_train_timesteps=_num_train_ts,
+            lead=cfg_get(t, "timestep_sampling_lead", "video"),
+            alpha=cfg_get(t, "timestep_sampling_alpha", 9.0),
+        )
+        # Decoupled timestep sampling (variance_shift) is only supported on the
+        # joint_self_attn variant; reject any other architecture up front (the
+        # other variants consume the sampler through paths never validated for it).
+        if self._timestep_sampler is not None and resolved_arch.canonical.variant != "joint_self_attn":
+            raise ValueError(
+                f"training.timestep_sampling is only supported on the joint_self_attn variant; "
+                f"got framework={resolved_arch.canonical.framework!r} "
+                f"variant={resolved_arch.canonical.variant!r}. "
+                f"Use timestep_sampling=default for other architectures."
+            )
+        if self._timestep_sampler is not None and self._rank == 0:
+            logger.info("Training timestep sampling: %s", cfg_get(t, "timestep_sampling", None))
 
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.
@@ -293,7 +326,6 @@ class OpenWAMTrainer:
                         optimizer.zero_grad()
                         opt_step += 1
 
-                self._current_step = global_step
                 global_step += 1
 
                 metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
@@ -482,7 +514,7 @@ class OpenWAMTrainer:
             **inputs,
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
-            current_step=self._current_step,
+            decoupled_sampler=self._timestep_sampler,
         )
 
         return {

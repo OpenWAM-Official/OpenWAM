@@ -29,7 +29,7 @@ __all__ = [
     "VideoBackbone",
     "Wan22Ti2v",
     "Wan21",
-    "Cosmos25VideoBackbone",
+    "CosmosPredict25VideoBackbone",
     "build_video_backbone",
     "register_video_backbone",
     "_VIDEO_BACKBONE_REGISTRY",
@@ -45,7 +45,7 @@ register_video_backbone("wan21_i2v_14b_480p")(Wan21)
 
 # Cosmos-Predict2.5 backbone. Importing the module is CPU-only-CI safe — the
 # heavy ``cosmos_predict2`` import is deferred to ``from_pretrained``.
-from openwam.model.video_backbone.cosmos25_backbone import Cosmos25VideoBackbone  # noqa: E402
+from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone  # noqa: E402
 
-register_video_backbone("cosmos25_predict_2b")(Cosmos25VideoBackbone)
-register_video_backbone("cosmos25_predict_14b")(Cosmos25VideoBackbone)
+register_video_backbone("cosmos_predict25_2b")(CosmosPredict25VideoBackbone)
+register_video_backbone("cosmos_predict25_14b")(CosmosPredict25VideoBackbone)

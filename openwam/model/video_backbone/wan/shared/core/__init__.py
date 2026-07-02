@@ -1,9 +1,7 @@
 from .attention import attention_forward as attention_forward
 from .data import UnifiedDataset as UnifiedDataset
 from .device import IS_CUDA_AVAILABLE as IS_CUDA_AVAILABLE
-from .device import IS_NPU_AVAILABLE as IS_NPU_AVAILABLE
 from .device import get_available_device_type as get_available_device_type
-from .device import get_device_name as get_device_name
 from .device import parse_device_type as parse_device_type
 from .device import parse_nccl_backend as parse_nccl_backend
 from .gradient import gradient_checkpoint_forward as gradient_checkpoint_forward

@@ -91,7 +91,7 @@ class TestDeploymentYaml:
 
         cfg = self._load()
         assert OmegaConf.select(cfg, "optimization.compile") is not None
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "auto"
+        assert OmegaConf.select(cfg, "optimization.compile.enabled") is False
         assert OmegaConf.select(cfg, "optimization.compile.self_attn.torch_mode") == "default"
         assert OmegaConf.select(cfg, "optimization.compile.self_attn.dynamic") is False
         assert OmegaConf.select(cfg, "optimization.compile.cross_attn.torch_mode") == "default"
@@ -152,8 +152,10 @@ class TestDeployConfigLoading:
             "port",
             "denoise_steps",
             "schedule_type",
+            "vs_lead",
+            "vs_alpha",
             "shift",
-            "compile_mode",
+            "compile_enabled",
             "execution_mode",
             "execution_horizon",
             "inference_delay_steps",
@@ -187,7 +189,21 @@ class TestDeployConfigLoading:
         cfg = deploy._apply_inference_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.denoise_steps") == 20
 
-    def test_cli_compile_mode_none_disables_compile(self):
+    def test_cli_schedule_overrides(self):
+        from omegaconf import OmegaConf
+
+        deploy = self._policy_server()
+
+        cfg = deploy._load_deploy_yaml()
+        args = self._blank_args()
+        args.schedule_type = "variance_shift"
+        args.vs_lead = "video"
+
+        cfg = deploy._apply_inference_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "inference.schedule_type") == "variance_shift"
+        assert OmegaConf.select(cfg, "inference.vs_lead") == "video"
+
+    def test_cli_compile_enabled_false_disables_compile(self):
         from omegaconf import OmegaConf
 
         deploy = self._policy_server()
@@ -195,14 +211,14 @@ class TestDeployConfigLoading:
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.compile_mode = "none"
+        args.compile_enabled = False
 
-        deploy._apply_compile_mode_override(cfg, args.compile_mode)
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
+        deploy._apply_compile_enabled_override(cfg, args.compile_enabled)
+        assert OmegaConf.select(cfg, "optimization.compile.enabled") is False
         compile_cfg = OmegaConf.select(cfg, "optimization.compile")
-        assert compile_options.compile_mode(compile_cfg, strict=True) == "none"
+        assert compile_options.compile_enabled(compile_cfg, strict=True) is False
 
-    def test_cli_compile_mode_auto_keeps_architecture_selection(self):
+    def test_cli_compile_enabled_true_keeps_architecture_selection(self):
         from omegaconf import OmegaConf
 
         deploy = self._policy_server()
@@ -210,27 +226,27 @@ class TestDeployConfigLoading:
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.compile_mode = "auto"
+        args.compile_enabled = True
 
-        deploy._apply_compile_mode_override(cfg, args.compile_mode)
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "auto"
+        deploy._apply_compile_enabled_override(cfg, args.compile_enabled)
+        assert OmegaConf.select(cfg, "optimization.compile.enabled") is True
         compile_cfg = OmegaConf.select(cfg, "optimization.compile")
-        assert compile_options.compile_mode(compile_cfg, strict=True) == "auto"
+        assert compile_options.compile_enabled(compile_cfg, strict=True) is True
 
-    def test_cli_compile_mode_accepts_only_auto_and_none(self):
+    def test_cli_compile_enabled_accepts_bool_strings(self):
         import argparse
 
         deploy = self._policy_server()
 
         parser = argparse.ArgumentParser()
-        parser.add_argument("--compile-mode", type=deploy._normalize_compile_mode_arg, choices=deploy._COMPILE_MODES)
+        parser.add_argument("--compile-enabled", type=deploy._normalize_compile_enabled_arg)
 
-        assert parser.parse_args(["--compile-mode", "auto"]).compile_mode == "auto"
-        assert parser.parse_args(["--compile-mode", "none"]).compile_mode == "none"
+        assert parser.parse_args(["--compile-enabled", "true"]).compile_enabled is True
+        assert parser.parse_args(["--compile-enabled", "false"]).compile_enabled is False
         with pytest.raises(SystemExit):
-            parser.parse_args(["--compile-mode", "self-attn"])
+            parser.parse_args(["--compile-enabled", "auto"])
         with pytest.raises(SystemExit):
-            parser.parse_args(["--compile-mode", "cross-attn"])
+            parser.parse_args(["--compile-enabled", "none"])
 
     def test_mode_only_compile_sections_use_fast_path_defaults(self):
         compile_options = self._compile_options()
@@ -306,51 +322,55 @@ class TestDeployConfigLoading:
         assert compile_options.section_enabled(idm_section.video_loop, default=True) is False
         assert compile_options.section_enabled(idm_section.action_cache, default=False) is True
 
-    def test_removed_compile_modes_are_rejected(self):
+    def test_compile_enabled_validation_rejects_non_bool_values(self):
         compile_options = self._compile_options()
 
-        assert compile_options.normalize_compile_mode("auto") == "auto"
-        assert compile_options.normalize_compile_mode("none") == "none"
-        with pytest.raises(ValueError, match="Unknown compile mode"):
-            compile_options.normalize_compile_mode("default")
-        with pytest.raises(ValueError, match="Unknown compile mode"):
-            compile_options.compile_mode({"mode": "default"}, strict=True)
-        with pytest.raises(ValueError, match="Unknown compile mode"):
-            compile_options.normalize_compile_mode("self_attn")
-        with pytest.raises(ValueError, match="Unknown compile mode"):
-            compile_options.normalize_compile_mode("cross-attn")
+        assert compile_options.normalize_compile_enabled("true") is True
+        assert compile_options.normalize_compile_enabled("false") is False
+        with pytest.raises(ValueError, match="Unknown compile enabled value"):
+            compile_options.normalize_compile_enabled("default")
+        with pytest.raises(ValueError, match="Unknown legacy compile mode"):
+            compile_options.compile_enabled({"mode": "default"}, strict=True)
+        with pytest.raises(ValueError, match="Unknown compile enabled value"):
+            compile_options.normalize_compile_enabled("self_attn")
+        with pytest.raises(ValueError, match="Unknown compile enabled value"):
+            compile_options.normalize_compile_enabled("cross-attn")
 
-    def test_policy_server_entrypoint_validates_compile_mode(self):
+    def test_policy_server_entrypoint_validates_compile_enabled(self):
         from omegaconf import OmegaConf
 
         policy_server = self._policy_server()
 
-        cfg = OmegaConf.create({"optimization": {"compile": {"mode": "none"}}})
-        policy_server._normalize_compile_mode_in_cfg(cfg)
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
+        cfg = OmegaConf.create({"optimization": {"compile": {"enabled": "false"}}})
+        policy_server._normalize_compile_enabled_in_cfg(cfg)
+        assert OmegaConf.select(cfg, "optimization.compile.enabled") is False
 
-        auto_cfg = OmegaConf.create({"optimization": {"compile": {"mode": "auto"}}})
-        policy_server._normalize_compile_mode_in_cfg(auto_cfg)
-        assert OmegaConf.select(auto_cfg, "optimization.compile.mode") == "auto"
+        true_cfg = OmegaConf.create({"optimization": {"compile": {"enabled": "true"}}})
+        policy_server._normalize_compile_enabled_in_cfg(true_cfg)
+        assert OmegaConf.select(true_cfg, "optimization.compile.enabled") is True
 
-        bad_cfg = OmegaConf.create({"optimization": {"compile": {"mode": "default"}}})
-        with pytest.raises(ValueError, match="Unknown compile mode"):
-            policy_server._normalize_compile_mode_in_cfg(bad_cfg)
+        legacy_cfg = OmegaConf.create({"optimization": {"compile": {"mode": "auto"}}})
+        policy_server._normalize_compile_enabled_in_cfg(legacy_cfg)
+        assert OmegaConf.select(legacy_cfg, "optimization.compile.enabled") is True
 
-    def test_policy_server_compile_mode_cli_override(self):
+        bad_cfg = OmegaConf.create({"optimization": {"compile": {"enabled": "default"}}})
+        with pytest.raises(ValueError, match="Unknown compile enabled value"):
+            policy_server._normalize_compile_enabled_in_cfg(bad_cfg)
+
+    def test_policy_server_compile_enabled_cli_override(self):
         from omegaconf import OmegaConf
 
         policy_server = self._policy_server()
 
-        args = policy_server._build_argparser().parse_args(["--compile-mode", "none"])
-        assert args.compile_mode == "none"
+        args = policy_server._build_argparser().parse_args(["--compile-enabled", "false"])
+        assert args.compile_enabled is False
 
         cfg = OmegaConf.create({})
-        policy_server._apply_compile_mode_override(cfg, args.compile_mode)
-        assert OmegaConf.select(cfg, "optimization.compile.mode") == "none"
+        policy_server._apply_compile_enabled_override(cfg, args.compile_enabled)
+        assert OmegaConf.select(cfg, "optimization.compile.enabled") is False
 
         with pytest.raises(SystemExit):
-            policy_server._build_argparser().parse_args(["--compile-mode", "self-attn"])
+            policy_server._build_argparser().parse_args(["--compile-enabled", "self-attn"])
 
     def test_cli_execution_mode_override(self):
         from omegaconf import OmegaConf
@@ -485,7 +505,7 @@ class TestJointEngineCompileFlags:
         engine._architecture_generate_warned_dropped_kwargs = set()
         return engine
 
-    def _make_engine(self, compile_mode="none", return_arch=False):
+    def _make_engine(self, compile_enabled=False, return_arch=False):
         from omegaconf import OmegaConf
 
         from openwam.deploy.engine import JointInferenceEngine
@@ -503,7 +523,7 @@ class TestJointEngineCompileFlags:
                 "optimization": {
                     "decode_video": True,
                     "compile": {
-                        "mode": compile_mode,
+                        "enabled": compile_enabled,
                         "self_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
                         "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
                         "tri_system": {"torch_mode": "reduce-overhead", "dynamic": False},
@@ -526,18 +546,18 @@ class TestJointEngineCompileFlags:
             return engine, mock_compile, arch
         return engine, mock_compile
 
-    def test_compile_mode_none_does_not_broad_compile(self):
+    def test_compile_enabled_false_does_not_broad_compile(self):
         _engine, mock_compile, arch = self._make_engine(return_arch=True)
         mock_compile.assert_not_called()
         arch.apply_compile_optimizations.assert_called_once()
 
-    def test_auto_mode_is_passed_to_architecture(self):
+    def test_compile_enabled_true_is_passed_to_architecture(self):
         from omegaconf import OmegaConf
 
-        _engine, mock_compile, arch = self._make_engine("auto", return_arch=True)
+        _engine, mock_compile, arch = self._make_engine(True, return_arch=True)
         mock_compile.assert_not_called()
         compile_cfg = arch.apply_compile_optimizations.call_args.args[0]
-        assert OmegaConf.select(compile_cfg, "mode") == "auto"
+        assert OmegaConf.select(compile_cfg, "enabled") is True
 
     def test_generate_kwarg_filter_warns_once_for_meaningful_drops(self, caplog):
         class _StrictArchitecture:
@@ -625,7 +645,7 @@ class TestJointEngineCompileFlags:
         arch = _make_tiny_arch()
         cfg = OmegaConf.create(
             {
-                "mode": "none",
+                "enabled": False,
                 "cross_attn": {"torch_mode": "reduce-overhead", "dynamic": False},
             }
         )
@@ -635,13 +655,13 @@ class TestJointEngineCompileFlags:
 
         mock_compile.assert_not_called()
 
-    def test_base_architecture_auto_compile_is_eager(self):
+    def test_architecture_auto_compile_respects_disabled_fast_path(self):
         from omegaconf import OmegaConf
 
         from tests.test_openwam_trainer import _make_tiny_arch
 
         arch = _make_tiny_arch()
-        cfg = OmegaConf.create({"mode": "auto"})
+        cfg = OmegaConf.create({"enabled": True, "cross_attn": {"enabled": False}})
 
         with patch("torch.compile") as mock_compile:
             arch.apply_compile_optimizations(cfg)
@@ -806,3 +826,42 @@ class TestCudagraphMarkStepBegin:
                     f"Line {i + 1}: dispatch not preceded by "
                     f"cudagraph_mark_step_begin(). Found instead: {lines[prev]!r}"
                 )
+
+
+class TestEmptyPromptCacheRouting:
+    """Empty prompt must resolve to ``empty.safetensors`` in cache mode.
+
+    The precompute stores the empty embedding as ``empty.safetensors`` (not
+    under ``sha256("")``), and the training-side read path special-cases
+    ``prompt == ""`` (text_embedding_cache.py). The engine must match, else a
+    cache-mode empty prompt raises FileNotFoundError despite the embedding
+    existing.
+    """
+
+    def _bypassed_engine(self, cache_dir):
+        from openwam.deploy.engine import JointInferenceEngine
+
+        engine = JointInferenceEngine.__new__(JointInferenceEngine)
+        engine._text_embedding_cache_dir = Path(cache_dir) if cache_dir is not None else None
+        # Echo the path handed to the loader so we can assert *which* file the
+        # router resolved, without real tensors or an architecture.
+        engine._load_pre_encoded_text_safetensors = lambda path: ("loaded", Path(path))
+        return engine
+
+    def test_empty_prompt_routes_to_empty_safetensors(self, tmp_path):
+        empty = tmp_path / "empty.safetensors"
+        empty.write_bytes(b"")  # existence is all the router checks before loading
+        engine = self._bypassed_engine(tmp_path)
+
+        assert engine._load_pre_encoded_text_for_prompt("") == ("loaded", empty)
+
+    def test_empty_prompt_missing_empty_file_raises(self, tmp_path):
+        engine = self._bypassed_engine(tmp_path)  # no empty.safetensors written
+
+        with pytest.raises(FileNotFoundError, match="empty.safetensors"):
+            engine._load_pre_encoded_text_for_prompt("")
+
+    def test_no_cache_dir_returns_none_for_empty_prompt(self):
+        engine = self._bypassed_engine(None)
+
+        assert engine._load_pre_encoded_text_for_prompt("") is None

@@ -58,7 +58,7 @@ def apply_normalization(
         * ``z-score``: ``(arr - mean) / std`` with std floored at 1e-6.
           Unbounded by design (standardization), so NOT clipped.
         * ``quantile``: ``clip((arr - q01) / (q99 - q01) * 2 - 1, -1, 1)``.
-          Robust to outliers (RT-1 has a y-axis action range of [-5.5, 22.09]
+          Robust to outliers (Fractal has a y-axis action range of [-5.5, 22.09]
           which would compress 99% of values into a tiny window under
           min-max). Quantile clips the outliers to the boundary.
 

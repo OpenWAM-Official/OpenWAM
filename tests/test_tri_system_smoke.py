@@ -5,6 +5,7 @@ interfaces, Qwen3-VL feature extraction with fake modules, and lightweight
 checkpoint invariants.
 """
 
+import copy
 import os
 
 import pytest
@@ -358,6 +359,47 @@ def test_tri_system_mot_driver_trimodal_cpu():
     assert torch.isfinite(vstate.hidden_states).all()
     assert torch.isfinite(astate.payload.x_action).all()
     assert torch.isfinite(ustate.und_tokens).all()
+
+
+def test_tri_system_mot_compile_core_matches_eager_cpu():
+    torch.manual_seed(0)
+    vb, ab, ub = _make_tiny_trimodal_components()
+    vb_core = copy.deepcopy(vb)
+    ab_core = copy.deepcopy(ab)
+    ub_core = copy.deepcopy(ub)
+
+    vstate, astate, ustate = _tri_system_mot_states(vb, ab, ub, seed=123)
+    vstate_core, astate_core, ustate_core = _tri_system_mot_states(vb_core, ab_core, ub_core, seed=123)
+
+    eager = TriSystemMoTDriver(vb, ab, ub, mot_checkpoint_mixed_attn=False)
+    core = TriSystemMoTDriver(vb_core, ab_core, ub_core, mot_checkpoint_mixed_attn=False)
+
+    with torch.no_grad():
+        vstate, astate, ustate = eager.run_joint_loop(vstate, astate, ustate)
+        video_tokens_per_frame = core._video_tokens_per_frame(vstate_core)
+        attn_mask = core._build_attention_mask(
+            s_video=int(vstate_core.grid_frames) * video_tokens_per_frame,
+            s_action=core._get_action_tokens(astate_core).shape[1],
+            s_understanding=ustate_core.und_tokens.shape[1],
+            video_tokens_per_frame=video_tokens_per_frame,
+            device=vstate_core.hidden_states.device,
+            und_mask=getattr(ustate_core, "und_mask", None),
+        )
+        vstate_core, astate_core, ustate_core = core.run_joint_loop_for_compile(
+            vstate_core,
+            astate_core,
+            ustate_core,
+            attn_mask=attn_mask,
+        )
+
+    assert torch.allclose(vstate_core.hidden_states, vstate.hidden_states, atol=1.0e-5, rtol=1.0e-5)
+    assert torch.allclose(
+        core._get_action_tokens(astate_core),
+        eager._get_action_tokens(astate),
+        atol=1.0e-5,
+        rtol=1.0e-5,
+    )
+    assert torch.allclose(ustate_core.und_tokens, ustate.und_tokens, atol=1.0e-5, rtol=1.0e-5)
 
 
 def _tri_system_mot_states(vb, ab, ub, seed: int, *, und_mask: torch.Tensor | None = None):

@@ -1,7 +1,7 @@
 """Map heterogeneous per-robot action vectors into a unified action space.
 
 Different robots emit different raw action layouts (multi-joint, OXE
-single-arm EEF, RoboMIND multi-embodiment, ...). To train one model over a
+single-arm EEF, ...). To train one model over a
 shared action head, each dataset declares — in its yaml — which raw dims map to
 which slots of a single unified space of width ``UNIFY_DIM``. This module is the
 pure-mechanism layer for that:
@@ -145,8 +145,7 @@ def parse_unify_spec(spec: Sequence, unify_dim: int = UNIFY_DIM) -> np.ndarray:
             dst = _expand_ranges(pair[1])
             if len(src) != len(dst):
                 raise ValueError(
-                    f"unify spec: src/dst length mismatch in {pair!r} "
-                    f"(src has {len(src)}, dst has {len(dst)})"
+                    f"unify spec: src/dst length mismatch in {pair!r} (src has {len(src)}, dst has {len(dst)})"
                 )
             for s, d in zip(src, dst):
                 if s in src_to_dst:
@@ -157,8 +156,7 @@ def parse_unify_spec(spec: Sequence, unify_dim: int = UNIFY_DIM) -> np.ndarray:
         expected = list(range(len(src_dims)))
         if src_dims != expected:
             raise ValueError(
-                f"unify spec: source dims must cover 0..N-1 with no gaps; "
-                f"got {src_dims} (expected {expected})"
+                f"unify spec: source dims must cover 0..N-1 with no gaps; got {src_dims} (expected {expected})"
             )
         dst_index = np.array([src_to_dst[s] for s in src_dims], dtype=np.int64)
     else:
@@ -205,8 +203,7 @@ def map_to_unify(
     n = dst_index.shape[0]
     if action.shape[-1] != n:
         raise ValueError(
-            f"map_to_unify: action last dim {action.shape[-1]} != mapping size {n} "
-            f"(action shape {action.shape})"
+            f"map_to_unify: action last dim {action.shape[-1]} != mapping size {n} (action shape {action.shape})"
         )
     unified = np.zeros((*action.shape[:-1], unify_dim), dtype=action.dtype)
     unified[..., dst_index] = action  # scatter along the last axis

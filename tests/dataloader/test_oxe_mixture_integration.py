@@ -1,9 +1,9 @@
 """Mixture-level integration test for OXE readers.
 
 Verifies:
-  1. ``mixture.yaml`` composes with all 4 OXE entries under Hydra defaults.
-  2. The composed ``cfg.datasets.oxe_*`` blocks contain the inherited
-     fields from ``configs/dataloader/oxe_*.yaml``.
+  1. ``mixture.yaml`` composes its robot/ego entries under Hydra defaults.
+  2. The composed ``cfg.datasets.<name>`` blocks contain the inherited
+     fields from ``configs/dataloader/<name>.yaml``.
   3. A mixture built from synthetic OXE buckets + FakeActionDataset
      collates cleanly through ``default_collate`` into per-batch tensors
      of the expected 2-D mask shapes.
@@ -15,26 +15,31 @@ import os
 
 import pytest
 
+# mixture.yaml composes these under Hydra defaults (robot: robocoin, oxe_droid;
+# ego: egodex). bcz/bridge/fractal stay registered but are no longer part of the
+# default mixture — see TestMixtureRegistryDispatch.
+MIXTURE_ENTRIES = ("robocoin", "oxe_droid", "egodex")
+
 
 class TestMixtureYamlComposition:
-    def test_mixture_includes_all_oxe_entries(self):
+    def test_mixture_includes_expected_entries(self):
         from hydra import compose, initialize_config_dir
 
         config_dir = os.path.abspath("configs/dataloader")
         with initialize_config_dir(config_dir=config_dir, version_base=None):
             cfg = compose(config_name="mixture")
         names = list(cfg.datasets.keys())
-        for required in ("oxe_bcz", "oxe_bridge", "oxe_rt1", "oxe_droid"):
+        for required in MIXTURE_ENTRIES:
             assert required in names, f"mixture missing {required}"
 
-    def test_oxe_blocks_inherit_dataset_dir(self):
+    def test_blocks_inherit_dataset_dir(self):
         from hydra import compose, initialize_config_dir
 
         config_dir = os.path.abspath("configs/dataloader")
         with initialize_config_dir(config_dir=config_dir, version_base=None):
             cfg = compose(config_name="mixture")
-        # Each OXE entry should have dataset_dir inherited from its standalone yaml
-        for name in ("oxe_bcz", "oxe_bridge", "oxe_rt1", "oxe_droid"):
+        # Each entry inherits dataset_dir + type from its standalone yaml.
+        for name in MIXTURE_ENTRIES:
             assert cfg.datasets[name].get("dataset_dir"), f"{name} missing dataset_dir"
             assert cfg.datasets[name].get("type") == name
 
@@ -55,7 +60,7 @@ class TestMixtureRegistryDispatch:
         from openwam.dataloader.registry import list_registered_datasets
 
         names = list_registered_datasets()
-        for required in ("oxe_bcz", "oxe_bridge", "oxe_rt1", "oxe_droid"):
+        for required in ("oxe_bcz", "oxe_bridge", "oxe_fractal", "oxe_droid"):
             assert required in names, f"{required} not in registry"
 
 

@@ -331,6 +331,44 @@ class TriSystemMoTDriver:
         ustate.und_tokens = new_ux
         return vstate, astate, ustate
 
+    def run_joint_loop_for_compile(
+        self,
+        vstate: "BlockLoopState",
+        astate: "ActionState",
+        ustate: "UnderstandingState",
+        *,
+        attn_mask: Optional[Tensor],
+    ) -> Tuple["BlockLoopState", "ActionState", "UnderstandingState"]:
+        """Compile-friendly trimodal loop with a prebuilt attention mask.
+
+        This eval-only path deliberately avoids the Python ``step(layer_id, ...)``
+        wrapper and the tensor-to-Python padding-mask branch in
+        ``_build_attention_mask``. The architecture builds the mask outside the
+        compiled boundary, then this method keeps the hot path on per-layer
+        tensor/tuple pre/post helpers.
+        """
+        for layer_id in range(self.num_layers):
+            q_v, k_v, v_v, vpost = self.vb.pre_attn_at_layer_for_compile(layer_id, vstate)
+            q_a, k_a, v_a, apost = self.ab.pre_attn_at_layer_for_compile(layer_id, astate)
+            q_u, k_u, v_u, upost = self.ub.pre_attn_at_layer_for_compile(layer_id, ustate)
+
+            self._check_compatible(layer_id, q_v, k_v, v_v, q_a, k_a, v_a, q_u, k_u, v_u)
+
+            s_video = q_v.shape[1]
+            s_action = q_a.shape[1]
+            s_understanding = q_u.shape[1]
+
+            q_cat = torch.cat([q_v, q_a, q_u], dim=1)
+            k_cat = torch.cat([k_v, k_a, k_u], dim=1)
+            v_cat = torch.cat([v_v, v_a, v_u], dim=1)
+            mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask)
+
+            attn_v, attn_a, attn_u = mixed.split([s_video, s_action, s_understanding], dim=1)
+            vstate = self.vb.post_attn_at_layer_for_compile(layer_id, vstate, attn_v.contiguous(), vpost)
+            astate = self.ab.post_attn_at_layer_for_compile(layer_id, astate, attn_a.contiguous(), apost)
+            ustate = self.ub.post_attn_at_layer_for_compile(layer_id, ustate, attn_u.contiguous(), upost)
+        return vstate, astate, ustate
+
     def run_joint_loop(
         self,
         vstate: "BlockLoopState",
@@ -344,7 +382,7 @@ class TriSystemMoTDriver:
         # ``vstate.hidden_states.shape[1]`` is identical to ``f*tokens_per_frame`` for
         # backbones that carry a 3D ``(B, S, D)`` state (Wan), but for
         # backbones whose ``state.hidden_states`` is natively 5D ``(B, T, H, W, D)``
-        # (Cosmos25) ``shape[1]`` is just ``T`` — wrong. Going through f and
+        # (CosmosPredict25) ``shape[1]`` is just ``T`` — wrong. Going through f and
         # the shared ``compute_video_tokens_per_frame`` helper is the only
         # formulation that works for both layouts.
         s_video = int(vstate.grid_frames) * self._video_tokens_per_frame(vstate)

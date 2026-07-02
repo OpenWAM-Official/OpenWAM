@@ -429,7 +429,9 @@ class ActionDiT(ActionDiTBackbone):
         )
 
         # Both variants rely on RoPE inside attention — no learned absolute PE.
-        # Plain attribute (not a buffer): model.to(bf16) would cast complex → real.
+        # Keep this as a plain attribute, not a buffer: Module.to(dtype=bf16)
+        # casts complex buffers to real and drops the imaginary part. _apply()
+        # below moves it across devices while preserving complex dtype.
         # RoPE freqs are sized by attn_head_dim (the per-head attention dim that
         # both modalities share), not by hidden_dim/num_heads.
         self.freqs = precompute_freqs_cis_1d(attn_head_dim, max_action_len)
@@ -476,6 +478,18 @@ class ActionDiT(ActionDiTBackbone):
 
         # FastWAM-compatible simple action decoder; no AdaLN and no zero init.
         self.action_decoder = nn.Linear(dim, action_dim)
+
+    def _sync_rope_freqs_device(self) -> None:
+        if not isinstance(getattr(self, "freqs", None), torch.Tensor):
+            return
+        ref = next(self.parameters(), None)
+        if ref is not None and self.freqs.device != ref.device:
+            self.freqs = self.freqs.to(device=ref.device)
+
+    def _apply(self, fn, recurse=True):
+        module = super()._apply(fn, recurse=recurse)
+        self._sync_rope_freqs_device()
+        return module
 
     # ------------------------------------------------------------------
     # ActionDiTBackbone interface

@@ -1,9 +1,12 @@
-"""Dataset-neutral multi-view image composition and prompt formatting.
+"""Multi-view image composition and RoboTwin prompt formatting.
 
-These helpers used to live inside ``robotwin.py`` but are pure image /
-text utilities reused by both the RoboTwin dataloader and the deployment
-``policy_server``. Keeping them in a transform module avoids deploy → dataset
-hard-coupling.
+These helpers used to live inside ``robotwin.py``. The image utilities
+(``crop_and_resize`` / ``assemble_multiview_layout``) are dataset-neutral and
+reused by both the RoboTwin dataloader and the deployment ``policy_server``.
+``format_prompt_for_inference`` is RoboTwin's training-time prompt template —
+deploy no longer uses it (the server is prompt-agnostic; the RoboTwin eval
+client owns its own copy in ``benchmarks/robotwin/prompt_template.py``).
+Keeping these in a transform module avoids deploy → dataset hard-coupling.
 """
 
 from PIL import Image
@@ -94,10 +97,13 @@ def assemble_multiview_layout(
 
 
 def format_prompt_for_inference(base_prompt: str) -> str:
-    """Deploy prompt template.
+    """RoboTwin training-time prompt template.
 
-    Must match :meth:`RoboTwinDataset._get_prompt` byte-for-byte so that the
-    deployment-time prompt stays in-distribution with training.
+    The RoboTwin dataloader wraps every instruction with this before the model
+    sees it. Deploy is prompt-agnostic on the server side, so the RoboTwin
+    benchmark client re-implements this byte-for-byte in
+    ``benchmarks/robotwin/prompt_template.py`` (pinned by a regression test) to
+    keep eval prompts in-distribution with training.
     """
     return "A video recorded from a robot's point of view executing the following instruction: " + base_prompt
 

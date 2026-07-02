@@ -4,18 +4,18 @@
 #   joint_self_attn:  MoTJointDriver runs one mixed self-attention per layer;
 #                     requires num_layers/num_heads/head_dim parity across backbones.
 #   idm:              teacher-forcing training + two-stage inference. Wan-only
-#                     (Cosmos25 raises NotImplementedError).
-# Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos25.
+#                     (CosmosPredict25 raises NotImplementedError).
+# Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos_predict25.
 
 defaults:
-  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos25
+  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25
   - action_backbone: separate_action_dit # ActionDiT (dual/tri only support ActionDiT)
   - _self_
 
 # Frozen pretrained components (freeze_modules walks each via get_submodule;
 # missing paths silently skipped — image_encoder None on TI2V/VACE, _encoder
 # only on the from_scratch external-encoder path). The list spans backbones:
-# `text_encoder`/`vae` are Wan; `reason1` is the Cosmos25 text-encoder child
+# `text_encoder`/`vae` are Wan; `reason1` is the CosmosPredict25 text-encoder child
 # (Cosmos `vae` is also a real child, so the same `video_backbone.vae` entry
 # covers it). Each no-ops on backbones that lack the path.
 freeze:
@@ -43,21 +43,17 @@ architecture:
 
   # MoT options (joint_self_attn / idm only; ignored by joint_cross_attn).
   mot_checkpoint_mixed_attn: true       # grad-checkpoint the mixed attention (VRAM ↓, +1 recompute/layer)
-  # Cross-modal visibility (video<->action).
-  # Two invariants: v<->v controlled by video_attention_mask_mode; a<->a always mutually visible.
-  # Modes:
-  #   <mutual>             video sees action (except first-frame rows), action sees all video
-  #   <action_sees_video>  video can't see action, action sees all video
-  #   <video_sees_action>  video sees action (except first-frame rows), action sees only first frame
-  #   <isolated>           video can't see action, action sees only first frame
-  # joint_self_attn ONLY; idm and joint_cross_attn ignore this and use their own masks
-  # (idm: teacher-forcing + Stage-2 all-visible; joint_cross_attn: bridge cross-attn, no joint mask).
+  # Cross-modal visibility (video<->action). Two invariants: v<->v controlled by
+  # video_attention_mask_mode; a<->a always mutually visible. Modes:
+  #   mutual             video sees action (except first-frame rows), action sees all video
+  #   action_sees_video  video can't see action, action sees all video
+  #   video_sees_action  video sees action (except first-frame rows), action sees only first frame
+  #   isolated           video can't see action, action sees only first frame
+  # joint_self_attn only; joint_cross_attn ignores this (no joint mask);
+  # idm locks action_sees_video internally (do not override).
   attention_mask_mode: action_sees_video
-  # v↔v visibility; idm also uses it for teacher-forcing + cache-prefill submasks. Modes:
-  #   <bidirectional>       every frame attends every frame (no temporal order)
-  #   <per_frame_causal>    frame t attends frames 0..t; full attention within a frame
-  #   <first_frame_causal>  first frame attends only itself; all later frames attend everything
-  video_attention_mask_mode: first_frame_causal
+  # v↔v block layout; idm also uses it for the teacher-forcing + cache-prefill submasks.
+  video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
 
   detach_bridge: false             # joint_cross_attn only
   idm_video_cond_noise_prob: 0.5   # idm only
