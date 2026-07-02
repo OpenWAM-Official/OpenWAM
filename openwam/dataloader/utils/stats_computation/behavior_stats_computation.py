@@ -31,18 +31,23 @@ R_arm7, R_grip1, base3, trunk4]`` (joint mode). We write **four** stats blocks �
                     JointController setpoints (``action[7:14]/[14]/[15:22]/[22]``),
                     the joint-mode arm block. **Real** stats, NOT pinned (no rot6d).
 
-Every row contributes one 20-D EEF point (pose from ``observation.state`` quats
-at frame t + gripper command from ``action`` at t), one 3-D base point
-(``action[0:3]`` at t), and one 16-D arm-joint point (native ``action`` arm + grip
-columns at t). The reader's action target is the *next*-frame pose and proprio is
-the *current*-frame pose, but both are drawn from the same marginal distribution,
-so pooling per-frame values is the correct, simplest stat — exactly as RoboCOIN
-pools its action+state streams (shared schema / frame / units).
+Every row contributes TWO points per block — one from the ACTION stream (the
+target: gripper/base/trunk commands, native arm setpoints) and one from the
+PROPRIO stream (the achieved state the reader renders: gripper open-scale, base-
+frame velocity, trunk qpos, arm qpos). We pool both into one accumulator, exactly
+as RoboCOIN pools ``*_action`` + ``*_state`` (``pool: action+state``). This is the
+correction that makes the shared stats actually serve both: the proprio gripper
+is a continuous open-scale while the action gripper is a binary ±1 command — NOT
+the same marginal — so normalizing proprio with action-only stats (as this script
+did before) would mis-scale it. The eef POSE dims are identical in both streams
+(both = ``eef(state)``), so pooling them is a harmless duplicate; only the
+gripper/base/trunk/arm dims genuinely differ and need the union.
 
-To guarantee zero layout drift, the EEF + base + trunk + arm_joint vectors are
-built with the reader's own helpers (``_state_to_eef18`` / ``_assemble_raw`` /
-``_assemble_arm_joint``); the stats are literally computed over the same numbers
-the reader feeds the model (pre-scatter, pre-normalization).
+To guarantee zero layout drift, the action-stream vectors are built with the
+reader's own ``_state_to_eef18`` / ``_assemble_raw`` / ``_assemble_arm_joint`` and
+the proprio-stream vectors with the reader's own ``_state_to_raw_proprio_eef`` /
+``_state_to_raw_proprio_joint`` — the stats are computed over the exact numbers the
+reader feeds the model as action and as proprio (pre-scatter, pre-normalization).
 
 Output schema (``meta/stats_R1Pro.json``)::
 
@@ -90,6 +95,8 @@ from openwam.dataloader.behavior import (
     _assemble_arm_joint,
     _assemble_raw,
     _state_to_eef18,
+    _state_to_raw_proprio_eef,
+    _state_to_raw_proprio_joint,
 )
 
 # Reuse RoboCOIN's online accumulator + rot6d-identity pin VERBATIM (dev-aligned:
@@ -145,6 +152,24 @@ def _rows_to_arm_joint(action: np.ndarray) -> np.ndarray:
     )
 
 
+def _proprio_rows_to_blocks(state: np.ndarray):
+    """``(T,256)`` state → the PROPRIO stream's ``(T,20)`` eef + ``(T,3)`` base +
+    ``(T,4)`` trunk + ``(T,16)`` arm-joint, using the reader's own achieved-state
+    renderers so the stats see the exact numbers ``_proprio_20d`` emits.
+
+    Proprio differs from action on the gripper (open-scale vs ±1 cmd), base
+    (achieved base-frame velocity vs cmd) and arm (achieved qpos vs setpoint); the
+    eef POSE dims are identical to the action stream (both ``eef(state)``)."""
+    p_eef27 = _state_to_raw_proprio_eef(state)  # [eef20, base3, trunk4]
+    p_joint23 = _state_to_raw_proprio_joint(state)  # [arm16, base3, trunk4]
+    e, b = _EEF_DIM, _BASE_DIM
+    p_eef20 = p_eef27[:, :e]
+    p_base3 = p_eef27[:, e : e + b]
+    p_trunk4 = p_eef27[:, e + b : e + b + _TRUNK_DIM]
+    p_arm16 = p_joint23[:, :_ARM_JOINT_DIM]
+    return p_eef20, p_base3, p_trunk4, p_arm16
+
+
 def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> dict:
     """Stream every episode parquet → eef(20) + base_vel(3) + trunk(4) + arm_joint(16) stats.
 
@@ -163,11 +188,17 @@ def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> di
             df = pq.read_table(fpath, columns=_NEEDED_COLS).to_pandas()
             state = np.stack(df["observation.state"].values).astype(np.float32)
             action = np.stack(df["action"].values).astype(np.float32)
-            eef20, base3, trunk4 = _rows_to_blocks(state, action)
-            eef_acc.update_batch(eef20)
-            base_acc.update_batch(base3)
-            trunk_acc.update_batch(trunk4)
-            arm_acc.update_batch(_rows_to_arm_joint(action))
+            # ACTION stream (targets) + PROPRIO stream (achieved state the reader
+            # renders) — pool both into each accumulator, mirroring RoboCOIN's
+            # action+state pooling so the shared stats cover the proprio gripper /
+            # base / arm marginals too (not just the action command's).
+            a_eef20, a_base3, a_trunk4 = _rows_to_blocks(state, action)
+            a_arm16 = _rows_to_arm_joint(action)
+            p_eef20, p_base3, p_trunk4, p_arm16 = _proprio_rows_to_blocks(state)
+            eef_acc.update_batch(np.concatenate([a_eef20, p_eef20], axis=0))
+            base_acc.update_batch(np.concatenate([a_base3, p_base3], axis=0))
+            trunk_acc.update_batch(np.concatenate([a_trunk4, p_trunk4], axis=0))
+            arm_acc.update_batch(np.concatenate([a_arm16, p_arm16], axis=0))
             n_files += 1
         except Exception as e:  # noqa: BLE001 — skip a corrupt shard, keep going
             print(f"  Warning: skipping {fpath}: {e}")
@@ -183,21 +214,25 @@ def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> di
     eef["num_files"] = n_files
     eef["robot_type"] = "R1Pro"
     eef["rot6d_identity"] = bool(rot6d_identity)
+    eef["pool"] = "action+proprio"  # self-documents the pooled marginal (== RoboCOIN)
 
     base = base_acc.finalize()  # NOT pinned — real base-velocity stats
     base["num_timesteps"] = int(base_acc.count)
     base["num_files"] = n_files
     base["layout"] = "vx,vy,vyaw"
+    base["pool"] = "action+proprio"
 
     trunk = trunk_acc.finalize()  # NOT pinned — real torso-joint stats
     trunk["num_timesteps"] = int(trunk_acc.count)
     trunk["num_files"] = n_files
     trunk["layout"] = "torso_joint_abs"
+    trunk["pool"] = "action+proprio"
 
     arm = arm_acc.finalize()  # NOT pinned — real arm-joint stats (no rot6d in joint mode)
     arm["num_timesteps"] = int(arm_acc.count)
     arm["num_files"] = n_files
     arm["layout"] = "L_arm7,L_grip1,R_arm7,R_grip1"
+    arm["pool"] = "action+proprio"
 
     return {"eef": eef, "base_vel": base, "trunk": trunk, "arm_joint": arm}
 

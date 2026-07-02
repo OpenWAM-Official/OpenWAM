@@ -642,6 +642,42 @@ class TestStatsScript:
         # arm_joint block: real stats, NOT pinned (no rot6d in joint mode)
         assert "rot6d_identity" not in arm
         assert arm["layout"] == "L_arm7,L_grip1,R_arm7,R_grip1"
+        # every block pools the ACTION + PROPRIO streams (== RoboCOIN), so the
+        # stats cover the proprio marginals (gripper open-scale, base-frame vel),
+        # not just the action command's.
+        for blk in (eef, base, trunk, arm):
+            assert blk["pool"] == "action+proprio"
+
+    def test_stats_pool_both_action_and_proprio_streams(self, tmp_path):
+        # The gripper stats must reflect the pooled action+proprio marginal: pooling
+        # the achieved open-scale changes mean/std vs an action-only computation
+        # (identical only if we forgot to pool). Guards the fix from silently
+        # regressing back to action-only stats.
+        import numpy as _np
+
+        from openwam.dataloader.utils.stats_computation.behavior_stats_computation import (
+            _proprio_rows_to_blocks,
+            _rows_to_blocks,
+            compute_behavior_stats,
+        )
+        from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
+
+        b = make_behavior_bucket(tmp_path, n_episodes=3)
+        pooled = compute_behavior_stats(b)["eef"]
+        # Recompute an ACTION-ONLY eef accumulator over the same episodes.
+        import pyarrow.parquet as _pq
+
+        action_only = Accumulator(dim=20)
+        for f in sorted((b / "data").glob("task-*/episode_*.parquet")):
+            df = _pq.read_table(f, columns=["observation.state", "action"]).to_pandas()
+            st = _np.stack(df["observation.state"].values).astype(_np.float32)
+            ac = _np.stack(df["action"].values).astype(_np.float32)
+            action_only.update_batch(_rows_to_blocks(st, ac)[0])
+        ao = action_only.finalize()
+        # pooled count is exactly 2x the action-only count (action + proprio rows).
+        assert pooled["num_timesteps"] == 2 * action_only.count
+        # gripper mean (slots 9/19) differs once the proprio open-scale is pooled in.
+        assert abs(pooled["mean"][9] - ao["mean"][9]) > 1e-6 or abs(pooled["mean"][19] - ao["mean"][19]) > 1e-6
 
     def test_no_rot6d_identity_flag(self, tmp_path):
         from openwam.dataloader.utils.stats_computation.behavior_stats_computation import compute_behavior_stats
