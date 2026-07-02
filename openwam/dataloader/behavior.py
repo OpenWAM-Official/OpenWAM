@@ -35,11 +35,13 @@ Action target vs proprio (the contract):
   (row-aligned recorded commands). The two are drawn from different fields:
 
   * **Proprio (from state[0], ACHIEVED):** eef pose from the state quats, gripper
-    open-scale from the finger qpos, base-frame velocity from ``base_qvel``, trunk
-    qpos — all rendered into the action's raw representation (see
-    ``_state_to_raw_proprio_*``). It is NOT the action command: at deploy the model
-    only ever sees the achieved state, so training on the command would cause
-    covariate-shift drift on the base/gripper channels.
+    open-scale from the finger qpos, WORLD-frame velocity from ``base_qvel`` (raw, no
+    rotation), trunk qpos (see ``_state_to_raw_proprio_*``). It is NOT the action
+    command: at deploy the model only ever sees the achieved state, so training on the
+    command would cause covariate-shift drift. Following the 1st-place Larchenko
+    solution, proprio and the action target are a different physical quantity per slot
+    and are normalized with **SEPARATE stats** (``_normalize_proprio`` vs
+    ``_normalize_action``) — which is what lets the base proprio stay raw world-frame.
   * **Action target (row-aligned commands):** the gripper command
     (``action[:,14/22]``, binary {-1,+1}, +1=open), base velocity (``action[:,0:3]``)
     and torso joints (``action[:,3:7]``) are taken at t. The EEF arm target is the
@@ -128,19 +130,16 @@ _R_ARM_QPOS_SIN = slice(204, 211)
 _L_GRIP_QPOS = slice(193, 195)  # left MultiFinger gripper: 2 finger positions (m)
 _R_GRIP_QPOS = slice(232, 234)  # right gripper: 2 finger positions (m)
 _TRUNK_QPOS = slice(236, 240)  # achieved trunk joint positions (rad)
-_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw] in the WORLD frame
-_BASE_YAW = 246  # base_qpos yaw (world), for the world→base-frame rotation
+_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw], WORLD frame (fed raw)
 
-# Controller limits that map ACHIEVED (physical) proprio into the ACTION's
-# normalized command space, so proprio + action share one stats set (robocoin
-# renders both its action and its state into the same eef space too):
-#  * gripper: MultiFingerGripperController maps cmd [-1,+1] → finger qpos
-#    [0, _GRIPPER_OPEN_QPOS]; invert to open-scale = 2*qpos/OPEN - 1 (+1 open,
-#    -1 closed). Reports true partial opening when grasping an object.
-#  * base: HolonomicBaseJointController output_limits = ±_BASE_VEL_OUTPUT_SCALE;
-#    the achieved base-frame velocity divided by these recovers the [-1,1] cmd.
+# Proprio and action are normalized with SEPARATE stats (Larchenko-style), so the
+# proprio channels are NOT re-scaled into the action's command space — each is fed
+# in its natural units and normalized by its own proprio stats:
+#  * gripper: achieved open-scale = 2*mean(finger qpos)/_GRIPPER_OPEN_QPOS - 1
+#    (+1 open, -1 closed; reports true partial opening when grasping an object).
+#    == Larchenko's 2*sum/0.1-1 (per-finger open 0.05 → 2-finger sum 0.1).
+#  * base: raw WORLD-frame base_qvel (no rotation, no scaling — see _base_vel_world).
 _GRIPPER_OPEN_QPOS = 0.05
-_BASE_VEL_OUTPUT_SCALE = np.array([0.75, 0.75, 1.0], dtype=np.float32)
 
 # Raw pre-scatter width: EEF 20 (pos3+rot6d6+grip1 ×2) + base velocity 3 + trunk 4.
 # _EEF_DIM is the shared bimanual EEF width (== utils.eef.EEF_DIM, as RoboCOIN
@@ -214,65 +213,63 @@ def _assemble_joint(
 
 
 # ── achieved-state → raw proprio rendering ───────────────────────────────────
-# Proprio is the MEASURED observation.state at the window start, rendered into
-# the SAME raw representation as the action (so one stats set normalizes both,
-# and the deploy obs — which is only the 256-D state, never a command — matches
-# training). The deploy bridge (benchmarks/utils/action_conversion.py) MUST
-# reproduce these three transforms byte-for-byte; a cross-check test guards it.
+# Proprio is the MEASURED observation.state at the window start. It is a DIFFERENT
+# physical quantity from the action target (achieved state vs command), so — like
+# the 1st-place Larchenko solution — proprio and action are normalized with
+# SEPARATE stats (see _load_stats). That decoupling is what lets the base proprio
+# stay the raw WORLD-frame base_qvel (no rotation): its own proprio stats normalize
+# it, and the network learns to relate it to the base-frame base command. The
+# deploy bridge (benchmarks/utils/action_conversion.py) MUST reproduce these
+# transforms byte-for-byte; a cross-check test guards it.
 
 
 def _grip_open_scale(grip_qpos: np.ndarray) -> np.ndarray:
     """``(..., 2)`` finger positions → ``(..., 1)`` open-scale in ``[-1, +1]``.
 
-    Mean of the two finger joints mapped through the gripper controller's
-    cmd→qpos limits (``+1`` fully open at ``_GRIPPER_OPEN_QPOS``, ``-1`` closed at 0).
-    """
+    Mean of the two finger joints mapped through the gripper controller's cmd→qpos
+    limits (``+1`` fully open at ``_GRIPPER_OPEN_QPOS``, ``-1`` closed at 0). Identical
+    to Larchenko's ``2*sum/0.1-1`` (his MAX is the 2-finger sum; ours the per-finger
+    open, and ``mean/0.05 == sum/0.1``)."""
     opening = grip_qpos.mean(axis=-1, keepdims=True)
     return np.clip(2.0 * opening / _GRIPPER_OPEN_QPOS - 1.0, -1.0, 1.0).astype(np.float32)
 
 
-def _base_vel_local(state: np.ndarray) -> np.ndarray:
-    """``(..., 256)`` state → ``(..., 3)`` achieved base velocity in the BASE frame,
-    normalized to the ``[-1, 1]`` command scale.
+def _base_vel_world(state: np.ndarray) -> np.ndarray:
+    """``(..., 256)`` state → ``(..., 3)`` achieved base velocity, WORLD frame, raw.
 
-    ``base_qvel`` is the world-frame ``d(base_qpos)/dt``; the linear part is rotated
-    by ``-yaw`` into the base frame (``vyaw`` is frame-invariant), then divided by the
-    controller output limits so it lands in the same space as the base action command.
-    """
-    qv = state[..., _BASE_QVEL]
-    yaw = state[..., _BASE_YAW]
-    cos, sin = np.cos(yaw), np.sin(yaw)
-    vx = cos * qv[..., 0] + sin * qv[..., 1]
-    vy = -sin * qv[..., 0] + cos * qv[..., 1]
-    vb = np.stack([vx, vy, qv[..., 2]], axis=-1).astype(np.float32)
-    return (vb / _BASE_VEL_OUTPUT_SCALE).astype(np.float32)
+    ``base_qvel`` is the world-frame ``d(base_qpos)/dt`` (OmniGibson packs the
+    holonomic base joints [x,y,yaw] in the odom/world frame). Following Larchenko,
+    it is fed RAW — no world→base rotation, no scaling — because proprio has its own
+    (proprio-only) normalization stats; the network relates it to the base-frame base
+    action itself. (The base action, by contrast, is the local-frame command.)"""
+    return state[..., _BASE_QVEL].astype(np.float32)
 
 
 def _state_to_raw_proprio_eef(state: np.ndarray) -> np.ndarray:
     """``(T, 256)`` achieved state → ``(T, 27)`` proprio in the eef/unified raw layout
-    ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]`` (== the
-    action layout). EEF pose + rot6d from the state quats, gripper open-scale from the
-    finger qpos, base-frame velocity, achieved trunk qpos."""
+    ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]`` (same slot
+    layout as the action, but a different quantity per slot: achieved eef pose, gripper
+    open-scale, WORLD-frame base velocity, achieved trunk qpos)."""
     eef18 = _state_to_eef18(state)
     return _assemble_raw(
         eef18,
         _grip_open_scale(state[..., _L_GRIP_QPOS]),
         _grip_open_scale(state[..., _R_GRIP_QPOS]),
-        _base_vel_local(state),
+        _base_vel_world(state),
         state[..., _TRUNK_QPOS],
     )
 
 
 def _state_to_raw_proprio_joint(state: np.ndarray) -> np.ndarray:
     """``(T, 256)`` achieved state → ``(T, 23)`` proprio in the joint raw layout
-    ``[L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]`` — all from achieved qpos
-    (arms), open-scale (grippers), base-frame velocity, and trunk qpos."""
+    ``[L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]`` — achieved arm qpos, gripper
+    open-scale, WORLD-frame base velocity, achieved trunk qpos."""
     return _assemble_joint(
         state[..., _L_ARM_QPOS],
         _grip_open_scale(state[..., _L_GRIP_QPOS]),
         state[..., _R_ARM_QPOS],
         _grip_open_scale(state[..., _R_GRIP_QPOS]),
-        _base_vel_local(state),
+        _base_vel_world(state),
         state[..., _TRUNK_QPOS],
     )
 
@@ -540,14 +537,68 @@ class BehaviorDataset(LeRobotV3Reader):
                 "observation.state layout may have changed — re-verify the proprio offsets."
             )
 
-    def _load_stats(self, info: dict):
-        """Load ``meta/stats_R1Pro.json`` → combined raw stats for the active mode.
+    # Stats sub-dict keys the reader reads / writes.
+    _STATS_KEYS = ("mean", "std", "min", "max", "q01", "q99")
 
-        eef/unified → 27-D ``[eef20, base_vel3, trunk4]`` (rot6d pinned to identity
-        in the stats file, see behavior_stats_computation). joint → 23-D
-        ``[arm_joint16, base_vel3, trunk4]`` (no rot6d, no pin; ``arm_joint`` is the
-        BEHAVIOR-specific joint block). The base_vel + trunk blocks are shared by
-        both modes (same native columns)."""
+    def _materialize_combined(self, raw: dict, stats_path, label: str) -> dict:
+        """Materialize one combined raw-stats vector from a stats dict holding the
+        ``eef``/``arm_joint`` + ``base_vel`` + ``trunk`` blocks.
+
+        eef/unified → 27-D ``[eef20, base_vel3, trunk4]``; joint → 23-D
+        ``[arm_joint16, base_vel3, trunk4]``. ``label`` (``"action"``/``"proprio"``)
+        only sharpens error messages — the block layout is identical for both."""
+        base = materialize_eef_stats(
+            raw.get("base_vel", {}), self._normalize_mode, dim=_BASE_DIM, strict_minmax=False,
+            source_hint=f"{stats_path}: {label}.base_vel.*",
+        )
+        trunk = materialize_eef_stats(
+            raw.get("trunk", {}), self._normalize_mode, dim=_TRUNK_DIM, strict_minmax=False,
+            source_hint=f"{stats_path}: {label}.trunk.*",
+        )
+        if self._action_mode == "joint":
+            if "arm_joint" not in raw:
+                raise KeyError(
+                    f"BEHAVIOR({self._dataset_id}): action_mode='joint' needs the '{label}.arm_joint' stats "
+                    f"block, absent from {stats_path}. Re-run behavior_stats_computation --dataset_dir "
+                    f"{self._dataset_dir} (it now emits separate action + proprio stats, each with arm_joint)."
+                )
+            head, head_name, head_dim = (
+                materialize_eef_stats(
+                    raw.get("arm_joint", {}), self._normalize_mode, dim=_ARM_JOINT_DIM, strict_minmax=False,
+                    source_hint=f"{stats_path}: {label}.arm_joint.*",
+                ),
+                "arm_joint",
+                _ARM_JOINT_DIM,
+            )
+        else:
+            head, head_name, head_dim = (
+                materialize_eef_stats(
+                    raw.get("eef", {}), self._normalize_mode, dim=_EEF_DIM, strict_minmax=False,
+                    source_hint=f"{stats_path}: {label}.eef.*",
+                ),
+                "eef",
+                _EEF_DIM,
+            )
+        for blk, name, dim in ((head, head_name, head_dim), (base, "base_vel", _BASE_DIM), (trunk, "trunk", _TRUNK_DIM)):
+            for k in self._STATS_KEYS:
+                if blk[k].shape[0] != dim:
+                    raise ValueError(
+                        f"BEHAVIOR({self._dataset_id}): '{label}.{name}' stats '{k}' width {blk[k].shape[0]} "
+                        f"in {stats_path} != expected {dim}. Re-run behavior_stats_computation."
+                    )
+        return {k: np.concatenate([head[k], base[k], trunk[k]]).astype(np.float32) for k in self._STATS_KEYS}
+
+    def _load_stats(self, info: dict):
+        """Load ``meta/stats_R1Pro.json`` → SEPARATE action + proprio raw stats.
+
+        Following the 1st-place Larchenko solution, proprio (achieved state) and the
+        action (command) are DIFFERENT quantities and are normalized with different
+        stats. The file therefore holds the action blocks at top level plus a nested
+        ``"proprio"`` dict with the same block names; we materialize both. The action
+        combined vector is returned (→ ``self._normalization_stats``, used by
+        ``_action_20d``); the proprio combined is stashed on ``self._proprio_stats``
+        (used by ``_proprio_20d``). Both are written to the deploy npy."""
+        self._proprio_stats = None
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             return None
         stats_path = self._dataset_dir / "meta" / "stats_R1Pro.json"
@@ -559,72 +610,34 @@ class BehaviorDataset(LeRobotV3Reader):
             )
         with open(stats_path) as f:
             raw = json.load(f)
-        base = materialize_eef_stats(
-            raw.get("base_vel", {}),
-            self._normalize_mode,
-            dim=_BASE_DIM,
-            strict_minmax=False,
-            source_hint=f"{stats_path}: base_vel.*",
-        )
-        trunk = materialize_eef_stats(
-            raw.get("trunk", {}),
-            self._normalize_mode,
-            dim=_TRUNK_DIM,
-            strict_minmax=False,
-            source_hint=f"{stats_path}: trunk.*",
-        )
-        keys = ("mean", "std", "min", "max", "q01", "q99")
-        if self._action_mode == "joint":
-            if "arm_joint" not in raw:
-                raise KeyError(
-                    f"BEHAVIOR({self._dataset_id}): action_mode='joint' needs the 'arm_joint' stats "
-                    f"block, absent from {stats_path}. Re-run behavior_stats_computation "
-                    f"--dataset_dir {self._dataset_dir} (it now emits arm_joint alongside eef)."
-                )
-            arm = materialize_eef_stats(
-                raw.get("arm_joint", {}),
-                self._normalize_mode,
-                dim=_ARM_JOINT_DIM,
-                strict_minmax=False,
-                source_hint=f"{stats_path}: arm_joint.*",
+        if "proprio" not in raw or not isinstance(raw["proprio"], dict):
+            raise KeyError(
+                f"BEHAVIOR({self._dataset_id}): {stats_path} has no 'proprio' stats block. Proprio and action "
+                "are normalized with SEPARATE stats now (Larchenko-style) — re-run behavior_stats_computation "
+                f"--dataset_dir {self._dataset_dir} to emit the action + proprio stat sets."
             )
-            head, head_name, head_dim = arm, "arm_joint", _ARM_JOINT_DIM
-        else:
-            head = materialize_eef_stats(
-                raw.get("eef", {}),
-                self._normalize_mode,
-                dim=_EEF_DIM,
-                strict_minmax=False,
-                source_hint=f"{stats_path}: eef.*",
-            )
-            head_name, head_dim = "eef", _EEF_DIM
-        for blk, name, dim in (
-            (head, head_name, head_dim),
-            (base, "base_vel", _BASE_DIM),
-            (trunk, "trunk", _TRUNK_DIM),
-        ):
-            for k in keys:
-                if blk[k].shape[0] != dim:
-                    raise ValueError(
-                        f"BEHAVIOR({self._dataset_id}): '{name}' stats '{k}' width {blk[k].shape[0]} "
-                        f"in {stats_path} != expected {dim}. Re-run behavior_stats_computation."
-                    )
-        combined = {k: np.concatenate([head[k], base[k], trunk[k]]).astype(np.float32) for k in keys}
-        # Emit the deploy denormalizer artifact (meta/normalization_stats.npy) in RAW
-        # action space, keyed by DEPLOY_ACTION_MODE: eef/unified → 27-D (eef20 + base3
-        # + trunk4), joint → 23-D (arm_joint16 + base3 + trunk4). For the unified ckpt
-        # the policy server's _UnifyAwareNormalizer gathers the model's 80-D output back
-        # to the 27 raw dims THEN unnormalizes (PR #17); eef/joint deploy unnormalize the
-        # raw width directly (no scatter). The trainer copies normalization_stats_path
-        # into the checkpoint dir. Driven by the shared base helper + DEPLOY_ACTION_MODE.
-        self._write_deploy_normalizer_stats(combined, keys)
-        return combined
+        action_combined = self._materialize_combined(raw, stats_path, "action")
+        self._proprio_stats = self._materialize_combined(raw["proprio"], stats_path, "proprio")
+        # Deploy artifact (meta/normalization_stats.npy): the action stats under
+        # DEPLOY_ACTION_MODE (action OUT: _UnifyAwareNormalizer gathers 80-D → raw
+        # THEN unnormalizes) + the proprio stats under "<mode>__proprio" (proprio IN:
+        # normalize THEN scatter). eef/unified → 27-D, joint → 23-D. The trainer copies
+        # normalization_stats_path into the ckpt dir.
+        self._write_deploy_normalizer_stats(
+            action_combined, self._STATS_KEYS, extra={f"{self.DEPLOY_ACTION_MODE}__proprio": self._proprio_stats}
+        )
+        return action_combined
 
-    def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
-        """Apply per-bucket normalization to a raw vector — ``(..., 27)`` in eef/unified
-        mode, ``(..., 23)`` in joint mode (no-op when normalize_mode is null / stats
-        absent). Stats width matches via the action_mode branch in _load_stats."""
+    def _normalize_action(self, arr: np.ndarray) -> np.ndarray:
+        """Normalize a raw ACTION vector with the action stats — ``(..., 27)`` eef/unified
+        or ``(..., 23)`` joint (no-op when normalize_mode is null / stats absent)."""
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
+
+    def _normalize_proprio(self, arr: np.ndarray) -> np.ndarray:
+        """Normalize a raw PROPRIO vector with the SEPARATE proprio stats (achieved-state
+        distribution — e.g. world-frame base velocity, gripper open-scale), NOT the
+        action stats. No-op when normalize_mode is null / stats absent."""
+        return apply_normalization(arr, self._proprio_stats, self._normalize_mode)
 
     # ----- action / proprio -------------------------------------------------
 
@@ -653,7 +666,7 @@ class BehaviorDataset(LeRobotV3Reader):
                 action[:, _ACT_BASE],
                 action[:, _ACT_TRUNK],
             )
-            return self._normalize_array(raw)
+            return self._normalize_action(raw)
         state = np.stack(win["observation.state"].values).astype(np.float32)  # (L, 256)
         eef = _state_to_eef18(state)  # (L, 18) current-frame poses
         # action target = next-frame achieved pose (shift +1; clamp the last step,
@@ -666,25 +679,24 @@ class BehaviorDataset(LeRobotV3Reader):
             action[:, _ACT_BASE],
             action[:, _ACT_TRUNK],
         )
-        return self._normalize_array(raw)
+        return self._normalize_action(raw)
 
     def _proprio_20d(self, win) -> np.ndarray:
         """Raw normalized proprio at the window start (t=0), read from the MEASURED
         ``observation.state`` (achieved qpos/qvel/pose) — NOT the action command.
 
-        Rendered into the action's raw representation so one stats set normalizes
-        both and the deploy obs (only the 256-D state exists at inference) matches:
-        ``(1, 27)`` eef/unified ``[L_pose10, R_pose10, base3, trunk4]`` (eef pose from
-        the state quats, gripper open-scale from finger qpos, base-frame velocity,
-        trunk qpos) or ``(1, 23)`` joint ``[L_arm7, L_grip1, R_arm7, R_grip1, base3,
-        trunk4]`` (achieved arm qpos in place of the setpoints). Sourcing proprio from
-        the command would train the model on a value it never sees at deploy → drift."""
+        Rendered by ``_state_to_raw_proprio_*`` (achieved eef pose, gripper open-scale,
+        WORLD-frame base velocity, trunk/arm qpos) and normalized with the SEPARATE
+        proprio stats (Larchenko-style): ``(1, 27)`` eef/unified or ``(1, 23)`` joint.
+        Sourcing proprio from the command would train the model on a value it never
+        sees at deploy → drift; sharing the action stats would mis-scale the world-frame
+        base velocity (a different distribution from the base command)."""
         state = np.stack(win["observation.state"].values[:1]).astype(np.float32)  # (1, 256)
         if self._action_mode == "joint":
             raw = _state_to_raw_proprio_joint(state)
         else:
             raw = _state_to_raw_proprio_eef(state)
-        return self._normalize_array(raw)
+        return self._normalize_proprio(raw)
 
 
 __all__ = ["BehaviorDataset"]

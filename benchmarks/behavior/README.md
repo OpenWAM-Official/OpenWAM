@@ -140,15 +140,17 @@ dispatch (metadata-first / act-reply / reset-no-reply / error framing) are
 covered by `tests/benchmarks/test_behavior_bridge.py`. Confirm these on a
 sim-capable box, in order of risk:
 
-1. **Proprio offsets.** EEF offsets in `R1PRO_PROPRIO_OFFSETS`
-   (`action_conversion.py`) are verified on the dataset's `observation.state`;
-   `base_vel` and the grippers default to `None` → **zero-filled** (the model
-   leans on EEF + vision). `trunk` is a best-estimate (`236:240`). Confirm all
-   offsets against the live `robot_r1::proprio` (`PROPRIOCEPTION_INDICES`) and
-   fill in the `None`s, or run `--no-send-state` to A/B.
-2. **Base velocity scaling.** Base/trunk/grippers are passed through assuming the
-   recorded `action` was the controller's normalized `[-1,1]` command. If the
-   demos recorded physical units instead, rescale to the controller input range.
+1. **Proprio offsets.** `r1pro_proprio_to_raw27` (`action_conversion.py`) decodes
+   ALL proprio channels from the robot's `proprio_obs` layout (eef pose, arm/trunk
+   qpos, 2-finger gripper qpos → open-scale, `base_qvel`), verified numerically on
+   the dataset's `observation.state` and byte-checked against the trainer's
+   `_state_to_raw_proprio_eef` by `test_behavior_bridge`. Confirm the offsets still
+   hold against the live `robot_r1::proprio` on a sim box (a re-upload could shift
+   the packing), or run `--no-send-state` to A/B.
+2. **Base velocity frame.** The proprio base is the RAW WORLD-frame `base_qvel`
+   (Larchenko-style, no rotation), normalized by its own proprio stats — separate
+   from the local-frame base action command. Confirm the live `robot_r1::proprio`
+   base velocity is world-frame (`d(base_qpos)/dt`) as decoded.
 3. **Prompt text.** The model was trained on the dataset's `tasks[0]` strings;
    the bridge uses the de-underscored activity name. If training used a different
    phrasing, adjust the mapping (or pass `--default-prompt`).

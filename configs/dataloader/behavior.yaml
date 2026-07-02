@@ -43,24 +43,30 @@ color_jitter:
   hue: 0.0
 
 # ── Action normalization ────────────────────────────────────────────────────
-# Loads meta/stats_R1Pro.json (eef 20-D + base_vel 3-D + trunk 4-D). rot6d dims are pinned to
-# identity in the stats file (no normalization), matching robocoin. Generate via:
+# Loads meta/stats_R1Pro.json. Following the 1st-place Larchenko solution, proprio
+# and action are normalized with SEPARATE stats: the file holds the ACTION blocks
+# (eef 20 + base_vel 3 + trunk 4, or arm_joint 16 in joint mode) at top level plus a
+# nested "proprio" set of the same blocks (achieved-state distribution). rot6d dims
+# are pinned to identity in both, matching robocoin. Generate/REGENERATE via:
 #   python -m openwam.dataloader.utils.stats_computation.behavior_stats_computation \
 #       --dataset_dir <dataset_dir>
 #   null / "none" → no normalization (raw values)
-#   "min-max" / "z-score" / "quantile" (default — same as robocoin)
+#   "min-max" / "z-score" / "quantile" (default). NOTE: Larchenko uses z-score for
+#   B1K; quantile is kept as the OpenWAM family default (one-line switch to z-score).
 normalize_mode: quantile
 
 # ── Action / proprio supervision ────────────────────────────────────────────
-# Contract: a sample's PROPRIO is the MEASURED observation.state at t=0 (achieved
-# eef pose + gripper open-scale + base-frame velocity + trunk qpos, decoded from
-# the robot's proprio_obs layout); the TARGET is the action sequence
-# action[0..T_action-1] (row-aligned recorded commands; the eef arm target is the
-# next-frame achieved pose = the EEF rendering of the arm's joint setpoint). Proprio
-# is NOT the action command — at deploy the model only ever sees the achieved state,
-# so training on the command would cause covariate-shift drift. The deploy bridge
+# Contract (aligned with the Larchenko 1st-place solution): a sample's PROPRIO is the
+# MEASURED observation.state at t=0 (achieved eef pose + gripper open-scale + RAW
+# WORLD-frame base_qvel + trunk/arm qpos, decoded from the robot's proprio_obs
+# layout); the TARGET is the action sequence action[0..T_action-1] (row-aligned
+# recorded commands; the eef arm target is the next-frame achieved pose = the EEF
+# rendering of the arm's joint setpoint). Proprio is NOT the action command, and is a
+# DIFFERENT quantity per slot (world-frame velocity vs local-frame base cmd; open-scale
+# vs ±1 grip cmd) → normalized with SEPARATE proprio stats. The deploy bridge
 # (benchmarks/utils/action_conversion.r1pro_proprio_to_raw27) renders the same
-# achieved-state → raw-27 proprio, byte-checked against the reader.
+# achieved-state → raw-27 proprio (world-frame base, no rotation), byte-checked
+# against the reader; the deploy server normalizes it with the "<mode>__proprio" stats.
 enable_action_supervision: true
 
 # ── Unified 80-D action space (cross-robot shared head) ─────────────────────

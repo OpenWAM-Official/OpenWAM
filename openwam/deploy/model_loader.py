@@ -224,44 +224,42 @@ def load_from_checkpoint_dir(
     return cfg, architecture
 
 
-def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
-    """Build the RAW-space normalizer for both deploy directions, or ``None`` if disabled.
+def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str, *, stats_key: Optional[str] = None, required: bool = True):
+    """Build a RAW-space ``Normalizer`` from ``normalization_stats.npy``, or ``None``.
 
-    The returned ``Normalizer`` serves both: ``normalize`` maps the input
-    proprio state into training space, ``unnormalize`` maps the output action
-    back to physical units. proprio is a single-frame action
-    (``raw_actions[0:1]``), so both share one set of stats.
+    By default loads the ``action_mode`` stats sub-dict (used for BOTH deploy
+    directions unless a separate proprio set exists). Pass ``stats_key`` to load a
+    different sub-dict (e.g. ``"<action_mode>__proprio"`` for readers that normalize
+    proprio and action separately — Larchenko-style); with ``required=False`` a
+    missing sub-dict returns ``None`` quietly so callers fall back to the action stats.
 
-    Reads ``dataloader.normalize_mode`` / ``action_mode`` from the saved config;
-    when enabled, loads ``normalization_stats.npy`` and wraps the requested stats
-    sub-dict. When disabled, returns ``None`` (no stats file required).
+    Reads ``dataloader.normalize_mode`` / ``action_mode`` from the saved config; when
+    ``normalize_mode`` is disabled returns ``None`` (no stats file required).
     """
-    logger.info("[normalizer] Resolving deployment action normalizer from checkpoint dir: %s", ckpt_dir)
-
     dl = OmegaConf.select(cfg, "dataloader", default=None)
     norm_mode = OmegaConf.select(cfg, "dataloader.normalize_mode", default=None)
     action_mode = OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
+    key = action_mode if stats_key is None else stats_key
     if dl is None or norm_mode in (None, "", "none", "null"):
-        logger.info(
-            "[normalizer] normalize_mode=%r disabled in saved config; action normalizer INACTIVE "
-            "(actions and deploy proprio will be returned/used as-is).",
-            norm_mode,
-        )
+        if required:
+            logger.info(
+                "[normalizer] normalize_mode=%r disabled in saved config; action normalizer INACTIVE "
+                "(actions and deploy proprio will be returned/used as-is).",
+                norm_mode,
+            )
         return None
-    logger.info(
-        "[normalizer] Saved config: normalize_mode=%s, action_mode=%s",
-        norm_mode,
-        action_mode,
-    )
+    if required:
+        logger.info("[normalizer] Saved config: normalize_mode=%s, action_mode=%s", norm_mode, action_mode)
 
     stats_path = os.path.join(ckpt_dir, "normalization_stats.npy")
     if not os.path.exists(stats_path):
+        if not required:
+            return None
         raise FileNotFoundError(
             f"Missing required normalization_stats.npy in checkpoint dir: {stats_path}. "
             "Checkpoints with active action normalization must include it "
             "(older action_stats.npy checkpoints: rename the file)."
         )
-    logger.info("[normalizer] Found pre-computed stats file: %s (exists ✓)", stats_path)
 
     from openwam.dataloader.transforms.normalize import (
         YAML_TO_NORM_MODE,
@@ -270,30 +268,49 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
     )
 
     if norm_mode not in YAML_TO_NORM_MODE:
-        logger.warning(
-            "[normalizer] Unknown normalize_mode %r in checkpoint config; action normalizer DISABLED.",
-            norm_mode,
-        )
+        if required:
+            logger.warning(
+                "[normalizer] Unknown normalize_mode %r in checkpoint config; action normalizer DISABLED.",
+                norm_mode,
+            )
         return None
 
-    mode_stats = load_mode_stats(stats_path, action_mode)
+    mode_stats = load_mode_stats(stats_path, key)
     if mode_stats is None:
-        logger.warning(
-            "[normalizer] Stats file %s has no '%s' entry; action normalizer DISABLED.",
-            stats_path,
-            action_mode,
-        )
+        if required:
+            logger.warning("[normalizer] Stats file %s has no '%s' entry; action normalizer DISABLED.", stats_path, key)
+        else:
+            logger.info(
+                "[normalizer] No '%s' proprio stats in %s; proprio will reuse the action stats.", key, stats_path
+            )
         return None
 
     normalizer = Normalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=mode_stats)
     logger.info(
-        "[normalizer] Active: mode=%s action_mode=%s dim=%d stats=%s",
-        norm_mode,
-        action_mode,
-        len(mode_stats["mean"]),
-        stats_path,
+        "[normalizer] Active: mode=%s key=%s dim=%d stats=%s", norm_mode, key, len(mode_stats["mean"]), stats_path
     )
     return normalizer
+
+
+class _DualStatsNormalizer:
+    """Non-unify deploy normalizer with SEPARATE stats per direction: ``normalize``
+    (proprio IN) uses the proprio stats, ``unnormalize`` (action OUT) uses the action
+    stats. Duck-typed to the ``Normalizer`` surface (``normalize`` / ``unnormalize``).
+    Used only when the ckpt carries a ``"<mode>__proprio"`` stats set (BEHAVIOR)."""
+
+    def __init__(self, inner_action, inner_proprio):
+        self._action = inner_action
+        self._proprio = inner_proprio
+
+    def normalize(self, x):
+        return self._proprio.normalize(x)
+
+    def unnormalize(self, x):
+        return self._action.unnormalize(x)
+
+    @property
+    def stats(self):
+        return getattr(self._action, "stats", {})
 
 
 class _UnifyAwareNormalizer:
@@ -315,10 +332,13 @@ class _UnifyAwareNormalizer:
     ``.normalize``), so ``base.py`` needs no change.
     """
 
-    def __init__(self, inner, dst_index: np.ndarray, unify_dim: int):
+    def __init__(self, inner, dst_index: np.ndarray, unify_dim: int, inner_proprio=None):
         from openwam.dataloader.utils.unify_action import map_to_unify, unmap_from_unify
 
         self._inner = inner
+        # proprio IN may use a SEPARATE stats set (Larchenko-style); default to the
+        # action stats when the ckpt has no proprio-specific block (backward-compat).
+        self._inner_proprio = inner if inner_proprio is None else inner_proprio
         self._dst_index = np.asarray(dst_index, dtype=np.int64)
         self._unify_dim = int(unify_dim)
         self._map_to_unify = map_to_unify
@@ -343,8 +363,8 @@ class _UnifyAwareNormalizer:
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
     def normalize(self, x):
         arr = np.asarray(x)
-        if self._inner is not None:
-            arr = self._inner.normalize(arr)
+        if self._inner_proprio is not None:
+            arr = self._inner_proprio.normalize(arr)
         unified, _mask = self._map_to_unify(arr, self._dst_index, self._unify_dim)
         return unified
 
@@ -375,9 +395,16 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
     normalize) — the exact inverse of the train-time transform.
     """
     inner = _build_inner_normalizer(cfg, ckpt_dir)
+    # Optional separate proprio stats (Larchenko-style, e.g. BEHAVIOR). Absent for
+    # readers with one shared set → inner_proprio is None → both directions use `inner`.
+    action_mode = OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
+    inner_proprio = _build_inner_normalizer(cfg, ckpt_dir, stats_key=f"{action_mode}__proprio", required=False)
 
     unify_on = bool(OmegaConf.select(cfg, "dataloader.unify_action", default=False))
     if not unify_on:
+        # Non-unify deploy: split directions only if a distinct proprio set exists.
+        if inner is not None and inner_proprio is not None:
+            return _DualStatsNormalizer(inner, inner_proprio)
         return inner
 
     from openwam.dataloader.utils.unify_action import UNIFY_DIM, parse_unify_spec
@@ -406,4 +433,4 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
         dst_index.shape[0],
         "then" if inner is not None else "(no stats, gather-only:)",
     )
-    return _UnifyAwareNormalizer(inner, dst_index, unify_dim)
+    return _UnifyAwareNormalizer(inner, dst_index, unify_dim, inner_proprio=inner_proprio)
