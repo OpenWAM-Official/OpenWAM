@@ -475,7 +475,7 @@ class LeRobotV3Reader(BaseDataset):
             source_hint=str(stats_path),
         )
 
-    def _write_deploy_normalizer_stats(self, combined: dict, keys, extra: Optional[dict] = None) -> None:
+    def _write_deploy_normalizer_stats(self, combined: dict, keys) -> None:
         """Write ``meta/normalization_stats.npy`` — the deploy denormalizer artifact.
 
         ``combined`` is this reader's RAW-space per-mode stats (the values the
@@ -487,11 +487,6 @@ class LeRobotV3Reader(BaseDataset):
         max, q01, q99}}`` that ``load_mode_stats`` / ``_build_normalizer`` consume
         unchanged. Shared by every reader that serves the unified action: set
         ``DEPLOY_ACTION_MODE`` and call this from ``_load_stats``.
-
-        ``extra`` (optional) adds further top-level keyed sub-dicts to the same file
-        — e.g. a separate proprio-stats entry ``{action_mode + "__proprio": {...}}``
-        for readers that normalize proprio and action with different stats. Absent by
-        default, so readers with a single shared stats set are unaffected.
         """
         if self.DEPLOY_ACTION_MODE is None:
             raise ValueError(
@@ -499,9 +494,6 @@ class LeRobotV3Reader(BaseDataset):
                 "set it on the reader class to the action_mode key the deploy stats are stored under."
             )
         payload = {self.DEPLOY_ACTION_MODE: {k: np.asarray(combined[k], dtype=np.float32) for k in keys}}
-        if extra:
-            for ekey, estats in extra.items():
-                payload[ekey] = {k: np.asarray(estats[k], dtype=np.float32) for k in keys}
         out = self._dataset_dir / "meta" / "normalization_stats.npy"
         # Atomic write (unique temp + replace) so concurrent per-rank constructors
         # never observe a half-written file. The temp name ends in '.npy' so

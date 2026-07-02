@@ -78,9 +78,8 @@ def _make_state(rng: np.random.RandomState, n: int, *, unit_quats: bool = True) 
 
     Populates every field the proprio path + the ``_post_init`` layout guard read:
     EEF pos/quat, arm qpos (with its ``sin(qpos)`` block — the proprio_obs invariant
-    the guard checks), 2-finger gripper qpos ∈ [0, 0.05], trunk qpos, world-frame
-    base velocity, and the base yaw used for the world→base rotation. Other dims stay
-    random (the reader never reads them).
+    the guard checks), 2-finger gripper qpos ∈ [0, 0.05], trunk qpos, and the raw
+    world-frame base velocity. Other dims stay random (the reader never reads them).
     """
     state = rng.uniform(-1, 1, size=(n, STATE_DIM)).astype(np.float32)
     state[:, _L_EEF_POS] = rng.uniform(0.1, 0.6, size=(n, 3))
@@ -504,19 +503,16 @@ class TestDeployNormalizer:
         assert ds.normalization_stats_path is not None
         assert Path(ds.normalization_stats_path).exists()
         raw = np.load(ds.normalization_stats_path, allow_pickle=True).item()
-        # action_mode key from behavior.yaml + the separate proprio-stats key.
-        assert set(raw) == {"unified", "unified__proprio"}
+        assert set(raw) == {"unified"}  # action_mode key from behavior.yaml
         stats = raw["unified"]
         # RAW-27 stats (eef20 + base3 + trunk4); the deploy _UnifyAwareNormalizer
         # gathers the model's 80-D output back to these 27 raw dims first.
         for k in ("mean", "std", "min", "max", "q01", "q99"):
             assert stats[k].shape == (27,)
-            assert raw["unified__proprio"][k].shape == (27,)  # proprio stats same width
-        # rot6d raw dims (3:9 / 13:19) pinned to identity in the stats file (both sets).
+        # rot6d raw dims (3:9 / 13:19) pinned to identity in the stats file.
         for i in (3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 18):
             assert stats["q01"][i] == -1.0 and stats["q99"][i] == 1.0
             assert stats["mean"][i] == 0.0 and stats["std"][i] == 1.0
-            assert raw["unified__proprio"]["q01"][i] == -1.0 and raw["unified__proprio"]["q99"][i] == 1.0
 
     def test_deploy_unify_normalizer_matches_reader(self, tmp_path):
         # The deploy _UnifyAwareNormalizer built from the RAW .npy + the unify map
@@ -545,32 +541,6 @@ class TestDeployNormalizer:
         norm27 = unmap_from_unify(norm80, dst_index)
         inside = np.abs(norm27) < 1.0 - 1e-3  # exclude quantile-clipped entries
         np.testing.assert_allclose(recovered27[inside], raw27[inside], atol=1e-4)
-
-    def test_deploy_unify_uses_separate_proprio_stats(self, tmp_path):
-        # Larchenko-style split: _UnifyAwareNormalizer must normalize proprio-IN with
-        # the PROPRIO inner stats and unnormalize action-OUT with the ACTION inner stats.
-        from openwam.dataloader.transforms.normalize import Normalizer
-        from openwam.dataloader.utils.unify_action import map_to_unify, parse_unify_spec, unmap_from_unify
-        from openwam.deploy.model_loader import _UnifyAwareNormalizer
-
-        def _mk(mean, std):  # full stats dict, distinct action vs proprio
-            return {
-                k: np.full(27, v, np.float32)
-                for k, v in (("mean", mean), ("std", std), ("min", mean - 1), ("max", mean + 1),
-                             ("q01", mean - 1), ("q99", mean + 1))
-            }
-
-        act = Normalizer(mode="mean_std", stats=_mk(0.0, 1.0))
-        pro = Normalizer(mode="mean_std", stats=_mk(5.0, 2.0))  # different distribution
-        dst = parse_unify_spec(UNIFY_MAP, UNIFY_DIM)
-        uan = _UnifyAwareNormalizer(act, dst, UNIFY_DIM, inner_proprio=pro)
-        rng = np.random.RandomState(0)
-        raw = rng.uniform(-1, 1, size=(1, 27)).astype(np.float32)
-        exp_norm, _ = map_to_unify(pro.normalize(raw), dst, UNIFY_DIM)  # proprio stats
-        np.testing.assert_allclose(uan.normalize(raw), exp_norm, atol=1e-6)
-        unified = rng.uniform(-1, 1, size=(1, UNIFY_DIM)).astype(np.float32)
-        exp_unnorm = act.unnormalize(unmap_from_unify(unified, dst))  # action stats
-        np.testing.assert_allclose(uan.unnormalize(unified), exp_unnorm, atol=1e-6)
 
 
 # ── color jitter (train-split video augmentation) -----------------------------
@@ -647,22 +617,19 @@ class TestStatsScript:
 
         b = make_behavior_bucket(tmp_path, n_episodes=3)
         result = compute_behavior_stats(b)
-        assert set(result) == {"eef", "base_vel", "trunk", "arm_joint", "proprio"}
-        assert set(result["proprio"]) == {"eef", "base_vel", "trunk", "arm_joint"}
+        assert set(result) == {"eef", "base_vel", "trunk", "arm_joint"}
         eef, base, trunk, arm = result["eef"], result["base_vel"], result["trunk"], result["arm_joint"]
         for k in ("mean", "std", "min", "max", "q01", "q99"):
             assert len(eef[k]) == 20
             assert len(base[k]) == 3
             assert len(trunk[k]) == 4
             assert len(arm[k]) == _ARM_JOINT_DIM == 16
-            assert len(result["proprio"]["eef"][k]) == 20  # proprio set has matching widths
-        # rot6d dims (3:9 / 13:19) pinned to identity in BOTH streams
-        assert eef["rot6d_identity"] is True and result["proprio"]["eef"]["rot6d_identity"] is True
+        # rot6d dims (3:9 / 13:19) pinned to identity
+        assert eef["rot6d_identity"] is True
         for i in (3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 18):
             assert eef["min"][i] == -1.0 and eef["max"][i] == 1.0
             assert eef["q01"][i] == -1.0 and eef["q99"][i] == 1.0
             assert eef["mean"][i] == 0.0 and eef["std"][i] == 1.0
-            assert result["proprio"]["eef"]["q01"][i] == -1.0 and result["proprio"]["eef"]["q99"][i] == 1.0
         # base velocity is NOT pinned (real stats from data)
         assert "rot6d_identity" not in base
         assert base["layout"] == "vx,vy,vyaw"
@@ -672,26 +639,42 @@ class TestStatsScript:
         # arm_joint block: real stats, NOT pinned (no rot6d in joint mode)
         assert "rot6d_identity" not in arm
         assert arm["layout"] == "L_arm7,L_grip1,R_arm7,R_grip1"
-        # each block is tagged with its stream (action top-level / proprio nested).
+        # every block pools the ACTION + PROPRIO streams (== RoboCOIN), so the
+        # stats cover the proprio marginals (gripper open-scale, raw world-frame base
+        # velocity), not just the action command's.
         for blk in (eef, base, trunk, arm):
-            assert blk["stream"] == "action"
-        for blk in result["proprio"].values():
-            assert blk["stream"] == "proprio"
+            assert blk["pool"] == "action+proprio"
 
-    def test_stats_action_and_proprio_are_separate(self, tmp_path):
-        # Proprio and action stats are SEPARATE sets (Larchenko-style), not pooled.
-        # The base_vel block must differ: action base = local-frame command; proprio
-        # base = raw WORLD-frame base_qvel — different distributions. And the gripper
-        # slot differs (±1 command vs continuous open-scale).
-        from openwam.dataloader.utils.stats_computation.behavior_stats_computation import compute_behavior_stats
+    def test_stats_pool_both_action_and_proprio_streams(self, tmp_path):
+        # The gripper stats must reflect the pooled action+proprio marginal: pooling
+        # the achieved open-scale changes mean/std vs an action-only computation
+        # (identical only if we forgot to pool). Guards the fix from silently
+        # regressing back to action-only stats.
+        import numpy as _np
+
+        from openwam.dataloader.utils.stats_computation.behavior_stats_computation import (
+            _proprio_rows_to_blocks,
+            _rows_to_blocks,
+            compute_behavior_stats,
+        )
+        from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
         b = make_behavior_bucket(tmp_path, n_episodes=3)
-        result = compute_behavior_stats(b)
-        a_base, p_base = result["base_vel"], result["proprio"]["base_vel"]
-        a_eef, p_eef = result["eef"], result["proprio"]["eef"]
-        # different quantities → the stats must not be identical
-        assert not np.allclose(a_base["mean"], p_base["mean"]) or not np.allclose(a_base["std"], p_base["std"])
-        assert abs(a_eef["mean"][9] - p_eef["mean"][9]) > 1e-9 or abs(a_eef["mean"][19] - p_eef["mean"][19]) > 1e-9
+        pooled = compute_behavior_stats(b)["eef"]
+        # Recompute an ACTION-ONLY eef accumulator over the same episodes.
+        import pyarrow.parquet as _pq
+
+        action_only = Accumulator(dim=20)
+        for f in sorted((b / "data").glob("task-*/episode_*.parquet")):
+            df = _pq.read_table(f, columns=["observation.state", "action"]).to_pandas()
+            st = _np.stack(df["observation.state"].values).astype(_np.float32)
+            ac = _np.stack(df["action"].values).astype(_np.float32)
+            action_only.update_batch(_rows_to_blocks(st, ac)[0])
+        ao = action_only.finalize()
+        # pooled count is exactly 2x the action-only count (action + proprio rows).
+        assert pooled["num_timesteps"] == 2 * action_only.count
+        # gripper mean (slots 9/19) differs once the proprio open-scale is pooled in.
+        assert abs(pooled["mean"][9] - ao["mean"][9]) > 1e-6 or abs(pooled["mean"][19] - ao["mean"][19]) > 1e-6
 
     def test_no_rot6d_identity_flag(self, tmp_path):
         from openwam.dataloader.utils.stats_computation.behavior_stats_computation import compute_behavior_stats
@@ -884,8 +867,8 @@ class TestActionModes:
 
     def test_eef_proprio_is_rendered_achieved_state(self, tmp_path):
         # eef/unified proprio (t=0) = _state_to_raw_proprio_eef(state[0]): achieved
-        # eef pose + gripper open-scale + base-frame velocity + trunk qpos — NOT the
-        # action command. Compare value-for-value (normalize off, raw 27).
+        # eef pose + gripper open-scale + RAW world-frame base velocity + trunk qpos —
+        # NOT the action command. Compare value-for-value (normalize off, raw 27).
         b = make_behavior_bucket(tmp_path, n_episodes=1)
         with _mock_video_decoder():
             ds = BehaviorDataset(
@@ -939,8 +922,8 @@ class TestActionModes:
         with _mock_video_decoder():
             ds = _make_joint_ds(b, normalize_mode="quantile")
         raw = np.load(ds.normalization_stats_path, allow_pickle=True).item()
-        assert set(raw) == {"joint", "joint__proprio"}  # action stats + separate proprio stats
-        assert len(raw["joint"]["mean"]) == 23 and len(raw["joint__proprio"]["mean"]) == 23
+        assert set(raw) == {"joint"}  # DEPLOY_ACTION_MODE == action_mode
+        assert len(raw["joint"]["mean"]) == 23
 
     def test_joint_missing_arm_joint_block_raises(self, tmp_path):
         # An eef-era stats file (no arm_joint block) must fail fast in joint mode.

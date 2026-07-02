@@ -148,9 +148,9 @@ sim-capable box, in order of risk:
    hold against the live `robot_r1::proprio` on a sim box (a re-upload could shift
    the packing), or run `--no-send-state` to A/B.
 2. **Base velocity frame.** The proprio base is the RAW WORLD-frame `base_qvel`
-   (Larchenko-style, no rotation), normalized by its own proprio stats — separate
-   from the local-frame base action command. Confirm the live `robot_r1::proprio`
-   base velocity is world-frame (`d(base_qpos)/dt`) as decoded.
+   (Larchenko-style, no rotation), sharing the action's pooled normalization stats.
+   Confirm the live `robot_r1::proprio` base velocity is world-frame
+   (`d(base_qpos)/dt`) as decoded.
 3. **Prompt text.** The model was trained on the dataset's `tasks[0]` strings;
    the bridge uses the de-underscored activity name. If training used a different
    phrasing, adjust the mapping (or pass `--default-prompt`).

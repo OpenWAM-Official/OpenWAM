@@ -168,8 +168,7 @@ class TestProprioToRaw27:
 
     def test_gripper_open_scale_and_base_world_frame(self):
         # Grippers: mean of the 2 finger qpos → open-scale 2*mean/0.05-1 ∈ [-1,1].
-        # Base (Larchenko): RAW WORLD-frame base_qvel — no rotation, no scaling
-        # (its own proprio stats normalize it; the net relates it to the base cmd).
+        # Base (Larchenko): RAW WORLD-frame base_qvel — no rotation, no scaling.
         rng = np.random.RandomState(4)
         p = self._make_proprio(rng)
         out = r1pro_proprio_to_raw27(p)
