@@ -247,57 +247,84 @@ def raw27_to_r1pro_action(action: np.ndarray, *, clip_passthrough: bool = True) 
     return np.concatenate([base, trunk, arm_left, grip_l, arm_right, grip_r]).astype(np.float32)
 
 
-# Offsets into the R1Pro 256-D proprio vector (OmniGibson ``robot_r1::proprio``,
-# == the dataset's ``observation.state`` when both come from the same proprio
-# config). The EEF blocks are the dataloader's reverse-engineered + unit-norm-
-# validated offsets (openwam/dataloader/behavior.py) — VERIFIED on real data.
-# base_vel / trunk / gripper are sourced from the ACTION command at train time
-# (not the state), so their state-side offsets must be CONFIRMED on a sim box;
-# ``None`` → that raw block is zero-filled (the model leans on EEF + vision).
-R1PRO_PROPRIO_OFFSETS = {
-    "l_pos": slice(186, 189),  # verified
-    "l_quat": slice(189, 193),  # verified (xyzw, unit-norm checked by the reader)
-    "r_pos": slice(225, 228),  # verified
-    "r_quat": slice(228, 232),  # verified
-    "trunk": slice(236, 240),  # best-estimate (PROPRIOCEPTION_INDICES) — confirm on sim
-    "base_vel": None,  # UNCONFIRMED — set the slice after sim validation
-    "l_grip": None,  # UNCONFIRMED — gripper width/qpos offset
-    "r_grip": None,  # UNCONFIRMED
-}
+# ── R1Pro 256-D proprio → RAW-27 (ACHIEVED state, rendered into the action's raw
+#    space) ─────────────────────────────────────────────────────────────────────
+# The bridge sends the model's proprio from the ONLY thing that exists at deploy:
+# the robot's measured 256-D ``observation.state`` (OmniGibson ``robot_r1::proprio``
+# == the dataset's ``observation.state``). It must be rendered EXACTLY as the trainer
+# does (openwam.dataloader.behavior._state_to_raw_proprio_eef), else the model sees a
+# proprio distribution it never trained on → pose drift. This module stays pure-numpy
+# (no ``openwam`` import) so the deploy client can run it anywhere, so the rendering
+# is duplicated here; ``test_behavior_bridge`` cross-checks the two implementations
+# produce byte-identical output on the same 256-D state.
+#
+# Offsets decoded from the robot's ``proprio_obs`` list (each episode's
+# meta/episodes/*.json → ``config`` → ``robots[0].proprio_obs``) and verified
+# through redundant relationships (sin(qpos) agrees with the redundant sine block; quat ‖·‖==1; base_qvel
+# == d(base_qpos)/dt). eef pose is achieved; gripper/base/trunk are mapped into the
+# action's normalized command space (see the two helpers below).
+_PP_L_POS = slice(186, 189)
+_PP_L_QUAT = slice(189, 193)  # xyzw
+_PP_R_POS = slice(225, 228)
+_PP_R_QUAT = slice(228, 232)
+_PP_L_GRIP_QPOS = slice(193, 195)  # left MultiFinger gripper: 2 finger positions (m)
+_PP_R_GRIP_QPOS = slice(232, 234)  # right gripper: 2 finger positions (m)
+_PP_TRUNK_QPOS = slice(236, 240)  # achieved trunk joint positions (rad)
+_PP_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw] in the WORLD frame
+_PP_BASE_YAW = 246  # base_qpos yaw (world), for the world→base-frame rotation
+R1PRO_PROPRIO_DIM = 256
+# Controller limits mapping achieved (physical) proprio → the action's [-1,1] cmd
+# space (kept in lockstep with openwam.dataloader.behavior).
+_GRIPPER_OPEN_QPOS = 0.05
+_BASE_VEL_OUTPUT_SCALE = np.array([0.75, 0.75, 1.0], dtype=np.float32)
 
 
-def r1pro_proprio_to_raw27(proprio: np.ndarray, offsets: dict | None = None) -> np.ndarray:
-    """Assemble the RAW-27 proprio (physical units) from R1Pro 256-D proprio.
+def _proprio_grip_open_scale(grip_qpos: np.ndarray) -> np.ndarray:
+    """``(2,)`` finger positions → ``(1,)`` open-scale in ``[-1,+1]`` (mean of the two
+    fingers through the gripper cmd→qpos limits; +1 open, -1 closed)."""
+    opening = np.asarray(grip_qpos, dtype=np.float32).mean(axis=-1, keepdims=True)
+    return np.clip(2.0 * opening / _GRIPPER_OPEN_QPOS - 1.0, -1.0, 1.0).astype(np.float32)
 
-    Builds the reader's raw layout ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6,
-    R_grip1, base3, trunk4]`` (EEF pose = xyz + rot6d from the state quaternion).
-    The OpenWAM server's _UnifyAwareNormalizer normalizes this raw proprio and
-    scatters it into the unified space the model wants — so the bridge sends RAW,
-    NOT unified. Blocks whose ``offsets`` entry is ``None`` stay zero.
+
+def _proprio_base_vel_local(proprio: np.ndarray) -> np.ndarray:
+    """``(256,)`` proprio → ``(3,)`` achieved base velocity in the BASE frame,
+    normalized to the ``[-1,1]`` command scale (world ``base_qvel`` rotated by ``-yaw``,
+    then divided by the controller output limits)."""
+    qv = proprio[_PP_BASE_QVEL]
+    yaw = float(proprio[_PP_BASE_YAW])
+    cos, sin = np.cos(yaw), np.sin(yaw)
+    vx = cos * qv[0] + sin * qv[1]
+    vy = -sin * qv[0] + cos * qv[1]
+    return (np.array([vx, vy, qv[2]], dtype=np.float32) / _BASE_VEL_OUTPUT_SCALE).astype(np.float32)
+
+
+def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
+    """Render the R1Pro 256-D measured proprio → RAW-27 in the reader's action layout.
+
+    Output (== ``openwam.dataloader.behavior._state_to_raw_proprio_eef``)::
+
+        [L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]
+
+    EEF pose + rot6d from the state quaternions (achieved), gripper open-scale from
+    the finger qpos, base-frame velocity, achieved trunk qpos. The OpenWAM server's
+    _UnifyAwareNormalizer then normalizes this raw proprio (shared stats) and scatters
+    it into the unified space — so the bridge sends RAW, NOT unified.
 
     Returns an un-normalized ``(27,)`` float32 vector (the server normalizes it).
     """
     p = np.asarray(proprio, dtype=np.float32).reshape(-1)
-    off = dict(R1PRO_PROPRIO_OFFSETS if offsets is None else offsets)
-
-    def _blk(name: str, width: int) -> np.ndarray:
-        sl = off.get(name)
-        if sl is None:
-            return np.zeros(width, dtype=np.float32)
-        v = p[sl].astype(np.float32)
-        if v.shape[0] != width:
-            raise ValueError(f"proprio offset {name!r}={sl} yielded width {v.shape[0]}, expected {width}")
-        return v
+    if p.shape[0] != R1PRO_PROPRIO_DIM:
+        raise ValueError(f"expected R1Pro proprio of width {R1PRO_PROPRIO_DIM}, got {p.shape[0]}")
 
     return np.concatenate(
         [
-            _blk("l_pos", 3),
-            quat_xyzw_to_rot6d(_blk("l_quat", 4)),
-            _blk("l_grip", 1),
-            _blk("r_pos", 3),
-            quat_xyzw_to_rot6d(_blk("r_quat", 4)),
-            _blk("r_grip", 1),
-            _blk("base_vel", 3),
-            _blk("trunk", 4),
+            p[_PP_L_POS],
+            quat_xyzw_to_rot6d(p[_PP_L_QUAT]),
+            _proprio_grip_open_scale(p[_PP_L_GRIP_QPOS]),
+            p[_PP_R_POS],
+            quat_xyzw_to_rot6d(p[_PP_R_QUAT]),
+            _proprio_grip_open_scale(p[_PP_R_GRIP_QPOS]),
+            _proprio_base_vel_local(p),
+            p[_PP_TRUNK_QPOS],
         ]
     ).astype(np.float32)

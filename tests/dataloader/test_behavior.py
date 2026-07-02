@@ -31,12 +31,23 @@ from openwam.dataloader.behavior import (
     _ACT_RGRIP,
     _ACT_TRUNK,
     _ARM_JOINT_DIM,
+    _BASE_QVEL,
+    _BASE_YAW,
     _JOINT_DIM,
+    _L_ARM_QPOS,
+    _L_ARM_QPOS_SIN,
     _L_EEF_POS,
     _L_EEF_QUAT,
+    _L_GRIP_QPOS,
+    _R_ARM_QPOS,
+    _R_ARM_QPOS_SIN,
     _R_EEF_POS,
     _R_EEF_QUAT,
+    _R_GRIP_QPOS,
+    _TRUNK_QPOS,
     BehaviorDataset,
+    _state_to_raw_proprio_eef,
+    _state_to_raw_proprio_joint,
 )
 from openwam.dataloader.utils.unify_action import UNIFY_DIM
 
@@ -64,7 +75,14 @@ def _unit_quats(rng: np.random.RandomState, n: int) -> np.ndarray:
 
 
 def _make_state(rng: np.random.RandomState, n: int, *, unit_quats: bool = True) -> np.ndarray:
-    """``(n, 256)`` state with valid EEF pos + (unit) quats at the reader's offsets."""
+    """``(n, 256)`` state with valid ACHIEVED proprio channels at the reader's offsets.
+
+    Populates every field the proprio path + the ``_post_init`` layout guard read:
+    EEF pos/quat, arm qpos (with its ``sin(qpos)`` block — the proprio_obs invariant
+    the guard checks), 2-finger gripper qpos ∈ [0, 0.05], trunk qpos, world-frame
+    base velocity, and the base yaw used for the world→base rotation. Other dims stay
+    random (the reader never reads them).
+    """
     state = rng.uniform(-1, 1, size=(n, STATE_DIM)).astype(np.float32)
     state[:, _L_EEF_POS] = rng.uniform(0.1, 0.6, size=(n, 3))
     state[:, _R_EEF_POS] = rng.uniform(0.1, 0.6, size=(n, 3))
@@ -75,6 +93,16 @@ def _make_state(rng: np.random.RandomState, n: int, *, unit_quats: bool = True) 
         rq *= 3.0
     state[:, _L_EEF_QUAT] = lq
     state[:, _R_EEF_QUAT] = rq
+    # achieved arm qpos + its sin-block (guard checks sin(qpos)==sin-block)
+    for qsl, ssl in ((_L_ARM_QPOS, _L_ARM_QPOS_SIN), (_R_ARM_QPOS, _R_ARM_QPOS_SIN)):
+        q = rng.uniform(-1.5, 1.5, size=(n, 7)).astype(np.float32)
+        state[:, qsl] = q
+        state[:, ssl] = np.sin(q)
+    state[:, _L_GRIP_QPOS] = rng.uniform(0.0, 0.05, size=(n, 2))  # finger travel [0, 0.05]
+    state[:, _R_GRIP_QPOS] = rng.uniform(0.0, 0.05, size=(n, 2))
+    state[:, _TRUNK_QPOS] = rng.uniform(-0.4, 0.4, size=(n, 4))
+    state[:, _BASE_QVEL] = rng.uniform(-0.2, 0.2, size=(n, 3))  # world-frame base vel
+    state[:, _BASE_YAW] = rng.uniform(-np.pi, np.pi, size=n)
     return state
 
 
@@ -688,52 +716,57 @@ class TestActionModes:
         assert am.all()  # all 23 dims valid on all 32 (< EP_LENGTH) steps
         assert s["proprio_mask"].numpy().all()
 
-    def test_joint_layout_matches_native_action(self, tmp_path):
-        # raw-23 proprio (t=0) = [L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]
-        # built from native action row 0. Recompute the exact synthetic action
-        # (ep 0 → RandomState(100)) and compare value-for-value (normalize off).
+    def test_joint_proprio_is_rendered_achieved_state(self, tmp_path):
+        # raw-23 proprio (t=0) = achieved state rendered by _state_to_raw_proprio_joint
+        # [L_arm_qpos7, L_grip_openscale1, R_arm_qpos7, R_grip_openscale1, base3, trunk4]
+        # — NOT the action command. Replay the writer rng, render, compare exactly.
         b = make_behavior_bucket(tmp_path, n_episodes=1)
         with _mock_video_decoder():
             p = _make_joint_ds(b)[0]["proprio"].numpy()[0]  # (23,)
-        # Replay the writer's rng: ep 0 uses RandomState(100), and _make_state
-        # consumes it BEFORE _make_action (shared rng) — so advance it identically.
-        rng = np.random.RandomState(100)
-        _make_state(rng, EP_LENGTH)
-        act0 = _make_action(rng, EP_LENGTH)[0]  # native (23,)
-        expected = np.concatenate(
-            [
-                act0[_ACT_LARM],  # 0:7   left arm
-                act0[_ACT_LGRIP : _ACT_LGRIP + 1],  # 7     left gripper
-                act0[_ACT_RARM],  # 8:15  right arm
-                act0[_ACT_RGRIP : _ACT_RGRIP + 1],  # 15    right gripper
-                act0[_ACT_BASE],  # 16:19 base velocity
-                act0[_ACT_TRUNK],  # 19:23 trunk
-            ]
-        ).astype(np.float32)
+        rng = np.random.RandomState(100)  # ep 0 writer seed
+        state0 = _make_state(rng, EP_LENGTH)[:1]  # (1, 256)
+        expected = _state_to_raw_proprio_joint(state0)[0]
         np.testing.assert_allclose(p, expected, rtol=0, atol=1e-6)
-        # grippers land at the interleaved joint-layout slots 7 and 15, binary {-1,+1}
-        assert p[7] in (-1.0, 1.0) and p[15] in (-1.0, 1.0)
+        # gripper open-scale lands at slots 7 / 15, continuous in [-1, +1] (NOT the
+        # binary ±1 command — it is the achieved finger opening).
+        assert -1.0 <= p[7] <= 1.0 and -1.0 <= p[15] <= 1.0
 
-    def test_joint_action_is_row_aligned(self, tmp_path):
-        # Joint reads the native command at t (no +1 shift), so the window's step-0
-        # action equals the t=0 proprio (both = native row 0). (eef mode would differ:
-        # action[0] = eef(state[1]) vs proprio = eef(state[0]).)
+    def test_joint_action_is_row_aligned_and_differs_from_proprio(self, tmp_path):
+        # Joint ACTION reads the native command at t (no +1 shift): action[0] == the
+        # reordered native row 0. PROPRIO is the achieved state, a DIFFERENT field —
+        # so the two must NOT be equal (that mismatch is the whole point of the fix).
         b = make_behavior_bucket(tmp_path, n_episodes=1)
         with _mock_video_decoder():
             s = _make_joint_ds(b)[0]
-        np.testing.assert_allclose(s["action"].numpy()[0], s["proprio"].numpy()[0], rtol=0, atol=1e-6)
+        a0 = s["action"].numpy()[0]
+        rng = np.random.RandomState(100)
+        _make_state(rng, EP_LENGTH)
+        act0 = _make_action(rng, EP_LENGTH)[0]  # native (23,)
+        expected_a0 = np.concatenate(
+            [
+                act0[_ACT_LARM],
+                act0[_ACT_LGRIP : _ACT_LGRIP + 1],
+                act0[_ACT_RARM],
+                act0[_ACT_RGRIP : _ACT_RGRIP + 1],
+                act0[_ACT_BASE],
+                act0[_ACT_TRUNK],
+            ]
+        ).astype(np.float32)
+        np.testing.assert_allclose(a0, expected_a0, rtol=0, atol=1e-6)  # action row-aligned
+        assert not np.allclose(a0, s["proprio"].numpy()[0])  # proprio != command
 
-    def test_joint_uses_native_arm_columns_not_eef(self, tmp_path):
-        # Sanity: the joint arm block must come from action[7:14]/[15:22], NOT the
-        # EEF reconstruction — so it is unaffected by the observation.state quats.
+    def test_joint_proprio_arm_from_state_qpos_not_action(self, tmp_path):
+        # The joint arm proprio must come from the ACHIEVED arm qpos in
+        # observation.state ([158:165]/[197:204]), NOT the action[7:14]/[15:22] columns.
         b = make_behavior_bucket(tmp_path, n_episodes=1)
         with _mock_video_decoder():
             p = _make_joint_ds(b)[0]["proprio"].numpy()[0]
         rng = np.random.RandomState(100)
-        _make_state(rng, EP_LENGTH)  # advance rng as the writer did before _make_action
+        state0 = _make_state(rng, EP_LENGTH)[0]  # (256,)
         act0 = _make_action(rng, EP_LENGTH)[0]
-        np.testing.assert_allclose(p[0:7], act0[_ACT_LARM], rtol=0, atol=1e-6)
-        np.testing.assert_allclose(p[8:15], act0[_ACT_RARM], rtol=0, atol=1e-6)
+        np.testing.assert_allclose(p[0:7], state0[_L_ARM_QPOS], rtol=0, atol=1e-6)  # from state
+        np.testing.assert_allclose(p[8:15], state0[_R_ARM_QPOS], rtol=0, atol=1e-6)
+        assert not np.allclose(p[0:7], act0[_ACT_LARM])  # and NOT the action columns
 
     def test_joint_plus_unify_rejected(self, tmp_path):
         # joint requires unify_action=false (the 80-D space is EEF-semantic).
@@ -798,6 +831,34 @@ class TestActionModes:
         assert s["action"].shape == (32, 27)
         assert s["proprio"].shape == (1, 27)
         assert s["action_mask"].numpy().all()  # no mask
+
+    def test_eef_proprio_is_rendered_achieved_state(self, tmp_path):
+        # eef/unified proprio (t=0) = _state_to_raw_proprio_eef(state[0]): achieved
+        # eef pose + gripper open-scale + base-frame velocity + trunk qpos — NOT the
+        # action command. Compare value-for-value (normalize off, raw 27).
+        b = make_behavior_bucket(tmp_path, n_episodes=1)
+        with _mock_video_decoder():
+            ds = BehaviorDataset(
+                dataset_dir=str(b),
+                height=384,
+                width=320,
+                action_mode="eef",
+                unify_action=False,
+                normalize_mode=None,
+                multiview=True,
+            )
+            s = ds[0]
+        p = s["proprio"].numpy()[0]  # (27,)
+        rng = np.random.RandomState(100)  # ep 0 writer seed
+        state0 = _make_state(rng, EP_LENGTH)[:1]
+        expected = _state_to_raw_proprio_eef(state0)[0]
+        np.testing.assert_allclose(p, expected, rtol=0, atol=1e-6)
+        # gripper open-scale (slots 9/19) continuous in [-1,1]; base (20:23) finite.
+        assert -1.0 <= p[9] <= 1.0 and -1.0 <= p[19] <= 1.0
+        assert np.isfinite(p[20:23]).all()
+        # proprio EEF pose comes from state[0] (achieved), NOT the +1-shifted action.
+        act = s["action"].numpy()  # eef action arm target = eef(state[1])
+        assert not np.allclose(p[0:3], act[0, 0:3])  # proprio L_pos != action L_pos target
 
     def test_unified_default_unchanged(self, tmp_path):
         # Regression: action_mode=unified (the default) is byte-identical to before

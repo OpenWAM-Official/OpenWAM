@@ -29,13 +29,25 @@ base[68:71] and trunk[71:75] carry real data.
 Raw 27-D pre-scatter vector (action & proprio):
   [L_pos(3), L_rot6d(6), L_grip(1), R_pos(3), R_rot6d(6), R_grip(1), base_vel(3), trunk(4)]
 
-Action/state temporal alignment (eef/unified):
-  The EEF *action target* at window step t is the NEXT-frame achieved pose
-  ``eef(state[t+1])`` (shifted +1, last step clamped → T_action = num_frames-1
-  targets, matching the other readers). The gripper command (``action[:,14/22]``,
-  binary {-1,+1}, +1=open), base velocity (``action[:,0:3]``) and torso joints
-  (``action[:,3:7]``) are taken at t (row-aligned commands). Proprio is the
-  current-frame (t=0) pose + commands.
+Action target vs proprio (the contract):
+  A sample's *proprio* is the MEASURED ``observation.state`` at the window start
+  (t=0); the *prediction target* is the action sequence ``action[0..T_action-1]``
+  (row-aligned recorded commands). The two are drawn from different fields:
+
+  * **Proprio (from state[0], ACHIEVED):** eef pose from the state quats, gripper
+    open-scale from the finger qpos, base-frame velocity from ``base_qvel``, trunk
+    qpos — all rendered into the action's raw representation (see
+    ``_state_to_raw_proprio_*``). It is NOT the action command: at deploy the model
+    only ever sees the achieved state, so training on the command would cause
+    covariate-shift drift on the base/gripper channels.
+  * **Action target (row-aligned commands):** the gripper command
+    (``action[:,14/22]``, binary {-1,+1}, +1=open), base velocity (``action[:,0:3]``)
+    and torso joints (``action[:,3:7]``) are taken at t. The EEF arm target is the
+    next-frame achieved pose ``eef(state[t+1])`` — the EEF-space rendering of the
+    arm's joint setpoint ``action[t]`` (the demos used a JointController, so there is
+    no recorded EEF command; the pose reached after executing ``action[t]`` is its
+    faithful proxy). Shift +1, last step clamped → T_action = num_frames-1 targets,
+    matching the other readers.
 
 Action modes (``action_mode`` in the yaml; selects the *representation*):
   * ``unified`` (default) — EEF, scattered into the shared 80-D space when
@@ -95,6 +107,40 @@ _ACT_LARM = slice(7, 14)  # 7 left-arm joint targets (joint mode only)
 _ACT_LGRIP = 14
 _ACT_RARM = slice(15, 22)  # 7 right-arm joint targets (joint mode only)
 _ACT_RGRIP = 22
+
+# ── observation.state[256] ACHIEVED proprio offsets ──────────────────────────
+# The 256-D vector is the robot's `proprio_obs` list concatenated in a fixed
+# order. That list ships in every episode's meta/episodes/*.json → `config` →
+# robots[0].proprio_obs; we decoded it (n_dof=28) and verified every offset
+# through redundant relationships (sin(qpos) agrees with the redundant sine block; quat ‖·‖==1;
+# base_qvel == d(base_qpos)/dt). These are the ACHIEVED (measured) states — what
+# proprio must be sourced from (NOT the action command, which the model never
+# sees at deploy). Layout of the blocks we read:
+#   [158:165] arm_left_qpos   [165:172] arm_left_qpos_sin
+#   [193:195] gripper_left_qpos (2 fingers, m)   [197:204] arm_right_qpos
+#   [204:211] arm_right_qpos_sin  [232:234] gripper_right_qpos (2 fingers)
+#   [236:240] trunk_qpos (rad)  [244:247] base_qpos (x,y,yaw world)
+#   [253:256] base_qvel (world-frame d(base_qpos)/dt)
+_L_ARM_QPOS = slice(158, 165)  # achieved left-arm joint positions (rad)
+_L_ARM_QPOS_SIN = slice(165, 172)  # sin(left-arm qpos) — used only by the layout guard
+_R_ARM_QPOS = slice(197, 204)  # achieved right-arm joint positions (rad)
+_R_ARM_QPOS_SIN = slice(204, 211)
+_L_GRIP_QPOS = slice(193, 195)  # left MultiFinger gripper: 2 finger positions (m)
+_R_GRIP_QPOS = slice(232, 234)  # right gripper: 2 finger positions (m)
+_TRUNK_QPOS = slice(236, 240)  # achieved trunk joint positions (rad)
+_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw] in the WORLD frame
+_BASE_YAW = 246  # base_qpos yaw (world), for the world→base-frame rotation
+
+# Controller limits that map ACHIEVED (physical) proprio into the ACTION's
+# normalized command space, so proprio + action share one stats set (robocoin
+# renders both its action and its state into the same eef space too):
+#  * gripper: MultiFingerGripperController maps cmd [-1,+1] → finger qpos
+#    [0, _GRIPPER_OPEN_QPOS]; invert to open-scale = 2*qpos/OPEN - 1 (+1 open,
+#    -1 closed). Reports true partial opening when grasping an object.
+#  * base: HolonomicBaseJointController output_limits = ±_BASE_VEL_OUTPUT_SCALE;
+#    the achieved base-frame velocity divided by these recovers the [-1,1] cmd.
+_GRIPPER_OPEN_QPOS = 0.05
+_BASE_VEL_OUTPUT_SCALE = np.array([0.75, 0.75, 1.0], dtype=np.float32)
 
 # Raw pre-scatter width: EEF 20 (pos3+rot6d6+grip1 ×2) + base velocity 3 + trunk 4.
 # _EEF_DIM is the shared bimanual EEF width (== utils.eef.EEF_DIM, as RoboCOIN
@@ -165,6 +211,70 @@ def _assemble_joint(
     """Joint-mode raw 23-D layout ``[L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]``
     — the native ``action[23]`` re-ordered to the 左臂+夹爪 / 右臂+夹爪 / 其他 convention."""
     return np.concatenate([_assemble_arm_joint(l_arm, l_grip, r_arm, r_grip), base, trunk], axis=-1).astype(np.float32)
+
+
+# ── achieved-state → raw proprio rendering ───────────────────────────────────
+# Proprio is the MEASURED observation.state at the window start, rendered into
+# the SAME raw representation as the action (so one stats set normalizes both,
+# and the deploy obs — which is only the 256-D state, never a command — matches
+# training). The deploy bridge (benchmarks/utils/action_conversion.py) MUST
+# reproduce these three transforms byte-for-byte; a cross-check test guards it.
+
+
+def _grip_open_scale(grip_qpos: np.ndarray) -> np.ndarray:
+    """``(..., 2)`` finger positions → ``(..., 1)`` open-scale in ``[-1, +1]``.
+
+    Mean of the two finger joints mapped through the gripper controller's
+    cmd→qpos limits (``+1`` fully open at ``_GRIPPER_OPEN_QPOS``, ``-1`` closed at 0).
+    """
+    opening = grip_qpos.mean(axis=-1, keepdims=True)
+    return np.clip(2.0 * opening / _GRIPPER_OPEN_QPOS - 1.0, -1.0, 1.0).astype(np.float32)
+
+
+def _base_vel_local(state: np.ndarray) -> np.ndarray:
+    """``(..., 256)`` state → ``(..., 3)`` achieved base velocity in the BASE frame,
+    normalized to the ``[-1, 1]`` command scale.
+
+    ``base_qvel`` is the world-frame ``d(base_qpos)/dt``; the linear part is rotated
+    by ``-yaw`` into the base frame (``vyaw`` is frame-invariant), then divided by the
+    controller output limits so it lands in the same space as the base action command.
+    """
+    qv = state[..., _BASE_QVEL]
+    yaw = state[..., _BASE_YAW]
+    cos, sin = np.cos(yaw), np.sin(yaw)
+    vx = cos * qv[..., 0] + sin * qv[..., 1]
+    vy = -sin * qv[..., 0] + cos * qv[..., 1]
+    vb = np.stack([vx, vy, qv[..., 2]], axis=-1).astype(np.float32)
+    return (vb / _BASE_VEL_OUTPUT_SCALE).astype(np.float32)
+
+
+def _state_to_raw_proprio_eef(state: np.ndarray) -> np.ndarray:
+    """``(T, 256)`` achieved state → ``(T, 27)`` proprio in the eef/unified raw layout
+    ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]`` (== the
+    action layout). EEF pose + rot6d from the state quats, gripper open-scale from the
+    finger qpos, base-frame velocity, achieved trunk qpos."""
+    eef18 = _state_to_eef18(state)
+    return _assemble_raw(
+        eef18,
+        _grip_open_scale(state[..., _L_GRIP_QPOS]),
+        _grip_open_scale(state[..., _R_GRIP_QPOS]),
+        _base_vel_local(state),
+        state[..., _TRUNK_QPOS],
+    )
+
+
+def _state_to_raw_proprio_joint(state: np.ndarray) -> np.ndarray:
+    """``(T, 256)`` achieved state → ``(T, 23)`` proprio in the joint raw layout
+    ``[L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]`` — all from achieved qpos
+    (arms), open-scale (grippers), base-frame velocity, and trunk qpos."""
+    return _assemble_joint(
+        state[..., _L_ARM_QPOS],
+        _grip_open_scale(state[..., _L_GRIP_QPOS]),
+        state[..., _R_ARM_QPOS],
+        _grip_open_scale(state[..., _R_GRIP_QPOS]),
+        _base_vel_local(state),
+        state[..., _TRUNK_QPOS],
+    )
 
 
 class BehaviorDataset(LeRobotV3Reader):
@@ -410,6 +520,25 @@ class BehaviorDataset(LeRobotV3Reader):
                     f"BEHAVIOR({self._dataset_id}): {name} eef quat at state[{sl.start}:{sl.stop}] failed the "
                     f"unit-norm check ({e}); observation.state layout may have changed — re-verify the EEF offsets."
                 ) from e
+        # Guard the ACHIEVED-proprio offsets the proprio path now reads (arm qpos,
+        # gripper qpos). arm_qpos: the proprio_obs invariant sin(qpos)==sin-block
+        # pins the arm offset to machine precision; gripper qpos must lie in the
+        # finger travel [0, _GRIPPER_OPEN_QPOS]. Either failing means the packing
+        # drifted → the (base/trunk/gripper/arm) proprio would be silently wrong.
+        for qsl, ssl, name in ((_L_ARM_QPOS, _L_ARM_QPOS_SIN, "left"), (_R_ARM_QPOS, _R_ARM_QPOS_SIN, "right")):
+            if np.abs(np.sin(st[:, qsl]) - st[:, ssl]).max() > 1e-2:
+                raise ValueError(
+                    f"BEHAVIOR({self._dataset_id}): {name} arm_qpos at state[{qsl.start}:{qsl.stop}] fails the "
+                    f"sin(qpos)==state[{ssl.start}:{ssl.stop}] proprio_obs invariant; state layout may have changed "
+                    "— re-decode proprio_obs from meta/episodes/*.json→config and re-verify the proprio offsets."
+                )
+        grip = np.concatenate([st[:, _L_GRIP_QPOS], st[:, _R_GRIP_QPOS]], axis=1)
+        if grip.min() < -0.02 or grip.max() > _GRIPPER_OPEN_QPOS + 0.02:
+            raise ValueError(
+                f"BEHAVIOR({self._dataset_id}): gripper qpos at state[193:195]/[232:234] out of the expected "
+                f"finger travel [0, {_GRIPPER_OPEN_QPOS}] (saw [{grip.min():.4f}, {grip.max():.4f}]); "
+                "observation.state layout may have changed — re-verify the proprio offsets."
+            )
 
     def _load_stats(self, info: dict):
         """Load ``meta/stats_R1Pro.json`` → combined raw stats for the active mode.
@@ -540,32 +669,21 @@ class BehaviorDataset(LeRobotV3Reader):
         return self._normalize_array(raw)
 
     def _proprio_20d(self, win) -> np.ndarray:
-        """Raw normalized proprio at the window start (t=0): ``(1, 27)`` current-frame
-        EEF pose + grip/base/trunk cmd (eef/unified), or ``(1, 23)`` native joint
-        setpoints (joint). The joint arm proprio uses the t=0 command as a proxy for
-        achieved qpos — consistent with how the eef path sources its base/trunk/grip
-        proprio from commands; achieved arm-qpos offsets in observation.state[256]
-        are not yet reverse-engineered."""
-        action = np.stack(win["action"].values[:1]).astype(np.float32)  # (1, 23) native
-        if self._action_mode == "joint":
-            raw = _assemble_joint(
-                action[:, _ACT_LARM],
-                action[:, _ACT_LGRIP : _ACT_LGRIP + 1],
-                action[:, _ACT_RARM],
-                action[:, _ACT_RGRIP : _ACT_RGRIP + 1],
-                action[:, _ACT_BASE],
-                action[:, _ACT_TRUNK],
-            )
-            return self._normalize_array(raw)
+        """Raw normalized proprio at the window start (t=0), read from the MEASURED
+        ``observation.state`` (achieved qpos/qvel/pose) — NOT the action command.
+
+        Rendered into the action's raw representation so one stats set normalizes
+        both and the deploy obs (only the 256-D state exists at inference) matches:
+        ``(1, 27)`` eef/unified ``[L_pose10, R_pose10, base3, trunk4]`` (eef pose from
+        the state quats, gripper open-scale from finger qpos, base-frame velocity,
+        trunk qpos) or ``(1, 23)`` joint ``[L_arm7, L_grip1, R_arm7, R_grip1, base3,
+        trunk4]`` (achieved arm qpos in place of the setpoints). Sourcing proprio from
+        the command would train the model on a value it never sees at deploy → drift."""
         state = np.stack(win["observation.state"].values[:1]).astype(np.float32)  # (1, 256)
-        eef = _state_to_eef18(state)  # (1, 18)
-        raw = _assemble_raw(
-            eef,
-            action[:, _ACT_LGRIP : _ACT_LGRIP + 1],
-            action[:, _ACT_RGRIP : _ACT_RGRIP + 1],
-            action[:, _ACT_BASE],
-            action[:, _ACT_TRUNK],
-        )
+        if self._action_mode == "joint":
+            raw = _state_to_raw_proprio_joint(state)
+        else:
+            raw = _state_to_raw_proprio_eef(state)
         return self._normalize_array(raw)
 
 

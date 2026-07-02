@@ -143,12 +143,17 @@ class TestRaw27ToR1Pro:
 
 class TestProprioToRaw27:
     def _make_proprio(self, rng):
+        """A realistic R1Pro 256-D measured proprio (only the fields the renderer reads)."""
         p = rng.uniform(-1, 1, size=256).astype(np.float32)
-        p[186:189] = [0.41, -0.22, 0.33]  # L pos
-        p[189:193] = _unit_quat(rng)  # L quat
-        p[225:228] = [0.52, 0.21, 0.30]  # R pos
-        p[228:232] = _unit_quat(rng)  # R quat
-        p[236:240] = [0.12, -0.34, 0.56, -0.78]  # trunk
+        p[186:189] = [0.41, -0.22, 0.33]  # L eef pos
+        p[189:193] = _unit_quat(rng)  # L eef quat
+        p[225:228] = [0.52, 0.21, 0.30]  # R eef pos
+        p[228:232] = _unit_quat(rng)  # R eef quat
+        p[193:195] = rng.uniform(0.0, 0.05, size=2)  # L gripper: 2 finger qpos (m)
+        p[232:234] = rng.uniform(0.0, 0.05, size=2)  # R gripper: 2 finger qpos
+        p[236:240] = [0.12, -0.34, 0.56, -0.78]  # trunk qpos (rad)
+        p[253:256] = [0.1, -0.05, 0.2]  # base_qvel (WORLD frame)
+        p[246] = 0.7  # base yaw (world)
         return p
 
     def test_shape_and_eef_placement(self):
@@ -160,25 +165,37 @@ class TestProprioToRaw27:
         np.testing.assert_allclose(out[3:9], quat_xyzw_to_rot6d(p[189:193]), atol=1e-5)  # L rot6d
         np.testing.assert_allclose(out[10:13], p[225:228], atol=1e-6)  # R pos
         np.testing.assert_allclose(out[13:19], quat_xyzw_to_rot6d(p[228:232]), atol=1e-5)  # R rot6d
-        np.testing.assert_allclose(out[23:27], p[236:240], atol=1e-6)  # trunk
+        np.testing.assert_allclose(out[23:27], p[236:240], atol=1e-6)  # trunk qpos
 
-    def test_unset_offsets_zero_filled(self):
-        # base_vel / grippers default to None offsets → those raw slots stay 0.
+    def test_gripper_open_scale_and_base_local_frame(self):
+        # Grippers: mean of the 2 finger qpos → open-scale 2*mean/0.05-1 ∈ [-1,1].
+        # Base: world base_qvel rotated by -yaw into the base frame, /[0.75,0.75,1.0].
         rng = np.random.RandomState(4)
-        out = r1pro_proprio_to_raw27(self._make_proprio(rng))
-        assert (out[20:23] == 0).all()  # base vel (None offset)
-        assert out[9] == 0.0 and out[19] == 0.0  # grippers (None offset)
-
-    def test_offset_override(self):
-        rng = np.random.RandomState(5)
         p = self._make_proprio(rng)
-        p[250:253] = [0.1, 0.2, 0.3]  # pretend base vel lives here on a real build
-        offs = dict(
-            l_pos=slice(186, 189), l_quat=slice(189, 193), r_pos=slice(225, 228), r_quat=slice(228, 232),
-            trunk=slice(236, 240), base_vel=slice(250, 253), l_grip=None, r_grip=None,
-        )
-        out = r1pro_proprio_to_raw27(p, offsets=offs)
-        np.testing.assert_allclose(out[20:23], [0.1, 0.2, 0.3], atol=1e-6)
+        out = r1pro_proprio_to_raw27(p)
+        exp_l = np.clip(2.0 * p[193:195].mean() / 0.05 - 1.0, -1.0, 1.0)
+        exp_r = np.clip(2.0 * p[232:234].mean() / 0.05 - 1.0, -1.0, 1.0)
+        assert out[9] == pytest.approx(exp_l, abs=1e-6)  # L grip open-scale
+        assert out[19] == pytest.approx(exp_r, abs=1e-6)  # R grip open-scale
+        yaw = float(p[246])
+        c, s = np.cos(yaw), np.sin(yaw)
+        qv = p[253:256]
+        exp_base = np.array([c * qv[0] + s * qv[1], -s * qv[0] + c * qv[1], qv[2]]) / np.array([0.75, 0.75, 1.0])
+        np.testing.assert_allclose(out[20:23], exp_base, atol=1e-6)  # base-frame velocity
+
+    def test_matches_trainer_rendering(self):
+        # The deploy renderer MUST equal the trainer's _state_to_raw_proprio_eef
+        # byte-for-byte on the same 256-D state — otherwise train/deploy proprio skew.
+        behavior = pytest.importorskip("openwam.dataloader.behavior")
+        rng = np.random.RandomState(6)
+        p = self._make_proprio(rng)
+        deploy = r1pro_proprio_to_raw27(p)
+        trainer = behavior._state_to_raw_proprio_eef(p[None])[0]
+        np.testing.assert_allclose(deploy, trainer, atol=1e-6)
+
+    def test_wrong_width_raises(self):
+        with pytest.raises(ValueError, match="expected R1Pro proprio of width 256"):
+            r1pro_proprio_to_raw27(np.zeros(80, dtype=np.float32))
 
 
 # ── msgpack-numpy codec (openpi byte layout) ─────────────────────────────────

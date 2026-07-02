@@ -52,6 +52,15 @@ color_jitter:
 normalize_mode: quantile
 
 # ── Action / proprio supervision ────────────────────────────────────────────
+# Contract: a sample's PROPRIO is the MEASURED observation.state at t=0 (achieved
+# eef pose + gripper open-scale + base-frame velocity + trunk qpos, decoded from
+# the robot's proprio_obs layout); the TARGET is the action sequence
+# action[0..T_action-1] (row-aligned recorded commands; the eef arm target is the
+# next-frame achieved pose = the EEF rendering of the arm's joint setpoint). Proprio
+# is NOT the action command — at deploy the model only ever sees the achieved state,
+# so training on the command would cause covariate-shift drift. The deploy bridge
+# (benchmarks/utils/action_conversion.r1pro_proprio_to_raw27) renders the same
+# achieved-state → raw-27 proprio, byte-checked against the reader.
 enable_action_supervision: true
 
 # ── Unified 80-D action space (cross-robot shared head) ─────────────────────
