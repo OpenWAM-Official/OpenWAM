@@ -116,6 +116,15 @@ def make_dataloader_generator(seed: int, *, rank: int = 0) -> torch.Generator:
 
     Each rank gets a different stream so independent ranks shuffle their
     local indices independently while still being reproducible.
+
+    Note (accelerate multi-GPU path): ``accelerator.prepare`` registers this
+    generator as the prepared loader's ``synchronized_generator`` and
+    re-broadcasts rank 0's generator state to every rank at each epoch start,
+    so the per-rank offset does NOT diversify the epoch shuffle order there —
+    all ranks intentionally share rank 0's permutation (i.e. the one seeded
+    with ``seed`` itself) and ``BatchSamplerShard`` hands each rank a disjoint
+    slice of it. The offset still applies to loaders that are never
+    ``prepare()``-d.
     """
     g = torch.Generator()
     g.manual_seed(int(seed) + RANK_OFFSET * int(rank))
@@ -139,27 +148,81 @@ def per_step_seed(seed: int, *, rank: int = 0, step: int = 0) -> int:
     return int(seed) + RANK_OFFSET * int(rank) + int(step)
 
 
-def wire_sampler_seed(dataloader, run_seed: int) -> None:
-    """Tie the (possibly wrapped) DistributedSampler's ``seed`` to ``run_seed``.
+def _candidate_samplers(dataloader) -> list:
+    """Collect every sampler reachable from ``dataloader``, outermost first.
 
-    Without this, ``accelerator.prepare``'s auto-wrapped DistributedSampler keeps
-    the upstream default ``seed=0`` and per-epoch shuffle order is identical
-    regardless of ``cfg.project.seed``. Walks both ``dataloader.sampler`` and
-    ``dataloader.batch_sampler.sampler``; warns if no seedable sampler is reachable.
+    Handles the shapes produced by ``accelerator.prepare``: the re-created
+    DataLoader is constructed with ``batch_sampler=BatchSamplerShard(...)``,
+    which leaves torch's vestigial default ``SequentialSampler`` on
+    ``.sampler`` (never used for iteration) while the real sampler sits at
+    ``.batch_sampler.batch_sampler.sampler``. Walks a bounded number of
+    ``batch_sampler`` nesting levels so both the plain and the wrapped
+    layouts are covered.
     """
-    sampler = getattr(dataloader, "sampler", None)
-    if sampler is None:
-        batch_sampler = getattr(dataloader, "batch_sampler", None)
-        sampler = getattr(batch_sampler, "sampler", None) if batch_sampler is not None else None
-    if sampler is not None and hasattr(sampler, "seed"):
-        old = sampler.seed
-        sampler.seed = int(run_seed)
-        logger.info("%s.seed wired to cfg.project.seed: %s -> %d", type(sampler).__name__, old, run_seed)
-    else:
-        logger.warning(
-            "cfg.project.seed=%d is set but the prepared dataloader has no sampler with a "
-            "``.seed`` attribute (found %s). Per-epoch shuffle order falls back to the library "
-            "default and will NOT vary with cfg.project.seed.",
-            run_seed,
-            type(sampler).__name__ if sampler is not None else "None",
-        )
+    samplers = []
+    top = getattr(dataloader, "sampler", None)
+    if top is not None:
+        samplers.append(top)
+    batch_sampler = getattr(dataloader, "batch_sampler", None)
+    for _ in range(4):  # bounded walk; accelerate nests exactly one level
+        if batch_sampler is None:
+            break
+        inner = getattr(batch_sampler, "sampler", None)
+        if inner is not None and inner not in samplers:
+            samplers.append(inner)
+        batch_sampler = getattr(batch_sampler, "batch_sampler", None)
+    return samplers
+
+
+def wire_sampler_seed(dataloader, run_seed: int, *, rank: int = 0) -> None:
+    """Ensure the prepared dataloader's shuffle order follows ``run_seed``.
+
+    Two supported seeding mechanisms, checked in order over every sampler
+    reachable via :func:`_candidate_samplers`:
+
+    1. A sampler exposing ``.seed`` (DistributedSampler, accelerate's
+       SeedableRandomSampler): patch it to ``run_seed``. Without this,
+       ``accelerator.prepare``'s auto-wrapped DistributedSampler keeps the
+       upstream default ``seed=0`` and per-epoch shuffle order is identical
+       regardless of ``cfg.project.seed``.
+    2. A generator-driven ``RandomSampler`` (this repo's production path:
+       ``build_dataloader`` passes ``make_dataloader_generator(run_seed,
+       rank)``): if the generator's ``initial_seed()`` matches the expected
+       per-rank seed, the shuffle order already follows ``run_seed`` —
+       accelerate registers that generator as ``synchronized_generator`` and
+       re-broadcasts rank 0's state each epoch, so nothing needs wiring and
+       no warning is emitted.
+
+    Warns only when neither mechanism is in effect (shuffle order then falls
+    back to library defaults and will NOT vary with ``cfg.project.seed``).
+    """
+    samplers = _candidate_samplers(dataloader)
+    for sampler in samplers:
+        if hasattr(sampler, "seed"):
+            old = sampler.seed
+            sampler.seed = int(run_seed)
+            logger.info("%s.seed wired to cfg.project.seed: %s -> %d", type(sampler).__name__, old, run_seed)
+            return
+    # Single source of truth for the expected per-rank seed: derive it through
+    # make_dataloader_generator itself (also normalizes negative seeds the same
+    # way torch.Generator.manual_seed does, so e.g. seed=-1 still matches).
+    expected_seed = make_dataloader_generator(run_seed, rank=rank).initial_seed()
+    for sampler in samplers:
+        generator = getattr(sampler, "generator", None)
+        if generator is not None and generator.initial_seed() == expected_seed:
+            logger.info(
+                "shuffle order already follows cfg.project.seed via %s.generator "
+                "(initial_seed=%d); accelerate re-syncs this generator from rank 0 "
+                "each epoch — nothing to wire.",
+                type(sampler).__name__,
+                expected_seed,
+            )
+            return
+    logger.warning(
+        "cfg.project.seed=%d is set but the prepared dataloader has no sampler with a "
+        "``.seed`` attribute and no generator seeded from it (found %s). Per-epoch "
+        "shuffle order falls back to the library default and will NOT vary with "
+        "cfg.project.seed.",
+        run_seed,
+        "[" + ", ".join(type(s).__name__ for s in samplers) + "]" if samplers else "None",
+    )

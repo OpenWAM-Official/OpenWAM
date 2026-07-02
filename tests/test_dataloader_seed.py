@@ -375,3 +375,53 @@ def test_wire_sampler_seed_with_real_distributed_sampler(caplog: pytest.LogCaptu
     wired_sampler.set_epoch(0)
     reference.set_epoch(0)
     assert list(wired_sampler) == list(reference)
+
+
+def test_wire_sampler_seed_accepts_generator_driven_random_sampler(caplog: pytest.LogCaptureFixture):
+    """Production path: accelerate's prepared loader carries a vestigial
+    SequentialSampler on ``.sampler`` while the real generator-driven
+    RandomSampler sits at ``.batch_sampler.batch_sampler.sampler``. When that
+    generator was seeded by make_dataloader_generator(run_seed, rank), the
+    helper must recognize it (INFO) and must NOT warn."""
+    import logging
+
+    from openwam.train.utils.seeding import RANK_OFFSET, make_dataloader_generator, wire_sampler_seed
+
+    ds = list(range(64))
+    rank = 2
+    inner_sampler = torch.utils.data.RandomSampler(ds, generator=make_dataloader_generator(42, rank=rank))
+    inner_batch = torch.utils.data.BatchSampler(inner_sampler, batch_size=8, drop_last=False)
+
+    class _FakeShard:  # mirrors accelerate.BatchSamplerShard
+        def __init__(self, batch_sampler):
+            self.batch_sampler = batch_sampler
+
+    dataloader = _FakeDataLoader(
+        sampler=torch.utils.data.SequentialSampler(ds),  # torch's vestigial default
+        batch_sampler=_FakeShard(inner_batch),
+    )
+    with caplog.at_level(logging.INFO, logger="openwam.train.utils.seeding"):
+        wire_sampler_seed(dataloader, run_seed=42, rank=rank)
+    assert any("already follows cfg.project.seed" in rec.message for rec in caplog.records)
+    assert not any(rec.levelno >= logging.WARNING for rec in caplog.records)
+    assert inner_sampler.generator.initial_seed() == 42 + RANK_OFFSET * rank
+
+
+def test_wire_sampler_seed_warns_on_foreign_generator(caplog: pytest.LogCaptureFixture):
+    """A generator NOT seeded from run_seed (e.g. accelerate injecting a
+    randomly-seeded one when none was passed) must still trigger the warning —
+    shuffle order would not follow cfg.project.seed."""
+    import logging
+
+    from openwam.train.utils.seeding import wire_sampler_seed
+
+    ds = list(range(64))
+    foreign = torch.Generator()
+    foreign.manual_seed(123456789)
+    sampler = torch.utils.data.RandomSampler(ds, generator=foreign)
+    dataloader = _FakeDataLoader(sampler=sampler)
+    with caplog.at_level(logging.WARNING, logger="openwam.train.utils.seeding"):
+        wire_sampler_seed(dataloader, run_seed=42, rank=0)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "Expected a WARNING for a generator not derived from run_seed"
+    assert "RandomSampler" in warnings[-1].message
