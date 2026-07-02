@@ -656,7 +656,6 @@ class TestStatsScript:
         import numpy as _np
 
         from openwam.dataloader.utils.stats_computation.behavior_stats_computation import (
-            _proprio_rows_to_blocks,
             _rows_to_blocks,
             compute_behavior_stats,
         )
