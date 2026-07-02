@@ -35,11 +35,11 @@ Action target vs proprio (the contract):
   (row-aligned recorded commands). The two are drawn from different fields:
 
   * **Proprio (from state[0], ACHIEVED):** eef pose from the state quats, gripper
-    open-scale from the finger qpos, RAW WORLD-frame velocity from ``base_qvel`` (no
-    rotation — Larchenko base mode), trunk qpos — rendered into the action's raw
-    LAYOUT (see ``_state_to_raw_proprio_*``). It is NOT the action command: at deploy
-    the model only ever sees the achieved state, so training on the command would
-    cause covariate-shift drift on the base/gripper channels.
+    open-scale from the finger qpos, base-frame velocity from ``base_qvel``, trunk
+    qpos — all rendered into the action's raw representation (see
+    ``_state_to_raw_proprio_*``). It is NOT the action command: at deploy the model
+    only ever sees the achieved state, so training on the command would cause
+    covariate-shift drift on the base/gripper channels.
   * **Action target (row-aligned commands):** the gripper command
     (``action[:,14/22]``, binary {-1,+1}, +1=open), base velocity (``action[:,0:3]``)
     and torso joints (``action[:,3:7]``) are taken at t. The EEF arm target is the
@@ -128,14 +128,19 @@ _R_ARM_QPOS_SIN = slice(204, 211)
 _L_GRIP_QPOS = slice(193, 195)  # left MultiFinger gripper: 2 finger positions (m)
 _R_GRIP_QPOS = slice(232, 234)  # right gripper: 2 finger positions (m)
 _TRUNK_QPOS = slice(236, 240)  # achieved trunk joint positions (rad)
-_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw], WORLD frame (fed raw)
+_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw] in the WORLD frame
+_BASE_YAW = 246  # base_qpos yaw (world), for the world→base-frame rotation
 
-# Gripper open-scale mapping (base needs no constant — the world-frame base_qvel is
-# fed raw, see _base_vel_world). MultiFingerGripperController maps cmd [-1,+1] →
-# finger qpos [0, _GRIPPER_OPEN_QPOS]; invert to open-scale = 2*mean(qpos)/OPEN - 1
-# (+1 open, -1 closed; reports true partial opening when grasping). Identical to
-# Larchenko's 2*sum/0.1-1 (per-finger open 0.05 → 2-finger sum 0.1).
+# Controller limits that map ACHIEVED (physical) proprio into the ACTION's
+# normalized command space, so proprio + action share one stats set (robocoin
+# renders both its action and its state into the same eef space too):
+#  * gripper: MultiFingerGripperController maps cmd [-1,+1] → finger qpos
+#    [0, _GRIPPER_OPEN_QPOS]; invert to open-scale = 2*qpos/OPEN - 1 (+1 open,
+#    -1 closed). Reports true partial opening when grasping an object.
+#  * base: HolonomicBaseJointController output_limits = ±_BASE_VEL_OUTPUT_SCALE;
+#    the achieved base-frame velocity divided by these recovers the [-1,1] cmd.
 _GRIPPER_OPEN_QPOS = 0.05
+_BASE_VEL_OUTPUT_SCALE = np.array([0.75, 0.75, 1.0], dtype=np.float32)
 
 # Raw pre-scatter width: EEF 20 (pos3+rot6d6+grip1 ×2) + base velocity 3 + trunk 4.
 # _EEF_DIM is the shared bimanual EEF width (== utils.eef.EEF_DIM, as RoboCOIN
@@ -209,57 +214,65 @@ def _assemble_joint(
 
 
 # ── achieved-state → raw proprio rendering ───────────────────────────────────
-# Proprio is the MEASURED observation.state at the window start, rendered into the
-# action's raw LAYOUT (same slots). The base slot follows the 1st-place Larchenko
-# solution: the RAW WORLD-frame base_qvel (no rotation) — see _base_vel_world. It
-# still shares the action's pooled normalization stats (family convention); the base
-# action is the local-frame command, so the base slot mixes two frames in one stats
-# block, which the network resolves. The deploy bridge
-# (benchmarks/utils/action_conversion.py) MUST reproduce this byte-for-byte; a
-# cross-check test guards it.
+# Proprio is the MEASURED observation.state at the window start, rendered into
+# the SAME raw representation as the action (so one stats set normalizes both,
+# and the deploy obs — which is only the 256-D state, never a command — matches
+# training). The deploy bridge (benchmarks/utils/action_conversion.py) MUST
+# reproduce these three transforms byte-for-byte; a cross-check test guards it.
 
 
 def _grip_open_scale(grip_qpos: np.ndarray) -> np.ndarray:
-    """``(..., 2)`` finger positions → ``(..., 1)`` open-scale in ``[-1, +1]``
-    (mean of the two fingers → ``2*mean/_GRIPPER_OPEN_QPOS - 1``; +1 open, -1 closed)."""
+    """``(..., 2)`` finger positions → ``(..., 1)`` open-scale in ``[-1, +1]``.
+
+    Mean of the two finger joints mapped through the gripper controller's
+    cmd→qpos limits (``+1`` fully open at ``_GRIPPER_OPEN_QPOS``, ``-1`` closed at 0).
+    """
     opening = grip_qpos.mean(axis=-1, keepdims=True)
     return np.clip(2.0 * opening / _GRIPPER_OPEN_QPOS - 1.0, -1.0, 1.0).astype(np.float32)
 
 
-def _base_vel_world(state: np.ndarray) -> np.ndarray:
-    """``(..., 256)`` state → ``(..., 3)`` achieved base velocity, WORLD frame, RAW.
+def _base_vel_local(state: np.ndarray) -> np.ndarray:
+    """``(..., 256)`` state → ``(..., 3)`` achieved base velocity in the BASE frame,
+    normalized to the ``[-1, 1]`` command scale.
 
-    Larchenko-style: ``base_qvel`` (world-frame ``d(base_qpos)/dt``) is fed raw — no
-    world→base rotation, no scaling — and the network relates it to the local-frame
-    base action command."""
-    return state[..., _BASE_QVEL].astype(np.float32)
+    ``base_qvel`` is the world-frame ``d(base_qpos)/dt``; the linear part is rotated
+    by ``-yaw`` into the base frame (``vyaw`` is frame-invariant), then divided by the
+    controller output limits so it lands in the same space as the base action command.
+    """
+    qv = state[..., _BASE_QVEL]
+    yaw = state[..., _BASE_YAW]
+    cos, sin = np.cos(yaw), np.sin(yaw)
+    vx = cos * qv[..., 0] + sin * qv[..., 1]
+    vy = -sin * qv[..., 0] + cos * qv[..., 1]
+    vb = np.stack([vx, vy, qv[..., 2]], axis=-1).astype(np.float32)
+    return (vb / _BASE_VEL_OUTPUT_SCALE).astype(np.float32)
 
 
 def _state_to_raw_proprio_eef(state: np.ndarray) -> np.ndarray:
     """``(T, 256)`` achieved state → ``(T, 27)`` proprio in the eef/unified raw layout
-    ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]`` (same
-    slots as the action): achieved eef pose, gripper open-scale, WORLD-frame base
-    velocity, achieved trunk qpos."""
+    ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]`` (== the
+    action layout). EEF pose + rot6d from the state quats, gripper open-scale from the
+    finger qpos, base-frame velocity, achieved trunk qpos."""
     eef18 = _state_to_eef18(state)
     return _assemble_raw(
         eef18,
         _grip_open_scale(state[..., _L_GRIP_QPOS]),
         _grip_open_scale(state[..., _R_GRIP_QPOS]),
-        _base_vel_world(state),
+        _base_vel_local(state),
         state[..., _TRUNK_QPOS],
     )
 
 
 def _state_to_raw_proprio_joint(state: np.ndarray) -> np.ndarray:
     """``(T, 256)`` achieved state → ``(T, 23)`` proprio in the joint raw layout
-    ``[L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]`` — achieved arm qpos, gripper
-    open-scale, WORLD-frame base velocity, achieved trunk qpos."""
+    ``[L_arm7, L_grip1, R_arm7, R_grip1, base3, trunk4]`` — all from achieved qpos
+    (arms), open-scale (grippers), base-frame velocity, and trunk qpos."""
     return _assemble_joint(
         state[..., _L_ARM_QPOS],
         _grip_open_scale(state[..., _L_GRIP_QPOS]),
         state[..., _R_ARM_QPOS],
         _grip_open_scale(state[..., _R_GRIP_QPOS]),
-        _base_vel_world(state),
+        _base_vel_local(state),
         state[..., _TRUNK_QPOS],
     )
 
@@ -659,13 +672,13 @@ class BehaviorDataset(LeRobotV3Reader):
         """Raw normalized proprio at the window start (t=0), read from the MEASURED
         ``observation.state`` (achieved qpos/qvel/pose) — NOT the action command.
 
-        Rendered into the action's raw LAYOUT so one (pooled) stats set normalizes
+        Rendered into the action's raw representation so one stats set normalizes
         both and the deploy obs (only the 256-D state exists at inference) matches:
         ``(1, 27)`` eef/unified ``[L_pose10, R_pose10, base3, trunk4]`` (eef pose from
-        the state quats, gripper open-scale from finger qpos, RAW WORLD-frame base
-        velocity, trunk qpos) or ``(1, 23)`` joint ``[L_arm7, L_grip1, R_arm7, R_grip1,
-        base3, trunk4]`` (achieved arm qpos in place of the setpoints). Sourcing proprio
-        from the command would train the model on a value it never sees at deploy → drift."""
+        the state quats, gripper open-scale from finger qpos, base-frame velocity,
+        trunk qpos) or ``(1, 23)`` joint ``[L_arm7, L_grip1, R_arm7, R_grip1, base3,
+        trunk4]`` (achieved arm qpos in place of the setpoints). Sourcing proprio from
+        the command would train the model on a value it never sees at deploy → drift."""
         state = np.stack(win["observation.state"].values[:1]).astype(np.float32)  # (1, 256)
         if self._action_mode == "joint":
             raw = _state_to_raw_proprio_joint(state)

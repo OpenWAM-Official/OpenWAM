@@ -152,7 +152,8 @@ class TestProprioToRaw27:
         p[193:195] = rng.uniform(0.0, 0.05, size=2)  # L gripper: 2 finger qpos (m)
         p[232:234] = rng.uniform(0.0, 0.05, size=2)  # R gripper: 2 finger qpos
         p[236:240] = [0.12, -0.34, 0.56, -0.78]  # trunk qpos (rad)
-        p[253:256] = [0.1, -0.05, 0.2]  # base_qvel (WORLD frame, fed raw)
+        p[253:256] = [0.1, -0.05, 0.2]  # base_qvel (WORLD frame)
+        p[246] = 0.7  # base yaw (world)
         return p
 
     def test_shape_and_eef_placement(self):
@@ -166,9 +167,9 @@ class TestProprioToRaw27:
         np.testing.assert_allclose(out[13:19], quat_xyzw_to_rot6d(p[228:232]), atol=1e-5)  # R rot6d
         np.testing.assert_allclose(out[23:27], p[236:240], atol=1e-6)  # trunk qpos
 
-    def test_gripper_open_scale_and_base_world_frame(self):
+    def test_gripper_open_scale_and_base_local_frame(self):
         # Grippers: mean of the 2 finger qpos → open-scale 2*mean/0.05-1 ∈ [-1,1].
-        # Base (Larchenko): RAW WORLD-frame base_qvel — no rotation, no scaling.
+        # Base: world base_qvel rotated by -yaw into the base frame, /[0.75,0.75,1.0].
         rng = np.random.RandomState(4)
         p = self._make_proprio(rng)
         out = r1pro_proprio_to_raw27(p)
@@ -176,7 +177,11 @@ class TestProprioToRaw27:
         exp_r = np.clip(2.0 * p[232:234].mean() / 0.05 - 1.0, -1.0, 1.0)
         assert out[9] == pytest.approx(exp_l, abs=1e-6)  # L grip open-scale
         assert out[19] == pytest.approx(exp_r, abs=1e-6)  # R grip open-scale
-        np.testing.assert_allclose(out[20:23], p[253:256], atol=1e-6)  # raw world-frame base_qvel
+        yaw = float(p[246])
+        c, s = np.cos(yaw), np.sin(yaw)
+        qv = p[253:256]
+        exp_base = np.array([c * qv[0] + s * qv[1], -s * qv[0] + c * qv[1], qv[2]]) / np.array([0.75, 0.75, 1.0])
+        np.testing.assert_allclose(out[20:23], exp_base, atol=1e-6)  # base-frame velocity
 
     def test_matches_trainer_rendering(self):
         # The deploy renderer MUST equal the trainer's _state_to_raw_proprio_eef

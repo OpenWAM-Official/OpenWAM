@@ -147,10 +147,12 @@ sim-capable box, in order of risk:
    `_state_to_raw_proprio_eef` by `test_behavior_bridge`. Confirm the offsets still
    hold against the live `robot_r1::proprio` on a sim box (a re-upload could shift
    the packing), or run `--no-send-state` to A/B.
-2. **Base velocity frame.** The proprio base is the RAW WORLD-frame `base_qvel`
-   (Larchenko-style, no rotation), sharing the action's pooled normalization stats.
-   Confirm the live `robot_r1::proprio` base velocity is world-frame
-   (`d(base_qpos)/dt`) as decoded.
+2. **Base velocity frame.** The proprio base is `base_qvel` (world-frame
+   `d(base_qpos)/dt`) rotated into the robot's LOCAL/base frame by `-yaw` and scaled
+   by `1/[0.75,0.75,1.0]` (the controller output limits) — so it lands in the SAME
+   frame and scale as the local-frame base action command, and both share the pooled
+   normalization stats. Confirm the live `robot_r1::proprio` base velocity is
+   world-frame and the base yaw offset is correct on a sim box.
 3. **Prompt text.** The model was trained on the dataset's `tasks[0]` strings;
    the bridge uses the de-underscored activity name. If training used a different
    phrasing, adjust the mapping (or pass `--default-prompt`).

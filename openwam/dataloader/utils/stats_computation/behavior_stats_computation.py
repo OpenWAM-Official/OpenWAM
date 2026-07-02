@@ -21,9 +21,9 @@ R_arm7, R_grip1, base3, trunk4]`` (joint mode). We write **four** stats blocks �
                     normalization is a pass-through on the rotation manifold
                     (pos / gripper keep real stats). Pass ``--no-rot6d-identity``
                     to disable.
-  * ``base_vel``  — 3-D ``[vx, vy, vyaw]`` base velocity. Pooled: action = local-frame
-                    command (``action[0:3]``), proprio = RAW world-frame ``base_qvel``
-                    (Larchenko base mode). Real stats — NOT pinned (a genuine velocity).
+  * ``base_vel``  — 3-D ``[vx, vy, vyaw]`` base-frame velocity (Larchenko's mobile
+                    base design). A BEHAVIOR-specific block with **real** stats —
+                    NOT pinned (it's a genuine velocity, not a rotation basis).
   * ``trunk``     — 4-D absolute torso joint targets (native ``action[3:7]``). Like
                     ``base_vel``, a BEHAVIOR-specific block with **real** stats —
                     NOT pinned (genuine joint angles).
@@ -158,7 +158,7 @@ def _proprio_rows_to_blocks(state: np.ndarray):
     renderers so the stats see the exact numbers ``_proprio_20d`` emits.
 
     Proprio differs from action on the gripper (open-scale vs ±1 cmd), base
-    (achieved raw WORLD-frame velocity vs local-frame cmd) and arm (achieved qpos vs setpoint); the
+    (achieved base-frame velocity vs cmd) and arm (achieved qpos vs setpoint); the
     eef POSE dims are identical to the action stream (both ``eef(state)``)."""
     p_eef27 = _state_to_raw_proprio_eef(state)  # [eef20, base3, trunk4]
     p_joint23 = _state_to_raw_proprio_joint(state)  # [arm16, base3, trunk4]

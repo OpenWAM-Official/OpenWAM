@@ -32,6 +32,7 @@ from openwam.dataloader.behavior import (
     _ACT_TRUNK,
     _ARM_JOINT_DIM,
     _BASE_QVEL,
+    _BASE_YAW,
     _JOINT_DIM,
     _L_ARM_QPOS,
     _L_ARM_QPOS_SIN,
@@ -78,8 +79,9 @@ def _make_state(rng: np.random.RandomState, n: int, *, unit_quats: bool = True) 
 
     Populates every field the proprio path + the ``_post_init`` layout guard read:
     EEF pos/quat, arm qpos (with its ``sin(qpos)`` block — the proprio_obs invariant
-    the guard checks), 2-finger gripper qpos ∈ [0, 0.05], trunk qpos, and the raw
-    world-frame base velocity. Other dims stay random (the reader never reads them).
+    the guard checks), 2-finger gripper qpos ∈ [0, 0.05], trunk qpos, world-frame
+    base velocity, and the base yaw used for the world→base rotation. Other dims stay
+    random (the reader never reads them).
     """
     state = rng.uniform(-1, 1, size=(n, STATE_DIM)).astype(np.float32)
     state[:, _L_EEF_POS] = rng.uniform(0.1, 0.6, size=(n, 3))
@@ -99,7 +101,8 @@ def _make_state(rng: np.random.RandomState, n: int, *, unit_quats: bool = True) 
     state[:, _L_GRIP_QPOS] = rng.uniform(0.0, 0.05, size=(n, 2))  # finger travel [0, 0.05]
     state[:, _R_GRIP_QPOS] = rng.uniform(0.0, 0.05, size=(n, 2))
     state[:, _TRUNK_QPOS] = rng.uniform(-0.4, 0.4, size=(n, 4))
-    state[:, _BASE_QVEL] = rng.uniform(-0.2, 0.2, size=(n, 3))  # world-frame base vel (fed raw)
+    state[:, _BASE_QVEL] = rng.uniform(-0.2, 0.2, size=(n, 3))  # world-frame base vel
+    state[:, _BASE_YAW] = rng.uniform(-np.pi, np.pi, size=n)
     return state
 
 
@@ -640,8 +643,8 @@ class TestStatsScript:
         assert "rot6d_identity" not in arm
         assert arm["layout"] == "L_arm7,L_grip1,R_arm7,R_grip1"
         # every block pools the ACTION + PROPRIO streams (== RoboCOIN), so the
-        # stats cover the proprio marginals (gripper open-scale, raw world-frame base
-        # velocity), not just the action command's.
+        # stats cover the proprio marginals (gripper open-scale, base-frame vel),
+        # not just the action command's.
         for blk in (eef, base, trunk, arm):
             assert blk["pool"] == "action+proprio"
 
@@ -867,8 +870,8 @@ class TestActionModes:
 
     def test_eef_proprio_is_rendered_achieved_state(self, tmp_path):
         # eef/unified proprio (t=0) = _state_to_raw_proprio_eef(state[0]): achieved
-        # eef pose + gripper open-scale + RAW world-frame base velocity + trunk qpos —
-        # NOT the action command. Compare value-for-value (normalize off, raw 27).
+        # eef pose + gripper open-scale + base-frame velocity + trunk qpos — NOT the
+        # action command. Compare value-for-value (normalize off, raw 27).
         b = make_behavior_bucket(tmp_path, n_episodes=1)
         with _mock_video_decoder():
             ds = BehaviorDataset(

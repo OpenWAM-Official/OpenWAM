@@ -258,11 +258,11 @@ def raw27_to_r1pro_action(action: np.ndarray, *, clip_passthrough: bool = True) 
 # is duplicated here; ``test_behavior_bridge`` cross-checks the two implementations
 # produce byte-identical output on the same 256-D state.
 #
-# Following the 1st-place Larchenko solution, the base proprio is the RAW WORLD-frame
-# base_qvel (no rotation); gripper is the achieved open-scale. Offsets decoded from
-# the robot's ``proprio_obs`` list (each episode's meta/episodes/*.json → ``config`` →
-# ``robots[0].proprio_obs``) and checked through redundant fields (sin(qpos)==sin-block
-# to measured tolerance; quat ‖·‖==1; base_qvel == d(base_qpos)/dt).
+# Offsets decoded from the robot's ``proprio_obs`` list (each episode's
+# meta/episodes/*.json → ``config`` → ``robots[0].proprio_obs``) and verified
+# through redundant relationships (sin(qpos) agrees with the redundant sine block; quat ‖·‖==1; base_qvel
+# == d(base_qpos)/dt). eef pose is achieved; gripper/base/trunk are mapped into the
+# action's normalized command space (see the two helpers below).
 _PP_L_POS = slice(186, 189)
 _PP_L_QUAT = slice(189, 193)  # xyzw
 _PP_R_POS = slice(225, 228)
@@ -270,32 +270,45 @@ _PP_R_QUAT = slice(228, 232)
 _PP_L_GRIP_QPOS = slice(193, 195)  # left MultiFinger gripper: 2 finger positions (m)
 _PP_R_GRIP_QPOS = slice(232, 234)  # right gripper: 2 finger positions (m)
 _PP_TRUNK_QPOS = slice(236, 240)  # achieved trunk joint positions (rad)
-_PP_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw], WORLD frame (fed raw)
+_PP_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw] in the WORLD frame
+_PP_BASE_YAW = 246  # base_qpos yaw (world), for the world→base-frame rotation
 R1PRO_PROPRIO_DIM = 256
-# Per-finger fully-open qpos (== Larchenko 2-finger sum 0.1); in lockstep with
-# openwam.dataloader.behavior._GRIPPER_OPEN_QPOS.
+# Controller limits mapping achieved (physical) proprio → the action's [-1,1] cmd
+# space (kept in lockstep with openwam.dataloader.behavior).
 _GRIPPER_OPEN_QPOS = 0.05
+_BASE_VEL_OUTPUT_SCALE = np.array([0.75, 0.75, 1.0], dtype=np.float32)
 
 
 def _proprio_grip_open_scale(grip_qpos: np.ndarray) -> np.ndarray:
     """``(2,)`` finger positions → ``(1,)`` open-scale in ``[-1,+1]`` (mean of the two
-    fingers → ``2*mean/OPEN - 1``; +1 open, -1 closed)."""
+    fingers through the gripper cmd→qpos limits; +1 open, -1 closed)."""
     opening = np.asarray(grip_qpos, dtype=np.float32).mean(axis=-1, keepdims=True)
     return np.clip(2.0 * opening / _GRIPPER_OPEN_QPOS - 1.0, -1.0, 1.0).astype(np.float32)
 
 
+def _proprio_base_vel_local(proprio: np.ndarray) -> np.ndarray:
+    """``(256,)`` proprio → ``(3,)`` achieved base velocity in the BASE frame,
+    normalized to the ``[-1,1]`` command scale (world ``base_qvel`` rotated by ``-yaw``,
+    then divided by the controller output limits)."""
+    qv = proprio[_PP_BASE_QVEL]
+    yaw = float(proprio[_PP_BASE_YAW])
+    cos, sin = np.cos(yaw), np.sin(yaw)
+    vx = cos * qv[0] + sin * qv[1]
+    vy = -sin * qv[0] + cos * qv[1]
+    return (np.array([vx, vy, qv[2]], dtype=np.float32) / _BASE_VEL_OUTPUT_SCALE).astype(np.float32)
+
+
 def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
-    """Render the R1Pro 256-D measured proprio → RAW-27 in the reader's proprio layout.
+    """Render the R1Pro 256-D measured proprio → RAW-27 in the reader's action layout.
 
     Output (== ``openwam.dataloader.behavior._state_to_raw_proprio_eef``)::
 
         [L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]
 
-    Achieved eef pose + rot6d from the state quaternions, gripper open-scale from the
-    finger qpos, RAW WORLD-frame base velocity (``base_qvel``, no rotation — Larchenko),
-    achieved trunk qpos. The OpenWAM server's _UnifyAwareNormalizer normalizes this raw
-    proprio (the shared pooled stats) and scatters it into the unified space — so the
-    bridge sends RAW, NOT unified.
+    EEF pose + rot6d from the state quaternions (achieved), gripper open-scale from
+    the finger qpos, base-frame velocity, achieved trunk qpos. The OpenWAM server's
+    _UnifyAwareNormalizer then normalizes this raw proprio (shared stats) and scatters
+    it into the unified space — so the bridge sends RAW, NOT unified.
 
     Returns an un-normalized ``(27,)`` float32 vector (the server normalizes it).
     """
@@ -311,7 +324,7 @@ def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
             p[_PP_R_POS],
             quat_xyzw_to_rot6d(p[_PP_R_QUAT]),
             _proprio_grip_open_scale(p[_PP_R_GRIP_QPOS]),
-            p[_PP_BASE_QVEL].astype(np.float32),  # raw WORLD-frame base velocity
+            _proprio_base_vel_local(p),
             p[_PP_TRUNK_QPOS],
         ]
     ).astype(np.float32)
