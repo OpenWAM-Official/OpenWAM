@@ -193,3 +193,38 @@ def test_eval_does_not_require_proprio_when_send_state_false(monkeypatch):
 
     assert task_env.action_type == "ee"
     assert task_env.action.shape == (16,)
+
+
+def test_robotwin_prompt_template_matches_training():
+    """RoboTwin's client-side prompt wrapper must stay byte-for-byte identical to
+    the training-time dataloader wrapper, so eval prompts stay in-distribution.
+
+    The server is prompt-agnostic and no longer wraps; this pins the two RoboTwin
+    ends (training dataloader vs eval client) of the same contract together."""
+    from benchmarks.robotwin.prompt_template import format_prompt_for_inference as client_wrap
+    from openwam.dataloader.transforms.multiview import format_prompt_for_inference as train_wrap
+
+    for base in ["pick up the red bottle", "fold the towel.", "", "brace {x} and (y)"]:
+        assert client_wrap(base) == train_wrap(base)
+
+
+def test_step_sends_wrapped_prompt(monkeypatch):
+    """The server forwards the prompt verbatim, so the RoboTwin adapter must send
+    the fully wrapped prompt on the wire — not the raw instruction."""
+    from benchmarks.robotwin.prompt_template import format_prompt_for_inference
+
+    model = _make_bypassed_client(send_state=False)
+    monkeypatch.setattr(iface.client, "encode_numpy_b64", lambda img: "jpeg")
+    model._client = _StubClient({"action": [0.0] * 20})
+
+    model.step(
+        {
+            # "lang" equals _task_description ("pick") so no reset is triggered.
+            "cams": {"head": np.zeros((2, 2, 3), dtype=np.uint8), "left": None, "right": None},
+            "lang": "pick",
+        }
+    )
+
+    sent = model._client.captured["payload"]["prompt"]
+    assert sent == format_prompt_for_inference("pick")
+    assert sent.startswith("A video recorded from a robot's point of view")
