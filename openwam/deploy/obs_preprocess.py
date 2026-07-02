@@ -205,10 +205,7 @@ class ObsPreprocessor:
                 out_w=self.img_width,
             )
 
-        # --- Prompt passthrough ---
-        # The server is prompt-agnostic: forward the client's prompt to the model
-        # verbatim. Each benchmark owns its prompt processing (e.g. RoboTwin wraps
-        # the instruction client-side), so we only normalize a missing prompt to "".
+        # --- Prompt passthrough (server is prompt-agnostic; normalize missing to "") ---
         obs["prompt"] = obs.get("prompt", "") or ""
 
         # --- Proprio state passthrough ---

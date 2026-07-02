@@ -222,7 +222,7 @@ All flags are optional; yaml values apply when a flag is absent. Optimization se
 
 #### WebSocket messages
 
-- `{"type": "obs", ...}` — send 3-camera `images` dict, base prompt, optional raw `state`; receive an action in the checkpoint's deploy scale (unnormalized to physical units for normalized checkpoints).
+- `{"type": "obs", ...}` — send 3-camera `images` dict, the prompt (forwarded to the model verbatim; wrap per your checkpoint's template), optional raw `state`; receive an action in the checkpoint's deploy scale (unnormalized to physical units for normalized checkpoints).
 - `{"type": "reset"}` — reset policy state between episodes.
 - `{"type": "ping"}` — liveness check; server replies `{"type": "pong"}`.
 

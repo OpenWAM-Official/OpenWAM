@@ -826,3 +826,42 @@ class TestCudagraphMarkStepBegin:
                     f"Line {i + 1}: dispatch not preceded by "
                     f"cudagraph_mark_step_begin(). Found instead: {lines[prev]!r}"
                 )
+
+
+class TestEmptyPromptCacheRouting:
+    """Empty prompt must resolve to ``empty.safetensors`` in cache mode.
+
+    The precompute stores the empty embedding as ``empty.safetensors`` (not
+    under ``sha256("")``), and the training-side read path special-cases
+    ``prompt == ""`` (text_embedding_cache.py). The engine must match, else a
+    cache-mode empty prompt raises FileNotFoundError despite the embedding
+    existing.
+    """
+
+    def _bypassed_engine(self, cache_dir):
+        from openwam.deploy.engine import JointInferenceEngine
+
+        engine = JointInferenceEngine.__new__(JointInferenceEngine)
+        engine._text_embedding_cache_dir = Path(cache_dir) if cache_dir is not None else None
+        # Echo the path handed to the loader so we can assert *which* file the
+        # router resolved, without real tensors or an architecture.
+        engine._load_pre_encoded_text_safetensors = lambda path: ("loaded", Path(path))
+        return engine
+
+    def test_empty_prompt_routes_to_empty_safetensors(self, tmp_path):
+        empty = tmp_path / "empty.safetensors"
+        empty.write_bytes(b"")  # existence is all the router checks before loading
+        engine = self._bypassed_engine(tmp_path)
+
+        assert engine._load_pre_encoded_text_for_prompt("") == ("loaded", empty)
+
+    def test_empty_prompt_missing_empty_file_raises(self, tmp_path):
+        engine = self._bypassed_engine(tmp_path)  # no empty.safetensors written
+
+        with pytest.raises(FileNotFoundError, match="empty.safetensors"):
+            engine._load_pre_encoded_text_for_prompt("")
+
+    def test_no_cache_dir_returns_none_for_empty_prompt(self):
+        engine = self._bypassed_engine(None)
+
+        assert engine._load_pre_encoded_text_for_prompt("") is None

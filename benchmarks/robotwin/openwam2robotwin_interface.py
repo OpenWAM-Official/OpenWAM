@@ -339,10 +339,7 @@ class ModelClient:
                 )
             state_list = [float(v) for v in state_np]
 
-        # The OpenWAM server is prompt-agnostic: it forwards whatever prompt it
-        # receives to the model verbatim. RoboTwin owns its prompt template, so
-        # wrap the raw instruction here — byte-for-byte the training-time
-        # _get_prompt — to keep eval prompts in-distribution.
+        # Server is prompt-agnostic; RoboTwin wraps its own instruction here (see prompt_template).
         prompt = format_prompt_for_inference(instruction)
         payload = client.build_payload(
             head=client.encode_numpy_b64(cams["head"]),

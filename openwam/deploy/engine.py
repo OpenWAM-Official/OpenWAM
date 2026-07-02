@@ -317,9 +317,22 @@ class JointInferenceEngine(BaseInferenceEngine):
         configured). When the cache dir IS set but the file is missing, we
         deliberately don't fall back silently — re-raise instead so the user
         notices the mismatch before model output drift goes undetected.
+
+        The empty prompt routes to ``empty.safetensors`` (matching the
+        training-side read path and the uncond resolver), not ``sha256("")`` —
+        the precompute stores the empty embedding under that fixed name.
         """
         if self._text_embedding_cache_dir is None:
             return None
+        if prompt == "":
+            empty_path = self._text_embedding_cache_dir / "empty.safetensors"
+            if not empty_path.exists():
+                raise FileNotFoundError(
+                    f"text_embedding_cache_dir is set but {empty_path} is missing "
+                    f"for the empty prompt. Re-run precompute so empty.safetensors "
+                    f"lands alongside the per-prompt caches."
+                )
+            return self._load_pre_encoded_text_safetensors(empty_path)
         sha = sha256_for_prompt(prompt)
         cache_path = Path(resolve_cache_path_for_sha(str(self._text_embedding_cache_dir), sha))
         if not cache_path.exists():
