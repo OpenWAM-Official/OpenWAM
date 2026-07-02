@@ -4,7 +4,7 @@ Each OXE dataset has its own raw state/action representation:
 
   * BC-Z / Bridge: ``state = [x,y,z,roll,pitch,yaw,pad,gripper] (8)``,
     ``action = [x,y,z,roll,pitch,yaw,gripper] (7)`` (Euler XYZ).
-  * RT-1: ``state = [x,y,z,rx,ry,rz,rw,gripper] (8)`` (quat xyzw),
+  * Fractal: ``state = [x,y,z,rx,ry,rz,rw,gripper] (8)`` (quat xyzw),
     ``action = [x,y,z,roll,pitch,yaw,gripper] (7)`` (Euler XYZ).
   * DROID: ``observation.state.cartesian_position (6) +
     observation.state.gripper_position (1) = 7`` (Euler XYZ),
@@ -47,7 +47,7 @@ def bcz_state_to_arm10(state: np.ndarray) -> np.ndarray:
 def euler7_action_to_arm10(action: np.ndarray) -> np.ndarray:
     """``(..., 7)`` ``[x,y,z,roll,pitch,yaw,gripper]`` → ``(..., 10)`` EEF.
 
-    Used by BC-Z / Bridge / RT-1 / DROID action streams (all share this layout
+    Used by BC-Z / Bridge / Fractal / DROID action streams (all share this layout
     after the dataset's own conversion).
     """
     pos = action[..., 0:3]
@@ -58,12 +58,12 @@ def euler7_action_to_arm10(action: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# RT-1: state has quaternion in xyzw layout at indices 3:7
+# Fractal: state has quaternion in xyzw layout at indices 3:7
 # ---------------------------------------------------------------------------
 
 
-def rt1_state_to_arm10(state: np.ndarray) -> np.ndarray:
-    """``(..., 8)`` RT-1 state → ``(..., 10)`` EEF.
+def fractal_state_to_arm10(state: np.ndarray) -> np.ndarray:
+    """``(..., 8)`` Fractal state → ``(..., 10)`` EEF.
 
     Layout: ``state[:, [0:3, 3:7, 7]]`` — quat is xyzw, no pad.
     """
@@ -100,6 +100,6 @@ __all__ = [
     "ARM10_DIM",
     "bcz_state_to_arm10",
     "euler7_action_to_arm10",
-    "rt1_state_to_arm10",
+    "fractal_state_to_arm10",
     "droid_state_to_arm10",
 ]

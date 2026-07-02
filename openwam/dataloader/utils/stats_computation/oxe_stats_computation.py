@@ -33,7 +33,7 @@ from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
     droid_state_to_arm10,
     euler7_action_to_arm10,
-    rt1_state_to_arm10,
+    fractal_state_to_arm10,
 )
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
@@ -54,10 +54,10 @@ SCHEMA: Dict[str, Dict] = {
         "state_fn": "bcz_state",
         "action_fn": "euler7_action",
     },
-    "RT-1": {
+    "Fractal": {
         "state_cols": ["observation.state"],
         "action_cols": ["action"],
-        "state_fn": "rt1_state",
+        "state_fn": "fractal_state",
         "action_fn": "euler7_action",
     },
     "DROID": {
@@ -78,10 +78,10 @@ SCHEMA: Dict[str, Dict] = {
 def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
     if state_fn == "bcz_state":
         return bcz_state_to_arm10(rows["observation.state"])
-    if state_fn == "rt1_state":
+    if state_fn == "fractal_state":
         quat = rows["observation.state"][:, 3:7]
         assert_unit_quaternion(quat, tol=0.05, sample_n=min(64, len(quat)))
-        return rt1_state_to_arm10(rows["observation.state"])
+        return fractal_state_to_arm10(rows["observation.state"])
     if state_fn == "droid_state":
         return droid_state_to_arm10(
             rows["observation.state.cartesian_position"],
