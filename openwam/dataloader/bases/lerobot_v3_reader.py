@@ -191,9 +191,9 @@ class LeRobotV3Reader(BaseDataset):
         if color_jitter and split == "train":
             cj_get = color_jitter.get if hasattr(color_jitter, "get") else (lambda k, d: d)
             self._color_jitter = VideoColorJitter(
-                brightness=float(cj_get("brightness", 0.1)),
-                contrast=float(cj_get("contrast", 0.1)),
-                saturation=float(cj_get("saturation", 0.1)),
+                brightness=float(cj_get("brightness", 0.2)),
+                contrast=float(cj_get("contrast", 0.2)),
+                saturation=float(cj_get("saturation", 0.2)),
                 hue=float(cj_get("hue", 0.0)),
             )
 
