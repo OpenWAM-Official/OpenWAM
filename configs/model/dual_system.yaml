@@ -28,12 +28,15 @@ freeze:
 architecture:
   framework: dual_system
   variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm (idm = Wan only)
-  action_dim: 20
+  # action_dim/state_dim default 80 (unified cross-robot action space, unify_action=true).
+  # For dataloaders shipping unify_action=false (robotwin, oxe_bcz/bridge/fractal)
+  # override both to the raw width: robotwin action_mode=eef (20D) → 20; action_mode=joint (14D qpos) → 14.
+  action_dim: 80
 
   # When true, dataloader must provide sample["proprio"]; one proprio token is
   # appended to the text context before the backbones consume it.
   use_proprioception: true
-  state_dim: 20                  # required when use_proprioception=true
+  state_dim: 80                  # required when use_proprioception=true
 
   # ActionDiT layer selection. joint_cross_attn: which video layers feed the
   # bridge. joint_self_attn/idm: sizes ActionDiT (must match vb.num_layers).
