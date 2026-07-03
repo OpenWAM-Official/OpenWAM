@@ -20,7 +20,7 @@ Two strategies are supported:
   stream denoises earlier than the other along an alpha-shift curve
   (``alpha``, arXiv:2602.11401), with ``lead`` choosing which stream
   leads. Each stream rides its own ``alpha_shift`` grid (matching
-  training), and ``alpha=1`` degenerates to the ``sync`` diagonal.
+  training), and ``alpha=1`` reproduces ``sync`` bit-for-bit.
 
 The removed strategies (video_leading / cascade / action_only) live in
 git history; ``make_schedule`` raises ``NotImplementedError`` for them.
@@ -29,6 +29,8 @@ git history; ``make_schedule`` raises ``NotImplementedError`` for them.
 from __future__ import annotations
 
 from typing import List, Tuple
+
+import torch
 
 Schedule = List[Tuple[float, float]]
 
@@ -60,16 +62,15 @@ def schedule_sync(
     return [(v, a) for v, a in zip(v_ts, a_ts)] + [(0.0, 0.0)]
 
 
-def _alpha_shift(u: float, shift: float) -> float:
-    """alpha-shift a uniform sample ``u`` in [0, 1] into a shifted sigma.
+def _alpha_shift(u, shift: float):
+    """alpha-shift ``u`` (float or tensor) in [0, 1] into a shifted sigma.
 
     ``f_alpha(u) = shift*u / (1 + (shift - 1)*u)`` -- the time shift that
     is informationally equivalent to scaling the latent variance by
     ``shift`` (Esser et al. 2024, SD3; Latent Forcing arXiv:2602.11401
-    Eq. 4). This is the same closed form the backbone schedulers apply
-    inside ``set_timesteps``; it is inlined here because random continuous
-    sampling cannot reuse their fixed-grid ``linspace`` path. Keeping the
-    formula identical preserves the train/inference alpha-shift contract.
+    Eq. 4). Same closed form, same operation order as the backbone
+    schedulers' ``set_timesteps``, so float32 tensor input reproduces
+    their grids bit-for-bit.
     """
     return shift * u / (1.0 + (shift - 1.0) * u)
 
@@ -92,8 +93,13 @@ def schedule_variance_shift(
     stream's sigma is ``alpha_shift(1 - cleanness, shift_stream)`` -- the SAME
     grid the backbone applies at training time (``set_timesteps_wan`` /
     ``ActionScheduler.set_timesteps``). A variance_shift-trained checkpoint and
-    this schedule therefore stay point-wise in-distribution, and ``alpha=1``
-    collapses both streams to ``u`` so the schedule becomes exactly ``sync``.
+    this schedule therefore stay point-wise in-distribution.
+
+    Computed in float32 on the schedulers' own base grid
+    (``linspace(1, 0, n+1)[:-1]``), with the lead curve applied as the
+    algebraically identical ``1 - f_alpha(1 - s) == f_{1/alpha}(s)`` -- exact
+    at ``alpha=1`` in floating point -- so ``alpha=1`` reproduces
+    ``schedule_sync`` bit-for-bit.
 
     Sigma is monotonically decreasing and the schedule ends with the
     ``(0.0, 0.0)`` sentinel -- consumed by ``BaseWAMArchitecture.generate``
@@ -115,19 +121,18 @@ def schedule_variance_shift(
     num_train_v = float(getattr(video_scheduler, "num_train_timesteps", 1000))
     num_train_a = float(getattr(action_scheduler, "num_train_timesteps", 1000))
 
-    v_ts: List[float] = []
-    a_ts: List[float] = []
-    for k in range(num_steps):
-        u = k / num_steps  # shared global progress in [0, 1)
-        lead_cleanness = _alpha_shift(u, alpha)  # f_alpha(u) >= u: lead reaches clean earlier
-        lag_cleanness = u
-        if lead == "video":
-            v_clean, a_clean = lead_cleanness, lag_cleanness
-        else:
-            v_clean, a_clean = lag_cleanness, lead_cleanness
-        # Each stream's sigma rides its own alpha-shift grid (matches training).
-        v_ts.append(_alpha_shift(1.0 - v_clean, shift_video) * num_train_v)
-        a_ts.append(_alpha_shift(1.0 - a_clean, shift_action) * num_train_a)
+    # s[k] = 1 - k/num_steps: the schedulers' float32 base sigma grid.
+    s = torch.linspace(1.0, 0.0, num_steps + 1)[:-1]
+    # Lead pre-shift sigma 1 - f_alpha(1-s) rewritten as f_{1/alpha}(s), which
+    # leaves s bitwise untouched at alpha=1; the lag stream stays on s.
+    lead_sigma = _alpha_shift(s, 1.0 / alpha)
+    if lead == "video":
+        v_sigma, a_sigma = lead_sigma, s
+    else:
+        v_sigma, a_sigma = s, lead_sigma
+    # Each stream's sigma rides its own alpha-shift grid (matches training).
+    v_ts = (_alpha_shift(v_sigma, shift_video) * num_train_v).tolist()
+    a_ts = (_alpha_shift(a_sigma, shift_action) * num_train_a).tolist()
 
     return [(v, a) for v, a in zip(v_ts, a_ts)] + [(0.0, 0.0)]
 
