@@ -99,6 +99,18 @@ _NORMALIZE_MODE_UNSET = object()
 _CONFIG_MISSING = object()
 
 
+# Process-global LRU for decoded parquet shards, shared across all bucket
+# instances. A per-instance cache (the previous maxsize=32 design) is a memory
+# bomb under shuffled training: many buckets x many shards x one copy per
+# DataLoader worker grows unbounded (substantial memory per step and rank, node OOM at
+# sustained distributed runs) while the random access pattern gives ~0 hit rate.
+# A small global cache keeps sequential scans fast at a fixed bounded memory per worker
+# ceiling (largest shards decode to large tables).
+@functools.lru_cache(maxsize=4)
+def _read_data_table_cached(path: str, columns: Tuple[str, ...]):
+    return pq.read_table(path, memory_map=True, columns=list(columns))
+
+
 class LeRobotV3Reader(BaseDataset):
     """Shared single-bucket LeRobot v3 reading machinery (see module docstring)."""
 
@@ -270,6 +282,30 @@ class LeRobotV3Reader(BaseDataset):
             eps, split, info_splits, source_name=f"{self.DATASET_NAME}({self._dataset_id})"
         )
 
+        # ── per-bucket episode exclusion (data-quality blacklist) ─────────
+        # meta/excluded_episodes.json holds episode_index values that must not
+        # be sampled (e.g. episodes whose frames fall in a truncated video
+        # file). Rows are dropped AFTER offset computation — the same
+        # alignment-safe filter path as info splits; physically deleting
+        # episodes-parquet rows would shift the groupby-cumsum offsets of
+        # later episodes in each (chunk, file) shard and misalign them.
+        excl_path = self._dataset_dir / "meta" / "excluded_episodes.json"
+        if excl_path.exists():
+            import json
+
+            with open(excl_path) as f:
+                excluded = set(json.load(f)["episode_indices"])
+            n_before = len(self._eps_df)
+            self._eps_df = self._eps_df[~self._eps_df["episode_index"].isin(excluded)].reset_index(drop=True)
+            if len(self._eps_df) < n_before:
+                logger.info(
+                    "%s(%s): excluded %d/%d episodes via meta/excluded_episodes.json",
+                    self.DATASET_NAME,
+                    self._dataset_id,
+                    n_before - len(self._eps_df),
+                    n_before,
+                )
+
         # ── optional episode-level subsample to fit a per-bucket hour budget ──
         if self._max_hours is not None:
             n_before = len(self._eps_df)
@@ -322,9 +358,6 @@ class LeRobotV3Reader(BaseDataset):
         # ── prompts + per-dataset normalization stats (hooks) ─────────────
         self._load_prompts()
         self._normalization_stats = self._load_stats(info)
-
-        # ── LRU cache for parquet shards ──────────────────────────────────
-        self._load_data_table = functools.lru_cache(maxsize=32)(self._read_data_file_uncached)
 
         # ── subclass hook ─────────────────────────────────────────────────
         self._post_init(info)
@@ -462,17 +495,6 @@ class LeRobotV3Reader(BaseDataset):
         """Root-mode aggregate wrapper class, or None when only single-bucket is supported."""
         return None
 
-    # ----- pickle -----------------------------------------------------------
-
-    def __getstate__(self) -> Dict[str, Any]:
-        state = self.__dict__.copy()
-        state.pop("_load_data_table", None)
-        return state
-
-    def __setstate__(self, state: Dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        self._load_data_table = functools.lru_cache(maxsize=32)(self._read_data_file_uncached)
-
     # ----- offsets / IO -----------------------------------------------------
 
     def _add_episode_offsets(self, eps: pd.DataFrame) -> None:
@@ -489,9 +511,9 @@ class LeRobotV3Reader(BaseDataset):
     def _video_offset_col(camera: str) -> str:
         return f"_video_frame_offset/{camera}"
 
-    def _read_data_file_uncached(self, chunk_idx: int, file_idx: int):
+    def _load_data_table(self, chunk_idx: int, file_idx: int):
         path = self._dataset_dir / self._data_path_template.format(chunk_index=chunk_idx, file_index=file_idx)
-        return pq.read_table(path, memory_map=True, columns=list(self.NEEDED_COLS))
+        return _read_data_table_cached(str(path), tuple(self.NEEDED_COLS))
 
     # ----- Dataset ----------------------------------------------------------
 
