@@ -112,6 +112,16 @@ def test_schedule_variance_shift_alpha1_is_diagonal():
         assert abs(tv - ta) < 1e-9  # alpha=1 -> both streams identical (sync diagonal)
 
 
+def test_variance_shift_alpha1_matches_sync_bitwise():
+    from openwam.deploy.denoise_schedule import make_schedule
+
+    v, a = _two_schedulers()
+    sync = make_schedule("sync", v, a, num_steps=50, shift=5.0, shift_video=3.0)
+    for lead in ("video", "action"):
+        vs = make_schedule("variance_shift", v, a, num_steps=50, shift=5.0, shift_video=3.0, lead=lead, alpha=1.0)
+        assert vs == sync  # exact float equality, not approx
+
+
 def test_schedule_variance_shift_lead_direction_flips():
     from openwam.deploy.denoise_schedule import schedule_variance_shift
 
