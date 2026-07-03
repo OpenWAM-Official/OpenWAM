@@ -238,7 +238,7 @@ class OpenWAMTrainer:
         optimizer, dataloader, scheduler = self.prepare_accelerate(optimizer, dataloader, scheduler)
 
         if self._run_seed is not None:
-            wire_sampler_seed(dataloader, int(self._run_seed))
+            wire_sampler_seed(dataloader, int(self._run_seed), rank=self._rank)
 
         all_params = [p for group in optimizer.param_groups for p in group["params"]]
 

@@ -76,6 +76,7 @@ from openwam.dataloader.robocoin import (
     _finger_indices,
     dex_finger_layout,
 )
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
 
 
 
@@ -187,27 +188,6 @@ class Accumulator:
 
 
 
-
-
-
-
-
-
-ROT6D_DIMS = (3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 18)
-
-
-def _pin_rot6d_identity(stats: dict) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
-
-
-
-
-
-
-    ident = {"min": -1.0, "max": 1.0, "q01": -1.0, "q99": 1.0, "mean": 0.0, "std": 1.0}
-    for key, val in ident.items():
-        for i in ROT6D_DIMS:
-            stats[key][i] = val
 
 
 def discover_datasets_by_robot_type(root: str) -> dict:
@@ -401,7 +381,7 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list, rot6d_identity:
     stats = acc.finalize()
     if rot6d_identity:
 
-        _pin_rot6d_identity(stats)
+        pin_rot6d_identity(stats, ROT6D_DIMS_EEF20)
     stats["num_timesteps"] = int(acc.count)
     stats["num_datasets"] = len(dataset_dirs)
     stats["num_files"] = total_files
@@ -439,7 +419,7 @@ def main():
         "--no-rot6d-identity",
         action="store_true",
         help="Disable pinning rot6d stats to identity (rot6d would then be per-dim normalized "
-        "like pos/gripper — generally undesirable; see _pin_rot6d_identity).",
+        "like pos/gripper — generally undesirable; see pin_rot6d_identity).",
     )
     args = parser.parse_args()
 
