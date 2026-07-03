@@ -99,12 +99,14 @@ from openwam.dataloader.behavior import (
     _state_to_raw_proprio_joint,
 )
 
-# Reuse RoboCOIN's online accumulator + rot6d-identity pin VERBATIM (dev-aligned:
-# one definition of the EEF stats machinery and the rot6d convention).
-from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
-    Accumulator,
-    _pin_rot6d_identity,
-)
+# NOTE: RoboCOIN's ``Accumulator`` + ``_pin_rot6d_identity`` (reused verbatim, dev-
+# aligned) are imported LAZILY inside ``compute_behavior_stats`` rather than at module
+# top. ``robocoin_stats_computation`` imports from ``openwam.dataloader.robocoin`` at
+# its own module top, so a top-level import here couples this module's load to that
+# chain — under some test-collection/import orders that surfaced as a spurious
+# "cannot import name '_pin_rot6d_identity'" (partially-initialized module) on the CI
+# interpreter. Deferring the import to call time keeps loading this module side-effect
+# free (mirrors how ``robotwin.py`` imports its stats module inside functions).
 
 _NEEDED_COLS = ["observation.state", "action"]
 
@@ -177,6 +179,13 @@ def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> di
     is the joint-mode arm block (raw 23 = arm_joint16 + base_vel3 + trunk4). base_vel
     and trunk are shared by both modes (same native columns) so they are computed once.
     """
+    # Lazy import (see the module-level note): defer the robocoin_stats_computation
+    # dependency to call time so importing this module never triggers that chain.
+    from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
+        Accumulator,
+        _pin_rot6d_identity,
+    )
+
     eef_acc = Accumulator(dim=_EEF_DIM)
     base_acc = Accumulator(dim=_BASE_DIM)
     trunk_acc = Accumulator(dim=_TRUNK_DIM)
