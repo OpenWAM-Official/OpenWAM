@@ -1,68 +1,124 @@
-# BEHAVIOR-1K 2025 Challenge — Training Configs & Baseline Scores
+# BEHAVIOR-1K 2025 Challenge — 有实测分数的策略 · 训练配置与表现
 
-> Two deliverables: **① 训练步数/batch 配置调研**(供微调测试参照)、**② 已有 baseline 得分**(供效果对比/论文图表)。
-> 范围:BEHAVIOR-1K 2025 Challenge(NeurIPS 2025,OmniGibson,机器人 Galaxea R1 Pro,50 长程家务任务)。
-> 置信度:✅ 一手源确证 / ⚠️ 单源或示例值 / ❌ 未公布。
-
----
-
-## ① 训练配置(微调参照)
-
-排名指标见 §②。两位 top 选手均用 **π0.5 (Pi0.5) + 8×H200**;第一名动作空间 **23D**(3 base 速度 + 4 trunk + 7+1 左 + 7+1 右)与本仓库 BEHAVIOR dataloader `action[23]` schema 一致,可直接作微调与 sanity-check 参照。
-
-### 官方 baseline 配方
-
-| 方法 | base | steps | batch | lr / optimizer | 其它 | 硬件 | 置信度 |
-|---|---|---|---|---|---|---|---|
-| **π0 / openpi** (`pi0_b1k`, 从 `pi0_base` 初始化) | π0 | **50,000** | **64** (CLI flag) | `peak_lr=2.5e-5 → decay 2.5e-6`, warmup 1k, decay 30k, **AdamW**(openpi 默认,配方未显式给出) | action_horizon 50, gemma_2b_lora | 单大显存 GPU(`XLA_PYTHON_CLIENT_MEM_FRACTION=0.9`) | ✅ steps/batch/默认 LR |
-| **OpenVLA-OFT(+)** | OpenVLA-7B | **100,005** (decay@50k) | **4** | **5e-4** | LoRA rank 32, 3 图, 25-act chunk, L1 reg + FiLM | 未明示 | ✅ |
-| ACT / Diffusion Policy(RGB(D)+3D)/ BC-RNN / WB-VIMA | BC | 仅给训练配方,无聚合得分 | — | — | `il_lib` 仓库 | — | ✅ 方法 |
-
-注:官方 index/CFP 写 "OpenVLA",baselines 教程页实为 **OpenVLA-OFT / OFT+** 配方。**无 RL/PPO/SAC 官方 baseline**。π0 配方未写 LR,但 openpi 代码默认即上表值(读 `optimizer.py` 可得)。
-
-### Top-2 竞赛方案
-
-| 方案 | base | steps | batch | lr / optimizer | 数据 | 硬件 | 置信度 |
-|---|---|---|---|---|---|---|---|
-| **① Robot Learning Collective** (Larchenko 等) | **π0.5**(Gemma 300M action expert ~311M *仅 action expert*;JAX/FSDP) | 按墙钟:多任务 **~15 天** → 每 task-group 微调 **~1 周**,全程 **≈2 epochs**(README 示例 `num_train_steps=200000`,非声明最终值) | 多卡 **2048** / 单卡 **16**(README 示例) | ❌ 未公布 | 10k demos / 50 任务(200 demo/任务)/ 1200+ h;RGB-only 224×224 子集 ~260GB | 训练 **8×H200**(FSDP);推理单张 RTX 4090;评测扩 20×4090 | 硬件/墙钟 ✅;steps/batch ⚠️ 示例;LR ❌ |
-| **② Comet** (NVIDIA) | **π0.5**(JAX) | 多任务预训练 **50k**;单任务 SFT **15k–20k** | 论文 per-device **64**;⚠️ 释出 config 实为 8×32(32/卡,256 总) | 预训练 **2.5e-5**,SFT/RFT **2.5e-6**,**cosine**;AdamW | 官方 10k + 自采 ~3.6K(规划器+离线RL)+ RFT 3 轮(~2.5K 选样) | **8×H200** | ✅(论文);batch ⚠️ 论文 vs config |
-
-**①方案要点**:两阶段(50 任务多任务预训练 → 拆 4 个 task-group 专用 ckpt,最终提交 = 4 ckpt,按 task ID 自动切换);horizon 30,3 路相机(头+双腕 224×224);correlated noise flow matching、learnable mixed-layer attention、可学习任务嵌入(vision-action,非语言 VLA);预算 ~$13k(Nebius 赞助 $10k)。
+> 本文只收录**在 BEHAVIOR-1K 上有实测分数**的策略（world-model / 通用 VLA peers 不在此文）。
+> 分两类：
+>
+> - **表 A = Challenge** —— 官方 2025 leaderboard 名次，排名口径 = **held-out / private test Q-score**。
+> - **表 B = 自测** —— 策略自报的 BEHAVIOR 分数，**非**官方 held-out 排名。
+>
+> **Q-score** = 已满足 BDDL 目标谓词数 / 总目标谓词数，50 任务平均（部分给分）。
+> **口径不可混用**：held-out(private) ≠ public-validation ≠ 自测。
+> 置信度：✅ 一手源确证 · ⚠️ 转载或单源 · ❌ 未披露。
 
 ---
 
-## ② Baseline 得分(效果对比 / 论文图表)
+## 表 A — Challenge（官方 2025 leaderboard）
 
-### 竞赛 leaderboard(官方,排名指标 = held-out test **Q-score**)
+| 名次 | 方法 | 所属 | 赛道 | 可引用 | **held-out Q** | pub-val Q | Full-Success (priv / pub) |
+|:--:|---|---|---|---|:--:|:--:|:--:|
+| 1 | **RLC / Robot Learning Collective** | 独立 | Standard | ✅ arXiv:2512.06951 | **0.2599** | 0.2605 | 0.1240 / 0.1120 |
+| 2 | **Comet** | NVIDIA | Standard | ✅ arXiv:2512.10071 | **0.2514** | 0.1830 | 0.1140 / 0.1440 |
+| 3 | **SimpleAI Robot** | Beijing Simple AI | Standard | ❌ 无 | **0.1591** | 0.1943 | 0.1080 / 0.1400 |
+| 4 | **The North Star** | Huawei CRI EAI | Standard | ❌ 无 | **0.1204** | — | 0.076 / — |
+| 5 | **Embodied Intelligence** | 独立 | ⚠️ Privileged | ❌ 无 | **0.0947** | 0.1110 | 0.0520 / 0.0620 |
 
-口径:50 任务 ×200 训练 demo;评测 = 10 public-validation + 10 held-out(private)实例/任务,仅 top-5 跑 held-out。**Q-score** = 已满足 BDDL 目标谓词数 / 总目标谓词数,50 任务平均(给部分分)。**Full Success** = 二元全成功,**不用于排名**。赛道:**Standard**(RGB-D+seg+proprio,禁全局位姿)/ **Privileged**(可查仿真器特权信息)。官方页标注 "Provisional"。
+> - 只有 **1、2 名**有可引用 artifact；3 / 4 / 5 名仅存于官方 leaderboard 与转载表（Comet Table 1 / RLC 博客），**训练配置全部未披露**。
+> - **#5 为 Privileged track**（可查特权仿真信息），与 1–4 名的 Standard track 不同赛道，谨慎并列。
 
-| 排名 | 队伍 | 所属 | 赛道 | Full Success (pub / test) | **Q-score (pub / test)** | 置信度 |
-|---|---|---|---|---|---|---|
-| 1 | **Robot Learning Collective** (Larchenko, Zarin, Karnatak) | Independent | Standard | 0.1120 / 0.1240 | 0.2605 / **0.2599** | ✅ |
-| 2 | **Comet** | NVIDIA Research | Standard | 0.1440 / 0.1140 | 0.1830 / **0.2514** | ✅ |
-| 3 | SimpleAI Robot | Beijing Simple AI | Standard | 0.1400 / 0.1080 | 0.1943 / **0.1591** | ✅ |
-| 4 | The North Star | Huawei CRI EAI | Standard | 0.1280 / 0.0760 | 0.1702 / **0.1204** | ✅ |
-| 5 | Embodied Intelligence | Independent | **Privileged** | 0.0620 / 0.0520 | 0.1110 / **0.0947** | ✅ |
+### 训练配置详情（仅 1、2 名有报告）
 
-规模:18 队 / 4 国(美·中·加·韩);每赛道各取 top-3;现金奖 $1,000 / $500 / $300。
-排名按 **held-out test Q-score**(①0.2599 > ②0.2514);注意 ② 的 pub-val full-success 0.1440 高于 ① 0.1120,但非排名指标。
-⚠️ Comet GitHub 提到的 **0.345** 是赛后(post-challenge)public-validation 双模型分,**非** held-out test(0.2514),论文未收录,勿引用。
+#### 1 · RLC / Robot Learning Collective — Larchenko, Zarin, Karnatak（独立）
 
-### 官方 baseline 聚合得分
+- **base**：π0.5（SigLIP-So400m/14 冻结 + PaliGemma VLM + Gemma-300M flow-matching expert；语言头替换为 50 个可训练 2048-D task embedding）
+- **硬件**：训练 **8×H200**（FSDP）；推理单张 4090；评测 20×4090
+- **batch**：⚠️ **无 declared-final** —— README 的 16（单卡）/ 2048（FSDP8）**明标"示例"**，dataclass 默认 32，获胜 config 未覆盖
+- **iters / epochs**：config target = **200k steps**，但实际提交是**时间受限**：连续训练约 1 个月、**≈2 epoch、未收敛**
+- **两阶段**：50 任务多任务预训练 ~15 天 → 拆 4 个 task-group 各微调 ~1 周（最终提交 = **4 个 ckpt**，按 task 自动切换）
+- **优化**：AdamW + CosineDecay（warmup 1000，**peak 1e-4 → 1e-5，decay@20k**）；EMA 0.99；flow-matching t~Beta(1.5,1)，num_flow_samples=15；action horizon 30
+- **表现**：**held-out Q 0.2599（第 1）**，pub-val 0.2605（公私几乎无差）；Full-Success（非排名指标）priv 0.1240 / pub 0.1120
 
-❌ **官方未公布 π0 / OpenVLA-OFT / ACT / DP / BC-RNN / WB-VIMA 的 50 任务聚合得分**——仅提供个别单任务 checkpoint(π0:turning_on_radio + picking_up_trash,各 50k step;WB-VIMA:仅 turning_on_radio)。
-若论文需 "baseline floor" 弱下限,可引榜单第 13 名参赛队 "ACT"(Xiamen,Q≈0.0037),**须注明是参赛实现,非官方 baseline**。
+#### 2 · Comet — Team Comet（NVIDIA）
 
-### 可引的 RL 对照(2024 原始论文,口径不同,不可与 2025 直接比)
+- **base**：π0.5（transformer flow-matching action head）
+- **硬件**：SFT / RFT 明确 **8×H200**；⚠️ **预训练卡数未披露**（旧传 "gpu40" 经复核为**捏造**，勿引用）
+- **batch**：paper 声明 per-device **64**；公开 config 一律 hard-code **8×32 = 256**（全局，可复现值）
+- **iters / epochs**（steps，非 epoch）：预训练 **50k** → 单任务 SFT **15–20k** → RFT **20k**；RFT 外循环 **3 轮**
+- **优化**：CosineDecay；预训练 peak **2.5e-5**，SFT / RFT peak **2.5e-6**；AdamW；action chunk 32；绝对关节动作；30 Hz；头相机 720 / 腕相机 480 分辨率为关键
+- **表现（三口径务必分开）**：
+  - **held-out TEST Q 0.2514（第 2）**，完成 22/50，Full-Success 0.1140
+  - 赛中 public-val Q 0.1830，Full-Success 0.1440
+  - 赛后 public-val Q **0.3453**（仅 2 个 ckpt，**非**挑战 / test 分数，**勿**与他队 test 并列）
 
-arXiv:2403.09227 Table 2,**RL-Prim.Hist.**(PPO+原语+历史):StoreDecoration / CollectTrash / CleanTable = **0.55 / 0.63 / 0.88**(✅)。仅 3 个活动、用 assistive/sticky 抓取原语,与 2025(50 任务、R1 Pro、纯 IL、无抓取辅助)**不可比**,引用须加注。
+---
+
+## 表 B — 自测（策略自报，非官方 held-out 排名）
+
+| 方法 | 可引用 | base | **分数（口径）** | 备注 |
+|---|---|---|:--:|---|
+| **Galaxea G0.5** | ✅ tech-report URL（无 arXiv；G0 = arXiv:2509.00576） | Qwen3.5-2B 单一自回归 decoder | **0.3136**（4 ep，自测） | 单 generalist ckpt，2 次平均 |
+| ↳ G0.5 协议下 re-report | — | — | G0.5(1ep) 0.2904 · pi0.5(4ep) 0.2626 · RLC 0.2605 · Comet 0.1830 | ⚠️ 均 public-val 级，**非** held-out |
+| **LEGACY RL**（VMC / Prim. / Prim.Hist.）⚠️ 不可比 | ✅ arXiv:2403.09227 | SAC / PPO + primitive | Prim.Hist. Q **0.59 / 0.68 / 0.88** | 旧 3 任务协议 |
+
+### 训练配置详情
+
+#### Galaxea G0.5（自测口径）
+
+- **引用**：tech report `opengalaxea.github.io/G05/`（**无 arXiv / DOI**；前身 G0 = arXiv:2509.00576，建议双引）
+- **base**：**Qwen3.5-2B 单一统一自回归 decoder**（VLM-as-actor；27-D 统一动作空间 + 可学 cross-embodiment tokenizer）。⚠️ **不是**双系统 + action expert —— 那是前身 G0
+- **iters / epochs**：BEHAVIOR 后训练 **1 epoch 与 4 epochs** 两档，co-train 全部 10000 episodes / 50 任务；预训练 ~120k steps
+- **优化**：预训练 AdamW β(0.9, 0.95) wd 1e-2，peak **1e-5**，4000 warmup → 92% 后 cosine 衰到 peak 的 30%（vision tower 全程不冻）；BEHAVIOR 专属 LR 未单独披露
+- **口径**：Standard、低分辨率 RGB，50 任务 ×10，单 generalist ckpt，2 次平均，Task-Success Score（BDDL 谓词比例，部分给分）
+- **表现**：**G0.5(4 epochs) = 0.3136（headline 31.4%）**
+- **同表（Table 4）G0.5 协议下 re-report**：G0.5(1ep) 0.2904 · pi0.5(4ep) **0.2626**（摘要 26.3%）· RLC 0.2605 · Comet 0.1830
+  - ⚠️ 这里的 RLC 0.2605 / Comet 0.1830 是 **public-val 级**，**不是**官方 held-out（0.2599 / 0.2514），勿混
+
+#### LEGACY RL 基线（RL-VMC / RL-Prim. / RL-Prim.Hist.）—— ❌ 与 2025 挑战不可比
+
+- **引用**：arXiv:2403.09227（BEHAVIOR-1K 论文，CoRL'22 li23a）
+- **算法**：RL-VMC = SAC 端到端视觉运动；RL-Prim.(+Hist.) = PPO + 运动规划 primitive（RRT-Connect，特权 / 传送）
+- **训练**：**30,000 env steps**；batch 64；buffer 300；3 seed；LR **3e-4**（PPO γ0.99 / λ0.99 / ε0.2；SAC γ0.99 / τ0.005）
+- **表现（旧 3 任务：StoreDecoration / CollectTrash / CleanTable）**：
+  - Success rate：VMC 0/0/0 · Prim. 0.48/0.42/0.77 · **Prim.Hist. 0.55/0.63/0.88**
+  - Q-score：VMC 0/0/0 · Prim. 0.50/0.49/0.77 · **Prim.Hist. 0.59/0.68/0.88**
+- ❌ **不可比**：3 个 legacy 任务、单臂旧本体、特权抓取 primitive、旧协议 —— 与 2025 的 50 任务 / R1 Pro / 纯 IL 是不同基准
+
+---
+
+## 官方 starter baseline（训练配方公开，但**无 50-任务 aggregate 分数**）
+
+> 来源：`StanfordVL/b1k-baselines` · `wensi-ai/openpi@behavior` · `wensi-ai/il_lib` · `evansh666/openvla-oft`。
+> **关键事实**：官方仅发布 **per-task checkpoint**，不发布 50 任务平均 Q-score，均未上 leaderboard ——
+> 因此以下是**训练配方参考，不是分数行**。
+
+**pi0 / openpi**（config `pi0_b1k` / fork `pi05_b1k`，从 `pi0_base` / `pi05_base` 初始化）
+- global batch **64**；**50k steps = declared-final**（turning_on_radio + picking_up_trash 各一个 ckpt；openpi 默认 30k）
+- LR 未覆盖 → 继承默认 CosineDecay peak 2.5e-5 → 2.5e-6，warmup 1000，decay 30k，AdamW clip 1.0，EMA 0.99；action horizon 32；卡数未披露
+
+**OpenVLA-OFT**（`openvla-7b` + LoRA r32）
+- batch **4**；**max_steps 100,005，decay@50k**；lr **5e-4**；L1 回归头 + FiLM + 3 视图 + proprio，~25-action chunk
+- **仅配方，无 ckpt、无分数**
+
+**il_lib BC**（ACT / Diffusion Policy RGB(D) / DP3 / BC-RNN / WB-VIMA，均从零，action_dim = 23）
+- epoch / val 驱动，**无固定 step**（`lr_cosine_steps=300000` 是 LR 调度视界，**不是** stop 点）
+- lr **7e-4** cosine（warmup 1000，min 5e-6）；Adam；grad-clip 1.0；wd 默认 0（WB-VIMA / ACT 覆盖 0.1）；batch base 64、WB-VIMA / ACT 128
+- **仅 WB-VIMA 发布 turning_on_radio 单任务 ckpt，其余仅配方，均无 aggregate 分数**
+
+---
+
+## ⚠️ 待核（出版前人工复核）
+
+- **SimpleAI(3) / North Star(4) / Embodied Intelligence(5)** 分数：来自转载表（Comet Table 1 / RLC 博客），官方 2025 leaderboard 已迁 2026 无法直读 —— 分数高置信但**无第一方 artifact**。
+- **Embodied Intelligence 的 Privileged track 归属**：反推得来（Comet "standard track" 表仅列 1–4 名），未逐字确认。
+- **LEGACY RL 数值**：建议核对 arXiv:2403.09227 的 Tables 2 / A.11 / A.12 / A.13。
+- **RLC 全局 batch**：无 declared-final（2048 / 16 为示例，代码默认 32）。
+- **Comet 预训练卡数**：genuinely not disclosed（旧 "gpu40" 已确认为捏造）。
 
 ---
 
 ## Sources
 
-**官方** — leaderboard https://behavior.stanford.edu/challenge/leaderboard.html · evaluation https://behavior.stanford.edu/challenge/evaluation.html · baselines https://behavior.stanford.edu/challenge/baselines.html · index https://behavior.stanford.edu/challenge/index.html · dataset https://behavior.stanford.edu/challenge/dataset.html · HF https://huggingface.co/datasets/behavior-1k/2025-challenge-demos
-**① RLC** — arXiv 2512.06951 · GitHub https://github.com/IliaLarchenko/behavior-1k-solution · HF https://huggingface.co/IliaLarchenko/behavior_submission
-**② Comet** — arXiv 2512.10071 · GitHub https://github.com/mli0603/openpi-comet
-**官方 baseline 仓库 / 原始论文** — https://github.com/StanfordVL/b1k-baselines (openpi fork: github.com/wensi-ai/openpi `behavior` 分支;`il_lib`: github.com/wensi-ai/il_lib) · https://github.com/StanfordVL/BEHAVIOR-1K · 2024 RL baselines: arXiv 2403.09227
+- **官方** —— leaderboard / evaluation / baselines / dataset：`behavior.stanford.edu/challenge/` · HF：`huggingface.co/datasets/behavior-1k/2025-challenge-demos`
+- **① RLC** —— arXiv:2512.06951 · GitHub `IliaLarchenko/behavior-1k-solution` · HF `IliaLarchenko/behavior_submission`
+- **② Comet** —— arXiv:2512.10071（v3，赛后修订）· GitHub `mli0603/openpi-comet`
+- **G0.5** —— `opengalaxea.github.io/G05/`（tech report，无 arXiv）· 前身 G0：arXiv:2509.00576
+- **官方 baseline / 原始论文** —— `StanfordVL/b1k-baselines` · `wensi-ai/openpi@behavior` · `wensi-ai/il_lib` · `evansh666/openvla-oft` · BEHAVIOR-1K：arXiv:2403.09227
