@@ -29,6 +29,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from openwam.dataloader.utils.eef import assert_unit_quaternion
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_ARM10, pin_rot6d_identity
 from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
     droid_state_to_arm10,
@@ -73,31 +74,6 @@ SCHEMA: Dict[str, Dict] = {
         "action_fn": "euler7_action",
     },
 }
-
-
-
-
-
-
-
-
-
-
-ROT6D_DIMS = (3, 4, 5, 6, 7, 8)
-
-
-def _pin_rot6d_identity(stats: dict) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
-
-
-
-
-
-
-    ident = {"min": -1.0, "max": 1.0, "q01": -1.0, "q99": 1.0, "mean": 0.0, "std": 1.0}
-    for key, val in ident.items():
-        for i in ROT6D_DIMS:
-            stats[key][i] = val
 
 
 def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
@@ -189,7 +165,7 @@ def compute_dataset_stats(
     }
     if rot6d_identity:
 
-        _pin_rot6d_identity(stats)
+        pin_rot6d_identity(stats, ROT6D_DIMS_ARM10)
     return stats, n_state, n_action
 
 
@@ -234,7 +210,7 @@ def main():
         "--no-rot6d-identity",
         action="store_true",
         help="Disable pinning rot6d stats to identity (rot6d would then be per-dim normalized "
-        "like pos/gripper — generally undesirable; see _pin_rot6d_identity).",
+        "like pos/gripper — generally undesirable; see pin_rot6d_identity).",
     )
     args = parser.parse_args()
 

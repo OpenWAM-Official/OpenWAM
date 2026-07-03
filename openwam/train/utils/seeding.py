@@ -195,6 +195,12 @@ def wire_sampler_seed(dataloader, run_seed: int, *, rank: int = 0) -> None:
 
     Warns only when neither mechanism is in effect (shuffle order then falls
     back to library defaults and will NOT vary with ``cfg.project.seed``).
+
+    Must be called BEFORE the loader's first iteration: accelerate re-broadcasts
+    rank 0's generator state via ``set_state`` on every ``__iter__``, and
+    ``set_state`` overwrites ``initial_seed()`` — so mechanism 2's
+    ``initial_seed()`` check is only valid pre-iteration (calling this later
+    would spuriously warn on rank > 0).
     """
     samplers = _candidate_samplers(dataloader)
     for sampler in samplers:
