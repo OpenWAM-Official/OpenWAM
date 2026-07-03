@@ -16,7 +16,7 @@ R_arm7, R_grip1, base3, trunk4]`` (joint mode). We write **four** stats blocks �
 
   * ``eef``       — 20-D ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1]``.
                     Same layout RoboCOIN normalizes, so we **reuse its
-                    ``Accumulator`` and ``_pin_rot6d_identity`` verbatim**: the 12
+                    ``Accumulator`` verbatim + the shared ``pin_rot6d_identity``**: the 12
                     rot6d dims (3:9 / 13:19) are pinned to identity so
                     normalization is a pass-through on the rotation manifold
                     (pos / gripper keep real stats). Pass ``--no-rot6d-identity``
@@ -99,44 +99,16 @@ from openwam.dataloader.behavior import (
     _state_to_raw_proprio_joint,
 )
 
-# NOTE: RoboCOIN's ``Accumulator`` + ``_pin_rot6d_identity`` (reused verbatim, dev-
-# aligned) are resolved LAZILY at call time via ``_robocoin_stats_symbols()`` rather
-# than a module-top import. ``robocoin_stats_computation`` imports from
-# ``openwam.dataloader.robocoin`` at ITS module top; the ``openwam.dataloader`` package
-# ``__init__`` eagerly loads every reader, so under some CI test-collection/import
-# orders ``robocoin_stats_computation`` gets cached PARTIALLY-initialized (stuck at its
-# top ``from openwam.dataloader.robocoin import ...`` before ``_pin_rot6d_identity`` is
-# defined). A plain import then surfaces a spurious "cannot import name
-# '_pin_rot6d_identity'". Resolving at call time — when the package is fully loaded —
-# and reloading a partial module recovers the complete definitions.
+# RoboCOIN's online ``Accumulator`` is reused verbatim (dev-aligned: one definition of
+# the EEF stats machinery). The rot6d-identity pin lives in the shared leaf
+# ``openwam.dataloader.utils.normalization`` (``pin_rot6d_identity`` + the EEF-20 dim
+# tuple), the same helper robocoin_stats/oxe_stats use — so both readers pin rot6d
+# identically. The normalization module imports nothing from the reader package, so
+# these top-level imports are cycle-free.
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
+from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
 _NEEDED_COLS = ["observation.state", "action"]
-
-
-def _robocoin_stats_symbols():
-    """Return RoboCOIN's ``(Accumulator, _pin_rot6d_identity)``, healing a partial import.
-
-    See the module note: ``robocoin_stats_computation`` can be observed cached
-    mid-initialization on some CI interpreters. If the required symbols are missing we
-    ``importlib.reload`` it — by call time ``openwam.dataloader.robocoin`` is fully
-    loaded, so re-executing the module body completes it. Raises with a clear message
-    if the symbols are still absent after a reload (a real breakage, not the transient).
-    """
-    import importlib
-
-    from openwam.dataloader.utils.stats_computation import robocoin_stats_computation as rsc
-
-    if not (hasattr(rsc, "Accumulator") and hasattr(rsc, "_pin_rot6d_identity")):
-        rsc = importlib.reload(rsc)
-    try:
-        return rsc.Accumulator, rsc._pin_rot6d_identity
-    except AttributeError as e:  # pragma: no cover - real breakage, not the transient
-        present = sorted(n for n in vars(rsc) if not n.startswith("__"))
-        raise ImportError(
-            "robocoin_stats_computation is missing Accumulator/_pin_rot6d_identity even after "
-            f"reload — genuinely broken, not the transient partial-import. file={getattr(rsc, '__file__', '?')} "
-            f"top-level names present={present}"
-        ) from e
 
 
 def _iter_episode_parquets(dataset_dir: Path):
@@ -207,10 +179,6 @@ def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> di
     is the joint-mode arm block (raw 23 = arm_joint16 + base_vel3 + trunk4). base_vel
     and trunk are shared by both modes (same native columns) so they are computed once.
     """
-    # Resolve RoboCOIN's Accumulator + rot6d pin at call time, healing a partial import
-    # (see the module note + _robocoin_stats_symbols).
-    Accumulator, _pin_rot6d_identity = _robocoin_stats_symbols()
-
     eef_acc = Accumulator(dim=_EEF_DIM)
     base_acc = Accumulator(dim=_BASE_DIM)
     trunk_acc = Accumulator(dim=_TRUNK_DIM)
@@ -243,7 +211,7 @@ def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> di
     eef = eef_acc.finalize()
     if rot6d_identity:
         # Identity on the 12 rot6d dims (3:9 / 13:19); pos + gripper keep real stats.
-        _pin_rot6d_identity(eef)
+        pin_rot6d_identity(eef, ROT6D_DIMS_EEF20)
     eef["num_timesteps"] = int(eef_acc.count)
     eef["num_files"] = n_files
     eef["robot_type"] = "R1Pro"
@@ -278,7 +246,7 @@ def main():
         "--no-rot6d-identity",
         action="store_true",
         help="Disable pinning rot6d stats to identity (rot6d would then be per-dim normalized; "
-        "generally undesirable — see _pin_rot6d_identity).",
+        "generally undesirable — see pin_rot6d_identity).",
     )
     args = parser.parse_args()
 
