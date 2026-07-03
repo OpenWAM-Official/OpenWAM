@@ -38,6 +38,29 @@ def test_cache_hit_with_similar_velocities():
     assert cached.shape == v.shape
 
 
+def test_cache_hit_can_reuse_joint_action_prediction():
+    cache = DiTVelocityCache(cosine_threshold=0.9)
+    v = torch.randn(1, 4, 8, 8)
+    a = torch.randn(1, 8, 7)
+
+    cache.update(v, 0.9, a)
+    cache.update(v * 1.01, 0.85, a * 1.01)
+
+    assert cache.should_recompute(0.8, require_action=True) is False
+    assert torch.allclose(cache.get_cached(), v * 1.01)
+    assert torch.allclose(cache.get_cached_action(), a * 1.01)
+
+
+def test_cache_requires_action_when_joint_caller_needs_it():
+    cache = DiTVelocityCache(cosine_threshold=0.9)
+    v = torch.randn(1, 4, 8, 8)
+
+    cache.update(v, 0.9)
+    cache.update(v * 1.01, 0.85)
+
+    assert cache.should_recompute(0.8, require_action=True) is True
+
+
 def test_cache_miss_with_different_velocities():
     cache = DiTVelocityCache(cosine_threshold=0.99)
     v1 = torch.randn(1, 4, 8, 8)

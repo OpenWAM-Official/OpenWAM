@@ -50,17 +50,21 @@ class DiTVelocityCache:
         self.interpolation_weight = interpolation_weight
 
         self._cached_velocity: Optional[Tensor] = None
+        self._cached_action_velocity: Optional[Tensor] = None
         self._cached_sigma: Optional[float] = None
         self._prev_velocity: Optional[Tensor] = None
         self._consecutive_skips: int = 0
         self._total_skips: int = 0
         self._total_steps: int = 0
 
-    def should_recompute(self, current_sigma: float) -> bool:
+    def should_recompute(self, current_sigma: float, *, require_action: bool = False) -> bool:
         """Decide whether to run the DiT forward pass or reuse cache.
 
         Args:
             current_sigma: Current noise level (sigma = t / 1000).
+            require_action: Whether the caller also needs a cached action
+                prediction. Joint video/action denoising can only skip a full
+                forward when both streams have cached predictions.
 
         Returns:
             True if the DiT should be run, False if cache can be reused.
@@ -68,6 +72,9 @@ class DiTVelocityCache:
         self._total_steps += 1
 
         if self._cached_velocity is None or self._prev_velocity is None:
+            return True
+
+        if require_action and self._cached_action_velocity is None:
             return True
 
         if self._consecutive_skips >= self.max_consecutive_skips:
@@ -94,7 +101,11 @@ class DiTVelocityCache:
             raise RuntimeError("No cached velocity available")
         return self._cached_velocity
 
-    def update(self, velocity: Tensor, sigma: float):
+    def get_cached_action(self) -> Optional[Tensor]:
+        """Return the cached action prediction, when the last update had one."""
+        return self._cached_action_velocity
+
+    def update(self, velocity: Tensor, sigma: float, action_velocity: Optional[Tensor] = None):
         """Store a new velocity prediction in the cache.
 
         Call this after each DiT forward pass.
@@ -102,15 +113,20 @@ class DiTVelocityCache:
         Args:
             velocity: (B, C, T, H, W) or (B, T, D) velocity prediction.
             sigma: Current noise level.
+            action_velocity: Optional action noise prediction from the same
+                joint forward. When present, joint denoising can skip the whole
+                forward instead of re-running it just to recover action output.
         """
         self._prev_velocity = self._cached_velocity
         self._cached_velocity = velocity.detach()
+        self._cached_action_velocity = action_velocity.detach() if action_velocity is not None else None
         self._cached_sigma = sigma
         self._consecutive_skips = 0
 
     def reset(self):
         """Clear all cached state. Call between inference runs."""
         self._cached_velocity = None
+        self._cached_action_velocity = None
         self._cached_sigma = None
         self._prev_velocity = None
         self._consecutive_skips = 0
