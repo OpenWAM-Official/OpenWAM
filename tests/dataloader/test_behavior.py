@@ -545,6 +545,60 @@ class TestDeployNormalizer:
         inside = np.abs(norm27) < 1.0 - 1e-3  # exclude quantile-clipped entries
         np.testing.assert_allclose(recovered27[inside], raw27[inside], atol=1e-4)
 
+    def test_stats_merge_preserves_other_mode(self, tmp_path):
+        # Two action_modes sharing ONE bucket must COEXIST in normalization_stats.npy.
+        # Constructing joint after unified must not destroy the 'unified' key: the write
+        # is a read-modify-write merge, not a blind overwrite. (A blind overwrite would
+        # drop 'unified'; deploy then hard-fails on the missing key → refused deploy.)
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        with _mock_video_decoder():
+            uds = _make_ds(b, normalize_mode="quantile")  # writes {'unified'}
+            after_unified = set(np.load(uds.normalization_stats_path, allow_pickle=True).item())
+            jds = _make_joint_ds(b, normalize_mode="quantile")  # merges in {'joint'}
+        assert after_unified == {"unified"}
+        raw = np.load(jds.normalization_stats_path, allow_pickle=True).item()
+        assert set(raw) == {"unified", "joint"}  # both modes survive
+        assert raw["unified"]["mean"].shape == (27,)  # eef20 + base3 + trunk4
+        assert raw["joint"]["mean"].shape == (23,)  # arm16 + base3 + trunk4
+
+    def test_readonly_mount_skips_deploy_stats_write(self, tmp_path):
+        # A read-only dataset mount (np.save → OSError) must degrade to "no deploy
+        # artifact" + warning, NOT crash __init__. In-process normalization still loads,
+        # so training on a RO mount works; only the deploy artifact is skipped.
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        with _mock_video_decoder(), patch(
+            "openwam.dataloader.bases.lerobot_v3_reader.np.save",
+            side_effect=OSError("read-only file system"),
+        ):
+            ds = _make_ds(b, normalize_mode="quantile")  # must NOT raise
+            assert ds.normalization_stats_path is None  # artifact skipped
+            assert ds._normalization_stats is not None  # in-process stats still built
+            s = ds[0]
+        assert s["action"].shape == (32, 80)
+
+    def test_transient_read_error_preserves_existing_modes(self, tmp_path):
+        # A transient OSError on the merge-READ (NFS/fuseblk blip) must NOT be mistaken
+        # for corruption: the write is skipped and the existing file is left intact,
+        # rather than clobbering a valid other-mode key with a single-key rewrite.
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        stats_npy = b / "meta" / "normalization_stats.npy"
+        with _mock_video_decoder():
+            uds = _make_ds(b, normalize_mode="quantile")  # writes {'unified'}
+            assert set(np.load(uds.normalization_stats_path, allow_pickle=True).item()) == {"unified"}
+            real_load = np.load
+
+            def _load_blip(path, *a, **k):
+                if "normalization_stats.npy" in str(path):
+                    raise OSError("transient nfs read")
+                return real_load(path, *a, **k)
+
+            with patch("openwam.dataloader.bases.lerobot_v3_reader.np.load", side_effect=_load_blip):
+                jds = _make_joint_ds(b, normalize_mode="quantile")  # read blip → skip write
+            assert jds.normalization_stats_path is None  # write skipped, not clobbered
+        # existing file untouched: 'unified' survives (NOT rewritten to just {'joint'}).
+        raw = np.load(str(stats_npy), allow_pickle=True).item()
+        assert set(raw) == {"unified"}
+
 
 # ── color jitter (train-split video augmentation) -----------------------------
 

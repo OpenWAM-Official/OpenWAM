@@ -54,6 +54,9 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import pickle
+import socket
+import uuid
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
@@ -487,24 +490,71 @@ class LeRobotV3Reader(BaseDataset):
         max, q01, q99}}`` that ``load_mode_stats`` / ``_build_normalizer`` consume
         unchanged. Shared by every reader that serves the unified action: set
         ``DEPLOY_ACTION_MODE`` and call this from ``_load_stats``.
+
+        The file may legitimately hold MORE than one ``action_mode`` (a bucket used
+        by both a ``unified`` and a ``joint`` run): this MERGES this mode's entry into
+        whatever the file already holds rather than overwriting. Overwriting would
+        drop the other mode's key, and the deploy side (``_build_inner_normalizer``)
+        now hard-fails on a missing key — so a blind overwrite would turn a stale
+        artifact into a refused deployment. (Merge closes the sequential case; the
+        deploy-side raise backstops the residual same-instant two-writer race.)
+
+        Best-effort on the write: a read-only dataset mount raises ``OSError``, which
+        is caught and logged — the artifact is skipped (``normalization_stats_path``
+        stays ``None``) instead of crashing construction. Training itself never reads
+        this file (it normalizes in-process from the reader stats), so a RO mount
+        degrades to "no deploy artifact" rather than an ``__init__`` failure.
         """
         if self.DEPLOY_ACTION_MODE is None:
             raise ValueError(
                 f"{self.DATASET_NAME}: _write_deploy_normalizer_stats called but DEPLOY_ACTION_MODE is None; "
                 "set it on the reader class to the action_mode key the deploy stats are stored under."
             )
-        payload = {self.DEPLOY_ACTION_MODE: {k: np.asarray(combined[k], dtype=np.float32) for k in keys}}
+        entry = {k: np.asarray(combined[k], dtype=np.float32) for k in keys}
         out = self._dataset_dir / "meta" / "normalization_stats.npy"
-        # Atomic write (unique temp + replace) so concurrent per-rank constructors
-        # never observe a half-written file. The temp name ends in '.npy' so
-        # np.save does not append a second '.npy' suffix.
-        tmp = out.with_name(f".{out.stem}.{os.getpid()}.npy")
         try:
-            np.save(tmp, payload, allow_pickle=True)
-            tmp.replace(out)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+            # Read-modify-write: preserve other modes' keys already in the file.
+            # A genuinely corrupt file (truncated / not a pickle) is caught below and
+            # rewritten with just this mode. A bare OSError on the READ (e.g. a
+            # transient NFS/fuseblk blip) is NOT treated as corruption — it propagates
+            # to the outer handler, which skips the write and leaves the existing
+            # (valid) file intact rather than clobbering another mode's key with a
+            # single-key rewrite (which the deploy-side raise would then reject).
+            payload: Dict[str, Any] = {}
+            if out.exists():
+                try:
+                    prev = np.load(out, allow_pickle=True).item()
+                    if isinstance(prev, dict):
+                        payload.update(prev)
+                except (ValueError, EOFError, pickle.UnpicklingError) as e:
+                    logger.warning(
+                        "%s(%s): existing %s is corrupt (%s); rewriting with only the %r key.",
+                        self.DATASET_NAME, self._dataset_id, out.name, e, self.DEPLOY_ACTION_MODE,
+                    )
+            payload[self.DEPLOY_ACTION_MODE] = entry
+            # Atomic write (unique temp + replace) so concurrent per-rank constructors
+            # never observe a half-written file. pid ALONE collides on a shared
+            # filesystem (same local-rank across nodes → same pid), so the temp name
+            # also carries hostname + a uuid. Ends in '.npy' so np.save adds no suffix.
+            tmp = out.with_name(f".{out.stem}.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex}.npy")
+            try:
+                np.save(tmp, payload, allow_pickle=True)
+                tmp.replace(out)
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
+        except OSError as e:
+            # Read-only mount (write) or transient IO fault (read): leave any existing
+            # file untouched and skip the artifact. normalization_stats_path stays None
+            # so the trainer copy is skipped and deploy fails loud on the missing key.
+            logger.warning(
+                "%s(%s): could not read/write deploy stats artifact %s (%s); "
+                "normalization_stats.npy left unchanged (deploy artifact not (re)generated). "
+                "Training is unaffected (in-process normalization uses the reader stats); to "
+                "deploy this run, pre-generate the artifact on a writable copy of the meta/ dir.",
+                self.DATASET_NAME, self._dataset_id, out, e,
+            )
+            return
         self.normalization_stats_path = str(out)
 
     def _action_20d(self, win: pd.DataFrame) -> Optional[np.ndarray]:
