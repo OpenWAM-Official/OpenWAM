@@ -1,7 +1,8 @@
 # OpenWAM RoboCasa365 benchmark client config.
 #
-# Template: single_eval.sh patches host/port/task/split at runtime; copy this and
-# set POLICY_CONFIG_PATH=/path/to/custom.yml to override the rest. The OpenWAM
+# Template: single_eval.sh forwards host/port/task/split as CLI flags that
+# single_eval.py overrides in-memory (no file rewrite); copy this and set
+# POLICY_CONFIG_PATH=/path/to/custom.yml to override the rest. The OpenWAM
 # server reads the checkpoint's config.yaml and does all preprocessing / multi-view
 # composition / prompt wrapping / action denormalization. The client forwards raw frames
 # + a 20-D single-arm EEF proprio (converted from the env's 16-D state); the server returns

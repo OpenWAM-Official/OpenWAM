@@ -160,8 +160,9 @@ def _expand_stats_to_20d(s10: dict) -> dict:
 
     The right arm carries no data (always 0, masked), so its stats are NEUTRAL:
     mean=0/std=1/min=-1/max=1/q01=-1/q99=1 — i.e. a normalized 0 maps back to 0.
-    Consumed by the trainer (copies 20-D mean/std into ``action_mean``/``action_std``)
-    and by eval-time denormalization.
+    The 20-D result is what gets persisted to the checkpoint (via
+    ``normalization_stats_path``) and read back by the deploy normalizer, and is
+    the same dict returned by the ``normalization_stats`` property.
     """
 
     def pad(arm, neutral):
@@ -385,8 +386,9 @@ class RoboCasa365Dataset(BaseDataset):
     @property
     def normalization_stats(self) -> Optional[dict]:
         """20-D stats (arm10 left, neutral right) — the SAME dict persisted to the checkpoint
-        and read by the deploy normalizer, and copied into the trainer's action buffers.
-        None when normalization is disabled."""
+        (via ``normalization_stats_path``) and read by the deploy normalizer. Also surfaced
+        through the multi-task wrapper's ``normalization_stats`` (mirrors robotwin). None when
+        normalization is disabled."""
         return dict(self._stats) if self._stats is not None else None
 
     def denormalize_action(self, action) -> np.ndarray:

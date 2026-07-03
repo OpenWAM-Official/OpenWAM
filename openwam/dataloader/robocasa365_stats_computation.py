@@ -1,4 +1,5 @@
-"""Per-task action-normalization stats for RoboCasa365 (single-arm 10-D arm EEF).
+"""Per-task action-normalization stats for RoboCasa365 (single-arm EEF; computed
+at 10-D, persisted at 20-D).
 
 Simplified single-arm dual of ``robotwin_stats_computation.py``. RoboCasa365 has
 exactly one action representation (the state-derived single-arm EEF), so there is
@@ -8,7 +9,10 @@ episodes, assemble the raw 10-D arm pose from ``observation.state`` (the same
 
 Output schema (``.npy``, ``allow_pickle``)::
 
-    {"eef": {mean, std, min, max, q01, q99}, "num_timesteps": int}   # 10-D vectors
+    {"eef": {mean, std, min, max, q01, q99}, "num_timesteps": int}   # 20-D vectors
+    #   (arm10 left = real stats, right half = neutral: mean0/std1/min-1/max1/q01-1/q99 1;
+    #    reduced at 10-D internally, then left-padded to 20-D by _expand_stats_to_20d before
+    #    persist so the deploy normalizer can invert the model's 20-D action)
 
 ``RoboCasa365Dataset`` auto-computes this on first use when ``normalize_mode`` is
 set and no stats file exists; run :func:`main` to precompute.
