@@ -100,15 +100,43 @@ from openwam.dataloader.behavior import (
 )
 
 # NOTE: RoboCOIN's ``Accumulator`` + ``_pin_rot6d_identity`` (reused verbatim, dev-
-# aligned) are imported LAZILY inside ``compute_behavior_stats`` rather than at module
-# top. ``robocoin_stats_computation`` imports from ``openwam.dataloader.robocoin`` at
-# its own module top, so a top-level import here couples this module's load to that
-# chain — under some test-collection/import orders that surfaced as a spurious
-# "cannot import name '_pin_rot6d_identity'" (partially-initialized module) on the CI
-# interpreter. Deferring the import to call time keeps loading this module side-effect
-# free (mirrors how ``robotwin.py`` imports its stats module inside functions).
+# aligned) are resolved LAZILY at call time via ``_robocoin_stats_symbols()`` rather
+# than a module-top import. ``robocoin_stats_computation`` imports from
+# ``openwam.dataloader.robocoin`` at ITS module top; the ``openwam.dataloader`` package
+# ``__init__`` eagerly loads every reader, so under some CI test-collection/import
+# orders ``robocoin_stats_computation`` gets cached PARTIALLY-initialized (stuck at its
+# top ``from openwam.dataloader.robocoin import ...`` before ``_pin_rot6d_identity`` is
+# defined). A plain import then surfaces a spurious "cannot import name
+# '_pin_rot6d_identity'". Resolving at call time — when the package is fully loaded —
+# and reloading a partial module recovers the complete definitions.
 
 _NEEDED_COLS = ["observation.state", "action"]
+
+
+def _robocoin_stats_symbols():
+    """Return RoboCOIN's ``(Accumulator, _pin_rot6d_identity)``, healing a partial import.
+
+    See the module note: ``robocoin_stats_computation`` can be observed cached
+    mid-initialization on some CI interpreters. If the required symbols are missing we
+    ``importlib.reload`` it — by call time ``openwam.dataloader.robocoin`` is fully
+    loaded, so re-executing the module body completes it. Raises with a clear message
+    if the symbols are still absent after a reload (a real breakage, not the transient).
+    """
+    import importlib
+
+    from openwam.dataloader.utils.stats_computation import robocoin_stats_computation as rsc
+
+    if not (hasattr(rsc, "Accumulator") and hasattr(rsc, "_pin_rot6d_identity")):
+        rsc = importlib.reload(rsc)
+    try:
+        return rsc.Accumulator, rsc._pin_rot6d_identity
+    except AttributeError as e:  # pragma: no cover - real breakage, not the transient
+        present = sorted(n for n in vars(rsc) if not n.startswith("__"))
+        raise ImportError(
+            "robocoin_stats_computation is missing Accumulator/_pin_rot6d_identity even after "
+            f"reload — genuinely broken, not the transient partial-import. file={getattr(rsc, '__file__', '?')} "
+            f"top-level names present={present}"
+        ) from e
 
 
 def _iter_episode_parquets(dataset_dir: Path):
@@ -179,12 +207,9 @@ def compute_behavior_stats(dataset_dir: Path, rot6d_identity: bool = True) -> di
     is the joint-mode arm block (raw 23 = arm_joint16 + base_vel3 + trunk4). base_vel
     and trunk are shared by both modes (same native columns) so they are computed once.
     """
-    # Lazy import (see the module-level note): defer the robocoin_stats_computation
-    # dependency to call time so importing this module never triggers that chain.
-    from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
-        Accumulator,
-        _pin_rot6d_identity,
-    )
+    # Resolve RoboCOIN's Accumulator + rot6d pin at call time, healing a partial import
+    # (see the module note + _robocoin_stats_symbols).
+    Accumulator, _pin_rot6d_identity = _robocoin_stats_symbols()
 
     eef_acc = Accumulator(dim=_EEF_DIM)
     base_acc = Accumulator(dim=_BASE_DIM)
