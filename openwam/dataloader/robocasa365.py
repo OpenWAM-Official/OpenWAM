@@ -132,7 +132,8 @@ def _compute_shared_stats_rank0_synced(shared_path: str, data_roots: list) -> No
 
 @functools.lru_cache(maxsize=1)
 def _fixed_base_task_names() -> frozenset:
-    """The 112 fixed-base task names from ``benchmarks/robocasa365/fixed_base_tasks.json``."""
+    """The 111 fixed-base task names from ``benchmarks/robocasa365/fixed_base_tasks.json``
+    (112 moma_required=No tasks minus the excluded PanTransfer coverage orphan)."""
     if not os.path.exists(_FIXED_BASE_JSON):
         raise FileNotFoundError(
             f"fixed-base task list not found at {_FIXED_BASE_JSON}; root-mode discovery is filtered "

@@ -48,7 +48,8 @@ arm's real wrist) → `left_wrist_camera`. The single arm has no 2nd wrist, so
 
 RoboCasa365 ships 365 tasks; many need the holonomic **mobile base** (whole-body
 manipulation, `moma_required=Yes`). This benchmark + the dataloader scope to the
-**fixed-base** subset — `moma_required=No`, **112 tasks** — so a single-arm EEF policy
+**fixed-base** subset — `moma_required=No`, **111 tasks** (112 fixed-base minus one excluded
+orphan, see below) — so a single-arm EEF policy
 never has to command base motion (the eval bridge fills `base_motion`=0).
 
 The authoritative list is [`fixed_base_tasks.json`](fixed_base_tasks.json) (with a
@@ -58,10 +59,22 @@ The authoritative list is [`fixed_base_tasks.json`](fixed_base_tasks.json) (with
 |---|---|---|---|---|
 | `train_only` | pretrain data only | 38 | 51 | 89 |
 | `train_and_eval` | pretrain + target (**seen** eval) | 14 | 5 | 19 |
-| `eval_only` | target only (**unseen**, zero-shot composite) | 0 | 4 | 4 |
+| `eval_only` | target only (**unseen**, zero-shot composite) | 0 | 3 | 3 |
 
-So 108 tasks are trainable and 23 have eval targets (19 seen + 4 unseen). Per-task demo
+So 108 tasks are trainable and 22 have eval targets (19 seen + 3 unseen). Per-task demo
 counts aren't fixed — read each bucket's `meta/info.json` `total_episodes` after download.
+
+> **Excluded orphan — `PanTransfer`.** One `moma_required=No` unseen task is intentionally
+> dropped from the list (112 → 111 fixed-base; see `_meta.excluded_fixed_base`). PanTransfer's
+> skill domain (`activity="Serving Food"`) has **zero** fixed-base training coverage: all four
+> same-activity train tasks (DessertUpgrade / PlaceFoodInBowls / PrepareSoupServing / ServeSteak)
+> are `moma_required=Yes` (mobile) and are removed by the fixed-base filter, and its distinctive
+> "dump pan contents onto plate" (pour/transfer) primitive appears in **0** fixed-base train
+> tasks. A fixed-base-only policy would be asked to zero-shot a domain it never saw. An audit
+> across all fixed-base eval tasks found this is the **only** such orphan — every other unseen
+> task (ArrangeTea, WashFruitColander, WeighIngredients) has ≥1 same-domain fixed-base train
+> task. (`LoadDishwasher` / `WashLettuce` also have a lone activity but are **seen**, so they
+> train on their own data and are not orphans.)
 
 ## Training data + dataloader (Phase 2)
 

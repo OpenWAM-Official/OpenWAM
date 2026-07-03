@@ -2,7 +2,7 @@
   "_meta": {
     "source": "robocasa local repo (~/projects/robocasa) dataset_registry.py + docs/composite_tasks/task_attributes.json",
     "description": "RoboCasa365 downloadable & fixed-base (moma_required=No) tasks — candidate subset for fixed-base (non-mobile) eval/train",
-    "total_fixed_base": 112,
+    "total_fixed_base": 111,
     "by_split_group": {
       "train_only": {
         "atomic": 38,
@@ -16,15 +16,26 @@
       },
       "eval_only": {
         "atomic": 0,
-        "composite": 4,
-        "total": 4
+        "composite": 3,
+        "total": 3
       }
     },
+    "excluded_fixed_base": [
+      {
+        "name": "PanTransfer",
+        "idx": 195,
+        "moma_required": "No",
+        "split_group": "eval_only",
+        "activity": "Serving Food",
+        "reason": "Coverage orphan: unseen (zero-shot) eval task whose 'Serving Food' skill domain has ZERO fixed-base training coverage — all 4 same-activity train tasks (DessertUpgrade/PlaceFoodInBowls/PrepareSoupServing/ServeSteak) are moma_required=Yes (mobile) and were dropped by the fixed-base filter. The distinctive 'dump pan contents onto plate' (pour/transfer) primitive appears in 0 fixed-base train tasks. So a fixed-base-only policy is asked to zero-shot a domain it never saw; excluded to keep the fixed-base eval set fairly coverable. It is the ONLY such orphan (audited across all 23 fixed-base eval tasks: no other unseen task has zero same-domain fixed-base coverage)."
+      }
+    ],
     "notes": [
       "idx = position in full downloadable task list (atomic 1-65, composite 66-317).",
       "split_group: train_only=只有pretrain数据; train_and_eval=pretrain+target都有(seen); eval_only=只有target(composite_unseen,零样本).",
       "moma_required=No 表示无需底盘移动(固定底盘).",
-      "human demo 数量需下载后读各自 meta/info.json 的 total_episodes, 非固定值."
+      "human demo 数量需下载后读各自 meta/info.json 的 total_episodes, 非固定值.",
+      "total_fixed_base=111: there are 112 moma_required=No tasks, but PanTransfer is intentionally excluded (see excluded_fixed_base) — it IS fixed-base, just an un-coverable unseen orphan for a fixed-base-only training mix."
     ]
   },
   "tasks": [
@@ -918,17 +929,6 @@
       "has_train_pretrain": true,
       "has_eval_target": false,
       "description": "Place the [*vegetable1*] and the [*vegetable2*] on separate cutting boards."
-    },
-    {
-      "idx": 195,
-      "name": "PanTransfer",
-      "type": "composite",
-      "activity": "Serving Food",
-      "num_subtasks": 3,
-      "split_group": "eval_only",
-      "has_train_pretrain": false,
-      "has_eval_target": true,
-      "description": "Pick up the pan and dump the vegetables in it onto the plate. Then return the pan to the stove."
     },
     {
       "idx": 206,

@@ -363,7 +363,11 @@ class TestMultiAndRegistry:
         from openwam.dataloader.robocasa365 import _fixed_base_task_names
 
         names = _fixed_base_task_names()
-        assert "OpenDrawer" in names and len(names) == 112
+        assert "OpenDrawer" in names and len(names) == 111
+        # PanTransfer is moma_required=No but intentionally excluded (coverage orphan:
+        # its 'Serving Food' domain has zero fixed-base training coverage) — see
+        # fixed_base_tasks.json _meta.excluded_fixed_base.
+        assert "PanTransfer" not in names
         make_robocasa_bucket(tmp_path / "keep")  # -> .../OpenDrawer/.../lerobot (fixed-base)
         mobile = tmp_path / "drop" / "MobileNonFixedBaseTask" / "20250101" / "lerobot" / "meta"
         mobile.mkdir(parents=True)

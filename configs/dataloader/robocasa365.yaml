@@ -6,7 +6,7 @@ type: robocasa365
 #   - a single task's lerobot/ bucket (has meta/info.json), or
 #   - a root holding many .../<Task>/<date>/lerobot buckets (multi-task: one
 #     RoboCasa365Dataset per bucket, concatenated).
-# Fixed-base task subset (moma_required=No, 112 tasks):
+# Fixed-base task subset (moma_required=No, 111 tasks; 112 minus the excluded PanTransfer orphan):
 #   benchmarks/robocasa365/fixed_base_tasks.json
 dataset_dir: /path/to/robocasa365/datasets/v1.0
 task_name: null                   # null = use every discovered bucket; set name = filter to one task dir
