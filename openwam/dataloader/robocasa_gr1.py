@@ -8,7 +8,6 @@ the same, but feature names can differ across conversion jobs.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, ClassVar, List, Optional, Sequence, Tuple
 
 import numpy as np

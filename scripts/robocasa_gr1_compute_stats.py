@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
-from openwam.dataloader.robocasa_gr1_stats import compute_array_stats
+from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset  # noqa: E402
+from openwam.dataloader.robocasa_gr1_stats import compute_array_stats  # noqa: E402
 
 
 def _iter_buckets(dataset) -> Iterable[RoboCasaGR1Dataset]:
