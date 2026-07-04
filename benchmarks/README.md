@@ -2,6 +2,10 @@
 
 For users wiring their own robot or benchmark to an OpenWAM policy server.
 
+Benchmark readiness notes, public baseline scores, and RoboCasa GR1 EEF data
+preparation guidance are tracked in
+[`BENCHMARK_STATS.md`](BENCHMARK_STATS.md).
+
 **You don't need to know anything about the server** — its model, preprocessing,
 multi-view composition, or checkpoint. Just speak the WebSocket
 protocol below. Minimal client dependencies: `numpy`, `Pillow`, `websockets`
