@@ -51,7 +51,7 @@ training:
   timestep_sampling: default      # <default>        per-stream timesteps; fills the (sigma_v, sigma_a) plane (baseline; all architectures)
                                   # <variance_shift> shared progress, one stream leads denoising; joint_self_attn only, else raises
   timestep_sampling_lead: video   # variance_shift only: which stream denoises first  <action> | <video>
-  timestep_sampling_alpha: 9.0    # variance_shift only: lead-curve strength  (>1 leads; 1 = diagonal = sync)
+  timestep_sampling_alpha: 1.0    # variance_shift only: lead-curve strength  (>1 leads; 1 = diagonal = sync)
 
   # --- Checkpoint ---
   output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output

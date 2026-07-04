@@ -15,7 +15,7 @@ inference:
                               #                    denoises earlier (curve, see vs_* below)
   # --- variance_shift (Latent-Forcing) only ---
   vs_lead: video              # which stream denoises first  <action> | <video>
-  vs_alpha: 9.0               # lead-curve strength  (>1 leads; 1 = diagonal = sync)
+  vs_alpha: 1.0               # lead-curve strength  (>1 leads; 1 = diagonal = sync)
 
   execution_mode: sync        # sync | async — Sync/AsyncInferenceExecutor
   execution_horizon: null     # async only: actions per chunk; null = policy.execute_horizon
