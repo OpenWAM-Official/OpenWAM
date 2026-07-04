@@ -1,6 +1,6 @@
 defaults:
   - model: dual_system            # [Optional]: dual_system(default), shared_backbone, tri_system
-  - dataloader: robocoin          # [Optional]: robocoin(default), robotwin, mixture
+  - dataloader: robotwin          # [Optional]: robocoin(default), robotwin, mixture
   - _self_
 
 training:
