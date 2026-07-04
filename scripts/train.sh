@@ -30,13 +30,12 @@ else
 fi
 
 # ── GPU / Node topology ──
-# Priority: explicit override > cloud scheduler vars (HOST_GPU_NUM/HOST_NUM) > auto-detect.
-NPROC_PER_NODE="${NPROC_PER_NODE:-${HOST_GPU_NUM:-$(nvidia-smi -L 2>/dev/null | wc -l)}}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
-NNODES="${NNODES:-${HOST_NUM:-${WORLD_SIZE:-1}}}"
+NNODES="${NNODES:-${WORLD_SIZE:-1}}"
 NODE_RANK="${NODE_RANK:-${RANK:-0}}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-MASTER_PORT="${MASTER_PORT:-29500}"
+MASTER_PORT="${MASTER_PORT:-29500}
 
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║  OpenWAM Training                                   ║"
