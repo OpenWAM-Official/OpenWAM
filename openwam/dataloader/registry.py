@@ -74,6 +74,7 @@ def list_registered_datasets():
 
 def _register_builtins():
     """Register all built-in dataset classes."""
+    from openwam.dataloader.behavior import BehaviorDataset
     from openwam.dataloader.ego4d import Ego4DDataset
     from openwam.dataloader.egodex import EgoDexDataset
     from openwam.dataloader.mixture import MixtureDataset
@@ -86,6 +87,7 @@ def _register_builtins():
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
     register_dataset("mixture")(MixtureDataset)
+    register_dataset("behavior")(BehaviorDataset)
     register_dataset("robocoin")(MultiRobotCOINDataset)
     register_dataset("egodex")(EgoDexDataset)
     register_dataset("ego4d")(Ego4DDataset)

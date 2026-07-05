@@ -16,7 +16,7 @@ help:
 	@echo "make clean            - remove Python cache files"
 
 test:
-	$(PYTHON) -m pytest -q $(CORE_TEST_ARGS)
+	$(PYTHON) -m pytest -q -m "not gpu" $(CORE_TEST_ARGS)
 
 test-full:
 	$(PYTHON) -m pytest -q tests
