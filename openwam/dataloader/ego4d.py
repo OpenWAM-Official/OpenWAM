@@ -70,9 +70,15 @@ logger = logging.getLogger(__name__)
 # 英文/中文, so the character classes cover both.
 _EN_MARKER_RE = re.compile(r"(?s)^.*英文[:：]\s*(.*)$")
 _ZH_MARKER_RE = re.compile(r"中文[:：]")
-# CJK Unified Ideographs (+ extension A). Used as a final guard: an "English"
-# clause that still contains Han characters is a malformed / mixed annotation.
-_CJK_RE = re.compile(r"[㐀-鿿]")
+# English-only guard (allowlist). Reject any character OUTSIDE: ASCII
+# (U+0000–007F), Latin-1 Supplement + Latin Extended-A/B letters (U+00C0–024F,
+# e.g. é ñ — common in loanwords like "sautéed" / "Español"), and General
+# Punctuation (U+2000–206F, curly quotes ’ and dashes —). Any character outside
+# these ranges means another script (CJK, Arabic, Cyrillic, Hangul, …) leaked
+# in — a malformed / mixed annotation that isn't usable English, so it's dropped.
+# An allowlist (not a CJK blocklist) keeps legitimate typographic English while
+# still catching non-Latin contamination beyond Chinese.
+_NON_ENGLISH_RE = re.compile(r"[^\x00-\x7f\u00c0-\u024f\u2000-\u206f]")
 
 
 def extract_english_prompt(combined: Optional[str]) -> Optional[str]:
@@ -80,12 +86,14 @@ def extract_english_prompt(combined: Optional[str]) -> Optional[str]:
 
     Returns None when the input is missing, the literal ``"null"`` placeholder,
     carries no ``英文`` marker, the English half is blank after stripping, or the
-    extracted text still contains Han characters (a malformed / mixed annotation
-    — e.g. a stray Han glyph inside the English, or a duplicated ``English:``
-    block). A None result marks the episode as having no usable English
-    instruction so the caller drops it (:meth:`Ego4DDataset._filter_episodes`),
-    guaranteeing no Chinese ever reaches training. Such malformed tasks are
-    ~13/189689 (0.007%), on top of the ~12 ``null`` placeholders.
+    extracted text still contains any non-Latin-script character (a malformed /
+    mixed annotation — e.g. a stray Han glyph inside the English, a duplicated
+    ``English:`` block, or Arabic/other-script contamination). A None result
+    marks the episode as having no usable English instruction so the caller
+    drops it (:meth:`Ego4DDataset._filter_episodes`), guaranteeing no non-English
+    script reaches training. Legitimate typographic English (é, ñ, curly quotes,
+    dashes) is kept. Such unusable tasks are ~14/189689 (0.007%), on top of the
+    ~12 ``null`` placeholders.
     """
     if combined is None:
         return None
@@ -98,7 +106,7 @@ def extract_english_prompt(combined: Optional[str]) -> Optional[str]:
     # Strip a trailing ``中文:…`` clause (reversed-order annotations); the greedy
     # ``^.*英文`` already discarded any Chinese before the final 英文 marker.
     en = _ZH_MARKER_RE.split(m.group(1))[0].strip()
-    if not en or _CJK_RE.search(en):
+    if not en or _NON_ENGLISH_RE.search(en):
         return None
     return en
 
