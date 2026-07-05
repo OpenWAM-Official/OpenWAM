@@ -74,16 +74,19 @@ many `.../<Task>/<date>/lerobot` buckets (multi-task). Config + knobs live in
 `configs/dataloader/robocasa365.yaml`.
 
 ```bash
-# single task
+# multi-task (full 365): point dataset_dir at the root of buckets, drop task_name.
+# unify_action + mobile_base are on by default, so the model head must be 80-D:
 scripts/train.sh dataloader=robocasa365 \
-  dataloader.dataset_dir=/path/to/robocasa365/.../OpenDrawer/<date>/lerobot \
-  dataloader.task_name=OpenDrawer
-# multi-task: point dataset_dir at the root of buckets, drop task_name
+  dataloader.dataset_dir=/path/to/robocasa365/datasets/v1.0 \
+  model.architecture.action_dim=80 model.architecture.state_dim=80
+# single task: add dataloader.task_name=<Task> (dataset_dir may be that task's lerobot/ bucket)
 ```
 
-The model trains the repo-standard **20-D EEF** action (action + proprio are both the
-absolute EEF pose from `observation.state`; see the action-spaces note above), bridged
-back to the env's 12-D OSC at eval time.
+The model trains the repo-standard **20-D EEF** arm action (absolute EEF pose from
+`observation.state`, bridged to 12-D OSC at eval) plus the **5-D mobile base command** (raw
+from the LeRobot `action` field, direct-to-env), scattered into the unified 80-D head. On this
+branch `configs/model/dual_system.yaml` still defaults the head to 20 — the `action_dim=80
+state_dim=80` overrides above are REQUIRED (upstream main defaults to 80; redundant after merge).
 
 ## Environment setup
 
