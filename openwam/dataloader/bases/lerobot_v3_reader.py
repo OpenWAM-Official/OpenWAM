@@ -53,6 +53,10 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
+import pickle
+import socket
+import uuid
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
@@ -133,6 +137,15 @@ class LeRobotV3Reader(BaseDataset):
     STATS_FILENAME: ClassVar[Optional[str]] = None
     STATS_DIM: ClassVar[int] = EEF_DIM
     STATS_STRICT_MINMAX: ClassVar[bool] = False
+    # Deploy denormalizer artifact (meta/normalization_stats.npy). A reader that
+    # serves a unified action and wants a deployable checkpoint sets this to the
+    # action_mode key its RAW stats are stored under, and calls
+    # ``_write_deploy_normalizer_stats(combined, keys)`` from its ``_load_stats``.
+    # At deploy the policy server's ``_UnifyAwareNormalizer`` gathers the model's
+    # unified output back to raw dims, THEN unnormalizes with these RAW stats —
+    # so the artifact is authored in RAW space (NOT scattered). None → no deploy
+    # stats written (default).
+    DEPLOY_ACTION_MODE: ClassVar[Optional[str]] = None
     # Default normalize_mode when the caller doesn't pass one. OXE readers
     # override to "quantile" (their historical default); RoboCOIN/EgoDex keep
     # None (no in-reader normalization unless a config opts in).
@@ -242,6 +255,10 @@ class LeRobotV3Reader(BaseDataset):
             # the action_dim property, and the model action head are all unify_dim.
             self.ACTION_DIM = self._unify_dim
 
+        # Deploy denormalizer artifact path (set by _write_deploy_normalizer_stats
+        # when a reader emits meta/normalization_stats.npy; None otherwise).
+        self.normalization_stats_path: Optional[str] = None
+
         # Rate-limited failure counters for _safe_get / wrist decode.
         self._fail_count = 0
         self._wrist_fail_count = 0
@@ -274,13 +291,11 @@ class LeRobotV3Reader(BaseDataset):
         self._video_sample_indices = np.arange(0, self._num_frames, self._video_stride, dtype=np.int64)
         self._num_video_frames = int(self._video_sample_indices.size)
 
-        # ── episodes + offsets + split ────────────────────────────────────
-        eps = load_episodes_parquet(self._dataset_dir)
-        self._add_episode_offsets(eps)
-        info_splits = info.get("splits", {}) or {}
-        self._eps_df = apply_info_splits(
-            eps, split, info_splits, source_name=f"{self.DATASET_NAME}({self._dataset_id})"
-        )
+        # ── episodes + offsets + split (hook) ─────────────────────────────
+        # _build_episode_index is overridable so non-v3 on-disk layouts (e.g.
+        # LeRobot v2.1: per-episode parquet + meta/episodes.jsonl) can supply
+        # the same eps DataFrame contract without reimplementing __init__.
+        self._eps_df = self._build_episode_index(info)
 
         # ── per-bucket episode exclusion (data-quality blacklist) ─────────
         # meta/excluded_episodes.json holds episode_index values that must not
@@ -408,6 +423,23 @@ class LeRobotV3Reader(BaseDataset):
         """Set ``eps['_data_row_offset']`` (generic LeRobot v3 groupby-cumsum)."""
         eps["_data_row_offset"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
 
+    def _build_episode_index(self, info: dict) -> pd.DataFrame:
+        """Load + offset + split the episodes table. LeRobot v3 default.
+
+        Returns the split-filtered episodes DataFrame the rest of ``__init__``
+        consumes. It MUST carry: ``length``, ``episode_index``,
+        ``data/chunk_index``, ``data/file_index``, ``_data_row_offset``, and for
+        every resolved camera ``videos/<cam>/chunk_index`` /
+        ``videos/<cam>/file_index`` / ``_video_frame_offset/<cam>``.
+
+        Override for non-v3 on-disk layouts (e.g. LeRobot v2.1: one parquet per
+        episode + ``meta/episodes.jsonl`` instead of ``meta/episodes/*.parquet``).
+        """
+        eps = load_episodes_parquet(self._dataset_dir)
+        self._add_episode_offsets(eps)
+        info_splits = info.get("splits", {}) or {}
+        return apply_info_splits(eps, self._split, info_splits, source_name=f"{self.DATASET_NAME}({self._dataset_id})")
+
     def _train_min_window_len(self) -> int:
         """Min episode length to yield a train window. 1 = any single labeled step."""
         return 1
@@ -478,6 +510,85 @@ class LeRobotV3Reader(BaseDataset):
             strict_minmax=self.STATS_STRICT_MINMAX,
             source_hint=str(stats_path),
         )
+
+    def _write_deploy_normalizer_stats(self, combined: dict, keys) -> None:
+        """Write ``meta/normalization_stats.npy`` — the deploy denormalizer artifact.
+
+        ``combined`` is this reader's RAW-space per-mode stats (the values the
+        reader normalizes against, BEFORE the unify scatter). The model emits the
+        unified action; at deploy the policy server's ``_UnifyAwareNormalizer``
+        gathers that unified output back to raw dims, THEN unnormalizes with these
+        RAW stats — so the artifact is authored in RAW space (NOT scattered to the
+        unified width). Schema is the nested ``{DEPLOY_ACTION_MODE: {mean, std, min,
+        max, q01, q99}}`` that ``load_mode_stats`` / ``_build_normalizer`` consume
+        unchanged. Shared by every reader that serves the unified action: set
+        ``DEPLOY_ACTION_MODE`` and call this from ``_load_stats``.
+
+        The file may legitimately hold MORE than one ``action_mode`` (a bucket used
+        by both a ``unified`` and a ``joint`` run): this MERGES this mode's entry into
+        whatever the file already holds rather than overwriting. Overwriting would
+        drop the other mode's key, and the deploy side (``_build_inner_normalizer``)
+        now hard-fails on a missing key — so a blind overwrite would turn a stale
+        artifact into a refused deployment. (Merge closes the sequential case; the
+        deploy-side raise backstops the residual same-instant two-writer race.)
+
+        Best-effort on the write: a read-only dataset mount raises ``OSError``, which
+        is caught and logged — the artifact is skipped (``normalization_stats_path``
+        stays ``None``) instead of crashing construction. Training itself never reads
+        this file (it normalizes in-process from the reader stats), so a RO mount
+        degrades to "no deploy artifact" rather than an ``__init__`` failure.
+        """
+        if self.DEPLOY_ACTION_MODE is None:
+            raise ValueError(
+                f"{self.DATASET_NAME}: _write_deploy_normalizer_stats called but DEPLOY_ACTION_MODE is None; "
+                "set it on the reader class to the action_mode key the deploy stats are stored under."
+            )
+        entry = {k: np.asarray(combined[k], dtype=np.float32) for k in keys}
+        out = self._dataset_dir / "meta" / "normalization_stats.npy"
+        try:
+            # Read-modify-write: preserve other modes' keys already in the file.
+            # A genuinely corrupt file (truncated / not a pickle) is caught below and
+            # rewritten with just this mode. A bare OSError on the READ (e.g. a
+            # transient NFS/fuseblk blip) is NOT treated as corruption — it propagates
+            # to the outer handler, which skips the write and leaves the existing
+            # (valid) file intact rather than clobbering another mode's key with a
+            # single-key rewrite (which the deploy-side raise would then reject).
+            payload: Dict[str, Any] = {}
+            if out.exists():
+                try:
+                    prev = np.load(out, allow_pickle=True).item()
+                    if isinstance(prev, dict):
+                        payload.update(prev)
+                except (ValueError, EOFError, pickle.UnpicklingError) as e:
+                    logger.warning(
+                        "%s(%s): existing %s is corrupt (%s); rewriting with only the %r key.",
+                        self.DATASET_NAME, self._dataset_id, out.name, e, self.DEPLOY_ACTION_MODE,
+                    )
+            payload[self.DEPLOY_ACTION_MODE] = entry
+            # Atomic write (unique temp + replace) so concurrent per-rank constructors
+            # never observe a half-written file. pid ALONE collides on a shared
+            # filesystem (same local-rank across nodes → same pid), so the temp name
+            # also carries hostname + a uuid. Ends in '.npy' so np.save adds no suffix.
+            tmp = out.with_name(f".{out.stem}.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex}.npy")
+            try:
+                np.save(tmp, payload, allow_pickle=True)
+                tmp.replace(out)
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
+        except OSError as e:
+            # Read-only mount (write) or transient IO fault (read): leave any existing
+            # file untouched and skip the artifact. normalization_stats_path stays None
+            # so the trainer copy is skipped and deploy fails loud on the missing key.
+            logger.warning(
+                "%s(%s): could not read/write deploy stats artifact %s (%s); "
+                "normalization_stats.npy left unchanged (deploy artifact not (re)generated). "
+                "Training is unaffected (in-process normalization uses the reader stats); to "
+                "deploy this run, pre-generate the artifact on a writable copy of the meta/ dir.",
+                self.DATASET_NAME, self._dataset_id, out, e,
+            )
+            return
+        self.normalization_stats_path = str(out)
 
     def _action_20d(self, win: pd.DataFrame) -> Optional[np.ndarray]:
         """Return normalized ``(actual_raw_len, ACTION_DIM)`` action, or None (disabled)."""
@@ -598,10 +709,15 @@ class LeRobotV3Reader(BaseDataset):
         width = self._raw_action_dim  # fill at raw width first; unify-scatter below
         action = np.zeros((T_action, width), dtype=np.float32)
         n_valid = 0
+        n_supervised = 0
         if action_20d is not None:
             n_valid = min(actual_raw_len, T_action)
             if n_valid > 0:
                 action[:n_valid] = action_20d[:n_valid]
+            # Steps with a REAL supervised target. Default == n_valid (row-aligned
+            # readers); a reader that shifts the target +1 frame overrides
+            # _n_supervised_action_steps so its clamped final boundary step is masked.
+            n_supervised = min(self._n_supervised_action_steps(actual_raw_len), T_action)
 
         if self._unify:
             # (T, raw) -> (T, unify_dim). The dim mask is the precomputed
@@ -615,10 +731,23 @@ class LeRobotV3Reader(BaseDataset):
         action_mask = build_action_mask_2d(
             T_action=T_action,
             action_dim=self.ACTION_DIM,
-            n_valid_time=n_valid if self._enable_action_supervision else 0,
+            n_valid_time=n_supervised if self._enable_action_supervision else 0,
             dim_mask=dim_mask,
         )
         return action, action_mask
+
+    def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
+        """Number of action steps in the window that carry a REAL supervised target.
+
+        Default: every row present (``actual_raw_len``) — row-aligned readers read
+        the action at row ``t`` directly, so all rows are real. A reader that builds
+        the target by shifting the achieved pose +1 frame (so the last row of a
+        boundary window is a clamped / fabricated target) overrides this to drop
+        that final step (e.g. ``actual_raw_len`` if the window is full, else
+        ``actual_raw_len - 1``). The result is min-capped to ``T_action`` by the
+        caller, so the default reproduces the previous ``n_valid`` exactly.
+        """
+        return actual_raw_len
 
     def _finalize_proprio(self, proprio_20d: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         """Build ``(1, ACTION_DIM)`` proprio + its 2-D mask.
