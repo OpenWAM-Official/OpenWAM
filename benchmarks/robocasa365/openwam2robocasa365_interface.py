@@ -349,12 +349,15 @@ class OpenWAMRoboCasa365Policy:
         if ack.get("type") != transport.RESET_ACK:
             raise RuntimeError(f"OpenWAM server reset returned unexpected response: {ack}")
 
-    def _bridge_eef20d(self, obs: dict, flat: np.ndarray) -> np.ndarray:
-        """Convert a 20-D absolute EEF action to the env's 12-D OSC action.
+    def _bridge_eef20d(self, obs: dict, arm20: np.ndarray, base5: Optional[np.ndarray] = None) -> np.ndarray:
+        """Convert a 20-D absolute EEF action (+ optional 5-D RoboCasa-native base command) to the
+        env's 12-D OSC action.
 
-        Needs the current proprio (to form the OSC delta) and the env's OSC scaling.
-        Raises if the scales weren't configured — emitting an unscaled/guessed action
-        would drive wrong-magnitude motions.
+        The arm needs the current proprio (to form the OSC delta) and the env's OSC scaling. The
+        base command (mobile) is passed through RAW: ``base5`` = [x/y/yaw vel, torso, control_mode];
+        the first 4 fill ``base_motion``, the 5th is ``control_mode`` (gym thresholds at 0.5).
+        Raises if the scales weren't configured — emitting an unscaled action would drive
+        wrong-magnitude motions.
         """
         if self._osc_pos_scale is None or self._osc_rot_scale is None:
             raise ValueError(
@@ -363,12 +366,17 @@ class OpenWAMRoboCasa365Policy:
             )
         pos = np.asarray(obs["state.end_effector_position_relative"], np.float32).reshape(-1)
         rot6d = quat_xyzw_to_rot6d(np.asarray(obs["state.end_effector_rotation_relative"], np.float32).reshape(-1))
+        base_kw = {}
+        if base5 is not None:
+            base5 = np.asarray(base5, np.float32).reshape(-1)
+            base_kw = dict(base_motion=base5[0:4], control_mode=float(base5[4]))
         return eef20d_to_robocasa12d(
-            flat,
+            arm20,
             proprio_eef_pos=pos,
             proprio_eef_rot6d=rot6d,
             pos_scale=self._osc_pos_scale,
             rot_scale=self._osc_rot_scale,
+            **base_kw,
         )
 
     def act(self, obs: dict, prompt: str) -> dict:
@@ -385,9 +393,14 @@ class OpenWAMRoboCasa365Policy:
             raise ValueError(f"RoboCasa365 state dim {len(payload['state'])} != expected {self._state_dim}")
         response = self._client.predict(payload)
         flat = np.asarray(response["action"], dtype=np.float32).reshape(-1)
-        # 20-D absolute EEF (RoboCasa365Dataset-trained model) -> env 12-D OSC.
-        # Dual of robotwin's client-side eef20d_to_ee16d; 12-D is passed through.
-        if flat.shape[0] == 20:
+        # Server returns the un-unified RoboCasa action; the client bridges the arm and passes the
+        # base command through:
+        #   25-D = [arm20 absolute EEF, base5 (x/y/yaw vel, torso, control_mode)] — mobile ckpt.
+        #   20-D = arm-only (fixed-base ckpt): base is zero-filled by the bridge.
+        #   12-D = a raw env action, passed through unchanged.
+        if flat.shape[0] == 25:
+            flat = self._bridge_eef20d(obs, flat[:20], flat[20:25])
+        elif flat.shape[0] == 20:
             flat = self._bridge_eef20d(obs, flat)
         if flat.shape[0] != self._action_dim:
             raise ValueError(f"OpenWAM returned action dim {flat.shape[0]}, expected {self._action_dim}")

@@ -23,12 +23,14 @@ arm's real wrist) → `left_wrist_camera`. The single arm has no 2nd wrist, so
 > **Action spaces (two layers).** The env (`RoboCasaGymEnv`) consumes a fixed **12-D**
 > robosuite OSC + base action. The OpenWAM model trained by `RoboCasa365Dataset`
 > predicts a **20-D absolute EEF pose** (repo-standard EEF schema, dual of robotwin) —
-> NOT 12-D. So `act()` bridges 20-D → 12-D client-side via
-> `benchmarks.utils.eef20d_to_robocasa12d` (dual of robotwin's `eef20d_to_ee16d`); a
-> 12-D server action is passed through unchanged. The bridge needs the env's OSC
-> scaling (`osc_pos_scale` / `osc_rot_scale`, from the OSC_POSE controller config) and
-> fills `base_motion`=0 / `control_mode`=-1 (fixed-base constants). End-to-end
-> correctness of those scalars must be confirmed with a trained checkpoint in the env.
+> NOT 12-D. With **mobile base** (`mobile_base=true`, the full-task default), the model
+> ALSO emits a 5-D RoboCasa-native base command in the unified reserved slots, so the server
+> returns a **25-D** `[arm20, base5]`; `act()` bridges the arm 20-D → OSC and passes `base5`
+> ([x/y/yaw velocity, torso, control_mode]) through RAW into the env's `base_motion`+`control_mode`.
+> A 20-D (arm-only) action still bridges with a zero base; a 12-D server action is passed through.
+> The bridge needs the env's OSC scaling (`osc_pos_scale` / `osc_rot_scale`, from the OSC_POSE
+> controller config). End-to-end correctness of those scalars must be confirmed with a trained
+> checkpoint in the env.
 
 ## Files
 
@@ -37,44 +39,31 @@ arm's real wrist) → `left_wrist_camera`. The single arm has no 2nd wrist, so
 | `openwam2robocasa365_interface.py` | WS adapter: `RoboCasaGymEnv` obs → OpenWAM payload; server action → env 12-D action dict (20-D EEF bridged via `eef20d_to_robocasa12d`, 12-D passed through). |
 | `single_eval.py` | Run one RoboCasa365 task against an OpenWAM server. |
 | `single_eval.sh` | Shell wrapper; patches host/port/task/split at runtime. |
-| `multi_eval.sh` | Evaluate a list of tasks / `all` (from `fixed_base_tasks.json`) / a task-file; aggregates per-task success into a CSV. |
+| `multi_eval.sh` | Evaluate a list of tasks / a task-file (e.g. `target_tasks.txt`); aggregates per-task success into a CSV. |
 | `step_limits.yml` | Per-task eval horizon overrides (robotwin-style `ceil(avg/32)*32`); unlisted tasks fall back to the config `max_steps`. |
 | `smoke_robocasa365.py` | Preflight: `import` / `env` / `roundtrip` checks. |
 | `run_smoke.sh` | Smoke launcher. |
 | `policy_config.yml` | Eval client config template. |
-| `fixed_base_tasks.json` | The fixed-base task subset this benchmark + dataloader target (see below). |
+| `target_tasks.txt` | The official 50 eval target tasks (the multi-task leaderboard set). |
 
-## Fixed-base task subset
+## Full task set + mobile base
 
-RoboCasa365 ships 365 tasks; many need the holonomic **mobile base** (whole-body
-manipulation, `moma_required=Yes`). This benchmark + the dataloader scope to the
-**fixed-base** subset — `moma_required=No`, **111 tasks** (112 fixed-base minus one excluded
-orphan, see below) — so a single-arm EEF policy
-never has to command base motion (the eval bridge fills `base_motion`=0).
+This benchmark + dataloader cover the **full RoboCasa365** (all 365 tasks — mobile +
+fixed). The model commands the holonomic base via the **mobile base** channel
+(`mobile_base=true`), so tasks are no longer restricted to the fixed-base
+(`moma_required=No`) subset. (Earlier revisions scoped to a fixed-base manifest and filled
+`base_motion=0`; that filter — `fixed_base_tasks.json`, the `moma` root-mode drop, and the
+`_assert_fixed_base` eval gate — has been removed.)
 
-The authoritative list is [`fixed_base_tasks.json`](fixed_base_tasks.json) (with a
-`_meta` block: source, per-split counts, notes). Split groups:
+- **Training:** root-mode discovery keeps every downloaded bucket. Point `dataset_dir` at the
+  RoboCasa365 root; each task's `meta/info.json` `total_episodes` gives its (non-fixed) demo count.
+- **Eval:** the official **50 target tasks** (the multi-task leaderboard set — 18 atomic + 16
+  composite-seen + 16 composite-unseen), listed in [`target_tasks.txt`](target_tasks.txt). The 16
+  composite-**unseen** tasks are held out of training (zero-shot). Run them with
+  `multi_eval.sh ... target_tasks.txt`.
 
-| split_group | meaning | atomic | composite | total |
-|---|---|---|---|---|
-| `train_only` | pretrain data only | 38 | 51 | 89 |
-| `train_and_eval` | pretrain + target (**seen** eval) | 14 | 5 | 19 |
-| `eval_only` | target only (**unseen**, zero-shot composite) | 0 | 3 | 3 |
-
-So 108 tasks are trainable and 22 have eval targets (19 seen + 3 unseen). Per-task demo
-counts aren't fixed — read each bucket's `meta/info.json` `total_episodes` after download.
-
-> **Excluded orphan — `PanTransfer`.** One `moma_required=No` unseen task is intentionally
-> dropped from the list (112 → 111 fixed-base; see `_meta.excluded_fixed_base`). PanTransfer's
-> skill domain (`activity="Serving Food"`) has **zero** fixed-base training coverage: all four
-> same-activity train tasks (DessertUpgrade / PlaceFoodInBowls / PrepareSoupServing / ServeSteak)
-> are `moma_required=Yes` (mobile) and are removed by the fixed-base filter, and its distinctive
-> "dump pan contents onto plate" (pour/transfer) primitive appears in **0** fixed-base train
-> tasks. A fixed-base-only policy would be asked to zero-shot a domain it never saw. An audit
-> across all fixed-base eval tasks found this is the **only** such orphan — every other unseen
-> task (ArrangeTea, WashFruitColander, WeighIngredients) has ≥1 same-domain fixed-base train
-> task. (`LoadDishwasher` / `WashLettuce` also have a lone activity but are **seen**, so they
-> train on their own data and are not orphans.)
+See the mobile-base design (arm absolute-EEF in unified slots `[0:9]`; RoboCasa-native base command
+raw in reserved `[68:73)`; base action-only, not proprio) in `docs/plans/robocasa365-full-mobile.md`.
 
 ## Training data + dataloader (Phase 2)
 
@@ -178,8 +167,8 @@ for a copied config. Headless rendering uses `MUJOCO_GL=egl`.
 # named tasks
 ROBOCASA365_PYTHON=/path/to/env/bin/python \
   bash benchmarks/robocasa365/multi_eval.sh --split target --port 8848 OpenDrawer CloseDrawer
-# every fixed-base task (from fixed_base_tasks.json)
-ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/multi_eval.sh all
+# every official eval target (the 50 in target_tasks.txt)
+ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/multi_eval.sh target
 # from a task-list file (one task per line, `#` comments)
 ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/multi_eval.sh my_tasks.txt
 ```

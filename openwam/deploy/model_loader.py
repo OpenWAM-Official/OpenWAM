@@ -315,7 +315,7 @@ class _UnifyAwareNormalizer:
     ``.normalize``), so ``base.py`` needs no change.
     """
 
-    def __init__(self, inner, dst_index: np.ndarray, unify_dim: int):
+    def __init__(self, inner, dst_index: np.ndarray, unify_dim: int, base_slice=None, base_normalizer=None):
         from openwam.dataloader.utils.unify_action import map_to_unify, unmap_from_unify
 
         self._inner = inner
@@ -323,6 +323,12 @@ class _UnifyAwareNormalizer:
         self._unify_dim = int(unify_dim)
         self._map_to_unify = map_to_unify
         self._unmap_from_unify = unmap_from_unify
+        # Mobile base (robocasa365): the base command lives in a contiguous reserved span [68:73)
+        # (action-only) with its OWN stats. When set, unnormalize gathers it, un-normalizes with
+        # base_normalizer, and appends it → the returned raw action is [arm_raw, base_raw]. proprio
+        # (normalize path) has no base, so it is unaffected.
+        self._base_slice = base_slice
+        self._base_normalizer = base_normalizer
 
     # action OUT: model emits (..., unify_dim) normalized-unified → physical raw.
     def unnormalize(self, x):
@@ -335,10 +341,16 @@ class _UnifyAwareNormalizer:
                 arr.shape[-1], self._unify_dim,
             )
             return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
-        arr = self._unmap_from_unify(arr, self._dst_index)   # (..., unify_dim) -> (..., raw)
-        if self._inner is None:
-            return arr            # gather (advanced indexing) already returns a fresh array
-        return self._inner.unnormalize(arr)
+        base_phys = None
+        if self._base_slice is not None:
+            # Gather base BEFORE un-unifying the arm (unmap collapses to arm width, dropping [68:73)).
+            base = arr[..., self._base_slice]
+            base_phys = base.copy() if self._base_normalizer is None else self._base_normalizer.unnormalize(base)
+        raw = self._unmap_from_unify(arr, self._dst_index)  # (..., unify_dim) -> (..., arm_raw)
+        arm = raw if self._inner is None else self._inner.unnormalize(raw)
+        if base_phys is not None:
+            return np.concatenate([np.asarray(arm), np.asarray(base_phys)], axis=-1)  # [arm_raw, base_raw]
+        return arm
 
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
     def normalize(self, x):
@@ -366,13 +378,34 @@ def _infer_raw_dim(inner) -> Optional[int]:
     return None
 
 
+def _build_key_normalizer(cfg: DictConfig, ckpt_dir: str, key: str):
+    """Build a Normalizer from the ``key`` stats block of normalization_stats.npy (mobile base uses
+    key='base'). Returns None when normalization is disabled; raises if the block is missing."""
+    norm_mode = OmegaConf.select(cfg, "dataloader.normalize_mode", default=None)
+    if norm_mode in (None, "", "none", "null"):
+        return None
+    from openwam.dataloader.transforms.normalize import YAML_TO_NORM_MODE, Normalizer, load_mode_stats
+
+    if norm_mode not in YAML_TO_NORM_MODE:
+        return None
+    stats_path = os.path.join(ckpt_dir, "normalization_stats.npy")
+    stats = load_mode_stats(stats_path, key)
+    if stats is None:
+        raise ValueError(
+            f"[normalizer/unify] mobile_base=True but normalization_stats.npy has no '{key}' block "
+            f"({stats_path}); retrain — the dataloader persists a 'base' block when mobile_base=true."
+        )
+    return Normalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=stats)
+
+
 def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
     """Build the deploy normalizer, wrapping for ``unify_action`` when the ckpt used it.
 
     Non-unify ckpts: identical to upstream (returns the raw-space Normalizer or None).
     Unify ckpts: wrap in :class:`_UnifyAwareNormalizer` so the model's UNIFY_DIM output
     is gathered back to raw dims BEFORE unnormalize (and proprio scattered AFTER
-    normalize) — the exact inverse of the train-time transform.
+    normalize) — the exact inverse of the train-time transform. With ``mobile_base``,
+    the base command span [68:73) is un-normalized separately and appended (→ [arm_raw, base_raw]).
     """
     inner = _build_inner_normalizer(cfg, ckpt_dir)
 
@@ -406,4 +439,19 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
         dst_index.shape[0],
         "then" if inner is not None else "(no stats, gather-only:)",
     )
-    return _UnifyAwareNormalizer(inner, dst_index, unify_dim)
+    # Mobile base (robocasa365): un-normalize the base command span [68:73) separately from its
+    # own "base" stats block, so the returned raw action is [arm_raw, base_raw] (25-D). The client
+    # then bridges arm (→OSC) and sends base raw.
+    base_slice = base_normalizer = None
+    if bool(OmegaConf.select(cfg, "dataloader.mobile_base", default=False)):
+        from openwam.dataloader.robocasa365 import _UNIFY_BASE
+
+        base_slice = _UNIFY_BASE
+        base_normalizer = _build_key_normalizer(cfg, ckpt_dir, "base")
+        logger.info(
+            "[normalizer/unify] mobile_base ON: base command span [%d:%d) un-normalized separately "
+            "→ deploy returns [arm_raw, base_raw].",
+            base_slice.start,
+            base_slice.stop,
+        )
+    return _UnifyAwareNormalizer(inner, dst_index, unify_dim, base_slice=base_slice, base_normalizer=base_normalizer)

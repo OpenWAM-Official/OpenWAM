@@ -9,7 +9,7 @@
 # Then, inside the robocasa365 env:
 #   ROBOCASA365_PYTHON=/path/to/python bash multi_eval.sh [options] <tasks...>
 #
-# Tasks (positional): task names | "all" (every task in fixed_base_tasks.json) | a file (one
+# Tasks (positional): task names | "all"/"target" (the 50 eval targets in target_tasks.txt) | a file (one
 #                     task per line, '#' comments allowed).
 # Options:
 #   --split <s>   target | pretrain | all   (default: target)
@@ -37,13 +37,13 @@ done
 
 python_bin="${ROBOCASA365_PYTHON:-python}"
 
-# Resolve the task list: "all" -> fixed_base_tasks.json names; a file -> its non-comment lines;
-# anything else -> a literal task name.
+# Resolve the task list: "all"/"target" -> the official 50 eval targets (target_tasks.txt);
+# a file -> its non-comment lines; anything else -> a literal task name.
 resolve_tasks() {
   local arg
   for arg in "${tasks[@]:-}"; do
-    if [[ "$arg" == "all" ]]; then
-      "$python_bin" -c "import json; print('\n'.join(t['name'] for t in json.load(open('${SCRIPT_DIR}/fixed_base_tasks.json'))['tasks']))"
+    if [[ "$arg" == "all" || "$arg" == "target" ]]; then
+      sed 's/#.*//' "${SCRIPT_DIR}/target_tasks.txt" | awk 'NF'
     elif [[ -f "$arg" ]]; then
       sed 's/#.*//' "$arg" | awk 'NF'
     else
