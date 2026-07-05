@@ -46,6 +46,21 @@ def _make_state(n_rows: int, seed: int) -> np.ndarray:
     return state
 
 
+def _make_action(n_rows: int, seed: int) -> np.ndarray:
+    """RoboCasa365-shaped LeRobot action[12] (layout B): base_motion(0:4 = x/y/yaw vel + torso),
+    control_mode(4), eef Δpos(5:8), eef Δrot(8:11), gripper(11). Only base_motion(0:4) + mode(4)
+    (the mobile channel) are exercised; the arm dims are filled but the reader ignores them (arm
+    comes from observation.state)."""
+    rng = np.random.RandomState(seed + 1000)
+    action = np.zeros((n_rows, 12), dtype=np.float64)
+    action[:, 0:3] = rng.uniform(-1, 1, size=(n_rows, 3))  # base x/y/yaw velocity
+    action[:, 3] = rng.uniform(0, 0.34, size=n_rows)  # torso lift (position)
+    action[:, 4] = rng.choice([-1.0, 1.0], size=n_rows)  # control_mode
+    action[:, 5:11] = rng.uniform(-1, 1, size=(n_rows, 6))  # arm OSC delta (ignored by reader)
+    action[:, 11] = rng.choice([-1.0, 1.0], size=n_rows)  # gripper (ignored)
+    return action
+
+
 def make_robocasa_bucket(tmp_path: Path, n_episodes: int = N_EPISODES) -> Path:
     """Write a minimal raw LeRobot v2.1 RoboCasa365 bucket; return its lerobot/ dir."""
     bucket = tmp_path / "OpenDrawer" / "20250816" / "lerobot"
@@ -64,7 +79,12 @@ def make_robocasa_bucket(tmp_path: Path, n_episodes: int = N_EPISODES) -> Path:
         for ep in range(n_episodes):
             data_dir = bucket / "data" / "chunk-000"
             data_dir.mkdir(parents=True, exist_ok=True)
-            df = pd.DataFrame({"observation.state": list(_make_state(EP_LENGTH, seed=ep))})
+            df = pd.DataFrame(
+                {
+                    "observation.state": list(_make_state(EP_LENGTH, seed=ep)),
+                    "action": list(_make_action(EP_LENGTH, seed=ep)),
+                }
+            )
             df.to_parquet(data_dir / f"episode_{ep:06d}.parquet")
             for cam in (HEAD_CAM, WRIST_CAM):
                 vd = bucket / "videos" / "chunk-000" / cam
@@ -261,6 +281,36 @@ class TestNormalize:
         assert ds.action_dim == EEF_DIM == 20
         assert s["action"].shape == (32, EEF_DIM)
 
+    def test_mobile_base_scatters_into_reserved(self, tmp_path):
+        # mobile_base=True reads the RoboCasa-native base command from the LeRobot action field and
+        # scatters it into the 80-D reserved slots [68:73). Proprio stays 20-D EEF (no base: world
+        # base pose is scene-arbitrary). denormalize returns 25-D [arm20, base5].
+        from openwam.dataloader.utils.unify_action import UNIFY_DIM
+
+        b = make_robocasa_bucket(tmp_path)
+        with _mock_video_decoder():
+            ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                    width=96, normalize_mode="min-max", unify_action=True,
+                                    unify_action_map=["0-9", "34-43"], mobile_base=True)
+            s = ds[0]
+        assert ds.action_dim == UNIFY_DIM == 80
+        am = s["action_mask"].numpy()
+        assert am[0, 68:73].all()        # base command slots valid in ACTION
+        assert am[0, :10].all()          # left eef valid
+        assert not am[0, 34:44].any()    # right eef masked
+        assert np.abs(s["action"].numpy()[:, 68:73]).sum() > 0  # base carries a (normalized) command
+        pm = s["proprio_mask"].numpy()
+        assert not pm[0, 68:73].any()                    # proprio: NO base
+        assert (s["proprio"].numpy()[0, 68:73] == 0).all()
+        deno = ds.denormalize_action(s["action"].numpy())
+        assert deno.shape == (32, 25)  # [arm20, base5]
+
+    def test_mobile_base_requires_unify(self, tmp_path):
+        b = make_robocasa_bucket(tmp_path)
+        with pytest.raises(ValueError, match="requires unify_action"):
+            RoboCasa365Dataset(data_root=str(b), normalize_mode=None, multiview=False, height=64, width=96,
+                               mobile_base=True)
+
     def test_deploy_stats_roundtrip_20d(self, tmp_path):
         """The DEPLOY round-trip (the N1/S1 bug): the persisted stats are 20-D and keyed
         'eef', so the deploy normalizer (load_mode_stats + Normalizer) inverts the model's
@@ -357,23 +407,15 @@ class TestMultiAndRegistry:
         # no per-task stats files were written under the buckets
         assert not list(Path(tmp_path).glob("**/taskA_eef_stats.npy"))
 
-    def test_root_mode_filters_to_fixed_base(self, tmp_path):
-        # Root discovery must drop non-fixed-base (mobile-base) buckets, which would violate
-        # the base_motion=0 / control_mode=-1 design.
-        from openwam.dataloader.robocasa365 import _fixed_base_task_names
-
-        names = _fixed_base_task_names()
-        assert "OpenDrawer" in names and len(names) == 111
-        # PanTransfer is moma_required=No but intentionally excluded (coverage orphan:
-        # its 'Serving Food' domain has zero fixed-base training coverage) — see
-        # fixed_base_tasks.json _meta.excluded_fixed_base.
-        assert "PanTransfer" not in names
-        make_robocasa_bucket(tmp_path / "keep")  # -> .../OpenDrawer/.../lerobot (fixed-base)
-        mobile = tmp_path / "drop" / "MobileNonFixedBaseTask" / "20250101" / "lerobot" / "meta"
+    def test_root_mode_keeps_all_including_mobile(self, tmp_path):
+        # Full RoboCasa365 (fixed-base filter removed): root discovery keeps EVERY bucket, including
+        # mobile (formerly moma_required=Yes) tasks — the base command is trained, not dropped.
+        make_robocasa_bucket(tmp_path / "keep")  # -> .../OpenDrawer/.../lerobot
+        mobile = tmp_path / "mob" / "SomeMobileTask" / "20250101" / "lerobot" / "meta"
         mobile.mkdir(parents=True)
         (mobile / "info.json").write_text("{}")  # just enough to be discovered
         roots = MultiTaskRoboCasa365Dataset._resolve_task_roots(str(tmp_path), None, None)
-        assert {tn for tn, _ in roots} == {"OpenDrawer"}  # mobile task filtered out
+        assert {tn for tn, _ in roots} == {"OpenDrawer", "SomeMobileTask"}  # mobile task NOT dropped
 
     def test_registered_to_multi(self):
         from openwam.dataloader.registry import DATASET_REGISTRY, list_registered_datasets

@@ -1,4 +1,4 @@
-"""RoboCasa365 dataloader — fixed-base subset, single-arm 20-D EEF (LeRobot v2.1).
+"""RoboCasa365 dataloader — full task set, single-arm 20-D EEF + mobile base (LeRobot v2.1).
 
 Bespoke ``BaseDataset`` that reads the RAW downloaded RoboCasa365 LeRobot **v2.1**
 buckets directly (per-episode ``data/chunk-*/episode_*.parquet`` + per-episode
@@ -21,8 +21,12 @@ robotwin's endpose): both are the ABSOLUTE single-arm end-effector pose taken fr
     proprio = eef20d[0:1]      # current pose
     action  = eef20d[1:T]      # future-pose trajectory (model predicts poses)
 
-The fixed base (``base_position`` / ``base_rotation``) and the OSC-delta ``action``
-field are dropped.
+Mobile base (``mobile_base=True``, requires ``unify_action``): the RoboCasa-native base command
+is read RAW from the LeRobot ``action`` field ([x/y/yaw velocity, torso position, control_mode])
+and scattered into the 80-D reserved slots ``[68:73)`` — direct-to-env at eval, no bridge. The
+arm stays absolute-EEF (bridged). Base is action-only; world-frame base pose is scene-arbitrary so
+it is NOT added to proprio (the policy perceives base state from the robot-mounted head video).
+See ``docs/plans/robocasa365-full-mobile.md``.
 
 ``observation.state`` layout (16-D, from meta/modality.json)::
 
@@ -81,6 +85,17 @@ _DEPLOY_RESOLVABLE_MODES = ("min-max", "z-score")
 _STATE_EEF_POS = slice(7, 10)
 _STATE_EEF_ROT = slice(10, 14)  # quaternion (xyzw)
 
+# LeRobot ``action`` field (12-D, "layout B" from PandaOmron_modality.json). Mobile support reads
+# the base COMMAND dims (raw, RoboCasa-native — NOT reconstructed from state like the arm):
+#   [0:3] base x/y/yaw velocity, [3] torso lift (position 0-0.34 m), [4] control_mode {-1,+1}.
+_ACTION_BASE = slice(0, 5)
+BASE_ACTION_DIM = 5
+# 80-D reserved-slot span for the base command (ACTION side only, [68:73)). Proprio stays 20-D EEF:
+# absolute world-frame base pose is scene-arbitrary (differs per kitchen), a poor generalizable
+# proprio signal, so it is deliberately NOT added — the policy perceives base state from the
+# robot-mounted head video. See docs/plans/robocasa365-full-mobile.md.
+_UNIFY_BASE = slice(68, 68 + BASE_ACTION_DIM)
+
 # Multiview L-shape slot sizes (must match assemble_multiview_layout defaults at
 # height=384/width=320: top 256x320, each bottom 128x160).
 _HEAD_SLOT_H, _HEAD_SLOT_W = 256, 320
@@ -92,19 +107,13 @@ def _task_dir_name(lerobot_dir: str) -> str:
     return os.path.basename(os.path.dirname(os.path.dirname(lerobot_dir.rstrip("/")))) or "task"
 
 
-# Authoritative fixed-base (moma_required=No) task list — root-mode discovery is filtered to it
-# so mobile-base tasks (which violate the base_motion=0 / control_mode=-1 design) can't sneak in.
-_FIXED_BASE_JSON = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "benchmarks", "robocasa365", "fixed_base_tasks.json")
-)
-
-
-def _compute_shared_stats_rank0_synced(shared_path: str, data_roots: list) -> None:
+def _compute_shared_stats_rank0_synced(shared_path: str, data_roots: list, include_base: bool = False) -> None:
     """Compute + persist the shared multitask stats with rank-0 synchronization.
 
     On a multi-GPU first run, only rank 0 computes + atomically writes; other ranks poll for the
     file (mirrors robotwin). Without this, every rank races to write the same ``{path}.tmp`` →
-    torn writes + N× redundant compute over all buckets.
+    torn writes + N× redundant compute over all buckets. ``include_base`` adds the mobile ``base``
+    block (5-D base command stats) to the pooled file.
     """
     from openwam.dataloader.robocasa365_stats_computation import atomic_save_stats_npy, compute_multitask_stats
 
@@ -118,7 +127,7 @@ def _compute_shared_stats_rank0_synced(shared_path: str, data_roots: list) -> No
 
     if not dist_ready or rank == 0:
         print(f"  [normalizer] computing SHARED multitask stats over {len(data_roots)} buckets -> {shared_path}")
-        atomic_save_stats_npy(shared_path, compute_multitask_stats(data_roots))
+        atomic_save_stats_npy(shared_path, compute_multitask_stats(data_roots, include_base=include_base))
         return
     # non-rank0: wait for rank 0 to produce the file
     import time
@@ -128,20 +137,6 @@ def _compute_shared_stats_rank0_synced(shared_path: str, data_roots: list) -> No
         if time.monotonic() >= deadline:
             raise TimeoutError(f"timed out waiting for rank 0 to produce shared stats: {shared_path}")
         time.sleep(float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10)))
-
-
-@functools.lru_cache(maxsize=1)
-def _fixed_base_task_names() -> frozenset:
-    """The 111 fixed-base task names from ``benchmarks/robocasa365/fixed_base_tasks.json``
-    (112 moma_required=No tasks minus the excluded PanTransfer coverage orphan)."""
-    if not os.path.exists(_FIXED_BASE_JSON):
-        raise FileNotFoundError(
-            f"fixed-base task list not found at {_FIXED_BASE_JSON}; root-mode discovery is filtered "
-            "to it. Pass an explicit task_roots/task_name, or restore the json."
-        )
-    with open(_FIXED_BASE_JSON) as f:
-        data = json.load(f)
-    return frozenset(t["name"] for t in data.get("tasks", []))
 
 
 def state_to_arm10(state: np.ndarray) -> np.ndarray:
@@ -214,6 +209,7 @@ class RoboCasa365Dataset(BaseDataset):
         max_static_retry: int = 3,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
+        mobile_base: bool = False,
         **_unused,
     ):
         super().__init__()
@@ -245,8 +241,15 @@ class RoboCasa365Dataset(BaseDataset):
         # the scatter (right-arm slots stay masked out of the loss). Off (default) → 20-D as before.
         self._unify_action = bool(unify_action)
         self._unify_action_map = unify_action_map
+        # Mobile base: read the RoboCasa-native base command (x/y/yaw vel + torso + control_mode)
+        # from the LeRobot ``action`` field and scatter it into the 80-D reserved slots [68:73).
+        # Requires unify_action (the base lives in the unified reserved region).
+        self._mobile_base = bool(mobile_base)
+        if self._mobile_base and not self._unify_action:
+            raise ValueError("mobile_base=True requires unify_action=True (base occupies the 80-D reserved slots)")
         self._unify_dst_index = None
-        self._unify_dim_mask = None
+        self._unify_dim_mask = None  # proprio dim mask (arm only)
+        self._unify_action_dim_mask = None  # action dim mask (arm + base when mobile)
         if self._unify_action:
             spec = self._unify_action_map if self._unify_action_map is not None else list(range(EEF_DIM))
             self._unify_dst_index = parse_unify_spec(spec, UNIFY_DIM)
@@ -255,8 +258,14 @@ class RoboCasa365Dataset(BaseDataset):
                     f"robocasa365 unify_action_map maps {self._unify_dst_index.shape[0]} source dims "
                     f"but the EEF action is {EEF_DIM}-D; they must match."
                 )
+            # Proprio: only the left-arm slots are valid (right arm zero-padded + masked).
             self._unify_dim_mask = np.zeros(UNIFY_DIM, dtype=bool)
             self._unify_dim_mask[self._unify_dst_index] = np.asarray(LEFT_ARM_DIM_MASK, dtype=bool)
+            # Action: same arm mask, plus the base command slots when mobile (proprio has no base —
+            # world-frame base pose is scene-arbitrary; see _UNIFY_BASE).
+            self._unify_action_dim_mask = self._unify_dim_mask.copy()
+            if self._mobile_base:
+                self._unify_action_dim_mask[_UNIFY_BASE] = True
         self.window_stride = max(1, int(window_stride))
         self.video_stride = max(1, int(video_stride))
         if (self.num_frames - 1) % self.video_stride != 0:
@@ -338,7 +347,8 @@ class RoboCasa365Dataset(BaseDataset):
         # Stats are persisted + loaded at the full 20-D action dim (left=arm, right=neutral),
         # so the deploy-time un-normalization of the model's 20-D output round-trips cleanly
         # (the 10-D forward path was the deploy-break; see _DEPLOY_RESOLVABLE_MODES).
-        self._stats: Optional[dict] = None  # 20-D stats (forward + persist + deploy)
+        self._stats: Optional[dict] = None  # 20-D arm stats (forward + persist + deploy)
+        self._base_stats: Optional[dict] = None  # 5-D base command stats (mobile only)
         self.normalization_stats_path: Optional[str] = None
         if self.normalize_mode is not None:
             if self.normalize_mode not in _DEPLOY_RESOLVABLE_MODES:
@@ -351,31 +361,54 @@ class RoboCasa365Dataset(BaseDataset):
             stats_path = self._resolve_stats_path(normalization_stats_path)
             if stats_path.endswith(".json"):
                 with open(stats_path) as f:
-                    raw = json.load(f)
+                    full = json.load(f)
             else:
-                raw = np.load(stats_path, allow_pickle=True).item()
-            raw = raw.get("eef", raw)  # accept flat or {"eef": {...}} schema
+                full = np.load(stats_path, allow_pickle=True).item()
+            eef_raw = full.get("eef", full) if isinstance(full, dict) else full  # flat or {"eef": {...}}
             self._stats = materialize_eef_stats(
-                raw, self.normalize_mode, dim=EEF_DIM, strict_minmax=True, source_hint=stats_path
+                eef_raw, self.normalize_mode, dim=EEF_DIM, strict_minmax=True, source_hint=stats_path
             )
+            if self._mobile_base:
+                base_raw = full.get("base") if isinstance(full, dict) else None
+                if base_raw is None:
+                    raise ValueError(
+                        f"mobile_base=True but stats file {stats_path} has no 'base' block. Recompute stats "
+                        "(robocasa365_stats_computation emits a 'base' block when the action field is read)."
+                    )
+                self._base_stats = {
+                    k: np.asarray(base_raw[k], np.float32).reshape(-1) for k in ("mean", "std", "min", "max")
+                }
+                if self._base_stats["mean"].shape[0] != BASE_ACTION_DIM:
+                    raise ValueError(
+                        f"base stats dim {self._base_stats['mean'].shape[0]} != {BASE_ACTION_DIM}; recompute stats."
+                    )
             self.normalization_stats_path = stats_path
-            print(f"  [normalizer] {self.normalize_mode}, dim={EEF_DIM}, stats={stats_path}")
+            print(
+                f"  [normalizer] {self.normalize_mode}, dim={EEF_DIM}"
+                f"{' +base5' if self._mobile_base else ''}, stats={stats_path}"
+            )
         else:
             print("  [normalizer] DISABLED (normalize_mode=None)")
 
     def _resolve_stats_path(self, explicit: Optional[str]) -> str:
-        """Explicit path wins; else ``{data_root}/{task}_eef_stats.npy`` (auto-compute)."""
+        """Explicit path wins; else ``{data_root}/{task}_{eef|eefbase}_stats.npy`` (auto-compute).
+
+        Mobile runs use a distinct ``_eefbase_`` suffix so they never load a stale arm-only
+        ``_eef_`` file (which lacks the required ``base`` block).
+        """
         if explicit and os.path.exists(explicit):
             return explicit
-        stats_path = os.path.join(self.data_root, f"{self.task_name}_eef_stats.npy")
+        suffix = "eefbase" if self._mobile_base else "eef"
+        stats_path = os.path.join(self.data_root, f"{self.task_name}_{suffix}_stats.npy")
         if not os.path.exists(stats_path):
             from openwam.dataloader.robocasa365_stats_computation import (
                 atomic_save_stats_npy,
                 compute_normalization_stats,
             )
 
-            print(f"  [normalizer] computing arm-10 stats from {self.data_root} -> {stats_path}")
-            atomic_save_stats_npy(stats_path, compute_normalization_stats(self.data_root))
+            print(f"  [normalizer] computing {'arm-10 + base' if self._mobile_base else 'arm-10'} stats "
+                  f"from {self.data_root} -> {stats_path}")
+            atomic_save_stats_npy(stats_path, compute_normalization_stats(self.data_root, include_base=self._mobile_base))
         return stats_path
 
     # ----- BaseDataset interface -----
@@ -392,25 +425,39 @@ class RoboCasa365Dataset(BaseDataset):
         normalization is disabled."""
         return dict(self._stats) if self._stats is not None else None
 
-    def denormalize_action(self, action) -> np.ndarray:
-        """Invert the 20-D normalization for the active mode (no-op when disabled).
+    def _unnormalize(self, arr: np.ndarray, stats: dict) -> np.ndarray:
+        """Invert min-max / z-score with the given stats (no-op for other modes)."""
+        arr = np.asarray(arr, dtype=np.float32)
+        if stats is None or self.normalize_mode is None:
+            return arr.copy()
+        if self.normalize_mode == "z-score":
+            return (arr * stats["std"] + stats["mean"]).astype(np.float32)
+        if self.normalize_mode == "min-max":
+            return ((arr + 1.0) * 0.5 * (stats["max"] - stats["min"]) + stats["min"]).astype(np.float32)
+        return arr.copy()
 
-        Right-10 dims carry neutral stats (min=-1/max=1/mean0/std1) so they pass through ~unchanged;
-        the left-10 are inverted with the real arm stats. Same contract as the deploy normalizer.
+    def denormalize_action(self, action) -> np.ndarray:
+        """Invert normalization + un-unify for the active mode (no-op when disabled).
+
+        Returns the raw RoboCasa action the client bridges:
+          * unify off → 20-D arm EEF.
+          * unify on, no base → 20-D arm EEF (un-unified from 80-D).
+          * unify on + mobile_base → 25-D ``[arm20, base5]`` (base5 = raw x/y/yaw vel, torso, mode).
+
+        Arm right-10 dims carry neutral stats so they pass through ~unchanged; left-10 use the real
+        arm stats; base5 uses the separate base stats. Same contract as the deploy normalizer.
         """
         arr = np.asarray(action, dtype=np.float32)
-        # Un-unify first (inverse of the map_to_unify scatter in _build_sample), then unnormalize —
-        # the model emits UNIFY_DIM-wide actions when unify is on. No-op when unify is off.
+        base_phys = None
         if self._unify_dst_index is not None:
+            if self._mobile_base:
+                # Gather base BEFORE un-unifying the arm (unmap collapses to 20-D and drops [68:73)).
+                base_phys = self._unnormalize(arr[..., _UNIFY_BASE], self._base_stats)
             arr = unmap_from_unify(arr, self._unify_dst_index).astype(np.float32)  # (..., 80) -> (..., 20)
-        if self._stats is None or self.normalize_mode is None:
-            return arr.copy()
-        s = self._stats
-        if self.normalize_mode == "z-score":
-            return (arr * s["std"] + s["mean"]).astype(np.float32)
-        if self.normalize_mode == "min-max":
-            return ((arr + 1.0) * 0.5 * (s["max"] - s["min"]) + s["min"]).astype(np.float32)
-        return arr.copy()
+        arm = self._unnormalize(arr, self._stats)
+        if base_phys is not None:
+            return np.concatenate([arm, base_phys], axis=-1)  # (..., 25)
+        return arm
 
     def __len__(self) -> int:
         return len(self._val_samples) if self._val_samples is not None else len(self._window_index)
@@ -444,14 +491,28 @@ class RoboCasa365Dataset(BaseDataset):
             cache = self._state_cache = functools.lru_cache(maxsize=8)(self._read_full_state_uncached)
         return cache(ep_global_idx)[start:end]
 
+    def _read_full_action_uncached(self, ep_global_idx: int) -> np.ndarray:
+        df = pd.read_parquet(self._data_path(ep_global_idx), columns=["action"])
+        return np.stack(df["action"].values).astype(np.float32)  # (T, 12)
+
+    def _read_base_action(self, ep_global_idx: int, start: int, end: int) -> np.ndarray:
+        """Base command window [start, end) from the LeRobot ``action`` field: ``(n, 5)`` =
+        [x_vel, y_vel, yaw_vel, torso, control_mode] (RoboCasa-native, raw, mobile only)."""
+        cache = getattr(self, "_action_cache", None)
+        if cache is None:
+            cache = self._action_cache = functools.lru_cache(maxsize=8)(self._read_full_action_uncached)
+        return cache(ep_global_idx)[start:end, _ACTION_BASE]
+
     def __getstate__(self):
         state = self.__dict__.copy()
         state.pop("_state_cache", None)  # lru_cache over a bound method isn't picklable
+        state.pop("_action_cache", None)
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._state_cache = None
+        self._action_cache = None
 
     def _decode_camera(self, ep_global_idx: int, camera: str, frame_indices, slot_h: int, slot_w: int):
         return decode_video_frames(self._video_path(ep_global_idx, camera), list(frame_indices), slot_h, slot_w)
@@ -520,16 +581,31 @@ class RoboCasa365Dataset(BaseDataset):
         # own mask would mark every mapped slot valid, so use the LEFT_ARM_DIM_MASK-honoring
         # _unify_dim_mask instead — otherwise the zero-padded right-arm slots leak into the loss.
         if self._unify_dst_index is not None:
-            proprio, _ = map_to_unify(proprio, self._unify_dst_index, UNIFY_DIM)
-            action, _ = map_to_unify(action, self._unify_dst_index, UNIFY_DIM)
-            mask_dim, dim_mask = UNIFY_DIM, self._unify_dim_mask
+            proprio, _ = map_to_unify(proprio, self._unify_dst_index, UNIFY_DIM)  # (1, 80)
+            action, _ = map_to_unify(action, self._unify_dst_index, UNIFY_DIM)  # (T, 80)
+            if self._mobile_base:
+                # RoboCasa-native base command (raw, read from the action field), aligned with the
+                # arm's action steps: command at frame start+i drives the transition to action step i.
+                # Padded rows land beyond n_valid_action so the time mask drops them (value irrelevant).
+                base_raw = self._read_base_action(ep_global, start, start + n_valid_action)  # (n_valid, 5)
+                if self._base_stats is not None:
+                    base_raw = apply_normalization(base_raw, self._base_stats, self.normalize_mode)
+                if base_raw.shape[0] < self.num_action_steps:
+                    pad_row = base_raw[-1:] if base_raw.shape[0] else np.zeros((1, BASE_ACTION_DIM), np.float32)
+                    base_raw = np.concatenate(
+                        [base_raw, np.repeat(pad_row, self.num_action_steps - base_raw.shape[0], axis=0)], axis=0
+                    )
+                action[:, _UNIFY_BASE] = base_raw.astype(action.dtype)
+            mask_dim = UNIFY_DIM
+            action_dim_mask, proprio_dim_mask = self._unify_action_dim_mask, self._unify_dim_mask
         else:
-            mask_dim, dim_mask = EEF_DIM, LEFT_ARM_DIM_MASK
+            mask_dim = EEF_DIM
+            action_dim_mask = proprio_dim_mask = LEFT_ARM_DIM_MASK
         action_mask = torch.from_numpy(
-            build_action_mask_2d(self.num_action_steps, mask_dim, n_valid_action, dim_mask=dim_mask)
+            build_action_mask_2d(self.num_action_steps, mask_dim, n_valid_action, dim_mask=action_dim_mask)
         )
         proprio_mask = torch.from_numpy(
-            build_proprio_mask_2d(mask_dim, enabled=actual_len > 0, dim_mask=dim_mask)
+            build_proprio_mask_2d(mask_dim, enabled=actual_len > 0, dim_mask=proprio_dim_mask)
         )
 
         return {
@@ -577,8 +653,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
     Concatenates one ``RoboCasa365Dataset`` per task so one epoch covers all
     tasks. ``dataset_dir`` may point at a single task's ``lerobot`` bucket, or at
     a root holding many ``.../<Task>/<date>/lerobot`` buckets (the RoboCasa
-    download layout); the fixed-base task subset is listed in
-    ``benchmarks/robocasa365/fixed_base_tasks.json``.
+    download layout) — root mode discovers EVERY bucket (full 365, mobile + fixed).
     """
 
     @classmethod
@@ -610,6 +685,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             max_static_retry=int(get_cfg(config, "max_static_retry", 3)),
             unify_action=bool(get_cfg(config, "unify_action", False)),
             unify_action_map=get_cfg(config, "unify_action_map", None),
+            mobile_base=bool(get_cfg(config, "mobile_base", False)),
             seed=int(get_cfg(config, "seed", 42)),
         )
 
@@ -620,10 +696,12 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         task_roots: Optional[list] = None,
         normalize_mode: Optional[str] = "min-max",
         normalization_stats_path: Optional[str] = None,
+        mobile_base: bool = False,
         **kwargs,
     ):
         super().__init__()
         self.task_name = task_name
+        self._mobile_base = bool(mobile_base)
         roots = self._resolve_task_roots(dataset_dir, task_name, task_roots)
         if not roots:
             raise FileNotFoundError(f"No RoboCasa365 task buckets found under {dataset_dir}")
@@ -633,13 +711,16 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         # the SAME normalized space (mirrors robotwin's multi-task shared-stats
         # contract). Single-bucket → None lets the sub-dataset auto-resolve its own
         # per-task stats (the verified single-task path, unchanged).
-        shared_stats = self._resolve_shared_stats(dataset_dir, task_name, roots, normalization_stats_path, norm)
+        shared_stats = self._resolve_shared_stats(
+            dataset_dir, task_name, roots, normalization_stats_path, norm, self._mobile_base
+        )
         self._datasets = [
             RoboCasa365Dataset(
                 data_root=dr,
                 task_name=tn,
                 normalize_mode=norm,
                 normalization_stats_path=shared_stats,
+                mobile_base=self._mobile_base,
                 **kwargs,
             )
             for tn, dr in roots
@@ -653,12 +734,13 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         self.normalization_stats_path = self._datasets[0].normalization_stats_path if self._datasets else None
 
     @staticmethod
-    def _resolve_shared_stats(dataset_dir, task_name, roots, explicit, norm):
+    def _resolve_shared_stats(dataset_dir, task_name, roots, explicit, norm, mobile_base=False):
         """Resolve a single stats path shared by every sub-dataset (or None).
 
         explicit (if it exists) wins; single bucket → None (sub-dataset
         auto-resolves per-task); multi-bucket → pool stats over ALL buckets to a
-        dataset_dir-level file, computing once if absent.
+        dataset_dir-level file, computing once if absent. Mobile runs use a distinct
+        ``_eefbase_`` file (with a ``base`` block) so they never load a stale arm-only file.
         """
         if norm is None:
             return None
@@ -666,10 +748,11 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             return explicit
         if len(roots) <= 1:
             return None  # single bucket: keep the per-task auto-resolve path
-        name = f"{task_name}_eef_stats.npy" if task_name else "robocasa365_multitask_eef_stats.npy"
+        tag = "eefbase" if mobile_base else "eef"
+        name = f"{task_name}_{tag}_stats.npy" if task_name else f"robocasa365_multitask_{tag}_stats.npy"
         shared = os.path.join(dataset_dir, name)
         if not os.path.exists(shared):
-            _compute_shared_stats_rank0_synced(shared, [dr for _, dr in roots])
+            _compute_shared_stats_rank0_synced(shared, [dr for _, dr in roots], include_base=mobile_base)
         return shared
 
     @staticmethod
@@ -691,10 +774,10 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         # Single bucket: dataset_dir points straight at a lerobot/ dir.
         if os.path.isfile(os.path.join(dataset_dir, "meta", "info.json")):
             return [(task_name or _task_dir_name(dataset_dir), dataset_dir)]
-        # Root mode: discover every */lerobot bucket below dataset_dir, FILTERED to the
-        # fixed-base task list (so mobile-base tasks can't violate the base-drop assumption).
-        fixed_base = _fixed_base_task_names()
-        out, dropped = [], []
+        # Root mode: discover EVERY */lerobot bucket below dataset_dir (full RoboCasa365 — mobile +
+        # fixed; the base command is trained via mobile_base, no longer dropped). ``task_name`` filters
+        # to one task dir.
+        out = []
         for info_path in sorted(
             glob.glob(os.path.join(dataset_dir, "**", "lerobot", "meta", "info.json"), recursive=True)
         ):
@@ -702,12 +785,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             tn = os.path.basename(os.path.dirname(os.path.dirname(dr)))  # .../<Task>/<date>/lerobot
             if task_name and tn != task_name:
                 continue
-            if tn not in fixed_base:
-                dropped.append(tn)
-                continue
             out.append((tn, dr))
-        if dropped:
-            print(f"  [robocasa365] dropped {len(dropped)} non-fixed-base bucket(s): {sorted(set(dropped))[:8]}...")
         return out
 
     @property

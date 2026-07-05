@@ -6,8 +6,9 @@ type: robocasa365
 #   - a single task's lerobot/ bucket (has meta/info.json), or
 #   - a root holding many .../<Task>/<date>/lerobot buckets (multi-task: one
 #     RoboCasa365Dataset per bucket, concatenated).
-# Fixed-base task subset (moma_required=No, 111 tasks; 112 minus the excluded PanTransfer orphan):
-#   benchmarks/robocasa365/fixed_base_tasks.json
+# Full RoboCasa365 (all 365 tasks, mobile + fixed): root mode discovers every bucket. The mobile
+# base command is trained (mobile_base=true below), so tasks are no longer filtered to a fixed-base
+# subset. Eval targets the official 50 target tasks (see benchmarks/robocasa365/).
 dataset_dir: /path/to/robocasa365/datasets/v1.0
 task_name: null                   # null = use every discovered bucket; set name = filter to one task dir
 task_roots: null                  # optional explicit list of bucket paths (relative to dataset_dir); overrides discovery
@@ -71,19 +72,28 @@ action_mode: eef
 normalize_mode: min-max
 normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resolve under each bucket
 
-# ── Unified 80-D action space (cross-robot shared head) ──────────────────────
+# ── Unified 80-D action space (cross-robot shared head) + mobile base ────────
 # unify_action=true scatters this reader's 20-D EEF into a shared UNIFY_DIM (80) vector so
-# heterogeneous robots train one action head; unify_action=false (default) is byte-identical to
-# the 20-D reader. Turn it on in the mixture/unified config (like robotwin/robocoin/oxe_bcz).
+# heterogeneous robots train one action head (like robotwin/robocoin/oxe_bcz).
 # 80-D layout: [0:10) left eef (pos3+rot6d6+grip1)  [10:34) left hand  [34:44) right eef
 #              [44:68) right hand  [68:80) reserved. RoboCasa365 is single-arm: the real arm
 # lands in the LEFT eef slots (0-9, valid); the zero-padded right half maps to 34-43 but stays
 # masked out of the loss (LEFT_ARM_DIM_MASK is honored through the scatter).
+unify_action: true
+unify_action_map: ["0-9", "34-43"]  # raw left-arm 0-9 → unified 0-9, raw right-arm 10-19 → 34-43
+#
+# mobile_base=true (requires unify_action): read the RoboCasa-native base COMMAND raw from the
+# LeRobot action field ([x/y/yaw velocity, torso position, control_mode]) and scatter it into the
+# reserved slots [68:73) (ACTION side only; direct-to-env at eval, no bridge). Proprio stays 20-D
+# EEF — world-frame base pose is scene-arbitrary, so it is NOT added; the policy perceives base
+# state from the robot-mounted head video. See docs/plans/robocasa365-full-mobile.md.
+mobile_base: true
+#
 # REQUIRED when training with unify_action=true: also set the model head + proprio dims to 80, e.g.
 #   model.architecture.action_dim=80 model.architecture.state_dim=80
-# (the model config hardcodes 20 and does NOT auto-derive from the dataloader; same as robotwin).
-# Deploy needs no extra flag: model_loader reads unify_action/unify_action_map from the saved
-# config and wraps _UnifyAwareNormalizer (server gathers 80->20 out, scatters 20->80 proprio in),
-# so the eval client stays 20-D. Verified e2e: train(80-D) -> deploy -> real RoboCasa sim closes.
-unify_action: false
-unify_action_map: ["0-9", "34-43"]  # raw left-arm 0-9 → unified 0-9, raw right-arm 10-19 → 34-43
+# (the model config hardcodes 20 and does NOT auto-derive from the dataloader; same as robotwin;
+#  the current default is already 80 for the unified cross-robot head).
+# Deploy needs no extra flag: model_loader reads unify_action/unify_action_map/mobile_base from the
+# saved config and wraps _UnifyAwareNormalizer (server gathers 80->25 = arm20+base5, un-normalizes),
+# so the eval client bridges arm (20->OSC) + sends base raw. Base stats live under the "base" key of
+# {task}_eefbase_stats.npy (auto-computed).

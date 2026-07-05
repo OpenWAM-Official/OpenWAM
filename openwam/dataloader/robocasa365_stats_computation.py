@@ -45,8 +45,18 @@ def atomic_save_stats_npy(path: str, stats: dict) -> None:
     os.replace(actual_tmp, path)
 
 
-def _iter_episode_arm10(data_root: str):
-    """Yield each episode's raw ``(T, 10)`` arm pose from a v2.1 bucket."""
+# LeRobot ``action`` base command dims (mobile): [0:3] x/y/yaw vel, [3] torso, [4] control_mode.
+_ACTION_BASE = slice(0, 5)
+BASE_ACTION_DIM = 5
+
+
+def _iter_episode_arrays(data_root: str, include_base: bool = False):
+    """Yield ``(arm10, base5)`` per episode from a v2.1 bucket.
+
+    ``arm10`` = raw ``(T, 10)`` arm pose from ``observation.state`` (always). ``base5`` = raw
+    ``(T, 5)`` base command from the ``action`` field ([x/y/yaw vel, torso, control_mode]) when
+    ``include_base`` else ``None``.
+    """
     with open(os.path.join(data_root, "meta", "info.json")) as f:
         info = json.load(f)
     data_tmpl = info["data_path"]
@@ -55,64 +65,89 @@ def _iter_episode_arm10(data_root: str):
         episodes = [json.loads(line) for line in f if line.strip()]
     if not episodes:
         raise FileNotFoundError(f"No episodes in {data_root}/meta/episodes.jsonl")
+    cols = ["observation.state"] + (["action"] if include_base else [])
     for ep in episodes:
         ep_idx = int(ep["episode_index"])
         path = os.path.join(
             data_root, data_tmpl.format(episode_chunk=ep_idx // chunks_size, episode_index=ep_idx)
         )
-        state = np.stack(pd.read_parquet(path, columns=["observation.state"])["observation.state"].values)
-        yield state_to_arm10(state.astype(np.float32))
+        df = pd.read_parquet(path, columns=cols)
+        arm10 = state_to_arm10(np.stack(df["observation.state"].values).astype(np.float32))
+        base5 = np.stack(df["action"].values).astype(np.float32)[:, _ACTION_BASE] if include_base else None
+        yield arm10, base5
 
 
-def compute_normalization_stats(data_root: str) -> dict:
-    """Compute single-arm 10-D EEF stats for one RoboCasa365 task bucket.
+def _base_stats_block(base_chunks: list) -> dict:
+    """5-D base command stats, with a min==max / std==0 guard so constant dims (e.g. control_mode
+    all -1 or torso all 0 in fixed-base buckets) don't divide-by-zero at min-max/z-score time —
+    a constant dim then normalizes to a constant that still round-trips through denormalize."""
+    b = compute_extended_stats(base_chunks)
+    out = {k: np.asarray(b[k], np.float32).reshape(-1).copy() for k in ("mean", "std", "min", "max", "q01", "q99")}
+    degenerate = (out["max"] - out["min"]) < 1e-6
+    out["max"] = np.where(degenerate, out["min"] + 1.0, out["max"]).astype(np.float32)
+    out["std"] = np.where(out["std"] < 1e-6, 1.0, out["std"]).astype(np.float32)
+    if out["mean"].shape[0] != BASE_ACTION_DIM:
+        raise ValueError(f"base stats dim {out['mean'].shape[0]} != {BASE_ACTION_DIM}")
+    return out
 
-    Returns ``{"eef": {mean, std, min, max, q01, q99}, "num_timesteps": int}``.
+
+def compute_normalization_stats(data_root: str, include_base: bool = False) -> dict:
+    """Compute single-arm 10-D EEF stats (+ optional 5-D base command stats) for one bucket.
+
+    Returns ``{"eef": {...20-D...}, "num_timesteps": int}``, plus ``"base": {...5-D...}`` when
+    ``include_base`` (mobile: base command read from the LeRobot ``action`` field).
     """
-    chunks = []
-    total = 0
-    for i, arm10 in enumerate(_iter_episode_arm10(data_root)):
-        chunks.append(arm10)
+    arm_chunks, base_chunks, total = [], [], 0
+    for i, (arm10, base5) in enumerate(_iter_episode_arrays(data_root, include_base)):
+        arm_chunks.append(arm10)
         total += arm10.shape[0]
+        if include_base:
+            base_chunks.append(base5)
         if (i + 1) % 100 == 0:
             print(f"  [stats] {i + 1} episodes, {total} timesteps so far")
-    if not chunks:
+    if not arm_chunks:
         raise ValueError(f"No timesteps accumulated from {data_root}")
-    eef = compute_extended_stats(chunks)
+    eef = compute_extended_stats(arm_chunks)
     if len(eef["mean"]) != STATS_DIM:
         raise ValueError(f"computed arm dim {len(eef['mean'])} != {STATS_DIM}")
-    print(f"  [stats] done: {total} timesteps over {len(chunks)} episodes, dim={STATS_DIM}")
-    # Persist at the full 20-D action dim (left=arm, right=neutral) so the deploy normalizer
+    print(f"  [stats] done: {total} timesteps over {len(arm_chunks)} episodes, dim={STATS_DIM}"
+          f"{' +base5' if include_base else ''}")
+    # Persist arm at the full 20-D action dim (left=arm, right=neutral) so the deploy normalizer
     # can invert the model's 20-D output (the 10-D file was the deploy-break).
-    return {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
+    out = {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
+    if include_base:
+        out["base"] = _base_stats_block(base_chunks)
+    return out
 
 
-def compute_multitask_stats(data_roots: list[str]) -> dict:
-    """Compute ONE shared 10-D EEF stats across several task buckets.
+def compute_multitask_stats(data_roots: list[str], include_base: bool = False) -> dict:
+    """Compute ONE shared 10-D EEF (+ optional 5-D base) stats across several task buckets.
 
-    Mirrors robotwin's multi-task shared-stats contract: every task in a
-    multi-task run must train in the SAME normalized space, so stats are pooled
-    over all buckets (not computed per-task). Returns the same
-    ``{"eef": {...}, "num_timesteps": int}`` schema as the single-task path.
+    Mirrors robotwin's multi-task shared-stats contract: every task in a multi-task run must train
+    in the SAME normalized space, so stats are pooled over all buckets. Same schema as the
+    single-task path (plus a ``"base"`` block when ``include_base``).
     """
-    chunks = []
-    total = 0
+    arm_chunks, base_chunks, total = [], [], 0
     for dr in data_roots:
         n0 = total
-        for arm10 in _iter_episode_arm10(dr):
-            chunks.append(arm10)
+        for arm10, base5 in _iter_episode_arrays(dr, include_base):
+            arm_chunks.append(arm10)
             total += arm10.shape[0]
+            if include_base:
+                base_chunks.append(base5)
         print(f"  [multitask-stats] {os.path.basename(os.path.dirname(os.path.dirname(dr.rstrip('/'))))}: "
               f"+{total - n0} timesteps (running {total})")
-    if not chunks:
+    if not arm_chunks:
         raise ValueError(f"No timesteps accumulated from {len(data_roots)} buckets")
-    eef = compute_extended_stats(chunks)
+    eef = compute_extended_stats(arm_chunks)
     if len(eef["mean"]) != STATS_DIM:
         raise ValueError(f"computed arm dim {len(eef['mean'])} != {STATS_DIM}")
-    print(f"  [multitask-stats] done: {total} timesteps over {len(data_roots)} buckets, dim={STATS_DIM}")
-    # Persist at the full 20-D action dim (left=arm, right=neutral) so the deploy normalizer
-    # can invert the model's 20-D output (the 10-D file was the deploy-break).
-    return {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
+    print(f"  [multitask-stats] done: {total} timesteps over {len(data_roots)} buckets, dim={STATS_DIM}"
+          f"{' +base5' if include_base else ''}")
+    out = {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
+    if include_base:
+        out["base"] = _base_stats_block(base_chunks)
+    return out
 
 
 def main():
