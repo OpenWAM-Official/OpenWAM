@@ -407,6 +407,30 @@ class TestMultiAndRegistry:
         # no per-task stats files were written under the buckets
         assert not list(Path(tmp_path).glob("**/taskA_eef_stats.npy"))
 
+    def test_multi_mobile_shared_eefbase_stats(self, tmp_path):
+        # Multi-bucket + mobile_base: ONE shared _eefbase_ stats file (with a 5-D 'base' block)
+        # pooled over all buckets and forwarded to every sub-dataset; samples carry the base command
+        # in the 80-D reserved slots [68:73). Covers the multitask mobile path e2e (in-process).
+        make_robocasa_bucket(tmp_path / "taskA")
+        make_robocasa_bucket(tmp_path / "taskB")
+        with _mock_video_decoder():
+            ds = MultiTaskRoboCasa365Dataset(
+                dataset_dir=str(tmp_path), multiview=False, height=64, width=96, normalize_mode="min-max",
+                unify_action=True, unify_action_map=["0-9", "34-43"], mobile_base=True,
+            )
+            s = ds[0]
+        shared = Path(tmp_path) / "robocasa365_multitask_eefbase_stats.npy"
+        assert shared.exists(), "multi-bucket mobile must pool ONE shared _eefbase_ stats file"
+        blob = np.load(shared, allow_pickle=True).item()
+        assert "base" in blob and len(blob["base"]["mean"]) == 5, "shared stats need a 5-D base block"
+        assert {d.normalization_stats_path for d in ds._datasets} == {str(shared)}  # all share it
+        assert not list(Path(tmp_path).glob("**/*_eef_stats.npy"))  # not the arm-only file
+        assert ds.action_dim == 80
+        assert s["action"].shape == (32, 80)
+        am = s["action_mask"].numpy()
+        assert am[0, 68:73].all() and am[0, :10].all() and not am[0, 34:44].any()
+        assert np.abs(s["action"].numpy()[:, 68:73]).sum() > 0  # base carries a command
+
     def test_root_mode_keeps_all_including_mobile(self, tmp_path):
         # Full RoboCasa365 (fixed-base filter removed): root discovery keeps EVERY bucket, including
         # mobile (formerly moma_required=Yes) tasks — the base command is trained, not dropped.
