@@ -25,9 +25,11 @@ class DiTVelocityCache:
     expected to differ significantly. If not, :meth:`get_cached` returns
     the previous prediction directly.
 
-    The decision is based on cosine similarity between consecutive
-    velocity predictions. When similarity exceeds the threshold, the
-    cached value is reused with optional linear interpolation.
+    The decision is based on cosine similarity between consecutive velocity
+    predictions. Joint video/action callers additionally require the cached
+    action prediction to be stable against the previous action prediction.
+    When all required similarities exceed the threshold, the cached value is
+    reused with optional linear interpolation.
 
     Args:
         cosine_threshold: Minimum cosine similarity to trigger cache reuse.
@@ -53,6 +55,7 @@ class DiTVelocityCache:
         self._cached_action_velocity: Optional[Tensor] = None
         self._cached_sigma: Optional[float] = None
         self._prev_velocity: Optional[Tensor] = None
+        self._prev_action_velocity: Optional[Tensor] = None
         self._consecutive_skips: int = 0
         self._total_skips: int = 0
         self._total_steps: int = 0
@@ -74,7 +77,7 @@ class DiTVelocityCache:
         if self._cached_velocity is None or self._prev_velocity is None:
             return True
 
-        if require_action and self._cached_action_velocity is None:
+        if require_action and (self._cached_action_velocity is None or self._prev_action_velocity is None):
             return True
 
         if self._consecutive_skips >= self.max_consecutive_skips:
@@ -84,13 +87,19 @@ class DiTVelocityCache:
         v1 = self._prev_velocity.flatten().float()
         v2 = self._cached_velocity.flatten().float()
         cos_sim = torch.nn.functional.cosine_similarity(v1.unsqueeze(0), v2.unsqueeze(0))
+        if cos_sim.item() < self.cosine_threshold:
+            return True
 
-        if cos_sim.item() >= self.cosine_threshold:
-            self._consecutive_skips += 1
-            self._total_skips += 1
-            return False
+        if require_action:
+            a1 = self._prev_action_velocity.flatten().float()
+            a2 = self._cached_action_velocity.flatten().float()
+            action_cos_sim = torch.nn.functional.cosine_similarity(a1.unsqueeze(0), a2.unsqueeze(0))
+            if action_cos_sim.item() < self.cosine_threshold:
+                return True
 
-        return True
+        self._consecutive_skips += 1
+        self._total_skips += 1
+        return False
 
     def get_cached(self) -> Tensor:
         """Return the cached velocity prediction.
@@ -118,6 +127,7 @@ class DiTVelocityCache:
                 forward instead of re-running it just to recover action output.
         """
         self._prev_velocity = self._cached_velocity
+        self._prev_action_velocity = self._cached_action_velocity
         self._cached_velocity = velocity.detach()
         self._cached_action_velocity = action_velocity.detach() if action_velocity is not None else None
         self._cached_sigma = sigma
@@ -129,6 +139,7 @@ class DiTVelocityCache:
         self._cached_action_velocity = None
         self._cached_sigma = None
         self._prev_velocity = None
+        self._prev_action_velocity = None
         self._consecutive_skips = 0
         self._total_skips = 0
         self._total_steps = 0

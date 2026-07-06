@@ -51,6 +51,18 @@ def test_cache_hit_can_reuse_joint_action_prediction():
     assert torch.allclose(cache.get_cached_action(), a * 1.01)
 
 
+def test_cache_recomputes_when_action_velocity_diverges():
+    cache = DiTVelocityCache(cosine_threshold=0.9)
+    v = torch.randn(1, 4, 8, 8)
+    a = torch.randn(1, 8, 7)
+
+    cache.update(v, 0.9, a)
+    cache.update(v * 1.01, 0.85, -a)
+
+    assert cache.should_recompute(0.8, require_action=True) is True
+    assert cache.stats["total_skips"] == 0
+
+
 def test_cache_requires_action_when_joint_caller_needs_it():
     cache = DiTVelocityCache(cosine_threshold=0.9)
     v = torch.randn(1, 4, 8, 8)
@@ -93,6 +105,8 @@ def test_reset_clears_state():
     cache.update(torch.randn(1, 4, 8, 8), 0.9)
     cache.reset()
     assert cache._cached_velocity is None
+    assert cache._cached_action_velocity is None
+    assert cache._prev_action_velocity is None
     assert cache.skip_rate == 0.0
 
 
