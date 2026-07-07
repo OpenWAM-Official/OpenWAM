@@ -30,9 +30,10 @@ training:
 
   # --- DeepSpeed / precision ---
   mixed_precision: bf16           # bf16 / fp16 / no — training + deploy compute dtype
-  use_deepspeed: true             # false = plain Accelerate (DDP, no ZeRO). REQUIRED for
-                                  # tri_system: DeepSpeed bf16 injects NaN into the trimodal
-                                  # MoT gradients (the model trains cleanly without DeepSpeed).
+  use_deepspeed: true             # false = plain Accelerate (DDP, no ZeRO). Set false for
+                                  # tri_system in this repo's pinned env (transformers 5.x +
+                                  # Qwen3-VL-4B): DeepSpeed bf16 was observed to NaN the trimodal
+                                  # MoT at step 1; not reproduced on transformers 4.57.x.
   zero_stage: 2                   # DeepSpeed ZeRO stage: 1 or 2 (CLI override: training.zero_stage=1)
 
   # --- Memory optimization ---

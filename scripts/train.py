@@ -55,14 +55,15 @@ def _build_accelerator(cfg: DictConfig):
     mixed_precision = str(t.mixed_precision)
     logger.info("mixed_precision = %s (from cfg.training.mixed_precision)", mixed_precision)
 
-    # tri_system requires the non-DeepSpeed path: DeepSpeed's bf16 gradient
-    # handling injects NaN into the trimodal MoT within a few steps (the identical
-    # model trains cleanly without DeepSpeed — verified in plain-torch bf16), and
-    # its non-reentrant activation checkpoint is corrupted by DeepSpeed's grad
-    # accumulation on recompute. With `use_deepspeed=false` we build a plain
-    # Accelerator (DDP + bf16 autocast); ZeRO optimizer/grad sharding is dropped,
-    # so multi-GPU memory per rank is higher — keep gradient checkpointing on
-    # (it works correctly outside DeepSpeed) and reduce batch/enable more GPUs if needed.
+    # tri_system + DeepSpeed NaN (environment-scoped). Under this repo's pinned
+    # stack (transformers 5.12.1 + Qwen3-VL-4B, bf16) DeepSpeed ZeRO-1/2 drove the
+    # trimodal MoT to NaN right after the first optimizer step; the identical model
+    # on the plain Accelerate/DDP path trained cleanly (both start at step-1
+    # grad_norm ~264, only DeepSpeed on/off differs). Not reproduced on transformers
+    # 4.57.x + Qwen3-VL-2B (external review). With `use_deepspeed=false` we build a
+    # plain Accelerator (DDP + bf16 autocast); ZeRO optimizer/grad sharding is
+    # dropped, so per-rank memory is higher — keep gradient checkpointing on and
+    # reduce batch / add GPUs if needed.
     use_deepspeed = bool(getattr(t, "use_deepspeed", True))
     if not use_deepspeed:
         logger.info("use_deepspeed=false → plain Accelerator (DDP), no ZeRO/DeepSpeed plugin")
