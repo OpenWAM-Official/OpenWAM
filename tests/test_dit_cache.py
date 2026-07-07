@@ -51,6 +51,26 @@ def test_cache_hit_can_reuse_joint_action_prediction():
     assert torch.allclose(cache.get_cached_action(), a * 1.01)
 
 
+def test_cache_clones_forward_outputs():
+    cache = DiTVelocityCache(cosine_threshold=0.9)
+    v = torch.ones(1, 4, 8, 8)
+    a = torch.ones(1, 8, 7)
+
+    cache.update(v, 0.9, a)
+    cached_v = cache.get_cached()
+    cached_a = cache.get_cached_action()
+
+    assert cached_v.data_ptr() != v.data_ptr()
+    assert cached_a is not None
+    assert cached_a.data_ptr() != a.data_ptr()
+
+    v.zero_()
+    a.zero_()
+
+    assert torch.all(cached_v == 1)
+    assert torch.all(cached_a == 1)
+
+
 def test_cache_recomputes_when_action_velocity_diverges():
     cache = DiTVelocityCache(cosine_threshold=0.9)
     v = torch.randn(1, 4, 8, 8)

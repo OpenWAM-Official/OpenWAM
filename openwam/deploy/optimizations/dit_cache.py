@@ -128,8 +128,8 @@ class DiTVelocityCache:
         """
         self._prev_velocity = self._cached_velocity
         self._prev_action_velocity = self._cached_action_velocity
-        self._cached_velocity = velocity.detach()
-        self._cached_action_velocity = action_velocity.detach() if action_velocity is not None else None
+        self._cached_velocity = velocity.detach().clone()
+        self._cached_action_velocity = action_velocity.detach().clone() if action_velocity is not None else None
         self._cached_sigma = sigma
         self._consecutive_skips = 0
 
