@@ -487,10 +487,23 @@ class OpenWAMTrainer:
             self.architecture, optimizer, dataloader, scheduler = self.accelerator.prepare(*prepare_args)
         else:
             self.architecture, optimizer, dataloader = self.accelerator.prepare(*prepare_args)
+        # After prepare, self.architecture is the wrapped handle used for the loop's
+        # forward/backward. Architecture-level helpers must run on the UNDERLYING
+        # module, not the wrapper: DeepSpeedEngine.__getattr__ forwards unknown attrs
+        # to the inner module, but DistributedDataParallel does NOT — so calling
+        # set_dtype_device/move_frozen_to_device on the wrapper raises AttributeError
+        # under plain DDP (use_deepspeed=false, world_size>1). unwrap_model returns
+        # the inner module for both backends (no-op single-GPU, where Accelerate adds
+        # no wrapper).
+        arch = self.accelerator.unwrap_model(self.architecture)
         # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
-        self.architecture.set_dtype_device(self.architecture.dtype, self.accelerator.device)
-        self.architecture.move_frozen_to_device(self.accelerator.device)
-        logger.info("DeepSpeed: architecture wrapped, device=%s", self.accelerator.device)
+        arch.set_dtype_device(arch.dtype, self.accelerator.device)
+        arch.move_frozen_to_device(self.accelerator.device)
+        logger.info(
+            "architecture wrapped (%s), device=%s",
+            type(self.architecture).__name__,
+            self.accelerator.device,
+        )
         return optimizer, dataloader, scheduler
 
     # (8) Called by train() on the resume path — restore full state, map step -> (start_epoch, skip).
