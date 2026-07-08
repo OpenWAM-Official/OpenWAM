@@ -431,6 +431,12 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
     def normalization_stats_path(self) -> Optional[str]:
         return self._normalization_stats_path
 
+    @normalization_stats_path.setter
+    def normalization_stats_path(self, value: Optional[str]) -> None:
+        if value is None and hasattr(self, "_normalization_stats_path"):
+            return
+        self._normalization_stats_path = str(value) if value else None
+
     @property
     def normalization_stats(self):
         # Samples leave this reader already normalized when normalize_mode is set.
