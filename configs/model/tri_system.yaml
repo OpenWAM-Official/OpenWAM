@@ -6,16 +6,6 @@
 # trimodal driver counts video tokens as grid_frames·H·W and drives the 5D-grid
 # stream via vb.pre/post_attn_at_layer — the same backbone-agnostic path as
 # dual_system joint_self_attn; no Cosmos-specific code.
-#
-# DeepSpeed-NaN caveat (environment-scoped, not universal). Under this repo's
-# pinned stack (transformers 5.12.1 + Qwen3-VL-4B, bf16) DeepSpeed ZeRO-1/2 drove
-# the trimodal MoT to NaN right after the first optimizer step, while the identical
-# model on the plain Accelerate/DDP path trained cleanly (both start at step-1
-# grad_norm ~264; only DeepSpeed on/off differs). This was NOT reproduced on
-# transformers 4.57.x + Qwen3-VL-2B (external review), so it depends on the stack.
-# If you hit NaN, set `training.use_deepspeed=false` (plain DDP + bf16, no ZeRO).
-# That drops ZeRO optimizer/grad sharding, so per-rank memory is higher — keep
-# gradient checkpointing on and scale GPUs/batch.
 
 defaults:
   - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25
