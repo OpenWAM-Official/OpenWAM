@@ -60,11 +60,26 @@ def test_single_view_ignores_wrist_inputs():
     assert obs["image"].size == (32, 32)
 
 
-def test_multiview_black_fills_missing_wrists():
-    obs = _multi_view().preprocess(
-        {"images": {"head_camera": _jpeg_b64(), "left_wrist_camera": None, "right_wrist_camera": None}, "prompt": "x"}
-    )
-    assert obs["image"].size == (32, 32)
+def test_multiview_missing_wrists_raise():
+    # A multi-view checkpoint must fail loudly on None wrists rather than
+    # black-filling them and silently degrading the success rate.
+    with pytest.raises(ObsValidationError, match="left_wrist_camera"):
+        _multi_view().preprocess(
+            {
+                "images": {"head_camera": _jpeg_b64(), "left_wrist_camera": None, "right_wrist_camera": None},
+                "prompt": "x",
+            }
+        )
+
+
+def test_multiview_missing_right_wrist_raises():
+    with pytest.raises(ObsValidationError, match="right_wrist_camera"):
+        _multi_view().preprocess(
+            {
+                "images": {"head_camera": _jpeg_b64(), "left_wrist_camera": _jpeg_b64(seed=1)},
+                "prompt": "x",
+            }
+        )
 
 
 def test_missing_images_dict_raises():
@@ -160,29 +175,24 @@ def test_multiview_all_three_bright_canvas():
     assert np.asarray(obs["image"]).mean() > 200
 
 
-def test_multiview_black_fill_pixels_when_wrists_none():
-    obs = _multi_view_canvas().preprocess(
-        {
-            "images": {"head_camera": _solid_b64(), "left_wrist_camera": None, "right_wrist_camera": None},
-            "prompt": "go",
-        }
-    )
-    arr = np.asarray(obs["image"])
-    # Layout: top 2/3 (rows 0-255) is head, bottom 1/3 is the two wrist slots.
-    assert arr[:256].mean() > 200
-    assert arr[256:].max() < 5
+def test_multiview_none_wrists_raise_instead_of_black_fill():
+    with pytest.raises(ObsValidationError, match="left_wrist_camera"):
+        _multi_view_canvas().preprocess(
+            {
+                "images": {"head_camera": _solid_b64(), "left_wrist_camera": None, "right_wrist_camera": None},
+                "prompt": "go",
+            }
+        )
 
 
-def test_multiview_black_fill_one_wrist_missing():
-    obs = _multi_view_canvas().preprocess(
-        {
-            "images": {"head_camera": _solid_b64(), "left_wrist_camera": _solid_b64()},
-            "prompt": "go",
-        }
-    )
-    bottom = np.asarray(obs["image"])[256:]
-    assert bottom[:, : 320 // 2].mean() > 200
-    assert bottom[:, 320 // 2 :].max() < 5
+def test_multiview_one_wrist_missing_raises():
+    with pytest.raises(ObsValidationError, match="right_wrist_camera"):
+        _multi_view_canvas().preprocess(
+            {
+                "images": {"head_camera": _solid_b64(), "left_wrist_camera": _solid_b64()},
+                "prompt": "go",
+            }
+        )
 
 
 # --- Prompt template contract (migrated from test_policy_server_obs.py) ---
