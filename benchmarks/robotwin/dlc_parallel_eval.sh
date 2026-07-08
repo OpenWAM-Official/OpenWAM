@@ -666,11 +666,24 @@ if (( DRY_RUN )) && [[ "${NODE_RANK}" == "0" ]]; then
     done
     touch "${DRY_RUN_WORKER_START_FILE}"
 fi
-wait "${worker_pids[@]}"
+# Wait on each worker individually. A bare `wait "${worker_pids[@]}"` returns
+# only the LAST pid's status, so under `set -e` a non-zero exit from the last
+# worker would abort the script *before* the done sentinel is written, leaving
+# rank0 to block until ALL_NODES_DONE_TIMEOUT_SEC. Capture every worker's status
+# here so the sentinel is always written and rank0 can proceed.
+worker_rc=0
+for pid in "${worker_pids[@]}"; do
+    wait "${pid}" || worker_rc=$?
+done
 worker_pids=()
 
+# Always publish the done sentinel before honoring any worker failure, so a
+# corrupt-queue abort on this node cannot strand rank0's node-completion wait.
 touch "${LOG_DIR}/.node${NODE_RANK}_done"
 echo "[node${NODE_RANK}] local workers finished"
+if (( worker_rc != 0 )); then
+    echo "[node${NODE_RANK}] WARNING: a worker exited non-zero (rc=${worker_rc}); see worker logs" >&2
+fi
 
 if [[ "${NODE_RANK}" == "0" ]]; then
     echo "[rank0] waiting for all node done sentinels"
@@ -706,6 +719,11 @@ if [[ "${NODE_RANK}" == "0" ]]; then
     if (( DRY_RUN )); then
         echo "[DRYRUN] shared-queue assignment validated: ${finished_count}/${TOTAL_JOBS} jobs claimed exactly once"
     fi
+fi
+
+if (( worker_rc != 0 )); then
+    echo "[node${NODE_RANK}] exiting non-zero due to worker failure (rc=${worker_rc})" >&2
+    exit "${worker_rc}"
 fi
 
 echo "[node${NODE_RANK}] done"
