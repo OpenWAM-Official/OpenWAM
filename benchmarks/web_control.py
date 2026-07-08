@@ -294,6 +294,47 @@ def parse_success_counts_from_text(text: str) -> tuple[int, int] | None:
     return last_counts
 
 
+# RoboTwin prints ``step: N / M`` per step and ``Success!`` / ``Fail!`` per
+# episode. A ``Fail!`` whose last step reached ``N >= M`` was truncated at the
+# step limit (out of steps) rather than the model reaching a terminal state —
+# a non-model cause of a low success rate. This is computed over the full log
+# (not the tail) so it is only wired into the on-demand CSV export, never the
+# polled live state where a tail window would undercount it.
+STEP_PROGRESS_RE = re.compile(r"step:\s*(\d+)\s*/\s*(\d+)")
+EPISODE_VERDICT_RE = re.compile(r"\b(Success|Fail)!")
+
+
+def count_step_limit_hits(text: str) -> int:
+    hits = 0
+    last_step: tuple[int, int] | None = None
+    for line in strip_ansi(text).splitlines():
+        step_match = STEP_PROGRESS_RE.search(line)
+        if step_match:
+            last_step = (int(step_match.group(1)), int(step_match.group(2)))
+            continue
+        verdict = EPISODE_VERDICT_RE.search(line)
+        if verdict:
+            if (
+                verdict.group(1) == "Fail"
+                and last_step is not None
+                and last_step[1] > 0
+                and last_step[0] >= last_step[1]
+            ):
+                hits += 1
+            last_step = None
+    return hits
+
+
+def step_limit_hits_for_log(path: Path) -> int | None:
+    """Full-file step-limit-hit count for one task log, or None if unreadable."""
+    if not path.is_file():
+        return None
+    try:
+        return count_step_limit_hits(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+
+
 
 def safe_relative(root: Path, path: Path) -> str | None:
     try:
@@ -731,6 +772,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     "success_rate": "" if job.get("success_rate") is None else f"{float(job['success_rate']):.6f}",
                     "success": "" if job.get("success") is None else job.get("success"),
                     "episodes": "" if job.get("episodes") is None else job.get("episodes"),
+                    "step_limit_hits": self._step_limit_hits_for_job(job),
                     "duration_sec": "" if job.get("duration_sec") is None else f"{float(job['duration_sec']):.3f}",
                     "duration": job.get("duration", ""),
                     "log_path": job.get("log", ""),
@@ -738,6 +780,18 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                 }
             )
         return rows
+
+    def _step_limit_hits_for_job(self, job: dict[str, Any]) -> str:
+        """Full-log step-limit-hit count for a job, blank when unavailable.
+
+        ``Path(root) / log`` collapses to ``log`` when it is already absolute
+        (as summary.tsv records it), so both relative and absolute refs work.
+        """
+        log_ref = job.get("log", "")
+        if not log_ref:
+            return ""
+        hits = step_limit_hits_for_log(self.root / log_ref)
+        return "" if hits is None else str(hits)
 
     def csv_fieldnames(self, rows: list[dict[str, Any]]) -> list[str]:
         return [
@@ -753,6 +807,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             "success_rate",
             "success",
             "episodes",
+            "step_limit_hits",
             "duration_sec",
             "duration",
             "log_path",

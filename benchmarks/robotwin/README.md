@@ -383,6 +383,8 @@ The CSV columns are:
 | `status` | `ok` or `failed` from `summary.tsv`. |
 | `exit_code` | Task process exit code. |
 | `success_rate` | Parsed numeric success rate from the task log; blank if not found. |
+| `episodes` | Number of `Success!` / `Fail!` verdicts parsed from the task log; blank if none. |
+| `step_limit_hits` | `Fail!` episodes truncated at `step_lim` (last `step: N / M` had `N >= M`). These ran out of steps rather than the model reaching a terminal state, so they are **not necessarily model errors** — a high count means `step_lim` may be too tight for this policy (see `step_limits.yml`), not that the model is worse. |
 | `log_path` | Full path to the per-task log used for parsing. |
 
 The exporter also validates run completeness when `run.env` is available: duplicate `task/mode` rows, missing rows, unexpected rows, or a row-count mismatch are reported. It searches nested `node*/worker*/*.log` files when `summary.tsv` is absent and strips ANSI escape sequences before parsing `Success rate`.
