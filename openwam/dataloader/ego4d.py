@@ -65,9 +65,13 @@ logger = logging.getLogger(__name__)
 # order ``英文:<en>。中文:<zh>``. To be robust:
 #   * greedy ``^.*英文`` anchors to the LAST ``英文`` marker (so a duplicated
 #     marker doesn't leak the Chinese clause before it), and
-#   * any trailing ``中文:…`` tail (reversed order) is stripped.
-# Both the ASCII colon ``:`` and the full-width colon ``：`` (U+FF1A) appear after
-# 英文/中文, so the character classes cover both.
+#   * any trailing ``中文:…`` clause is split off at the ``中文`` marker.
+# Note the split only removes text from ``中文`` onward, so a separator that sits
+# BEFORE it (the ideographic full stop ``。`` in ``…<en>。中文:…``) stays on the
+# English tail; being non-Latin it then trips the allowlist and the episode is
+# dropped. That is the conservative outcome (a handful of reversed-order tasks are
+# discarded rather than salvaged), not a rescue. Both the ASCII colon ``:`` and the
+# full-width colon ``：`` (U+FF1A) appear after 英文/中文, so the classes cover both.
 _EN_MARKER_RE = re.compile(r"(?s)^.*英文[:：]\s*(.*)$")
 _ZH_MARKER_RE = re.compile(r"中文[:：]")
 # English-only guard (allowlist). Reject any character OUTSIDE: ASCII
@@ -121,7 +125,9 @@ def _episode_tasks_string(tasks_cell) -> Optional[str]:
     if tasks_cell is None:
         return None
     if isinstance(tasks_cell, (list, tuple, np.ndarray)):
-        return str(tasks_cell[0]) if len(tasks_cell) else None
+        # A ``[None]`` cell must map to None, NOT the literal string "None".
+        first = tasks_cell[0] if len(tasks_cell) else None
+        return None if first is None else str(first)
     return str(tasks_cell)
 
 
