@@ -90,13 +90,21 @@ def compute_bucket(bucket_dir: str) -> dict:
         present = set(pq.ParquetFile(fp).schema_arrow.names)
         cols = [c for c in _COLS if c in present]
         df = pd.read_parquet(fp, columns=cols)
+        n_files += 1
+        n_time += len(df)
+        if not len(df):
+            continue
         for c in cols:
             arr = np.stack(df[c].values).astype(np.float32)
             accs[c].update_batch(arr)
-        n_files += 1
-        n_time += len(df)
     out = {}
     for c, acc in accs.items():
+        if acc.count == 0:
+
+
+
+
+            continue
         s = acc.finalize()
         s["num_timesteps"] = int(acc.count)
         out[c] = s
@@ -112,8 +120,12 @@ def _process_one(bucket_dir: str):
         result = compute_bucket(bucket_dir)
         out_path = os.path.join(bucket_dir, "meta", OUT_FILENAME)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "w") as f:
+
+
+        tmp_path = f"{out_path}.{os.getpid()}.tmp"
+        with open(tmp_path, "w") as f:
             json.dump(result, f, indent=2)
+        os.replace(tmp_path, out_path)
         return name, {"num_timesteps": result["num_timesteps"], "num_files": result["num_files"], "path": out_path}
     except Exception as e:
         return name, {"error": f"{type(e).__name__}: {e}"}

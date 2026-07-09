@@ -61,6 +61,7 @@
 
 
 
+
 from __future__ import annotations
 
 import json
@@ -72,7 +73,6 @@ import numpy as np
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
 from openwam.dataloader.robocoin import GRIP_EXCLUDED_DIM_MASK, _build_dex_unify_map
-from openwam.dataloader.utils.eef import EEF_DIM as _ACTION_DIM
 from openwam.dataloader.utils.normalization import (
     ROT6D_DIMS_EEF20,
     apply_normalization,
@@ -97,8 +97,14 @@ _DEX_RAW_DIM = 18 + 2 * _DEX_PER_HAND
 
 
 
-_MOVE_DIM = 3
-_MOVE_SLOTS = (68, 69, 70)
+
+
+
+
+
+_MOVE_SRC_DIMS = (0, 2)
+_MOVE_DIM = len(_MOVE_SRC_DIMS)
+_MOVE_SLOTS = (68, 70)
 _MOVE_EPS = 1e-6
 
 
@@ -144,6 +150,21 @@ _ROT6D_DIMS_DEX30 = (3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23)
 _STAT_FIELDS = ("min", "max", "mean", "std", "q01", "q99")
 
 
+
+
+
+_STATS_FILENAMES = ("stats_pooled.json", "stats.json")
+
+
+def _resolve_stats_path(dataset_dir):
+    """Public implementation. Dataset-specific audit notes were removed."""
+    for fn in _STATS_FILENAMES:
+        p = Path(dataset_dir) / "meta" / fn
+        if p.exists():
+            return p
+    return None
+
+
 def _bucket_has_base_motion(dataset_dir) -> bool:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -156,25 +177,31 @@ def _bucket_has_base_motion(dataset_dir) -> bool:
 
 
 
-    for fn in ("stats_pooled.json", "stats.json"):
-        p = Path(dataset_dir) / "meta" / fn
-        if not p.exists():
+    p = _resolve_stats_path(dataset_dir)
+    if p is None:
+        logger.warning(
+            "AgiBotWorld %s: no stats file (%s) — treating base as stationary (move slots unmapped).",
+            dataset_dir, " / ".join(_STATS_FILENAMES),
+        )
+        return False
+    try:
+        with open(p) as f:
+            st = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning(
+            "AgiBotWorld %s: could not read %s (%s) — treating base as stationary (move slots unmapped).",
+            dataset_dir, p.name, e,
+        )
+        return False
+    moved = False
+    for key in ("action.robot_velocity", "observation.state.robot_velocity"):
+        blk = st.get(key)
+        if not blk:
             continue
-        try:
-            with open(p) as f:
-                st = json.load(f)
-        except (OSError, ValueError):
-            continue
-        moved = False
-        for key in ("action.robot_velocity", "observation.state.robot_velocity"):
-            blk = st.get(key)
-            if not blk:
-                continue
-            lo = np.abs(np.asarray(blk.get("min", [0.0]), dtype=np.float64)).max()
-            hi = np.abs(np.asarray(blk.get("max", [0.0]), dtype=np.float64)).max()
-            moved = moved or max(lo, hi) > _MOVE_EPS
-        return moved
-    return False
+        lo = np.abs(np.asarray(blk.get("min", [0.0]), dtype=np.float64)).max()
+        hi = np.abs(np.asarray(blk.get("max", [0.0]), dtype=np.float64)).max()
+        moved = moved or max(lo, hi) > _MOVE_EPS
+    return moved
 
 
 def _eef18_to_eef20(ee18: np.ndarray, grip2: np.ndarray) -> np.ndarray:
@@ -256,7 +283,7 @@ class AgiBotWorldDataset(LeRobotV3Reader):
                 unify_action_map = _build_dex_unify_map(_DEX_PER_HAND, _DEX_PER_HAND) + move_slots
             else:
                 self.ACTION_DIM = _EEF_RAW_DIM + move_dim
-                unify_action_map = ["0-9", "34-43"] + (["68-70"] if self._has_move else [])
+                unify_action_map = ["0-9", "34-43"] + move_slots
         super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
 
 
@@ -307,6 +334,8 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
 
+
+
         self._action_norm_stats = None
         self._proprio_norm_stats = None
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
@@ -314,24 +343,24 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
 
-        pooled_path = self._dataset_dir / "meta" / "stats_pooled.json"
-        shipped_path = self._dataset_dir / "meta" / "stats.json"
-        if pooled_path.exists():
-            stats_path = pooled_path
-        elif shipped_path.exists():
-            stats_path = shipped_path
-            if self._normalize_mode == "quantile":
-                logger.warning(
-                    "AgiBotWorld bucket %s: using shipped stats.json for quantile normalization, but its "
-                    "q01/q99 are UNRELIABLE (LeRobot averages per-episode quantiles → collapsed toward the "
-                    "mean). Run `python -m openwam.dataloader.utils.stats_computation.agibotworld_stats_computation "
-                    "--dataset_dir <root>` to generate meta/stats_pooled.json, or use z-score/min-max.",
-                    self._dataset_id,
-                )
-        else:
+        stats_path = _resolve_stats_path(self._dataset_dir)
+        if stats_path is None:
             raise FileNotFoundError(
-                f"normalize_mode={self._normalize_mode!r} but no stats file found "
-                f"({pooled_path} / {shipped_path}); set normalize_mode=null to disable."
+                f"normalize_mode={self._normalize_mode!r} but no stats file found in "
+                f"{self._dataset_dir / 'meta'} ({' / '.join(_STATS_FILENAMES)}); set normalize_mode=null to disable."
+            )
+        if self._normalize_mode == "quantile" and stats_path.name == "stats.json":
+
+
+
+
+            raise ValueError(
+                f"AgiBotWorld bucket {self._dataset_id}: normalize_mode='quantile' requires the recomputed "
+                f"meta/stats_pooled.json, but only the shipped {stats_path} is present, whose q01/q99 are "
+                f"UNRELIABLE (LeRobot averages per-episode quantiles → collapsed toward the mean). Run "
+                f"`python -m openwam.dataloader.utils.stats_computation.agibotworld_stats_computation "
+                f"--dataset_dir <root>` to generate stats_pooled.json, or switch normalize_mode to "
+                f"z-score / min-max / null."
             )
         with open(stats_path) as f:
             raw = json.load(f)
@@ -365,9 +394,11 @@ class AgiBotWorldDataset(LeRobotV3Reader):
             if self._has_move:
 
 
-                vel = _mat(f"{prefix}.robot_velocity", _MOVE_DIM)
+
+                vel = _mat(f"{prefix}.robot_velocity", 3)
+                src = list(_MOVE_SRC_DIMS)
                 for k in _STAT_FIELDS:
-                    combined[k] = np.concatenate([combined[k], vel[k]]).astype(np.float32)
+                    combined[k] = np.concatenate([combined[k], vel[k][src]]).astype(np.float32)
             return combined
 
         self._action_norm_stats = _build("action")
@@ -408,9 +439,10 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
     def _append_move(self, raw: np.ndarray, win, col: str, n: int) -> np.ndarray:
         """Public implementation. Dataset-specific audit notes were removed."""
+
         if not self._has_move:
             return raw
-        vel = np.stack(win[col].values[:n]).astype(np.float32)
+        vel = np.stack(win[col].values[:n]).astype(np.float32)[:, _MOVE_SRC_DIMS]
         return np.concatenate([raw, vel], axis=-1)
 
     def _action_20d(self, win) -> np.ndarray:
@@ -464,12 +496,8 @@ class MultiAgiBotWorldDataset(MultiLeRobotV3Reader):
             len(self),
         )
 
-    @property
-    def action_dim(self):
 
 
-
-        return self._buckets[0].action_dim if self._buckets else _ACTION_DIM
 
     @classmethod
     def from_config(cls, config, split: str = "train"):

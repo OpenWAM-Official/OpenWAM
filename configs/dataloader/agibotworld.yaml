@@ -24,6 +24,5 @@ normalize_mode: quantile
 enable_action_supervision: true
 
 unify_action: true
-unify_action_map: ["0-9", "34-43"]
 
 total_hours: null
