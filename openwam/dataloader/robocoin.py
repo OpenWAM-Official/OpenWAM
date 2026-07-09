@@ -204,6 +204,10 @@ HEAD_CAMERA_PRIORITY = [
     "observation.images.cam_high_left_rgb",
     "observation.images.cam_high_realsense_rgb",
     "observation.images.cam_front_rgb",
+
+
+
+    "observation.images.cam_front_head_rgb",
     "observation.images.cam_front_chest_rgb",
     "observation.images.cam_chest_rgb",
 

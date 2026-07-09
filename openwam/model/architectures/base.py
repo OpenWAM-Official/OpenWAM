@@ -1518,23 +1518,16 @@ class BaseWAMArchitecture(ABC, nn.Module):
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
             a_timestep = torch.tensor([t_a], dtype=dtype, device=device) if action_stepping else None
 
-            if dit_cache is not None and video_stepping and not dit_cache.should_recompute(sigma_v):
-                # Reuse cached video noise prediction; still call forward() with
-                # noisy_actions=None to skip the action stream cleanly. This is
-                # only valid when video_stepping=True (the only path that
-                # populates the cache).
+            if (
+                dit_cache is not None
+                and video_stepping
+                and not dit_cache.should_recompute(sigma_v, require_action=action_stepping)
+            ):
+                # Reuse cached predictions from the previous joint forward.
+                # Joint denoising can only skip the whole DiT call when the
+                # action prediction was cached together with video prediction.
                 noise_pred = dit_cache.get_cached()
-                action_noise_pred = None
-                if action_stepping:
-                    # Re-run action with a fresh forward pass; without cached
-                    # bridges we just rerun video too. Acceptable at this scale.
-                    torch.compiler.cudagraph_mark_step_begin()
-                    noise_pred, action_noise_pred = self.forward(
-                        action_latents,
-                        a_timestep,
-                        **inputs_shared,
-                        timestep=v_timestep,
-                    )
+                action_noise_pred = dit_cache.get_cached_action() if action_stepping else None
             else:
                 forward_action_latents = action_latents if action_stepping else None
                 if cfg_scale_f > 1.0:
@@ -1557,7 +1550,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                         timestep=v_timestep,
                     )
                 if dit_cache is not None and video_stepping:
-                    dit_cache.update(noise_pred, sigma_v)
+                    dit_cache.update(noise_pred, sigma_v, action_noise_pred)
 
             if video_stepping:
                 new_latents = inputs_shared["latents"] + noise_pred * (sigma_v_next - sigma_v)
