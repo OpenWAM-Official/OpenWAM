@@ -23,12 +23,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from openwam.dataloader.robocasa365 import STATS_DIM, _expand_stats_to_20d, state_to_arm10
+from openwam.dataloader.robocasa365 import (
+    STATS_DIM,
+    _expand_stats_to_20d,
+    _task_from_source_prefix,
+    state_to_arm10,
+)
 from openwam.dataloader.transforms.normalize import compute_extended_stats
+from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
 
 
 def atomic_save_stats_npy(path: str, stats: dict) -> None:
@@ -50,31 +57,36 @@ _ACTION_BASE = slice(0, 5)
 BASE_ACTION_DIM = 5
 
 
-def _iter_episode_arrays(data_root: str, include_base: bool = False):
-    """Yield ``(arm10, base5)`` per episode from a v2.1 bucket.
+def _iter_episode_arrays(data_root: str, include_base: bool = False, task_name: str | None = None):
+    """Yield ``(arm10, base5)`` per episode from a v3 aggregated repo.
 
     ``arm10`` = raw ``(T, 10)`` arm pose from ``observation.state`` (always). ``base5`` = raw
     ``(T, 5)`` base command from the ``action`` field ([x/y/yaw vel, torso, control_mode]) when
-    ``include_base`` else ``None``.
+    ``include_base`` else ``None``. When ``task_name`` is given the episode table is filtered to that
+    task's ``source_prefix`` (v3 packs all tasks into one repo). Each aggregated shard is read once
+    and sliced per episode via its file-local row offset (mirrors the reader).
     """
     with open(os.path.join(data_root, "meta", "info.json")) as f:
-        info = json.load(f)
-    data_tmpl = info["data_path"]
-    chunks_size = int(info.get("chunks_size", 1000))
-    with open(os.path.join(data_root, "meta", "episodes.jsonl")) as f:
-        episodes = [json.loads(line) for line in f if line.strip()]
-    if not episodes:
-        raise FileNotFoundError(f"No episodes in {data_root}/meta/episodes.jsonl")
+        data_tmpl = json.load(f)["data_path"]
+    eps = load_episodes_parquet(Path(data_root))
+    # Offsets over the FULL table BEFORE the task filter (a task not first in its shard must read at
+    # its true file-local offset, past the other tasks' rows in the same file). Mirrors the reader.
+    eps["_data_row_offset"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
+    if task_name is not None:
+        eps = eps[eps["source_prefix"].map(_task_from_source_prefix) == task_name].reset_index(drop=True)
+    if len(eps) == 0:
+        raise FileNotFoundError(f"No episodes for task {task_name!r} under {data_root}")
     cols = ["observation.state"] + (["action"] if include_base else [])
-    for ep in episodes:
-        ep_idx = int(ep["episode_index"])
-        path = os.path.join(
-            data_root, data_tmpl.format(episode_chunk=ep_idx // chunks_size, episode_index=ep_idx)
-        )
+    for (chunk, file), grp in eps.groupby(["data/chunk_index", "data/file_index"], sort=False):
+        path = os.path.join(data_root, data_tmpl.format(chunk_index=int(chunk), file_index=int(file)))
         df = pd.read_parquet(path, columns=cols)
-        arm10 = state_to_arm10(np.stack(df["observation.state"].values).astype(np.float32))
-        base5 = np.stack(df["action"].values).astype(np.float32)[:, _ACTION_BASE] if include_base else None
-        yield arm10, base5
+        st = df["observation.state"].values
+        ac = df["action"].values if include_base else None
+        for _, r in grp.iterrows():
+            o, length = int(r["_data_row_offset"]), int(r["length"])
+            arm10 = state_to_arm10(np.stack(st[o : o + length]).astype(np.float32))
+            base5 = np.stack(ac[o : o + length]).astype(np.float32)[:, _ACTION_BASE] if include_base else None
+            yield arm10, base5
 
 
 def _base_stats_block(base_chunks: list) -> dict:
@@ -91,14 +103,15 @@ def _base_stats_block(base_chunks: list) -> dict:
     return out
 
 
-def compute_normalization_stats(data_root: str, include_base: bool = False) -> dict:
-    """Compute single-arm 10-D EEF stats (+ optional 5-D base command stats) for one bucket.
+def compute_normalization_stats(data_root: str, include_base: bool = False, task_name: str | None = None) -> dict:
+    """Compute single-arm 10-D EEF stats (+ optional 5-D base command stats) for one task.
 
     Returns ``{"eef": {...20-D...}, "num_timesteps": int}``, plus ``"base": {...5-D...}`` when
-    ``include_base`` (mobile: base command read from the LeRobot ``action`` field).
+    ``include_base`` (mobile: base command read from the LeRobot ``action`` field). ``task_name``
+    filters the v3 aggregated repo to one task (see :func:`_iter_episode_arrays`).
     """
     arm_chunks, base_chunks, total = [], [], 0
-    for i, (arm10, base5) in enumerate(_iter_episode_arrays(data_root, include_base)):
+    for i, (arm10, base5) in enumerate(_iter_episode_arrays(data_root, include_base, task_name)):
         arm_chunks.append(arm10)
         total += arm10.shape[0]
         if include_base:
@@ -120,29 +133,29 @@ def compute_normalization_stats(data_root: str, include_base: bool = False) -> d
     return out
 
 
-def compute_multitask_stats(data_roots: list[str], include_base: bool = False) -> dict:
-    """Compute ONE shared 10-D EEF (+ optional 5-D base) stats across several task buckets.
+def compute_multitask_stats(roots: list, include_base: bool = False) -> dict:
+    """Compute ONE shared 10-D EEF (+ optional 5-D base) stats across several tasks.
 
-    Mirrors robotwin's multi-task shared-stats contract: every task in a multi-task run must train
-    in the SAME normalized space, so stats are pooled over all buckets. Same schema as the
-    single-task path (plus a ``"base"`` block when ``include_base``).
+    ``roots`` is ``[(task_name, repo), ...]`` (v3: every entry shares the same aggregated repo, one
+    per selected task). Mirrors robotwin's multi-task shared-stats contract: every task in a
+    multi-task run must train in the SAME normalized space, so stats are pooled over all tasks. Same
+    schema as the single-task path (plus a ``"base"`` block when ``include_base``).
     """
     arm_chunks, base_chunks, total = [], [], 0
-    for dr in data_roots:
+    for task_name, repo in roots:
         n0 = total
-        for arm10, base5 in _iter_episode_arrays(dr, include_base):
+        for arm10, base5 in _iter_episode_arrays(repo, include_base, task_name):
             arm_chunks.append(arm10)
             total += arm10.shape[0]
             if include_base:
                 base_chunks.append(base5)
-        print(f"  [multitask-stats] {os.path.basename(os.path.dirname(os.path.dirname(dr.rstrip('/'))))}: "
-              f"+{total - n0} timesteps (running {total})")
+        print(f"  [multitask-stats] {task_name}: +{total - n0} timesteps (running {total})")
     if not arm_chunks:
-        raise ValueError(f"No timesteps accumulated from {len(data_roots)} buckets")
+        raise ValueError(f"No timesteps accumulated from {len(roots)} tasks")
     eef = compute_extended_stats(arm_chunks)
     if len(eef["mean"]) != STATS_DIM:
         raise ValueError(f"computed arm dim {len(eef['mean'])} != {STATS_DIM}")
-    print(f"  [multitask-stats] done: {total} timesteps over {len(data_roots)} buckets, dim={STATS_DIM}"
+    print(f"  [multitask-stats] done: {total} timesteps over {len(roots)} tasks, dim={STATS_DIM}"
           f"{' +base5' if include_base else ''}")
     out = {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
     if include_base:

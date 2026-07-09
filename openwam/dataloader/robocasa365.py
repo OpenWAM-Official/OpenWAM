@@ -1,12 +1,20 @@
-"""RoboCasa365 dataloader — full task set, single-arm 20-D EEF + mobile base (LeRobot v2.1).
+"""RoboCasa365 dataloader — full task set, single-arm 20-D EEF + mobile base (LeRobot v3.0).
 
-Bespoke ``BaseDataset`` that reads the RAW downloaded RoboCasa365 LeRobot **v2.1**
-buckets directly (per-episode ``data/chunk-*/episode_*.parquet`` + per-episode
-``videos/chunk-*/<cam>/episode_*.mp4`` + ``meta/episodes.jsonl``). Structurally a
-faithful dual of ``robotwin.py`` (which reads raw RoboTwin HDF5): same
-window enumeration, multiview L-shape, per-task stats, ``Single`` + ``Multi`` pair.
-``dataset_dir`` points at the data exactly as downloaded — **no migration /
-conversion / overlay**.
+Bespoke ``BaseDataset`` that reads the RAW downloaded RoboCasa365 LeRobot **v3.0**
+aggregated repo directly (aggregated ``data/chunk-*/file-*.parquet`` +
+``videos/<cam>/chunk-*/file-*.mp4`` + ``meta/episodes/*.parquet``). Shares the v3 IO
+helpers (``load_episodes_parquet`` / ``compute_file_local_offsets`` /
+``decode_video_frames``) with the ``LeRobotV3Reader`` benches, but is NOT a subclass
+of it: that base class's "EEF read from an action column" archetype doesn't fit
+RoboCasa's state-derived arm + mobile base + benchmark-deploy stats, so RoboCasa
+stays a ``BaseDataset`` sibling (a faithful dual of ``robotwin.py``: same window
+enumeration, multiview L-shape, per-task stats, ``Single`` + ``Multi`` pair).
+
+v3 packs ALL tasks into one aggregated repo; each episode is tagged by
+``source_prefix`` (``<split>/<atomic|composite>/<Task>/<date>``). A single-task reader
+(``task_name`` given) filters the episode table to that task; the multi-task wrapper
+discovers/pools tasks from the same repo. ``dataset_dir`` points at the repo exactly as
+downloaded — **no migration / conversion / overlay**.
 
 Single-arm, so the numeric EEF path is borrowed from the OXE single-arm readers
 (``single_arm_20d`` / ``LEFT_ARM_DIM_MASK`` / 10-D ``eef_stats``): the canonical
@@ -41,10 +49,10 @@ wrist), composed into the L-shape via ``assemble_multiview_layout``.
 from __future__ import annotations
 
 import functools
-import glob
 import json
 import os
 import random
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -69,6 +77,7 @@ from openwam.dataloader.utils.eef import (
 )
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec, unmap_from_unify
+from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
 from openwam.dataloader.utils.video_io import decode_video_frames
 
 # Phase-1 2-view mapping (also what the deploy server composes).
@@ -107,13 +116,24 @@ def _task_dir_name(lerobot_dir: str) -> str:
     return os.path.basename(os.path.dirname(os.path.dirname(lerobot_dir.rstrip("/")))) or "task"
 
 
-def _compute_shared_stats_rank0_synced(shared_path: str, data_roots: list, include_base: bool = False) -> None:
+def _task_from_source_prefix(prefix: str) -> str:
+    """Task name from a v3 ``source_prefix`` like ``pretrain/atomic/OpenDrawer/20250819`` -> ``OpenDrawer``.
+
+    v3 aggregates all tasks into one repo, tagging each episode's origin task with ``source_prefix``
+    (``<split>/<atomic|composite>/<Task>/<date>``); the task is the second-to-last path segment.
+    """
+    parts = str(prefix).strip("/").split("/")
+    return parts[-2] if len(parts) >= 2 else str(prefix)
+
+
+def _compute_shared_stats_rank0_synced(shared_path: str, roots: list, include_base: bool = False) -> None:
     """Compute + persist the shared multitask stats with rank-0 synchronization.
 
-    On a multi-GPU first run, only rank 0 computes + atomically writes; other ranks poll for the
-    file (mirrors robotwin). Without this, every rank races to write the same ``{path}.tmp`` →
-    torn writes + N× redundant compute over all buckets. ``include_base`` adds the mobile ``base``
-    block (5-D base command stats) to the pooled file.
+    ``roots`` is ``[(task_name, repo), ...]`` (v3: every entry shares the same aggregated repo, one
+    per selected task). On a multi-GPU first run, only rank 0 computes + atomically writes; other
+    ranks poll for the file (mirrors robotwin). Without this, every rank races to write the same
+    ``{path}.tmp`` → torn writes + N× redundant compute over all tasks. ``include_base`` adds the
+    mobile ``base`` block (5-D base command stats) to the pooled file.
     """
     from openwam.dataloader.robocasa365_stats_computation import atomic_save_stats_npy, compute_multitask_stats
 
@@ -126,8 +146,8 @@ def _compute_shared_stats_rank0_synced(shared_path: str, data_roots: list, inclu
     rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
 
     if not dist_ready or rank == 0:
-        print(f"  [normalizer] computing SHARED multitask stats over {len(data_roots)} buckets -> {shared_path}")
-        atomic_save_stats_npy(shared_path, compute_multitask_stats(data_roots, include_base=include_base))
+        print(f"  [normalizer] computing SHARED multitask stats over {len(roots)} tasks -> {shared_path}")
+        atomic_save_stats_npy(shared_path, compute_multitask_stats(roots, include_base=include_base))
         return
     # non-rank0: wait for rank 0 to produce the file
     import time
@@ -175,13 +195,13 @@ def _expand_stats_to_20d(s10: dict) -> dict:
 
 
 class RoboCasa365Dataset(BaseDataset):
-    """Single-task RoboCasa365 reader (raw LeRobot v2.1, single-arm 20-D EEF).
+    """Single-task RoboCasa365 reader (raw LeRobot v3.0 aggregated repo, single-arm 20-D EEF).
 
     Mirrors ``RoboTwinDataset``: exhaustive ``(episode, start)`` window enumeration,
     deterministic train/val split, multiview L-shape composition, per-task action
-    normalization with auto-compute on first use. RoboCasa-specific: reads v2.1
-    parquet/mp4 (not HDF5) and assembles the 20-D EEF from ``observation.state``
-    (see module docstring).
+    normalization with auto-compute on first use. RoboCasa-specific: reads the v3
+    aggregated shards (``task_name`` filters the repo to one task via ``source_prefix``)
+    and assembles the 20-D EEF from ``observation.state`` (see module docstring).
     """
 
     def __init__(
@@ -284,23 +304,48 @@ class RoboCasa365Dataset(BaseDataset):
         # Camera layout: head (top), wrist (bot-left), missing right (bot-right=black).
         self.camera_layout = list(camera_layout) if camera_layout else [HEAD_CAMERA, WRIST_CAMERA, _MISSING_RIGHT]
 
-        # ── info.json: path templates + chunk size ────────────────────────
+        # ── info.json: v3 aggregated path templates ───────────────────────
         with open(os.path.join(data_root, "meta", "info.json")) as f:
             info = json.load(f)
-        self._data_path_tmpl = info["data_path"]
-        self._video_path_tmpl = info["video_path"]
-        self._chunks_size = int(info.get("chunks_size", 1000))
+        self._data_path_tmpl = info["data_path"]  # data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet
+        self._video_path_tmpl = info["video_path"]  # videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4
 
-        # ── episodes.jsonl: per-episode index / length / task strings ─────
-        episodes = []
-        with open(os.path.join(data_root, "meta", "episodes.jsonl")) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    episodes.append(json.loads(line))
-        episodes.sort(key=lambda e: e["episode_index"])
-        if not episodes:
-            raise FileNotFoundError(f"No episodes in {data_root}/meta/episodes.jsonl")
+        # ── episodes (v3 aggregated meta) + single-task filter by source_prefix ──
+        # v3 packs ALL tasks into one repo; ``source_prefix`` tags each episode's origin task, and the
+        # aggregated data/video shards mix tasks. A single-task reader (task_name given) filters the
+        # episode table to that task; the rest of the pipeline (window enumeration, split, reads) is
+        # unchanged — it just sees a filtered episode set. Reads resolve each episode's (chunk, file) +
+        # file-local row/frame offset (mirrors LeRobotV3Reader; offsets via compute_file_local_offsets).
+        eps = load_episodes_parquet(Path(data_root))
+        # File-local offsets (row/frame position WITHIN the aggregated shard) MUST be computed over the
+        # FULL episode table, BEFORE the single-task filter — a task that isn't first in its shard would
+        # otherwise get an offset counting only its own episodes, not the other tasks' rows physically
+        # preceding it in the same file.
+        eps["_data_row_offset"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
+        for cam in (HEAD_CAMERA, WRIST_CAMERA):
+            if f"videos/{cam}/chunk_index" in eps.columns:
+                eps[f"_voff/{cam}"] = compute_file_local_offsets(eps, f"videos/{cam}/chunk_index", f"videos/{cam}/file_index")
+        if task_name is not None:
+            eps = eps[eps["source_prefix"].map(_task_from_source_prefix) == self.task_name].reset_index(drop=True)
+        if len(eps) == 0:
+            raise FileNotFoundError(f"No episodes for task {self.task_name!r} under {data_root}")
+        # Per-episode dicts for window enumeration/split (episode_index/length/tasks) + a read-metadata
+        # map keyed by episode_index (aggregated (chunk,file) + file-local row/frame offsets).
+        episodes, self._ep_meta = [], {}
+        for _, r in eps.iterrows():
+            epi = int(r["episode_index"])
+            episodes.append({"episode_index": epi, "length": int(r["length"]), "tasks": list(r["tasks"])})
+            self._ep_meta[epi] = {
+                "chunk": int(r["data/chunk_index"]),
+                "file": int(r["data/file_index"]),
+                "row_offset": int(r["_data_row_offset"]),
+                "voff": {c: int(r[f"_voff/{c}"]) for c in (HEAD_CAMERA, WRIST_CAMERA) if f"_voff/{c}" in eps.columns},
+                "vcf": {
+                    c: (int(r[f"videos/{c}/chunk_index"]), int(r[f"videos/{c}/file_index"]))
+                    for c in (HEAD_CAMERA, WRIST_CAMERA)
+                    if f"videos/{c}/chunk_index" in eps.columns
+                },
+            }
         self._episodes = episodes
 
         # ── deterministic train/val split ─────────────────────────────────
@@ -408,7 +453,10 @@ class RoboCasa365Dataset(BaseDataset):
 
             print(f"  [normalizer] computing {'arm-10 + base' if self._mobile_base else 'arm-10'} stats "
                   f"from {self.data_root} -> {stats_path}")
-            atomic_save_stats_npy(stats_path, compute_normalization_stats(self.data_root, include_base=self._mobile_base))
+            atomic_save_stats_npy(
+                stats_path,
+                compute_normalization_stats(self.data_root, include_base=self._mobile_base, task_name=self.task_name),
+            )
         return stats_path
 
     # ----- BaseDataset interface -----
@@ -464,75 +512,81 @@ class RoboCasa365Dataset(BaseDataset):
 
     # ----- IO helpers -----
 
-    def _data_path(self, ep_global_idx: int) -> str:
-        chunk = ep_global_idx // self._chunks_size
+    def _data_file_path(self, chunk: int, file: int) -> str:
+        return os.path.join(self.data_root, self._data_path_tmpl.format(chunk_index=chunk, file_index=file))
+
+    def _video_path(self, camera: str, chunk: int, file: int) -> str:
         return os.path.join(
-            self.data_root, self._data_path_tmpl.format(episode_chunk=chunk, episode_index=ep_global_idx)
+            self.data_root, self._video_path_tmpl.format(video_key=camera, chunk_index=chunk, file_index=file)
         )
 
-    def _video_path(self, ep_global_idx: int, camera: str) -> str:
-        chunk = ep_global_idx // self._chunks_size
-        return os.path.join(
-            self.data_root,
-            self._video_path_tmpl.format(episode_chunk=chunk, video_key=camera, episode_index=ep_global_idx),
-        )
+    def _read_data_file_uncached(self, chunk: int, file: int) -> pd.DataFrame:
+        return pd.read_parquet(self._data_file_path(chunk, file), columns=["observation.state", "action"])
 
-    def _read_full_state_uncached(self, ep_global_idx: int) -> np.ndarray:
-        df = pd.read_parquet(self._data_path(ep_global_idx), columns=["observation.state"])
-        return np.stack(df["observation.state"].values).astype(np.float32)  # (T, 16)
+    def _file_table(self, chunk: int, file: int) -> pd.DataFrame:
+        # Cache the aggregated-shard decode: with window_stride=1 all windows of an episode hit the
+        # same (chunk,file) shard — without the cache each re-decodes the whole shard (mirrors
+        # LeRobotV3Reader's lru_cache). Lazy (re)build so it survives DataLoader-worker pickling.
+        cache = getattr(self, "_file_cache", None)
+        if cache is None:
+            cache = self._file_cache = functools.lru_cache(maxsize=8)(self._read_data_file_uncached)
+        return cache(chunk, file)
 
     def _read_state(self, ep_global_idx: int, start: int, end: int) -> np.ndarray:
-        # Cache the per-episode parquet decode: with window_stride=1 a length-T episode yields
-        # ~T windows, all hitting the same episode — without the cache each re-decodes the whole
-        # parquet (mirrors LeRobotV3Reader's lru_cache). _state_cache is (re)built lazily so it
-        # survives DataLoader-worker pickling (see __getstate__/__setstate__).
-        cache = getattr(self, "_state_cache", None)
-        if cache is None:
-            cache = self._state_cache = functools.lru_cache(maxsize=8)(self._read_full_state_uncached)
-        return cache(ep_global_idx)[start:end]
-
-    def _read_full_action_uncached(self, ep_global_idx: int) -> np.ndarray:
-        df = pd.read_parquet(self._data_path(ep_global_idx), columns=["action"])
-        return np.stack(df["action"].values).astype(np.float32)  # (T, 12)
+        m = self._ep_meta[ep_global_idx]
+        df = self._file_table(m["chunk"], m["file"])
+        o = m["row_offset"]
+        return np.stack(df["observation.state"].values[o + start : o + end]).astype(np.float32)  # (n, 16)
 
     def _read_base_action(self, ep_global_idx: int, start: int, end: int) -> np.ndarray:
         """Base command window [start, end) from the LeRobot ``action`` field: ``(n, 5)`` =
         [x_vel, y_vel, yaw_vel, torso, control_mode] (RoboCasa-native, raw, mobile only)."""
-        cache = getattr(self, "_action_cache", None)
-        if cache is None:
-            cache = self._action_cache = functools.lru_cache(maxsize=8)(self._read_full_action_uncached)
-        return cache(ep_global_idx)[start:end, _ACTION_BASE]
+        m = self._ep_meta[ep_global_idx]
+        df = self._file_table(m["chunk"], m["file"])
+        o = m["row_offset"]
+        return np.stack(df["action"].values[o + start : o + end]).astype(np.float32)[:, _ACTION_BASE]  # (n, 5)
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state.pop("_state_cache", None)  # lru_cache over a bound method isn't picklable
-        state.pop("_action_cache", None)
+        state.pop("_file_cache", None)  # lru_cache over a bound method isn't picklable
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self._state_cache = None
-        self._action_cache = None
-
-    def _decode_camera(self, ep_global_idx: int, camera: str, frame_indices, slot_h: int, slot_w: int):
-        return decode_video_frames(self._video_path(ep_global_idx, camera), list(frame_indices), slot_h, slot_w)
+        self._file_cache = None
 
     def _read_video(self, ep_global_idx: int, start: int, actual_end: int):
-        """Decode the window's sampled frames into a list of L-shape canvases (or
-        single-view PIL frames). v2.1 stores one mp4 per episode, so frame indices
-        are episode-local (no concatenated-shard offset)."""
-        real_abs = [start + i for i in self._video_sample_indices if start + i < actual_end]
+        """Decode the window's sampled frames into a list of L-shape canvases (or single-view PIL
+        frames). v3 stores aggregated mp4s, so an absolute frame index = the episode's file-local
+        frame offset within its (chunk,file) video shard + the episode-local index."""
+        m = self._ep_meta[ep_global_idx]
+        local = [start + i for i in self._video_sample_indices if start + i < actual_end]
         if self.multiview:
-            head = self._decode_camera(ep_global_idx, HEAD_CAMERA, real_abs, _HEAD_SLOT_H, _HEAD_SLOT_W)
-            wrist = self._decode_camera(ep_global_idx, WRIST_CAMERA, real_abs, _WRIST_SLOT_H, _WRIST_SLOT_W)
+            hc, hf = m["vcf"][HEAD_CAMERA]
+            wc, wf = m["vcf"][WRIST_CAMERA]
+            head = decode_video_frames(
+                self._video_path(HEAD_CAMERA, hc, hf),
+                [m["voff"][HEAD_CAMERA] + a for a in local],
+                _HEAD_SLOT_H,
+                _HEAD_SLOT_W,
+            )
+            wrist = decode_video_frames(
+                self._video_path(WRIST_CAMERA, wc, wf),
+                [m["voff"][WRIST_CAMERA] + a for a in local],
+                _WRIST_SLOT_H,
+                _WRIST_SLOT_W,
+            )
             frames = [
                 assemble_multiview_layout(
                     {HEAD_CAMERA: head[fi], WRIST_CAMERA: wrist[fi]}, self.camera_layout, self.height, self.width
                 )
-                for fi in range(len(real_abs))
+                for fi in range(len(local))
             ]
         else:
-            head = self._decode_camera(ep_global_idx, HEAD_CAMERA, real_abs, self.height, self.width)
+            hc, hf = m["vcf"][HEAD_CAMERA]
+            head = decode_video_frames(
+                self._video_path(HEAD_CAMERA, hc, hf), [m["voff"][HEAD_CAMERA] + a for a in local], self.height, self.width
+            )
             frames = [crop_and_resize(f, self.height, self.width) for f in head]
         # Pad to num_video_frames with the last real frame.
         if frames and len(frames) < self.num_video_frames:
@@ -650,10 +704,12 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
     """Multi-task wrapper over per-task ``RoboCasa365Dataset`` (mirrors
     ``MultiTaskRoboTwinDataset``).
 
-    Concatenates one ``RoboCasa365Dataset`` per task so one epoch covers all
-    tasks. ``dataset_dir`` may point at a single task's ``lerobot`` bucket, or at
-    a root holding many ``.../<Task>/<date>/lerobot`` buckets (the RoboCasa
-    download layout) — root mode discovers EVERY bucket (full 365, mobile + fixed).
+    Concatenates one ``RoboCasa365Dataset`` per task so one epoch covers all tasks.
+    ``dataset_dir`` points at the v3 aggregated repo; tasks are distinguished by
+    ``source_prefix``. ``task_name`` selects one task, ``task_roots`` a subset (task
+    names), else EVERY task in the repo is discovered (full RoboCasa365, mobile + fixed —
+    the base command is trained via ``mobile_base``, not dropped). All sub-datasets share
+    one pooled stats file.
     """
 
     @classmethod
@@ -752,41 +808,28 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         name = f"{task_name}_{tag}_stats.npy" if task_name else f"robocasa365_multitask_{tag}_stats.npy"
         shared = os.path.join(dataset_dir, name)
         if not os.path.exists(shared):
-            _compute_shared_stats_rank0_synced(shared, [dr for _, dr in roots], include_base=mobile_base)
+            _compute_shared_stats_rank0_synced(shared, roots, include_base=mobile_base)
         return shared
 
     @staticmethod
     def _resolve_task_roots(dataset_dir: str, task_name: Optional[str], task_roots: Optional[list]):
-        """Return ``[(task_name, lerobot_dir), ...]`` for buckets present on disk.
+        """Return ``[(task_name, repo), ...]`` — the v3 aggregated repo, one entry per selected task.
 
-        ``task_roots`` (explicit relative paths) wins; else if ``dataset_dir`` is
-        itself a bucket (has ``meta/info.json``) use it directly; else discover every
-        ``*/lerobot/meta/info.json`` under ``dataset_dir``. ``task_name`` filters by
-        the task directory name.
+        v3 packs ALL tasks into one repo (``dataset_dir``); tasks are distinguished by
+        ``source_prefix`` (not per-task dirs). ``task_name`` selects one; ``task_roots`` (a list of
+        task names) selects a subset; else discover EVERY distinct task in the repo (full RoboCasa365
+        — mobile + fixed, base trained via mobile_base). Every entry shares the same ``dataset_dir``
+        repo; the sub-dataset filters it to its task.
         """
-        if task_roots:
-            out = []
-            for rp in task_roots:
-                dr = os.path.join(dataset_dir, rp)
-                if os.path.isfile(os.path.join(dr, "meta", "info.json")):
-                    out.append((os.path.basename(rp.rstrip("/")) or rp, dr))
-            return out
-        # Single bucket: dataset_dir points straight at a lerobot/ dir.
-        if os.path.isfile(os.path.join(dataset_dir, "meta", "info.json")):
-            return [(task_name or _task_dir_name(dataset_dir), dataset_dir)]
-        # Root mode: discover EVERY */lerobot bucket below dataset_dir (full RoboCasa365 — mobile +
-        # fixed; the base command is trained via mobile_base, no longer dropped). ``task_name`` filters
-        # to one task dir.
-        out = []
-        for info_path in sorted(
-            glob.glob(os.path.join(dataset_dir, "**", "lerobot", "meta", "info.json"), recursive=True)
-        ):
-            dr = os.path.dirname(os.path.dirname(info_path))  # .../lerobot
-            tn = os.path.basename(os.path.dirname(os.path.dirname(dr)))  # .../<Task>/<date>/lerobot
-            if task_name and tn != task_name:
-                continue
-            out.append((tn, dr))
-        return out
+        eps = load_episodes_parquet(Path(dataset_dir))
+        tasks_in_repo = sorted({_task_from_source_prefix(p) for p in eps["source_prefix"]})
+        if task_name is not None:
+            sel = [task_name] if task_name in tasks_in_repo else []
+        elif task_roots:
+            sel = [t for t in task_roots if t in tasks_in_repo]
+        else:
+            sel = tasks_in_repo
+        return [(t, dataset_dir) for t in sel]
 
     @property
     def action_dim(self) -> int:

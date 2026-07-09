@@ -1,17 +1,19 @@
 type: robocasa365
 
 # ── Dataset root ─────────────────────────────────────────────────────────────
-# Points at the RAW RoboCasa365 download (LeRobot v2.1, read directly — no
-# migration/conversion). May be EITHER:
-#   - a single task's lerobot/ bucket (has meta/info.json), or
-#   - a root holding many .../<Task>/<date>/lerobot buckets (multi-task: one
-#     RoboCasa365Dataset per bucket, concatenated).
-# Full RoboCasa365 (all 365 tasks, mobile + fixed): root mode discovers every bucket. The mobile
-# base command is trained (mobile_base=true below), so tasks are no longer filtered to a fixed-base
-# subset. Eval targets the official 50 target tasks (see benchmarks/robocasa365/).
-dataset_dir: /path/to/robocasa365/datasets/v1.0
-task_name: null                   # null = use every discovered bucket; set name = filter to one task dir
-task_roots: null                  # optional explicit list of bucket paths (relative to dataset_dir); overrides discovery
+# Points at the RAW RoboCasa365 download (LeRobot v3.0 aggregated repo, read directly — no
+# migration/conversion). v3 packs ALL tasks into ONE repo (e.g. the HF mirror
+# ember-lab-berkeley/robocasa365-pretrain-{atomic,composite}); each episode is tagged by
+# source_prefix (<split>/<atomic|composite>/<Task>/<date>).
+#   - task_name set   → single task (filter the repo to that source_prefix)
+#   - task_name null  → multi-task: every task in the repo (or the task_roots subset), one
+#                       RoboCasa365Dataset per task, concatenated, sharing ONE pooled stats file.
+# Full RoboCasa365 (all tasks, mobile + fixed): the mobile base command is trained (mobile_base=true
+# below), so tasks are no longer filtered to a fixed-base subset. Eval targets the official 50 target
+# tasks (see benchmarks/robocasa365/).
+dataset_dir: /path/to/robocasa365-pretrain-atomic
+task_name: null                   # null = every task in the repo; set a name = filter to one task (source_prefix)
+task_roots: null                  # optional list of task NAMES to include (a subset); overrides full discovery
 
 # ── Frame sampling (aligned with OXE / RoboCOIN / RoboTwin) ──────────────────
 # num_frames   = state window length in raw frames; action horizon = num_frames - 1.

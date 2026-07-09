@@ -1,9 +1,10 @@
-"""Unit tests for the bespoke RoboCasa365 dataloader (raw LeRobot v2.1).
+"""Unit tests for the bespoke RoboCasa365 dataloader (raw LeRobot v3.0).
 
-Builds a minimal RoboCasa365-shaped v2.1 bucket on disk (per-episode
-``data/chunk-000/episode_NNNNNN.parquet`` with a 16-D ``observation.state`` column,
-``meta/info.json`` with the v2.1 path templates, ``meta/episodes.jsonl`` with
-per-episode task strings) and exercises the single-task + multi-task readers.
+Builds a minimal RoboCasa365-shaped **v3.0 aggregated** repo on disk
+(``meta/episodes/chunk-000/file-000.parquet`` with per-episode offset metadata +
+``source_prefix`` task tag + ``tasks`` strings, one aggregated
+``data/chunk-000/file-000.parquet`` with all episodes' rows concatenated, and
+aggregated ``videos/<cam>/chunk-000/file-000.mp4``) and exercises the readers.
 Video decoding is mocked, so no real mp4s are needed.
 
 RoboCasa365 is single-arm: action & proprio are the absolute EEF pose derived from
@@ -61,37 +62,76 @@ def _make_action(n_rows: int, seed: int) -> np.ndarray:
     return action
 
 
-def make_robocasa_bucket(tmp_path: Path, n_episodes: int = N_EPISODES) -> Path:
-    """Write a minimal raw LeRobot v2.1 RoboCasa365 bucket; return its lerobot/ dir."""
-    bucket = tmp_path / "OpenDrawer" / "20250816" / "lerobot"
-    (bucket / "meta").mkdir(parents=True, exist_ok=True)
+def _write_v3_repo(root: Path, task_specs: list) -> Path:
+    """Write a minimal LeRobot **v3.0** aggregated RoboCasa365 repo; return its root dir.
+
+    ``task_specs`` = ``[(task_name, n_episodes), ...]`` — v3 packs several tasks into ONE repo,
+    tagged per episode by ``source_prefix``. Layout: ``meta/episodes/chunk-000/file-000.parquet``
+    (per-episode offset metadata), one aggregated ``data/chunk-000/file-000.parquet`` (all episodes'
+    rows concatenated), aggregated ``videos/<cam>/chunk-000/file-000.mp4`` (empty; decoder mocked).
+    All episodes share (chunk 0, file 0), so each episode's file-local row offset is the cumulative
+    length of the episodes before it.
+    """
+    (root / "meta" / "episodes" / "chunk-000").mkdir(parents=True, exist_ok=True)
+    (root / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
+    total = sum(n for _, n in task_specs)
     info = {
-        "codebase_version": "v2.1",
+        "codebase_version": "v3.0",
         "robot_type": "PandaOmron",
         "chunks_size": 1000,
         "fps": 20,
-        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+        "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+        "splits": {"train": f"0:{total}"},
     }
-    (bucket / "meta" / "info.json").write_text(json.dumps(info))
+    (root / "meta" / "info.json").write_text(json.dumps(info))
 
-    with open(bucket / "meta" / "episodes.jsonl", "w") as f:
-        for ep in range(n_episodes):
-            data_dir = bucket / "data" / "chunk-000"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            df = pd.DataFrame(
-                {
-                    "observation.state": list(_make_state(EP_LENGTH, seed=ep)),
-                    "action": list(_make_action(EP_LENGTH, seed=ep)),
-                }
-            )
-            df.to_parquet(data_dir / f"episode_{ep:06d}.parquet")
+    states, actions, task_idx, ep_rows, cum, epi = [], [], [], [], 0, 0
+    for ti, (task_name, n_episodes) in enumerate(task_specs):
+        for _ in range(n_episodes):
+            states.extend(list(_make_state(EP_LENGTH, seed=epi)))
+            actions.extend(list(_make_action(EP_LENGTH, seed=epi)))
+            task_idx.extend([ti] * EP_LENGTH)
+            row = {
+                "episode_index": epi,
+                "dataset_from_index": cum,
+                "dataset_to_index": cum + EP_LENGTH,
+                "length": EP_LENGTH,
+                "tasks": [PROMPT],
+                "data/chunk_index": 0,
+                "data/file_index": 0,
+                "source_prefix": f"pretrain/atomic/{task_name}/20250819",
+                "source_episode_index": epi,
+                "meta/episodes/chunk_index": 0,
+                "meta/episodes/file_index": 0,
+            }
             for cam in (HEAD_CAM, WRIST_CAM):
-                vd = bucket / "videos" / "chunk-000" / cam
-                vd.mkdir(parents=True, exist_ok=True)
-                (vd / f"episode_{ep:06d}.mp4").write_bytes(b"")  # mocked decoder ignores content
-            f.write(json.dumps({"episode_index": ep, "tasks": [PROMPT], "length": EP_LENGTH}) + "\n")
-    return bucket
+                row[f"videos/{cam}/chunk_index"] = 0
+                row[f"videos/{cam}/file_index"] = 0
+            ep_rows.append(row)
+            cum += EP_LENGTH
+            epi += 1
+
+    pd.DataFrame({"observation.state": states, "action": actions, "task_index": task_idx}).to_parquet(
+        root / "data" / "chunk-000" / "file-000.parquet"
+    )
+    pd.DataFrame(ep_rows).to_parquet(root / "meta" / "episodes" / "chunk-000" / "file-000.parquet")
+
+    for cam in (HEAD_CAM, WRIST_CAM):
+        vd = root / "videos" / cam / "chunk-000"
+        vd.mkdir(parents=True, exist_ok=True)
+        (vd / "file-000.mp4").write_bytes(b"")  # mocked decoder ignores content
+    return root
+
+
+def make_robocasa_bucket(tmp_path: Path, n_episodes: int = N_EPISODES, task_name: str = "OpenDrawer") -> Path:
+    """A single-task v3 aggregated repo (one ``source_prefix``)."""
+    return _write_v3_repo(tmp_path / "pretrain-atomic", [(task_name, n_episodes)])
+
+
+def make_multitask_bucket(tmp_path: Path, tasks=("taskA", "taskB"), n_episodes: int = N_EPISODES) -> Path:
+    """A v3 aggregated repo holding several tasks (distinct ``source_prefix`` tags)."""
+    return _write_v3_repo(tmp_path / "pretrain-atomic", [(t, n_episodes) for t in tasks])
 
 
 @contextmanager
@@ -181,7 +221,7 @@ class TestGetItem:
         assert s["proprio_mask"][0, :10].all()
         assert not s["proprio_mask"][0, 10:].any()
 
-    def test_prompt_from_episodes_jsonl(self, tmp_path):
+    def test_prompt_from_episodes_parquet(self, tmp_path):
         s = self._sample(tmp_path, multiview=False, height=64, width=96)
         assert s["prompt"].endswith(PROMPT)
         assert s["prompt"].startswith("A video recorded from a robot")
@@ -381,50 +421,62 @@ class TestMultiAndRegistry:
         eef = load_mode_stats(ds.normalization_stats_path, "eef")
         assert eef is not None and len(eef["min"]) == EEF_DIM
 
-    def test_multi_root_mode_discovers_buckets(self, tmp_path):
-        # Two task dirs under a common root -> root-mode discovery.
-        make_robocasa_bucket(tmp_path / "taskA")
-        make_robocasa_bucket(tmp_path / "taskB")
+    def test_multi_discovers_tasks_by_source_prefix(self, tmp_path):
+        # v3: ONE aggregated repo with two tasks (distinct source_prefix) -> two sub-datasets.
+        root = make_multitask_bucket(tmp_path, tasks=["taskA", "taskB"])
         with _mock_video_decoder():
-            ds = MultiTaskRoboCasa365Dataset(dataset_dir=str(tmp_path), multiview=False, height=64, width=96,
+            ds = MultiTaskRoboCasa365Dataset(dataset_dir=str(root), multiview=False, height=64, width=96,
                                              normalize_mode=None)
         assert len(ds._datasets) == 2
         assert len(ds) == 2 * N_EPISODES * (EP_LENGTH - 1)
 
-    def test_multi_root_uses_one_shared_stats(self, tmp_path):
-        # Multi-bucket + normalization → ONE shared stats file pooled over all
-        # buckets, forwarded to every sub-dataset (robotwin's shared-stats contract).
-        make_robocasa_bucket(tmp_path / "taskA")
-        make_robocasa_bucket(tmp_path / "taskB")
+    def test_single_task_offset_in_shared_shard(self, tmp_path):
+        # A task that is NOT first in its aggregated shard must read at its TRUE file-local offset:
+        # offsets are computed over the FULL episode table before the single-task filter, else taskB
+        # (physically after taskA in the same file) would read taskA's rows. Real repos pack many
+        # tasks per shard, so this is the read-correctness contract the single-file case can't catch.
+        root = make_multitask_bucket(tmp_path, tasks=["taskA", "taskB"], n_episodes=2)
         with _mock_video_decoder():
-            ds = MultiTaskRoboCasa365Dataset(dataset_dir=str(tmp_path), multiview=False, height=64, width=96,
+            ds = RoboCasa365Dataset(data_root=str(root), task_name="taskB", multiview=False, height=64,
+                                    width=96, normalize_mode=None)
+            s = ds._build_sample(0, 0)
+        # taskB's first episode is GLOBAL episode 2 (seed=2), physically at row offset 2*EP_LENGTH.
+        expected_arm0 = rc.state_to_arm10(_make_state(EP_LENGTH, seed=2))[0]
+        assert s["proprio"][0, :10].numpy() == pytest.approx(expected_arm0, abs=1e-4)
+
+    def test_multi_uses_one_shared_stats(self, tmp_path):
+        # Multi-task + normalization → ONE shared stats file pooled over all tasks in the repo,
+        # forwarded to every sub-dataset (robotwin's shared-stats contract).
+        root = make_multitask_bucket(tmp_path, tasks=["taskA", "taskB"])
+        with _mock_video_decoder():
+            ds = MultiTaskRoboCasa365Dataset(dataset_dir=str(root), multiview=False, height=64, width=96,
                                              normalize_mode="min-max")
-        shared = Path(tmp_path) / "robocasa365_multitask_eef_stats.npy"
-        assert shared.exists(), "multi-bucket must pool ONE shared stats file at dataset_dir"
+        shared = Path(root) / "robocasa365_multitask_eef_stats.npy"
+        assert shared.exists(), "multi-task must pool ONE shared stats file at the repo root"
         # every sub-dataset points at the SAME shared file (not per-task stats)
         paths = {d.normalization_stats_path for d in ds._datasets}
         assert paths == {str(shared)}, paths
-        # no per-task stats files were written under the buckets
-        assert not list(Path(tmp_path).glob("**/taskA_eef_stats.npy"))
+        # no per-task stats files were written
+        assert not list(Path(root).glob("**/taskA_eef_stats.npy"))
 
     def test_multi_mobile_shared_eefbase_stats(self, tmp_path):
-        # Multi-bucket + mobile_base: ONE shared _eefbase_ stats file (with a 5-D 'base' block)
-        # pooled over all buckets and forwarded to every sub-dataset; samples carry the base command
-        # in the 80-D reserved slots [68:73). Covers the multitask mobile path e2e (in-process).
-        make_robocasa_bucket(tmp_path / "taskA")
-        make_robocasa_bucket(tmp_path / "taskB")
+        # Multi-task + mobile_base: ONE shared _eefbase_ stats file (with a 5-D 'base' block) pooled
+        # over all tasks and forwarded to every sub-dataset; samples carry the base command in the
+        # 80-D reserved slots [68:73). Covers the multitask mobile path e2e (in-process).
+        root = make_multitask_bucket(tmp_path, tasks=["taskA", "taskB"])
         with _mock_video_decoder():
             ds = MultiTaskRoboCasa365Dataset(
-                dataset_dir=str(tmp_path), multiview=False, height=64, width=96, normalize_mode="min-max",
+                dataset_dir=str(root), multiview=False, height=64, width=96, normalize_mode="min-max",
                 unify_action=True, unify_action_map=["0-9", "34-43"], mobile_base=True,
             )
             s = ds[0]
-        shared = Path(tmp_path) / "robocasa365_multitask_eefbase_stats.npy"
-        assert shared.exists(), "multi-bucket mobile must pool ONE shared _eefbase_ stats file"
+        shared = Path(root) / "robocasa365_multitask_eefbase_stats.npy"
+        assert shared.exists(), "multi-task mobile must pool ONE shared _eefbase_ stats file"
         blob = np.load(shared, allow_pickle=True).item()
         assert "base" in blob and len(blob["base"]["mean"]) == 5, "shared stats need a 5-D base block"
         assert {d.normalization_stats_path for d in ds._datasets} == {str(shared)}  # all share it
-        assert not list(Path(tmp_path).glob("**/*_eef_stats.npy"))  # not the arm-only file
+        assert not list(Path(root).glob("**/*_eef_stats.npy"))  # not the arm-only file
+        assert s["action"].shape == (32, 80)
         assert ds.action_dim == 80
         assert s["action"].shape == (32, 80)
         am = s["action_mask"].numpy()
@@ -432,13 +484,11 @@ class TestMultiAndRegistry:
         assert np.abs(s["action"].numpy()[:, 68:73]).sum() > 0  # base carries a command
 
     def test_root_mode_keeps_all_including_mobile(self, tmp_path):
-        # Full RoboCasa365 (fixed-base filter removed): root discovery keeps EVERY bucket, including
-        # mobile (formerly moma_required=Yes) tasks — the base command is trained, not dropped.
-        make_robocasa_bucket(tmp_path / "keep")  # -> .../OpenDrawer/.../lerobot
-        mobile = tmp_path / "mob" / "SomeMobileTask" / "20250101" / "lerobot" / "meta"
-        mobile.mkdir(parents=True)
-        (mobile / "info.json").write_text("{}")  # just enough to be discovered
-        roots = MultiTaskRoboCasa365Dataset._resolve_task_roots(str(tmp_path), None, None)
+        # Full RoboCasa365 (fixed-base filter removed): task discovery from the v3 aggregated repo
+        # keeps EVERY task's source_prefix, including mobile (formerly moma_required=Yes) tasks — the
+        # base command is trained, not dropped.
+        root = make_multitask_bucket(tmp_path, tasks=["OpenDrawer", "SomeMobileTask"])
+        roots = MultiTaskRoboCasa365Dataset._resolve_task_roots(str(root), None, None)
         assert {tn for tn, _ in roots} == {"OpenDrawer", "SomeMobileTask"}  # mobile task NOT dropped
 
     def test_registered_to_multi(self):
