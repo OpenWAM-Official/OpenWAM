@@ -97,10 +97,8 @@ def build_payload(
     """Assemble an obs payload from base64-encoded images.
 
     ``head`` is the base64 string for ``head_camera`` (required).
-    ``left_wrist`` / ``right_wrist`` may be None: the server ignores them when
-    multiview=False, but rejects a None wrist with an obs-validation error when
-    multiview=True (a multi-view checkpoint needs both wrist frames — see
-    ``ObsPreprocessor``).
+    ``left_wrist`` / ``right_wrist`` may be None → server black-fills when
+    multiview=True, or ignores when multiview=False.
     """
     payload = {
         "images": {

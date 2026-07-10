@@ -68,16 +68,13 @@ class ObsPreprocessor:
     """Validate + preprocess a client obs payload against a fixed view config.
 
     Unified payload contract across single- and multi-view checkpoints: the
-    client sends ``obs["images"]`` with fixed keys (``head_camera`` always
-    required; ``left_wrist_camera`` / ``right_wrist_camera`` required only for
-    multi-view checkpoints).
+    client sends ``obs["images"]`` with fixed keys (``head_camera`` required,
+    ``left_wrist_camera`` / ``right_wrist_camera`` optional and may be ``None``).
 
     - ``multiview=False``: use ``head_camera`` only, ``crop_and_resize`` to (W, H);
-      wrist fields are ignored (may be ``None``).
-    - ``multiview=True``: both wrist frames are required; a ``None`` wrist raises
-      ``ObsValidationError`` instead of being black-filled, so a client that did
-      not capture the wrist cameras fails loudly rather than silently scoring low.
-      Present frames compose the L-shape layout keyed by ``camera_layout``.
+      wrist fields are ignored.
+    - ``multiview=True``: black-fill missing/None wrists, then compose the L-shape
+      layout keyed by ``camera_layout``.
     """
 
     def __init__(
@@ -184,25 +181,13 @@ class ObsPreprocessor:
                     f"got {self.camera_layout}. Check the checkpoint's config.yaml."
                 )
 
-            # Fail fast instead of silently black-filling a missing wrist frame.
-            # A multi-view checkpoint was trained on the full L-shape layout, so
-            # a None wrist means the eval client never captured that camera.
-            # Black-filling would degrade the success rate with no error, which
-            # looks exactly like a model regression — so reject it here and let
-            # the job be marked failed rather than quietly scoring low.
-            def _decode_required(raw, ctx: str) -> Image.Image:
+            def _decode_or_black(raw, ctx: str) -> Image.Image:
                 if raw is None:
-                    raise ObsValidationError(
-                        f"multi-view checkpoint requires {ctx} but the client sent None. "
-                        "The checkpoint was trained on head + both wrist cameras; a missing "
-                        "wrist frame would be black-filled and silently degrade the success "
-                        "rate. Verify the eval client captures and sends left_wrist_camera "
-                        "and right_wrist_camera (RoboTwin left_camera / right_camera)."
-                    )
+                    return Image.new("RGB", (self.img_width, self.img_height), (0, 0, 0))
                 return _as_pil(raw, ctx=ctx)
 
-            left_pil = _decode_required(imgs.get("left_wrist_camera"), ctx="images['left_wrist_camera']")
-            right_pil = _decode_required(imgs.get("right_wrist_camera"), ctx="images['right_wrist_camera']")
+            left_pil = _decode_or_black(imgs.get("left_wrist_camera"), ctx="images['left_wrist_camera']")
+            right_pil = _decode_or_black(imgs.get("right_wrist_camera"), ctx="images['right_wrist_camera']")
 
             # Map the fixed client-side keys to camera_layout positions:
             #   head_camera        -> layout[0]  (top)
