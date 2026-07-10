@@ -29,6 +29,20 @@ def metric_by_id(snapshot, metric_id):
     return metrics[metric_id]
 
 
+def test_count_episode_verdicts_success_only_log():
+    console = load_console_module()
+    text = "step: 1 / 10\rstep: 2 / 10\rSuccess!\nstep: 1 / 10\rstep: 2 / 10\rSuccess!\n"
+    assert console.count_episode_verdicts(text) == (2, 2, 0)
+
+
+def test_count_episode_verdicts_fail_without_step_line():
+    # A Fail! with no preceding step: line must not be miscounted as a step
+    # limit hit (mirrors export_results_csv.py's
+    # test_parse_episode_stats_fail_without_step_line).
+    console = load_console_module()
+    assert console.count_episode_verdicts("Fail!\n") == (0, 1, 0)
+
+
 def test_dlc_snapshot_merges_summary_queue_and_success_rates(tmp_path):
     console = load_console_module()
     root = tmp_path
@@ -192,6 +206,10 @@ def test_results_csv_derives_all_columns_from_full_log_not_tail(tmp_path):
     outside the tail window (e.g. behind a long traceback) — if any of these
     four columns were still sourced from the tail-windowed live-state job
     dict, that column would go blank/stale while its siblings stay accurate.
+
+    success/episodes are counted from Success!/Fail! verdict lines (matching
+    export_results_csv.py's convention), independent of the separate
+    "Success rate: X / Y" summary line used only for success_rate.
     """
     console = load_console_module()
     root = tmp_path
@@ -202,8 +220,15 @@ def test_results_csv_derives_all_columns_from_full_log_not_tail(tmp_path):
         encoding="utf-8",
     )
     task_log = worker_dir / "bad_step_limit_demo_clean.log"
+    episodes = (
+        "step: 1 / 10\rstep: 2 / 10\rSuccess!\n"
+        "step: 1 / 10\rstep: 2 / 10\rSuccess!\n"
+        "step: 1 / 10\rstep: 2 / 10\rSuccess!\n"
+        "step: 1 / 10\rstep: 5 / 10\rFail!\n"  # not a step-limit hit (5 < 10)
+        "step: 1 / 10\rstep: 10 / 10\rFail!\n"  # step-limit hit (10 >= 10)
+    )
     task_log.write_text(
-        "step: 10 / 10\rFail!\n"
+        episodes
         + "Success rate: 3/5 => 60.00%\n"
         + ("padding to push the summary line out of a small tail window\n" * 50),
         encoding="utf-8",
@@ -231,6 +256,36 @@ def test_results_csv_derives_all_columns_from_full_log_not_tail(tmp_path):
     assert row["step_limit_hits"] == 1
 
 
+def test_results_csv_reports_zero_episodes_not_blank_when_log_is_readable(tmp_path):
+    # A readable log with no verdict lines yet (e.g. crashed before the
+    # first episode finished) must report 0, not blank — matching
+    # export_results_csv.py's convention that blank is reserved for
+    # missing/unreadable/outside-root logs, not "no data yet".
+    console = load_console_module()
+    root = tmp_path
+    worker_dir = root / "node0" / "worker0"
+    worker_dir.mkdir(parents=True)
+    (root / "run.env").write_text(
+        "run_id=zero\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=1\ntasks=bad_task\n",
+        encoding="utf-8",
+    )
+    task_log = worker_dir / "bad_task_demo_clean.log"
+    task_log.write_text("booting policy server...\nstep: 1 / 160\r", encoding="utf-8")
+    (root / "summary.tsv").write_text(
+        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
+        f"bad_task\tdemo_clean\t0\t0\tfailed\t1\t{task_log}\n",
+        encoding="utf-8",
+    )
+
+    rows = make_builder(console, root).build_results_rows()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["success"] == 0
+    assert row["episodes"] == 0
+    assert row["step_limit_hits"] == 0
+
+
 def test_dlc_snapshot_does_not_read_failure_snippet_outside_root(tmp_path):
     console = load_console_module()
     root = tmp_path / "logs"
@@ -247,11 +302,20 @@ def test_dlc_snapshot_does_not_read_failure_snippet_outside_root(tmp_path):
         encoding="utf-8",
     )
 
-    snapshot = make_builder(console, root).build()
+    builder = make_builder(console, root)
+    snapshot = builder.build()
 
     assert snapshot["failures"][0]["log"] == str(outside)
     assert snapshot["failures"][0]["snippet"] == ""
     assert "secret should not be exposed" not in json.dumps(snapshot)
+
+    # /api/results.csv must refuse the same outside-root log its snippet/
+    # timeline siblings already refuse, not read and serve its stats anyway.
+    rows = builder.build_results_rows()
+    assert rows[0]["success_rate"] == ""
+    assert rows[0]["success"] == ""
+    assert rows[0]["episodes"] == ""
+    assert rows[0]["step_limit_hits"] == ""
 
 
 def test_web_control_auto_detects_robotwin_and_compat_exports_builder(tmp_path):

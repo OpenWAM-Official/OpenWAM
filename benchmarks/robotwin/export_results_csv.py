@@ -88,16 +88,6 @@ def parse_success_rate_from_text(text: str) -> Optional[float]:
     return last_match
 
 
-def parse_success_rate(log_path: Path) -> Optional[float]:
-    if not log_path.is_file():
-        return None
-    try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    return parse_success_rate_from_text(text)
-
-
 def parse_episode_stats_from_text(text: str) -> Tuple[int, int]:
     """Parse ``(episodes, step_limit_hits)`` from one RoboTwin task log's text.
 
@@ -132,16 +122,6 @@ def parse_episode_stats_from_text(text: str) -> Tuple[int, int]:
                 step_limit_hits += 1
             last_step = None  # reset for the next episode
     return (episodes, step_limit_hits)
-
-
-def parse_episode_stats(log_path: Path) -> Tuple[int, int]:
-    if not log_path.is_file():
-        return (0, 0)
-    try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return (0, 0)
-    return parse_episode_stats_from_text(text)
 
 
 def iter_summary_rows(summary_path: Path) -> Iterable[Dict[str, str]]:
@@ -303,8 +283,8 @@ def main() -> int:
                 "status": row.get("status", ""),
                 "exit_code": row.get("exit_code", ""),
                 "success_rate": "" if success_rate is None else f"{success_rate:.6f}",
-                "episodes": str(episodes) if episodes else "",
-                "step_limit_hits": str(step_limit_hits) if episodes else "",
+                "episodes": "" if log_text is None else str(episodes),
+                "step_limit_hits": "" if log_text is None else str(step_limit_hits),
                 "log_path": str(log_path),
             }
         )

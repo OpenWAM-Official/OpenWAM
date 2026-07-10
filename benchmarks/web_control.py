@@ -304,8 +304,20 @@ STEP_PROGRESS_RE = re.compile(r"step:\s*(\d+)\s*/\s*(\d+)")
 EPISODE_VERDICT_RE = re.compile(r"\b(Success|Fail)!")
 
 
-def count_step_limit_hits(text: str) -> int:
-    hits = 0
+def count_episode_verdicts(text: str) -> tuple[int, int, int]:
+    """``(success, episodes, step_limit_hits)`` counted from verdict lines.
+
+    Mirrors ``benchmarks/robotwin/export_results_csv.py``'s
+    ``parse_episode_stats_from_text`` (verdict-line counting) rather than
+    ``parse_success_counts_from_text``'s denominator of the last cumulative
+    ``success rate: X / Y`` line: a task that crashes between a verdict and
+    its rate line would otherwise report different ``episodes`` between the
+    two exporters, and could pair a real ``step_limit_hits`` with a blank
+    ``episodes`` in the same row (crash before any rate line at all).
+    """
+    success = 0
+    episodes = 0
+    step_limit_hits = 0
     last_step: tuple[int, int] | None = None
     for line in strip_ansi(text).splitlines():
         step_match = STEP_PROGRESS_RE.search(line)
@@ -314,15 +326,13 @@ def count_step_limit_hits(text: str) -> int:
             continue
         verdict = EPISODE_VERDICT_RE.search(line)
         if verdict:
-            if (
-                verdict.group(1) == "Fail"
-                and last_step is not None
-                and last_step[1] > 0
-                and last_step[0] >= last_step[1]
-            ):
-                hits += 1
+            episodes += 1
+            if verdict.group(1) == "Success":
+                success += 1
+            elif last_step is not None and last_step[1] > 0 and last_step[0] >= last_step[1]:
+                step_limit_hits += 1
             last_step = None
-    return hits
+    return success, episodes, step_limit_hits
 
 
 def safe_relative(root: Path, path: Path) -> str | None:
@@ -764,7 +774,9 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     ),
                     "success": "" if full_log["success"] is None else full_log["success"],
                     "episodes": "" if full_log["episodes"] is None else full_log["episodes"],
-                    "step_limit_hits": "" if full_log["step_limit_hits"] is None else full_log["step_limit_hits"],
+                    "step_limit_hits": (
+                        "" if full_log["step_limit_hits"] is None else full_log["step_limit_hits"]
+                    ),
                     "duration_sec": "" if job.get("duration_sec") is None else f"{float(job['duration_sec']):.3f}",
                     "duration": job.get("duration", ""),
                     "log_path": job.get("log", ""),
@@ -785,8 +797,23 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         (e.g. behind a long traceback), leaving a stale/blank value next to
         accurate full-log-derived siblings in the same CSV row.
 
-        ``Path(root) / log`` collapses to ``log`` when it is already absolute
-        (as summary.tsv records it), so both relative and absolute refs work.
+        ``success``/``episodes`` are counted from ``Success!``/``Fail!``
+        verdict lines (``count_episode_verdicts``), not the denominator of
+        the last cumulative ``success rate: X / Y`` line — matching
+        ``export_results_csv.py``'s convention so the two exporters agree,
+        and so a task that crashes before any rate line still reports
+        ``episodes`` consistent with ``step_limit_hits`` from the same pass.
+
+        All four fields are blank only when the log itself is missing/
+        unreadable/outside-root — never when it was read but simply has no
+        episode data yet (e.g. crashed before the first verdict), which
+        reports a genuine ``0`` instead. Blanking on a falsy ``0`` would
+        make "no data" indistinguishable from "measured zero".
+
+        Uses ``normalize_log_ref`` (like every other log reader in this file)
+        so a ``log`` ref pointing outside ``self.root`` is refused here too,
+        instead of this endpoint alone reading and serving stats for a path
+        the snippet/timeline readers already treat as inaccessible.
         """
         empty: dict[str, float | int | None] = {
             "success_rate": None,
@@ -797,19 +824,19 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         log_ref = job.get("log", "")
         if not log_ref:
             return empty
-        log_path = self.root / log_ref
-        if not log_path.is_file():
+        _, log_path = normalize_log_ref(self.root, log_ref)
+        if log_path is None or not log_path.is_file():
             return empty
         try:
             text = log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return empty
-        counts = parse_success_counts_from_text(text)
+        success, episodes, step_limit_hits = count_episode_verdicts(text)
         return {
             "success_rate": parse_success_rate_from_text(text),
-            "success": counts[0] if counts else None,
-            "episodes": counts[1] if counts else None,
-            "step_limit_hits": count_step_limit_hits(text),
+            "success": success,
+            "episodes": episodes,
+            "step_limit_hits": step_limit_hits,
         }
 
     def csv_fieldnames(self, rows: list[dict[str, Any]]) -> list[str]:
