@@ -24,8 +24,10 @@ state_dict (``vae.*`` / ``reason1.*``). Identity is preserved, so the facade's
 ``iface.model.model`` still resolves to the same tensors. The inner modules are
 moved explicitly in :meth:`set_dtype_device` via ``cosmos_predict25/_vae_utils.py``.
 
-Scope: ``dual_system`` + ``joint_cross_attn`` / ``joint_self_attn``. VACE is
-rejected; IDM stays T2V-only. Freeze policy is owned by the training-strategy /
+Scope: ``dual_system`` + ``joint_cross_attn`` / ``joint_self_attn``, plus IDM
+teacher-forcing (``cosmos_predict25/idm_merge.py``) and the shared-backbone mode
+that rides action/state tokens on the video DiT (:meth:`inject_shared_tokens`).
+VACE is rejected. Freeze policy is owned by the training-strategy /
 model freeze list, reached via native ``nn.Module.get_submodule`` dotted paths
 (``dit`` / ``vae`` / ``reason1``). The ``freeze`` kwarg here is retained for
 tests / direct programmatic use and defaults to ``False``.
@@ -316,16 +318,34 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         not apply — no-op."""
         return None
 
-    def _shared_token_emb(self, timestep: Tensor, n_tokens: int, batch_size: int) -> Tuple[Tensor, Tensor]:
-        """Per-token AdaLN emb + lora for ``n_tokens`` non-grid tokens at ``timestep``."""
-        ts = timestep.flatten()
-        if ts.numel() == 1:
-            ts = ts.expand(batch_size)
-        elif ts.numel() != batch_size:
-            raise ValueError(
-                f"shared-token timestep has {ts.numel()} elements; expected 1 or batch_size={batch_size}."
-            )
-        ts_tok = ts.view(batch_size, 1).expand(batch_size, n_tokens)
+    def _shared_token_emb(self, timestep: Tensor, n_tokens: int, batch_size: int) -> Tuple[Tensor, Optional[Tensor]]:
+        """Per-token AdaLN emb + lora for ``n_tokens`` non-grid tokens at ``timestep``.
+
+        Accepts a scalar, a per-sample ``(B,)`` timestep, or a per-token
+        ``(B, n_tokens)`` tensor (parity with Wan's ``build_action_t_mod``). ``lora``
+        is ``None`` when the DiT was built with ``use_adaln_lora=False``.
+        """
+        if timestep.dim() == 2:
+            if tuple(timestep.shape) != (batch_size, n_tokens):
+                raise ValueError(
+                    f"shared-token timestep has shape {tuple(timestep.shape)}; expected "
+                    f"(B={batch_size}, n_tokens={n_tokens}) for the per-token form."
+                )
+            ts_tok = timestep
+        else:
+            ts = timestep.flatten()
+            if ts.numel() == 1:
+                ts = ts.expand(batch_size)
+            elif ts.numel() != batch_size:
+                raise ValueError(
+                    f"shared-token timestep has {ts.numel()} elements; expected 1, "
+                    f"batch_size={batch_size}, or a (B={batch_size}, n_tokens={n_tokens}) per-token tensor."
+                )
+            ts_tok = ts.view(batch_size, 1).expand(batch_size, n_tokens)
+        # Match the video path (dit_forward.prepare_block_loop): MinimalV1LVGDiT
+        # scales timesteps by ``timestep_scale`` before ``t_embedder`` so shared
+        # action/state tokens land in the same time domain as the video grid.
+        ts_tok = ts_tok * float(getattr(self.dit, "timestep_scale", 1.0))
         emb, lora = self.dit.t_embedder(ts_tok)
         emb = self.dit.t_embedding_norm(emb)
         return emb, lora
@@ -359,16 +379,26 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
                 "(extra_per_block_pos_emb must be None)."
             )
         B = state.hidden_states.shape[0]
-        T, H, W = int(state.grid_frames), int(state.grid_height), int(state.grid_width)
-        tokens_per_frame = H * W
+        T = int(state.grid_frames)
         video_3d = rearrange(state.hidden_states, "b t h w d -> b (t h w) d")
         dim = video_3d.shape[2]
         if (n_action + n_state) > 0 and timestep is None:
             raise ValueError("inject_shared_tokens requires `timestep` for action/state token modulation.")
 
+        # Keep the AdaLN emb COMPACT — video per-frame (B, T, D) rather than
+        # expanded over H·W. run_block_3d expands the modulation, not the emb, so
+        # the AdaLN projections run at H·W× fewer FLOPs (see shared_block).
+        def _to_per_frame(t: Tensor) -> Tensor:
+            return t.expand(B, T, t.shape[2]) if t.shape[1] == 1 else t
+
         pieces_x = [video_3d]
-        pieces_emb = [shared_block.expand_video_emb_to_tokens(state.extras["t_embedding_B_T_D"], T, tokens_per_frame)]
-        pieces_lora = [shared_block.expand_video_emb_to_tokens(state.extras["adaln_lora_B_T_3D"], T, tokens_per_frame)]
+        pieces_emb = [_to_per_frame(state.extras["t_embedding_B_T_D"])]
+        # A DiT built with use_adaln_lora=False has no LoRA term; carry None
+        # through so run_block_3d takes its no-LoRA branch instead of crashing on
+        # a None tensor.
+        video_lora = state.extras.get("adaln_lora_B_T_3D")
+        use_lora = video_lora is not None
+        pieces_lora = [_to_per_frame(video_lora)] if use_lora else None
 
         for n_tok, tokens, name in ((n_action, action_tokens, "action"), (n_state, state_tokens, "state")):
             if not n_tok:
@@ -383,18 +413,21 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
             emb, lora = self._shared_token_emb(timestep, n_tok, B)
             pieces_x.append(tokens.to(video_3d.dtype))
             pieces_emb.append(emb)
-            pieces_lora.append(lora)
+            if use_lora:
+                if lora is None:
+                    raise ValueError(
+                        "video branch uses AdaLN-LoRA but t_embedder returned no LoRA for shared tokens."
+                    )
+                pieces_lora.append(lora)
 
         state.hidden_states = torch.cat(pieces_x, dim=1)
         new_extras = dict(state.extras)
-        new_extras["shared_emb_B_S_D"] = torch.cat(pieces_emb, dim=1)
-        new_extras["shared_adaln_lora_B_S_3D"] = torch.cat(pieces_lora, dim=1)
+        new_extras["shared_emb_B_C_D"] = torch.cat(pieces_emb, dim=1)
+        new_extras["shared_adaln_lora_B_C_3D"] = torch.cat(pieces_lora, dim=1) if use_lora else None
         new_extras["shared_rope"] = shared_block.extend_rope_with_shared_tokens(
             state.extras["rope_emb_L_1_1_D"], n_action + n_state
         )
         new_extras["shared_mode"] = True
-        new_extras["shared_n_action"] = n_action
-        new_extras["shared_n_state"] = n_state
         state.extras = new_extras
         return state
 
@@ -411,11 +444,13 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
             state.use_gradient_checkpointing_offload,
             block,
             state.hidden_states,
-            state.extras["shared_emb_B_S_D"],
-            state.extras["shared_adaln_lora_B_S_3D"],
+            state.extras["shared_emb_B_C_D"],
+            state.extras["shared_adaln_lora_B_C_3D"],
             state.extras["shared_rope"],
             state.context,
             state.extras.get("shared_attention_mask"),
+            grid_frames=int(state.grid_frames),
+            tokens_per_frame=int(state.grid_height) * int(state.grid_width),
         )
         return state
 
@@ -447,12 +482,10 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         new_extras = dict(state.extras)
         for key in (
             "shared_mode",
-            "shared_emb_B_S_D",
-            "shared_adaln_lora_B_S_3D",
+            "shared_emb_B_C_D",
+            "shared_adaln_lora_B_C_3D",
             "shared_rope",
             "shared_attention_mask",
-            "shared_n_action",
-            "shared_n_state",
         ):
             new_extras.pop(key, None)
         state.extras = new_extras

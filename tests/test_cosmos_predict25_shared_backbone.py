@@ -48,10 +48,15 @@ def test_run_block_3d_matches_5d_video_only():
     T, H, W = s3.grid_frames, s3.grid_height, s3.grid_width
     tpf = H * W
     x3d = rearrange(s3.hidden_states, "b t h w d -> b (t h w) d")
-    emb = shared_block.expand_video_emb_to_tokens(s3.extras["t_embedding_B_T_D"], T, tpf)
-    lora = shared_block.expand_video_emb_to_tokens(s3.extras["adaln_lora_B_T_3D"], T, tpf)
+    # Compact per-frame emb (video-only, n_shared=0); run_block_3d expands the
+    # modulation internally.
+    emb = s3.extras["t_embedding_B_T_D"]
+    lora = s3.extras["adaln_lora_B_T_3D"]
     block = backbone.dit.blocks[0]
-    out_3d = shared_block.run_block_3d(block, x3d, emb, lora, s3.extras["rope_emb_L_1_1_D"], s3.context, None)
+    out_3d = shared_block.run_block_3d(
+        block, x3d, emb, lora, s3.extras["rope_emb_L_1_1_D"], s3.context, None,
+        grid_frames=T, tokens_per_frame=tpf,
+    )
 
     assert torch.allclose(out_5d_flat, out_3d, atol=1e-5, rtol=1e-5), (
         f"3D shared block must reproduce the 5D block on video-only input; "
@@ -68,6 +73,107 @@ def test_expand_video_emb_matches_repeat_order():
     assert out.shape == (1, 8, 3)
     assert torch.equal(out[0, :4], emb[0, 0].expand(4, 3))
     assert torch.equal(out[0, 4:], emb[0, 1].expand(4, 3))
+
+
+# ----------------------------------------------------------------------
+# shared-token timesteps ride the same timestep_scale as the video grid.
+# ----------------------------------------------------------------------
+
+
+def test_shared_token_emb_applies_timestep_scale():
+    # The video path scales timesteps by dit.timestep_scale before t_embedder
+    # (dit_forward.prepare_block_loop); shared action/state tokens must match so
+    # they land in the same time domain. Non-1 scale is exercised upstream
+    # (transfer2 uses 0.001), so a missing scale is a silent per-token regression.
+    backbone = _build_rich_wrapper(num_blocks=1)
+    ts, n_tokens, B = torch.tensor([0.5]), 3, 1
+
+    backbone.dit.timestep_scale = 4.0
+    emb_scaled, lora_scaled = backbone._shared_token_emb(ts, n_tokens, B)
+
+    # With scale folded in, emb(ts, scale=4) must equal emb(ts*4, scale=1).
+    backbone.dit.timestep_scale = 1.0
+    emb_ref, lora_ref = backbone._shared_token_emb(ts * 4.0, n_tokens, B)
+    assert torch.allclose(emb_scaled, emb_ref, atol=1e-6)
+    assert torch.allclose(lora_scaled, lora_ref, atol=1e-6)
+
+    # Guard: the scaled emb must NOT match the unscaled timestep (regression net).
+    emb_unscaled, _ = backbone._shared_token_emb(ts, n_tokens, B)
+    assert not torch.allclose(emb_scaled, emb_unscaled, atol=1e-6)
+
+
+def test_run_block_shared_honors_gradient_checkpointing():
+    # _run_block_shared passes grid_frames/tokens_per_frame as keyword-only args
+    # through gradient_checkpoint_forward → torch.utils.checkpoint; drive the real
+    # dispatch with checkpointing on and off (eval → dropout is identity) and
+    # assert they agree, locking the kwargs plumbing on CPU.
+    backbone = _build_rich_wrapper(num_blocks=1)
+    backbone.eval()
+    action = torch.randn(1, 2, 16, generator=torch.Generator().manual_seed(4))
+
+    def _injected(use_gc):
+        s = _prep(backbone, seed=3)
+        s = backbone.inject_shared_tokens(s, action, 2, timestep=torch.tensor([0.5]))
+        s.use_gradient_checkpointing = use_gc
+        s.use_gradient_checkpointing_offload = False
+        return s
+
+    out_off = backbone.run_block(0, _injected(False))
+    out_on = backbone.run_block(0, _injected(True))
+    assert torch.allclose(out_off.hidden_states, out_on.hidden_states, atol=1e-5)
+
+
+# ----------------------------------------------------------------------
+# shared-token parity with Wan: per-token timestep + no-AdaLN-LoRA DiT.
+# ----------------------------------------------------------------------
+
+
+def test_shared_token_emb_accepts_per_token_timestep():
+    # Parity with wan.action_tokens.build_action_t_mod, which accepts a 2D
+    # (B, n_tokens) per-token timestep; Cosmos previously ValueError'd on it.
+    backbone = _build_rich_wrapper(num_blocks=1)
+    B, n = 1, 3
+    per_token = torch.linspace(0.1, 0.9, n).view(B, n)
+    emb, _ = backbone._shared_token_emb(per_token, n, B)
+    assert emb.shape[:2] == (B, n)
+    # distinct per-token timesteps → distinct per-token embeddings
+    assert not torch.allclose(emb[:, 0], emb[:, 1])
+
+    import pytest
+
+    with pytest.raises(ValueError, match="per-token"):
+        backbone._shared_token_emb(torch.zeros(B, n + 1), n, B)
+
+
+def test_inject_and_block_tolerate_no_adaln_lora():
+    # A DiT built with use_adaln_lora=False has adaln_lora_B_T_3D=None; inject
+    # must carry None through and the block must take its no-LoRA path instead of
+    # crashing on a None tensor (torch.cat / .shape).
+    from openwam.model.video_backbone.cosmos_predict25 import shared_block
+
+    backbone = _build_rich_wrapper(num_blocks=1)
+    for blk in backbone.dit.blocks:
+        blk.use_adaln_lora = False
+    state = _prep(backbone, seed=1)
+    state.extras["adaln_lora_B_T_3D"] = None  # emulate the no-LoRA DiT
+
+    action = torch.randn(1, 2, 16)
+    state = backbone.inject_shared_tokens(state, action, 2, timestep=torch.tensor([0.5]))
+    assert state.extras["shared_adaln_lora_B_C_3D"] is None
+
+    T, H, W = state.grid_frames, state.grid_height, state.grid_width
+    out = shared_block.run_block_3d(
+        backbone.dit.blocks[0],
+        state.hidden_states,
+        state.extras["shared_emb_B_C_D"],
+        state.extras["shared_adaln_lora_B_C_3D"],
+        state.extras["shared_rope"],
+        state.context,
+        None,
+        grid_frames=T,
+        tokens_per_frame=H * W,
+    )
+    assert out.shape == state.hidden_states.shape
 
 
 # ----------------------------------------------------------------------
@@ -91,7 +197,8 @@ def test_inject_extract_round_trip():
     # 3D shared sequence
     assert state.hidden_states.shape == (B, s_video + n_action + n_state, dim)
     assert state.extras["shared_mode"] is True
-    assert state.extras["shared_emb_B_S_D"].shape[1] == s_video + n_action + n_state
+    # emb is kept COMPACT: video per-frame (T rows) + one row per shared token.
+    assert state.extras["shared_emb_B_C_D"].shape[1] == T + n_action + n_state
     assert state.extras["shared_rope"].shape[0] == s_video + n_action + n_state
 
     state, action_out = backbone.extract_shared_tokens(state, n_action, n_state=n_state)

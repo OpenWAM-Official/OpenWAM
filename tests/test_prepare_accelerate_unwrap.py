@@ -5,10 +5,10 @@ After ``accelerator.prepare(...)`` the trainer's ``self.architecture`` is the
 ``move_frozen_to_device``) must be invoked on the UNDERLYING module:
 
 * ``DeepSpeedEngine.__getattr__`` forwards unknown attributes to the inner
-  module, so the DeepSpeed path (``use_deepspeed=true``, the default) happened
-  to work even when the helpers were called on the wrapper.
+  module, so the DeepSpeed path happened to work even when the helpers were
+  called on the wrapper.
 * ``torch.nn.parallel.DistributedDataParallel`` does NOT forward arbitrary
-  attributes, so on the plain-Accelerate path (``use_deepspeed=false``) with
+  attributes, so under a hypothetical plain-DDP accelerator with
   ``world_size > 1`` the wrapper has no ``set_dtype_device`` and the call
   raised ``AttributeError`` at startup.
 

@@ -163,7 +163,12 @@ class IDMMoTDriver(DualSystemMoTDriver):
 
     @torch.no_grad()
     def prefill_video_cache(self, vstate):
-        """Run the frozen video branch once and cache per-layer K/V for IDM inference."""
+        """Run the frozen video branch once and cache per-layer K/V for IDM inference.
+
+        Returns ``(kv_cache, video_seq_len)`` where ``video_seq_len`` is the token
+        count (T·H·W) callers need for the action mask — so they need not re-derive
+        it via the private ``_video_tokens_per_frame``.
+        """
         # Token count (T·H·W), not hidden_states.shape[1] — that is T for 5D-grid
         # backbones (CosmosPredict25). Mirrors run_joint_loop's s_video formula.
         video_tokens_per_frame = self._video_tokens_per_frame(vstate)
@@ -179,7 +184,7 @@ class IDMMoTDriver(DualSystemMoTDriver):
             mixed_v = self._mixed_attention(q_v, k_v, v_v, attn_mask)
             vstate = self.vb.post_attn_at_layer(layer_id, vstate, mixed_v.contiguous(), vpost)
             kv_cache.append({"k": k_v, "v": v_v})
-        return kv_cache, vstate
+        return kv_cache, video_seq_len
 
     def run_action_with_video_cache(
         self,
@@ -1055,10 +1060,9 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         driver = self._mot_driver
         if driver is None:
             driver = self.build_mot_driver()
-        # Token count (T·H·W); cond_vstate.hidden_states.shape[1] is T for the
-        # CosmosPredict25 5D grid. Matches prefill_video_cache's seq length.
-        video_seq_len = int(cond_vstate.grid_frames) * driver._video_tokens_per_frame(cond_vstate)
-        video_kv_cache, _ = driver.prefill_video_cache(cond_vstate)
+        # prefill returns the token count (T·H·W) directly — no need to re-derive it
+        # via the private _video_tokens_per_frame.
+        video_kv_cache, video_seq_len = driver.prefill_video_cache(cond_vstate)
         compiled_action_cache_inputs = None
         if getattr(self, "_compiled_idm_action_cache_loop", None) is not None:
             video_k_tuple, video_v_tuple = driver.video_kv_cache_to_tuples(video_kv_cache)

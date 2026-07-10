@@ -63,6 +63,23 @@ def merge_branches(
                 f"IDM merge requires Cosmos extras['{key}'] on both branches; "
                 "ensure both were prepared by the CosmosPredict25 backbone."
             )
+    # The frame-axis concat below (dim=1) is only meaningful if the per-frame
+    # modulation is truly per-frame, i.e. both branches were prepared with
+    # ``force_per_token_t_mod=True`` so ``t_embedding_B_T_D`` is ``(B, T, D)``
+    # (not the broadcast ``(B, 1, D)``). Mirror the Wan-side ``ndim==4`` guard:
+    # without this a broadcast ``(B, 1, D)`` slips through and produces a
+    # ``(B, 2, D)`` emb for the ``2T``-frame grid — a hard-to-attribute broadcast
+    # error deep in ``block_split`` for ``T>1`` and a silently-wrong pass for ``T==1``.
+    for key in _FRAME_EXTRAS:
+        for name, branch in (("noisy", noisy), ("cond", cond)):
+            got = branch.extras[key].shape[1]
+            if got != int(branch.grid_frames):
+                raise ValueError(
+                    f"IDM merge requires per-frame modulation on the {name} branch: "
+                    f"extras['{key}'] has {got} frame(s) but grid_frames="
+                    f"{int(branch.grid_frames)}. Prepare the branch with "
+                    "force_per_token_t_mod=True (see idm_merge module docstring)."
+                )
 
     s_noisy = _tokens(noisy)
     s_cond = _tokens(cond)
@@ -101,15 +118,19 @@ def merge_branches(
 def split_branches(
     merged: BlockLoopState, noisy: BlockLoopState, cond: BlockLoopState
 ) -> Tuple[BlockLoopState, BlockLoopState]:
-    """Write the post-loop merged hidden state back onto the noisy/cond branches."""
+    """Write the post-loop merged hidden state back onto the noisy/cond branches.
+
+    Only ``hidden_states`` is written back — that is the sole field the block loop
+    mutates. The per-frame modulation extras (``_FRAME_EXTRAS``) are NOT touched:
+    ``merge_branches`` builds ``merged`` from ``copy.copy`` + a fresh extras dict,
+    so each branch still holds its own original per-frame ``t_embedding_B_T_D`` /
+    ``adaln_lora_B_T_3D`` for ``finalize()``. (The old writeback rebound them to
+    views of the big merged tensor — a value-preserving no-op that also pinned the
+    merged tensor alive.)
+    """
     f_n = int(noisy.grid_frames)
     noisy.hidden_states = merged.hidden_states[:, :f_n]
     cond.hidden_states = merged.hidden_states[:, f_n:]
-    # t_embedding is consumed by finalize() per branch; restore the per-branch slices.
-    for key in _FRAME_EXTRAS:
-        if key in merged.extras:
-            noisy.extras[key] = merged.extras[key][:, :f_n]
-            cond.extras[key] = merged.extras[key][:, f_n:]
     return noisy, cond
 
 

@@ -491,10 +491,13 @@ class OpenWAMTrainer:
         # forward/backward. Architecture-level helpers must run on the UNDERLYING
         # module, not the wrapper: DeepSpeedEngine.__getattr__ forwards unknown attrs
         # to the inner module, but DistributedDataParallel does NOT — so calling
-        # set_dtype_device/move_frozen_to_device on the wrapper raises AttributeError
-        # under plain DDP (use_deepspeed=false, world_size>1). unwrap_model returns
-        # the inner module for both backends (no-op single-GPU, where Accelerate adds
-        # no wrapper).
+        # set_dtype_device/move_frozen_to_device on the wrapper would raise
+        # AttributeError under a hypothetical plain-DDP accelerator (world_size>1).
+        # unwrap_model returns the inner module for both backends (no-op single-GPU,
+        # where Accelerate adds no wrapper). NB: this only covers these setup-time
+        # helpers — the training loop's self.architecture.prepare_inputs/compute_loss
+        # calls would hit the same non-forwarding wrapper if a non-DeepSpeed multi-GPU
+        # path is ever reintroduced.
         arch = self.accelerator.unwrap_model(self.architecture)
         # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
         arch.set_dtype_device(arch.dtype, self.accelerator.device)

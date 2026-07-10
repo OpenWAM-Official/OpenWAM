@@ -265,31 +265,18 @@ class _CapturePrepareVideoBackbone(nn.Module):
         )
 
     def merge_idm_video_branches(self, noisy, cond):
-        """Wan-shaped merge: flat (B, L, D) hidden_states, 4D time_mod, rope_freqs."""
-        import copy
+        """Drive the *production* Wan merge (flat (B, L, D), 4D time_mod, rope_freqs,
+        VACE hints) rather than a copy, so its validation stays covered. ``WanBase``'s
+        implementation touches only the two states (never ``self``), so an unbound
+        call on this fake is exact."""
+        from openwam.model.video_backbone.wan_backbone import WanBase
 
-        if noisy.time_mod.ndim != 4 or cond.time_mod.ndim != 4:
-            raise ValueError(
-                "IDM teacher-forcing requires token-wise video t_mod for noisy and cond branches; "
-                "ensure the video backbone is running in separated-timestep/fused-first-frame mode."
-            )
-        if (noisy.grid_height, noisy.grid_width) != (cond.grid_height, cond.grid_width):
-            raise ValueError("IDM teacher-forcing requires matching spatial token layout.")
-        s_noisy = int(noisy.hidden_states.shape[1])
-        s_cond = int(cond.hidden_states.shape[1])
-        merged = copy.copy(noisy)
-        merged.hidden_states = torch.cat([noisy.hidden_states, cond.hidden_states], dim=1)
-        merged.rope_freqs = torch.cat([noisy.rope_freqs, cond.rope_freqs], dim=0)
-        merged.time_mod = torch.cat([noisy.time_mod, cond.time_mod], dim=1)
-        return merged, s_noisy, s_cond
+        return WanBase.merge_idm_video_branches(self, noisy, cond)
 
     def split_idm_video_branches(self, merged, noisy, cond):
-        s_noisy = int(noisy.hidden_states.shape[1])
-        noisy.hidden_states = merged.hidden_states[:, :s_noisy]
-        cond.hidden_states = merged.hidden_states[:, s_noisy:]
-        noisy.time_mod = merged.time_mod[:, :s_noisy]
-        cond.time_mod = merged.time_mod[:, s_noisy:]
-        return noisy, cond
+        from openwam.model.video_backbone.wan_backbone import WanBase
+
+        return WanBase.split_idm_video_branches(self, merged, noisy, cond)
 
     def pre_attn_at_layer(self, layer_id, state):
         del layer_id

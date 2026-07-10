@@ -110,12 +110,18 @@ def test_merge_split_round_trips():
     cond = _prep(backbone, timestep=torch.zeros(1), force_per_token_t_mod=True, seed=2)
     noisy_ref = noisy.hidden_states.clone()
     cond_ref = cond.hidden_states.clone()
+    # Per-frame modulation extras must survive the merge/split untouched (they feed
+    # finalize per branch); split_branches deliberately does NOT write them back.
+    t_emb_noisy_ref = noisy.extras["t_embedding_B_T_D"].clone()
+    t_emb_cond_ref = cond.extras["t_embedding_B_T_D"].clone()
 
     merged, _, _ = backbone.merge_idm_video_branches(noisy, cond)
     # No block loop runs the merged state changes here; splitting must recover both.
     noisy_out, cond_out = backbone.split_idm_video_branches(merged, noisy, cond)
     assert torch.allclose(noisy_out.hidden_states, noisy_ref)
     assert torch.allclose(cond_out.hidden_states, cond_ref)
+    assert torch.allclose(noisy_out.extras["t_embedding_B_T_D"], t_emb_noisy_ref)
+    assert torch.allclose(cond_out.extras["t_embedding_B_T_D"], t_emb_cond_ref)
 
 
 def test_merge_rejects_mismatched_spatial_layout():
@@ -130,6 +136,21 @@ def test_merge_rejects_mismatched_spatial_layout():
     import pytest
 
     with pytest.raises(ValueError, match="spatial token layout"):
+        backbone.merge_idm_video_branches(noisy, cond)
+
+
+def test_merge_rejects_broadcast_t_mod():
+    # The module docstring requires both branches prepared with
+    # force_per_token_t_mod=True; a broadcast (B, 1, D) t_embedding must be
+    # rejected up front rather than silently producing a (B, 2, D) emb for the
+    # 2T-frame grid (mirrors the Wan-side ndim==4 guard).
+    _, backbone = _make_cosmos_idm()
+    noisy = _prep(backbone, timestep=torch.tensor([0.7]), force_per_token_t_mod=False, seed=1)
+    cond = _prep(backbone, timestep=torch.zeros(1), force_per_token_t_mod=True, seed=2)
+    assert noisy.grid_frames == 2  # but t_embedding_B_T_D is broadcast (B, 1, D)
+    import pytest
+
+    with pytest.raises(ValueError, match="per-frame modulation"):
         backbone.merge_idm_video_branches(noisy, cond)
 
 
