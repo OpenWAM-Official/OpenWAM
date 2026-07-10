@@ -1,22 +1,29 @@
-"""Per-task action-normalization stats for RoboCasa365 (single-arm EEF; computed
-at 10-D, persisted at 20-D).
+"""Per-task action-normalization stats for RoboCasa365 (single-arm EEF; computed at 10-D, persisted
+at 20-D, or the combined 25-D ``eef_base`` [arm20, base5] when mobile).
 
-Simplified single-arm dual of ``robotwin_stats_computation.py``, reading the v3.0 aggregated
-repo: iterate the episodes (single task via ``task_name``, or all tasks pooled — see
-:func:`compute_multitask_stats`), assemble the raw 10-D arm pose from ``observation.state`` (the
-same ``state_to_arm10`` the reader uses), and reduce to ``mean/std/min/max/q01/q99``.
+Simplified single-arm dual of ``robotwin_stats_computation.py``, reading the v3.0 aggregated repo:
+iterate the episodes (single task via ``task_name``, or all tasks pooled — see
+:func:`compute_multitask_stats`), assemble the raw 10-D arm pose from ``observation.state`` (the same
+``state_to_arm10`` the reader uses), reduce to ``mean/std/min/max/q01/q99``, and — when
+``include_base`` — also the 5-D base command from the LeRobot ``action`` field, then concatenate the
+two into ONE 25-D block so the whole ``[arm20, base5]`` vector normalizes with a single stats block
+(deploy gathers 80->25 and un-normalizes with it, no base special-casing).
 
 Output schema (``.npy``, ``allow_pickle``)::
 
-    {"eef": {mean, std, min, max, q01, q99}, "num_timesteps": int}   # 20-D vectors
-    #   (arm10 left = real stats, right half = neutral: mean0/std1/min-1/max1/q01-1/q99 1;
-    #    reduced at 10-D internally, then left-padded to 20-D by _expand_stats_to_20d before
-    #    persist so the deploy normalizer can invert the model's 20-D action)
-    # plus "base"     : {...5-D...}   when include_base      (mobile action command x/y/yaw/torso/mode)
-    # plus "base_vel" : {...3-D...}   when include_base_vel  (base-velocity proprio [vx, vy, vyaw])
+    {"eef": {mean, std, min, max, q01, q99}, "num_timesteps": int}            # 20-D (non-mobile)
+    #   arm10 left = real stats, right half = neutral (mean0/std1/min-1/max1/q01-1/q99 1); reduced at
+    #   10-D internally, then left-padded to 20-D by _expand_stats_to_20d before persist.
+    {"eef_base": {...25-D...}, "num_timesteps": int}                          # 25-D (include_base)
+    #   eef_base = concat(eef20, base5); base5 = the RoboCasa-native action command stats
+    #   [x_vel, y_vel, yaw_vel, torso, control_mode] with a constant-dim guard (torso is 0 across the
+    #   whole dataset → its min==max is nudged to avoid divide-by-zero at normalize time).
 
-``RoboCasa365Dataset`` auto-computes this on first use when ``normalize_mode`` is
-set and no stats file exists; run :func:`main` to precompute.
+The PROPRIO base velocity does NOT get its own stats block: the reader rescales it into the action's
+command space (A′, see robocasa365._BASE_VEL_PHYS_MAX) so it shares the base5 command stats.
+
+``RoboCasa365Dataset`` auto-computes this on first use when ``normalize_mode`` is set and no stats file
+exists; run :func:`main` to precompute.
 """
 
 from __future__ import annotations
@@ -30,15 +37,21 @@ import numpy as np
 import pandas as pd
 
 from openwam.dataloader.robocasa365 import (
-    BASE_VEL_DIM,
+    _MOBILE_STATS_KEY,
+    BASE_ACTION_DIM,
+    RAW_MOBILE_DIM,
     STATS_DIM,
-    _base_velocity_body,
     _expand_stats_to_20d,
     _task_from_source_prefix,
     state_to_arm10,
 )
 from openwam.dataloader.transforms.normalize import compute_extended_stats
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
+
+_STAT_KEYS = ("mean", "std", "min", "max", "q01", "q99")
+
+# LeRobot ``action`` base command dims (mobile): [0:3] x/y/yaw vel, [3] torso, [4] control_mode.
+_ACTION_BASE = slice(0, 5)
 
 
 def atomic_save_stats_npy(path: str, stats: dict) -> None:
@@ -55,31 +68,13 @@ def atomic_save_stats_npy(path: str, stats: dict) -> None:
     os.replace(actual_tmp, path)
 
 
-# LeRobot ``action`` base command dims (mobile): [0:3] x/y/yaw vel, [3] torso, [4] control_mode.
-_ACTION_BASE = slice(0, 5)
-BASE_ACTION_DIM = 5
-
-
-def _episode_base_velocity(base_pose: np.ndarray) -> np.ndarray:
-    """``(T, 7)`` per-frame base pose (base_position(3) + base_rotation(4)) -> ``(T, 3)`` body-frame
-    base velocity (finite-diff; frame 0 = 0). Same formula the reader uses at frame 0 of a window."""
-    length = base_pose.shape[0]
-    out = np.zeros((length, BASE_VEL_DIM), np.float32)
-    for t in range(1, length):
-        out[t] = _base_velocity_body(base_pose[t - 1 : t + 1])
-    return out
-
-
-def _iter_episode_arrays(
-    data_root: str, include_base: bool = False, task_name: str | None = None, include_base_vel: bool = False
-):
-    """Yield ``(arm10, base5, base_vel)`` per episode from a v3 aggregated repo.
+def _iter_episode_arrays(data_root: str, include_base: bool = False, task_name: str | None = None):
+    """Yield ``(arm10, base5)`` per episode from a v3 aggregated repo.
 
     ``arm10`` = raw ``(T, 10)`` arm pose from ``observation.state`` (always). ``base5`` = raw
     ``(T, 5)`` base command from the ``action`` field when ``include_base`` else ``None``.
-    ``base_vel`` = ``(T, 3)`` body-frame base velocity (finite-diff of ``observation.state`` base pose)
-    when ``include_base_vel`` else ``None``. ``task_name`` filters the v3 aggregated repo to one task.
-    Each aggregated shard is read once and sliced per episode via its file-local row offset.
+    ``task_name`` filters the v3 aggregated repo to one task. Each aggregated shard is read once and
+    sliced per episode via its file-local row offset.
     """
     with open(os.path.join(data_root, "meta", "info.json")) as f:
         data_tmpl = json.load(f)["data_path"]
@@ -102,29 +97,15 @@ def _iter_episode_arrays(
             states = np.stack(st[o : o + length]).astype(np.float32)  # (T, 16)
             arm10 = state_to_arm10(states)
             base5 = np.stack(ac[o : o + length]).astype(np.float32)[:, _ACTION_BASE] if include_base else None
-            base_vel = _episode_base_velocity(states[:, 0:7]) if include_base_vel else None
-            yield arm10, base5, base_vel
-
-
-def _base_vel_stats_block(chunks: list) -> dict:
-    """3-D base velocity stats, with the same constant-dim guard as ``_base_stats_block`` (fixed-base
-    episodes have ~0 base velocity, which would divide-by-zero at min-max/z-score time)."""
-    b = compute_extended_stats(chunks)
-    out = {k: np.asarray(b[k], np.float32).reshape(-1).copy() for k in ("mean", "std", "min", "max", "q01", "q99")}
-    degenerate = (out["max"] - out["min"]) < 1e-6
-    out["max"] = np.where(degenerate, out["min"] + 1.0, out["max"]).astype(np.float32)
-    out["std"] = np.where(out["std"] < 1e-6, 1.0, out["std"]).astype(np.float32)
-    if out["mean"].shape[0] != BASE_VEL_DIM:
-        raise ValueError(f"base_vel stats dim {out['mean'].shape[0]} != {BASE_VEL_DIM}")
-    return out
+            yield arm10, base5
 
 
 def _base_stats_block(base_chunks: list) -> dict:
-    """5-D base command stats, with a min==max / std==0 guard so constant dims (e.g. control_mode
-    all -1 or torso all 0 in fixed-base buckets) don't divide-by-zero at min-max/z-score time —
+    """5-D base command stats, with a min==max / std==0 guard so constant dims (torso is 0 across the
+    whole dataset; control_mode all -1 in fixed-base buckets) don't divide-by-zero at normalize time —
     a constant dim then normalizes to a constant that still round-trips through denormalize."""
     b = compute_extended_stats(base_chunks)
-    out = {k: np.asarray(b[k], np.float32).reshape(-1).copy() for k in ("mean", "std", "min", "max", "q01", "q99")}
+    out = {k: np.asarray(b[k], np.float32).reshape(-1).copy() for k in _STAT_KEYS}
     degenerate = (out["max"] - out["min"]) < 1e-6
     out["max"] = np.where(degenerate, out["min"] + 1.0, out["max"]).astype(np.float32)
     out["std"] = np.where(out["std"] < 1e-6, 1.0, out["std"]).astype(np.float32)
@@ -133,99 +114,80 @@ def _base_stats_block(base_chunks: list) -> dict:
     return out
 
 
-def compute_normalization_stats(
-    data_root: str, include_base: bool = False, task_name: str | None = None, include_base_vel: bool = False
-) -> dict:
-    """Compute single-arm 10-D EEF stats (+ optional 5-D base command / 3-D base velocity stats).
+def _finish(arm_chunks: list, base_chunks: list, total: int, include_base: bool, label: str) -> dict:
+    """Reduce accumulated arm (+ base) chunks to the persisted stats dict.
 
-    Returns ``{"eef": {...20-D...}, "num_timesteps": int}``, plus ``"base": {...5-D...}`` when
-    ``include_base`` (mobile action base command) and ``"base_vel": {...3-D...}`` when
-    ``include_base_vel`` (base-velocity proprio, from ``observation.state``). ``task_name`` filters
-    the v3 aggregated repo to one task (see :func:`_iter_episode_arrays`).
+    Non-mobile → ``{"eef": 20-D}``; mobile → ``{"eef_base": 25-D}`` (concat of the 20-D arm block and
+    the 5-D base command block, so the whole [arm20, base5] vector shares ONE stats block). The arm
+    block is computed at 10-D (STATS_DIM) then left-padded to the 20-D bimanual schema."""
+    if not arm_chunks:
+        raise ValueError(f"No timesteps accumulated ({label})")
+    eef10 = compute_extended_stats(arm_chunks)
+    if len(eef10["mean"]) != STATS_DIM:
+        raise ValueError(f"computed arm dim {len(eef10['mean'])} != {STATS_DIM}")
+    eef20 = _expand_stats_to_20d(eef10)
+    print(f"  [{label}] done: {total} timesteps, dim=20{' +base5 (combined eef_base)' if include_base else ''}")
+    if not include_base:
+        return {"eef": eef20, "num_timesteps": int(total)}
+    base5 = _base_stats_block(base_chunks)
+    combined = {k: np.concatenate([eef20[k], base5[k]]).astype(np.float32) for k in _STAT_KEYS}
+    if combined["mean"].shape[0] != RAW_MOBILE_DIM:
+        raise ValueError(f"combined {_MOBILE_STATS_KEY} dim {combined['mean'].shape[0]} != {RAW_MOBILE_DIM}")
+    return {_MOBILE_STATS_KEY: combined, "num_timesteps": int(total)}
+
+
+def compute_normalization_stats(data_root: str, include_base: bool = False, task_name: str | None = None) -> dict:
+    """Compute single-arm 20-D EEF stats (+ optional 5-D base command → combined 25-D ``eef_base``).
+
+    ``task_name`` filters the v3 aggregated repo to one task (see :func:`_iter_episode_arrays`).
     """
-    arm_chunks, base_chunks, base_vel_chunks, total = [], [], [], 0
-    for i, (arm10, base5, base_vel) in enumerate(
-        _iter_episode_arrays(data_root, include_base, task_name, include_base_vel)
-    ):
+    arm_chunks, base_chunks, total = [], [], 0
+    for i, (arm10, base5) in enumerate(_iter_episode_arrays(data_root, include_base, task_name)):
         arm_chunks.append(arm10)
         total += arm10.shape[0]
         if include_base:
             base_chunks.append(base5)
-        if include_base_vel:
-            base_vel_chunks.append(base_vel)
         if (i + 1) % 100 == 0:
             print(f"  [stats] {i + 1} episodes, {total} timesteps so far")
-    if not arm_chunks:
-        raise ValueError(f"No timesteps accumulated from {data_root}")
-    eef = compute_extended_stats(arm_chunks)
-    if len(eef["mean"]) != STATS_DIM:
-        raise ValueError(f"computed arm dim {len(eef['mean'])} != {STATS_DIM}")
-    print(f"  [stats] done: {total} timesteps over {len(arm_chunks)} episodes, dim={STATS_DIM}"
-          f"{' +base5' if include_base else ''}{' +basevel3' if include_base_vel else ''}")
-    # Persist arm at the full 20-D action dim (left=arm, right=neutral) so the deploy normalizer
-    # can invert the model's 20-D output (the 10-D file was the deploy-break).
-    out = {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
-    if include_base:
-        out["base"] = _base_stats_block(base_chunks)
-    if include_base_vel:
-        out["base_vel"] = _base_vel_stats_block(base_vel_chunks)
-    return out
+    return _finish(arm_chunks, base_chunks, total, include_base, "stats")
 
 
-def compute_multitask_stats(roots: list, include_base: bool = False, include_base_vel: bool = False) -> dict:
-    """Compute ONE shared 10-D EEF (+ optional 5-D base / 3-D base velocity) stats across several tasks.
+def compute_multitask_stats(roots: list, include_base: bool = False) -> dict:
+    """Compute ONE shared 20-D EEF (+ optional 5-D base → combined 25-D ``eef_base``) across tasks.
 
-    ``roots`` is ``[(task_name, repo), ...]`` (v3: every entry shares the same aggregated repo, one
-    per selected task). Mirrors robotwin's multi-task shared-stats contract: every task in a
-    multi-task run must train in the SAME normalized space, so stats are pooled over all tasks. Same
-    schema as the single-task path (plus ``"base"`` / ``"base_vel"`` blocks when requested).
+    ``roots`` is ``[(task_name, repo), ...]`` (one per selected task, paired with its repo). Mirrors
+    robotwin's multi-task shared-stats contract: every task in a multi-task run must train in the SAME
+    normalized space, so stats are pooled over all tasks. Same schema as the single-task path.
     """
-    arm_chunks, base_chunks, base_vel_chunks, total = [], [], [], 0
+    arm_chunks, base_chunks, total = [], [], 0
     for task_name, repo in roots:
         n0 = total
-        for arm10, base5, base_vel in _iter_episode_arrays(repo, include_base, task_name, include_base_vel):
+        for arm10, base5 in _iter_episode_arrays(repo, include_base, task_name):
             arm_chunks.append(arm10)
             total += arm10.shape[0]
             if include_base:
                 base_chunks.append(base5)
-            if include_base_vel:
-                base_vel_chunks.append(base_vel)
         print(f"  [multitask-stats] {task_name}: +{total - n0} timesteps (running {total})")
-    if not arm_chunks:
-        raise ValueError(f"No timesteps accumulated from {len(roots)} tasks")
-    eef = compute_extended_stats(arm_chunks)
-    if len(eef["mean"]) != STATS_DIM:
-        raise ValueError(f"computed arm dim {len(eef['mean'])} != {STATS_DIM}")
-    print(f"  [multitask-stats] done: {total} timesteps over {len(roots)} tasks, dim={STATS_DIM}"
-          f"{' +base5' if include_base else ''}{' +basevel3' if include_base_vel else ''}")
-    out = {"eef": _expand_stats_to_20d(eef), "num_timesteps": int(total)}
-    if include_base:
-        out["base"] = _base_stats_block(base_chunks)
-    if include_base_vel:
-        out["base_vel"] = _base_vel_stats_block(base_vel_chunks)
-    return out
+    return _finish(arm_chunks, base_chunks, total, include_base, f"multitask-stats over {len(roots)} tasks")
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Precompute RoboCasa365 EEF (+ optional base command / base-velocity) normalization stats"
+        description="Precompute RoboCasa365 EEF (+ optional combined 25-D eef_base) normalization stats"
     )
     ap.add_argument("data_root", help="A v3.0 aggregated RoboCasa365 repo (meta/info.json + meta/episodes/*.parquet)")
     ap.add_argument("--task", default=None, help="Filter the repo to one task (source_prefix); default: all tasks")
-    ap.add_argument("--mobile-base", action="store_true", help="Also emit the 5-D 'base' command stats block")
-    ap.add_argument("--base-proprio-velocity", action="store_true", help="Also emit the 3-D 'base_vel' proprio stats block")
+    ap.add_argument("--mobile-base", action="store_true",
+                    help="Also read the base command and emit the combined 25-D 'eef_base' block")
     ap.add_argument("-o", "--output", default=None,
-                    help="Output .npy (default: {data_root}/{task|robocasa365}_{eef[base][vel]}_stats.npy)")
+                    help="Output .npy (default: {data_root}/{task|robocasa365}_{eef|eefbase}_stats.npy)")
     args = ap.parse_args()
 
     out = args.output
     if out is None:
-        tag = "eef" + ("base" if args.mobile_base else "") + ("vel" if args.base_proprio_velocity else "")
+        tag = "eefbase" if args.mobile_base else "eef"
         out = os.path.join(args.data_root, f"{args.task or 'robocasa365'}_{tag}_stats.npy")
-    stats = compute_normalization_stats(
-        args.data_root, include_base=args.mobile_base, task_name=args.task,
-        include_base_vel=args.base_proprio_velocity,
-    )
+    stats = compute_normalization_stats(args.data_root, include_base=args.mobile_base, task_name=args.task)
     atomic_save_stats_npy(out, stats)
     print(f"Saved stats -> {out}")
 

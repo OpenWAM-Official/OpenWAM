@@ -21,9 +21,12 @@ Action spaces (two layers — don't conflate):
     is **control_mode-aware** (achieved → current eef; desired / base-mode → previous target), so the
     arm stays placed while the base drives.
 
-Proprio: the client sends the model's **20-D single-arm EEF** proprio (converted from the env's raw
-16-D state). For a ``base_proprio_velocity`` checkpoint (set ``base_proprio_velocity: true`` in the
-policy config), it appends the body-frame base velocity → **23-D** ``[arm20, base_vel3]``.
+Proprio: the client sends the model's single-arm EEF proprio (converted from the env's raw 16-D
+state). For a **mobile** checkpoint (``mobile_base: true``, the default), it appends the 5-D base
+proprio → **25-D** ``[arm20, base5]`` where ``base5 = [vx, vy, vyaw, 0, 0]``: the 3 body-frame base
+velocities are the finite-diff of the world base pose rescaled into the action command space (A′,
+``base_velocity_cmd``, exactly as the dataloader), and torso + control_mode have no achieved value so
+they are 0 (masked at train). A fixed-base ckpt sends the 20-D arm proprio.
 
 Debug dumping follows the robotwin convention (``ep{N}/step_{N}/`` with per-camera
 JPGs + ``meta.json``) and adds a labeled ``cameras.png`` montage plus
@@ -49,7 +52,7 @@ import numpy as np  # noqa: E402
 
 from benchmarks.utils import (  # noqa: E402
     WSPolicyClient,
-    base_velocity_body,
+    base_velocity_cmd,
     build_payload,
     eef20d_to_robocasa12d,
     encode_numpy_b64,
@@ -79,20 +82,19 @@ DEFAULT_STATE_KEYS = [
     "state.end_effector_rotation_relative",   # 4
     "state.gripper_qpos",                     # 2
 ]
-# The 3 obs keys the 20-D EEF proprio is built from (base POSE dropped, like training; base
-# VELOCITY is added separately from BASE_POSE_KEYS when base_proprio_velocity).
+# The 3 obs keys the 20-D EEF proprio is built from (base POSE dropped, like training; the base5
+# VELOCITY is derived separately from BASE_POSE_KEYS when mobile_base).
 PROPRIO_EEF_KEYS = (
     "state.end_effector_position_relative",   # 3
     "state.end_effector_rotation_relative",   # 4 (quat xyzw)
     "state.gripper_qpos",                     # 2
 )
-# Proprio is sent as the SAME 20-D EEF representation the model trains on
-# (RoboCasa365Dataset proprio = eef20d[0:1]); the server validates this dim and normalizes it.
+# Proprio: the SAME representation the model trains on (RoboCasa365Dataset proprio); the server
+# validates this dim and normalizes it. Fixed-base → 20-D arm EEF; mobile → 25-D [arm20, base5].
 STATE_DIM = 20
-# base_proprio_velocity ckpts append the current body-frame base velocity [vx, vy, vyaw] → 23-D
-# proprio [arm20, base_vel3]; the server normalizes base_vel with its 'base_vel' stats block and
-# scatters it into the unified reserved slots [68:71) (dual of the action base command in [68:73)).
-BASE_VEL_DIM = 3
+BASE_VEL_DIM = 3      # the 3 base-velocity dims within base5 (rescaled into command space via A′)
+BASE_ACTION_DIM = 5   # base5 = [vx, vy, vyaw, torso=0 (masked), control_mode=0 (masked)]
+STATE_DIM_MOBILE = STATE_DIM + BASE_ACTION_DIM  # 25
 # The two obs keys the body-frame base velocity is finite-differenced from (world base pose).
 BASE_POSE_KEYS = ("state.base_position", "state.base_rotation")  # 3 + 4 = 7-D pose
 
@@ -119,7 +121,7 @@ def assemble_state(obs: dict, state_keys: Iterable[str]) -> list:
     return state
 
 
-def assemble_eef20d_proprio(obs: dict, base_vel: Optional[np.ndarray] = None) -> list:
+def assemble_eef20d_proprio(obs: dict, base5: Optional[np.ndarray] = None) -> list:
     """Build the single-arm EEF proprio (RAW) the model trains on, from a RoboCasa obs.
 
     Mirrors the dataloader's proprio exactly (``state_to_arm10`` + ``assemble_single_arm_left``):
@@ -127,8 +129,9 @@ def assemble_eef20d_proprio(obs: dict, base_vel: Optional[np.ndarray] = None) ->
     Sent raw (physical) — the server normalizes. This replaces the stale 16-D raw send so the
     deploy proprio matches the trained representation (the dual of robotwin's _extract_eef_proprio).
 
-    When ``base_vel`` (3-D body-frame ``[vx, vy, vyaw]``, raw) is given — a base_proprio_velocity
-    ckpt — it is appended → 23-D ``[arm20, base_vel3]``; the server normalizes+scatters it to [68:71).
+    When ``base5`` (5-D ``[vx, vy, vyaw, 0, 0]``, raw command-space velocity) is given — a mobile
+    ckpt — it is appended → 25-D ``[arm20, base5]``; the server normalizes+scatters it through the
+    ONE map (the 3 velocities to [68:71), torso+control_mode to [71:73), masked at train).
     """
     missing = [k for k in PROPRIO_EEF_KEYS if k not in obs]
     if missing:
@@ -139,8 +142,8 @@ def assemble_eef20d_proprio(obs: dict, base_vel: Optional[np.ndarray] = None) ->
         obs["state.gripper_qpos"],
     )
     proprio = eef20d.astype(np.float32).reshape(-1).tolist()
-    if base_vel is not None:
-        proprio.extend(np.asarray(base_vel, np.float32).reshape(-1)[:BASE_VEL_DIM].tolist())
+    if base5 is not None:
+        proprio.extend(np.asarray(base5, np.float32).reshape(-1)[:BASE_ACTION_DIM].tolist())
     return proprio
 
 
@@ -179,12 +182,12 @@ def build_obs_payload(
     image_transform: str,
     state_keys: Iterable[str],
     prompt: str,
-    base_vel: Optional[np.ndarray] = None,
+    base5: Optional[np.ndarray] = None,
 ) -> dict:
     """Turn a RoboCasaGymEnv obs dict into an OpenWAM obs payload (no server).
 
-    Encodes the 3 camera slots (head required) and assembles the proprio state. ``base_vel`` (when
-    given, a base_proprio_velocity ckpt) is appended to the proprio → 23-D.
+    Encodes the 3 camera slots (head required) and assembles the proprio state. ``base5`` (when
+    given, a mobile ckpt) is appended to the proprio → 25-D ``[arm20, base5]``.
     """
 
     def _encode(key: Optional[str], *, required: bool) -> Optional[str]:
@@ -203,9 +206,9 @@ def build_obs_payload(
         left_wrist=_encode(left_wrist_camera_key, required=False),
         right_wrist=_encode(right_wrist_camera_key, required=False),
         prompt=prompt,
-        # Send the 20-D EEF proprio the model trains on (NOT the raw 16-D), + base_vel3 when a
-        # base_proprio_velocity ckpt. state_keys is retained for the debug breakdown only.
-        state=assemble_eef20d_proprio(obs, base_vel=base_vel),
+        # Send the EEF proprio the model trains on (NOT the raw 16-D), + base5 when a mobile ckpt.
+        # state_keys is retained for the debug breakdown only.
+        state=assemble_eef20d_proprio(obs, base5=base5),
     )
 
 
@@ -333,7 +336,7 @@ class OpenWAMRoboCasa365Policy:
         action_dim: int = ACTION_DIM,
         osc_pos_scale: Optional[float] = None,
         osc_rot_scale: Optional[float] = None,
-        base_proprio_velocity: bool = False,
+        mobile_base: bool = False,
         debug: bool = False,
         debug_dir: str = "./debug_robocasa365",
         _client=None,
@@ -346,13 +349,11 @@ class OpenWAMRoboCasa365Policy:
         self._right_wrist_camera_key = right_wrist_camera_key
         self._image_transform = image_transform
         self._state_keys = list(state_keys) if state_keys else list(DEFAULT_STATE_KEYS)
-        # base_proprio_velocity ckpts append the 3-D body-frame base velocity to the proprio → 23-D.
-        # Must match the ckpt's dataloader.base_proprio_velocity (set from the eval policy config).
-        self._base_proprio_velocity = bool(base_proprio_velocity)
-        # Expected proprio width for the fail-fast guard: 20-D EEF (+ 3-D base velocity when on).
-        self._state_dim = (
-            state_dim if state_dim is not None else STATE_DIM + (BASE_VEL_DIM if self._base_proprio_velocity else 0)
-        )
+        # Mobile ckpts send the 25-D [arm20, base5] proprio (base5 = [vel3 A′-rescaled, 0, 0]). Must
+        # match the ckpt's dataloader.mobile_base (set from the eval policy config).
+        self._mobile_base = bool(mobile_base)
+        # Expected proprio width for the fail-fast guard: 20-D EEF (+ 5-D base5 when mobile).
+        self._state_dim = state_dim if state_dim is not None else (STATE_DIM_MOBILE if self._mobile_base else STATE_DIM)
         self._action_dim = action_dim
         self._osc_pos_scale = osc_pos_scale
         self._osc_rot_scale = osc_rot_scale
@@ -364,7 +365,7 @@ class OpenWAMRoboCasa365Policy:
         # the env is in "desired" goal-update mode (control_mode>=0.5). Cleared per episode in reset().
         self._prev_target_pose: Optional[np.ndarray] = None
         # Previous step's world base pose (pos3 + quat4) — the reference for the body-frame base
-        # velocity finite-diff (base_proprio_velocity). Cleared per episode in reset().
+        # base-velocity finite-diff (mobile_base). Cleared per episode in reset().
         self._prev_base_pose: Optional[np.ndarray] = None
 
         pong = self._client.ping()
@@ -372,7 +373,7 @@ class OpenWAMRoboCasa365Policy:
             raise RuntimeError(f"OpenWAM server ping returned unexpected response: {pong}")
         print(
             f"[OpenWAMRoboCasa365Policy] action_dim={action_dim} state_dim={self._state_dim} "
-            f"base_proprio_velocity={self._base_proprio_velocity} image_transform={image_transform} "
+            f"mobile_base={self._mobile_base} image_transform={image_transform} "
             f"cameras=({head_camera_key}, {left_wrist_camera_key}, {right_wrist_camera_key})"
         )
 
@@ -437,25 +438,27 @@ class OpenWAMRoboCasa365Policy:
         self._prev_target_pose = arm20[0:9].copy()
         return twelve
 
-    def _base_velocity(self, obs: dict) -> np.ndarray:
-        """Current body-frame base velocity [vx, vy, vyaw] via stateful finite-diff of the world base
-        pose (base_position + base_rotation), the SAME derivation the dataloader uses at train time.
-        The first step of an episode (no previous pose) is zero. Updates the tracked previous pose."""
+    def _base5_proprio(self, obs: dict) -> np.ndarray:
+        """The 5-D base proprio ``[vx, vy, vyaw, 0, 0]``: body-frame base velocity rescaled into the
+        action command space (A′, ``base_velocity_cmd``) via a stateful finite-diff of the world base
+        pose (base_position + base_rotation) — the SAME derivation + rescale the dataloader uses at
+        train time, so no exposure bias. torso + control_mode are 0 (masked at train). The first step
+        of an episode (no previous pose) is all zeros. Updates the tracked previous pose."""
         missing = [k for k in BASE_POSE_KEYS if k not in obs]
         if missing:
-            raise KeyError(f"base_proprio_velocity needs obs base-pose key(s): {missing}")
+            raise KeyError(f"mobile_base needs obs base-pose key(s): {missing}")
         cur = np.concatenate([
             np.asarray(obs["state.base_position"], np.float32).reshape(-1)[:3],
             np.asarray(obs["state.base_rotation"], np.float32).reshape(-1)[:4],
         ])
-        vel = np.zeros(BASE_VEL_DIM, np.float32) if self._prev_base_pose is None else base_velocity_body(
-            self._prev_base_pose, cur
-        )
+        base5 = np.zeros(BASE_ACTION_DIM, np.float32)
+        if self._prev_base_pose is not None:
+            base5[0:BASE_VEL_DIM] = base_velocity_cmd(self._prev_base_pose, cur)
         self._prev_base_pose = cur
-        return vel
+        return base5
 
     def act(self, obs: dict, prompt: str) -> dict:
-        base_vel = self._base_velocity(obs) if self._base_proprio_velocity else None
+        base5 = self._base5_proprio(obs) if self._mobile_base else None
         payload = build_obs_payload(
             obs,
             head_camera_key=self._head_camera_key,
@@ -464,7 +467,7 @@ class OpenWAMRoboCasa365Policy:
             image_transform=self._image_transform,
             state_keys=self._state_keys,
             prompt=prompt,
-            base_vel=base_vel,
+            base5=base5,
         )
         if self._state_dim is not None and len(payload["state"]) != self._state_dim:
             raise ValueError(f"RoboCasa365 state dim {len(payload['state'])} != expected {self._state_dim}")

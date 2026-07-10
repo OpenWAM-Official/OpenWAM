@@ -321,16 +321,7 @@ class _UnifyAwareNormalizer:
     ``.normalize``), so ``base.py`` needs no change.
     """
 
-    def __init__(
-        self,
-        inner,
-        dst_index: np.ndarray,
-        unify_dim: int,
-        base_slice=None,
-        base_normalizer=None,
-        base_vel_dst=None,
-        base_vel_normalizer=None,
-    ):
+    def __init__(self, inner, dst_index: np.ndarray, unify_dim: int):
         from openwam.dataloader.utils.unify_action import map_to_unify, unmap_from_unify
 
         self._inner = inner
@@ -338,18 +329,6 @@ class _UnifyAwareNormalizer:
         self._unify_dim = int(unify_dim)
         self._map_to_unify = map_to_unify
         self._unmap_from_unify = unmap_from_unify
-        # Mobile base (robocasa365): the base command lives in a contiguous reserved span [68:73)
-        # (action-only) with its OWN stats. When set, unnormalize gathers it, un-normalizes with
-        # base_normalizer, and appends it → the returned raw action is [arm_raw, base_raw]. The
-        # ACTION path (unnormalize) uses base_slice/base_normalizer.
-        self._base_slice = base_slice
-        self._base_normalizer = base_normalizer
-        # Base-velocity proprio (robocasa365 base_proprio_velocity): the PROPRIO path (normalize) gets
-        # a 3-D body-frame base velocity appended to the raw arm → raw = [arm_raw, base_vel3]. When set,
-        # normalize splits it off, un-normalizes with base_vel_normalizer, and scatters it into
-        # base_vel_dst ([68:71)) of the unified vector — the dual of the action base command.
-        self._base_vel_dst = base_vel_dst
-        self._base_vel_normalizer = base_vel_normalizer
 
     # action OUT: model emits (..., unify_dim) normalized-unified → physical raw.
     def unnormalize(self, x):
@@ -362,41 +341,15 @@ class _UnifyAwareNormalizer:
                 arr.shape[-1], self._unify_dim,
             )
             return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
-        base_phys = None
-        if self._base_slice is not None:
-            # Gather base BEFORE un-unifying the arm (unmap collapses to arm width, dropping [68:73)).
-            base = arr[..., self._base_slice]
-            base_phys = base.copy() if self._base_normalizer is None else self._base_normalizer.unnormalize(base)
-        raw = self._unmap_from_unify(arr, self._dst_index)  # (..., unify_dim) -> (..., arm_raw)
-        arm = raw if self._inner is None else self._inner.unnormalize(raw)
-        if base_phys is not None:
-            return np.concatenate([np.asarray(arm), np.asarray(base_phys)], axis=-1)  # [arm_raw, base_raw]
-        return arm
+        raw = self._unmap_from_unify(arr, self._dst_index)  # (..., unify_dim) -> (..., raw_dim)
+        return raw if self._inner is None else self._inner.unnormalize(raw)
 
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
     def normalize(self, x):
         arr = np.asarray(x)
-        base_vel_raw = None
-        if self._base_vel_dst is not None:
-            # Raw proprio is [arm_raw, base_vel3]; split the base velocity off (arm width = len of the
-            # arm dst_index) BEFORE the arm normalize+scatter, then scatter it into base_vel_dst after.
-            arm_w = self._dst_index.shape[0]
-            n_bv = self._base_vel_dst.stop - self._base_vel_dst.start
-            if arr.shape[-1] != arm_w + n_bv:
-                raise ValueError(
-                    f"[normalizer/unify] base_proprio_velocity expects proprio width {arm_w + n_bv} "
-                    f"([arm{arm_w}, base_vel{n_bv}]), got {arr.shape[-1]}; the eval client must send "
-                    "base_proprio_velocity=true to match this checkpoint (else train/eval proprio diverge)."
-                )
-            base_vel_raw = arr[..., arm_w : arm_w + n_bv]
-            arr = arr[..., :arm_w]
         if self._inner is not None:
             arr = self._inner.normalize(arr)
         unified, _mask = self._map_to_unify(arr, self._dst_index, self._unify_dim)
-        if base_vel_raw is not None:
-            bv = base_vel_raw if self._base_vel_normalizer is None else self._base_vel_normalizer.normalize(base_vel_raw)
-            unified = np.array(unified, copy=True)  # map_to_unify may hand back a read-only/aliased array
-            unified[..., self._base_vel_dst] = np.asarray(bv)
         return unified
 
     # Expose inner stats for callers that introspect (best-effort).
@@ -417,34 +370,15 @@ def _infer_raw_dim(inner) -> Optional[int]:
     return None
 
 
-def _build_key_normalizer(cfg: DictConfig, ckpt_dir: str, key: str):
-    """Build a Normalizer from the ``key`` stats block of normalization_stats.npy (mobile base uses
-    key='base'). Returns None when normalization is disabled; raises if the block is missing."""
-    norm_mode = OmegaConf.select(cfg, "dataloader.normalize_mode", default=None)
-    if norm_mode in (None, "", "none", "null"):
-        return None
-    from openwam.dataloader.transforms.normalize import YAML_TO_NORM_MODE, Normalizer, load_mode_stats
-
-    if norm_mode not in YAML_TO_NORM_MODE:
-        return None
-    stats_path = os.path.join(ckpt_dir, "normalization_stats.npy")
-    stats = load_mode_stats(stats_path, key)
-    if stats is None:
-        raise ValueError(
-            f"[normalizer/unify] normalization_stats.npy has no '{key}' block ({stats_path}); retrain — "
-            f"the dataloader persists a '{key}' block (mobile_base → 'base', base_proprio_velocity → 'base_vel')."
-        )
-    return Normalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=stats)
-
-
 def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
     """Build the deploy normalizer, wrapping for ``unify_action`` when the ckpt used it.
 
     Non-unify ckpts: identical to upstream (returns the raw-space Normalizer or None).
-    Unify ckpts: wrap in :class:`_UnifyAwareNormalizer` so the model's UNIFY_DIM output
-    is gathered back to raw dims BEFORE unnormalize (and proprio scattered AFTER
-    normalize) — the exact inverse of the train-time transform. With ``mobile_base``,
-    the base command span [68:73) is un-normalized separately and appended (→ [arm_raw, base_raw]).
+    Unify ckpts: wrap in :class:`_UnifyAwareNormalizer` so the model's UNIFY_DIM output is gathered
+    back to the raw width BEFORE unnormalize (and proprio scattered AFTER normalize) — the exact
+    inverse of the train-time transform. FULLY GENERIC: the raw width and its stats come from the
+    reader's ``action_mode`` stats block (e.g. robocasa365 mobile → 25-D ``eef_base`` [arm20, base5]);
+    the base is part of the raw vector and needs no special-casing here.
     """
     inner = _build_inner_normalizer(cfg, ckpt_dir)
 
@@ -478,42 +412,4 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
         dst_index.shape[0],
         "then" if inner is not None else "(no stats, gather-only:)",
     )
-    # Mobile base (robocasa365): un-normalize the base command span [68:73) separately from its
-    # own "base" stats block, so the returned raw action is [arm_raw, base_raw] (25-D). The client
-    # then bridges arm (→OSC) and sends base raw.
-    base_slice = base_normalizer = None
-    if bool(OmegaConf.select(cfg, "dataloader.mobile_base", default=False)):
-        from openwam.dataloader.robocasa365 import _UNIFY_BASE
-
-        base_slice = _UNIFY_BASE
-        base_normalizer = _build_key_normalizer(cfg, ckpt_dir, "base")
-        logger.info(
-            "[normalizer/unify] mobile_base ON: base command span [%d:%d) un-normalized separately "
-            "→ deploy returns [arm_raw, base_raw].",
-            base_slice.start,
-            base_slice.stop,
-        )
-    # Base-velocity proprio (robocasa365): the client sends [arm_raw, base_vel3]; scatter the base
-    # velocity into [68:71) after normalizing with its own "base_vel" stats block (proprio-only dual
-    # of the action base command above).
-    base_vel_dst = base_vel_normalizer = None
-    if bool(OmegaConf.select(cfg, "dataloader.base_proprio_velocity", default=False)):
-        from openwam.dataloader.robocasa365 import _UNIFY_BASE_VEL
-
-        base_vel_dst = _UNIFY_BASE_VEL
-        base_vel_normalizer = _build_key_normalizer(cfg, ckpt_dir, "base_vel")
-        logger.info(
-            "[normalizer/unify] base_proprio_velocity ON: proprio base velocity scattered into [%d:%d) "
-            "(client sends [arm_raw, base_vel3]).",
-            base_vel_dst.start,
-            base_vel_dst.stop,
-        )
-    return _UnifyAwareNormalizer(
-        inner,
-        dst_index,
-        unify_dim,
-        base_slice=base_slice,
-        base_normalizer=base_normalizer,
-        base_vel_dst=base_vel_dst,
-        base_vel_normalizer=base_vel_normalizer,
-    )
+    return _UnifyAwareNormalizer(inner, dst_index, unify_dim)

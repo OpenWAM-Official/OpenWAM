@@ -42,6 +42,7 @@ The wire contract (message types) lives in ``benchmarks/utils/transport.py``
 
 from benchmarks.utils.action_conversion import (
     base_velocity_body,
+    base_velocity_cmd,
     eef20d_to_ee16d,
     eef20d_to_robocasa12d,
     quat_xyzw_to_axis_angle,
@@ -66,6 +67,7 @@ __all__ = [
     "ServerError",
     "WSPolicyClient",
     "base_velocity_body",
+    "base_velocity_cmd",
     "build_payload",
     "eef20d_to_ee16d",
     "eef20d_to_robocasa12d",

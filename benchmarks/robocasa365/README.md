@@ -61,9 +61,10 @@ fixed; 65 atomic + 235 composite have pretrain data). The model commands the hol
   composite-**unseen** tasks are held out of training (zero-shot). Run them with
   `multi_eval.sh ... target_tasks.txt`.
 
-See the mobile-base design (arm absolute-EEF in unified slots `[0:10)`; RoboCasa-native base command
-raw in reserved `[68:73)`) in `docs/plans/robocasa365-full-mobile.md`. Optional base-velocity proprio
-occupies `[68:71)` on the proprio side (see "Base-velocity proprio" below).
+See the mobile design in `docs/plans/robocasa365-unify-raw-vector-refactor.md`: with `mobile_base` the
+base command is folded INTO the raw vector → raw **25-D `[arm20, base5]`** (action & proprio share ONE
+layout), scattered to the unified 80-D via ONE map `["0-9","34-43","68-72"]` (arm → `[0:10)`+`[34:44)`,
+base5 → `[68:73)`) — like BEHAVIOR's RAW-27, base is not a bypass channel.
 
 ## Training data + dataloader
 
@@ -94,26 +95,23 @@ scripts/train.sh dataloader=robocasa365 \
   dataloader.dataset_dir=/data/robocasa365-pretrain-atomic   # [+ dataloader.task_name=OpenDrawer]
 ```
 
-`unify_action` + `mobile_base` are ON by default: the model trains the repo-standard **20-D
-EEF** arm action (absolute EEF pose from `observation.state`, bridged to 12-D OSC at eval) in
-unified slots `[0:10)`, plus the **5-D mobile base command** (raw from the LeRobot `action`
-field, direct-to-env at eval) in reserved `[68:73)`, all in the unified **80-D** head.
+`unify_action` + `mobile_base` are ON by default. The arm action is the repo-standard **20-D
+EEF** (full base-relative pose from `observation.state`, bridged to 12-D OSC at eval) in unified
+slots `[0:10)`; the **5-D base command** (raw from the LeRobot `action` field: `[x_vel, y_vel,
+yaw_vel, torso, control_mode]`, direct-to-env at eval) maps to `[68:73)`. **Proprio mirrors the
+layout**: the arm current pose plus the **body-frame base velocity** in `[68:71)` (finite-diff of
+the base pose, rescaled into the action command space so it shares the base stats — **A′**), with
+torso + control_mode masked (no achieved value). ONE combined **25-D `eef_base`** stats block
+normalizes the whole `[arm20, base5]` vector; deploy gathers 80→25 and un-normalizes with it (no
+base special-casing — the eval client sends 25-D proprio and bridges arm→OSC, base5 direct).
 `configs/model/dual_system.yaml` **defaults** `action_dim/state_dim=80`, so **no override is
 needed** for the default model (only a model config that hardcodes 20 would need
 `model.architecture.action_dim=80 model.architecture.state_dim=80`).
 
-### Base-velocity proprio — optional (`base_proprio_velocity=true`, requires RETRAIN)
-
-Adds the current **body-frame base velocity** `[vx, vy, vyaw]` (finite-diff of
-`observation.state` base pose, world→body) to **proprio** `[68:71)` — the proprio dual of the
-action base command. Off by default (proprio stays 20-D EEF; existing ckpts unaffected). When
-on, the stats file gains a 3-D `base_vel` block, and the **eval client must also set
-`base_proprio_velocity: true`** (it then derives the same velocity from the sim obs and sends
-**23-D** proprio `[arm20, base_vel3]`; the server scatters it into `[68:71)`). It changes the
-proprio definition, so it only takes effect on a fresh training run.
-```bash
-scripts/train.sh dataloader=robocasa365 ... dataloader.base_proprio_velocity=true
-```
+`mobile_base` and `unify_action` are **decoupled**: non-unify emits the raw 25-D head directly. A
+fixed-base (arm-only) run sets `mobile_base=false` → 20-D `eef` stats, no base5. Changing
+`mobile_base` changes the action/proprio definition + stats schema, so it takes effect only on a
+fresh training run.
 
 ## Environment setup
 
@@ -140,12 +138,13 @@ live in a **separate** env (like RoboTwin's `robotwin` env / LIBERO's
    export ROBOCASA365_PYTHON=/path/to/robocasa365/env/bin/python
    ```
 3. Match the checkpoint's action/state config in `policy_config.yml`:
-   - `state_dim: null` — auto-derives the expected proprio width (20-D EEF, or **23-D** when
-     `base_proprio_velocity: true`). Set an explicit int only to pin it; it's a fail-fast
+   - `state_dim: null` — auto-derives the expected proprio width (20-D EEF, or **25-D** `[arm20,
+     base5]` when `mobile_base: true`). Set an explicit int only to pin it; it's a fail-fast
      check against what the client sends. (The env's raw 16-D state is converted client-side.)
-   - `base_proprio_velocity: true` **only** for a checkpoint trained with
-     `dataloader.base_proprio_velocity=true` (client then sends 23-D `[arm20, base_vel3]`); a
-     mismatch fails fast at the server. Leave `false` otherwise.
+   - `mobile_base: true` **only** for a checkpoint trained with `dataloader.mobile_base=true` (the
+     default; client then sends 25-D proprio `[arm20, base5]` where `base5 = [vx, vy, vyaw (A′
+     command-space velocity), 0, 0]`); a mismatch fails fast at the server. Leave `false` for a
+     fixed-base ckpt.
    - The model emits the repo-standard **20-D EEF** (or **25-D** `[arm20, base5]` for a mobile
      ckpt); the client bridges the arm 20-D → the env's **12-D OSC** (position → scaled OSC delta
      vs the current/last-target eef per `control_mode`; rot6d → axis-angle) and passes the base
@@ -221,10 +220,11 @@ v3 repo's `meta/episodes/*.parquet` (`length` column), filtered to that task's `
 ## Known limitations
 
 - **Plumbing is validated end-to-end** (train → deploy → real-sim, EXIT 0) on `OpenDrawer`
-  and `NavigateKitchen` — including the mobile-base command and the optional base-velocity
-  proprio (23-D proprio scattered to `[68:71)`). But these were 100-step smoke checkpoints, so
-  **success rates are ~0 (undertrained)** — a real SR needs a full training run. Other tasks
-  share the same obs/action contract but haven't been individually run.
+  and `NavigateKitchen` — including the mobile raw 25-D `[arm20, base5]` (base command in action
+  `[68:73)`, A′-rescaled base velocity in proprio `[68:71)`, one map, one `eef_base` stats block).
+  But these were 100-step smoke checkpoints, so **success rates are ~0 (undertrained)** — a real
+  SR needs a full training run. Other tasks share the same obs/action contract but haven't been
+  individually run.
 - **No parallel / distributed eval** (cf. robotwin's `parallel_eval.sh` / DLC path) — tasks
   run sequentially.
 - **OSC scales + gripper threshold** in `policy_config.yml` were measured on `OpenDrawer` /

@@ -5,9 +5,9 @@
 # POLICY_CONFIG_PATH=/path/to/custom.yml to override the rest. The OpenWAM
 # server reads the checkpoint's config.yaml and does all preprocessing / multi-view
 # composition / prompt wrapping / action denormalization. The client forwards raw frames
-# + a 20-D single-arm EEF proprio (23-D with base_proprio_velocity; converted from the env's
-# 16-D state); the server returns a 20-D EEF action (25-D = [arm20, base5] for a mobile ckpt),
-# which the client bridges to the env's 12-D action (a 12-D server action is passed through unchanged).
+# + a single-arm EEF proprio (20-D fixed-base, or 25-D [arm20, base5] for a mobile ckpt; converted
+# from the env's 16-D state); the server returns a 20-D EEF action (25-D = [arm20, base5] for a mobile
+# ckpt), which the client bridges to the env's 12-D action (a 12-D server action is passed through).
 
 host: 127.0.0.1
 port: 8848
@@ -33,24 +33,25 @@ right_wrist_camera_key: null
 # client-side rotation. Set 'rotate_180' only for checkpoints trained on raw frames.
 image_transform: none
 
-# Proprio: the client converts the raw obs into the 20-D single-arm EEF proprio the model
-# trains on ([eef_pos3, rot6d6, grip1, <right10 zeros>]). With base_proprio_velocity below it also
-# appends the 3-D body-frame base velocity → 23-D. state_keys are used only for the debug display.
+# Proprio: the client converts the raw obs into the single-arm EEF proprio the model trains on
+# ([eef_pos3, rot6d6, grip1, <right10 zeros>]). With mobile_base below it also appends the 5-D base
+# proprio [vx, vy, vyaw, 0, 0] → 25-D. state_keys are used only for the debug display.
 state_keys:
   - state.base_position
   - state.base_rotation
   - state.end_effector_position_relative
   - state.end_effector_rotation_relative
   - state.gripper_qpos
-# state_dim: fail-fast check against what the client sends. Leave null to auto-derive (20, or 23 when
-# base_proprio_velocity=true); set an explicit int only to pin it. MUST match the checkpoint.
+# state_dim: fail-fast check against what the client sends. Leave null to auto-derive (20, or 25 when
+# mobile_base=true); set an explicit int only to pin it. MUST match the checkpoint.
 state_dim: null
 
-# base_proprio_velocity: set true ONLY for a checkpoint trained with dataloader.base_proprio_velocity=true.
-# The client then derives the current body-frame base velocity from the sim obs (stateful finite-diff of
-# base_position) and sends 23-D proprio [arm20, base_vel3]; the server scatters it into the unified
-# reserved slots [68:71). A mismatch (client on, ckpt off — or vice versa) fails fast at the server.
-base_proprio_velocity: false
+# mobile_base: set true ONLY for a checkpoint trained with dataloader.mobile_base=true (the default).
+# The client then derives the base5 proprio ([vx, vy, vyaw, 0, 0]; the 3 velocities are the world base
+# pose finite-diff rescaled into the action command space, A′) and sends 25-D [arm20, base5]; the
+# server normalizes it with the combined eef_base stats and scatters through the ONE map. A mismatch
+# (client on, ckpt off — or vice versa) fails fast at the server.
+mobile_base: false
 
 # Action: the env consumes a flat 12-D vector (eef_pos 3 + eef_rot 3 + gripper 1 +
 # base 4 + mode 1), sliced into the RoboCasaGymEnv action dict. A RoboCasa365Dataset-

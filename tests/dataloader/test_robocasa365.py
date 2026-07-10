@@ -327,35 +327,59 @@ class TestNormalize:
         assert ds.action_dim == EEF_DIM == 20
         assert s["action"].shape == (32, EEF_DIM)
 
-    def test_mobile_base_scatters_into_reserved(self, tmp_path):
-        # mobile_base=True reads the RoboCasa-native base command from the LeRobot action field and
-        # scatters it into the 80-D reserved slots [68:73). Proprio stays 20-D EEF (no base: world
-        # base pose is scene-arbitrary). denormalize returns 25-D [arm20, base5].
+    def test_mobile_base_symmetric_25d(self, tmp_path):
+        # mobile_base=True folds base5 INTO the raw vector [arm20, base5], mapped via ONE 25-D map to
+        # 80-D. ACTION base command valid in [68:73); PROPRIO base VELOCITY valid in [68:71), torso +
+        # control_mode masked. denormalize returns 25-D [arm20, base5].
         from openwam.dataloader.utils.unify_action import UNIFY_DIM
 
         b = make_robocasa_bucket(tmp_path)
         with _mock_video_decoder():
             ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
                                     width=96, normalize_mode="min-max", unify_action=True,
-                                    unify_action_map=["0-9", "34-43"], mobile_base=True)
-            s = ds[0]
+                                    unify_action_map=["0-9", "34-43", "68-72"], mobile_base=True)
+            s = ds._build_sample(0, 1)  # start>0 so the frame-0 base velocity is a real finite-diff
         assert ds.action_dim == UNIFY_DIM == 80
         am = s["action_mask"].numpy()
-        assert am[0, 68:73].all()        # base command slots valid in ACTION
+        assert am[0, 68:73].all()        # all 5 base command slots valid in ACTION
         assert am[0, :10].all()          # left eef valid
         assert not am[0, 34:44].any()    # right eef masked
         assert np.abs(s["action"].numpy()[:, 68:73]).sum() > 0  # base carries a (normalized) command
         pm = s["proprio_mask"].numpy()
-        assert not pm[0, 68:73].any()                    # proprio: NO base
-        assert (s["proprio"].numpy()[0, 68:73] == 0).all()
+        assert pm[0, 68:71].all()                        # proprio base VELOCITY valid
+        assert not pm[0, 71:73].any()                    # torso + control_mode masked in proprio
+        assert np.abs(s["proprio"].numpy()[0, 68:71]).sum() > 0  # carries a (nonzero) base velocity
         deno = ds.denormalize_action(s["action"].numpy())
         assert deno.shape == (32, 25)  # [arm20, base5]
 
-    def test_mobile_base_requires_unify(self, tmp_path):
+    def test_mobile_base_without_unify_is_25d(self, tmp_path):
+        # mobile_base and unify_action are DECOUPLED: non-unify emits the raw 25-D [arm20, base5] head.
         b = make_robocasa_bucket(tmp_path)
-        with pytest.raises(ValueError, match="requires unify_action"):
-            RoboCasa365Dataset(data_root=str(b), normalize_mode=None, multiview=False, height=64, width=96,
-                               mobile_base=True)
+        with _mock_video_decoder():
+            ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                    width=96, normalize_mode="min-max", mobile_base=True)
+            s = ds._build_sample(0, 1)
+        assert ds.action_dim == 25
+        assert s["action"].shape == (32, 25) and s["proprio"].shape == (1, 25)
+        am = s["action_mask"].numpy()
+        assert am[0, :10].all() and not am[0, 10:20].any() and am[0, 20:25].all()  # arm-left + all base valid
+        pm = s["proprio_mask"].numpy()
+        assert pm[0, 20:23].all() and not pm[0, 23:25].any()  # base velocity valid, torso+mode masked
+
+    def test_mobile_proprio_velocity_command_space(self, tmp_path):
+        # A′: the proprio base velocity is the finite-diff rescaled into the action's command space
+        # (× fps / _BASE_VEL_PHYS_MAX), so it shares the action base stats. Value-pin against the
+        # reader's own base_velocity_cmd on the same two base poses (no train/eval divergence).
+        from openwam.dataloader.robocasa365 import base_velocity_cmd
+
+        b = make_robocasa_bucket(tmp_path)
+        with _mock_video_decoder():
+            ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                    width=96, normalize_mode=None, mobile_base=True)  # null-norm → raw values
+            s = ds._build_sample(0, 3)
+        prev_cur = ds._read_state(0, 2, 4)[:, 0:7]  # base pose at start-1=2 .. start+1=4
+        expected = base_velocity_cmd(prev_cur, ds._fps)
+        assert s["proprio"].numpy()[0, 20:23] == pytest.approx(expected, abs=1e-5)
 
     def test_deploy_stats_roundtrip_20d(self, tmp_path):
         """The DEPLOY round-trip (the N1/S1 bug): the persisted stats are 20-D and keyed
@@ -466,23 +490,23 @@ class TestMultiAndRegistry:
         assert not list(Path(root).glob("**/taskA_eef_stats.npy"))
 
     def test_multi_mobile_shared_eefbase_stats(self, tmp_path):
-        # Multi-task + mobile_base: ONE shared _eefbase_ stats file (with a 5-D 'base' block) pooled
-        # over all tasks and forwarded to every sub-dataset; samples carry the base command in the
-        # 80-D reserved slots [68:73). Covers the multitask mobile path e2e (in-process).
+        # Multi-task + mobile_base: ONE shared _eefbase_ stats file (a combined 25-D 'eef_base' block)
+        # pooled over all tasks and forwarded to every sub-dataset; the whole [arm20, base5] vector
+        # maps to 80-D via the single map. Covers the multitask mobile path e2e (in-process).
         root = make_multitask_bucket(tmp_path, tasks=["taskA", "taskB"])
         with _mock_video_decoder():
             ds = MultiTaskRoboCasa365Dataset(
                 dataset_dir=str(root), multiview=False, height=64, width=96, normalize_mode="min-max",
-                unify_action=True, unify_action_map=["0-9", "34-43"], mobile_base=True,
+                unify_action=True, unify_action_map=["0-9", "34-43", "68-72"], mobile_base=True,
             )
             s = ds[0]
         shared = Path(root) / "robocasa365_multitask_eefbase_stats.npy"
         assert shared.exists(), "multi-task mobile must pool ONE shared _eefbase_ stats file"
         blob = np.load(shared, allow_pickle=True).item()
-        assert "base" in blob and len(blob["base"]["mean"]) == 5, "shared stats need a 5-D base block"
+        assert "eef_base" in blob and len(blob["eef_base"]["mean"]) == 25, "shared stats need a 25-D eef_base block"
+        assert "base" not in blob and "base_vel" not in blob, "no separate base/base_vel blocks (converged)"
         assert {d.normalization_stats_path for d in ds._datasets} == {str(shared)}  # all share it
         assert not list(Path(root).glob("**/*_eef_stats.npy"))  # not the arm-only file
-        assert s["action"].shape == (32, 80)
         assert ds.action_dim == 80
         assert s["action"].shape == (32, 80)
         am = s["action_mask"].numpy()
@@ -558,95 +582,58 @@ def test_base_velocity_body_frame():
     assert v[2] == pytest.approx(0.2, abs=1e-4)
 
 
-def test_base_proprio_velocity_scatters_into_reserved(tmp_path):
-    """base_proprio_velocity=True fills PROPRIO [68:71) with the current body-frame base velocity
-    (finite-diff of base_position) and unmasks those 3 dims; torso[71]+control_mode[72] stay masked.
-    Independent of mobile_base (which controls the ACTION base command)."""
+def test_mobile_proprio_velocity_first_frame_zero(tmp_path):
+    """At window start=0 there is no previous frame → proprio base velocity is 0 (slots still valid)."""
     b = make_robocasa_bucket(tmp_path)
     with _mock_video_decoder():
         ds = RoboCasa365Dataset(
             data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
-            normalize_mode=None, unify_action=True, unify_action_map=["0-9", "34-43"],
-            base_proprio_velocity=True,
-        )
-        s = ds._build_sample(0, 1)  # start=1 (>0) so the frame-0 base velocity is finite-diffed
-    pm = s["proprio_mask"].numpy()
-    assert pm[0, :10].all()          # left arm valid
-    assert not pm[0, 34:44].any()    # right arm masked
-    assert pm[0, 68:71].all()        # base velocity valid in PROPRIO
-    assert not pm[0, 71:73].any()    # torso + control_mode stay masked
-    assert np.abs(s["proprio"].numpy()[0, 68:71]).sum() > 0  # carries a (nonzero) base velocity
-
-
-def test_base_proprio_velocity_first_frame_zero(tmp_path):
-    """At window start=0 there is no previous frame -> base velocity proprio is 0 (slots still valid)."""
-    b = make_robocasa_bucket(tmp_path)
-    with _mock_video_decoder():
-        ds = RoboCasa365Dataset(
-            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
-            normalize_mode=None, unify_action=True, unify_action_map=["0-9", "34-43"],
-            base_proprio_velocity=True,
+            normalize_mode=None, unify_action=True, unify_action_map=["0-9", "34-43", "68-72"],
+            mobile_base=True,
         )
         s = ds._build_sample(0, 0)
     assert s["proprio_mask"].numpy()[0, 68:71].all()
     assert (s["proprio"].numpy()[0, 68:71] == 0).all()
 
 
-def test_base_proprio_velocity_normalized(tmp_path):
-    """min-max + base_proprio_velocity auto-computes a base_vel stats block and normalizes the
-    proprio base velocity into [-1, 1]; the stats file carries a 3-D 'base_vel' block."""
+def test_mobile_proprio_velocity_normalized(tmp_path):
+    """min-max mobile: the combined 25-D eef_base stats normalize the proprio base velocity into
+    [-1, 1]; the stats file carries ONE 25-D 'eef_base' block (no separate base/base_vel blocks)."""
     b = make_robocasa_bucket(tmp_path)
     with _mock_video_decoder():
         ds = RoboCasa365Dataset(
             data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
-            normalize_mode="min-max", unify_action=True, unify_action_map=["0-9", "34-43"],
-            base_proprio_velocity=True,
+            normalize_mode="min-max", unify_action=True, unify_action_map=["0-9", "34-43", "68-72"],
+            mobile_base=True,
         )
         s = ds._build_sample(0, 1)
     blob = np.load(ds.normalization_stats_path, allow_pickle=True).item()
-    assert "base_vel" in blob and len(blob["base_vel"]["mean"]) == 3, "stats need a 3-D base_vel block"
-    assert ds.normalization_stats_path.endswith("_eefvel_stats.npy")  # suffix reflects base_vel
+    assert "eef_base" in blob and len(blob["eef_base"]["mean"]) == 25
+    assert "base_vel" not in blob and "base" not in blob
+    assert ds.normalization_stats_path.endswith("_eefbase_stats.npy")
     bv = s["proprio"].numpy()[0, 68:71]
     assert (np.abs(bv) <= 1.0 + 1e-5).all()  # normalized into [-1, 1]
     assert s["proprio_mask"].numpy()[0, 68:71].all()
 
 
-def test_from_config_threads_base_proprio_velocity(tmp_path):
-    # base_proprio_velocity MUST be reachable through from_config (all config-driven runs, even
-    # single-task, go through MultiTaskRoboCasa365Dataset.from_config): the sub-dataset gets the flag,
-    # fills proprio[68:71), and writes a _eefvel_ stats file with a base_vel block.
+def test_from_config_threads_mobile_base(tmp_path):
+    # mobile_base MUST be reachable through from_config (all config-driven runs, even single-task, go
+    # through MultiTaskRoboCasa365Dataset.from_config): the sub-dataset gets the flag, fills the base5
+    # command + proprio velocity, and writes an _eefbase_ stats file with a 25-D eef_base block.
     b = make_robocasa_bucket(tmp_path)
     cfg = {
         "type": "robocasa365", "dataset_dir": str(b), "multiview": False, "height": 64, "width": 96,
-        "normalize_mode": "min-max", "unify_action": True, "unify_action_map": ["0-9", "34-43"],
-        "base_proprio_velocity": True,
+        "normalize_mode": "min-max", "unify_action": True, "unify_action_map": ["0-9", "34-43", "68-72"],
+        "mobile_base": True,
     }
     with _mock_video_decoder():
         ds = MultiTaskRoboCasa365Dataset.from_config(cfg, split="train")
-        assert ds._datasets[0]._base_proprio_vel is True
+        assert ds._datasets[0]._mobile_base is True
         s = ds._datasets[0]._build_sample(0, 1)  # start>0 → a finite-diff velocity
     pm = s["proprio_mask"].numpy()
     assert pm[0, 68:71].all() and not pm[0, 71:73].any()
-    assert ds._datasets[0].normalization_stats_path.endswith("_eefvel_stats.npy")
-    assert "base_vel" in np.load(ds._datasets[0].normalization_stats_path, allow_pickle=True).item()
-
-
-def test_multi_shared_base_vel_stats(tmp_path):
-    # Multi-task + base_proprio_velocity: ONE shared _eefvel_ stats file (with a 3-D 'base_vel' block)
-    # pooled over all tasks and forwarded to every sub-dataset (the multitask leaderboard path).
-    root = make_multitask_bucket(tmp_path, tasks=["taskA", "taskB"])
-    with _mock_video_decoder():
-        ds = MultiTaskRoboCasa365Dataset(
-            dataset_dir=str(root), multiview=False, height=64, width=96, normalize_mode="min-max",
-            unify_action=True, unify_action_map=["0-9", "34-43"], base_proprio_velocity=True,
-        )
-        s = ds[0]
-    shared = Path(root) / "robocasa365_multitask_eefvel_stats.npy"
-    assert shared.exists(), "multi-task base-vel must pool ONE shared _eefvel_ stats file"
-    blob = np.load(shared, allow_pickle=True).item()
-    assert "base_vel" in blob and len(blob["base_vel"]["mean"]) == 3, "shared stats need a 3-D base_vel block"
-    assert {d.normalization_stats_path for d in ds._datasets} == {str(shared)}  # all share it
-    assert s["proprio_mask"].numpy()[0, 68:71].all()
+    assert ds._datasets[0].normalization_stats_path.endswith("_eefbase_stats.npy")
+    assert "eef_base" in np.load(ds._datasets[0].normalization_stats_path, allow_pickle=True).item()
 
 
 def _two_repos(tmp_path):
@@ -720,22 +707,3 @@ def test_single_repo_explicit_stats_path_honored(tmp_path):
     assert Path(explicit).exists(), "explicit stats path must be honored as the compute target"
     assert {d.normalization_stats_path for d in ds._datasets} == {explicit}
     assert not (Path(root) / "robocasa365_multitask_eef_stats.npy").exists()  # default location NOT used
-
-
-def test_multi_mobile_and_base_vel_shared_stats(tmp_path):
-    # mobile_base + base_proprio_velocity together: shared _eefbasevel_ file carries BOTH a 5-D 'base'
-    # (action) block and a 3-D 'base_vel' (proprio) block; action[68:73) + proprio[68:71) both filled.
-    root = make_multitask_bucket(tmp_path, tasks=["taskA", "taskB"])
-    with _mock_video_decoder():
-        ds = MultiTaskRoboCasa365Dataset(
-            dataset_dir=str(root), multiview=False, height=64, width=96, normalize_mode="min-max",
-            unify_action=True, unify_action_map=["0-9", "34-43"], mobile_base=True, base_proprio_velocity=True,
-        )
-        s = ds._datasets[0]._build_sample(0, 1)
-    shared = Path(root) / "robocasa365_multitask_eefbasevel_stats.npy"
-    assert shared.exists(), "combined run must pool ONE shared _eefbasevel_ stats file"
-    blob = np.load(shared, allow_pickle=True).item()
-    assert len(blob["base"]["mean"]) == 5 and len(blob["base_vel"]["mean"]) == 3
-    am, pm = s["action_mask"].numpy(), s["proprio_mask"].numpy()
-    assert am[0, 68:73].all()                       # action base command valid
-    assert pm[0, 68:71].all() and not pm[0, 71:73].any()  # proprio base velocity valid, torso/mode masked

@@ -358,7 +358,7 @@ def test_bridge_reset_clears_prev_target():
     assert out[0:3] == pytest.approx([(4.03 - 4.0) / 0.05, 0.0, 0.0], abs=1e-4)  # (target - current)/scale = [0.6,0,0]
 
 
-# --- Task 2: base-velocity proprio (base_proprio_velocity ckpts send 23-D [arm20, base_vel3]) ---
+# --- Task 2: mobile proprio (mobile_base ckpts send 25-D [arm20, base5=(vel3 A′-rescaled, 0, 0)]) ---
 
 
 def _obs_base(pos, quat):
@@ -368,64 +368,70 @@ def _obs_base(pos, quat):
     return o
 
 
-def test_base_velocity_body_matches_dataloader():
-    """The client's pure-numpy base_velocity_body MUST equal the dataloader's _base_velocity_body
-    (train side), so a base_proprio_velocity ckpt sees the SAME body-frame velocity at eval as in
-    training (no exposure bias / distribution shift)."""
-    from openwam.dataloader.robocasa365 import _base_velocity_body
+def test_base_velocity_cmd_matches_dataloader():
+    """The client's pure-numpy base_velocity_cmd MUST equal the dataloader's base_velocity_cmd (train
+    side) — same finite-diff AND same A′ rescale (× fps / _BASE_VEL_PHYS_MAX) — so a mobile ckpt sees
+    the SAME command-space base velocity at eval as in training (no exposure bias / distribution shift)."""
+    from openwam.dataloader.robocasa365 import base_velocity_cmd as train_cmd
 
     rng = np.random.RandomState(0)
     for _ in range(5):
         prev = rng.uniform(-1, 1, 7).astype(np.float32)
         cur = rng.uniform(-1, 1, 7).astype(np.float32)
-        client = adapter.base_velocity_body(prev, cur)
-        train = _base_velocity_body(np.stack([prev, cur]))
+        client = adapter.base_velocity_cmd(prev, cur)
+        train = train_cmd(np.stack([prev, cur]))
         assert client == pytest.approx(train, abs=1e-5)
 
 
-def test_policy_sends_23d_proprio_with_base_velocity():
-    # base_proprio_velocity=True → the client sends 23-D proprio [arm20, base_vel3]; the first step
-    # of an episode has no previous base pose, so the velocity is zero.
+def test_policy_sends_25d_proprio_when_mobile():
+    # mobile_base=True → the client sends 25-D proprio [arm20, base5]; the first step of an episode
+    # has no previous base pose, so base5 = [0, 0, 0, 0, 0].
     fake = _FakeClient(action=list(range(25)))
     policy = adapter.OpenWAMRoboCasa365Policy(
-        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, base_proprio_velocity=True
+        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True
     )
     policy.reset()
     policy.act(_obs_base([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")
     state = fake.last_payload["state"]
-    assert len(state) == 23                         # [arm20, base_vel3]
+    assert len(state) == 25                         # [arm20, base5]
     assert state[:20] == pytest.approx(list(adapter.assemble_eef20d_proprio(_make_obs())), abs=1e-5)
-    assert state[20:23] == [0.0, 0.0, 0.0]          # first step: no prev -> zero velocity
+    assert state[20:25] == [0.0, 0.0, 0.0, 0.0, 0.0]  # first step: no prev -> zero base5
 
 
-def test_base_velocity_stateful_finite_diff():
-    # step 2 velocity = body-frame finite-diff of the two obs base poses (moved +0.1 in world x,
-    # yaw 0 → body vx=+0.1). Matches the dataloader's frame-0 finite-diff convention.
+def test_mobile_base5_stateful_finite_diff():
+    # step 2 base velocity = body-frame finite-diff of the two obs base poses (moved +0.1 in world x,
+    # yaw 0 → body vx=+0.1), rescaled into the action command space (A′). torso + control_mode stay 0.
     fake = _FakeClient(action=list(range(25)))
     policy = adapter.OpenWAMRoboCasa365Policy(
-        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, base_proprio_velocity=True
+        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True
     )
     policy.reset()
     policy.act(_obs_base([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")  # step 1: prev set
     policy.act(_obs_base([0.1, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")  # step 2: moved +x
-    assert fake.last_payload["state"][20:23] == pytest.approx([0.1, 0.0, 0.0], abs=1e-5)
+    expected = adapter.base_velocity_cmd(
+        np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], np.float32),
+        np.array([0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], np.float32),
+    )
+    state = fake.last_payload["state"]
+    assert state[20:23] == pytest.approx(list(expected), abs=1e-5)  # A′-rescaled velocity (not raw 0.1)
+    assert state[23:25] == [0.0, 0.0]                               # torso + control_mode masked
 
 
-def test_base_velocity_reset_clears_prev_base_pose():
+def test_mobile_reset_clears_prev_base_pose():
     fake = _FakeClient(action=list(range(25)))
     policy = adapter.OpenWAMRoboCasa365Policy(
-        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, base_proprio_velocity=True
+        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True
     )
     policy.reset()
     policy.act(_obs_base([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")
     policy.act(_obs_base([0.1, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")
     policy.reset()  # new episode: prev base pose cleared
     policy.act(_obs_base([0.5, 0.5, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")  # first step -> zero again
-    assert fake.last_payload["state"][20:23] == [0.0, 0.0, 0.0]
+    assert fake.last_payload["state"][20:25] == [0.0, 0.0, 0.0, 0.0, 0.0]
 
 
-def test_base_velocity_off_sends_20d():
-    # default (base_proprio_velocity=False): proprio stays 20-D (no velocity appended).
+def test_fixed_base_sends_20d():
+    # default (mobile_base=False): proprio stays 20-D (no base5 appended).
     fake = _FakeClient(action=list(range(25)))
     policy = adapter.OpenWAMRoboCasa365Policy(
         _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5

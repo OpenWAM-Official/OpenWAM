@@ -96,10 +96,10 @@ def test_rollout_accumulates_success_and_terminates():
     assert pol.acts == 2 + 5  # trial 0: 2 steps then done; trial 1: 5 (max) steps
 
 
-def test_build_policy_threads_base_proprio_velocity(monkeypatch):
-    """_build_policy must forward dataloader.base_proprio_velocity to the policy and NOT pin
-    state_dim (so the policy auto-derives 23 = arm20 + base_vel3). Captures the ctor kwargs (the
-    real ctor pings a live server)."""
+def test_build_policy_threads_mobile_base(monkeypatch):
+    """_build_policy must forward dataloader.mobile_base to the policy and NOT pin state_dim (so the
+    policy auto-derives 25 = arm20 + base5). Captures the ctor kwargs (the real ctor pings a live
+    server)."""
     captured = {}
 
     class _Capture:
@@ -107,12 +107,12 @@ def test_build_policy_threads_base_proprio_velocity(monkeypatch):
             captured.update(kw)
 
     monkeypatch.setattr(single_eval, "OpenWAMRoboCasa365Policy", _Capture)
-    single_eval._build_policy({"base_proprio_velocity": True, "osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
-    assert captured["base_proprio_velocity"] is True
-    assert captured["state_dim"] is None  # auto → policy derives 23 from the flag
+    single_eval._build_policy({"mobile_base": True, "osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
+    assert captured["mobile_base"] is True
+    assert captured["state_dim"] is None  # auto → policy derives 25 from the flag
 
 
-def test_build_policy_defaults_no_base_velocity(monkeypatch):
+def test_build_policy_defaults_fixed_base(monkeypatch):
     captured = {}
 
     class _Capture:
@@ -121,4 +121,4 @@ def test_build_policy_defaults_no_base_velocity(monkeypatch):
 
     monkeypatch.setattr(single_eval, "OpenWAMRoboCasa365Policy", _Capture)
     single_eval._build_policy({"osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
-    assert captured["base_proprio_velocity"] is False
+    assert captured["mobile_base"] is False

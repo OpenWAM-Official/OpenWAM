@@ -389,181 +389,106 @@ def test_build_normalizer_unify_no_map_no_stats_raises(tmp_path):
         _build_normalizer(cfg, str(tmp_path))
 
 
-# --- base_proprio_velocity: proprio IN carries [arm_raw, base_vel3] -> scatter base_vel to [68:71) ---
+# --- mobile (25-D [arm20, base5]): the base is folded INTO the raw vector, mapped via ONE map, and
+#     un-normalized with ONE combined 'eef_base' stats block — the deploy normalizer is fully generic
+#     (no base special-casing). Verifies the wayrise convergence (base is no longer a bypass channel). ---
+
+_UNIFY_MAP_MOBILE = ["0-9", "32-41", "68-72"]  # raw 25-D [arm20, base5] -> unified [0:10)+[32:42)+[68:73)
 
 
-def _base_vel_stats_min_max():
-    lo = np.array([-0.2, -0.2, -0.3], dtype=np.float32)
-    hi = np.array([0.2, 0.2, 0.3], dtype=np.float32)
-    return {"mean": (lo + hi) / 2, "std": np.maximum((hi - lo) / 4, 1e-6), "min": lo, "max": hi, "q01": lo, "q99": hi}
-
-
-def _write_stats_file_with_base_vel(tmp_path):
-    stats = {"eef": _eef_stats_min_max(), "base_vel": _base_vel_stats_min_max(), "num_timesteps": 1000}
-    p = tmp_path / "normalization_stats.npy"
-    np.save(str(p), stats, allow_pickle=True)
-    return str(p)
-
-
-def test_unify_proprio_in_with_base_velocity():
-    """proprio IN, base_proprio_velocity: raw [arm20, base_vel3] -> normalize arm + scatter to arm
-    slots, AND normalize base_vel with its own stats + scatter to [68:71). The dual of the action
-    base command ([68:73) gather on OUT)."""
-    from openwam.dataloader.robocasa365 import _UNIFY_BASE_VEL
-
-    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
-    bv_norm = Normalizer(mode="min_max", stats=_base_vel_stats_min_max())
-    dst = _unify_dst()
-    w = _UnifyAwareNormalizer(inner, dst, UNIFY_DIM, base_vel_dst=_UNIFY_BASE_VEL, base_vel_normalizer=bv_norm)
-    arm = _clipped_raw(5, n=2)                          # (2, 20) raw arm
-    bv = np.array([[0.1, -0.05, 0.2], [0.0, 0.1, -0.1]], np.float32)  # raw base velocity
-    out = w.normalize(np.concatenate([arm, bv], axis=-1))            # (2, 23) -> (2, 80)
-    assert out.shape == (2, UNIFY_DIM)
-    expected_arm, _ = map_to_unify(inner.normalize(arm), dst, UNIFY_DIM)  # arm-only forward
-    np.testing.assert_allclose(out[..., dst], expected_arm[..., dst], atol=1e-6)   # arm slots match
-    np.testing.assert_allclose(out[..., _UNIFY_BASE_VEL], bv_norm.normalize(bv), atol=1e-6)  # [68:71) = norm bv
-
-
-def test_build_normalizer_base_proprio_velocity_scatters(tmp_path):
-    """cfg base_proprio_velocity=True + a 'base_vel' stats block -> _build_normalizer wires a base_vel
-    scatter so normalize([arm20, base_vel3]) fills [68:71) with the normalized velocity."""
-    from openwam.dataloader.robocasa365 import _UNIFY_BASE_VEL
-
-    _write_stats_file_with_base_vel(tmp_path)
-    cfg = OmegaConf.create(
-        {
-            "dataloader": {
-                "normalize_mode": "min-max",
-                "action_mode": "eef",
-                "unify_action": True,
-                "unify_action_map": _UNIFY_MAP,
-                "base_proprio_velocity": True,
-            }
-        }
-    )
-    norm = _build_normalizer(cfg, str(tmp_path))
-    assert isinstance(norm, _UnifyAwareNormalizer)
-    arm = _clipped_raw(9, n=2)
-    bv = np.array([[0.1, -0.05, 0.2], [0.0, 0.1, -0.1]], np.float32)
-    out = norm.normalize(np.concatenate([arm, bv], axis=-1))  # (2, 23) -> (2, 80)
-    assert out.shape == (2, UNIFY_DIM)
-    inner_bv = Normalizer(mode="min_max", stats=_base_vel_stats_min_max())
-    np.testing.assert_allclose(out[..., _UNIFY_BASE_VEL], inner_bv.normalize(bv), atol=1e-6)
-
-
-def test_unify_proprio_wrong_width_raises():
-    """base_vel_dst set but a 20-D (arm-only) proprio arrives -> clear ValueError naming
-    base_proprio_velocity, not a cryptic broadcast error (client/server config drift guard)."""
-    from openwam.dataloader.robocasa365 import _UNIFY_BASE_VEL
-
-    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
-    bv_norm = Normalizer(mode="min_max", stats=_base_vel_stats_min_max())
-    w = _UnifyAwareNormalizer(inner, _unify_dst(), UNIFY_DIM, base_vel_dst=_UNIFY_BASE_VEL, base_vel_normalizer=bv_norm)
-    with pytest.raises(ValueError, match="base_proprio_velocity"):
-        w.normalize(_clipped_raw(1, n=2))  # 20-D, but 23 expected
-
-
-def test_build_normalizer_base_proprio_velocity_missing_block_raises(tmp_path):
-    """base_proprio_velocity=True but no 'base_vel' block in stats -> raise (no silent fallback)."""
-    _write_stats_file(tmp_path, mode_key="eef")  # eef only, no base_vel
-    cfg = OmegaConf.create(
-        {
-            "dataloader": {
-                "normalize_mode": "min-max",
-                "action_mode": "eef",
-                "unify_action": True,
-                "unify_action_map": _UNIFY_MAP,
-                "base_proprio_velocity": True,
-            }
-        }
-    )
-    with pytest.raises(ValueError, match="base_vel"):
-        _build_normalizer(cfg, str(tmp_path))
-
-
-# --- mobile_base: action OUT carries the base command in [68:73) -> unnormalize returns [arm20, base5] ---
-
-
-def _base_stats_min_max():
+def _base5_stats_min_max():
     lo = np.array([-1.0, -1.0, -1.0, 0.0, -1.0], dtype=np.float32)  # x/y/yaw vel, torso, control_mode
     hi = np.array([1.0, 1.0, 1.0, 0.34, 1.0], dtype=np.float32)
     return {"mean": (lo + hi) / 2, "std": np.maximum((hi - lo) / 4, 1e-6), "min": lo, "max": hi, "q01": lo, "q99": hi}
 
 
-def _write_stats_file_with_base(tmp_path):
-    stats = {"eef": _eef_stats_min_max(), "base": _base_stats_min_max(), "num_timesteps": 1000}
+def _eef_base_stats_min_max():
+    """Combined 25-D stats = 20-D arm ++ 5-D base command (what the mobile reader/deploy persist)."""
+    a, b = _eef_stats_min_max(), _base5_stats_min_max()
+    return {k: np.concatenate([a[k], b[k]]).astype(np.float32) for k in ("mean", "std", "min", "max", "q01", "q99")}
+
+
+def _write_stats_file_eef_base(tmp_path):
+    stats = {"eef_base": _eef_base_stats_min_max(), "num_timesteps": 1000}
     p = tmp_path / "normalization_stats.npy"
     np.save(str(p), stats, allow_pickle=True)
     return str(p)
 
 
-def test_unify_action_out_with_mobile_base():
-    """action OUT, mobile_base: the model's 80-D unified action carries the base command in [68:73);
-    _UnifyAwareNormalizer.unnormalize gathers it (un-normalized with the 'base' stats) and appends →
-    raw [arm20, base5]. The deploy hop hit by every mobile ckpt (mobile_base: true is the yaml default)."""
-    from openwam.dataloader.robocasa365 import _UNIFY_BASE
+def _unify_dst_mobile():
+    return parse_unify_spec(_UNIFY_MAP_MOBILE, UNIFY_DIM)
 
-    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
-    base_norm = Normalizer(mode="min_max", stats=_base_stats_min_max())
-    dst = _unify_dst()
-    w = _UnifyAwareNormalizer(inner, dst, UNIFY_DIM, base_slice=_UNIFY_BASE, base_normalizer=base_norm)
-    arm = _clipped_raw(3, n=2)                                            # (2, 20) raw arm
-    unified, _ = map_to_unify(inner.normalize(arm), dst, UNIFY_DIM)       # arm forward → 80
-    unified = np.array(unified)
-    base_n = np.array([[0.2, -0.1, 0.05, 0.5, 0.9], [-0.3, 0.0, 0.1, -0.2, -0.9]], np.float32)  # normalized base
-    unified[..., _UNIFY_BASE] = base_n
-    out = w.unnormalize(unified)                                          # (2, 80) → (2, 25)
-    assert out.shape == (2, 25)                                          # [arm20, base5]
-    np.testing.assert_allclose(out[..., :20], arm, atol=1e-5)                        # arm round-trips
-    np.testing.assert_allclose(out[..., 20:25], base_norm.unnormalize(base_n), atol=1e-6)  # base un-normalized
+
+def _clipped_raw25(seed: int, n: int = 2):
+    """A 25-D raw [arm20, base5] clipped into the combined stats range (clean round-trip)."""
+    arm = _clipped_raw(seed, n)
+    b = _base5_stats_min_max()
+    base = np.random.RandomState(seed + 100).uniform(b["min"], b["max"], size=(n, 5)).astype(np.float32)
+    return np.concatenate([arm, base], axis=-1)
+
+
+def test_unify_action_out_with_mobile_base():
+    """action OUT, mobile: the model's 80-D unified action is gathered back to the 25-D [arm20, base5]
+    raw vector via the ONE map, then un-normalized with the single combined 'eef_base' stats — no base
+    special-casing (generic _UnifyAwareNormalizer). mobile_base: true is the robocasa365.yaml default."""
+    inner = Normalizer(mode="min_max", stats=_eef_base_stats_min_max())  # 25-D combined
+    dst = _unify_dst_mobile()
+    raw25 = _clipped_raw25(3)
+    unified, _ = map_to_unify(inner.normalize(raw25), dst, UNIFY_DIM)  # what the model is trained on
+    out = _UnifyAwareNormalizer(inner, dst, UNIFY_DIM).unnormalize(unified)  # (2, 80) → (2, 25)
+    assert out.shape == (2, 25)  # [arm20, base5]
+    np.testing.assert_allclose(out, raw25, atol=1e-5)  # whole vector round-trips (arm + base)
+
+
+def test_unify_proprio_in_mobile_roundtrip():
+    """proprio IN, mobile: wrapper.normalize(raw25) == map_to_unify(inner.normalize(raw25)) — the base
+    velocity (raw slots 20:23) scatters through the SAME map, no split-off special-casing."""
+    inner = Normalizer(mode="min_max", stats=_eef_base_stats_min_max())
+    dst = _unify_dst_mobile()
+    raw25 = _clipped_raw25(1, n=3)
+    expected, _ = map_to_unify(inner.normalize(raw25), dst, UNIFY_DIM)
+    np.testing.assert_allclose(_UnifyAwareNormalizer(inner, dst, UNIFY_DIM).normalize(raw25), expected, atol=1e-6)
 
 
 def test_build_normalizer_mobile_base_unnormalizes(tmp_path):
-    """cfg mobile_base=true + a 'base' stats block → _build_normalizer wires the base gather so
-    unnormalize(80) returns 25-D [arm20, base5]. Same chain as PR bugs #1/#2; mobile_base: true is
-    the robocasa365.yaml default → every mobile ckpt serves through this."""
-    from openwam.dataloader.robocasa365 import _UNIFY_BASE
-
-    _write_stats_file_with_base(tmp_path)
+    """cfg action_mode='eef_base' + the 25-D mobile map → generic _UnifyAwareNormalizer; unnormalize(80)
+    returns the 25-D [arm20, base5] raw vector the client bridges (arm→OSC, base5 direct)."""
+    _write_stats_file_eef_base(tmp_path)
     cfg = OmegaConf.create(
         {
             "dataloader": {
                 "normalize_mode": "min-max",
-                "action_mode": "eef",
+                "action_mode": "eef_base",
                 "unify_action": True,
-                "unify_action_map": _UNIFY_MAP,
+                "unify_action_map": _UNIFY_MAP_MOBILE,
                 "mobile_base": True,
             }
         }
     )
     norm = _build_normalizer(cfg, str(tmp_path))
     assert isinstance(norm, _UnifyAwareNormalizer)
-    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
-    arm = _clipped_raw(7, n=2)
-    unified, _ = map_to_unify(inner.normalize(arm), _unify_dst(), UNIFY_DIM)
-    unified = np.array(unified)
-    base_n = np.array([[0.1, 0.2, -0.1, 0.3, 0.9], [0.0, -0.2, 0.1, -0.1, -0.9]], np.float32)
-    unified[..., _UNIFY_BASE] = base_n
+    inner = Normalizer(mode="min_max", stats=_eef_base_stats_min_max())
+    raw25 = _clipped_raw25(7)
+    unified, _ = map_to_unify(inner.normalize(raw25), _unify_dst_mobile(), UNIFY_DIM)
     out = norm.unnormalize(unified)
     assert out.shape == (2, 25)
-    np.testing.assert_allclose(out[..., :20], arm, atol=1e-5)
-    base_norm = Normalizer(mode="min_max", stats=_base_stats_min_max())
-    np.testing.assert_allclose(out[..., 20:25], base_norm.unnormalize(base_n), atol=1e-6)
+    np.testing.assert_allclose(out, raw25, atol=1e-5)
 
 
 def test_build_normalizer_mobile_base_missing_block_raises(tmp_path):
-    """mobile_base=true but no 'base' block in stats → raise (mirrors the base_proprio_velocity guard)."""
-    _write_stats_file(tmp_path, mode_key="eef")  # eef only, no 'base'
+    """action_mode='eef_base' but the stats file only has 'eef' → KeyError (no silent disable): the
+    combined 25-D block is required, so a stale arm-only file must fail loud, not serve un-normalized."""
+    _write_stats_file(tmp_path, mode_key="eef")  # eef only, no 'eef_base'
     cfg = OmegaConf.create(
         {
             "dataloader": {
                 "normalize_mode": "min-max",
-                "action_mode": "eef",
+                "action_mode": "eef_base",
                 "unify_action": True,
-                "unify_action_map": _UNIFY_MAP,
+                "unify_action_map": _UNIFY_MAP_MOBILE,
                 "mobile_base": True,
             }
         }
     )
-    with pytest.raises(ValueError, match=r"no 'base' block"):
+    with pytest.raises(KeyError, match="no 'eef_base' entry"):
         _build_normalizer(cfg, str(tmp_path))

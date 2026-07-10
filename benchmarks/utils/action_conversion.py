@@ -278,16 +278,14 @@ def robocasa_state_to_eef20d(
 
 
 def base_velocity_body(prev_base_pose: np.ndarray, cur_base_pose: np.ndarray) -> np.ndarray:
-    """Body-frame base velocity from two consecutive base poses (finite difference), RAW.
+    """Body-frame base velocity from two consecutive base poses (finite difference), per-frame.
 
-    Bit-identical to the dataloader's ``_base_velocity_body`` (``openwam.dataloader.robocasa365``):
-    the base-velocity proprio the client sends (when the ckpt was trained with
-    ``base_proprio_velocity=true``) must be derived the SAME way it was at train time, so there is no
-    train/eval mismatch. Each pose is ``base_position(3, world) + base_rotation(4, world quat xyzw)``.
+    The low-level building block for ``base_velocity_cmd`` (which applies the A′ rescale on top).
+    Bit-identical to the dataloader's ``_base_velocity_body`` (``openwam.dataloader.robocasa365``).
+    Each pose is ``base_position(3, world) + base_rotation(4, world quat xyzw)``.
 
-    Returns ``(3,)`` = ``[vx, vy, vyaw]`` in the robot's body frame at ``cur`` (per-step displacement;
-    the constant 1/dt is absorbed by normalization). SE(2): z + roll/pitch are ignored (ground base);
-    Δyaw is wrapped to (-pi, pi]. Sent RAW — the server normalizes with the ``base_vel`` stats block.
+    Returns ``(3,)`` = ``[vx, vy, vyaw]`` in the robot's body frame at ``cur`` (per-step displacement,
+    m/frame + rad/frame). SE(2): z + roll/pitch are ignored (ground base); Δyaw is wrapped to (-pi, pi].
     """
     prev = np.asarray(prev_base_pose, np.float64).reshape(-1)
     cur = np.asarray(cur_base_pose, np.float64).reshape(-1)
@@ -305,6 +303,26 @@ def base_velocity_body(prev_base_pose: np.ndarray, cur_base_pose: np.ndarray) ->
     vy = -s * d[0] + c * d[1]
     d_yaw = np.arctan2(np.sin(yaw_cur - yaw_prev), np.cos(yaw_cur - yaw_prev))  # wrapped Δyaw
     return np.array([vx, vy, d_yaw], np.float32)
+
+
+# A′ base-velocity rescale (MUST stay in lockstep with openwam.dataloader.robocasa365):
+# _BASE_VEL_PHYS_MAX = per-axis base max speed at command saturation, DATASET_FPS = v3 rate.
+_RC365_BASE_VEL_PHYS_MAX = np.array([0.75, 0.88, 1.33], dtype=np.float32)
+_RC365_FPS = 20
+
+
+def base_velocity_cmd(prev_base_pose: np.ndarray, cur_base_pose: np.ndarray, fps: int = _RC365_FPS) -> np.ndarray:
+    """Body-frame base velocity finite-diff rescaled into the action's [-1, 1] command space (A′).
+
+    Bit-identical to the dataloader's ``base_velocity_cmd`` (``openwam.dataloader.robocasa365``): the
+    proprio base velocity the client sends for a mobile ckpt must be derived — AND rescaled — the SAME
+    way it was at train time (``× fps / _BASE_VEL_PHYS_MAX``), so the achieved proprio velocity lands
+    in the same space as the recorded action base command and shares its stats. No train/eval mismatch.
+    Each pose = ``base_position(3, world) + base_rotation(4, world quat xyzw)``. Sent RAW; the server
+    normalizes with the combined ``eef_base`` stats block."""
+    return (base_velocity_body(prev_base_pose, cur_base_pose) * float(fps) / _RC365_BASE_VEL_PHYS_MAX).astype(
+        np.float32
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

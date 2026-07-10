@@ -26,7 +26,7 @@ task_roots: null                  # optional list of task NAMES to include (a su
 # num_frames   = state window length in raw frames; action horizon = num_frames - 1.
 # video_stride = video-only stride; state/action stay at raw rate.
 # video length = (num_frames - 1) // video_stride + 1   (must divide evenly)
-# proprio = eef_pose[0:1] (1, 20); action = eef_pose[1:num_frames] (num_frames-1, 20).
+# proprio = raw[0:1] (1, 20 arm / 25 mobile); action = raw[1:num_frames] (num_frames-1, 20 / 25).
 num_frames: 33
 video_stride: 4
 window_stride: 1
@@ -61,20 +61,21 @@ filter_static_segments: true
 static_segment_threshold: 1.0e-5  # max-abs of the first NORMALIZED action-vs-proprio step below which a window is static (robotwin parity)
 max_static_retry: 3               # resample attempts before keeping a static window
 
-# ── Action / proprio (single-arm 20-D EEF) ──────────────────────────────────
-# RoboCasa365 is single-arm: action & proprio are BOTH the full base-relative EEF pose from
-# observation.state — eef_pos(3) + eef_rot(quat→rot6d, 6) + gripper(1) → the LEFT
-# 10 dims of the bimanual 20-D EEF (right 10 zero-padded + masked). "Full pose" (not the env's OSC
-# per-step delta), in the robot BASE frame (end_effector_position_relative = robot0_base_to_eef_pos),
-# NOT world-frame — loosely called "absolute" = full-not-delta, do not read as world-frame.
-# action_mode MUST be eef: the deploy server (model_loader) reads dataloader.action_mode
-# to pick the normalizer's stats key; without it deploy defaults to 'joint', finds no
-# 'joint' stats, and silently disables de-normalization.
-action_mode: eef
-# Stats are persisted at the full 20-D action dim so the deploy normalizer can invert the
-# model's 20-D output. Auto-resolve and, if absent, auto-compute on first load to
-# {data_root}/{task}_eef_stats.npy (precompute via
-# `python -m openwam.dataloader.robocasa365_stats_computation <bucket>`).
+# ── Action / proprio (single-arm EEF + mobile base) ─────────────────────────
+# RoboCasa365 is single-arm. The arm part of action & proprio is the full base-relative EEF pose from
+# observation.state — eef_pos(3) + eef_rot(quat→rot6d, 6) + gripper(1) → the LEFT 10 dims of the
+# bimanual 20-D EEF (right 10 zero-padded + masked). "Full pose" (not the env's OSC per-step delta),
+# in the robot BASE frame (end_effector_position_relative = robot0_base_to_eef_pos), NOT world-frame —
+# loosely called "absolute" = full-not-delta, do not read as world-frame. With mobile_base the base
+# command is FOLDED INTO the raw vector → raw 25-D [arm20, base5]; action & proprio share ONE layout.
+# action_mode = the deploy stats key the server (model_loader) reads: 'eef_base' for the combined 25-D
+# mobile block ('eef' for a fixed-base 20-D ckpt). NOT 'joint' (deploy would find no stats and silently
+# disable de-normalization).
+action_mode: eef_base
+# Stats are persisted at the raw dim so the deploy normalizer can invert the model's output: one 25-D
+# 'eef_base' block (arm20 ++ base5 command) when mobile, else 20-D 'eef'. Auto-resolve and, if absent,
+# auto-compute on first load to {data_root}/{task}_eefbase_stats.npy (precompute via
+# `python -m openwam.dataloader.robocasa365_stats_computation <bucket> --mobile-base`).
 #   null / "none" → no normalization (raw physical units)
 #   "min-max"     → rescale each dim into [-1, 1] using {min, max}   [default; deploy-resolvable]
 #   "z-score"     → (x - mean) / std                                  [deploy-resolvable]
@@ -86,39 +87,30 @@ normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resol
                                   # stats over all tasks×repos are computed to this path on first use.
 
 # ── Unified 80-D action space (cross-robot shared head) + mobile base ────────
-# unify_action=true scatters this reader's 20-D EEF into a shared UNIFY_DIM (80) vector so
-# heterogeneous robots train one action head (like robotwin/robocoin/oxe_bcz).
-# 80-D layout: [0:10) left eef (pos3+rot6d6+grip1)  [10:34) left hand  [34:44) right eef
-#              [44:68) right hand  [68:80) reserved. RoboCasa365 is single-arm: the real arm
-# lands in the LEFT eef slots (0-9, valid); the zero-padded right half maps to 34-43 but stays
-# masked out of the loss (LEFT_ARM_DIM_MASK is honored through the scatter).
+# unify_action=true scatters this reader's raw vector (20-D arm, or 25-D [arm20, base5] when mobile)
+# into a shared UNIFY_DIM (80) vector so heterogeneous robots train one action head (like
+# robotwin/robocoin/oxe_bcz/behavior). 80-D layout: [0:10) left eef  [10:34) left hand  [34:44) right
+# eef  [44:68) right hand  [68:80) reserved. RoboCasa365 is single-arm: the real arm lands in the LEFT
+# eef slots (0-9, valid); the zero-padded right half maps to 34-43 (masked); the base5 maps to [68:73).
+# ONE map covers the WHOLE raw vector (base is NOT a bypass channel) — like BEHAVIOR's RAW-27.
 unify_action: true
-unify_action_map: ["0-9", "34-43"]  # raw left-arm 0-9 → unified 0-9, raw right-arm 10-19 → 34-43
+unify_action_map: ["0-9", "34-43", "68-72"]  # raw arm 0-9→0-9, 10-19→34-43; raw base5 20-24→68-72
 #
-# mobile_base=true (requires unify_action): read the RoboCasa-native base COMMAND raw from the
-# LeRobot action field ([x/y/yaw velocity, torso position, control_mode]) and scatter it into the
-# reserved slots [68:73) (ACTION side only; direct-to-env at eval, no bridge). See
-# docs/plans/robocasa365-full-mobile.md.
+# mobile_base=true (DECOUPLED from unify_action — non-unify emits the raw 25-D head directly): fold
+# the RoboCasa-native base command from the LeRobot action field into the raw vector as base5 =
+# [x_vel, y_vel, yaw_vel, torso, control_mode]. ACTION supervises all 5; PROPRIO carries the body-frame
+# base VELOCITY (finite-diff of observation.state base pose, rescaled into the action command space so
+# it shares the base stats), with torso + control_mode masked (no achieved value). The action base is
+# direct-to-env at eval (arm bridged, base raw). See docs/plans/robocasa365-unify-raw-vector-refactor.md.
 mobile_base: true
-#
-# base_proprio_velocity=true (requires unify_action; changes the PROPRIO definition → RETRAIN to take
-# effect): put the current body-frame base velocity [vx, vy, vyaw] (finite-diff of observation.state
-# base_position, world→body) into PROPRIO [68:71). World-frame base POSE is scene-arbitrary, but its
-# body-frame VELOCITY is scene-invariant and symmetric with the action's commanded base velocity
-# ([68:71) proprio = current, [68:71) action = commanded). torso[71] + control_mode[72] have no
-# observable current-state source, so they stay masked in proprio. The eval client derives the SAME
-# velocity from the sim obs and sends 23-D proprio [arm20, base_vel3]; the deploy server normalizes it
-# with the 'base_vel' stats block and scatters to [68:71). Stats file gains a 3-D 'base_vel' block and
-# a '..vel_' suffix. Default false (proprio stays 20-D EEF; existing ckpts unaffected).
-base_proprio_velocity: false
 #
 # Model head + proprio dims must be 80 when unify_action=true. As of the main merge,
 # configs/model/dual_system.yaml already defaults to action_dim=80 / state_dim=80 (the unified
 # cross-robot head), so NO override is needed for the default model. Only if you point at a model
 # config that hardcodes 20 do you still need:
 #   scripts/train.sh dataloader=robocasa365 model.architecture.action_dim=80 model.architecture.state_dim=80 ...
-# Deploy needs no extra flag: model_loader reads unify_action/unify_action_map/mobile_base/
-# base_proprio_velocity from the saved config and wraps _UnifyAwareNormalizer (action OUT: gathers
-# 80->25 = arm20+base5; proprio IN: scatters base_vel3 into [68:71)), so the eval client bridges arm
-# (20->OSC), sends base raw, and (when base_proprio_velocity) sends 23-D proprio [arm20, base_vel3].
-# Base stats live under "base", base velocity under "base_vel", in the auto-computed stats .npy.
+# Deploy needs no extra flag and touches NO robocasa-specific code: model_loader reads unify_action/
+# unify_action_map/action_mode from the saved config and wraps the generic _UnifyAwareNormalizer
+# (action OUT: gathers 80->25 and un-normalizes with the single 'eef_base' block → [arm20, base5];
+# proprio IN: normalizes then scatters through the SAME map). The eval client bridges arm (20->OSC),
+# sends base5 raw, and (when mobile) sends the 25-D [arm20, base5] proprio.
