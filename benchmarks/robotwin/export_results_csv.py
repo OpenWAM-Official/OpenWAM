@@ -78,24 +78,28 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_RE.sub("", text)
 
 
-def parse_success_rate(log_path: Path) -> Optional[float]:
-    if not log_path.is_file():
-        return None
+def parse_success_rate_from_text(text: str) -> Optional[float]:
     last_match: Optional[float] = None
-    try:
-        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            clean_line = strip_ansi(line)
-            for pattern in SUCCESS_RATE_PATTERNS:
-                match = pattern.search(clean_line)
-                if match:
-                    last_match = float(match.group(1))
-    except OSError:
-        return None
+    for line in strip_ansi(text).splitlines():
+        for pattern in SUCCESS_RATE_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                last_match = float(match.group(1))
     return last_match
 
 
-def parse_episode_stats(log_path: Path) -> Tuple[int, int]:
-    """Parse ``(episodes, step_limit_hits)`` from one RoboTwin task log.
+def parse_success_rate(log_path: Path) -> Optional[float]:
+    if not log_path.is_file():
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return parse_success_rate_from_text(text)
+
+
+def parse_episode_stats_from_text(text: str) -> Tuple[int, int]:
+    """Parse ``(episodes, step_limit_hits)`` from one RoboTwin task log's text.
 
     - ``episodes``: number of ``Success!`` / ``Fail!`` verdicts seen.
     - ``step_limit_hits``: ``Fail!`` episodes whose most recent ``step: N / M``
@@ -108,23 +112,15 @@ def parse_episode_stats(log_path: Path) -> Tuple[int, int]:
     still splits on ``\\r`` so each ``step:`` update is its own logical line and
     the last one before a verdict is that episode's final step count.
     """
-    if not log_path.is_file():
-        return (0, 0)
-    try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return (0, 0)
-
     episodes = 0
     step_limit_hits = 0
     last_step: Optional[Tuple[int, int]] = None
-    for line in text.splitlines():
-        clean = strip_ansi(line)
-        step_match = STEP_PROGRESS_RE.search(clean)
+    for line in strip_ansi(text).splitlines():
+        step_match = STEP_PROGRESS_RE.search(line)
         if step_match:
             last_step = (int(step_match.group(1)), int(step_match.group(2)))
             continue
-        verdict = EPISODE_VERDICT_RE.search(clean)
+        verdict = EPISODE_VERDICT_RE.search(line)
         if verdict:
             episodes += 1
             if (
@@ -136,6 +132,16 @@ def parse_episode_stats(log_path: Path) -> Tuple[int, int]:
                 step_limit_hits += 1
             last_step = None  # reset for the next episode
     return (episodes, step_limit_hits)
+
+
+def parse_episode_stats(log_path: Path) -> Tuple[int, int]:
+    if not log_path.is_file():
+        return (0, 0)
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return (0, 0)
+    return parse_episode_stats_from_text(text)
 
 
 def iter_summary_rows(summary_path: Path) -> Iterable[Dict[str, str]]:
@@ -266,8 +272,18 @@ def main() -> int:
         log_path = Path(row.get("log", ""))
         if not log_path.is_absolute():
             log_path = (log_dir / log_path).resolve()
-        success_rate = parse_success_rate(log_path)
-        episodes, step_limit_hits = parse_episode_stats(log_path)
+
+        log_text: Optional[str] = None
+        if log_path.is_file():
+            try:
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                log_text = None
+
+        success_rate = parse_success_rate_from_text(log_text) if log_text is not None else None
+        episodes, step_limit_hits = (
+            parse_episode_stats_from_text(log_text) if log_text is not None else (0, 0)
+        )
 
         if not log_path.is_file():
             failures.append(f"missing log: {log_path}")

@@ -317,6 +317,19 @@ SERVER_LOG_DIR="${NODE_DIR}/servers"
 server_pids=()
 worker_pids=()
 
+# Idempotent: touching an existing sentinel is a no-op. Called both from the
+# normal post-worker-wait path (rank0's own peer-sentinel loop below needs to
+# observe its own file, so it cannot wait until this node's process actually
+# exits) and from cleanup() (so a pre-wait abort — queue-wait timeout,
+# wait_for_server failure, dry-run barrier timeout, SIGTERM/SIGINT from DLC
+# preemption — still publishes the sentinel instead of stranding rank0's poll
+# for up to ALL_NODES_DONE_TIMEOUT_SEC).
+publish_done_sentinel() {
+    [[ -n "${LOG_DIR:-}" ]] || return 0
+    mkdir -p "${LOG_DIR}" 2>/dev/null || true
+    touch "${LOG_DIR}/.node${NODE_RANK}_done" 2>/dev/null || true
+}
+
 cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM
@@ -339,6 +352,7 @@ cleanup() {
         for pid in "${worker_pids[@]}" "${server_pids[@]}"; do kill_tree "${pid}" KILL; done
     fi
     wait 2>/dev/null || true
+    publish_done_sentinel
     echo "[node${NODE_RANK}] cleanup complete." >&2
     exit "${exit_code}"
 }
@@ -677,9 +691,11 @@ for pid in "${worker_pids[@]}"; do
 done
 worker_pids=()
 
-# Always publish the done sentinel before honoring any worker failure, so a
-# corrupt-queue abort on this node cannot strand rank0's node-completion wait.
-touch "${LOG_DIR}/.node${NODE_RANK}_done"
+# Publish the done sentinel now (not just from cleanup()) because rank0's own
+# peer-sentinel loop below checks this same file for rank0 itself, and that
+# loop must not block on a sentinel that would otherwise only be written when
+# this process exits.
+publish_done_sentinel
 echo "[node${NODE_RANK}] local workers finished"
 if (( worker_rc != 0 )); then
     echo "[node${NODE_RANK}] WARNING: a worker exited non-zero (rc=${worker_rc}); see worker logs" >&2
