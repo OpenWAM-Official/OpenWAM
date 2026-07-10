@@ -215,8 +215,8 @@ Tasks run sequentially; per-task `Success rate` lines are aggregated into
 `single_eval.py` resolves the rollout horizon from `step_limits.yml` (per-task override),
 falling back to `max_steps` in the policy config (default 500) for unlisted tasks; the env's
 own `done`/`truncated` still ends an episode early. Values follow robotwin's
-`ceil(avg_episode_len / 32) * 32` — seed a new task by computing its mean episode length over
-`data/chunk-*/episode_*.parquet`.
+`ceil(avg_episode_len / 32) * 32` — seed a new task by computing its mean episode length from the
+v3 repo's `meta/episodes/*.parquet` (`length` column), filtered to that task's `source_prefix`.
 
 ## Known limitations
 

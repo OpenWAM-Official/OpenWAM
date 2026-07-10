@@ -1,4 +1,4 @@
-"""Unit tests for the RoboCasa365 eval adapter (Phase 1).
+"""Unit tests for the RoboCasa365 eval adapter.
 
 Pure transforms + the policy class (with an injected fake client) + the pinned
 upstream contract. No sim, no GPU, no live server. Mirrors robotwin's

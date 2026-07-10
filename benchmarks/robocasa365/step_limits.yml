@@ -11,7 +11,8 @@
 #     central tendency (not a ceiling), a non-trivial fraction of rollouts run longer than avg.
 #
 # Only tasks whose LeRobot data is available locally are seeded here; add the rest by running
-# the same mean-length computation over each task's `data/chunk-*/episode_*.parquet`.
+# the same mean-length computation over the v3 repo's `meta/episodes/*.parquet` (`length` column),
+# filtered to the task's `source_prefix`.
 # This is for EVALUATION, not training.
 
 OpenDrawer: 288  # avg 267 (514 eps; max 603, p90 354)

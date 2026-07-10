@@ -790,11 +790,12 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
     ``MultiTaskRoboTwinDataset``).
 
     Concatenates one ``RoboCasa365Dataset`` per task so one epoch covers all tasks.
-    ``dataset_dir`` points at the v3 aggregated repo; tasks are distinguished by
-    ``source_prefix``. ``task_name`` selects one task, ``task_roots`` a subset (task
-    names), else EVERY task in the repo is discovered (full RoboCasa365, mobile + fixed —
-    the base command is trained via ``mobile_base``, not dropped). All sub-datasets share
-    one pooled stats file.
+    ``dataset_dir`` is a single v3 aggregated repo OR a LIST of repos (the full 300-task
+    atomic+composite case = two separate HF repos); tasks are discovered across all of them by
+    ``source_prefix``. ``task_name`` selects one task, ``task_roots`` a subset (task names), else
+    EVERY task across the repo(s) is discovered (full RoboCasa365, mobile + fixed — the base command
+    is trained via ``mobile_base``, not dropped). All sub-datasets share one pooled stats file
+    (multi-repo requires an explicit ``normalization_stats_path`` — no single root to auto-place it).
     """
 
     @classmethod
