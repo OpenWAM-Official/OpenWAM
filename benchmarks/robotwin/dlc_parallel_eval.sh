@@ -432,8 +432,14 @@ if [[ "${NODE_RANK}" == "0" ]]; then
         fi
         printf 'tasks=%s\n' "${TASKS[*]}"
     } > "${LOG_DIR}/run.env"
-    touch "${READY_FILE}"
+    # Set before the touch, not after: rank0 has fully built the queue by
+    # this point, so there is no reason to leave a window (however narrow)
+    # between publishing READY_FILE and considering itself joined — a
+    # SIGTERM landing exactly there would otherwise skip cleanup()'s
+    # sentinel publish despite the queue already being real for this
+    # attempt.
     NODE_JOINED=1
+    touch "${READY_FILE}"
     echo "[rank0] queue initialized: ${TOTAL_JOBS} per-job files at ${QUEUE_PENDING_DIR}"
 else
     echo "[rank${NODE_RANK}] waiting for queue ${READY_FILE} (timeout ${QUEUE_READY_TIMEOUT_SEC}s)"

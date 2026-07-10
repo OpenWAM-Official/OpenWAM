@@ -281,12 +281,15 @@ def test_robotwin_dlc_sentinel_published_on_post_join_sigterm(tmp_path):
         stderr=subprocess.STDOUT,
     )
     try:
-        # Poll for READY_FILE itself (the same file the script uses to flip
-        # NODE_JOINED=1) rather than a fixed sleep after the node directory
-        # appears: there's a real, variable-duration gap between the two
-        # (--fresh cleanup, queue/job-file writes, run.env write all happen
-        # in between) that a fixed sleep could lose on a loaded machine.
-        _wait_for_path(log_dir / ".queue_ready", proc)
+        # Poll for dryrun_node_ready/node0, not .queue_ready (READY_FILE):
+        # the script sets NODE_JOINED=1 and touches READY_FILE as two
+        # separate statements, so .queue_ready can become visible while
+        # NODE_JOINED=1 hasn't run yet — a signal landing in that window
+        # would make cleanup() see NODE_JOINED=0 and skip the sentinel,
+        # flaking this test. dryrun_node_ready/node0 is only touched after
+        # the join block (this test always runs --dry-run), so it's
+        # strictly post-join and race-free.
+        _wait_for_path(log_dir / "dryrun_node_ready" / "node0", proc)
         assert proc.poll() is None, "process exited before SIGTERM was sent"
         proc.send_signal(signal.SIGTERM)
         stdout, _ = proc.communicate(timeout=15)

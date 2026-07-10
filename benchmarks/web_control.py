@@ -804,11 +804,15 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         and so a task that crashes before any rate line still reports
         ``episodes`` consistent with ``step_limit_hits`` from the same pass.
 
-        All four fields are blank only when the log itself is missing/
-        unreadable/outside-root — never when it was read but simply has no
-        episode data yet (e.g. crashed before the first verdict), which
-        reports a genuine ``0`` instead. Blanking on a falsy ``0`` would
-        make "no data" indistinguishable from "measured zero".
+        ``success``/``episodes``/``step_limit_hits`` are blank only when the
+        log itself is missing/unreadable/outside-root — never when it was
+        read but simply has no episode data yet (e.g. crashed before the
+        first verdict), which reports a genuine ``0`` instead. Blanking on a
+        falsy ``0`` would make "no data" indistinguishable from "measured
+        zero". ``success_rate`` additionally blanks whenever no ``success
+        rate: X / Y => Z%`` line has been printed yet (``parse_success_rate_
+        from_text`` returns ``None``), even on an otherwise-readable log —
+        it has no verdict-count fallback to report a "0" from.
 
         Uses ``normalize_log_ref`` (like every other log reader in this file)
         so a ``log`` ref pointing outside ``self.root`` is refused here too,
