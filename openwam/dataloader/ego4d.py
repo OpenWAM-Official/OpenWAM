@@ -145,9 +145,7 @@ class Ego4DDataset(LeRobotV3Reader):
     """
 
     DATASET_NAME = "Ego4D"
-    # Reader-emit dims; matches the EEF mixture schema (action_dim=20 pre-unify).
-    _ACTION_DIM = 20
-    _STATE_DIM = 20
+    # Reader-emit width; matches the EEF mixture schema (action_dim=20 pre-unify).
     ACTION_DIM = 20
     # Only task_index is read from the per-frame parquet (for the inherited
     # task_index prompt path); the MANO hand columns are ignored (video-only).
