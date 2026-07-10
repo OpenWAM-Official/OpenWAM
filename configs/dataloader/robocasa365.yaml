@@ -11,8 +11,15 @@ type: robocasa365
 # Full RoboCasa365 (all tasks, mobile + fixed): the mobile base command is trained (mobile_base=true
 # below), so tasks are no longer filtered to a fixed-base subset. Eval targets the official 50 target
 # tasks (see benchmarks/robocasa365/).
+#
+# dataset_dir may be a single repo OR a LIST of repos. The full 300 train tasks live in TWO separate
+# HF repos (65 atomic + 235 composite): pass both to train over all of them, e.g.
+#   dataset_dir: [/path/to/robocasa365-pretrain-atomic, /path/to/robocasa365-pretrain-composite]
+# Tasks are discovered across all listed repos (atomic/composite task sets are disjoint). Multi-repo
+# REQUIRES an explicit normalization_stats_path (see below) — there is no single root to auto-place
+# the shared stats file.
 dataset_dir: /path/to/robocasa365-pretrain-atomic
-task_name: null                   # null = every task in the repo; set a name = filter to one task (source_prefix)
+task_name: null                   # null = every task across all repos; set a name = filter to one task (source_prefix)
 task_roots: null                  # optional list of task NAMES to include (a subset); overrides full discovery
 
 # ── Frame sampling (aligned with OXE / RoboCOIN / RoboTwin) ──────────────────
@@ -72,7 +79,9 @@ action_mode: eef
 # (quantile is NOT supported here — the deploy normalizer can't invert it, so the dataloader
 #  rejects it rather than let a checkpoint silently lose normalization at serve time.)
 normalize_mode: min-max
-normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resolve under each bucket
+normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resolve under the (single) repo.
+                                  # REQUIRED (non-null) when dataset_dir is a list of repos — the pooled
+                                  # stats over all tasks×repos are computed to this path on first use.
 
 # ── Unified 80-D action space (cross-robot shared head) + mobile base ────────
 # unify_action=true scatters this reader's 20-D EEF into a shared UNIFY_DIM (80) vector so
@@ -101,12 +110,11 @@ mobile_base: true
 # a '..vel_' suffix. Default false (proprio stays 20-D EEF; existing ckpts unaffected).
 base_proprio_velocity: false
 #
-# REQUIRED when training with unify_action=true: also set the model head + proprio dims to 80:
-#   scripts/train.sh dataloader=robocasa365 \
-#     model.architecture.action_dim=80 model.architecture.state_dim=80 ...
-# (the model config hardcodes dims and does NOT auto-derive from the dataloader; same as robotwin.
-#  On this branch configs/model/dual_system.yaml still defaults to 20 — override it; upstream main
-#  defaults to 80 for the unified cross-robot head, so after merging main the override is redundant.)
+# Model head + proprio dims must be 80 when unify_action=true. As of the main merge,
+# configs/model/dual_system.yaml already defaults to action_dim=80 / state_dim=80 (the unified
+# cross-robot head), so NO override is needed for the default model. Only if you point at a model
+# config that hardcodes 20 do you still need:
+#   scripts/train.sh dataloader=robocasa365 model.architecture.action_dim=80 model.architecture.state_dim=80 ...
 # Deploy needs no extra flag: model_loader reads unify_action/unify_action_map/mobile_base/
 # base_proprio_velocity from the saved config and wraps _UnifyAwareNormalizer (action OUT: gathers
 # 80->25 = arm20+base5; proprio IN: scatters base_vel3 into [68:71)), so the eval client bridges arm

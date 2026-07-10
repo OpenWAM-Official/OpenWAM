@@ -892,8 +892,19 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         if len(roots) <= 1:
             return None  # single bucket: keep the per-task auto-resolve path
         tag = "eef" + ("base" if mobile_base else "") + ("vel" if base_proprio_vel else "")
-        name = f"{task_name}_{tag}_stats.npy" if task_name else f"robocasa365_multitask_{tag}_stats.npy"
-        shared = os.path.join(dataset_dir, name)
+        if isinstance(dataset_dir, str):
+            name = f"{task_name}_{tag}_stats.npy" if task_name else f"robocasa365_multitask_{tag}_stats.npy"
+            shared = os.path.join(dataset_dir, name)
+        elif explicit:
+            shared = explicit  # multi-repo: pool the shared stats into the explicit path (computed below)
+        else:
+            # Multi-repo (dataset_dir is a list of repos) has no single root to auto-place the pooled
+            # stats; require an explicit target (no silent fallback — surface the missing config).
+            raise ValueError(
+                "multi-repo robocasa365 (dataset_dir is a list of repos) has no single root to auto-place "
+                "the shared stats; set dataloader.normalization_stats_path to the target .npy "
+                "(it is computed there on first use)."
+            )
         if not os.path.exists(shared):
             _compute_shared_stats_rank0_synced(
                 shared, roots, include_base=mobile_base, include_base_vel=base_proprio_vel
@@ -901,24 +912,29 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         return shared
 
     @staticmethod
-    def _resolve_task_roots(dataset_dir: str, task_name: Optional[str], task_roots: Optional[list]):
-        """Return ``[(task_name, repo), ...]`` — the v3 aggregated repo, one entry per selected task.
+    def _resolve_task_roots(dataset_dir, task_name: Optional[str], task_roots: Optional[list]):
+        """Return ``[(task_name, repo), ...]`` — one entry per selected task, paired with its repo.
 
-        v3 packs ALL tasks into one repo (``dataset_dir``); tasks are distinguished by
-        ``source_prefix`` (not per-task dirs). ``task_name`` selects one; ``task_roots`` (a list of
-        task names) selects a subset; else discover EVERY distinct task in the repo (full RoboCasa365
-        — mobile + fixed, base trained via mobile_base). Every entry shares the same ``dataset_dir``
-        repo; the sub-dataset filters it to its task.
+        ``dataset_dir`` is a single v3 aggregated repo (str) OR a list of repos (the full 300-task
+        atomic+composite case = two separate HF repos). v3 packs many tasks per repo, distinguished by
+        ``source_prefix``; each task is discovered in the repo it lives in (atomic/composite task sets
+        are disjoint). ``task_name`` selects one; ``task_roots`` (task names) a subset; else EVERY task
+        across all repos. The sub-dataset later filters its own repo to its task via ``source_prefix``.
         """
-        eps = load_episodes_parquet(Path(dataset_dir))
-        tasks_in_repo = sorted({_task_from_source_prefix(p) for p in eps["source_prefix"]})
+        repos = [dataset_dir] if isinstance(dataset_dir, str) else list(dataset_dir)
+        pairs = []  # [(task, repo), ...] across all repos, in repo order
+        for repo in repos:
+            eps = load_episodes_parquet(Path(repo))
+            for t in sorted({_task_from_source_prefix(p) for p in eps["source_prefix"]}):
+                pairs.append((t, repo))
+        all_tasks = {t for t, _ in pairs}
         if task_name is not None:
-            sel = [task_name] if task_name in tasks_in_repo else []
+            sel = {task_name} if task_name in all_tasks else set()
         elif task_roots:
-            sel = [t for t in task_roots if t in tasks_in_repo]
+            sel = {t for t in task_roots if t in all_tasks}
         else:
-            sel = tasks_in_repo
-        return [(t, dataset_dir) for t in sel]
+            sel = all_tasks
+        return [(t, repo) for t, repo in pairs if t in sel]
 
     @property
     def action_dim(self) -> int:

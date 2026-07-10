@@ -649,6 +649,66 @@ def test_multi_shared_base_vel_stats(tmp_path):
     assert s["proprio_mask"].numpy()[0, 68:71].all()
 
 
+def _two_repos(tmp_path):
+    """Two SEPARATE v3 aggregated repos (the atomic + composite case): disjoint task sets."""
+    a = _write_v3_repo(tmp_path / "repo_atomic", [("taskA", N_EPISODES), ("taskB", N_EPISODES)])
+    b = _write_v3_repo(tmp_path / "repo_composite", [("taskC", N_EPISODES), ("taskD", N_EPISODES)])
+    return str(a), str(b)
+
+
+def test_multi_repo_discovers_across_repos(tmp_path):
+    # dataset_dir = [repoA, repoB] -> discover tasks across BOTH repos (the 300-task atomic+composite
+    # case: two separate HF repos). One sub-dataset per (task, its repo).
+    a, b = _two_repos(tmp_path)
+    with _mock_video_decoder():
+        ds = MultiTaskRoboCasa365Dataset(dataset_dir=[a, b], multiview=False, height=64, width=96, normalize_mode=None)
+    assert len(ds._datasets) == 4
+    assert {d.task_name for d in ds._datasets} == {"taskA", "taskB", "taskC", "taskD"}
+    assert len(ds) == 4 * N_EPISODES * (EP_LENGTH - 1)
+
+
+def test_multi_repo_task_roots_subset(tmp_path):
+    # task_roots selects across repos: one task from each repo.
+    a, b = _two_repos(tmp_path)
+    with _mock_video_decoder():
+        ds = MultiTaskRoboCasa365Dataset(dataset_dir=[a, b], task_roots=["taskA", "taskC"],
+                                         multiview=False, height=64, width=96, normalize_mode=None)
+    assert {d.task_name for d in ds._datasets} == {"taskA", "taskC"}
+
+
+def test_multi_repo_shared_stats_requires_explicit(tmp_path):
+    # Multi-repo has no single root dir to auto-place the shared stats -> require an explicit
+    # normalization_stats_path (no silent fallback).
+    a, b = _two_repos(tmp_path)
+    with _mock_video_decoder():
+        with pytest.raises(ValueError, match="normalization_stats_path"):
+            MultiTaskRoboCasa365Dataset(dataset_dir=[a, b], multiview=False, height=64, width=96,
+                                        normalize_mode="min-max")
+
+
+def test_multi_repo_shared_stats_explicit_pooled(tmp_path):
+    # With an explicit stats path, stats are pooled over ALL tasks across BOTH repos and every
+    # sub-dataset shares that one file.
+    a, b = _two_repos(tmp_path)
+    stats_path = str(tmp_path / "shared_multitask_stats.npy")
+    with _mock_video_decoder():
+        ds = MultiTaskRoboCasa365Dataset(dataset_dir=[a, b], normalization_stats_path=stats_path,
+                                         multiview=False, height=64, width=96, normalize_mode="min-max")
+        s = ds[0]
+    assert Path(stats_path).exists()
+    assert {d.normalization_stats_path for d in ds._datasets} == {stats_path}  # all share the pooled file
+    assert s["action"].shape == (32, EEF_DIM)
+
+
+def test_from_config_multi_repo(tmp_path):
+    a, b = _two_repos(tmp_path)
+    cfg = {"type": "robocasa365", "dataset_dir": [a, b], "multiview": False, "height": 64, "width": 96,
+           "normalize_mode": None}
+    with _mock_video_decoder():
+        ds = MultiTaskRoboCasa365Dataset.from_config(cfg, split="train")
+    assert len(ds._datasets) == 4
+
+
 def test_multi_mobile_and_base_vel_shared_stats(tmp_path):
     # mobile_base + base_proprio_velocity together: shared _eefbasevel_ file carries BOTH a 5-D 'base'
     # (action) block and a 3-D 'base_vel' (proprio) block; action[68:73) + proprio[68:71) both filled.
