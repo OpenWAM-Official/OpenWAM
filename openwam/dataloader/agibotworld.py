@@ -336,6 +336,7 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
 
+
         self._action_norm_stats = None
         self._proprio_norm_stats = None
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):

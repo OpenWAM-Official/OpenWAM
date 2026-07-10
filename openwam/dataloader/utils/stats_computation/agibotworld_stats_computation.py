@@ -40,6 +40,7 @@
 
 
 
+
 import argparse
 import glob
 import json
@@ -61,7 +62,6 @@ _COL_WIDTH = {
     "action.dex": 12, "observation.state.dex": 12,
     "action.robot_velocity": 3, "observation.state.robot_velocity": 3,
 }
-_STAT_FIELDS = ("min", "max", "mean", "std", "q01", "q99")
 
 OUT_FILENAME = "stats_g2a.json"
 WORKER_CAP = 200_000
@@ -193,22 +193,46 @@ def main():
     rng = np.random.default_rng(args.seed)
     g: dict = {}
     contrib: dict = {}
+    contributed, skipped, failed = [], [], []
     done = 0
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
 
 
 
-        futures = [pool.submit(_partial_bucket, b) for b in buckets]
-        for fut in futures:
-            name, partial = fut.result()
+        futures = {b: pool.submit(_partial_bucket, b) for b in buckets}
+        for b in buckets:
+            name = os.path.basename(b.rstrip("/"))
             done += 1
+            try:
+
+                _, partial = futures[b].result()
+            except Exception as e:
+                failed.append(name)
+                print(f"[{done}/{len(buckets)}] {name}: FAILED — {type(e).__name__}: {e}", flush=True)
+                continue
+            if not partial:
+
+
+
+                skipped.append(name)
+                print(f"[{done}/{len(buckets)}] {name}: SKIPPED — no data rows found", flush=True)
+                continue
+            contributed.append(name)
             _merge_into(g, partial, rng)
             for c in partial:
                 contrib[c] = contrib.get(c, 0) + 1
             if done % 20 == 0 or done == len(buckets):
                 print(f"[{done}/{len(buckets)}] merged {name}: cols={sorted(partial)}", flush=True)
 
-    result = {"robot_type": "g2a", "num_buckets": len(buckets)}
+    if not contributed:
+        raise RuntimeError(f"No bucket contributed any data under {args.dataset_dir}; nothing to write.")
+
+    result = {
+        "robot_type": "g2a",
+        "num_buckets": len(contributed),
+        "num_skipped": len(skipped),
+        "num_failed": len(failed),
+    }
     result.update(_finalize(g, contrib))
 
     out_dir = os.path.join(args.dataset_dir, "meta")
@@ -221,7 +245,13 @@ def main():
 
     print("\n" + "=" * 60, flush=True)
     print(f"Wrote {out_path}", flush=True)
-    for c in sorted(k for k in result if k not in ("robot_type", "num_buckets")):
+    print(f"  contributed {len(contributed)} / skipped {len(skipped)} / failed {len(failed)} "
+          f"of {len(buckets)} buckets", flush=True)
+    if skipped:
+        print(f"  SKIPPED (no data): {sorted(skipped)}", flush=True)
+    if failed:
+        print(f"  FAILED: {sorted(failed)}", flush=True)
+    for c in sorted(k for k in result if isinstance(result[k], dict)):
         s = result[c]
         print(f"  {c:34s} n={s['num_timesteps']:>12,}  buckets={s['num_buckets']:>3}  "
               f"q01[0]={s['q01'][0]:+.3f} q99[0]={s['q99'][0]:+.3f}", flush=True)
