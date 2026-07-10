@@ -14,11 +14,10 @@ views** — `agentview_left` (3rd-person) → `head_camera` and `eye_in_hand` (t
 arm's real wrist) → `left_wrist_camera`. The single arm has no 2nd wrist, so
 `right_wrist_camera` is left empty and the server black-fills it.
 
-> **Scope.** This directory is the eval **client + smoke**. The matching training
-> dataloader (`openwam.dataloader.robocasa365.RoboCasa365Dataset`) now lives in the
-> same PR. Real success rates still need a RoboCasa365-trained OpenWAM checkpoint;
-> there is no public one yet, so a smoke run against a mismatched checkpoint will
-> fail the `state_dim` check or produce garbage actions (expected).
+> **Scope.** This directory is the eval **client + smoke**; the matching training dataloader
+> (`openwam.dataloader.robocasa365`, registered `robocasa365`) is in the same PR — see
+> "Training data + dataloader" below. The full train→deploy→eval chain is validated (plumbing);
+> real success rates need a full training run (the smoke checkpoints are undertrained).
 >
 > **Action spaces (two layers).** The env (`RoboCasaGymEnv`) consumes a fixed **12-D**
 > robosuite OSC + base action. The OpenWAM model trained by `RoboCasa365Dataset`
@@ -48,45 +47,73 @@ arm's real wrist) → `left_wrist_camera`. The single arm has no 2nd wrist, so
 
 ## Full task set + mobile base
 
-This benchmark + dataloader cover the **full RoboCasa365** (all 365 tasks — mobile +
-fixed). The model commands the holonomic base via the **mobile base** channel
+This benchmark + dataloader cover the **full RoboCasa365** task set (all tasks — mobile +
+fixed; 65 atomic + 235 composite have pretrain data). The model commands the holonomic base via the **mobile base** channel
 (`mobile_base=true`), so tasks are no longer restricted to the fixed-base
 (`moma_required=No`) subset. (Earlier revisions scoped to a fixed-base manifest and filled
 `base_motion=0`; that filter — `fixed_base_tasks.json`, the `moma` root-mode drop, and the
 `_assert_fixed_base` eval gate — has been removed.)
 
-- **Training:** root-mode discovery keeps every downloaded bucket. Point `dataset_dir` at the
-  RoboCasa365 root; each task's `meta/info.json` `total_episodes` gives its (non-fixed) demo count.
+- **Training:** multi-task discovery keeps every task in the v3 repo(s) (by `source_prefix`) — see
+  "Training data + dataloader" below for `dataset_dir` (single repo or the atomic+composite list).
 - **Eval:** the official **50 target tasks** (the multi-task leaderboard set — 18 atomic + 16
   composite-seen + 16 composite-unseen), listed in [`target_tasks.txt`](target_tasks.txt). The 16
   composite-**unseen** tasks are held out of training (zero-shot). Run them with
   `multi_eval.sh ... target_tasks.txt`.
 
-See the mobile-base design (arm absolute-EEF in unified slots `[0:9]`; RoboCasa-native base command
-raw in reserved `[68:73)`; base action-only, not proprio) in `docs/plans/robocasa365-full-mobile.md`.
+See the mobile-base design (arm absolute-EEF in unified slots `[0:10)`; RoboCasa-native base command
+raw in reserved `[68:73)`) in `docs/plans/robocasa365-full-mobile.md`. Optional base-velocity proprio
+occupies `[68:71)` on the proprio side (see "Base-velocity proprio" below).
 
-## Training data + dataloader (Phase 2)
+## Training data + dataloader
 
-The trainer side is `openwam.dataloader.robocasa365.RoboCasa365Dataset` (registered
-`robocasa365`), reading the RAW RoboCasa365 LeRobot **v2.1** download directly (no
-conversion). Point `dataset_dir` at one task's `lerobot/` bucket, or at a root holding
-many `.../<Task>/<date>/lerobot` buckets (multi-task). Config + knobs live in
-`configs/dataloader/robocasa365.yaml`.
+The trainer side is `openwam.dataloader.robocasa365.MultiTaskRoboCasa365Dataset`
+(registered `robocasa365`), reading the RAW RoboCasa365 LeRobot **v3.0 aggregated** repo
+directly (no conversion) — the HuggingFace mirrors
+`ember-lab-berkeley/robocasa365-pretrain-{atomic,composite}`. `dataset_dir` points at the
+repo exactly as downloaded (aggregated `data/chunk-*/file-*.parquet` + `videos/…` +
+`meta/episodes/*.parquet`). Config + knobs: `configs/dataloader/robocasa365.yaml`.
+
+v3 packs many tasks into ONE aggregated repo, tagged per episode by `source_prefix`:
+- `task_name` set → single task (the repo filtered to that task).
+- `task_name` null → multi-task: every task across the repo(s), one sub-dataset per task,
+  concatenated, sharing ONE pooled stats file.
+
+The full **300 train tasks** live in TWO separate repos (65 atomic + 235 composite), so pass
+`dataset_dir` as a **list**. Multi-repo requires an explicit `normalization_stats_path` (there
+is no single root to auto-place the pooled stats — the reader raises if it's unset):
 
 ```bash
-# multi-task (full 365): point dataset_dir at the root of buckets, drop task_name.
-# unify_action + mobile_base are on by default, so the model head must be 80-D:
+# FULL 300-task multi-task training (atomic + composite):
 scripts/train.sh dataloader=robocasa365 \
-  dataloader.dataset_dir=/path/to/robocasa365/datasets/v1.0 \
-  model.architecture.action_dim=80 model.architecture.state_dim=80
-# single task: add dataloader.task_name=<Task> (dataset_dir may be that task's lerobot/ bucket)
+  'dataloader.dataset_dir=[/data/robocasa365-pretrain-atomic,/data/robocasa365-pretrain-composite]' \
+  dataloader.normalization_stats_path=/data/robocasa365_multitask_eefbase_stats.npy
+
+# Single repo (atomic-only, or a one-task smoke):
+scripts/train.sh dataloader=robocasa365 \
+  dataloader.dataset_dir=/data/robocasa365-pretrain-atomic   # [+ dataloader.task_name=OpenDrawer]
 ```
 
-The model trains the repo-standard **20-D EEF** arm action (absolute EEF pose from
-`observation.state`, bridged to 12-D OSC at eval) plus the **5-D mobile base command** (raw
-from the LeRobot `action` field, direct-to-env), scattered into the unified 80-D head. On this
-branch `configs/model/dual_system.yaml` still defaults the head to 20 — the `action_dim=80
-state_dim=80` overrides above are REQUIRED (upstream main defaults to 80; redundant after merge).
+`unify_action` + `mobile_base` are ON by default: the model trains the repo-standard **20-D
+EEF** arm action (absolute EEF pose from `observation.state`, bridged to 12-D OSC at eval) in
+unified slots `[0:10)`, plus the **5-D mobile base command** (raw from the LeRobot `action`
+field, direct-to-env at eval) in reserved `[68:73)`, all in the unified **80-D** head.
+`configs/model/dual_system.yaml` **defaults** `action_dim/state_dim=80`, so **no override is
+needed** for the default model (only a model config that hardcodes 20 would need
+`model.architecture.action_dim=80 model.architecture.state_dim=80`).
+
+### Base-velocity proprio — optional (`base_proprio_velocity=true`, requires RETRAIN)
+
+Adds the current **body-frame base velocity** `[vx, vy, vyaw]` (finite-diff of
+`observation.state` base pose, world→body) to **proprio** `[68:71)` — the proprio dual of the
+action base command. Off by default (proprio stays 20-D EEF; existing ckpts unaffected). When
+on, the stats file gains a 3-D `base_vel` block, and the **eval client must also set
+`base_proprio_velocity: true`** (it then derives the same velocity from the sim obs and sends
+**23-D** proprio `[arm20, base_vel3]`; the server scatters it into `[68:71)`). It changes the
+proprio definition, so it only takes effect on a fresh training run.
+```bash
+scripts/train.sh dataloader=robocasa365 ... dataloader.base_proprio_velocity=true
+```
 
 ## Environment setup
 
@@ -113,13 +140,18 @@ live in a **separate** env (like RoboTwin's `robotwin` env / LIBERO's
    export ROBOCASA365_PYTHON=/path/to/robocasa365/env/bin/python
    ```
 3. Match the checkpoint's action/state config in `policy_config.yml`:
-   - `state_dim: 20` — the model's 20-D EEF proprio; a fail-fast check against the
-     checkpoint's training config. (The env's raw 16-D state is converted client-side.)
-   - The model emits the repo-standard **20-D EEF**; the client bridges it to the env's
-     **12-D OSC**. Set `osc_pos_scale` / `osc_rot_scale` to the eval env's OSC_POSE
-     `output_max` (position metres / rotation radians mapped to action 1.0) — a 20-D
-     action with these unset raises rather than emitting wrong-magnitude motions. A
-     12-D server action (legacy 12-D checkpoint) is passed through unchanged.
+   - `state_dim: null` — auto-derives the expected proprio width (20-D EEF, or **23-D** when
+     `base_proprio_velocity: true`). Set an explicit int only to pin it; it's a fail-fast
+     check against what the client sends. (The env's raw 16-D state is converted client-side.)
+   - `base_proprio_velocity: true` **only** for a checkpoint trained with
+     `dataloader.base_proprio_velocity=true` (client then sends 23-D `[arm20, base_vel3]`); a
+     mismatch fails fast at the server. Leave `false` otherwise.
+   - The model emits the repo-standard **20-D EEF** (or **25-D** `[arm20, base5]` for a mobile
+     ckpt); the client bridges the arm 20-D → the env's **12-D OSC** (position → scaled OSC delta
+     vs the current/last-target eef per `control_mode`; rot6d → axis-angle) and passes the base
+     command through. Set `osc_pos_scale` / `osc_rot_scale` to the eval env's OSC_POSE
+     `output_max` (metres / radians mapped to action 1.0) — unset → raises rather than emitting
+     wrong-magnitude motions. A 12-D server action (legacy ckpt) is passed through unchanged.
 4. Start the OpenWAM server (in the OpenWAM env) with a RoboCasa365 checkpoint:
    ```bash
    bash scripts/deploy.sh --ckpt-dir /path/to/robocasa365_ckpt --port 8848
@@ -188,8 +220,11 @@ own `done`/`truncated` still ends an episode early. Values follow robotwin's
 
 ## Known limitations
 
-- **Only `OpenDrawer` is validated end-to-end** (train → deploy → real-sim). The other
-  fixed-base tasks share the obs/action contract but are unverified.
+- **Plumbing is validated end-to-end** (train → deploy → real-sim, EXIT 0) on `OpenDrawer`
+  and `NavigateKitchen` — including the mobile-base command and the optional base-velocity
+  proprio (23-D proprio scattered to `[68:71)`). But these were 100-step smoke checkpoints, so
+  **success rates are ~0 (undertrained)** — a real SR needs a full training run. Other tasks
+  share the same obs/action contract but haven't been individually run.
 - **No parallel / distributed eval** (cf. robotwin's `parallel_eval.sh` / DLC path) — tasks
   run sequentially.
 - **OSC scales + gripper threshold** in `policy_config.yml` were measured on `OpenDrawer` /
@@ -201,8 +236,8 @@ own `done`/`truncated` still ends an episode early. Values follow robotwin's
 - **Two views (agentview + wrist)**: the client sends `agentview_left` → `head_camera`
   and the `eye_in_hand` wrist → `left_wrist_camera`. The single arm has no 2nd wrist,
   so `right_wrist_camera` stays `null` and the server black-fills that slot when it
-  composes the multi-view layout. Mapping lives in `policy_config.yml`; Phase-2
-  training must use the same 2-view layout.
+  composes the multi-view layout. Mapping lives in `policy_config.yml`; training must use
+  the same 2-view layout.
 - **No client resize / flip**: frames go full resolution; `RoboCasaGymEnv` already
   flips them upright (`image_transform: none`).
 - **State / action are raw physical units**: the server (de)normalizes. The client converts
