@@ -62,6 +62,9 @@
 
 
 
+
+
+
 from __future__ import annotations
 
 import json
@@ -152,17 +155,12 @@ _STAT_FIELDS = ("min", "max", "mean", "std", "q01", "q99")
 
 
 
+_UNIFIED_STATS_FILENAME = "stats_g2a.json"
 
-_STATS_FILENAMES = ("stats_pooled.json", "stats.json")
 
 
-def _resolve_stats_path(dataset_dir):
-    """Public implementation. Dataset-specific audit notes were removed."""
-    for fn in _STATS_FILENAMES:
-        p = Path(dataset_dir) / "meta" / fn
-        if p.exists():
-            return p
-    return None
+
+_BUCKET_STATS_FILENAME = "stats.json"
 
 
 def _bucket_has_base_motion(dataset_dir) -> bool:
@@ -177,11 +175,11 @@ def _bucket_has_base_motion(dataset_dir) -> bool:
 
 
 
-    p = _resolve_stats_path(dataset_dir)
-    if p is None:
+    p = Path(dataset_dir) / "meta" / _BUCKET_STATS_FILENAME
+    if not p.exists():
         logger.warning(
-            "AgiBotWorld %s: no stats file (%s) — treating base as stationary (move slots unmapped).",
-            dataset_dir, " / ".join(_STATS_FILENAMES),
+            "AgiBotWorld %s: no %s — treating base as stationary (move slots unmapped).",
+            dataset_dir, _BUCKET_STATS_FILENAME,
         )
         return False
     try:
@@ -336,31 +334,19 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
 
+
+
+
         self._action_norm_stats = None
         self._proprio_norm_stats = None
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             return None
-
-
-
-        stats_path = _resolve_stats_path(self._dataset_dir)
-        if stats_path is None:
+        stats_path = self._dataset_dir.parent / "meta" / _UNIFIED_STATS_FILENAME
+        if not stats_path.exists():
             raise FileNotFoundError(
-                f"normalize_mode={self._normalize_mode!r} but no stats file found in "
-                f"{self._dataset_dir / 'meta'} ({' / '.join(_STATS_FILENAMES)}); set normalize_mode=null to disable."
-            )
-        if self._normalize_mode == "quantile" and stats_path.name == "stats.json":
-
-
-
-
-            raise ValueError(
-                f"AgiBotWorld bucket {self._dataset_id}: normalize_mode='quantile' requires the recomputed "
-                f"meta/stats_pooled.json, but only the shipped {stats_path} is present, whose q01/q99 are "
-                f"UNRELIABLE (LeRobot averages per-episode quantiles → collapsed toward the mean). Run "
-                f"`python -m openwam.dataloader.utils.stats_computation.agibotworld_stats_computation "
-                f"--dataset_dir <root>` to generate stats_pooled.json, or switch normalize_mode to "
-                f"z-score / min-max / null."
+                f"normalize_mode={self._normalize_mode!r} but the unified stats file {stats_path} is missing. "
+                f"Run `python -m openwam.dataloader.utils.stats_computation.agibotworld_stats_computation "
+                f"--dataset_dir {self._dataset_dir.parent}` to generate it, or set normalize_mode=null to disable."
             )
         with open(stats_path) as f:
             raw = json.load(f)
