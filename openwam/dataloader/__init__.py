@@ -1,4 +1,5 @@
 from openwam.dataloader.bases import BaseDataset
+from openwam.dataloader.ego4d import Ego4DDataset
 from openwam.dataloader.egodex import EgoDexDataset
 from openwam.dataloader.registry import (
     DATASET_REGISTRY,
@@ -17,19 +18,4 @@ from openwam.dataloader.robotwin import (
     RoboTwinDataset,
 )
 
-__all__ = [
-    "BaseDataset",
-    "RoboTwinDataset",
-    "MultiTaskRoboTwinDataset",
-    "EgoDexDataset",
-    "DATASET_REGISTRY",
-    "register_dataset",
-    "build_dataset",
-    "list_registered_datasets",
-    "ROBOTWIN_TRAIN_TASKS",
-    "ROBOTWIN_HOLDOUT_TASKS",
-    "ROBOTWIN_ALL_TASKS",
-    "EEF_ACTION_DIM",
-    "EEF_GRIPPER_INDICES",
-    "JOINT_GRIPPER_INDICES",
-]
+__all__ = ['BaseDataset', 'RoboTwinDataset', 'MultiTaskRoboTwinDataset', 'EgoDexDataset', 'Ego4DDataset', 'DATASET_REGISTRY', 'register_dataset', 'build_dataset', 'list_registered_datasets', 'ROBOTWIN_TRAIN_TASKS', 'ROBOTWIN_HOLDOUT_TASKS', 'ROBOTWIN_ALL_TASKS', 'EEF_ACTION_DIM', 'EEF_GRIPPER_INDICES', 'JOINT_GRIPPER_INDICES']
