@@ -310,3 +310,49 @@ def test_policy_act_20d_without_scales_raises():
     policy = adapter.OpenWAMRoboCasa365Policy(_client=_FakeClient(action=list(range(20))))
     with pytest.raises(ValueError, match="osc_pos_scale"):
         policy.act(_make_obs(), "x")
+
+
+def _arm20(pos):
+    a = np.zeros(20, np.float32)
+    a[0:3] = pos
+    a[3:9] = _IDENT_R6D
+    a[9] = 0.7
+    return a
+
+
+def test_bridge_desired_mode_uses_prev_target_not_current():
+    """control_mode=+1 (desired / "base mode"): robosuite OSC updates the arm goal from the last
+    DESIRED goal (goal = last_goal + delta), so to reach the absolute target the bridge must form
+    delta = target - previous_target, NOT target - current observed eef. Achieved (-1) uses the
+    current eef. The bridge is stateful across steps (tracks the previous target)."""
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5
+    )
+    obs = _make_obs()  # current eef pos = [4, 5, 6]
+
+    # Step 1 (achieved, control_mode=-1): delta = (target1 - current_eef)/scale; sets prev_target=target1.
+    # (small deltas so pos_cmd stays inside the [-1,1] clip and the two references stay distinguishable)
+    out1 = policy._bridge_eef20d(obs, _arm20([4.02, 5.0, 6.0]), np.array([0, 0, 0, 0, -1.0], np.float32))
+    assert out1[0:3] == pytest.approx([(4.02 - 4.0) / 0.05, 0.0, 0.0], abs=1e-4)  # (target1 - current)/scale = [0.4,0,0]
+
+    # Step 2 (desired, control_mode=+1): delta MUST be (target2 - target1)/scale, NOT (target2 - current).
+    out2 = policy._bridge_eef20d(obs, _arm20([4.03, 5.0, 6.0]), np.array([0.1, 0, 0, 0, 1.0], np.float32))
+    assert out2[0:3] == pytest.approx([(4.03 - 4.02) / 0.05, 0.0, 0.0], abs=1e-4)  # (target2 - target1)/scale = [0.2,0,0]
+    assert out2[0] != pytest.approx((4.03 - 4.0) / 0.05, abs=1e-3)  # would be 0.6 if it wrongly used current eef
+    assert out2[11] == pytest.approx(1.0)  # control_mode forwarded
+
+
+def test_bridge_reset_clears_prev_target():
+    """reset() (called per-episode by single_eval) clears the tracked previous target, so the first
+    desired-mode step of a new episode falls back to the current observed eef (matches the OSC's
+    goal initialization at episode start)."""
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5
+    )
+    obs = _make_obs()  # current eef = [4, 5, 6]
+    des = np.array([0.1, 0, 0, 0, 1.0], np.float32)
+    policy._bridge_eef20d(obs, _arm20([4.04, 5.0, 6.0]), des)  # sets prev_target
+    policy.reset()
+    # after reset, prev_target is None -> desired step uses current eef as reference again
+    out = policy._bridge_eef20d(obs, _arm20([4.03, 5.0, 6.0]), des)
+    assert out[0:3] == pytest.approx([(4.03 - 4.0) / 0.05, 0.0, 0.0], abs=1e-4)  # (target - current)/scale = [0.6,0,0]

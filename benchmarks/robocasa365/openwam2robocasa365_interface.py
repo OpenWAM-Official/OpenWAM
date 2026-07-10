@@ -329,6 +329,9 @@ class OpenWAMRoboCasa365Policy:
         self._debug_dir = debug_dir
         self._episode = -1
         self._step = 0
+        # Previous step's absolute arm target (pos3 + rot6d6) — the reference for the OSC delta when
+        # the env is in "desired" goal-update mode (control_mode>=0.5). Cleared per episode in reset().
+        self._prev_target_pose: Optional[np.ndarray] = None
 
         pong = self._client.ping()
         if pong.get("type") != transport.PONG:
@@ -345,6 +348,7 @@ class OpenWAMRoboCasa365Policy:
     def reset(self) -> None:
         self._episode += 1
         self._step = 0
+        self._prev_target_pose = None  # new episode: OSC goal re-inits to the current eef
         ack = self._client.reset()
         if ack.get("type") != transport.RESET_ACK:
             raise RuntimeError(f"OpenWAM server reset returned unexpected response: {ack}")
@@ -364,20 +368,39 @@ class OpenWAMRoboCasa365Policy:
                 "server returned a 20-D EEF action but osc_pos_scale/osc_rot_scale are unset; "
                 "set them from the eval env's OSC_POSE controller config to enable the 20-D->12-D bridge."
             )
-        pos = np.asarray(obs["state.end_effector_position_relative"], np.float32).reshape(-1)
-        rot6d = quat_xyzw_to_rot6d(np.asarray(obs["state.end_effector_rotation_relative"], np.float32).reshape(-1))
-        base_kw = {}
-        if base5 is not None:
-            base5 = np.asarray(base5, np.float32).reshape(-1)
-            base_kw = dict(base_motion=base5[0:4], control_mode=float(base5[4]))
-        return eef20d_to_robocasa12d(
+        arm20 = np.asarray(arm20, np.float32).reshape(-1)
+        base5 = None if base5 is None else np.asarray(base5, np.float32).reshape(-1)
+        control_mode = float(base5[4]) if base5 is not None else -1.0
+        # The OSC delta's reference frame depends on the arm goal-update mode robosuite picks from
+        # control_mode (composite_controller: control_mode>0 -> "desired", else "achieved"):
+        #   achieved (control_mode<0.5, OR the first step with no prior target): goal = current_eef +
+        #     delta -> reference = the CURRENT observed eef -> delta = target - current.
+        #   desired  (control_mode>=0.5, "base mode": the base is driving): goal = last_desired_goal +
+        #     delta, and that last goal is the PREVIOUS step's target -> reference = previous target ->
+        #     delta = target - previous_target. Without this, a desired-mode step applies an
+        #     achieved-relative delta on top of the desired goal and mis-places the arm exactly while
+        #     the base moves (control_mode=+1 is ~7% of steps globally, up to 91% on NavigateKitchen,
+        #     and co-occurs with base motion 92-99% of the time).
+        if control_mode >= 0.5 and self._prev_target_pose is not None:
+            ref_pos = self._prev_target_pose[0:3]
+            ref_rot6d = self._prev_target_pose[3:9]
+        else:
+            ref_pos = np.asarray(obs["state.end_effector_position_relative"], np.float32).reshape(-1)
+            ref_rot6d = quat_xyzw_to_rot6d(
+                np.asarray(obs["state.end_effector_rotation_relative"], np.float32).reshape(-1)
+            )
+        base_kw = {} if base5 is None else dict(base_motion=base5[0:4], control_mode=control_mode)
+        twelve = eef20d_to_robocasa12d(
             arm20,
-            proprio_eef_pos=pos,
-            proprio_eef_rot6d=rot6d,
+            proprio_eef_pos=ref_pos,
+            proprio_eef_rot6d=ref_rot6d,
             pos_scale=self._osc_pos_scale,
             rot_scale=self._osc_rot_scale,
             **base_kw,
         )
+        # Remember this step's absolute arm target (pos3 + rot6d6) as next step's desired reference.
+        self._prev_target_pose = arm20[0:9].copy()
+        return twelve
 
     def act(self, obs: dict, prompt: str) -> dict:
         payload = build_obs_payload(
