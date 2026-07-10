@@ -104,6 +104,11 @@ BASE_ACTION_DIM = 5
 # proprio signal, so it is deliberately NOT added — the policy perceives base state from the
 # robot-mounted head video. See docs/plans/robocasa365-full-mobile.md.
 _UNIFY_BASE = slice(68, 68 + BASE_ACTION_DIM)
+# Proprio base velocity: the current body-frame [vx, vy, vyaw] occupies the SAME 3 unified slots
+# [68:71) the action's base velocity does (proprio = current, action = commanded). torso[71] and
+# control_mode[72] have no observable current-state source, so they stay masked in proprio.
+BASE_VEL_DIM = 3
+_UNIFY_BASE_VEL = slice(68, 68 + BASE_VEL_DIM)
 
 # Multiview L-shape slot sizes (must match assemble_multiview_layout defaults at
 # height=384/width=320: top 256x320, each bottom 128x160).
@@ -126,14 +131,17 @@ def _task_from_source_prefix(prefix: str) -> str:
     return parts[-2] if len(parts) >= 2 else str(prefix)
 
 
-def _compute_shared_stats_rank0_synced(shared_path: str, roots: list, include_base: bool = False) -> None:
+def _compute_shared_stats_rank0_synced(
+    shared_path: str, roots: list, include_base: bool = False, include_base_vel: bool = False
+) -> None:
     """Compute + persist the shared multitask stats with rank-0 synchronization.
 
     ``roots`` is ``[(task_name, repo), ...]`` (v3: every entry shares the same aggregated repo, one
     per selected task). On a multi-GPU first run, only rank 0 computes + atomically writes; other
     ranks poll for the file (mirrors robotwin). Without this, every rank races to write the same
     ``{path}.tmp`` → torn writes + N× redundant compute over all tasks. ``include_base`` adds the
-    mobile ``base`` block (5-D base command stats) to the pooled file.
+    mobile ``base`` block (5-D base command stats); ``include_base_vel`` adds the ``base_vel`` block
+    (3-D base-velocity proprio stats) to the pooled file.
     """
     from openwam.dataloader.robocasa365_stats_computation import atomic_save_stats_npy, compute_multitask_stats
 
@@ -147,7 +155,10 @@ def _compute_shared_stats_rank0_synced(shared_path: str, roots: list, include_ba
 
     if not dist_ready or rank == 0:
         print(f"  [normalizer] computing SHARED multitask stats over {len(roots)} tasks -> {shared_path}")
-        atomic_save_stats_npy(shared_path, compute_multitask_stats(roots, include_base=include_base))
+        atomic_save_stats_npy(
+            shared_path,
+            compute_multitask_stats(roots, include_base=include_base, include_base_vel=include_base_vel),
+        )
         return
     # non-rank0: wait for rank 0 to produce the file
     import time
@@ -169,6 +180,31 @@ def state_to_arm10(state: np.ndarray) -> np.ndarray:
     rot6d = quat_xyzw_to_rotation_6d(state[:, _STATE_EEF_ROT])
     grip = (state[:, 14] - state[:, 15])[:, None]
     return np.concatenate([pos, rot6d, grip], axis=-1).astype(np.float32)
+
+
+def _yaw_from_quat_xyzw(q: np.ndarray) -> float:
+    """Yaw (rotation about world +z) from a quaternion ``(x, y, z, w)``."""
+    x, y, z, w = (float(v) for v in np.asarray(q).reshape(-1)[:4])
+    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+
+def _base_velocity_body(base_pose: np.ndarray) -> np.ndarray:
+    """Body-frame base velocity from 2 consecutive base poses (finite difference).
+
+    ``base_pose`` = ``(2, 7)`` rows ``[prev, cur]``, each ``base_position(3, world) +
+    base_rotation(4, world quat xyzw)``. Returns ``(3,)`` = ``[vx, vy, vyaw]`` in the robot's body
+    frame at ``cur`` (per-step displacement; the constant 1/dt scale is absorbed by normalization).
+    SE(2): z + roll/pitch are ignored (ground base). Δyaw is wrapped to (-pi, pi].
+    """
+    prev = np.asarray(base_pose[0], np.float64)
+    cur = np.asarray(base_pose[1], np.float64)
+    d_world = cur[0:2] - prev[0:2]  # world planar displacement
+    yaw_cur, yaw_prev = _yaw_from_quat_xyzw(cur[3:7]), _yaw_from_quat_xyzw(prev[3:7])
+    c, s = np.cos(yaw_cur), np.sin(yaw_cur)
+    vx = c * d_world[0] + s * d_world[1]  # R(-yaw_cur) @ d_world -> body frame
+    vy = -s * d_world[0] + c * d_world[1]
+    d_yaw = np.arctan2(np.sin(yaw_cur - yaw_prev), np.cos(yaw_cur - yaw_prev))  # wrapped Δyaw
+    return np.array([vx, vy, d_yaw], np.float32)
 
 
 def _expand_stats_to_20d(s10: dict) -> dict:
@@ -230,6 +266,7 @@ class RoboCasa365Dataset(BaseDataset):
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
         mobile_base: bool = False,
+        base_proprio_velocity: bool = False,
         **_unused,
     ):
         super().__init__()
@@ -267,6 +304,14 @@ class RoboCasa365Dataset(BaseDataset):
         self._mobile_base = bool(mobile_base)
         if self._mobile_base and not self._unify_action:
             raise ValueError("mobile_base=True requires unify_action=True (base occupies the 80-D reserved slots)")
+        # Base-velocity proprio: put the current body-frame base velocity into proprio [68:71). Needs
+        # unify (proprio is the 80-D unified vector). Independent of mobile_base (that is the ACTION
+        # base command); requires retraining since it changes the proprio definition.
+        self._base_proprio_vel = bool(base_proprio_velocity)
+        if self._base_proprio_vel and not self._unify_action:
+            raise ValueError(
+                "base_proprio_velocity=True requires unify_action=True (base velocity occupies the 80-D reserved proprio slots)"
+            )
         self._unify_dst_index = None
         self._unify_dim_mask = None  # proprio dim mask (arm only)
         self._unify_action_dim_mask = None  # action dim mask (arm + base when mobile)
@@ -286,6 +331,10 @@ class RoboCasa365Dataset(BaseDataset):
             self._unify_action_dim_mask = self._unify_dim_mask.copy()
             if self._mobile_base:
                 self._unify_action_dim_mask[_UNIFY_BASE] = True
+            # Proprio: base velocity valid in [68:71) (added AFTER the action-mask copy so it lands on
+            # the proprio mask only; the action mask already covers [68:73) when mobile).
+            if self._base_proprio_vel:
+                self._unify_dim_mask[_UNIFY_BASE_VEL] = True
         self.window_stride = max(1, int(window_stride))
         self.video_stride = max(1, int(video_stride))
         if (self.num_frames - 1) % self.video_stride != 0:
@@ -394,6 +443,7 @@ class RoboCasa365Dataset(BaseDataset):
         # (the 10-D forward path was the deploy-break; see _DEPLOY_RESOLVABLE_MODES).
         self._stats: Optional[dict] = None  # 20-D arm stats (forward + persist + deploy)
         self._base_stats: Optional[dict] = None  # 5-D base command stats (mobile only)
+        self._base_vel_stats: Optional[dict] = None  # 3-D base velocity stats (base_proprio_velocity)
         self.normalization_stats_path: Optional[str] = None
         if self.normalize_mode is not None:
             if self.normalize_mode not in _DEPLOY_RESOLVABLE_MODES:
@@ -427,10 +477,24 @@ class RoboCasa365Dataset(BaseDataset):
                     raise ValueError(
                         f"base stats dim {self._base_stats['mean'].shape[0]} != {BASE_ACTION_DIM}; recompute stats."
                     )
+            if self._base_proprio_vel:
+                bv_raw = full.get("base_vel") if isinstance(full, dict) else None
+                if bv_raw is None:
+                    raise ValueError(
+                        f"base_proprio_velocity=True but stats file {stats_path} has no 'base_vel' block. "
+                        "Recompute stats (robocasa365_stats_computation emits it when include_base_vel=True)."
+                    )
+                self._base_vel_stats = {
+                    k: np.asarray(bv_raw[k], np.float32).reshape(-1) for k in ("mean", "std", "min", "max")
+                }
+                if self._base_vel_stats["mean"].shape[0] != BASE_VEL_DIM:
+                    raise ValueError(
+                        f"base_vel stats dim {self._base_vel_stats['mean'].shape[0]} != {BASE_VEL_DIM}; recompute stats."
+                    )
             self.normalization_stats_path = stats_path
             print(
                 f"  [normalizer] {self.normalize_mode}, dim={EEF_DIM}"
-                f"{' +base5' if self._mobile_base else ''}, stats={stats_path}"
+                f"{' +base5' if self._mobile_base else ''}{' +vel3' if self._base_proprio_vel else ''}, stats={stats_path}"
             )
         else:
             print("  [normalizer] DISABLED (normalize_mode=None)")
@@ -443,7 +507,7 @@ class RoboCasa365Dataset(BaseDataset):
         """
         if explicit and os.path.exists(explicit):
             return explicit
-        suffix = "eefbase" if self._mobile_base else "eef"
+        suffix = "eef" + ("base" if self._mobile_base else "") + ("vel" if self._base_proprio_vel else "")
         stats_path = os.path.join(self.data_root, f"{self.task_name}_{suffix}_stats.npy")
         if not os.path.exists(stats_path):
             from openwam.dataloader.robocasa365_stats_computation import (
@@ -451,11 +515,16 @@ class RoboCasa365Dataset(BaseDataset):
                 compute_normalization_stats,
             )
 
-            print(f"  [normalizer] computing {'arm-10 + base' if self._mobile_base else 'arm-10'} stats "
-                  f"from {self.data_root} -> {stats_path}")
+            print(f"  [normalizer] computing arm-10{' + base' if self._mobile_base else ''}"
+                  f"{' + base_vel' if self._base_proprio_vel else ''} stats from {self.data_root} -> {stats_path}")
             atomic_save_stats_npy(
                 stats_path,
-                compute_normalization_stats(self.data_root, include_base=self._mobile_base, task_name=self.task_name),
+                compute_normalization_stats(
+                    self.data_root,
+                    include_base=self._mobile_base,
+                    task_name=self.task_name,
+                    include_base_vel=self._base_proprio_vel,
+                ),
             )
         return stats_path
 
@@ -650,6 +719,19 @@ class RoboCasa365Dataset(BaseDataset):
                         [base_raw, np.repeat(pad_row, self.num_action_steps - base_raw.shape[0], axis=0)], axis=0
                     )
                 action[:, _UNIFY_BASE] = base_raw.astype(action.dtype)
+            if self._base_proprio_vel:
+                # Proprio: current body-frame base velocity in [68:71). Finite-diff of base_position
+                # at the window's frame 0 (start-1 -> start); start=0 has no previous frame -> 0. The
+                # eval interface uses the SAME finite-diff formula (obs base_position), so train/eval
+                # match (no exposure bias — this is an observation, not the last action).
+                if start > 0:
+                    base_pose = self._read_state(ep_global, start - 1, start + 1)[:, 0:7]  # (2, 7) prev+cur
+                    base_vel = _base_velocity_body(base_pose)
+                else:
+                    base_vel = np.zeros(BASE_VEL_DIM, np.float32)
+                if self._base_vel_stats is not None:
+                    base_vel = apply_normalization(base_vel[None, :], self._base_vel_stats, self.normalize_mode)[0]
+                proprio[0, _UNIFY_BASE_VEL] = base_vel.astype(proprio.dtype)
             mask_dim = UNIFY_DIM
             action_dim_mask, proprio_dim_mask = self._unify_action_dim_mask, self._unify_dim_mask
         else:
@@ -742,6 +824,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             unify_action=bool(get_cfg(config, "unify_action", False)),
             unify_action_map=get_cfg(config, "unify_action_map", None),
             mobile_base=bool(get_cfg(config, "mobile_base", False)),
+            base_proprio_velocity=bool(get_cfg(config, "base_proprio_velocity", False)),
             seed=int(get_cfg(config, "seed", 42)),
         )
 
@@ -753,11 +836,13 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         normalize_mode: Optional[str] = "min-max",
         normalization_stats_path: Optional[str] = None,
         mobile_base: bool = False,
+        base_proprio_velocity: bool = False,
         **kwargs,
     ):
         super().__init__()
         self.task_name = task_name
         self._mobile_base = bool(mobile_base)
+        self._base_proprio_vel = bool(base_proprio_velocity)
         roots = self._resolve_task_roots(dataset_dir, task_name, task_roots)
         if not roots:
             raise FileNotFoundError(f"No RoboCasa365 task buckets found under {dataset_dir}")
@@ -768,7 +853,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         # contract). Single-bucket → None lets the sub-dataset auto-resolve its own
         # per-task stats (the verified single-task path, unchanged).
         shared_stats = self._resolve_shared_stats(
-            dataset_dir, task_name, roots, normalization_stats_path, norm, self._mobile_base
+            dataset_dir, task_name, roots, normalization_stats_path, norm, self._mobile_base, self._base_proprio_vel
         )
         self._datasets = [
             RoboCasa365Dataset(
@@ -777,6 +862,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
                 normalize_mode=norm,
                 normalization_stats_path=shared_stats,
                 mobile_base=self._mobile_base,
+                base_proprio_velocity=self._base_proprio_vel,
                 **kwargs,
             )
             for tn, dr in roots
@@ -790,13 +876,14 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         self.normalization_stats_path = self._datasets[0].normalization_stats_path if self._datasets else None
 
     @staticmethod
-    def _resolve_shared_stats(dataset_dir, task_name, roots, explicit, norm, mobile_base=False):
+    def _resolve_shared_stats(dataset_dir, task_name, roots, explicit, norm, mobile_base=False, base_proprio_vel=False):
         """Resolve a single stats path shared by every sub-dataset (or None).
 
         explicit (if it exists) wins; single bucket → None (sub-dataset
         auto-resolves per-task); multi-bucket → pool stats over ALL buckets to a
-        dataset_dir-level file, computing once if absent. Mobile runs use a distinct
-        ``_eefbase_`` file (with a ``base`` block) so they never load a stale arm-only file.
+        dataset_dir-level file, computing once if absent. The suffix encodes which blocks the file
+        carries — ``_eef`` (+``base`` when mobile, +``vel`` when base_proprio_velocity) — so a run
+        never loads a stale file missing a block it needs (matches ``_resolve_stats_path``).
         """
         if norm is None:
             return None
@@ -804,11 +891,13 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             return explicit
         if len(roots) <= 1:
             return None  # single bucket: keep the per-task auto-resolve path
-        tag = "eefbase" if mobile_base else "eef"
+        tag = "eef" + ("base" if mobile_base else "") + ("vel" if base_proprio_vel else "")
         name = f"{task_name}_{tag}_stats.npy" if task_name else f"robocasa365_multitask_{tag}_stats.npy"
         shared = os.path.join(dataset_dir, name)
         if not os.path.exists(shared):
-            _compute_shared_stats_rank0_synced(shared, roots, include_base=mobile_base)
+            _compute_shared_stats_rank0_synced(
+                shared, roots, include_base=mobile_base, include_base_vel=base_proprio_vel
+            )
         return shared
 
     @staticmethod

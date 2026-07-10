@@ -383,3 +383,83 @@ def test_build_normalizer_unify_no_map_no_stats_raises(tmp_path):
     )
     with pytest.raises(ValueError, match="unify_action_map is missing"):
         _build_normalizer(cfg, str(tmp_path))
+
+
+# --- base_proprio_velocity: proprio IN carries [arm_raw, base_vel3] -> scatter base_vel to [68:71) ---
+
+
+def _base_vel_stats_min_max():
+    lo = np.array([-0.2, -0.2, -0.3], dtype=np.float32)
+    hi = np.array([0.2, 0.2, 0.3], dtype=np.float32)
+    return {"mean": (lo + hi) / 2, "std": np.maximum((hi - lo) / 4, 1e-6), "min": lo, "max": hi, "q01": lo, "q99": hi}
+
+
+def _write_stats_file_with_base_vel(tmp_path):
+    stats = {"eef": _eef_stats_min_max(), "base_vel": _base_vel_stats_min_max(), "num_timesteps": 1000}
+    p = tmp_path / "normalization_stats.npy"
+    np.save(str(p), stats, allow_pickle=True)
+    return str(p)
+
+
+def test_unify_proprio_in_with_base_velocity():
+    """proprio IN, base_proprio_velocity: raw [arm20, base_vel3] -> normalize arm + scatter to arm
+    slots, AND normalize base_vel with its own stats + scatter to [68:71). The dual of the action
+    base command ([68:73) gather on OUT)."""
+    from openwam.dataloader.robocasa365 import _UNIFY_BASE_VEL
+
+    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
+    bv_norm = Normalizer(mode="min_max", stats=_base_vel_stats_min_max())
+    dst = _unify_dst()
+    w = _UnifyAwareNormalizer(inner, dst, UNIFY_DIM, base_vel_dst=_UNIFY_BASE_VEL, base_vel_normalizer=bv_norm)
+    arm = _clipped_raw(5, n=2)                          # (2, 20) raw arm
+    bv = np.array([[0.1, -0.05, 0.2], [0.0, 0.1, -0.1]], np.float32)  # raw base velocity
+    out = w.normalize(np.concatenate([arm, bv], axis=-1))            # (2, 23) -> (2, 80)
+    assert out.shape == (2, UNIFY_DIM)
+    expected_arm, _ = map_to_unify(inner.normalize(arm), dst, UNIFY_DIM)  # arm-only forward
+    np.testing.assert_allclose(out[..., dst], expected_arm[..., dst], atol=1e-6)   # arm slots match
+    np.testing.assert_allclose(out[..., _UNIFY_BASE_VEL], bv_norm.normalize(bv), atol=1e-6)  # [68:71) = norm bv
+
+
+def test_build_normalizer_base_proprio_velocity_scatters(tmp_path):
+    """cfg base_proprio_velocity=True + a 'base_vel' stats block -> _build_normalizer wires a base_vel
+    scatter so normalize([arm20, base_vel3]) fills [68:71) with the normalized velocity."""
+    from openwam.dataloader.robocasa365 import _UNIFY_BASE_VEL
+
+    _write_stats_file_with_base_vel(tmp_path)
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "min-max",
+                "action_mode": "eef",
+                "unify_action": True,
+                "unify_action_map": _UNIFY_MAP,
+                "base_proprio_velocity": True,
+            }
+        }
+    )
+    norm = _build_normalizer(cfg, str(tmp_path))
+    assert isinstance(norm, _UnifyAwareNormalizer)
+    arm = _clipped_raw(9, n=2)
+    bv = np.array([[0.1, -0.05, 0.2], [0.0, 0.1, -0.1]], np.float32)
+    out = norm.normalize(np.concatenate([arm, bv], axis=-1))  # (2, 23) -> (2, 80)
+    assert out.shape == (2, UNIFY_DIM)
+    inner_bv = Normalizer(mode="min_max", stats=_base_vel_stats_min_max())
+    np.testing.assert_allclose(out[..., _UNIFY_BASE_VEL], inner_bv.normalize(bv), atol=1e-6)
+
+
+def test_build_normalizer_base_proprio_velocity_missing_block_raises(tmp_path):
+    """base_proprio_velocity=True but no 'base_vel' block in stats -> raise (no silent fallback)."""
+    _write_stats_file(tmp_path, mode_key="eef")  # eef only, no base_vel
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "min-max",
+                "action_mode": "eef",
+                "unify_action": True,
+                "unify_action_map": _UNIFY_MAP,
+                "base_proprio_velocity": True,
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="base_vel"):
+        _build_normalizer(cfg, str(tmp_path))

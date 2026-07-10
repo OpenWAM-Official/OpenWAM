@@ -107,10 +107,15 @@ def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
         ),
         image_transform=cfg.get("image_transform", "none"),
         state_keys=list(cfg.get("state_keys") or DEFAULT_STATE_KEYS),
-        state_dim=_parse_optional_int(cfg.get("state_dim", 20), "state_dim"),
+        # Default None → the policy auto-derives the expected proprio width (20-D EEF, or 23-D when
+        # base_proprio_velocity appends the base velocity). An explicit state_dim still overrides.
+        state_dim=_parse_optional_int(cfg.get("state_dim"), "state_dim"),
         action_dim=int(cfg.get("action_dim", 12)),
         osc_pos_scale=cfg.get("osc_pos_scale"),
         osc_rot_scale=cfg.get("osc_rot_scale"),
+        # base_proprio_velocity ckpts: the client derives the body-frame base velocity from the sim
+        # obs and sends 23-D proprio. Must match the ckpt's dataloader.base_proprio_velocity.
+        base_proprio_velocity=_parse_bool(cfg.get("base_proprio_velocity", False), "base_proprio_velocity"),
         debug=_parse_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_robocasa365"),
     )

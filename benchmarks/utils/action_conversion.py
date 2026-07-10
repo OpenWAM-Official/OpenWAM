@@ -270,3 +270,33 @@ def robocasa_state_to_eef20d(
     out = np.zeros(20, np.float32)
     out[:10] = arm10  # single-arm LEFT; right half stays 0 (masked at train time)
     return out
+
+
+def base_velocity_body(prev_base_pose: np.ndarray, cur_base_pose: np.ndarray) -> np.ndarray:
+    """Body-frame base velocity from two consecutive base poses (finite difference), RAW.
+
+    Bit-identical to the dataloader's ``_base_velocity_body`` (``openwam.dataloader.robocasa365``):
+    the base-velocity proprio the client sends (when the ckpt was trained with
+    ``base_proprio_velocity=true``) must be derived the SAME way it was at train time, so there is no
+    train/eval mismatch. Each pose is ``base_position(3, world) + base_rotation(4, world quat xyzw)``.
+
+    Returns ``(3,)`` = ``[vx, vy, vyaw]`` in the robot's body frame at ``cur`` (per-step displacement;
+    the constant 1/dt is absorbed by normalization). SE(2): z + roll/pitch are ignored (ground base);
+    Δyaw is wrapped to (-pi, pi]. Sent RAW — the server normalizes with the ``base_vel`` stats block.
+    """
+    prev = np.asarray(prev_base_pose, np.float64).reshape(-1)
+    cur = np.asarray(cur_base_pose, np.float64).reshape(-1)
+    if prev.shape[0] < 7 or cur.shape[0] < 7:
+        raise ValueError(f"base pose must be >=7D (pos3+quat4); got prev={prev.shape}, cur={cur.shape}")
+
+    def _yaw(q):  # yaw about world +z from a quaternion (x, y, z, w)
+        x, y, z, w = (float(v) for v in q[:4])
+        return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+    d = cur[0:2] - prev[0:2]  # world planar displacement
+    yaw_cur, yaw_prev = _yaw(cur[3:7]), _yaw(prev[3:7])
+    c, s = np.cos(yaw_cur), np.sin(yaw_cur)
+    vx = c * d[0] + s * d[1]  # R(-yaw_cur) @ d -> body frame
+    vy = -s * d[0] + c * d[1]
+    d_yaw = np.arctan2(np.sin(yaw_cur - yaw_prev), np.cos(yaw_cur - yaw_prev))  # wrapped Δyaw
+    return np.array([vx, vy, d_yaw], np.float32)

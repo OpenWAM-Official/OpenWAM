@@ -152,7 +152,7 @@ the obs → payload → action mapping:
   `image_transform: none` because `RoboCasaGymEnv` already flips them).
 - `meta.json` — `episode` / `step` / `prompt` / `state` / `action` / `server_step`
   / `latency_ms` (robotwin fields) plus a per-key `state_breakdown`, the 12-D
-  `action_sliced` into env keys, and a `checks` block (`state_dim_is_20`,
+  `action_sliced` into env keys, and a `checks` block (`state_dim_ok`,
   `head_and_wrist_present`, `action_dim_is_12`).
 
 ## Single-task evaluation

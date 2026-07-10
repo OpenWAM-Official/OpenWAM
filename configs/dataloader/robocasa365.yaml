@@ -86,10 +86,20 @@ unify_action_map: ["0-9", "34-43"]  # raw left-arm 0-9 → unified 0-9, raw righ
 #
 # mobile_base=true (requires unify_action): read the RoboCasa-native base COMMAND raw from the
 # LeRobot action field ([x/y/yaw velocity, torso position, control_mode]) and scatter it into the
-# reserved slots [68:73) (ACTION side only; direct-to-env at eval, no bridge). Proprio stays 20-D
-# EEF — world-frame base pose is scene-arbitrary, so it is NOT added; the policy perceives base
-# state from the robot-mounted head video. See docs/plans/robocasa365-full-mobile.md.
+# reserved slots [68:73) (ACTION side only; direct-to-env at eval, no bridge). See
+# docs/plans/robocasa365-full-mobile.md.
 mobile_base: true
+#
+# base_proprio_velocity=true (requires unify_action; changes the PROPRIO definition → RETRAIN to take
+# effect): put the current body-frame base velocity [vx, vy, vyaw] (finite-diff of observation.state
+# base_position, world→body) into PROPRIO [68:71). World-frame base POSE is scene-arbitrary, but its
+# body-frame VELOCITY is scene-invariant and symmetric with the action's commanded base velocity
+# ([68:71) proprio = current, [68:71) action = commanded). torso[71] + control_mode[72] have no
+# observable current-state source, so they stay masked in proprio. The eval client derives the SAME
+# velocity from the sim obs and sends 23-D proprio [arm20, base_vel3]; the deploy server normalizes it
+# with the 'base_vel' stats block and scatters to [68:71). Stats file gains a 3-D 'base_vel' block and
+# a '..vel_' suffix. Default false (proprio stays 20-D EEF; existing ckpts unaffected).
+base_proprio_velocity: false
 #
 # REQUIRED when training with unify_action=true: also set the model head + proprio dims to 80:
 #   scripts/train.sh dataloader=robocasa365 \
@@ -97,7 +107,8 @@ mobile_base: true
 # (the model config hardcodes dims and does NOT auto-derive from the dataloader; same as robotwin.
 #  On this branch configs/model/dual_system.yaml still defaults to 20 — override it; upstream main
 #  defaults to 80 for the unified cross-robot head, so after merging main the override is redundant.)
-# Deploy needs no extra flag: model_loader reads unify_action/unify_action_map/mobile_base from the
-# saved config and wraps _UnifyAwareNormalizer (server gathers 80->25 = arm20+base5, un-normalizes),
-# so the eval client bridges arm (20->OSC) + sends base raw. Base stats live under the "base" key of
-# {task}_eefbase_stats.npy (auto-computed).
+# Deploy needs no extra flag: model_loader reads unify_action/unify_action_map/mobile_base/
+# base_proprio_velocity from the saved config and wraps _UnifyAwareNormalizer (action OUT: gathers
+# 80->25 = arm20+base5; proprio IN: scatters base_vel3 into [68:71)), so the eval client bridges arm
+# (20->OSC), sends base raw, and (when base_proprio_velocity) sends 23-D proprio [arm20, base_vel3].
+# Base stats live under "base", base velocity under "base_vel", in the auto-computed stats .npy.

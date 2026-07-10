@@ -100,7 +100,7 @@ def test_dump_obs_debug_robotwin_layout_and_meta(tmp_path):
     assert meta["state_breakdown"]["state.gripper_qpos"] == pytest.approx([0.01, 0.02])
     assert meta["image_slots"]["head_camera"] == [64, 64]
     assert meta["checks"] == {
-        "state_dim_is_20": True,
+        "state_dim_ok": True,
         "head_and_wrist_present": True,
         "action_dim_is_12": True,
     }
