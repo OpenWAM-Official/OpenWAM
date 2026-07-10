@@ -133,6 +133,33 @@ def _task_from_source_prefix(prefix: str) -> str:
     return parts[-2] if len(parts) >= 2 else str(prefix)
 
 
+@functools.lru_cache(maxsize=8)
+def _episodes_with_offsets(data_root: str):
+    """Load the v3 episodes table + compute file-local row/frame offsets ONCE per repo (process-global
+    cache). The multi-task wrapper (``_resolve_task_roots``) AND every per-task sub-dataset need the same
+    table; without this a full 300-task run re-reads + re-offsets it 300+ times at startup. Offsets are
+    over the FULL table (before any single-task filter) so a task that isn't first in its shard reads at
+    its true file-local offset. Callers MUST treat the returned frame as read-only (filter to a copy)."""
+    eps = load_episodes_parquet(Path(data_root))
+    eps["_data_row_offset"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
+    for cam in (HEAD_CAMERA, WRIST_CAMERA):
+        if f"videos/{cam}/chunk_index" in eps.columns:
+            eps[f"_voff/{cam}"] = compute_file_local_offsets(
+                eps, f"videos/{cam}/chunk_index", f"videos/{cam}/file_index"
+            )
+    return eps
+
+
+@functools.lru_cache(maxsize=8)
+def _read_shard_cached(path: str) -> pd.DataFrame:
+    """Process-global cache of one decoded v3 data shard (state+action columns), shared across ALL
+    RoboCasa365 sub-datasets in the process. v3 aggregated shards are shared by many tasks, so a
+    per-instance cache would hold one copy PER task per DataLoader worker (a memory bomb at 300-task
+    scale); a module-level cache keeps it to one copy per shard per worker, bounded by maxsize. Mirrors
+    the process-global shard cache ``LeRobotV3Reader`` adopted (commit 9b95134)."""
+    return pd.read_parquet(path, columns=["observation.state", "action"])
+
+
 def _compute_shared_stats_rank0_synced(
     shared_path: str, roots: list, include_base: bool = False, include_base_vel: bool = False
 ) -> None:
@@ -368,15 +395,10 @@ class RoboCasa365Dataset(BaseDataset):
         # episode table to that task; the rest of the pipeline (window enumeration, split, reads) is
         # unchanged — it just sees a filtered episode set. Reads resolve each episode's (chunk, file) +
         # file-local row/frame offset (mirrors LeRobotV3Reader; offsets via compute_file_local_offsets).
-        eps = load_episodes_parquet(Path(data_root))
-        # File-local offsets (row/frame position WITHIN the aggregated shard) MUST be computed over the
-        # FULL episode table, BEFORE the single-task filter — a task that isn't first in its shard would
-        # otherwise get an offset counting only its own episodes, not the other tasks' rows physically
-        # preceding it in the same file.
-        eps["_data_row_offset"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
-        for cam in (HEAD_CAMERA, WRIST_CAMERA):
-            if f"videos/{cam}/chunk_index" in eps.columns:
-                eps[f"_voff/{cam}"] = compute_file_local_offsets(eps, f"videos/{cam}/chunk_index", f"videos/{cam}/file_index")
+        # Episodes table + file-local offsets, cached once per repo (see _episodes_with_offsets;
+        # offsets are over the FULL table so a task not first in its shard reads at its true offset).
+        # The cached frame is shared/read-only — filter to a single task on a COPY (reset_index).
+        eps = _episodes_with_offsets(data_root)
         if task_name is not None:
             eps = eps[eps["source_prefix"].map(_task_from_source_prefix) == self.task_name].reset_index(drop=True)
         if len(eps) == 0:
@@ -592,21 +614,9 @@ class RoboCasa365Dataset(BaseDataset):
             self.data_root, self._video_path_tmpl.format(video_key=camera, chunk_index=chunk, file_index=file)
         )
 
-    def _read_data_file_uncached(self, chunk: int, file: int) -> pd.DataFrame:
-        return pd.read_parquet(self._data_file_path(chunk, file), columns=["observation.state", "action"])
-
-    def _file_table(self, chunk: int, file: int) -> pd.DataFrame:
-        # Cache the aggregated-shard decode: with window_stride=1 all windows of an episode hit the
-        # same (chunk,file) shard — without the cache each re-decodes the whole shard (mirrors
-        # LeRobotV3Reader's lru_cache). Lazy (re)build so it survives DataLoader-worker pickling.
-        cache = getattr(self, "_file_cache", None)
-        if cache is None:
-            cache = self._file_cache = functools.lru_cache(maxsize=8)(self._read_data_file_uncached)
-        return cache(chunk, file)
-
     def _read_state(self, ep_global_idx: int, start: int, end: int) -> np.ndarray:
         m = self._ep_meta[ep_global_idx]
-        df = self._file_table(m["chunk"], m["file"])
+        df = _read_shard_cached(self._data_file_path(m["chunk"], m["file"]))  # process-global shard cache
         o = m["row_offset"]
         return np.stack(df["observation.state"].values[o + start : o + end]).astype(np.float32)  # (n, 16)
 
@@ -614,18 +624,9 @@ class RoboCasa365Dataset(BaseDataset):
         """Base command window [start, end) from the LeRobot ``action`` field: ``(n, 5)`` =
         [x_vel, y_vel, yaw_vel, torso, control_mode] (RoboCasa-native, raw, mobile only)."""
         m = self._ep_meta[ep_global_idx]
-        df = self._file_table(m["chunk"], m["file"])
+        df = _read_shard_cached(self._data_file_path(m["chunk"], m["file"]))
         o = m["row_offset"]
         return np.stack(df["action"].values[o + start : o + end]).astype(np.float32)[:, _ACTION_BASE]  # (n, 5)
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state.pop("_file_cache", None)  # lru_cache over a bound method isn't picklable
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self._file_cache = None
 
     def _read_video(self, ep_global_idx: int, start: int, actual_end: int):
         """Decode the window's sampled frames into a list of L-shape canvases (or single-view PIL
@@ -883,24 +884,27 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
     def _resolve_shared_stats(dataset_dir, task_name, roots, explicit, norm, mobile_base=False, base_proprio_vel=False):
         """Resolve a single stats path shared by every sub-dataset (or None).
 
-        explicit (if it exists) wins; single bucket → None (sub-dataset
-        auto-resolves per-task); multi-bucket → pool stats over ALL buckets to a
-        dataset_dir-level file, computing once if absent. The suffix encodes which blocks the file
-        carries — ``_eef`` (+``base`` when mobile, +``vel`` when base_proprio_velocity) — so a run
-        never loads a stale file missing a block it needs (matches ``_resolve_stats_path``).
+        An explicit ``normalization_stats_path`` is ALWAYS honored — read if it exists, else used as
+        the compute target (no silent fallback to a different location). Without an explicit path: a
+        single bucket returns None (the sub-dataset auto-resolves its own per-task stats); a multi-task
+        single repo pools stats to a ``dataset_dir``-level file; a multi-repo list requires an explicit
+        path (raises otherwise). The suffix encodes which blocks the file carries — ``_eef`` (+``base``
+        when mobile, +``vel`` when base_proprio_velocity) — matching ``_resolve_stats_path``.
         """
         if norm is None:
             return None
-        if explicit and os.path.exists(explicit):
-            return explicit
-        if len(roots) <= 1:
-            return None  # single bucket: keep the per-task auto-resolve path
-        tag = "eef" + ("base" if mobile_base else "") + ("vel" if base_proprio_vel else "")
-        if isinstance(dataset_dir, str):
+        if explicit:
+            # Honor the user's path: read it if present, else it is the compute target below. Never
+            # quietly ignore an explicit path and compute stats somewhere else (no silent fallback).
+            if os.path.exists(explicit):
+                return explicit
+            shared = explicit
+        elif len(roots) <= 1:
+            return None  # single bucket, no explicit path: sub-dataset auto-resolves its own per-task stats
+        elif isinstance(dataset_dir, str):
+            tag = "eef" + ("base" if mobile_base else "") + ("vel" if base_proprio_vel else "")
             name = f"{task_name}_{tag}_stats.npy" if task_name else f"robocasa365_multitask_{tag}_stats.npy"
             shared = os.path.join(dataset_dir, name)
-        elif explicit:
-            shared = explicit  # multi-repo: pool the shared stats into the explicit path (computed below)
         else:
             # Multi-repo (dataset_dir is a list of repos) has no single root to auto-place the pooled
             # stats; require an explicit target (no silent fallback — surface the missing config).
@@ -928,7 +932,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
         repos = [dataset_dir] if isinstance(dataset_dir, str) else list(dataset_dir)
         pairs = []  # [(task, repo), ...] across all repos, in repo order
         for repo in repos:
-            eps = load_episodes_parquet(Path(repo))
+            eps = _episodes_with_offsets(repo)  # cached: reused by each sub-dataset's __init__
             for t in sorted({_task_from_source_prefix(p) for p in eps["source_prefix"]}):
                 pairs.append((t, repo))
         all_tasks = {t for t, _ in pairs}

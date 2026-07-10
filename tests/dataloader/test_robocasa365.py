@@ -709,6 +709,19 @@ def test_from_config_multi_repo(tmp_path):
     assert len(ds._datasets) == 4
 
 
+def test_single_repo_explicit_stats_path_honored(tmp_path):
+    # An explicit normalization_stats_path is honored even if it doesn't exist yet: stats are computed
+    # AT that path, not silently dropped / computed at the default location (no silent fallback).
+    root = make_multitask_bucket(tmp_path, tasks=["taskA", "taskB"])
+    explicit = str(tmp_path / "my_explicit_stats.npy")
+    with _mock_video_decoder():
+        ds = MultiTaskRoboCasa365Dataset(dataset_dir=str(root), normalization_stats_path=explicit,
+                                         multiview=False, height=64, width=96, normalize_mode="min-max")
+    assert Path(explicit).exists(), "explicit stats path must be honored as the compute target"
+    assert {d.normalization_stats_path for d in ds._datasets} == {explicit}
+    assert not (Path(root) / "robocasa365_multitask_eef_stats.npy").exists()  # default location NOT used
+
+
 def test_multi_mobile_and_base_vel_shared_stats(tmp_path):
     # mobile_base + base_proprio_velocity together: shared _eefbasevel_ file carries BOTH a 5-D 'base'
     # (action) block and a 3-D 'base_vel' (proprio) block; action[68:73) + proprio[68:71) both filled.

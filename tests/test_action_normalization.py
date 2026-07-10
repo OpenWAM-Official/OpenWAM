@@ -479,3 +479,91 @@ def test_build_normalizer_base_proprio_velocity_missing_block_raises(tmp_path):
     )
     with pytest.raises(ValueError, match="base_vel"):
         _build_normalizer(cfg, str(tmp_path))
+
+
+# --- mobile_base: action OUT carries the base command in [68:73) -> unnormalize returns [arm20, base5] ---
+
+
+def _base_stats_min_max():
+    lo = np.array([-1.0, -1.0, -1.0, 0.0, -1.0], dtype=np.float32)  # x/y/yaw vel, torso, control_mode
+    hi = np.array([1.0, 1.0, 1.0, 0.34, 1.0], dtype=np.float32)
+    return {"mean": (lo + hi) / 2, "std": np.maximum((hi - lo) / 4, 1e-6), "min": lo, "max": hi, "q01": lo, "q99": hi}
+
+
+def _write_stats_file_with_base(tmp_path):
+    stats = {"eef": _eef_stats_min_max(), "base": _base_stats_min_max(), "num_timesteps": 1000}
+    p = tmp_path / "normalization_stats.npy"
+    np.save(str(p), stats, allow_pickle=True)
+    return str(p)
+
+
+def test_unify_action_out_with_mobile_base():
+    """action OUT, mobile_base: the model's 80-D unified action carries the base command in [68:73);
+    _UnifyAwareNormalizer.unnormalize gathers it (un-normalized with the 'base' stats) and appends →
+    raw [arm20, base5]. The deploy hop hit by every mobile ckpt (mobile_base: true is the yaml default)."""
+    from openwam.dataloader.robocasa365 import _UNIFY_BASE
+
+    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
+    base_norm = Normalizer(mode="min_max", stats=_base_stats_min_max())
+    dst = _unify_dst()
+    w = _UnifyAwareNormalizer(inner, dst, UNIFY_DIM, base_slice=_UNIFY_BASE, base_normalizer=base_norm)
+    arm = _clipped_raw(3, n=2)                                            # (2, 20) raw arm
+    unified, _ = map_to_unify(inner.normalize(arm), dst, UNIFY_DIM)       # arm forward → 80
+    unified = np.array(unified)
+    base_n = np.array([[0.2, -0.1, 0.05, 0.5, 0.9], [-0.3, 0.0, 0.1, -0.2, -0.9]], np.float32)  # normalized base
+    unified[..., _UNIFY_BASE] = base_n
+    out = w.unnormalize(unified)                                          # (2, 80) → (2, 25)
+    assert out.shape == (2, 25)                                          # [arm20, base5]
+    np.testing.assert_allclose(out[..., :20], arm, atol=1e-5)                        # arm round-trips
+    np.testing.assert_allclose(out[..., 20:25], base_norm.unnormalize(base_n), atol=1e-6)  # base un-normalized
+
+
+def test_build_normalizer_mobile_base_unnormalizes(tmp_path):
+    """cfg mobile_base=true + a 'base' stats block → _build_normalizer wires the base gather so
+    unnormalize(80) returns 25-D [arm20, base5]. Same chain as PR bugs #1/#2; mobile_base: true is
+    the robocasa365.yaml default → every mobile ckpt serves through this."""
+    from openwam.dataloader.robocasa365 import _UNIFY_BASE
+
+    _write_stats_file_with_base(tmp_path)
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "min-max",
+                "action_mode": "eef",
+                "unify_action": True,
+                "unify_action_map": _UNIFY_MAP,
+                "mobile_base": True,
+            }
+        }
+    )
+    norm = _build_normalizer(cfg, str(tmp_path))
+    assert isinstance(norm, _UnifyAwareNormalizer)
+    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
+    arm = _clipped_raw(7, n=2)
+    unified, _ = map_to_unify(inner.normalize(arm), _unify_dst(), UNIFY_DIM)
+    unified = np.array(unified)
+    base_n = np.array([[0.1, 0.2, -0.1, 0.3, 0.9], [0.0, -0.2, 0.1, -0.1, -0.9]], np.float32)
+    unified[..., _UNIFY_BASE] = base_n
+    out = norm.unnormalize(unified)
+    assert out.shape == (2, 25)
+    np.testing.assert_allclose(out[..., :20], arm, atol=1e-5)
+    base_norm = Normalizer(mode="min_max", stats=_base_stats_min_max())
+    np.testing.assert_allclose(out[..., 20:25], base_norm.unnormalize(base_n), atol=1e-6)
+
+
+def test_build_normalizer_mobile_base_missing_block_raises(tmp_path):
+    """mobile_base=true but no 'base' block in stats → raise (mirrors the base_proprio_velocity guard)."""
+    _write_stats_file(tmp_path, mode_key="eef")  # eef only, no 'base'
+    cfg = OmegaConf.create(
+        {
+            "dataloader": {
+                "normalize_mode": "min-max",
+                "action_mode": "eef",
+                "unify_action": True,
+                "unify_action_map": _UNIFY_MAP,
+                "mobile_base": True,
+            }
+        }
+    )
+    with pytest.raises(ValueError, match=r"no 'base' block"):
+        _build_normalizer(cfg, str(tmp_path))
