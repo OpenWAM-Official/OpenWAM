@@ -76,9 +76,9 @@ from openwam.dataloader.utils.eef import (
     build_action_mask_2d,
     build_proprio_mask_2d,
 )
+from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec, unmap_from_unify
-from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
 from openwam.dataloader.utils.video_io import decode_video_frames
 
 # 2-view mapping (also what the deploy server composes).
