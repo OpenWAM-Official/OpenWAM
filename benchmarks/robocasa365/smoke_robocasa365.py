@@ -46,8 +46,8 @@ def env_smoke(task: str, split: str, steps: int) -> None:
     try:
         obs, info = env.reset(seed=0)
         zero_action = {key: np.zeros(end - start, dtype=np.float32) for key, (start, end) in ACTION_SLICES.items()}
-        # Hold the documented fixed-base constant control_mode=-1 (the bridge's value); a zero here
-        # binarizes to -1 at the env's 0.5 threshold too, but -1 keeps the smoke consistent with the bridge.
+        # control_mode=-1 = "achieved" mode (no base driving) for this zero-action plumbing smoke; a
+        # zero here binarizes to -1 at the env's 0.5 threshold anyway, but -1 is explicit.
         zero_action["action.control_mode"][:] = -1.0
         reward = done = None
         for _ in range(steps):
@@ -95,7 +95,7 @@ def main(argv=None) -> int:
     parser.add_argument("--steps", type=int, default=int(os.environ.get("ROBOCASA365_SMOKE_STEPS", "1")))
     parser.add_argument("--host", default=os.environ.get("ROBOCASA365_POLICY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("ROBOCASA365_PORT", "8848")))
-    parser.add_argument("--state-dim", type=int, default=20)  # 20-D EEF proprio the server expects; the env's raw 16-D state is converted client-side
+    parser.add_argument("--state-dim", type=int, default=20)  # 20-D EEF proprio (23 for a base_proprio_velocity ckpt); env's raw 16-D state converted client-side
     args = parser.parse_args(argv)
 
     if args.mode == "import":

@@ -159,8 +159,10 @@ def eef20d_to_robocasa12d(
         pos_scale: robosuite OSC position ``output_max`` (metres mapped to action 1.0). **REQUIRED, env-specific** —
             read it from the eval env's OSC_POSE controller config; a wrong value drives wrong-magnitude motions.
         rot_scale: robosuite OSC rotation ``output_max`` (radians mapped to action 1.0). Same caveat as ``pos_scale``.
-        base_motion: (4,) base command; defaults to zeros (fixed-base subset — base is dropped at train time).
-        control_mode: scalar; defaults to -1.0 (the near-constant value observed in the fixed-base data).
+        base_motion: (4,) base command [x/y/yaw vel, torso]; defaults to zeros — the arm-only (non-mobile)
+            ckpt fallback. A mobile_base ckpt passes the real base command through here.
+        control_mode: scalar; defaults to -1.0 ("achieved" mode) — the arm-only fallback. A mobile_base
+            ckpt passes the model's real control_mode (gym thresholds it at 0.5 → -1/+1).
         gripper_close_threshold: finger-separation (metres) below which the gripper is commanded CLOSED.
             The model's gripper dim is finger separation (large=open, ~0.013–0.081); ``RoboCasaGymEnv``
             binarizes ``gripper_close`` at 0.5 (``-1`` open / ``+1`` close), so a raw pass-through (as in

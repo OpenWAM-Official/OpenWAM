@@ -1,11 +1,10 @@
 """Per-task action-normalization stats for RoboCasa365 (single-arm EEF; computed
 at 10-D, persisted at 20-D).
 
-Simplified single-arm dual of ``robotwin_stats_computation.py``. RoboCasa365 has
-exactly one action representation (the state-derived single-arm EEF), so there is
-no joint/eef split and no multitask-checkpoint sharding — just: iterate a bucket's
-episodes, assemble the raw 10-D arm pose from ``observation.state`` (the same
-``state_to_arm10`` the reader uses), and reduce to ``mean/std/min/max/q01/q99``.
+Simplified single-arm dual of ``robotwin_stats_computation.py``, reading the v3.0 aggregated
+repo: iterate the episodes (single task via ``task_name``, or all tasks pooled — see
+:func:`compute_multitask_stats`), assemble the raw 10-D arm pose from ``observation.state`` (the
+same ``state_to_arm10`` the reader uses), and reduce to ``mean/std/min/max/q01/q99``.
 
 Output schema (``.npy``, ``allow_pickle``)::
 
@@ -13,6 +12,8 @@ Output schema (``.npy``, ``allow_pickle``)::
     #   (arm10 left = real stats, right half = neutral: mean0/std1/min-1/max1/q01-1/q99 1;
     #    reduced at 10-D internally, then left-padded to 20-D by _expand_stats_to_20d before
     #    persist so the deploy normalizer can invert the model's 20-D action)
+    # plus "base"     : {...5-D...}   when include_base      (mobile action command x/y/yaw/torso/mode)
+    # plus "base_vel" : {...3-D...}   when include_base_vel  (base-velocity proprio [vx, vy, vyaw])
 
 ``RoboCasa365Dataset`` auto-computes this on first use when ``normalize_mode`` is
 set and no stats file exists; run :func:`main` to precompute.
@@ -206,16 +207,25 @@ def compute_multitask_stats(roots: list, include_base: bool = False, include_bas
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Compute RoboCasa365 per-task EEF normalization stats")
-    ap.add_argument("data_root", help="A task's lerobot/ bucket (has meta/info.json + meta/episodes.jsonl)")
-    ap.add_argument("-o", "--output", default=None, help="Output .npy (default: {data_root}/{task}_eef_stats.npy)")
+    ap = argparse.ArgumentParser(
+        description="Precompute RoboCasa365 EEF (+ optional base command / base-velocity) normalization stats"
+    )
+    ap.add_argument("data_root", help="A v3.0 aggregated RoboCasa365 repo (meta/info.json + meta/episodes/*.parquet)")
+    ap.add_argument("--task", default=None, help="Filter the repo to one task (source_prefix); default: all tasks")
+    ap.add_argument("--mobile-base", action="store_true", help="Also emit the 5-D 'base' command stats block")
+    ap.add_argument("--base-proprio-velocity", action="store_true", help="Also emit the 3-D 'base_vel' proprio stats block")
+    ap.add_argument("-o", "--output", default=None,
+                    help="Output .npy (default: {data_root}/{task|robocasa365}_{eef[base][vel]}_stats.npy)")
     args = ap.parse_args()
 
     out = args.output
     if out is None:
-        task = os.path.basename(os.path.dirname(os.path.dirname(args.data_root.rstrip("/")))) or "task"
-        out = os.path.join(args.data_root, f"{task}_eef_stats.npy")
-    stats = compute_normalization_stats(args.data_root)
+        tag = "eef" + ("base" if args.mobile_base else "") + ("vel" if args.base_proprio_velocity else "")
+        out = os.path.join(args.data_root, f"{args.task or 'robocasa365'}_{tag}_stats.npy")
+    stats = compute_normalization_stats(
+        args.data_root, include_base=args.mobile_base, task_name=args.task,
+        include_base_vel=args.base_proprio_velocity,
+    )
     atomic_save_stats_npy(out, stats)
     print(f"Saved stats -> {out}")
 

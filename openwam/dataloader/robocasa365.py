@@ -32,16 +32,17 @@ robotwin's endpose): both are the ABSOLUTE single-arm end-effector pose taken fr
 Mobile base (``mobile_base=True``, requires ``unify_action``): the RoboCasa-native base command
 is read RAW from the LeRobot ``action`` field ([x/y/yaw velocity, torso position, control_mode])
 and scattered into the 80-D reserved slots ``[68:73)`` — direct-to-env at eval, no bridge. The
-arm stays absolute-EEF (bridged). Base is action-only; world-frame base pose is scene-arbitrary so
-it is NOT added to proprio (the policy perceives base state from the robot-mounted head video).
-See ``docs/plans/robocasa365-full-mobile.md``.
+arm stays absolute-EEF (bridged). The base COMMAND is action-only; the absolute world-frame base
+POSE is scene-arbitrary so it is NOT added to proprio. (Optionally, ``base_proprio_velocity=True``
+adds the current body-frame base VELOCITY — which IS scene-invariant — to proprio ``[68:71)``; see
+that flag below.) See ``docs/plans/robocasa365-full-mobile.md``.
 
 ``observation.state`` layout (16-D, from meta/modality.json)::
 
     base_position(0:3) + base_rotation(3:7) + eef_pos_rel(7:10)
     + eef_rot_rel(10:14, quat xyzw) + gripper_qpos(14:16)
 
-Cameras (Phase-1 mapping): head=``robot0_agentview_left``,
+Cameras (2-view mapping): head=``robot0_agentview_left``,
 left_wrist=``robot0_eye_in_hand``, right_wrist=None -> black (single arm, no 2nd
 wrist), composed into the L-shape via ``assemble_multiview_layout``.
 """
@@ -80,7 +81,7 @@ from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
 from openwam.dataloader.utils.video_io import decode_video_frames
 
-# Phase-1 2-view mapping (also what the deploy server composes).
+# 2-view mapping (also what the deploy server composes).
 HEAD_CAMERA = "observation.images.robot0_agentview_left"
 WRIST_CAMERA = "observation.images.robot0_eye_in_hand"
 STATS_DIM = ARM10_DIM  # the per-arm stats are COMPUTED at 10-D, then expanded to 20-D for persist
@@ -99,10 +100,10 @@ _STATE_EEF_ROT = slice(10, 14)  # quaternion (xyzw)
 #   [0:3] base x/y/yaw velocity, [3] torso lift (position 0-0.34 m), [4] control_mode {-1,+1}.
 _ACTION_BASE = slice(0, 5)
 BASE_ACTION_DIM = 5
-# 80-D reserved-slot span for the base command (ACTION side only, [68:73)). Proprio stays 20-D EEF:
-# absolute world-frame base pose is scene-arbitrary (differs per kitchen), a poor generalizable
-# proprio signal, so it is deliberately NOT added — the policy perceives base state from the
-# robot-mounted head video. See docs/plans/robocasa365-full-mobile.md.
+# 80-D reserved-slot span for the base command (ACTION side only, [68:73)). The absolute world-frame
+# base POSE is scene-arbitrary (differs per kitchen), a poor generalizable proprio signal, so it is
+# deliberately NOT put in proprio. (The base VELOCITY optionally is — it is scene-invariant; see
+# _UNIFY_BASE_VEL + base_proprio_velocity.) See docs/plans/robocasa365-full-mobile.md.
 _UNIFY_BASE = slice(68, 68 + BASE_ACTION_DIM)
 # Proprio base velocity: the current body-frame [vx, vy, vyaw] occupies the SAME 3 unified slots
 # [68:71) the action's base velocity does (proprio = current, action = commanded). torso[71] and
@@ -116,9 +117,10 @@ _HEAD_SLOT_H, _HEAD_SLOT_W = 256, 320
 _WRIST_SLOT_H, _WRIST_SLOT_W = 128, 160
 
 
-def _task_dir_name(lerobot_dir: str) -> str:
-    """Task name from a ``.../<Task>/<date>/lerobot`` bucket path."""
-    return os.path.basename(os.path.dirname(os.path.dirname(lerobot_dir.rstrip("/")))) or "task"
+def _task_dir_name(data_root: str) -> str:
+    """Fallback display / stats-file name when ``task_name`` is unset: the v3 repo's directory name
+    (a single-task reader normally gets an explicit ``task_name`` that filters the repo)."""
+    return os.path.basename(data_root.rstrip("/")) or "robocasa365"
 
 
 def _task_from_source_prefix(prefix: str) -> str:
@@ -326,8 +328,9 @@ class RoboCasa365Dataset(BaseDataset):
             # Proprio: only the left-arm slots are valid (right arm zero-padded + masked).
             self._unify_dim_mask = np.zeros(UNIFY_DIM, dtype=bool)
             self._unify_dim_mask[self._unify_dst_index] = np.asarray(LEFT_ARM_DIM_MASK, dtype=bool)
-            # Action: same arm mask, plus the base command slots when mobile (proprio has no base —
-            # world-frame base pose is scene-arbitrary; see _UNIFY_BASE).
+            # Action: same arm mask, plus the base command slots when mobile. Proprio has no base
+            # POSE (scene-arbitrary); base VELOCITY is added to the proprio mask below when
+            # base_proprio_velocity. See _UNIFY_BASE.
             self._unify_action_dim_mask = self._unify_dim_mask.copy()
             if self._mobile_base:
                 self._unify_action_dim_mask[_UNIFY_BASE] = True

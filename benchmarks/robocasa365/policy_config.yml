@@ -24,8 +24,7 @@ seed: 0
 # cameras + 1 wrist cam. We send TWO real views: agentview_left (3rd-person) as
 # head_camera and the eye_in_hand wrist cam as left_wrist_camera. The single arm
 # has no 2nd wrist, so right_wrist_camera stays null — the server black-fills that
-# slot when composing the multi-view layout. (Phase-2 training must match this
-# 2-view layout.)
+# slot when composing the multi-view layout. (Training must match this 2-view layout.)
 head_camera_key: video.robot0_agentview_left
 left_wrist_camera_key: video.robot0_eye_in_hand
 right_wrist_camera_key: null

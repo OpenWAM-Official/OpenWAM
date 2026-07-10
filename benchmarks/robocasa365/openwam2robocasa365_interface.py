@@ -9,14 +9,19 @@ single-arm PandaOmron 16-D state layout that
 Action spaces (two layers — don't conflate):
   * ``RoboCasaGymEnv`` consumes a fixed **12-D robosuite OSC + base** action
     (``eef_pos3 + eef_rot3 + grip1 + base4 + mode1``, the env's native delta-OSC).
-  * The OpenWAM model trained by ``openwam.dataloader.robocasa365.RoboCasa365Dataset``
-    predicts a **20-D absolute EEF pose** (the repo-standard EEF schema, dual of
-    robotwin). When the server returns 20-D, ``act()`` bridges it to the env's 12-D
-    via ``benchmarks.utils.eef20d_to_robocasa12d`` (the dual of robotwin's client-side
-    ``eef20d_to_ee16d``); a 12-D server action is passed through unchanged. The bridge
-    needs the env's OSC position/rotation scaling (``osc_pos_scale`` / ``osc_rot_scale``)
-    — set them from the eval env's OSC_POSE controller config; without them a 20-D
-    action cannot be converted (raises, rather than emit wrong-magnitude motions).
+  * The OpenWAM model predicts a **20-D absolute EEF pose** (repo-standard EEF schema, dual of
+    robotwin); with the default **mobile base** it ALSO emits the 5-D base command, so the server
+    returns **25-D** ``[arm20, base5]``. ``act()`` bridges the arm 20-D → 12-D via
+    ``benchmarks.utils.eef20d_to_robocasa12d`` and passes ``base5`` (x/y/yaw vel, torso,
+    control_mode) through. A 20-D (arm-only) action bridges with a zero base; a 12-D server action
+    is passed through unchanged. The arm bridge needs the env's OSC scaling (``osc_pos_scale`` /
+    ``osc_rot_scale`` from the OSC_POSE controller config; unset → raises). The OSC delta's reference
+    is **control_mode-aware** (achieved → current eef; desired / base-mode → previous target), so the
+    arm stays placed while the base drives.
+
+Proprio: the client sends the model's **20-D single-arm EEF** proprio (converted from the env's raw
+16-D state). For a ``base_proprio_velocity`` checkpoint (set ``base_proprio_velocity: true`` in the
+policy config), it appends the body-frame base velocity → **23-D** ``[arm20, base_vel3]``.
 
 Debug dumping follows the robotwin convention (``ep{N}/step_{N}/`` with per-camera
 JPGs + ``meta.json``) and adds a labeled ``cameras.png`` montage plus
@@ -72,7 +77,8 @@ DEFAULT_STATE_KEYS = [
     "state.end_effector_rotation_relative",   # 4
     "state.gripper_qpos",                     # 2
 ]
-# The 3 obs keys the 20-D EEF proprio is built from (base is dropped, like training).
+# The 3 obs keys the 20-D EEF proprio is built from (base POSE dropped, like training; base
+# VELOCITY is added separately from BASE_POSE_KEYS when base_proprio_velocity).
 PROPRIO_EEF_KEYS = (
     "state.end_effector_position_relative",   # 3
     "state.end_effector_rotation_relative",   # 4 (quat xyzw)
