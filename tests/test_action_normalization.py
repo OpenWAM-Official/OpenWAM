@@ -112,19 +112,23 @@ def test_build_normalizer_disabled_mode_does_not_require_stats(tmp_path, disable
     assert normalizer is None
 
 
-def test_build_normalizer_unknown_mode_returns_none(tmp_path):
+def test_build_normalizer_unknown_mode_raises(tmp_path):
+    # An ACTIVE-but-unrecognized normalize_mode must fail fast, not silently disable
+    # the normalizer (that would send the model's normalized outputs to the robot as
+    # physical commands).
     _write_stats_file(tmp_path)
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "bogus", "action_mode": "eef"}})
-    normalizer = _build_normalizer(cfg, str(tmp_path))
-    assert normalizer is None
+    with pytest.raises(ValueError, match="not a recognized mode"):
+        _build_normalizer(cfg, str(tmp_path))
 
 
-def test_build_normalizer_wrong_action_mode_returns_none(tmp_path):
-    # Stats file has only "eef" but config says action_mode="joint"
+def test_build_normalizer_wrong_action_mode_raises(tmp_path):
+    # Stats file has only "eef" but config says action_mode="joint": the requested
+    # key is missing → refuse to deploy with normalization silently disabled.
     _write_stats_file(tmp_path, mode_key="eef")
     cfg = OmegaConf.create({"dataloader": {"normalize_mode": "min-max", "action_mode": "joint"}})
-    normalizer = _build_normalizer(cfg, str(tmp_path))
-    assert normalizer is None
+    with pytest.raises(KeyError, match="no 'joint' entry"):
+        _build_normalizer(cfg, str(tmp_path))
 
 
 # --- Deployment-path invariant: unnormalize must push xyz beyond [-1, 1] ---

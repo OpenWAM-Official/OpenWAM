@@ -22,9 +22,11 @@ Camera mapping from RoboTwin to the OpenWAM server's fixed client API names:
     right_camera          →  right_wrist_camera (optional)
     front_camera          →  dropped (not part of the OpenWAM contract)
 
-All image preprocessing (resize, multi-view composition) and prompt
-wrapping happen server-side, driven by the checkpoint's saved
-``config.yaml``. This client just streams raw camera frames.
+All image preprocessing (resize, multi-view composition) happens server-side,
+driven by the checkpoint's saved ``config.yaml``. The server is prompt-agnostic:
+it forwards the prompt to the model verbatim, so this adapter wraps the raw task
+instruction with RoboTwin's own deploy template (``prompt_template``) before
+sending. Camera frames are streamed raw.
 """
 
 # benchmarks.utils lives one level up. single_eval.sh only puts benchmarks/robotwin/
@@ -48,6 +50,7 @@ import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
 from benchmarks.utils import WSPolicyClient, action_conversion, client, transport  # noqa: E402
+from benchmarks.robotwin.prompt_template import format_prompt_for_inference  # noqa: E402
 
 # --- Per-task step_lim overrides ---
 # A single YAML file of {task_name: int} lets users override RoboTwin's
@@ -312,11 +315,11 @@ class ModelClient:
             action: np.ndarray, shape (action_dim,)
         """
         cams = example["cams"]
-        prompt = str(example.get("lang", self._task_description))
+        instruction = str(example.get("lang", self._task_description))
 
         # Mirror the upstream pattern: reset if the task instruction changes.
-        if prompt and prompt != self._task_description:
-            self.reset(prompt)
+        if instruction and instruction != self._task_description:
+            self.reset(instruction)
 
         state_arr = example.get("state", None)
         state_list: Optional[list] = None
@@ -336,6 +339,8 @@ class ModelClient:
                 )
             state_list = [float(v) for v in state_np]
 
+        # Server is prompt-agnostic; RoboTwin wraps its own instruction here (see prompt_template).
+        prompt = format_prompt_for_inference(instruction)
         payload = client.build_payload(
             head=client.encode_numpy_b64(cams["head"]),
             left_wrist=client.encode_numpy_b64(cams["left"]) if cams.get("left") is not None else None,

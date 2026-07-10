@@ -192,7 +192,9 @@ server: { host: "0.0.0.0", port: 8848 }
 
 inference:
   denoise_steps: 10       # denoising steps (FastWAM-Joint default)
-  schedule_type: sync     # only "sync" supported (video/action timesteps lockstep)
+  schedule_type: sync     # sync (lockstep) | variance_shift (Latent-Forcing ordered; joint_self_attn ckpts)
+  vs_lead: video          # variance_shift only: which stream denoises first (action | video)
+  vs_alpha: 9.0           # variance_shift only: lead-curve strength (>1 leads; 1 = sync diagonal)
   execution_mode: sync    # sync | async
   execution_horizon: null # async only: actions per chunk (null = policy default)
   inference_delay_steps: null
@@ -220,7 +222,7 @@ All flags are optional; yaml values apply when a flag is absent. Optimization se
 
 #### WebSocket messages
 
-- `{"type": "obs", ...}` — send 3-camera `images` dict, base prompt, optional raw `state`; receive an action in the checkpoint's deploy scale (unnormalized to physical units for normalized checkpoints).
+- `{"type": "obs", ...}` — send 3-camera `images` dict, the prompt (forwarded to the model verbatim; wrap per your checkpoint's template), optional raw `state`; receive an action in the checkpoint's deploy scale (unnormalized to physical units for normalized checkpoints).
 - `{"type": "reset"}` — reset policy state between episodes.
 - `{"type": "ping"}` — liveness check; server replies `{"type": "pong"}`.
 

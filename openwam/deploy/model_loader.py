@@ -269,21 +269,27 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
         load_mode_stats,
     )
 
+    # Past this point normalization is ACTIVE (dl present + a real normalize_mode +
+    # the stats file exists). Any failure to actually build the normalizer must be a
+    # HARD error, not a silent disable: a disabled normalizer would hand the model's
+    # normalized [-1, 1] outputs straight to the robot as physical poses/velocities.
     if norm_mode not in YAML_TO_NORM_MODE:
-        logger.warning(
-            "[normalizer] Unknown normalize_mode %r in checkpoint config; action normalizer DISABLED.",
-            norm_mode,
+        raise ValueError(
+            f"[normalizer] Checkpoint config sets an active normalize_mode={norm_mode!r} that is not a "
+            f"recognized mode {sorted(YAML_TO_NORM_MODE)}. Refusing to deploy with normalization silently "
+            "disabled (the model emits normalized actions; unnormalize would be skipped). Fix the checkpoint "
+            "config, or add the mode to YAML_TO_NORM_MODE."
         )
-        return None
 
     mode_stats = load_mode_stats(stats_path, action_mode)
     if mode_stats is None:
-        logger.warning(
-            "[normalizer] Stats file %s has no '%s' entry; action normalizer DISABLED.",
-            stats_path,
-            action_mode,
+        raise KeyError(
+            f"[normalizer] Stats file {stats_path} has no '{action_mode}' entry (its keys are written from the "
+            f"training reader's DEPLOY_ACTION_MODE). Refusing to deploy with normalization silently disabled: "
+            "the model emits normalized actions for this action_mode and unnormalize would be skipped, sending "
+            "normalized [-1, 1] values to the robot as physical poses/velocities. Regenerate "
+            "normalization_stats.npy so it contains the checkpoint's action_mode key."
         )
-        return None
 
     normalizer = Normalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=mode_stats)
     logger.info(

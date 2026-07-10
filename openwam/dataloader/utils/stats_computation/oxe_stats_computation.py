@@ -29,11 +29,12 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from openwam.dataloader.utils.eef import assert_unit_quaternion
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_ARM10, pin_rot6d_identity
 from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
     droid_state_to_arm10,
     euler7_action_to_arm10,
-    rt1_state_to_arm10,
+    fractal_state_to_arm10,
 )
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
@@ -54,10 +55,10 @@ SCHEMA: Dict[str, Dict] = {
         "state_fn": "bcz_state",
         "action_fn": "euler7_action",
     },
-    "RT-1": {
+    "Fractal": {
         "state_cols": ["observation.state"],
         "action_cols": ["action"],
-        "state_fn": "rt1_state",
+        "state_fn": "fractal_state",
         "action_fn": "euler7_action",
     },
     "DROID": {
@@ -78,10 +79,10 @@ SCHEMA: Dict[str, Dict] = {
 def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
     if state_fn == "bcz_state":
         return bcz_state_to_arm10(rows["observation.state"])
-    if state_fn == "rt1_state":
+    if state_fn == "fractal_state":
         quat = rows["observation.state"][:, 3:7]
         assert_unit_quaternion(quat, tol=0.05, sample_n=min(64, len(quat)))
-        return rt1_state_to_arm10(rows["observation.state"])
+        return fractal_state_to_arm10(rows["observation.state"])
     if state_fn == "droid_state":
         return droid_state_to_arm10(
             rows["observation.state.cartesian_position"],
@@ -111,7 +112,9 @@ def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
     return out
 
 
-def compute_dataset_stats(dataset_dir: Path, dataset_name: str) -> Tuple[dict, int, int]:
+def compute_dataset_stats(
+    dataset_dir: Path, dataset_name: str, rot6d_identity: bool = True
+) -> Tuple[dict, int, int]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -160,6 +163,9 @@ def compute_dataset_stats(dataset_dir: Path, dataset_name: str) -> Tuple[dict, i
         "q01": np.quantile(merged, 0.01, axis=0).astype(np.float64).tolist(),
         "q99": np.quantile(merged, 0.99, axis=0).astype(np.float64).tolist(),
     }
+    if rot6d_identity:
+
+        pin_rot6d_identity(stats, ROT6D_DIMS_ARM10)
     return stats, n_state, n_action
 
 
@@ -200,6 +206,12 @@ def main():
         action="store_true",
         help="Compute and print stats but do not write meta/eef_stats.json",
     )
+    parser.add_argument(
+        "--no-rot6d-identity",
+        action="store_true",
+        help="Disable pinning rot6d stats to identity (rot6d would then be per-dim normalized "
+        "like pos/gripper — generally undesirable; see pin_rot6d_identity).",
+    )
     args = parser.parse_args()
 
     if not args.dataset and not args.all:
@@ -211,7 +223,9 @@ def main():
         if not ds_dir.is_dir():
             logger.warning("%s: directory %s missing, skipping", name, ds_dir)
             continue
-        stats, n_state, n_action = compute_dataset_stats(ds_dir, name)
+        stats, n_state, n_action = compute_dataset_stats(
+            ds_dir, name, rot6d_identity=not args.no_rot6d_identity
+        )
         _print_stats_table(stats, name)
         if not args.dry_run:
             out_path = ds_dir / "meta" / "eef_stats.json"

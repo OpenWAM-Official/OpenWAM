@@ -14,11 +14,55 @@ input untouched whenever ``stats is None`` or ``mode`` is one of the
 
 from __future__ import annotations
 
-from typing import Optional
+import logging
+from typing import Optional, Sequence
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 _NO_OP_MODES = (None, "none", "null")
+
+# rot6d dims within the two EEF stat layouts:
+#   10-D single-arm  [pos(0:3), rot6d(3:9), grip(9)]                 (OXE)
+#   20-D bimanual    [L_pos, L_rot6d(3:9), L_grip, R_pos, R_rot6d(13:19), R_grip]  (RoboCOIN)
+# rot6d entries are rotation-matrix basis components: already bounded in [-1, 1]
+# and geometrically COUPLED (two unit 3-vectors). Per-dim affine normalization
+# would scale each of the 6 independently — breaking the unit-norm structure and
+# reweighting the rotation regression loss across dims, which is geometrically
+# meaningless. The stats-computation scripts therefore pin these dims to
+# identity (:func:`pin_rot6d_identity`) and :func:`materialize_eef_stats` warns
+# when it loads a stats file that predates the pinning.
+ROT6D_DIMS_ARM10 = (3, 4, 5, 6, 7, 8)
+ROT6D_DIMS_EEF20 = (3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 18)
+_ROT6D_DIMS_BY_WIDTH = {10: ROT6D_DIMS_ARM10, 20: ROT6D_DIMS_EEF20}
+
+# Identity stat values that make every normalize mode a pass-through.
+_ROT6D_IDENTITY = {"min": -1.0, "max": 1.0, "q01": -1.0, "q99": 1.0, "mean": 0.0, "std": 1.0}
+
+# Which materialized fields the active mode actually consumes (for the
+# stale-stats warning: only complain about fields that would distort data).
+_MODE_IDENTITY_FIELDS = {
+    "quantile": ("q01", "q99"),
+    "min-max": ("min", "max"),
+    "z-score": ("mean", "std"),
+}
+
+
+def pin_rot6d_identity(stats: dict, dims: Sequence[int]) -> None:
+    """In-place: force the rot6d dims of a flat EEF stats dict to identity.
+
+    min=-1 / max=1 (min-max identity), q01=-1 / q99=1 (quantile identity),
+    mean=0 / std=1 (z-score identity) → normalization is a pass-through on rot6d
+    under EVERY mode, so the rotation representation reaches the model unchanged.
+    pos / gripper dims are left untouched.
+
+    Shared by the OXE (``dims=ROT6D_DIMS_ARM10``) and RoboCOIN
+    (``dims=ROT6D_DIMS_EEF20``) stats-computation scripts.
+    """
+    for key, val in _ROT6D_IDENTITY.items():
+        for i in dims:
+            stats[key][i] = val
 
 # Shared division-by-zero floor for read-time normalization. Referenced by
 # both ``apply_normalization`` (in-reader path) and ``transforms.normalize``'s
@@ -58,7 +102,7 @@ def apply_normalization(
         * ``z-score``: ``(arr - mean) / std`` with std floored at 1e-6.
           Unbounded by design (standardization), so NOT clipped.
         * ``quantile``: ``clip((arr - q01) / (q99 - q01) * 2 - 1, -1, 1)``.
-          Robust to outliers (RT-1 has a y-axis action range of [-5.5, 22.09]
+          Robust to outliers (Fractal has a y-axis action range of [-5.5, 22.09]
           which would compress 99% of values into a tiny window under
           min-max). Quantile clips the outliers to the boundary.
 
@@ -136,7 +180,7 @@ def materialize_eef_stats(
     else:
         mn = np.array(raw.get("min", [-1.0] * dim), dtype=np.float32)
         mx = np.array(raw.get("max", [1.0] * dim), dtype=np.float32)
-    return {
+    out = {
         "min": mn,
         "max": mx,
         "mean": np.array(raw.get("mean", [0.0] * dim), dtype=np.float32),
@@ -145,5 +189,32 @@ def materialize_eef_stats(
         "q99": np.array(raw.get("q99", [1.0] * dim), dtype=np.float32),
     }
 
+    # Stale-stats guard: the rot6d identity pin happens at stats-GENERATION time,
+    # so a stats file written by a pre-pin script silently keeps the distorted
+    # per-dim rot6d normalization. Warn (don't raise — --no-rot6d-identity is a
+    # legitimate escape hatch) when the mode-relevant fields aren't identity.
+    rot6d_dims = _ROT6D_DIMS_BY_WIDTH.get(dim)
+    fields = _MODE_IDENTITY_FIELDS.get(mode)
+    if rot6d_dims is not None and fields is not None:
+        idx = list(rot6d_dims)
+        if any(not np.allclose(out[f][idx], _ROT6D_IDENTITY[f], atol=1e-6) for f in fields):
+            logger.warning(
+                "rot6d dims %s of this stats file are not identity under mode=%r — the file "
+                "likely predates rot6d identity pinning and normalization WILL distort the "
+                "rotation representation. Rerun the matching *_stats_computation script. %s",
+                idx,
+                mode,
+                source_hint,
+            )
 
-__all__ = ["apply_normalization", "materialize_eef_stats", "NORM_EPS"]
+    return out
+
+
+__all__ = [
+    "apply_normalization",
+    "materialize_eef_stats",
+    "pin_rot6d_identity",
+    "ROT6D_DIMS_ARM10",
+    "ROT6D_DIMS_EEF20",
+    "NORM_EPS",
+]

@@ -300,3 +300,199 @@ def base_velocity_body(prev_base_pose: np.ndarray, cur_base_pose: np.ndarray) ->
     vy = -s * d[0] + c * d[1]
     d_yaw = np.arctan2(np.sin(yaw_cur - yaw_prev), np.cos(yaw_cur - yaw_prev))  # wrapped Δyaw
     return np.array([vx, vy, d_yaw], np.float32)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BEHAVIOR-1K / R1Pro (RAW-27 ↔ OmniGibson controllers)
+#
+# The OpenWAM policy server serves a BEHAVIOR checkpoint trained with
+# ``action_mode=unified`` (== robocoin.yaml layout). The model emits the unified
+# 80-D action, but the deploy server's ``_UnifyAwareNormalizer`` (PR #17) gathers
+# it back to the reader's RAW-27 layout and unnormalizes there — so the server
+# RETURNS and EXPECTS the RAW-27 vector (physical units)::
+#
+#     [ L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4 ]
+#
+# The OmniGibson R1Pro robot consumes a flat per-controller action vector in the
+# robot's ``_raw_controller_order`` = [base, trunk, arm_left, gripper_left,
+# arm_right, gripper_right]. With the submission controller config
+# (``benchmarks/behavior/configs/r1pro.yaml``) the arms are
+# ``InverseKinematicsController, mode=absolute_pose`` (6-D each: base-frame xyz +
+# absolute axis-angle), so the executed vector is 21-D::
+#
+#     [ base(3), trunk(4), armL_pos3+aa3 (6), gripL(1), armR_pos3+aa3 (6), gripR(1) ]
+#
+# Only the ARMS need a representation change (rot6d → axis-angle); base / trunk /
+# grippers are the model's own native recorded commands and pass straight
+# through (the controllers keep ``command_input_limits: default`` == the demos),
+# clipped to the [-1, 1] normalized input range as a guard.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# RAW-27 layout (the reader's pre-scatter vector == what the deploy server
+# returns/expects after the _UnifyAwareNormalizer gather).
+_R_L_POS = slice(0, 3)
+_R_L_ROT6D = slice(3, 9)
+_R_L_GRIP = 9
+_R_R_POS = slice(10, 13)
+_R_R_ROT6D = slice(13, 19)
+_R_R_GRIP = 19
+_R_BASE = slice(20, 23)  # [vx, vy, vyaw] base-frame velocity
+_R_TRUNK = slice(23, 27)  # 4 absolute torso joint commands
+R1PRO_RAW_DIM = 27
+# Executed R1Pro vector width with IK absolute_pose arms.
+R1PRO_IK_ACTION_DIM = 21
+
+
+def quat_xyzw_to_axis_angle(quat: np.ndarray) -> np.ndarray:
+    """Convert an xyzw quaternion to a 3-D axis-angle (rotation vector ``axis * angle``).
+
+    Matches OmniGibson / robosuite ``quat2axisangle``: the result, when fed back
+    through ``axisangle2quat`` (what ``InverseKinematicsController`` does with
+    ``command[3:6]``), reproduces the same orientation. The hemisphere is
+    normalized (``w >= 0``) so the returned vector is the minimal rotation
+    (``|angle| <= pi``); both hemispheres map to the same physical rotation.
+    """
+    q = np.asarray(quat, dtype=np.float64).reshape(-1)
+    if q.shape[0] != 4:
+        raise ValueError(f"quat must be 4-D xyzw, got shape {q.shape}")
+    n = np.linalg.norm(q)
+    if n < 1e-8:
+        return np.zeros(3, dtype=np.float32)
+    q = q / n
+    if q[3] < 0.0:  # shortest-path hemisphere: angle in [0, pi]
+        q = -q
+    v = q[:3]
+    vn = np.linalg.norm(v)
+    if vn < 1e-8:  # identity rotation
+        return np.zeros(3, dtype=np.float32)
+    angle = 2.0 * np.arctan2(vn, q[3])
+    return ((v / vn) * angle).astype(np.float32)
+
+
+def rot6d_to_axis_angle(r6d: np.ndarray) -> np.ndarray:
+    """Convert a 6-D rotation (first two rotation-matrix columns) to axis-angle.
+
+    Composes the existing ``rot6d_to_quat_xyzw`` (Gram-Schmidt) with
+    ``quat_xyzw_to_axis_angle`` so the IK ``absolute_pose`` orientation command
+    is bit-consistent with how the dataloader encodes orientation (rot6d).
+    """
+    return quat_xyzw_to_axis_angle(rot6d_to_quat_xyzw(np.asarray(r6d, dtype=np.float64).reshape(-1)))
+
+
+def raw27_to_r1pro_action(action: np.ndarray, *, clip_passthrough: bool = True) -> np.ndarray:
+    """Convert a denormalized RAW-27 action → the 21-D R1Pro IK vector.
+
+    Input is the reader's raw layout (== what the deploy server returns after the
+    _UnifyAwareNormalizer gather): ``[L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6,
+    R_grip1, base3, trunk4]``. Output (== ``_raw_controller_order`` with IK
+    absolute_pose arms)::
+
+        [ base(3), trunk(4), armL_xyz(3)+aa(3), gripL(1), armR_xyz(3)+aa(3), gripR(1) ]
+
+    Arms: base-frame xyz pass through (metric), rot6d → absolute axis-angle.
+    base / trunk / grippers: the model's native normalized commands, optionally
+    clipped to ``[-1, 1]`` (the controllers' ``command_input_limits: default``).
+    Arm pose is NEVER clipped (IK absolute_pose uses ``command_*_limits: null``,
+    i.e. raw metric pose + axis-angle).
+    """
+    a = np.asarray(action, dtype=np.float32).reshape(-1)
+    if a.shape[0] != R1PRO_RAW_DIM:
+        raise ValueError(f"expected raw action of width {R1PRO_RAW_DIM}, got {a.shape[0]}")
+
+    arm_left = np.concatenate([a[_R_L_POS], rot6d_to_axis_angle(a[_R_L_ROT6D])]).astype(np.float32)
+    arm_right = np.concatenate([a[_R_R_POS], rot6d_to_axis_angle(a[_R_R_ROT6D])]).astype(np.float32)
+
+    base = a[_R_BASE]
+    trunk = a[_R_TRUNK]
+    grip_l = a[_R_L_GRIP : _R_L_GRIP + 1]
+    grip_r = a[_R_R_GRIP : _R_R_GRIP + 1]
+    if clip_passthrough:
+        base = np.clip(base, -1.0, 1.0)
+        trunk = np.clip(trunk, -1.0, 1.0)
+        grip_l = np.clip(grip_l, -1.0, 1.0)
+        grip_r = np.clip(grip_r, -1.0, 1.0)
+
+    return np.concatenate([base, trunk, arm_left, grip_l, arm_right, grip_r]).astype(np.float32)
+
+
+# ── R1Pro 256-D proprio → RAW-27 (ACHIEVED state, rendered into the action's raw
+#    space) ─────────────────────────────────────────────────────────────────────
+# The bridge sends the model's proprio from the ONLY thing that exists at deploy:
+# the robot's measured 256-D ``observation.state`` (OmniGibson ``robot_r1::proprio``
+# == the dataset's ``observation.state``). It must be rendered EXACTLY as the trainer
+# does (openwam.dataloader.behavior._state_to_raw_proprio_eef), else the model sees a
+# proprio distribution it never trained on → pose drift. This module stays pure-numpy
+# (no ``openwam`` import) so the deploy client can run it anywhere, so the rendering
+# is duplicated here; ``test_behavior_bridge`` cross-checks the two implementations
+# produce byte-identical output on the same 256-D state.
+#
+# Offsets decoded from the robot's ``proprio_obs`` list (each episode's
+# meta/episodes/*.json → ``config`` → ``robots[0].proprio_obs``) and verified
+# through redundant relationships (sin(qpos) agrees with the redundant sine block; quat ‖·‖==1; base_qvel
+# == d(base_qpos)/dt). eef pose is achieved; gripper/base/trunk are mapped into the
+# action's normalized command space (see the two helpers below).
+_PP_L_POS = slice(186, 189)
+_PP_L_QUAT = slice(189, 193)  # xyzw
+_PP_R_POS = slice(225, 228)
+_PP_R_QUAT = slice(228, 232)
+_PP_L_GRIP_QPOS = slice(193, 195)  # left MultiFinger gripper: 2 finger positions (m)
+_PP_R_GRIP_QPOS = slice(232, 234)  # right gripper: 2 finger positions (m)
+_PP_TRUNK_QPOS = slice(236, 240)  # achieved trunk joint positions (rad)
+_PP_BASE_QVEL = slice(253, 256)  # base joint velocity [vx,vy,vyaw] in the WORLD frame
+_PP_BASE_YAW = 246  # base_qpos yaw (world), for the world→base-frame rotation
+R1PRO_PROPRIO_DIM = 256
+# Controller limits mapping achieved (physical) proprio → the action's [-1,1] cmd
+# space (kept in lockstep with openwam.dataloader.behavior).
+_GRIPPER_OPEN_QPOS = 0.05
+_BASE_VEL_OUTPUT_SCALE = np.array([0.75, 0.75, 1.0], dtype=np.float32)
+
+
+def _proprio_grip_open_scale(grip_qpos: np.ndarray) -> np.ndarray:
+    """``(2,)`` finger positions → ``(1,)`` open-scale in ``[-1,+1]`` (mean of the two
+    fingers through the gripper cmd→qpos limits; +1 open, -1 closed)."""
+    opening = np.asarray(grip_qpos, dtype=np.float32).mean(axis=-1, keepdims=True)
+    return np.clip(2.0 * opening / _GRIPPER_OPEN_QPOS - 1.0, -1.0, 1.0).astype(np.float32)
+
+
+def _proprio_base_vel_local(proprio: np.ndarray) -> np.ndarray:
+    """``(256,)`` proprio → ``(3,)`` achieved base velocity in the BASE frame,
+    normalized to the ``[-1,1]`` command scale (world ``base_qvel`` rotated by ``-yaw``,
+    then divided by the controller output limits)."""
+    qv = proprio[_PP_BASE_QVEL]
+    yaw = float(proprio[_PP_BASE_YAW])
+    cos, sin = np.cos(yaw), np.sin(yaw)
+    vx = cos * qv[0] + sin * qv[1]
+    vy = -sin * qv[0] + cos * qv[1]
+    return (np.array([vx, vy, qv[2]], dtype=np.float32) / _BASE_VEL_OUTPUT_SCALE).astype(np.float32)
+
+
+def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
+    """Render the R1Pro 256-D measured proprio → RAW-27 in the reader's action layout.
+
+    Output (== ``openwam.dataloader.behavior._state_to_raw_proprio_eef``)::
+
+        [L_pos3, L_rot6d6, L_grip1, R_pos3, R_rot6d6, R_grip1, base3, trunk4]
+
+    EEF pose + rot6d from the state quaternions (achieved), gripper open-scale from
+    the finger qpos, base-frame velocity, achieved trunk qpos. The OpenWAM server's
+    _UnifyAwareNormalizer then normalizes this raw proprio (shared stats) and scatters
+    it into the unified space — so the bridge sends RAW, NOT unified.
+
+    Returns an un-normalized ``(27,)`` float32 vector (the server normalizes it).
+    """
+    p = np.asarray(proprio, dtype=np.float32).reshape(-1)
+    if p.shape[0] != R1PRO_PROPRIO_DIM:
+        raise ValueError(f"expected R1Pro proprio of width {R1PRO_PROPRIO_DIM}, got {p.shape[0]}")
+
+    return np.concatenate(
+        [
+            p[_PP_L_POS],
+            quat_xyzw_to_rot6d(p[_PP_L_QUAT]),
+            _proprio_grip_open_scale(p[_PP_L_GRIP_QPOS]),
+            p[_PP_R_POS],
+            quat_xyzw_to_rot6d(p[_PP_R_QUAT]),
+            _proprio_grip_open_scale(p[_PP_R_GRIP_QPOS]),
+            _proprio_base_vel_local(p),
+            p[_PP_TRUNK_QPOS],
+        ]
+    ).astype(np.float32)

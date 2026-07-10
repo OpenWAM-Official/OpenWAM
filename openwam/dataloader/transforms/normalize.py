@@ -144,9 +144,18 @@ class Normalizer(InvertibleModalityTransform):
 # ---------------------------------------------------------------------------
 
 # Map user-facing yaml strings to the internal Normalizer modes.
+#
+# ``quantile`` maps to the q99 mode: the reader-family transform
+# ``clip(2*(x - q01)/(q99 - q01) - 1, -1, 1)`` (see
+# ``openwam.dataloader.utils.normalization.apply_normalization``) is bit-identical
+# to ``Normalizer(NormMode.Q99)`` (``_precompute`` gives scale=2/(q99-q01),
+# offset=q01+(q99-q01)/2), so deploy-side unnormalization is its exact inverse.
+# Without this entry, a checkpoint trained with the LeRobotV3 family's default
+# ``normalize_mode=quantile`` would silently disable its deploy normalizer.
 YAML_TO_NORM_MODE = {
     "min-max": "min_max",
     "z-score": "mean_std",
+    "quantile": "q99",
 }
 
 

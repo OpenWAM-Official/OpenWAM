@@ -13,13 +13,15 @@ Client → server obs message (validated server-side by ``ObsPreprocessor.prepro
         "left_wrist_camera":  <base64 JPEG>|null,  # optional
         "right_wrist_camera": <base64 JPEG>|null   # optional
       },
-      "prompt": "<base task prompt>",
+      "prompt": "<prompt fed to the model verbatim>",
       "state":  [float, ...]                       # optional
     }
 
 Server reads the checkpoint's ``config.yaml`` and handles all image preprocessing
-(crop / resize / multi-view composition) and prompt wrapping internally, then
-returns actions already denormalized to physical units.
+(crop / resize / multi-view composition) internally, then returns actions already
+denormalized to physical units. The server is prompt-agnostic: it forwards the
+``prompt`` field to the model verbatim, so the caller sends the exact prompt the
+model should see (each benchmark owns its own prompt template).
 """
 
 import base64

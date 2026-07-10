@@ -13,7 +13,7 @@ from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
     droid_state_to_arm10,
     euler7_action_to_arm10,
-    rt1_state_to_arm10,
+    fractal_state_to_arm10,
 )
 
 
@@ -61,18 +61,18 @@ class TestEuler7ActionToArm10:
         assert out[0, 9] == np.float32(0.9)
 
 
-class TestRt1StateToArm10:
+class TestFractalStateToArm10:
     def test_shape(self):
         state = np.zeros((4, 8), dtype=np.float32)
         state[:, 6] = 1.0  # w = 1 → identity quat
-        out = rt1_state_to_arm10(state)
+        out = fractal_state_to_arm10(state)
         assert out.shape == (4, 10)
         assert out.dtype == np.float32
 
     def test_identity_quat_yields_identity_rot6d(self):
         # state[3:7] = [0, 0, 0, 1] is identity in xyzw
         state = np.array([[1.0, 2.0, 3.0, 0, 0, 0, 1, 0.5]], dtype=np.float32)
-        out = rt1_state_to_arm10(state)
+        out = fractal_state_to_arm10(state)
         # position
         np.testing.assert_allclose(out[0, :3], [1, 2, 3], atol=1e-6)
         # rot6d
@@ -81,7 +81,7 @@ class TestRt1StateToArm10:
         assert out[0, 9] == np.float32(0.5)
 
     def test_quat_vs_euler_consistency(self):
-        # Build BC-Z-style with euler [0, 0, pi/4]; build RT-1-style with
+        # Build BC-Z-style with euler [0, 0, pi/4]; build Fractal-style with
         # equivalent quaternion. Both should give the same rot6d.
         from scipy.spatial.transform import Rotation as _R
 
@@ -91,13 +91,13 @@ class TestRt1StateToArm10:
 
         bcz_state = np.zeros((T, 8), dtype=np.float32)
         bcz_state[:, 3:6] = euler
-        rt1_state = np.zeros((T, 8), dtype=np.float32)
-        rt1_state[:, 3:7] = quat
+        fractal_state = np.zeros((T, 8), dtype=np.float32)
+        fractal_state[:, 3:7] = quat
 
         bcz_out = bcz_state_to_arm10(bcz_state)
-        rt1_out = rt1_state_to_arm10(rt1_state)
+        fractal_out = fractal_state_to_arm10(fractal_state)
         # Rot6d portion should match
-        np.testing.assert_allclose(bcz_out[:, 3:9], rt1_out[:, 3:9], atol=1e-5)
+        np.testing.assert_allclose(bcz_out[:, 3:9], fractal_out[:, 3:9], atol=1e-5)
 
 
 class TestDroidStateToArm10:

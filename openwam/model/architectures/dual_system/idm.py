@@ -739,7 +739,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         actions: Optional[Tensor] = None,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
-        current_step: int = 0,
+        decoupled_sampler=None,
         **inputs,
     ) -> dict:
         """IDM training loss with three branches and teacher-forcing mask.
@@ -747,6 +747,11 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         Branch A: noisy video (denoising target)
         Branch B: noisy action (denoising target)
         Branch C: teacher-forcing cond video (condition for action, optionally noised)
+
+        Branch A/B timesteps are drawn independently with ``torch.randint``.
+        ``decoupled_sampler`` is accepted only for trainer-interface parity and
+        is unused here: decoupled timestep sampling is restricted to the
+        joint_self_attn variant and rejected upstream in the trainer.
         """
         vb = self.video_backbone
         ab = self.action_backbone

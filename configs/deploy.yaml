@@ -9,8 +9,13 @@ server:
 # Every field has a same-name CLI override (--denoise-steps, --execution-mode, ...).
 inference:
   denoise_steps: 10           # Denoising steps (FastWAM-Joint default)
-  schedule_type: sync         # Within one denoise pass: how video/action timesteps advance.
-                              #   Only "sync" (both streams lockstep). NOT execution_mode below.
+  schedule_type: sync         # Within one denoise pass: how video/action timesteps advance (NOT execution_mode below).
+                              #   <sync>           both streams lockstep (default)
+                              #   <variance_shift> Latent-Forcing ordered trajectory: one stream
+                              #                    denoises earlier (curve, see vs_* below)
+  # --- variance_shift (Latent-Forcing) only ---
+  vs_lead: video              # which stream denoises first  <action> | <video>
+  vs_alpha: 1.0               # lead-curve strength  (>1 leads; 1 = diagonal = sync)
 
   execution_mode: sync        # sync | async — Sync/AsyncInferenceExecutor
   execution_horizon: null     # async only: actions per chunk; null = policy.execute_horizon

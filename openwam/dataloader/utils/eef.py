@@ -6,7 +6,7 @@ bimanual 20-D EEF schema::
     [L_pos(3) + L_rot6d(6) + L_grip(1) + R_pos(3) + R_rot6d(6) + R_grip(1)]
 
 Originally lived as private helpers inside ``robocoin.py``; extracted so
-the upcoming OXE readers (BC-Z, Bridge, RT-1, DROID — all single-arm)
+the upcoming OXE readers (BC-Z, Bridge, Fractal, DROID — all single-arm)
 can reuse the same rot6d / 20-D assembly logic without copy-paste.
 
 Single-arm OXE readers fill the **left** half ``[0:10]`` with real data
@@ -91,7 +91,7 @@ def assert_unit_quaternion(quat: np.ndarray, tol: float = 0.05, sample_n: int = 
     """Sanity check that ``quat`` entries are roughly unit-norm.
 
     Reads up to ``sample_n`` leading rows from ``quat`` and asserts
-    ``|‖q‖₂ - 1| < tol`` element-wise. Used in the RT-1 reader __init__ to
+    ``|‖q‖₂ - 1| < tol`` element-wise. Used in the Fractal reader __init__ to
     catch quaternion data that is un-normalized or otherwise wrong-magnitude
     (e.g. raw axis-angle / a 4-vector that isn't a unit quaternion at all)
     before training starts.
@@ -143,7 +143,7 @@ def single_arm_20d(arm10: np.ndarray, stats: dict | None, mode: str | None) -> n
     """Normalize a single-arm ``(..., 10)`` EEF and slot it into the left half
     of the canonical bimanual ``(..., 20)`` schema (right half zero-padded).
 
-    The single-arm readers (OXE BC-Z / Bridge / RT-1 / DROID) normalize on the
+    The single-arm readers (OXE BC-Z / Bridge / Fractal / DROID) normalize on the
     10-D arm (their ``eef_stats.json`` is 10-D) *before* assembly. This is the
     exact ``apply_normalization`` → ``assemble_single_arm_left`` sequence those
     readers ran inline; factored here so each reader's action/proprio hook is a
