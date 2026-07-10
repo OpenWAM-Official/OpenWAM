@@ -273,8 +273,9 @@ def main() -> int:
         if not log_path.is_absolute():
             log_path = (log_dir / log_path).resolve()
 
+        log_exists = log_path.is_file()
         log_text: Optional[str] = None
-        if log_path.is_file():
+        if log_exists:
             try:
                 log_text = log_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -285,7 +286,7 @@ def main() -> int:
             parse_episode_stats_from_text(log_text) if log_text is not None else (0, 0)
         )
 
-        if not log_path.is_file():
+        if not log_exists:
             failures.append(f"missing log: {log_path}")
         elif success_rate is None:
             failures.append(f"missing success rate: {log_path}")

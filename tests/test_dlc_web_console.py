@@ -185,6 +185,52 @@ def test_dlc_snapshot_collects_failure_snippets_and_csv_rows(tmp_path):
     assert rows[0]["exit_code"] == "137"
 
 
+def test_results_csv_derives_all_columns_from_full_log_not_tail(tmp_path):
+    """success_rate/success/episodes/step_limit_hits in /api/results.csv rows
+    must all come from the same full-log read. A tiny state_tail_bytes here
+    stands in for a log whose terminal ``success rate: X / Y`` line falls
+    outside the tail window (e.g. behind a long traceback) — if any of these
+    four columns were still sourced from the tail-windowed live-state job
+    dict, that column would go blank/stale while its siblings stay accurate.
+    """
+    console = load_console_module()
+    root = tmp_path
+    worker_dir = root / "node0" / "worker0"
+    worker_dir.mkdir(parents=True)
+    (root / "run.env").write_text(
+        "run_id=tailwindow\npolicy_name=openwam\nmode=demo_clean\ntotal_jobs=1\ntasks=bad_step_limit\n",
+        encoding="utf-8",
+    )
+    task_log = worker_dir / "bad_step_limit_demo_clean.log"
+    task_log.write_text(
+        "step: 10 / 10\rFail!\n"
+        + "Success rate: 3/5 => 60.00%\n"
+        + ("padding to push the summary line out of a small tail window\n" * 50),
+        encoding="utf-8",
+    )
+    (root / "summary.tsv").write_text(
+        "task\tmode\tnode\tworker\tstatus\texit_code\tlog\n"
+        f"bad_step_limit\tdemo_clean\t0\t0\tok\t0\t{task_log}\n",
+        encoding="utf-8",
+    )
+
+    builder = console.SnapshotBuilder(
+        root,
+        max_logs=100,
+        state_tail_bytes=64,
+        max_task_log_bytes=100_000,
+        max_error_snippets=10,
+    )
+    rows = builder.build_results_rows()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["success_rate"] == "60.000000"
+    assert row["success"] == 3
+    assert row["episodes"] == 5
+    assert row["step_limit_hits"] == 1
+
+
 def test_dlc_snapshot_does_not_read_failure_snippet_outside_root(tmp_path):
     console = load_console_module()
     root = tmp_path / "logs"

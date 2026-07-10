@@ -759,7 +759,9 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     "worker": job.get("worker", ""),
                     "status": job.get("status", ""),
                     "exit_code": job.get("exit_code", ""),
-                    "success_rate": "" if job.get("success_rate") is None else f"{float(job['success_rate']):.6f}",
+                    "success_rate": (
+                        "" if full_log["success_rate"] is None else f"{full_log['success_rate']:.6f}"
+                    ),
                     "success": "" if full_log["success"] is None else full_log["success"],
                     "episodes": "" if full_log["episodes"] is None else full_log["episodes"],
                     "step_limit_hits": "" if full_log["step_limit_hits"] is None else full_log["step_limit_hits"],
@@ -771,31 +773,40 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             )
         return rows
 
-    def _full_log_stats_for_job(self, job: dict[str, Any]) -> dict[str, int | None]:
-        """Full-log ``success``/``episodes``/``step_limit_hits`` for a job.
+    def _full_log_stats_for_job(self, job: dict[str, Any]) -> dict[str, float | int | None]:
+        """Full-log ``success_rate``/``success``/``episodes``/``step_limit_hits``.
 
         Reads the log once (not the tail window used for the polled live
-        state) so all three columns come from the same pass — pairing
-        ``episodes`` from a tail-windowed read with a full-log
-        ``step_limit_hits`` could otherwise report a stale/blank episode
-        count alongside a real hit count when the last ``success rate: X / Y``
-        line falls outside the tail (e.g. behind a long traceback).
+        state) so all four columns come from the same pass. Deriving only
+        some of them from the full log (e.g. episodes/step_limit_hits) while
+        leaving another (success_rate) sourced from the tail-windowed job
+        dict would reproduce the same staleness bug on a different column:
+        the last ``success rate: X / Y => Z%`` line can fall outside the tail
+        (e.g. behind a long traceback), leaving a stale/blank value next to
+        accurate full-log-derived siblings in the same CSV row.
 
         ``Path(root) / log`` collapses to ``log`` when it is already absolute
         (as summary.tsv records it), so both relative and absolute refs work.
         """
+        empty: dict[str, float | int | None] = {
+            "success_rate": None,
+            "success": None,
+            "episodes": None,
+            "step_limit_hits": None,
+        }
         log_ref = job.get("log", "")
         if not log_ref:
-            return {"success": None, "episodes": None, "step_limit_hits": None}
+            return empty
         log_path = self.root / log_ref
         if not log_path.is_file():
-            return {"success": None, "episodes": None, "step_limit_hits": None}
+            return empty
         try:
             text = log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return {"success": None, "episodes": None, "step_limit_hits": None}
+            return empty
         counts = parse_success_counts_from_text(text)
         return {
+            "success_rate": parse_success_rate_from_text(text),
             "success": counts[0] if counts else None,
             "episodes": counts[1] if counts else None,
             "step_limit_hits": count_step_limit_hits(text),
