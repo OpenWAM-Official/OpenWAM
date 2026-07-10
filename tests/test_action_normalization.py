@@ -447,6 +447,18 @@ def test_build_normalizer_base_proprio_velocity_scatters(tmp_path):
     np.testing.assert_allclose(out[..., _UNIFY_BASE_VEL], inner_bv.normalize(bv), atol=1e-6)
 
 
+def test_unify_proprio_wrong_width_raises():
+    """base_vel_dst set but a 20-D (arm-only) proprio arrives -> clear ValueError naming
+    base_proprio_velocity, not a cryptic broadcast error (client/server config drift guard)."""
+    from openwam.dataloader.robocasa365 import _UNIFY_BASE_VEL
+
+    inner = Normalizer(mode="min_max", stats=_eef_stats_min_max())
+    bv_norm = Normalizer(mode="min_max", stats=_base_vel_stats_min_max())
+    w = _UnifyAwareNormalizer(inner, _unify_dst(), UNIFY_DIM, base_vel_dst=_UNIFY_BASE_VEL, base_vel_normalizer=bv_norm)
+    with pytest.raises(ValueError, match="base_proprio_velocity"):
+        w.normalize(_clipped_raw(1, n=2))  # 20-D, but 23 expected
+
+
 def test_build_normalizer_base_proprio_velocity_missing_block_raises(tmp_path):
     """base_proprio_velocity=True but no 'base_vel' block in stats -> raise (no silent fallback)."""
     _write_stats_file(tmp_path, mode_key="eef")  # eef only, no base_vel

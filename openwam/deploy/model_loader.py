@@ -376,6 +376,12 @@ class _UnifyAwareNormalizer:
             # arm dst_index) BEFORE the arm normalize+scatter, then scatter it into base_vel_dst after.
             arm_w = self._dst_index.shape[0]
             n_bv = self._base_vel_dst.stop - self._base_vel_dst.start
+            if arr.shape[-1] != arm_w + n_bv:
+                raise ValueError(
+                    f"[normalizer/unify] base_proprio_velocity expects proprio width {arm_w + n_bv} "
+                    f"([arm{arm_w}, base_vel{n_bv}]), got {arr.shape[-1]}; the eval client must send "
+                    "base_proprio_velocity=true to match this checkpoint (else train/eval proprio diverge)."
+                )
             base_vel_raw = arr[..., arm_w : arm_w + n_bv]
             arr = arr[..., :arm_w]
         if self._inner is not None:
