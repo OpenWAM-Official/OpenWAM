@@ -21,13 +21,22 @@ Single-arm, so the numeric EEF path is borrowed from the OXE single-arm readers
 20-D bimanual schema is filled LEFT-only, right 10 zero-padded + masked.
 
 20-D EEF definition (action & proprio share ONE definition and ONE stats, like
-robotwin's endpose): both are the ABSOLUTE single-arm end-effector pose taken from
-``observation.state`` (NOT the OSC-delta ``action`` field)::
+robotwin's endpose): both are the **full base-relative** single-arm end-effector pose taken from
+``observation.state``.
 
-    arm10 = [eef_pos_rel(3) + eef_rot_rel(quat->rot6d, 6) + gripper(1)]
+  ⚠️ Terminology: elsewhere this is loosely called the "absolute EEF pose", where "absolute" means
+  ONLY "a FULL pose, not the env's per-step OSC *delta*" (axis 1). It does NOT mean world-frame
+  (axis 2): the pose is expressed in the robot **base frame** — the state field
+  ``end_effector_position_relative`` is ``robot0_base_to_eef_pos`` (eef IN base coordinates), and the
+  OSC controller runs with ``input_ref_frame="base"``. So it is base-relative (scene/base-position
+  invariant), NOT world-absolute. The eval bridge converts this full pose to the env's OSC delta.
+
+::
+
+    arm10 = [eef_pos_rel(3) + eef_rot_rel(quat->rot6d, 6) + gripper(1)]   # base-frame, full pose
           -> single-arm LEFT 10 of the canonical 20-D EEF.
     proprio = eef20d[0:1]      # current pose
-    action  = eef20d[1:T]      # future-pose trajectory (model predicts poses)
+    action  = eef20d[1:T]      # future-pose trajectory (model predicts full base-relative poses)
 
 Mobile base (``mobile_base=True``, requires ``unify_action``): the RoboCasa-native base command
 is read RAW from the LeRobot ``action`` field ([x/y/yaw velocity, torso position, control_mode])

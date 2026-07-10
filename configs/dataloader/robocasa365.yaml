@@ -62,9 +62,11 @@ static_segment_threshold: 1.0e-5  # max-abs of the first NORMALIZED action-vs-pr
 max_static_retry: 3               # resample attempts before keeping a static window
 
 # ── Action / proprio (single-arm 20-D EEF) ──────────────────────────────────
-# RoboCasa365 is single-arm: action & proprio are BOTH the absolute EEF pose from
+# RoboCasa365 is single-arm: action & proprio are BOTH the full base-relative EEF pose from
 # observation.state — eef_pos(3) + eef_rot(quat→rot6d, 6) + gripper(1) → the LEFT
-# 10 dims of the bimanual 20-D EEF (right 10 zero-padded + masked).
+# 10 dims of the bimanual 20-D EEF (right 10 zero-padded + masked). "Full pose" (not the env's OSC
+# per-step delta), in the robot BASE frame (end_effector_position_relative = robot0_base_to_eef_pos),
+# NOT world-frame — loosely called "absolute" = full-not-delta, do not read as world-frame.
 # action_mode MUST be eef: the deploy server (model_loader) reads dataloader.action_mode
 # to pick the normalizer's stats key; without it deploy defaults to 'joint', finds no
 # 'joint' stats, and silently disables de-normalization.

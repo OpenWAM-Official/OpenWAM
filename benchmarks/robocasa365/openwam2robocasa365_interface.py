@@ -9,8 +9,10 @@ single-arm PandaOmron 16-D state layout that
 Action spaces (two layers — don't conflate):
   * ``RoboCasaGymEnv`` consumes a fixed **12-D robosuite OSC + base** action
     (``eef_pos3 + eef_rot3 + grip1 + base4 + mode1``, the env's native delta-OSC).
-  * The OpenWAM model predicts a **20-D absolute EEF pose** (repo-standard EEF schema, dual of
-    robotwin); with the default **mobile base** it ALSO emits the 5-D base command, so the server
+  * The OpenWAM model predicts a **20-D full base-relative EEF pose** (repo-standard EEF schema, dual
+    of robotwin) — "full pose" (not the env's per-step OSC *delta*), expressed in the robot **base
+    frame** (``robot0_base_to_eef_*``), NOT world-frame; the bridge converts it to the OSC delta.
+    With the default **mobile base** it ALSO emits the 5-D base command, so the server
     returns **25-D** ``[arm20, base5]``. ``act()`` bridges the arm 20-D → 12-D via
     ``benchmarks.utils.eef20d_to_robocasa12d`` and passes ``base5`` (x/y/yaw vel, torso,
     control_mode) through. A 20-D (arm-only) action bridges with a zero base; a 12-D server action

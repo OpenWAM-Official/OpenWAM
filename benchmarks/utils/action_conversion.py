@@ -137,15 +137,17 @@ def eef20d_to_robocasa12d(
     gripper_close_threshold: float = 0.05,
     clip: bool = True,
 ) -> np.ndarray:
-    """Bridge the model's 20-D **absolute** EEF pose to RoboCasa's 12-D **OSC** action.
+    """Bridge the model's 20-D **full** EEF pose to RoboCasa's 12-D **OSC delta** action.
 
     RoboCasa365's ``RoboCasaGymEnv`` consumes a 12-D robosuite OSC_POSE + mobile-base
-    action; the OpenWAM model trained by ``RoboCasa365Dataset`` instead predicts a
-    20-D *absolute* single-arm EEF pose (left half ``[pos3, rot6d6, grip1]``, right
-    half 0). This is the dual of robotwin's client-side ``eef20d_to_ee16d`` — except
-    robotwin's env takes absolute 16-D poses, whereas RoboCasa's OSC controller takes
-    *delta* commands scaled into ``[-1, 1]``, so the conversion needs the current
-    proprio (to form the delta) and the controller's scaling.
+    action; the OpenWAM model trained by ``RoboCasa365Dataset`` instead predicts a 20-D single-arm
+    EEF pose (left half ``[pos3, rot6d6, grip1]``, right half 0) that is a **full pose** (not a
+    per-step delta) expressed in the robot **base frame** (``robot0_base_to_eef_*``) — base-relative,
+    NOT world-frame. (Loosely called "absolute" elsewhere = full-not-delta; do not read it as
+    world-frame.) This is the dual of robotwin's client-side ``eef20d_to_ee16d`` — except robotwin's
+    env takes full 16-D poses, whereas RoboCasa's OSC controller takes *delta* commands scaled into
+    ``[-1, 1]``, so the conversion needs the current proprio (to form the delta) and the controller's
+    scaling.
 
     Output is the flat 12-D in the SERVER/``slice_action`` order (NOT modality.json
     order)::
@@ -154,7 +156,8 @@ def eef20d_to_robocasa12d(
 
     Args:
         action: 20-D EEF action; only the left-arm 10 dims ``[pos3, rot6d6, grip1]`` are used.
-        proprio_eef_pos: (3,) current absolute EEF position (from ``state.end_effector_position_relative``).
+        proprio_eef_pos: (3,) current base-frame EEF position (from ``state.end_effector_position_relative``
+            = ``robot0_base_to_eef_pos``).
         proprio_eef_rot6d: (6,) current EEF rotation as rot6d (quat->rot6d of ``state.end_effector_rotation_relative``).
         pos_scale: robosuite OSC position ``output_max`` (metres mapped to action 1.0). **REQUIRED, env-specific** —
             read it from the eval env's OSC_POSE controller config; a wrong value drives wrong-magnitude motions.
@@ -190,7 +193,7 @@ def eef20d_to_robocasa12d(
             "non-positive scale would silently mask a misconfigured OSC controller (clamping it "
             "to ~0 emits huge/garbage deltas). Set them from the eval env's OSC_POSE output_max."
         )
-    tgt_pos, tgt_r6d, grip = act[0:3], act[3:9], act[9:10]
+    tgt_pos, tgt_r6d = act[0:3], act[3:9]  # gripper (act[9]) handled below
 
     # Position: absolute target -> scaled OSC delta.
     pos_cmd = (tgt_pos - cur_pos) / float(pos_scale)
