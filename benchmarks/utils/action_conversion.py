@@ -134,7 +134,6 @@ def eef20d_to_robocasa12d(
     rot_scale: float,
     base_motion: np.ndarray | None = None,
     control_mode: float = -1.0,
-    gripper_close_threshold: float = 0.05,
     clip: bool = True,
 ) -> np.ndarray:
     """Bridge the model's 20-D **full** EEF pose to RoboCasa's 12-D **OSC delta** action.
@@ -166,20 +165,19 @@ def eef20d_to_robocasa12d(
             ckpt fallback. A mobile_base ckpt passes the real base command through here.
         control_mode: scalar; defaults to -1.0 ("achieved" mode) — the arm-only fallback. A mobile_base
             ckpt passes the model's real control_mode (gym thresholds it at 0.5 → -1/+1).
-        gripper_close_threshold: finger-separation (metres) below which the gripper is commanded CLOSED.
-            The model's gripper dim is finger separation (large=open, ~0.013–0.081); ``RoboCasaGymEnv``
-            binarizes ``gripper_close`` at 0.5 (``-1`` open / ``+1`` close), so a raw pass-through (as in
-            robotwin, whose env accepts the value directly) would never cross 0.5 and the gripper would
-            never close. We map separation -> {open=0, close=1}: ``close iff sep < threshold``. Default
-            0.05 sits between the empirical open (~0.078) and closed (~0.034) means; override per env.
         clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
 
+    Gripper: the model dim ``act[9]`` is the gripper COMMAND in ``[-1, +1]`` (+1=close, -1=open, matching
+    the recorded ``action.gripper_close``). The env binarizes ``gripper_close`` at 0.5 (-1 open / +1
+    close), so we decide by SIGN: ``close (1.0) iff act[9] > 0``. No width binarization — the model
+    predicts the command directly, so there is no actuation-lag delay (unlike deriving open/close from
+    the achieved finger-separation width).
+
     ENV CONTRACT (MEASURED on the real robocasa/OpenDrawer env, PandaOmron / default_pandaomron.json):
-    the action convention is **delta** (zero action -> no EEF motion; constant action -> constant
+    the eef action convention is **delta** (zero action -> no EEF motion; constant action -> constant
     per-step displacement), matching the (target-current)/scale here. Steady per-step motion per
-    action 1.0: ~0.0126 m (pos) / ~0.102 rad (rot) -> use as pos_scale/rot_scale. gripper command
-    g=1 closes (separation 0.078 open -> 0.006 closed), so threshold 0.05 straddles them. control_mode
-    -1 + base 0 hold the fixed base. (Probed via env.step with known actions; see e2e plan.)
+    action 1.0: ~0.0126 m (pos) / ~0.102 rad (rot) -> use as pos_scale/rot_scale. control_mode -1 +
+    base 0 hold the fixed base. (Probed via env.step with known actions; see e2e plan.)
     """
     act = np.asarray(action, dtype=np.float64).reshape(-1)
     if act.shape[0] != 20:
@@ -207,9 +205,11 @@ def eef20d_to_robocasa12d(
         pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
         rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
 
-    # Gripper: model dim is finger separation (large=open); env binarizes gripper_close at 0.5
-    # (-1 open / +1 close). Map separation -> command: close (1.0) iff separation < threshold, else open (0.0).
-    gripper_cmd = 1.0 if float(act[9]) < float(gripper_close_threshold) else 0.0
+    # Gripper: model dim [9] is now the COMMAND in [-1,+1] (+1=close, -1=open; matches
+    # action.gripper_close and the proprio's rendered width). The env binarizes gripper_close at 0.5
+    # (-1 open / +1 close), so decide by SIGN: close (1.0) iff act[9] > 0, else open (0.0). No width
+    # binarization — the model predicts the command directly, so there is no actuation-lag delay.
+    gripper_cmd = 1.0 if float(act[9]) > 0.0 else 0.0
 
     base = np.zeros(4, np.float64) if base_motion is None else np.asarray(base_motion, np.float64).reshape(-1)
     if base.shape[0] != 4:
@@ -247,6 +247,18 @@ def robotwin_endpose_to_eef20d(
     return np.concatenate([left, right], axis=-1).astype(np.float32)
 
 
+# Gripper render (MUST stay in lockstep with openwam.dataloader.robocasa365._gripper_width_to_cmd):
+# achieved finger-separation width → [-1,+1] command space (open width → -1, closed 0 → +1).
+_RC365_GRIPPER_WIDTH_OPEN = 0.1
+
+
+def rc365_gripper_width_to_cmd(width) -> float:
+    """Achieved finger-separation width → [-1,+1] gripper command space (closed→+1, open→-1). Bit-
+    identical to the dataloader's ``_gripper_width_to_cmd`` so the proprio gripper the client sends
+    matches training."""
+    return float(np.clip(1.0 - 2.0 * float(width) / _RC365_GRIPPER_WIDTH_OPEN, -1.0, 1.0))
+
+
 def robocasa_state_to_eef20d(
     eef_pos_rel: np.ndarray,
     eef_rot_rel_quat_xyzw: np.ndarray,
@@ -257,10 +269,10 @@ def robocasa_state_to_eef20d(
     Bit-identical to the dataloader's ``state_to_arm10`` + ``assemble_single_arm_left``
     (``openwam.dataloader.robocasa365``): the eval client must send proprio in the SAME 20-D
     representation the model was trained on (the env outputs a 16-D raw state; the client converts).
-    The server normalizes; send RAW physical units here. Right-arm 10 dims are zero-padded.
+    The server normalizes; send RAW here. Right-arm 10 dims are zero-padded.
 
-        arm10 = [eef_pos_rel(3), rot6d(eef_rot_rel quat xyzw, 6), gripper_separation(1)]
-        gripper_separation = gripper_qpos[0] - gripper_qpos[1]   (finger width; large=open)
+        arm10 = [eef_pos_rel(3), rot6d(eef_rot_rel quat xyzw, 6), gripper(1)]
+        gripper = rc365_gripper_width_to_cmd(gripper_qpos[0] - gripper_qpos[1])   ([-1,+1] command space)
     """
     pos = np.asarray(eef_pos_rel, np.float32).reshape(-1)
     quat = np.asarray(eef_rot_rel_quat_xyzw, np.float32).reshape(-1)
@@ -270,7 +282,7 @@ def robocasa_state_to_eef20d(
             f"robocasa proprio dims: eef_pos_rel must be 3 (got {pos.shape[0]}), "
             f"eef_rot_rel quat 4 (got {quat.shape[0]}), gripper_qpos 2 (got {qpos.shape[0]})"
         )
-    grip = np.array([qpos[0] - qpos[1]], np.float32)
+    grip = np.array([rc365_gripper_width_to_cmd(qpos[0] - qpos[1])], np.float32)
     arm10 = np.concatenate([pos, quat_xyzw_to_rot6d(quat), grip], axis=-1)  # (10,)
     out = np.zeros(20, np.float32)
     out[:10] = arm10  # single-arm LEFT; right half stays 0 (masked at train time)

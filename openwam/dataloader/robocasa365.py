@@ -117,7 +117,14 @@ _STATE_EEF_ROT = slice(10, 14)  # quaternion (xyzw)
 #   [0:3] base x/y/yaw velocity, [3] torso lift (position 0-0.34 m), [4] control_mode {-1,+1}.
 _ACTION_BASE = slice(0, 5)
 BASE_ACTION_DIM = 5
+_ACTION_GRIPPER = 11  # LeRobot action field gripper_close: recorded binary command {-1=open, +1=close}
 BASE_VEL_DIM = 3  # the 3 base-velocity dims within base5 (proprio populates these; torso+mode masked)
+# Gripper is rendered into the [-1, +1] COMMAND space (matching the env's action.gripper_close, +1=close):
+#   ACTION gripper = the recorded command (exact timing, no actuation lag).
+#   PROPRIO gripper = the ACHIEVED finger-separation width linearly mapped to [-1, +1] via _gripper_width_to_cmd
+#     (open width _GRIPPER_WIDTH_OPEN → -1, closed 0 → +1), so both share the gripper stats and the deploy
+#     bridge decides open/close by SIGN (>0 → close) — no width binarization / actuation-lag delay.
+_GRIPPER_WIDTH_OPEN = 0.1  # finger-separation width mapped to -1 (fully open); 0 (closed) → +1
 # The mobile raw vector folds the base command INTO the pre-unify vector (like BEHAVIOR's RAW-27):
 #   raw25 = [arm20 (single-arm EEF, left real + right zero), base5]. unify then maps the WHOLE 25-D via
 # one map (["0-9","34-43","68-72"]); base is NOT a bypass channel. Deploy gathers 80->25 and
@@ -228,15 +235,23 @@ def _compute_shared_stats_rank0_synced(shared_path: str, roots: list, include_ba
         time.sleep(float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10)))
 
 
+def _gripper_width_to_cmd(width: np.ndarray) -> np.ndarray:
+    """Achieved finger-separation width → [-1, +1] gripper COMMAND space (closed→+1, open→-1), matching
+    the RoboCasa ``action.gripper_close`` convention (+1=close). Linear over ``[0, _GRIPPER_WIDTH_OPEN]``,
+    clipped. The eval client reproduces this exactly (benchmarks/utils.robocasa_state_to_eef20d)."""
+    return np.clip(1.0 - 2.0 * np.asarray(width) / _GRIPPER_WIDTH_OPEN, -1.0, 1.0).astype(np.float32)
+
+
 def state_to_arm10(state: np.ndarray) -> np.ndarray:
     """``(T, 16)`` observation.state -> ``(T, 10)`` single-arm EEF (raw, unnormalized).
 
-    arm10 = [eef_pos_rel(3), rot6d(eef_rot_rel quat xyzw, 6), gripper_opening(1)].
-    Gripper 1-D = finger separation ``qpos[0] - qpos[1]``.
-    """
+    arm10 = [eef_pos_rel(3), rot6d(eef_rot_rel quat xyzw, 6), gripper(1)]. The gripper is the ACHIEVED
+    finger-separation width ``qpos[0] - qpos[1]`` rendered into the [-1, +1] command space
+    (``_gripper_width_to_cmd``: open→-1, closed→+1). This is the PROPRIO gripper; the ACTION gripper is
+    replaced with the recorded command in ``_build_sample`` (both live in the same command space)."""
     pos = state[:, _STATE_EEF_POS]
     rot6d = quat_xyzw_to_rotation_6d(state[:, _STATE_EEF_ROT])
-    grip = (state[:, 14] - state[:, 15])[:, None]
+    grip = _gripper_width_to_cmd(state[:, 14] - state[:, 15])[:, None]
     return np.concatenate([pos, rot6d, grip], axis=-1).astype(np.float32)
 
 
@@ -640,6 +655,16 @@ class RoboCasa365Dataset(BaseDataset):
         o = m["row_offset"]
         return np.stack(df["action"].values[o + start : o + end]).astype(np.float32)[:, _ACTION_BASE]  # (n, 5)
 
+    def _read_gripper_command(self, ep_global_idx: int, start: int, end: int) -> np.ndarray:
+        """Recorded gripper command window [start, end) from the LeRobot ``action`` field: ``(n, 1)`` =
+        gripper_close (binary {-1=open, +1=close}). The ACTION gripper target — exact timing, no
+        actuation lag (unlike the achieved width). Aligned to action steps like the base command."""
+        m = self._ep_meta[ep_global_idx]
+        df = _read_shard_cached(self._data_file_path(m["chunk"], m["file"]))
+        o = m["row_offset"]
+        col = np.stack(df["action"].values[o + start : o + end]).astype(np.float32)[:, _ACTION_GRIPPER]
+        return col[:, None]  # (n, 1)
+
     def _read_video(self, ep_global_idx: int, start: int, actual_end: int):
         """Decode the window's sampled frames into a list of L-shape canvases (or single-view PIL
         frames). v3 stores aggregated mp4s, so an absolute frame index = the episode's file-local
@@ -706,8 +731,18 @@ class RoboCasa365Dataset(BaseDataset):
 
         n_valid_action = max(0, min(actual_len - 1, self.num_action_steps))
         # ── raw pre-normalization vectors: PROPRIO = current pose [0:1], ACTION = next-frame poses ──
-        proprio_raw = arm20[0:1]                       # (1, 20)
-        action_raw = arm20[1 : self.num_frames]        # (T, 20)
+        proprio_raw = arm20[0:1]                        # (1, 20)  gripper = rendered achieved width
+        action_raw = arm20[1 : self.num_frames].copy()  # (T, 20)  pos/rot = next-frame achieved pose
+        # ACTION gripper (dim 9) = the recorded command (exact timing, no actuation lag), replacing the
+        # achieved width; aligned to the action steps + padded like the base command (padded rows are
+        # dropped by the time mask). Both proprio and action gripper live in the same [-1, +1] space.
+        grip_cmd = self._read_gripper_command(ep_global, start, start + n_valid_action)  # (n_valid, 1)
+        if grip_cmd.shape[0] < self.num_action_steps:
+            pad_row = grip_cmd[-1:] if grip_cmd.shape[0] else np.zeros((1, 1), np.float32)
+            grip_cmd = np.concatenate(
+                [grip_cmd, np.repeat(pad_row, self.num_action_steps - grip_cmd.shape[0], axis=0)], axis=0
+            )
+        action_raw[:, ARM10_DIM - 1] = grip_cmd[:, 0]  # dim 9 = left-arm gripper
         if self._mobile_base:
             # ACTION base5 = RoboCasa-native command (raw) aligned to the action steps: command at
             # frame start+i drives the transition to step i. Padded rows land past n_valid_action so
@@ -733,9 +768,12 @@ class RoboCasa365Dataset(BaseDataset):
         # A′ rescale already put proprio velocity in the action's command space).
         action = apply_normalization(action_raw, self._stats, self.normalize_mode).astype(np.float32)
         proprio = apply_normalization(proprio_raw, self._stats, self.normalize_mode).astype(np.float32)
-        # Static-window flag (robotwin parity) on the ARM dims only (base velocity is a separate
-        # channel): first action step vs proprio in the normalized representation the model sees.
-        is_static = bool(np.max(np.abs(action[0, :EEF_DIM] - proprio[0, :EEF_DIM])) < self._static_segment_threshold)
+        # Static-window flag (robotwin parity) on the arm POSE dims [0:9] only (pos3 + rot6d6): base
+        # velocity is a separate channel, and the gripper dim is a COMMAND on the action side vs an
+        # achieved width on the proprio side (they legitimately differ), so both are excluded. First
+        # action step vs proprio in the normalized representation the model sees.
+        _pose = ARM10_DIM - 1  # 9: left-arm pos+rot6d (exclude gripper)
+        is_static = bool(np.max(np.abs(action[0, :_pose] - proprio[0, :_pose])) < self._static_segment_threshold)
 
         video_mask = torch.tensor([start + i < actual_end for i in self._video_sample_indices], dtype=torch.bool)
         # Unified 80-D scatter of the whole raw vector (arm + base) through the ONE map. Use the raw

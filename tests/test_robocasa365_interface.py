@@ -218,7 +218,7 @@ def test_bridge_pos_delta_and_order():
     eef20d = np.zeros(20, np.float32)
     eef20d[0:3] = [0.025, 0.0, 0.0]      # absolute target pos
     eef20d[3:9] = _IDENT_R6D             # no rotation
-    eef20d[9] = 0.7                      # gripper separation 0.7 (>>0.05) -> OPEN
+    eef20d[9] = -0.7                     # gripper command -0.7 (<0) -> OPEN
     out = eef20d_to_robocasa12d(
         eef20d, proprio_eef_pos=[0.0, 0.0, 0.0], proprio_eef_rot6d=_IDENT_R6D,
         pos_scale=0.05, rot_scale=0.5,
@@ -226,31 +226,30 @@ def test_bridge_pos_delta_and_order():
     assert out.shape == (12,)
     assert out[0:3] == pytest.approx([0.5, 0.0, 0.0], abs=1e-5)   # eef_pos delta/scale
     assert out[3:6] == pytest.approx([0.0, 0.0, 0.0], abs=1e-5)   # eef_rot (identity)
-    assert out[6] == pytest.approx(0.0)                          # gripper OPEN (sep 0.7 >= thresh)
+    assert out[6] == pytest.approx(0.0)                          # gripper OPEN (cmd -0.7 < 0)
     assert out[7:11] == pytest.approx([0.0, 0.0, 0.0, 0.0])      # base_motion default 0
     assert out[11] == pytest.approx(-1.0)                        # control_mode default -1
     # slices line up with the env adapter's ACTION_SLICES
     assert adapter.slice_action(out)["action.control_mode"][0] == pytest.approx(-1.0)
 
 
-def test_bridge_gripper_binarize_and_invert():
-    """Model gripper = finger separation (large=open); env binarizes gripper_close at 0.5
-    (-1 open/+1 close). Bridge must map small sep -> close (>=0.5), large sep -> open (<0.5)."""
+def test_bridge_gripper_sign_command():
+    """Model gripper dim [9] is the COMMAND in [-1,+1] (+1=close, -1=open). The bridge decides by SIGN:
+    >0 -> close (1.0), <=0 -> open (0.0). No width binarization / actuation-lag delay."""
     from benchmarks.utils import eef20d_to_robocasa12d
 
-    def _grip(sep):
+    def _grip(cmd):
         a = np.zeros(20, np.float32)
         a[3:9] = _IDENT_R6D
-        a[9] = sep
+        a[9] = cmd
         out = eef20d_to_robocasa12d(a, proprio_eef_pos=[0, 0, 0], proprio_eef_rot6d=_IDENT_R6D,
                                     pos_scale=0.05, rot_scale=0.5)
         return float(out[6])
 
-    # default threshold 0.05: empirical closed-sep ~0.034 -> close; open-sep ~0.078 -> open
-    assert _grip(0.034) >= 0.5    # closing -> env reads >=0.5 -> close
-    assert _grip(0.078) < 0.5     # open -> env reads <0.5 -> open
-    # raw pass-through (the old bug) would give 0.034/0.078 — both <0.5 -> gripper NEVER closes
-    assert _grip(0.034) != pytest.approx(0.034)
+    assert _grip(1.0) == pytest.approx(1.0)    # command +1 (close) -> env gripper_close 1.0 -> close
+    assert _grip(0.2) == pytest.approx(1.0)    # any >0 -> close
+    assert _grip(-1.0) == pytest.approx(0.0)   # command -1 (open) -> 0.0 -> open
+    assert _grip(-0.2) == pytest.approx(0.0)   # any <=0 -> open
 
 
 def test_bridge_pos_clipped_to_unit():

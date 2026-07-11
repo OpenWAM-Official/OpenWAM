@@ -64,7 +64,7 @@ def _make_action(n_rows: int, seed: int) -> np.ndarray:
     action[:, 3] = rng.uniform(0, 0.34, size=n_rows)  # torso lift (position)
     action[:, 4] = rng.choice([-1.0, 1.0], size=n_rows)  # control_mode
     action[:, 5:11] = rng.uniform(-1, 1, size=(n_rows, 6))  # arm OSC delta (ignored by reader)
-    action[:, 11] = rng.choice([-1.0, 1.0], size=n_rows)  # gripper (ignored)
+    action[:, 11] = rng.choice([-1.0, 1.0], size=n_rows)  # gripper_close command (used as ACTION gripper)
     return action
 
 
@@ -211,7 +211,8 @@ class TestGetItem:
         a = state_to_arm10(st)[0]
         assert a[:3] == pytest.approx([0.1, -0.2, 0.3])
         assert a[3:9] == pytest.approx([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])  # identity rotation -> rot6d
-        assert a[9] == pytest.approx(0.04)  # finger separation = qpos[0] - qpos[1]
+        # gripper = width 0.04 rendered to command space: 1 - 20*0.04 = 0.2
+        assert a[9] == pytest.approx(0.2)
 
     def test_proprio_20d_left_filled_right_zero(self, tmp_path):
         s = self._sample(tmp_path, multiview=False, height=64, width=96)
@@ -616,6 +617,24 @@ def test_mobile_proprio_velocity_normalized(tmp_path):
     bv = s["proprio"].numpy()[0, 68:71]
     assert (np.abs(bv) <= 1.0 + 1e-5).all()  # normalized into [-1, 1]
     assert s["proprio_mask"].numpy()[0, 68:71].all()
+
+
+def test_action_gripper_is_command_proprio_is_rendered_width(tmp_path):
+    # ACTION gripper (dim 9) = the recorded action.gripper_close command (exact timing, {-1,+1}), NOT
+    # the achieved width; PROPRIO gripper = the achieved finger-separation width rendered to [-1,+1].
+    from openwam.dataloader.robocasa365 import _gripper_width_to_cmd
+
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder():
+        ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                width=96, normalize_mode=None)  # raw, non-unify 20-D
+        s = ds._build_sample(0, 0)
+    st = _make_state(EP_LENGTH, seed=0)   # episode 0 = seed 0 (see _write_v3_repo)
+    ac = _make_action(EP_LENGTH, seed=0)
+    # proprio gripper (frame 0) = rendered achieved width
+    assert s["proprio"].numpy()[0, 9] == pytest.approx(_gripper_width_to_cmd(st[0, 14] - st[0, 15]), abs=1e-5)
+    # action gripper (step i) = the recorded command at frame i (idx 11), NOT the next-frame width
+    assert s["action"].numpy()[:5, 9] == pytest.approx(ac[:5, 11], abs=1e-5)
 
 
 def test_mask_torso_action(tmp_path):
