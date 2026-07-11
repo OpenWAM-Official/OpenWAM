@@ -33,7 +33,6 @@ from openwam.train.utils.checkpointing import (
     compute_resume_position,
     finalize_keep_weights_only,
     find_latest_accel_state,
-    find_latest_weights,
     load_full_state,
     manage_checkpoints,
     save_config,
@@ -69,7 +68,6 @@ class OpenWAMTrainer:
         self.cfg = cfg
         self.dataset = dataset
         self.accelerator = accelerator
-        self._current_step = 0
 
         # ---- Reproducible seed (FastWAM-style, yaml-driven) ----
         # Seed before build_architecture so DiT/ActionDiT weight init is
@@ -91,8 +89,28 @@ class OpenWAMTrainer:
         # Build architecture (creates video_backbone internally from config).
         from openwam.model import build_architecture, resolve_architecture_config
 
-        resolved_arch = resolve_architecture_config(m)
-        self.architecture = build_architecture(resolved_arch.registry_name, resolved_arch.params)
+        # Finetune/resume: build from the self-contained checkpoint dir alone
+        # (skeletons from its config.yaml component specs, weights from its
+        # safetensors) so model.video_backbone.model_path need not exist on
+        # this host. Weights land here, BEFORE the freeze below.
+        finetune_path = cfg_get(t, "finetune_ckpt_path", None) or None
+        resume_path = cfg_get(t, "resume_ckpt_path", None) or None
+        if finetune_path and resume_path:
+            raise ValueError("finetune_ckpt_path and resume_ckpt_path are mutually exclusive; set at most one.")
+        self._ckpt_source_dir = finetune_path or resume_path
+        if self._ckpt_source_dir is not None:
+            from openwam.train.utils.ckpt_model_loader import (
+                build_architecture_from_ckpt_dir,
+                propagate_component_specs,
+            )
+
+            resolved_arch, self.architecture, ckpt_cfg = build_architecture_from_ckpt_dir(
+                self._ckpt_source_dir, weights_required=finetune_path is not None
+            )
+            propagate_component_specs(ckpt_cfg, cfg)
+        else:
+            resolved_arch = resolve_architecture_config(m)
+            self.architecture = build_architecture(resolved_arch.registry_name, resolved_arch.params)
         logger.info(
             "Architecture: %s (framework=%s variant=%s)",
             resolved_arch.registry_name,
@@ -129,6 +147,40 @@ class OpenWAMTrainer:
         # Loss weights from the training config
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)
+
+        # Optional decoupled timestep sampler (training.timestep_sampling).
+        # None keeps compute_loss's legacy torch.randint path (default,
+        # bit-identical to upstream). "variance_shift" routes curve-correlated
+        # per-stream timesteps through the decoupled_sampler hook
+        # (Latent-Forcing; the training-time counterpart to the deploy
+        # schedule_type="variance_shift"). See
+        # openwam.model.architectures.utils.timestep_sampling.
+        from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
+
+        # num_train_timesteps from the action scheduler (matches the
+        # init_training_schedulers(1000) call above); fall back to 1000 for
+        # stub/mock architectures. compute_loss only uses this as a ratio
+        # (t / num_train * num_ts), so a mismatch would be harmless -- reading
+        # it keeps the sampler aligned with the backbone's actual grid.
+        _num_train_ts = int(getattr(getattr(self.architecture, "action_scheduler", None), "num_train_timesteps", 1000))
+        self._timestep_sampler = build_timestep_sampler(
+            cfg_get(t, "timestep_sampling", None),
+            num_train_timesteps=_num_train_ts,
+            lead=cfg_get(t, "timestep_sampling_lead", "video"),
+            alpha=cfg_get(t, "timestep_sampling_alpha", 9.0),
+        )
+        # Decoupled timestep sampling (variance_shift) is only supported on the
+        # joint_self_attn variant; reject any other architecture up front (the
+        # other variants consume the sampler through paths never validated for it).
+        if self._timestep_sampler is not None and resolved_arch.canonical.variant != "joint_self_attn":
+            raise ValueError(
+                f"training.timestep_sampling is only supported on the joint_self_attn variant; "
+                f"got framework={resolved_arch.canonical.framework!r} "
+                f"variant={resolved_arch.canonical.variant!r}. "
+                f"Use timestep_sampling=default for other architectures."
+            )
+        if self._timestep_sampler is not None and self._rank == 0:
+            logger.info("Training timestep sampling: %s", cfg_get(t, "timestep_sampling", None))
 
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.
@@ -179,7 +231,7 @@ class OpenWAMTrainer:
         """Run the training loop (HuggingFace Accelerate distributed).
 
         Three entry modes (train.yaml finetune/resume fields): fresh, finetune warm-start
-        (load weights before prepare), or resume (load full state after prepare).
+        (weights loaded at construction), or resume (load full state after prepare).
         """
         t = self.cfg.training
         num_epochs = num_epochs or cfg_get(t, "num_epochs", None)
@@ -201,11 +253,9 @@ class OpenWAMTrainer:
                 "set num_epochs, or set max_steps for step-only training."
             )
 
-        # Entry validation (all ranks): finetune and resume are mutually exclusive.
-        finetune_path = cfg_get(t, "finetune_ckpt_path", None) or None
+        # finetune/resume validation + architecture construction happen in
+        # __init__ (self-contained ckpt-dir path); only resume needs a path here.
         resume_path = cfg_get(t, "resume_ckpt_path", None) or None
-        if finetune_path and resume_path:
-            raise ValueError("finetune_ckpt_path and resume_ckpt_path are mutually exclusive; set at most one.")
 
         optimizer = self.build_optimizer()
         dataloader = self.build_dataloader(batch_size)
@@ -234,18 +284,14 @@ class OpenWAMTrainer:
                 save_steps = int(save_steps)
         keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
 
-        # Finetune warm-start: load latest weights into the bare architecture BEFORE prepare
-        # (real-device in-place copy, ZeRO-agnostic, tolerates missing vlm keys). Step stays 0.
-        if finetune_path is not None:
-            weights = find_latest_weights(finetune_path)
-            logger.info("[finetune] loading pretrained weights: %s", weights)
-            self.architecture.load_checkpoint(weights)
+        # Finetune warm-start weights were already loaded at architecture
+        # construction (__init__, self-contained ckpt-dir path). Step stays 0.
 
         output_path, resume_state_dir = self.setup_output_dir(debug, resume_path)
         optimizer, dataloader, scheduler = self.prepare_accelerate(optimizer, dataloader, scheduler)
 
         if self._run_seed is not None:
-            wire_sampler_seed(dataloader, int(self._run_seed))
+            wire_sampler_seed(dataloader, int(self._run_seed), rank=self._rank)
 
         all_params = [p for group in optimizer.param_groups for p in group["params"]]
 
@@ -333,7 +379,6 @@ class OpenWAMTrainer:
                         optimizer.zero_grad()
                         opt_step += 1
 
-                self._current_step = global_step
                 global_step += 1
 
                 metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
@@ -454,6 +499,12 @@ class OpenWAMTrainer:
             # Self-contained deploy: backbones save assets, then config + action stats.
             # BEFORE save_config so config.yaml carries the merged reconstruction specs.
             self.architecture.save_assets_for_deployment(output_path, self.cfg)
+            if self._ckpt_source_dir is not None:
+                # Self-contained finetune/resume: model_path may be unreachable,
+                # so relay the tokenizer files from the source ckpt dir instead.
+                from openwam.train.utils.ckpt_model_loader import copy_ckpt_artifacts
+
+                copy_ckpt_artifacts(self._ckpt_source_dir, output_path)
             save_config(output_path, self.cfg)
             if self.dataset is not None:
                 save_normalization_stats(output_path, self.dataset)
@@ -522,7 +573,7 @@ class OpenWAMTrainer:
             **inputs,
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
-            current_step=self._current_step,
+            decoupled_sampler=self._timestep_sampler,
         )
 
         return {

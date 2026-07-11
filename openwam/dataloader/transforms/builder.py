@@ -16,9 +16,9 @@ Config example::
         random_crop:
           scale: [0.8, 1.0]
         color_jitter:
-          brightness: 0.1
-          contrast: 0.1
-          saturation: 0.1
+          brightness: 0.2
+          contrast: 0.2
+          saturation: 0.2
         horizontal_flip:
           p: 0.5
 """
@@ -101,9 +101,9 @@ def build_transforms(
         if jitter_cfg is not None:
             transforms.append(
                 VideoColorJitter(
-                    brightness=float(_get(jitter_cfg, "brightness", 0.1)),
-                    contrast=float(_get(jitter_cfg, "contrast", 0.1)),
-                    saturation=float(_get(jitter_cfg, "saturation", 0.1)),
+                    brightness=float(_get(jitter_cfg, "brightness", 0.2)),
+                    contrast=float(_get(jitter_cfg, "contrast", 0.2)),
+                    saturation=float(_get(jitter_cfg, "saturation", 0.2)),
                     hue=float(_get(jitter_cfg, "hue", 0.0)),
                 )
             )

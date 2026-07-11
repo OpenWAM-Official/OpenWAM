@@ -1,4 +1,4 @@
-"""OXE RT-1 reader.
+"""OXE Fractal reader.
 
 Google Robotics Transformer 1 (~351h, 87,212 episodes, Google Robot).
 State uses **quaternion (xyzw)** for orientation; action uses Euler XYZ
@@ -16,11 +16,11 @@ import pyarrow.parquet as pq
 
 from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.eef import LEFT_ARM_DIM_MASK, assert_unit_quaternion, single_arm_20d
-from openwam.dataloader.utils.oxe_schema import euler7_action_to_arm10, rt1_state_to_arm10
+from openwam.dataloader.utils.oxe_schema import euler7_action_to_arm10, fractal_state_to_arm10
 
 
-class OxeRt1Dataset(LeRobotV3Reader):
-    DATASET_NAME = "OXE-RT-1"
+class OxeFractalDataset(LeRobotV3Reader):
+    DATASET_NAME = "OXE-Fractal"
     HEAD_CAMERA = "observation.images.image"
     # Prompts come from tasks_annotated.parquet (per-episode), so task_index
     # is no longer consumed from the data parquet.
@@ -33,7 +33,7 @@ class OxeRt1Dataset(LeRobotV3Reader):
     STATS_STRICT_MINMAX = True
 
     def _post_init(self, info: dict) -> None:
-        """Sanity-check the RT-1 quaternion convention.
+        """Sanity-check the Fractal quaternion convention.
 
         Reads up to 64 rows from the first parquet shard and asserts that
         ``state[:, 3:7]`` is unit-norm (xyzw). Catches data that is not
@@ -53,7 +53,7 @@ class OxeRt1Dataset(LeRobotV3Reader):
 
     def _proprio_20d(self, win: pd.DataFrame) -> np.ndarray:
         state = np.stack(win["observation.state"].values[:1]).astype(np.float32)  # (1, 8)
-        return single_arm_20d(rt1_state_to_arm10(state), self._normalization_stats, self._normalize_mode)
+        return single_arm_20d(fractal_state_to_arm10(state), self._normalization_stats, self._normalize_mode)
 
 
-__all__ = ["OxeRt1Dataset"]
+__all__ = ["OxeFractalDataset"]

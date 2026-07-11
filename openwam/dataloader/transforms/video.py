@@ -108,9 +108,9 @@ class VideoColorJitter(ModalityTransform):
 
     def __init__(
         self,
-        brightness: float = 0.1,
-        contrast: float = 0.1,
-        saturation: float = 0.1,
+        brightness: float = 0.2,
+        contrast: float = 0.2,
+        saturation: float = 0.2,
         hue: float = 0.0,
     ):
         super().__init__(apply_to=["video"])

@@ -1616,3 +1616,65 @@ def test_base_generate_signature_takes_extra_pipeline_inputs():
             f"'{arch_specific}' must not be in base.generate's explicit signature — "
             "it's tri_system-specific and should flow through **extra_pipeline_inputs."
         )
+
+
+def test_base_generate_dit_cache_reuses_joint_action_prediction(monkeypatch):
+    """A joint cache hit must skip the whole video/action forward."""
+
+    from openwam.deploy.optimizations.dit_cache import DiTVelocityCache
+    from openwam.model.architectures.base import BaseWAMArchitecture
+
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+
+    class _Scheduler:
+        num_train_timesteps = 1000
+
+        @staticmethod
+        def flow_step(model_output, sigma, sigma_next, sample):
+            return sample + model_output * (sigma_next - sigma)
+
+    class _VideoBackbone(torch.nn.Module):
+        scheduler = _Scheduler()
+        external_encoder = None
+
+        @staticmethod
+        def preprocess_input_for_inference(**_kwargs):
+            return {"latents": torch.zeros(1, 1, 1, 1, 1)}
+
+    class _ActionBackbone(torch.nn.Module):
+        scheduler = _Scheduler()
+        action_dim = 3
+        bridge_layers = ()
+        uses_proprioception = False
+
+    class _Arch(BaseWAMArchitecture):
+        def __init__(self):
+            super().__init__(cfg=None)
+            self._device = torch.device("cpu")
+            self._dtype = torch.float32
+            self.video_backbone = _VideoBackbone()
+            self.action_backbone = _ActionBackbone()
+            self.forward_calls = 0
+
+        def forward(self, noisy_actions, action_timestep, **kwargs):  # noqa: ARG002
+            self.forward_calls += 1
+            return torch.ones_like(kwargs["latents"]), torch.ones_like(noisy_actions) * 2
+
+    arch = _Arch()
+    cache = DiTVelocityCache(cosine_threshold=0.0)
+    schedule = [(1000, 1000), (800, 800), (600, 600), (400, 400)]
+
+    result = arch.generate(
+        schedule=schedule,
+        prompt="",
+        num_frames=4,
+        action_num_frames=4,
+        seed=0,
+        dit_cache=cache,
+        decode_video=False,
+    )
+
+    assert arch.forward_calls == 2
+    assert cache.stats["total_steps"] == 3
+    assert cache.stats["total_skips"] == 1
+    assert result["actions"].shape == (3, 3)

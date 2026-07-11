@@ -317,9 +317,22 @@ class JointInferenceEngine(BaseInferenceEngine):
         configured). When the cache dir IS set but the file is missing, we
         deliberately don't fall back silently — re-raise instead so the user
         notices the mismatch before model output drift goes undetected.
+
+        The empty prompt routes to ``empty.safetensors`` (matching the
+        training-side read path and the uncond resolver), not ``sha256("")`` —
+        the precompute stores the empty embedding under that fixed name.
         """
         if self._text_embedding_cache_dir is None:
             return None
+        if prompt == "":
+            empty_path = self._text_embedding_cache_dir / "empty.safetensors"
+            if not empty_path.exists():
+                raise FileNotFoundError(
+                    f"text_embedding_cache_dir is set but {empty_path} is missing "
+                    f"for the empty prompt. Re-run precompute so empty.safetensors "
+                    f"lands alongside the per-prompt caches."
+                )
+            return self._load_pre_encoded_text_safetensors(empty_path)
         sha = sha256_for_prompt(prompt)
         cache_path = Path(resolve_cache_path_for_sha(str(self._text_embedding_cache_dir), sha))
         if not cache_path.exists():
@@ -361,6 +374,12 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): for action_only mode
                 - schedule_type (str, optional): override schedule type
+                  ("sync" lockstep | "variance_shift" Latent-Forcing ordered
+                  curve)
+                - vs_lead (str, optional): "variance_shift" only — which stream
+                  denoises earlier ("action" | "video")
+                - vs_alpha (float, optional): "variance_shift" only — lead-curve
+                  strength (>1 leads; 1 = sync diagonal)
                 - denoise_steps (int, optional): override num denoising steps
 
         Returns:
@@ -368,9 +387,14 @@ class JointInferenceEngine(BaseInferenceEngine):
         """
         inf_cfg = self.cfg.inference
 
-        # Build schedule (only "sync" is supported; make_schedule raises on anything else)
+        # Build schedule: "sync" (lockstep) or "variance_shift" (Latent-Forcing
+        # ordered trajectory); make_schedule raises on anything else.
         schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
+        # ``variance_shift`` controls (Latent-Forcing-style ordered trajectory):
+        # which stream denoises earlier + curve strength. Ignored by sync.
+        vs_lead = conditions.get("vs_lead", getattr(inf_cfg, "vs_lead", "video"))
+        vs_alpha = conditions.get("vs_alpha", getattr(inf_cfg, "vs_alpha", 9.0))
         # Single source of truth for each stream's α-shift is the backbone
         # property — ``action_backbone.shift_action`` and
         # ``video_backbone.shift_video`` — set via the model yaml and saved in
@@ -396,6 +420,8 @@ class JointInferenceEngine(BaseInferenceEngine):
             num_steps=denoise_steps,
             shift=shift,
             shift_video=shift_video,
+            lead=vs_lead,
+            alpha=vs_alpha,
         )
 
         # Reset dit cache for each generation

@@ -4,11 +4,12 @@ Provides a network-accessible policy server that wraps WAMPolicy with
 receding-horizon execution. Robot controllers connect over a single
 persistent WebSocket.
 
-The client is thin on purpose: it always sends raw per-camera JPEGs plus a
-base task prompt. Image composition and resize happen server-side, driven by
-the saved training config (``cfg.dataloader.multiview`` / ``camera_layout`` /
-``height`` / ``width``); the prompt is wrapped with the FastWAM deploy
-template.
+The client is thin on purpose: it always sends raw per-camera JPEGs plus the
+task prompt. Image composition and resize happen server-side, driven by the
+saved training config (``cfg.dataloader.multiview`` / ``camera_layout`` /
+``height`` / ``width``). The server is prompt-agnostic — it forwards the prompt
+to the model verbatim; each benchmark client owns whatever prompt template its
+checkpoints were trained with.
 
 Protocol (unified — same shape for single-view and multi-view checkpoints):
     Client → {
@@ -19,7 +20,7 @@ Protocol (unified — same shape for single-view and multi-view checkpoints):
             "left_wrist_camera":  <base64_jpeg>|null,  # optional
             "right_wrist_camera": <base64_jpeg>|null   # optional
         },
-        "prompt": "<base task prompt>",
+        "prompt": "<prompt fed to the model verbatim>",
         "state":  [floats]                             # optional proprio
     }
 
@@ -27,7 +28,7 @@ Server-side behavior:
 - ``multiview=False``: ignores wrist fields, crop+resize ``head_camera``.
 - ``multiview=True``:  black-fills missing/None wrists, then composes the
   L-shape layout defined by ``camera_layout``.
-- ``prompt`` is always re-wrapped via ``format_prompt_for_inference``.
+- ``prompt`` is forwarded to the model verbatim (no server-side wrapping).
 
 Messages:
     obs   → {"type": "action", "action": [floats], "step": int, "latency_ms": float}
@@ -170,8 +171,9 @@ class PolicyServer:
             obs: Observation dict with ``images`` (dict of camera name →
                 base64 JPEG / bytes / PIL.Image, with ``head_camera`` required
                 and ``left_wrist_camera`` / ``right_wrist_camera`` optional),
-                a base ``prompt`` (str), and optional ``state`` (list of floats).
-                Server does all preprocessing and prompt wrapping internally.
+                the ``prompt`` (str, forwarded to the model verbatim), and
+                optional ``state`` (list of floats). Server does all image
+                preprocessing internally; prompt wrapping is the client's job.
 
         Returns:
             dict with "action" (list of floats in physical units),
@@ -426,10 +428,25 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schedule-type",
         type=str,
-        choices=["sync"],
+        choices=["sync", "variance_shift"],
         default=None,
         dest="schedule_type",
-        help="Override schedule type (only 'sync' is supported)",
+        help="Override inference.schedule_type: 'sync' | 'variance_shift' (Latent-Forcing ordered)",
+    )
+    parser.add_argument(
+        "--vs-lead",
+        type=str,
+        choices=["action", "video"],
+        default=None,
+        dest="vs_lead",
+        help="Override inference.vs_lead (variance_shift only): which stream denoises earlier",
+    )
+    parser.add_argument(
+        "--vs-alpha",
+        type=float,
+        default=None,
+        dest="vs_alpha",
+        help="Override inference.vs_alpha (variance_shift only): lead-curve strength (>1 leads; 1 = diagonal)",
     )
     parser.add_argument(
         "--compile-enabled",
@@ -493,6 +510,10 @@ def _apply_inference_overrides(cfg, args):
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.schedule_type is not None:
         OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
+    if args.vs_lead is not None:
+        OmegaConf.update(cfg, "inference.vs_lead", args.vs_lead, merge=False)
+    if args.vs_alpha is not None:
+        OmegaConf.update(cfg, "inference.vs_alpha", args.vs_alpha, merge=False)
     return cfg
 
 

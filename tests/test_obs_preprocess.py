@@ -221,11 +221,16 @@ def test_prompt_wrap_matches_dataset_training_output():
     assert training_output == format_prompt_for_inference(base)
 
 
-def test_decode_wraps_prompt():
+def test_decode_passes_prompt_through():
+    # The server is prompt-agnostic: it forwards the client's prompt verbatim.
+    # Prompt wrapping now lives in each benchmark's client, not the server.
     obs = _single_view().preprocess({"images": {"head_camera": _jpeg_b64()}, "prompt": "pick up the bottle"})
-    assert obs["prompt"] == (
-        "A video recorded from a robot's point of view executing the following instruction: pick up the bottle"
-    )
+    assert obs["prompt"] == "pick up the bottle"
+
+
+def test_decode_missing_prompt_normalized_to_empty():
+    obs = _single_view().preprocess({"images": {"head_camera": _jpeg_b64()}})
+    assert obs["prompt"] == ""
 
 
 def test_state_accepts_nested_list_and_flattens():

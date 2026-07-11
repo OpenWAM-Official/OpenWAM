@@ -6,7 +6,7 @@ Three classes live here:
   in this package inherits from it directly or transitively.
 
 - ``LeRobotV3Reader`` — unified single-bucket LeRobot v3 reader base.
-  Direct parent of all 4 OXE readers (BC-Z / Bridge / RT-1 / DROID),
+  Direct parent of all 4 OXE readers (BC-Z / Bridge / Fractal / DROID),
   :class:`~openwam.dataloader.robocoin.RoboCOINDataset`, and
   :class:`~openwam.dataloader.egodex.EgoDexDataset` — equal siblings, no
   per-family intermediate base.
