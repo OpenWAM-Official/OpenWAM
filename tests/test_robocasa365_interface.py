@@ -439,3 +439,35 @@ def test_fixed_base_sends_20d():
     policy.reset()
     policy.act(_make_obs(), "x")
     assert len(fake.last_payload["state"]) == 20
+
+
+# --- Task 3: torso safety clamp (mask_torso_action zeros base_motion[3] at eval) ---
+# torso is a LIVE JOINT_POSITION delta actuator (base_motion[3] → robot0_torso) but constant 0 in the
+# data → masked out of the action loss, so the client must zero the (unconstrained) torso prediction.
+
+_SERVER25_TORSO09 = list(np.arange(20, dtype=float)) + [0.5, -0.3, 0.2, 0.9, -1.0]  # base5 torso=0.9, mode=-1
+
+
+def test_mask_torso_action_zeros_torso():
+    # mask_torso_action=True (default): even if the server returns torso=0.9 in base5[3], the bridged
+    # env action's base_motion[3] (torso) is 0; x_vel + control_mode pass through unchanged.
+    fake = _FakeClient(action=_SERVER25_TORSO09)
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True  # mask_torso_action default True
+    )
+    policy.reset()
+    act = policy.act(_obs_base([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")
+    assert float(act["action.base_motion"][3]) == 0.0                 # torso zeroed despite server 0.9
+    assert float(act["action.base_motion"][0]) == pytest.approx(0.5)  # x_vel passed through
+    assert float(act["action.control_mode"][0]) == -1.0              # control_mode passed through
+
+
+def test_mask_torso_action_false_passes_torso():
+    # mask_torso_action=False: the model's torso prediction is passed through to the env.
+    fake = _FakeClient(action=_SERVER25_TORSO09)
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, mask_torso_action=False
+    )
+    policy.reset()
+    act = policy.act(_obs_base([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")
+    assert float(act["action.base_motion"][3]) == pytest.approx(0.9)  # torso passed through

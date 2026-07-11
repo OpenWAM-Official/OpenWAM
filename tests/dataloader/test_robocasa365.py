@@ -341,7 +341,7 @@ class TestNormalize:
             s = ds._build_sample(0, 1)  # start>0 so the frame-0 base velocity is a real finite-diff
         assert ds.action_dim == UNIFY_DIM == 80
         am = s["action_mask"].numpy()
-        assert am[0, 68:73].all()        # all 5 base command slots valid in ACTION
+        assert am[0, 68:71].all() and not am[0, 71] and am[0, 72]  # vel + control_mode valid, torso masked (default)
         assert am[0, :10].all()          # left eef valid
         assert not am[0, 34:44].any()    # right eef masked
         assert np.abs(s["action"].numpy()[:, 68:73]).sum() > 0  # base carries a (normalized) command
@@ -362,7 +362,8 @@ class TestNormalize:
         assert ds.action_dim == 25
         assert s["action"].shape == (32, 25) and s["proprio"].shape == (1, 25)
         am = s["action_mask"].numpy()
-        assert am[0, :10].all() and not am[0, 10:20].any() and am[0, 20:25].all()  # arm-left + all base valid
+        assert am[0, :10].all() and not am[0, 10:20].any()          # arm-left valid, right masked
+        assert am[0, 20:23].all() and not am[0, 23] and am[0, 24]   # base vel + control_mode valid, torso masked
         pm = s["proprio_mask"].numpy()
         assert pm[0, 20:23].all() and not pm[0, 23:25].any()  # base velocity valid, torso+mode masked
 
@@ -510,7 +511,8 @@ class TestMultiAndRegistry:
         assert ds.action_dim == 80
         assert s["action"].shape == (32, 80)
         am = s["action_mask"].numpy()
-        assert am[0, 68:73].all() and am[0, :10].all() and not am[0, 34:44].any()
+        assert am[0, 68:71].all() and not am[0, 71] and am[0, 72]  # vel + control_mode valid, torso masked
+        assert am[0, :10].all() and not am[0, 34:44].any()
         assert np.abs(s["action"].numpy()[:, 68:73]).sum() > 0  # base carries a command
 
     def test_root_mode_keeps_all_including_mobile(self, tmp_path):
@@ -614,6 +616,28 @@ def test_mobile_proprio_velocity_normalized(tmp_path):
     bv = s["proprio"].numpy()[0, 68:71]
     assert (np.abs(bv) <= 1.0 + 1e-5).all()  # normalized into [-1, 1]
     assert s["proprio_mask"].numpy()[0, 68:71].all()
+
+
+def test_mask_torso_action(tmp_path):
+    # mask_torso_action=True (default) masks torso (base idx 3 → 80-D slot 71) out of the ACTION loss;
+    # control_mode (slot 72) stays supervised. False supervises all 5 base command dims.
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder():
+        masked = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                    width=96, normalize_mode="min-max", unify_action=True,
+                                    unify_action_map=["0-9", "34-43", "68-72"], mobile_base=True)  # default mask=True
+        unmasked = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                      width=96, normalize_mode="min-max", unify_action=True,
+                                      unify_action_map=["0-9", "34-43", "68-72"], mobile_base=True,
+                                      mask_torso_action=False)
+        s_masked = masked._build_sample(0, 1)
+        am_masked = s_masked["action_mask"].numpy()[0]
+        am_unmasked = unmasked._build_sample(0, 1)["action_mask"].numpy()[0]
+    assert am_masked[68:71].all() and not am_masked[71] and am_masked[72]  # vel + mode valid, torso masked
+    assert am_unmasked[68:73].all()                                        # all 5 base dims supervised
+    # proprio is unaffected (torso already masked there regardless of mask_torso_action)
+    pm = s_masked["proprio_mask"].numpy()[0]
+    assert pm[68:71].all() and not pm[71:73].any()
 
 
 def test_from_config_threads_mobile_base(tmp_path):

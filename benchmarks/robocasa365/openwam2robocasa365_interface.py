@@ -337,6 +337,7 @@ class OpenWAMRoboCasa365Policy:
         osc_pos_scale: Optional[float] = None,
         osc_rot_scale: Optional[float] = None,
         mobile_base: bool = False,
+        mask_torso_action: bool = True,
         debug: bool = False,
         debug_dir: str = "./debug_robocasa365",
         _client=None,
@@ -352,6 +353,11 @@ class OpenWAMRoboCasa365Policy:
         # Mobile ckpts send the 25-D [arm20, base5] proprio (base5 = [vel3 A′-rescaled, 0, 0]). Must
         # match the ckpt's dataloader.mobile_base (set from the eval policy config).
         self._mobile_base = bool(mobile_base)
+        # torso safety clamp: when the ckpt masked torso out of the action loss (dataloader
+        # mask_torso_action=true, the default), the model's torso output is unconstrained, so force it
+        # to 0 before the env — torso is a LIVE JOINT_POSITION delta actuator, and 0 → no motion
+        # (scale_action(0)=0), reproducing the demos. Must match the ckpt's dataloader.mask_torso_action.
+        self._mask_torso_action = bool(mask_torso_action)
         # Expected proprio width for the fail-fast guard: 20-D EEF (+ 5-D base5 when mobile).
         self._state_dim = state_dim if state_dim is not None else (STATE_DIM_MOBILE if self._mobile_base else STATE_DIM)
         self._action_dim = action_dim
@@ -373,7 +379,8 @@ class OpenWAMRoboCasa365Policy:
             raise RuntimeError(f"OpenWAM server ping returned unexpected response: {pong}")
         print(
             f"[OpenWAMRoboCasa365Policy] action_dim={action_dim} state_dim={self._state_dim} "
-            f"mobile_base={self._mobile_base} image_transform={image_transform} "
+            f"mobile_base={self._mobile_base} mask_torso_action={self._mask_torso_action} "
+            f"image_transform={image_transform} "
             f"cameras=({head_camera_key}, {left_wrist_camera_key}, {right_wrist_camera_key})"
         )
 
@@ -405,7 +412,11 @@ class OpenWAMRoboCasa365Policy:
                 "set them from the eval env's OSC_POSE controller config to enable the 20-D->12-D bridge."
             )
         arm20 = np.asarray(arm20, np.float32).reshape(-1)
-        base5 = None if base5 is None else np.asarray(base5, np.float32).reshape(-1)
+        base5 = None if base5 is None else np.asarray(base5, np.float32).reshape(-1).copy()
+        # torso safety clamp: when torso was masked out of the action loss, the model's torso output is
+        # unconstrained → force it to 0 (no torso motion, reproducing the demos) before the env.
+        if base5 is not None and self._mask_torso_action:
+            base5[3] = 0.0
         control_mode = float(base5[4]) if base5 is not None else -1.0
         # The OSC delta's reference frame depends on the arm goal-update mode robosuite picks from
         # control_mode (composite_controller: control_mode>0 -> "desired", else "achieved"):

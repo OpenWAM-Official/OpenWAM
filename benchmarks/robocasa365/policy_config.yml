@@ -53,6 +53,11 @@ state_dim: null
 # (client on, ckpt off — or vice versa) fails fast at the server.
 mobile_base: false
 
+# mask_torso_action: when the ckpt masked torso out of the action loss (dataloader default true), the
+# client zeros the torso command before the env — torso is a live JOINT_POSITION delta actuator but is
+# constant 0 in the data, so a nonzero prediction would wrongly drive it. MUST match the checkpoint.
+mask_torso_action: true
+
 # Action: the env consumes a flat 12-D vector (eef_pos 3 + eef_rot 3 + gripper 1 +
 # base 4 + mode 1), sliced into the RoboCasaGymEnv action dict. A RoboCasa365Dataset-
 # trained model emits the repo-standard 20-D EEF instead; the client bridges 20-D ->

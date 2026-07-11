@@ -134,12 +134,16 @@ DATASET_FPS = 20  # v3 atomic + composite are both fps=20 (asserted against meta
 # action base velocity share ONE stats block (the dual of BEHAVIOR's _BASE_VEL_OUTPUT_SCALE). Without
 # this the two differ ~30× in scale and cannot share stats. [vx m/s, vy m/s, vyaw rad/s].
 _BASE_VEL_PHYS_MAX = np.array([0.75, 0.88, 1.33], np.float32)
-# 25-D raw dim masks (arm left-valid / right-masked, then base). ACTION supervises all 5 base command
-# dims (incl. control_mode, kept predicted, and torso — constant 0 across the dataset but part of the
-# native command). PROPRIO only the 3 base-velocity dims are observable; torso + control_mode have no
-# achieved value → masked (zero-filled). Scattered to 80-D through the unify map when unify_action.
+# 25-D raw dim masks (arm left-valid / right-masked, then base). ACTION supervises the 5 base command
+# dims; PROPRIO only the 3 base-velocity dims are observable (torso + control_mode have no achieved
+# value → masked, zero-filled). Scattered to 80-D through the unify map when unify_action.
+#   torso (base idx 3, raw idx 23) is CONSTANT 0 across the whole dataset (29.1M frames) yet a LIVE sim
+#   actuator (base_motion[3] → robot0_torso JOINT_POSITION delta). Predicting it risks a nonzero output
+#   driving the torso at eval, so ``mask_torso_action`` (default true) masks it out of the action loss;
+#   the eval client then zeros it before the env (see the interface). control_mode stays supervised.
 _ARM_MASK = np.asarray(LEFT_ARM_DIM_MASK, dtype=bool)
-_RAW_ACTION_MASK = np.concatenate([_ARM_MASK, np.ones(BASE_ACTION_DIM, dtype=bool)])
+_RAW_ACTION_MASK = np.concatenate([_ARM_MASK, np.array([True, True, True, True, True])])           # all base dims
+_RAW_ACTION_MASK_NO_TORSO = np.concatenate([_ARM_MASK, np.array([True, True, True, False, True])])  # torso[3] masked
 _RAW_PROPRIO_MASK = np.concatenate([_ARM_MASK, np.array([True, True, True, False, False])])
 
 # Multiview L-shape slot sizes (must match assemble_multiview_layout defaults at
@@ -331,6 +335,7 @@ class RoboCasa365Dataset(BaseDataset):
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
         mobile_base: bool = False,
+        mask_torso_action: bool = True,
         **_unused,
     ):
         super().__init__()
@@ -368,8 +373,14 @@ class RoboCasa365Dataset(BaseDataset):
         # the LeRobot ``action`` field INTO the raw vector as base5; proprio carries the A′-rescaled
         # body-frame base velocity in those 3 velocity slots (torso + control_mode masked).
         self._mobile_base = bool(mobile_base)
+        # torso is a live sim actuator but constant 0 in the data → mask it out of the ACTION loss
+        # (default) so a nonzero prediction can't drive it at eval; the eval client zeros it too.
+        self._mask_torso_action = bool(mask_torso_action)
         self._raw_dim = RAW_MOBILE_DIM if self._mobile_base else EEF_DIM  # 25 or 20
-        self._raw_action_mask = _RAW_ACTION_MASK if self._mobile_base else _ARM_MASK
+        if self._mobile_base:
+            self._raw_action_mask = _RAW_ACTION_MASK_NO_TORSO if self._mask_torso_action else _RAW_ACTION_MASK
+        else:
+            self._raw_action_mask = _ARM_MASK
         self._raw_proprio_mask = _RAW_PROPRIO_MASK if self._mobile_base else _ARM_MASK
         self._unify_dst_index = None
         self._unify_dim_mask = None  # proprio dim mask (80-D, scattered from _raw_proprio_mask)
@@ -826,6 +837,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             unify_action=bool(get_cfg(config, "unify_action", False)),
             unify_action_map=get_cfg(config, "unify_action_map", None),
             mobile_base=bool(get_cfg(config, "mobile_base", False)),
+            mask_torso_action=bool(get_cfg(config, "mask_torso_action", True)),
             seed=int(get_cfg(config, "seed", 42)),
         )
 

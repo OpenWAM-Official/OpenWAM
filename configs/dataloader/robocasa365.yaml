@@ -98,11 +98,19 @@ unify_action_map: ["0-9", "34-43", "68-72"]  # raw arm 0-9→0-9, 10-19→34-43;
 #
 # mobile_base=true (DECOUPLED from unify_action — non-unify emits the raw 25-D head directly): fold
 # the RoboCasa-native base command from the LeRobot action field into the raw vector as base5 =
-# [x_vel, y_vel, yaw_vel, torso, control_mode]. ACTION supervises all 5; PROPRIO carries the body-frame
-# base VELOCITY (finite-diff of observation.state base pose, rescaled into the action command space so
-# it shares the base stats), with torso + control_mode masked (no achieved value). The action base is
-# direct-to-env at eval (arm bridged, base raw). See docs/plans/robocasa365-unify-raw-vector-refactor.md.
+# [x_vel, y_vel, yaw_vel, torso, control_mode]. ACTION supervises the base command; PROPRIO carries the
+# body-frame base VELOCITY (finite-diff of observation.state base pose, rescaled into the action command
+# space so it shares the base stats), with torso + control_mode masked (no achieved value). The action
+# base is direct-to-env at eval (arm bridged, base raw). See docs/plans/robocasa365-unify-raw-vector-refactor.md.
 mobile_base: true
+#
+# mask_torso_action=true (default): mask torso (base idx 3) out of the ACTION loss. torso is a LIVE sim
+# actuator (base_motion[3] → robot0_torso JOINT_POSITION delta) but is CONSTANT 0 across the whole
+# dataset (29.1M frames), so predicting it risks a nonzero output driving the torso at eval; masking it
+# out of the loss + the eval client zeroing it (see policy_config.yml mask_torso_action) keeps the torso
+# put (scale_action(0)=0, reproducing the demos). control_mode stays supervised. Set false ONLY to
+# predict torso (e.g. for a future dataset that actually commands it); the eval flag must then match.
+mask_torso_action: true
 #
 # Model head + proprio dims must be 80 when unify_action=true. As of the main merge,
 # configs/model/dual_system.yaml already defaults to action_dim=80 / state_dim=80 (the unified

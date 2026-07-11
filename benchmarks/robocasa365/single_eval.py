@@ -116,6 +116,9 @@ def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
         # mobile ckpts: the client derives the base5 proprio (A′-rescaled body-frame base velocity)
         # from the sim obs and sends 25-D [arm20, base5]. Must match the ckpt's dataloader.mobile_base.
         mobile_base=_parse_bool(cfg.get("mobile_base", False), "mobile_base"),
+        # mask_torso_action: when the ckpt masked torso out of the action loss (default), the client
+        # zeros the torso command before the env. Must match the ckpt's dataloader.mask_torso_action.
+        mask_torso_action=_parse_bool(cfg.get("mask_torso_action", True), "mask_torso_action"),
         debug=_parse_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_robocasa365"),
     )
