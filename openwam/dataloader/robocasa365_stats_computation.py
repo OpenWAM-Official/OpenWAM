@@ -114,18 +114,34 @@ def _base_stats_block(base_chunks: list) -> dict:
     return out
 
 
+def _pin_gripper_stats(eef10: dict) -> dict:
+    """Pin the gripper dim (dim 9 of the 10-D arm) normalize range to the [-1, +1] COMMAND space.
+
+    The gripper is a command (ACTION = the recorded binary command; PROPRIO = the achieved width
+    rendered into [-1, +1]), so its min/max are pinned to [-1, +1] instead of the achieved-width data
+    range. Then the model's ±1 output de-normalizes to EXACTLY ±1 (the deploy bridge thresholds at
+    exactly 0 — a +1 close reaches the sim as +1, a -1 open as -1), and normalizing the rendered proprio
+    is the identity. mean/std are set command-neutral (0/1) for the z-score path."""
+    out = {k: np.array(eef10[k], dtype=np.float32) for k in eef10}
+    g = STATS_DIM - 1  # dim 9 = gripper
+    out["min"][g], out["max"][g], out["q01"][g], out["q99"][g] = -1.0, 1.0, -1.0, 1.0
+    out["mean"][g], out["std"][g] = 0.0, 1.0
+    return out
+
+
 def _finish(arm_chunks: list, base_chunks: list, total: int, include_base: bool, label: str) -> dict:
     """Reduce accumulated arm (+ base) chunks to the persisted stats dict.
 
     Non-mobile → ``{"eef": 20-D}``; mobile → ``{"eef_base": 25-D}`` (concat of the 20-D arm block and
     the 5-D base command block, so the whole [arm20, base5] vector shares ONE stats block). The arm
-    block is computed at 10-D (STATS_DIM) then left-padded to the 20-D bimanual schema."""
+    block is computed at 10-D (STATS_DIM) then left-padded to the 20-D bimanual schema; the gripper dim
+    is pinned to the [-1, +1] command range (see _pin_gripper_stats)."""
     if not arm_chunks:
         raise ValueError(f"No timesteps accumulated ({label})")
     eef10 = compute_extended_stats(arm_chunks)
     if len(eef10["mean"]) != STATS_DIM:
         raise ValueError(f"computed arm dim {len(eef10['mean'])} != {STATS_DIM}")
-    eef20 = _expand_stats_to_20d(eef10)
+    eef20 = _expand_stats_to_20d(_pin_gripper_stats(eef10))
     print(f"  [{label}] done: {total} timesteps, dim=20{' +base5 (combined eef_base)' if include_base else ''}")
     if not include_base:
         return {"eef": eef20, "num_timesteps": int(total)}

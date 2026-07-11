@@ -637,6 +637,25 @@ def test_action_gripper_is_command_proprio_is_rendered_width(tmp_path):
     assert s["action"].numpy()[:5, 9] == pytest.approx(ac[:5, 11], abs=1e-5)
 
 
+def test_gripper_stats_pinned_to_command_range(tmp_path):
+    # The gripper dim (9) normalize range is pinned to [-1,+1] (command space), so the model's ±1
+    # de-normalizes to EXACTLY ±1 — a +1 (close) reaches the sim as +1, a -1 (open) as -1, the deploy
+    # bridge cuts at exactly 0 (not the achieved-width data range).
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder():
+        ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,
+                                width=96, normalize_mode="min-max", mobile_base=True)  # unify off → raw 25
+        ds._build_sample(0, 1)  # trigger stats auto-compute
+    blob = np.load(ds.normalization_stats_path, allow_pickle=True).item()["eef_base"]
+    assert blob["min"][9] == pytest.approx(-1.0) and blob["max"][9] == pytest.approx(1.0)  # gripper pinned
+    # de-normalize normalized ±1 at the gripper dim → EXACTLY ±1
+    x = np.zeros((1, 25), np.float32)
+    x[0, 9] = 1.0
+    assert ds.denormalize_action(x)[0, 9] == pytest.approx(1.0, abs=1e-5)   # +1 → +1 (close)
+    x[0, 9] = -1.0
+    assert ds.denormalize_action(x)[0, 9] == pytest.approx(-1.0, abs=1e-5)  # -1 → -1 (open)
+
+
 def test_mask_torso_action(tmp_path):
     # mask_torso_action=True (default) masks torso (base idx 3 → 80-D slot 71) out of the ACTION loss;
     # control_mode (slot 72) stays supervised. False supervises all 5 base command dims.
