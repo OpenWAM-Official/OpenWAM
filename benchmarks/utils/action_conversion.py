@@ -168,10 +168,10 @@ def eef20d_to_robocasa12d(
         clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
 
     Gripper: the model dim ``act[9]`` is the gripper COMMAND in ``[-1, +1]`` (+1=close, -1=open, matching
-    the recorded ``action.gripper_close``). The env binarizes ``gripper_close`` at 0.5 (-1 open / +1
-    close), so we decide by SIGN: ``close (1.0) iff act[9] > 0``. No width binarization — the model
-    predicts the command directly, so there is no actuation-lag delay (unlike deriving open/close from
-    the achieved finger-separation width).
+    the recorded ``action.gripper_close``). Close only on a CONFIDENT command: ``close (1.0) iff act[9] >
+    0.5``, else open — an uncertain / neutral output (~0, the flow-matching prior mean) defaults to open,
+    avoiding spurious grasps. No width binarization — the model predicts the command directly, so there
+    is no actuation-lag delay (unlike deriving open/close from the achieved finger-separation width).
 
     ENV CONTRACT (MEASURED on the real robocasa/OpenDrawer env, PandaOmron / default_pandaomron.json):
     the eef action convention is **delta** (zero action -> no EEF motion; constant action -> constant
@@ -205,11 +205,11 @@ def eef20d_to_robocasa12d(
         pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
         rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
 
-    # Gripper: model dim [9] is now the COMMAND in [-1,+1] (+1=close, -1=open; matches
-    # action.gripper_close and the proprio's rendered width). The env binarizes gripper_close at 0.5
-    # (-1 open / +1 close), so decide by SIGN: close (1.0) iff act[9] > 0, else open (0.0). No width
-    # binarization — the model predicts the command directly, so there is no actuation-lag delay.
-    gripper_cmd = 1.0 if float(act[9]) > 0.0 else 0.0
+    # Gripper: model dim [9] is the COMMAND in [-1,+1] (+1=close, -1=open; matches action.gripper_close
+    # and the proprio's rendered width). Close only on a CONFIDENT command: close (1.0) iff act[9] > 0.5,
+    # else open (0.0). An uncertain / neutral output (~0, the flow-matching prior mean) defaults to open,
+    # avoiding spurious grasps. No width binarization, so no actuation-lag delay.
+    gripper_cmd = 1.0 if float(act[9]) > 0.5 else 0.0
 
     base = np.zeros(4, np.float64) if base_motion is None else np.asarray(base_motion, np.float64).reshape(-1)
     if base.shape[0] != 4:

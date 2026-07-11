@@ -226,16 +226,17 @@ def test_bridge_pos_delta_and_order():
     assert out.shape == (12,)
     assert out[0:3] == pytest.approx([0.5, 0.0, 0.0], abs=1e-5)   # eef_pos delta/scale
     assert out[3:6] == pytest.approx([0.0, 0.0, 0.0], abs=1e-5)   # eef_rot (identity)
-    assert out[6] == pytest.approx(0.0)                          # gripper OPEN (cmd -0.7 < 0)
+    assert out[6] == pytest.approx(0.0)                          # gripper OPEN (cmd -0.7, not > 0.5)
     assert out[7:11] == pytest.approx([0.0, 0.0, 0.0, 0.0])      # base_motion default 0
     assert out[11] == pytest.approx(-1.0)                        # control_mode default -1
     # slices line up with the env adapter's ACTION_SLICES
     assert adapter.slice_action(out)["action.control_mode"][0] == pytest.approx(-1.0)
 
 
-def test_bridge_gripper_sign_command():
-    """Model gripper dim [9] is the COMMAND in [-1,+1] (+1=close, -1=open). The bridge decides by SIGN:
-    >0 -> close (1.0), <=0 -> open (0.0). No width binarization / actuation-lag delay."""
+def test_bridge_gripper_threshold_at_half():
+    """Model gripper dim [9] is the COMMAND in [-1,+1] (+1=close, -1=open). The bridge closes only on a
+    CONFIDENT command: >0.5 -> close (1.0), else open (0.0) — an uncertain/neutral output (~0) defaults
+    to open (no spurious grasp). No width binarization / actuation-lag delay."""
     from benchmarks.utils import eef20d_to_robocasa12d
 
     def _grip(cmd):
@@ -246,10 +247,12 @@ def test_bridge_gripper_sign_command():
                                     pos_scale=0.05, rot_scale=0.5)
         return float(out[6])
 
-    assert _grip(1.0) == pytest.approx(1.0)    # command +1 (close) -> env gripper_close 1.0 -> close
-    assert _grip(0.2) == pytest.approx(1.0)    # any >0 -> close
-    assert _grip(-1.0) == pytest.approx(0.0)   # command -1 (open) -> 0.0 -> open
-    assert _grip(-0.2) == pytest.approx(0.0)   # any <=0 -> open
+    assert _grip(1.0) == pytest.approx(1.0)    # confident close (+1) -> close
+    assert _grip(0.6) == pytest.approx(1.0)    # >0.5 -> close
+    assert _grip(0.5) == pytest.approx(0.0)    # exactly 0.5 (not >) -> open
+    assert _grip(0.2) == pytest.approx(0.0)    # weak/uncertain (0 < x <= 0.5) -> open (no spurious grasp)
+    assert _grip(0.0) == pytest.approx(0.0)    # neutral -> open
+    assert _grip(-1.0) == pytest.approx(0.0)   # open (-1) -> open
 
 
 def test_bridge_pos_clipped_to_unit():
