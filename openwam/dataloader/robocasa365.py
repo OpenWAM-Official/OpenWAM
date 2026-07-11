@@ -134,7 +134,7 @@ RAW_MOBILE_DIM = EEF_DIM + BASE_ACTION_DIM  # 25
 # schema shared by robotwin/OXE via materialize_eef_stats); the wider mobile vector gets its own key
 # (mirrors behavior.py's per-mode DEPLOY_ACTION_MODE keys). Non-mobile stays 20-D under 'eef'.
 _MOBILE_STATS_KEY = "eef_base"
-DATASET_FPS = 20  # v3 atomic + composite are both fps=20 (asserted against meta/info.json on load)
+DATASET_FPS = 20  # v3 atomic + composite are both fps=20 (asserted == meta/info.json on load for mobile)
 # A′ base-velocity rescale: per-axis physical base speed at command saturation (measured p99.9 over
 # NavigateKitchen). The proprio finite-diff base velocity (m/frame) is rescaled into the action's
 # [-1, 1] command space via ``× fps / PHYS_MAX`` so the ACHIEVED proprio velocity and the COMMANDED
@@ -437,9 +437,18 @@ class RoboCasa365Dataset(BaseDataset):
             info = json.load(f)
         self._data_path_tmpl = info["data_path"]  # data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet
         self._video_path_tmpl = info["video_path"]  # videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4
-        # fps for the A′ base-velocity rescale (proprio finite-diff m/frame → m/s → command space).
-        # Both v3 repos are 20; the eval client hardcodes DATASET_FPS, so train↔eval match at that rate.
-        self._fps = int(info.get("fps", DATASET_FPS))
+        # fps for the A′ base-velocity rescale (proprio finite-diff m/frame → m/s → command space). The
+        # eval client hardcodes DATASET_FPS, so a mobile run on a differently-sampled repo would diverge
+        # train↔eval — fail loud (no silent fallback) rather than silently mis-scale the base velocity.
+        if "fps" not in info:
+            raise ValueError(f"meta/info.json under {data_root} has no 'fps'.")
+        self._fps = int(info["fps"])
+        if self._mobile_base and self._fps != DATASET_FPS:
+            raise ValueError(
+                f"RoboCasa365 mobile_base pins the A′ base-velocity rescale (and the eval client) to "
+                f"fps={DATASET_FPS}; this repo's meta/info.json says fps={self._fps}. A different rate "
+                "would diverge train↔eval — re-verify _BASE_VEL_PHYS_MAX and the eval client fps."
+            )
 
         # ── episodes (v3 aggregated meta) + single-task filter by source_prefix ──
         # v3 packs ALL tasks into one repo; ``source_prefix`` tags each episode's origin task, and the
