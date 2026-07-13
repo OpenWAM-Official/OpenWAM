@@ -116,7 +116,7 @@ Then convert it to training-verbatim prompts (needs the dataset's `meta/` and
 
 ```bash
 python -m benchmarks.behavior.gen_task_prompts \
-    --dataset-dir /path/to/datasets/behaviour-1k \
+    --dataset-dir /path/to/behaviour-1k \
     --activity-names task_names.json \
     --output task_prompts.json
 ```

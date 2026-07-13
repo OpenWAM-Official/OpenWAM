@@ -16,20 +16,33 @@ values to those sentences, joining through the dataset's own files:
 
 The join key is the normalized activity name, NOT the task_id order, so
 nothing rests on OmniGibson's task indices matching the dataset's task-chunk
-numbering. Every step fails fast: a missing annotation dir, an activity name
-with no matching ``task_name``, or episodes of one chunk disagreeing on their
-prompt all abort with the offending items listed.
+numbering. On the data side no single labeling source is trusted blindly:
+
+* the annotation directory numbering is cross-checked against the episode
+  index embedded in EVERY annotation filename (``episode_index //
+  chunks_size`` must equal the directory number);
+* the ``task_name`` field is read from EVERY annotation JSON of a chunk and
+  must be unanimous (a stale first file cannot mislabel the chunk);
+* where ``meta/episodes/task-XXXX/`` metainfo is present locally, its
+  ``config.task.activity_name`` — an independent, simulator-authored label —
+  must agree with the annotation ``task_name`` (chunk derived from the
+  metainfo filename, not its directory name).
+
+Every inconsistency fails fast with the offending items listed; the script
+never falls back to activity-name prompts. Reading all ~10k annotation JSONs
+takes a few seconds — this is a run-once generator, not a hot path.
 
 Usage::
 
     python -m benchmarks.behavior.gen_task_prompts \
-        --dataset-dir /path/to/datasets/behaviour-1k \
+        --dataset-dir /path/to/behaviour-1k \
         --activity-names task_names.json \
         --output task_prompts.json
 
 Pass the result to ``run_bridge.sh --task-names task_prompts.json``. The
 bridge's ``.replace("_", " ")`` is a no-op on the sentences (none contain an
-underscore), so they reach the model verbatim.
+underscore — the generator warns if a future dataset breaks this), so they
+reach the model verbatim.
 """
 
 from __future__ import annotations
@@ -38,7 +51,10 @@ import argparse
 import glob
 import json
 import os
-from typing import Dict
+import sys
+from typing import Dict, List, Tuple
+
+_EP_PREFIX = "episode_"
 
 
 def normalize_activity_name(name: str) -> str:
@@ -46,9 +62,51 @@ def normalize_activity_name(name: str) -> str:
     return " ".join(str(name).replace("_", " ").lower().split())
 
 
-def _load_chunk_task_names(dataset_dir: str) -> Dict[int, str]:
-    """Map task chunk id → annotation ``task_name`` (one JSON sampled per chunk)."""
-    chunk_dirs = sorted(glob.glob(os.path.join(dataset_dir, "annotations", "task-*")))
+def underscored_task_ids(task_prompts: Dict[int, str]) -> List[int]:
+    """task_ids whose prompt the bridge's ``replace("_", " ")`` would rewrite."""
+    return sorted(tid for tid, prompt in task_prompts.items() if "_" in prompt)
+
+
+def _read_chunks_size(dataset_dir: str) -> int:
+    with open(os.path.join(dataset_dir, "meta", "info.json")) as f:
+        return int(json.load(f)["chunks_size"])
+
+
+def _to_ascii_int(text: str) -> int:
+    """Strict decimal parse: plain ASCII digits only (no '_' grouping, no unicode digits)."""
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(f"not a plain decimal integer: {text!r}")
+    return int(text)
+
+
+def _parse_chunk_id(chunk_dir: str) -> int:
+    suffix = os.path.basename(chunk_dir).split("-", 1)[1]
+    try:
+        return _to_ascii_int(suffix)
+    except ValueError:
+        raise ValueError(f"annotation dir {chunk_dir!r} does not end in a numeric chunk id") from None
+
+
+def _parse_episode_index(path: str) -> int:
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if stem.startswith(_EP_PREFIX):
+        try:
+            return _to_ascii_int(stem[len(_EP_PREFIX) :])
+        except ValueError:
+            pass
+    raise ValueError(f"annotation file {path!r} is not named {_EP_PREFIX}<index>.json")
+
+
+def _load_chunk_task_names(dataset_dir: str, chunks_size: int) -> Dict[int, str]:
+    """Map task chunk id → the unanimous annotation ``task_name`` of the chunk.
+
+    Trust nothing singly: the directory number must match the chunk derived
+    from every contained filename's episode index, chunk ids must be unique
+    across directories, and the ``task_name`` field must be identical across
+    all JSONs of the chunk.
+    """
+    entries = sorted(glob.glob(os.path.join(glob.escape(dataset_dir), "annotations", "task-*")))
+    chunk_dirs = [p for p in entries if os.path.isdir(p)]
     if not chunk_dirs:
         raise FileNotFoundError(
             f"no annotations/task-* directories under {dataset_dir!r}. The "
@@ -57,23 +115,79 @@ def _load_chunk_task_names(dataset_dir: str) -> Dict[int, str]:
         )
     names: Dict[int, str] = {}
     for chunk_dir in chunk_dirs:
-        chunk = int(os.path.basename(chunk_dir).split("-", 1)[1])
-        files = sorted(glob.glob(os.path.join(chunk_dir, "*.json")))
+        chunk = _parse_chunk_id(chunk_dir)
+        if chunk in names:
+            raise ValueError(
+                f"duplicate annotation chunk id {chunk}: {chunk_dir!r} collides with an earlier "
+                "task-* dir (differently padded numbering?) — refusing to pick one."
+            )
+        files = sorted(glob.glob(os.path.join(glob.escape(chunk_dir), "*.json")))
         if not files:
             raise FileNotFoundError(f"annotation dir {chunk_dir!r} has no episode JSONs")
-        with open(files[0]) as f:
-            task_name = str(json.load(f).get("task_name", "")).strip()
-        if not task_name:
-            raise ValueError(f"{files[0]!r} has an empty 'task_name'")
+        task_name = None
+        for fp in files:
+            ep_chunk = _parse_episode_index(fp) // chunks_size
+            if ep_chunk != chunk:
+                raise ValueError(
+                    f"annotation dir {chunk_dir!r} is numbered {chunk} but contains {fp!r} whose "
+                    f"episode index falls in chunk {ep_chunk} (chunks_size={chunks_size}); the "
+                    "directory numbering and the episodes.jsonl chunking disagree — refusing to join."
+                )
+            with open(fp) as f:
+                this_name = str(json.load(f).get("task_name", "")).strip()
+            if not this_name:
+                raise ValueError(f"{fp!r} has an empty 'task_name'")
+            if task_name is None:
+                task_name = this_name
+            elif this_name != task_name:
+                raise ValueError(
+                    f"annotation dir {chunk_dir!r} has conflicting task_name values "
+                    f"({task_name!r} vs {this_name!r} in {fp!r}); refusing to pick one."
+                )
         names[chunk] = task_name
     return names
 
 
-def _load_chunk_prompts(dataset_dir: str) -> Dict[int, str]:
+def _cross_check_metainfo(dataset_dir: str, chunk_task_names: Dict[int, str], chunks_size: int) -> Tuple[int, int]:
+    """Validate annotation task_names against ``meta/episodes`` where present.
+
+    ``meta/episodes/task-XXXX/episode_*.json`` carries the simulator-authored
+    ``config.task.activity_name`` — a labeling source independent of the
+    ``annotations/`` folder. For every chunk that has such metainfo locally
+    (the folder is large and often partially downloaded), the two labels must
+    agree under join normalization. Returns ``(checked, total)`` chunk counts.
+    """
+    meta_dirs = sorted(glob.glob(os.path.join(glob.escape(dataset_dir), "meta", "episodes", "task-*")))
+    checked = 0
+    for meta_dir in meta_dirs:
+        if not os.path.isdir(meta_dir):
+            continue
+        files = sorted(glob.glob(os.path.join(glob.escape(meta_dir), "*.json")))
+        if not files:
+            continue
+        # Chunk from the metainfo FILENAME (dir numbering not trusted here either).
+        chunk = _parse_episode_index(files[0]) // chunks_size
+        if chunk not in chunk_task_names:
+            continue
+        with open(files[0]) as f:
+            config = json.load(f).get("config")
+        if isinstance(config, str):
+            config = json.loads(config)
+        activity = str((config or {}).get("task", {}).get("activity_name", "")).strip()
+        if not activity:
+            continue
+        if normalize_activity_name(activity) != normalize_activity_name(chunk_task_names[chunk]):
+            raise ValueError(
+                f"chunk {chunk}: annotation task_name {chunk_task_names[chunk]!r} disagrees with "
+                f"metainfo activity_name {activity!r} ({files[0]!r}); the annotations/ and "
+                "meta/episodes labels are inconsistent — refusing to join."
+            )
+        checked += 1
+    return checked, len(chunk_task_names)
+
+
+def _load_chunk_prompts(dataset_dir: str, chunks_size: int) -> Dict[int, str]:
     """Map task chunk id → the training prompt (``tasks[0]``) shared by its episodes."""
-    info_path = os.path.join(dataset_dir, "meta", "info.json")
-    with open(info_path) as f:
-        chunks_size = int(json.load(f)["chunks_size"])
     prompts: Dict[int, str] = {}
     episodes_path = os.path.join(dataset_dir, "meta", "episodes.jsonl")
     with open(episodes_path) as f:
@@ -83,9 +197,7 @@ def _load_chunk_prompts(dataset_dir: str) -> Dict[int, str]:
             tasks = ep.get("tasks") or []
             prompt = str(tasks[0]).strip() if tasks else ""
             if not prompt:
-                raise ValueError(
-                    f"episode {ep['episode_index']} in {episodes_path!r} has an empty 'tasks' prompt"
-                )
+                raise ValueError(f"episode {ep['episode_index']} in {episodes_path!r} has an empty 'tasks' prompt")
             if prompts.setdefault(chunk, prompt) != prompt:
                 raise ValueError(
                     f"task chunk {chunk} has episodes with differing prompts "
@@ -96,8 +208,11 @@ def _load_chunk_prompts(dataset_dir: str) -> Dict[int, str]:
 
 def build_task_prompts(dataset_dir: str, activity_names: Dict[int, str]) -> Dict[int, str]:
     """Return ``task_id → training-verbatim prompt`` for the bridge's --task-names."""
-    chunk_task_names = _load_chunk_task_names(dataset_dir)
-    chunk_prompts = _load_chunk_prompts(dataset_dir)
+    chunks_size = _read_chunks_size(dataset_dir)
+    chunk_task_names = _load_chunk_task_names(dataset_dir, chunks_size)
+    checked, total = _cross_check_metainfo(dataset_dir, chunk_task_names, chunks_size)
+    print(f"metainfo cross-check: {checked}/{total} chunks validated against meta/episodes activity_name")
+    chunk_prompts = _load_chunk_prompts(dataset_dir, chunks_size)
 
     missing_annotations = sorted(set(chunk_prompts) - set(chunk_task_names))
     if missing_annotations:
@@ -117,18 +232,28 @@ def build_task_prompts(dataset_dir: str, activity_names: Dict[int, str]) -> Dict
         name_to_chunk[key] = chunk
 
     out: Dict[int, str] = {}
-    unmatched = []
+    unmatched_names = []
+    matched_without_episodes = []
     for task_id, activity in sorted(activity_names.items()):
         chunk = name_to_chunk.get(normalize_activity_name(activity))
-        if chunk is None or chunk not in chunk_prompts:
-            unmatched.append((task_id, activity))
-            continue
-        out[task_id] = chunk_prompts[chunk]
-    if unmatched:
+        if chunk is None:
+            unmatched_names.append((task_id, activity))
+        elif chunk not in chunk_prompts:
+            matched_without_episodes.append((task_id, activity, chunk))
+        else:
+            out[task_id] = chunk_prompts[chunk]
+    if unmatched_names:
         raise ValueError(
-            f"{len(unmatched)} activity name(s) have no matching annotation task_name: "
-            f"{unmatched}. Dataset annotations and TASK_INDICES_TO_NAMES disagree — "
+            f"{len(unmatched_names)} activity name(s) have no matching annotation task_name: "
+            f"{unmatched_names}. Dataset annotations and TASK_INDICES_TO_NAMES disagree — "
             "resolve before eval, do not fall back to activity-name prompts."
+        )
+    if matched_without_episodes:
+        raise ValueError(
+            f"{len(matched_without_episodes)} activity name(s) matched an annotation task_name but "
+            f"episodes.jsonl has no episodes for the chunk: {matched_without_episodes}. "
+            "The annotations/ and meta/episodes.jsonl in --dataset-dir are out of sync "
+            "(incomplete or mixed-version episodes.jsonl)."
         )
     return out
 
@@ -147,6 +272,13 @@ def main() -> None:
     with open(args.activity_names) as f:
         activity_names = {int(k): str(v) for k, v in json.load(f).items()}
     task_prompts = build_task_prompts(args.dataset_dir, activity_names)
+    underscored = underscored_task_ids(task_prompts)
+    if underscored:
+        print(
+            f"WARNING: prompt(s) for task_id(s) {underscored} contain '_', which the bridge "
+            "rewrites to spaces — the model will NOT receive them verbatim.",
+            file=sys.stderr,
+        )
     with open(args.output, "w") as f:
         json.dump({str(k): v for k, v in sorted(task_prompts.items())}, f, indent=2)
     print(f"wrote {len(task_prompts)} task prompts → {args.output}")
