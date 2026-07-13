@@ -224,6 +224,32 @@ class VideoBackbone(ABC, nn.Module):
         raise NotImplementedError(f"{type(self).__name__} does not support joint self-attention.")
 
     # ================================================================
+    # Optional: IDM teacher-forcing branch merge/split (default raise)
+    # ================================================================
+
+    def merge_idm_video_branches(
+        self, noisy: BlockLoopState, cond: BlockLoopState
+    ) -> Tuple[BlockLoopState, int, int]:
+        """Concatenate the IDM noisy + cond video branches into one state along
+        the frame/sequence axis for a single MoT pass.
+
+        Returns ``(merged, s_noisy_tokens, s_cond_tokens)`` where the two seq
+        lengths are **token counts** (``T·H·W``) — the granularity the
+        teacher-forcing attention mask is built at. The driver must not inspect
+        ``hidden_states.shape[1]`` (it is ``T`` for 5D-grid backbones), so the
+        merge implementation — which owns its own layout — returns them here.
+        Pair with :meth:`split_idm_video_branches`."""
+        raise NotImplementedError(f"{type(self).__name__} does not support IDM teacher-forcing.")
+
+    def split_idm_video_branches(
+        self, merged: BlockLoopState, noisy: BlockLoopState, cond: BlockLoopState
+    ) -> Tuple[BlockLoopState, BlockLoopState]:
+        """Inverse of :meth:`merge_idm_video_branches`: write the post-loop merged
+        ``hidden_states`` (and any per-branch fields) back onto the ``noisy`` and
+        ``cond`` states. Returns ``(noisy, cond)``."""
+        raise NotImplementedError(f"{type(self).__name__} does not support IDM teacher-forcing.")
+
+    # ================================================================
     # Optional: shared-token injection (default raise)
     # ================================================================
 
@@ -246,6 +272,22 @@ class VideoBackbone(ABC, nn.Module):
     ) -> Tuple[BlockLoopState, Tensor]:
         """Slice action/state tokens off the sequence tail. Returns ``(state, action_tokens)``."""
         raise NotImplementedError(f"{type(self).__name__} does not support shared-backbone.")
+
+    def assert_ready_for_shared_tokens(self, state: BlockLoopState) -> None:
+        """Validate the prepared state can carry action/state shared tokens.
+
+        Default (Wan): the per-token ``time_mod`` must be 4D so injected
+        action/state tokens get their own timestep instead of being silently
+        modulated by a global one. Backbones that carry per-token modulation
+        elsewhere (CosmosPredict25 builds it in ``inject_shared_tokens`` from
+        ``extras``) override this to a no-op."""
+        if state.time_mod.dim() != 4:
+            raise RuntimeError(
+                f"{type(self).__name__} shared-backbone requires the video backbone to run in per-token "
+                "t_mod mode (e.g. dit.seperated_timestep=True with fuse_vae_embedding_in_latents=True). "
+                f"Got vstate.time_mod with dim={state.time_mod.dim()}; action/state timestep would be "
+                "silently ignored otherwise."
+            )
 
     # ================================================================
     # Lifecycle: device/dtype (default moves all registered children)
