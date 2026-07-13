@@ -20,7 +20,6 @@ from openwam.dataloader.utils.normalization import apply_normalization
 logger = logging.getLogger(__name__)
 
 _ACTION_MODES = {"joint", "eef", "unify"}
-_EEF20_UNIFY_SPEC = ("0-9", "34-43")
 _STAT_KEYS = ("mean", "std", "min", "max", "q01", "q99")
 
 
@@ -140,6 +139,11 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
                 f"RoboCasaGR1 action_mode={mode!r} requires unify_action=false; "
                 "use action_mode='unify' for the shared 80-D action space"
             )
+        if mode == "unify" and unify_action_map is None:
+            raise ValueError(
+                "RoboCasaGR1 action_mode='unify' requires an explicit unify_action_map; "
+                "set ['0-9', '34-43'] for canonical EEF20 mapping"
+            )
         self.action_mode = mode
         self.DEPLOY_ACTION_MODE = mode
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
@@ -202,8 +206,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         cols.append("task_index")
         self.NEEDED_COLS = tuple(dict.fromkeys(cols))
 
-        if mode == "unify" and unify_action_map is None:
-            unify_action_map = list(_EEF20_UNIFY_SPEC)
         super().__init__(
             dataset_dir=dataset_dir,
             unify_action=unify_on,

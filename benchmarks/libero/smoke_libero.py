@@ -33,10 +33,9 @@ def _benchmark_root(repo_root: Path) -> Path:
 
 
 def _config_root() -> Path:
+    default = Path.home() / (".libero-openwam")
     env_name = "LIBERO_CONFIG_ROOT"
-    raw_root = os.environ.get(env_name, os.environ.get("LIBERO_CONFIG_PATH", ""))
-    if not raw_root:
-        raise SystemExit(f"{env_name} is not set")
+    raw_root = os.environ.get(env_name, os.environ.get("LIBERO_CONFIG_PATH", str(default)))
     root = Path(raw_root).expanduser()
     return root.resolve()
 

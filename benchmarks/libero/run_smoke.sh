@@ -28,9 +28,17 @@ case "${MODE}" in
         ;;
 esac
 
-if [[ ! -x "${PYTHON_BIN}" ]]; then
-    echo "[ERROR] Python not executable: ${PYTHON_BIN}" >&2
-    exit 1
+if [[ "${PYTHON_BIN}" == */* ]]; then
+    [[ -x "${PYTHON_BIN}" ]] || {
+        echo "[ERROR] Python not executable: ${PYTHON_BIN}" >&2
+        exit 1
+    }
+else
+    PYTHON_COMMAND="${PYTHON_BIN}"
+    PYTHON_BIN="$(command -v "${PYTHON_COMMAND}")" || {
+        echo "[ERROR] Python command not found: ${PYTHON_COMMAND}" >&2
+        exit 1
+    }
 fi
 if [[ ! -d "${REPO_ROOT}" ]]; then
     echo "[ERROR] Repository not found: ${REPO_ROOT}" >&2

@@ -141,7 +141,12 @@ def test_eef_sample_and_missing_wrist_black_slots(tmp_path: Path):
 def test_unify_mode_maps_eef20_to_80_and_masks_unmapped_dims(tmp_path: Path):
     _write_bucket(tmp_path)
     with _mock_decoder():
-        ds = _dataset(tmp_path, action_mode="unify", unify_action=True)
+        ds = _dataset(
+            tmp_path,
+            action_mode="unify",
+            unify_action=True,
+            unify_action_map=["0-9", "34-43"],
+        )
         sample = ds[0]
 
     assert ds.action_dim == 80
@@ -172,6 +177,7 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
             tmp_path,
             action_mode="unify",
             unify_action=True,
+            unify_action_map=["0-9", "34-43"],
             normalize_mode="min-max",
             normalization_stats_path=str(stats_path),
         )
@@ -205,6 +211,12 @@ def test_unify_mode_rejects_mismatched_base_flag(tmp_path: Path):
     _write_bucket(tmp_path)
     with np.testing.assert_raises_regex(ValueError, "requires unify_action=true"):
         _dataset(tmp_path, action_mode="unify", unify_action=False)
+
+
+def test_unify_mode_requires_explicit_map(tmp_path: Path):
+    _write_bucket(tmp_path)
+    with np.testing.assert_raises_regex(ValueError, "requires an explicit unify_action_map"):
+        _dataset(tmp_path, action_mode="unify", unify_action=True, unify_action_map=None)
 
 
 def test_missing_optional_prompt_column_is_not_projected(tmp_path: Path):

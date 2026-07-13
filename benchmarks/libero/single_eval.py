@@ -52,28 +52,17 @@ def _load_config(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def _normalize_optional(value):
-    if isinstance(value, str) and value.strip().lower() in ("", "none", "null"):
-        return None
+def _require_bool(value, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{field_name} must be a YAML boolean, got {value!r}")
     return value
 
 
-def _parse_bool(value, field_name: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in ("1", "true", "yes", "y", "on"):
-            return True
-        if text in ("0", "false", "no", "n", "off", "none", "null", ""):
-            return False
-    raise ValueError(f"{field_name} must be a boolean, got {value!r}")
-
-
 def _parse_optional_int(value, field_name: str) -> int | None:
-    value = _normalize_optional(value)
     if value is None:
         return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be a YAML integer or null, got {value!r}")
     parsed = int(value)
     if parsed <= 0:
         raise ValueError(f"{field_name} must be positive or null, got {value!r}")
@@ -81,9 +70,10 @@ def _parse_optional_int(value, field_name: str) -> int | None:
 
 
 def _parse_optional_float(value, field_name: str) -> float | None:
-    value = _normalize_optional(value)
     if value is None:
         return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{field_name} must be a YAML number or null, got {value!r}")
     parsed = float(value)
     if parsed <= 0:
         raise ValueError(f"{field_name} must be positive or null, got {value!r}")
@@ -125,23 +115,23 @@ def run_eval(cfg: dict) -> int:
         port=int(cfg.get("port", 8848)),
         request_timeout=int(cfg.get("request_timeout", 300)),
         head_camera_key=cfg.get("head_camera_key", "agentview_image"),
-        left_wrist_camera_key=_normalize_optional(cfg.get("left_wrist_camera_key")),
-        right_wrist_camera_key=_normalize_optional(cfg.get("right_wrist_camera_key")),
+        left_wrist_camera_key=cfg.get("left_wrist_camera_key"),
+        right_wrist_camera_key=cfg.get("right_wrist_camera_key"),
         image_transform=cfg.get("image_transform", "rotate_180"),
-        send_state=_parse_bool(cfg.get("send_state", False), "send_state"),
+        send_state=_require_bool(cfg.get("send_state", False), "send_state"),
         state_keys=list(cfg.get("state_keys") or []),
         state_dim=_parse_optional_int(cfg.get("state_dim"), "state_dim"),
         action_dim=int(cfg.get("action_dim", 7)),
-        action_indices=_normalize_optional(cfg.get("action_indices")),
+        action_indices=cfg.get("action_indices"),
         action_clip=_parse_optional_float(cfg.get("action_clip"), "action_clip"),
-        debug=_parse_bool(cfg.get("debug", False), "debug"),
+        debug=_require_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_libero"),
     )
 
     num_trials = int(cfg.get("num_trials", 1))
     max_steps = int(cfg.get("max_steps", 600))
     settle_steps = int(cfg.get("settle_steps", 10))
-    fail_on_incomplete = _parse_bool(cfg.get("fail_on_incomplete", False), "fail_on_incomplete")
+    fail_on_incomplete = _require_bool(cfg.get("fail_on_incomplete", False), "fail_on_incomplete")
     init_states = task_suite.get_task_init_states(task_id)
     env = _make_env(task, cfg)
     successes = 0

@@ -18,6 +18,19 @@ host="${4:-${LIBERO_POLICY_HOST:-127.0.0.1}}"
 python_bin="${LIBERO_PYTHON:-python}"
 repo_root="${LIBERO_PATH}"
 
+if [[ "${python_bin}" == */* ]]; then
+    [[ -x "${python_bin}" ]] || {
+        echo "[ERROR] Python not executable: ${python_bin}" >&2
+        exit 1
+    }
+else
+    python_command="${python_bin}"
+    python_bin="$(command -v "${python_command}")" || {
+        echo "[ERROR] Python command not found: ${python_command}" >&2
+        exit 1
+    }
+fi
+
 policy_config="${POLICY_CONFIG_PATH:-${SCRIPT_DIR}/policy_config.yml}"
 [[ -f "${policy_config}" ]] || { echo "[ERROR] policy config not found: ${policy_config}" >&2; exit 1; }
 [[ -d "${repo_root}" ]] || { echo "[ERROR] LIBERO repo not found: ${repo_root}" >&2; exit 1; }

@@ -26,6 +26,11 @@ def _load_interface_module(repo_root: Path):
     return _load_module(repo_root, "benchmarks/libero/openwam2libero_interface.py", "openwam2libero_interface")
 
 
+def _load_single_eval_module(repo_root: Path, monkeypatch):
+    monkeypatch.syspath_prepend(str(repo_root / "benchmarks" / "libero"))
+    return _load_module(repo_root, "benchmarks/libero/single_eval.py", "libero_single_eval")
+
+
 def _fake_libero_repo(root: Path):
     package_root = root / "libero" / "libero"
     for name in ["bddl_files", "init_files", "assets"]:
@@ -56,6 +61,33 @@ def test_libero_smoke_rejects_missing_repo_env(monkeypatch):
     monkeypatch.delenv("LIBERO_PATH", raising=False)
     with pytest.raises(SystemExit, match="LIBERO_PATH is not set"):
         smoke.write_config()
+
+
+def test_libero_smoke_config_root_uses_documented_default(tmp_path, monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    smoke = _load_smoke_module(repo_root)
+    ordinary_repo = tmp_path / "LIBERO"
+    _fake_libero_repo(ordinary_repo)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LIBERO_PATH", str(ordinary_repo))
+    monkeypatch.delenv("LIBERO_CONFIG_ROOT", raising=False)
+    monkeypatch.delenv("LIBERO_CONFIG_PATH", raising=False)
+
+    smoke.write_config()
+
+    assert (tmp_path / "home" / ".libero-openwam" / "config.yaml").is_file()
+
+
+def test_libero_single_eval_requires_typed_yaml(monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    single_eval = _load_single_eval_module(repo_root, monkeypatch)
+
+    with pytest.raises(TypeError, match="YAML boolean"):
+        single_eval._require_bool("off", "send_state")
+    with pytest.raises(TypeError, match="YAML integer"):
+        single_eval._parse_optional_int("8", "state_dim")
+    with pytest.raises(TypeError, match="YAML number"):
+        single_eval._parse_optional_float("1.0", "action_clip")
 
 
 def test_libero_policy_reuses_ws_and_rotates_images(monkeypatch):
@@ -127,3 +159,34 @@ def test_libero_shell_scripts_are_valid():
         timeout=10,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_libero_shell_wrappers_resolve_python_from_path(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    fake_repo = tmp_path / "LIBERO"
+    fake_repo.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python"
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "LIBERO_PATH": str(fake_repo),
+    }
+
+    for script, args in (
+        ("run_smoke.sh", ["import"]),
+        ("single_eval.sh", ["libero_spatial", "0"]),
+    ):
+        result = subprocess.run(
+            ["bash", str(repo_root / "benchmarks" / "libero" / script), *args],
+            cwd=repo_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert str(fake_python) in result.stdout
