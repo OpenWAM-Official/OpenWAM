@@ -123,7 +123,8 @@ BASE_VEL_DIM = 3  # the 3 base-velocity dims within base5 (proprio populates the
 #   ACTION gripper = the recorded command (exact timing, no actuation lag).
 #   PROPRIO gripper = the ACHIEVED finger-separation width linearly mapped to [-1, +1] via _gripper_width_to_cmd
 #     (open width _GRIPPER_WIDTH_OPEN → -1, closed 0 → +1), so both share the gripper stats and the deploy
-#     bridge decides open/close by SIGN (>0 → close) — no width binarization / actuation-lag delay.
+#     bridge decides open/close by CONFIDENT-CLOSE (>0.5 → close; neutral/uncertain ~0 output defaults to
+#     open, avoiding spurious grasps) — no width binarization / actuation-lag delay.
 _GRIPPER_WIDTH_OPEN = 0.1  # finger-separation width mapped to -1 (fully open); 0 (closed) → +1
 # The mobile raw vector folds the base command INTO the pre-unify vector (like BEHAVIOR's RAW-27):
 #   raw25 = [arm20 (single-arm EEF, left real + right zero), base5]. unify then maps the WHOLE 25-D via

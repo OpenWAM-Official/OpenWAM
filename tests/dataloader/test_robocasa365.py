@@ -639,8 +639,8 @@ def test_action_gripper_is_command_proprio_is_rendered_width(tmp_path):
 
 def test_gripper_stats_pinned_to_command_range(tmp_path):
     # The gripper dim (9) normalize range is pinned to [-1,+1] (command space), so the model's ±1
-    # de-normalizes to EXACTLY ±1 — a +1 (close) reaches the sim as +1, a -1 (open) as -1, the deploy
-    # bridge cuts at exactly 0 (not the achieved-width data range).
+    # de-normalizes to EXACTLY ±1 — a +1 (close) reaches the sim as +1, a -1 (open) as -1; the deploy
+    # bridge cuts at 0.5 (confident-close), not the achieved-width data range.
     b = make_robocasa_bucket(tmp_path)
     with _mock_video_decoder():
         ds = RoboCasa365Dataset(data_root=str(b), task_name="OpenDrawer", multiview=False, height=64,

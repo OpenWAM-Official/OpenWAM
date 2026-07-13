@@ -119,8 +119,8 @@ def _pin_gripper_stats(eef10: dict) -> dict:
 
     The gripper is a command (ACTION = the recorded binary command; PROPRIO = the achieved width
     rendered into [-1, +1]), so its min/max are pinned to [-1, +1] instead of the achieved-width data
-    range. Then the model's ±1 output de-normalizes to EXACTLY ±1 (the deploy bridge thresholds at
-    exactly 0 — a +1 close reaches the sim as +1, a -1 open as -1), and normalizing the rendered proprio
+    range. Then the model's ±1 output de-normalizes to EXACTLY ±1 (a +1 close reaches the sim as +1, a -1
+    open as -1; the deploy bridge thresholds at 0.5 — confident-close), and normalizing the rendered proprio
     is the identity. mean/std are set command-neutral (0/1) for the z-score path."""
     out = {k: np.array(eef10[k], dtype=np.float32) for k in eef10}
     g = STATS_DIM - 1  # dim 9 = gripper

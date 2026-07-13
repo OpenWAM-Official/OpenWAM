@@ -125,7 +125,7 @@ def assemble_eef20d_proprio(obs: dict, base5: Optional[np.ndarray] = None) -> li
     """Build the single-arm EEF proprio (RAW) the model trains on, from a RoboCasa obs.
 
     Mirrors the dataloader's proprio exactly (``state_to_arm10`` + ``assemble_single_arm_left``):
-    ``[eef_pos_rel(3), rot6d(eef_rot_rel quat,6), gripper_separation(1), <right 10 zeros>]``.
+    ``[eef_pos_rel(3), rot6d(eef_rot_rel quat,6), gripper cmd-space [-1,+1] (rendered width, 1), <right 10 zeros>]``.
     Sent raw (physical) — the server normalizes. This replaces the stale 16-D raw send so the
     deploy proprio matches the trained representation (the dual of robotwin's _extract_eef_proprio).
 

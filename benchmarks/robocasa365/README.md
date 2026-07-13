@@ -227,8 +227,9 @@ v3 repo's `meta/episodes/*.parquet` (`length` column), filtered to that task's `
   individually run.
 - **No parallel / distributed eval** (cf. robotwin's `parallel_eval.sh` / DLC path) — tasks
   run sequentially.
-- **OSC scales + gripper threshold** in `policy_config.yml` were measured on `OpenDrawer` /
-  `default_pandaomron.json`; re-verify for other tasks/controllers.
+- **OSC scales** in `policy_config.yml` were measured on `OpenDrawer` /
+  `default_pandaomron.json`; re-verify for other tasks/controllers. (The gripper close threshold
+  `0.5` is a bridge-internal command-space contract, hardcoded in `eef20d_to_robocasa12d`, not a config.)
 - `step_limits.yml` is seeded only for tasks whose data is local; add the rest as needed.
 
 ## Contract notes
