@@ -32,8 +32,9 @@ right_wrist_camera_key: null
 prompt_key: annotation.human.coarse_action
 fallback_prompt_key: annotation.human.action.task_description
 
-# Proprioception. Leave state_keys null to preserve the observation insertion
-# order from GrootRoboCasaEnv. The official dataset card documents 44D
+# Proprioception. Prefer an explicit ordered state_keys list matching the
+# conversion job. null uses sorted state.* keys (deterministic, but not proof of
+# semantic agreement). The official dataset card documents 44D
 # state/action, while the default gr1_unified arms+waist Fourier-hands gym env
 # currently reports 29D state/action through its action_space. Keep state_dim
 # null unless you have verified the exact checkpoint/env data contract.
@@ -41,10 +42,14 @@ send_state: true
 state_keys: null
 state_dim: null
 
-# Action handling. Leave action_keys null to split the flat OpenWAM action using
-# env.action_space order. For GR1ArmsAndWaistFourierHands this maps to the
+# Action handling. Prefer an explicit ordered action_keys list matching the
+# conversion job. null uses sorted env.action_space keys. For
+# GR1ArmsAndWaistFourierHands this maps to the
 # official GR00T action dict keys such as action.left_hand, action.right_hand,
 # action.left_arm, action.right_arm, and action.waist.
+# The shipped 29D env can directly consume only a matching joint-mode checkpoint.
+# A 20D EEF or 80D unified checkpoint needs an explicit robot-specific conversion;
+# action_indices alone cannot synthesize the missing joint/hand dimensions.
 action_keys: null
 action_indices: null
 action_clip: null

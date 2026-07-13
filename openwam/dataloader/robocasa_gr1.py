@@ -11,54 +11,17 @@ import logging
 from typing import Any, ClassVar, List, Optional, Sequence, Tuple
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
-from openwam.dataloader.robocasa_gr1_stats import load_stats_file, neutralize_rot6d_stats
-from openwam.dataloader.utils.eef import (
-    EEF_DIM,
-    build_action_mask_2d,
-    build_proprio_mask_2d,
-    eef14_to_eef20,
-)
+from openwam.dataloader.robocasa_gr1_stats import load_stats_file
+from openwam.dataloader.utils.eef import EEF_DIM, eef14_to_eef20
 from openwam.dataloader.utils.normalization import apply_normalization
 
 logger = logging.getLogger(__name__)
 
 _ACTION_MODES = {"joint", "eef", "unify"}
-_UNIFY_DIM = 80
-_DEFAULT_PROMPT = "Perform the RoboCasa GR1 tabletop task."
-
-# 80-D pretraining action space:
-#   L xyz[0:3] rot6d[3:9] gripper[9] dexterous_hand[10:34]
-#   R xyz[34:37] rot6d[37:43] gripper[43] dexterous_hand[44:68]
-#   redundant/base[68:80]
-_EEF20_TO_UNIFY80 = [
-    0,
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    34,
-    35,
-    36,
-    37,
-    38,
-    39,
-    40,
-    41,
-    42,
-    43,
-]
-
-_EEF_ROT6D_SLICES = ((3, 9), (13, 19))
-_UNIFY_ROT6D_SLICES = ((3, 9), (37, 43))
+_EEF20_UNIFY_SPEC = ("0-9", "34-43")
+_STAT_KEYS = ("mean", "std", "min", "max", "q01", "q99")
 
 
 def _as_list(value: Any) -> List[Any]:
@@ -161,18 +124,25 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         right_wrist_camera_priority: Optional[Sequence[str]] = None,
         normalization_stats_path: Optional[str] = None,
         unify_action: Optional[bool] = None,
-        unify_action_map: Optional[Sequence[int]] = None,
+        unify_action_map: Optional[Any] = None,
         action_mask: Optional[Sequence[bool]] = None,
         state_mask: Optional[Sequence[bool]] = None,
         **kwargs: Any,
     ):
         mode = str(action_mode).strip().lower()
-        if unify_action is True:
-            mode = "unify"
         if mode not in _ACTION_MODES:
             raise ValueError(f"action_mode must be one of {sorted(_ACTION_MODES)}, got {action_mode!r}")
+        unify_on = bool(unify_action)
+        if mode == "unify" and not unify_on:
+            raise ValueError("RoboCasaGR1 action_mode='unify' requires unify_action=true")
+        if mode != "unify" and unify_on:
+            raise ValueError(
+                f"RoboCasaGR1 action_mode={mode!r} requires unify_action=false; "
+                "use action_mode='unify' for the shared 80-D action space"
+            )
         self.action_mode = mode
-        self._normalization_stats_path = str(normalization_stats_path) if normalization_stats_path else None
+        self.DEPLOY_ACTION_MODE = mode
+        self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
 
         self._prompt_columns = [str(x) for x in _as_list(prompt_columns)]
         self._head_priority = tuple(str(x) for x in (head_camera_priority or self.HEAD_CAMERA_PRIORITY))
@@ -199,31 +169,23 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             self._gripper_action_column = None if self._action_column else eef_gripper_action_column
             self._pose_state_column = None if self._state_column else eef_pose_state_column
             self._gripper_state_column = None if self._state_column else eef_gripper_state_column
-            dim = _UNIFY_DIM if mode == "unify" else (int(action_dim) if action_dim is not None else EEF_DIM)
+            dim = int(action_dim) if action_dim is not None else EEF_DIM
 
         if mode == "joint" and dim is None:
             # LeRobot v3 joint conversions should set action_dim explicitly.
             # A clear constructor error is better than a late assignment failure.
             raise ValueError("RoboCasaGR1Dataset action_mode='joint' requires action_dim in the dataloader config")
+        if mode != "joint" and dim != EEF_DIM:
+            raise ValueError(f"RoboCasaGR1 action_mode={mode!r} requires raw 20-D EEF vectors, got action_dim={dim}")
 
         self.ACTION_DIM = int(dim)
-        self._raw_action_dim = int(action_dim) if action_dim is not None and mode == "unify" else None
-        self._unify_action_map = self._resolve_unify_map(unify_action_map)
-        default_unify_mask = None
-        if mode == "unify":
-            default_unify_mask = np.zeros((self.ACTION_DIM,), dtype=bool)
-            default_unify_mask[self._unify_action_map] = True
-        self._action_dim_mask = (
-            _as_bool_mask(action_mask, self.ACTION_DIM, field="action_mask")
-            if action_mask is not None
-            else default_unify_mask
-        )
-        self._proprio_dim_mask = (
-            _as_bool_mask(state_mask, self.ACTION_DIM, field="state_mask")
-            if state_mask is not None
-            else default_unify_mask
-        )
-        self.ACTION_DIM_MASK = self._action_dim_mask
+        action_dim_mask = _as_bool_mask(action_mask, self.ACTION_DIM, field="action_mask")
+        state_dim_mask = _as_bool_mask(state_mask, self.ACTION_DIM, field="state_mask")
+        if action_dim_mask is not None and state_dim_mask is not None and not np.array_equal(
+            action_dim_mask, state_dim_mask
+        ):
+            raise ValueError("RoboCasaGR1 action_mask and state_mask must match; the shared reader uses one raw mask")
+        self.ACTION_DIM_MASK = action_dim_mask if action_dim_mask is not None else state_dim_mask
 
         cols: List[str] = []
         for col in (
@@ -237,24 +199,17 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         ):
             if col:
                 cols.append(str(col))
-        if not self._prompt_columns:
-            cols.append("task_index")
+        cols.append("task_index")
         self.NEEDED_COLS = tuple(dict.fromkeys(cols))
 
-        super().__init__(dataset_dir=dataset_dir, **kwargs)
-
-    def _resolve_unify_map(self, raw_map: Optional[Sequence[int]]) -> Optional[np.ndarray]:
-        if self.action_mode != "unify":
-            return None
-        mapping = _EEF20_TO_UNIFY80 if raw_map is None else [int(x) for x in raw_map]
-        arr = np.asarray(mapping, dtype=np.int64)
-        if arr.ndim != 1:
-            raise ValueError("unify_action_map must be a 1-D list of destination indices")
-        if (arr < 0).any() or (arr >= _UNIFY_DIM).any():
-            raise ValueError(f"unify_action_map indices must be in [0, {_UNIFY_DIM}), got {arr.tolist()}")
-        if len(set(arr.tolist())) != len(arr):
-            raise ValueError("unify_action_map must not contain duplicate destination indices")
-        return arr
+        if mode == "unify" and unify_action_map is None:
+            unify_action_map = list(_EEF20_UNIFY_SPEC)
+        super().__init__(
+            dataset_dir=dataset_dir,
+            unify_action=unify_on,
+            unify_action_map=unify_action_map,
+            **kwargs,
+        )
 
     def _resolve_cameras(self, info: dict):
         features = info.get("features", {}) or {}
@@ -266,19 +221,20 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             _pick_feature(features, self._right_wrist_priority),
         )
 
-    def _read_data_file_uncached(self, chunk_idx: int, file_idx: int):
-        path = self._dataset_dir / self._data_path_template.format(chunk_index=chunk_idx, file_index=file_idx)
-        try:
-            return pq.read_table(path, memory_map=True, columns=list(self.NEEDED_COLS))
-        except pa.ArrowInvalid as exc:
-            # Flat LeRobot feature names may contain dots (e.g.
-            # annotation.human.coarse_action). Some pyarrow versions parse those
-            # projection strings as nested field paths. Fall back to reading the
-            # shard and let the normal hook-level column checks produce precise
-            # missing-column errors.
-            if "Dot path" not in str(exc):
-                raise
-            return pq.read_table(path, memory_map=True)
+    def _post_init(self, info: dict) -> None:
+        features = info.get("features", {}) or {}
+        configured = set(self._prompt_columns)
+        self._prompt_columns = [col for col in self._prompt_columns if col in features]
+        missing = configured.difference(self._prompt_columns)
+        if missing:
+            logger.info(
+                "RoboCasaGR1(%s): ignoring prompt columns absent from info.features: %s",
+                self._dataset_id,
+                sorted(missing),
+            )
+        self.NEEDED_COLS = tuple(
+            col for col in self.NEEDED_COLS if col not in configured or col in self._prompt_columns
+        )
 
     def _resolve_prompt(self, row, win) -> str:
         for col in self._prompt_columns:
@@ -288,42 +244,42 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
                     text = str(value).strip()
                     if text:
                         return text
-        try:
-            return super()._resolve_prompt(row, win)
-        except Exception:
-            return _DEFAULT_PROMPT
+        return super()._resolve_prompt(row, win)
 
     def _load_stats(self, info: dict):
         if not self._normalize_mode or self._normalize_mode in (None, "none", "null"):
             return None
-        if not self._normalization_stats_path:
+        if not self._source_stats_path:
             raise FileNotFoundError(
                 "RoboCasaGR1Dataset normalize_mode is enabled but normalization_stats_path is unset. "
                 "Run scripts/robocasa_gr1_compute_stats.py or set normalize_mode=null."
             )
-        stats = load_stats_file(self._normalization_stats_path, action_mode=self.action_mode)
-        return neutralize_rot6d_stats(stats, self._rot6d_slices_for_stats())
-
-    def _rot6d_slices_for_stats(self) -> Tuple[Tuple[int, int], ...]:
-        if self.action_mode == "eef":
-            return _EEF_ROT6D_SLICES
-        if self.action_mode == "unify":
-            # Stats are computed/applied before mapping raw vectors into the
-            # 80-D space. The default raw vector is canonical 20-D EEF.
-            if self._unify_action_map is not None and len(self._unify_action_map) == EEF_DIM:
-                return _EEF_ROT6D_SLICES
-        return ()
+        stats = load_stats_file(
+            self._source_stats_path,
+            action_mode=self.action_mode,
+            normalize_mode=self._normalize_mode,
+            dim=self._raw_action_dim,
+        )
+        self._write_deploy_normalizer_stats(stats, _STAT_KEYS)
+        return stats
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
 
     def _action_20d(self, win) -> np.ndarray:
         raw = self._raw_action(win)
-        return self._map_after_normalize(raw)
+        return self._normalize_array(raw)
 
     def _proprio_20d(self, win) -> np.ndarray:
-        raw = self._raw_state(win)
-        return self._map_after_normalize(raw[:1])
+        raw = self._read_vector_window(
+            win,
+            vector_col=self._state_column,
+            pose_col=self._pose_state_column,
+            grip_col=self._gripper_state_column,
+            label="state",
+            first_only=True,
+        )
+        return self._normalize_array(raw)
 
     def _raw_action(self, win) -> np.ndarray:
         return self._read_vector_window(
@@ -351,11 +307,13 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         pose_col: Optional[str],
         grip_col: Optional[str],
         label: str,
+        first_only: bool = False,
     ) -> np.ndarray:
+        values = slice(0, 1) if first_only else slice(None)
         if vector_col:
             if vector_col not in win:
                 raise KeyError(f"RoboCasaGR1 {label} column {vector_col!r} not found in parquet window")
-            return np.stack(win[vector_col].values).astype(np.float32)
+            return np.stack(win[vector_col].values[values]).astype(np.float32)
         if not pose_col or not grip_col:
             raise KeyError(f"RoboCasaGR1 {label} needs either a vector column or pose+gripper columns")
         if pose_col not in win or grip_col not in win:
@@ -363,84 +321,14 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
                 f"RoboCasaGR1 {label} columns missing: pose={pose_col!r} present={pose_col in win}, "
                 f"gripper={grip_col!r} present={grip_col in win}"
             )
-        pose = np.stack(win[pose_col].values).astype(np.float32)
-        grip = np.stack(win[grip_col].values).astype(np.float32)
+        pose = np.stack(win[pose_col].values[values]).astype(np.float32)
+        grip = np.stack(win[grip_col].values[values]).astype(np.float32)
         if pose.shape[-1] != 12 or grip.shape[-1] != 2:
             raise ValueError(
                 f"RoboCasaGR1 {label} pose+gripper EEF conversion expects 12D+2D, "
                 f"got {pose.shape[-1]}D+{grip.shape[-1]}D"
             )
         return eef14_to_eef20(pose, grip)
-
-    def _map_after_normalize(self, raw: np.ndarray) -> np.ndarray:
-        normalized = self._normalize_array(raw)
-        if self.action_mode != "unify":
-            if normalized.shape[-1] != self.ACTION_DIM:
-                raise ValueError(
-                    f"RoboCasaGR1 action_mode={self.action_mode!r} expected {self.ACTION_DIM}D vectors, "
-                    f"got {normalized.shape[-1]}D"
-                )
-            return normalized.astype(np.float32)
-        return self.map_to_unify(normalized)
-
-    def map_to_unify(self, arr: np.ndarray) -> np.ndarray:
-        if self._unify_action_map is None:
-            raise RuntimeError("map_to_unify called outside action_mode='unify'")
-        if arr.shape[-1] != len(self._unify_action_map):
-            raise ValueError(
-                f"unify_action_map length {len(self._unify_action_map)} does not match raw vector dim {arr.shape[-1]}"
-            )
-        out = np.zeros(arr.shape[:-1] + (_UNIFY_DIM,), dtype=np.float32)
-        out[..., self._unify_action_map] = arr
-        return out
-
-    def unmap_from_unify(self, arr: np.ndarray) -> np.ndarray:
-        if self._unify_action_map is None:
-            return arr
-        return np.asarray(arr)[..., self._unify_action_map]
-
-    def _finalize_action(self, action_20d: Optional[np.ndarray], actual_raw_len: int):
-        T_action = self._num_frames - 1
-        action = np.zeros((T_action, self.ACTION_DIM), dtype=np.float32)
-        n_valid = 0
-        if action_20d is not None:
-            n_valid = min(actual_raw_len, T_action)
-            if n_valid > 0:
-                action[:n_valid] = action_20d[:n_valid]
-        action_mask = build_action_mask_2d(
-            T_action=T_action,
-            action_dim=self.ACTION_DIM,
-            n_valid_time=n_valid if self._enable_action_supervision else 0,
-            dim_mask=self._action_dim_mask,
-        )
-        return action, action_mask
-
-    def _finalize_proprio(self, proprio_20d: Optional[np.ndarray]):
-        if proprio_20d is None:
-            proprio = np.zeros((1, self.ACTION_DIM), dtype=np.float32)
-            mask = build_proprio_mask_2d(action_dim=self.ACTION_DIM, enabled=False)
-            return proprio, mask
-        mask = build_proprio_mask_2d(
-            action_dim=self.ACTION_DIM,
-            enabled=self._enable_action_supervision,
-            dim_mask=self._proprio_dim_mask if self._proprio_dim_mask is not None else self._action_dim_mask,
-        )
-        return np.asarray(proprio_20d, dtype=np.float32), mask
-
-    @property
-    def normalization_stats_path(self) -> Optional[str]:
-        return self._normalization_stats_path
-
-    @normalization_stats_path.setter
-    def normalization_stats_path(self, value: Optional[str]) -> None:
-        if value is None and hasattr(self, "_normalization_stats_path"):
-            return
-        self._normalization_stats_path = str(value) if value else None
-
-    @property
-    def normalization_stats(self):
-        # Samples leave this reader already normalized when normalize_mode is set.
-        return None
 
     @classmethod
     def _multibucket_wrapper(cls):
@@ -458,6 +346,9 @@ class MultiRoboCasaGR1Dataset(MultiLeRobotV3Reader):
             raise ValueError(f"MultiRoboCasaGR1Dataset requires homogeneous action_dim, got {sorted(dims)}")
         if len(modes) != 1:
             raise ValueError(f"MultiRoboCasaGR1Dataset requires homogeneous action_mode, got {sorted(modes)}")
+        stats_paths = {b._source_stats_path for b in self._buckets}
+        if len(stats_paths) != 1:
+            raise ValueError("MultiRoboCasaGR1Dataset requires one shared normalization_stats_path")
         logger.info(
             "MultiRoboCasaGR1Dataset: %d buckets, %d windows, action_mode=%s, action_dim=%d",
             len(self._buckets),
@@ -465,6 +356,11 @@ class MultiRoboCasaGR1Dataset(MultiLeRobotV3Reader):
             next(iter(modes)),
             next(iter(dims)),
         )
+
+    @property
+    def normalization_stats_path(self) -> Optional[str]:
+        """Deploy artifact generated by the first homogeneous bucket."""
+        return self._buckets[0].normalization_stats_path
 
     @classmethod
     def from_config(cls, config, split: str = "train"):

@@ -6,8 +6,8 @@ dataset_dir: /TODO/robocasa_gr1_lerobotv3
 
 # joint: raw joint vectors from action/state columns; requires action_dim.
 # eef:   20D [L xyz+rot6d+grip, R xyz+rot6d+grip].
-# unify: 80D pretraining action space; maps normalized raw dims via
-#        unify_action_map and masks unmapped dims.
+# unify: normalize raw 20D EEF, then scatter through the shared base reader into
+#        the 80D pretraining space. Requires unify_action: true below.
 action_mode: eef
 action_dim: null
 
@@ -23,8 +23,8 @@ eef_gripper_action_column: gripper_open_scale_action
 eef_pose_state_column: eef_sim_pose_state
 eef_gripper_state_column: gripper_open_scale_state
 
-# Prompt resolution tries these parquet columns first, then falls back to
-# meta/tasks.parquet task_index, then a generic RoboCasa prompt.
+# Prompt resolution tries available parquet columns first, then falls back to
+# meta/tasks.parquet via task_index. Missing/blank prompt metadata is an error.
 prompt_columns:
   - annotation.human.coarse_action
   - annotation.human.action.task_description
@@ -57,22 +57,24 @@ multiview: true
 split: train
 enable_action_supervision: true
 
-# null disables in-reader normalization. Set to min-max or z-score after
+# null disables in-reader normalization. Set to min-max, z-score, or quantile after
 # generating normalization_stats.npy with scripts/robocasa_gr1_compute_stats.py.
 normalize_mode: null
 normalization_stats_path: null
 
 # Unify mode knobs. Default map slots canonical 20D EEF into the 80D space:
 # L xyz/rot6d/gripper -> [0:10], R xyz/rot6d/gripper -> [34:44].
+# Set action_mode: unify and unify_action: true together; eef/joint require false.
 unify_action: false
-unify_action_map: null
+unify_action_map:
+  - "0-9"
+  - "34-43"
 state_mask: null
 action_mask: null
 
-transforms:
-  augmentation:
-    color_jitter:
-      brightness: 0.2
-      contrast: 0.2
-      saturation: 0.2
-      hue: 0.0
+# Load-time, temporally consistent augmentation (train split only).
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0

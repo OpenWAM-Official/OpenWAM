@@ -62,6 +62,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
@@ -112,7 +113,15 @@ _CONFIG_MISSING = object()
 # ceiling (largest shards decode to large tables).
 @functools.lru_cache(maxsize=4)
 def _read_data_table_cached(path: str, columns: Tuple[str, ...]):
-    return pq.read_table(path, memory_map=True, columns=list(columns))
+    try:
+        return pq.read_table(path, memory_map=True, columns=list(columns))
+    except pa.ArrowInvalid as exc:
+        # Some pyarrow versions interpret flat LeRobot feature names containing
+        # dots as nested-field paths. Keep the compatibility fallback inside
+        # the process-global cache so affected shards are still read only once.
+        if "Dot path" not in str(exc):
+            raise
+        return pq.read_table(path, memory_map=True)
 
 
 class LeRobotV3Reader(BaseDataset):

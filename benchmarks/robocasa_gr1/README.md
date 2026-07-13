@@ -96,16 +96,17 @@ episode count, and max steps. By default:
 
 - `head_camera_key` is `video.ego_view_pad_res256_freq20`, the official
   processed ego-view stream from `GrootRoboCasaEnv`.
-- `send_state: true` forwards the GR00T-style `state.*` fields. Leave
-  `state_keys: null` to preserve the observation insertion order from the
-  official wrapper.
-- `action_keys: null` splits the flat OpenWAM action using `env.action_space`
-  order. For the default GR1 arms+waist Fourier-hands tasks this corresponds to
-  the official GR00T action dict keys, including the hands, arms, and waist.
+- `send_state: true` forwards the GR00T-style `state.*` fields. Set an explicit
+  ordered `state_keys` list matching the conversion job; `null` uses sorted keys
+  for deterministic diagnostics but cannot prove semantic alignment.
+- Set an explicit ordered `action_keys` list matching the conversion job.
+  `action_keys: null` uses sorted `env.action_space` keys.
 - The NVIDIA dataset card documents 44D state/action, while the default
   `gr1_unified/*GR1ArmsAndWaistFourierHands_Env` gym wrapper currently reports
   29D state/action (`6+6+7+7+3`). Treat the env smoke output as the source of
-  truth for the checkpoint you evaluate.
+  truth for the checkpoint you evaluate. The shipped 29D environment directly
+  consumes only a matching joint-mode checkpoint; 20D EEF and 80D unified
+  checkpoints require a robot-specific EEF-to-joint controller/conversion.
 - `fail_on_incomplete: false` means the process exits successfully after a
   completed benchmark run even when success rate is below 100%. Set it to
   `true` for pass/fail smoke gates.

@@ -25,7 +25,7 @@ def _as_vector(value) -> np.ndarray:
 def _state_keys(obs: Mapping, configured: Iterable[str] | None) -> list[str]:
     if configured:
         return [str(key) for key in configured]
-    return [key for key in obs if str(key).startswith("state.")]
+    return sorted(str(key) for key in obs if str(key).startswith("state."))
 
 
 def build_state(obs: Mapping, keys: Iterable[str] | None = None) -> list[float]:
@@ -60,7 +60,7 @@ def action_vector_to_dict(
     if spaces is None:
         raise TypeError("RoboCasa action_space must be a gymnasium.spaces.Dict")
 
-    keys = [str(key) for key in (action_keys or spaces.keys())]
+    keys = [str(key) for key in action_keys] if action_keys else sorted(str(key) for key in spaces)
     out = {}
     offset = 0
     for key in keys:
@@ -80,6 +80,17 @@ def action_vector_to_dict(
     if offset != vector.shape[0]:
         raise ValueError(f"OpenWAM returned action dim {vector.shape[0]}, but RoboCasa action mapping consumed {offset}")
     return out
+
+
+def zero_action(action_space) -> dict:
+    """Build a deterministic all-zero action for a Dict action space."""
+    spaces = getattr(action_space, "spaces", None)
+    if spaces is None:
+        raise TypeError("RoboCasa action_space must be a gymnasium.spaces.Dict")
+    return {
+        key: (0 if getattr(space, "shape", None) is None else np.zeros(space.shape, dtype=np.float32))
+        for key, space in spaces.items()
+    }
 
 
 class OpenWAMRoboCasaGR1Policy:

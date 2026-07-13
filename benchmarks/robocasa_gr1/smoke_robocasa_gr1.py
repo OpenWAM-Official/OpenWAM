@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from openwam2robocasa_gr1_interface import zero_action
 
 DEFAULT_ENV_ID = "gr1_unified/PnPCupToDrawerClose_GR1ArmsAndWaistFourierHands_Env"
 
@@ -21,17 +22,6 @@ def _repo_root() -> Path:
     if not root.is_dir():
         raise SystemExit(f"ROBOCASA_GR1_PATH does not exist: {root}")
     return root.resolve()
-
-
-def _zero_action(action_space) -> dict:
-    out = {}
-    for key, space in action_space.spaces.items():
-        shape = getattr(space, "shape", None)
-        if shape is None:
-            out[key] = 0
-        else:
-            out[key] = np.zeros(shape, dtype=np.float32)
-    return out
 
 
 def import_smoke() -> None:
@@ -70,7 +60,7 @@ def env_smoke(env_id: str, steps: int, enable_render: bool) -> None:
     try:
         obs, info = env.reset(seed=0)
         for _ in range(steps):
-            obs, reward, terminated, truncated, info = env.step(_zero_action(env.action_space))
+            obs, reward, terminated, truncated, info = env.step(zero_action(env.action_space))
         obs_keys = ",".join(sorted(obs.keys()))
         action_dims = {
             key: int(np.prod(space.shape))

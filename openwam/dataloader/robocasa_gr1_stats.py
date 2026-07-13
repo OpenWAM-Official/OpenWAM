@@ -1,37 +1,22 @@
-"""Normalization stats helpers for RoboCasa GR1 dataloaders."""
+"""Cached normalization-stats loading for RoboCasa GR1 dataloaders."""
 
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping
 
 import numpy as np
 
-_STAT_KEYS = ("min", "max", "mean", "std")
+from openwam.dataloader.utils.normalization import materialize_eef_stats
+
+_STAT_KEYS = ("min", "max", "mean", "std", "q01", "q99")
 
 
-def _as_float_vector(value, *, key: str) -> np.ndarray:
-    arr = np.asarray(value, dtype=np.float32)
-    if arr.ndim != 1:
-        raise ValueError(f"normalization stat {key!r} must be a 1-D vector, got shape {arr.shape}")
-    return arr
-
-
-def materialize_stats(raw: Mapping) -> dict:
-    """Return a float32 stats dict with required min/max/mean/std vectors."""
-    missing = [key for key in _STAT_KEYS if key not in raw]
-    if missing:
-        raise KeyError(f"normalization stats missing required keys: {missing}")
-    out = {key: _as_float_vector(raw[key], key=key) for key in _STAT_KEYS}
-    dims = {len(v) for v in out.values()}
-    if len(dims) != 1:
-        raise ValueError(f"normalization stat vectors must share one dim, got {sorted(dims)}")
-    return out
-
-
-def load_stats_file(path: str | Path, *, action_mode: str | None = None) -> dict:
-    """Load flat or nested normalization stats from JSON / NPY."""
+@functools.lru_cache(maxsize=8)
+def _load_raw_stats(path: str, action_mode: str | None) -> Mapping:
+    """Read an immutable training-time stats file once per process."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -40,64 +25,37 @@ def load_stats_file(path: str | Path, *, action_mode: str | None = None) -> dict
             raw = json.load(f)
     else:
         raw = np.load(path, allow_pickle=True).item()
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"normalization stats must contain a mapping, got {type(raw).__name__}")
     if action_mode and action_mode in raw:
-        raw = raw[action_mode]
-    return materialize_stats(raw)
+        return raw[action_mode]
+    if any(key in raw for key in _STAT_KEYS):
+        return raw
+    raise KeyError(f"normalization stats {path} do not contain action_mode={action_mode!r}")
 
 
-def neutralize_rot6d_stats(stats: Mapping, rot6d_slices: Iterable[Sequence[int]]) -> dict:
-    """Force rot6d stat slices to identity normalization.
-
-    rot6d columns are already bounded rotation-matrix columns. They should not
-    receive dataset-derived min-max or z-score statistics.
-    """
-    out = {key: np.asarray(value, dtype=np.float32).copy() for key, value in stats.items()}
-    for start, end in rot6d_slices:
-        out["min"][start:end] = -1.0
-        out["max"][start:end] = 1.0
-        out["mean"][start:end] = 0.0
-        out["std"][start:end] = 1.0
-    return out
-
-
-def compute_array_stats(arrays: Iterable[np.ndarray], *, rot6d_slices: Iterable[Sequence[int]] = ()) -> dict:
-    """Compute min/max/mean/std over a stream of ``(..., D)`` arrays."""
-    chunks = []
-    for arr in arrays:
-        a = np.asarray(arr, dtype=np.float32)
-        if a.size == 0:
-            continue
-        chunks.append(a.reshape(-1, a.shape[-1]))
-    if not chunks:
-        raise ValueError("cannot compute normalization stats from an empty array stream")
-    data = np.concatenate(chunks, axis=0)
-    stats = {
-        "min": data.min(axis=0).astype(np.float32),
-        "max": data.max(axis=0).astype(np.float32),
-        "mean": data.mean(axis=0).astype(np.float32),
-        "std": data.std(axis=0).astype(np.float32),
-    }
-    return neutralize_rot6d_stats(stats, rot6d_slices)
+def load_stats_file(
+    path: str | Path,
+    *,
+    action_mode: str | None,
+    normalize_mode: str | None,
+    dim: int,
+) -> dict:
+    """Load and validate flat or nested JSON/NPY stats for one raw action mode."""
+    resolved = str(Path(path).expanduser().resolve())
+    raw = _load_raw_stats(resolved, action_mode)
+    stats = materialize_eef_stats(
+        dict(raw),
+        normalize_mode,
+        dim=dim,
+        strict_minmax=False,
+        source_hint=f"{resolved}:{action_mode}",
+    )
+    widths = {key: stats[key].shape for key in _STAT_KEYS}
+    bad = {key: shape for key, shape in widths.items() if shape != (dim,)}
+    if bad:
+        raise ValueError(f"normalization stats vectors must have shape ({dim},), got {bad}")
+    return stats
 
 
-def save_stats_file(path: str | Path, stats: Mapping) -> None:
-    """Save stats as `.npy` or `.json` based on suffix."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    materialized = materialize_stats(stats)
-    if path.suffix == ".json":
-        payload = {key: value.tolist() for key, value in materialized.items()}
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-            f.write("\n")
-    else:
-        np.save(path, materialized)
-
-
-__all__ = [
-    "compute_array_stats",
-    "load_stats_file",
-    "materialize_stats",
-    "neutralize_rot6d_stats",
-    "save_stats_file",
-]
+__all__ = ["load_stats_file"]
