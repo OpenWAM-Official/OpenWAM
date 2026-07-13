@@ -341,10 +341,8 @@ class _UnifyAwareNormalizer:
                 arr.shape[-1], self._unify_dim,
             )
             return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
-        arr = self._unmap_from_unify(arr, self._dst_index)   # (..., unify_dim) -> (..., raw)
-        if self._inner is None:
-            return arr            # gather (advanced indexing) already returns a fresh array
-        return self._inner.unnormalize(arr)
+        raw = self._unmap_from_unify(arr, self._dst_index)  # (..., unify_dim) -> (..., raw_dim)
+        return raw if self._inner is None else self._inner.unnormalize(raw)
 
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
     def normalize(self, x):
@@ -376,9 +374,11 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
     """Build the deploy normalizer, wrapping for ``unify_action`` when the ckpt used it.
 
     Non-unify ckpts: identical to upstream (returns the raw-space Normalizer or None).
-    Unify ckpts: wrap in :class:`_UnifyAwareNormalizer` so the model's UNIFY_DIM output
-    is gathered back to raw dims BEFORE unnormalize (and proprio scattered AFTER
-    normalize) — the exact inverse of the train-time transform.
+    Unify ckpts: wrap in :class:`_UnifyAwareNormalizer` so the model's UNIFY_DIM output is gathered
+    back to the raw width BEFORE unnormalize (and proprio scattered AFTER normalize) — the exact
+    inverse of the train-time transform. FULLY GENERIC: the raw width and its stats come from the
+    reader's ``action_mode`` stats block (e.g. robocasa365 mobile → 25-D ``eef_base`` [arm20, base5]);
+    the base is part of the raw vector and needs no special-casing here.
     """
     inner = _build_inner_normalizer(cfg, ckpt_dir)
 
