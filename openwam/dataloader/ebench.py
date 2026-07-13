@@ -56,8 +56,6 @@ logger = logging.getLogger(__name__)
 
 EBENCH_UNIFY_DIM = int(UNIFY_DIM)
 EBENCH_RAW_ACTION_DIM = 23
-EBENCH_ACTION_DIM = EBENCH_UNIFY_DIM
-EBENCH_STATE_DIM = EBENCH_UNIFY_DIM
 
 EBENCH_ACTION_KEYS = ("action.ee_pose", "action.gripper", "action.base")
 EBENCH_ACTION_DELTA_BASE_KEYS = ("action.ee_pose", "action.gripper", "action.base_delta")
@@ -170,12 +168,8 @@ def _raw23_to_ebench80(raw: np.ndarray) -> np.ndarray:
     return unified.astype(np.float32)
 
 
-def ebench80_dim_mask(unify_action_map: Optional[Sequence[Any]] = None) -> np.ndarray:
-    dst_index = (
-        EBENCH_UNIFY_DST_INDEX
-        if unify_action_map is None
-        else parse_unify_spec(unify_action_map, EBENCH_UNIFY_DIM)
-    )
+def ebench80_dim_mask() -> np.ndarray:
+    dst_index = EBENCH_UNIFY_DST_INDEX
     mask = np.zeros(EBENCH_UNIFY_DIM, dtype=bool)
     mask[dst_index] = True
     return mask
@@ -909,8 +903,6 @@ class MultiEBenchDataset(BaseDataset):
 
 __all__ = [
     "EBENCH80_DIM_MASK",
-    "EBENCH_ACTION_DIM",
-    "EBENCH_STATE_DIM",
     "EBenchDataset",
     "MultiEBenchDataset",
     "discover_ebench_buckets",
