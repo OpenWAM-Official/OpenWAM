@@ -40,7 +40,7 @@ def main():
     normalize_mode = None if args.normalize_mode == "null" else args.normalize_mode
     stats_path = args.stats_path
     if normalize_mode is not None and stats_path is None:
-        stats_path = str(Path(tempfile.mkdtemp(prefix="openwam_ebench_check_")) / "ebench80_stats.npy")
+        stats_path = str(Path(tempfile.mkdtemp(prefix="openwam_ebench_check_")) / "ebench_stats.npy")
     buckets = discover_ebench_buckets(args.dataset_dir, buckets=args.buckets)
     print(f"Found {len(buckets)} EBench bucket(s): {[str(p.relative_to(args.dataset_dir)) for p in buckets]}")
 

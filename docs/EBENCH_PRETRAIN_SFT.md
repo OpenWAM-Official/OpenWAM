@@ -4,9 +4,9 @@ This setup fine-tunes an OpenWAM 80-D pretrain checkpoint on EBench without
 changing the model head. The code path is:
 
 1. Download EBench into `/path/to/data_lake/EBench-Dataset`.
-2. Use `dataloader=ebench`, which emits 80-D `action`, `action_mask`,
-   `proprio`, and `proprio_mask`.
-3. Load an 80-D OpenWAM checkpoint via `training.pretrained_checkpoint_path`.
+2. Use `dataloader=ebench`, which builds raw 23-D EEF/base actions and, by
+   default, scatters them to 80-D with `unify_action_map`.
+3. Load an 80-D OpenWAM checkpoint via `training.finetune_ckpt_path`.
 4. Run full SFT through `scripts/train_ebench_sft.sh`.
 
 ## Data
@@ -35,47 +35,49 @@ huggingface-cli download InternRobotics/EBench-Dataset \
   --include 'teleop_tasks/peg_in_hole/**'
 ```
 
-The default config discovers:
+The default config discovers all three EBench training families:
 
 ```yaml
-groups: [simple_pnp, teleop_tasks]
+groups: [long_horizon, simple_pnp, teleop_tasks]
 ```
 
-For a smoke subset, pass:
+For the original simplePNP + table teleop smoke subset, pass:
 
 ```bash
 EBENCH_BUCKETS='[simple_pnp/task1,teleop_tasks/peg_in_hole]'
 ```
 
-## 80-D Action Mapping
+## Action Mapping
 
-EBench raw control is 19-D:
-
-```text
-[0:6]   left arm joints
-[6:12]  right arm joints
-[12:14] left two-finger gripper
-[14:16] right two-finger gripper
-[16:19] base velocity command
-```
-
-OpenWAM 80-D placement:
+EBench raw control is converted to 23-D:
 
 ```text
-raw joints[0:6]      -> 80D[10:16]
-raw gripper[0:2]    -> 80D[16:18], mean -> 80D[9]
-raw joints[6:12]    -> 80D[42:48]
-raw gripper[2:4]    -> 80D[48:50], mean -> 80D[41]
-raw base[0:3]       -> 80D[64:67]
+[0:10]  left  xyz(3) + rot6d(6) + scalar gripper(1)
+[10:20] right xyz(3) + rot6d(6) + scalar gripper(1)
+[20:23] base x, y, yaw
 ```
 
-All EEF xyz/rot6d slots and unused hand/reserved slots stay zero and masked
-out. The action loss mask is `(T, 80)` and has 21 valid dimensions per valid
+The reader uses `action.ee_pose` / `state.ee_pose` (`xyz + quaternion(wxyz)`
+per arm), converts quaternion to rot6d, and averages each hand's two gripper
+finger values into one scalar gripper.
+
+With `unify_action: false`, the dataloader emits this raw 23-D vector and all
+23 dimensions are visible. With `unify_action: true` (default for pretrain-SFT),
+`unify_action_map` scatters the raw vector into OpenWAM's 80-D layout:
+
+```text
+raw[0:10]   -> 80D[0:10]    left xyz + rot6d + gripper
+raw[10:20]  -> 80D[34:44]   right xyz + rot6d + gripper
+raw[20:23]  -> 80D[68:71]   base x, y, yaw
+```
+
+Dexterous hand slots and unused reserved slots stay zero and masked out. The
+80-D action loss mask is `(T, 80)` and has 23 valid dimensions per valid
 timestep.
 
 The default base source is `action.base`, matching the EBench paper's mobile
-base interface: a 3-D velocity command `[vx, vy, yaw_rate]` for planar x/y
-motion and yaw rate. It is placed in the reserved 80-D slots `[64:67)`.
+base interface: a 3-D planar command `[x, y, yaw]`. It is placed in reserved
+80-D slots `[68:71)`.
 For an ablation with EBench's alternate delta-base field:
 
 ```bash
@@ -88,17 +90,22 @@ dataloader.base_action_source=delta
 
 ```yaml
 normalize_mode: z-score
-normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench80_stats.npy
+normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.npy
 ```
 
 On first load, the dataloader builds this cache from each bucket's
-`meta/episodes_stats.jsonl`. Action stats use `action.*` columns; proprio stats
-use `state.*` columns. The checkpoint directory gets `normalization_stats.npy`
-copied automatically for deployment-time action denormalization.
+`meta/episodes_stats.jsonl`. The cache stores raw 23-D stats under the
+`action_mode` key (`ebench` by default). Both action and proprio use the same
+action stats, matching deployment. Rot6d dimensions are pinned to identity
+stats because they cannot be derived exactly from quaternion summary moments.
+
+The checkpoint directory gets `normalization_stats.npy` copied automatically.
+With `unify_action=true`, deploy gathers the model's 80-D output back to raw
+23-D via `unify_action_map` and then applies this raw-space denormalizer.
 
 `scripts/train_ebench_sft.sh` avoids polluting the full-dataset stats cache
 during subset runs: if `EBENCH_BUCKETS` is set and `EBENCH_STATS_PATH` is not
-set, stats are written under `$OUTPUT_DIR/ebench80_stats.npy`.
+set, stats are written under `$OUTPUT_DIR/ebench_stats.npy`.
 
 ## Check Dataloader Only
 
@@ -127,7 +134,7 @@ Set the latest 80-D OpenWAM pretrain checkpoint:
 
 ```bash
 cd /path/to/OpenWAM
-export PRETRAIN_CKPT=/path/to/openwam_80d_pretrain/checkpoint_step_x.safetensors
+export FINETUNE_CKPT=/path/to/openwam_80d_pretrain/checkpoint_step_x.safetensors
 export EBENCH_DATASET_DIR=/path/to/data_lake/EBench-Dataset
 export OUTPUT_DIR=/path/to/train_runs/openwam_ebench_sft
 export WAN22_PATH=/path/to/Wan2.2-TI2V-5B
@@ -147,9 +154,11 @@ The script forces:
 
 ```text
 dataloader=ebench
+dataloader.unify_action=true
+dataloader.unify_action_map=["0-9","34-43","68-70"]
 model.architecture.action_dim=80
 model.architecture.state_dim=80
-training.pretrained_checkpoint_path=$PRETRAIN_CKPT
+training.finetune_ckpt_path=$FINETUNE_CKPT
 ```
 
 No LoRA is enabled. The run is full SFT over the trainable OpenWAM modules

@@ -134,16 +134,6 @@ class OpenWAMTrainer:
         # Initialize all schedulers (video + action) inside architecture
         self.architecture.init_training_schedulers(1000)
 
-        pretrained_checkpoint_path = cfg_get(t, "pretrained_checkpoint_path", None)
-        if pretrained_checkpoint_path not in (None, "", "null"):
-            pretrained_checkpoint_strict = bool(cfg_get(t, "pretrained_checkpoint_strict", True))
-            self.architecture.load_checkpoint(str(pretrained_checkpoint_path), strict=pretrained_checkpoint_strict)
-            logger.info(
-                "Loaded pretrained checkpoint for SFT: %s (strict=%s)",
-                pretrained_checkpoint_path,
-                pretrained_checkpoint_strict,
-            )
-
         # Loss weights from the training config
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)

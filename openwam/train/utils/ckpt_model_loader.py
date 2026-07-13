@@ -1,12 +1,13 @@
 """Self-contained architecture construction for finetune / resume.
 
 When ``training.finetune_ckpt_path`` or ``training.resume_ckpt_path`` is set,
-the trainer builds the architecture from that checkpoint directory alone:
+the trainer builds the architecture from that checkpoint source alone:
 module skeletons from the component specs saved in its ``config.yaml``,
-weights from its latest ``checkpoint_step_*.safetensors`` (finetune) or
-from accelerate's ``load_state`` after prepare (resume). The original
-pretrained backbone directory (``model.video_backbone.model_path``) does not
-need to exist on the training host.
+weights from either the requested ``checkpoint_step_*.safetensors`` file or
+the latest weights in the directory (finetune), or from accelerate's
+``load_state`` after prepare (resume). The original pretrained backbone
+directory (``model.video_backbone.model_path``) does not need to exist on the
+training host.
 
 Train-side counterpart of the deploy loader (``openwam/deploy/model_loader.py``),
 kept independent so training never imports deploy code.
@@ -23,13 +24,22 @@ from openwam.train.utils.checkpointing import find_latest_weights
 logger = logging.getLogger(__name__)
 
 
+def _resolve_ckpt_source(source: str) -> tuple[str, str | None]:
+    """Return ``(ckpt_dir, explicit_weights)`` for a directory or safetensors file."""
+    source = os.fspath(source)
+    if source.endswith(".safetensors"):
+        return os.path.dirname(os.path.abspath(source)), os.path.abspath(source)
+    return source, None
+
+
 def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool):
-    """Build the architecture purely from a self-contained checkpoint dir.
+    """Build the architecture purely from a self-contained checkpoint source.
 
     Skeletons come from ``<ckpt_dir>/config.yaml``'s
     ``model.video_backbone.components`` specs (tokenizer resolved against
-    ``<ckpt_dir>/tokenizer/``). With ``weights_required=True`` (finetune) the
-    latest ``checkpoint_step_*.safetensors`` is loaded here; with
+    ``<ckpt_dir>/tokenizer/``). With ``weights_required=True`` (finetune) either
+    the explicit safetensors source or latest ``checkpoint_step_*.safetensors``
+    in the source dir is loaded here; with
     ``weights_required=False`` (resume) safetensors are skipped entirely —
     accelerate's ``load_state`` restores a strict superset (module weights
     incl. frozen params) after prepare, and reading the latest safetensors
@@ -40,6 +50,7 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool):
     """
     from openwam.model import build_architecture, resolve_architecture_config
 
+    ckpt_dir, explicit_weights = _resolve_ckpt_source(ckpt_dir)
     tag = "finetune" if weights_required else "resume"
     ckpt_cfg = OmegaConf.load(os.path.join(ckpt_dir, "config.yaml"))
     resolved_arch = resolve_architecture_config(ckpt_cfg.model)
@@ -61,7 +72,7 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool):
     architecture = build_architecture(resolved_arch.registry_name, params)
 
     if weights_required:
-        weights = find_latest_weights(ckpt_dir)
+        weights = explicit_weights or find_latest_weights(ckpt_dir)
         logger.info("[%s] loading pretrained weights: %s", tag, weights)
         # Plain print so the warm-start is visible on the launch terminal even
         # when logger output is drowned out; non-main ranks have print disabled.
@@ -92,6 +103,7 @@ def copy_ckpt_artifacts(ckpt_dir: str, output_dir: str) -> None:
     Same reason as propagate_component_specs: keeps the self-containment chain
     alive when the tokenizer's original model_path source is unreachable.
     """
+    ckpt_dir, _explicit_weights = _resolve_ckpt_source(ckpt_dir)
     src = os.path.join(ckpt_dir, "tokenizer")
     dst = os.path.join(output_dir, "tokenizer")
     if os.path.isdir(src) and not os.path.isdir(dst):

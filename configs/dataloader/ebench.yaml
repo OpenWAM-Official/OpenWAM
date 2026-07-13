@@ -1,25 +1,31 @@
 type: ebench
 dataset_dir: /path/to/data_lake/EBench-Dataset
 
-# EBench buckets. Default covers both requested evaluation families.
+# EBench buckets. Default covers all three official families.
 # To smoke-test a tiny subset:
 #   dataloader.buckets=[simple_pnp/task1,teleop_tasks/peg_in_hole] dataloader.groups=null
-groups: [simple_pnp, teleop_tasks]
+groups: [long_horizon, simple_pnp, teleop_tasks]
 buckets: null
 
-# 80-D OpenWAM semantic action space:
-#   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper, [10:32) L hand
-#   [32:35) R eef xyz, [35:41) R eef rot6d, [41] R gripper, [42:64) R hand
-#   [64:80) reserved
+# EBench raw 23-D action/proprio:
+#   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper
+#   [10:13) R eef xyz, [13:19) R eef rot6d, [19] R gripper
+#   [20:23) base [x, y, yaw]
 #
-# EBench raw 19-D:
-#   action.joints[0:6]  -> left hand slots 10:16
-#   action.joints[6:12] -> right hand slots 42:48
-#   action.gripper[0:2] -> left hand slots 16:18 and mean -> scalar slot 9
-#   action.gripper[2:4] -> right hand slots 48:50 and mean -> scalar slot 41
-#   action.base[0:3]    -> reserved slots 64:67 as [vx, vy, yaw_rate]
-action_mode: ebench80
+# 80-D OpenWAM semantic action space, enabled by unify_action=true:
+#   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper, [10:34) L hand
+#   [34:37) R eef xyz, [37:43) R eef rot6d, [43] R gripper, [44:68) R hand
+#   [68:80) reserved
+#
+# EBench raw action.ee_pose is [L xyz + quat(wxyz), R xyz + quat(wxyz)].
+# The reader converts each quaternion to rot6d and averages each hand's two
+# gripper fingers into one scalar gripper.
+# unify_action_map scatters raw 0:10 -> L EEF, raw 10:20 -> R EEF, raw 20:23 -> base.
+action_mode: ebench
+unify_action: true
+unify_action_map: ["0-9", "34-43", "68-70"]
 base_action_source: velocity # velocity uses action.base; delta uses action.base_delta for ablations
+enable_action_supervision: true
 
 # --- Frame sampling ---
 num_frames: 33
@@ -37,8 +43,8 @@ target_camera: video.overlook_camera_view
 camera_layout: [video.overlook_camera_view, video.left_camera_view, video.right_camera_view]
 
 # --- Normalization ---
-# The reader builds a shared 80-D stats cache from meta/episodes_stats.jsonl on
-# first load and reuses it afterward. Action uses action.* stats; proprio uses
-# state.* stats. Only mapped dims are normalized and supervised.
+# The reader builds a shared raw-23 stats cache from meta/episodes_stats.jsonl on
+# first load and reuses it afterward. Action and proprio both use this same
+# action stats entry, matching deploy. Rot6d stats are pinned to identity.
 normalize_mode: z-score           # "z-score", "min-max", or null
-normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench80_stats.npy
+normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.npy
