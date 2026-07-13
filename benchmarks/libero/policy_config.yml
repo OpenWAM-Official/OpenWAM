@@ -1,0 +1,53 @@
+# OpenWAM LIBERO benchmark client config.
+#
+# This file is a template. `single_eval.sh` patches host/port at runtime; all
+# other fields can be overridden by copying the file and passing
+# `POLICY_CONFIG_PATH=/path/to/custom.yml`.
+
+policy_name: openwam
+
+# OpenWAM policy server connection.
+host: "127.0.0.1"
+port: 8848
+request_timeout: 300
+
+
+# Benchmark task selection.
+suite: libero_spatial
+task_id: 0
+num_trials: 1
+max_steps: 600
+settle_steps: 10
+seed: 0
+fail_on_incomplete: false
+
+# Offscreen rendering.
+camera_height: 128
+camera_width: 128
+
+# Observation mapping from LIBERO obs dict to OpenWAM's fixed camera contract.
+head_camera_key: agentview_image
+left_wrist_camera_key: robot0_eye_in_hand_image
+right_wrist_camera_key: null
+
+# Standard LIBERO/OpenVLA evaluation rotates offscreen robosuite images by 180
+# degrees before policy input. Set to `none` only for checkpoints trained on raw
+# unrotated LIBERO frames.
+image_transform: rotate_180
+
+# Optional proprioception. Leave send_state=false for image-only checkpoints.
+send_state: false
+state_keys:
+  - robot0_eef_pos
+  - robot0_eef_quat
+  - robot0_gripper_qpos
+state_dim: null
+
+# Action handling. LIBERO environments expect 7D single-arm actions. For
+# LIBERO-trained OpenWAM checkpoints this should usually be direct.
+action_dim: 7
+action_indices: null
+action_clip: null
+
+debug: false
+debug_dir: "./debug_libero"

@@ -12,6 +12,12 @@ protocol below. Minimal client dependencies: `numpy`, `Pillow`, `websockets`
 (plus `opencv-python` if you decode camera frames yourself). The wire contract
 (message types) is mirrored on both sides: server constants in [`openwam/deploy/server.py`](../openwam/deploy/server.py), client constants in [`benchmarks/utils/transport.py`](utils/transport.py).
 
+Bundled clients:
+
+- [RoboTwin](robotwin/README.md)
+- [LIBERO](libero/README.md)
+- [RoboCasa GR1](robocasa_gr1/README.md)
+
 ## 1. What the client sends
 
 One call per control step: three raw camera JPEGs + the task `prompt` — the exact string the model should see (the server forwards it verbatim; wrap it in your checkpoint's template first). Proprioceptive checkpoints also require a raw `state` vector whose length matches the checkpoint's `model.architecture.state_dim`.
