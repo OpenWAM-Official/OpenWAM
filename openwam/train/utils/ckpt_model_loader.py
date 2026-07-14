@@ -28,6 +28,10 @@ def _resolve_ckpt_source(source: str) -> tuple[str, str | None]:
     """Return ``(ckpt_dir, explicit_weights)`` for a directory or safetensors file."""
     source = os.fspath(source)
     if source.endswith(".safetensors"):
+        # Fail fast on a typo'd filename — otherwise safetensors only errors
+        # after minutes of architecture-skeleton construction.
+        if not os.path.isfile(source):
+            raise FileNotFoundError(f"Explicit checkpoint weights file does not exist: {source}")
         return os.path.dirname(os.path.abspath(source)), os.path.abspath(source)
     return source, None
 

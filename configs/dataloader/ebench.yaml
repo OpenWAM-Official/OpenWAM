@@ -10,7 +10,7 @@ buckets: null
 # EBench raw 23-D action/proprio:
 #   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper
 #   [10:13) R eef xyz, [13:19) R eef rot6d, [19] R gripper
-#   [20:23) base [x, y, yaw]
+#   [20:23) base [x, y, yaw(DEGREES)]
 #
 # 80-D OpenWAM semantic action space, enabled by unify_action=true:
 #   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper, [10:34) L hand
@@ -24,7 +24,16 @@ buckets: null
 action_mode: ebench
 unify_action: true
 unify_action_map: ["0-9", "34-43", "68-70"]
-base_action_source: velocity # velocity uses action.base; delta uses action.base_delta for ablations
+# Base action field (see the module docstring of openwam/dataloader/ebench.py):
+#   delta (default) — action.base_delta, the per-step commanded displacement
+#     [dx_m, dy_m, dyaw_deg] in the spawn/odom axes. Closest analogue of the
+#     instantaneous base command BEHAVIOR keeps in slots [68:71) (BEHAVIOR is
+#     local-frame velocity; EBench is odom-frame displacement, deg yaw).
+#     Proprio renders the measured per-step displacement into the same space.
+#   cumulative — action.base, the episode-cumulative commanded pose (deg yaw;
+#     NOT a velocity despite its history). Proprio = state.base with yaw
+#     rad->deg. Kept for ablations.
+base_action_source: delta
 enable_action_supervision: true
 
 # --- Frame sampling ---
@@ -46,5 +55,8 @@ camera_layout: [video.overlook_camera_view, video.left_camera_view, video.right_
 # The reader builds a shared raw-23 stats cache from meta/episodes_stats.jsonl on
 # first load and reuses it afterward. Action and proprio both use this same
 # action stats entry, matching deploy. Rot6d stats are pinned to identity.
-normalize_mode: z-score           # "z-score", "min-max", or null
+# min-max keeps targets in the bounded [-1,1] distribution the 80-D pretrain
+# checkpoint was trained on and is exact from the summary stats; "quantile" is
+# rejected (no true quantiles exist for this dataset).
+normalize_mode: min-max           # "min-max", "z-score", or null
 normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.npy

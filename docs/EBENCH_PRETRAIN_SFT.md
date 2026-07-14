@@ -68,20 +68,38 @@ With `unify_action: false`, the dataloader emits this raw 23-D vector and all
 ```text
 raw[0:10]   -> 80D[0:10]    left xyz + rot6d + gripper
 raw[10:20]  -> 80D[34:44]   right xyz + rot6d + gripper
-raw[20:23]  -> 80D[68:71]   base x, y, yaw
+raw[20:23]  -> 80D[68:71]   base x, y, yaw(deg)
 ```
 
 Dexterous hand slots and unused reserved slots stay zero and masked out. The
 80-D action loss mask is `(T, 80)` and has 23 valid dimensions per valid
 timestep.
 
-The default base source is `action.base`, matching the EBench paper's mobile
-base interface: a 3-D planar command `[x, y, yaw]`. It is placed in reserved
-80-D slots `[68:71)`.
-For an ablation with EBench's alternate delta-base field:
+### Base action semantics
+
+GenManip's dataset converter (`genmanip2lerobot.py`) defines the two base
+fields precisely — neither is a velocity:
+
+* `action.base_delta` — the per-step commanded displacement
+  `[dx_m, dy_m, dyaw_deg]` in the robot's spawn/odom axes (the raw
+  `base_motion` sent each step; GenManip clips it to ±0.015 m / ±1°).
+* `action.base` — the running cumsum of `action.base_delta` since episode
+  start, i.e. an episode-cumulative commanded pose with **degree** yaw.
+
+The default `base_action_source=delta` supervises `action.base_delta`: a
+per-step command is the closest analogue of the instantaneous base command
+BEHAVIOR keeps in shared slots `[68:71)` (BEHAVIOR stores local-frame
+*velocity*; EBench deltas are odom-frame *displacements* with degree yaw —
+same role, different frame/unit, so do not pool their stats in mixtures).
+Proprio renders the *measured* per-step displacement
+(`state.base[t] - state.base[t-1]`, yaw wrapped, rad→deg) into the same
+space, mirroring BEHAVIOR's measured-state-into-command-space rendering.
+
+The `cumulative` ablation supervises `action.base` instead; its proprio is
+`state.base` with yaw rad→deg:
 
 ```bash
-dataloader.base_action_source=delta
+dataloader.base_action_source=cumulative
 ```
 
 ## Normalization
@@ -89,15 +107,24 @@ dataloader.base_action_source=delta
 `configs/dataloader/ebench.yaml` defaults to:
 
 ```yaml
-normalize_mode: z-score
+normalize_mode: min-max
 normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.npy
 ```
 
+`min-max` keeps action targets in the bounded `[-1, 1]` distribution the 80-D
+pretrain checkpoint was trained on (the family convention) and its parameters
+are exact from the summary stats. `z-score` (unbounded) remains available for
+ablations; `quantile` is rejected because `episodes_stats.jsonl` carries no
+true quantiles and a silent min/max alias would misrepresent the mode.
+
 On first load, the dataloader builds this cache from each bucket's
 `meta/episodes_stats.jsonl`. The cache stores raw 23-D stats under the
-`action_mode` key (`ebench` by default). Both action and proprio use the same
-action stats, matching deployment. Rot6d dimensions are pinned to identity
-stats because they cannot be derived exactly from quaternion summary moments.
+`action_mode` key (`ebench` by default) plus a fingerprint (schema version,
+action keys, bucket paths, and a sha256 over the source
+`episodes_stats.jsonl` bytes — re-downloading a bucket invalidates the cache).
+Both action and proprio use the same action stats, matching deployment. Rot6d
+dimensions are pinned to identity stats because they cannot be derived exactly
+from quaternion summary moments.
 
 The checkpoint directory gets `normalization_stats.npy` copied automatically.
 With `unify_action=true`, deploy gathers the model's 80-D output back to raw
