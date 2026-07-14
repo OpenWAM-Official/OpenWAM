@@ -139,17 +139,11 @@ def step_num(path: str, prefix: str = "checkpoint_step_") -> int:
 
 
 def find_latest_weights(run_dir: str) -> str:
-    """Return a specific weights file or the highest-step weights in *run_dir*.
+    """Return the highest-step ``checkpoint_step_N.safetensors`` in *run_dir*.
 
-    Used by the finetune path. If *run_dir* is already a
-    ``checkpoint_step_N.safetensors`` file, it is returned directly. Otherwise
-    malformed names are skipped; step-0-only triggers a warning (likely a crash
-    before the first real save).
+    Used by the finetune path. Malformed names are skipped; step-0-only triggers
+    a warning (likely a crash before the first real save).
     """
-    if os.path.isfile(run_dir):
-        if run_dir.endswith(".safetensors"):
-            return run_dir
-        raise FileNotFoundError(f"Checkpoint path is a file but not a .safetensors weights file: {run_dir}")
     files = _glob.glob(os.path.join(run_dir, "checkpoint_step_*.safetensors"))
     if not files:
         raise FileNotFoundError(f"No checkpoint_step_*.safetensors found in {run_dir}")

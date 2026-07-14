@@ -117,7 +117,6 @@ class OpenWAMTrainer:
             resolved_arch.canonical.framework,
             resolved_arch.canonical.variant,
         )
-        self._validate_dataset_model_dims(dataset, cfg)
 
         # Device placement: skip .to(device) when initialize_model_on_cpu and a real
         # training Accelerator is present — DeepSpeed's prepare() then handles the move.
@@ -185,35 +184,6 @@ class OpenWAMTrainer:
 
         is_main = self.accelerator is None or self.accelerator.is_main_process
         log_parameter_counts(self.architecture, is_main=is_main)
-
-    def _validate_dataset_model_dims(self, dataset, cfg: DictConfig) -> None:
-        """Fail fast when a dataloader's action/state width mismatches the model."""
-        if dataset is None:
-            return
-
-        dataset_action_dim = getattr(dataset, "action_dim", None)
-        if dataset_action_dim is not None and int(dataset_action_dim) != int(self.architecture.action_dim):
-            raise ValueError(
-                f"Dataset action_dim={int(dataset_action_dim)} but model.architecture.action_dim="
-                f"{int(self.architecture.action_dim)}. Override model.architecture.action_dim to match "
-                "the dataloader, e.g. 80 for dataloader=ebench."
-            )
-
-        arch_cfg = getattr(getattr(cfg, "model", None), "architecture", None)
-        cfg_uses_proprio = bool(cfg_get(arch_cfg, "use_proprioception", False))
-        arch_uses_proprio = bool(getattr(self.architecture, "uses_proprioception", False))
-        if not (cfg_uses_proprio or arch_uses_proprio):
-            return
-
-        dataset_state_dim = getattr(dataset, "state_dim", dataset_action_dim)
-        if dataset_state_dim is None:
-            return
-        cfg_state_dim = int(cfg_get(arch_cfg, "state_dim", getattr(self.architecture, "proprio_dim", 0)) or 0)
-        if cfg_state_dim and int(dataset_state_dim) != cfg_state_dim:
-            raise ValueError(
-                f"Dataset state_dim={int(dataset_state_dim)} but model.architecture.state_dim={cfg_state_dim}. "
-                "Override model.architecture.state_dim to match the dataloader, e.g. 80 for dataloader=ebench."
-            )
 
     # (2) Driver — build optimizer/dataloader/scheduler -> setup dir -> accelerate prepare
     #     -> (resume) -> epoch/step loop{compute_loss -> log_step -> save} -> finish_training.
