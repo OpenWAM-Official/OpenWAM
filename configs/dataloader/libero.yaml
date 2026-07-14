@@ -24,6 +24,13 @@ wrist_camera_priority:
   - observation.images.image2
   - observation.images.robot0_eye_in_hand_image
 
+# Use an in-shard language column when a conversion provides one, otherwise
+# resolve task_index through meta/tasks.parquet. Absent columns are not projected.
+prompt_columns:
+  - language_instruction
+  - task
+  - prompt
+
 num_frames: 33
 video_stride: 4
 window_stride: 1

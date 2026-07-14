@@ -12,8 +12,9 @@ import pyarrow.parquet as pq
 from omegaconf import OmegaConf
 from PIL import Image
 
-from openwam.dataloader.libero import LiberoDataset
+from openwam.dataloader.libero import LiberoDataset, MultiLiberoDataset
 from openwam.dataloader.registry import build_dataset, list_registered_datasets
+from openwam.deploy.model_loader import _build_normalizer
 from openwam.train.utils.checkpointing import save_normalization_stats
 from scripts.libero_compute_stats import _iter_action_arrays
 
@@ -75,6 +76,18 @@ def _write_bucket(bucket: Path) -> None:
     pq.write_table(pa.Table.from_pandas(frame), bucket / "data" / "chunk-000" / "file-000.parquet")
 
 
+def _add_prompt_column(bucket: Path, column: str, values: list[str]) -> None:
+    info_path = bucket / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["features"][column] = {"dtype": "string", "shape": [1]}
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    data_path = bucket / "data" / "chunk-000" / "file-000.parquet"
+    frame = pd.read_parquet(data_path)
+    frame[column] = values
+    pq.write_table(pa.Table.from_pandas(frame), data_path)
+
+
 @contextmanager
 def _mock_decoder():
     def _fake(path, frame_indices, h, w):
@@ -124,6 +137,22 @@ def test_libero_sample_uses_native_action_and_masks_proprio(tmp_path: Path):
     assert sample["video"][0].getpixel((250, 300)) == (0, 0, 0)
 
 
+def test_libero_prompt_column_falls_back_to_tasks_parquet(tmp_path: Path):
+    fallback_dir = tmp_path / "fallback"
+    _write_bucket(fallback_dir)
+    _add_prompt_column(fallback_dir, "language_instruction", [""] * EP_LENGTH)
+    with _mock_decoder():
+        fallback = _dataset(fallback_dir)[0]
+    assert fallback["prompt"] == "pick up the red mug"
+
+    direct_dir = tmp_path / "direct"
+    _write_bucket(direct_dir)
+    _add_prompt_column(direct_dir, "language_instruction", ["lift the crimson cup"] * EP_LENGTH)
+    with _mock_decoder():
+        direct = _dataset(direct_dir)[0]
+    assert direct["prompt"] == "lift the crimson cup"
+
+
 def test_libero_rejects_unify_action(tmp_path: Path):
     _write_bucket(tmp_path)
     with np.testing.assert_raises_regex(ValueError, "does not support unify_action"):
@@ -158,6 +187,22 @@ def test_libero_stats_generate_deploy_artifact(tmp_path: Path):
     save_normalization_stats(str(checkpoint), dataset)
     copied = np.load(checkpoint / "normalization_stats.npy", allow_pickle=True).item()
     assert copied["libero"]["q99"].shape == (7,)
+    with _mock_decoder():
+        sample = dataset[0]
+    normalizer = _build_normalizer(
+        OmegaConf.create(
+            {
+                "dataloader": {
+                    "normalize_mode": "quantile",
+                    "action_mode": "libero",
+                    "unify_action": False,
+                }
+            }
+        ),
+        str(checkpoint),
+    )
+    raw = np.stack(dataset._load_data_table(0, 0).to_pandas()["action"].values)[:4]
+    np.testing.assert_allclose(normalizer.unnormalize(sample["action"].numpy()), raw, atol=1e-6)
 
 
 def test_libero_stats_stream_reads_each_shard_once(tmp_path: Path):
@@ -180,3 +225,35 @@ def test_registry_builds_libero_dataset(tmp_path: Path):
         )
     )
     assert isinstance(dataset, LiberoDataset)
+
+
+def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
+    root = tmp_path / "root"
+    _write_bucket(root / "suite_a")
+    _write_bucket(root / "suite_b")
+    stats_path = tmp_path / "source_stats.npy"
+    unit_stats = {
+        "mean": np.zeros(7, dtype=np.float32),
+        "std": np.ones(7, dtype=np.float32),
+        "min": -np.ones(7, dtype=np.float32),
+        "max": np.ones(7, dtype=np.float32),
+        "q01": -np.ones(7, dtype=np.float32),
+        "q99": np.ones(7, dtype=np.float32),
+    }
+    np.save(stats_path, {"libero": unit_stats})
+
+    dataset = LiberoDataset.from_config(
+        OmegaConf.create(
+            {
+                "dataset_dir": str(root),
+                "num_frames": 5,
+                "normalize_mode": "quantile",
+                "normalization_stats_path": str(stats_path),
+            }
+        )
+    )
+    assert isinstance(dataset, MultiLiberoDataset)
+    assert dataset.normalization_stats_path == dataset.buckets[0].normalization_stats_path
+    checkpoint = tmp_path / "multibucket_checkpoint"
+    save_normalization_stats(str(checkpoint), dataset)
+    assert (checkpoint / "normalization_stats.npy").is_file()

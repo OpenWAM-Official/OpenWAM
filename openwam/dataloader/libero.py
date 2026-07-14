@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, ClassVar, List, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
@@ -95,6 +96,7 @@ class LiberoDataset(LeRobotV3Reader):
         "action_mode",
         "head_camera_priority",
         "wrist_camera_priority",
+        "prompt_columns",
         "normalization_stats_path",
     )
 
@@ -105,6 +107,7 @@ class LiberoDataset(LeRobotV3Reader):
         action_mode: str = "libero",
         head_camera_priority: Optional[Sequence[str]] = None,
         wrist_camera_priority: Optional[Sequence[str]] = None,
+        prompt_columns: Optional[Sequence[str]] = None,
         normalization_stats_path: Optional[str] = None,
         unify_action: bool = False,
         **kwargs: Any,
@@ -116,6 +119,10 @@ class LiberoDataset(LeRobotV3Reader):
         self.action_mode = action_mode
         self._head_priority = _as_priority(head_camera_priority, self.HEAD_CAMERA_PRIORITY)
         self._wrist_priority = _as_priority(wrist_camera_priority, self.WRIST_CAMERA_PRIORITY)
+        self._prompt_columns = _as_priority(
+            prompt_columns,
+            ("language_instruction", "task", "prompt"),
+        )
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
         super().__init__(dataset_dir=dataset_dir, unify_action=False, **kwargs)
 
@@ -135,6 +142,8 @@ class LiberoDataset(LeRobotV3Reader):
         shape = tuple(action.get("shape", ()))
         if shape and shape != (_ACTION_DIM,):
             raise ValueError(f"LIBERO action feature must have shape [7], got {shape}")
+        self._prompt_columns = tuple(col for col in self._prompt_columns if col in features)
+        self.NEEDED_COLS = self.NEEDED_COLS + self._prompt_columns
 
     def _load_stats(self, info: dict):
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
@@ -160,6 +169,15 @@ class LiberoDataset(LeRobotV3Reader):
 
     def _proprio_20d(self, win):
         return None
+
+    def _resolve_prompt(self, row, win) -> str:
+        for column in self._prompt_columns:
+            value = win[column].iloc[0]
+            if value is not None and not pd.isna(value):
+                text = str(value).strip()
+                if text:
+                    return text
+        return super()._resolve_prompt(row, win)
 
     @classmethod
     def _multibucket_wrapper(cls):
