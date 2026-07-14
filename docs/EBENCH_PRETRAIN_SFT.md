@@ -120,8 +120,9 @@ true quantiles and a silent min/max alias would misrepresent the mode.
 On first load, the dataloader builds this cache from each bucket's
 `meta/episodes_stats.jsonl`. The cache stores raw 23-D stats under the
 `action_mode` key (`ebench` by default) plus a fingerprint (schema version,
-action keys, bucket paths, and a sha256 over the source
-`episodes_stats.jsonl` bytes — re-downloading a bucket invalidates the cache).
+action keys, bucket paths, and a sha256 over each bucket's dataset-relative
+path + its `episodes_stats.jsonl` bytes — re-downloading a bucket invalidates
+the cache, while moving the whole dataset to another mount does not).
 Both action and proprio use the same action stats, matching deployment. Rot6d
 dimensions are pinned to identity stats because they cannot be derived exactly
 from quaternion summary moments.

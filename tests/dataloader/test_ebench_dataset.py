@@ -70,7 +70,9 @@ def _key_stats(rows: np.ndarray) -> dict:
     }
 
 
-def make_bucket(root: Path, name: str = "task1", *, tasks_text: bool = True, n_eps: int = N_EPS) -> Path:
+def make_bucket(
+    root: Path, name: str = "task1", *, tasks_text: bool = True, n_eps: int = N_EPS, ep_len: int = EP_LEN
+) -> Path:
     bucket = root / "simple_pnp" / name
     (bucket / "meta").mkdir(parents=True)
     (bucket / "data" / "chunk-000").mkdir(parents=True)
@@ -102,7 +104,7 @@ def make_bucket(root: Path, name: str = "task1", *, tasks_text: bool = True, n_e
 
     episodes, stats_rows = [], []
     for ep in range(n_eps):
-        rows = [_make_frame_row(t) for t in range(EP_LEN)]
+        rows = [_make_frame_row(t) for t in range(ep_len)]
         df = pd.DataFrame(rows)
         df.to_parquet(bucket / "data" / "chunk-000" / f"episode_{ep:06d}.parquet")
         for cam in CAMS:
@@ -110,7 +112,7 @@ def make_bucket(root: Path, name: str = "task1", *, tasks_text: bool = True, n_e
         episodes.append(
             {
                 "episode_index": ep,
-                "length": EP_LEN,
+                "length": ep_len,
                 "tasks": ["pick the apple"] if tasks_text else [],
             }
         )
@@ -449,3 +451,137 @@ def test_explicit_safetensors_missing_fails_fast(tmp_path):
     assert ckpt_dir == str(tmp_path) and weights == str(real)
     # directories pass through untouched
     assert _resolve_ckpt_source(str(tmp_path)) == (str(tmp_path), None)
+
+
+# ---------------------------------------------------------------- gate-2 fixes
+
+
+def test_data_error_not_masked_by_retry(tmp_path):
+    """A deterministic NaN in the data must surface immediately (EBenchDataError),
+    not be retried into a different window. The NaN sits beyond the init
+    validation's leading-64-row sample, so it is only hit at __getitem__."""
+    b = make_bucket(tmp_path, "task_nanlate", ep_len=100)
+    p = b / "data" / "chunk-000" / "episode_000000.parquet"
+    df = pd.read_parquet(p)
+    bad = np.stack(df["action.ee_pose"].to_numpy()).copy()
+    bad[70, 0] = np.nan
+    df["action.ee_pose"] = list(bad)
+    df.to_parquet(p)
+
+    ds = _make_ds(b, normalize_mode=None, unify_action=False)
+    calls = {"n": 0}
+    orig = ds._getitem_impl
+
+    def counting(idx):
+        calls["n"] += 1
+        return orig(idx)
+
+    ds._getitem_impl = counting
+    with pytest.raises(ebench_mod.EBenchDataError, match="non-finite"):
+        ds[68]  # window offset 68 covers row 70
+    assert calls["n"] == 1  # no retry churn
+
+
+def test_nan_raises_even_without_normalization(bucket):
+    ds = _make_ds(bucket, normalize_mode=None, unify_action=False)
+    corrupt = np.full((1, 23), 1.0, np.float32)
+    corrupt[0, 3] = np.inf
+    with pytest.raises(ebench_mod.EBenchDataError, match="non-finite"):
+        ds._normalize(corrupt, None)
+
+
+def test_retry_jumps_over_long_bad_episode(bucket, monkeypatch):
+    """One fully-broken episode mp4 must not consume all 64 retries: the walk
+    jumps to the NEXT episode's first window and succeeds."""
+    from PIL import Image
+
+    def decode_ep0_broken(path, frame_indices, height, width):
+        if "episode_000000" in str(path):
+            raise RuntimeError("episode 0 mp4 truncated")
+        return [Image.new("RGB", (width, height), (10, 20, 30)) for _ in frame_indices]
+
+    monkeypatch.setattr(ebench_mod, "_decode_video_frames", decode_ep0_broken)
+    ds = _make_ds(bucket, normalize_mode=None, unify_action=False)
+    calls = {"n": 0}
+    orig = ds._getitem_impl
+
+    def counting(idx):
+        calls["n"] += 1
+        return orig(idx)
+
+    ds._getitem_impl = counting
+    sample = ds[0]  # a window of episode 0 -> retried onto episode 1
+    assert calls["n"] == 2
+    assert sample["action"].shape[-1] == 23
+
+
+def test_excluded_episodes_scanner_schema(bucket):
+    (bucket / "meta" / "excluded_episodes.json").write_text('{"episode_indices": [1]}')
+    ds = _make_ds(bucket, normalize_mode=None, unify_action=False)
+    assert {int(ep["episode_index"]) for ep in ds._episodes} == {0}
+
+
+def test_stats_cache_survives_dataset_move(bucket, tmp_path):
+    import shutil
+
+    root_a = bucket.parents[1]
+    stats_path = tmp_path / "stats.npy"
+    _load_or_build_stats(
+        [bucket],
+        ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
+        str(stats_path),
+        action_mode="ebench",
+        dataset_dir=str(root_a),
+    )
+    root_b = tmp_path / "moved_root"
+    shutil.copytree(root_a, root_b)
+    moved_bucket = root_b / "simple_pnp" / "task1"
+    # same relative path + same bytes at a different mount -> cache hit, no error
+    stats, path = _load_or_build_stats(
+        [moved_bucket],
+        ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
+        str(stats_path),
+        action_mode="ebench",
+        dataset_dir=str(root_b),
+    )
+    assert path == str(stats_path)
+
+
+def test_min_max_train_deploy_round_trip(bucket):
+    """Reader normalize -> deploy Normalizer(min_max) unnormalize == identity,
+    including constant (min==max) dims."""
+    from openwam.dataloader.transforms.normalize import Normalizer
+
+    ds = _make_ds(bucket, normalize_mode="min-max", unify_action=False)
+    stats = ds._action_stats
+    rng = np.random.default_rng(7)
+    raw = rng.uniform(stats["min"], stats["max"], size=(5, 23)).astype(np.float32)
+    normalized = ds._normalize(raw, stats)
+    deploy = Normalizer(mode="min_max", stats={"min": stats["min"], "max": stats["max"]})
+    recovered = deploy.unnormalize(normalized)
+    np.testing.assert_allclose(recovered, raw, atol=1e-4)
+
+
+def test_validation_covers_multiple_episodes(tmp_path):
+    """A defect only in the LAST episode must be caught at init."""
+    b = make_bucket(tmp_path, "task_lastbad", n_eps=3)
+    p = b / "data" / "chunk-000" / "episode_000002.parquet"
+    df = pd.read_parquet(p)
+    bad = np.stack(df["action.ee_pose"].to_numpy()).copy()
+    bad[:, 3:7] *= 5.0
+    df["action.ee_pose"] = list(bad)
+    df.to_parquet(p)
+    with pytest.raises(ValueError):
+        _make_ds(b, normalize_mode=None, unify_action=False)
+
+
+def test_validation_checks_base_finite(tmp_path):
+    b = make_bucket(tmp_path, "task_badbase")
+    p = b / "data" / "chunk-000" / "episode_000000.parquet"
+    df = pd.read_parquet(p)
+    bad = np.stack(df["state.base"].to_numpy()).copy()
+    bad[2, 1] = np.nan
+    df["state.base"] = list(bad)
+    df.to_parquet(p)
+    with pytest.raises(ValueError, match="non-finite"):
+        _make_ds(b, normalize_mode=None, unify_action=False)

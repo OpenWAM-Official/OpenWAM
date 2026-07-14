@@ -116,6 +116,12 @@ _GETITEM_MAX_RETRIES = 64
 _WRIST_DECODE_TOLERATED: tuple = (FileNotFoundError, OSError, RuntimeError)
 
 
+class EBenchDataError(ValueError):
+    """Deterministic data-contract violation (non-finite values, unresolvable
+    prompt). NEVER masked by the ``_safe_get`` retry loop — transient IO gets
+    retried, corrupt data must surface."""
+
+
 def wrap_angle_rad(angle: np.ndarray) -> np.ndarray:
     """Wrap radian angle(s) to [-pi, pi)."""
     return (np.asarray(angle, dtype=np.float64) + np.pi) % (2.0 * np.pi) - np.pi
@@ -129,8 +135,11 @@ def render_ebench_state_base(
 
     * ``delta``: measured per-step displacement ``cur - prev`` with the yaw
       difference wrapped to [-pi, pi) then converted to DEGREES — the space of
-      ``action.base_delta``. ``prev_base=None`` (episode start) yields zeros,
-      matching GenManip's zero first-step convention.
+      ``action.base_delta``. ``prev_base=None`` (episode start) yields zeros:
+      there is no previous measurement to difference. (Note this is a
+      state-side rendering choice; GenManip's ``action.base_delta[0]`` keeps
+      the raw first command and may be non-zero — it is ``action.base`` that
+      the converter pins to 0 at t=0, an exclusive prefix sum.)
     * ``cumulative``: ``cur`` with yaw converted rad→deg (unwrapped — the
       cumulative command's degree yaw is unbounded too) — the space of
       ``action.base``.
@@ -428,18 +437,33 @@ def _bucket_fingerprint_paths(buckets: Sequence[Path], dataset_dir: Optional[str
     return sorted(bucket_paths)
 
 
-def _stats_source_digest(buckets: Sequence[Path]) -> str:
+def _stats_source_digest(buckets: Sequence[Path], dataset_dir: Optional[str] = None) -> str:
     """Joint sha256 over every bucket's ``episodes_stats.jsonl`` bytes.
 
     An in-place dataset update (re-download, re-export) must invalidate the
-    stats cache; bucket *paths* alone cannot see that.
+    stats cache; bucket *paths* alone cannot see that. Paths are mixed into
+    the digest in the same dataset_dir-relative normalization as
+    ``_bucket_fingerprint_paths`` so moving the whole dataset to another
+    mount does NOT invalidate a byte-identical cache.
     """
     import hashlib
 
+    root = Path(dataset_dir).resolve() if dataset_dir else None
+
+    def _rel(bucket: Path) -> str:
+        resolved = Path(bucket).resolve()
+        if root is not None:
+            try:
+                return resolved.relative_to(root).as_posix()
+            except ValueError:
+                pass
+        return resolved.as_posix()
+
+    pairs = sorted((_rel(b), Path(b).resolve()) for b in buckets)
     digest = hashlib.sha256()
-    for bucket in sorted(Path(b).resolve().as_posix() for b in buckets):
-        stats_path = Path(bucket) / "meta" / "episodes_stats.jsonl"
-        digest.update(stats_path.as_posix().encode())
+    for rel, bucket in pairs:
+        stats_path = bucket / "meta" / "episodes_stats.jsonl"
+        digest.update(rel.encode())
         digest.update(stats_path.read_bytes())
     return digest.hexdigest()
 
@@ -457,7 +481,7 @@ def _stats_fingerprint(
         "action_mode": action_mode,
         "action_keys": list(action_keys),
         "buckets": _bucket_fingerprint_paths(buckets, dataset_dir),
-        "source_digest": _stats_source_digest(buckets),
+        "source_digest": _stats_source_digest(buckets, dataset_dir),
     }
 
 
@@ -739,12 +763,19 @@ class EBenchDataset(BaseDataset):
         self._validate_sample_values()
 
     def _filter_excluded(self, episodes: list[dict]) -> list[dict]:
-        """Honor ``meta/excluded_episodes.json`` (list of episode indices)."""
+        """Honor ``meta/excluded_episodes.json``.
+
+        Accepts both the family/scanner schema ``{"episode_indices": [...]}``
+        (LeRobotV3Reader / scripts/scan_dataset.py output) and a bare list.
+        """
         excluded_path = self._dataset_dir / "meta" / "excluded_episodes.json"
         if not excluded_path.exists():
             return episodes
         with excluded_path.open() as f:
-            excluded = {int(i) for i in json.load(f)}
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            payload = payload.get("episode_indices", [])
+        excluded = {int(i) for i in payload}
         kept = [ep for ep in episodes if int(ep["episode_index"]) not in excluded]
         if len(kept) != len(episodes):
             logger.info(
@@ -754,27 +785,43 @@ class EBenchDataset(BaseDataset):
             )
         return kept
 
+    _VALIDATE_ROWS_PER_EPISODE = 64
+
     def _validate_sample_values(self) -> None:
-        """Data-level convention checks on the first episode, before training.
+        """SAMPLED data-level convention checks before training — not a full
+        dataset scan. Reads the leading 64 rows of the first, middle, and last
+        selected episodes.
 
         Catches (a) non-unit quaternions (wrong field routed into the quat
-        slots), (b) non-finite values, (c) gripper values outside GenManip's
-        physical ranges, and (d) per-hand finger commands that disagree —
-        which would invalidate both the scalar-gripper averaging and the
-        summary-stats derivation in ``_raw_stats_to_23``.
+        slots), (b) non-finite ee/gripper/base values, (c) gripper values
+        outside GenManip's physical ranges, and (d) per-hand finger commands
+        that disagree — which would invalidate both the scalar-gripper
+        averaging and the summary-stats derivation in ``_raw_stats_to_23``
+        (the check pins that assumption on a sample, it does not prove it
+        dataset-wide).
 
         A norm check cannot catch a wxyz↔xyzw reorder; that convention is
         pinned upstream (GenManip's converter names ``ee0_qw`` first and
         cuRobo FK returns wxyz) and by the bridge round-trip tests.
         """
-        ep_idx = int(self._episodes[0]["episode_index"])
-        frame = self._read_episode_data(ep_idx, 0, min(64, int(self._episodes[0]["length"])))
+        picks = sorted({0, len(self._episodes) // 2, len(self._episodes) - 1})
+        for ep_pos in picks:
+            ep = self._episodes[ep_pos]
+            self._validate_episode_rows(int(ep["episode_index"]), int(ep["length"]))
+
+    def _validate_episode_rows(self, ep_idx: int, ep_len: int) -> None:
+        frame = self._read_episode_data(ep_idx, 0, min(self._VALIDATE_ROWS_PER_EPISODE, ep_len))
+        ctx = f"EBench({self._dataset_id}) episode {ep_idx}"
         for key in (self._action_keys[0], self._state_keys[0]):
             ee = _column_matrix(frame, key, 14)
             if not np.isfinite(ee).all():
-                raise ValueError(f"EBench({self._dataset_id}) {key} contains non-finite values")
+                raise ValueError(f"{ctx} {key} contains non-finite values")
             assert_unit_quaternion(ee[:, 3:7])
             assert_unit_quaternion(ee[:, 10:14])
+        for key in (self._action_keys[2], self._state_keys[2]):
+            base = _column_matrix(frame, key, 3)
+            if not np.isfinite(base).all():
+                raise ValueError(f"{ctx} {key} contains non-finite values")
         lo_cmd, hi_cmd = EBENCH_GRIPPER_CMD_RANGE
         lo_state, hi_state = EBENCH_GRIPPER_STATE_RANGE
         eps = 1e-4
@@ -784,11 +831,9 @@ class EBenchDataset(BaseDataset):
         ):
             grip = _column_matrix(frame, key, 4)
             if not np.isfinite(grip).all():
-                raise ValueError(f"EBench({self._dataset_id}) {key} contains non-finite values")
+                raise ValueError(f"{ctx} {key} contains non-finite values")
             if grip.min() < lo or grip.max() > hi:
-                raise ValueError(
-                    f"EBench({self._dataset_id}) {key} outside [{lo}, {hi}]: min={grip.min():.4f}, max={grip.max():.4f}"
-                )
+                raise ValueError(f"{ctx} {key} outside [{lo}, {hi}]: min={grip.min():.4f}, max={grip.max():.4f}")
         cmd = _column_matrix(frame, self._action_keys[1], 4)
         finger_gap = max(
             float(np.abs(cmd[:, 0] - cmd[:, 1]).max()),
@@ -796,7 +841,7 @@ class EBenchDataset(BaseDataset):
         )
         if finger_gap > 1e-3:
             raise ValueError(
-                f"EBench({self._dataset_id}) per-hand finger commands disagree by {finger_gap:.5f} m; "
+                f"{ctx} per-hand finger commands disagree by {finger_gap:.5f} m; "
                 "the scalar-gripper averaging and its summary stats assume identical finger commands"
             )
 
@@ -850,12 +895,20 @@ class EBenchDataset(BaseDataset):
         return self._safe_get(idx)
 
     def _safe_get(self, idx: int) -> dict:
-        # Mirror of LeRobotV3Reader._safe_get: a flaky NFS read or one corrupt
-        # mp4 frame must not kill a multi-day multi-node run — walk to the next
-        # window instead, with throttled cumulative logging.
+        # Adapted from LeRobotV3Reader._safe_get: a flaky NFS read or one
+        # corrupt mp4 frame must not kill a multi-day multi-node run. Two
+        # deliberate deviations from the base:
+        #   * EBenchDataError (deterministic data corruption) re-raises
+        #     immediately — retrying would mask a data bug as sample churn;
+        #   * the retry walks to the NEXT EPISODE's first window, not idx+1.
+        #     EBench stores one mp4 per episode, so idx+1 inside a long broken
+        #     episode would reopen the same bad file 64 times and still die
+        #     (the base-class flaw scripts/scan_dataset.py documents).
         for attempt in range(_GETITEM_MAX_RETRIES):
             try:
                 return self._getitem_impl(idx)
+            except EBenchDataError:
+                raise
             except Exception as e:
                 if attempt == _GETITEM_MAX_RETRIES - 1:
                     raise
@@ -870,8 +923,14 @@ class EBenchDataset(BaseDataset):
                         type(e).__name__,
                         attempt,
                     )
-                idx = (idx + 1) % max(1, len(self))
+                idx = self._next_episode_start(idx)
         raise RuntimeError("unreachable")
+
+    def _next_episode_start(self, idx: int) -> int:
+        """First window index of the episode after the one owning ``idx``."""
+        ep_local = int(np.searchsorted(self._cum_n_starts, idx, side="right") - 1)
+        nxt = (ep_local + 1) % len(self._episodes)
+        return int(self._cum_n_starts[nxt]) % max(1, self._n_total)
 
     def _getitem_impl(self, idx: int) -> dict:
         ep_local = int(np.searchsorted(self._cum_n_starts, idx, side="right") - 1)
@@ -959,6 +1018,12 @@ class EBenchDataset(BaseDataset):
         return unified.astype(np.float32)
 
     def _normalize(self, arr: np.ndarray, stats: Optional[dict]) -> np.ndarray:
+        # Corrupt values must surface regardless of mode (a NaN row under
+        # normalize_mode=null would otherwise flow straight into the loss).
+        # EBenchDataError: _safe_get must not retry data corruption away.
+        if not np.isfinite(arr).all():
+            bad = np.argwhere(~np.isfinite(np.asarray(arr)))
+            raise EBenchDataError(f"EBench({self._dataset_id}) non-finite raw values at indices {bad[:8].tolist()}")
         if self._normalize_mode in (None, "none", "null"):
             return arr.astype(np.float32)
         if stats is None:
@@ -970,7 +1035,9 @@ class EBenchDataset(BaseDataset):
             # Never silently zero corrupt values into "stop" actions — a slow
             # data-corruption event must surface, not train invisibly.
             bad = np.argwhere(~np.isfinite(normalized))
-            raise ValueError(f"EBench({self._dataset_id}) non-finite normalized values at indices {bad[:8].tolist()}")
+            raise EBenchDataError(
+                f"EBench({self._dataset_id}) non-finite normalized values at indices {bad[:8].tolist()}"
+            )
         return normalized.astype(np.float32)
 
     def _prompt_for_episode(self, episode_index: int, frame: pd.DataFrame) -> str:
@@ -982,7 +1049,8 @@ class EBenchDataset(BaseDataset):
             return format_prompt_for_inference(self._tasks[task_idx])
         # A data bug must not slip into training as a fabricated prompt
         # (family convention — BEHAVIOR fails fast on blank prompts too).
-        raise ValueError(
+        # EBenchDataError: _safe_get must not retry this away.
+        raise EBenchDataError(
             f"EBench({self._dataset_id}) episode {episode_index} has no task text in "
             "meta/episodes.jsonl or meta/tasks.jsonl"
         )
