@@ -150,7 +150,9 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
 
         self._prompt_columns = [str(x) for x in _as_list(prompt_columns)]
         self._head_priority = tuple(str(x) for x in (head_camera_priority or self.HEAD_CAMERA_PRIORITY))
-        self._left_wrist_priority = tuple(str(x) for x in (left_wrist_camera_priority or self.LEFT_WRIST_CAMERA_PRIORITY))
+        self._left_wrist_priority = tuple(
+            str(x) for x in (left_wrist_camera_priority or self.LEFT_WRIST_CAMERA_PRIORITY)
+        )
         self._right_wrist_priority = tuple(
             str(x) for x in (right_wrist_camera_priority or self.RIGHT_WRIST_CAMERA_PRIORITY)
         )
@@ -185,8 +187,10 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         self.ACTION_DIM = int(dim)
         action_dim_mask = _as_bool_mask(action_mask, self.ACTION_DIM, field="action_mask")
         state_dim_mask = _as_bool_mask(state_mask, self.ACTION_DIM, field="state_mask")
-        if action_dim_mask is not None and state_dim_mask is not None and not np.array_equal(
-            action_dim_mask, state_dim_mask
+        if (
+            action_dim_mask is not None
+            and state_dim_mask is not None
+            and not np.array_equal(action_dim_mask, state_dim_mask)
         ):
             raise ValueError("RoboCasaGR1 action_mask and state_mask must match; the shared reader uses one raw mask")
         self.ACTION_DIM_MASK = action_dim_mask if action_dim_mask is not None else state_dim_mask

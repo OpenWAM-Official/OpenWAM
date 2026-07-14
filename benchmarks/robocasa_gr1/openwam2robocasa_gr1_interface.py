@@ -78,7 +78,9 @@ def action_vector_to_dict(
         offset += dim
 
     if offset != vector.shape[0]:
-        raise ValueError(f"OpenWAM returned action dim {vector.shape[0]}, but RoboCasa action mapping consumed {offset}")
+        raise ValueError(
+            f"OpenWAM returned action dim {vector.shape[0]}, but RoboCasa action mapping consumed {offset}"
+        )
     return out
 
 

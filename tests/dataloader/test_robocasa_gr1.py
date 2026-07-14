@@ -63,7 +63,9 @@ def _write_bucket(bucket: Path, *, include_wrist: bool = False) -> None:
 
     info = {"fps": 20, "features": features}
     (bucket / "meta" / "info.json").write_text(json.dumps(info))
-    pq.write_table(pa.Table.from_pandas(pd.DataFrame([episode_row])), bucket / "meta" / "episodes" / "chunk-000.parquet")
+    pq.write_table(
+        pa.Table.from_pandas(pd.DataFrame([episode_row])), bucket / "meta" / "episodes" / "chunk-000.parquet"
+    )
 
     eef = np.zeros((EP_LENGTH, 12), dtype=np.float32)
     eef[:, 0] = np.linspace(0.0, 0.7, EP_LENGTH)
