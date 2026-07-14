@@ -1,0 +1,18 @@
+# Per-task eval step limits for RoboCasa365 (mirrors benchmarks/robotwin/step_limits.yml).
+#
+# Format: <task_name>: <int>
+#
+# Semantics:
+#   - single_eval.py / multi_eval.sh use this per-task limit as the rollout horizon for the
+#     listed task; tasks NOT listed fall back to `max_steps` in the policy config (default 500).
+#   - The env still terminates early on its own done/truncated, so this is an upper bound.
+#   - Each value follows robotwin's convention `ceil(avg_episode_len / 32) * 32`; the `# avg N`
+#     comment preserves the raw per-task mean episode length before rounding. Because avg is a
+#     central tendency (not a ceiling), a non-trivial fraction of rollouts run longer than avg.
+#
+# Only tasks whose LeRobot data is available locally are seeded here; add the rest by running
+# the same mean-length computation over the v3 repo's `meta/episodes/*.parquet` (`length` column),
+# filtered to the task's `source_prefix`.
+# This is for EVALUATION, not training.
+
+OpenDrawer: 288  # avg 267 (514 eps; max 603, p90 354)
