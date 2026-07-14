@@ -20,7 +20,6 @@ A teacher-forcing attention mask ensures:
 
 from __future__ import annotations
 
-import copy
 import logging
 from typing import Callable, Optional, Tuple
 
@@ -108,45 +107,22 @@ class IDMMoTDriver(DualSystemMoTDriver):
     ):
         """Run the IDM training loop with merged [noisy_video || cond_video] as video.
 
-        We merge the two video states into one by concatenating their x tensors,
-        freqs, and t_mod along the sequence dimension. The MoT joint loop then
-        runs as if there is one large video sequence + action. After the loop,
-        we split the video output back.
+        The backbone owns the branch concatenation (``merge_idm_video_branches``)
+        and split (``split_idm_video_branches``) since the layout differs by
+        backbone: Wan merges flat ``(B, L, D)`` fields, while CosmosPredict25
+        concatenates a 5D grid plus its ``extras`` (per-frame ``t_embedding`` and
+        per-token ``rope_emb``) along the right axes. The MoT joint loop then
+        runs as if there is one large video sequence + action.
         """
         # Merge noisy + cond video sequences. IDM teacher forcing needs two
-        # different video timesteps inside one video-expert sequence, so the
-        # backbone must expose token-wise t_mod, mirroring FastWAM-IDM's
-        # seperated_timestep + fuse_vae_embedding_in_latents requirement.
-        if vstate_noisy.time_mod.ndim != 4 or vstate_cond.time_mod.ndim != 4:
-            raise ValueError(
-                "IDM teacher-forcing requires token-wise video t_mod for noisy and cond branches; "
-                "ensure the video backbone is running in separated-timestep/fused-first-frame mode."
-            )
-        s_noisy = vstate_noisy.hidden_states.shape[1]
-        s_cond = vstate_cond.hidden_states.shape[1]
+        # different video timesteps inside one video-expert sequence; the
+        # backbone returns the per-branch TOKEN counts (``T·H·W``) so the
+        # teacher-forcing mask never depends on ``hidden_states.shape[1]`` (which
+        # is ``T`` for 5D-grid backbones like CosmosPredict25).
+        merged_vstate, s_noisy, s_cond = self.vb.merge_idm_video_branches(vstate_noisy, vstate_cond)
         s_action = astate.payload.x_action.shape[1]
-        if (vstate_noisy.grid_height, vstate_noisy.grid_width) != (vstate_cond.grid_height, vstate_cond.grid_width):
-            raise ValueError(
-                "IDM teacher-forcing requires noisy and cond video branches to share spatial token layout, "
-                f"got noisy h/w={(vstate_noisy.grid_height, vstate_noisy.grid_width)} and cond h/w={(vstate_cond.grid_height, vstate_cond.grid_width)}."
-            )
 
-        # Build merged vstate
-        merged_vstate = copy.copy(vstate_noisy)
-        merged_vstate.hidden_states = torch.cat([vstate_noisy.hidden_states, vstate_cond.hidden_states], dim=1)
-        merged_vstate.rope_freqs = torch.cat([vstate_noisy.rope_freqs, vstate_cond.rope_freqs], dim=0)
-        merged_vstate.time_mod = torch.cat([vstate_noisy.time_mod, vstate_cond.time_mod], dim=1)
-        if vstate_noisy.vace_hints is not None or vstate_cond.vace_hints is not None:
-            if vstate_noisy.vace_hints is None or vstate_cond.vace_hints is None:
-                raise ValueError("IDM teacher-forcing requires both video branches to have VACE hints or neither.")
-            if len(vstate_noisy.vace_hints) != len(vstate_cond.vace_hints):
-                raise ValueError("IDM teacher-forcing VACE hint count mismatch between noisy and cond branches.")
-            merged_vstate.vace_hints = [
-                torch.cat([hint_noisy, hint_cond], dim=1)
-                for hint_noisy, hint_cond in zip(vstate_noisy.vace_hints, vstate_cond.vace_hints)
-            ]
-
-        # Build IDM teacher-forcing mask
+        # Build IDM teacher-forcing mask (token granularity).
         video_tokens_per_frame = self._video_tokens_per_frame(vstate_noisy)
         attn_mask = self._build_teacher_forcing_mask(
             s_noisy_video=s_noisy,
@@ -168,10 +144,7 @@ class IDMMoTDriver(DualSystemMoTDriver):
             )
 
         # Split merged video back into noisy + cond
-        vstate_noisy.hidden_states = merged_vstate.hidden_states[:, :s_noisy]
-        vstate_cond.hidden_states = merged_vstate.hidden_states[:, s_noisy:]
-        vstate_noisy.time_mod = merged_vstate.time_mod[:, :s_noisy]
-        vstate_cond.time_mod = merged_vstate.time_mod[:, s_noisy:]
+        vstate_noisy, vstate_cond = self.vb.split_idm_video_branches(merged_vstate, vstate_noisy, vstate_cond)
 
         return vstate_noisy, vstate_cond, astate
 
@@ -190,9 +163,16 @@ class IDMMoTDriver(DualSystemMoTDriver):
 
     @torch.no_grad()
     def prefill_video_cache(self, vstate):
-        """Run the frozen video branch once and cache per-layer K/V for IDM inference."""
-        video_seq_len = int(vstate.hidden_states.shape[1])
+        """Run the frozen video branch once and cache per-layer K/V for IDM inference.
+
+        Returns ``(kv_cache, video_seq_len)`` where ``video_seq_len`` is the token
+        count (T·H·W) callers need for the action mask — so they need not re-derive
+        it via the private ``_video_tokens_per_frame``.
+        """
+        # Token count (T·H·W), not hidden_states.shape[1] — that is T for 5D-grid
+        # backbones (CosmosPredict25). Mirrors run_joint_loop's s_video formula.
         video_tokens_per_frame = self._video_tokens_per_frame(vstate)
+        video_seq_len = int(vstate.grid_frames) * video_tokens_per_frame
         attn_mask = self._build_video_only_attention_mask(
             video_seq_len=video_seq_len,
             video_tokens_per_frame=video_tokens_per_frame,
@@ -204,7 +184,7 @@ class IDMMoTDriver(DualSystemMoTDriver):
             mixed_v = self._mixed_attention(q_v, k_v, v_v, attn_mask)
             vstate = self.vb.post_attn_at_layer(layer_id, vstate, mixed_v.contiguous(), vpost)
             kv_cache.append({"k": k_v, "v": v_v})
-        return kv_cache, vstate
+        return kv_cache, video_seq_len
 
     def run_action_with_video_cache(
         self,
@@ -425,14 +405,19 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
     def build_mot_driver(self) -> IDMMoTDriver:
         """Construct the IDM-extended MoT driver.
 
-        IDM training needs token-wise (4D) video ``t_mod`` so the
-        noisy + cond branches can be concatenated along the sequence dim with
-        per-branch timesteps. TI2V provides that natively
+        IDM training needs per-branch video timesteps so the noisy + cond
+        branches can be concatenated along the sequence dim. On Wan this is
+        token-wise (4D) ``t_mod``: TI2V provides it natively
         (``seperated_timestep + fuse_vae_embedding_in_latents``); other Wan
         backbones (VACE, I2V) get the same 4D shape via
         ``force_per_token_t_mod=True`` + ``zero_clean_prefix_t_mod=True`` in
-        :meth:`_forward_idm_training`. ``IDMMoTDriver.run_idm_training_loop``
-        keeps a runtime ``t_mod.ndim == 4`` assertion as the safety net.
+        :meth:`_forward_idm_training`. On CosmosPredict25 the analogue is a
+        per-FRAME ``t_embedding`` (Cosmos modulation is intrinsically per-frame);
+        the same ``force_per_token_t_mod=True`` flag drives
+        ``prepare_block_loop`` to expand the per-sample timestep to ``(B, T)`` so
+        both branches concatenate along the frame axis (see
+        ``cosmos_predict25.idm_merge``). The backbone owns the merge/split and the
+        runtime shape checks, so the driver stays backbone-agnostic.
         """
         if self.video_backbone is None:
             raise RuntimeError("DualSystemIDMArchitecture.build_mot_driver: video_backbone is not set.")
@@ -1075,8 +1060,9 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         driver = self._mot_driver
         if driver is None:
             driver = self.build_mot_driver()
-        video_seq_len = int(cond_vstate.hidden_states.shape[1])
-        video_kv_cache, _ = driver.prefill_video_cache(cond_vstate)
+        # prefill returns the token count (T·H·W) directly — no need to re-derive it
+        # via the private _video_tokens_per_frame.
+        video_kv_cache, video_seq_len = driver.prefill_video_cache(cond_vstate)
         compiled_action_cache_inputs = None
         if getattr(self, "_compiled_idm_action_cache_loop", None) is not None:
             video_k_tuple, video_v_tuple = driver.video_kv_cache_to_tuples(video_kv_cache)

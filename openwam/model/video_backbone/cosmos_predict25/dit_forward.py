@@ -43,6 +43,7 @@ def prepare_block_loop(
     fps: Optional[Tensor] = None,
     use_gradient_checkpointing: bool = False,
     use_gradient_checkpointing_offload: bool = False,
+    force_per_token_t_mod: bool = False,
     **_ignored: Any,
 ) -> BlockLoopState:
     """Replicate ``MiniTrainDIT.forward`` up to (but excluding) the block loop.
@@ -96,6 +97,17 @@ def prepare_block_loop(
             timesteps_eff = timesteps_eff.unsqueeze(1).expand(-1, T_lat).clone()
             frame_mask = condition_mask[:, 0, :, 0, 0]  # (B, T_lat)
             timesteps_eff = torch.where(frame_mask > 0, torch.zeros_like(timesteps_eff), timesteps_eff)
+        elif force_per_token_t_mod:
+            # IDM teacher-forcing: expand a uniform (or t=0) per-sample timestep to
+            # per-frame ``(B, T_lat)`` so this branch yields ``t_embedding_B_T_D`` of
+            # shape ``(B, T_lat, D)``. The noisy and cond branches then concatenate
+            # along the frame axis with their own per-branch timesteps (see
+            # ``cosmos_predict25.idm_merge``). Cosmos's per-FRAME timestep is the
+            # analogue of Wan's per-token ``t_mod`` here: Cosmos modulation is
+            # already per-frame (``_compute_modulation`` broadcasts ``(B,T,1,1,D)``
+            # over H,W), so frame-granular timesteps are all IDM needs.
+            # ``T_lat == f`` because the Cosmos temporal patch size is 1.
+            timesteps_eff = timesteps_eff.unsqueeze(1).expand(-1, T_lat).clone()
         else:
             timesteps_eff = timesteps_eff.unsqueeze(1)
     t_embedding_B_T_D, adaln_lora_B_T_3D = net.t_embedder(timesteps_eff)

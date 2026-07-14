@@ -74,27 +74,33 @@ def list_registered_datasets():
 
 def _register_builtins():
     """Register all built-in dataset classes."""
+    from openwam.dataloader.agibotworld import MultiAgiBotWorldDataset
     from openwam.dataloader.behavior import BehaviorDataset
+    from openwam.dataloader.ego4d import Ego4DDataset
     from openwam.dataloader.egodex import EgoDexDataset
     from openwam.dataloader.mixture import MixtureDataset
     from openwam.dataloader.oxe_bcz import OxeBczDataset
     from openwam.dataloader.oxe_bridge import OxeBridgeDataset
     from openwam.dataloader.oxe_droid import OxeDroidDataset
     from openwam.dataloader.oxe_fractal import OxeFractalDataset
+    from openwam.dataloader.robocasa365 import MultiTaskRoboCasa365Dataset
     from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset
     from openwam.dataloader.robocoin import MultiRobotCOINDataset
     from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
+    register_dataset("agibotworld")(MultiAgiBotWorldDataset)
     register_dataset("mixture")(MixtureDataset)
     register_dataset("behavior")(BehaviorDataset)
     register_dataset("robocasa_gr1")(MultiRoboCasaGR1Dataset)
     register_dataset("robocoin")(MultiRobotCOINDataset)
     register_dataset("egodex")(EgoDexDataset)
+    register_dataset("ego4d")(Ego4DDataset)
     register_dataset("oxe_bcz")(OxeBczDataset)
     register_dataset("oxe_bridge")(OxeBridgeDataset)
     register_dataset("oxe_fractal")(OxeFractalDataset)
     register_dataset("oxe_droid")(OxeDroidDataset)
+    register_dataset("robocasa365")(MultiTaskRoboCasa365Dataset)
 
 
 _register_builtins()

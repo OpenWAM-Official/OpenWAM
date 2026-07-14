@@ -29,6 +29,14 @@ SUCCESS_RATE_PATTERNS = (
     re.compile(r"success rate[^%]*?([0-9]+(?:\.[0-9]+)?)\s*%", re.IGNORECASE),
 )
 
+# RoboTwin prints per-step progress as ``step: N / M`` (with ``end="\r"``) and
+# an episode verdict as ``Success!`` / ``Fail!``. A ``Fail!`` whose last step
+# reached ``N == M`` was truncated at the step limit (ran out of steps) rather
+# than being driven to a failed terminal state — a non-model cause that would
+# otherwise be indistinguishable from a model error in the success rate alone.
+STEP_PROGRESS_RE = re.compile(r"step:\s*(\d+)\s*/\s*(\d+)")
+EPISODE_VERDICT_RE = re.compile(r"\b(Success|Fail)!")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -70,20 +78,50 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_RE.sub("", text)
 
 
-def parse_success_rate(log_path: Path) -> Optional[float]:
-    if not log_path.is_file():
-        return None
+def parse_success_rate_from_text(text: str) -> Optional[float]:
     last_match: Optional[float] = None
-    try:
-        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            clean_line = strip_ansi(line)
-            for pattern in SUCCESS_RATE_PATTERNS:
-                match = pattern.search(clean_line)
-                if match:
-                    last_match = float(match.group(1))
-    except OSError:
-        return None
+    for line in strip_ansi(text).splitlines():
+        for pattern in SUCCESS_RATE_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                last_match = float(match.group(1))
     return last_match
+
+
+def parse_episode_stats_from_text(text: str) -> Tuple[int, int]:
+    """Parse ``(episodes, step_limit_hits)`` from one RoboTwin task log's text.
+
+    - ``episodes``: number of ``Success!`` / ``Fail!`` verdicts seen.
+    - ``step_limit_hits``: ``Fail!`` episodes whose most recent ``step: N / M``
+      had ``N >= M`` — i.e. the rollout was cut off at the step limit instead of
+      the model reaching a terminal state. These are "out of steps", not
+      necessarily model failures, so they let a low success rate be split into
+      "model got it wrong" vs "step_lim too tight for this policy".
+
+    Step-progress lines are written with ``\\r`` (no newline), but ``splitlines``
+    still splits on ``\\r`` so each ``step:`` update is its own logical line and
+    the last one before a verdict is that episode's final step count.
+    """
+    episodes = 0
+    step_limit_hits = 0
+    last_step: Optional[Tuple[int, int]] = None
+    for line in strip_ansi(text).splitlines():
+        step_match = STEP_PROGRESS_RE.search(line)
+        if step_match:
+            last_step = (int(step_match.group(1)), int(step_match.group(2)))
+            continue
+        verdict = EPISODE_VERDICT_RE.search(line)
+        if verdict:
+            episodes += 1
+            if (
+                verdict.group(1) == "Fail"
+                and last_step is not None
+                and last_step[1] > 0
+                and last_step[0] >= last_step[1]
+            ):
+                step_limit_hits += 1
+            last_step = None  # reset for the next episode
+    return (episodes, step_limit_hits)
 
 
 def iter_summary_rows(summary_path: Path) -> Iterable[Dict[str, str]]:
@@ -214,9 +252,21 @@ def main() -> int:
         log_path = Path(row.get("log", ""))
         if not log_path.is_absolute():
             log_path = (log_dir / log_path).resolve()
-        success_rate = parse_success_rate(log_path)
 
-        if not log_path.is_file():
+        log_exists = log_path.is_file()
+        log_text: Optional[str] = None
+        if log_exists:
+            try:
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                log_text = None
+
+        success_rate = parse_success_rate_from_text(log_text) if log_text is not None else None
+        episodes, step_limit_hits = (
+            parse_episode_stats_from_text(log_text) if log_text is not None else (0, 0)
+        )
+
+        if not log_exists:
             failures.append(f"missing log: {log_path}")
         elif success_rate is None:
             failures.append(f"missing success rate: {log_path}")
@@ -233,6 +283,8 @@ def main() -> int:
                 "status": row.get("status", ""),
                 "exit_code": row.get("exit_code", ""),
                 "success_rate": "" if success_rate is None else f"{success_rate:.6f}",
+                "episodes": "" if log_text is None else str(episodes),
+                "step_limit_hits": "" if log_text is None else str(step_limit_hits),
                 "log_path": str(log_path),
             }
         )
@@ -252,6 +304,8 @@ def main() -> int:
                 "status",
                 "exit_code",
                 "success_rate",
+                "episodes",
+                "step_limit_hits",
                 "log_path",
             ],
         )
@@ -260,8 +314,15 @@ def main() -> int:
 
     ok_rows = sum(1 for row in exported_rows if row["status"] in ("", "ok"))
     parsed_rows = sum(1 for row in exported_rows if row["success_rate"] != "")
+    total_step_limit_hits = sum(
+        int(row["step_limit_hits"]) for row in exported_rows if row["step_limit_hits"]
+    )
     print(f"[INFO] wrote CSV: {output_csv}")
     print(f"[INFO] rows={len(exported_rows)} parsed_success_rate={parsed_rows} ok_or_unknown={ok_rows}")
+    print(
+        f"[INFO] step_limit_hits(total)={total_step_limit_hits} "
+        "(failed episodes truncated at step_lim, not necessarily model errors)"
+    )
 
     if failures:
         print("[WARN] encountered issues while parsing:", file=sys.stderr)

@@ -1,0 +1,77 @@
+# OpenWAM RoboCasa365 benchmark client config.
+#
+# Template: single_eval.sh forwards host/port/task/split as CLI flags that
+# single_eval.py overrides in-memory (no file rewrite); copy this and set
+# POLICY_CONFIG_PATH=/path/to/custom.yml to override the rest. The OpenWAM
+# server reads the checkpoint's config.yaml and does all preprocessing / multi-view
+# composition / prompt wrapping / action denormalization. The client forwards raw frames
+# + a single-arm EEF proprio (20-D fixed-base, or 25-D [arm20, base5] for a mobile ckpt; converted
+# from the env's 16-D state); the server returns a 20-D EEF action (25-D = [arm20, base5] for a mobile
+# ckpt), which the client bridges to the env's 12-D action (a 12-D server action is passed through).
+
+host: 127.0.0.1
+port: 8848
+request_timeout: 300
+
+# Benchmark task selection (robocasa/<task>; split=target = held-out eval scenes).
+split: target
+task: OpenDrawer
+num_trials: 5
+max_steps: 500
+seed: 0
+
+# Observation mapping. RoboCasa365 is single-arm with 2 third-person agentview
+# cameras + 1 wrist cam. We send TWO real views: agentview_left (3rd-person) as
+# head_camera and the eye_in_hand wrist cam as left_wrist_camera. The single arm
+# has no 2nd wrist, so right_wrist_camera stays null — the server black-fills that
+# slot when composing the multi-view layout. (Training must match this 2-view layout.)
+head_camera_key: video.robot0_agentview_left
+left_wrist_camera_key: video.robot0_eye_in_hand
+right_wrist_camera_key: null
+
+# RoboCasaGymEnv already returns upright frames (it flips with img[::-1]), so no
+# client-side rotation. Set 'rotate_180' only for checkpoints trained on raw frames.
+image_transform: none
+
+# Proprio: the client converts the raw obs into the single-arm EEF proprio the model trains on
+# ([eef_pos3, rot6d6, grip1, <right10 zeros>]). With mobile_base below it also appends the 5-D base
+# proprio [vx, vy, vyaw, 0, 0] → 25-D. state_keys are used only for the debug display.
+state_keys:
+  - state.base_position
+  - state.base_rotation
+  - state.end_effector_position_relative
+  - state.end_effector_rotation_relative
+  - state.gripper_qpos
+# state_dim: fail-fast check against what the client sends. Leave null to auto-derive (20, or 25 when
+# mobile_base=true); set an explicit int only to pin it. MUST match the checkpoint.
+state_dim: null
+
+# mobile_base: set true ONLY for a checkpoint trained with dataloader.mobile_base=true (the default).
+# The client then derives the base5 proprio ([vx, vy, vyaw, 0, 0]; the 3 velocities are the world base
+# pose finite-diff rescaled into the action command space, A′) and sends 25-D [arm20, base5]; the
+# server normalizes it with the combined eef_base stats and scatters through the ONE map. A mismatch
+# (client on, ckpt off — or vice versa) fails fast at the server.
+mobile_base: false
+
+# mask_torso_action: when the ckpt masked torso out of the action loss (dataloader default true), the
+# client zeros the torso command before the env — torso is a live JOINT_POSITION delta actuator but is
+# constant 0 in the data, so a nonzero prediction would wrongly drive it. MUST match the checkpoint.
+mask_torso_action: true
+
+# Action: the env consumes a flat 12-D vector (eef_pos 3 + eef_rot 3 + gripper 1 +
+# base 4 + mode 1), sliced into the RoboCasaGymEnv action dict. A RoboCasa365Dataset-
+# trained model emits the repo-standard 20-D EEF instead; the client bridges 20-D ->
+# 12-D (see README "Action spaces"). A 12-D server action is passed through unchanged.
+action_dim: 12
+
+# OSC scaling for the 20-D -> 12-D bridge: metres / radians of steady per-step EEF motion
+# per action magnitude 1.0. MEASURED on the real robocasa/OpenDrawer env (PandaOmron,
+# default_pandaomron.json controller): action 0.5 -> ~0.0063 m/step and ~0.051 rad/step steady,
+# i.e. ~0.0126 m and ~0.102 rad per unit. The action convention is DELTA (zero action -> no
+# motion; constant action -> constant per-step displacement), matching the bridge's
+# (target-current)/scale. REQUIRED when the server returns 20-D (unset -> raises).
+osc_pos_scale: 0.0126
+osc_rot_scale: 0.102
+
+debug: false
+debug_dir: ./debug_robocasa365

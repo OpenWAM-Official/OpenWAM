@@ -330,6 +330,15 @@ class LeRobotV3Reader(BaseDataset):
                     n_before,
                 )
 
+        # ── subclass episode filter hook (default identity) ───────────────
+        # Runs AFTER info-split + excluded_episodes.json filtering and BEFORE
+        # the offset arrays are extracted, so dropped rows stay alignment-safe
+        # (the per-row _data_row_offset / _video_frame_offset columns ride
+        # along). Ego4D overrides this to drop episodes whose bilingual prompt
+        # has no usable English half; every other reader keeps the identity
+        # default → byte-identical to before.
+        self._eps_df = self._filter_episodes(self._eps_df)
+
         # ── optional episode-level subsample to fit a per-bucket hour budget ──
         if self._max_hours is not None:
             n_before = len(self._eps_df)
@@ -453,6 +462,20 @@ class LeRobotV3Reader(BaseDataset):
         """Min episode length to yield a train window. 1 = any single labeled step."""
         return 1
 
+    def _filter_episodes(self, eps_df: pd.DataFrame) -> pd.DataFrame:
+        """Optional hook to drop episodes after split / excluded_episodes filtering.
+
+        Default: identity (no filtering). Called in ``__init__`` right after the
+        ``meta/excluded_episodes.json`` blacklist is applied and before the
+        offset arrays / window index are built, so a subclass can remove
+        episodes on a data-quality criterion computed from ``eps_df`` columns
+        (e.g. Ego4D drops rows whose bilingual ``tasks`` string has no usable
+        English half). Implementations MUST ``reset_index(drop=True)`` on the
+        returned frame. The per-row ``_data_row_offset`` / ``_video_frame_offset``
+        columns are preserved across row filtering, so alignment stays correct.
+        """
+        return eps_df
+
     def _load_prompts(self) -> None:
         """Populate the prompt lookup according to ``PROMPT_SOURCE``."""
         if self.PROMPT_SOURCE == "episode_annotated":
@@ -571,7 +594,11 @@ class LeRobotV3Reader(BaseDataset):
                 except (ValueError, EOFError, pickle.UnpicklingError) as e:
                     logger.warning(
                         "%s(%s): existing %s is corrupt (%s); rewriting with only the %r key.",
-                        self.DATASET_NAME, self._dataset_id, out.name, e, self.DEPLOY_ACTION_MODE,
+                        self.DATASET_NAME,
+                        self._dataset_id,
+                        out.name,
+                        e,
+                        self.DEPLOY_ACTION_MODE,
                     )
             payload[self.DEPLOY_ACTION_MODE] = entry
             # Atomic write (unique temp + replace) so concurrent per-rank constructors
@@ -594,7 +621,10 @@ class LeRobotV3Reader(BaseDataset):
                 "normalization_stats.npy left unchanged (deploy artifact not (re)generated). "
                 "Training is unaffected (in-process normalization uses the reader stats); to "
                 "deploy this run, pre-generate the artifact on a writable copy of the meta/ dir.",
-                self.DATASET_NAME, self._dataset_id, out, e,
+                self.DATASET_NAME,
+                self._dataset_id,
+                out,
+                e,
             )
             return
         self.normalization_stats_path = str(out)

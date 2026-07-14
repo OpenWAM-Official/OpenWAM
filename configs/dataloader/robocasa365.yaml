@@ -1,0 +1,124 @@
+type: robocasa365
+
+# ── Dataset root ─────────────────────────────────────────────────────────────
+# Points at the RAW RoboCasa365 download (LeRobot v3.0 aggregated repo, read directly — no
+# migration/conversion). v3 packs ALL tasks into ONE repo (e.g. the HF mirror
+# ember-lab-berkeley/robocasa365-pretrain-{atomic,composite}); each episode is tagged by
+# source_prefix (<split>/<atomic|composite>/<Task>/<date>).
+#   - task_name set   → single task (filter the repo to that source_prefix)
+#   - task_name null  → multi-task: every task in the repo (or the task_roots subset), one
+#                       RoboCasa365Dataset per task, concatenated, sharing ONE pooled stats file.
+# Full RoboCasa365 (all tasks, mobile + fixed): the mobile base command is trained (mobile_base=true
+# below), so tasks are no longer filtered to a fixed-base subset. Eval targets the official 50 target
+# tasks (see benchmarks/robocasa365/).
+#
+# dataset_dir may be a single repo OR a LIST of repos. The full 300 train tasks live in TWO separate
+# HF repos (65 atomic + 235 composite): pass both to train over all of them, e.g.
+#   dataset_dir: [/path/to/robocasa365-pretrain-atomic, /path/to/robocasa365-pretrain-composite]
+# Tasks are discovered across all listed repos (atomic/composite task sets are disjoint). Multi-repo
+# REQUIRES an explicit normalization_stats_path (see below) — there is no single root to auto-place
+# the shared stats file.
+dataset_dir: /path/to/robocasa365-pretrain-atomic
+task_name: null                   # null = every task across all repos; set a name = filter to one task (source_prefix)
+task_roots: null                  # optional list of task NAMES to include (a subset); overrides full discovery
+
+# ── Frame sampling (aligned with OXE / RoboCOIN / RoboTwin) ──────────────────
+# num_frames   = state window length in raw frames; action horizon = num_frames - 1.
+# video_stride = video-only stride; state/action stay at raw rate.
+# video length = (num_frames - 1) // video_stride + 1   (must divide evenly)
+# proprio = raw[0:1] (1, 20 arm / 25 mobile); action = raw[1:num_frames] (num_frames-1, 20 / 25).
+num_frames: 33
+video_stride: 4
+window_stride: 1
+repeat: 1
+
+# ── Image size / multi-view L-shape (FastWAM-compatible) ─────────────────────
+# multiview=true → L-shape canvas 384H×320W (matches the deploy server's compose,
+# so train/eval frames stay in-distribution):
+#   +---------------------------+   top  256H×320W → robot0_agentview_left (head)
+#   |          head             |
+#   +-------------+-------------+   bot-L 128H×160W → robot0_eye_in_hand (the arm's wrist)
+#   |    wrist    |   BLACK     |   bot-R 128H×160W → BLACK (single-arm: no 2nd wrist)
+#   +-------------+-------------+
+# When multiview=true, height MUST be 384 and width MUST be 320.
+height: 384
+width: 320
+multiview: true
+# Override the 3-slot layout if needed (top, bot-left, bot-right). The sentinel
+# "__missing_right_wrist__" renders a black slot. Default fills head + wrist + black.
+camera_layout: null
+
+# ── Train / val split ────────────────────────────────────────────────────────
+split: train
+val_ratio: 0.0                    # fraction of episodes reserved for validation
+seed: 42
+
+# ── Static-segment filtering (mirrors robotwin) ──────────────────────────────
+# Train-only: resample windows that "haven't started moving" (first raw EEF step's
+# max-abs < threshold) so the model isn't taught to output ~zero motion. Val stays
+# deterministic; no-op when there is only one window.
+filter_static_segments: true
+static_segment_threshold: 1.0e-5  # max-abs of the first NORMALIZED action-vs-proprio step below which a window is static (robotwin parity)
+max_static_retry: 3               # resample attempts before keeping a static window
+
+# ── Action / proprio (single-arm EEF + mobile base) ─────────────────────────
+# RoboCasa365 is single-arm. The arm part of action & proprio is the full base-relative EEF pose from
+# observation.state — eef_pos(3) + eef_rot(quat→rot6d, 6) + gripper(1) → the LEFT 10 dims of the
+# bimanual 20-D EEF (right 10 zero-padded + masked). "Full pose" (not the env's OSC per-step delta),
+# in the robot BASE frame (end_effector_position_relative = robot0_base_to_eef_pos), NOT world-frame —
+# loosely called "absolute" = full-not-delta, do not read as world-frame. With mobile_base the base
+# command is FOLDED INTO the raw vector → raw 25-D [arm20, base5]; action & proprio share ONE layout.
+# action_mode = the deploy stats key the server (model_loader) reads: 'eef_base' for the combined 25-D
+# mobile block ('eef' for a fixed-base 20-D ckpt). NOT 'joint' (deploy would find no stats and silently
+# disable de-normalization).
+action_mode: eef_base
+# Stats are persisted at the raw dim so the deploy normalizer can invert the model's output: one 25-D
+# 'eef_base' block (arm20 ++ base5 command) when mobile, else 20-D 'eef'. Auto-resolve and, if absent,
+# auto-compute on first load to {data_root}/{task}_eefbase_stats.npy (precompute via
+# `python -m openwam.dataloader.robocasa365_stats_computation <bucket> --mobile-base`).
+#   null / "none" → no normalization (raw physical units)
+#   "min-max"     → rescale each dim into [-1, 1] using {min, max}   [default; deploy-resolvable]
+#   "z-score"     → (x - mean) / std                                  [deploy-resolvable]
+# (quantile is NOT supported here — the deploy normalizer can't invert it, so the dataloader
+#  rejects it rather than let a checkpoint silently lose normalization at serve time.)
+normalize_mode: min-max
+normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resolve under the (single) repo.
+                                  # REQUIRED (non-null) when dataset_dir is a list of repos — the pooled
+                                  # stats over all tasks×repos are computed to this path on first use.
+
+# ── Unified 80-D action space (cross-robot shared head) + mobile base ────────
+# unify_action=true scatters this reader's raw vector (20-D arm, or 25-D [arm20, base5] when mobile)
+# into a shared UNIFY_DIM (80) vector so heterogeneous robots train one action head (like
+# robotwin/robocoin/oxe_bcz/behavior). 80-D layout: [0:10) left eef  [10:34) left hand  [34:44) right
+# eef  [44:68) right hand  [68:80) reserved. RoboCasa365 is single-arm: the real arm lands in the LEFT
+# eef slots (0-9, valid); the zero-padded right half maps to 34-43 (masked); the base5 maps to [68:73).
+# ONE map covers the WHOLE raw vector (base is NOT a bypass channel) — like BEHAVIOR's RAW-27.
+unify_action: true
+unify_action_map: ["0-9", "34-43", "68-72"]  # raw arm 0-9→0-9, 10-19→34-43; raw base5 20-24→68-72
+#
+# mobile_base=true (DECOUPLED from unify_action — non-unify emits the raw 25-D head directly): fold
+# the RoboCasa-native base command from the LeRobot action field into the raw vector as base5 =
+# [x_vel, y_vel, yaw_vel, torso, control_mode]. ACTION supervises the base command; PROPRIO carries the
+# body-frame base VELOCITY (finite-diff of observation.state base pose, rescaled into the action command
+# space so it shares the base stats), with torso + control_mode masked (no achieved value). The action
+# base is direct-to-env at eval (arm bridged, base raw). See docs/plans/robocasa365-unify-raw-vector-refactor.md.
+mobile_base: true
+#
+# mask_torso_action=true (default): mask torso (base idx 3) out of the ACTION loss. torso is a LIVE sim
+# actuator (base_motion[3] → robot0_torso JOINT_POSITION delta) but is CONSTANT 0 across the whole
+# dataset (29.1M frames), so predicting it risks a nonzero output driving the torso at eval; masking it
+# out of the loss + the eval client zeroing it (see policy_config.yml mask_torso_action) keeps the torso
+# put (scale_action(0)=0, reproducing the demos). control_mode stays supervised. Set false ONLY to
+# predict torso (e.g. for a future dataset that actually commands it); the eval flag must then match.
+mask_torso_action: true
+#
+# Model head + proprio dims must be 80 when unify_action=true. As of the main merge,
+# configs/model/dual_system.yaml already defaults to action_dim=80 / state_dim=80 (the unified
+# cross-robot head), so NO override is needed for the default model. Only if you point at a model
+# config that hardcodes 20 do you still need:
+#   scripts/train.sh dataloader=robocasa365 model.architecture.action_dim=80 model.architecture.state_dim=80 ...
+# Deploy needs no extra flag and touches NO robocasa-specific code: model_loader reads unify_action/
+# unify_action_map/action_mode from the saved config and wraps the generic _UnifyAwareNormalizer
+# (action OUT: gathers 80->25 and un-normalizes with the single 'eef_base' block → [arm20, base5];
+# proprio IN: normalizes then scatters through the SAME map). The eval client bridges arm (20->OSC),
+# sends base5 raw, and (when mobile) sends the 25-D [arm20, base5] proprio.

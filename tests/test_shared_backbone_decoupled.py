@@ -80,6 +80,9 @@ class _StubVideoBackbone(nn.Module):
     def build_video_to_video_mask(self, *, video_seq_len, video_tokens_per_frame, device):  # noqa: ARG002
         return torch.ones((video_seq_len, video_seq_len), dtype=torch.bool, device=device)
 
+    def assert_ready_for_shared_tokens(self, state):  # noqa: ARG002
+        return None
+
     def finalize(self, state):
         # Caller has already extracted action tokens; just return a fixed-shape
         # video noise prediction whose value depends on state.hidden_states so grads can

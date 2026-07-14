@@ -12,6 +12,8 @@ before a sim-capable box can validate the closed loop:
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -408,3 +410,45 @@ class TestServerFraming:
         assert isinstance(ws.sent[-1], str)
         assert "head camera" in ws.sent[-1]
         assert ws.closed is not None and ws.closed[0] == 1011
+
+
+class TestPromptLoggingAndFallback:
+    """The round-2 additions: per-episode `resolved prompt` logging and loud fallbacks."""
+
+    def test_resolved_prompt_logged_on_change_and_after_reset(self, caplog):
+        south = _FakeSouth()
+        b = _bridge(south)
+        rng = np.random.RandomState(20)
+        with caplog.at_level(logging.INFO, logger="behavior_bridge"):
+            b.handle_message(_make_obs(rng))
+            b.handle_message(_make_obs(rng))  # same task → no second line
+            assert [r for r in caplog.records if "resolved prompt" in r.message]
+            n_before = sum("resolved prompt" in r.message for r in caplog.records)
+            assert n_before == 1
+            b.handle_message({"reset": True})  # new episode → log again
+            b.handle_message(_make_obs(rng))
+            n_after = sum("resolved prompt" in r.message for r in caplog.records)
+            assert n_after == 2
+
+    def test_default_prompt_fallback_warns_when_map_misses_id(self, caplog):
+        south = _FakeSouth()
+        b = _bridge(south, default_prompt="fallback text")
+        obs = _make_obs(np.random.RandomState(21))
+        obs[TASK_ID_KEY] = np.array([42], dtype=np.int64)  # not in {0: ...}
+        with caplog.at_level(logging.WARNING, logger="behavior_bridge"):
+            b.handle_message(obs)
+        (payload,) = south.payloads
+        assert payload["prompt"] == "fallback text"
+        assert any("task_id 42 missing from --task-names" in r.message for r in caplog.records)
+
+    def test_load_task_names_warns_on_underscored_values(self, tmp_path, caplog):
+        import json as _json
+
+        from benchmarks.behavior.openwam2behavior_bridge import _load_task_names
+
+        p = tmp_path / "map.json"
+        p.write_text(_json.dumps({"0": "clean sentence", "1": "turning_on_radio"}))
+        with caplog.at_level(logging.WARNING, logger="behavior_bridge"):
+            mapping = _load_task_names(str(p))
+        assert mapping == {0: "clean sentence", 1: "turning_on_radio"}
+        assert any("de-underscored" in r.message for r in caplog.records)
