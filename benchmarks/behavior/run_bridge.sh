@@ -8,7 +8,7 @@
 #
 # Usage:
 #   bash run_bridge.sh [--port 8000] [--south-host 127.0.0.1] [--south-port 8848] \
-#                      [--task-names task_names.json] [--default-prompt "..."] \
+#                      [--task-names task_prompts.json] [--default-prompt "..."] \
 #                      [--no-send-state]
 #
 # Env:
@@ -18,10 +18,12 @@
 # Prereqs:
 #   1. The OpenWAM server is already running on --south-host:--south-port
 #      (e.g. `bash scripts/deploy.sh --ckpt-dir <ckpt> --port 8848`).
-#   2. Generate task_names.json once from the installed OmniGibson:
-#        python -c "from omnigibson.learning.utils.eval_utils import TASK_INDICES_TO_NAMES; \
-#          import json; json.dump({int(k): v for k, v in TASK_INDICES_TO_NAMES.items()}, \
-#          open('task_names.json', 'w'), indent=2)"
+#   2. Generate task_prompts.json once (README §3): export TASK_INDICES_TO_NAMES
+#      from the installed OmniGibson, then convert it to the dataset's
+#      training-verbatim sentences:
+#        python -m benchmarks.behavior.gen_task_prompts \
+#          --dataset-dir <behaviour-1k root> --activity-names task_names.json \
+#          --output task_prompts.json
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

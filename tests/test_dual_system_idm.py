@@ -264,6 +264,20 @@ class _CapturePrepareVideoBackbone(nn.Module):
             grid_width=w,
         )
 
+    def merge_idm_video_branches(self, noisy, cond):
+        """Drive the *production* Wan merge (flat (B, L, D), 4D time_mod, rope_freqs,
+        VACE hints) rather than a copy, so its validation stays covered. ``WanBase``'s
+        implementation touches only the two states (never ``self``), so an unbound
+        call on this fake is exact."""
+        from openwam.model.video_backbone.wan_backbone import WanBase
+
+        return WanBase.merge_idm_video_branches(self, noisy, cond)
+
+    def split_idm_video_branches(self, merged, noisy, cond):
+        from openwam.model.video_backbone.wan_backbone import WanBase
+
+        return WanBase.split_idm_video_branches(self, merged, noisy, cond)
+
     def pre_attn_at_layer(self, layer_id, state):
         del layer_id
         return state.hidden_states, state.hidden_states, state.hidden_states, {"residual": state.hidden_states}
@@ -338,35 +352,30 @@ def test_idm_clean_cond_video_uses_zero_timestep():
 
 
 def test_idm_training_requires_tokenwise_video_t_mod():
-    """IDM should fail loudly if a backbone cannot represent noisy/cond timesteps in one sequence."""
+    """IDM should fail loudly if a backbone cannot represent noisy/cond timesteps in one sequence.
+
+    The check now lives in the backbone's ``merge_idm_video_branches`` (the
+    driver delegates branch concatenation to the backbone), so a non-4D
+    ``time_mod`` must raise there and propagate through the driver loop.
+    """
     from openwam.model.video_backbone.base import BlockLoopState
 
-    vb = MagicMock()
-    vb.num_layers = 1
-    vb.num_heads = 2
-    vb.head_dim = 4
-    vb.build_video_to_video_mask.return_value = torch.ones(2, 2, dtype=torch.bool)
+    vb = _CapturePrepareVideoBackbone()
+    arch = _make_idm_with_video(vb)
+    driver = arch._mot_driver
 
-    ab = MagicMock()
-    ab.num_layers = 1
-    ab.num_heads = 2
-    ab.head_dim = 4
-    driver = __import__("openwam.model.architectures.dual_system.idm", fromlist=["IDMMoTDriver"]).IDMMoTDriver(
-        vb,
-        ab,
-        mot_checkpoint_mixed_attn=False,
-    )
+    # 3D time_mod (not the token-wise 4D shape IDM requires).
     vstate = BlockLoopState(
-        hidden_states=torch.zeros(1, 2, 8),
-        time_mod=torch.zeros(1, 6, 8),
+        hidden_states=torch.zeros(1, 2, vb.dim),
+        time_mod=torch.zeros(1, 6, vb.dim),
         rope_freqs=torch.zeros(2, 1, 2),
-        context=torch.zeros(1, 1, 8),
+        context=torch.zeros(1, 1, vb.dim),
         grid_frames=2,
         grid_height=1,
         grid_width=1,
     )
     astate = MagicMock()
-    astate.payload.x_action = torch.zeros(1, 1, 8)
+    astate.payload.x_action = torch.zeros(1, 1, vb.dim)
 
     import pytest
 
