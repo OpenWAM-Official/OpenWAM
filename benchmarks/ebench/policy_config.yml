@@ -1,6 +1,7 @@
-# EBench bridge configuration template. single_eval.sh / multi_eval.sh read
-# these defaults and patch host/port/worker at runtime (never edit machine
-# paths into this file — CONTRIBUTING.md config policy).
+# EBench bridge defaults, consumed via:
+#   python benchmarks/ebench/openwam2ebench_interface.py --config benchmarks/ebench/policy_config.yml
+# Keys map 1:1 to the CLI flags (argparse dests); explicit CLI flags override
+# these values. Never commit machine-specific paths (CONTRIBUTING.md).
 
 # --- GenManip eval server (north) ---
 # Local server: http://<host>:8087 (ray_eval_server.py).
@@ -14,7 +15,7 @@ worker_id: "0"
 
 # --- OpenWAM Policy Server (south) ---
 # One OpenWAM server per worker (the server-side action executor is stateful
-# per episode). multi_eval.sh assigns port = south_port_base + worker index.
+# per episode). multi_eval.sh assigns port = SOUTH_PORT_BASE + worker index.
 south_host: "127.0.0.1"
 south_port: 8848
 request_timeout: 300      # seconds per south inference round-trip
@@ -23,6 +24,8 @@ request_timeout: 300      # seconds per south inference round-trip
 # Must match the checkpoint's dataloader.base_action_source:
 #   delta      -> base_motion = per-step [dx_m, dy_m, dyaw_deg], base_is_rel=true
 #   cumulative -> base_motion = absolute [x_m, y_m, yaw_deg],   base_is_rel=false
+# Pass --ckpt-config <ckpt>/config.yaml to hard-verify this at startup — a
+# silent mismatch scores garbage.
 base_mode: delta
 
 # --- Observation settings ---

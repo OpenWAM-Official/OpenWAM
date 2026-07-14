@@ -182,13 +182,21 @@ class _FakeSouth:
         self.resets = 0
         self.payloads = []
 
+    def close(self):
+        pass
+
     def reset(self):
         self.resets += 1
         return {"type": "reset_ack"}
 
     def predict(self, payload):
         self.payloads.append(payload)
-        return {"action": [0.0] * 23, "step": len(self.payloads), "latency_ms": 1.0}
+        # valid raw-23: identity rot6d in the rotation slots (all-zeros would
+        # correctly trip the driver's degenerate-quaternion guard)
+        action = [0.0] * 23
+        action[3:9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        action[13:19] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        return {"action": action, "step": len(self.payloads), "latency_ms": 1.0}
 
 
 def _obs(t, reset=False, base=None, instruction="pick the apple"):
@@ -253,3 +261,103 @@ def test_driver_no_send_state():
     driver = EBenchOpenWAMDriver(south, base_mode="delta", send_state=False)
     driver.act(_obs(0, reset=True))
     assert "state" not in south.payloads[0]
+
+
+def test_driver_rejects_nonfinite_and_degenerate_actions():
+    class _NaNSouth(_FakeSouth):
+        def predict(self, payload):
+            action = [0.0] * 23
+            action[3:9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            action[13:19] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            action[0] = float("nan")
+            return {"action": action}
+
+    driver = EBenchOpenWAMDriver(_NaNSouth(), base_mode="delta")
+    with pytest.raises(ValueError, match="non-finite"):
+        driver.act(_obs(0, reset=True))
+
+    class _ZeroRotSouth(_FakeSouth):
+        def predict(self, payload):
+            return {"action": [0.0] * 23}  # all-zero rot6d -> non-unit quat
+
+    driver = EBenchOpenWAMDriver(_ZeroRotSouth(), base_mode="delta")
+    with pytest.raises(ValueError, match="non-unit quaternion"):
+        driver.act(_obs(0, reset=True))
+
+
+def test_driver_rejects_bad_image_dtype():
+    south = _FakeSouth()
+    driver = EBenchOpenWAMDriver(south, base_mode="delta")
+    obs = _obs(0, reset=True)
+    obs["video.overlook_camera_view"] = np.zeros((8, 8, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="uint8"):
+        driver.act(obs)
+
+
+def test_run_worker_reconnect_discards_stale_actions(monkeypatch):
+    """Drive the REAL run_worker: after a step failure the client is rebuilt,
+    the stale actions dict is discarded, and the loop resumes from the fresh
+    reset obs (reset=True) — the old episode's action is never re-sent."""
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    import benchmarks.ebench.openwam2ebench_interface as iface
+
+    class _FakeEvalClient:
+        instances = []
+
+        def __init__(self, url, worker_ids=None, token=None, run_id="", save_process=False, verbose=True):
+            self.sent = []
+            self.step_calls = 0
+            _FakeEvalClient.instances.append(self)
+
+        def reset(self):
+            return {"0": {"obs": _obs(0, reset=True), "metric": None}}
+
+        def step(self, actions):
+            self.step_calls += 1
+            self.sent.append(actions)
+            if len(_FakeEvalClient.instances) == 1 and self.step_calls == 2:
+                raise RuntimeError("transport blip")
+            t = self.step_calls
+            if len(_FakeEvalClient.instances) > 1 and self.step_calls >= 2:
+                return {"0": {"obs": None, "metric": {"m": {"score": 0.0}}}}, True
+            return {"0": {"obs": _obs(t), "metric": None}}, False
+
+        def close(self):
+            pass
+
+    fake_mod = ModuleType("genmanip_client")
+    fake_mod.EvalClient = _FakeEvalClient
+    monkeypatch.setitem(sys.modules, "genmanip_client", fake_mod)
+    south = _FakeSouth()
+    monkeypatch.setattr(iface, "WSPolicyClient", lambda *a, **k: south)
+    monkeypatch.setattr(iface, "wait_until_healthy", lambda *a, **k: None)
+
+    args = SimpleNamespace(
+        url="http://fake",
+        token="",
+        run_id="",
+        worker_id="0",
+        south_host="h",
+        south_port=1,
+        request_timeout=1.0,
+        base_mode="delta",
+        no_send_state=False,
+        save_process=False,
+        client_reinit_retries=2,
+        client_reinit_backoff=0.0,
+    )
+    iface.run_worker(args)
+
+    assert len(_FakeEvalClient.instances) == 2
+    first_client, second_client = _FakeEvalClient.instances
+    failed_actions = first_client.sent[-1]
+    # the stale actions dict must not have been replayed on the new client
+    assert all(sent is not failed_actions for sent in second_client.sent)
+    # the new client's first step was computed from the fresh reset obs:
+    # south saw an episode restart (reset called again -> 2 resets total... first episode + reconnect)
+    assert south.resets >= 2
+    # base proprio of the first post-reconnect payload is the episode-start zero rendering
+    post_reconnect_payload = south.payloads[first_client.step_calls]
+    assert post_reconnect_payload["state"][20:23] == pytest.approx([0.0, 0.0, 0.0])

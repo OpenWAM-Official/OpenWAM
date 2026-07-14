@@ -83,6 +83,13 @@ class Normalizer(InvertibleModalityTransform):
             range_ = np.maximum(hi - lo, self.eps)
             self._scale = 2.0 / range_
             self._offset = lo + range_ / 2.0
+            # Keep lo/range for the training-identical normalize form: the
+            # precomputed (x-offset)*scale form absorbs the eps into offset in
+            # float32 for large constants (|c|>=8 → -1.907, |c|>=16 → 0.0
+            # instead of training's exact -1) — see _min_max_lo/_min_max_range
+            # usage in normalize().
+            self._min_max_lo = lo
+            self._min_max_range = range_
 
         elif self.mode == NormMode.MEAN_STD:
             self._offset = np.asarray(s["mean"], dtype=np.float32)
@@ -102,6 +109,18 @@ class Normalizer(InvertibleModalityTransform):
 
         if self._scale is None:
             return x
+
+        if self.mode == NormMode.MIN_MAX:
+            # Bit-parallel to the training-side apply_normalization min-max:
+            # clip(((x - min) / max(max-min, eps)) * 2 - 1, -1, 1). Training
+            # CLIPS min-max (bounded contract) — an unclipped deploy normalize
+            # would hand the model proprio values thousands of sigma out of
+            # distribution whenever eval-time state leaves the training range
+            # (degenerate near-constant dims make scale enormous: min==max →
+            # scale = 2/eps = 2e6). Also avoids the float32 offset-absorption
+            # trap on large constant dims (see _precompute).
+            result = ((x - self._min_max_lo) / self._min_max_range) * 2.0 - 1.0
+            return np.clip(result, -1.0, 1.0).astype(np.float32)
 
         result = (x - self._offset) * self._scale
         if self.mode == NormMode.Q99:

@@ -124,6 +124,11 @@ class EBenchOpenWAMDriver:
         self.episodes += 1
         logger.info("episode %d start; prompt=%r", self.episodes, self._prompt)
 
+    def invalidate_episode(self) -> None:
+        """Force on_episode_start at the next act() — used after a north
+        reconnect, whose reset() started a fresh sim episode."""
+        self._episode_active = False
+
     def act(self, inner_obs: dict) -> dict:
         """One sim step: obs dict in → EBench action dict out."""
         if inner_obs.get("reset", False) or not self._episode_active:
@@ -134,6 +139,14 @@ class EBenchOpenWAMDriver:
             raise KeyError(f"EBench obs missing required camera {HEAD_KEY!r}")
         left = inner_obs.get(LEFT_WRIST_KEY)
         right = inner_obs.get(RIGHT_WRIST_KEY)
+        for name, img in ((HEAD_KEY, head), (LEFT_WRIST_KEY, left), (RIGHT_WRIST_KEY, right)):
+            if img is None:
+                continue
+            arr = np.asarray(img)
+            if arr.dtype != np.uint8 or arr.ndim != 3 or arr.shape[2] != 3:
+                # Fail fast with the camera name: a float/RGBA/BGR frame would
+                # either crash deep inside Pillow or silently swap channels.
+                raise ValueError(f"camera {name!r} must be HxWx3 uint8 RGB, got dtype={arr.dtype} shape={arr.shape}")
 
         state_list = None
         cur_base = None
@@ -158,13 +171,31 @@ class EBenchOpenWAMDriver:
                 f"{EBENCH_RAW_DIM}-D — is the checkpoint an EBench (action_mode=ebench, "
                 "unify_action=true) checkpoint?"
             )
+        if not np.isfinite(action).all():
+            # NaN survives every hop (JSON emits NaN tokens; np.clip(nan)=nan;
+            # a NaN quat passes norm checks because abs(nan-1)>tol is False) —
+            # stop it here, before the sim consumes a NaN pose target.
+            raise ValueError(f"OpenWAM server returned non-finite action: {action.tolist()}")
+
+        out = raw23_to_ebench_action(action, self._base_mode)
+        for i, (_pos, quat, _grip) in enumerate(out["action"]):
+            norm = float(np.linalg.norm(quat))
+            if not abs(norm - 1.0) <= 0.05:
+                # Degenerate rot6d (e.g. all-zeros from an early/diverged model:
+                # rot6d stats are identity-pinned, so a zero normalized output
+                # denormalizes to a zero rot6d) → non-unit quat → real cuRobo IK
+                # silently holds the current joints. Fail loudly instead.
+                raise ValueError(
+                    f"arm {i} rot6d degenerated to a non-unit quaternion (norm={norm:.4f}); "
+                    f"raw rot6d={action[3:9] if i == 0 else action[13:19]}"
+                )
 
         # Update AFTER building this step's proprio: proprio(t) differences
         # state(t) against state(t-1), exactly like training rows.
         if cur_base is not None:
             self._prev_base = cur_base
         self.steps += 1
-        return raw23_to_ebench_action(action, self._base_mode)
+        return out
 
 
 def run_worker(args) -> None:
@@ -184,6 +215,34 @@ def run_worker(args) -> None:
             verbose=True,
         )
 
+    def reconnect(last_err: Exception):
+        """Rebuild the EvalClient with retries; return the fresh reset obs.
+
+        The whole rebuild+reset lives INSIDE the retried scope: the most
+        likely trigger is a sim-server hiccup/restart, so the first reinit is
+        likely to fail too — it must consume a retry, not abort the run.
+        """
+        nonlocal client
+        err = last_err
+        for attempt in range(args.client_reinit_retries):
+            logger.warning(
+                "EvalClient.step failed (%s); rebuilding client (attempt %d/%d)",
+                err,
+                attempt + 1,
+                args.client_reinit_retries,
+            )
+            time.sleep(args.client_reinit_backoff * (attempt + 1))
+            try:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                client = make_client()
+                return client.reset()
+            except Exception as e:  # noqa: BLE001 — reinit itself failed; burn a retry
+                err = e
+        raise RuntimeError(f"EvalClient recovery failed after {args.client_reinit_retries} attempts") from err
+
     client = make_client()
     try:
         obs = client.reset()
@@ -191,32 +250,37 @@ def run_worker(args) -> None:
         while not done:
             actions = {}
             for wid, entry in obs.items():
+                if (entry or {}).get("lock_lost"):
+                    logger.warning("worker %s lost its episode lock; server will requeue", wid)
                 inner = (entry or {}).get("obs")
                 if inner is None:
                     continue  # worker finished or reset pending
                 actions[wid] = driver.act(inner)
             if not actions:
+                logger.warning(
+                    "no actionable obs (workers finished or wedged) — leaving the loop; "
+                    "verify the final metrics below before trusting this run"
+                )
                 break
-            for attempt in range(args.client_reinit_retries + 1):
-                try:
-                    obs, done = client.step(actions)
-                    break
-                except Exception as e:  # noqa: BLE001 — north-side transport recovery
-                    if attempt == args.client_reinit_retries:
-                        raise
-                    logger.warning(
-                        "EvalClient.step failed (%s); rebuilding client (attempt %d)",
-                        e,
-                        attempt + 1,
+            try:
+                obs, done = client.step(actions)
+            except Exception as e:  # noqa: BLE001 — north-side transport recovery
+                # DISCARD the stale actions: client.reset() kills the workers
+                # and starts a fresh episode, so replaying an action computed
+                # for the old episode's obs would corrupt the new one. Resume
+                # the outer loop from the fresh reset obs instead.
+                obs = reconnect(e)
+                driver.invalidate_episode()
+                first = next(
+                    ((v or {}).get("obs") for v in obs.values() if (v or {}).get("obs") is not None),
+                    None,
+                )
+                if first is not None and not first.get("reset", False):
+                    raise RuntimeError(
+                        "post-reconnect obs is mid-episode (reset=False): the sim episode was "
+                        "NOT restarted — aborting instead of silently splicing policy state"
                     )
-                    try:
-                        client.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    time.sleep(args.client_reinit_backoff * (attempt + 1))
-                    client = make_client()
-                    obs = client.reset()
-                    driver._episode_active = False  # fresh episode after reconnect
+                continue
         for wid, entry in (obs or {}).items():
             metric = (entry or {}).get("metric")
             if metric:
@@ -232,6 +296,11 @@ def run_worker(args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--config",
+        default=None,
+        help="optional YAML (e.g. benchmarks/ebench/policy_config.yml) supplying defaults; CLI flags win",
+    )
     p.add_argument("--url", default="http://127.0.0.1:8087", help="GenManip eval server / online endpoint")
     p.add_argument("--token", default="", help="Bearer token (online evaluation)")
     p.add_argument("--run-id", default="", help="run_id (== online task_id)")
@@ -243,7 +312,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-mode",
         default="delta",
         choices=list(EBENCH_BASE_SOURCES),
-        help="must match the checkpoint's dataloader.base_action_source",
+        help="must match the checkpoint's dataloader.base_action_source (verified when --ckpt-config is given)",
+    )
+    p.add_argument(
+        "--ckpt-config",
+        default=None,
+        help="path to the served checkpoint's config.yaml — when the ckpt dir is reachable from this "
+        "host, pass it so base-mode/action-mode mismatches fail at startup instead of scoring garbage",
     )
     p.add_argument("--no-send-state", action="store_true", help="for non-proprio checkpoints")
     p.add_argument("--save-process", action="store_true", help="client-side per-episode video/log dump")
@@ -252,9 +327,60 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def parse_args_with_config(argv=None) -> argparse.Namespace:
+    """Two-phase parse: --config YAML supplies defaults, explicit CLI flags win."""
+    parser = build_parser()
+    pre, _ = parser.parse_known_args(argv)
+    if pre.config:
+        import yaml
+
+        with open(pre.config) as f:
+            cfg = yaml.safe_load(f) or {}
+        known = {a.dest for a in parser._actions}
+        mapped = {}
+        for key, value in cfg.items():
+            if key == "send_state":
+                mapped["no_send_state"] = not bool(value)
+            elif key in known:
+                mapped[key] = value
+            else:
+                raise ValueError(f"unknown key {key!r} in {pre.config}")
+        parser.set_defaults(**mapped)
+    return parser.parse_args(argv)
+
+
+def verify_ckpt_config(args) -> None:
+    """Hard-verify the bridge's action settings against the checkpoint config."""
+    if not args.ckpt_config:
+        logger.warning(
+            "--ckpt-config not given: base-mode=%s is UNVERIFIED against the checkpoint. "
+            "A mismatch scores garbage silently — pass the ckpt's config.yaml when reachable.",
+            args.base_mode,
+        )
+        return
+    import yaml
+
+    with open(args.ckpt_config) as f:
+        cfg = yaml.safe_load(f)
+    dl = cfg.get("dataloader", {}) or {}
+    problems = []
+    if dl.get("type") != "ebench" or dl.get("action_mode") != "ebench":
+        problems.append(f"dataloader type/action_mode is {dl.get('type')}/{dl.get('action_mode')}, not ebench")
+    if not dl.get("unify_action", False):
+        problems.append("checkpoint was not trained with unify_action=true")
+    ckpt_base = dl.get("base_action_source", "delta")
+    if ckpt_base != args.base_mode:
+        problems.append(f"checkpoint base_action_source={ckpt_base!r} but bridge --base-mode={args.base_mode!r}")
+    if problems:
+        raise ValueError("checkpoint/bridge contract mismatch: " + "; ".join(problems))
+    logger.info("ckpt-config verified: action_mode=ebench, base_action_source=%s", args.base_mode)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
-    run_worker(build_parser().parse_args())
+    args = parse_args_with_config()
+    verify_ckpt_config(args)
+    run_worker(args)
 
 
 if __name__ == "__main__":

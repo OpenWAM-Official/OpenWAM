@@ -106,7 +106,25 @@ EBENCH_PYTHON=... bash benchmarks/ebench/single_eval.sh --url http://127.0.0.1:8
 
 ## 已知限制 / 状态
 
-- mock 闭环只验证 wire/转换/推理链路,**不产生分数**;真实闭环(Isaac Sim)未在本仓验证。
-- `--base-mode` 必须与 ckpt 训练配置一致,桥无法从 ckpt 自动读取(torch-free)。
+- mock 闭环验证 wire 编码/转换/推理链路,且以 HTTP 500 强制契约(坏桥 fail 而非静默过),
+  但**不产生分数**、无 IK/物理/提前终止;真实闭环(Isaac Sim)未在本仓验证。
+- `--base-mode` 必须与 ckpt 训练配置一致:ckpt 目录可达时**务必**传
+  `--ckpt-config <ckpt>/config.yaml` 硬校验(错配会静默产出灾难性 base 动作);
+  不可达时桥打 UNVERIFIED 警告。
+- 配置可放 `--config benchmarks/ebench/policy_config.yml`(CLI 优先)。
 - 吞吐:794 实例 generalist ≈ 1.79M sim 步;每次 replan 一次视频模型推理,预算见
   `openwam/deploy` 的 `execute_horizon`。
+
+## Isaac Sim 实测前检查单(gate-3 输出)
+
+1. 用最终 ckpt 跑 `--ckpt-config` 校验;确认 stats 含 `ebench`、normalize=min-max、
+   `base_action_source` 与 `--base-mode` 一致、camera layout=overlook/left/right。
+2. 单 worker 单 episode 起步:核对 reset/prompt/episode_id/timestep、base 首步零差分;
+   注入一次 north 断连,确认旧动作未进入新 episode 且重连首帧 `reset=True`。
+3. 观察 GenManip 日志的 IK 成功率(cuRobo `None→hold` 是静默的);对比 commanded EE pose
+   与下一步 `state.ee_pose`。
+4. 检查 invalid-state termination_reason 计数(arm/gripper/base 范围与单步跳变)。
+5. 三路图像目检 uint8 RGB(红/蓝物体对比训练视频与 south 预处理输出)。
+6. 再扩 2 worker:各自独立 south server/端口/结果记录。
+7. 在线评测前:endpoint/token/`run_id==task_id`、≤16 workers、首次推理编译不要撞
+   10 分钟 inactivity 断线(先本地 warmup)。

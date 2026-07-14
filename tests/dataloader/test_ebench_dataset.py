@@ -585,3 +585,31 @@ def test_validation_checks_base_finite(tmp_path):
     df.to_parquet(p)
     with pytest.raises(ValueError, match="non-finite"):
         _make_ds(b, normalize_mode=None, unify_action=False)
+
+
+def test_deploy_normalizer_min_max_clips_and_handles_large_constants():
+    """Gate-3 critical fix: deploy Normalizer(min_max).normalize must be
+    bit-parallel to training's clipped apply_normalization — including
+    out-of-range eval jitter (clip to ±1, not thousands of sigma) and large
+    constant dims (float32 offset absorption previously gave -1.907 / 0.0)."""
+    from openwam.dataloader.transforms.normalize import Normalizer
+    from openwam.dataloader.utils.normalization import apply_normalization
+
+    lo = np.array([0.0, 0.044, 12.0, 90.0, 0.1], np.float32)
+    hi = np.array([0.0, 0.044, 12.0, 90.0, 0.1002], np.float32)
+    deploy = Normalizer(mode="min_max", stats={"min": lo, "max": hi})
+    stats = {"min": lo, "max": hi, "mean": lo, "std": np.ones(5, np.float32)}
+    probes = [
+        lo,
+        hi,
+        lo + 0.015,  # one legal base step of jitter on constant dims
+        np.array([1e-4, 0.02, 11.5, 90.006, 0.2], np.float32),
+    ]
+    for x in probes:
+        train = apply_normalization(x[None, :].astype(np.float32), stats, "min-max")[0]
+        got = deploy.normalize(x.astype(np.float32))
+        np.testing.assert_allclose(got, train, atol=1e-5)
+        assert np.abs(got).max() <= 1.0 + 1e-6  # bounded like training
+    # unnormalize still recovers the constants exactly
+    rec = deploy.unnormalize(np.array([-1.0, -1.0, -1.0, -1.0, 0.3], np.float32))
+    np.testing.assert_allclose(rec[:4], lo[:4], atol=1e-4)
