@@ -46,6 +46,38 @@ Optional config roots:
 The wrappers write `config.yaml` under these roots before importing LIBERO, so
 they do not prompt interactively and do not clobber `~/.libero/config.yaml`.
 
+## Training Data
+
+OpenWAM's `libero` dataloader consumes LeRobot v3 parquet/MP4 data. The
+recommended source is:
+
+```bash
+hf download nvidia/LIBERO_LeRobot_v3 \
+  --repo-type dataset \
+  --local-dir /path/to/LIBERO_LeRobot_v3
+```
+
+Configure `configs/dataloader/libero.yaml`, then generate action statistics:
+
+```bash
+python scripts/libero_compute_stats.py \
+  --config configs/dataloader/libero.yaml \
+  --output /path/to/LIBERO_LeRobot_v3/libero_normalization_stats.npy
+```
+
+LIBERO's 7-D action is a delta command while its 8-D state is an absolute
+EEF/gripper observation. They must not share normalization statistics. The
+current reader therefore trains image+language→action and masks proprioception
+out. Required model overrides:
+
+```text
+model.architecture.action_dim=7
+model.architecture.use_proprioception=false
+```
+
+The stored videos already follow the 180-degree-rotated LIBERO convention. The
+evaluation client applies the same transform to live simulator observations.
+
 ## Single-Task Evaluation
 
 Ordinary LIBERO:
