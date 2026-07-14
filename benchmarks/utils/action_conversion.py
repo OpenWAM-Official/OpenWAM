@@ -531,3 +531,157 @@ def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
             p[_PP_TRUNK_QPOS],
         ]
     ).astype(np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# EBench (GenManip lift2/R5a dual-arm mobile manipulator)                      #
+# --------------------------------------------------------------------------- #
+# Mirrors of the trainer's rendering in openwam/dataloader/ebench.py — the
+# eval and training ends of the same contract. A regression test
+# (tests/benchmarks/test_ebench_bridge.py) pins each pair together byte-for-
+# byte; change them in lockstep.
+
+EBENCH_RAW_DIM = 23
+EBENCH_BASE_SOURCES = ("delta", "cumulative")
+# GenManip lift2 gripper: 0.0 closed .. 0.044 open per finger (both fingers of
+# a hand are commanded identically).
+EBENCH_GRIPPER_OPEN = 0.044
+
+
+def ebench_wrap_angle_rad(angle: np.ndarray) -> np.ndarray:
+    """Wrap radian angle(s) to [-pi, pi). Mirror of ebench.wrap_angle_rad."""
+    return (np.asarray(angle, dtype=np.float64) + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def ebench_render_state_base(cur_base, prev_base, base_action_source: str) -> np.ndarray:
+    """Render measured ``state.base`` ``[x_m, y_m, yaw_RAD]`` into the trained
+    base-action command space. Mirror of ebench.render_ebench_state_base.
+
+    ``delta``: measured per-step displacement (yaw wrapped, rad→deg);
+    ``prev_base=None`` (episode start) → zeros. ``cumulative``: pose with yaw
+    rad→deg.
+    """
+    cur = np.asarray(cur_base, dtype=np.float64).reshape(3)
+    if base_action_source == "delta":
+        if prev_base is None:
+            return np.zeros(3, dtype=np.float32)
+        prev = np.asarray(prev_base, dtype=np.float64).reshape(3)
+        delta = cur - prev
+        dyaw = float(ebench_wrap_angle_rad(delta[2]))
+        return np.array([delta[0], delta[1], np.degrees(dyaw)], dtype=np.float32)
+    if base_action_source == "cumulative":
+        return np.array([cur[0], cur[1], np.degrees(cur[2])], dtype=np.float32)
+    raise ValueError(f"base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}")
+
+
+def ebench_quat_wxyz_to_rot6d(quat_wxyz: np.ndarray) -> np.ndarray:
+    """wxyz quaternion(s) → rot6d. Mirror of ebench._quat_wxyz_to_rot6d.
+
+    Inlines ``openwam.dataloader.utils.eef.quat_xyzw_to_rot6d`` (float32, no
+    re-normalization — GenManip quats are unit by construction and the reader
+    checks a sample at init) rather than this module's normalizing
+    ``quat_xyzw_to_rot6d``, so bridge proprio is byte-identical to training.
+    """
+    q = np.asarray(quat_wxyz, dtype=np.float32)
+    if q.shape[-1] != 4:
+        raise ValueError(f"quaternion must be 4-D wxyz, got shape {q.shape}")
+    leading = q.shape[:-1]
+    flat = q.reshape(-1, 4)
+    flat_xyzw = np.concatenate([flat[:, 1:4], flat[:, 0:1]], axis=-1)
+    x, y, z, w = flat_xyzw[:, 0], flat_xyzw[:, 1], flat_xyzw[:, 2], flat_xyzw[:, 3]
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    c0 = np.stack([1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy)], axis=-1)
+    c1 = np.stack([2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx)], axis=-1)
+    r6d = np.concatenate([c0, c1], axis=-1).astype(flat_xyzw.dtype)
+    return r6d.reshape(*leading, 6).astype(np.float32)
+
+
+def ebench_obs_to_raw23(state_ee_pose, state_gripper, rendered_base) -> np.ndarray:
+    """EBench eval obs (measured state) → RAW-23 proprio in the reader layout.
+
+    ``state_ee_pose``: the obs ``state.ee_pose`` nested pairs
+    ``[[L_pos3, L_quat_wxyz4], [R_pos3, R_quat_wxyz4]]`` (or an already-flat
+    14-vector). ``state_gripper``: 4 finger positions ``[L,L,R,R]``.
+    ``rendered_base``: the 3-vector from :func:`ebench_render_state_base`.
+
+    Output layout (== ebench._ee_pose_gripper_base_to_raw23)::
+
+        [L_xyz3, L_rot6d6, L_grip1, R_xyz3, R_rot6d6, R_grip1, base3]
+
+    Sent RAW — the OpenWAM server normalizes with the checkpoint stats and
+    scatters into the unified 80-D space.
+    """
+
+    def _leaves(node):
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                yield from _leaves(item)
+        else:
+            yield np.asarray(node, dtype=np.float32).reshape(-1)
+
+    flat = np.concatenate(list(_leaves(state_ee_pose)))
+    if flat.shape[0] != 14:
+        raise ValueError(f"state.ee_pose must flatten to 14 values, got {flat.shape[0]}")
+    grip = np.asarray(state_gripper, dtype=np.float32).reshape(-1)
+    if grip.shape[0] != 4:
+        raise ValueError(f"state.gripper must have 4 values, got {grip.shape[0]}")
+    base = np.asarray(rendered_base, dtype=np.float32).reshape(-1)
+    if base.shape[0] != 3:
+        raise ValueError(f"rendered base must have 3 values, got {base.shape[0]}")
+    return np.concatenate(
+        [
+            flat[0:3],
+            ebench_quat_wxyz_to_rot6d(flat[3:7]),
+            grip[0:2].mean(keepdims=True),
+            flat[7:10],
+            ebench_quat_wxyz_to_rot6d(flat[10:14]),
+            grip[2:4].mean(keepdims=True),
+            base,
+        ]
+    ).astype(np.float32)
+
+
+def raw23_to_ebench_action(action: np.ndarray, base_action_source: str) -> dict:
+    """OpenWAM RAW-23 physical action → GenManip EvalClient action dict.
+
+    The server already inverted normalization and the 80-D unify scatter, so
+    ``action`` is the raw 23-D vector in physical units. Arms go out as
+    absolute ``ee_pose`` targets (GenManip runs cuRobo IK per arm in the same
+    per-arm base frames that produced the training FK); the scalar gripper is
+    duplicated to both fingers and clipped to the physical range; the base
+    slot goes out per the trained ``base_action_source``:
+
+    * ``delta`` → ``base_motion=[dx_m, dy_m, dyaw_deg]``, ``base_is_rel=True``
+      (GenManip clips each step to ±0.015 m / ±1° — the same clamps the demos
+      obeyed — and converts the degree yaw internally).
+    * ``cumulative`` → absolute ``base_motion=[x_m, y_m, yaw_deg]``,
+      ``base_is_rel=False`` (GenManip applies ``deg2rad`` to index 2).
+
+    Positions/quaternions are plain Python lists ON PURPOSE: the GenManip
+    server concatenates ``position + orientation`` (list concat) before IK —
+    numpy arrays would broadcast-add and crash it.
+    """
+    a = np.asarray(action, dtype=np.float64).reshape(-1)
+    if a.shape[0] != EBENCH_RAW_DIM:
+        raise ValueError(f"expected raw {EBENCH_RAW_DIM}-D EBench action, got {a.shape[0]}")
+    if base_action_source not in EBENCH_BASE_SOURCES:
+        raise ValueError(f"base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}")
+
+    def _arm(xyz: np.ndarray, r6d: np.ndarray, grip: float) -> tuple:
+        quat_xyzw = rot6d_to_quat_xyzw(r6d.astype(np.float32))
+        quat_wxyz = [float(quat_xyzw[3]), float(quat_xyzw[0]), float(quat_xyzw[1]), float(quat_xyzw[2])]
+        g = float(np.clip(grip, 0.0, EBENCH_GRIPPER_OPEN))
+        return ([float(v) for v in xyz], quat_wxyz, [g, g])
+
+    return {
+        "action": [
+            _arm(a[0:3], a[3:9], a[9]),
+            _arm(a[10:13], a[13:19], a[19]),
+        ],
+        "control_type": "ee_pose",
+        "is_rel": False,
+        "base_motion": [float(v) for v in a[20:23]],
+        "base_is_rel": base_action_source == "delta",
+    }
