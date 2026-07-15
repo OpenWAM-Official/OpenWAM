@@ -566,12 +566,9 @@ class TestDeployNormalizer:
         # artifact" + warning, NOT crash __init__. In-process normalization still loads,
         # so training on a RO mount works; only the deploy artifact is skipped.
         b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
-        with (
-            _mock_video_decoder(),
-            patch(
-                "openwam.dataloader.bases.lerobot_v3_reader.np.save",
-                side_effect=OSError("read-only file system"),
-            ),
+        with _mock_video_decoder(), patch(
+            "openwam.dataloader.bases.lerobot_v3_reader.np.save",
+            side_effect=OSError("read-only file system"),
         ):
             ds = _make_ds(b, normalize_mode="quantile")  # must NOT raise
             assert ds.normalization_stats_path is None  # artifact skipped
@@ -1000,10 +997,11 @@ class TestActionModes:
 
 class TestMinMaxDefault:
     """BEHAVIOR is a closed-loop scored benchmark: its default flipped from the
-    robocoin-family quantile to min-max so the deployable command envelope is
-    not clipped at [q01, q99] (base velocity dims lose a substantial fraction of the demos' top
-    speed under quantile). These tests pin the new default and the deploy-side
-    min_max normalize being training-identical (clipped, constant-dim safe)."""
+    robocoin-family quantile to min-max so training targets are not saturated
+    at [q01, q99] (base velocity dims lose a substantial fraction of the demos' top speed:
+    q99 is substantially below max). These tests pin the new default and the
+    deploy-side min_max normalize being training-identical (clipped,
+    constant-dim safe)."""
 
     def test_default_normalize_mode_is_min_max(self, tmp_path):
         from openwam.dataloader.behavior import BehaviorDataset
@@ -1062,3 +1060,17 @@ class TestMinMaxDefault:
         # unnormalize still recovers the constants exactly
         rec = deploy.unnormalize(np.array([-1.0, -1.0, -1.0, -1.0, 0.3], np.float32))
         np.testing.assert_allclose(rec[:4], lo[:4], atol=1e-4)
+
+    def test_deploy_q99_normalize_matches_training_on_constant_dims(self):
+        """Same parity for the q99 path (BEHAVIOR/robocoin quantile ckpts):
+        degenerate constant dims previously normalized to 0.0 (|c|>=16) or
+        -1.907 (8<=|c|<16) at deploy while training saw exactly -1."""
+        from openwam.dataloader.transforms.normalize import Normalizer
+        from openwam.dataloader.utils.normalization import apply_normalization
+
+        q = np.array([0.0, 12.0, 90.0, 0.1], np.float32)  # q01 == q99 == c
+        deploy = Normalizer(mode="q99", stats={"q01": q, "q99": q + np.array([0, 0, 0, 0.2], np.float32)})
+        stats = {"q01": q, "q99": q + np.array([0, 0, 0, 0.2], np.float32)}
+        for x in (q, q + 0.05):
+            train = apply_normalization(x[None, :].astype(np.float32), stats, "quantile")[0]
+            np.testing.assert_allclose(deploy.normalize(x.astype(np.float32)), train, atol=1e-5)
