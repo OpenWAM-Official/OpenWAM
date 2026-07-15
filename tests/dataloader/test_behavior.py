@@ -566,9 +566,12 @@ class TestDeployNormalizer:
         # artifact" + warning, NOT crash __init__. In-process normalization still loads,
         # so training on a RO mount works; only the deploy artifact is skipped.
         b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
-        with _mock_video_decoder(), patch(
-            "openwam.dataloader.bases.lerobot_v3_reader.np.save",
-            side_effect=OSError("read-only file system"),
+        with (
+            _mock_video_decoder(),
+            patch(
+                "openwam.dataloader.bases.lerobot_v3_reader.np.save",
+                side_effect=OSError("read-only file system"),
+            ),
         ):
             ds = _make_ds(b, normalize_mode="quantile")  # must NOT raise
             assert ds.normalization_stats_path is None  # artifact skipped
@@ -1063,8 +1066,9 @@ class TestMinMaxDefault:
 
     def test_deploy_q99_normalize_matches_training_on_constant_dims(self):
         """Same parity for the q99 path (BEHAVIOR/robocoin quantile ckpts):
-        degenerate constant dims previously normalized to 0.0 (|c|>=16) or
-        -1.907 (8<=|c|<16) at deploy while training saw exactly -1."""
+        degenerate constant dims |c|>=16 previously normalized to 0.0 at
+        deploy while training saw exactly -1 (8<=|c|<16 happened to be
+        rescued by the old branch's clip)."""
         from openwam.dataloader.transforms.normalize import Normalizer
         from openwam.dataloader.utils.normalization import apply_normalization
 
