@@ -1,0 +1,80 @@
+type: robocasa_gr1
+
+# LeRobot v3 root or single bucket. Replace this with the real converted
+# RoboCasa GR1 dataset path before sample/debug training smoke.
+dataset_dir: /TODO/robocasa_gr1_lerobotv3
+
+# joint: raw joint vectors from action/state columns; requires action_dim.
+# eef:   20D [L xyz+rot6d+grip, R xyz+rot6d+grip].
+# unify: normalize raw 20D EEF, then scatter through the shared base reader into
+#        the 80D pretraining space. Requires unify_action: true below.
+action_mode: eef
+action_dim: null
+
+# Default EEF path expects RoboCOIN-style standardized columns. If your
+# conversion exports final 20D vectors directly, set eef_action_column /
+# eef_state_column instead and null the pose+gripper columns.
+joint_action_column: action
+joint_state_column: observation.state
+eef_action_column: null
+eef_state_column: null
+eef_pose_action_column: eef_sim_pose_action
+eef_gripper_action_column: gripper_open_scale_action
+eef_pose_state_column: eef_sim_pose_state
+eef_gripper_state_column: gripper_open_scale_state
+
+# Prompt resolution tries available parquet columns first, then falls back to
+# meta/tasks.parquet via task_index. Missing/blank prompt metadata is an error.
+prompt_columns:
+  - annotation.human.coarse_action
+  - annotation.human.action.task_description
+  - task
+
+# Camera key resolution by info.json features priority. Missing wrist views are
+# rendered as black slots in multiview mode.
+head_camera_priority:
+  - observation.images.ego_view
+  - observation.images.ego_view_rgb
+  - observation.images.ego_rgb
+  - observation.images.head_rgb
+  - observation.images.cam_head_rgb
+  - observation.images.cam_high_rgb
+left_wrist_camera_priority:
+  - observation.images.left_wrist
+  - observation.images.left_wrist_rgb
+  - observation.images.cam_left_wrist_rgb
+right_wrist_camera_priority:
+  - observation.images.right_wrist
+  - observation.images.right_wrist_rgb
+  - observation.images.cam_right_wrist_rgb
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+split: train
+enable_action_supervision: true
+
+# null disables in-reader normalization. Set to min-max, z-score, or quantile after
+# generating normalization_stats.npy with scripts/robocasa_gr1_compute_stats.py.
+normalize_mode: null
+normalization_stats_path: null
+
+# Unify mode knobs. Default map slots canonical 20D EEF into the 80D space:
+# L xyz/rot6d/gripper -> [0:10], R xyz/rot6d/gripper -> [34:44].
+# Set action_mode: unify and unify_action: true together; eef/joint require false.
+unify_action: false
+unify_action_map:
+  - "0-9"
+  - "34-43"
+state_mask: null
+action_mask: null
+
+# Load-time, temporally consistent augmentation (train split only).
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
