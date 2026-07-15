@@ -196,7 +196,8 @@ inference:
   denoise_steps: 10       # denoising steps (FastWAM-Joint default)
   schedule_type: sync     # sync (lockstep) | variance_shift (Latent-Forcing ordered; joint_self_attn ckpts)
   vs_lead: video          # variance_shift only: which stream denoises first (action | video)
-  vs_alpha: 9.0           # variance_shift only: lead-curve strength (>1 leads; 1 = sync diagonal)
+  vs_alpha: 1.0           # variance_shift only: lead-curve strength (>1 leads; 1 = sync diagonal)
+  vs_offset: 0.0          # variance_shift only: delay the lag stream's start (0 = pure curve)
   execution_mode: sync    # sync | async
   execution_horizon: null # async only: actions per chunk (null = policy default)
   inference_delay_steps: null

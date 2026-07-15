@@ -60,7 +60,7 @@ class VarianceShiftTimestepSampler:
         num_train_timesteps: int = DEFAULT_NUM_TRAIN_TIMESTEPS,
         *,
         lead: str = "video",
-        alpha: float = 9.0,
+        alpha: float = 1.0,
     ):
         if lead not in ("action", "video"):
             raise ValueError(f"variance_shift lead must be 'action' or 'video', got {lead!r}.")
@@ -98,7 +98,7 @@ def build_timestep_sampler(
     *,
     num_train_timesteps: int = DEFAULT_NUM_TRAIN_TIMESTEPS,
     lead: str = "video",
-    alpha: float = 9.0,
+    alpha: float = 1.0,
 ):
     """Construct a training timestep sampler from a config mode string.
 
