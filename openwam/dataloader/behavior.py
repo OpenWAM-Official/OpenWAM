@@ -295,12 +295,11 @@ class BehaviorDataset(LeRobotV3Reader):
     # Prompt is per-episode in meta/episodes.jsonl (no tasks.parquet).
     PROMPT_SOURCE = "episode_annotated"
     # min-max, deviating from the robocoin-family quantile default: BEHAVIOR is
-    # a closed-loop scored benchmark, and quantile clips the deployable command
-    # envelope to [q01, q99] — in the relevant normalization distribution that caps the base
-    # velocity commands at only part of the demos' fastest usage (q99 below
-    # max on the base-velocity dims). Robust-to-outliers quantile stays the right
-    # default for pretrain corpora that never deploy closed-loop; see
-    # configs/dataloader/behavior.yaml for the full rationale.
+    # a closed-loop scored benchmark, and quantile saturates beyond-q99 training
+    # targets to 1.0 — the policy learns a soft cap near q99 (a fraction of the
+    # demos' top base speed in the relevant normalization distribution, dims [20:22)). Robust
+    # quantile stays the right default for pretrain corpora that never deploy
+    # closed-loop; see configs/dataloader/behavior.yaml for the full rationale.
     DEFAULT_NORMALIZE_MODE = "min-max"
     # Tolerate any wrist-camera decode failure (→ black slot), mirroring RoboCOIN.
     WRIST_DECODE_TOLERATED = (Exception,)
