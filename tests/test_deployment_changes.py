@@ -154,6 +154,7 @@ class TestDeployConfigLoading:
             "schedule_type",
             "vs_lead",
             "vs_alpha",
+            "vs_offset",
             "shift",
             "compile_enabled",
             "execution_mode",
@@ -198,10 +199,12 @@ class TestDeployConfigLoading:
         args = self._blank_args()
         args.schedule_type = "variance_shift"
         args.vs_lead = "video"
+        args.vs_offset = 0.25
 
         cfg = deploy._apply_inference_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.schedule_type") == "variance_shift"
         assert OmegaConf.select(cfg, "inference.vs_lead") == "video"
+        assert OmegaConf.select(cfg, "inference.vs_offset") == 0.25
 
     def test_cli_compile_enabled_false_disables_compile(self):
         from omegaconf import OmegaConf

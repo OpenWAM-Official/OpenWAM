@@ -156,7 +156,7 @@ class OpenWAMTrainer:
             cfg_get(t, "timestep_sampling", None),
             num_train_timesteps=_num_train_ts,
             lead=cfg_get(t, "timestep_sampling_lead", "video"),
-            alpha=cfg_get(t, "timestep_sampling_alpha", 9.0),
+            alpha=cfg_get(t, "timestep_sampling_alpha", 1.0),
         )
         # Decoupled timestep sampling (variance_shift) is only supported on the
         # joint_self_attn variant; reject any other architecture up front (the

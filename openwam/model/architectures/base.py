@@ -1515,8 +1515,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if not video_stepping and not action_stepping:
                 continue
 
+            # A frozen stream (sigma plateau, e.g. vs_offset delay) still rides
+            # the forward context: under a v→a-visible attention mask, dropping
+            # its tokens would change the other stream's prediction. Freezing
+            # only gates the *update* below, never the forward inputs.
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
-            a_timestep = torch.tensor([t_a], dtype=dtype, device=device) if action_stepping else None
+            a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
 
             if (
                 dit_cache is not None
@@ -1529,12 +1533,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 noise_pred = dit_cache.get_cached()
                 action_noise_pred = dit_cache.get_cached_action() if action_stepping else None
             else:
-                forward_action_latents = action_latents if action_stepping else None
                 if cfg_scale_f > 1.0:
                     # _forward_with_cfg runs its own cudagraph_mark_step_begin()
                     # before each inner forward (1 for cfg_merge, 2 for sequential).
                     noise_pred, action_noise_pred = self._forward_with_cfg(
-                        action_latents=forward_action_latents,
+                        action_latents=action_latents,
                         a_timestep=a_timestep,
                         inputs_shared=inputs_shared,
                         v_timestep=v_timestep,
@@ -1544,7 +1547,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 else:
                     torch.compiler.cudagraph_mark_step_begin()
                     noise_pred, action_noise_pred = self.forward(
-                        forward_action_latents,
+                        action_latents,
                         a_timestep,
                         **inputs_shared,
                         timestep=v_timestep,
