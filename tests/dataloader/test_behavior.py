@@ -566,9 +566,12 @@ class TestDeployNormalizer:
         # artifact" + warning, NOT crash __init__. In-process normalization still loads,
         # so training on a RO mount works; only the deploy artifact is skipped.
         b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
-        with _mock_video_decoder(), patch(
-            "openwam.dataloader.bases.lerobot_v3_reader.np.save",
-            side_effect=OSError("read-only file system"),
+        with (
+            _mock_video_decoder(),
+            patch(
+                "openwam.dataloader.bases.lerobot_v3_reader.np.save",
+                side_effect=OSError("read-only file system"),
+            ),
         ):
             ds = _make_ds(b, normalize_mode="quantile")  # must NOT raise
             assert ds.normalization_stats_path is None  # artifact skipped
@@ -990,3 +993,88 @@ class TestActionModes:
         stats_path.write_text(json.dumps(stats))
         with _mock_video_decoder(), pytest.raises(KeyError, match="arm_joint"):
             _make_joint_ds(b, normalize_mode="quantile")
+
+
+# ── min-max default (benchmark convention) ------------------------------------
+
+
+class TestMinMaxDefault:
+    """BEHAVIOR is a closed-loop scored benchmark: its default flipped from the
+    robocoin-family quantile to min-max so training targets are not saturated
+    at [q01, q99] (base velocity dims lose a substantial fraction of the demos' top speed:
+    q99 is substantially below max). These tests pin the new default and the
+    deploy-side min_max normalize being training-identical (clipped,
+    constant-dim safe)."""
+
+    def test_default_normalize_mode_is_min_max(self, tmp_path):
+        from openwam.dataloader.behavior import BehaviorDataset
+
+        assert BehaviorDataset.DEFAULT_NORMALIZE_MODE == "min-max"
+        # _make_ds force-passes normalize_mode=None (explicit null = disable),
+        # so construct directly to exercise the UNSET → class-default path.
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        with _mock_video_decoder():
+            ds = BehaviorDataset(
+                dataset_dir=str(b),
+                height=384,
+                width=320,
+                multiview=True,
+                unify_action=True,
+                unify_action_map=UNIFY_MAP,
+            )
+        assert ds._normalize_mode == "min-max"
+
+    def test_min_max_registered_in_deploy_mode_map(self):
+        from openwam.dataloader.transforms.normalize import YAML_TO_NORM_MODE
+
+        assert YAML_TO_NORM_MODE.get("min-max") == "min_max"
+
+    def test_min_max_bounded_and_rot6d_passthrough(self, tmp_path):
+        b = make_behavior_bucket(tmp_path, n_episodes=2, with_stats=True)
+        with _mock_video_decoder():
+            raw = _make_ds(b, normalize_mode=None)[0]["action"].numpy()
+            norm_ds = _make_ds(b, normalize_mode="min-max")
+            norm = norm_ds[0]["action"].numpy()
+        assert (np.abs(norm[:, EXPECTED_VALID]) <= 1.0 + 1e-5).all()
+        # rot6d stats stay identity-pinned → passthrough under min-max too
+        for sl in (slice(3, 9), slice(37, 43)):
+            np.testing.assert_allclose(norm[:, sl], raw[:, sl], atol=1e-5)
+
+    def test_deploy_min_max_normalize_matches_training_and_clips(self):
+        """Deploy Normalizer(min_max).normalize must be bit-parallel to the
+        training-side apply_normalization — CLIPPED (training clips min-max;
+        an unclipped deploy would hand the model proprio thousands of sigma
+        out-of-distribution on degenerate near-constant dims where
+        scale=2/eps) and exact on large constant dims (float32 offset
+        absorption previously yielded -1.907/0.0 instead of -1)."""
+        from openwam.dataloader.transforms.normalize import Normalizer
+        from openwam.dataloader.utils.normalization import apply_normalization
+
+        lo = np.array([0.0, 0.044, 12.0, 90.0, 0.1], np.float32)
+        hi = np.array([0.0, 0.044, 12.0, 90.0, 0.1002], np.float32)
+        deploy = Normalizer(mode="min_max", stats={"min": lo, "max": hi})
+        stats = {"min": lo, "max": hi, "mean": lo, "std": np.ones(5, np.float32)}
+        probes = [lo, hi, lo + 0.015, np.array([1e-4, 0.02, 11.5, 90.006, 0.2], np.float32)]
+        for x in probes:
+            train = apply_normalization(x[None, :].astype(np.float32), stats, "min-max")[0]
+            got = deploy.normalize(x.astype(np.float32))
+            np.testing.assert_allclose(got, train, atol=1e-5)
+            assert np.abs(got).max() <= 1.0 + 1e-6  # bounded like training
+        # unnormalize still recovers the constants exactly
+        rec = deploy.unnormalize(np.array([-1.0, -1.0, -1.0, -1.0, 0.3], np.float32))
+        np.testing.assert_allclose(rec[:4], lo[:4], atol=1e-4)
+
+    def test_deploy_q99_normalize_matches_training_on_constant_dims(self):
+        """Same parity for the q99 path (BEHAVIOR/robocoin quantile ckpts):
+        degenerate constant dims |c|>=16 previously normalized to 0.0 at
+        deploy while training saw exactly -1 (8<=|c|<16 happened to be
+        rescued by the old branch's clip)."""
+        from openwam.dataloader.transforms.normalize import Normalizer
+        from openwam.dataloader.utils.normalization import apply_normalization
+
+        q = np.array([0.0, 12.0, 90.0, 0.1], np.float32)  # q01 == q99 == c
+        deploy = Normalizer(mode="q99", stats={"q01": q, "q99": q + np.array([0, 0, 0, 0.2], np.float32)})
+        stats = {"q01": q, "q99": q + np.array([0, 0, 0, 0.2], np.float32)}
+        for x in (q, q + 0.05):
+            train = apply_normalization(x[None, :].astype(np.float32), stats, "quantile")[0]
+            np.testing.assert_allclose(deploy.normalize(x.astype(np.float32)), train, atol=1e-5)
