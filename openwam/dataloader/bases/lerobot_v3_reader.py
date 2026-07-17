@@ -284,8 +284,9 @@ class LeRobotV3Reader(BaseDataset):
         # Octo-style head-view sampling (see __init__ arg docs). Resolved BEFORE
         # _build_episode_index so _video_cameras() covers every choice when the
         # per-camera frame offsets are computed. Randomness comes from the
-        # module-level ``random`` RNG — per-worker seeded by
-        # dataloader_worker_init_fn, the same source the video transforms use.
+        # module-level ``random`` RNG — per-worker seeded by the torch worker
+        # loop (and by dataloader_worker_init_fn in deterministic mode), the
+        # same source the video transforms use.
         # Val keeps the resolved head camera so eval stays deterministic.
         self._head_camera_choices: Optional[List[str]] = None
         if head_camera_choices:

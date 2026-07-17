@@ -103,16 +103,6 @@ def dataloader_worker_init_fn(worker_id: int) -> None:
     NumPy with the same value so any dataset transform that reaches into
     those RNGs is reproducible too.
     """
-    # Demote dataloader workers below the training process. PyAV decode +
-    # prefetch bursts across all workers on a node otherwise starve the
-    # trainer's per-batch CPU stage, and one starved rank stalls every rank
-    # at the gradient all-reduce (the periodic slow waves). nice(10) makes
-    # the scheduler always favor the training process; the prefetch queue
-    # absorbs the slightly slower workers.
-    try:
-        os.nice(10)
-    except OSError:
-        pass
     info = torch.utils.data.get_worker_info()
     if info is None:
         return
