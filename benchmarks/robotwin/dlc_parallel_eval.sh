@@ -317,9 +317,50 @@ SERVER_LOG_DIR="${NODE_DIR}/servers"
 server_pids=()
 worker_pids=()
 
+# Set to 1 once this node has actually joined the shared queue for this run
+# attempt: rank0 right after it publishes READY_FILE, everyone else right
+# after observing it. Gates publish_done_sentinel() below.
+NODE_JOINED=0
+
+# Idempotent: touching an existing sentinel is a no-op. Called both from the
+# normal post-worker-wait path (rank0's own peer-sentinel loop below needs to
+# observe its own file, so it cannot wait until this node's process actually
+# exits) and from the top of cleanup() (so a post-join abort — wait_for_server
+# failure, dry-run barrier timeout, SIGTERM/SIGINT from DLC preemption, or the
+# worker-wait completing — still publishes the sentinel instead of stranding
+# rank0's poll for up to ALL_NODES_DONE_TIMEOUT_SEC).
+#
+# Gated on NODE_JOINED: a node that aborts the *queue-ready wait* (never
+# observed READY_FILE) never joined this attempt's queue, so it must not
+# publish. Publishing there was tried and reverted — see PR #36 review:
+# a sentinel from a node that never joined survives as long as READY_FILE
+# is absent, so on a same-RUN_ID retry without --fresh (rank0 itself never
+# came up last time) rank0's peer-sentinel loop finds a stale "done" file
+# for a node that hasn't even started the new attempt, and can race
+# rank0's --fresh cleanup for a node that gives up moments before rank0
+# finally comes up in the *same* attempt. A node that truly never joins
+# still leaves rank0 waiting on its rank forever either way — an
+# orchestration-level problem (the node is simply gone) that no sentinel
+# mechanism here can fix — but not publishing avoids inventing a second,
+# worse failure mode (stale/racy "done" markers) on top of it.
+publish_done_sentinel() {
+    (( NODE_JOINED )) || return 0
+    [[ -n "${LOG_DIR:-}" ]] || return 0
+    mkdir -p "${LOG_DIR}" 2>/dev/null || true
+    if ! touch "${LOG_DIR}/.node${NODE_RANK}_done" 2>/dev/null; then
+        echo "[node${NODE_RANK}] WARNING: failed to publish done sentinel at ${LOG_DIR}/.node${NODE_RANK}_done; rank0 may hang waiting for it" >&2
+    fi
+}
+
 cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM
+    # First: idempotent, and the node is exiting either way, so publishing
+    # before the kill/drain/escalate sequence below means a KILL landing
+    # during the ~8s TERM drain (DLC preemption is TERM-then-KILL) or a
+    # second TERM (default disposition once "trap - EXIT INT TERM" above
+    # has run) still doesn't skip it.
+    publish_done_sentinel
     echo ""
     echo "[node${NODE_RANK}] stopping workers and servers..." >&2
     for pid in "${worker_pids[@]}"; do kill_tree "${pid}" TERM; done
@@ -391,6 +432,13 @@ if [[ "${NODE_RANK}" == "0" ]]; then
         fi
         printf 'tasks=%s\n' "${TASKS[*]}"
     } > "${LOG_DIR}/run.env"
+    # Set before the touch, not after: rank0 has fully built the queue by
+    # this point, so there is no reason to leave a window (however narrow)
+    # between publishing READY_FILE and considering itself joined — a
+    # SIGTERM landing exactly there would otherwise skip cleanup()'s
+    # sentinel publish despite the queue already being real for this
+    # attempt.
+    NODE_JOINED=1
     touch "${READY_FILE}"
     echo "[rank0] queue initialized: ${TOTAL_JOBS} per-job files at ${QUEUE_PENDING_DIR}"
 else
@@ -403,6 +451,7 @@ else
         fi
         sleep 1
     done
+    NODE_JOINED=1
 fi
 
 if (( DRY_RUN )); then
@@ -666,11 +715,26 @@ if (( DRY_RUN )) && [[ "${NODE_RANK}" == "0" ]]; then
     done
     touch "${DRY_RUN_WORKER_START_FILE}"
 fi
-wait "${worker_pids[@]}"
+# Wait on each worker individually. A bare `wait "${worker_pids[@]}"` returns
+# only the LAST pid's status, so under `set -e` a non-zero exit from the last
+# worker would abort the script *before* the done sentinel is written, leaving
+# rank0 to block until ALL_NODES_DONE_TIMEOUT_SEC. Capture every worker's status
+# here so the sentinel is always written and rank0 can proceed.
+worker_rc=0
+for pid in "${worker_pids[@]}"; do
+    wait "${pid}" || worker_rc=$?
+done
 worker_pids=()
 
-touch "${LOG_DIR}/.node${NODE_RANK}_done"
+# Publish the done sentinel now (not just from cleanup()) because rank0's own
+# peer-sentinel loop below checks this same file for rank0 itself, and that
+# loop must not block on a sentinel that would otherwise only be written when
+# this process exits.
+publish_done_sentinel
 echo "[node${NODE_RANK}] local workers finished"
+if (( worker_rc != 0 )); then
+    echo "[node${NODE_RANK}] WARNING: a worker exited non-zero (rc=${worker_rc}); see worker logs" >&2
+fi
 
 if [[ "${NODE_RANK}" == "0" ]]; then
     echo "[rank0] waiting for all node done sentinels"
@@ -706,6 +770,11 @@ if [[ "${NODE_RANK}" == "0" ]]; then
     if (( DRY_RUN )); then
         echo "[DRYRUN] shared-queue assignment validated: ${finished_count}/${TOTAL_JOBS} jobs claimed exactly once"
     fi
+fi
+
+if (( worker_rc != 0 )); then
+    echo "[node${NODE_RANK}] exiting non-zero due to worker failure (rc=${worker_rc})" >&2
+    exit "${worker_rc}"
 fi
 
 echo "[node${NODE_RANK}] done"

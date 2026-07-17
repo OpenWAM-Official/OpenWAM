@@ -105,6 +105,119 @@ def eef20d_to_ee16d(action: np.ndarray) -> np.ndarray:
     return np.concatenate([l_xyz, l_quat, l_grip, r_xyz, r_quat, r_grip]).astype(np.float32)
 
 
+def _rot6d_to_matrix(r6d: np.ndarray) -> np.ndarray:
+    """6D rotation (first two columns) -> 3x3 rotation matrix (Gram-Schmidt)."""
+    a1, a2 = np.asarray(r6d[:3], np.float64), np.asarray(r6d[3:6], np.float64)
+    b1 = a1 / max(float(np.linalg.norm(a1)), 1e-8)
+    b2 = a2 - float(np.dot(b1, a2)) * b1
+    b2 = b2 / max(float(np.linalg.norm(b2)), 1e-8)
+    b3 = np.cross(b1, b2)
+    return np.stack([b1, b2, b3], axis=1)  # columns = b1,b2,b3
+
+
+def _matrix_to_axis_angle(R: np.ndarray) -> np.ndarray:
+    """3x3 rotation matrix -> axis-angle (rotation vector), pure numpy."""
+    angle = np.arccos(np.clip((np.trace(R) - 1.0) * 0.5, -1.0, 1.0))
+    if angle < 1e-8:
+        return np.zeros(3, np.float32)
+    axis = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]], np.float64)
+    axis = axis / max(float(np.linalg.norm(axis)), 1e-8)
+    return (axis * angle).astype(np.float32)
+
+
+def eef20d_to_robocasa12d(
+    action: np.ndarray,
+    proprio_eef_pos: np.ndarray,
+    proprio_eef_rot6d: np.ndarray,
+    *,
+    pos_scale: float,
+    rot_scale: float,
+    base_motion: np.ndarray | None = None,
+    control_mode: float = -1.0,
+    clip: bool = True,
+) -> np.ndarray:
+    """Bridge the model's 20-D **full** EEF pose to RoboCasa's 12-D **OSC delta** action.
+
+    RoboCasa365's ``RoboCasaGymEnv`` consumes a 12-D robosuite OSC_POSE + mobile-base
+    action; the OpenWAM model trained by ``RoboCasa365Dataset`` instead predicts a 20-D single-arm
+    EEF pose (left half ``[pos3, rot6d6, grip1]``, right half 0) that is a **full pose** (not a
+    per-step delta) expressed in the robot **base frame** (``robot0_base_to_eef_*``) — base-relative,
+    NOT world-frame. (Loosely called "absolute" elsewhere = full-not-delta; do not read it as
+    world-frame.) This is the dual of robotwin's client-side ``eef20d_to_ee16d`` — except robotwin's
+    env takes full 16-D poses, whereas RoboCasa's OSC controller takes *delta* commands scaled into
+    ``[-1, 1]``, so the conversion needs the current proprio (to form the delta) and the controller's
+    scaling.
+
+    Output is the flat 12-D in the SERVER/``slice_action`` order (NOT modality.json
+    order)::
+
+        [eef_pos_cmd(3), eef_rot_cmd(3), gripper(1), base_motion(4), control_mode(1)]
+
+    Args:
+        action: 20-D EEF action; only the left-arm 10 dims ``[pos3, rot6d6, grip1]`` are used.
+        proprio_eef_pos: (3,) current base-frame EEF position (from ``state.end_effector_position_relative``
+            = ``robot0_base_to_eef_pos``).
+        proprio_eef_rot6d: (6,) current EEF rotation as rot6d (quat->rot6d of ``state.end_effector_rotation_relative``).
+        pos_scale: robosuite OSC position ``output_max`` (metres mapped to action 1.0). **REQUIRED, env-specific** —
+            read it from the eval env's OSC_POSE controller config; a wrong value drives wrong-magnitude motions.
+        rot_scale: robosuite OSC rotation ``output_max`` (radians mapped to action 1.0). Same caveat as ``pos_scale``.
+        base_motion: (4,) base command [x/y/yaw vel, torso]; defaults to zeros — the arm-only (non-mobile)
+            ckpt fallback. A mobile_base ckpt passes the real base command through here.
+        control_mode: scalar; defaults to -1.0 ("achieved" mode) — the arm-only fallback. A mobile_base
+            ckpt passes the model's real control_mode (gym thresholds it at 0.5 → -1/+1).
+        clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
+
+    Gripper: the model dim ``act[9]`` is the gripper COMMAND in ``[-1, +1]`` (+1=close, -1=open, matching
+    the recorded ``action.gripper_close``). Close only on a CONFIDENT command: ``close (1.0) iff act[9] >
+    0.5``, else open — an uncertain / neutral output (~0, the flow-matching prior mean) defaults to open,
+    avoiding spurious grasps. No width binarization — the model predicts the command directly, so there
+    is no actuation-lag delay (unlike deriving open/close from the achieved finger-separation width).
+
+    ENV CONTRACT (MEASURED on the real robocasa/OpenDrawer env, PandaOmron / default_pandaomron.json):
+    the eef action convention is **delta** (zero action -> no EEF motion; constant action -> constant
+    per-step displacement), matching the (target-current)/scale here. Steady per-step motion per
+    action 1.0: ~0.0126 m (pos) / ~0.102 rad (rot) -> use as pos_scale/rot_scale. control_mode -1 +
+    base 0 hold the fixed base. (Probed via env.step with known actions; see e2e plan.)
+    """
+    act = np.asarray(action, dtype=np.float64).reshape(-1)
+    if act.shape[0] != 20:
+        raise ValueError(f"expected a 20-D EEF action, got {act.shape[0]}")
+    cur_pos = np.asarray(proprio_eef_pos, np.float64).reshape(-1)
+    if cur_pos.shape[0] != 3:
+        raise ValueError(f"proprio_eef_pos must be 3-D, got {cur_pos.shape[0]}")
+    if not (float(pos_scale) > 0.0 and float(rot_scale) > 0.0):
+        raise ValueError(
+            f"pos_scale and rot_scale must be > 0 (got pos={pos_scale}, rot={rot_scale}); a "
+            "non-positive scale would silently mask a misconfigured OSC controller (clamping it "
+            "to ~0 emits huge/garbage deltas). Set them from the eval env's OSC_POSE output_max."
+        )
+    tgt_pos, tgt_r6d = act[0:3], act[3:9]  # gripper (act[9]) handled below
+
+    # Position: absolute target -> scaled OSC delta.
+    pos_cmd = (tgt_pos - cur_pos) / float(pos_scale)
+
+    # Rotation: relative rotation R_target @ R_current^-1 -> axis-angle -> scaled.
+    R_t = _rot6d_to_matrix(tgt_r6d)
+    R_c = _rot6d_to_matrix(np.asarray(proprio_eef_rot6d, np.float64).reshape(-1))
+    rot_cmd = _matrix_to_axis_angle(R_t @ R_c.T).astype(np.float64) / float(rot_scale)
+
+    if clip:
+        pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
+        rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
+
+    # Gripper: model dim [9] is the COMMAND in [-1,+1] (+1=close, -1=open; matches action.gripper_close
+    # and the proprio's rendered width). Close only on a CONFIDENT command: close (1.0) iff act[9] > 0.5,
+    # else open (0.0). An uncertain / neutral output (~0, the flow-matching prior mean) defaults to open,
+    # avoiding spurious grasps. No width binarization, so no actuation-lag delay.
+    gripper_cmd = 1.0 if float(act[9]) > 0.5 else 0.0
+
+    base = np.zeros(4, np.float64) if base_motion is None else np.asarray(base_motion, np.float64).reshape(-1)
+    if base.shape[0] != 4:
+        raise ValueError(f"base_motion must be 4-D, got {base.shape[0]}")
+    # SERVER / slice_action order: eef_pos, eef_rot, grip, base_motion, control_mode.
+    return np.concatenate([pos_cmd, rot_cmd, [gripper_cmd], base, [float(control_mode)]]).astype(np.float32)
+
+
 def robotwin_endpose_to_eef20d(
     left_endpose: np.ndarray,
     right_endpose: np.ndarray,
@@ -132,6 +245,96 @@ def robotwin_endpose_to_eef20d(
     left = np.concatenate([left_ep[:3], quat_xyzw_to_rot6d(left_ep[3:]), left_grip[:1]], axis=-1)
     right = np.concatenate([right_ep[:3], quat_xyzw_to_rot6d(right_ep[3:]), right_grip[:1]], axis=-1)
     return np.concatenate([left, right], axis=-1).astype(np.float32)
+
+
+# Gripper render (MUST stay in lockstep with openwam.dataloader.robocasa365._gripper_width_to_cmd):
+# achieved finger-separation width → [-1,+1] command space (open width → -1, closed 0 → +1).
+_RC365_GRIPPER_WIDTH_OPEN = 0.1
+
+
+def rc365_gripper_width_to_cmd(width) -> float:
+    """Achieved finger-separation width → [-1,+1] gripper command space (closed→+1, open→-1). Bit-
+    identical to the dataloader's ``_gripper_width_to_cmd`` so the proprio gripper the client sends
+    matches training."""
+    return float(np.clip(1.0 - 2.0 * float(width) / _RC365_GRIPPER_WIDTH_OPEN, -1.0, 1.0))
+
+
+def robocasa_state_to_eef20d(
+    eef_pos_rel: np.ndarray,
+    eef_rot_rel_quat_xyzw: np.ndarray,
+    gripper_qpos: np.ndarray,
+) -> np.ndarray:
+    """Assemble the **20-D single-arm EEF proprio** from a RoboCasa365 obs, RAW (unnormalized).
+
+    Bit-identical to the dataloader's ``state_to_arm10`` + ``assemble_single_arm_left``
+    (``openwam.dataloader.robocasa365``): the eval client must send proprio in the SAME 20-D
+    representation the model was trained on (the env outputs a 16-D raw state; the client converts).
+    The server normalizes; send RAW here. Right-arm 10 dims are zero-padded.
+
+        arm10 = [eef_pos_rel(3), rot6d(eef_rot_rel quat xyzw, 6), gripper(1)]
+        gripper = rc365_gripper_width_to_cmd(gripper_qpos[0] - gripper_qpos[1])   ([-1,+1] command space)
+    """
+    pos = np.asarray(eef_pos_rel, np.float32).reshape(-1)
+    quat = np.asarray(eef_rot_rel_quat_xyzw, np.float32).reshape(-1)
+    qpos = np.asarray(gripper_qpos, np.float32).reshape(-1)
+    if pos.shape[0] != 3 or quat.shape[0] != 4 or qpos.shape[0] != 2:
+        raise ValueError(
+            f"robocasa proprio dims: eef_pos_rel must be 3 (got {pos.shape[0]}), "
+            f"eef_rot_rel quat 4 (got {quat.shape[0]}), gripper_qpos 2 (got {qpos.shape[0]})"
+        )
+    grip = np.array([rc365_gripper_width_to_cmd(qpos[0] - qpos[1])], np.float32)
+    arm10 = np.concatenate([pos, quat_xyzw_to_rot6d(quat), grip], axis=-1)  # (10,)
+    out = np.zeros(20, np.float32)
+    out[:10] = arm10  # single-arm LEFT; right half stays 0 (masked at train time)
+    return out
+
+
+def base_velocity_body(prev_base_pose: np.ndarray, cur_base_pose: np.ndarray) -> np.ndarray:
+    """Body-frame base velocity from two consecutive base poses (finite difference), per-frame.
+
+    The low-level building block for ``base_velocity_cmd`` (which applies the A′ rescale on top).
+    Bit-identical to the dataloader's ``_base_velocity_body`` (``openwam.dataloader.robocasa365``).
+    Each pose is ``base_position(3, world) + base_rotation(4, world quat xyzw)``.
+
+    Returns ``(3,)`` = ``[vx, vy, vyaw]`` in the robot's body frame at ``cur`` (per-step displacement,
+    m/frame + rad/frame). SE(2): z + roll/pitch are ignored (ground base); Δyaw is wrapped to (-pi, pi].
+    """
+    prev = np.asarray(prev_base_pose, np.float64).reshape(-1)
+    cur = np.asarray(cur_base_pose, np.float64).reshape(-1)
+    if prev.shape[0] < 7 or cur.shape[0] < 7:
+        raise ValueError(f"base pose must be >=7D (pos3+quat4); got prev={prev.shape}, cur={cur.shape}")
+
+    def _yaw(q):  # yaw about world +z from a quaternion (x, y, z, w)
+        x, y, z, w = (float(v) for v in q[:4])
+        return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+    d = cur[0:2] - prev[0:2]  # world planar displacement
+    yaw_cur, yaw_prev = _yaw(cur[3:7]), _yaw(prev[3:7])
+    c, s = np.cos(yaw_cur), np.sin(yaw_cur)
+    vx = c * d[0] + s * d[1]  # R(-yaw_cur) @ d -> body frame
+    vy = -s * d[0] + c * d[1]
+    d_yaw = np.arctan2(np.sin(yaw_cur - yaw_prev), np.cos(yaw_cur - yaw_prev))  # wrapped Δyaw
+    return np.array([vx, vy, d_yaw], np.float32)
+
+
+# A′ base-velocity rescale (MUST stay in lockstep with openwam.dataloader.robocasa365):
+# _BASE_VEL_PHYS_MAX = per-axis base max speed at command saturation, DATASET_FPS = v3 rate.
+_RC365_BASE_VEL_PHYS_MAX = np.array([0.75, 0.88, 1.33], dtype=np.float32)
+_RC365_FPS = 20
+
+
+def base_velocity_cmd(prev_base_pose: np.ndarray, cur_base_pose: np.ndarray, fps: int = _RC365_FPS) -> np.ndarray:
+    """Body-frame base velocity finite-diff rescaled into the action's [-1, 1] command space (A′).
+
+    Bit-identical to the dataloader's ``base_velocity_cmd`` (``openwam.dataloader.robocasa365``): the
+    proprio base velocity the client sends for a mobile ckpt must be derived — AND rescaled — the SAME
+    way it was at train time (``× fps / _BASE_VEL_PHYS_MAX``), so the achieved proprio velocity lands
+    in the same space as the recorded action base command and shares its stats. No train/eval mismatch.
+    Each pose = ``base_position(3, world) + base_rotation(4, world quat xyzw)``. Sent RAW; the server
+    normalizes with the combined ``eef_base`` stats block."""
+    return (base_velocity_body(prev_base_pose, cur_base_pose) * float(fps) / _RC365_BASE_VEL_PHYS_MAX).astype(
+        np.float32
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,3 +531,157 @@ def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
             p[_PP_TRUNK_QPOS],
         ]
     ).astype(np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# EBench (GenManip lift2/R5a dual-arm mobile manipulator)                      #
+# --------------------------------------------------------------------------- #
+# Mirrors of the trainer's rendering in openwam/dataloader/ebench.py — the
+# eval and training ends of the same contract. A regression test
+# (tests/benchmarks/test_ebench_bridge.py) pins each pair together byte-for-
+# byte; change them in lockstep.
+
+EBENCH_RAW_DIM = 23
+EBENCH_BASE_SOURCES = ("delta", "cumulative")
+# GenManip lift2 gripper: 0.0 closed .. 0.044 open per finger (both fingers of
+# a hand are commanded identically).
+EBENCH_GRIPPER_OPEN = 0.044
+
+
+def ebench_wrap_angle_rad(angle: np.ndarray) -> np.ndarray:
+    """Wrap radian angle(s) to [-pi, pi). Mirror of ebench.wrap_angle_rad."""
+    return (np.asarray(angle, dtype=np.float64) + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def ebench_render_state_base(cur_base, prev_base, base_action_source: str) -> np.ndarray:
+    """Render measured ``state.base`` ``[x_m, y_m, yaw_RAD]`` into the trained
+    base-action command space. Mirror of ebench.render_ebench_state_base.
+
+    ``delta``: measured per-step displacement (yaw wrapped, rad→deg);
+    ``prev_base=None`` (episode start) → zeros. ``cumulative``: pose with yaw
+    rad→deg.
+    """
+    cur = np.asarray(cur_base, dtype=np.float64).reshape(3)
+    if base_action_source == "delta":
+        if prev_base is None:
+            return np.zeros(3, dtype=np.float32)
+        prev = np.asarray(prev_base, dtype=np.float64).reshape(3)
+        delta = cur - prev
+        dyaw = float(ebench_wrap_angle_rad(delta[2]))
+        return np.array([delta[0], delta[1], np.degrees(dyaw)], dtype=np.float32)
+    if base_action_source == "cumulative":
+        return np.array([cur[0], cur[1], np.degrees(cur[2])], dtype=np.float32)
+    raise ValueError(f"base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}")
+
+
+def ebench_quat_wxyz_to_rot6d(quat_wxyz: np.ndarray) -> np.ndarray:
+    """wxyz quaternion(s) → rot6d. Mirror of ebench._quat_wxyz_to_rot6d.
+
+    Inlines ``openwam.dataloader.utils.eef.quat_xyzw_to_rot6d`` (float32, no
+    re-normalization — GenManip quats are unit by construction and the reader
+    checks a sample at init) rather than this module's normalizing
+    ``quat_xyzw_to_rot6d``, so bridge proprio is byte-identical to training.
+    """
+    q = np.asarray(quat_wxyz, dtype=np.float32)
+    if q.shape[-1] != 4:
+        raise ValueError(f"quaternion must be 4-D wxyz, got shape {q.shape}")
+    leading = q.shape[:-1]
+    flat = q.reshape(-1, 4)
+    flat_xyzw = np.concatenate([flat[:, 1:4], flat[:, 0:1]], axis=-1)
+    x, y, z, w = flat_xyzw[:, 0], flat_xyzw[:, 1], flat_xyzw[:, 2], flat_xyzw[:, 3]
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    c0 = np.stack([1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy)], axis=-1)
+    c1 = np.stack([2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx)], axis=-1)
+    r6d = np.concatenate([c0, c1], axis=-1).astype(flat_xyzw.dtype)
+    return r6d.reshape(*leading, 6).astype(np.float32)
+
+
+def ebench_obs_to_raw23(state_ee_pose, state_gripper, rendered_base) -> np.ndarray:
+    """EBench eval obs (measured state) → RAW-23 proprio in the reader layout.
+
+    ``state_ee_pose``: the obs ``state.ee_pose`` nested pairs
+    ``[[L_pos3, L_quat_wxyz4], [R_pos3, R_quat_wxyz4]]`` (or an already-flat
+    14-vector). ``state_gripper``: 4 finger positions ``[L,L,R,R]``.
+    ``rendered_base``: the 3-vector from :func:`ebench_render_state_base`.
+
+    Output layout (== ebench._ee_pose_gripper_base_to_raw23)::
+
+        [L_xyz3, L_rot6d6, L_grip1, R_xyz3, R_rot6d6, R_grip1, base3]
+
+    Sent RAW — the OpenWAM server normalizes with the checkpoint stats and
+    scatters into the unified 80-D space.
+    """
+
+    def _leaves(node):
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                yield from _leaves(item)
+        else:
+            yield np.asarray(node, dtype=np.float32).reshape(-1)
+
+    flat = np.concatenate(list(_leaves(state_ee_pose)))
+    if flat.shape[0] != 14:
+        raise ValueError(f"state.ee_pose must flatten to 14 values, got {flat.shape[0]}")
+    grip = np.asarray(state_gripper, dtype=np.float32).reshape(-1)
+    if grip.shape[0] != 4:
+        raise ValueError(f"state.gripper must have 4 values, got {grip.shape[0]}")
+    base = np.asarray(rendered_base, dtype=np.float32).reshape(-1)
+    if base.shape[0] != 3:
+        raise ValueError(f"rendered base must have 3 values, got {base.shape[0]}")
+    return np.concatenate(
+        [
+            flat[0:3],
+            ebench_quat_wxyz_to_rot6d(flat[3:7]),
+            grip[0:2].mean(keepdims=True),
+            flat[7:10],
+            ebench_quat_wxyz_to_rot6d(flat[10:14]),
+            grip[2:4].mean(keepdims=True),
+            base,
+        ]
+    ).astype(np.float32)
+
+
+def raw23_to_ebench_action(action: np.ndarray, base_action_source: str) -> dict:
+    """OpenWAM RAW-23 physical action → GenManip EvalClient action dict.
+
+    The server already inverted normalization and the 80-D unify scatter, so
+    ``action`` is the raw 23-D vector in physical units. Arms go out as
+    absolute ``ee_pose`` targets (GenManip runs cuRobo IK per arm in the same
+    per-arm base frames that produced the training FK); the scalar gripper is
+    duplicated to both fingers and clipped to the physical range; the base
+    slot goes out per the trained ``base_action_source``:
+
+    * ``delta`` → ``base_motion=[dx_m, dy_m, dyaw_deg]``, ``base_is_rel=True``
+      (GenManip clips each step to ±0.015 m / ±1° — the same clamps the demos
+      obeyed — and converts the degree yaw internally).
+    * ``cumulative`` → absolute ``base_motion=[x_m, y_m, yaw_deg]``,
+      ``base_is_rel=False`` (GenManip applies ``deg2rad`` to index 2).
+
+    Positions/quaternions are plain Python lists ON PURPOSE: the GenManip
+    server concatenates ``position + orientation`` (list concat) before IK —
+    numpy arrays would broadcast-add and crash it.
+    """
+    a = np.asarray(action, dtype=np.float64).reshape(-1)
+    if a.shape[0] != EBENCH_RAW_DIM:
+        raise ValueError(f"expected raw {EBENCH_RAW_DIM}-D EBench action, got {a.shape[0]}")
+    if base_action_source not in EBENCH_BASE_SOURCES:
+        raise ValueError(f"base_action_source must be one of {EBENCH_BASE_SOURCES}, got {base_action_source!r}")
+
+    def _arm(xyz: np.ndarray, r6d: np.ndarray, grip: float) -> tuple:
+        quat_xyzw = rot6d_to_quat_xyzw(r6d.astype(np.float32))
+        quat_wxyz = [float(quat_xyzw[3]), float(quat_xyzw[0]), float(quat_xyzw[1]), float(quat_xyzw[2])]
+        g = float(np.clip(grip, 0.0, EBENCH_GRIPPER_OPEN))
+        return ([float(v) for v in xyz], quat_wxyz, [g, g])
+
+    return {
+        "action": [
+            _arm(a[0:3], a[3:9], a[9]),
+            _arm(a[10:13], a[13:19], a[19]),
+        ],
+        "control_type": "ee_pose",
+        "is_rel": False,
+        "base_motion": [float(v) for v in a[20:23]],
+        "base_is_rel": base_action_source == "delta",
+    }

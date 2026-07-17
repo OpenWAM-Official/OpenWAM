@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from openwam.dataloader.transforms.base import InvertibleModalityTransform
-from openwam.dataloader.utils.normalization import NORM_EPS
+from openwam.dataloader.utils.normalization import NORM_EPS, apply_normalization
 
 
 class NormMode(str, Enum):
@@ -56,9 +56,11 @@ class Normalizer(InvertibleModalityTransform):
         self.binary_threshold = binary_threshold
         self.eps = eps
 
-        # Precompute scale/offset for fast apply/unapply
+        # Precompute scale/offset for fast apply/unapply; _mode_stats feeds the
+        # min_max/q99 normalize delegation to the training-side formula.
         self._scale = None
         self._offset = None
+        self._mode_stats = None
         if stats:
             self._precompute()
 
@@ -76,6 +78,7 @@ class Normalizer(InvertibleModalityTransform):
             range_ = np.maximum(q99 - q01, self.eps)
             self._scale = 2.0 / range_
             self._offset = q01 + range_ / 2.0  # center
+            self._mode_stats = {"q01": q01, "q99": q99}
 
         elif self.mode == NormMode.MIN_MAX:
             lo = np.asarray(s["min"], dtype=np.float32)
@@ -83,6 +86,7 @@ class Normalizer(InvertibleModalityTransform):
             range_ = np.maximum(hi - lo, self.eps)
             self._scale = 2.0 / range_
             self._offset = lo + range_ / 2.0
+            self._mode_stats = {"min": lo, "max": hi}
 
         elif self.mode == NormMode.MEAN_STD:
             self._offset = np.asarray(s["mean"], dtype=np.float32)
@@ -103,10 +107,18 @@ class Normalizer(InvertibleModalityTransform):
         if self._scale is None:
             return x
 
-        result = (x - self._offset) * self._scale
-        if self.mode == NormMode.Q99:
-            result = np.clip(result, -1.0, 1.0)
-        return result.astype(np.float32)
+        if self.mode in (NormMode.MIN_MAX, NormMode.Q99):
+            # Delegate to the training-side formula so train/deploy parity
+            # holds by construction — incl. the [-1,1] clip and exactness on
+            # degenerate constant dims, where the precomputed (x-offset)*scale
+            # form absorbs the eps into offset in float32 (|c|>=16 → 0.0
+            # instead of training's -1, unbounded on out-of-range inputs).
+            # apply_normalization uses NORM_EPS; self.eps is deliberately not
+            # honored here — parity requires the training-side eps.
+            mode = "min-max" if self.mode == NormMode.MIN_MAX else "quantile"
+            return apply_normalization(x, self._mode_stats, mode).astype(np.float32)
+
+        return ((x - self._offset) * self._scale).astype(np.float32)
 
     def unnormalize(self, x: np.ndarray) -> np.ndarray:
         """Reverse normalization."""
@@ -145,13 +157,12 @@ class Normalizer(InvertibleModalityTransform):
 
 # Map user-facing yaml strings to the internal Normalizer modes.
 #
-# ``quantile`` maps to the q99 mode: the reader-family transform
-# ``clip(2*(x - q01)/(q99 - q01) - 1, -1, 1)`` (see
-# ``openwam.dataloader.utils.normalization.apply_normalization``) is bit-identical
-# to ``Normalizer(NormMode.Q99)`` (``_precompute`` gives scale=2/(q99-q01),
-# offset=q01+(q99-q01)/2), so deploy-side unnormalization is its exact inverse.
-# Without this entry, a checkpoint trained with the LeRobotV3 family's default
-# ``normalize_mode=quantile`` would silently disable its deploy normalizer.
+# ``quantile`` → q99 and ``min-max`` → min_max normalize by DELEGATING to the
+# training-side ``apply_normalization`` (see ``Normalizer.normalize``), so
+# train/deploy parity holds by construction; unnormalization inverts the same
+# linear map. Without the ``quantile`` entry, a checkpoint trained with the
+# LeRobotV3 family's default ``normalize_mode=quantile`` would silently
+# disable its deploy normalizer.
 YAML_TO_NORM_MODE = {
     "min-max": "min_max",
     "z-score": "mean_std",

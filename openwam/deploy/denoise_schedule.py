@@ -18,9 +18,10 @@ Two strategies are supported:
   deterministic timestep series (default; unchanged behavior).
 - ``variance_shift`` — Latent-Forcing-style ordered trajectory: one
   stream denoises earlier than the other along an alpha-shift curve
-  (``alpha``, arXiv:2602.11401), with ``lead`` choosing which stream
-  leads. Each stream rides its own ``alpha_shift`` grid (matching
-  training), and ``alpha=1`` reproduces ``sync`` bit-for-bit.
+  (``alpha``, arXiv:2602.11401) and/or a linear ``offset`` delaying the
+  lag stream, with ``lead`` choosing which stream leads. Each stream
+  rides its own ``alpha_shift`` grid (matching training), and
+  ``alpha=1, offset=0`` reproduces ``sync`` bit-for-bit.
 
 The removed strategies (video_leading / cascade / action_only) live in
 git history; ``make_schedule`` raises ``NotImplementedError`` for them.
@@ -81,7 +82,8 @@ def schedule_variance_shift(
     num_steps: int = 50,
     *,
     lead: str = "video",
-    alpha: float = 9.0,
+    alpha: float = 1.0,
+    offset: float = 0.0,
     shift_video: float = 5.0,
     shift_action: float = 5.0,
 ) -> Schedule:
@@ -89,16 +91,20 @@ def schedule_variance_shift(
 
     Both streams share a global progress ``u = k / num_steps``. The **lead**
     stream takes cleanness ``f_alpha(u) >= u`` (Latent Forcing arXiv:2602.11401
-    Eq. 4) so it reaches "clean" earlier; the **lag** stream takes ``u``. Each
-    stream's sigma is ``alpha_shift(1 - cleanness, shift_stream)`` -- the SAME
-    grid the backbone applies at training time (``set_timesteps_wan`` /
+    Eq. 4) so it reaches "clean" earlier; the **lag** stream takes ``u``,
+    optionally delayed by ``offset``: cleanness stays 0 (sigma 1) until global
+    progress passes ``offset``, then advances linearly (the piecewise variant).
+    Each stream's sigma is ``alpha_shift(1 - cleanness, shift_stream)`` -- the
+    SAME grid the backbone applies at training time (``set_timesteps_wan`` /
     ``ActionScheduler.set_timesteps``). A variance_shift-trained checkpoint and
-    this schedule therefore stay point-wise in-distribution.
+    this schedule therefore stay point-wise in-distribution (the delayed head
+    rides the grid's sigma=1 endpoint).
 
     Computed in float32 on the schedulers' own base grid
     (``linspace(1, 0, n+1)[:-1]``), with the lead curve applied as the
     algebraically identical ``1 - f_alpha(1 - s) == f_{1/alpha}(s)`` -- exact
-    at ``alpha=1`` in floating point -- so ``alpha=1`` reproduces
+    at ``alpha=1`` in floating point -- and the ``offset == 0`` path leaving
+    the lag grid untouched, so ``alpha=1, offset=0`` reproduces
     ``schedule_sync`` bit-for-bit.
 
     Sigma is monotonically decreasing and the schedule ends with the
@@ -113,6 +119,7 @@ def schedule_variance_shift(
         num_steps: Number of denoising steps per stream.
         lead: Which stream denoises earlier -- ``"action"`` or ``"video"``.
         alpha: Lead-curve strength, must be ``>= 1`` (``>1`` leads; ``1`` = sync diagonal; ``<1`` inverts lead/lag).
+        offset: Fraction of pre-shift progress to delay the lag stream's start (clamped to [0, 0.999]; ``0`` = pure curve).
         shift_video: alpha-shift for the video stream's sigma grid.
         shift_action: alpha-shift for the action stream's sigma grid.
     """
@@ -124,12 +131,20 @@ def schedule_variance_shift(
     # s[k] = 1 - k/num_steps: the schedulers' float32 base sigma grid.
     s = torch.linspace(1.0, 0.0, num_steps + 1)[:-1]
     # Lead pre-shift sigma 1 - f_alpha(1-s) rewritten as f_{1/alpha}(s), which
-    # leaves s bitwise untouched at alpha=1; the lag stream stays on s.
+    # leaves s bitwise untouched at alpha=1; the lag stream stays on s unless
+    # delayed by offset below.
     lead_sigma = _alpha_shift(s, 1.0 / alpha)
-    if lead == "video":
-        v_sigma, a_sigma = lead_sigma, s
+    off = min(max(float(offset), 0.0), 0.999)
+    if off > 0.0:
+        # lag cleanness = clamp((u - off)/(1 - off), 0, 1) in sigma form;
+        # the off == 0 passthrough keeps alpha=1 bitwise == sync.
+        lag_sigma = torch.clamp(s / (1.0 - off), max=1.0)
     else:
-        v_sigma, a_sigma = s, lead_sigma
+        lag_sigma = s
+    if lead == "video":
+        v_sigma, a_sigma = lead_sigma, lag_sigma
+    else:
+        v_sigma, a_sigma = lag_sigma, lead_sigma
     # Each stream's sigma rides its own alpha-shift grid (matches training).
     v_ts = (_alpha_shift(v_sigma, shift_video) * num_train_v).tolist()
     a_ts = (_alpha_shift(a_sigma, shift_action) * num_train_a).tolist()
@@ -146,7 +161,8 @@ def make_schedule(
     *,
     shift_video: float = None,
     lead: str = "video",
-    alpha: float = 9.0,
+    alpha: float = 1.0,
+    offset: float = 0.0,
 ) -> Schedule:
     """Dispatcher kept as the single entry point for building a schedule.
 
@@ -170,6 +186,8 @@ def make_schedule(
             (``"action"`` or ``"video"``).
         alpha: ``variance_shift`` only -- lead-curve strength (``>1`` leads;
             ``1`` = diagonal = sync).
+        offset: ``variance_shift`` only -- delay the lag stream's start
+            (``0`` = pure curve; ``>0`` = piecewise offset).
     """
     if strategy == "sync":
         return schedule_sync(
@@ -182,6 +200,7 @@ def make_schedule(
             num_steps=num_steps,
             lead=lead,
             alpha=alpha,
+            offset=offset,
             shift_video=shift if shift_video is None else shift_video,
             shift_action=shift,
         )

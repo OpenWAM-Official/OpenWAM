@@ -2,11 +2,21 @@
 
 For users wiring their own robot or benchmark to an OpenWAM policy server.
 
+Benchmark readiness notes, public baseline scores, and RoboCasa GR1 EEF data
+preparation guidance are tracked in
+[`BENCHMARK_STATS.md`](BENCHMARK_STATS.md).
+
 **You don't need to know anything about the server** — its model, preprocessing,
 multi-view composition, or checkpoint. Just speak the WebSocket
 protocol below. Minimal client dependencies: `numpy`, `Pillow`, `websockets`
 (plus `opencv-python` if you decode camera frames yourself). The wire contract
 (message types) is mirrored on both sides: server constants in [`openwam/deploy/server.py`](../openwam/deploy/server.py), client constants in [`benchmarks/utils/transport.py`](utils/transport.py).
+
+Bundled clients:
+
+- [RoboTwin](robotwin/README.md)
+- [LIBERO](libero/README.md)
+- [RoboCasa GR1](robocasa_gr1/README.md)
 
 ## 1. What the client sends
 

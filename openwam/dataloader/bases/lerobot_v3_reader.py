@@ -63,6 +63,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
@@ -113,7 +114,15 @@ _CONFIG_MISSING = object()
 # ceiling (largest shards decode to large tables).
 @functools.lru_cache(maxsize=4)
 def _read_data_table_cached(path: str, columns: Tuple[str, ...]):
-    return pq.read_table(path, memory_map=True, columns=list(columns))
+    try:
+        return pq.read_table(path, memory_map=True, columns=list(columns))
+    except pa.ArrowInvalid as exc:
+        # Some pyarrow versions interpret flat LeRobot feature names containing
+        # dots as nested-field paths. Keep the compatibility fallback inside
+        # the process-global cache so affected shards are still read only once.
+        if "Dot path" not in str(exc):
+            raise
+        return pq.read_table(path, memory_map=True)
 
 
 class LeRobotV3Reader(BaseDataset):
@@ -623,7 +632,11 @@ class LeRobotV3Reader(BaseDataset):
                 except (ValueError, EOFError, pickle.UnpicklingError) as e:
                     logger.warning(
                         "%s(%s): existing %s is corrupt (%s); rewriting with only the %r key.",
-                        self.DATASET_NAME, self._dataset_id, out.name, e, self.DEPLOY_ACTION_MODE,
+                        self.DATASET_NAME,
+                        self._dataset_id,
+                        out.name,
+                        e,
+                        self.DEPLOY_ACTION_MODE,
                     )
             payload[self.DEPLOY_ACTION_MODE] = entry
             # Atomic write (unique temp + replace) so concurrent per-rank constructors
@@ -646,7 +659,10 @@ class LeRobotV3Reader(BaseDataset):
                 "normalization_stats.npy left unchanged (deploy artifact not (re)generated). "
                 "Training is unaffected (in-process normalization uses the reader stats); to "
                 "deploy this run, pre-generate the artifact on a writable copy of the meta/ dir.",
-                self.DATASET_NAME, self._dataset_id, out, e,
+                self.DATASET_NAME,
+                self._dataset_id,
+                out,
+                e,
             )
             return
         self.normalization_stats_path = str(out)

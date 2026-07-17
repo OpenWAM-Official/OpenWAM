@@ -43,7 +43,9 @@ OpenWAM/
 ├── configs/           # Hydra configs for model, dataloader, accelerate, deploy
 ├── tests/             # Unit tests
 ├── benchmarks/
-│   └── robotwin/      # RoboTwin eval client, single / multi / DLC-parallel eval scripts
+│   ├── robotwin/      # RoboTwin eval client, single / multi / DLC-parallel eval scripts
+│   ├── libero/        # LIBERO WebSocket eval client
+│   └── robocasa_gr1/  # RoboCasa GR1 tabletop eval client
 ├── assets_repo/       # Architecture diagrams
 └── third_party/       # Vendored externals (Cosmos-Predict2.5 submodule)
 ```
@@ -69,8 +71,8 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 |---|---|---|
 | RoboTwin eval | Supported | All 50 tasks; see `benchmarks/robotwin/` |
 | SimplerEnv eval | Planned | Requires external environment setup |
-| LIBERO eval | Planned | Requires external environment setup |
-| RoboCasa eval | Planned | Requires external environment setup |
+| LIBERO eval | Supported | LIBERO; see `benchmarks/libero/` |
+| RoboCasa GR1 eval | Supported | GR1 tabletop tasks; see `benchmarks/robocasa_gr1/` |
 | Calvin eval | Planned | Requires external environment setup |
 | BEHAVIOR-1K eval | Planned | Requires external environment setup |
 
@@ -194,7 +196,8 @@ inference:
   denoise_steps: 10       # denoising steps (FastWAM-Joint default)
   schedule_type: sync     # sync (lockstep) | variance_shift (Latent-Forcing ordered; joint_self_attn ckpts)
   vs_lead: video          # variance_shift only: which stream denoises first (action | video)
-  vs_alpha: 9.0           # variance_shift only: lead-curve strength (>1 leads; 1 = sync diagonal)
+  vs_alpha: 1.0           # variance_shift only: lead-curve strength (>1 leads; 1 = sync diagonal)
+  vs_offset: 0.0          # variance_shift only: delay the lag stream's start (0 = pure curve)
   execution_mode: sync    # sync | async
   execution_horizon: null # async only: actions per chunk (null = policy default)
   inference_delay_steps: null

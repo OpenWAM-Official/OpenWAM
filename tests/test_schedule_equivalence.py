@@ -132,6 +132,53 @@ def test_schedule_variance_shift_lead_direction_flips():
     assert [ta for _, ta in res_a] == [tv for tv, _ in res_v]
 
 
+@pytest.mark.parametrize("lead", ["action", "video"])
+def test_schedule_variance_shift_offset_delays_lag(lead):
+    from openwam.deploy.denoise_schedule import schedule_variance_shift
+
+    v, a = _two_stub_schedulers()
+    # Dyadic num_steps/offset: s[k] and s/(1-off) are exact in float32, so the
+    # pinned head has a crisp boundary at k = off*num_steps (inclusive: s=1-off
+    # maps to sigma exactly 1.0).
+    num_steps, off = 16, 0.5
+    base = schedule_variance_shift(v, a, num_steps=num_steps, lead=lead, alpha=9.0)
+    res = schedule_variance_shift(v, a, num_steps=num_steps, lead=lead, alpha=9.0, offset=off)
+    lag_idx = 0 if lead == "action" else 1  # offset delays the non-lead stream
+    lead_idx = 1 - lag_idx
+    # The lead stream's code path is untouched by offset.
+    assert [p[lead_idx] for p in res] == [p[lead_idx] for p in base]
+    lag = [p[lag_idx] for p in res[:-1]]
+    pin = int(off * num_steps)
+    assert all(t == 1000.0 for t in lag[: pin + 1])
+    assert all(t < 1000.0 for t in lag[pin + 1 :])
+    # Both streams stay monotonically non-increasing.
+    v_ts = [tv for tv, _ in res[:-1]]
+    a_ts = [ta for _, ta in res[:-1]]
+    assert v_ts == sorted(v_ts, reverse=True)
+    assert a_ts == sorted(a_ts, reverse=True)
+    assert len(res) == num_steps + 1
+    assert res[-1] == (0.0, 0.0)
+
+
+def test_schedule_variance_shift_offset_zero_is_noop_bitwise():
+    from openwam.deploy.denoise_schedule import make_schedule
+
+    v, a = _two_schedulers()
+    default = make_schedule("variance_shift", v, a, num_steps=50, shift=5.0, lead="action", alpha=9.0)
+    explicit = make_schedule("variance_shift", v, a, num_steps=50, shift=5.0, lead="action", alpha=9.0, offset=0.0)
+    assert explicit == default  # exact float equality, not approx
+
+
+def test_schedule_variance_shift_offset_lead_flip_swaps_streams():
+    from openwam.deploy.denoise_schedule import schedule_variance_shift
+
+    v, a = _two_stub_schedulers()
+    res_a = schedule_variance_shift(v, a, num_steps=12, lead="action", alpha=9.0, offset=0.3)
+    res_v = schedule_variance_shift(v, a, num_steps=12, lead="video", alpha=9.0, offset=0.3)
+    assert [tv for tv, _ in res_a] == [ta for _, ta in res_v]
+    assert [ta for _, ta in res_a] == [tv for tv, _ in res_v]
+
+
 def test_variance_shift_timestep_sampler():
     import torch
 

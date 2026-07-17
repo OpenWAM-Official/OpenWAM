@@ -1,0 +1,62 @@
+type: ebench
+dataset_dir: /path/to/data_lake/EBench-Dataset
+
+# EBench buckets. Default covers all three official families.
+# To smoke-test a tiny subset:
+#   dataloader.buckets=[simple_pnp/task1,teleop_tasks/peg_in_hole] dataloader.groups=null
+groups: [long_horizon, simple_pnp, teleop_tasks]
+buckets: null
+
+# EBench raw 23-D action/proprio:
+#   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper
+#   [10:13) R eef xyz, [13:19) R eef rot6d, [19] R gripper
+#   [20:23) base [x, y, yaw(DEGREES)]
+#
+# 80-D OpenWAM semantic action space, enabled by unify_action=true:
+#   [0:3) L eef xyz, [3:9) L eef rot6d, [9] L gripper, [10:34) L hand
+#   [34:37) R eef xyz, [37:43) R eef rot6d, [43] R gripper, [44:68) R hand
+#   [68:80) reserved
+#
+# EBench raw action.ee_pose is [L xyz + quat(wxyz), R xyz + quat(wxyz)].
+# The reader converts each quaternion to rot6d and averages each hand's two
+# gripper fingers into one scalar gripper.
+# unify_action_map scatters raw 0:10 -> L EEF, raw 10:20 -> R EEF, raw 20:23 -> base.
+action_mode: ebench
+unify_action: true
+unify_action_map: ["0-9", "34-43", "68-70"]
+# Base action field (see the module docstring of openwam/dataloader/ebench.py):
+#   delta (default) — action.base_delta, the per-step commanded displacement
+#     [dx_m, dy_m, dyaw_deg] in the spawn/odom axes. Closest analogue of the
+#     instantaneous base command BEHAVIOR keeps in slots [68:71) (BEHAVIOR is
+#     local-frame velocity; EBench is odom-frame displacement, deg yaw).
+#     Proprio renders the measured per-step displacement into the same space.
+#   cumulative — action.base, the episode-cumulative commanded pose (deg yaw;
+#     NOT a velocity despite its history). Proprio = state.base with yaw
+#     rad->deg. Kept for ablations.
+base_action_source: delta
+enable_action_supervision: true
+
+# --- Frame sampling ---
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+split: train
+
+# --- Multi-view composition ---
+# EBench baseline clients use overlook as the head camera and left/right wrist
+# cameras as hand views. Set multiview=false to use target_camera only.
+multiview: true
+target_camera: video.overlook_camera_view
+camera_layout: [video.overlook_camera_view, video.left_camera_view, video.right_camera_view]
+
+# --- Normalization ---
+# The reader builds a shared raw-23 stats cache from meta/episodes_stats.jsonl on
+# first load and reuses it afterward. Action and proprio both use this same
+# action stats entry, matching deploy. Rot6d stats are pinned to identity.
+# min-max keeps targets in the bounded [-1,1] distribution the 80-D pretrain
+# checkpoint was trained on and is exact from the summary stats; "quantile" is
+# rejected (no true quantiles exist for this dataset).
+normalize_mode: min-max           # "min-max", "z-score", or null
+normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.npy

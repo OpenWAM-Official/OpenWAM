@@ -27,15 +27,6 @@ from openwam.model.architectures.utils.mask_modes import (
 )
 
 
-def _validate_per_token_t_mod(vstate) -> None:
-    if vstate.time_mod.dim() != 4:
-        raise RuntimeError(
-            "SharedBackbone requires the video backbone to run in per-token t_mod mode "
-            "(e.g. dit.seperated_timestep=True with fuse_vae_embedding_in_latents=True). "
-            f"Got vstate.time_mod with dim={vstate.time_mod.dim()}; action/state timestep would be silently ignored otherwise."
-        )
-
-
 @register_architecture(
     "shared_backbone_vanilla",
     status="supported",
@@ -118,7 +109,7 @@ class SharedBackboneVanillaArchitecture(BaseWAMArchitecture):
         n_state = 0 if state_tokens is None else state_tokens.shape[1]
         has_shared_tokens = n_action + n_state > 0
         if has_shared_tokens:
-            _validate_per_token_t_mod(vstate)
+            vb.assert_ready_for_shared_tokens(vstate)
             shared_timestep = action_timestep if action_timestep is not None else pipeline_inputs.get("timestep")
             if shared_timestep is None:
                 raise ValueError(

@@ -48,8 +48,18 @@ color_jitter:
 #   python -m openwam.dataloader.utils.stats_computation.behavior_stats_computation \
 #       --dataset_dir <dataset_dir>
 #   null / "none" → no normalization (raw values)
-#   "min-max" / "z-score" / "quantile" (default — same as robocoin)
-normalize_mode: quantile
+#   "min-max" (default) / "z-score" / "quantile"
+#
+# min-max, NOT the robocoin-family quantile: BEHAVIOR is a closed-loop scored
+# BENCHMARK, and quantile saturates every beyond-q99 training target to 1.0 —
+# the supervision that distinguishes fast commands is erased, so the learned
+# policy effectively tops out near q99 (a soft cap; deploy unnormalize itself
+# does not clamp). In the relevant normalization distribution the base-velocity dims [20:22)
+# have q99 is substantially below max — a fraction of the demos' top speed —
+# a direct handicap under mobile long-horizon step budgets. quantile's
+# outlier robustness is the right default for PRETRAIN corpora (robocoin/OXE)
+# that never deploy closed-loop; benchmarks pay for it with expressiveness.
+normalize_mode: min-max
 
 # ── Action / proprio supervision ────────────────────────────────────────────
 # Contract: a sample's PROPRIO is the MEASURED observation.state at t=0 (achieved

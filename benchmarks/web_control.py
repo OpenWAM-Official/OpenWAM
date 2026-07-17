@@ -294,6 +294,46 @@ def parse_success_counts_from_text(text: str) -> tuple[int, int] | None:
     return last_counts
 
 
+# RoboTwin prints ``step: N / M`` per step and ``Success!`` / ``Fail!`` per
+# episode. A ``Fail!`` whose last step reached ``N >= M`` was truncated at the
+# step limit (out of steps) rather than the model reaching a terminal state —
+# a non-model cause of a low success rate. This is computed over the full log
+# (not the tail) so it is only wired into the on-demand CSV export, never the
+# polled live state where a tail window would undercount it.
+STEP_PROGRESS_RE = re.compile(r"step:\s*(\d+)\s*/\s*(\d+)")
+EPISODE_VERDICT_RE = re.compile(r"\b(Success|Fail)!")
+
+
+def count_episode_verdicts(text: str) -> tuple[int, int, int]:
+    """``(success, episodes, step_limit_hits)`` counted from verdict lines.
+
+    Mirrors ``benchmarks/robotwin/export_results_csv.py``'s
+    ``parse_episode_stats_from_text`` (verdict-line counting) rather than
+    ``parse_success_counts_from_text``'s denominator of the last cumulative
+    ``success rate: X / Y`` line: a task that crashes between a verdict and
+    its rate line would otherwise report different ``episodes`` between the
+    two exporters, and could pair a real ``step_limit_hits`` with a blank
+    ``episodes`` in the same row (crash before any rate line at all).
+    """
+    success = 0
+    episodes = 0
+    step_limit_hits = 0
+    last_step: tuple[int, int] | None = None
+    for line in strip_ansi(text).splitlines():
+        step_match = STEP_PROGRESS_RE.search(line)
+        if step_match:
+            last_step = (int(step_match.group(1)), int(step_match.group(2)))
+            continue
+        verdict = EPISODE_VERDICT_RE.search(line)
+        if verdict:
+            episodes += 1
+            if verdict.group(1) == "Success":
+                success += 1
+            elif last_step is not None and last_step[1] > 0 and last_step[0] >= last_step[1]:
+                step_limit_hits += 1
+            last_step = None
+    return success, episodes, step_limit_hits
+
 
 def safe_relative(root: Path, path: Path) -> str | None:
     try:
@@ -717,6 +757,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         run_env = snapshot["run_env"]
         rows = []
         for job in snapshot["jobs"]:
+            full_log = self._full_log_stats_for_job(job)
             rows.append(
                 {
                     "run_id": run_env.get("run_id", ""),
@@ -728,9 +769,14 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     "worker": job.get("worker", ""),
                     "status": job.get("status", ""),
                     "exit_code": job.get("exit_code", ""),
-                    "success_rate": "" if job.get("success_rate") is None else f"{float(job['success_rate']):.6f}",
-                    "success": "" if job.get("success") is None else job.get("success"),
-                    "episodes": "" if job.get("episodes") is None else job.get("episodes"),
+                    "success_rate": (
+                        "" if full_log["success_rate"] is None else f"{full_log['success_rate']:.6f}"
+                    ),
+                    "success": "" if full_log["success"] is None else full_log["success"],
+                    "episodes": "" if full_log["episodes"] is None else full_log["episodes"],
+                    "step_limit_hits": (
+                        "" if full_log["step_limit_hits"] is None else full_log["step_limit_hits"]
+                    ),
                     "duration_sec": "" if job.get("duration_sec") is None else f"{float(job['duration_sec']):.3f}",
                     "duration": job.get("duration", ""),
                     "log_path": job.get("log", ""),
@@ -738,6 +784,64 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                 }
             )
         return rows
+
+    def _full_log_stats_for_job(self, job: dict[str, Any]) -> dict[str, float | int | None]:
+        """Full-log ``success_rate``/``success``/``episodes``/``step_limit_hits``.
+
+        Reads the log once (not the tail window used for the polled live
+        state) so all four columns come from the same pass. Deriving only
+        some of them from the full log (e.g. episodes/step_limit_hits) while
+        leaving another (success_rate) sourced from the tail-windowed job
+        dict would reproduce the same staleness bug on a different column:
+        the last ``success rate: X / Y => Z%`` line can fall outside the tail
+        (e.g. behind a long traceback), leaving a stale/blank value next to
+        accurate full-log-derived siblings in the same CSV row.
+
+        ``success``/``episodes`` are counted from ``Success!``/``Fail!``
+        verdict lines (``count_episode_verdicts``), not the denominator of
+        the last cumulative ``success rate: X / Y`` line — matching
+        ``export_results_csv.py``'s convention so the two exporters agree,
+        and so a task that crashes before any rate line still reports
+        ``episodes`` consistent with ``step_limit_hits`` from the same pass.
+
+        ``success``/``episodes``/``step_limit_hits`` are blank only when the
+        log itself is missing/unreadable/outside-root — never when it was
+        read but simply has no episode data yet (e.g. crashed before the
+        first verdict), which reports a genuine ``0`` instead. Blanking on a
+        falsy ``0`` would make "no data" indistinguishable from "measured
+        zero". ``success_rate`` additionally blanks whenever no ``success
+        rate: X / Y => Z%`` line has been printed yet (``parse_success_rate_
+        from_text`` returns ``None``), even on an otherwise-readable log —
+        it has no verdict-count fallback to report a "0" from.
+
+        Uses ``normalize_log_ref`` (like every other log reader in this file)
+        so a ``log`` ref pointing outside ``self.root`` is refused here too,
+        instead of this endpoint alone reading and serving stats for a path
+        the snippet/timeline readers already treat as inaccessible.
+        """
+        empty: dict[str, float | int | None] = {
+            "success_rate": None,
+            "success": None,
+            "episodes": None,
+            "step_limit_hits": None,
+        }
+        log_ref = job.get("log", "")
+        if not log_ref:
+            return empty
+        _, log_path = normalize_log_ref(self.root, log_ref)
+        if log_path is None or not log_path.is_file():
+            return empty
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return empty
+        success, episodes, step_limit_hits = count_episode_verdicts(text)
+        return {
+            "success_rate": parse_success_rate_from_text(text),
+            "success": success,
+            "episodes": episodes,
+            "step_limit_hits": step_limit_hits,
+        }
 
     def csv_fieldnames(self, rows: list[dict[str, Any]]) -> list[str]:
         return [
@@ -753,6 +857,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             "success_rate",
             "success",
             "episodes",
+            "step_limit_hits",
             "duration_sec",
             "duration",
             "log_path",

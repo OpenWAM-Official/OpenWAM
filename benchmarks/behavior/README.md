@@ -99,13 +99,26 @@ to IK `absolute_pose`; base/trunk/grippers keep the demo controllers.
 ### 3. Generate the task_id → instruction map (once)
 
 The OpenWAM checkpoint is language-conditioned, but the wire obs carries only
-`task_id`. Generate the mapping from the installed OmniGibson and let the bridge
-de-underscore the activity name into the prompt:
+`task_id`. The model was trained on the dataset's per-episode `tasks[0]`
+sentences, so the bridge must be fed those exact sentences — an activity-name
+prompt like "turning on radio" is off the training text distribution.
+
+First export OmniGibson's task_id → activity_name table (on the sim box):
 
 ```bash
 python -c "from omnigibson.learning.utils.eval_utils import TASK_INDICES_TO_NAMES; \
   import json; json.dump({int(k): v for k, v in TASK_INDICES_TO_NAMES.items()}, \
   open('task_names.json', 'w'), indent=2)"
+```
+
+Then convert it to training-verbatim prompts (needs the dataset's `meta/` and
+`annotations/`; the join runs on annotation `task_name`s, not on index order):
+
+```bash
+python -m benchmarks.behavior.gen_task_prompts \
+    --dataset-dir /path/to/behaviour-1k \
+    --activity-names task_names.json \
+    --output task_prompts.json
 ```
 
 ### 4. Start the OpenWAM server (south)
@@ -121,7 +134,7 @@ bash scripts/deploy.sh --ckpt-dir /path/to/behavior_ckpt --port 8848
 ```bash
 BRIDGE_PYTHON=$(which python) bash benchmarks/behavior/run_bridge.sh \
     --port 8000 --south-host 127.0.0.1 --south-port 8848 \
-    --task-names task_names.json
+    --task-names task_prompts.json
 ```
 
 ### 6. Run the OmniGibson eval
@@ -153,9 +166,11 @@ sim-capable box, in order of risk:
    frame and scale as the local-frame base action command, and both share the pooled
    normalization stats. Confirm the live `robot_r1::proprio` base velocity is
    world-frame and the base yaw offset is correct on a sim box.
-3. **Prompt text.** The model was trained on the dataset's `tasks[0]` strings;
-   the bridge uses the de-underscored activity name. If training used a different
-   phrasing, adjust the mapping (or pass `--default-prompt`).
+3. **Prompt text.** Confirm the bridge was launched with the
+   `gen_task_prompts.py` output (step 3), not the raw activity-name JSON: the
+   bridge logs `resolved prompt: …` whenever the prompt changes, and it must
+   read as a full dataset sentence ("Turn on the radio receiver that's…"),
+   not a short activity phrase ("turning on radio").
 4. **Action-vector width.** With IK arms the executed vector is 21-D;
    `apply_action` asserts `len(action) == sum(controller.command_dim)`. If you
    keep JointController arms instead, the model's EEF output would need a

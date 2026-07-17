@@ -699,6 +699,62 @@ class WanBase(VideoBackbone):
         return state, action_tokens
 
     # ================================================================
+    # IDM teacher-forcing branch merge/split
+    # ================================================================
+
+    def merge_idm_video_branches(
+        self, noisy: BlockLoopState, cond: BlockLoopState
+    ) -> Tuple[BlockLoopState, int, int]:
+        """Concatenate the IDM noisy + cond branches along the sequence axis.
+
+        Wan's ``hidden_states`` is flat ``(B, L, D)`` with ``L == f·h·w``, so the
+        token seq lengths equal ``hidden_states.shape[1]``. IDM teacher-forcing
+        needs two different video timesteps inside one video-expert sequence, so
+        the backbone must expose token-wise (4D) ``t_mod``.
+        """
+        import copy
+
+        if noisy.time_mod.ndim != 4 or cond.time_mod.ndim != 4:
+            raise ValueError(
+                "IDM teacher-forcing requires token-wise video t_mod for noisy and cond branches; "
+                "ensure the video backbone is running in separated-timestep/fused-first-frame mode."
+            )
+        if (noisy.grid_height, noisy.grid_width) != (cond.grid_height, cond.grid_width):
+            raise ValueError(
+                "IDM teacher-forcing requires noisy and cond video branches to share spatial token layout, "
+                f"got noisy h/w={(noisy.grid_height, noisy.grid_width)} "
+                f"and cond h/w={(cond.grid_height, cond.grid_width)}."
+            )
+        s_noisy = int(noisy.hidden_states.shape[1])
+        s_cond = int(cond.hidden_states.shape[1])
+
+        merged = copy.copy(noisy)
+        merged.hidden_states = torch.cat([noisy.hidden_states, cond.hidden_states], dim=1)
+        merged.rope_freqs = torch.cat([noisy.rope_freqs, cond.rope_freqs], dim=0)
+        merged.time_mod = torch.cat([noisy.time_mod, cond.time_mod], dim=1)
+        if noisy.vace_hints is not None or cond.vace_hints is not None:
+            if noisy.vace_hints is None or cond.vace_hints is None:
+                raise ValueError("IDM teacher-forcing requires both video branches to have VACE hints or neither.")
+            if len(noisy.vace_hints) != len(cond.vace_hints):
+                raise ValueError("IDM teacher-forcing VACE hint count mismatch between noisy and cond branches.")
+            merged.vace_hints = [
+                torch.cat([hint_noisy, hint_cond], dim=1)
+                for hint_noisy, hint_cond in zip(noisy.vace_hints, cond.vace_hints)
+            ]
+        return merged, s_noisy, s_cond
+
+    def split_idm_video_branches(
+        self, merged: BlockLoopState, noisy: BlockLoopState, cond: BlockLoopState
+    ) -> Tuple[BlockLoopState, BlockLoopState]:
+        """Inverse of :meth:`merge_idm_video_branches` for Wan's flat sequence."""
+        s_noisy = int(noisy.hidden_states.shape[1])
+        noisy.hidden_states = merged.hidden_states[:, :s_noisy]
+        cond.hidden_states = merged.hidden_states[:, s_noisy:]
+        noisy.time_mod = merged.time_mod[:, :s_noisy]
+        cond.time_mod = merged.time_mod[:, s_noisy:]
+        return noisy, cond
+
+    # ================================================================
     # ABC: Unified preprocessing (1)
     # ================================================================
 

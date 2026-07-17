@@ -1,0 +1,33 @@
+# EBench bridge defaults, consumed via:
+#   python benchmarks/ebench/openwam2ebench_interface.py --config benchmarks/ebench/policy_config.yml
+# Keys map 1:1 to the CLI flags (argparse dests); explicit CLI flags override
+# these values. Never commit machine-specific paths (CONTRIBUTING.md).
+
+# --- GenManip eval server (north) ---
+# Local server: http://<host>:8087 (ray_eval_server.py).
+# Official online eval: the per-task endpoint from `gmp online submit`
+# (https://internrobotics.shlab.org.cn/eval), plus your API token; run_id must
+# equal the online task_id.
+url: "http://127.0.0.1:8087"
+token: ""
+run_id: ""
+worker_id: "0"
+
+# --- OpenWAM Policy Server (south) ---
+# One OpenWAM server per worker (the server-side action executor is stateful
+# per episode). multi_eval.sh assigns port = SOUTH_PORT_BASE + worker index.
+south_host: "127.0.0.1"
+south_port: 8848
+request_timeout: 300      # seconds per south inference round-trip
+
+# --- Action settings ---
+# Must match the checkpoint's dataloader.base_action_source:
+#   delta      -> base_motion = per-step [dx_m, dy_m, dyaw_deg], base_is_rel=true
+#   cumulative -> base_motion = absolute [x_m, y_m, yaw_deg],   base_is_rel=false
+# Pass --ckpt-config <ckpt>/config.yaml to hard-verify this at startup — a
+# silent mismatch scores garbage.
+base_mode: delta
+
+# --- Observation settings ---
+send_state: true          # RAW-23 proprio; required for proprio-conditioned ckpts
+save_process: false       # EvalClient-side per-episode video/log dump (slower)

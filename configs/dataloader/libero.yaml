@@ -1,0 +1,54 @@
+type: libero
+
+# LeRobot v3 dataset, recommended:
+#   https://huggingface.co/datasets/nvidia/LIBERO_LeRobot_v3
+# A compatible HuggingFaceVLA/libero v3 conversion is also accepted.
+dataset_dir: /TODO/LIBERO_LeRobot_v3
+
+# Native LIBERO command: 7-D OSC action consumed directly by the eval env.
+action_mode: libero
+
+# OpenWAM's current deploy normalizer shares action/proprio stats, while LIBERO
+# state is absolute 8-D EEF/gripper state and action is a 7-D delta command.
+# The reader therefore masks proprio out. Train with CLI overrides:
+#   model.architecture.action_dim=7
+#   model.architecture.use_proprioception=false
+unify_action: false
+
+# nvidia/LIBERO_LeRobot_v3 uses wrist_image; HuggingFaceVLA/libero uses image2.
+head_camera_priority:
+  - observation.images.image
+  - observation.images.agentview_image
+wrist_camera_priority:
+  - observation.images.wrist_image
+  - observation.images.image2
+  - observation.images.robot0_eye_in_hand_image
+
+# Use an in-shard language column when a conversion provides one, otherwise
+# resolve task_index through meta/tasks.parquet. Absent columns are not projected.
+prompt_columns:
+  - language_instruction
+  - task
+  - prompt
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+split: train
+enable_action_supervision: true
+
+# Generate with:
+#   python scripts/libero_compute_stats.py \
+#     --config configs/dataloader/libero.yaml \
+#     --output /path/to/libero_normalization_stats.npy
+normalize_mode: null
+normalization_stats_path: null
+
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0

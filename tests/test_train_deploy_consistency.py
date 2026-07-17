@@ -601,6 +601,41 @@ def test_variance_shift_deploy_matches_training_grid(lead, alpha):
     assert max_da < 6e-3, f"action train↔deploy sigma max|Δ|={max_da:.2e}"
 
 
+@pytest.mark.parametrize("lead", ["action", "video"])
+def test_variance_shift_offset_deploy_matches_training_grid(lead):
+    """offset delays the lag stream in the pre-shift cleanness domain, so every
+    schedule sigma (including the pinned sigma=1 head) still lands on the
+    training alpha-shift grid within the same 6e-3 quantization bound."""
+    from openwam.deploy.denoise_schedule import schedule_variance_shift
+
+    shift, num_train, num_steps, alpha, off = 5.0, 1000, 64, 9.0, 0.3
+    v, a = _real_video_action_schedulers()
+    v.set_timesteps(num_train, training=True, shift=shift)
+    a.set_timesteps(num_train, training=True, shift=shift)
+    v_grid = v.sigmas.float()
+    a_grid = a.sigmas.float()
+
+    sched = schedule_variance_shift(
+        v, a, num_steps=num_steps, lead=lead, alpha=alpha, offset=off, shift_video=shift, shift_action=shift
+    )
+
+    max_dv = max_da = 0.0
+    for k, (tv, ta) in enumerate(sched[:-1]):
+        u = k / num_steps
+        lead_clean = (alpha * u) / (1.0 + (alpha - 1.0) * u)
+        lag_clean = min(max((u - off) / (1.0 - off), 0.0), 1.0)
+        if lead == "video":
+            v_clean, a_clean = lead_clean, lag_clean
+        else:
+            v_clean, a_clean = lag_clean, lead_clean
+        vi = min(int(v_clean * num_train), num_train - 1)
+        ai = min(int(a_clean * num_train), num_train - 1)
+        max_dv = max(max_dv, abs(float(v_grid[vi]) - tv / num_train))
+        max_da = max(max_da, abs(float(a_grid[ai]) - ta / num_train))
+    assert max_dv < 6e-3, f"video train↔deploy sigma max|Δ|={max_dv:.2e}"
+    assert max_da < 6e-3, f"action train↔deploy sigma max|Δ|={max_da:.2e}"
+
+
 def test_variance_shift_sampler_per_step_seed_diversity():
     """Dropping the sampler seed is safe: the trainer's per_step_seed seeds the
     global RNG, so each rank draws a different (reproducible) batch."""
