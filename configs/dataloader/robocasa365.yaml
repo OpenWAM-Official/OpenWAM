@@ -18,7 +18,7 @@ type: robocasa365
 # Tasks are discovered across all listed repos (atomic/composite task sets are disjoint). Multi-repo
 # REQUIRES an explicit normalization_stats_path (see below) — there is no single root to auto-place
 # the shared stats file.
-dataset_dir: [/path/to/robocasa365/pretrain/atomic, /path/to/robocasa365/pretrain/composite]
+dataset_dir: [/path/to/robocasa365_v3/robocasa365-pretrain-atomic, /path/to/robocasa365_v3/robocasa365-pretrain-composite]
 task_name: null                   # null = every task across all repos; set a name = filter to one task (source_prefix)
 task_roots: null                  # optional list of task NAMES to include (a subset); overrides full discovery
 
@@ -82,9 +82,9 @@ action_mode: eef_base
 # (quantile is NOT supported here — the deploy normalizer can't invert it, so the dataloader
 #  rejects it rather than let a checkpoint silently lose normalization at serve time.)
 normalize_mode: min-max
-normalization_stats_path: null    # explicit stats .npy/.json; null = auto-resolve under the (single) repo.
-                                  # REQUIRED (non-null) when dataset_dir is a list of repos — the pooled
-                                  # stats over all tasks×repos are computed to this path on first use.
+# Explicit stats .npy/.json; null = auto-resolve under the (single) repo. REQUIRED (non-null) when
+# dataset_dir is a list of repos — the pooled stats over all tasks×repos are computed there on first use.
+normalization_stats_path: /path/to/robocasa365_v3/robocasa365_multitask_eefbase_stats.npy
 
 # ── Unified 80-D action space (cross-robot shared head) + mobile base ────────
 # unify_action=true scatters this reader's raw vector (20-D arm, or 25-D [arm20, base5] when mobile)
