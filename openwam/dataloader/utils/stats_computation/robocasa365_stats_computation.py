@@ -193,10 +193,17 @@ def main():
     )
     ap.add_argument("data_root", help="A v3.0 aggregated RoboCasa365 repo (meta/info.json + meta/episodes/*.parquet)")
     ap.add_argument("--task", default=None, help="Filter the repo to one task (source_prefix); default: all tasks")
-    ap.add_argument("--mobile-base", action="store_true",
-                    help="Also read the base command and emit the combined 25-D 'eef_base' block")
-    ap.add_argument("-o", "--output", default=None,
-                    help="Output .npy (default: {data_root}/{task|robocasa365}_{eef|eefbase}_stats.npy)")
+    ap.add_argument(
+        "--mobile-base",
+        action="store_true",
+        help="Also read the base command and emit the combined 25-D 'eef_base' block",
+    )
+    ap.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output .npy (default: {data_root}/{task|robocasa365}_{eef|eefbase}_stats.npy)",
+    )
     args = ap.parse_args()
 
     out = args.output

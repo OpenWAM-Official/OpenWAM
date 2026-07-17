@@ -16,12 +16,12 @@ from benchmarks.robocasa_gr1.openwam2robocasa_gr1_interface import action_vector
 from openwam.dataloader.bases.lerobot_v3_reader import _read_data_table_cached
 from openwam.dataloader.registry import list_registered_datasets
 from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
-from openwam.dataloader.robocasa_gr1_stats import load_stats_file
 from openwam.dataloader.transforms.builder import build_transforms
 from openwam.dataloader.transforms.video import VideoColorJitter
+from openwam.dataloader.utils.normalization import load_stats_file
+from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import _iter_bucket_arrays
 from openwam.deploy.model_loader import _build_normalizer, _UnifyAwareNormalizer
 from openwam.train.utils.checkpointing import save_normalization_stats
-from scripts.robocasa_gr1_compute_stats import _iter_bucket_arrays
 
 EP_LENGTH = 8
 HEAD_CAM = "observation.images.ego_view"

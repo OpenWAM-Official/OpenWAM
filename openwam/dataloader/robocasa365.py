@@ -150,7 +150,7 @@ _BASE_VEL_PHYS_MAX = np.array([0.75, 0.88, 1.33], np.float32)
 #   driving the torso at eval, so ``mask_torso_action`` (default true) masks it out of the action loss;
 #   the eval client then zeros it before the env (see the interface). control_mode stays supervised.
 _ARM_MASK = np.asarray(LEFT_ARM_DIM_MASK, dtype=bool)
-_RAW_ACTION_MASK = np.concatenate([_ARM_MASK, np.array([True, True, True, True, True])])           # all base dims
+_RAW_ACTION_MASK = np.concatenate([_ARM_MASK, np.array([True, True, True, True, True])])  # all base dims
 _RAW_ACTION_MASK_NO_TORSO = np.concatenate([_ARM_MASK, np.array([True, True, True, False, True])])  # torso[3] masked
 _RAW_PROPRIO_MASK = np.concatenate([_ARM_MASK, np.array([True, True, True, False, False])])
 
@@ -212,7 +212,10 @@ def _compute_shared_stats_rank0_synced(shared_path: str, roots: list, include_ba
     + N× redundant compute over all tasks. ``include_base`` emits the combined 25-D ``eef_base`` block
     (arm20 + base5 command) instead of the arm-only 20-D ``eef`` block.
     """
-    from openwam.dataloader.robocasa365_stats_computation import atomic_save_stats_npy, compute_multitask_stats
+    from openwam.dataloader.utils.stats_computation.robocasa365_stats_computation import (
+        atomic_save_stats_npy,
+        compute_multitask_stats,
+    )
 
     try:
         import torch.distributed as dist
@@ -368,8 +371,7 @@ class RoboCasa365Dataset(BaseDataset):
         # so both dims must be divisible by 32 or latent shapes silently break.
         if self.height % 32 != 0 or self.width % 32 != 0:
             raise ValueError(
-                f"Resolution {self.height}x{self.width} must be divisible by 32 "
-                "(VAE downsamples by 16, patch size 2)."
+                f"Resolution {self.height}x{self.width} must be divisible by 32 (VAE downsamples by 16, patch size 2)."
             )
         self.repeat = int(repeat)
         self.split = split
@@ -437,7 +439,9 @@ class RoboCasa365Dataset(BaseDataset):
         with open(os.path.join(data_root, "meta", "info.json")) as f:
             info = json.load(f)
         self._data_path_tmpl = info["data_path"]  # data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet
-        self._video_path_tmpl = info["video_path"]  # videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4
+        self._video_path_tmpl = info[
+            "video_path"
+        ]  # videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4
         # fps for the A′ base-velocity rescale (proprio finite-diff m/frame → m/s → command space). The
         # eval client hardcodes DATASET_FPS, so a mobile run on a differently-sampled repo would diverge
         # train↔eval — fail loud (no silent fallback) rather than silently mis-scale the base velocity.
@@ -582,18 +586,18 @@ class RoboCasa365Dataset(BaseDataset):
         suffix = "eefbase" if self._mobile_base else "eef"
         stats_path = os.path.join(self.data_root, f"{self.task_name}_{suffix}_stats.npy")
         if not os.path.exists(stats_path):
-            from openwam.dataloader.robocasa365_stats_computation import (
+            from openwam.dataloader.utils.stats_computation.robocasa365_stats_computation import (
                 atomic_save_stats_npy,
                 compute_normalization_stats,
             )
 
-            print(f"  [normalizer] computing arm-10{' + base5 (combined eef_base)' if self._mobile_base else ''} "
-                  f"stats from {self.data_root} -> {stats_path}")
+            print(
+                f"  [normalizer] computing arm-10{' + base5 (combined eef_base)' if self._mobile_base else ''} "
+                f"stats from {self.data_root} -> {stats_path}"
+            )
             atomic_save_stats_npy(
                 stats_path,
-                compute_normalization_stats(
-                    self.data_root, include_base=self._mobile_base, task_name=self.task_name
-                ),
+                compute_normalization_stats(self.data_root, include_base=self._mobile_base, task_name=self.task_name),
             )
         return stats_path
 
@@ -705,7 +709,10 @@ class RoboCasa365Dataset(BaseDataset):
         else:
             hc, hf = m["vcf"][HEAD_CAMERA]
             head = decode_video_frames(
-                self._video_path(HEAD_CAMERA, hc, hf), [m["voff"][HEAD_CAMERA] + a for a in local], self.height, self.width
+                self._video_path(HEAD_CAMERA, hc, hf),
+                [m["voff"][HEAD_CAMERA] + a for a in local],
+                self.height,
+                self.width,
             )
             frames = [crop_and_resize(f, self.height, self.width) for f in head]
         # Pad to num_video_frames with the last real frame.
@@ -741,7 +748,7 @@ class RoboCasa365Dataset(BaseDataset):
 
         n_valid_action = max(0, min(actual_len - 1, self.num_action_steps))
         # ── raw pre-normalization vectors: PROPRIO = current pose [0:1], ACTION = next-frame poses ──
-        proprio_raw = arm20[0:1]                        # (1, 20)  gripper = rendered achieved width
+        proprio_raw = arm20[0:1]  # (1, 20)  gripper = rendered achieved width
         action_raw = arm20[1 : self.num_frames].copy()  # (T, 20)  pos/rot = next-frame achieved pose
         # ACTION gripper (dim 9) = the recorded command (exact timing, no actuation lag), replacing the
         # achieved width; aligned to the action steps + padded like the base command (padded rows are
@@ -771,8 +778,8 @@ class RoboCasa365Dataset(BaseDataset):
             if start > 0:
                 base_pose = self._read_state(ep_global, start - 1, start + 1)[:, 0:7]  # (2, 7) prev+cur
                 base_pro[0, 0:BASE_VEL_DIM] = base_velocity_cmd(base_pose, self._fps)
-            action_raw = np.concatenate([action_raw, base_act.astype(np.float32)], axis=-1)   # (T, 25)
-            proprio_raw = np.concatenate([proprio_raw, base_pro], axis=-1)                    # (1, 25)
+            action_raw = np.concatenate([action_raw, base_act.astype(np.float32)], axis=-1)  # (T, 25)
+            proprio_raw = np.concatenate([proprio_raw, base_pro], axis=-1)  # (1, 25)
 
         # Normalize the WHOLE raw vector with the ONE combined stats block (arm + base share it; the
         # A′ rescale already put proprio velocity in the action's command space).

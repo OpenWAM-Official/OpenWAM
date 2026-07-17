@@ -58,7 +58,8 @@ split: train
 enable_action_supervision: true
 
 # null disables in-reader normalization. Set to min-max, z-score, or quantile after
-# generating normalization_stats.npy with scripts/robocasa_gr1_compute_stats.py.
+# generating normalization_stats.npy with
+# openwam/dataloader/utils/stats_computation/robocasa_gr1_stats_computation.py.
 normalize_mode: null
 normalization_stats_path: null
 

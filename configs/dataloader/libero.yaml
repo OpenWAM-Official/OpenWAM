@@ -41,7 +41,7 @@ split: train
 enable_action_supervision: true
 
 # Generate with:
-#   python scripts/libero_compute_stats.py \
+#   python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
 #     --config configs/dataloader/libero.yaml \
 #     --output /path/to/libero_normalization_stats.npy
 normalize_mode: null

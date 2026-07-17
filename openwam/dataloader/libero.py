@@ -18,22 +18,18 @@ the 8-D state. Train with ``model.architecture.use_proprioception=false``.
 
 from __future__ import annotations
 
-import functools
-import json
 import logging
-from pathlib import Path
 from typing import Any, ClassVar, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
-from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
+from openwam.dataloader.utils.normalization import STAT_KEYS, apply_normalization, load_stats_file
 
 logger = logging.getLogger(__name__)
 
 _ACTION_DIM = 7
-_STAT_KEYS = ("mean", "std", "min", "max", "q01", "q99")
 
 
 def _as_priority(value: Optional[Sequence[str]], default: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -46,32 +42,6 @@ def _as_priority(value: Optional[Sequence[str]], default: Tuple[str, ...]) -> Tu
 
 def _pick_feature(features: dict, priorities: Sequence[str]) -> Optional[str]:
     return next((key for key in priorities if key in features), None)
-
-
-@functools.lru_cache(maxsize=8)
-def _load_libero_stats(path: str, action_mode: str, normalize_mode: str) -> dict:
-    stats_path = Path(path)
-    if not stats_path.is_file():
-        raise FileNotFoundError(stats_path)
-    if stats_path.suffix == ".json":
-        with stats_path.open(encoding="utf-8") as handle:
-            payload = json.load(handle)
-    else:
-        payload = np.load(stats_path, allow_pickle=True).item()
-    if not isinstance(payload, dict):
-        raise ValueError(f"LIBERO stats must be a mapping, got {type(payload).__name__}")
-    raw = payload.get(action_mode, payload)
-    stats = materialize_eef_stats(
-        raw,
-        normalize_mode,
-        dim=_ACTION_DIM,
-        strict_minmax=False,
-        source_hint=f"{stats_path}:{action_mode}",
-    )
-    bad = {key: value.shape for key, value in stats.items() if value.shape != (_ACTION_DIM,)}
-    if bad:
-        raise ValueError(f"LIBERO normalization stats must be 7-D, got {bad}")
-    return stats
 
 
 class LiberoDataset(LeRobotV3Reader):
@@ -151,14 +121,16 @@ class LiberoDataset(LeRobotV3Reader):
         if not self._source_stats_path:
             raise FileNotFoundError(
                 "LIBERO normalize_mode is enabled but normalization_stats_path is unset. "
-                "Run scripts/libero_compute_stats.py or set normalize_mode=null."
+                "Run python -m openwam.dataloader.utils.stats_computation.libero_stats_computation "
+                "or set normalize_mode=null."
             )
-        stats = _load_libero_stats(
-            str(Path(self._source_stats_path).expanduser().resolve()),
-            self.action_mode,
-            str(self._normalize_mode),
+        stats = load_stats_file(
+            self._source_stats_path,
+            action_mode=self.action_mode,
+            normalize_mode=str(self._normalize_mode),
+            dim=_ACTION_DIM,
         )
-        self._write_deploy_normalizer_stats(stats, _STAT_KEYS)
+        self._write_deploy_normalizer_stats(stats, STAT_KEYS)
         return stats
 
     def _action_20d(self, win) -> np.ndarray:

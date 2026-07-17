@@ -60,7 +60,7 @@ hf download nvidia/LIBERO_LeRobot_v3 \
 Configure `configs/dataloader/libero.yaml`, then generate action statistics:
 
 ```bash
-python scripts/libero_compute_stats.py \
+python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
   --config configs/dataloader/libero.yaml \
   --output /path/to/LIBERO_LeRobot_v3/libero_normalization_stats.npy
 ```

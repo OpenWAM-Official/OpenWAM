@@ -14,14 +14,21 @@ input untouched whenever ``stats is None`` or ``mode`` is one of the
 
 from __future__ import annotations
 
+import functools
+import json
 import logging
-from typing import Optional, Sequence
+from pathlib import Path
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 _NO_OP_MODES = (None, "none", "null")
+
+# The six stat vectors every materialized stats dict carries (also the keys
+# readers hand to ``_write_deploy_normalizer_stats``).
+STAT_KEYS = ("mean", "std", "min", "max", "q01", "q99")
 
 # rot6d dims within the two EEF stat layouts:
 #   10-D single-arm  [pos(0:3), rot6d(3:9), grip(9)]                 (OXE)
@@ -63,6 +70,7 @@ def pin_rot6d_identity(stats: dict, dims: Sequence[int]) -> None:
     for key, val in _ROT6D_IDENTITY.items():
         for i in dims:
             stats[key][i] = val
+
 
 # Shared division-by-zero floor for read-time normalization. Referenced by
 # both ``apply_normalization`` (in-reader path) and ``transforms.normalize``'s
@@ -210,11 +218,57 @@ def materialize_eef_stats(
     return out
 
 
+def load_stats_file(
+    path: str | Path,
+    *,
+    action_mode: Optional[str],
+    normalize_mode: Optional[str],
+    dim: int,
+) -> dict:
+    """Load, materialize, and validate a training-time stats file (``.json``/``.npy``).
+
+    Shared by the LeRobot v3 readers whose stats-computation scripts emit either
+    a flat stats mapping or one nested per ``action_mode``. Cached per process so
+    multi-bucket datasets (and every DataLoader worker) read the file once.
+    """
+    return _load_stats_file_cached(str(Path(path).expanduser().resolve()), action_mode, normalize_mode, dim)
+
+
+@functools.lru_cache(maxsize=8)
+def _load_stats_file_cached(path: str, action_mode: Optional[str], normalize_mode: Optional[str], dim: int) -> dict:
+    stats_path = Path(path)
+    if not stats_path.is_file():
+        raise FileNotFoundError(stats_path)
+    if stats_path.suffix == ".json":
+        raw = json.loads(stats_path.read_text(encoding="utf-8"))
+    else:
+        raw = np.load(stats_path, allow_pickle=True).item()
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"normalization stats must contain a mapping, got {type(raw).__name__}")
+    if action_mode and action_mode in raw:
+        raw = raw[action_mode]
+    elif not any(key in raw for key in STAT_KEYS):
+        raise KeyError(f"normalization stats {stats_path} do not contain action_mode={action_mode!r}")
+    stats = materialize_eef_stats(
+        dict(raw),
+        normalize_mode,
+        dim=dim,
+        strict_minmax=False,
+        source_hint=f"{stats_path}:{action_mode}",
+    )
+    bad = {key: stats[key].shape for key in STAT_KEYS if stats[key].shape != (dim,)}
+    if bad:
+        raise ValueError(f"normalization stats vectors must have shape ({dim},), got {bad}")
+    return stats
+
+
 __all__ = [
     "apply_normalization",
+    "load_stats_file",
     "materialize_eef_stats",
     "pin_rot6d_identity",
     "ROT6D_DIMS_ARM10",
     "ROT6D_DIMS_EEF20",
     "NORM_EPS",
+    "STAT_KEYS",
 ]

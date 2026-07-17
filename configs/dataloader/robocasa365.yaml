@@ -75,7 +75,7 @@ action_mode: eef_base
 # Stats are persisted at the raw dim so the deploy normalizer can invert the model's output: one 25-D
 # 'eef_base' block (arm20 ++ base5 command) when mobile, else 20-D 'eef'. Auto-resolve and, if absent,
 # auto-compute on first load to {data_root}/{task}_eefbase_stats.npy (precompute via
-# `python -m openwam.dataloader.robocasa365_stats_computation <bucket> --mobile-base`).
+# `python -m openwam.dataloader.utils.stats_computation.robocasa365_stats_computation <bucket> --mobile-base`).
 #   null / "none" → no normalization (raw physical units)
 #   "min-max"     → rescale each dim into [-1, 1] using {min, max}   [default; deploy-resolvable]
 #   "z-score"     → (x - mean) / std                                  [deploy-resolvable]

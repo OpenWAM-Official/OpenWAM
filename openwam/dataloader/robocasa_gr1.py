@@ -13,14 +13,12 @@ from typing import Any, ClassVar, List, Optional, Sequence, Tuple
 import numpy as np
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
-from openwam.dataloader.robocasa_gr1_stats import load_stats_file
 from openwam.dataloader.utils.eef import EEF_DIM, eef14_to_eef20
-from openwam.dataloader.utils.normalization import apply_normalization
+from openwam.dataloader.utils.normalization import STAT_KEYS, apply_normalization, load_stats_file
 
 logger = logging.getLogger(__name__)
 
 _ACTION_MODES = {"joint", "eef", "unify"}
-_STAT_KEYS = ("mean", "std", "min", "max", "q01", "q99")
 
 
 def _as_list(value: Any) -> List[Any]:
@@ -258,7 +256,8 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         if not self._source_stats_path:
             raise FileNotFoundError(
                 "RoboCasaGR1Dataset normalize_mode is enabled but normalization_stats_path is unset. "
-                "Run scripts/robocasa_gr1_compute_stats.py or set normalize_mode=null."
+                "Run python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation "
+                "or set normalize_mode=null."
             )
         stats = load_stats_file(
             self._source_stats_path,
@@ -266,7 +265,7 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             normalize_mode=self._normalize_mode,
             dim=self._raw_action_dim,
         )
-        self._write_deploy_normalizer_stats(stats, _STAT_KEYS)
+        self._write_deploy_normalizer_stats(stats, STAT_KEYS)
         return stats
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:

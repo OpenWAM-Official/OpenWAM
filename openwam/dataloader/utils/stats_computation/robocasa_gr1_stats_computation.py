@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 """Compute RoboCasa GR1 action normalization stats.
 
 Example:
-    python scripts/robocasa_gr1_compute_stats.py \
+    python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
       --config configs/dataloader/robocasa_gr1.yaml \
       --output /path/to/normalization_stats.npy
 """
@@ -10,20 +9,15 @@ Example:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 from omegaconf import OmegaConf
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset  # noqa: E402
-from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity  # noqa: E402
-from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator  # noqa: E402
+from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
+from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
 
 def _iter_buckets(dataset) -> Iterable[RoboCasaGR1Dataset]:

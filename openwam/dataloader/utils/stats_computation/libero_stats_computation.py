@@ -1,22 +1,22 @@
-#!/usr/bin/env python3
-"""Compute streaming 7-D LIBERO action normalization statistics."""
+"""Compute streaming 7-D LIBERO action normalization statistics.
+
+Example:
+    python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
+      --config configs/dataloader/libero.yaml \
+      --output /path/to/normalization_stats.npy
+"""
 
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 from omegaconf import OmegaConf
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from openwam.dataloader.libero import LiberoDataset, MultiLiberoDataset  # noqa: E402
-from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator  # noqa: E402
+from openwam.dataloader.libero import LiberoDataset, MultiLiberoDataset
+from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
 
 def _iter_buckets(dataset) -> Iterable[LiberoDataset]:

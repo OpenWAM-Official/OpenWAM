@@ -14,9 +14,9 @@ from PIL import Image
 
 from openwam.dataloader.libero import LiberoDataset, MultiLiberoDataset
 from openwam.dataloader.registry import build_dataset, list_registered_datasets
+from openwam.dataloader.utils.stats_computation.libero_stats_computation import _iter_action_arrays
 from openwam.deploy.model_loader import _build_normalizer
 from openwam.train.utils.checkpointing import save_normalization_stats
-from scripts.libero_compute_stats import _iter_action_arrays
 
 EP_LENGTH = 8
 HEAD = "observation.images.image"
