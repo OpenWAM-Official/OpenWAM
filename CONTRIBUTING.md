@@ -30,7 +30,7 @@ make all       # lint + tests (full validation)
 1. Run `make all` and ensure it passes
 2. Add tests for new functionality in `tests/`
 3. If you changed user-visible behavior, update `README.md`
-5. Keep commits focused: one logical change per commit
+4. Keep commits focused: one logical change per commit
 
 ## Config Change Policy (All Contributors)
 
@@ -42,6 +42,7 @@ To keep shared configs stable and avoid environment-specific breakage:
    - Hydra CLI overrides, e.g. `dataloader.dataset_dir=... dataloader.stats_path=...`
    - Local, untracked config files for personal environments
    - `sandbox/` launch scripts that inject local override arguments (see [§Sandbox](#sandbox-测试场))
+4. If a config file change is unavoidable, explain the necessity in the PR description.
 
 ## Sandbox (测试场)
 
@@ -72,70 +73,6 @@ reference**，别人换机器要 fork。`sandbox/` 不是 production training en
 
 如果你写的脚本属于"任何人在任何机器上都该这么跑"，应该升级到 `scripts/`；
 否则留在 `sandbox/`。
-
-## Updating the CHANGELOG
-
-
-### When to update
-
-- ✅ New feature, refactor, fix, perf change, dataset / config / interface change
-- ✅ Anything you'd want a future engineer to find when bisecting an issue
-- ❌ Pure typo / comment / formatting fixes
-- ❌ Docs-only changes inside `docs/`
-- ❌ Test-only changes that don't modify production behavior
-
-### Entry format
-
-Group entries by date (`## YYYY-MM-DD: <短主题>`) in reverse chronological
-order. Within a date, group bullets by stage:
-
-| Section | When |
-|---|---|
-| `### 新增` | 新文件 / 新接口 / 新 config |
-| `### 变更` | 现有行为修改、refactor、interface 重命名 |
-| `### 修复` | bug fix |
-| `### 性能` | benchmark 数字变化（必须给 before / after）|
-| `### 验收` | 这次提交跑了什么测试 / 训练，附 W&B / pytest 输出 |
-| `### 已知 Gap` | 留给后续 PR 的 TODO，写明触发条件 |
-
-Within each section, each bullet should:
-
-1. Lead with a `**type(scope)**` tag (`feat(framework)`, `fix(fsdp)`,
-   `refactor(dataloader)`, ...)
-2. Cite **specific file paths and line ranges** (`openwam/.../foo.py:464-477`)
-   so readers can navigate without searching
-3. Explain **why** non-obviously — what the previous behavior was, what
-   constraint forced the change, what tradeoff was taken
-4. Quote concrete numbers (loss, throughput, memory, sample count) over
-   adjectives ("faster", "smaller")
-5. Link external artifacts when they prove the claim — W&B run IDs, PR /
-   issue numbers, golden test names
-
-Example (good):
-
-> `**fix(loader)**: Handle empty batches in openwam/dataloader/example.py:42-57. Explain the root cause, the public behavior change, and the regression test that verifies it.`
-
-Example (bad — 不要这样写):
-
-> `修了一些 bug，性能更好了。`
-
-### Where the entry goes
-
-- 提交分支上的工作完成 + 测试通过后，把当次 PR 的 changelog 段写到
-- 该段日期使用 commit / PR 即将合并日（不一定是最早开发日），保证倒序时序正确。
-- 如果同一天已经有别的 entry，**附加一个新二级标题**（`## YYYY-MM-DD: <主题二>`），
-  不要合并到别人的 entry 里，避免 git diff 串味。
-
-### Linking back from CHANGELOG
-
-CHANGELOG entries通常引用其他文档作为权威细节出处：
-
-- Protocol / spec：写到 `docs/<topic>.md`，CHANGELOG 提一行带链接
-- 性能 / 训练曲线：留 W&B run id / link
-- 数据格式 / dataset layout：写到 `docs/dataloader.md` 或对应 dataset
-  README，CHANGELOG 引用
-
-CHANGELOG 本身**不是** spec —— 它说"哪天改了什么、为什么"，详细规范在 `docs/`。
 
 ## Code Style
 
@@ -177,6 +114,7 @@ CHANGELOG 本身**不是** spec —— 它说"哪天改了什么、为什么"，
 
 我们已经踩过 transformers 5.5+ 才有 `Qwen3_5ForConditionalGeneration` 的坑（早期版本 import 直接 NotFound）。原 `pyproject.toml` 写 `transformers<5` 等于允许装 4.x，新 contributor 一装 4.x 跑 Qwen 直接挂。完整区间 pin 是这种问题的唯一根治方案。
 
+**新 PR 引入的新 dep 必须按上面规则双向 pin**。`pyproject.toml` 历史上的 hygiene 债已于 2026-04-30 一次性 audit 完成（27 个 dep 全部双向 pin）。
 
 ## Follow-ups & Engineering Debt
 
