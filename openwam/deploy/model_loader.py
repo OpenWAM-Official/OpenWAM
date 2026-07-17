@@ -217,13 +217,32 @@ def load_from_checkpoint_dir(
     return cfg, architecture
 
 
+class _AsymmetricNormalizer:
+    """Use distinct physical statistics for model actions and proprioception."""
+
+    def __init__(self, action_normalizer, state_normalizer):
+        self._action = action_normalizer
+        self._state = state_normalizer
+
+    def unnormalize(self, x):
+        return self._action.unnormalize(x)
+
+    def normalize(self, x):
+        return self._state.normalize(x)
+
+    @property
+    def stats(self):
+        # Action width drives raw-dimension inference for unified checkpoints.
+        return self._action.stats
+
+
 def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
     """Build the RAW-space normalizer for both deploy directions, or ``None`` if disabled.
 
-    The returned ``Normalizer`` serves both: ``normalize`` maps the input
-    proprio state into training space, ``unnormalize`` maps the output action
-    back to physical units. proprio is a single-frame action
-    (``raw_actions[0:1]``), so both share one set of stats.
+    ``unnormalize`` always uses the selected action-mode stats. When
+    ``dataloader.state_stats_mode`` is configured, ``normalize`` uses that
+    separate achieved-state distribution; old checkpoints without the field
+    retain the historical single-stats behavior.
 
     Reads ``dataloader.normalize_mode`` / ``action_mode`` from the saved config;
     when enabled, loads ``normalization_stats.npy`` and wraps the requested stats
@@ -285,6 +304,24 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
         )
 
     normalizer = Normalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=mode_stats)
+    state_stats_mode = OmegaConf.select(cfg, "dataloader.state_stats_mode", default=None)
+    if state_stats_mode not in (None, "", "none", "null", action_mode):
+        state_stats = load_mode_stats(stats_path, state_stats_mode)
+        if state_stats is None:
+            raise KeyError(
+                f"[normalizer] Stats file {stats_path} has no state stats entry {state_stats_mode!r}. "
+                "Refusing to normalize deploy proprio with action statistics."
+            )
+        if len(state_stats["mean"]) != len(mode_stats["mean"]):
+            raise ValueError(
+                f"[normalizer] action/state stats dimensions differ: "
+                f"{len(mode_stats['mean'])} vs {len(state_stats['mean'])}"
+            )
+        normalizer = _AsymmetricNormalizer(
+            normalizer,
+            Normalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=state_stats),
+        )
+        logger.info("[normalizer] Asymmetric proprio stats active: state_mode=%s", state_stats_mode)
     logger.info(
         "[normalizer] Active: mode=%s action_mode=%s dim=%d stats=%s",
         norm_mode,

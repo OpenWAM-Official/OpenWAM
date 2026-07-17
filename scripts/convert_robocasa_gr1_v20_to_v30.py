@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Re-index NVIDIA RoboCasa GR1 LeRobot v2.0 buckets as LeRobot v3.
+"""Re-index FK-enriched NVIDIA RoboCasa GR1 LeRobot v2.0 buckets as v3.
 
-OpenWAM's GR1 integration intentionally trains only bimanual EEF20. The public
-NVIDIA files contain joint44 and must first be enriched by a trusted simulator
-or FK pipeline with EEF pose/gripper columns. This converter validates those
-columns, preserves episode payloads (hard-linking by default), and writes the
-LeRobot v3 metadata/path contract. It never invents EEF values from joints.
+The public NVIDIA files contain joint44 and must first be processed by
+``enrich_robocasa_gr1_joint44_to_eef33.py``. This converter validates the
+simulator-derived EEF33 action/state columns, preserves episode payloads
+(hard-linking by default), and writes the LeRobot v3 metadata/path contract.
+It never invents EEF values from joints.
 """
 
 from __future__ import annotations
@@ -25,12 +25,7 @@ import pyarrow.parquet as pq
 _V20 = "v2.0"
 _V30 = "v3.0"
 _FILES_PER_CHUNK = 1000
-_EEF_FEATURES = {
-    "eef_sim_pose_action": (12,),
-    "gripper_open_scale_action": (2,),
-    "eef_sim_pose_state": (12,),
-    "gripper_open_scale_state": (2,),
-}
+_EEF_FEATURES = {"eef33_action": (33,), "eef33_state": (33,)}
 
 
 def _read_json(path: Path) -> dict:
@@ -131,8 +126,8 @@ def convert_bucket(
     if missing_eef:
         raise KeyError(
             f"{source}: missing required EEF features {missing_eef}. The native NVIDIA joint44 "
-            "download is not directly trainable by this EEF-only integration; enrich it with "
-            "trusted pose/gripper values before conversion."
+            "download is not directly trainable; run "
+            "scripts/enrich_robocasa_gr1_joint44_to_eef33.py first."
         )
     for key, expected in _EEF_FEATURES.items():
         shape = tuple(features[key].get("shape", ()))
@@ -255,8 +250,8 @@ def convert_bucket(
         "frames": total_frames,
         "tasks": len(used_tasks),
         "video_keys": video_keys,
-        "raw_eef_dim": 20,
-        "representation": "bimanual_eef20",
+        "raw_eef_dim": 33,
+        "representation": "bimanual_eef33_dex_waist",
     }
 
 

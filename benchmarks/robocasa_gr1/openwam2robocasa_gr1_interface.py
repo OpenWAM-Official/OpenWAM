@@ -16,6 +16,7 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 
 from benchmarks.utils import WSPolicyClient, client, transport  # noqa: E402
+from openwam.dataloader.utils.gr1_kinematics import EEF33_DIM, GR1Kinematics  # noqa: E402
 
 
 def _as_vector(value) -> np.ndarray:
@@ -101,6 +102,8 @@ class OpenWAMRoboCasaGR1Policy:
     def __init__(
         self,
         action_space,
+        env=None,
+        action_mode: str = "eef",
         host: str = "127.0.0.1",
         port: int = 8848,
         request_timeout: int = 300,
@@ -119,6 +122,13 @@ class OpenWAMRoboCasaGR1Policy:
         debug_dir: str = "./debug_robocasa_gr1",
     ) -> None:
         self._action_space = action_space
+        self._action_mode = str(action_mode).lower()
+        if self._action_mode != "eef":
+            raise ValueError(f"RoboCasa GR1 client supports only action_mode='eef', got {action_mode!r}")
+        if env is None:
+            raise ValueError("RoboCasa GR1 EEF deployment requires env=... for live FK/IK")
+        self._env = env
+        self._kinematics = GR1Kinematics.from_env(env)
         self._head_camera_key = head_camera_key
         self._left_wrist_camera_key = left_wrist_camera_key
         self._right_wrist_camera_key = right_wrist_camera_key
@@ -159,12 +169,15 @@ class OpenWAMRoboCasaGR1Policy:
     def reset(self) -> None:
         self._episode += 1
         self._step = 0
+        # RoboCasa rebuilds its MuJoCo simulation on reset; discard stale
+        # MjModel/MjData handles before computing the next episode's FK/IK.
+        self._kinematics = GR1Kinematics.from_env(self._env)
         ack = self._client.reset()
         if ack.get("type") != transport.RESET_ACK:
             raise RuntimeError(f"OpenWAM server reset returned unexpected response: {ack}")
 
     def act(self, obs: Mapping) -> dict:
-        state = build_state(obs, self._state_keys) if self._send_state else None
+        state = self._kinematics.observation_to_eef33(obs).tolist() if self._send_state else None
         if self._state_dim is not None and state is not None and len(state) != self._state_dim:
             raise ValueError(f"RoboCasa state dim {len(state)} != expected {self._state_dim}")
         prompt = str(obs.get(self._prompt_key) or obs.get(self._fallback_prompt_key) or obs.get("language", ""))
@@ -176,14 +189,11 @@ class OpenWAMRoboCasaGR1Policy:
             state=state,
         )
         response = self._client.predict(payload)
-        action = action_vector_to_dict(
-            response["action"],
-            self._action_space,
-            action_keys=self._action_keys,
-            action_indices=self._action_indices,
-            action_clip=self._action_clip,
-        )
-        self._maybe_debug(obs, payload, response["action"], action)
+        raw_action = _as_vector(response["action"])
+        if raw_action.shape != (EEF33_DIM,):
+            raise ValueError(f"OpenWAM GR1 server must return EEF33 after deploy gather, got {raw_action.shape}")
+        action, ik = self._kinematics.eef33_to_action_dict(raw_action)
+        self._maybe_debug(obs, payload, raw_action, action, ik=ik)
         self._step += 1
         return action
 
@@ -200,7 +210,15 @@ class OpenWAMRoboCasaGR1Policy:
             return None
         return client.encode_numpy_b64(self._image(obs, key))
 
-    def _maybe_debug(self, obs: Mapping, payload: dict, raw_action, action: Mapping[str, np.ndarray]) -> None:
+    def _maybe_debug(
+        self,
+        obs: Mapping,
+        payload: dict,
+        raw_action,
+        action: Mapping[str, np.ndarray],
+        *,
+        ik=None,
+    ) -> None:
         if not self._debug:
             return
         step_dir = self._debug_dir / f"episode_{self._episode:03d}" / f"step_{self._step:04d}"
@@ -211,5 +229,14 @@ class OpenWAMRoboCasaGR1Policy:
             "raw_action_dim": len(raw_action),
             "action_shapes": {key: list(value.shape) for key, value in action.items()},
             "obs_keys": sorted(obs.keys()),
+            "ik": (
+                {
+                    "converged": bool(ik.converged),
+                    "position_error": float(ik.position_error),
+                    "rotation_error": float(ik.rotation_error),
+                }
+                if ik is not None
+                else None
+            ),
         }
         (step_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")

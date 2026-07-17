@@ -1,8 +1,12 @@
 """RoboCasa GR1 LeRobot v3 dataloader.
 
-This integration intentionally accepts only bimanual EEF20. ``unify_action``
-optionally scatters that normalized raw representation into the shared 80-D
-space; joint vectors are rejected rather than assigned misleading EEF semantics.
+The reader accepts the FK-enriched 33-D EEF representation only::
+
+    [L xyz3, L rot6d6, L hand6, R xyz3, R rot6d6, R hand6, waist3]
+
+``unify_action`` scatters those physical dimensions into the shared 80-D
+EEF/dex-hand/reserved layout. Native 44-D joint vectors are deliberately
+rejected: they must first pass through the simulator-backed FK enrichment.
 """
 
 from __future__ import annotations
@@ -13,12 +17,12 @@ from typing import Any, ClassVar, List, Optional, Sequence, Tuple
 import numpy as np
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
-from openwam.dataloader.utils.eef import EEF_DIM, eef14_to_eef20
 from openwam.dataloader.utils.normalization import STAT_KEYS, apply_normalization, load_stats_file
 
 logger = logging.getLogger(__name__)
 
 _ACTION_MODE = "eef"
+EEF33_DIM = 33
 
 
 def _as_list(value: Any) -> List[Any]:
@@ -79,15 +83,12 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         "action_mode",
         "eef_action_column",
         "eef_state_column",
-        "eef_pose_action_column",
-        "eef_gripper_action_column",
-        "eef_pose_state_column",
-        "eef_gripper_state_column",
         "prompt_columns",
         "head_camera_priority",
         "left_wrist_camera_priority",
         "right_wrist_camera_priority",
         "normalization_stats_path",
+        "state_stats_mode",
         "unify_action",
         "unify_action_map",
         "state_mask",
@@ -99,17 +100,14 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         dataset_dir: str,
         *,
         action_mode: str = "eef",
-        eef_action_column: Optional[str] = None,
-        eef_state_column: Optional[str] = None,
-        eef_pose_action_column: str = "eef_sim_pose_action",
-        eef_gripper_action_column: str = "gripper_open_scale_action",
-        eef_pose_state_column: str = "eef_sim_pose_state",
-        eef_gripper_state_column: str = "gripper_open_scale_state",
+        eef_action_column: str = "eef33_action",
+        eef_state_column: str = "eef33_state",
         prompt_columns: Optional[Sequence[str]] = None,
         head_camera_priority: Optional[Sequence[str]] = None,
         left_wrist_camera_priority: Optional[Sequence[str]] = None,
         right_wrist_camera_priority: Optional[Sequence[str]] = None,
         normalization_stats_path: Optional[str] = None,
+        state_stats_mode: str = "eef_state",
         unify_action: Optional[bool] = None,
         unify_action_map: Optional[Any] = None,
         action_mask: Optional[Sequence[bool]] = None,
@@ -120,16 +118,18 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         if mode != _ACTION_MODE:
             raise ValueError(
                 f"RoboCasaGR1 currently supports only action_mode='eef', got {action_mode!r}. "
-                "EEF is raw bimanual 20-D: [L xyz3+rot6d6+grip1, R xyz3+rot6d6+grip1]."
+                "EEF is raw 33-D: [L xyz3+rot6d6+hand6, R xyz3+rot6d6+hand6, waist3]."
             )
         unify_on = bool(unify_action)
         if unify_on and unify_action_map is None:
             raise ValueError(
                 "RoboCasaGR1 unify_action=true requires an explicit unify_action_map; "
-                "set ['0-9', '34-43'] for canonical EEF20 mapping"
+                "set ['0-8', '10-15', '34-42', '44-49', '68-70'] for canonical EEF33 mapping"
             )
         self.action_mode = mode
         self.DEPLOY_ACTION_MODE = _ACTION_MODE
+        self._state_stats_mode = str(state_stats_mode)
+        self._state_normalization_stats = None
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
 
         self._prompt_columns = [str(x) for x in _as_list(prompt_columns)]
@@ -141,14 +141,10 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             str(x) for x in (right_wrist_camera_priority or self.RIGHT_WRIST_CAMERA_PRIORITY)
         )
 
-        self._action_column = eef_action_column
-        self._state_column = eef_state_column
-        self._pose_action_column = None if self._action_column else eef_pose_action_column
-        self._gripper_action_column = None if self._action_column else eef_gripper_action_column
-        self._pose_state_column = None if self._state_column else eef_pose_state_column
-        self._gripper_state_column = None if self._state_column else eef_gripper_state_column
+        self._action_column = str(eef_action_column)
+        self._state_column = str(eef_state_column)
 
-        self.ACTION_DIM = EEF_DIM
+        self.ACTION_DIM = EEF33_DIM
         action_dim_mask = _as_bool_mask(action_mask, self.ACTION_DIM, field="action_mask")
         state_dim_mask = _as_bool_mask(state_mask, self.ACTION_DIM, field="state_mask")
         if (
@@ -163,10 +159,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         for col in (
             self._action_column,
             self._state_column,
-            self._pose_action_column,
-            self._gripper_action_column,
-            self._pose_state_column,
-            self._gripper_state_column,
             *self._prompt_columns,
         ):
             if col:
@@ -203,10 +195,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         required = [
             self._action_column,
             self._state_column,
-            self._pose_action_column,
-            self._gripper_action_column,
-            self._pose_state_column,
-            self._gripper_state_column,
             "task_index",
         ]
         missing_required = sorted(col for col in required if col and col not in features)
@@ -217,12 +205,8 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
                 "the public NVIDIA GR1 joint44 columns must not be relabeled as EEF."
             )
         for column, expected_dim in (
-            (self._action_column, self._raw_action_dim),
-            (self._state_column, self._raw_action_dim),
-            (self._pose_action_column, 12),
-            (self._gripper_action_column, 2),
-            (self._pose_state_column, 12),
-            (self._gripper_state_column, 2),
+            (self._action_column, EEF33_DIM),
+            (self._state_column, EEF33_DIM),
         ):
             if not column:
                 continue
@@ -268,14 +252,24 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
                 "Run python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation "
                 "or set normalize_mode=null."
             )
-        stats = load_stats_file(
+        action_stats = load_stats_file(
             self._source_stats_path,
             action_mode=self.action_mode,
             normalize_mode=self._normalize_mode,
             dim=self._raw_action_dim,
         )
-        self._write_deploy_normalizer_stats(stats, STAT_KEYS)
-        return stats
+        self._state_normalization_stats = load_stats_file(
+            self._source_stats_path,
+            action_mode=self._state_stats_mode,
+            normalize_mode=self._normalize_mode,
+            dim=self._raw_action_dim,
+        )
+        self._write_deploy_normalizer_stats(
+            action_stats,
+            STAT_KEYS,
+            additional_entries={self._state_stats_mode: self._state_normalization_stats},
+        )
+        return action_stats
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
@@ -285,64 +279,30 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         return self._normalize_array(raw)
 
     def _proprio_20d(self, win) -> np.ndarray:
-        raw = self._read_vector_window(
-            win,
-            vector_col=self._state_column,
-            pose_col=self._pose_state_column,
-            grip_col=self._gripper_state_column,
-            label="state",
-            first_only=True,
-        )
-        return self._normalize_array(raw)
+        raw = self._read_vector_window(win, vector_col=self._state_column, label="state", first_only=True)
+        return apply_normalization(raw, self._state_normalization_stats, self._normalize_mode)
 
     def _raw_action(self, win) -> np.ndarray:
-        return self._read_vector_window(
-            win,
-            vector_col=self._action_column,
-            pose_col=self._pose_action_column,
-            grip_col=self._gripper_action_column,
-            label="action",
-        )
+        return self._read_vector_window(win, vector_col=self._action_column, label="action")
 
     def _raw_state(self, win) -> np.ndarray:
-        return self._read_vector_window(
-            win,
-            vector_col=self._state_column,
-            pose_col=self._pose_state_column,
-            grip_col=self._gripper_state_column,
-            label="state",
-        )
+        return self._read_vector_window(win, vector_col=self._state_column, label="state")
 
     def _read_vector_window(
         self,
         win,
         *,
-        vector_col: Optional[str],
-        pose_col: Optional[str],
-        grip_col: Optional[str],
+        vector_col: str,
         label: str,
         first_only: bool = False,
     ) -> np.ndarray:
         values = slice(0, 1) if first_only else slice(None)
-        if vector_col:
-            if vector_col not in win:
-                raise KeyError(f"RoboCasaGR1 {label} column {vector_col!r} not found in parquet window")
-            return np.stack(win[vector_col].values[values]).astype(np.float32)
-        if not pose_col or not grip_col:
-            raise KeyError(f"RoboCasaGR1 {label} needs either a vector column or pose+gripper columns")
-        if pose_col not in win or grip_col not in win:
-            raise KeyError(
-                f"RoboCasaGR1 {label} columns missing: pose={pose_col!r} present={pose_col in win}, "
-                f"gripper={grip_col!r} present={grip_col in win}"
-            )
-        pose = np.stack(win[pose_col].values[values]).astype(np.float32)
-        grip = np.stack(win[grip_col].values[values]).astype(np.float32)
-        if pose.shape[-1] != 12 or grip.shape[-1] != 2:
-            raise ValueError(
-                f"RoboCasaGR1 {label} pose+gripper EEF conversion expects 12D+2D, "
-                f"got {pose.shape[-1]}D+{grip.shape[-1]}D"
-            )
-        return eef14_to_eef20(pose, grip)
+        if vector_col not in win:
+            raise KeyError(f"RoboCasaGR1 {label} column {vector_col!r} not found in parquet window")
+        result = np.stack(win[vector_col].values[values]).astype(np.float32)
+        if result.ndim != 2 or result.shape[-1] != EEF33_DIM:
+            raise ValueError(f"RoboCasaGR1 {label} must be (T, {EEF33_DIM}), got {result.shape}")
+        return result
 
     @classmethod
     def _multibucket_wrapper(cls):
@@ -381,4 +341,4 @@ class MultiRoboCasaGR1Dataset(MultiLeRobotV3Reader):
         return RoboCasaGR1Dataset.from_config(config, split)
 
 
-__all__ = ["RoboCasaGR1Dataset", "MultiRoboCasaGR1Dataset"]
+__all__ = ["EEF33_DIM", "RoboCasaGR1Dataset", "MultiRoboCasaGR1Dataset"]

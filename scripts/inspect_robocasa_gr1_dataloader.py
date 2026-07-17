@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset  # noqa: E402
-from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20  # noqa: E402
+from openwam.dataloader.utils.gr1_kinematics import EEF33_DIM, ROT6D_DIMS_EEF33  # noqa: E402
 from openwam.dataloader.utils.unify_action import unmap_from_unify  # noqa: E402
 
 
@@ -39,7 +39,7 @@ def _contact_sheet(frames: list[Image.Image], labels: list[str], columns: int = 
 
 def _rot6d_report(raw: np.ndarray) -> dict:
     errors = []
-    for start in (3, 13):
+    for start in (3, 18):
         first = raw[..., start : start + 3]
         second = raw[..., start + 3 : start + 6]
         errors.append(
@@ -174,12 +174,12 @@ def inspect_sample(
             report["modality"] = json.load(handle)
 
     raw = raw_action
-    if raw.shape[-1] != 20:
-        raise ValueError(f"EEF reader must emit raw EEF20, got {raw.shape}")
-    report["eef20_layout"] = "[L xyz3, rot6d6, grip1, R xyz3, rot6d6, grip1]"
+    if raw.shape[-1] != EEF33_DIM:
+        raise ValueError(f"EEF reader must emit raw EEF33, got {raw.shape}")
+    report["eef33_layout"] = "[L xyz3, rot6d6, hand6, R xyz3, rot6d6, hand6, waist3]"
     report["rot6d"] = _rot6d_report(raw)
     normalized = bucket._normalize_array(raw)  # noqa: SLF001
-    rotation_indices = list(ROT6D_DIMS_EEF20)
+    rotation_indices = list(ROT6D_DIMS_EEF33)
     report["rot6d_normalization_max_delta"] = float(
         np.max(np.abs(normalized[..., rotation_indices] - raw[..., rotation_indices]))
     )
@@ -193,7 +193,7 @@ def inspect_sample(
         expected = normalized[: restored.shape[0]]
         report["unify_roundtrip_max_error"] = float(np.max(np.abs(restored - expected)))
         if report["unify_roundtrip_max_error"] > 1e-6:
-            raise ValueError("unify_action mapping does not round-trip to normalized EEF20")
+            raise ValueError("unify_action mapping does not round-trip to normalized EEF33")
 
     with (output_dir / "inspection_report.json").open("w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, ensure_ascii=False)

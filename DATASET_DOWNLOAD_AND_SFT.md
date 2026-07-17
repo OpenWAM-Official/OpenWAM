@@ -95,17 +95,20 @@ NVIDIA GR1 下载目录已经是 LeRobot v2.0（不是 HDF5），但当前 reade
 要求 v3 metadata/path contract。用仓库脚本非破坏性转换：
 
 ```bash
-# First enrich joint44 with trusted simulator/FK EEF pose12 + gripper2 columns.
-python scripts/convert_robocasa_gr1_v20_to_v30.py \
-  --input "${DATA_ROOT}/robocasa-gr1-eef-v20" \
-  --output "${DATA_ROOT}/robocasa-gr1-eef-v30"
+export ROBOCASA_GR1_PATH="${DATA_ROOT}/robocasa-gr1-tabletop-tasks"
+export ROBOCASA_GR1_PYTHON=/path/to/robocasa-gr1/bin/python
+export OPENWAM_PYTHON=/path/to/openwam/bin/python
+bash scripts/prepare_robocasa_gr1_eef33.sh \
+  "${DATA_ROOT}/robocasa-gr1-24k" \
+  "${DATA_ROOT}/robocasa-gr1-eef33-v20" \
+  "${DATA_ROOT}/robocasa-gr1-eef33-v30"
 ```
 
 默认使用 hardlink，不复制约 39GB payload。跨文件系统时使用
 `--link-mode symlink`。目标根下每个 task bucket 包含：
 
 ```text
-robocasa-gr1-eef-v30/<task-bucket>/
+robocasa-gr1-eef33-v30/<task-bucket>/
 ├── meta/info.json
 ├── meta/episodes/
 ├── data/
@@ -114,47 +117,47 @@ robocasa-gr1-eef-v30/<task-bucket>/
 
 训练数据契约：
 
-- `eef_sim_pose_action/state`: 双臂 `[L xyz+Euler, R xyz+Euler]`，12D
-- `gripper_open_scale_action/state`: 双臂夹爪，2D
-- reader 输出 EEF20：`[L xyz3+rot6d6+grip1, R xyz3+rot6d6+grip1]`
+- `eef33_action/state`：`[L xyz3+rot6d6+hand6, R xyz3+rot6d6+hand6, waist3]`
+- EEF pose 使用 `robot0_base` 坐标系，避免 world placement 随环境构造漂移
 - video: 单个 `observation.images.ego_view`
 - prompt: `task_index -> meta/tasks.parquet`
 - `annotation.human.coarse_action` 是整数类别，不是 prompt 文本
 
-原始 NVIDIA joint44 不包含 EEF20。转换器会拒绝缺少上述 EEF 列的数据，
+原始 NVIDIA joint44 不包含 EEF33。转换器会拒绝缺少上述 EEF 列的数据，
 不会把 joint 伪装成 xyz+rot6d+gripper。
 
 ## 6. 生成 RoboCasa normalization stats
 
 将 `configs/dataloader/robocasa_gr1.yaml` 中的 `dataset_dir` 改为转换后的
-目录。配置仅支持 EEF20，并默认映射到 unified80：
+目录。配置仅支持 EEF33，并默认映射到 unified80：
 
 ```bash
 python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
   --config configs/dataloader/robocasa_gr1.yaml \
-  --output "${DATA_ROOT}/robocasa-gr1-eef-v30/normalization_stats.npy"
+  --output "${DATA_ROOT}/robocasa-gr1-eef33-v30/normalization_stats.npy"
 ```
 
 随后配置：
 
 ```yaml
-dataset_dir: /path/to/h200/storage/datasets/robocasa-gr1-eef-v30
+dataset_dir: /path/to/h200/storage/datasets/robocasa-gr1-eef33-v30
 action_mode: eef
 unify_action: true
-unify_action_map: ["0-9", "34-43"]
+unify_action_map: ["0-8", "10-15", "34-42", "44-49", "68-70"]
 normalize_mode: min-max
-normalization_stats_path: /path/to/h200/storage/datasets/robocasa-gr1-eef-v30/normalization_stats.npy
+normalization_stats_path: /path/to/h200/storage/datasets/robocasa-gr1-eef33-v30/normalization_stats.npy
 ```
 
 stats 脚本会将 rotation6d 的 min/max 固定为 `-1/1`、mean/std 固定为
-`0/1`，因此 min-max 和 z-score 都只改变 xyz/gripper。
+`0/1`。action command 与 achieved state 分开统计，避免 hand command 和
+hand qpos 混用同一分布。
 
 可视化检查：
 
 ```bash
 python scripts/inspect_robocasa_gr1_dataloader.py \
   --config configs/dataloader/robocasa_gr1.yaml \
-  --dataset-dir "${DATA_ROOT}/robocasa-gr1-eef-v30" \
+  --dataset-dir "${DATA_ROOT}/robocasa-gr1-eef33-v30" \
   --output-dir "${DATA_ROOT}/robocasa-gr1-inspection"
 ```
 
@@ -162,19 +165,19 @@ python scripts/inspect_robocasa_gr1_dataloader.py \
 
 先以 global batch 64、30k optimizer steps 开始：
 
-> 注意：模型训练头为 unified80，部署 normalizer 会 unmap 为 EEF20。
-> 当前 tabletop gym wrapper 接收 29D joint action；没有 EEF→joint
-> controller 时不能完成 simulator 闭环。
+> 注意：模型训练头为 unified80，部署 normalizer 会 gather 并反归一化为
+> EEF33。benchmark client 再通过双臂 IK 转为 29D joint action，并直接透传
+> Fourier hand6 与 waist3。
 
 ```bash
 bash scripts/train.sh \
   dataloader=robocasa_gr1 \
-  dataloader.dataset_dir="${DATA_ROOT}/robocasa-gr1-eef-v30" \
+  dataloader.dataset_dir="${DATA_ROOT}/robocasa-gr1-eef33-v30" \
   dataloader.action_mode=eef \
   dataloader.unify_action=true \
-  'dataloader.unify_action_map=["0-9","34-43"]' \
+  'dataloader.unify_action_map=["0-8","10-15","34-42","44-49","68-70"]' \
   dataloader.normalize_mode=min-max \
-  dataloader.normalization_stats_path="${DATA_ROOT}/robocasa-gr1-eef-v30/normalization_stats.npy" \
+  dataloader.normalization_stats_path="${DATA_ROOT}/robocasa-gr1-eef33-v30/normalization_stats.npy" \
   model.architecture.action_dim=80 \
   model.architecture.state_dim=80 \
   training.batch_size=4 \

@@ -40,33 +40,32 @@ For a short machine-migration setup flow, start with
    ```
 
    These folders are LeRobot **v2.0** with native 44-D joint/body vectors.
-   This integration intentionally supports only bimanual EEF20, so the public
-   files are not directly trainable. First use a trusted simulator/FK export to
-   add these four columns:
-
-   ```text
-   eef_sim_pose_action[12] + gripper_open_scale_action[2]
-   eef_sim_pose_state[12]  + gripper_open_scale_state[2]
-   ```
-
-   Then re-index the enriched v2.0 buckets non-destructively:
+   This integration trains base-frame EEF33, so run the checked-in MuJoCo FK
+   enrichment and v3 conversion:
 
    ```bash
-   python scripts/convert_robocasa_gr1_v20_to_v30.py \
-     --input /path/to/robocasa-gr1-eef-v20 \
-     --output /path/to/robocasa-gr1-eef-v30
+   export ROBOCASA_GR1_PATH=/path/to/robocasa-gr1-tabletop-tasks
+   export ROBOCASA_PYTHON=/path/to/robocasa-gr1/bin/python
+   export OPENWAM_PYTHON=/path/to/openwam/bin/python
+   bash scripts/prepare_robocasa_gr1_eef33.sh \
+     /path/to/robocasa-gr1-24k \
+     /path/to/robocasa-gr1-eef33-v20 \
+     /path/to/robocasa-gr1-eef33-v30
    ```
 
-   The converter rejects joint-only buckets rather than assigning false EEF
-   semantics. It validates pose/gripper shapes for every episode.
+   EEF33 is
+   `[L xyz3, L rot6d6, L hand6, R xyz3, R rot6d6, R hand6, waist3]`.
+   Poses are relative to `robot0_base`, making enrichment deterministic across
+   randomized world placements. The converter rejects joint-only buckets.
    The converter hard-links payloads by default, so conversion is fast and does
    not duplicate the large parquet/MP4 data. Use `--link-mode symlink` across
    mount layouts, or `--link-mode copy` only when duplication is intended.
 
    `configs/dataloader/robocasa_gr1.yaml` accepts only
-   `[L xyz3, rot6d6, grip1, R xyz3, rot6d6, grip1]`. Its explicit map places
-   the two per-arm 10-D blocks into unified slots `0-9` and `34-43`. Generated
-   stats pin all rot6d dimensions to identity so only xyz/gripper are normalized.
+   EEF33. Its exact unified map is
+   `["0-8", "10-15", "34-42", "44-49", "68-70"]`; gripper slots 9/43 stay
+   masked because Fourier hands use six joint commands. Action and achieved
+   state have separate stats, while all rot6d dimensions remain identity-pinned.
 
 3. Start an OpenWAM policy server separately:
 
@@ -106,7 +105,7 @@ comparison, and validate action/prompt contracts:
 ```bash
 python scripts/inspect_robocasa_gr1_dataloader.py \
   --config configs/dataloader/robocasa_gr1.yaml \
-  --dataset-dir /path/to/robocasa-gr1-eef-v30 \
+  --dataset-dir /path/to/robocasa-gr1-eef33-v30 \
   --sample-index 0 \
   --output-dir validation_outputs/robocasa_gr1_sample0
 ```
@@ -116,7 +115,7 @@ sheet, a difference image, and `inspection_report.json`. The report checks that
 the single real ego view occupies the top 256×320 slot, both absent wrist slots
 are black, ColorJitter changes pixels, and the resolved task prompt is non-empty.
 For EEF/unify configs it additionally checks rot6d orthonormality, identity
-normalization on rotation components, and the EEF20↔unified80 map round-trip.
+normalization on rotation components, and the EEF33↔unified80 map round-trip.
 
 ## Evaluation
 
@@ -134,18 +133,15 @@ episode count, and max steps. By default:
 
 - `head_camera_key` is `video.ego_view_pad_res256_freq20`, the official
   processed ego-view stream from `GrootRoboCasaEnv`.
-- `send_state: true` forwards the GR00T-style `state.*` fields. Set an explicit
-  ordered `state_keys` list matching the conversion job; `null` uses sorted keys
-  for deterministic diagnostics but cannot prove semantic alignment.
-- Set an explicit ordered `action_keys` list matching the conversion job.
-  `action_keys: null` uses sorted `env.action_space` keys.
+- `send_state: true` converts the live 29-D GR00T state through the same
+  base-frame FK as offline enrichment and sends EEF33 proprio.
+- The returned EEF33 action is solved by damped-least-squares dual-arm IK;
+  Fourier hand6 and waist3 are passed through unchanged. Joint limits,
+  residual thresholds, and hold-current fallback are enforced.
 - The NVIDIA dataset card documents 44D joint state/action, while the default
   `gr1_unified/*GR1ArmsAndWaistFourierHands_Env` gym wrapper currently reports
-  29D joint state/action (`6+6+7+7+3`). The websocket transport is integrated,
-  but a 20D EEF checkpoint cannot drive this 29D joint environment until a
-  robot-specific EEF-to-joint controller is supplied. The client fails on the
-  dimension mismatch instead of silently slicing actions; full simulator
-  train/deploy closure remains blocked by that controller, not by websocket IO.
+  29D joint state/action (`6+6+7+7+3`). The EEF33 FK/IK bridge supplies the
+  required conversion in both directions.
 - `fail_on_incomplete: false` means the process exits successfully after a
   completed benchmark run even when success rate is below 100%. Set it to
   `true` for pass/fail smoke gates.

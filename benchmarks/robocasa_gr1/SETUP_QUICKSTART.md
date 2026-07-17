@@ -50,17 +50,19 @@ hf download nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim \
   --include "gr1_unified.*/**" \
   --local-dir /path/to/bench_deps/robocasa-gr1-24k
 
-# After a trusted simulator/FK pipeline adds the required EEF pose12 +
-# gripper2 action/state columns:
-python scripts/convert_robocasa_gr1_v20_to_v30.py \
-  --input /path/to/bench_deps/robocasa-gr1-eef-v20 \
-  --output /path/to/bench_deps/robocasa-gr1-eef-v30
+export ROBOCASA_GR1_PATH=/path/to/bench_deps/robocasa-gr1-tabletop-tasks
+export ROBOCASA_GR1_PYTHON="$CONDA_PREFIX/bin/python"
+export OPENWAM_PYTHON=/path/to/openwam/bin/python
+bash scripts/prepare_robocasa_gr1_eef33.sh \
+  /path/to/bench_deps/robocasa-gr1-24k \
+  /path/to/bench_deps/robocasa-gr1-eef33-v20 \
+  /path/to/bench_deps/robocasa-gr1-eef33-v30
 ```
 
 The public folders are LeRobot v2.0 with native 44-D joint/body state/action,
-not HDF5 and not EEF20. This integration does not support joint mode. The
-converter requires reliable EEF columns, writes the v3 metadata/path contract,
-and hard-links payloads by default.
+not HDF5 and not EEF33. This integration does not train joint mode. The wrapper
+uses the exact RoboCasa MuJoCo model for base-frame FK, writes EEF33
+action/state, converts to v3, and computes separate action/state statistics.
 
 Approximate dataset size:
 
@@ -147,4 +149,6 @@ bash benchmarks/robocasa_gr1/single_eval.sh \
 - Default max episode steps: `720`
 - Default GR1 arms+waist Fourier-hands action dims:
   `left_hand=6`, `right_hand=6`, `left_arm=7`, `right_arm=7`, `waist=3`
+- The client sends base-frame EEF33 proprio and converts returned EEF33 actions
+  to the 29-D environment action with dual-arm IK plus direct hand/waist pass-through.
 - Do not open/merge the PR until render smoke passes on the target machine.

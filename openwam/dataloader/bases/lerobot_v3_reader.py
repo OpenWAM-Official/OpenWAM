@@ -581,7 +581,13 @@ class LeRobotV3Reader(BaseDataset):
             source_hint=str(stats_path),
         )
 
-    def _write_deploy_normalizer_stats(self, combined: dict, keys) -> None:
+    def _write_deploy_normalizer_stats(
+        self,
+        combined: dict,
+        keys,
+        *,
+        additional_entries: Optional[Dict[str, dict]] = None,
+    ) -> None:
         """Write ``meta/normalization_stats.npy`` — the deploy denormalizer artifact.
 
         ``combined`` is this reader's RAW-space per-mode stats (the values the
@@ -639,6 +645,8 @@ class LeRobotV3Reader(BaseDataset):
                         self.DEPLOY_ACTION_MODE,
                     )
             payload[self.DEPLOY_ACTION_MODE] = entry
+            for mode, stats in (additional_entries or {}).items():
+                payload[str(mode)] = {k: np.asarray(stats[k], dtype=np.float32) for k in keys}
             # Atomic write (unique temp + replace) so concurrent per-rank constructors
             # never observe a half-written file. pid ALONE collides on a shared
             # filesystem (same local-rank across nodes → same pid), so the temp name

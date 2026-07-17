@@ -14,7 +14,7 @@ import pytest
 from omegaconf import OmegaConf
 from PIL import Image
 
-from openwam.dataloader.robocasa_gr1 import RoboCasaGR1Dataset
+from openwam.dataloader.robocasa_gr1 import EEF33_DIM, RoboCasaGR1Dataset
 from scripts.convert_robocasa_gr1_v20_to_v30 import convert_bucket, discover_buckets
 
 VIDEO_KEY = "observation.images.ego_view"
@@ -36,10 +36,8 @@ def _write_v20_bucket(root: Path, *, include_eef: bool = True) -> None:
     if include_eef:
         features.update(
             {
-                "eef_sim_pose_action": {"dtype": "object", "shape": [12]},
-                "gripper_open_scale_action": {"dtype": "object", "shape": [2]},
-                "eef_sim_pose_state": {"dtype": "object", "shape": [12]},
-                "gripper_open_scale_state": {"dtype": "object", "shape": [2]},
+                "eef33_action": {"dtype": "object", "shape": [EEF33_DIM]},
+                "eef33_state": {"dtype": "object", "shape": [EEF33_DIM]},
             }
         )
     info = {
@@ -81,19 +79,20 @@ def _write_v20_bucket(root: Path, *, include_eef: bool = True) -> None:
         "annotation.human.coarse_action": np.full(EP_LENGTH, 6, dtype=np.int64),
     }
     if include_eef:
-        pose = np.zeros((EP_LENGTH, 12), dtype=np.float32)
-        pose[:, 0] = np.linspace(0.0, 0.5, EP_LENGTH)
-        pose[:, 6] = np.linspace(1.0, 1.5, EP_LENGTH)
-        grip = np.stack(
-            [np.linspace(0.0, 1.0, EP_LENGTH), np.linspace(1.0, 0.0, EP_LENGTH)],
-            axis=1,
-        ).astype(np.float32)
+        eef = np.zeros((EP_LENGTH, EEF33_DIM), dtype=np.float32)
+        eef[:, 0] = np.linspace(0.0, 0.5, EP_LENGTH)
+        eef[:, 3:9] = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
+        eef[:, 9:15] = 0.25
+        eef[:, 15] = np.linspace(1.0, 1.5, EP_LENGTH)
+        eef[:, 18:24] = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
+        eef[:, 24:30] = -0.25
+        eef[:, 30:33] = 0.1
+        eef_state = eef.copy()
+        eef_state[:, [0, 1, 2, 15, 16, 17]] += 0.1
         columns.update(
             {
-                "eef_sim_pose_action": list(pose),
-                "gripper_open_scale_action": list(grip),
-                "eef_sim_pose_state": list(pose + 0.1),
-                "gripper_open_scale_state": list(grip),
+                "eef33_action": list(eef),
+                "eef33_state": list(eef_state),
             }
         )
     frame = pd.DataFrame(columns)
@@ -116,8 +115,8 @@ def test_converter_reindexes_v20_without_copying_payloads(tmp_path: Path):
     _write_v20_bucket(source)
     report = convert_bucket(source, output)
 
-    assert report["raw_eef_dim"] == 20
-    assert report["representation"] == "bimanual_eef20"
+    assert report["raw_eef_dim"] == EEF33_DIM
+    assert report["representation"] == "bimanual_eef33_dex_waist"
     info = json.loads((output / "meta" / "info.json").read_text())
     assert info["codebase_version"] == "v3.0"
     assert info["splits"] == {"train": "0:1"}
@@ -143,7 +142,7 @@ def test_converted_eef_schema_loads_unified80_and_task_prompt(tmp_path: Path):
             "dataset_dir": str(output),
             "action_mode": "eef",
             "unify_action": True,
-            "unify_action_map": ["0-9", "34-43"],
+            "unify_action_map": ["0-8", "10-15", "34-42", "44-49", "68-70"],
             # Deliberately include the native integer annotation: the reader
             # must reject it as text and fall back through task_index.
             "prompt_columns": ["annotation.human.coarse_action"],
@@ -160,7 +159,7 @@ def test_converted_eef_schema_loads_unified80_and_task_prompt(tmp_path: Path):
         sample = dataset[0]
     assert sample["action"].shape == (4, 80)
     assert sample["proprio"].shape == (1, 80)
-    assert sample["action_mask"][0].sum().item() == 20
+    assert sample["action_mask"][0].sum().item() == EEF33_DIM
     assert sample["prompt"] == "pick the squash"
     image = np.asarray(sample["video"][0])
     assert np.any(image[:256] != 0)
@@ -197,13 +196,13 @@ def test_discover_multibucket_root(tmp_path: Path):
     assert [path.name for path in discover_buckets(tmp_path)] == ["a", "b"]
 
 
-def test_shipped_config_is_eef20_mapped_to_unified80():
+def test_shipped_config_is_eef33_mapped_to_unified80():
     config = OmegaConf.load("configs/dataloader/robocasa_gr1.yaml")
     assert config.action_mode == "eef"
     assert config.unify_action is True
-    assert list(config.unify_action_map) == ["0-9", "34-43"]
+    assert list(config.unify_action_map) == ["0-8", "10-15", "34-42", "44-49", "68-70"]
     assert list(config.prompt_columns) == []
-    assert len(config.state_mask) == len(config.action_mask) == 20
+    assert len(config.state_mask) == len(config.action_mask) == EEF33_DIM
     assert all(config.state_mask) and all(config.action_mask)
 
 

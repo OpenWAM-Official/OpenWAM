@@ -16,7 +16,8 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
-from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
+from openwam.dataloader.utils.gr1_kinematics import ROT6D_DIMS_EEF33
+from openwam.dataloader.utils.normalization import pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
 
@@ -36,10 +37,7 @@ def _iter_bucket_arrays(bucket: RoboCasaGR1Dataset):
         seen.add(key)
         table = bucket._load_data_table(*key)  # noqa: SLF001
         win = table.to_pandas()
-        # Action and state share one raw representation and one runtime
-        # normalizer. Pool both streams, as the RoboCOIN computation does.
-        yield bucket._raw_action(win)  # noqa: SLF001
-        yield bucket._raw_state(win)  # noqa: SLF001
+        yield bucket._raw_action(win), bucket._raw_state(win)  # noqa: SLF001
 
 
 def main() -> int:
@@ -62,17 +60,23 @@ def main() -> int:
         raise ValueError(f"stats require homogeneous modes/dims, got modes={action_modes}, dims={raw_dims}")
     action_mode = next(iter(action_modes))
     raw_dim = next(iter(raw_dims))
-    accumulator = Accumulator(dim=raw_dim, reservoir_cap=args.reservoir_cap)
+    action_accumulator = Accumulator(dim=raw_dim, reservoir_cap=args.reservoir_cap)
+    state_accumulator = Accumulator(dim=raw_dim, reservoir_cap=args.reservoir_cap)
     for bucket in _iter_buckets(dataset):
-        for array in _iter_bucket_arrays(bucket):
-            accumulator.update_batch(np.asarray(array, dtype=np.float32).reshape(-1, raw_dim))
-    if accumulator.count == 0:
+        for action, state in _iter_bucket_arrays(bucket):
+            action_accumulator.update_batch(np.asarray(action, dtype=np.float32).reshape(-1, raw_dim))
+            state_accumulator.update_batch(np.asarray(state, dtype=np.float32).reshape(-1, raw_dim))
+    if action_accumulator.count == 0 or state_accumulator.count == 0:
         raise ValueError("cannot compute normalization stats from an empty dataset")
-    stats = accumulator.finalize()
-    stats["num_timesteps"] = accumulator.count
-    stats["pool"] = "action+state"
+    action_stats = action_accumulator.finalize()
+    state_stats = state_accumulator.finalize()
+    action_stats["num_timesteps"] = action_accumulator.count
+    action_stats["pool"] = "action"
+    state_stats["num_timesteps"] = state_accumulator.count
+    state_stats["pool"] = "state"
     if action_mode == "eef":
-        pin_rot6d_identity(stats, ROT6D_DIMS_EEF20)
+        pin_rot6d_identity(action_stats, ROT6D_DIMS_EEF33)
+        pin_rot6d_identity(state_stats, ROT6D_DIMS_EEF33)
 
     output = Path(args.output)
     if output.suffix != ".npy":
@@ -83,9 +87,13 @@ def main() -> int:
         previous = np.load(output, allow_pickle=True).item()
         if isinstance(previous, dict):
             payload.update(previous)
-    payload[action_mode] = stats
+    payload[action_mode] = action_stats
+    payload[f"{action_mode}_state"] = state_stats
     np.save(output, payload)
-    print(f"wrote {output} action_mode={action_mode} dim={raw_dim} rows={accumulator.count}")
+    print(
+        f"wrote {output} action_mode={action_mode} state_mode={action_mode}_state "
+        f"dim={raw_dim} action_rows={action_accumulator.count} state_rows={state_accumulator.count}"
+    )
     return 0
 
 

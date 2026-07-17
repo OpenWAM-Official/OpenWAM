@@ -73,6 +73,8 @@ def run_eval(cfg: dict) -> int:
     env = _make_env(cfg)
     policy = OpenWAMRoboCasaGR1Policy(
         action_space=env.action_space,
+        env=env,
+        action_mode=cfg.get("action_mode", "eef"),
         host=cfg.get("host", "127.0.0.1"),
         port=int(cfg.get("port", 8848)),
         request_timeout=int(cfg.get("request_timeout", 300)),
