@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Re-index NVIDIA RoboCasa GR1 LeRobot v2.0 buckets as LeRobot v3.
 
-The public ``PhysicalAI-Robotics-GR00T-X-Embodiment-Sim`` GR1 folders are
-already LeRobot v2.0 datasets: one parquet and one MP4 per episode. OpenWAM's
-shared reader consumes the v3 metadata contract. This converter preserves the
-episode files (hard-linking by default) and writes v3 path names plus parquet
-episode/task indexes. It does not invent EEF features from the native 44-D
-joint vectors.
+OpenWAM's GR1 integration intentionally trains only bimanual EEF20. The public
+NVIDIA files contain joint44 and must first be enriched by a trusted simulator
+or FK pipeline with EEF pose/gripper columns. This converter validates those
+columns, preserves episode payloads (hard-linking by default), and writes the
+LeRobot v3 metadata/path contract. It never invents EEF values from joints.
 """
 
 from __future__ import annotations
@@ -26,6 +25,12 @@ import pyarrow.parquet as pq
 _V20 = "v2.0"
 _V30 = "v3.0"
 _FILES_PER_CHUNK = 1000
+_EEF_FEATURES = {
+    "eef_sim_pose_action": (12,),
+    "gripper_open_scale_action": (2,),
+    "eef_sim_pose_state": (12,),
+    "gripper_open_scale_state": (2,),
+}
 
 
 def _read_json(path: Path) -> dict:
@@ -75,13 +80,12 @@ def _validate_episode(
     data_path: Path,
     episode: dict,
     tasks: dict[int, str],
-    info: dict,
 ) -> int:
     table = pq.read_table(data_path)
     length = int(episode["length"])
     if table.num_rows != length:
         raise ValueError(f"{data_path}: parquet rows={table.num_rows}, episode length={length}")
-    required = {"episode_index", "task_index", "observation.state", "action"}
+    required = {"episode_index", "task_index", *_EEF_FEATURES}
     missing = required.difference(table.column_names)
     if missing:
         raise KeyError(f"{data_path}: missing required columns {sorted(missing)}")
@@ -103,8 +107,7 @@ def _validate_episode(
             f"{data_path}: tasks.jsonl prompt {prompt!r} does not match episode tasks {episode_tasks!r}"
         )
 
-    for key in ("observation.state", "action"):
-        expected = tuple(info["features"][key]["shape"])
+    for key, expected in _EEF_FEATURES.items():
         values = np.stack(table[key].to_pylist())
         if values.shape != (length, *expected):
             raise ValueError(f"{data_path}: {key} shape={values.shape}, expected {(length, *expected)}")
@@ -123,6 +126,18 @@ def convert_bucket(
     version = info.get("codebase_version")
     if version != _V20:
         raise ValueError(f"{source}: expected codebase_version={_V20!r}, got {version!r}")
+    features = info.get("features", {})
+    missing_eef = sorted(set(_EEF_FEATURES).difference(features))
+    if missing_eef:
+        raise KeyError(
+            f"{source}: missing required EEF features {missing_eef}. The native NVIDIA joint44 "
+            "download is not directly trainable by this EEF-only integration; enrich it with "
+            "trusted pose/gripper values before conversion."
+        )
+    for key, expected in _EEF_FEATURES.items():
+        shape = tuple(features[key].get("shape", ()))
+        if shape != expected:
+            raise ValueError(f"{source}: feature {key!r} must have shape {list(expected)}, got {shape}")
     if output.exists():
         if not overwrite:
             raise FileExistsError(f"{output} already exists; pass --overwrite to replace it")
@@ -157,7 +172,7 @@ def convert_bucket(
         source_data = source / _format_v20_path(info["data_path"], episode_index)
         if not source_data.is_file():
             raise FileNotFoundError(source_data)
-        task_index = _validate_episode(source_data, episode, tasks, info)
+        task_index = _validate_episode(source_data, episode, tasks)
         used_tasks.add(task_index)
 
         target_data = output / f"data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
@@ -240,9 +255,8 @@ def convert_bucket(
         "frames": total_frames,
         "tasks": len(used_tasks),
         "video_keys": video_keys,
-        "native_state_dim": int(info["features"]["observation.state"]["shape"][0]),
-        "native_action_dim": int(info["features"]["action"]["shape"][0]),
-        "representation": "native_joint",
+        "raw_eef_dim": 20,
+        "representation": "bimanual_eef20",
     }
 
 

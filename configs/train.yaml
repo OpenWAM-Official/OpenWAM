@@ -1,11 +1,11 @@
 defaults:
   - model: dual_system            # [Optional]: dual_system(default), shared_backbone, tri_system
-  - dataloader: robotwin          # [Optional]: robocoin(default), robotwin, mixture
+  - dataloader: robocasa_gr1     # [Optional]: robocoin(default), robotwin, robocasa_gr1, libero, mixture
   - _self_
 
 training:
   # --- Debug ---
-  debug: false                    # Debug mode: max_steps=20, save@10, constant LR
+  debug: true                     # Debug mode: max_steps=20, save@10, constant LR
 
   # --- Optimizer ---
   learning_rate: 1e-4             # Base learning rate for AdamW
@@ -54,7 +54,7 @@ training:
   timestep_sampling_alpha: 1.0    # variance_shift only: lead-curve strength  (>1 leads; 1 = diagonal = sync)
 
   # --- Checkpoint ---
-  output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output
+  output_path: /pfs/weiyang/OpenWAM/outputs/checkpoints          # Base directory for checkpoint output
   save_steps: 2000                # Save checkpoint every N steps (0 or null = disable saving)
   keep_last_k_ckpts: 1           # Rolling window: keep only the last K checkpoints
 

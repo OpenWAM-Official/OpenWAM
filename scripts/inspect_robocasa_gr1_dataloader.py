@@ -173,33 +173,27 @@ def inspect_sample(
         with modality_path.open(encoding="utf-8") as handle:
             report["modality"] = json.load(handle)
 
-    mode = bucket.action_mode
-    if mode in {"eef", "unify"}:
-        raw = raw_action
-        if raw.shape[-1] != 20:
-            raise ValueError(f"EEF/unify reader must emit raw EEF20, got {raw.shape}")
-        report["eef20_layout"] = "[L xyz3, rot6d6, grip1, R xyz3, rot6d6, grip1]"
-        report["rot6d"] = _rot6d_report(raw)
-        normalized = bucket._normalize_array(raw)  # noqa: SLF001
-        rotation_indices = list(ROT6D_DIMS_EEF20)
-        report["rot6d_normalization_max_delta"] = float(
-            np.max(np.abs(normalized[..., rotation_indices] - raw[..., rotation_indices]))
+    raw = raw_action
+    if raw.shape[-1] != 20:
+        raise ValueError(f"EEF reader must emit raw EEF20, got {raw.shape}")
+    report["eef20_layout"] = "[L xyz3, rot6d6, grip1, R xyz3, rot6d6, grip1]"
+    report["rot6d"] = _rot6d_report(raw)
+    normalized = bucket._normalize_array(raw)  # noqa: SLF001
+    rotation_indices = list(ROT6D_DIMS_EEF20)
+    report["rot6d_normalization_max_delta"] = float(
+        np.max(np.abs(normalized[..., rotation_indices] - raw[..., rotation_indices]))
+    )
+    if report["rot6d_normalization_max_delta"] > 1e-6:
+        raise ValueError("normalization changed rot6d; regenerate stats with identity-pinned rotation dims")
+    if bucket._unify:  # noqa: SLF001
+        restored = unmap_from_unify(
+            jittered["action"].numpy(),
+            bucket._unify_dst_index,  # noqa: SLF001
         )
-        if report["rot6d_normalization_max_delta"] > 1e-6:
-            raise ValueError("normalization changed rot6d; regenerate stats with identity-pinned rotation dims")
-        if mode == "unify":
-            restored = unmap_from_unify(
-                jittered["action"].numpy(),
-                bucket._unify_dst_index,  # noqa: SLF001
-            )
-            expected = normalized[: restored.shape[0]]
-            report["unify_roundtrip_max_error"] = float(np.max(np.abs(restored - expected)))
-            if report["unify_roundtrip_max_error"] > 1e-6:
-                raise ValueError("unify_action mapping does not round-trip to normalized EEF20")
-    else:
-        report["representation"] = (
-            "native joint/body vector; not xyz+rot6d+gripper and not semantically mappable to EEF80"
-        )
+        expected = normalized[: restored.shape[0]]
+        report["unify_roundtrip_max_error"] = float(np.max(np.abs(restored - expected)))
+        if report["unify_roundtrip_max_error"] > 1e-6:
+            raise ValueError("unify_action mapping does not round-trip to normalized EEF20")
 
     with (output_dir / "inspection_report.json").open("w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, ensure_ascii=False)

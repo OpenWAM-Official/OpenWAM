@@ -21,10 +21,27 @@ VIDEO_KEY = "observation.images.ego_view"
 EP_LENGTH = 6
 
 
-def _write_v20_bucket(root: Path) -> None:
+def _write_v20_bucket(root: Path, *, include_eef: bool = True) -> None:
     (root / "meta").mkdir(parents=True)
     (root / "data" / "chunk-000").mkdir(parents=True)
     (root / "videos" / "chunk-000" / VIDEO_KEY).mkdir(parents=True)
+    features = {
+        VIDEO_KEY: {"dtype": "video", "shape": [256, 256, 3]},
+        "observation.state": {"dtype": "object", "shape": [44]},
+        "action": {"dtype": "object", "shape": [44]},
+        "task_index": {"dtype": "int64", "shape": [1]},
+        "episode_index": {"dtype": "int64", "shape": [1]},
+        "annotation.human.coarse_action": {"dtype": "int64", "shape": [1]},
+    }
+    if include_eef:
+        features.update(
+            {
+                "eef_sim_pose_action": {"dtype": "object", "shape": [12]},
+                "gripper_open_scale_action": {"dtype": "object", "shape": [2]},
+                "eef_sim_pose_state": {"dtype": "object", "shape": [12]},
+                "gripper_open_scale_state": {"dtype": "object", "shape": [2]},
+            }
+        )
     info = {
         "codebase_version": "v2.0",
         "robot_type": "GR1ArmsAndWaistFourierHands",
@@ -38,14 +55,7 @@ def _write_v20_bucket(root: Path) -> None:
         "splits": {"train": "0:100"},
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
         "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-        "features": {
-            VIDEO_KEY: {"dtype": "video", "shape": [256, 256, 3]},
-            "observation.state": {"dtype": "object", "shape": [44]},
-            "action": {"dtype": "object", "shape": [44]},
-            "task_index": {"dtype": "int64", "shape": [1]},
-            "episode_index": {"dtype": "int64", "shape": [1]},
-            "annotation.human.coarse_action": {"dtype": "int64", "shape": [1]},
-        },
+        "features": features,
     }
     (root / "meta" / "info.json").write_text(json.dumps(info))
     (root / "meta" / "episodes.jsonl").write_text(
@@ -63,15 +73,30 @@ def _write_v20_bucket(root: Path) -> None:
     (root / "meta" / "modality.json").write_text(json.dumps({"state": {}, "action": {}}))
     state = np.arange(EP_LENGTH * 44, dtype=np.float32).reshape(EP_LENGTH, 44) / 100
     action = state + 0.1
-    frame = pd.DataFrame(
-        {
-            "observation.state": list(state),
-            "action": list(action),
-            "task_index": np.ones(EP_LENGTH, dtype=np.int64),
-            "episode_index": np.zeros(EP_LENGTH, dtype=np.int64),
-            "annotation.human.coarse_action": np.full(EP_LENGTH, 6, dtype=np.int64),
-        }
-    )
+    columns = {
+        "observation.state": list(state),
+        "action": list(action),
+        "task_index": np.ones(EP_LENGTH, dtype=np.int64),
+        "episode_index": np.zeros(EP_LENGTH, dtype=np.int64),
+        "annotation.human.coarse_action": np.full(EP_LENGTH, 6, dtype=np.int64),
+    }
+    if include_eef:
+        pose = np.zeros((EP_LENGTH, 12), dtype=np.float32)
+        pose[:, 0] = np.linspace(0.0, 0.5, EP_LENGTH)
+        pose[:, 6] = np.linspace(1.0, 1.5, EP_LENGTH)
+        grip = np.stack(
+            [np.linspace(0.0, 1.0, EP_LENGTH), np.linspace(1.0, 0.0, EP_LENGTH)],
+            axis=1,
+        ).astype(np.float32)
+        columns.update(
+            {
+                "eef_sim_pose_action": list(pose),
+                "gripper_open_scale_action": list(grip),
+                "eef_sim_pose_state": list(pose + 0.1),
+                "gripper_open_scale_state": list(grip),
+            }
+        )
+    frame = pd.DataFrame(columns)
     pq.write_table(pa.Table.from_pandas(frame), root / "data" / "chunk-000" / "episode_000000.parquet")
     (root / "videos" / "chunk-000" / VIDEO_KEY / "episode_000000.mp4").write_bytes(b"video")
 
@@ -91,8 +116,8 @@ def test_converter_reindexes_v20_without_copying_payloads(tmp_path: Path):
     _write_v20_bucket(source)
     report = convert_bucket(source, output)
 
-    assert report["native_action_dim"] == 44
-    assert report["representation"] == "native_joint"
+    assert report["raw_eef_dim"] == 20
+    assert report["representation"] == "bimanual_eef20"
     info = json.loads((output / "meta" / "info.json").read_text())
     assert info["codebase_version"] == "v3.0"
     assert info["splits"] == {"train": "0:1"}
@@ -108,7 +133,7 @@ def test_converter_reindexes_v20_without_copying_payloads(tmp_path: Path):
     assert tasks.index.tolist() == ["pick the squash"]
 
 
-def test_converted_real_schema_loads_joint44_and_task_prompt(tmp_path: Path):
+def test_converted_eef_schema_loads_unified80_and_task_prompt(tmp_path: Path):
     source = tmp_path / "source"
     output = tmp_path / "output"
     _write_v20_bucket(source)
@@ -116,8 +141,9 @@ def test_converted_real_schema_loads_joint44_and_task_prompt(tmp_path: Path):
     config = OmegaConf.create(
         {
             "dataset_dir": str(output),
-            "action_mode": "joint",
-            "action_dim": 44,
+            "action_mode": "eef",
+            "unify_action": True,
+            "unify_action_map": ["0-9", "34-43"],
             # Deliberately include the native integer annotation: the reader
             # must reject it as text and fall back through task_index.
             "prompt_columns": ["annotation.human.coarse_action"],
@@ -132,12 +158,37 @@ def test_converted_real_schema_loads_joint44_and_task_prompt(tmp_path: Path):
     with _mock_decoder():
         dataset = RoboCasaGR1Dataset.from_config(config)
         sample = dataset[0]
-    assert sample["action"].shape == (4, 44)
-    assert sample["proprio"].shape == (1, 44)
+    assert sample["action"].shape == (4, 80)
+    assert sample["proprio"].shape == (1, 80)
+    assert sample["action_mask"][0].sum().item() == 20
     assert sample["prompt"] == "pick the squash"
     image = np.asarray(sample["video"][0])
     assert np.any(image[:256] != 0)
     assert not np.any(image[256:] != 0)
+
+
+def test_single_view_requires_256x320(tmp_path: Path):
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    _write_v20_bucket(source)
+    convert_bucket(source, output)
+    config = OmegaConf.create(
+        {
+            "dataset_dir": str(output),
+            "action_mode": "eef",
+            "unify_action": False,
+            "num_frames": 5,
+            "video_stride": 1,
+            "height": 256,
+            "width": 320,
+            "multiview": False,
+        }
+    )
+    with _mock_decoder():
+        assert RoboCasaGR1Dataset.from_config(config)[0]["video"][0].size == (320, 256)
+    config.height = 384
+    with pytest.raises(ValueError, match="single-view requires height=256, width=320"):
+        RoboCasaGR1Dataset.from_config(config)
 
 
 def test_discover_multibucket_root(tmp_path: Path):
@@ -146,27 +197,19 @@ def test_discover_multibucket_root(tmp_path: Path):
     assert [path.name for path in discover_buckets(tmp_path)] == ["a", "b"]
 
 
-def test_shipped_configs_separate_native_joint_and_eef_unify():
-    native = OmegaConf.load("configs/dataloader/robocasa_gr1.yaml")
-    assert native.action_mode == "joint"
-    assert native.action_dim == 44
-    assert native.unify_action is False
-    assert native.unify_action_map is None
-    assert list(native.prompt_columns) == []
-
-    unified = OmegaConf.load("configs/dataloader/robocasa_gr1_unify.yaml")
-    assert unified.action_mode == "unify"
-    assert unified.action_dim == 20
-    assert unified.unify_action is True
-    assert list(unified.unify_action_map) == ["0-9", "34-43"]
+def test_shipped_config_is_eef20_mapped_to_unified80():
+    config = OmegaConf.load("configs/dataloader/robocasa_gr1.yaml")
+    assert config.action_mode == "eef"
+    assert config.unify_action is True
+    assert list(config.unify_action_map) == ["0-9", "34-43"]
+    assert list(config.prompt_columns) == []
+    assert len(config.state_mask) == len(config.action_mask) == 20
+    assert all(config.state_mask) and all(config.action_mask)
 
 
-def test_eef_unify_profile_fails_fast_on_native_joint44(tmp_path: Path):
+def test_converter_rejects_native_joint44_without_eef_columns(tmp_path: Path):
     source = tmp_path / "source"
     output = tmp_path / "output"
-    _write_v20_bucket(source)
-    convert_bucket(source, output)
-    config = OmegaConf.load("configs/dataloader/robocasa_gr1_unify.yaml")
-    config.dataset_dir = str(output)
-    with pytest.raises(KeyError, match="native joint44 only"):
-        RoboCasaGR1Dataset.from_config(config)
+    _write_v20_bucket(source, include_eef=False)
+    with pytest.raises(KeyError, match="missing required EEF features"):
+        convert_bucket(source, output)

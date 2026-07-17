@@ -71,7 +71,7 @@ def main() -> int:
     stats = accumulator.finalize()
     stats["num_timesteps"] = accumulator.count
     stats["pool"] = "action+state"
-    if action_mode in {"eef", "unify"}:
+    if action_mode == "eef":
         pin_rot6d_identity(stats, ROT6D_DIMS_EEF20)
 
     output = Path(args.output)

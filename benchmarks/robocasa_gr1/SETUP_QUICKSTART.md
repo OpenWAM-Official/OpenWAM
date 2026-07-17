@@ -50,14 +50,17 @@ hf download nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim \
   --include "gr1_unified.*/**" \
   --local-dir /path/to/bench_deps/robocasa-gr1-24k
 
+# After a trusted simulator/FK pipeline adds the required EEF pose12 +
+# gripper2 action/state columns:
 python scripts/convert_robocasa_gr1_v20_to_v30.py \
-  --input /path/to/bench_deps/robocasa-gr1-24k \
-  --output /path/to/bench_deps/robocasa-gr1-v30
+  --input /path/to/bench_deps/robocasa-gr1-eef-v20 \
+  --output /path/to/bench_deps/robocasa-gr1-eef-v30
 ```
 
 The public folders are LeRobot v2.0 with native 44-D joint/body state/action,
-not HDF5 and not EEF20. The converter writes the v3 metadata/path contract and
-hard-links payloads by default.
+not HDF5 and not EEF20. This integration does not support joint mode. The
+converter requires reliable EEF columns, writes the v3 metadata/path contract,
+and hard-links payloads by default.
 
 Approximate dataset size:
 

@@ -146,7 +146,7 @@ def test_unify_mode_maps_eef20_to_80_and_masks_unmapped_dims(tmp_path: Path):
     with _mock_decoder():
         ds = _dataset(
             tmp_path,
-            action_mode="unify",
+            action_mode="eef",
             unify_action=True,
             unify_action_map=["0-9", "34-43"],
         )
@@ -165,7 +165,7 @@ def test_unify_mode_maps_eef20_to_80_and_masks_unmapped_dims(tmp_path: Path):
 def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     _write_bucket(tmp_path)
     stats = {
-        "unify": {
+        "eef": {
             "min": np.zeros(20, dtype=np.float32),
             "max": np.ones(20, dtype=np.float32),
             "mean": np.zeros(20, dtype=np.float32),
@@ -178,7 +178,7 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     with _mock_decoder():
         ds = _dataset(
             tmp_path,
-            action_mode="unify",
+            action_mode="eef",
             unify_action=True,
             unify_action_map=["0-9", "34-43"],
             normalize_mode="min-max",
@@ -192,13 +192,13 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     assert sample["action"][0, 34].item() == 1.0
     assert ds.normalization_stats_path == str(tmp_path / "meta" / "normalization_stats.npy")
     deploy_stats = np.load(ds.normalization_stats_path, allow_pickle=True).item()
-    assert set(deploy_stats["unify"]) == {"mean", "std", "min", "max", "q01", "q99"}
-    assert deploy_stats["unify"]["mean"].shape == (20,)
+    assert set(deploy_stats["eef"]) == {"mean", "std", "min", "max", "q01", "q99"}
+    assert deploy_stats["eef"]["mean"].shape == (20,)
     cfg = OmegaConf.create(
         {
             "dataloader": {
                 "normalize_mode": "min-max",
-                "action_mode": "unify",
+                "action_mode": "eef",
                 "unify_action": True,
                 "unify_action_map": ["0-9", "34-43"],
             }
@@ -222,10 +222,10 @@ def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Pat
     }
     pin_rot6d_identity(base, ROT6D_DIMS_EEF20)
     stats_path = tmp_path / "normalization_stats.npy"
-    np.save(stats_path, {"unify": base})
+    np.save(stats_path, {"eef": base})
     ds = _dataset(
         tmp_path,
-        action_mode="unify",
+        action_mode="eef",
         unify_action=True,
         unify_action_map=["0-9", "34-43"],
         normalize_mode="min-max",
@@ -244,16 +244,16 @@ def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Pat
         np.testing.assert_allclose(np.sum(first * second, axis=-1), 0.0, atol=1e-6)
 
 
-def test_unify_mode_rejects_mismatched_base_flag(tmp_path: Path):
+def test_joint_mode_is_rejected(tmp_path: Path):
     _write_bucket(tmp_path)
-    with np.testing.assert_raises_regex(ValueError, "requires unify_action=true"):
-        _dataset(tmp_path, action_mode="unify", unify_action=False)
+    with np.testing.assert_raises_regex(ValueError, "supports only action_mode='eef'"):
+        _dataset(tmp_path, action_mode="joint", unify_action=False)
 
 
 def test_unify_mode_requires_explicit_map(tmp_path: Path):
     _write_bucket(tmp_path)
     with np.testing.assert_raises_regex(ValueError, "requires an explicit unify_action_map"):
-        _dataset(tmp_path, action_mode="unify", unify_action=True, unify_action_map=None)
+        _dataset(tmp_path, action_mode="eef", unify_action=True, unify_action_map=None)
 
 
 def test_missing_optional_prompt_column_is_not_projected(tmp_path: Path):
@@ -354,21 +354,26 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
         _write_bucket(root / name)
     source = tmp_path / "stats.npy"
     base = np.arange(20, dtype=np.float32)
+    source_stats = {
+        "min": base - 1,
+        "max": base + 1,
+        "mean": base,
+        "std": np.ones(20, dtype=np.float32),
+        "q01": base - 1,
+        "q99": base + 1,
+    }
+    pin_rot6d_identity(source_stats, ROT6D_DIMS_EEF20)
     np.save(
         source,
         {
-            "eef": {
-                "min": base - 1,
-                "max": base + 1,
-                "mean": base,
-                "std": np.ones(20, dtype=np.float32),
-            }
+            "eef": source_stats
         },
     )
     cfg = OmegaConf.create(
         {
             "dataset_dir": str(root),
             "num_frames": 5,
+            "multiview": True,
             "prompt_columns": ["annotation.human.coarse_action"],
             "normalize_mode": "z-score",
             "normalization_stats_path": str(source),
@@ -398,3 +403,21 @@ def test_benchmark_fallback_key_order_is_deterministic():
     mapped = action_vector_to_dict([1.0, 2.0, 3.0], _DictSpace())
     np.testing.assert_array_equal(mapped["action.a"], [1.0, 2.0])
     np.testing.assert_array_equal(mapped["action.z"], [3.0])
+
+
+def test_benchmark_rejects_eef20_for_joint29_env_without_controller():
+    class _Space:
+        def __init__(self, shape):
+            self.shape = shape
+
+    class _Joint29:
+        spaces = {
+            "action.left_arm": _Space((7,)),
+            "action.left_hand": _Space((6,)),
+            "action.right_arm": _Space((7,)),
+            "action.right_hand": _Space((6,)),
+            "action.waist": _Space((3,)),
+        }
+
+    with np.testing.assert_raises_regex(ValueError, "too short|consumed"):
+        action_vector_to_dict(np.zeros(20, dtype=np.float32), _Joint29())

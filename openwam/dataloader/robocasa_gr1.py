@@ -1,8 +1,8 @@
 """RoboCasa GR1 LeRobot v3 dataloader.
 
-This reader is intentionally schema-configurable. RoboCasa GR1 data may be
-exported as joint, EEF, or pre-unified vectors; the LeRobot v3 container stays
-the same, but feature names can differ across conversion jobs.
+This integration intentionally accepts only bimanual EEF20. ``unify_action``
+optionally scatters that normalized raw representation into the shared 80-D
+space; joint vectors are rejected rather than assigned misleading EEF semantics.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from openwam.dataloader.utils.normalization import STAT_KEYS, apply_normalizatio
 
 logger = logging.getLogger(__name__)
 
-_ACTION_MODES = {"joint", "eef", "unify"}
+_ACTION_MODE = "eef"
 
 
 def _as_list(value: Any) -> List[Any]:
@@ -77,11 +77,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
 
     CONFIG_KEYS: ClassVar[Tuple[str, ...]] = LeRobotV3Reader.CONFIG_KEYS + (
         "action_mode",
-        "action_dim",
-        "action_column",
-        "state_column",
-        "joint_action_column",
-        "joint_state_column",
         "eef_action_column",
         "eef_state_column",
         "eef_pose_action_column",
@@ -104,11 +99,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         dataset_dir: str,
         *,
         action_mode: str = "eef",
-        action_dim: Optional[int] = None,
-        action_column: Optional[str] = None,
-        state_column: Optional[str] = None,
-        joint_action_column: str = "action",
-        joint_state_column: str = "observation.state",
         eef_action_column: Optional[str] = None,
         eef_state_column: Optional[str] = None,
         eef_pose_action_column: str = "eef_sim_pose_action",
@@ -127,23 +117,19 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         **kwargs: Any,
     ):
         mode = str(action_mode).strip().lower()
-        if mode not in _ACTION_MODES:
-            raise ValueError(f"action_mode must be one of {sorted(_ACTION_MODES)}, got {action_mode!r}")
-        unify_on = bool(unify_action)
-        if mode == "unify" and not unify_on:
-            raise ValueError("RoboCasaGR1 action_mode='unify' requires unify_action=true")
-        if mode != "unify" and unify_on:
+        if mode != _ACTION_MODE:
             raise ValueError(
-                f"RoboCasaGR1 action_mode={mode!r} requires unify_action=false; "
-                "use action_mode='unify' for the shared 80-D action space"
+                f"RoboCasaGR1 currently supports only action_mode='eef', got {action_mode!r}. "
+                "EEF is raw bimanual 20-D: [L xyz3+rot6d6+grip1, R xyz3+rot6d6+grip1]."
             )
-        if mode == "unify" and unify_action_map is None:
+        unify_on = bool(unify_action)
+        if unify_on and unify_action_map is None:
             raise ValueError(
-                "RoboCasaGR1 action_mode='unify' requires an explicit unify_action_map; "
+                "RoboCasaGR1 unify_action=true requires an explicit unify_action_map; "
                 "set ['0-9', '34-43'] for canonical EEF20 mapping"
             )
         self.action_mode = mode
-        self.DEPLOY_ACTION_MODE = mode
+        self.DEPLOY_ACTION_MODE = _ACTION_MODE
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
 
         self._prompt_columns = [str(x) for x in _as_list(prompt_columns)]
@@ -155,34 +141,14 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             str(x) for x in (right_wrist_camera_priority or self.RIGHT_WRIST_CAMERA_PRIORITY)
         )
 
-        self._action_column = action_column
-        self._state_column = state_column
-        self._pose_action_column = None
-        self._gripper_action_column = None
-        self._pose_state_column = None
-        self._gripper_state_column = None
+        self._action_column = eef_action_column
+        self._state_column = eef_state_column
+        self._pose_action_column = None if self._action_column else eef_pose_action_column
+        self._gripper_action_column = None if self._action_column else eef_gripper_action_column
+        self._pose_state_column = None if self._state_column else eef_pose_state_column
+        self._gripper_state_column = None if self._state_column else eef_gripper_state_column
 
-        if mode == "joint":
-            self._action_column = action_column or joint_action_column
-            self._state_column = state_column or joint_state_column
-            dim = int(action_dim) if action_dim is not None else None
-        else:
-            self._action_column = action_column or eef_action_column
-            self._state_column = state_column or eef_state_column
-            self._pose_action_column = None if self._action_column else eef_pose_action_column
-            self._gripper_action_column = None if self._action_column else eef_gripper_action_column
-            self._pose_state_column = None if self._state_column else eef_pose_state_column
-            self._gripper_state_column = None if self._state_column else eef_gripper_state_column
-            dim = int(action_dim) if action_dim is not None else EEF_DIM
-
-        if mode == "joint" and dim is None:
-            # LeRobot v3 joint conversions should set action_dim explicitly.
-            # A clear constructor error is better than a late assignment failure.
-            raise ValueError("RoboCasaGR1Dataset action_mode='joint' requires action_dim in the dataloader config")
-        if mode != "joint" and dim != EEF_DIM:
-            raise ValueError(f"RoboCasaGR1 action_mode={mode!r} requires raw 20-D EEF vectors, got action_dim={dim}")
-
-        self.ACTION_DIM = int(dim)
+        self.ACTION_DIM = EEF_DIM
         action_dim_mask = _as_bool_mask(action_mask, self.ACTION_DIM, field="action_mask")
         state_dim_mask = _as_bool_mask(state_mask, self.ACTION_DIM, field="state_mask")
         if (
@@ -227,6 +193,13 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
 
     def _post_init(self, info: dict) -> None:
         features = info.get("features", {}) or {}
+        expected_size = (384, 320) if self._multiview else (256, 320)
+        if (self._height, self._width) != expected_size:
+            mode = "multiview" if self._multiview else "single-view"
+            raise ValueError(
+                f"RoboCasaGR1 {mode} requires height={expected_size[0]}, width={expected_size[1]}, "
+                f"got height={self._height}, width={self._width}"
+            )
         required = [
             self._action_column,
             self._state_column,
@@ -240,8 +213,8 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         if missing_required:
             raise KeyError(
                 f"RoboCasaGR1 action_mode={self.action_mode!r} requires columns absent from info.features: "
-                f"{missing_required}. The public NVIDIA GR1 download contains native joint44 only; "
-                "use configs/dataloader/robocasa_gr1.yaml unless an EEF-enriched conversion was generated."
+                f"{missing_required}. Generate a reliable EEF-enriched conversion first; "
+                "the public NVIDIA GR1 joint44 columns must not be relabeled as EEF."
             )
         for column, expected_dim in (
             (self._action_column, self._raw_action_dim),

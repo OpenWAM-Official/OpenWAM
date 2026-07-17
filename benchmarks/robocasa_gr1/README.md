@@ -39,30 +39,34 @@ For a short machine-migration setup flow, start with
      --local-dir /path/to/robocasa-gr1-24k
    ```
 
-   These folders are LeRobot **v2.0**, not raw HDF5 and not v3. Convert their
-   metadata/path layout non-destructively for the OpenWAM reader:
+   These folders are LeRobot **v2.0** with native 44-D joint/body vectors.
+   This integration intentionally supports only bimanual EEF20, so the public
+   files are not directly trainable. First use a trusted simulator/FK export to
+   add these four columns:
+
+   ```text
+   eef_sim_pose_action[12] + gripper_open_scale_action[2]
+   eef_sim_pose_state[12]  + gripper_open_scale_state[2]
+   ```
+
+   Then re-index the enriched v2.0 buckets non-destructively:
 
    ```bash
    python scripts/convert_robocasa_gr1_v20_to_v30.py \
-     --input /path/to/robocasa-gr1-24k \
-     --output /path/to/robocasa-gr1-v30
+     --input /path/to/robocasa-gr1-eef-v20 \
+     --output /path/to/robocasa-gr1-eef-v30
    ```
 
+   The converter rejects joint-only buckets rather than assigning false EEF
+   semantics. It validates pose/gripper shapes for every episode.
    The converter hard-links payloads by default, so conversion is fast and does
    not duplicate the large parquet/MP4 data. Use `--link-mode symlink` across
    mount layouts, or `--link-mode copy` only when duplication is intended.
 
-   The public data contains native 44-D joint/body `observation.state` and
-   `action` vectors. It does **not** contain xyz+rot6d+gripper EEF20 columns.
-   `configs/dataloader/robocasa_gr1.yaml` therefore defaults to `joint`,
-   `action_dim: 44`, and prompt lookup through `task_index`. Do not enable
-   EEF80 unification on these joint vectors.
-
-   `configs/dataloader/robocasa_gr1_unify.yaml` is a separate, fail-fast
-   template for a genuinely EEF-enriched conversion with
+   `configs/dataloader/robocasa_gr1.yaml` accepts only
    `[L xyz3, rot6d6, grip1, R xyz3, rot6d6, grip1]`. Its explicit map places
-   EEF20 into unified slots `0-9` and `34-43`; generated stats pin all rot6d
-   dimensions to identity so only xyz/gripper are normalized.
+   the two per-arm 10-D blocks into unified slots `0-9` and `34-43`. Generated
+   stats pin all rot6d dimensions to identity so only xyz/gripper are normalized.
 
 3. Start an OpenWAM policy server separately:
 
@@ -102,7 +106,7 @@ comparison, and validate action/prompt contracts:
 ```bash
 python scripts/inspect_robocasa_gr1_dataloader.py \
   --config configs/dataloader/robocasa_gr1.yaml \
-  --dataset-dir /path/to/robocasa-gr1-v30 \
+  --dataset-dir /path/to/robocasa-gr1-eef-v30 \
   --sample-index 0 \
   --output-dir validation_outputs/robocasa_gr1_sample0
 ```
@@ -135,12 +139,13 @@ episode count, and max steps. By default:
   for deterministic diagnostics but cannot prove semantic alignment.
 - Set an explicit ordered `action_keys` list matching the conversion job.
   `action_keys: null` uses sorted `env.action_space` keys.
-- The NVIDIA dataset card documents 44D state/action, while the default
+- The NVIDIA dataset card documents 44D joint state/action, while the default
   `gr1_unified/*GR1ArmsAndWaistFourierHands_Env` gym wrapper currently reports
-  29D state/action (`6+6+7+7+3`). Treat the env smoke output as the source of
-  truth for the checkpoint you evaluate. The shipped 29D environment directly
-  consumes only a matching joint-mode checkpoint; 20D EEF and 80D unified
-  checkpoints require a robot-specific EEF-to-joint controller/conversion.
+  29D joint state/action (`6+6+7+7+3`). The websocket transport is integrated,
+  but a 20D EEF checkpoint cannot drive this 29D joint environment until a
+  robot-specific EEF-to-joint controller is supplied. The client fails on the
+  dimension mismatch instead of silently slicing actions; full simulator
+  train/deploy closure remains blocked by that controller, not by websocket IO.
 - `fail_on_incomplete: false` means the process exits successfully after a
   completed benchmark run even when success rate is below 100%. Set it to
   `true` for pass/fail smoke gates.
