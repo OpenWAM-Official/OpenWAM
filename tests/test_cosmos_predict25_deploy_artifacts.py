@@ -273,14 +273,11 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
     """Saved ``config.yaml``s come back as ``ListConfig`` of ``DictConfig``;
     iterating with ``isinstance(c, dict)`` against ``DictConfig`` would
     silently fail (``DictConfig`` is not a ``dict`` subclass). This test
-    pins that the self-contained Reason1 fallback fires when
-
-      - ``components`` contains the ``attr: text_encoder, source: state_dict``
-        marker that ``generate_cosmos_predict25_component_specs`` emits, AND
-      - ``<ckpt_dir>/reason1/`` artifact dir exists.
-
-    Under those conditions deploy must clear ``text_encoder_path`` so the
-    empty-shell deploy path picks up the in-state-dict Reason1 weights.
+    pins that the self-contained Reason1 branch fires when ``components``
+    contains the ``attr: text_encoder, source: state_dict`` marker that
+    ``generate_cosmos_predict25_component_specs`` emits: deploy must clear
+    ``text_encoder_path`` so the empty-shell path picks up the in-state-dict
+    Reason1 weights.
     """
     from unittest.mock import MagicMock, patch
 
@@ -306,7 +303,6 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
     ckpt_dir = tmp_path / "ckpt"
     ckpt_dir.mkdir()
     (ckpt_dir / "config.yaml").write_text(OmegaConf.to_yaml(saved_cfg))
-    # The fallback only fires when the reason1 artifact dir exists.
     (ckpt_dir / "reason1").mkdir()
     (ckpt_dir / "checkpoint_step_1.safetensors").write_bytes(b"")
 

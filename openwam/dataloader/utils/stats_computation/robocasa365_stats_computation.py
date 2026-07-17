@@ -47,25 +47,11 @@ from openwam.dataloader.robocasa365 import (
 )
 from openwam.dataloader.transforms.normalize import compute_extended_stats
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
-
-_STAT_KEYS = ("mean", "std", "min", "max", "q01", "q99")
+from openwam.dataloader.utils.normalization import STAT_KEYS
+from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import atomic_save_stats_npy
 
 # LeRobot ``action`` base command dims (mobile): [0:3] x/y/yaw vel, [3] torso, [4] control_mode.
 _ACTION_BASE = slice(0, 5)
-
-
-def atomic_save_stats_npy(path: str, stats: dict) -> None:
-    """Write the stats ``.npy`` atomically (tmp + ``os.replace``).
-
-    ``np.save`` creates the destination at open time but fills it afterwards, so a
-    polling consumer can see a half-written file; serialize to a sibling tmp path
-    and rename it into place instead. (Identical contract to robotwin's.)
-    """
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    tmp_path = f"{path}.tmp"
-    np.save(tmp_path, stats, allow_pickle=True)
-    actual_tmp = tmp_path if os.path.exists(tmp_path) else f"{tmp_path}.npy"
-    os.replace(actual_tmp, path)
 
 
 def _iter_episode_arrays(data_root: str, include_base: bool = False, task_name: str | None = None):
@@ -105,7 +91,7 @@ def _base_stats_block(base_chunks: list) -> dict:
     whole dataset; control_mode all -1 in fixed-base buckets) don't divide-by-zero at normalize time —
     a constant dim then normalizes to a constant that still round-trips through denormalize."""
     b = compute_extended_stats(base_chunks)
-    out = {k: np.asarray(b[k], np.float32).reshape(-1).copy() for k in _STAT_KEYS}
+    out = {k: np.asarray(b[k], np.float32).reshape(-1).copy() for k in STAT_KEYS}
     degenerate = (out["max"] - out["min"]) < 1e-6
     out["max"] = np.where(degenerate, out["min"] + 1.0, out["max"]).astype(np.float32)
     out["std"] = np.where(out["std"] < 1e-6, 1.0, out["std"]).astype(np.float32)
@@ -146,7 +132,7 @@ def _finish(arm_chunks: list, base_chunks: list, total: int, include_base: bool,
     if not include_base:
         return {"eef": eef20, "num_timesteps": int(total)}
     base5 = _base_stats_block(base_chunks)
-    combined = {k: np.concatenate([eef20[k], base5[k]]).astype(np.float32) for k in _STAT_KEYS}
+    combined = {k: np.concatenate([eef20[k], base5[k]]).astype(np.float32) for k in STAT_KEYS}
     if combined["mean"].shape[0] != RAW_MOBILE_DIM:
         raise ValueError(f"combined {_MOBILE_STATS_KEY} dim {combined['mean'].shape[0]} != {RAW_MOBILE_DIM}")
     return {_MOBILE_STATS_KEY: combined, "num_timesteps": int(total)}

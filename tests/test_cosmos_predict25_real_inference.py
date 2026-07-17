@@ -17,19 +17,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from tests.test_cosmos_predict25_real_load import _StubReason1Encoder
-
 pytestmark = pytest.mark.gpu
 
 ASSET_PATH = Path(os.environ.get("COSMOS25_ASSET_PATH", "/path/to/assets/Cosmos-Predict2.5-2B"))
-
-
-@pytest.fixture
-def stub_reason1(monkeypatch):
-    monkeypatch.setattr(
-        "openwam.model.video_backbone.cosmos_predict25.text_encoder.Reason1LiveTextEncoder",
-        _StubReason1Encoder,
-    )
 
 
 def _skip_unless_runnable():

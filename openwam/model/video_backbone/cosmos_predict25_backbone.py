@@ -537,16 +537,16 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         if self.training and self.text_dropout_p > 0.0:
             text_list = [text] if isinstance(text, str) else list(text)
             text = [t if self._text_dropout_rng.random() >= self.text_dropout_p else "" for t in text_list]
-        # Live encoder returns pre-projection `(B, 512, 100352) bf16`; apply
-        # the DiT's owned `crossattn_proj` HERE (not in prepare) so the
-        # architecture's proprio-token concat sees 1024-d context.
-        context = self.text_encoder(text)
-        context = context.to(device=input_latents.device, dtype=input_latents.dtype)
-        net = self.dit
-        if getattr(net, "use_crossattn_projection", False) and context.shape[-1] == int(
-            getattr(net, "crossattn_proj_in_channels", -1)
-        ):
-            context = net.crossattn_proj(context)
+        # Inference-only memoization: the deploy engine passes its bounded
+        # server-lifetime `prompt_embed_cache`; training never does (CFG
+        # dropout must re-encode per step).
+        cache = kw.get("prompt_embed_cache")
+        if cache is not None and isinstance(text, str) and text in cache:
+            context = cache[text].to(device=input_latents.device, dtype=input_latents.dtype)
+        else:
+            context = self._encode_text_context(text, device=input_latents.device, dtype=input_latents.dtype)
+            if cache is not None and isinstance(text, str):
+                cache[text] = context
 
         B = input_latents.shape[0]
         seq_lens = torch.full((B,), context.shape[1], dtype=torch.long, device=context.device)
@@ -590,6 +590,22 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
             out["num_clean_prefix_frames"] = 1
 
         return out
+
+    def _encode_text_context(self, text: Any, *, device, dtype) -> Tensor:
+        """Encode text into the post-projection context shared by cond and uncond CFG paths.
+
+        Live encoder returns pre-projection ``(B, 512, 100352) bf16``; the
+        DiT-owned ``crossattn_proj`` is applied HERE (not in prepare) so the
+        architecture's proprio-token concat sees 1024-d context.
+        """
+        context = self.text_encoder(text)
+        context = context.to(device=device, dtype=dtype)
+        net = self.dit
+        if getattr(net, "use_crossattn_projection", False) and context.shape[-1] == int(
+            getattr(net, "crossattn_proj_in_channels", -1)
+        ):
+            context = net.crossattn_proj(context)
+        return context
 
     def _encode_frames(self, frames: Any) -> Tensor:
         """PIL frames → bf16 ``(B, 16, T_lat, H/8, W/8)`` Wan2pt1 latents."""
@@ -654,7 +670,10 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         W_lat = int(width) // 8
         placeholder_latents = torch.randn((1, 16, T_lat, H_lat, W_lat), dtype=dtype, device=device)
 
-        preproc = self._preprocess_input(frames=None, text=prompt, input_latents=placeholder_latents)
+        prompt_embed_cache = kw.get("prompt_embed_cache")
+        preproc = self._preprocess_input(
+            frames=None, text=prompt, input_latents=placeholder_latents, prompt_embed_cache=prompt_embed_cache
+        )
 
         gen = torch.Generator(device="cpu").manual_seed(int(seed))
         init_noise = torch.randn(preproc["input_latents"].shape, generator=gen, dtype=torch.float32).to(
@@ -676,7 +695,9 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         inputs_shared["cfg_merge"] = bool(cfg_merge)
 
         if cfg_scale_f > 1.0:
-            inputs_shared["uncond_context"] = self._build_uncond_context(context_template=inputs_shared["context"])
+            inputs_shared["uncond_context"] = self._build_uncond_context(
+                context_template=inputs_shared["context"], prompt_embed_cache=prompt_embed_cache
+            )
         else:
             inputs_shared["uncond_context"] = None
 
@@ -708,18 +729,14 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         inputs_shared["condition_mask"] = condition_mask
         inputs_shared["num_clean_prefix_frames"] = 1
 
-    def _build_uncond_context(self, *, context_template: Tensor) -> Tensor:
+    def _build_uncond_context(self, *, context_template: Tensor, prompt_embed_cache: Optional[dict] = None) -> Tensor:
         """Materialise the unconditional text context for CFG via ``text_encoder("")``."""
-        text_encoder = getattr(self, "text_encoder", None)
-        if text_encoder is None:
-            raise ValueError("cfg_scale > 1.0 requires a configured text encoder (Reason1LiveTextEncoder).")
-        ctx = text_encoder("")
-        ctx = ctx.to(device=context_template.device, dtype=context_template.dtype)
-        net = getattr(self, "dit", None)
-        if net is not None and getattr(net, "use_crossattn_projection", False):
-            proj_in = int(getattr(net, "crossattn_proj_in_channels", -1))
-            if ctx.shape[-1] == proj_in:
-                ctx = net.crossattn_proj(ctx)
+        if prompt_embed_cache is not None and "" in prompt_embed_cache:
+            ctx = prompt_embed_cache[""].to(device=context_template.device, dtype=context_template.dtype)
+        else:
+            ctx = self._encode_text_context("", device=context_template.device, dtype=context_template.dtype)
+            if prompt_embed_cache is not None:
+                prompt_embed_cache[""] = ctx
         if ctx.shape[0] == 1 and context_template.shape[0] > 1:
             ctx = ctx.expand(context_template.shape[0], -1, -1).contiguous()
         if ctx.shape != context_template.shape:

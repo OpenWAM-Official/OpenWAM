@@ -225,7 +225,7 @@ def test_understanding_read_only_tail_isolation():
 
 
 @pytest.mark.gpu
-def test_tri_system_forward_on_real_cosmos():
+def test_tri_system_forward_on_real_cosmos(stub_reason1):
     """Drive the real Cosmos-Predict2.5-2B DiT through the trimodal MoT loop with
     random action/understanding backbones (VLM stubbed via ``vlm_hidden``): the
     forward restores 5D video, yields a finite action prediction, and preserves
@@ -245,12 +245,17 @@ def test_tri_system_forward_on_real_cosmos():
     dtype = torch.bfloat16
 
     vb = CosmosPredict25VideoBackbone.from_pretrained(
-        {"video_backbone": {"model_path": COSMOS25_2B, "text_encoder": "none", "vae": "none", "shift_video": 5.0}},
+        {
+            "video_backbone": {
+                "model_path": COSMOS25_2B,
+                "text_encoder_path": "/stub",
+                "vae": "none",
+                "shift_video": 5.0,
+            }
+        },
         device=device,
     )
-    arch, ab, ub = _make_tri_arch(
-        vb, action_dim=20, action_res_dim=256, und_dim=256, vlm_input_dim=1024, device=device
-    )
+    arch, ab, ub = _make_tri_arch(vb, action_dim=20, action_res_dim=256, und_dim=256, vlm_input_dim=1024, device=device)
     arch.to(device=device, dtype=dtype)
 
     B = 1

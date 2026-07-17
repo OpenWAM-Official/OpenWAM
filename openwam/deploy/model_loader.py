@@ -119,17 +119,13 @@ def load_from_checkpoint_dir(
     if vb_components is not None:
         logger.info("Using config-embedded component specs for video-backbone construction")
         vb_cfg_dict = OmegaConf.to_container(cfg.model.video_backbone, resolve=True)
-        # CosmosPredict25 Reason1 self-containment: when the ckpt was saved with the
-        # ``reason1`` registration enabled, its weights live in the
-        # unified safetensors and the small structural artifacts
-        # (config.json + tokenizer.json) live under ``<ckpt_dir>/reason1/``.
-        # Clearing ``text_encoder_path`` on that branch makes
-        # ``build_cosmos_predict25_pipeline`` take its deploy/empty-shell path
-        # (``pipeline_builder.py`` Reason1 construction site). For old ckpts
-        # without the ``reason1/`` artifact dir we leave the original
-        # ``text_encoder_path`` intact so the live encoder still loads from
-        # the external Cosmos-Reason1 bundle (backward compat).
-        reason1_artifact_dir = os.path.join(ckpt_dir, "reason1")
+        # CosmosPredict25 Reason1 self-containment: the ckpt's Reason1 weights
+        # live in the unified safetensors and the small structural artifacts
+        # (config.json + tokenizer.json) under ``<ckpt_dir>/reason1/`` —
+        # ``save_deploy_assets`` writes the component marker and the artifact
+        # dir together. Clearing ``text_encoder_path`` makes
+        # ``build_cosmos_predict25_pipeline`` take its deploy/empty-shell path;
+        # a missing ``reason1/`` dir then hard-errors inside ``from_empty``.
         # Iterate the plain-dict copy. ``vb_components`` is an OmegaConf
         # ``ListConfig`` whose entries are ``DictConfig`` (NOT a ``dict``
         # subclass) — so ``isinstance(c, dict)`` would always be False
@@ -137,12 +133,12 @@ def load_from_checkpoint_dir(
         has_reason1_state_component = any(
             isinstance(c, dict) and c.get("attr") == "text_encoder" for c in (vb_cfg_dict.get("components") or [])
         )
-        if os.path.isdir(reason1_artifact_dir) and has_reason1_state_component:
+        if has_reason1_state_component:
             prev_path = vb_cfg_dict.get("text_encoder_path")
             vb_cfg_dict["text_encoder_path"] = None
             logger.info(
                 "Using self-contained Reason1 artifacts from %s (clearing external text_encoder_path=%r)",
-                reason1_artifact_dir,
+                os.path.join(ckpt_dir, "reason1"),
                 prev_path,
             )
         # Symmetric with the Reason1 clearing above: when the ckpt carries a VAE

@@ -228,14 +228,27 @@ def load_stats_file(
     """Load, materialize, and validate a training-time stats file (``.json``/``.npy``).
 
     Shared by the LeRobot v3 readers whose stats-computation scripts emit either
-    a flat stats mapping or one nested per ``action_mode``. Cached per process so
-    multi-bucket datasets (and every DataLoader worker) read the file once.
+    a flat stats mapping or one nested per ``action_mode``. The raw read is
+    cached per process (multi-bucket datasets and every DataLoader worker read
+    the file once); materialization runs per call so each caller owns its arrays.
     """
-    return _load_stats_file_cached(str(Path(path).expanduser().resolve()), action_mode, normalize_mode, dim)
+    resolved = Path(path).expanduser().resolve()
+    raw = _load_raw_stats(str(resolved), action_mode)
+    stats = materialize_eef_stats(
+        dict(raw),
+        normalize_mode,
+        dim=dim,
+        strict_minmax=False,
+        source_hint=f"{resolved}:{action_mode}",
+    )
+    bad = {key: stats[key].shape for key in STAT_KEYS if stats[key].shape != (dim,)}
+    if bad:
+        raise ValueError(f"normalization stats vectors must have shape ({dim},), got {bad}")
+    return stats
 
 
 @functools.lru_cache(maxsize=8)
-def _load_stats_file_cached(path: str, action_mode: Optional[str], normalize_mode: Optional[str], dim: int) -> dict:
+def _load_raw_stats(path: str, action_mode: Optional[str]) -> Mapping:
     stats_path = Path(path)
     if not stats_path.is_file():
         raise FileNotFoundError(stats_path)
@@ -246,20 +259,10 @@ def _load_stats_file_cached(path: str, action_mode: Optional[str], normalize_mod
     if not isinstance(raw, Mapping):
         raise ValueError(f"normalization stats must contain a mapping, got {type(raw).__name__}")
     if action_mode and action_mode in raw:
-        raw = raw[action_mode]
-    elif not any(key in raw for key in STAT_KEYS):
+        return raw[action_mode]
+    if not any(key in raw for key in STAT_KEYS):
         raise KeyError(f"normalization stats {stats_path} do not contain action_mode={action_mode!r}")
-    stats = materialize_eef_stats(
-        dict(raw),
-        normalize_mode,
-        dim=dim,
-        strict_minmax=False,
-        source_hint=f"{stats_path}:{action_mode}",
-    )
-    bad = {key: stats[key].shape for key in STAT_KEYS if stats[key].shape != (dim,)}
-    if bad:
-        raise ValueError(f"normalization stats vectors must have shape ({dim},), got {bad}")
-    return stats
+    return raw
 
 
 __all__ = [

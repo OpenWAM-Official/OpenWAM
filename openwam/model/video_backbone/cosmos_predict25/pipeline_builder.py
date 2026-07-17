@@ -185,7 +185,7 @@ def _build_cosmos_predict25_vae(vae_pth: Optional[Path], *, device, dtype):
 def _resolve_checkpoint_path(model_path: Path, variant: str) -> Path:
     """Glob the single ``*_ema_bf16.pt`` checkpoint under ``model_path/variant``.
 
-    The asset layout at ``/path/to/assets/Cosmos-Predict2.5-2B/`` stores
+    The Cosmos-Predict2.5 bundle layout stores
     EMA inference weights as a single UUID-named file inside each variant
     sub-directory (``base/post-trained/<uuid>_ema_bf16.pt``). We refuse to
     guess when more than one file matches; the variant under
@@ -283,10 +283,12 @@ def build_cosmos_predict25_pipeline(
     """Construct a :class:`CosmosPredict25VideoBackbone` from *source*.
 
     ``source`` is either:
-      - a model directory ``str`` / ``Path`` (e.g. ``/path/to/assets/Cosmos-Predict2.5-2B``),
       - a Hydra ``DictConfig`` carrying ``video_backbone.{model_path, model_variant,
         text_encoder_path, shift_video}``,
-      - a plain dict with the same shape.
+      - a plain dict with the same shape,
+      - a model directory ``str`` / ``Path`` — deploy path only (``ckpt_dir``
+        non-None); the training path requires ``text_encoder_path``, which a
+        bare path cannot carry.
 
     Returns the wrapper with ``dim`` / ``num_layers`` / ``num_heads`` / ``head_dim``
     / ``context_dim`` attached as attributes so that
@@ -301,12 +303,12 @@ def build_cosmos_predict25_pipeline(
     # ``*_ema_bf16.pt`` + VAE ``tokenizer.pth``). On the deploy path
     # (``ckpt_dir`` non-None) both come from the unified safetensors instead,
     # so ``model_path`` is optional — this is what makes a cosmos_predict25 checkpoint
-    # truly portable to a host without ``/path/to/assets/...`` access.
+    # truly portable to a host without the training-time asset paths.
     if model_path_raw is None and ckpt_dir is None:
         raise ValueError(
             "build_cosmos_predict25_pipeline requires `video_backbone.model_path` to be set "
             "(point it at the Cosmos-Predict2.5 bundle root, e.g. "
-            "/path/to/assets/Cosmos-Predict2.5-2B)."
+            "<assets-root>/Cosmos-Predict2.5-2B)."
         )
     model_path = Path(model_path_raw) if model_path_raw is not None else None
     variant = str(_cfg_get(vb_cfg, "model_variant", "base/post-trained"))
@@ -327,8 +329,8 @@ def build_cosmos_predict25_pipeline(
             "(wan2pt1 = real Cosmos-Predict2.5 tokenizer; none = caller supplies pre-encoded latents)."
         )
     # `text_encoder_path` is checked here (pre-import / pre-checkpoint-load)
-    # so a missing path fails fast — without this, a typo in the config would
-    # only surface after `_resolve_checkpoint_path` and the 5 GB DiT load.
+    # so an UNSET path fails fast before the 5 GB DiT load; a mistyped path
+    # value still only surfaces at Reason1 construction, after the DiT load.
     # On the training path (``ckpt_dir is None``) it tells the builder where
     # to load Reason1 so it can be registered under ``reason1`` and saved into
     # the unified safetensors. On the deploy path (``ckpt_dir`` non-None),
@@ -339,7 +341,7 @@ def build_cosmos_predict25_pipeline(
         raise ValueError(
             "video_backbone.text_encoder_path is required on the training path. "
             "Point it at the Cosmos-Reason1-7B bundle root, e.g. "
-            "/path/to/assets/Cosmos-Reason1-7B."
+            "<assets-root>/Cosmos-Reason1-7B."
         )
     # §14.7 — CFG dropout. The actual substitution happens in
     # `CosmosPredict25VideoBackbone._preprocess_input`; validate the range here

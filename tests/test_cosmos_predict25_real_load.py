@@ -29,36 +29,6 @@ pytestmark = pytest.mark.gpu
 ASSET_PATH = Path(os.environ.get("COSMOS25_ASSET_PATH", "/path/to/assets/Cosmos-Predict2.5-2B"))
 
 
-class _StubReason1Encoder:
-    """Signature-compatible stand-in for ``Reason1LiveTextEncoder`` so GPU
-    tests don't pay the 16 GB Qwen load. Returns pre-projection
-    ``(B, 512, 100352)`` like the real encoder."""
-
-    def __init__(self, ckpt_path, *, dtype=torch.bfloat16, device=None):
-        self.dtype = dtype
-        self.device = torch.device(device) if device is not None else torch.device("cpu")
-
-    def __call__(self, prompts):
-        if isinstance(prompts, str):
-            prompts = [prompts]
-        return torch.randn(len(prompts), 512, 100352, dtype=self.dtype, device=self.device)
-
-    def to(self, *, dtype=None, device=None):
-        if dtype is not None:
-            self.dtype = dtype
-        if device is not None:
-            self.device = torch.device(device)
-        return self
-
-
-@pytest.fixture
-def stub_reason1(monkeypatch):
-    monkeypatch.setattr(
-        "openwam.model.video_backbone.cosmos_predict25.text_encoder.Reason1LiveTextEncoder",
-        _StubReason1Encoder,
-    )
-
-
 def _skip_unless_runnable():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available.")
