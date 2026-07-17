@@ -47,7 +47,7 @@ def test_inference_and_deploy_are_wired_not_stubs():
 
     # Inference now reaches the real no-prompt-source gate (ValueError), not the
     # old NotImplementedError stub.
-    with pytest.raises(ValueError, match="no prompt source"):
+    with pytest.raises(ValueError, match="text encoder"):
         bb.preprocess_input_for_inference(prompt="x", cfg_scale=1.0)
 
     # save_deploy_assets is a safe no-op when model_path is unreadable (it must

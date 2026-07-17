@@ -702,9 +702,7 @@ class WanBase(VideoBackbone):
     # IDM teacher-forcing branch merge/split
     # ================================================================
 
-    def merge_idm_video_branches(
-        self, noisy: BlockLoopState, cond: BlockLoopState
-    ) -> Tuple[BlockLoopState, int, int]:
+    def merge_idm_video_branches(self, noisy: BlockLoopState, cond: BlockLoopState) -> Tuple[BlockLoopState, int, int]:
         """Concatenate the IDM noisy + cond branches along the sequence axis.
 
         Wan's ``hidden_states`` is flat ``(B, L, D)`` with ``L == f·h·w``, so the
@@ -884,8 +882,8 @@ class WanBase(VideoBackbone):
 
         Only the text embedding is cached (prompt-keyed, seed/dim-independent);
         noise/clip/y/vace_context/first_frame_latents are rebuilt every call.
-        ``**kw`` swallows fields other backbones consume (CFG / pre-encoded text)
-        that Wan ignores — Wan does no CFG at inference.
+        ``**kw`` swallows fields other backbones consume (CFG) that Wan
+        ignores — Wan does no CFG at inference.
         """
         # Wan native tiling grid (other backbones may differ).
         tile_size = (30, 52)

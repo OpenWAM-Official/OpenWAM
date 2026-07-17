@@ -20,9 +20,8 @@ These tests pin three guarantees:
    ``deploy/model_loader.py:117-122``'s ``_ckpt_dir`` injection) and
    ``copy_cosmos_predict25_artifacts`` copies Reason1 structural JSONs.
 
-The Reason1 text encoder (~16 GB) is also registered under
-``reason1`` so cache-mode and live-mode checkpoints both carry it in
-the unified safetensors.
+The Reason1 text encoder (~16 GB) is also registered under ``reason1`` so
+checkpoints carry it in the unified safetensors.
 """
 
 from __future__ import annotations
@@ -212,8 +211,8 @@ def test_generate_cosmos_predict25_component_specs_emits_marker_when_model_path_
     assert text_entry["source"] == "state_dict"
 
 
-def test_pipeline_wrapper_state_dict_contains_reason1_even_when_cache_wins():
-    """Cache training still needs Reason1 registered so saves are deploy self-contained."""
+def test_pipeline_wrapper_state_dict_contains_reason1():
+    """Reason1 must be registered so saves are deploy self-contained."""
     wrapper = CosmosPredict25VideoBackbone(
         net=_ParamNet(),
         vae=None,
@@ -276,15 +275,12 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
     silently fail (``DictConfig`` is not a ``dict`` subclass). This test
     pins that the self-contained Reason1 fallback fires when
 
-      - ``text_encoder`` is **not** ``reason1_live`` in the saved config
-        (e.g. cache-mode training left it as ``none``), AND
       - ``components`` contains the ``attr: text_encoder, source: state_dict``
         marker that ``generate_cosmos_predict25_component_specs`` emits, AND
       - ``<ckpt_dir>/reason1/`` artifact dir exists.
 
-    Under those conditions deploy must clear ``text_encoder_path`` and
-    flip ``text_encoder=reason1_live`` so the empty-shell deploy path
-    picks up the in-state-dict Reason1 weights.
+    Under those conditions deploy must clear ``text_encoder_path`` so the
+    empty-shell deploy path picks up the in-state-dict Reason1 weights.
     """
     from unittest.mock import MagicMock, patch
 
@@ -298,7 +294,6 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
                 "variant": "shared_backbone_vanilla",
                 "video_backbone": {
                     "name": "cosmos_predict25_5b",
-                    "text_encoder": "none",
                     "text_encoder_path": "/path/to/model",
                     "components": [
                         {"attr": "text_encoder", "source": "state_dict"},
@@ -348,13 +343,10 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
 
     source = captured["params"]["video_backbone"]["_source"]
     assert isinstance(source, dict), f"Expected plain dict source, got {type(source).__name__}"
-    assert source["text_encoder"] == "reason1_live", (
-        "Reason1 self-contained marker (components entry with attr=text_encoder) was not "
-        "detected — deploy will leave text_encoder=none and the empty-shell branch never fires. "
-        "Likely a DictConfig vs dict regression in model_loader.py:132."
-    )
     assert source["text_encoder_path"] is None, (
-        "External text_encoder_path must be cleared once self-contained Reason1 weights are detected."
+        "External text_encoder_path must be cleared once self-contained Reason1 weights are detected "
+        "(components entry with attr=text_encoder + <ckpt_dir>/reason1/); otherwise the empty-shell "
+        "deploy branch never fires. Likely a DictConfig vs dict regression in model_loader.py."
     )
 
 
@@ -421,10 +413,10 @@ def test_save_deploy_assets_merges_components_and_copies_reason1(tmp_path):
     assert (output_dir / "reason1" / "tokenizer.json").is_file()
 
 
-def test_save_deploy_assets_cache_only_emits_vae_only_and_no_copy(tmp_path):
-    """Regression: the default cache-only config (no Reason1 encoder, no
-    ``text_encoder_path``) must NOT emit the text_encoder marker, must NOT copy
-    artifacts, and must NOT crash. Only the VAE component is recorded."""
+def test_save_deploy_assets_without_reason1_emits_vae_only_and_no_copy(tmp_path):
+    """A backbone without a Reason1 encoder must NOT emit the text_encoder
+    marker, must NOT copy artifacts, and must NOT crash. Only the VAE
+    component is recorded."""
     from omegaconf import OmegaConf
 
     model_path = tmp_path / "cosmos_bundle"
@@ -437,7 +429,6 @@ def test_save_deploy_assets_cache_only_emits_vae_only_and_no_copy(tmp_path):
             "model": {
                 "video_backbone": {
                     "model_path": str(model_path),
-                    "text_encoder": "none",
                     "text_encoder_path": None,
                 }
             }
@@ -464,9 +455,7 @@ def test_save_deploy_assets_vae_none_omits_vae_component(tmp_path):
     output_dir = tmp_path / "ckpt_out"
     output_dir.mkdir()
 
-    cfg = OmegaConf.create(
-        {"model": {"video_backbone": {"model_path": str(model_path), "vae": "none", "text_encoder": "none"}}}
-    )
+    cfg = OmegaConf.create({"model": {"video_backbone": {"model_path": str(model_path), "vae": "none"}}})
 
     _backbone_with_reason1(False, has_vae=False).save_deploy_assets(str(output_dir), cfg)
 
@@ -482,7 +471,7 @@ def test_save_deploy_assets_accepts_plain_dict_cfg(tmp_path):
     output_dir = tmp_path / "ckpt_out"
     output_dir.mkdir()
 
-    cfg = {"model": {"video_backbone": {"model_path": str(model_path), "text_encoder": "none", "text_encoder_path": None}}}
+    cfg = {"model": {"video_backbone": {"model_path": str(model_path), "text_encoder_path": None}}}
     _backbone_with_reason1(False).save_deploy_assets(str(output_dir), cfg)
 
     comps = cfg["model"]["video_backbone"]["components"]

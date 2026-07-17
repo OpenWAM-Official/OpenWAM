@@ -1,14 +1,10 @@
 """Live Cosmos-Reason1-7B text encoder for the CosmosPredict25 video backbone.
 
-Mirrors the offline path in
-``openwam.dataloader.reason1_embedding_computation`` (which writes a sha256-keyed
-``.safetensors`` cache of post-projection ``(L=512, 1024) bf16`` embeddings) but
-as an in-line encoder constructed once at training start. The encoder produces
-**pre-projection** ``(B, L=512, 100352) bf16`` tensors; the wrapper's
-``prepare_block_loop`` auto-gate (``pipeline_wrapper.py:174-177``) detects the
-``crossattn_proj_in_channels=100352`` match and applies the DiT's owned
-``net.crossattn_proj`` Linear(100352→1024)+GELU to land at the same
-post-projection tensor the offline cache would deliver.
+Constructed once at training start; produces **pre-projection**
+``(B, L=512, 100352) bf16`` tensors. The backbone's preprocess detects the
+``crossattn_proj_in_channels=100352`` match and applies the DiT-owned
+``net.crossattn_proj`` Linear(100352→1024)+GELU to land at the post-projection
+context the DiT consumes.
 
 Why a plain Python class (NOT an ``nn.Module``)?
 
@@ -39,12 +35,6 @@ classmethod builds the inner Qwen2.5-VL on the meta device using
 ``BaseWAMArchitecture.load_checkpoint`` then populates the meta tensors from
 the unified safetensors. This is the symmetric path to the empty-DiT and
 empty-VAE shells in ``pipeline_builder.py``.
-
-Cache vs Live precedence: when the dataloader supplies a per-sample
-``pre_encoded_text`` AND the wrapper is configured with a live encoder, the
-``pre_encoded_text is not None`` branch wins in ``preprocess_input:285-286``
-and the live encoder is silently skipped per-sample. This is the documented
-behaviour ("cache wins") — useful for staged migration.
 """
 
 from __future__ import annotations
@@ -56,26 +46,71 @@ from typing import Any, List, Union
 import torch
 from torch import Tensor
 
-from openwam.dataloader.utils.stats_computation.reason1_embedding_computation import (
-    _COSMOS_REASON1_SYSTEM_PROMPT,
-    _NUM_EMBEDDING_PADDING_TOKENS,
-    _REASON1_FULL_CONCAT_DIM,
-    _REASON1_HIDDEN_SIZE,
-    _REASON1_NUM_TRANSFORMER_LAYERS,
-    _mean_normalize_along_last,
-    _tokenize_with_chat_template,
-)
-
 logger = logging.getLogger(__name__)
+
+# Copied verbatim from upstream
+# cosmos_predict2/_src/predict2/text_encoders/text_encoder.py (via the
+# third_party/cosmos-predict2.5 submodule) so we don't import third_party
+# at runtime.
+_COSMOS_REASON1_SYSTEM_PROMPT = "You are a helpful assistant who will provide prompts to an image generator."
+
+# Upstream pad/truncation target.
+_NUM_EMBEDDING_PADDING_TOKENS = 512
+
+# Reason1 / Qwen2.5-VL-7B geometry: 28 transformer layers × hidden_size=3584
+# → full_concat produces 100352 channels (matches Cosmos `crossattn_proj_in_channels`).
+_REASON1_NUM_TRANSFORMER_LAYERS = 28
+_REASON1_HIDDEN_SIZE = 3584
+_REASON1_FULL_CONCAT_DIM = _REASON1_NUM_TRANSFORMER_LAYERS * _REASON1_HIDDEN_SIZE  # 100352
+
+
+def _tokenize_with_chat_template(tokenizer, prompt: str):
+    """Match upstream's chat-template wrap: system prompt + user content."""
+    conversations = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": _COSMOS_REASON1_SYSTEM_PROMPT}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": prompt}],
+        },
+    ]
+    # HF chat-template returns the formatted *string*; tokenize after.
+    chat_string = tokenizer.apply_chat_template(
+        conversations,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    enc = tokenizer(
+        chat_string,
+        return_tensors="pt",
+        add_special_tokens=False,
+        padding=False,
+        truncation=False,
+    )
+    input_ids = enc["input_ids"][0].tolist()
+
+    pad_id = int(tokenizer.pad_token_id)
+    if len(input_ids) < _NUM_EMBEDDING_PADDING_TOKENS:
+        pad_len = _NUM_EMBEDDING_PADDING_TOKENS - len(input_ids)
+        input_ids = input_ids + [pad_id] * pad_len
+    else:
+        input_ids = input_ids[:_NUM_EMBEDDING_PADDING_TOKENS]
+    return input_ids
+
+
+def _mean_normalize_along_last(hs):
+    """Per-token, per-layer normalize: (x - mean) / (std + 1e-8) along channel dim."""
+    return (hs - hs.mean(dim=-1, keepdim=True)) / (hs.std(dim=-1, keepdim=True) + 1e-8)
 
 
 class Reason1LiveTextEncoder:
     """Live Cosmos-Reason1-7B text encoder. Plain Python class — NOT an ``nn.Module``.
 
     Returns pre-projection ``(B, L=512, 100352) bf16`` embeddings; the
-    wrapper's ``prepare_block_loop`` auto-gate applies the DiT-owned
-    ``net.crossattn_proj`` Linear(100352→1024)+GELU on the way into the block
-    loop, matching the offline-cache numerical path exactly.
+    backbone's preprocess applies the DiT-owned ``net.crossattn_proj``
+    Linear(100352→1024)+GELU on the way into the block loop.
     """
 
     SYSTEM_PROMPT = _COSMOS_REASON1_SYSTEM_PROMPT
@@ -148,13 +183,7 @@ class Reason1LiveTextEncoder:
 
     @classmethod
     def _validate_geometry(cls, model: Any) -> None:
-        """Fail fast on Reason1 variants that don't match the expected geometry.
-
-        Keeps us aligned with the offline path's checks
-        (``reason1_embedding_computation._build_reason1:236-245``) so a Reason1
-        checkpoint upgrade either gets caught at load time or matches us
-        end-to-end on shape (no silent corruption).
-        """
+        """Fail fast on Reason1 variants that don't match the expected geometry."""
         cfg = getattr(model, "config", None)
         # transformers ≥5 ``Qwen2_5_VLConfig`` exposes the language-model
         # geometry under ``config.text_config``. ``or cfg`` is a defensive
@@ -175,19 +204,12 @@ class Reason1LiveTextEncoder:
             )
 
     def __call__(self, prompts: Union[str, List[str]]) -> Tensor:
-        """Encode prompts → ``(B, 512, 100352) bf16`` pre-projection on ``self.device``.
-
-        Mirrors ``_encode_reason1`` from the offline module but batches across
-        prompts (the offline CLI loops one-at-a-time because cache writes are
-        per-prompt anyway).
-        """
+        """Encode prompts → ``(B, 512, 100352) bf16`` pre-projection on ``self.device``."""
         if isinstance(prompts, str):
             prompts = [prompts]
         if not prompts:
             raise ValueError("Reason1LiveTextEncoder received an empty prompts list.")
 
-        # Batched tokenize: reuse the offline helper per-prompt so the chat
-        # template + L=512 pad logic matches the cache byte-for-byte.
         batch_ids = [_tokenize_with_chat_template(self.tokenizer, str(p)) for p in prompts]
         input_ids = torch.tensor(batch_ids, dtype=torch.long, device=self.device)
         attention_mask = torch.ones_like(input_ids)

@@ -137,11 +137,8 @@ def load_from_checkpoint_dir(
         has_reason1_state_component = any(
             isinstance(c, dict) and c.get("attr") == "text_encoder" for c in (vb_cfg_dict.get("components") or [])
         )
-        if os.path.isdir(reason1_artifact_dir) and (
-            vb_cfg_dict.get("text_encoder") == "reason1_live" or has_reason1_state_component
-        ):
+        if os.path.isdir(reason1_artifact_dir) and has_reason1_state_component:
             prev_path = vb_cfg_dict.get("text_encoder_path")
-            vb_cfg_dict["text_encoder"] = "reason1_live"
             vb_cfg_dict["text_encoder_path"] = None
             logger.info(
                 "Using self-contained Reason1 artifacts from %s (clearing external text_encoder_path=%r)",
@@ -173,7 +170,7 @@ def load_from_checkpoint_dir(
             vb_name = str(OmegaConf.select(cfg, "model.video_backbone.name", default=""))
             if vb_name.startswith("cosmos_predict25_"):
                 # Cosmos carries fields the path-only string source would
-                # lose: `shift_video`, `model_variant`, `text_encoder`.
+                # lose: `shift_video`, `model_variant`, `text_encoder_path`.
                 # `from_pretrained` accepts a dict natively (via
                 # `_video_backbone_cfg`). Wan never hits this branch.
                 vb_params["_source"] = {k: v for k, v in vb_params.items() if not str(k).startswith("_")}
@@ -336,9 +333,9 @@ class _UnifyAwareNormalizer:
         if arr.shape[-1] != self._unify_dim:
             # Defensive: already raw width (e.g. a non-unified head) → don't gather.
             logger.warning(
-                "[normalizer/unify] unnormalize got last-dim %d != unify_dim %d; "
-                "skipping gather (passing through).",
-                arr.shape[-1], self._unify_dim,
+                "[normalizer/unify] unnormalize got last-dim %d != unify_dim %d; skipping gather (passing through).",
+                arr.shape[-1],
+                self._unify_dim,
             )
             return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
         raw = self._unmap_from_unify(arr, self._dst_index)  # (..., unify_dim) -> (..., raw_dim)

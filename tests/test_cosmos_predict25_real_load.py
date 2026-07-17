@@ -29,6 +29,36 @@ pytestmark = pytest.mark.gpu
 ASSET_PATH = Path(os.environ.get("COSMOS25_ASSET_PATH", "/path/to/assets/Cosmos-Predict2.5-2B"))
 
 
+class _StubReason1Encoder:
+    """Signature-compatible stand-in for ``Reason1LiveTextEncoder`` so GPU
+    tests don't pay the 16 GB Qwen load. Returns pre-projection
+    ``(B, 512, 100352)`` like the real encoder."""
+
+    def __init__(self, ckpt_path, *, dtype=torch.bfloat16, device=None):
+        self.dtype = dtype
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+
+    def __call__(self, prompts):
+        if isinstance(prompts, str):
+            prompts = [prompts]
+        return torch.randn(len(prompts), 512, 100352, dtype=self.dtype, device=self.device)
+
+    def to(self, *, dtype=None, device=None):
+        if dtype is not None:
+            self.dtype = dtype
+        if device is not None:
+            self.device = torch.device(device)
+        return self
+
+
+@pytest.fixture
+def stub_reason1(monkeypatch):
+    monkeypatch.setattr(
+        "openwam.model.video_backbone.cosmos_predict25.text_encoder.Reason1LiveTextEncoder",
+        _StubReason1Encoder,
+    )
+
+
 def _skip_unless_runnable():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available.")
@@ -41,7 +71,7 @@ def _skip_unless_runnable():
 
 
 @pytest.mark.parametrize("sac_mode", ["none", "mm_only"])
-def test_real_load_block_loop_preserves_shape(sac_mode):
+def test_real_load_block_loop_preserves_shape(sac_mode, stub_reason1):
     _skip_unless_runnable()
     from openwam.model.video_backbone import build_video_backbone
 
@@ -50,7 +80,7 @@ def test_real_load_block_loop_preserves_shape(sac_mode):
             "name": "cosmos_predict25_2b",
             "model_path": str(ASSET_PATH),
             "model_variant": "base/post-trained",
-            "text_encoder": "none",
+            "text_encoder_path": "/stub",
             "sac_mode": sac_mode,
         }
     }
@@ -77,7 +107,7 @@ def test_real_load_block_loop_preserves_shape(sac_mode):
     # Latent T=2, spatial 8x8 → after patch (1, 2, 2): (B=1, T=2, H=4, W=4, D=2048).
     B, C, T, H, W = 1, 16, 2, 8, 8
     latents = torch.randn(B, C, T, H, W, dtype=torch.bfloat16, device="cuda:0")
-    # `text_encoder: none` ⇒ caller provides post-projection context (1024-dim).
+    # `prepare` consumes post-projection context (1024-dim) directly.
     context = torch.randn(B, 16, 1024, dtype=torch.bfloat16, device="cuda:0")
     timestep = torch.randint(0, 1000, (B,), device="cuda:0").to(torch.bfloat16)
 
@@ -104,7 +134,7 @@ def _build_backbone_with_real_vae():
             "name": "cosmos_predict25_2b",
             "model_path": str(ASSET_PATH),
             "model_variant": "base/post-trained",
-            "text_encoder": "none",
+            "text_encoder_path": "/stub",
             "vae": "wan2pt1",
             "sac_mode": "none",
         }
@@ -114,7 +144,7 @@ def _build_backbone_with_real_vae():
     return vb
 
 
-def test_real_vae_load_and_shape_round_trip():
+def test_real_vae_load_and_shape_round_trip(stub_reason1):
     """Encode random pixels through the real Wan2pt1 VAE and decode back."""
     _skip_unless_runnable()
     if not (ASSET_PATH / "tokenizer.pth").exists():
@@ -135,7 +165,7 @@ def test_real_vae_load_and_shape_round_trip():
     assert torch.isfinite(recon).all()
 
 
-def test_real_preprocess_input_full_path():
+def test_real_preprocess_input_full_path(stub_reason1):
     """End-to-end: PIL frames → preprocess_input_for_train → Wan2pt1 encode → latents."""
     _skip_unless_runnable()
     if not (ASSET_PATH / "tokenizer.pth").exists():
@@ -148,10 +178,10 @@ def test_real_preprocess_input_full_path():
     # 5 frames at 64×64 — Wan2pt1 internal conv3d wants T>=3 after chunking;
     # 5 frames is the smallest size that works through `temporal_window=4`.
     frames = [[Image.fromarray((np.ones((64, 64, 3), dtype=np.uint8) * (i * 30 % 256))) for i in range(5)]]
-    pre_text = torch.randn(1, 16, 1024, dtype=torch.bfloat16, device="cuda:0")
 
-    out = vb.preprocess_input_for_train(frames=frames, text=None, pre_encoded_text=pre_text)
+    out = vb.preprocess_input_for_train(frames=frames, text=["pick up the block"])
     # T_lat = 1 + (5-1)//4 = 2; spatial 64/8=8; C_z=16.
     assert out["input_latents"].shape == (1, 16, 2, 8, 8), f"input_latents shape={out['input_latents'].shape}"
     assert torch.isfinite(out["input_latents"]).all()
-    assert out["context"].shape == (1, 16, 1024)
+    # Stub encoder emits (1, 512, 100352); the DiT-owned crossattn_proj lands at 1024.
+    assert out["context"].shape == (1, 512, 1024)

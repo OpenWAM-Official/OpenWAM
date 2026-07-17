@@ -3,12 +3,11 @@
 Covers two layers:
 1. ``base.py`` module-level CFG math helpers (``_combine_cfg``,
    ``_expand_inputs_for_cfg``) — stateless, pure tensor ops.
-2. ``CosmosPredict25VideoBackbone.prepare_inputs_for_inference`` uncond
-   plumbing — exercises the cache > live precedence ladder and the
-   ``cfg_scale > 1.0`` gate for ``uncond_context``. The adapter computes
-   a shape-correct ``input_latents`` placeholder from the explicit
-   ``num_frames / height / width`` kwargs, so tests don't need a
-   configured VAE.
+2. ``CosmosPredict25VideoBackbone.preprocess_input_for_inference`` uncond
+   plumbing — exercises the live-encoder ``uncond_context`` path behind the
+   ``cfg_scale > 1.0`` gate. The adapter computes a shape-correct
+   ``input_latents`` placeholder from the explicit ``num_frames / height /
+   width`` kwargs, so tests don't need a configured VAE.
 
 The GPU smoke for end-to-end deploy round-trip lives in
 ``tests/test_cosmos_predict25_deploy_smoke.py``.
@@ -17,14 +16,12 @@ The GPU smoke for end-to-end deploy round-trip lives in
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
 import torch.nn as nn
 
-from openwam.dataloader.transforms.text_embedding_cache import bucketed_cache_path_for_sha, sha256_for_prompt
 from openwam.model.architectures.base import _combine_cfg, _expand_inputs_for_cfg
 from openwam.model.video_backbone.cosmos_predict25 import CosmosFlowSchedulerAdapter
 from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
@@ -37,8 +34,6 @@ class InferenceInputs:
     prompt: str = ""
     vace_video: Any = None
     first_frame_image: Any = None
-    pre_encoded_text: Any = None
-    uncond_pre_encoded_text: Any = None
     num_frames: int = 49
     height: int = 384
     width: int = 320
@@ -409,41 +404,47 @@ def test_forward_with_cfg_rejects_missing_uncond_context():
 # ----------------------------------------------------------------------
 
 
-class _ParamOnlyNet(nn.Module):
+class _FakeTextEncoder:
+    """Live-encoder stand-in returning pre-projection ``(B, L=16, 100352)``."""
+
+    def __init__(self) -> None:
+        self.seen: list = []
+
+    def __call__(self, text):
+        prompts = [text] if isinstance(text, str) else list(text)
+        self.seen.append(text)
+        return torch.zeros(len(prompts), 16, 100352)
+
+
+class _FakeProjNet(nn.Module):
+    use_crossattn_projection = True
+    crossattn_proj_in_channels = 100352
+
     def __init__(self) -> None:
         super().__init__()
         self.w = nn.Parameter(torch.zeros(1))
+        self.crossattn_proj_module = nn.Linear(100352, 1024, bias=False)
+
+    def crossattn_proj(self, x):
+        return self.crossattn_proj_module(x)
 
 
-def _build_cache_only_backbone() -> CosmosPredict25VideoBackbone:
-    """CosmosPredict25 backbone with no VAE and no live encoder. Every test that
-    uses this fixture must supply ``pre_encoded_text`` via the deploy cache
-    path; the adapter fabricates a shape-correct ``input_latents`` placeholder
-    from the explicit ``num_frames / height / width`` kwargs at inference time.
+def _build_live_encoder_backbone(*, text_encoder=None) -> CosmosPredict25VideoBackbone:
+    """CosmosPredict25 backbone with no VAE and a stub live encoder. The adapter
+    fabricates a shape-correct ``input_latents`` placeholder from the explicit
+    ``num_frames / height / width`` kwargs at inference time.
     """
-    pipe = CosmosPredict25VideoBackbone(
-        net=_ParamOnlyNet(),
-        vae=None,
-        text_encoder=None,
-        dim=2048,
-        num_layers=28,
-        num_heads=16,
-        head_dim=128,
-        context_dim=1024,
-        shift_video=5.0,
-    )
     return CosmosPredict25VideoBackbone(
-        net=pipe.dit,
-        vae=getattr(pipe, "_vae_iface", None),
-        text_encoder=getattr(pipe, "text_encoder", None),
-        shift_video=pipe._shift_video,
+        net=_FakeProjNet(),
+        vae=None,
+        text_encoder=text_encoder if text_encoder is not None else _FakeTextEncoder(),
         dim=2048,
         num_layers=28,
         num_heads=16,
         head_dim=128,
         context_dim=1024,
         scheduler=CosmosFlowSchedulerAdapter(shift_video=5.0),
-        freeze=True,
+        shift_video=5.0,
     )
 
 
@@ -451,9 +452,9 @@ def test_cosmos_predict25_adapter_cfg_scale_1_no_uncond_context():
     """Regression: `cfg_scale=1.0` (the default) MUST produce
     `uncond_context=None` — the denoising loop's CFG branch checks for None
     to decide whether to combine."""
-    vb = _build_cache_only_backbone()
-    cond_cache = torch.randn(1, 16, 1024)
-    inputs_shared = _call(vb,
+    vb = _build_live_encoder_backbone()
+    inputs_shared = _call(
+        vb,
         InferenceInputs(
             prompt="smoke",
             num_frames=13,
@@ -461,8 +462,7 @@ def test_cosmos_predict25_adapter_cfg_scale_1_no_uncond_context():
             width=320,
             seed=42,
             cfg_scale=1.0,
-            pre_encoded_text=cond_cache,
-        )
+        ),
     )
     assert inputs_shared["uncond_context"] is None
     assert inputs_shared["cfg_scale"] == pytest.approx(1.0)
@@ -471,78 +471,46 @@ def test_cosmos_predict25_adapter_cfg_scale_1_no_uncond_context():
 
 def test_cosmos_predict25_adapter_rejects_cfg_scale_below_one():
     """Negative / below-1 cfg_scale is meaningless; reject early at adapter."""
-    vb = _build_cache_only_backbone()
-    cond_cache = torch.randn(1, 16, 1024)
+    vb = _build_live_encoder_backbone()
     with pytest.raises(ValueError, match="cfg_scale must be >= 1.0"):
-        _call(vb, InferenceInputs(prompt="smoke", cfg_scale=0.5, pre_encoded_text=cond_cache))
+        _call(vb, InferenceInputs(prompt="smoke", cfg_scale=0.5))
 
 
-def test_cosmos_predict25_adapter_uncond_pre_encoded_text_2d_broadcast():
-    """A caller-supplied `(L, D)` empty.safetensors is broadcast to `(B, L, D)`
-    matching the cond context, no manual unsqueeze needed at the engine layer."""
-    vb = _build_cache_only_backbone()
-    cond_cache = torch.randn(1, 16, 1024)
-    # Shape (16, 1024) — what empty.safetensors looks like for Cosmos2.5-2B.
-    empty_2d = torch.full((16, 1024), -0.5)
-    inputs_shared = _call(vb,
-        InferenceInputs(
-            prompt="smoke",
-            cfg_scale=1.5,
-            pre_encoded_text=cond_cache,
-            uncond_pre_encoded_text=empty_2d,
-        )
+def test_cosmos_predict25_adapter_no_text_encoder_raises_with_hint():
+    """No live encoder configured → ValueError before the DiT is even invoked."""
+    vb = CosmosPredict25VideoBackbone(
+        net=_FakeProjNet(),
+        vae=None,
+        text_encoder=None,
+        dim=2048,
+        num_layers=28,
+        num_heads=16,
+        head_dim=128,
+        context_dim=1024,
+        scheduler=CosmosFlowSchedulerAdapter(shift_video=5.0),
+        shift_video=5.0,
     )
-    uncond = inputs_shared["uncond_context"]
-    cond = inputs_shared["context"]
-    assert uncond.shape == cond.shape  # (1, 16, 1024)
-    # All values should be -0.5 (the broadcast empty.safetensors content)
-    assert torch.all(uncond == -0.5)
-
-
-def test_cosmos_predict25_adapter_cfg_requires_uncond_source():
-    """With `cfg_scale > 1.0` but no `uncond_pre_encoded_text` and no live
-    text_encoder, the adapter must raise a clear ValueError (was previously
-    a silent randn_like fallback)."""
-    vb = _build_cache_only_backbone()
-    cond_cache = torch.randn(1, 16, 1024)
-    with pytest.raises(ValueError, match="cfg_scale > 1.0 requires"):
-        _call(vb,
-            InferenceInputs(
-                prompt="smoke",
-                cfg_scale=1.5,
-                pre_encoded_text=cond_cache,
-                # no uncond_pre_encoded_text, no live encoder
-            )
-        )
-
-
-def test_cosmos_predict25_adapter_no_prompt_source_raises_with_hint():
-    """No cache, no live encoder → ValueError before the wrapper is even
-    invoked."""
-    vb = _build_cache_only_backbone()
-    with pytest.raises(ValueError, match="no prompt source"):
+    with pytest.raises(ValueError, match="text encoder"):
         _call(vb, InferenceInputs(prompt="smoke"))
 
 
 def test_cosmos_predict25_adapter_shift_passthrough_overrides_shift_video():
     """An explicit ``shift`` lands in ``inputs_shared['sigma_shift']``; absent it,
     the backbone falls back to the wrapper's ``shift_video``."""
-    vb = _build_cache_only_backbone()
-    cond_cache = torch.randn(1, 16, 1024)
+    vb = _build_live_encoder_backbone()
 
-    explicit = _call(vb, InferenceInputs(prompt="s", pre_encoded_text=cond_cache, shift=3.0))
+    explicit = _call(vb, InferenceInputs(prompt="s", shift=3.0))
     assert explicit["sigma_shift"] == pytest.approx(3.0)
 
-    fallback = _call(vb, InferenceInputs(prompt="s", pre_encoded_text=cond_cache))  # shift=None
+    fallback = _call(vb, InferenceInputs(prompt="s"))  # shift=None
     assert fallback["sigma_shift"] == pytest.approx(5.0)  # wrapper shift_video default
 
 
-def test_generate_forwards_cfg_and_text_kwargs_to_backbone():
+def test_generate_forwards_cfg_kwargs_to_backbone():
     """Guard the one-line forwarding in ``BaseWAMArchitecture.generate``:
-    ``cfg_scale`` / ``cfg_merge`` / ``pre_encoded_text`` / ``uncond_pre_encoded_text``
-    MUST reach ``preprocess_input_for_inference`` so a CFG-capable backbone can
-    materialise ``uncond_context``. Called unbound with a fake self that aborts
-    right after the forwarding call."""
+    ``cfg_scale`` / ``cfg_merge`` MUST reach ``preprocess_input_for_inference``
+    so a CFG-capable backbone can materialise ``uncond_context``. Called
+    unbound with a fake self that aborts right after the forwarding call."""
     from openwam.model.architectures.base import BaseWAMArchitecture
 
     captured: dict = {}
@@ -563,8 +531,6 @@ def test_generate_forwards_cfg_and_text_kwargs_to_backbone():
         def eval(self):
             return self
 
-    cond = torch.randn(1, 16, 1024)
-    uncond = torch.randn(1, 16, 1024)
     with pytest.raises(_StopHere):
         BaseWAMArchitecture.generate(
             _FakeArch(),
@@ -572,116 +538,39 @@ def test_generate_forwards_cfg_and_text_kwargs_to_backbone():
             "a prompt",
             cfg_scale=2.0,
             cfg_merge=True,
-            pre_encoded_text=cond,
-            uncond_pre_encoded_text=uncond,
         )
 
     assert captured["cfg_scale"] == 2.0
     assert captured["cfg_merge"] is True
-    assert captured["pre_encoded_text"] is cond
-    assert captured["uncond_pre_encoded_text"] is uncond
 
 
 def test_cosmos_predict25_adapter_live_encoder_uncond_context():
     """A configured live text_encoder produces uncond via ``text_encoder("")`` +
-    ``crossattn_proj`` mirroring ``pipeline_wrapper.py:333-343``.
-
-    To isolate the uncond branch from the cond branch's wrapper-side batch
-    inference, the cond context is supplied via ``pre_encoded_text`` (the
-    deploy cache path); only the uncond branch exercises the encoder.
-    """
-
-    class _FakeTextEncoder:
-        def __init__(self) -> None:
-            self.seen: list = []
-
-        def __call__(self, text):
-            # Mirror Reason1's `(B=1, L=16, 100352)` pre-projection output
-            self.seen.append(text)
-            return torch.zeros(1, 16, 100352)
-
-    class _FakeProjNet(nn.Module):
-        use_crossattn_projection = True
-        crossattn_proj_in_channels = 100352
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.w = nn.Parameter(torch.zeros(1))
-            self.crossattn_proj_module = nn.Linear(100352, 1024, bias=False)
-
-        def crossattn_proj(self, x):
-            return self.crossattn_proj_module(x)
-
+    ``crossattn_proj``. The cond branch encodes the real prompt through the
+    same encoder."""
     encoder = _FakeTextEncoder()
-    pipe = CosmosPredict25VideoBackbone(
-        net=_FakeProjNet(),
-        vae=None,
-        text_encoder=encoder,
-        dim=2048,
-        num_layers=28,
-        num_heads=16,
-        head_dim=128,
-        context_dim=1024,
-        shift_video=5.0,
-    )
-    vb = CosmosPredict25VideoBackbone(
-        net=pipe.dit,
-        vae=getattr(pipe, "_vae_iface", None),
-        text_encoder=getattr(pipe, "text_encoder", None),
-        shift_video=pipe._shift_video,
-        dim=2048,
-        num_layers=28,
-        num_heads=16,
-        head_dim=128,
-        context_dim=1024,
-        scheduler=CosmosFlowSchedulerAdapter(shift_video=5.0),
-        freeze=False,  # let crossattn_proj_module's Linear stay trainable
-    )
+    vb = _build_live_encoder_backbone(text_encoder=encoder)
 
-    cond_cache = torch.zeros(1, 16, 1024)
-    inputs_shared = _call(vb,
+    inputs_shared = _call(
+        vb,
         InferenceInputs(
             prompt="real prompt",
-            pre_encoded_text=cond_cache,
             cfg_scale=1.5,
-        )
+        ),
     )
 
-    # Encoder fires exactly once for the empty (uncond) prompt; cond went
-    # through the cache path.
-    assert encoder.seen == [""], f"expected encoder called once with '', saw {encoder.seen}"
+    # Encoder fires once for the cond prompt and once for the empty (uncond) prompt.
+    assert encoder.seen == ["real prompt", ""], f"unexpected encoder calls: {encoder.seen}"
     uncond = inputs_shared["uncond_context"]
     assert uncond.shape == (1, 16, 1024)
     assert torch.isfinite(uncond).all()
-    # Cond stayed verbatim from the supplied cache (zeros).
     cond = inputs_shared["context"]
     assert cond.shape == (1, 16, 1024)
-    assert torch.equal(cond, cond_cache.to(device=cond.device, dtype=cond.dtype))
 
 
 # ----------------------------------------------------------------------
-# Layer 3: deploy cache loader (`JointInferenceEngine._load_pre_encoded_text_safetensors`)
-#
-# Catches the 2D-vs-3D shape contract drift reported by @d-finite in PR #52:
-# the precompute writer (`reason1_embedding_computation._project_to_postproj`)
-# `.squeeze(0)`s to 2D before writing, but every downstream consumer expects
-# 3D `(B, L, D)`. The loader must restore the batch axis so existing 2D
-# safetensors caches stay readable.
+# Layer 3: deploy kwarg filtering
 # ----------------------------------------------------------------------
-
-
-def _make_engine_for_loader_test():
-    """Bypass __init__ so we can exercise the loader without a real arch / cfg."""
-    from unittest.mock import MagicMock
-
-    from openwam.deploy.engine import JointInferenceEngine
-
-    arch = MagicMock()
-    arch.dtype = torch.float32
-    arch.device = torch.device("cpu")
-    engine = JointInferenceEngine.__new__(JointInferenceEngine)
-    engine.architecture = arch
-    return engine
 
 
 def test_joint_engine_filters_deploy_kwargs_for_strict_architecture():
@@ -704,7 +593,6 @@ def test_joint_engine_filters_deploy_kwargs_for_strict_architecture():
             "prompt": "p",
             "profile": True,
             "cfg_scale": 1.5,
-            "pre_encoded_text": object(),
         }
     )
 
@@ -729,57 +617,6 @@ def test_joint_engine_preserves_deploy_kwargs_for_flexible_architecture():
         "schedule": "s",
         "prompt": "p",
         "cfg_scale": 1.5,
-        "pre_encoded_text": object(),
     }
 
     assert engine._filter_architecture_generate_kwargs(kwargs) is kwargs
-
-
-def test_load_pre_encoded_text_safetensors_normalizes_2d(tmp_path):
-    """2D `(L, D)` cache files (precompute writer's `.squeeze(0)` output)
-    are restored to 3D `(1, L, D)` at the cache → inference boundary."""
-    from safetensors.torch import save_file
-
-    tensor_2d = torch.arange(16 * 8, dtype=torch.float32).reshape(16, 8)
-    cache_path = tmp_path / "cond.safetensors"
-    save_file({"pre_encoded_text": tensor_2d}, str(cache_path))
-
-    engine = _make_engine_for_loader_test()
-    loaded = engine._load_pre_encoded_text_safetensors(cache_path)
-
-    assert loaded.shape == (1, 16, 8)
-    # Content preserved bit-for-bit on the cpu/float32 path.
-    assert torch.equal(loaded[0], tensor_2d)
-
-
-def test_load_pre_encoded_text_safetensors_passthrough_3d(tmp_path):
-    """Idempotent: a 3D `(B, L, D)` cache is returned as-is (no double unsqueeze)."""
-    from safetensors.torch import save_file
-
-    tensor_3d = torch.arange(1 * 16 * 8, dtype=torch.float32).reshape(1, 16, 8)
-    cache_path = tmp_path / "cond.safetensors"
-    save_file({"pre_encoded_text": tensor_3d}, str(cache_path))
-
-    engine = _make_engine_for_loader_test()
-    loaded = engine._load_pre_encoded_text_safetensors(cache_path)
-
-    assert loaded.shape == (1, 16, 8)
-    assert torch.equal(loaded, tensor_3d)
-
-
-def test_load_pre_encoded_text_for_prompt_reads_bucketed_cache(tmp_path):
-    from safetensors.torch import save_file
-
-    prompt = "pick up the block"
-    sha = sha256_for_prompt(prompt)
-    cache_path = Path(bucketed_cache_path_for_sha(str(tmp_path), sha))
-    tensor_2d = torch.arange(16 * 8, dtype=torch.float32).reshape(16, 8)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    save_file({"pre_encoded_text": tensor_2d}, str(cache_path))
-
-    engine = _make_engine_for_loader_test()
-    engine._text_embedding_cache_dir = tmp_path
-    loaded = engine._load_pre_encoded_text_for_prompt(prompt)
-
-    assert loaded.shape == (1, 16, 8)
-    assert torch.equal(loaded[0], tensor_2d)

@@ -300,9 +300,7 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
 
         return idm_merge.merge_branches(noisy, cond)
 
-    def split_idm_video_branches(
-        self, merged: BlockLoopState, noisy: BlockLoopState, cond: BlockLoopState
-    ):
+    def split_idm_video_branches(self, merged: BlockLoopState, noisy: BlockLoopState, cond: BlockLoopState):
         """Inverse of :meth:`merge_idm_video_branches` — delegates to ``idm_merge``."""
         from openwam.model.video_backbone.cosmos_predict25 import idm_merge
 
@@ -407,17 +405,14 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
                 raise ValueError(f"n_{name} > 0 requires {name}_tokens.")
             if tokens.shape[0] != B or tokens.shape[1] != n_tok or tokens.shape[2] != dim:
                 raise ValueError(
-                    f"{name}_tokens shape {tuple(tokens.shape)} does not match "
-                    f"(B={B}, n_{name}={n_tok}, dim={dim})."
+                    f"{name}_tokens shape {tuple(tokens.shape)} does not match (B={B}, n_{name}={n_tok}, dim={dim})."
                 )
             emb, lora = self._shared_token_emb(timestep, n_tok, B)
             pieces_x.append(tokens.to(video_3d.dtype))
             pieces_emb.append(emb)
             if use_lora:
                 if lora is None:
-                    raise ValueError(
-                        "video branch uses AdaLN-LoRA but t_embedder returned no LoRA for shared tokens."
-                    )
+                    raise ValueError("video branch uses AdaLN-LoRA but t_embedder returned no LoRA for shared tokens.")
                 pieces_lora.append(lora)
 
         state.hidden_states = torch.cat(pieces_x, dim=1)
@@ -503,7 +498,6 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         *,
         frames: Any = None,
         text: Any = None,
-        pre_encoded_text: Optional[Tensor] = None,
         input_latents: Optional[Tensor] = None,
         vace_videos: Any = None,
         ref_images: Any = None,
@@ -534,35 +528,25 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
                 )
             input_latents = self._encode_frames(frames)
 
-        if pre_encoded_text is not None:
-            # Cache > live precedence: a cache hit wins per-sample.
-            context = pre_encoded_text
-        elif text is not None:
-            if self.text_encoder is None:
-                raise ValueError(
-                    "`text=` requires a configured text encoder. Pass `pre_encoded_text` directly, "
-                    "or set `video_backbone.text_encoder` to a registered loader."
-                )
-            # §14.7 — CFG dropout for the live path: substitute selected prompts
-            # with `""` so the encoder produces the canonical empty embedding.
-            if self.training and self.text_dropout_p > 0.0:
-                text_list = [text] if isinstance(text, str) else list(text)
-                text = [t if self._text_dropout_rng.random() >= self.text_dropout_p else "" for t in text_list]
-            # Live encoder returns pre-projection `(B, 512, 100352) bf16`; apply
-            # the DiT's owned `crossattn_proj` HERE (not in prepare) so the
-            # architecture's proprio-token concat sees 1024-d context.
-            context = self.text_encoder(text)
-            context = context.to(device=input_latents.device, dtype=input_latents.dtype)
-            net = self.dit
-            if getattr(net, "use_crossattn_projection", False) and context.shape[-1] == int(
-                getattr(net, "crossattn_proj_in_channels", -1)
-            ):
-                context = net.crossattn_proj(context)
-        else:
-            raise ValueError(
-                "CosmosPredict25VideoBackbone._preprocess_input requires either `text` (with text_encoder) "
-                "or `pre_encoded_text`."
-            )
+        if text is None:
+            raise ValueError("CosmosPredict25VideoBackbone._preprocess_input requires `text`.")
+        if self.text_encoder is None:
+            raise ValueError("`text=` requires a configured text encoder (Reason1LiveTextEncoder).")
+        # §14.7 — CFG dropout: substitute selected prompts with `""` so the
+        # encoder produces the canonical empty embedding.
+        if self.training and self.text_dropout_p > 0.0:
+            text_list = [text] if isinstance(text, str) else list(text)
+            text = [t if self._text_dropout_rng.random() >= self.text_dropout_p else "" for t in text_list]
+        # Live encoder returns pre-projection `(B, 512, 100352) bf16`; apply
+        # the DiT's owned `crossattn_proj` HERE (not in prepare) so the
+        # architecture's proprio-token concat sees 1024-d context.
+        context = self.text_encoder(text)
+        context = context.to(device=input_latents.device, dtype=input_latents.dtype)
+        net = self.dit
+        if getattr(net, "use_crossattn_projection", False) and context.shape[-1] == int(
+            getattr(net, "crossattn_proj_in_channels", -1)
+        ):
+            context = net.crossattn_proj(context)
 
         B = input_latents.shape[0]
         seq_lens = torch.full((B,), context.shape[1], dtype=torch.long, device=context.device)
@@ -627,16 +611,13 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
     def preprocess_input_for_inference(self, **kw) -> dict:
         """Build the inference denoising-loop input dict from explicit kwargs.
 
-        cache > live precedence for the prompt; materialises ``uncond_context``
-        for CFG (``cfg_scale > 1.0``); TI2V first-frame via condition_mask.
-        ``base.py:generate`` forwards ``cfg_scale`` / ``cfg_merge`` /
-        ``pre_encoded_text`` / ``uncond_pre_encoded_text``.
+        Materialises ``uncond_context`` for CFG (``cfg_scale > 1.0``); TI2V
+        first-frame via condition_mask. ``base.py:generate`` forwards
+        ``cfg_scale`` / ``cfg_merge``.
         """
         prompt = kw.get("prompt")
         vace_video = kw.get("vace_video")
         first_frame_image = kw.get("first_frame_image")
-        pre_encoded_text = kw.get("pre_encoded_text")
-        uncond_pre_encoded_text = kw.get("uncond_pre_encoded_text")
         num_frames = kw.get("num_frames", 49)
         height = kw.get("height", 384)
         width = kw.get("width", 320)
@@ -648,14 +629,13 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         cfg_merge = kw.get("cfg_merge", False)
 
         if vace_video is not None:
-            raise NotImplementedError("CosmosPredict25VideoBackbone does not support VACE conditioning at inference yet.")
-        has_cache = pre_encoded_text is not None
-        has_live = getattr(self, "text_encoder", None) is not None
-        if not (has_cache or has_live):
+            raise NotImplementedError(
+                "CosmosPredict25VideoBackbone does not support VACE conditioning at inference yet."
+            )
+        if getattr(self, "text_encoder", None) is None:
             raise ValueError(
-                "CosmosPredict25VideoBackbone.preprocess_input_for_inference has no prompt source: pass "
-                "`pre_encoded_text` (offline cache hit) or configure "
-                "`video_backbone.text_encoder=reason1_live`."
+                "CosmosPredict25VideoBackbone.preprocess_input_for_inference requires a configured "
+                "text encoder (Reason1LiveTextEncoder)."
             )
 
         cfg_scale_f = float(cfg_scale)
@@ -674,10 +654,7 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         W_lat = int(width) // 8
         placeholder_latents = torch.randn((1, 16, T_lat, H_lat, W_lat), dtype=dtype, device=device)
 
-        cond_kwargs = self._build_preprocess_kwargs(
-            prompt=prompt, pre_encoded_text=pre_encoded_text, input_latents=placeholder_latents
-        )
-        preproc = self._preprocess_input(**cond_kwargs)
+        preproc = self._preprocess_input(frames=None, text=prompt, input_latents=placeholder_latents)
 
         gen = torch.Generator(device="cpu").manual_seed(int(seed))
         init_noise = torch.randn(preproc["input_latents"].shape, generator=gen, dtype=torch.float32).to(
@@ -699,10 +676,7 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         inputs_shared["cfg_merge"] = bool(cfg_merge)
 
         if cfg_scale_f > 1.0:
-            inputs_shared["uncond_context"] = self._build_uncond_context(
-                uncond_pre_encoded_text=uncond_pre_encoded_text,
-                context_template=inputs_shared["context"],
-            )
+            inputs_shared["uncond_context"] = self._build_uncond_context(context_template=inputs_shared["context"])
         else:
             inputs_shared["uncond_context"] = None
 
@@ -734,57 +708,26 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         inputs_shared["condition_mask"] = condition_mask
         inputs_shared["num_clean_prefix_frames"] = 1
 
-    def _build_preprocess_kwargs(self, *, prompt, pre_encoded_text: Optional[Tensor], input_latents: Tensor) -> dict:
-        """Pick the right kwargs for ``_preprocess_input`` (cache > live precedence)."""
-        base = {"frames": None, "text": None, "input_latents": input_latents}
-        if pre_encoded_text is not None:
-            return {**base, "pre_encoded_text": pre_encoded_text}
-        if getattr(self, "text_encoder", None) is not None:
-            return {**base, "text": prompt}
-        raise RuntimeError(
-            "CosmosPredict25VideoBackbone._build_preprocess_kwargs reached the no-source branch despite "
-            "the preprocess_input_for_inference gate. This is a bug."
-        )
-
-    def _build_uncond_context(self, *, uncond_pre_encoded_text: Optional[Tensor], context_template: Tensor) -> Tensor:
-        """Materialise the unconditional text context for CFG.
-
-        Precedence: caller-supplied ``uncond_pre_encoded_text`` (``(L,D)`` is
-        broadcast across batch), else live ``text_encoder("")`` + ``crossattn_proj``.
-        """
-        if uncond_pre_encoded_text is not None:
-            t = uncond_pre_encoded_text.to(device=context_template.device, dtype=context_template.dtype)
-            if t.ndim == 2:
-                t = t.unsqueeze(0).expand(context_template.shape[0], -1, -1).contiguous()
-            if t.shape != context_template.shape:
-                raise ValueError(
-                    f"uncond_pre_encoded_text shape {tuple(t.shape)} doesn't match cond "
-                    f"context shape {tuple(context_template.shape)}."
-                )
-            return t
-
+    def _build_uncond_context(self, *, context_template: Tensor) -> Tensor:
+        """Materialise the unconditional text context for CFG via ``text_encoder("")``."""
         text_encoder = getattr(self, "text_encoder", None)
-        if text_encoder is not None:
-            ctx = text_encoder("")
-            ctx = ctx.to(device=context_template.device, dtype=context_template.dtype)
-            net = getattr(self, "dit", None)
-            if net is not None and getattr(net, "use_crossattn_projection", False):
-                proj_in = int(getattr(net, "crossattn_proj_in_channels", -1))
-                if ctx.shape[-1] == proj_in:
-                    ctx = net.crossattn_proj(ctx)
-            if ctx.shape[0] == 1 and context_template.shape[0] > 1:
-                ctx = ctx.expand(context_template.shape[0], -1, -1).contiguous()
-            if ctx.shape != context_template.shape:
-                raise ValueError(
-                    f"live uncond context shape {tuple(ctx.shape)} doesn't match cond "
-                    f"context shape {tuple(context_template.shape)}; check encoder output."
-                )
-            return ctx
-
-        raise ValueError(
-            "cfg_scale > 1.0 requires either `uncond_pre_encoded_text` (offline "
-            "`empty.safetensors`) or a configured `video_backbone.text_encoder` (e.g. reason1_live); got neither."
-        )
+        if text_encoder is None:
+            raise ValueError("cfg_scale > 1.0 requires a configured text encoder (Reason1LiveTextEncoder).")
+        ctx = text_encoder("")
+        ctx = ctx.to(device=context_template.device, dtype=context_template.dtype)
+        net = getattr(self, "dit", None)
+        if net is not None and getattr(net, "use_crossattn_projection", False):
+            proj_in = int(getattr(net, "crossattn_proj_in_channels", -1))
+            if ctx.shape[-1] == proj_in:
+                ctx = net.crossattn_proj(ctx)
+        if ctx.shape[0] == 1 and context_template.shape[0] > 1:
+            ctx = ctx.expand(context_template.shape[0], -1, -1).contiguous()
+        if ctx.shape != context_template.shape:
+            raise ValueError(
+                f"live uncond context shape {tuple(ctx.shape)} doesn't match cond "
+                f"context shape {tuple(context_template.shape)}; check encoder output."
+            )
+        return ctx
 
     # ------------------------------------------------------------------
     # Device / dtype

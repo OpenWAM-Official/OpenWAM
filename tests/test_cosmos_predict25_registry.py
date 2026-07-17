@@ -32,7 +32,13 @@ def test_cosmos_predict25_build_with_bad_path_raises_clear_error():
     - ``FileNotFoundError`` when the package is installed but
       ``model_path`` points nowhere.
     """
-    cfg = {"video_backbone": {"name": "cosmos_predict25_2b", "model_path": "/nonexistent"}}
+    cfg = {
+        "video_backbone": {
+            "name": "cosmos_predict25_2b",
+            "model_path": "/nonexistent",
+            "text_encoder_path": "/nonexistent",
+        }
+    }
     with pytest.raises((ImportError, NotImplementedError, FileNotFoundError)) as exc_info:
         build_video_backbone("cosmos_predict25_2b", cfg)
     message = str(exc_info.value).lower()
@@ -83,60 +89,29 @@ def test_cosmos_predict25_invalid_vae_choice_rejected():
         assert valid in message
 
 
-def test_cosmos_predict25_invalid_text_encoder_rejected():
-    """`text_encoder=foo` must fail-fast with a clear ValueError before any
-    `cosmos_predict2` import so the error is testable on CPU CI. Mirrors the
-    `sac_mode` and `vae` early validators in `pipeline_builder.py`."""
+def test_cosmos_predict25_missing_text_encoder_path_rejected():
+    """A training-path build without `text_encoder_path` must raise a clear
+    ValueError before any heavy import — Reason1 live encoding is the only
+    text pathway."""
     cfg = {
         "video_backbone": {
             "name": "cosmos_predict25_2b",
             "model_path": "/nonexistent",
-            "text_encoder": "garbage_encoder",
-        }
-    }
-    with pytest.raises(ValueError) as exc_info:
-        build_video_backbone("cosmos_predict25_2b", cfg)
-    message = str(exc_info.value)
-    assert "text_encoder" in message
-    assert "garbage_encoder" in message
-    for valid in ("none", "reason1_live"):
-        assert valid in message
-
-
-def test_cosmos_predict25_text_encoder_reason1_live_requires_path():
-    """`text_encoder=reason1_live` without `text_encoder_path` must raise a
-    clear ValueError before any heavy import (the offline-cache vs live-encoder
-    decision is config-level, not runtime)."""
-    cfg = {
-        "video_backbone": {
-            "name": "cosmos_predict25_2b",
-            "model_path": "/nonexistent",
-            "text_encoder": "reason1_live",
             # `text_encoder_path` intentionally omitted.
         }
     }
-    with pytest.raises((ImportError, ValueError)) as exc_info:
+    with pytest.raises(ValueError, match="text_encoder_path"):
         build_video_backbone("cosmos_predict25_2b", cfg)
-    # When `cosmos_predict2` is installed we get the explicit ValueError; on
-    # CPU CI without the extra we hit the ImportError earlier from
-    # `import_cosmos_predict2()`. Either failure is acceptable here — the
-    # critical contract is "fail fast, do not silently fall back to live=None".
-    if isinstance(exc_info.value, ValueError):
-        message = str(exc_info.value)
-        assert "text_encoder_path" in message
-        assert "reason1_live" in message
 
 
 def test_cosmos_predict25_text_encoder_dropout_out_of_range_rejected():
     """`text_encoder_dropout` outside [0, 1] must fail-fast at build time
-    (CPU CI testable). Mirrors the wrapper-side ValueError in
-    `CosmosPredict25PipelineWrapper.__init__`; catching it at the builder avoids any
-    upstream import / 5 GB DiT load for a config typo."""
+    (CPU CI testable). Mirrors the backbone-side ValueError; catching it at
+    the builder avoids any upstream import / 5 GB DiT load for a config typo."""
     cfg = {
         "video_backbone": {
             "name": "cosmos_predict25_2b",
             "model_path": "/nonexistent",
-            "text_encoder": "reason1_live",
             "text_encoder_path": "/nonexistent",
             "text_encoder_dropout": 1.5,
         }
@@ -146,24 +121,3 @@ def test_cosmos_predict25_text_encoder_dropout_out_of_range_rejected():
     message = str(exc_info.value)
     assert "text_encoder_dropout" in message
     assert "1.5" in message
-
-
-def test_cosmos_predict25_text_encoder_dropout_with_text_encoder_none_rejected():
-    """`text_encoder_dropout > 0` + `text_encoder=none` is a dead config — the
-    cache path uses `dataloader.text_embedding_dropout` instead, and the live
-    encoder is never instantiated. Build-time rejection prevents a silently
-    inert dropout knob from masking a missing `text_encoder=reason1_live`."""
-    cfg = {
-        "video_backbone": {
-            "name": "cosmos_predict25_2b",
-            "model_path": "/nonexistent",
-            "text_encoder": "none",
-            "text_encoder_dropout": 0.1,
-        }
-    }
-    with pytest.raises(ValueError) as exc_info:
-        build_video_backbone("cosmos_predict25_2b", cfg)
-    message = str(exc_info.value)
-    assert "text_encoder_dropout" in message
-    assert "reason1_live" in message
-    assert "text_embedding_dropout" in message  # points the user at the cache-path knob

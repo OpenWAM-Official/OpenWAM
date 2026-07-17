@@ -888,7 +888,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         all_prompts: list = []
         all_vace_videos: list = []
         all_ref_images: list = []
-        all_pre_encoded_text: list = []
         all_actions: list = []
         all_proprios: list = []
         all_proprio_masks: list = []
@@ -900,7 +899,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             all_prompts.append(sample["prompt"])
             all_vace_videos.append(sample.get("vace_video"))
             all_ref_images.append(sample.get("first_frame_image"))
-            all_pre_encoded_text.append(sample.get("pre_encoded_text"))
 
             action = sample.get("action")
             if action is not None:
@@ -957,44 +955,11 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if any(ref_flags) and not all(ref_flags):
             raise ValueError("Mixed reference images in batch: all samples must be consistent.")
 
-        # Optional per-sample pre-encoded text embedding (e.g. Reason1 cached
-        # offline for the CosmosPredict25 backbone). Backbones that don't consume it
-        # (Wan) silently drop the kwarg via ``**kw``. All-or-nothing per batch;
-        # uniform L required for fixed-shape stacking — padded variant deferred.
-        pre_text_flags = [t is not None for t in all_pre_encoded_text]
-        preprocess_extra: dict = {}
-        if any(pre_text_flags):
-            if not all(pre_text_flags):
-                raise ValueError(
-                    "Mixed pre_encoded_text in batch: every sample must carry the "
-                    "field, or none. Check the dataloader cache wiring."
-                )
-            tensors: list = []
-            for t in all_pre_encoded_text:
-                if isinstance(t, np.ndarray):
-                    t = torch.from_numpy(t)
-                if t.ndim == 3 and t.shape[0] == 1:
-                    t = t[0]
-                if t.ndim != 2:
-                    raise ValueError(f"pre_encoded_text must be (L, D) or (1, L, D); got {tuple(t.shape)}")
-                tensors.append(t)
-            lens = {t.shape[0] for t in tensors}
-            if len(lens) > 1:
-                raise ValueError(
-                    f"Inconsistent sequence length across pre_encoded_text batch: "
-                    f"{sorted(lens)}. Phase 3.x requires uniform L within a batch; "
-                    f"padded variant is deferred."
-                )
-            preprocess_extra["pre_encoded_text"] = torch.stack(
-                [t.to(dtype=_dtype, device=_device) for t in tensors], dim=0
-            )
-
         preprocessed = self.preprocess(
             frames=all_frames,
             text=all_prompts,
             vace_videos=all_vace_videos,
             ref_images=all_ref_images if ref_flags[0] else None,
-            **preprocess_extra,
         )
 
         action_data = torch.cat(all_actions, dim=0) if all_actions[0] is not None else None
@@ -1386,8 +1351,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         proprio: Optional[Tensor] = None,
         cfg_scale: float = 1.0,
         cfg_merge: bool = False,
-        pre_encoded_text: Optional[Tensor] = None,
-        uncond_pre_encoded_text: Optional[Tensor] = None,
         **extra_pipeline_inputs: Any,
     ) -> dict:
         """Execute joint video-action denoising driven by a schedule.
@@ -1438,9 +1401,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
-        # CFG / pre-encoded-text knobs ARE forwarded so a CFG-capable backbone
-        # (CosmosPredict25) can materialise ``inputs_shared['uncond_context']`` from its
-        # own encoder/cache; the denoising loop below then applies CFG via
+        # CFG knobs ARE forwarded so a CFG-capable backbone (CosmosPredict25)
+        # can materialise ``inputs_shared['uncond_context']`` from its own
+        # encoder; the denoising loop below then applies CFG via
         # ``cfg_scale_f`` / ``cfg_merge``. Wan does no CFG at inference and
         # swallows these via ``**kw``, so its behaviour is unchanged.
         inputs_shared = vb.preprocess_input_for_inference(
@@ -1458,8 +1421,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
             prompt_embed_cache=prompt_embed_cache,
             cfg_scale=cfg_scale,
             cfg_merge=cfg_merge,
-            pre_encoded_text=pre_encoded_text,
-            uncond_pre_encoded_text=uncond_pre_encoded_text,
         )
 
         if profile:

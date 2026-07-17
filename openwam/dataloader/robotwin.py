@@ -329,8 +329,6 @@ class RoboTwinDataset(BaseDataset):
         filter_static_segments: bool = True,
         static_segment_threshold: float = 1e-5,
         max_static_retry: int = 3,
-        text_embedding_cache_dir: Optional[str] = None,
-        text_embedding_dropout: float = 0.0,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
         # Optional load-time video color jitter, applied consistently across a
@@ -684,26 +682,6 @@ class RoboTwinDataset(BaseDataset):
         elif split == "val":
             print(f"  Val: exhaustive windows ({len(self._window_index)} samples)")
 
-        # ---- Optional pre-encoded text cache (e.g. Cosmos-Reason1 for the
-        # CosmosPredict25 backbone, pre-computed via
-        # ``openwam.dataloader.utils.stats_computation.reason1_embedding_computation``). When the
-        # cache_dir is set, every sample dict will carry a
-        # ``pre_encoded_text`` (L, D) tensor that the architecture threads to
-        # ``vb.preprocess_input_for_train``. Wan backbones drop it silently via ``**kw``.
-        self._text_embedding_transform = None
-        if text_embedding_cache_dir:
-            from openwam.dataloader.transforms.text_embedding_cache import (
-                TextEmbeddingCacheTransform,
-            )
-
-            self._text_embedding_transform = TextEmbeddingCacheTransform(
-                cache_dir=text_embedding_cache_dir,
-                dropout_p=float(text_embedding_dropout),
-            )
-            # Eval split: deterministic (no dropout). Train: random per call.
-            if split != "train":
-                self._text_embedding_transform.eval()
-
     @property
     def action_dim(self) -> int:
         return self._action_dim_value
@@ -1013,8 +991,6 @@ class RoboTwinDataset(BaseDataset):
             sample["video"] = self._color_jitter.apply({"video": sample["video"]})["video"]
             # Keep the first-frame conditioning image in sync with the jittered clip.
             sample["first_frame_image"] = [sample["video"][0]]
-        if self._text_embedding_transform is not None:
-            sample = self._text_embedding_transform.apply(sample)
         return sample
 
 
@@ -1108,8 +1084,6 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             filter_static_segments=bool(_get("filter_static_segments", True)),
             static_segment_threshold=float(_get("static_segment_threshold", 1e-5)),
             max_static_retry=int(_get("max_static_retry", 3)),
-            text_embedding_cache_dir=_get("text_embedding_cache_dir", None),
-            text_embedding_dropout=float(_get("text_embedding_dropout", 0.0)),
             unify_action=bool(_get("unify_action", False)),
             unify_action_map=_get("unify_action_map", None),
             color_jitter=_get("color_jitter", None),

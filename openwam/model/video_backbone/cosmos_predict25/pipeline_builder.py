@@ -35,11 +35,6 @@ _COSMOS_INSTALL_HINT = (
 _COSMOS25_VAE_FILENAME = "tokenizer.pth"
 _VAE_CHOICES = {"none", "wan2pt1"}
 
-# Text encoder choices. "none" = caller passes `pre_encoded_text` (offline
-# cache path). "reason1_live" = construct a Cosmos-Reason1-7B encoder inline
-# and run it per training step.
-_TEXT_ENCODER_CHOICES = {"none", "reason1_live"}
-
 
 # Concrete geometry for the 2B 720p network (matches probed
 # `*_ema_bf16.pt` checkpoints: 28 blocks, dim=2048, head_dim=128, context_dim=1024).
@@ -226,16 +221,6 @@ def _cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
     return getattr(cfg, key, default)
 
 
-def _cfg_set(cfg: Any, key: str, value: Any) -> None:
-    if isinstance(cfg, dict):
-        cfg[key] = value
-        return
-    try:
-        setattr(cfg, key, value)
-    except Exception:
-        pass
-
-
 def _video_backbone_cfg(source: Any) -> Any:
     """Extract the ``video_backbone`` sub-config from a Hydra cfg / path / dict."""
     if source is None:
@@ -300,7 +285,7 @@ def build_cosmos_predict25_pipeline(
     ``source`` is either:
       - a model directory ``str`` / ``Path`` (e.g. ``/path/to/assets/Cosmos-Predict2.5-2B``),
       - a Hydra ``DictConfig`` carrying ``video_backbone.{model_path, model_variant,
-        text_encoder, shift_video}``,
+        text_encoder_path, shift_video}``,
       - a plain dict with the same shape.
 
     Returns the wrapper with ``dim`` / ``num_layers`` / ``num_heads`` / ``head_dim``
@@ -325,8 +310,6 @@ def build_cosmos_predict25_pipeline(
         )
     model_path = Path(model_path_raw) if model_path_raw is not None else None
     variant = str(_cfg_get(vb_cfg, "model_variant", "base/post-trained"))
-    text_encoder_choice = str(_cfg_get(vb_cfg, "text_encoder", "none")).lower()
-    requested_text_encoder_choice = text_encoder_choice
     shift_video = float(_cfg_get(vb_cfg, "shift_video", 5.0))
     sac_mode_raw = str(_cfg_get(vb_cfg, "sac_mode", "none")).lower()
     _valid_sac_modes = {"none", "mm_only", "block_wise"}
@@ -343,46 +326,24 @@ def build_cosmos_predict25_pipeline(
             f"Choose one of: {sorted(_VAE_CHOICES)} "
             "(wan2pt1 = real Cosmos-Predict2.5 tokenizer; none = caller supplies pre-encoded latents)."
         )
-    if text_encoder_choice not in _TEXT_ENCODER_CHOICES:
-        raise ValueError(
-            f"video_backbone.text_encoder={text_encoder_choice!r} is not valid. "
-            f"Choose one of: {sorted(_TEXT_ENCODER_CHOICES)} "
-            "(none = caller passes pre_encoded_text; reason1_live = run Cosmos-Reason1-7B inline)."
-        )
-    # `text_encoder_path` is also checked here (pre-import / pre-checkpoint-load)
+    # `text_encoder_path` is checked here (pre-import / pre-checkpoint-load)
     # so a missing path fails fast — without this, a typo in the config would
     # only surface after `_resolve_checkpoint_path` and the 5 GB DiT load.
+    # On the training path (``ckpt_dir is None``) it tells the builder where
+    # to load Reason1 so it can be registered under ``reason1`` and saved into
+    # the unified safetensors. On the deploy path (``ckpt_dir`` non-None),
+    # weights flow from safetensors and the loader points ``from_empty`` at
+    # ``<ckpt_dir>/reason1/`` structural artifacts instead.
     text_encoder_path_raw = _cfg_get(vb_cfg, "text_encoder_path", None)
-    # On the training path (``ckpt_dir is None``), ``text_encoder_path`` tells
-    # the builder where to load Reason1 so it can be registered under
-    # ``reason1`` and saved into the unified safetensors. This applies
-    # even when the run consumes offline ``pre_encoded_text`` caches. On the
-    # deploy path (``ckpt_dir`` non-None), weights flow from safetensors and
-    # the loader points ``from_empty`` at ``<ckpt_dir>/reason1/`` structural
-    # artifacts instead.
-    if ckpt_dir is None and text_encoder_path_raw is not None and text_encoder_choice == "none":
-        text_encoder_choice = "reason1_live"
-        _cfg_set(vb_cfg, "text_encoder", text_encoder_choice)
-        logger.info(
-            "Cosmos Reason1: text_encoder=none but text_encoder_path is set; "
-            "loading/registering Reason1 so checkpoints are self-contained. "
-            "Cache-supplied pre_encoded_text still wins at preprocessing time."
-        )
-    if text_encoder_choice == "reason1_live" and text_encoder_path_raw is None and ckpt_dir is None:
+    if text_encoder_path_raw is None and ckpt_dir is None:
         raise ValueError(
-            "video_backbone.text_encoder_path is required when "
-            "text_encoder=reason1_live on the training path, and CosmosPredict25 "
-            "checkpoints now save Reason1 into safetensors whenever a "
-            "text_encoder_path is available. Point text_encoder_path at the "
-            "Cosmos-Reason1-7B bundle root, e.g. /path/to/assets/Cosmos-Reason1-7B."
+            "video_backbone.text_encoder_path is required on the training path. "
+            "Point it at the Cosmos-Reason1-7B bundle root, e.g. "
+            "/path/to/assets/Cosmos-Reason1-7B."
         )
-    # §14.7 — CFG dropout for the live encoder path. The actual substitution
-    # happens in `CosmosPredict25VideoBackbone.preprocess_input`; we validate the
-    # range + flag dead-config combinations here so a user misconfiguration
-    # fails before any 5 GB DiT load. The cache path uses the separate
-    # `dataloader.text_embedding_dropout` knob — these are intentionally
-    # independent (cache > live precedence makes them per-sample mutually
-    # exclusive).
+    # §14.7 — CFG dropout. The actual substitution happens in
+    # `CosmosPredict25VideoBackbone._preprocess_input`; validate the range here
+    # so a user misconfiguration fails before any 5 GB DiT load.
     text_dropout_p_raw = _cfg_get(vb_cfg, "text_encoder_dropout", 0.0)
     try:
         text_dropout_p = float(text_dropout_p_raw)
@@ -392,13 +353,6 @@ def build_cosmos_predict25_pipeline(
         ) from exc
     if not 0.0 <= text_dropout_p <= 1.0:
         raise ValueError(f"video_backbone.text_encoder_dropout={text_dropout_p} is out of range; must be in [0, 1].")
-    if text_dropout_p > 0.0 and requested_text_encoder_choice == "none":
-        raise ValueError(
-            "video_backbone.text_encoder_dropout > 0 requires "
-            "text_encoder=reason1_live (dead config otherwise). For the "
-            "offline-cache path use `dataloader.text_embedding_dropout` "
-            "instead."
-        )
     text_dropout_seed = _cfg_get(vb_cfg, "text_encoder_dropout_seed", None)
     if text_dropout_seed is not None:
         try:
@@ -454,44 +408,32 @@ def build_cosmos_predict25_pipeline(
         logger.info("Cosmos checkpoint: %s", ckpt_path)
         _load_state_dict_into_net(net, ckpt_path)
     else:
-        logger.info(
-            "Cosmos DiT: skipping `*_ema_bf16.pt` bootstrap (deploy path; weights from unified safetensors)"
-        )
+        logger.info("Cosmos DiT: skipping `*_ema_bf16.pt` bootstrap (deploy path; weights from unified safetensors)")
     if sac_mode_raw != "none":
         logger.info("Enabling Cosmos SAC selective-checkpoint (mode=%s) post-load", sac_mode_raw)
         net.enable_selective_checkpoint(SACConfig(mode=CheckpointMode(sac_mode_raw)), net.blocks)
     net = net.to(dtype=torch.bfloat16)
 
-    text_encoder_obj = None
-    if text_encoder_choice == "reason1_live":
-        # Lazy import — `text_encoder.py` pulls in `transformers` only when
-        # this branch fires, so the `text_encoder: none` path stays
-        # importable even without the Qwen-VL classes installed.
-        from openwam.model.video_backbone.cosmos_predict25.text_encoder import Reason1LiveTextEncoder
+    from openwam.model.video_backbone.cosmos_predict25.text_encoder import Reason1LiveTextEncoder
 
-        # Deploy path (``ckpt_dir`` non-None and no explicit path override):
-        # build a meta-device shell — the inner Qwen module is registered as
-        # ``reason1`` on the wrapper (see ``pipeline_wrapper.py``), so
-        # ``arch.load_checkpoint`` will populate its weights from the unified
-        # safetensors. Only the small structural files
-        # (``config.json`` + ``tokenizer.json``) need to exist on the deploy
-        # host, under ``<ckpt_dir>/reason1/``. Training path keeps the eager
-        # load from the full Cosmos-Reason1 bundle.
-        if ckpt_dir is not None and text_encoder_path_raw is None:
-            artifact_dir = Path(ckpt_dir) / "reason1"
-            logger.info(
-                "Cosmos Reason1: building empty shell (deploy path; weights from unified safetensors, "
-                "structural artifacts from %s)",
-                artifact_dir,
-            )
-            text_encoder_obj = Reason1LiveTextEncoder.from_empty(
-                artifact_dir, dtype=torch.bfloat16, device=device
-            )
-        else:
-            logger.info("Cosmos Reason1 live text encoder: loading from %s", text_encoder_path_raw)
-            text_encoder_obj = Reason1LiveTextEncoder(
-                Path(text_encoder_path_raw), dtype=torch.bfloat16, device=device
-            )
+    # Deploy path (``ckpt_dir`` non-None and no explicit path override):
+    # build a meta-device shell — the inner Qwen module is registered as
+    # ``reason1`` on the backbone, so ``arch.load_checkpoint`` will populate
+    # its weights from the unified safetensors. Only the small structural
+    # files (``config.json`` + ``tokenizer.json``) need to exist on the deploy
+    # host, under ``<ckpt_dir>/reason1/``. Training path keeps the eager load
+    # from the full Cosmos-Reason1 bundle.
+    if ckpt_dir is not None and text_encoder_path_raw is None:
+        artifact_dir = Path(ckpt_dir) / "reason1"
+        logger.info(
+            "Cosmos Reason1: building empty shell (deploy path; weights from unified safetensors, "
+            "structural artifacts from %s)",
+            artifact_dir,
+        )
+        text_encoder_obj = Reason1LiveTextEncoder.from_empty(artifact_dir, dtype=torch.bfloat16, device=device)
+    else:
+        logger.info("Cosmos Reason1 live text encoder: loading from %s", text_encoder_path_raw)
+        text_encoder_obj = Reason1LiveTextEncoder(Path(text_encoder_path_raw), dtype=torch.bfloat16, device=device)
 
     vae_obj = None
     if vae_choice != "none":

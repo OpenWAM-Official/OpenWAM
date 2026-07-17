@@ -19,13 +19,40 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYBIN="${PYBIN:-${REPO_ROOT}/.venv/bin/python}"
 COSMOS_ROOT="${REPO_ROOT}/third_party/cosmos-predict2.5"
 
-if [ ! -x "${PYBIN}" ]; then
-    echo "error: ${PYBIN} not found; set PYBIN=/path/to/python or create ${REPO_ROOT}/.venv first." >&2
+# Interpreter resolution: explicit $PYBIN > conda env named `openwam`
+# (probed via `conda env list`, then common conda roots — no activation
+# needed) > system python3.
+resolve_pybin() {
+    if [ -n "${PYBIN:-}" ]; then
+        echo "${PYBIN}"
+        return
+    fi
+    if command -v conda >/dev/null 2>&1; then
+        local env_path
+        env_path="$(conda env list 2>/dev/null | awk '$1 == "openwam" {print $NF}')"
+        if [ -n "${env_path}" ] && [ -x "${env_path}/bin/python" ]; then
+            echo "${env_path}/bin/python"
+            return
+        fi
+    fi
+    local root
+    for root in "${HOME}/miniconda3" "${HOME}/anaconda3" "${HOME}/miniforge3" /opt/conda /opt/miniconda3; do
+        if [ -x "${root}/envs/openwam/bin/python" ]; then
+            echo "${root}/envs/openwam/bin/python"
+            return
+        fi
+    done
+    command -v python3 || true
+}
+
+PYBIN="$(resolve_pybin)"
+if [ -z "${PYBIN}" ] || [ ! -x "${PYBIN}" ]; then
+    echo "error: no usable python found (no \$PYBIN, no conda env 'openwam', no system python3); set PYBIN=/path/to/python." >&2
     exit 1
 fi
+echo "[install_cosmos_predict25] python:    ${PYBIN}"
 
 if [ ! -f "${COSMOS_ROOT}/pyproject.toml" ]; then
     echo "error: cosmos-predict2.5 submodule not checked out at ${COSMOS_ROOT}." >&2
@@ -82,7 +109,7 @@ echo "[install_cosmos_predict25] SM list:   ${TORCH_CUDA_ARCH_LIST}"
 #    compile-time CPATH lets g++ see cudnn.h; LD path lets the resulting .so
 #    find libcudnn at runtime.
 CUDA_HOME="${CUDA_HOME}" \
-PATH="${CUDA_HOME}/bin:${REPO_ROOT}/.venv/bin:${PATH}" \
+PATH="${CUDA_HOME}/bin:$(dirname "${PYBIN}"):${PATH}" \
 LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDNN_LIB}:${LD_LIBRARY_PATH:-}" \
 CPATH="${CUDNN_INC}:${CPATH:-}" \
 CPLUS_INCLUDE_PATH="${CUDNN_INC}:${CPLUS_INCLUDE_PATH:-}" \

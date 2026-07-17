@@ -209,51 +209,53 @@ def test_crossattn_projection_only_when_dim_matches_pre(fake_wrapper):
     assert torch.equal(state_post.context, post_ctx)
 
 
-def test_preprocess_input_rejects_vace(fake_wrapper):
+def test_preprocess_input_rejects_vace():
+    wrapper = _wrapper_with_fake_live_encoder()
     latents = torch.randn(1, 16, 2, 4, 4)
-    pre_text = torch.randn(1, 8, 24)
     # Dataset always emits a list (possibly all-None for "no data"); rejection
     # must trigger only when an actual entry is non-None.
     with pytest.raises(NotImplementedError, match="VACE"):
-        fake_wrapper._preprocess_input(input_latents=latents, pre_encoded_text=pre_text, vace_videos=[object()])
+        wrapper._preprocess_input(input_latents=latents, text=["x"], vace_videos=[object()])
     # All-None VACE list passes through (RoboTwin's default).
-    out = fake_wrapper._preprocess_input(input_latents=latents, pre_encoded_text=pre_text, vace_videos=[None])
+    out = wrapper._preprocess_input(input_latents=latents, text=["x"], vace_videos=[None])
     assert "input_latents" in out
 
 
-def test_preprocess_input_passes_through_when_ref_images_absent(fake_wrapper):
+def test_preprocess_input_passes_through_when_ref_images_absent():
     """T2V path: ``ref_images=None`` or list-of-``None`` produces no TI2V keys.
 
     ``FirstFrameConditioningTransform`` skips populating ``first_frame_image``
     for samples with an empty video, so the adapter forwards
     ``ref_images=None`` (or list-of-``None``s when only some samples have a
-    reference, which ``base.py:556-558`` already rejects). Either way, the
-    wrapper must not crash on a missing VAE and must not emit TI2V plumbing.
+    reference, which ``base.py`` already rejects). Either way, the wrapper
+    must not crash on a missing VAE and must not emit TI2V plumbing.
     """
+    wrapper = _wrapper_with_fake_live_encoder()
     latents = torch.randn(1, 16, 2, 4, 4)
-    pre_text = torch.randn(1, 8, 24)
-    out_none = fake_wrapper._preprocess_input(
-        input_latents=latents, pre_encoded_text=pre_text, ref_images=None
-    )
+    out_none = wrapper._preprocess_input(input_latents=latents, text=["x"], ref_images=None)
     assert "input_latents" in out_none
     assert "first_frame_latents" not in out_none
     assert "condition_mask" not in out_none
-    out_listed_none = fake_wrapper._preprocess_input(
-        input_latents=latents, pre_encoded_text=pre_text, ref_images=[None]
-    )
+    out_listed_none = wrapper._preprocess_input(input_latents=latents, text=["x"], ref_images=[None])
     assert "first_frame_latents" not in out_listed_none
 
 
-def test_preprocess_input_requires_text_source(fake_wrapper):
+def test_preprocess_input_requires_text(fake_wrapper):
     latents = torch.randn(1, 16, 2, 4, 4)
-    with pytest.raises(ValueError, match="pre_encoded_text"):
+    with pytest.raises(ValueError, match="requires `text`"):
         fake_wrapper._preprocess_input(input_latents=latents)
 
 
-def test_preprocess_input_returns_required_keys(fake_wrapper):
+def test_preprocess_input_requires_configured_encoder(fake_wrapper):
     latents = torch.randn(1, 16, 2, 4, 4)
-    pre_text = torch.randn(1, 8, 24)
-    out = fake_wrapper._preprocess_input(input_latents=latents, pre_encoded_text=pre_text)
+    with pytest.raises(ValueError, match="text encoder"):
+        fake_wrapper._preprocess_input(input_latents=latents, text=["x"])
+
+
+def test_preprocess_input_returns_required_keys():
+    wrapper = _wrapper_with_fake_live_encoder()
+    latents = torch.randn(1, 16, 2, 4, 4)
+    out = wrapper._preprocess_input(input_latents=latents, text=["x"])
     assert set(out) >= {"input_latents", "context", "context_mask", "seq_lens", "num_frames", "height", "width"}
     assert out["num_frames"] == 2 and out["height"] == 4 and out["width"] == 4
     assert out["seq_lens"].tolist() == [8]
@@ -314,10 +316,13 @@ def _make_pil_video(B: int, T: int, H: int, W: int):
 
 def _wrapper_with_fake_vae() -> CosmosPredict25VideoBackbone:
     net = _FakeMiniDIT(dim=32, num_blocks=4)
+    # Encoder emits post-projection dim (24) directly: the fake VAE produces
+    # bf16 latents while the fake DiT's crossattn_proj Linear is float32, so
+    # this test skips the projection and exercises only the VAE path.
     return CosmosPredict25VideoBackbone(
         net=net,
         vae=_FakeVAEInterface(),
-        text_encoder=None,
+        text_encoder=_FakeLiveTextEncoder(L=8, ctx_dim_pre=24),
         dim=32,
         num_layers=4,
         num_heads=4,
@@ -329,9 +334,8 @@ def _wrapper_with_fake_vae() -> CosmosPredict25VideoBackbone:
 
 def test_preprocess_input_with_fake_vae_returns_real_latents():
     wrapper = _wrapper_with_fake_vae()
-    pre_text = torch.randn(1, 8, 24)
     frames = _make_pil_video(B=1, T=5, H=64, W=64)
-    out = wrapper._preprocess_input(frames=frames, text=None, pre_encoded_text=pre_text)
+    out = wrapper._preprocess_input(frames=frames, text=["x"])
 
     # Wan2pt1 stride: T_lat = 1 + (5-1)//4 = 2; H_lat=8; W_lat=8; C_z=16.
     assert out["input_latents"].shape == (1, 16, 2, 8, 8)
@@ -403,15 +407,12 @@ def _wrapper_with_fake_live_encoder():
 
 
 def test_preprocess_input_uses_live_text_encoder_when_text_provided():
-    """Live encoder dispatch path: caller provides `text=[...]`, no
-    `pre_encoded_text`. Wrapper must:
-      1. Invoke `self.text_encoder(text)` (records via the fake's `.calls`)
-      2. Apply `net.crossattn_proj` in-line (64 → 24 on FakeMiniDIT) so the
-         architecture's downstream `_append_proprio_context_token` sees the
-         expected post-projection dim.
-
-    Symmetric mirror with the cache test (post-projection 24 comes in, no
-    extra projection happens — caches are already post-projection)."""
+    """Live encoder dispatch path: caller provides `text=[...]`. Wrapper must:
+    1. Invoke `self.text_encoder(text)` (records via the fake's `.calls`)
+    2. Apply `net.crossattn_proj` in-line (64 → 24 on FakeMiniDIT) so the
+       architecture's downstream `_append_proprio_context_token` sees the
+       expected post-projection dim.
+    """
     wrapper = _wrapper_with_fake_live_encoder()
     latents = torch.randn(1, 16, 2, 4, 4)
 
@@ -428,28 +429,6 @@ def test_preprocess_input_uses_live_text_encoder_when_text_provided():
     )
     # `seq_lens` reflects the live encoder's L axis (8).
     assert out["seq_lens"].tolist() == [8]
-
-
-def test_preprocess_input_pre_encoded_text_wins_over_text():
-    """When BOTH a `pre_encoded_text` cache AND `text` are supplied, the cache
-    short-circuit must win and the live encoder must NOT be invoked. This
-    pins the documented cache > live precedence (§14) — useful for staged
-    migration where some samples have cache hits and others don't.
-
-    Mixed batches that BOTH carry cache are handled at `base.py:prepare_inputs`
-    (the all-or-nothing check); per-sample the wrapper sees either both or
-    neither, so a single-sample assertion is sufficient here."""
-    wrapper = _wrapper_with_fake_live_encoder()
-    latents = torch.randn(1, 16, 2, 4, 4)
-    pre_text = torch.randn(1, 12, 24)  # already post-projection (dim=24 matches ctx_dim_post)
-
-    out = wrapper._preprocess_input(input_latents=latents, text=["pick up the block"], pre_encoded_text=pre_text)
-
-    assert wrapper.text_encoder.calls == [], (
-        "Live encoder must be silently skipped when `pre_encoded_text` is supplied. "
-        "Cache wins per-sample."
-    )
-    assert torch.equal(out["context"], pre_text), "Cached embedding must flow through unchanged."
 
 
 # ----------------------------------------------------------------------
@@ -476,9 +455,8 @@ def _wrapper_with_dropout(*, p: float, seed=None) -> CosmosPredict25VideoBackbon
 
 def test_text_dropout_training_substitutes_empty_strings():
     """With `text_dropout_p=1.0` and the wrapper in training mode every prompt
-    must be substituted with `""` before the encoder is called. This pins the
-    canonical-empty-embedding contract that mirrors the cache-path's
-    `empty.safetensors` lookup."""
+    must be substituted with `""` before the encoder is called (canonical
+    empty-embedding contract)."""
     wrapper = _wrapper_with_dropout(p=1.0, seed=0)
     assert wrapper.training, "fresh nn.Module is in training mode by default"
     latents = torch.randn(2, 16, 2, 4, 4)

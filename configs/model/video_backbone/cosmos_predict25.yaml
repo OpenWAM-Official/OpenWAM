@@ -20,24 +20,15 @@
 
 name: cosmos_predict25_2b
 # Bundle root; build_cosmos_predict25_pipeline globs <model_variant>/<uuid>_ema_bf16.pt.
-model_path: /path/to/assets/Cosmos-Predict2.5-2B
+model_path: /path/to/Cosmos-Predict2.5-2B
 model_variant: base/post-trained   # base/{pre,post}-trained | base/distilled | auto/multiview | robot/multiview-agibot | robot/action-cond
 
-# text_encoder (default: none) selects the text pathway:
-#   none         = caller supplies a pre_encoded_text cache as the DiT context
-#                  (needs dataloader.text_embedding_cache_dir reachable).
-#   reason1_live = run Cosmos-Reason1-7B inline.
-# The key is omitted here (defaults to none); switch to live on the CLI with the
-# `+` append form:
-#   +model.video_backbone.text_encoder=reason1_live \
-#   +model.video_backbone.text_encoder_path=/path/to/assets/Cosmos-Reason1-7B
-# cache wins over live per-sample; preprocess_input raises if neither is available.
-# text_encoder_path also lets checkpoints save Reason1 into safetensors + copy
-# structural files under <ckpt_dir>/reason1/.
+# Cosmos-Reason1-7B bundle root, run inline as the live text encoder (required
+# on the training path). Checkpoints save Reason1 into safetensors + copy
+# structural files under <ckpt_dir>/reason1/, so deploy needs no external path.
+text_encoder_path: /path/to/Cosmos-Reason1-7B
 
-# CFG dropout for the live-encoder path: substitutes "" for prompts with prob p,
-# only when training=True. Independent of dataloader.text_embedding_dropout
-# (offline-cache path); the two are mutually exclusive (cache > live).
+# CFG dropout: substitutes "" for prompts with prob p, only when training=True.
 # text_encoder_dropout_seed defaults to null (nondeterministic); set an int for
 # reproducibility via +model.video_backbone.text_encoder_dropout_seed=<int>.
 text_encoder_dropout: 0.0
