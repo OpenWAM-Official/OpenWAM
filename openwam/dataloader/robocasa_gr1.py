@@ -227,6 +227,39 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
 
     def _post_init(self, info: dict) -> None:
         features = info.get("features", {}) or {}
+        required = [
+            self._action_column,
+            self._state_column,
+            self._pose_action_column,
+            self._gripper_action_column,
+            self._pose_state_column,
+            self._gripper_state_column,
+            "task_index",
+        ]
+        missing_required = sorted(col for col in required if col and col not in features)
+        if missing_required:
+            raise KeyError(
+                f"RoboCasaGR1 action_mode={self.action_mode!r} requires columns absent from info.features: "
+                f"{missing_required}. The public NVIDIA GR1 download contains native joint44 only; "
+                "use configs/dataloader/robocasa_gr1.yaml unless an EEF-enriched conversion was generated."
+            )
+        for column, expected_dim in (
+            (self._action_column, self._raw_action_dim),
+            (self._state_column, self._raw_action_dim),
+            (self._pose_action_column, 12),
+            (self._gripper_action_column, 2),
+            (self._pose_state_column, 12),
+            (self._gripper_state_column, 2),
+        ):
+            if not column:
+                continue
+            shape = tuple(features[column].get("shape", ()))
+            if shape and shape != (expected_dim,):
+                raise ValueError(
+                    f"RoboCasaGR1 feature {column!r} must have shape [{expected_dim}] for "
+                    f"action_mode={self.action_mode!r}, got {shape}"
+                )
+
         configured = set(self._prompt_columns)
         self._prompt_columns = [col for col in self._prompt_columns if col in features]
         missing = configured.difference(self._prompt_columns)
@@ -244,7 +277,10 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         for col in self._prompt_columns:
             if col in win:
                 value = win[col].iloc[0]
-                if value is not None:
+                # The public GR1 data's annotation.human.coarse_action is an
+                # integer class ID (e.g. 6), not language. Never stringify a
+                # categorical ID into a bogus training prompt.
+                if isinstance(value, str):
                     text = str(value).strip()
                     if text:
                         return text

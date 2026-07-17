@@ -1,0 +1,54 @@
+type: robocasa_gr1
+
+# This profile is ONLY for an EEF-enriched LeRobot v3 conversion containing the
+# four columns below. The public NVIDIA 24k download is native joint44 and does
+# not contain them; use robocasa_gr1.yaml for that data.
+dataset_dir: /TODO/robocasa_gr1_eef_v30
+
+action_mode: unify
+action_dim: 20
+eef_action_column: null
+eef_state_column: null
+eef_pose_action_column: eef_sim_pose_action
+eef_gripper_action_column: gripper_open_scale_action
+eef_pose_state_column: eef_sim_pose_state
+eef_gripper_state_column: gripper_open_scale_state
+
+# EEF20 layout:
+#   [L xyz(3), L rot6d(6), L grip(1), R xyz(3), R rot6d(6), R grip(1)]
+# Scatter left arm to unified [0:10] and right arm to [34:44].
+unify_action: true
+unify_action_map:
+  - "0-9"
+  - "34-43"
+
+prompt_columns: []
+head_camera_priority:
+  - observation.images.ego_view
+  - video.ego_view_pad_res256_freq20
+left_wrist_camera_priority:
+  - observation.images.left_wrist
+right_wrist_camera_priority:
+  - observation.images.right_wrist
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+split: train
+enable_action_supervision: true
+
+# Generate with robocasa_gr1_stats_computation. Its identity pin guarantees
+# normalization changes only xyz/gripper; all 12 rot6d components pass through.
+normalize_mode: null
+normalization_stats_path: null
+state_mask: null
+action_mask: null
+
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0

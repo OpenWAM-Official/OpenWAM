@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -18,7 +19,7 @@ from openwam.dataloader.registry import list_registered_datasets
 from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
 from openwam.dataloader.transforms.builder import build_transforms
 from openwam.dataloader.transforms.video import VideoColorJitter
-from openwam.dataloader.utils.normalization import load_stats_file
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, load_stats_file, pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import _iter_bucket_arrays
 from openwam.deploy.model_loader import _build_normalizer, _UnifyAwareNormalizer
 from openwam.train.utils.checkpointing import save_normalization_stats
@@ -209,6 +210,40 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     np.testing.assert_allclose(normalizer.unnormalize(sample["action"].numpy()), np.clip(raw, 0, 1), atol=1e-5)
 
 
+def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Path):
+    _write_bucket(tmp_path)
+    base = {
+        "min": np.full(20, -2.0, dtype=np.float32),
+        "max": np.full(20, 2.0, dtype=np.float32),
+        "mean": np.zeros(20, dtype=np.float32),
+        "std": np.full(20, 2.0, dtype=np.float32),
+        "q01": np.full(20, -2.0, dtype=np.float32),
+        "q99": np.full(20, 2.0, dtype=np.float32),
+    }
+    pin_rot6d_identity(base, ROT6D_DIMS_EEF20)
+    stats_path = tmp_path / "normalization_stats.npy"
+    np.save(stats_path, {"unify": base})
+    ds = _dataset(
+        tmp_path,
+        action_mode="unify",
+        unify_action=True,
+        unify_action_map=["0-9", "34-43"],
+        normalize_mode="min-max",
+        normalization_stats_path=str(stats_path),
+    )
+    raw = ds._raw_action(ds._load_data_table(0, 0).to_pandas())
+    normalized = ds._normalize_array(raw)
+    rot = list(ROT6D_DIMS_EEF20)
+    np.testing.assert_allclose(normalized[:, rot], raw[:, rot], atol=1e-7)
+    assert not np.allclose(normalized[:, [0, 9, 10, 19]], raw[:, [0, 9, 10, 19]])
+    for start in (3, 13):
+        first = raw[:, start : start + 3]
+        second = raw[:, start + 3 : start + 6]
+        np.testing.assert_allclose(np.linalg.norm(first, axis=-1), 1.0, atol=1e-6)
+        np.testing.assert_allclose(np.linalg.norm(second, axis=-1), 1.0, atol=1e-6)
+        np.testing.assert_allclose(np.sum(first * second, axis=-1), 0.0, atol=1e-6)
+
+
 def test_unify_mode_rejects_mismatched_base_flag(tmp_path: Path):
     _write_bucket(tmp_path)
     with np.testing.assert_raises_regex(ValueError, "requires unify_action=true"):
@@ -296,6 +331,15 @@ def test_color_jitter_defaults_are_02():
     assert built.brightness == 0.2
     assert built.contrast == 0.2
     assert built.saturation == 0.2
+
+
+def test_color_jitter_changes_pixels_consistently_across_frames():
+    source = Image.new("RGB", (32, 32), (80, 140, 200))
+    jitter = VideoColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)
+    random.seed(7)
+    frames = jitter({"video": [source.copy(), source.copy()]})["video"]
+    np.testing.assert_array_equal(np.asarray(frames[0]), np.asarray(frames[1]))
+    assert not np.array_equal(np.asarray(frames[0]), np.asarray(source))
 
 
 def test_robocasa_config_wires_reader_color_jitter():

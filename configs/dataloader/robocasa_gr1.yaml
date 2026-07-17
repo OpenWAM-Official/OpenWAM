@@ -1,34 +1,29 @@
 type: robocasa_gr1
 
-# LeRobot v3 root or single bucket. Replace this with the real converted
-# RoboCasa GR1 dataset path before sample/debug training smoke.
-dataset_dir: /TODO/robocasa_gr1_lerobotv3
+# Convert the NVIDIA LeRobot v2.0 download first:
+#   python scripts/convert_robocasa_gr1_v20_to_v30.py \
+#     --input /path/to/robocasa-gr1-24k \
+#     --output /path/to/robocasa-gr1-v30
+dataset_dir: /TODO/robocasa_gr1_v30
 
+# The public gr1_unified.*_1000 buckets contain native 44-D joint/body vectors,
+# not EEF poses. This is the only honest default for the downloaded dataset.
 # joint: raw joint vectors from action/state columns; requires action_dim.
 # eef:   20D [L xyz+rot6d+grip, R xyz+rot6d+grip].
 # unify: normalize raw 20D EEF, then scatter through the shared base reader into
-#        the 80D pretraining space. Requires unify_action: true below.
-action_mode: eef
-action_dim: null
+#        the 80D pretraining space. Requires an EEF-enriched conversion; see
+#        robocasa_gr1_unify.yaml. Never relabel the native 44-D joints as EEF20.
+action_mode: joint
+action_dim: 44
 
-# Default EEF path expects RoboCOIN-style standardized columns. If your
-# conversion exports final 20D vectors directly, set eef_action_column /
-# eef_state_column instead and null the pose+gripper columns.
+# Native v2.0/v3-reindexed columns.
 joint_action_column: action
 joint_state_column: observation.state
-eef_action_column: null
-eef_state_column: null
-eef_pose_action_column: eef_sim_pose_action
-eef_gripper_action_column: gripper_open_scale_action
-eef_pose_state_column: eef_sim_pose_state
-eef_gripper_state_column: gripper_open_scale_state
 
-# Prompt resolution tries available parquet columns first, then falls back to
-# meta/tasks.parquet via task_index. Missing/blank prompt metadata is an error.
-prompt_columns:
-  - annotation.human.coarse_action
-  - annotation.human.action.task_description
-  - task
+# Native annotation.human.coarse_action is an integer class ID, not text.
+# Resolve task_index through converted meta/tasks.parquet. Missing/blank prompt
+# metadata is an error.
+prompt_columns: []
 
 # Camera key resolution by info.json features priority. Missing wrist views are
 # rendered as black slots in multiview mode.
@@ -63,13 +58,9 @@ enable_action_supervision: true
 normalize_mode: null
 normalization_stats_path: null
 
-# Unify mode knobs. Default map slots canonical 20D EEF into the 80D space:
-# L xyz/rot6d/gripper -> [0:10], R xyz/rot6d/gripper -> [34:44].
-# Set action_mode: unify and unify_action: true together; eef/joint require false.
+# Native joint44 cannot be scattered into semantic EEF80 slots.
 unify_action: false
-unify_action_map:
-  - "0-9"
-  - "34-43"
+unify_action_map: null
 state_mask: null
 action_mask: null
 

@@ -30,14 +30,39 @@ For a short machine-migration setup flow, start with
    python robocasa/scripts/download_tabletop_assets.py -y
    ```
 
-2. Optionally download the official demonstrations for dataset inspection or
-   training:
+2. Optionally download the official 24k GR1 demonstrations:
 
    ```bash
-   huggingface-cli download \
-     --repo-type dataset nvidia/PhysicalAI-Robotics-GR00T-Teleop-Sim \
-     --local-dir ./datasets/
+   hf download nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim \
+     --repo-type dataset \
+     --include "gr1_unified.*/**" \
+     --local-dir /path/to/robocasa-gr1-24k
    ```
+
+   These folders are LeRobot **v2.0**, not raw HDF5 and not v3. Convert their
+   metadata/path layout non-destructively for the OpenWAM reader:
+
+   ```bash
+   python scripts/convert_robocasa_gr1_v20_to_v30.py \
+     --input /path/to/robocasa-gr1-24k \
+     --output /path/to/robocasa-gr1-v30
+   ```
+
+   The converter hard-links payloads by default, so conversion is fast and does
+   not duplicate the large parquet/MP4 data. Use `--link-mode symlink` across
+   mount layouts, or `--link-mode copy` only when duplication is intended.
+
+   The public data contains native 44-D joint/body `observation.state` and
+   `action` vectors. It does **not** contain xyz+rot6d+gripper EEF20 columns.
+   `configs/dataloader/robocasa_gr1.yaml` therefore defaults to `joint`,
+   `action_dim: 44`, and prompt lookup through `task_index`. Do not enable
+   EEF80 unification on these joint vectors.
+
+   `configs/dataloader/robocasa_gr1_unify.yaml` is a separate, fail-fast
+   template for a genuinely EEF-enriched conversion with
+   `[L xyz3, rot6d6, grip1, R xyz3, rot6d6, grip1]`. Its explicit map places
+   EEF20 into unified slots `0-9` and `34-43`; generated stats pin all rot6d
+   dimensions to identity so only xyz/gripper are normalized.
 
 3. Start an OpenWAM policy server separately:
 
@@ -71,14 +96,23 @@ bash benchmarks/robocasa_gr1/run_smoke.sh env
 For render-enabled smoke tests and machine migration notes, see
 [`RENDERING.md`](RENDERING.md).
 
-Inspect an HDF5 file from the NVIDIA dataset:
+Inspect a converted training sample, save the composed image and ColorJitter
+comparison, and validate action/prompt contracts:
 
 ```bash
-ROBOCASA_GR1_PATH=/path/to/robocasa-gr1-tabletop-tasks \
-ROBOCASA_GR1_PYTHON=/path/to/robocasa-gr1/bin/python \
-ROBOCASA_GR1_DATASET=/path/to/demo.hdf5 \
-bash benchmarks/robocasa_gr1/run_smoke.sh dataset
+python scripts/inspect_robocasa_gr1_dataloader.py \
+  --config configs/dataloader/robocasa_gr1.yaml \
+  --dataset-dir /path/to/robocasa-gr1-v30 \
+  --sample-index 0 \
+  --output-dir validation_outputs/robocasa_gr1_sample0
 ```
+
+The output directory contains plain/jittered composed PNGs, a temporal contact
+sheet, a difference image, and `inspection_report.json`. The report checks that
+the single real ego view occupies the top 256×320 slot, both absent wrist slots
+are black, ColorJitter changes pixels, and the resolved task prompt is non-empty.
+For EEF/unify configs it additionally checks rot6d orthonormality, identity
+normalization on rotation components, and the EEF20↔unified80 map round-trip.
 
 ## Evaluation
 
