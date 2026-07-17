@@ -151,8 +151,11 @@ def test_real_vae_load_and_shape_round_trip(stub_reason1):
         pytest.skip(f"tokenizer.pth missing at {ASSET_PATH}.")
 
     vb = _build_backbone_with_real_vae()
-    vae = vb.vae
+    # Use the Wan2pt1VAEInterface facade — the registered `vb.vae` child is the
+    # raw inner `WanVAE_` whose encode() takes an explicit `scale`.
+    vae = vb._vae_iface
     assert vae is not None, "vae='wan2pt1' should populate the wrapper VAE slot"
+    assert vb.vae is not None, "inner WanVAE_ must be registered for state_dict"
 
     # T_pix=5 → T_lat = 1 + (5-1)//4 = 2; spatial 64→8 (stride 8); z_dim=16.
     pixels = torch.randn(1, 3, 5, 64, 64, dtype=torch.bfloat16, device="cuda:0")
