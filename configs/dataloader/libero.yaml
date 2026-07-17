@@ -3,7 +3,7 @@ type: libero
 # LeRobot v3 dataset, recommended:
 #   https://huggingface.co/datasets/nvidia/LIBERO_LeRobot_v3
 # A compatible HuggingFaceVLA/libero v3 conversion is also accepted.
-dataset_dir: /TODO/LIBERO_LeRobot_v3
+dataset_dir: /path/to/libero
 
 # Native LIBERO command: 7-D OSC action consumed directly by the eval env.
 action_mode: libero
