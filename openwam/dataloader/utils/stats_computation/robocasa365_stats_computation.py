@@ -12,8 +12,10 @@ two into ONE 25-D block so the whole ``[arm20, base5]`` vector normalizes with a
 Output schema (``.npy``, ``allow_pickle``)::
 
     {"eef": {mean, std, min, max, q01, q99}, "num_timesteps": int}            # 20-D (non-mobile)
-    #   arm10 left = real stats, right half = neutral (mean0/std1/min-1/max1/q01-1/q99 1); reduced at
-    #   10-D internally, then left-padded to 20-D by _expand_stats_to_20d before persist.
+    #   arm10 left = real stats with the rot6d dims (3:9) pinned to identity (normalization is a
+    #   pass-through on rot6d under every mode — only pos + gripper normalize), right half = neutral
+    #   (mean0/std1/min-1/max1/q01-1/q99 1); reduced at 10-D internally, then left-padded to 20-D by
+    #   _expand_stats_to_20d before persist.
     {"eef_base": {...25-D...}, "num_timesteps": int}                          # 25-D (include_base)
     #   eef_base = concat(eef20, base5); base5 = the RoboCasa-native action command stats
     #   [x_vel, y_vel, yaw_vel, torso, control_mode] with a constant-dim guard (torso is 0 across the
@@ -47,7 +49,7 @@ from openwam.dataloader.robocasa365 import (
 )
 from openwam.dataloader.transforms.normalize import compute_extended_stats
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
-from openwam.dataloader.utils.normalization import STAT_KEYS
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_ARM10, STAT_KEYS, pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import atomic_save_stats_npy
 
 # LeRobot ``action`` base command dims (mobile): [0:3] x/y/yaw vel, [3] torso, [4] control_mode.
@@ -127,6 +129,9 @@ def _finish(arm_chunks: list, base_chunks: list, total: int, include_base: bool,
     eef10 = compute_extended_stats(arm_chunks)
     if len(eef10["mean"]) != STATS_DIM:
         raise ValueError(f"computed arm dim {len(eef10['mean'])} != {STATS_DIM}")
+    # Make normalization a no-op on the rot6d dims (see pin_rot6d_identity): only pos + gripper
+    # normalize; the rotation representation reaches the model unchanged.
+    pin_rot6d_identity(eef10, ROT6D_DIMS_ARM10)
     eef20 = _expand_stats_to_20d(_pin_gripper_stats(eef10))
     print(f"  [{label}] done: {total} timesteps, dim=20{' +base5 (combined eef_base)' if include_base else ''}")
     if not include_base:
