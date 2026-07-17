@@ -122,3 +122,14 @@ mask_torso_action: true
 # (action OUT: gathers 80->25 and un-normalizes with the single 'eef_base' block → [arm20, base5];
 # proprio IN: normalizes then scatters through the SAME map). The eval client bridges arm (20->OSC),
 # sends base5 raw, and (when mobile) sends the 25-D [arm20, base5] proprio.
+
+# ── Video augmentation (optional) ─────────────────────────────────────────────
+# color_jitter: load-time color jitter applied by the reader to each clip, with
+# the SAME random factors across all frames (temporal consistency), TRAIN split
+# only. Omit / null / false → disabled (default; video byte-identical). Provide
+# a dict to enable + set per-channel strengths (hue is a no-op in PIL mode).
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0

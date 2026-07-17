@@ -84,6 +84,7 @@ from openwam.dataloader.transforms.multiview import (
     format_prompt_for_inference,
 )
 from openwam.dataloader.transforms.rotation import quat_xyzw_to_rotation_6d
+from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils import get_cfg
 from openwam.dataloader.utils.eef import (
     ARM10_DIM,
@@ -355,6 +356,7 @@ class RoboCasa365Dataset(BaseDataset):
         unify_action_map: Optional[Any] = None,
         mobile_base: bool = False,
         mask_torso_action: bool = True,
+        color_jitter: Optional[Any] = None,
         **_unused,
     ):
         super().__init__()
@@ -375,6 +377,17 @@ class RoboCasa365Dataset(BaseDataset):
             )
         self.repeat = int(repeat)
         self.split = split
+        # Load-time color jitter (same random factors across the whole clip, via VideoColorJitter);
+        # train-only, disabled / val keeps video byte-identical (mirrors robotwin).
+        self._color_jitter = None
+        if color_jitter and split == "train":
+            cj_get = color_jitter.get if hasattr(color_jitter, "get") else (lambda k, d: d)
+            self._color_jitter = VideoColorJitter(
+                brightness=float(cj_get("brightness", 0.2)),
+                contrast=float(cj_get("contrast", 0.2)),
+                saturation=float(cj_get("saturation", 0.2)),
+                hue=float(cj_get("hue", 0.0)),
+            )
         # Static-segment filtering (mirrors robotwin): resample train windows that "haven't
         # started moving" so the model isn't taught to output ~zero motion.
         self._filter_static_segments = bool(filter_static_segments)
@@ -846,6 +859,11 @@ class RoboCasa365Dataset(BaseDataset):
                 sample = self._build_sample(li, st)
                 if not sample.get("_is_static"):
                     break
+        if self._color_jitter is not None:
+            # Same jitter factors across the whole clip (temporal consistency).
+            sample["video"] = self._color_jitter.apply({"video": sample["video"]})["video"]
+            # Keep the first-frame conditioning image in sync with the jittered clip.
+            sample["first_frame_image"] = [sample["video"][0]]
         return sample
 
 
@@ -893,6 +911,7 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             unify_action_map=get_cfg(config, "unify_action_map", None),
             mobile_base=bool(get_cfg(config, "mobile_base", False)),
             mask_torso_action=bool(get_cfg(config, "mask_torso_action", True)),
+            color_jitter=get_cfg(config, "color_jitter", None),
             seed=int(get_cfg(config, "seed", 42)),
         )
 
