@@ -91,7 +91,7 @@ class TestDeploymentYaml:
 
         cfg = self._load()
         assert OmegaConf.select(cfg, "optimization.compile") is not None
-        assert OmegaConf.select(cfg, "optimization.compile.enabled") is False
+        assert OmegaConf.select(cfg, "optimization.compile.enabled") is True
         assert OmegaConf.select(cfg, "optimization.compile.self_attn.torch_mode") == "default"
         assert OmegaConf.select(cfg, "optimization.compile.self_attn.dynamic") is False
         assert OmegaConf.select(cfg, "optimization.compile.cross_attn.torch_mode") == "default"
