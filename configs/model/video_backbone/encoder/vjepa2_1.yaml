@@ -8,7 +8,7 @@
 name: vjepa2_1
 # [Required] Dir with manifest.json + the checkpoint_file it names (e.g.
 # vjepa2_1_vitg_384.pt; arch=vit_giant_xformers_rope, patch=16, tubelet=2, img=384).
-model_path: /path/to/weights/vjepa2_1
+model_path: /path/to/vjepa2_1
 
 # Cond (frame-0) latent path; only controls the cond pass (targets always use the
 # prepend-and-drop video forward):

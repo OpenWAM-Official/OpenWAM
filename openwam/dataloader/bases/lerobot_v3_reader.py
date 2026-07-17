@@ -55,6 +55,7 @@ import functools
 import logging
 import os
 import pickle
+import random
 import socket
 import uuid
 from pathlib import Path
@@ -171,6 +172,12 @@ class LeRobotV3Reader(BaseDataset):
         dataset_id: Optional[str] = None,
         target_camera: Optional[str] = None,
         camera_layout: Optional[List[str]] = None,
+        # Octo-style head-view sampling: a list of >=2 camera keys (must include
+        # the resolved head camera). Each TRAIN window decodes the head slot from
+        # ONE uniformly sampled entry — viewpoint augmentation at unchanged window
+        # count. Val / None / single entry → always the resolved head camera
+        # (byte-identical to before).
+        head_camera_choices: Optional[List[str]] = None,
         # Unified action space. unify_action=True scatters this reader's raw
         # ACTION_DIM-wide action/proprio into a UNIFY_DIM-wide vector and marks
         # only the mapped dims valid. unify_action_map is the yaml spec (see
@@ -274,6 +281,22 @@ class LeRobotV3Reader(BaseDataset):
         self._head_camera, self._left_wrist_camera, self._right_wrist_camera = self._resolve_cameras(info)
         if self._head_camera is None:
             raise ValueError(f"{self.DATASET_NAME}({self._dataset_id}): no head camera resolved")
+        # Octo-style head-view sampling (see __init__ arg docs). Resolved BEFORE
+        # _build_episode_index so _video_cameras() covers every choice when the
+        # per-camera frame offsets are computed. Randomness comes from the
+        # module-level ``random`` RNG — per-worker seeded by
+        # dataloader_worker_init_fn, the same source the video transforms use.
+        # Val keeps the resolved head camera so eval stays deterministic.
+        self._head_camera_choices: Optional[List[str]] = None
+        if head_camera_choices:
+            cams = list(dict.fromkeys(str(c) for c in head_camera_choices))
+            if self._head_camera not in cams:
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): head_camera_choices {cams} must include "
+                    f"the resolved head camera {self._head_camera!r} (the val/default view)."
+                )
+            if self._split == "train" and len(cams) > 1:
+                self._head_camera_choices = cams
         if self._multiview:
             self._camera_layout = self._camera_layout_param or [
                 self._head_camera,
@@ -361,12 +384,26 @@ class LeRobotV3Reader(BaseDataset):
 
         self._ep_data_row_offset = self._eps_df["_data_row_offset"].to_numpy().astype(np.int64)
         self._ep_video_frame_offsets: Dict[str, np.ndarray] = {}
-        for cam in (self._head_camera, self._left_wrist_camera, self._right_wrist_camera):
-            if cam is None:
-                continue
+        for cam in self._video_cameras():
             col = self._video_offset_col(cam)
             if col in self._eps_df.columns:
                 self._ep_video_frame_offsets[cam] = self._eps_df[col].to_numpy().astype(np.int64)
+        if self._head_camera_choices:
+            # Fail fast on a mistyped choice: a camera without video index
+            # columns would otherwise surface as an opaque empty-head-decode
+            # retry storm in _safe_get.
+            missing = [c for c in self._head_camera_choices if c not in self._ep_video_frame_offsets]
+            if missing:
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): head_camera_choices cameras {missing} "
+                    "have no videos/<cam>/chunk_index + file_index columns in the episodes table."
+                )
+            logger.info(
+                "%s(%s): head-view sampling active over %s",
+                self.DATASET_NAME,
+                self._dataset_id,
+                self._head_camera_choices,
+            )
 
         # ── window index ──────────────────────────────────────────────────
         length = self._eps_df["length"].to_numpy().astype(np.int64)
@@ -631,11 +668,16 @@ class LeRobotV3Reader(BaseDataset):
 
     # ----- offsets / IO -----------------------------------------------------
 
+    def _video_cameras(self) -> Tuple[str, ...]:
+        """Cameras needing per-episode video frame offsets: the resolved trio
+        plus every head-view sampling choice, deduped, order-stable."""
+        cams = [self._head_camera, self._left_wrist_camera, self._right_wrist_camera]
+        cams.extend(self._head_camera_choices or ())
+        return tuple(dict.fromkeys(c for c in cams if c is not None))
+
     def _add_episode_offsets(self, eps: pd.DataFrame) -> None:
         self._add_data_offsets(eps)
-        for cam in (self._head_camera, self._left_wrist_camera, self._right_wrist_camera):
-            if cam is None:
-                continue
+        for cam in self._video_cameras():
             chunk_col = f"videos/{cam}/chunk_index"
             file_col = f"videos/{cam}/file_index"
             if chunk_col in eps.columns and file_col in eps.columns:
@@ -807,7 +849,14 @@ class LeRobotV3Reader(BaseDataset):
 
         Head decode failure is fatal (raises → ``_safe_get`` retries). Wrist
         (auxiliary) decode failure is tolerated (black slot)."""
-        head_frames = self._decode_one_camera(self._head_camera, row, ep_local, offset, real_local_indices, kind="head")
+        head_camera = self._head_camera
+        if self._head_camera_choices is not None:
+            # Head-view sampling (train only): decode the head slot from one
+            # uniformly sampled choice. The frames still land under the
+            # _head_camera layout key below — slot names are fixed, only the
+            # decoded content varies.
+            head_camera = self._head_camera_choices[random.randrange(len(self._head_camera_choices))]
+        head_frames = self._decode_one_camera(head_camera, row, ep_local, offset, real_local_indices, kind="head")
         if not head_frames:
             raise RuntimeError(f"empty head-video decode for {self.DATASET_NAME}({self._dataset_id}) at idx={idx}")
 
@@ -923,6 +972,7 @@ class LeRobotV3Reader(BaseDataset):
         "enable_action_supervision",
         "target_camera",
         "camera_layout",
+        "head_camera_choices",
         "unify_action",
         "unify_action_map",
         "color_jitter",

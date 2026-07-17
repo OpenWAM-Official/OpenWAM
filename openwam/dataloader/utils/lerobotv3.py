@@ -376,8 +376,31 @@ def build_multibucket(
         total_hours = float(total_hours)
         if total_hours <= 0:
             raise ValueError(f"{source_name} total_hours must be > 0 or null/unset; got {total_hours}.")
+
+        def _quick_hours_or_none(sub: Path) -> Optional[float]:
+            # Per-bucket tolerance, mirroring _build_one below: a bucket whose meta
+            # is unreadable (e.g. a truncated episodes parquet) would abort the
+            # whole build here, while the same bucket under total_hours=None is
+            # skipped with a warning at construction. Drop it from the hour scan
+            # (and from sub_dirs) so both paths degrade identically.
+            try:
+                return quick_bucket_hours(sub)
+            except Exception as e:
+                logger.warning("%s: skipping %s (hour scan failed): %s", source_name, sub.name, e)
+                return None
+
         with ThreadPoolExecutor(max_workers=min(len(sub_dirs), 16)) as pool:
-            bucket_hours = list(pool.map(quick_bucket_hours, sub_dirs))
+            scanned = list(pool.map(_quick_hours_or_none, sub_dirs))
+        dropped_scan = sorted(sub.name for sub, h in zip(sub_dirs, scanned) if h is None)
+        if dropped_scan:
+            sub_dirs = [sub for sub, h in zip(sub_dirs, scanned) if h is not None]
+            if not sub_dirs:
+                raise RuntimeError(f"All {source_name} buckets failed the hour scan")
+            logger.warning(
+                "%s: dropped %d bucket(s) during hour scan (unreadable meta): %s",
+                source_name, len(dropped_scan), ", ".join(dropped_scan),
+            )
+        bucket_hours = [h for h in scanned if h is not None]
         total_avail = sum(bucket_hours)
         if total_hours > total_avail - 1e-3:
             # Over budget: every bucket would get its full hours, so subsampling
