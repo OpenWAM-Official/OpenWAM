@@ -35,19 +35,33 @@ right_wrist_camera_key: null
 # unrotated LIBERO frames.
 image_transform: rotate_180
 
-# Optional proprioception. Leave send_state=false for image-only checkpoints.
-send_state: false
+# Action handling.
+#   eef    - the checkpoint predicts the raw 10-D EEF pose [xyz3, rot6d6, grip1]
+#            (unified 80-D gathered/denormalized server-side); the client sends
+#            the EEF10 proprio and converts the returned full pose to the env's
+#            native 7-D OSC delta using the live controller scales.
+#   native - legacy 7-D OSC passthrough for checkpoints trained on raw actions.
+action_mode: eef
+
+# Proprioception. EEF checkpoints REQUIRE the 10-D EEF proprio; the client
+# assembles it from robot0_eef_pos / robot0_eef_quat / robot0_gripper_qpos
+# (state_keys is only used by action_mode: native).
+send_state: true
 state_keys:
   - robot0_eef_pos
   - robot0_eef_quat
   - robot0_gripper_qpos
-state_dim: null
+state_dim: 10
 
-# Action handling. LIBERO environments expect 7D single-arm actions. For
-# LIBERO-trained OpenWAM checkpoints this should usually be direct.
+# LIBERO environments execute 7-D single-arm OSC delta actions.
 action_dim: 7
 action_indices: null
 action_clip: null
+
+# robosuite OSC_POSE output_max (metres / radians per unit action). null lets
+# the client probe the live env controller (falls back to 0.05 / 0.5).
+osc_pos_scale: null
+osc_rot_scale: null
 
 debug: false
 debug_dir: "./debug_libero"

@@ -110,30 +110,34 @@ def run_eval(cfg: dict) -> int:
     print(f"[libero-eval] suite={suite_name} task_id={task_id} task={task.name}")
     print(f"[libero-eval] instruction={task.language}")
 
-    policy = OpenWAMLiberoPolicy(
-        host=cfg.get("host", "127.0.0.1"),
-        port=int(cfg.get("port", 8848)),
-        request_timeout=int(cfg.get("request_timeout", 300)),
-        head_camera_key=cfg.get("head_camera_key", "agentview_image"),
-        left_wrist_camera_key=cfg.get("left_wrist_camera_key"),
-        right_wrist_camera_key=cfg.get("right_wrist_camera_key"),
-        image_transform=cfg.get("image_transform", "rotate_180"),
-        send_state=_require_bool(cfg.get("send_state", False), "send_state"),
-        state_keys=list(cfg.get("state_keys") or []),
-        state_dim=_parse_optional_int(cfg.get("state_dim"), "state_dim"),
-        action_dim=int(cfg.get("action_dim", 7)),
-        action_indices=cfg.get("action_indices"),
-        action_clip=_parse_optional_float(cfg.get("action_clip"), "action_clip"),
-        debug=_require_bool(cfg.get("debug", False), "debug"),
-        debug_dir=cfg.get("debug_dir", "./debug_libero"),
-    )
-
     num_trials = int(cfg.get("num_trials", 1))
     max_steps = int(cfg.get("max_steps", 600))
     settle_steps = int(cfg.get("settle_steps", 10))
     fail_on_incomplete = _require_bool(cfg.get("fail_on_incomplete", False), "fail_on_incomplete")
     init_states = task_suite.get_task_init_states(task_id)
     env = _make_env(task, cfg)
+
+    policy = OpenWAMLiberoPolicy(
+        host=cfg.get("host", "127.0.0.1"),
+        port=int(cfg.get("port", 8848)),
+        request_timeout=int(cfg.get("request_timeout", 300)),
+        action_mode=cfg.get("action_mode", "eef"),
+        head_camera_key=cfg.get("head_camera_key", "agentview_image"),
+        left_wrist_camera_key=cfg.get("left_wrist_camera_key"),
+        right_wrist_camera_key=cfg.get("right_wrist_camera_key"),
+        image_transform=cfg.get("image_transform", "rotate_180"),
+        send_state=_require_bool(cfg.get("send_state", True), "send_state"),
+        state_keys=list(cfg.get("state_keys") or []),
+        state_dim=_parse_optional_int(cfg.get("state_dim"), "state_dim"),
+        action_dim=int(cfg.get("action_dim", 7)),
+        action_indices=cfg.get("action_indices"),
+        action_clip=_parse_optional_float(cfg.get("action_clip"), "action_clip"),
+        osc_pos_scale=_parse_optional_float(cfg.get("osc_pos_scale"), "osc_pos_scale"),
+        osc_rot_scale=_parse_optional_float(cfg.get("osc_rot_scale"), "osc_rot_scale"),
+        env=env,
+        debug=_require_bool(cfg.get("debug", False), "debug"),
+        debug_dir=cfg.get("debug_dir", "./debug_libero"),
+    )
     successes = 0
     try:
         for trial in range(num_trials):

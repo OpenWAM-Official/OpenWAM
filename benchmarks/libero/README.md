@@ -57,7 +57,7 @@ hf download nvidia/LIBERO_LeRobot_v3 \
   --local-dir /path/to/LIBERO_LeRobot_v3
 ```
 
-Configure `configs/dataloader/libero.yaml`, then generate action statistics:
+
 
 ```bash
 python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
@@ -65,15 +65,26 @@ python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
   --output /path/to/LIBERO_LeRobot_v3/libero_normalization_stats.npy
 ```
 
-LIBERO's 7-D action is a delta command while its 8-D state is an absolute
-EEF/gripper observation. They must not share normalization statistics. The
-current reader therefore trains image+language→action and masks proprioception
-out. Required model overrides:
+### EEF10 data contract
 
-```text
-model.architecture.action_dim=7
-model.architecture.use_proprioception=false
-```
+The reader trains on the repo-standard single-arm **EEF10** representation
+`[xyz3, rot6d6, gripper1]` (world frame, full pose), not on LIBERO's native 7-D
+OSC delta:
+
+- **Proprio** at window frame 0 is the achieved 8-D `observation.state`
+  rendered to EEF10 (axis-angle → rot6d; finger separation → [-1, +1] command
+  space, +1 = close).
+- **Action target** at step `t` is the **next frame's achieved pose**
+  (`state[t+1]` → xyz + rot6d) plus the recorded gripper command `action[t][6]`
+  — a full absolute pose target. The final window step has no `t+1` and is
+  masked out of the loss.
+- With `unify_action: true` and `unify_action_map: ["0-9"]` the 10 physical
+  dims scatter into the unified 80-D pretraining space (left-arm slots); all
+  other slots stay masked, so `model.architecture.action_dim=80` needs no
+  LIBERO-specific override.
+- Action commands and achieved proprio use **separate** normalization blocks
+  (`eef` / `eef_state`); rot6d dims are pinned to identity and never
+  normalized. The stats script writes both blocks in one `.npy`.
 
 The stored videos already follow the 180-degree-rotated LIBERO convention. The
 evaluation client applies the same transform to live simulator observations.
@@ -92,10 +103,15 @@ bash benchmarks/libero/single_eval.sh ordinary libero_spatial 0 8848 127.0.0.1
 
 
 `policy_config.yml` controls camera mapping, number of trials, max steps,
-optional proprioception, and action handling. By default the client sends
-`agentview_image` as `head_camera`, `robot0_eye_in_hand_image` as
-`left_wrist_camera`, and forwards the server action directly as a 7D LIBERO
-action.
+proprioception, and action handling. By default (`action_mode: eef`) the client
+sends `agentview_image` as `head_camera`, `robot0_eye_in_hand_image` as
+`left_wrist_camera`, and the live 10-D EEF proprio assembled from
+`robot0_eef_pos` / `robot0_eef_quat` / `robot0_gripper_qpos` — byte-consistent
+with the dataloader. The server returns the raw EEF10 full-pose target; the
+client converts it to the env's native 7-D OSC delta using the live controller
+`output_max` scales (probed automatically, falls back to 0.05 m / 0.5 rad).
+`action_mode: native` keeps the legacy 7-D passthrough for checkpoints trained
+directly on raw OSC actions.
 
 Use `POLICY_CONFIG_PATH=/path/to/custom.yml` to run with a copied config.
 

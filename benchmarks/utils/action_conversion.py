@@ -14,6 +14,10 @@ These helpers are pure numpy and have no dependency on the ``openwam`` package,
 so they can run in any benchmark client's Python environment.
 """
 
+# Benchmark client envs can be as old as Python 3.8 (ordinary LIBERO):
+# keep PEP 604 unions lazy.
+from __future__ import annotations
+
 import numpy as np
 
 
@@ -531,6 +535,124 @@ def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
             p[_PP_TRUNK_QPOS],
         ]
     ).astype(np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# LIBERO (single-arm Panda, 7-D OSC delta)                        #
+# --------------------------------------------------------------------------- #
+# Mirrors of the trainer's rendering in openwam/dataloader/libero.py — the eval
+# and training ends of the same contract. tests/benchmarks/test_libero_bridge.py
+# pins each pair together; change them in lockstep.
+#
+# The OpenWAM LIBERO checkpoint predicts a raw 10-D single-arm EEF pose
+# (world frame, FULL pose — not the env's per-step OSC delta)::
+#
+#     eef10 = [xyz(3), rot6d(6), gripper_cmd(1)]
+#
+# The deploy server's _UnifyAwareNormalizer already gathered the model's 80-D
+# unified output back to this raw 10-D and unnormalized it, so the client
+# receives/sends physical EEF10 and only bridges representation:
+#   * proprio: live obs (robot0_eef_pos / robot0_eef_quat / robot0_gripper_qpos)
+#     -> EEF10, byte-consistent with the dataloader's state8_to_eef10.
+#   * action: EEF10 full pose -> 7-D OSC delta using the live controller scales.
+
+LIBERO_EEF10_DIM = 10
+LIBERO_ACTION7_DIM = 7
+# Panda finger separation at fully open (m). MUST stay in lockstep with
+# openwam.dataloader.libero.LIBERO_GRIPPER_WIDTH_OPEN.
+LIBERO_GRIPPER_WIDTH_OPEN = 0.08
+# robosuite OSC_POSE defaults for the LIBERO pin (output_max = 0.05 m / 0.5 rad
+# per unit action). Prefer reading the LIVE controller's output_max; these are
+# the documented fallbacks the client uses when the env probe is unavailable.
+LIBERO_OSC_POS_SCALE_DEFAULT = 0.05
+LIBERO_OSC_ROT_SCALE_DEFAULT = 0.5
+
+
+def libero_gripper_qpos_to_cmd(width) -> float:
+    """Achieved finger-separation width -> [-1, +1] command space (+1 = close).
+
+    Bit-identical to the dataloader's ``gripper_qpos_to_cmd`` so the proprio
+    gripper the client sends matches training.
+    """
+    return float(np.clip(1.0 - 2.0 * float(width) / LIBERO_GRIPPER_WIDTH_OPEN, -1.0, 1.0))
+
+
+def libero_obs_to_eef10(
+    eef_pos: np.ndarray,
+    eef_quat_xyzw: np.ndarray,
+    gripper_qpos: np.ndarray,
+) -> np.ndarray:
+    """Assemble the RAW 10-D EEF proprio from a live LIBERO obs (unnormalized).
+
+    Matches the dataloader's ``state8_to_eef10`` on the same physical state: the
+    dataset stores axis-angle (from this same quat via robosuite quat2axisangle),
+    so quat -> rot6d directly avoids the axis-angle round-trip while producing
+    the identical rotation columns.
+
+        eef10 = [robot0_eef_pos(3), rot6d(robot0_eef_quat xyzw, 6),
+                 gripper_cmd(robot0_gripper_qpos[0] - [1], 1)]
+    """
+    pos = np.asarray(eef_pos, np.float32).reshape(-1)
+    quat = np.asarray(eef_quat_xyzw, np.float32).reshape(-1)
+    qpos = np.asarray(gripper_qpos, np.float32).reshape(-1)
+    if pos.shape[0] != 3 or quat.shape[0] != 4 or qpos.shape[0] != 2:
+        raise ValueError(
+            f"LIBERO proprio dims: eef_pos must be 3 (got {pos.shape[0]}), "
+            f"eef_quat 4 (got {quat.shape[0]}), gripper_qpos 2 (got {qpos.shape[0]})"
+        )
+    grip = np.array([libero_gripper_qpos_to_cmd(qpos[0] - qpos[1])], np.float32)
+    return np.concatenate([pos, quat_xyzw_to_rot6d(quat[None])[0], grip], axis=-1).astype(np.float32)
+
+
+def eef10_to_libero7d(
+    action: np.ndarray,
+    ref_pos: np.ndarray,
+    ref_rot6d: np.ndarray,
+    *,
+    pos_scale: float = LIBERO_OSC_POS_SCALE_DEFAULT,
+    rot_scale: float = LIBERO_OSC_ROT_SCALE_DEFAULT,
+    clip: bool = True,
+) -> np.ndarray:
+    """Bridge the model's 10-D FULL EEF pose to LIBERO's 7-D OSC delta action.
+
+    The dual of ``eef20d_to_robocasa12d`` reduced to a fixed-base single arm:
+    position difference divided by the controller position scale, rotation via
+    ``R_target @ R_ref.T`` -> axis-angle divided by the rotation scale, gripper
+    command clipped and passed through (LIBERO's gripper is CONTINUOUS
+    [-1, +1], +1 = close — no RoboCasa-style 0/1 thresholding).
+
+    Args:
+        action: (10,) EEF10 ``[xyz3, rot6d6, grip1]`` (world frame, physical).
+        ref_pos: (3,) current achieved EEF position (world frame).
+        ref_rot6d: (6,) current achieved EEF rotation as rot6d.
+        pos_scale / rot_scale: robosuite OSC ``output_max`` (metres / radians
+            mapped to action 1.0). Read from the live controller when possible.
+        clip: clip the scaled pos/rot commands to [-1, 1] (OSC action bounds).
+    """
+    act = np.asarray(action, np.float64).reshape(-1)
+    if act.shape[0] != LIBERO_EEF10_DIM:
+        raise ValueError(f"expected a {LIBERO_EEF10_DIM}-D EEF action, got {act.shape[0]}")
+    ref_pos = np.asarray(ref_pos, np.float64).reshape(-1)
+    if ref_pos.shape[0] != 3:
+        raise ValueError(f"ref_pos must be 3-D, got {ref_pos.shape[0]}")
+    if not (float(pos_scale) > 0.0 and float(rot_scale) > 0.0):
+        raise ValueError(
+            f"pos_scale and rot_scale must be > 0 (got pos={pos_scale}, rot={rot_scale}); "
+            "set them from the eval env's OSC_POSE output_max."
+        )
+
+    pos_cmd = (act[0:3] - ref_pos) / float(pos_scale)
+
+    R_t = _rot6d_to_matrix(act[3:9])
+    R_c = _rot6d_to_matrix(np.asarray(ref_rot6d, np.float64).reshape(-1))
+    rot_cmd = _matrix_to_axis_angle(R_t @ R_c.T).astype(np.float64) / float(rot_scale)
+
+    if clip:
+        pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
+        rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
+
+    grip_cmd = float(np.clip(act[9], -1.0, 1.0))
+    return np.concatenate([pos_cmd, rot_cmd, [grip_cmd]]).astype(np.float32)
 
 
 # --------------------------------------------------------------------------- #
