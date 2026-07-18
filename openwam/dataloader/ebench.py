@@ -99,14 +99,23 @@ EBENCH_ACTION_DELTA_BASE_KEYS = ("action.ee_pose", "action.gripper", "action.bas
 EBENCH_STATE_KEYS = ("state.ee_pose", "state.gripper", "state.base")
 EBENCH_DEFAULT_UNIFY_ACTION_MAP = ("0-9", "34-43", "68-70")
 EBENCH_BASE_SOURCES = ("delta", "cumulative")
-# Only modes whose parameters are exact from episodes_stats.jsonl summary
-# moments. "quantile" is rejected: no true q01/q99 exist for this dataset and
-# silently aliasing them to min/max would degrade the mode without warning.
-EBENCH_SUPPORTED_NORMALIZE_MODES = (None, "none", "null", "min-max", "z-score")
+# min-max / z-score are exact from episodes_stats.jsonl summary moments and can
+# be built online at construction. "quantile" needs true q01/q99, which only the
+# offline parquet scan produces (python -m openwam.dataloader.utils.
+# stats_computation.ebench_stats_computation); without such a prebuilt stats file
+# the mode is rejected rather than silently aliased to min/max.
+EBENCH_SUPPORTED_NORMALIZE_MODES = (None, "none", "null", "min-max", "z-score", "quantile")
 # GenManip commands gripper fingers in [0, 0.044] m and terminates episodes
 # when a measured finger leaves [-0.01, 0.054] (env.py invalid-state guard).
 EBENCH_GRIPPER_CMD_RANGE = (0.0, 0.044)
 EBENCH_GRIPPER_STATE_RANGE = (-0.01, 0.054)
+# Max per-hand finger-command disagreement (m) before the scalar-gripper
+# averaging (and its summary-stats derivation) is considered invalid. Shared
+# with the offline stats scan so both validators agree.
+EBENCH_FINGER_GAP_TOLERANCE = 1e-3
+# Degenerate-dim floor applied to std at stats-build time (summary merge and
+# offline scan alike) so z-score never divides by ~0 on constant dims.
+EBENCH_STD_FLOOR = 1e-3
 
 EBENCH_UNIFY_DST_INDEX = parse_unify_spec(EBENCH_DEFAULT_UNIFY_ACTION_MAP, EBENCH_UNIFY_DIM)
 
@@ -277,8 +286,9 @@ EBENCH_RAW_DIM_MASK = np.ones(EBENCH_RAW_ACTION_DIM, dtype=bool)
 
 def _neutral_stats(dim: int = EBENCH_RAW_ACTION_DIM) -> Dict[str, np.ndarray]:
     # No q01/q99: episodes_stats.jsonl has no true quantiles and aliasing them
-    # to min/max would let a future "quantile" run silently degrade to min-max.
-    # The reader rejects quantile mode outright (EBENCH_SUPPORTED_NORMALIZE_MODES).
+    # to min/max would let a "quantile" run silently degrade to min-max. True
+    # quantiles come only from the offline parquet scan
+    # (ebench_stats_computation); _load_or_build_stats enforces that.
     zeros = np.zeros(dim, dtype=np.float32)
     ones = np.ones(dim, dtype=np.float32)
     return {
@@ -353,8 +363,22 @@ def _raw_stats_to_23(stats_by_key: dict, keys: Sequence[str]) -> dict:
 
     for name in out:
         out[name] = out[name].astype(np.float32)
-    out["std"] = np.maximum(out["std"], 1e-3)
+    out["std"] = np.maximum(out["std"], EBENCH_STD_FLOOR)
     return out
+
+
+def _episode_parquet_path(dataset_dir: Path, data_path_template: str, chunks_size: int, episode_index: int) -> Path:
+    """Resolve an episode's parquet path from info.json's ``data_path`` template.
+
+    Module-level so the offline stats scan (``ebench_stats_computation``)
+    resolves episode files with the exact logic the reader uses.
+    """
+    chunk = episode_index // chunks_size
+    return dataset_dir / data_path_template.format(
+        episode_chunk=chunk,
+        episode_index=episode_index,
+        chunk_index=chunk,
+    )
 
 
 @functools.lru_cache(maxsize=4)
@@ -374,6 +398,24 @@ def _read_jsonl(path: Path) -> Iterable[dict]:
             line = line.strip()
             if line:
                 yield json.loads(line)
+
+
+def _load_excluded_indices(dataset_dir: Path) -> set:
+    """Parse ``meta/excluded_episodes.json`` into a set (missing file → empty).
+
+    Accepts both the family/scanner schema ``{"episode_indices": [...]}``
+    (LeRobotV3Reader / scripts/scan_dataset.py output) and a bare list.
+    Module-level so the offline stats scan (``ebench_stats_computation``)
+    applies the exact exclusion semantics the reader does.
+    """
+    excluded_path = Path(dataset_dir) / "meta" / "excluded_episodes.json"
+    if not excluded_path.exists():
+        return set()
+    with excluded_path.open() as f:
+        payload = json.load(f)
+    if isinstance(payload, dict):
+        payload = payload.get("episode_indices", [])
+    return {int(i) for i in payload}
 
 
 def _build_stats_from_bucket(bucket_dir: Path, keys: Sequence[str]) -> Tuple[dict, int]:
@@ -418,7 +460,7 @@ def _merge_raw_stats(parts: list[Tuple[dict, int]]) -> dict:
             out[key] = values.max(axis=0)
     for key in out:
         out[key] = np.asarray(out[key], dtype=np.float32)
-    out["std"] = np.maximum(out["std"], 1e-3)
+    out["std"] = np.maximum(out["std"], EBENCH_STD_FLOOR)
     return out
 
 
@@ -525,6 +567,9 @@ def _stats_cache_payload(action_stats: dict, num_timesteps: int, fingerprint: di
     }
 
 
+_EBENCH_STATS_MODULE = "openwam.dataloader.utils.stats_computation.ebench_stats_computation"
+
+
 def _load_or_build_stats(
     buckets: Sequence[Path],
     action_keys: Sequence[str],
@@ -532,6 +577,7 @@ def _load_or_build_stats(
     *,
     action_mode: str,
     dataset_dir: Optional[str] = None,
+    normalize_mode: Optional[str] = None,
 ) -> Tuple[dict, Optional[str]]:
     fingerprint = _stats_fingerprint(buckets, action_keys, action_mode, dataset_dir)
     if stats_path:
@@ -544,7 +590,26 @@ def _load_or_build_stats(
                     f"the {action_mode!r} payload and fingerprint. Delete it and rebuild."
                 )
             _validate_stats_fingerprint(path, raw, fingerprint)
-            return raw[action_mode], str(path)
+            stats = raw[action_mode]
+            if normalize_mode == "quantile" and not ("q01" in stats and "q99" in stats):
+                raise ValueError(
+                    f"EBench stats cache {path} was built from episodes_stats.jsonl summaries and "
+                    "carries no true q01/q99 — normalize_mode='quantile' needs the offline parquet "
+                    f"scan. Regenerate with: python -m {_EBENCH_STATS_MODULE} "
+                    f"--dataset_dir <EBench root> --output {path}"
+                )
+            return stats, str(path)
+
+    if normalize_mode == "quantile":
+        # Never build quantile stats from summary moments — the mode would
+        # silently degrade. A prebuilt offline-scan cache is mandatory.
+        raise FileNotFoundError(
+            "EBench normalize_mode='quantile' requires a prebuilt offline-scan stats file at "
+            f"dataloader.normalization_stats_path (got {stats_path!r}"
+            + (", which does not exist" if stats_path else "")
+            + "); episodes_stats.jsonl summaries carry no true quantiles. Generate it with: "
+            f"python -m {_EBENCH_STATS_MODULE} --dataset_dir <EBench root>"
+        )
 
     action_parts = []
     total = 0
@@ -659,8 +724,15 @@ class EBenchDataset(BaseDataset):
         if normalize_mode not in EBENCH_SUPPORTED_NORMALIZE_MODES:
             raise ValueError(
                 f"EBench normalize_mode must be one of {EBENCH_SUPPORTED_NORMALIZE_MODES}, got "
-                f"{normalize_mode!r}. 'quantile' is unsupported: episodes_stats.jsonl carries no "
-                "true quantiles, and any other spelling would silently pass through un-normalized."
+                f"{normalize_mode!r}. Unknown spellings would silently pass through un-normalized."
+            )
+        if normalize_mode == "quantile" and (
+            action_stats is None or not ("q01" in action_stats and "q99" in action_stats)
+        ):
+            raise ValueError(
+                "EBench normalize_mode='quantile' but action_stats are missing or carry no q01/q99 — "
+                "summary-derived stats cannot serve quantile mode. Build true quantiles with: "
+                f"python -m {_EBENCH_STATS_MODULE} --dataset_dir <EBench root>"
             )
         self._normalize_mode = normalize_mode
         self.normalization_stats_path = normalization_stats_path
@@ -763,19 +835,10 @@ class EBenchDataset(BaseDataset):
         self._validate_sample_values()
 
     def _filter_excluded(self, episodes: list[dict]) -> list[dict]:
-        """Honor ``meta/excluded_episodes.json``.
-
-        Accepts both the family/scanner schema ``{"episode_indices": [...]}``
-        (LeRobotV3Reader / scripts/scan_dataset.py output) and a bare list.
-        """
-        excluded_path = self._dataset_dir / "meta" / "excluded_episodes.json"
-        if not excluded_path.exists():
+        """Honor ``meta/excluded_episodes.json`` (see ``_load_excluded_indices``)."""
+        excluded = _load_excluded_indices(self._dataset_dir)
+        if not excluded:
             return episodes
-        with excluded_path.open() as f:
-            payload = json.load(f)
-        if isinstance(payload, dict):
-            payload = payload.get("episode_indices", [])
-        excluded = {int(i) for i in payload}
         kept = [ep for ep in episodes if int(ep["episode_index"]) not in excluded]
         if len(kept) != len(episodes):
             logger.info(
@@ -839,7 +902,7 @@ class EBenchDataset(BaseDataset):
             float(np.abs(cmd[:, 0] - cmd[:, 1]).max()),
             float(np.abs(cmd[:, 2] - cmd[:, 3]).max()),
         )
-        if finger_gap > 1e-3:
+        if finger_gap > EBENCH_FINGER_GAP_TOLERANCE:
             raise ValueError(
                 f"{ctx} per-hand finger commands disagree by {finger_gap:.5f} m; "
                 "the scalar-gripper averaging and its summary stats assume identical finger commands"
@@ -967,12 +1030,7 @@ class EBenchDataset(BaseDataset):
         return table.slice(offset, length).to_pandas()
 
     def _episode_data_path(self, episode_index: int) -> Path:
-        chunk = episode_index // self._chunks_size
-        return self._dataset_dir / self._data_path_template.format(
-            episode_chunk=chunk,
-            episode_index=episode_index,
-            chunk_index=chunk,
-        )
+        return _episode_parquet_path(self._dataset_dir, self._data_path_template, self._chunks_size, episode_index)
 
     def _build_action(self, frame: pd.DataFrame, actual_raw_len: int) -> tuple[np.ndarray, np.ndarray]:
         T_action = self._num_frames - 1
@@ -1027,7 +1085,9 @@ class EBenchDataset(BaseDataset):
         if self._normalize_mode in (None, "none", "null"):
             return arr.astype(np.float32)
         if stats is None:
-            raise ValueError(
+            # EBenchDataError: a misconfiguration (active mode, no stats) is
+            # deterministic — _safe_get must not retry it through 64 windows.
+            raise EBenchDataError(
                 f"EBench({self._dataset_id}) normalize_mode={self._normalize_mode!r} but no stats were provided"
             )
         normalized = apply_normalization(arr, stats, self._normalize_mode)
@@ -1176,6 +1236,7 @@ class EBenchDataset(BaseDataset):
                 stats_path,
                 action_mode=action_mode,
                 dataset_dir=dataset_dir,
+                normalize_mode=normalize_mode,
             )
 
         common = {

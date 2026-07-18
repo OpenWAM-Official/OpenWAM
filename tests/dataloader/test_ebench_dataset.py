@@ -236,12 +236,29 @@ def test_delta_proprio_matches_action_space_stats(bucket):
 # ---------------------------------------------------------------- normalization
 
 
-def test_default_mode_is_min_max_and_quantile_rejected(bucket):
+def test_default_mode_is_min_max_and_quantile_needs_offline_stats(bucket):
+    """quantile is supported ONLY off an offline parquet-scan cache: summary
+    stats (no true q01/q99) must be rejected with the run-the-module hint,
+    never silently aliased to min-max."""
     import inspect
 
     assert inspect.signature(EBenchDataset.__init__).parameters["normalize_mode"].default == "min-max"
-    with pytest.raises(ValueError, match="quantile"):
+    # _make_ds hands summary-derived stats (no q01/q99) to __init__.
+    with pytest.raises(ValueError, match="ebench_stats_computation"):
         _make_ds(bucket, normalize_mode="quantile")
+    # Direct construction without stats must also be rejected AT INIT (the
+    # pre-change whitelist guarantee) — not deferred to __getitem__ retries.
+    with pytest.raises(ValueError, match="ebench_stats_computation"):
+        EBenchDataset(str(bucket), normalize_mode="quantile", num_frames=9)
+    # from_config path: no prebuilt stats file -> hard error, no summary build.
+    with pytest.raises(FileNotFoundError, match="ebench_stats_computation"):
+        _load_or_build_stats(
+            [bucket],
+            ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
+            None,
+            action_mode="ebench",
+            normalize_mode="quantile",
+        )
     with pytest.raises(ValueError, match="normalize_mode"):
         _make_ds(bucket, normalize_mode="zscore")  # misspelling must not pass through
 

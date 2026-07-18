@@ -114,11 +114,22 @@ normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.np
 `min-max` keeps action targets in the bounded `[-1, 1]` distribution the 80-D
 pretrain checkpoint was trained on (the family convention) and its parameters
 are exact from the summary stats. `z-score` (unbounded) remains available for
-ablations; `quantile` is rejected because `episodes_stats.jsonl` carries no
-true quantiles and a silent min/max alias would misrepresent the mode.
+ablations. `quantile` needs true q01/q99 — `episodes_stats.jsonl` carries
+none, so the mode requires a stats file prebuilt by the offline parquet scan
+(summary-built caches are rejected for quantile with a hard error, never a
+silent min/max alias):
 
-On first load, the dataloader builds this cache from each bucket's
-`meta/episodes_stats.jsonl`. The cache stores raw 23-D stats under the
+```bash
+python -m openwam.dataloader.utils.stats_computation.ebench_stats_computation \
+    --dataset_dir /path/to/data_lake/EBench-Dataset
+```
+
+The offline module writes the same cache file/schema (plus true q01/q99), so
+prebuilding it also spares every training rank the per-rank summary merge
+under min-max/z-score.
+
+For min-max/z-score without a prebuilt file, the dataloader builds this cache
+on first load from each bucket's `meta/episodes_stats.jsonl`. The cache stores raw 23-D stats under the
 `action_mode` key (`ebench` by default) plus a fingerprint (schema version,
 action keys, bucket paths, and a sha256 over each bucket's dataset-relative
 path + its `episodes_stats.jsonl` bytes — re-downloading a bucket invalidates

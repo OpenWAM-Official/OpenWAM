@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument("--video-stride", type=int, default=4)
     parser.add_argument("--height", type=int, default=384)
     parser.add_argument("--width", type=int, default=320)
-    parser.add_argument("--normalize-mode", default="min-max", choices=["min-max", "z-score", "null"])
+    parser.add_argument("--normalize-mode", default="min-max", choices=["min-max", "z-score", "quantile", "null"])
     parser.add_argument("--stats-path", default=None)
     return parser.parse_args()
 

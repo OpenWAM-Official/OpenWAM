@@ -56,7 +56,11 @@ camera_layout: [video.overlook_camera_view, video.left_camera_view, video.right_
 # first load and reuses it afterward. Action and proprio both use this same
 # action stats entry, matching deploy. Rot6d stats are pinned to identity.
 # min-max keeps targets in the bounded [-1,1] distribution the 80-D pretrain
-# checkpoint was trained on and is exact from the summary stats; "quantile" is
-# rejected (no true quantiles exist for this dataset).
-normalize_mode: min-max           # "min-max", "z-score", or null
+# checkpoint was trained on and is exact from the summary stats. "quantile"
+# additionally needs true q01/q99, which only the offline parquet scan provides
+# (it writes the same cache file; prebuilding also spares every training rank
+# the per-rank summary merge):
+#   python -m openwam.dataloader.utils.stats_computation.ebench_stats_computation \
+#     --dataset_dir /path/to/data_lake/EBench-Dataset
+normalize_mode: min-max           # "min-max", "z-score", "quantile", or null
 normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.npy
