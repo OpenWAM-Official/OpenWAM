@@ -14,7 +14,8 @@ cannot provide:
   * true ``q01``/``q99`` from the row stream — unlocking
     ``normalize_mode="quantile"`` for EBench;
   * a dataset-wide certificate of the reader's data contract (finite values,
-    unit quaternions, per-hand finger commands equal within
+    unit quaternions, gripper commands within ``EBENCH_GRIPPER_CMD_RANGE``,
+    per-hand finger commands equal within
     ``EBENCH_FINGER_GAP_TOLERANCE``) for every episode training can serve,
     instead of the sampled init check — episodes in
     ``meta/excluded_episodes.json`` are tolerated, not certified;
@@ -78,6 +79,7 @@ from openwam.dataloader.ebench import (
     EBENCH_ACTION_KEYS,
     EBENCH_BASE_SOURCES,
     EBENCH_FINGER_GAP_TOLERANCE,
+    EBENCH_GRIPPER_CMD_RANGE,
     EBENCH_RAW_ACTION_DIM,
     EBENCH_STD_FLOOR,
     _atomic_save_npy,
@@ -125,6 +127,13 @@ def _validated_raw23(frame: pd.DataFrame, action_keys: Sequence[str], ctx: str) 
             raise ValueError(f"{ctx} {key} contains non-finite values")
     assert_unit_quaternion(ee[:, 3:7], sample_n=len(ee))
     assert_unit_quaternion(ee[:, 10:14], sample_n=len(ee))
+    lo_cmd, hi_cmd = EBENCH_GRIPPER_CMD_RANGE
+    eps = 1e-4  # same slack the reader's _validate_episode_rows applies
+    if gripper.min() < lo_cmd - eps or gripper.max() > hi_cmd + eps:
+        raise ValueError(
+            f"{ctx} {action_keys[1]} outside [{lo_cmd - eps}, {hi_cmd + eps}]: "
+            f"min={gripper.min():.4f}, max={gripper.max():.4f}"
+        )
     finger_gap = max(
         float(np.abs(gripper[:, 0] - gripper[:, 1]).max()),
         float(np.abs(gripper[:, 2] - gripper[:, 3]).max()),

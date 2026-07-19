@@ -147,6 +147,31 @@ def test_finger_disagreement_fails_dataset_wide(tmp_path):
         compute_ebench_stats([b], DELTA_KEYS)
 
 
+def test_gripper_range_violation_fails_dataset_wide(tmp_path):
+    """The scan certifies EBENCH_GRIPPER_CMD_RANGE on EVERY row the reader
+    can serve — including rows beyond the sampled init check (where the
+    violation would silently skew min/max stats). Excluding the episode
+    restores lenience: it is accumulated, not certified."""
+    import json
+
+    import pandas as pd
+
+    b = make_bucket(tmp_path, "task_grip_range", ep_len=100)
+    p = b / "data" / "chunk-000" / "episode_000001.parquet"
+    df = pd.read_parquet(p)
+    bad = np.stack(df["action.gripper"].to_numpy()).copy()
+    bad[90, :] = 0.06  # > 0.044 + 1e-4, beyond the leading-64-row sample
+    df["action.gripper"] = list(bad)
+    df.to_parquet(p)
+    with pytest.raises(ValueError, match="outside"):
+        compute_ebench_stats([b], DELTA_KEYS)
+
+    (b / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [1]}))
+    stats, num_timesteps, n_files = compute_ebench_stats([b], DELTA_KEYS)
+    assert num_timesteps == 200 and n_files == 2
+    assert stats["max"][9] == pytest.approx(0.06)  # excluded rows still pool into stats
+
+
 def test_excluded_corrupt_episode_does_not_block_scan(tmp_path, capsys):
     """excluded_episodes.json marks episodes precisely BECAUSE they are bad;
     a corrupt or missing excluded episode must warn-skip, never make quantile
