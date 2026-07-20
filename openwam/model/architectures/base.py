@@ -1351,6 +1351,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         proprio: Optional[Tensor] = None,
         cfg_scale: float = 1.0,
         cfg_merge: bool = False,
+        active_action_mask: Optional[Tensor] = None,
         **extra_pipeline_inputs: Any,
     ) -> dict:
         """Execute joint video-action denoising driven by a schedule.
@@ -1365,6 +1366,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
             action_num_frames: Raw state/action window length. Generated
                 action chunk length is ``action_num_frames - 1``. Defaults to
                 ``num_frames`` for datasets whose video/action rates match.
+            active_action_mask: Optional ``(action_dim,)`` boolean mask for the
+                benchmark being generated. Inactive unified-action dimensions
+                stay on their analytic zero-padding noise path. When omitted,
+                the mask is inferred from the attached unified normalizer.
 
         Returns:
             dict with ``video`` (list of PIL images or None) and
@@ -1456,6 +1461,44 @@ class BaseWAMArchitecture(ABC, nn.Module):
             generator=torch.Generator(device=device).manual_seed(seed),
         )
 
+        # Unified-action checkpoints scatter raw actions into a larger zero-padded
+        # space.  The inactive dimensions may be excluded from the training loss,
+        # so their predicted flow is unconstrained.  Keep those dimensions on the
+        # analytic forward-noise path instead of feeding unconstrained updates back
+        # into the next denoising step.
+        inactive_action_noise = None
+        if active_action_mask is None:
+            normalizer = getattr(self, "normalizer", None)
+            active_action_indices = getattr(normalizer, "_dst_index", None)
+            unified_action_dim = getattr(normalizer, "_unify_dim", None)
+            if (
+                active_action_indices is not None
+                and unified_action_dim is not None
+                and int(unified_action_dim) == self.action_dim
+            ):
+                active_action_indices = torch.as_tensor(active_action_indices, device=device, dtype=torch.long)
+                if active_action_indices.numel() and (
+                    int(active_action_indices.min()) < 0 or int(active_action_indices.max()) >= self.action_dim
+                ):
+                    raise ValueError(
+                        f"Unified action indices must be within [0, {self.action_dim}); "
+                        f"got {active_action_indices.tolist()}."
+                    )
+                active_action_mask = torch.zeros(self.action_dim, device=device, dtype=torch.bool)
+                active_action_mask[active_action_indices] = True
+
+        inactive_action_dims = None
+        if active_action_mask is not None:
+            active_action_mask = torch.as_tensor(active_action_mask, device=device, dtype=torch.bool)
+            if active_action_mask.shape != (self.action_dim,):
+                raise ValueError(
+                    f"active_action_mask must have shape ({self.action_dim},); "
+                    f"got {tuple(active_action_mask.shape)}."
+                )
+            inactive_action_dims = ~active_action_mask
+            if not bool(inactive_action_dims.any()):
+                inactive_action_dims = None
+
         num_train_ts_v = float(self.video_scheduler.num_train_timesteps)
         num_train_ts_a = float(self.action_scheduler.num_train_timesteps)
 
@@ -1525,9 +1568,18 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 inputs_shared["latents"] = new_latents
 
             if action_stepping and action_noise_pred is not None:
+                if inactive_action_dims is not None and inactive_action_noise is None:
+                    sigma_a_f = float(sigma_a)
+                    if sigma_a_f <= 0.0:
+                        raise ValueError("Cannot initialize inactive action noise from a non-positive sigma.")
+                    inactive_action_noise = (
+                        action_latents[..., inactive_action_dims].detach().clone() / sigma_a_f
+                    )
                 action_latents = self.action_scheduler.flow_step(
                     action_noise_pred, sigma_a, sigma_a_next, action_latents
                 )
+                if inactive_action_dims is not None:
+                    action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
 
         if profile:
             if torch.cuda.is_available():
