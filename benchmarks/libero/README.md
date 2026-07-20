@@ -82,9 +82,9 @@ OSC delta:
   dims scatter into the unified 80-D pretraining space (left-arm slots); all
   other slots stay masked, so `model.architecture.action_dim=80` needs no
   LIBERO-specific override.
-- Action commands and achieved proprio use **separate** normalization blocks
-  (`eef` / `eef_state`); rot6d dims are pinned to identity and never
-  normalized. The stats script writes both blocks in one `.npy`.
+- Action targets and achieved proprio are pooled into one global `eef`
+  normalization block and both use that same transform; rot6d dims are pinned
+  to identity and never normalized.
 
 The stored videos already follow the 180-degree-rotated LIBERO convention. The
 evaluation client applies the same transform to live simulator observations.

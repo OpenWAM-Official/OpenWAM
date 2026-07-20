@@ -26,10 +26,9 @@ The reader trains on the repo-standard single-arm **EEF10** representation::
 
 ``unify_action: true`` scatters the 10 physical dims into the unified 80-D
 space via ``unify_action_map: ["0-9"]`` (left-arm slots; everything else stays
-masked). Action commands and achieved proprio use SEPARATE normalization
-statistics (``eef`` / ``eef_state`` blocks, rot6d dims pinned to identity) —
-the deploy ``_AsymmetricNormalizer`` unnormalizes actions with the former and
-normalizes incoming proprio with the latter.
+masked). Action targets and achieved proprio share one global ``eef``
+normalization-statistics block computed from both pools; rot6d dims are pinned
+to identity.
 """
 
 from __future__ import annotations
@@ -162,7 +161,6 @@ class LiberoDataset(LeRobotV3Reader):
         "wrist_camera_priority",
         "prompt_columns",
         "normalization_stats_path",
-        "state_stats_mode",
     )
 
     def __init__(
@@ -174,7 +172,6 @@ class LiberoDataset(LeRobotV3Reader):
         wrist_camera_priority: Optional[Sequence[str]] = None,
         prompt_columns: Optional[Sequence[str]] = None,
         normalization_stats_path: Optional[str] = None,
-        state_stats_mode: str = "eef_state",
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
         **kwargs: Any,
@@ -192,8 +189,6 @@ class LiberoDataset(LeRobotV3Reader):
                 'set ["0-9"] for the canonical single-arm left-slot mapping'
             )
         self.action_mode = mode
-        self._state_stats_mode = str(state_stats_mode)
-        self._state_normalization_stats: Optional[dict] = None
         self._head_priority = _as_priority(head_camera_priority, self.HEAD_CAMERA_PRIORITY)
         self._wrist_priority = _as_priority(wrist_camera_priority, self.WRIST_CAMERA_PRIORITY)
         self._prompt_columns = _as_priority(
@@ -263,24 +258,14 @@ class LiberoDataset(LeRobotV3Reader):
                 "Run python -m openwam.dataloader.utils.stats_computation.libero_stats_computation "
                 "or set normalize_mode=null."
             )
-        action_stats = load_stats_file(
+        global_stats = load_stats_file(
             self._source_stats_path,
             action_mode=self.action_mode,
             normalize_mode=str(self._normalize_mode),
             dim=self._raw_action_dim,
         )
-        self._state_normalization_stats = load_stats_file(
-            self._source_stats_path,
-            action_mode=self._state_stats_mode,
-            normalize_mode=str(self._normalize_mode),
-            dim=self._raw_action_dim,
-        )
-        self._write_deploy_normalizer_stats(
-            action_stats,
-            STAT_KEYS,
-            additional_entries={self._state_stats_mode: self._state_normalization_stats},
-        )
-        return action_stats
+        self._write_deploy_normalizer_stats(global_stats, STAT_KEYS)
+        return global_stats
 
     def _read_state8(self, win) -> np.ndarray:
         state = np.stack(win["observation.state"].values).astype(np.float32)
@@ -317,7 +302,7 @@ class LiberoDataset(LeRobotV3Reader):
 
     def _proprio_20d(self, win) -> np.ndarray:
         raw = state8_to_eef10(self._read_state8(win)[0:1])
-        return apply_normalization(raw, self._state_normalization_stats, self._normalize_mode)
+        return apply_normalization(raw, self._normalization_stats, self._normalize_mode)
 
     def _resolve_prompt(self, row, win) -> str:
         for column in self._prompt_columns:

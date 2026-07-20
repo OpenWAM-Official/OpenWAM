@@ -21,7 +21,10 @@ from openwam.dataloader.transforms.builder import build_transforms
 from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.gr1_kinematics import ROT6D_DIMS_EEF33
 from openwam.dataloader.utils.normalization import load_stats_file, pin_rot6d_identity
-from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import _iter_bucket_arrays
+from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import (
+    _compute_global_stats,
+    _iter_bucket_arrays,
+)
 from openwam.deploy.model_loader import _build_normalizer, _UnifyAwareNormalizer
 from openwam.train.utils.checkpointing import save_normalization_stats
 
@@ -172,9 +175,6 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
             "std": np.ones(EEF33_DIM, dtype=np.float32),
         }
     }
-    stats["eef_state"] = {key: value.copy() for key, value in stats["eef"].items()}
-    stats["eef_state"]["min"].fill(-1.0)
-    stats["eef_state"]["max"].fill(1.0)
     stats_path = tmp_path / "normalization_stats.npy"
     np.save(stats_path, stats)
 
@@ -191,15 +191,14 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
 
     # raw EEF left x=0 -> min-max -1, then maps to unified slot 0.
     assert sample["action"][0, 0].item() == -1.0
-    # state x=0.1 uses independent [-1, 1] state stats and remains 0.1.
-    np.testing.assert_allclose(sample["proprio"][0, 0].item(), 0.1, atol=1e-6)
+    # state x=0.1 uses the same [0, 1] global stats: 2*0.1-1 = -0.8.
+    np.testing.assert_allclose(sample["proprio"][0, 0].item(), -0.8, atol=1e-6)
     # raw EEF right x=1 -> min-max +1, then maps to unified slot 34.
     assert sample["action"][0, 34].item() == 1.0
     assert ds.normalization_stats_path == str(tmp_path / "meta" / "normalization_stats.npy")
     deploy_stats = np.load(ds.normalization_stats_path, allow_pickle=True).item()
     assert set(deploy_stats["eef"]) == {"mean", "std", "min", "max", "q01", "q99"}
     assert deploy_stats["eef"]["mean"].shape == (EEF33_DIM,)
-    assert deploy_stats["eef_state"]["mean"].shape == (EEF33_DIM,)
     cfg = OmegaConf.create(
         {
             "dataloader": {
@@ -207,7 +206,6 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
                 "action_mode": "eef",
                 "unify_action": True,
                 "unify_action_map": ["0-8", "10-15", "34-42", "44-49", "68-70"],
-                "state_stats_mode": "eef_state",
             }
         }
     )
@@ -215,7 +213,7 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     assert isinstance(normalizer, _UnifyAwareNormalizer)
     raw = ds._raw_action(ds._load_data_table(0, 0).to_pandas())[:4]
     np.testing.assert_allclose(normalizer.unnormalize(sample["action"].numpy()), np.clip(raw, 0, 1), atol=1e-5)
-    np.testing.assert_allclose(normalizer.normalize(np.array([[0.1] * EEF33_DIM]))[0, 0], 0.1, atol=1e-6)
+    np.testing.assert_allclose(normalizer.normalize(np.array([[0.1] * EEF33_DIM]))[0, 0], -0.8, atol=1e-6)
 
 
 def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Path):
@@ -230,7 +228,7 @@ def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Pat
     }
     pin_rot6d_identity(base, ROT6D_DIMS_EEF33)
     stats_path = tmp_path / "normalization_stats.npy"
-    np.save(stats_path, {"eef": base, "eef_state": {key: value.copy() for key, value in base.items()}})
+    np.save(stats_path, {"eef": base})
     ds = _dataset(
         tmp_path,
         action_mode="eef",
@@ -317,7 +315,7 @@ def test_quantile_stats_are_materialized(tmp_path: Path):
     np.testing.assert_allclose(stats["q01"], -1.0)
 
 
-def test_stats_stream_separates_action_and_state(tmp_path: Path):
+def test_stats_stream_exposes_action_and_state_for_global_pool(tmp_path: Path):
     _write_bucket(tmp_path)
     arrays = list(_iter_bucket_arrays(_dataset(tmp_path)))
     assert len(arrays) == 1
@@ -325,6 +323,23 @@ def test_stats_stream_separates_action_and_state(tmp_path: Path):
     assert action.shape == state.shape == (EP_LENGTH, EEF33_DIM)
     assert action[0, 0] == 0.0
     np.testing.assert_allclose(state[0, 0], 0.1)
+
+
+def test_stats_pool_action_and_state_rows_into_one_global_block(tmp_path: Path):
+    _write_bucket(tmp_path)
+    dataset = _dataset(tmp_path)
+    action, state = next(iter(_iter_bucket_arrays(dataset)))
+    mode, dim, stats, action_rows, state_rows = _compute_global_stats(dataset, reservoir_cap=10_000)
+
+    pooled = np.concatenate([action, state], axis=0)
+    assert mode == "eef"
+    assert dim == EEF33_DIM
+    assert action_rows == state_rows == EP_LENGTH
+    assert stats["num_timesteps"] == pooled.shape[0]
+    assert stats["pool"] == "action_state"
+    non_rot = [0, 1, 2, 9, 15, 16, 17, 24, 30, 31, 32]
+    np.testing.assert_allclose(np.asarray(stats["mean"])[non_rot], pooled.mean(0)[non_rot], atol=1e-7)
+    np.testing.assert_allclose(np.asarray(stats["min"])[non_rot], pooled.min(0)[non_rot], atol=1e-7)
 
 
 def test_color_jitter_defaults_are_02():
@@ -372,13 +387,7 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
         "q99": base + 1,
     }
     pin_rot6d_identity(source_stats, ROT6D_DIMS_EEF33)
-    np.save(
-        source,
-        {
-            "eef": source_stats,
-            "eef_state": {key: value.copy() for key, value in source_stats.items()},
-        },
-    )
+    np.save(source, {"eef": source_stats})
     cfg = OmegaConf.create(
         {
             "dataset_dir": str(root),
@@ -397,7 +406,7 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
     save_normalization_stats(str(checkpoint), ds)
     copied = np.load(checkpoint / "normalization_stats.npy", allow_pickle=True).item()
     assert copied["eef"]["mean"].shape == (EEF33_DIM,)
-    assert copied["eef_state"]["mean"].shape == (EEF33_DIM,)
+    assert set(copied) == {"eef"}
 
 
 def test_benchmark_fallback_key_order_is_deterministic():

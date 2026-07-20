@@ -26,7 +26,10 @@ from openwam.dataloader.libero import (
 )
 from openwam.dataloader.registry import build_dataset, list_registered_datasets
 from openwam.dataloader.utils.normalization import pin_rot6d_identity
-from openwam.dataloader.utils.stats_computation.libero_stats_computation import _iter_bucket_arrays
+from openwam.dataloader.utils.stats_computation.libero_stats_computation import (
+    _compute_global_stats,
+    _iter_bucket_arrays,
+)
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, parse_unify_spec, unmap_from_unify
 from openwam.deploy.model_loader import _build_normalizer, _UnifyAwareNormalizer
 from openwam.train.utils.checkpointing import save_normalization_stats
@@ -156,7 +159,7 @@ def test_registry_and_yaml_include_libero():
         assert config.action_mode == "eef"
         assert config.unify_action is True
         assert list(config.unify_action_map) == ["0-9"]
-        assert config.state_stats_mode == "eef_state"
+        assert "state_stats_mode" not in config
         assert config.color_jitter.brightness == 0.2
 
 
@@ -248,12 +251,10 @@ def test_unify_maps_eef10_to_80_and_masks_unmapped_dims(tmp_path: Path):
     )
 
 
-def test_asymmetric_normalization_uses_separate_action_state_stats(tmp_path: Path):
+def test_action_and_state_use_one_global_normalization_stats_block(tmp_path: Path):
     _write_bucket(tmp_path)
-    action_stats = _unit_stats(2.0)
-    state_stats = _unit_stats(4.0)
     stats_path = tmp_path / "source_stats.npy"
-    np.save(stats_path, {"eef": action_stats, "eef_state": state_stats})
+    np.save(stats_path, {"eef": _unit_stats(2.0)})
 
     with _mock_decoder():
         raw_dataset = _dataset(tmp_path)
@@ -270,9 +271,9 @@ def test_asymmetric_normalization_uses_separate_action_state_stats(tmp_path: Pat
     got_action = sample["action"].numpy()
     got_proprio = sample["proprio"].numpy()
     pos_grip = [0, 1, 2, 9]
-    # min-max with [-2, 2] -> x/2 for actions; [-4, 4] -> x/4 for proprio.
+    # The same global [-2, 2] transform applies to both directions.
     np.testing.assert_allclose(got_action[:, pos_grip], raw_action[:, pos_grip] / 2.0, atol=1e-6)
-    np.testing.assert_allclose(got_proprio[:, pos_grip], raw_proprio[:, pos_grip] / 4.0, atol=1e-6)
+    np.testing.assert_allclose(got_proprio[:, pos_grip], raw_proprio[:, pos_grip] / 2.0, atol=1e-6)
     # rot6d dims are pinned to identity: normalization is a pass-through.
     rot = list(ROT6D_DIMS_EEF10)
     np.testing.assert_allclose(got_action[:, rot], raw_action[:, rot], atol=1e-6)
@@ -282,7 +283,7 @@ def test_asymmetric_normalization_uses_separate_action_state_stats(tmp_path: Pat
 def test_libero_stats_generate_deploy_artifact_and_roundtrip(tmp_path: Path):
     _write_bucket(tmp_path)
     stats_path = tmp_path / "source_stats.npy"
-    np.save(stats_path, {"eef": _unit_stats(2.0), "eef_state": _unit_stats(4.0)})
+    np.save(stats_path, {"eef": _unit_stats(2.0)})
     with _mock_decoder():
         dataset = _dataset(
             tmp_path,
@@ -296,7 +297,7 @@ def test_libero_stats_generate_deploy_artifact_and_roundtrip(tmp_path: Path):
     deploy_path = Path(dataset.normalization_stats_path)
     assert deploy_path == tmp_path / "meta" / "normalization_stats.npy"
     payload = np.load(deploy_path, allow_pickle=True).item()
-    assert set(payload) >= {"eef", "eef_state"}
+    assert set(payload) == {"eef"}
 
     checkpoint = tmp_path / "checkpoint"
     save_normalization_stats(str(checkpoint), dataset)
@@ -308,7 +309,6 @@ def test_libero_stats_generate_deploy_artifact_and_roundtrip(tmp_path: Path):
                     "action_mode": "eef",
                     "unify_action": True,
                     "unify_action_map": UNIFY_MAP,
-                    "state_stats_mode": "eef_state",
                 }
             }
         ),
@@ -317,10 +317,10 @@ def test_libero_stats_generate_deploy_artifact_and_roundtrip(tmp_path: Path):
     assert isinstance(normalizer, _UnifyAwareNormalizer)
     raw_target = dataset._raw_action_eef10(_raw_window(dataset)[: dataset._num_frames])[:4]
     np.testing.assert_allclose(normalizer.unnormalize(sample["action"].numpy()), raw_target, atol=1e-5)
-    # Deploy proprio path: raw EEF10 -> state stats normalize (x/4) -> 80-D scatter.
+    # Deploy proprio path uses the same global stats: x/2 -> 80-D scatter.
     unified = normalizer.normalize(np.full((1, EEF10_DIM), 0.4, dtype=np.float32))
     assert unified.shape == (1, UNIFY_DIM)
-    np.testing.assert_allclose(unified[0, 0], 0.1, atol=1e-6)
+    np.testing.assert_allclose(unified[0, 0], 0.2, atol=1e-6)
     np.testing.assert_allclose(unified[0, 3], 0.4, atol=1e-6)  # rot6d pinned identity
 
 
@@ -350,6 +350,23 @@ def test_stats_stream_excludes_clamped_boundary_action_row(tmp_path: Path):
     np.testing.assert_allclose(action[:, 0:9], state[1:, 0:9], atol=1e-6)
 
 
+def test_stats_pool_action_and_state_rows_into_one_global_block(tmp_path: Path):
+    _write_bucket(tmp_path)
+    dataset = _dataset(tmp_path)
+    action, state = next(iter(_iter_bucket_arrays(dataset)))
+    mode, dim, stats, action_rows, state_rows = _compute_global_stats(dataset, reservoir_cap=10_000)
+
+    pooled = np.concatenate([action, state], axis=0)
+    assert mode == "eef"
+    assert dim == EEF10_DIM
+    assert action_rows == EP_LENGTH - 1
+    assert state_rows == EP_LENGTH
+    assert stats["num_timesteps"] == pooled.shape[0]
+    assert stats["pool"] == "action_state"
+    np.testing.assert_allclose(np.asarray(stats["mean"])[[0, 1, 2, 9]], pooled.mean(0)[[0, 1, 2, 9]])
+    np.testing.assert_allclose(np.asarray(stats["min"])[[0, 1, 2, 9]], pooled.min(0)[[0, 1, 2, 9]])
+
+
 def test_registry_builds_libero_dataset(tmp_path: Path):
     _write_bucket(tmp_path)
     dataset = build_dataset(
@@ -373,7 +390,7 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
     _write_bucket(root / "suite_a")
     _write_bucket(root / "suite_b")
     stats_path = tmp_path / "source_stats.npy"
-    np.save(stats_path, {"eef": _unit_stats(2.0), "eef_state": _unit_stats(4.0)})
+    np.save(stats_path, {"eef": _unit_stats(2.0)})
 
     dataset = LiberoDataset.from_config(
         OmegaConf.create(
@@ -393,4 +410,4 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
     checkpoint = tmp_path / "multibucket_checkpoint"
     save_normalization_stats(str(checkpoint), dataset)
     copied = np.load(checkpoint / "normalization_stats.npy", allow_pickle=True).item()
-    assert set(copied) >= {"eef", "eef_state"}
+    assert set(copied) == {"eef"}

@@ -1,4 +1,4 @@
-"""Compute RoboCasa GR1 action normalization stats.
+"""Compute shared RoboCasa GR1 action/state normalization stats.
 
 Example:
     python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
@@ -40,6 +40,42 @@ def _iter_bucket_arrays(bucket: RoboCasaGR1Dataset):
         yield bucket._raw_action(win), bucket._raw_state(win)  # noqa: SLF001
 
 
+def _compute_global_stats(dataset, reservoir_cap: int):
+    """Pool every EEF33 action and state row into one normalization block."""
+    buckets = list(_iter_buckets(dataset))
+    if not buckets:
+        raise ValueError("RoboCasa GR1 dataset has no buckets")
+    action_modes = {bucket.action_mode for bucket in buckets}
+    raw_dims = {bucket._raw_action_dim for bucket in buckets}  # noqa: SLF001
+    if len(action_modes) != 1 or len(raw_dims) != 1:
+        raise ValueError(f"stats require homogeneous modes/dims, got modes={action_modes}, dims={raw_dims}")
+    action_mode = next(iter(action_modes))
+    raw_dim = next(iter(raw_dims))
+
+    accumulator = Accumulator(dim=raw_dim, reservoir_cap=reservoir_cap)
+    action_rows = 0
+    state_rows = 0
+    for bucket in buckets:
+        for action, state in _iter_bucket_arrays(bucket):
+            action = np.asarray(action, dtype=np.float32).reshape(-1, raw_dim)
+            state = np.asarray(state, dtype=np.float32).reshape(-1, raw_dim)
+            accumulator.update_batch(action)
+            accumulator.update_batch(state)
+            action_rows += action.shape[0]
+            state_rows += state.shape[0]
+    if action_rows == 0 or state_rows == 0:
+        raise ValueError("cannot compute normalization stats from an empty dataset")
+
+    stats = accumulator.finalize()
+    stats["num_timesteps"] = accumulator.count
+    stats["pool"] = "action_state"
+    stats["action_rows"] = action_rows
+    stats["state_rows"] = state_rows
+    if action_mode == "eef":
+        pin_rot6d_identity(stats, ROT6D_DIMS_EEF33)
+    return action_mode, raw_dim, stats, action_rows, state_rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/dataloader/robocasa_gr1.yaml")
@@ -51,32 +87,9 @@ def main() -> int:
     OmegaConf.update(cfg, "normalize_mode", None, merge=False)
     dataset = RoboCasaGR1Dataset.from_config(cfg, split=str(OmegaConf.select(cfg, "split", default="train")))
 
-    buckets = list(_iter_buckets(dataset))
-    if not buckets:
-        raise ValueError("RoboCasa GR1 dataset has no buckets")
-    action_modes = {bucket.action_mode for bucket in buckets}
-    raw_dims = {bucket._raw_action_dim for bucket in buckets}  # noqa: SLF001
-    if len(action_modes) != 1 or len(raw_dims) != 1:
-        raise ValueError(f"stats require homogeneous modes/dims, got modes={action_modes}, dims={raw_dims}")
-    action_mode = next(iter(action_modes))
-    raw_dim = next(iter(raw_dims))
-    action_accumulator = Accumulator(dim=raw_dim, reservoir_cap=args.reservoir_cap)
-    state_accumulator = Accumulator(dim=raw_dim, reservoir_cap=args.reservoir_cap)
-    for bucket in _iter_buckets(dataset):
-        for action, state in _iter_bucket_arrays(bucket):
-            action_accumulator.update_batch(np.asarray(action, dtype=np.float32).reshape(-1, raw_dim))
-            state_accumulator.update_batch(np.asarray(state, dtype=np.float32).reshape(-1, raw_dim))
-    if action_accumulator.count == 0 or state_accumulator.count == 0:
-        raise ValueError("cannot compute normalization stats from an empty dataset")
-    action_stats = action_accumulator.finalize()
-    state_stats = state_accumulator.finalize()
-    action_stats["num_timesteps"] = action_accumulator.count
-    action_stats["pool"] = "action"
-    state_stats["num_timesteps"] = state_accumulator.count
-    state_stats["pool"] = "state"
-    if action_mode == "eef":
-        pin_rot6d_identity(action_stats, ROT6D_DIMS_EEF33)
-        pin_rot6d_identity(state_stats, ROT6D_DIMS_EEF33)
+    action_mode, raw_dim, global_stats, action_rows, state_rows = _compute_global_stats(
+        dataset, args.reservoir_cap
+    )
 
     output = Path(args.output)
     if output.suffix != ".npy":
@@ -87,12 +100,12 @@ def main() -> int:
         previous = np.load(output, allow_pickle=True).item()
         if isinstance(previous, dict):
             payload.update(previous)
-    payload[action_mode] = action_stats
-    payload[f"{action_mode}_state"] = state_stats
+    payload.pop(f"{action_mode}_state", None)
+    payload[action_mode] = global_stats
     np.save(output, payload)
     print(
-        f"wrote {output} action_mode={action_mode} state_mode={action_mode}_state "
-        f"dim={raw_dim} action_rows={action_accumulator.count} state_rows={state_accumulator.count}"
+        f"wrote {output} mode={action_mode} pool=action_state dim={raw_dim} "
+        f"action_rows={action_rows} state_rows={state_rows} total_rows={action_rows + state_rows}"
     )
     return 0
 

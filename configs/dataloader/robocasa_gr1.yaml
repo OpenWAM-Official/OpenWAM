@@ -53,8 +53,8 @@ enable_action_supervision: true
 # openwam/dataloader/utils/stats_computation/robocasa_gr1_stats_computation.py.
 normalize_mode: null
 normalization_stats_path: null
-# Action commands and achieved proprio use separate statistics.
-state_stats_mode: eef_state
+# The stats script pools EEF33 action and state rows into one global `eef`
+# block; both directions use this same transform.
 
 # Normalize EEF33 first, then scatter arm poses, Fourier hands, and waist into
 # the shared EEF/dex-hand/reserved slots. Gripper slots 9/43 stay unmapped.

@@ -1,9 +1,9 @@
-"""Compute streaming LIBERO EEF10 action/state normalization statistics.
+"""Compute shared LIBERO EEF10 action/state normalization statistics.
 
-Emits SEPARATE stats blocks for the action targets (next-frame achieved pose +
-recorded gripper command) and the achieved proprio, matching the reader's
-asymmetric normalization contract. rot6d dims (3:9) are pinned to identity so
-normalization never distorts the rotation representation.
+Action targets (next-frame achieved pose + recorded gripper command) and
+achieved proprio rows are accumulated into one global ``eef`` statistics block.
+Both training directions therefore use exactly the same transform. rot6d dims
+(3:9) are pinned to identity so normalization never distorts rotation.
 
 Example:
     python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
@@ -50,6 +50,41 @@ def _iter_bucket_arrays(bucket: LiberoDataset):
         yield action[:-1] if action.shape[0] > 1 else action[:0], state
 
 
+def _compute_global_stats(dataset, reservoir_cap: int):
+    """Pool every valid action and state row into one EEF10 accumulator."""
+    buckets = list(_iter_buckets(dataset))
+    if not buckets:
+        raise ValueError("LIBERO dataset has no buckets")
+    raw_dims = {bucket._raw_action_dim for bucket in buckets}  # noqa: SLF001
+    if len(raw_dims) != 1:
+        raise ValueError(f"stats require homogeneous raw dims, got {raw_dims}")
+    raw_dim = next(iter(raw_dims))
+    action_mode = buckets[0].action_mode
+
+    accumulator = Accumulator(dim=raw_dim, reservoir_cap=reservoir_cap)
+    action_rows = 0
+    state_rows = 0
+    for bucket in buckets:
+        for action, state in _iter_bucket_arrays(bucket):
+            action = np.asarray(action, np.float32).reshape(-1, raw_dim)
+            state = np.asarray(state, np.float32).reshape(-1, raw_dim)
+            if action.shape[0]:
+                accumulator.update_batch(action)
+                action_rows += action.shape[0]
+            accumulator.update_batch(state)
+            state_rows += state.shape[0]
+    if action_rows == 0 or state_rows == 0:
+        raise ValueError("cannot compute LIBERO stats from an empty dataset")
+
+    stats = accumulator.finalize()
+    stats["num_timesteps"] = accumulator.count
+    stats["pool"] = "action_state"
+    stats["action_rows"] = action_rows
+    stats["state_rows"] = state_rows
+    pin_rot6d_identity(stats, ROT6D_DIMS_EEF10)
+    return action_mode, raw_dim, stats, action_rows, state_rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/dataloader/libero.yaml")
@@ -65,46 +100,22 @@ def main() -> int:
     OmegaConf.update(cfg, "normalize_mode", None, merge=False)
     dataset = LiberoDataset.from_config(cfg, split=str(OmegaConf.select(cfg, "split", default="train")))
 
-    buckets = list(_iter_buckets(dataset))
-    if not buckets:
-        raise ValueError("LIBERO dataset has no buckets")
-    raw_dims = {bucket._raw_action_dim for bucket in buckets}  # noqa: SLF001
-    if len(raw_dims) != 1:
-        raise ValueError(f"stats require homogeneous raw dims, got {raw_dims}")
-    raw_dim = next(iter(raw_dims))
-    action_mode = buckets[0].action_mode
-
-    action_accumulator = Accumulator(dim=raw_dim, reservoir_cap=args.reservoir_cap)
-    state_accumulator = Accumulator(dim=raw_dim, reservoir_cap=args.reservoir_cap)
-    for bucket in buckets:
-        for action, state in _iter_bucket_arrays(bucket):
-            if action.shape[0]:
-                action_accumulator.update_batch(np.asarray(action, np.float32).reshape(-1, raw_dim))
-            state_accumulator.update_batch(np.asarray(state, np.float32).reshape(-1, raw_dim))
-    if action_accumulator.count == 0 or state_accumulator.count == 0:
-        raise ValueError("cannot compute LIBERO stats from an empty dataset")
-
-    action_stats = action_accumulator.finalize()
-    state_stats = state_accumulator.finalize()
-    action_stats["num_timesteps"] = action_accumulator.count
-    action_stats["pool"] = "action"
-    state_stats["num_timesteps"] = state_accumulator.count
-    state_stats["pool"] = "state"
-    pin_rot6d_identity(action_stats, ROT6D_DIMS_EEF10)
-    pin_rot6d_identity(state_stats, ROT6D_DIMS_EEF10)
+    action_mode, raw_dim, global_stats, action_rows, state_rows = _compute_global_stats(
+        dataset, args.reservoir_cap
+    )
 
     payload = {}
     if output.exists():
         previous = np.load(output, allow_pickle=True).item()
         if isinstance(previous, dict):
             payload.update(previous)
-    payload[action_mode] = action_stats
-    payload[f"{action_mode}_state"] = state_stats
+    payload.pop(f"{action_mode}_state", None)
+    payload[action_mode] = global_stats
     output.parent.mkdir(parents=True, exist_ok=True)
     np.save(output, payload)
     print(
-        f"wrote {output} action_mode={action_mode} state_mode={action_mode}_state "
-        f"dim={raw_dim} action_rows={action_accumulator.count} state_rows={state_accumulator.count}"
+        f"wrote {output} mode={action_mode} pool=action_state dim={raw_dim} "
+        f"action_rows={action_rows} state_rows={state_rows} total_rows={action_rows + state_rows}"
     )
     return 0
 

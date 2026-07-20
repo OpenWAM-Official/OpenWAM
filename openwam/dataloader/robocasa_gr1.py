@@ -88,7 +88,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         "left_wrist_camera_priority",
         "right_wrist_camera_priority",
         "normalization_stats_path",
-        "state_stats_mode",
         "unify_action",
         "unify_action_map",
         "state_mask",
@@ -107,7 +106,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         left_wrist_camera_priority: Optional[Sequence[str]] = None,
         right_wrist_camera_priority: Optional[Sequence[str]] = None,
         normalization_stats_path: Optional[str] = None,
-        state_stats_mode: str = "eef_state",
         unify_action: Optional[bool] = None,
         unify_action_map: Optional[Any] = None,
         action_mask: Optional[Sequence[bool]] = None,
@@ -128,8 +126,6 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             )
         self.action_mode = mode
         self.DEPLOY_ACTION_MODE = _ACTION_MODE
-        self._state_stats_mode = str(state_stats_mode)
-        self._state_normalization_stats = None
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
 
         self._prompt_columns = [str(x) for x in _as_list(prompt_columns)]
@@ -252,24 +248,14 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
                 "Run python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation "
                 "or set normalize_mode=null."
             )
-        action_stats = load_stats_file(
+        global_stats = load_stats_file(
             self._source_stats_path,
             action_mode=self.action_mode,
             normalize_mode=self._normalize_mode,
             dim=self._raw_action_dim,
         )
-        self._state_normalization_stats = load_stats_file(
-            self._source_stats_path,
-            action_mode=self._state_stats_mode,
-            normalize_mode=self._normalize_mode,
-            dim=self._raw_action_dim,
-        )
-        self._write_deploy_normalizer_stats(
-            action_stats,
-            STAT_KEYS,
-            additional_entries={self._state_stats_mode: self._state_normalization_stats},
-        )
-        return action_stats
+        self._write_deploy_normalizer_stats(global_stats, STAT_KEYS)
+        return global_stats
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
@@ -280,7 +266,7 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
 
     def _proprio_20d(self, win) -> np.ndarray:
         raw = self._read_vector_window(win, vector_col=self._state_column, label="state", first_only=True)
-        return apply_normalization(raw, self._state_normalization_stats, self._normalize_mode)
+        return self._normalize_array(raw)
 
     def _raw_action(self, win) -> np.ndarray:
         return self._read_vector_window(win, vector_col=self._action_column, label="action")
