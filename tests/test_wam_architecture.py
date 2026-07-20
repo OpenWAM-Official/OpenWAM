@@ -1759,3 +1759,132 @@ def test_base_generate_frozen_lag_stream_stays_in_forward_context(monkeypatch):
     # Plateau-step predictions are cached with the action branch present.
     assert cache.action_updates == [True, True, True, True]
     assert result["actions"].shape == (3, 3)
+
+
+_PIN_ACTION_DIM = 8
+_PIN_ACTIVE_IDX = [0, 2, 5]  # non-contiguous, mimics a unify_action scatter map
+_PIN_INACTIVE_IDX = [1, 3, 4, 6, 7]
+
+
+def _make_inactive_dim_probe_arch():
+    """Fake arch whose forward emits huge garbage flow on the non-active action
+    channels — an adversarial stand-in for the unsupervised padding-dim flow of
+    a unify_action checkpoint. Records every action forward input."""
+    from openwam.model.architectures.base import BaseWAMArchitecture
+
+    class _Scheduler:
+        num_train_timesteps = 1000
+
+        @staticmethod
+        def flow_step(model_output, sigma, sigma_next, sample):
+            return sample + model_output * (sigma_next - sigma)
+
+    class _VideoBackbone(torch.nn.Module):
+        scheduler = _Scheduler()
+        external_encoder = None
+
+        @staticmethod
+        def preprocess_input_for_inference(**_kwargs):
+            return {"latents": torch.zeros(1, 1, 1, 1, 1)}
+
+    class _ActionBackbone(torch.nn.Module):
+        scheduler = _Scheduler()
+        action_dim = _PIN_ACTION_DIM
+        bridge_layers = ()
+        uses_proprioception = False
+
+    class _Arch(BaseWAMArchitecture):
+        def __init__(self):
+            super().__init__(cfg=None)
+            self._device = torch.device("cpu")
+            self._dtype = torch.float32
+            self.video_backbone = _VideoBackbone()
+            self.action_backbone = _ActionBackbone()
+            self.seen_action_inputs = []
+
+        def forward(self, noisy_actions, action_timestep, **kwargs):  # noqa: ARG002
+            self.seen_action_inputs.append(noisy_actions.detach().clone())
+            pred = torch.empty_like(noisy_actions)
+            pred[..., _PIN_ACTIVE_IDX] = 1.0
+            pred[..., _PIN_INACTIVE_IDX] = 1000.0
+            return torch.ones_like(kwargs["latents"]), pred
+
+    return _Arch()
+
+
+def test_base_generate_pins_inactive_action_dims_on_noise_path(monkeypatch):
+    """Unsupervised (non-scattered) unified-action dims must ride the analytic
+    sigma * eps0 noise path through the denoising loop instead of integrating
+    unconstrained flow back into the next forward."""
+    import numpy as np
+
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+
+    schedule = [(1000.0, 1000.0), (750.0, 750.0), (500.0, 500.0), (250.0, 250.0), (0.0, 0.0)]
+    sigmas = [t_a / 1000.0 for _, t_a in schedule]
+    gen_kwargs = dict(schedule=schedule, prompt="", num_frames=5, action_num_frames=5, seed=7, decode_video=False)
+    eps0 = torch.randn(1, 4, _PIN_ACTION_DIM, generator=torch.Generator(device="cpu").manual_seed(7))
+
+    baseline = _make_inactive_dim_probe_arch().generate(**gen_kwargs)["actions"]
+    # Unpinned, the garbage flow drags inactive dims far off the noise path.
+    assert np.abs(baseline[:, _PIN_INACTIVE_IDX]).max() > 100
+
+    mask = torch.zeros(_PIN_ACTION_DIM, dtype=torch.bool)
+    mask[_PIN_ACTIVE_IDX] = True
+    pinned_arch = _make_inactive_dim_probe_arch()
+    pinned = pinned_arch.generate(**gen_kwargs, active_action_mask=mask)["actions"]
+
+    # Every forward saw inactive dims exactly on sigma_k * eps0 ...
+    for k, seen in enumerate(pinned_arch.seen_action_inputs):
+        torch.testing.assert_close(
+            seen[..., _PIN_INACTIVE_IDX], sigmas[k] * eps0[..., _PIN_INACTIVE_IDX], rtol=0, atol=1e-7
+        )
+    # ... the final state lands exactly on 0 (sigma_end == 0) ...
+    assert np.abs(pinned[:, _PIN_INACTIVE_IDX]).max() == 0.0
+    # ... and active dims are untouched by the pin (input-independent fake pred).
+    np.testing.assert_array_equal(pinned[:, _PIN_ACTIVE_IDX], baseline[:, _PIN_ACTIVE_IDX])
+
+
+def test_base_generate_infers_inactive_dims_from_unify_normalizer(monkeypatch):
+    """The pin auto-enables from the attached unify normalizer's scatter map and
+    stays off for plain (non-unify) normalizers or width mismatches."""
+    import numpy as np
+
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+
+    schedule = [(1000.0, 1000.0), (500.0, 500.0), (0.0, 0.0)]
+    gen_kwargs = dict(schedule=schedule, prompt="", num_frames=5, action_num_frames=5, seed=7, decode_video=False)
+
+    class _UnifyNormalizer:  # duck-types _UnifyAwareNormalizer's private surface
+        _dst_index = np.asarray(_PIN_ACTIVE_IDX, dtype=np.int64)
+        _unify_dim = _PIN_ACTION_DIM
+
+        @staticmethod
+        def unnormalize(x):
+            return x  # keep the unified width so inactive dims stay observable
+
+    baseline = _make_inactive_dim_probe_arch().generate(**gen_kwargs)["actions"]
+
+    mask = torch.zeros(_PIN_ACTION_DIM, dtype=torch.bool)
+    mask[_PIN_ACTIVE_IDX] = True
+    explicit = _make_inactive_dim_probe_arch().generate(**gen_kwargs, active_action_mask=mask)["actions"]
+
+    auto_arch = _make_inactive_dim_probe_arch()
+    auto_arch.attach_normalizer(_UnifyNormalizer())
+    np.testing.assert_array_equal(auto_arch.generate(**gen_kwargs)["actions"], explicit)
+
+    class _PlainNormalizer:
+        @staticmethod
+        def unnormalize(x):
+            return x
+
+    plain_arch = _make_inactive_dim_probe_arch()
+    plain_arch.attach_normalizer(_PlainNormalizer())
+    np.testing.assert_array_equal(plain_arch.generate(**gen_kwargs)["actions"], baseline)
+
+    class _MismatchNormalizer(_UnifyNormalizer):
+        _unify_dim = _PIN_ACTION_DIM + 1
+
+    mismatch_arch = _make_inactive_dim_probe_arch()
+    mismatch_arch.attach_normalizer(_MismatchNormalizer())
+    np.testing.assert_array_equal(mismatch_arch.generate(**gen_kwargs)["actions"], baseline)

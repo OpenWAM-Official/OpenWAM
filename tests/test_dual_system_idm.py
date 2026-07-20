@@ -463,6 +463,37 @@ def test_idm_generate_runs_attached_normalizer_on_actions(monkeypatch):
     torch.testing.assert_close(torch.from_numpy(normalized), torch.from_numpy(raw) + 100.0)
 
 
+def test_idm_generate_pins_inactive_unified_action_dims(monkeypatch):
+    """IDM's stage-2 loop must keep unsupervised unified dims on the analytic
+    sigma * eps0 path, exactly like BaseWAMArchitecture.generate."""
+    import numpy as np
+
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+    gen_kwargs = dict(
+        schedule=[(1000.0, 1000.0), (0.0, 500.0), (0.0, 0.0)],
+        prompt="",
+        num_frames=3,
+        action_num_frames=5,
+        decode_video=False,
+        seed=0,
+    )
+
+    arch = _make_idm_with_video(_GenerateVideoBackbone())
+    arch.eval()
+    torch.manual_seed(42)
+    baseline = arch.generate(**gen_kwargs)["actions"]
+    # The randomly initialized ActionDiT emits nonzero flow on every channel,
+    # so unpinned inactive dims do NOT land on 0.
+    assert np.abs(baseline[:, 1:]).max() > 0.0
+
+    torch.manual_seed(42)
+    pinned = arch.generate(**gen_kwargs, active_action_mask=torch.tensor([True, False, False]))["actions"]
+    # sigma_end == 0 -> pinned inactive dims land exactly on 0; the active dim
+    # still integrates real flow.
+    assert np.abs(pinned[:, 1:]).max() == 0.0
+    assert np.abs(pinned[:, 0]).max() > 0.0
+
+
 def test_idm_generate_with_proprio_appends_context_once(monkeypatch):
     """IDM generate appends proprio once even though stage 2 bypasses forward()."""
     monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
