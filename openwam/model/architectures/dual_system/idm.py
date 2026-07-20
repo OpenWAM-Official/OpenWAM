@@ -901,6 +901,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         vace_cache: Optional[dict] = None,
         prompt_embed_cache: Optional[dict] = None,
         proprio: Optional[Tensor] = None,
+        active_action_mask: Optional[Tensor] = None,
     ) -> dict:
         """Two-stage IDM generation.
 
@@ -966,6 +967,11 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             dtype=dtype,
             generator=torch.Generator(device=device).manual_seed(seed),
         )
+
+        # Same inactive-dim pinning as BaseWAMArchitecture.generate: unsupervised
+        # unified-action dims must stay on their analytic sigma * eps0 noise path.
+        inactive_action_noise = None
+        inactive_action_dims = self._resolve_inactive_action_dims(active_action_mask, device)
 
         num_train_ts_v = float(self.video_scheduler.num_train_timesteps)
         num_train_ts_a = float(self.action_scheduler.num_train_timesteps)
@@ -1151,9 +1157,16 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
                 action_noise_pred = ab.extract_prediction(astate)
 
             if action_noise_pred is not None:
+                if inactive_action_dims is not None and inactive_action_noise is None:
+                    sigma_a_f = float(sigma_a)
+                    if sigma_a_f <= 0.0:
+                        raise ValueError("Cannot initialize inactive action noise from a non-positive sigma.")
+                    inactive_action_noise = action_latents[..., inactive_action_dims].detach().clone() / sigma_a_f
                 action_latents = self.action_scheduler.flow_step(
                     action_noise_pred, sigma_a, sigma_a_next, action_latents
                 )
+                if inactive_action_dims is not None:
+                    action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
 
         if profile:
             if torch.cuda.is_available():

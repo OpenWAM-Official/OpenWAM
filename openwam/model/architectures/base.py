@@ -1324,6 +1324,49 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     # --- Inference: generation ---
 
+    def _resolve_inactive_action_dims(
+        self, active_action_mask: Optional[Tensor], device: torch.device
+    ) -> Optional[Tensor]:
+        """Resolve which unified-action dims must ride the analytic noise path.
+
+        An explicit ``active_action_mask`` wins; otherwise the active indices
+        are inferred from the attached unify normalizer's scatter map (its
+        absence, or a width mismatch with ``action_dim``, disables pinning).
+        Returns a bool ``(action_dim,)`` mask of INACTIVE dims, or ``None``
+        when every dim is active.
+        """
+        if active_action_mask is None:
+            normalizer = getattr(self, "normalizer", None)
+            active_action_indices = getattr(normalizer, "_dst_index", None)
+            unified_action_dim = getattr(normalizer, "_unify_dim", None)
+            if (
+                active_action_indices is not None
+                and unified_action_dim is not None
+                and int(unified_action_dim) == self.action_dim
+            ):
+                active_action_indices = torch.as_tensor(active_action_indices, device=device, dtype=torch.long)
+                if active_action_indices.numel() and (
+                    int(active_action_indices.min()) < 0 or int(active_action_indices.max()) >= self.action_dim
+                ):
+                    raise ValueError(
+                        f"Unified action indices must be within [0, {self.action_dim}); "
+                        f"got {active_action_indices.tolist()}."
+                    )
+                active_action_mask = torch.zeros(self.action_dim, device=device, dtype=torch.bool)
+                active_action_mask[active_action_indices] = True
+
+        if active_action_mask is None:
+            return None
+        active_action_mask = torch.as_tensor(active_action_mask, device=device, dtype=torch.bool)
+        if active_action_mask.shape != (self.action_dim,):
+            raise ValueError(
+                f"active_action_mask must have shape ({self.action_dim},); got {tuple(active_action_mask.shape)}."
+            )
+        inactive_action_dims = ~active_action_mask
+        if not bool(inactive_action_dims.any()):
+            return None
+        return inactive_action_dims
+
     @torch.no_grad()
     def generate(
         self,
@@ -1467,37 +1510,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # analytic forward-noise path instead of feeding unconstrained updates back
         # into the next denoising step.
         inactive_action_noise = None
-        if active_action_mask is None:
-            normalizer = getattr(self, "normalizer", None)
-            active_action_indices = getattr(normalizer, "_dst_index", None)
-            unified_action_dim = getattr(normalizer, "_unify_dim", None)
-            if (
-                active_action_indices is not None
-                and unified_action_dim is not None
-                and int(unified_action_dim) == self.action_dim
-            ):
-                active_action_indices = torch.as_tensor(active_action_indices, device=device, dtype=torch.long)
-                if active_action_indices.numel() and (
-                    int(active_action_indices.min()) < 0 or int(active_action_indices.max()) >= self.action_dim
-                ):
-                    raise ValueError(
-                        f"Unified action indices must be within [0, {self.action_dim}); "
-                        f"got {active_action_indices.tolist()}."
-                    )
-                active_action_mask = torch.zeros(self.action_dim, device=device, dtype=torch.bool)
-                active_action_mask[active_action_indices] = True
-
-        inactive_action_dims = None
-        if active_action_mask is not None:
-            active_action_mask = torch.as_tensor(active_action_mask, device=device, dtype=torch.bool)
-            if active_action_mask.shape != (self.action_dim,):
-                raise ValueError(
-                    f"active_action_mask must have shape ({self.action_dim},); "
-                    f"got {tuple(active_action_mask.shape)}."
-                )
-            inactive_action_dims = ~active_action_mask
-            if not bool(inactive_action_dims.any()):
-                inactive_action_dims = None
+        inactive_action_dims = self._resolve_inactive_action_dims(active_action_mask, device)
 
         num_train_ts_v = float(self.video_scheduler.num_train_timesteps)
         num_train_ts_a = float(self.action_scheduler.num_train_timesteps)
@@ -1572,9 +1585,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     sigma_a_f = float(sigma_a)
                     if sigma_a_f <= 0.0:
                         raise ValueError("Cannot initialize inactive action noise from a non-positive sigma.")
-                    inactive_action_noise = (
-                        action_latents[..., inactive_action_dims].detach().clone() / sigma_a_f
-                    )
+                    inactive_action_noise = action_latents[..., inactive_action_dims].detach().clone() / sigma_a_f
                 action_latents = self.action_scheduler.flow_step(
                     action_noise_pred, sigma_a, sigma_a_next, action_latents
                 )
