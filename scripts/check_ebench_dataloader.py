@@ -8,7 +8,6 @@ checks the OpenWAM-facing tensor contracts without constructing the model.
 from __future__ import annotations
 
 import argparse
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -22,8 +21,9 @@ def parse_args():
     parser.add_argument(
         "--buckets",
         nargs="*",
-        default=["simple_pnp/task1", "teleop_tasks/peg_in_hole"],
-        help="Relative EBench buckets to check.",
+        default=None,
+        help="Relative EBench buckets to check (default: all groups). Note: stats always live at "
+        "<dataset_dir>/meta/ebench_stats.npy, so a bucket subset must match the cache fingerprint.",
     )
     parser.add_argument("--samples", type=int, default=2)
     parser.add_argument("--num-frames", type=int, default=33)
@@ -31,16 +31,12 @@ def parse_args():
     parser.add_argument("--height", type=int, default=384)
     parser.add_argument("--width", type=int, default=320)
     parser.add_argument("--normalize-mode", default="min-max", choices=["min-max", "z-score", "quantile", "null"])
-    parser.add_argument("--stats-path", default=None)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     normalize_mode = None if args.normalize_mode == "null" else args.normalize_mode
-    stats_path = args.stats_path
-    if normalize_mode is not None and stats_path is None:
-        stats_path = str(Path(tempfile.mkdtemp(prefix="openwam_ebench_check_")) / "ebench_stats.npy")
     buckets = discover_ebench_buckets(args.dataset_dir, buckets=args.buckets)
     print(f"Found {len(buckets)} EBench bucket(s): {[str(p.relative_to(args.dataset_dir)) for p in buckets]}")
 
@@ -48,18 +44,17 @@ def main():
         {
             "type": "ebench",
             "dataset_dir": args.dataset_dir,
-            "buckets": [str(bucket.relative_to(Path(args.dataset_dir))) for bucket in buckets],
-            "groups": None,
+            "buckets": [str(bucket.relative_to(Path(args.dataset_dir))) for bucket in buckets] if args.buckets else None,
+            "groups": None if args.buckets else ["long_horizon", "simple_pnp", "teleop_tasks"],
             "num_frames": args.num_frames,
             "video_stride": args.video_stride,
             "height": args.height,
             "width": args.width,
             "normalize_mode": normalize_mode,
-            "normalization_stats_path": stats_path,
         },
         split="train",
     )
-    print(f"Dataset windows={len(ds)} action_dim={ds.action_dim} stats_path={stats_path}")
+    print(f"Dataset windows={len(ds)} action_dim={ds.action_dim} stats_path={ds.normalization_stats_path}")
 
     readers = ds.buckets if hasattr(ds, "buckets") else [ds]
     for reader in readers:

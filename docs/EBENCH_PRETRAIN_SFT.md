@@ -7,7 +7,7 @@ changing the model head. The code path is:
 2. Use `dataloader=ebench`, which builds raw 23-D EEF/base actions and, by
    default, scatters them to 80-D with `unify_action_map`.
 3. Load an 80-D OpenWAM checkpoint via `training.finetune_ckpt_path`.
-4. Run full SFT through `scripts/train_ebench_sft.sh`.
+4. Run full SFT through `scripts/train.sh` with the overrides below.
 
 ## Data
 
@@ -108,32 +108,35 @@ dataloader.base_action_source=cumulative
 
 ```yaml
 normalize_mode: min-max
-normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.npy
 ```
 
-`min-max` keeps action targets in the bounded `[-1, 1]` distribution the 80-D
-pretrain checkpoint was trained on (the family convention) and its parameters
-are exact from the summary stats. `z-score` (unbounded) remains available for
-ablations. `quantile` needs true q01/q99 — `episodes_stats.jsonl` carries
-none, so the mode requires a stats file prebuilt by the offline parquet scan
-(summary-built caches are rejected for quantile with a hard error, never a
-silent min/max alias):
+Stats live at the fixed location `<dataset_dir>/meta/ebench_stats.npy`. When
+the file is missing, the dataloader auto-builds it on first construction via
+the offline parquet scan (`ebench_stats_computation`): rank 0 runs the scan
+and writes atomically, other ranks poll for the file (timeout/interval
+overridable via `OPENWAM_STATS_WAIT_TIMEOUT_S` / `OPENWAM_STATS_POLL_INTERVAL_S`).
+The scan carries true q01/q99, so all modes work with no manual pre-step.
+To force a rebuild (e.g. after re-exporting episodes), delete the cache file.
+The offline module can still be run standalone to prebuild:
 
 ```bash
 python -m openwam.dataloader.utils.stats_computation.ebench_stats_computation \
     --dataset_dir /path/to/data_lake/EBench-Dataset
 ```
 
-The offline module writes the same cache file/schema (plus true q01/q99), so
-prebuilding it also spares every training rank the per-rank summary merge
-under min-max/z-score.
+`min-max` keeps action targets in the bounded `[-1, 1]` distribution the 80-D
+pretrain checkpoint was trained on (the family convention). `z-score`
+(unbounded) remains available for ablations. `quantile` uses the scan's true
+q01/q99; a legacy summary-built cache without them is rejected with a hard
+error, never a silent min/max alias.
 
-For min-max/z-score without a prebuilt file, the dataloader builds this cache
-on first load from each bucket's `meta/episodes_stats.jsonl`. The cache stores raw 23-D stats under the
-`action_mode` key (`ebench` by default) plus a fingerprint (schema version,
-action keys, bucket paths, and a sha256 over each bucket's dataset-relative
-path + its `episodes_stats.jsonl` bytes — re-downloading a bucket invalidates
-the cache, while moving the whole dataset to another mount does not).
+The cache stores raw 23-D stats under the `action_mode` key (`ebench` by
+default) plus a fingerprint (schema version, action keys, bucket paths, and a
+sha256 over each bucket's dataset-relative path + its `episodes_stats.jsonl`
+bytes — re-downloading a bucket invalidates the cache, while moving the whole
+dataset to another mount does not). A `dataloader.buckets`/`groups` subset run
+fingerprints its own bucket set, so it conflicts with a full-set cache at the
+same fixed path — delete the cache when switching bucket sets.
 Both action and proprio use the same action stats, matching deployment. Rot6d
 dimensions are pinned to identity stats because they cannot be derived exactly
 from quaternion summary moments.
@@ -141,10 +144,6 @@ from quaternion summary moments.
 The checkpoint directory gets `normalization_stats.npy` copied automatically.
 With `unify_action=true`, deploy gathers the model's 80-D output back to raw
 23-D via `unify_action_map` and then applies this raw-space denormalizer.
-
-`scripts/train_ebench_sft.sh` avoids polluting the full-dataset stats cache
-during subset runs: if `EBENCH_BUCKETS` is set and `EBENCH_STATS_PATH` is not
-set, stats are written under `$OUTPUT_DIR/ebench_stats.npy`.
 
 ## Check Dataloader Only
 
@@ -169,35 +168,32 @@ proprio_mask: (1, 80)
 
 ## Start Full SFT
 
-Set the latest 80-D OpenWAM pretrain checkpoint:
+Point `scripts/train.sh` at the latest 80-D OpenWAM pretrain checkpoint:
 
 ```bash
-cd /path/to/OpenWAM
-export FINETUNE_CKPT=/path/to/openwam_80d_pretrain/checkpoint_step_x.safetensors
-export EBENCH_DATASET_DIR=/path/to/data_lake/EBench-Dataset
-export OUTPUT_DIR=/path/to/train_runs/openwam_ebench_sft
-export WAN22_PATH=/path/to/Wan2.2-TI2V-5B
-
-bash scripts/train_ebench_sft.sh
+bash scripts/train.sh \
+    dataloader=ebench \
+    dataloader.action_mode=ebench \
+    dataloader.unify_action=true \
+    'dataloader.unify_action_map=["0-9","34-43","68-70"]' \
+    model=dual_system \
+    model.architecture.action_dim=80 \
+    model.architecture.state_dim=80 \
+    model.video_backbone.model_path=/path/to/Wan2.2-TI2V-5B \
+    training.finetune_ckpt_path=/path/to/openwam_80d_pretrain/checkpoint_step_x.safetensors \
+    training.output_path=/path/to/train_runs/openwam_ebench_sft
 ```
 
-Smoke-run on two buckets:
+Smoke-run on two buckets (note: the bucket subset fingerprints its own stats
+cache at the fixed location — see the normalization section above):
 
 ```bash
-EBENCH_BUCKETS='[simple_pnp/task1,teleop_tasks/peg_in_hole]' \
-BATCH_SIZE=1 \
-bash scripts/train_ebench_sft.sh training.max_steps=20 training.save_steps=20
-```
-
-The script forces:
-
-```text
-dataloader=ebench
-dataloader.unify_action=true
-dataloader.unify_action_map=["0-9","34-43","68-70"]
-model.architecture.action_dim=80
-model.architecture.state_dim=80
-training.finetune_ckpt_path=$FINETUNE_CKPT
+bash scripts/train.sh \
+    dataloader=ebench \
+    ... \
+    dataloader.groups=null \
+    'dataloader.buckets=[simple_pnp/task1,teleop_tasks/peg_in_hole]' \
+    training.batch_size=1 training.max_steps=20 training.save_steps=20
 ```
 
 No LoRA is enabled. The run is full SFT over the trainable OpenWAM modules

@@ -1,5 +1,5 @@
 type: ebench
-dataset_dir: /path/to/data_lake/EBench-Dataset
+dataset_dir: /path/to/ebench
 
 # EBench buckets. Default covers all three official families.
 # To smoke-test a tiny subset:
@@ -51,16 +51,24 @@ multiview: true
 target_camera: video.overlook_camera_view
 camera_layout: [video.overlook_camera_view, video.left_camera_view, video.right_camera_view]
 
+# --- Video augmentation (optional) ---
+# color_jitter: load-time color jitter applied by the reader to each clip, with
+# the SAME random factors across all frames (temporal consistency), TRAIN split
+# only. Omit / null / false -> disabled (video byte-identical). Provide a dict
+# to enable + set per-channel strengths (hue is a no-op in PIL mode).
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
+
 # --- Normalization ---
-# The reader builds a shared raw-23 stats cache from meta/episodes_stats.jsonl on
-# first load and reuses it afterward. Action and proprio both use this same
+# Raw-23 action stats live at the fixed location <dataset_dir>/meta/
+# ebench_stats.npy. When the file is missing, the reader auto-builds it on
+# first construction via the offline parquet scan (rank 0 scans, other ranks
+# wait; ebench_stats_computation). Action and proprio both use this same
 # action stats entry, matching deploy. Rot6d stats are pinned to identity.
+# The scan carries true q01/q99, so "quantile" works with no manual pre-step.
 # min-max keeps targets in the bounded [-1,1] distribution the 80-D pretrain
-# checkpoint was trained on and is exact from the summary stats. "quantile"
-# additionally needs true q01/q99, which only the offline parquet scan provides
-# (it writes the same cache file; prebuilding also spares every training rank
-# the per-rank summary merge):
-#   python -m openwam.dataloader.utils.stats_computation.ebench_stats_computation \
-#     --dataset_dir /path/to/data_lake/EBench-Dataset
+# checkpoint was trained on. To force a rebuild, delete the cache file.
 normalize_mode: min-max           # "min-max", "z-score", "quantile", or null
-normalization_stats_path: /path/to/data_lake/EBench-Dataset/meta/ebench_stats.npy

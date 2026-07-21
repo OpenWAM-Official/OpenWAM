@@ -20,7 +20,7 @@ action_mode: eef                  # "eef" (20D xyz+rot6d+grip, default) or "join
 # NOTE: for action_mode: joint (14-D qpos) this map does NOT apply — joints have
 # no eef-xyz/rot6d slots in the 80-D layout; set a joint-appropriate map first.
 # Single-list form (source dims implied 0..19 in token order):
-unify_action: false
+unify_action: true
 unify_action_map: ["0-9", "34-43"]
 
 # --- Frame sampling ---
