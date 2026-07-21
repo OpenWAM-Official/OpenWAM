@@ -85,9 +85,9 @@ from PIL import Image
 
 from openwam.dataloader.bases import BaseDataset
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout, format_prompt_for_inference
+from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.eef import assert_unit_quaternion, quat_xyzw_to_rot6d
 from openwam.dataloader.utils.normalization import apply_normalization
-from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
 from openwam.dataloader.utils.video_io import decode_video_frames as _decode_video_frames
 
@@ -606,9 +606,7 @@ def _build_stats_cache_rank0(
         rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
 
     if rank == 0:
-        logger.info(
-            "No EBench stats cache at %s — running the offline parquet scan (rank 0; other ranks wait)", path
-        )
+        logger.info("No EBench stats cache at %s — running the offline parquet scan (rank 0; other ranks wait)", path)
         build_and_save_ebench_stats(
             dataset_dir,
             output=str(path),

@@ -7,7 +7,7 @@ changing the model head. The code path is:
 2. Use `dataloader=ebench`, which builds raw 23-D EEF/base actions and, by
    default, scatters them to 80-D with `unify_action_map`.
 3. Load an 80-D OpenWAM checkpoint via `training.finetune_ckpt_path`.
-4. Run full SFT through `scripts/train_ebench_sft.sh`.
+4. Run full SFT through `scripts/train.sh` with the overrides below.
 
 ## Data
 
@@ -168,35 +168,32 @@ proprio_mask: (1, 80)
 
 ## Start Full SFT
 
-Set the latest 80-D OpenWAM pretrain checkpoint:
+Point `scripts/train.sh` at the latest 80-D OpenWAM pretrain checkpoint:
 
 ```bash
-cd /path/to/OpenWAM
-export FINETUNE_CKPT=/path/to/openwam_80d_pretrain/checkpoint_step_x.safetensors
-export EBENCH_DATASET_DIR=/path/to/data_lake/EBench-Dataset
-export OUTPUT_DIR=/path/to/train_runs/openwam_ebench_sft
-export WAN22_PATH=/path/to/Wan2.2-TI2V-5B
-
-bash scripts/train_ebench_sft.sh
+bash scripts/train.sh \
+    dataloader=ebench \
+    dataloader.action_mode=ebench \
+    dataloader.unify_action=true \
+    'dataloader.unify_action_map=["0-9","34-43","68-70"]' \
+    model=dual_system \
+    model.architecture.action_dim=80 \
+    model.architecture.state_dim=80 \
+    model.video_backbone.model_path=/path/to/Wan2.2-TI2V-5B \
+    training.finetune_ckpt_path=/path/to/openwam_80d_pretrain/checkpoint_step_x.safetensors \
+    training.output_path=/path/to/train_runs/openwam_ebench_sft
 ```
 
-Smoke-run on two buckets:
+Smoke-run on two buckets (note: the bucket subset fingerprints its own stats
+cache at the fixed location — see the normalization section above):
 
 ```bash
-EBENCH_BUCKETS='[simple_pnp/task1,teleop_tasks/peg_in_hole]' \
-BATCH_SIZE=1 \
-bash scripts/train_ebench_sft.sh training.max_steps=20 training.save_steps=20
-```
-
-The script forces:
-
-```text
-dataloader=ebench
-dataloader.unify_action=true
-dataloader.unify_action_map=["0-9","34-43","68-70"]
-model.architecture.action_dim=80
-model.architecture.state_dim=80
-training.finetune_ckpt_path=$FINETUNE_CKPT
+bash scripts/train.sh \
+    dataloader=ebench \
+    ... \
+    dataloader.groups=null \
+    'dataloader.buckets=[simple_pnp/task1,teleop_tasks/peg_in_hole]' \
+    training.batch_size=1 training.max_steps=20 training.save_steps=20
 ```
 
 No LoRA is enabled. The run is full SFT over the trainable OpenWAM modules
