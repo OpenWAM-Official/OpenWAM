@@ -381,8 +381,10 @@ training:
     arch_a = _build(from_scratch=False)
     arch_b = _build(from_scratch=True)
 
-    pipe_a = arch_a.video_backbone._pipe
-    pipe_b = arch_b.video_backbone._pipe
+    # The video backbone is itself the module holding dit / vae / text_encoder as
+    # named children (the old `._pipe` wrapper was removed); read them directly.
+    pipe_a = arch_a.video_backbone
+    pipe_b = arch_b.video_backbone
 
     # VAE: bit-exact identical (untouched by from_scratch).
     vae_a = dict(pipe_a.vae.named_parameters())
@@ -481,8 +483,8 @@ training:
     arch_a = _build_with_seed(seed=42)
     arch_b = _build_with_seed(seed=42)
 
-    dit_a = arch_a.video_backbone._pipe.dit
-    dit_b = arch_b.video_backbone._pipe.dit
+    dit_a = arch_a.video_backbone.dit
+    dit_b = arch_b.video_backbone.dit
 
     # Sanity: the re-init banner should have printed twice (once per build) —
     # we don't capture it here (capsys + pytest -s interactions are flaky in
