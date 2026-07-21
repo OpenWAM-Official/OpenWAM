@@ -121,9 +121,10 @@ def test_converter_reindexes_v20_without_copying_payloads(tmp_path: Path):
     assert info["codebase_version"] == "v3.0"
     assert info["splits"] == {"train": "0:1"}
     assert info["data_path"].endswith("file-{file_index:03d}.parquet")
-    assert os.stat(source / "data/chunk-000/episode_000000.parquet").st_ino == os.stat(
-        output / "data/chunk-000/file-000.parquet"
-    ).st_ino
+    assert (
+        os.stat(source / "data/chunk-000/episode_000000.parquet").st_ino
+        == os.stat(output / "data/chunk-000/file-000.parquet").st_ino
+    )
 
     episodes = pd.read_parquet(output / "meta" / "episodes" / "chunk-000.parquet")
     assert episodes.loc[0, "dataset_from_index"] == 0
@@ -202,8 +203,10 @@ def test_shipped_config_is_eef33_mapped_to_unified80():
     assert config.unify_action is True
     assert list(config.unify_action_map) == ["0-8", "10-15", "34-42", "44-49", "68-70"]
     assert list(config.prompt_columns) == []
-    assert len(config.state_mask) == len(config.action_mask) == EEF33_DIM
-    assert all(config.state_mask) and all(config.action_mask)
+    # All 33 raw dims are always valid: the config must not carry a per-dim mask
+    # (an omitted mask is the all-visible default).
+    assert "state_mask" not in config
+    assert "action_mask" not in config
 
 
 def test_converter_rejects_native_joint44_without_eef_columns(tmp_path: Path):

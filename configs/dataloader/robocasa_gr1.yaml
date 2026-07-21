@@ -58,15 +58,10 @@ normalization_stats_path: null
 
 # Normalize EEF33 first, then scatter arm poses, Fourier hands, and waist into
 # the shared EEF/dex-hand/reserved slots. Gripper slots 9/43 stay unmapped.
+# All 33 raw dims are simulator-backed and always valid, so no per-dim
+# state_mask/action_mask is needed; the unified mask marks unmapped slots false.
 unify_action: true
 unify_action_map: ["0-8", "10-15", "34-42", "44-49", "68-70"]
-# Raw EEF33 has no hidden dimensions; masks become false only for the unmapped
-# unified slots after scatter.
-state_mask: &eef33_all_visible
-  [true, true, true, true, true, true, true, true, true, true, true,
-   true, true, true, true, true, true, true, true, true, true, true,
-   true, true, true, true, true, true, true, true, true, true, true]
-action_mask: *eef33_all_visible
 
 # Load-time, temporally consistent augmentation (train split only).
 color_jitter:
