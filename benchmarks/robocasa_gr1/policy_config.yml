@@ -34,26 +34,12 @@ prompt_key: annotation.human.coarse_action
 fallback_prompt_key: annotation.human.action.task_description
 
 # Proprioception is converted online from the live 29-D GR00T state to the same
-# robot-base-frame EEF33 representation used by FK enrichment.
+# robot-base-frame EEF33 representation used by FK enrichment. The returned
+# EEF33 action is IK-solved to absolute 7+7 arm joints, with Fourier hand6+hand6
+# and waist3 passed through; the state/action key layout is fixed by the FK/IK
+# contract and is not configurable.
 send_state: true
-state_keys:
-  - state.left_arm
-  - state.left_hand
-  - state.right_arm
-  - state.right_hand
-  - state.waist
 state_dim: 33
-
-# The client solves the EEF33 arm targets to absolute 7+7 arm joints and passes
-# Fourier hand6+hand6 and waist3 through to the 29-D environment action dict.
-action_keys:
-  - action.left_arm
-  - action.left_hand
-  - action.right_arm
-  - action.right_hand
-  - action.waist
-action_indices: null
-action_clip: null
 
 debug: false
 debug_dir: "./debug_robocasa_gr1"

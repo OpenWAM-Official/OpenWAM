@@ -44,17 +44,6 @@ def _parse_optional_int(value, field_name: str) -> int | None:
     return parsed
 
 
-def _parse_optional_float(value, field_name: str) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{field_name} must be a YAML number or null, got {value!r}")
-    parsed = float(value)
-    if parsed <= 0:
-        raise ValueError(f"{field_name} must be positive or null, got {value!r}")
-    return parsed
-
-
 def _make_env(cfg: dict):
     import gymnasium as gym
     import robocasa  # noqa: F401
@@ -84,11 +73,7 @@ def run_eval(cfg: dict) -> int:
         prompt_key=cfg.get("prompt_key", "annotation.human.coarse_action"),
         fallback_prompt_key=cfg.get("fallback_prompt_key", "annotation.human.action.task_description"),
         send_state=_require_bool(cfg.get("send_state", True), "send_state"),
-        state_keys=cfg.get("state_keys"),
         state_dim=_parse_optional_int(cfg.get("state_dim"), "state_dim"),
-        action_keys=cfg.get("action_keys"),
-        action_indices=cfg.get("action_indices"),
-        action_clip=_parse_optional_float(cfg.get("action_clip"), "action_clip"),
         debug=_require_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_robocasa_gr1"),
     )

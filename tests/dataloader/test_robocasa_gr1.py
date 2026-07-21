@@ -13,7 +13,6 @@ import pyarrow.parquet as pq
 from omegaconf import OmegaConf
 from PIL import Image
 
-from benchmarks.robocasa_gr1.openwam2robocasa_gr1_interface import action_vector_to_dict, build_state
 from openwam.dataloader.bases.lerobot_v3_reader import _read_data_table_cached
 from openwam.dataloader.registry import list_registered_datasets
 from openwam.dataloader.robocasa_gr1 import EEF33_DIM, MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
@@ -407,37 +406,3 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
     copied = np.load(checkpoint / "normalization_stats.npy", allow_pickle=True).item()
     assert copied["eef"]["mean"].shape == (EEF33_DIM,)
     assert set(copied) == {"eef"}
-
-
-def test_benchmark_fallback_key_order_is_deterministic():
-    obs = {"state.z": np.array([3.0]), "state.a": np.array([1.0, 2.0])}
-    assert build_state(obs) == [1.0, 2.0, 3.0]
-
-    class _Space:
-        def __init__(self, shape):
-            self.shape = shape
-
-    class _DictSpace:
-        spaces = {"action.z": _Space((1,)), "action.a": _Space((2,))}
-
-    mapped = action_vector_to_dict([1.0, 2.0, 3.0], _DictSpace())
-    np.testing.assert_array_equal(mapped["action.a"], [1.0, 2.0])
-    np.testing.assert_array_equal(mapped["action.z"], [3.0])
-
-
-def test_benchmark_rejects_eef20_for_joint29_env_without_controller():
-    class _Space:
-        def __init__(self, shape):
-            self.shape = shape
-
-    class _Joint29:
-        spaces = {
-            "action.left_arm": _Space((7,)),
-            "action.left_hand": _Space((6,)),
-            "action.right_arm": _Space((7,)),
-            "action.right_hand": _Space((6,)),
-            "action.waist": _Space((3,)),
-        }
-
-    with np.testing.assert_raises_regex(ValueError, "too short|consumed"):
-        action_vector_to_dict(np.zeros(20, dtype=np.float32), _Joint29())

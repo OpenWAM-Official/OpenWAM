@@ -320,14 +320,11 @@ class GR1Kinematics:
                 if peak > max_step:
                     dq *= max_step / peak
                 self.data.qpos[qpos_ids] += dq
-                split = 0
                 for part in arm_parts:
-                    width = len(self.qpos_index[part])
                     self.data.qpos[self.qpos_index[part]] = self._clip_arm_qpos(
                         part,
                         self.data.qpos[self.qpos_index[part]],
                     )
-                    split += width
                 self.sim.forward()
             left = self.data.qpos[self.qpos_index["left_arm"]].copy().astype(np.float32)
             right = self.data.qpos[self.qpos_index["right_arm"]].copy().astype(np.float32)
