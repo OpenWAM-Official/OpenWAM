@@ -57,12 +57,12 @@ hf download nvidia/LIBERO_LeRobot_v3 \
   --local-dir /path/to/LIBERO_LeRobot_v3
 ```
 
-
+Normalization statistics load from `<dataset_dir>/meta/libero_normalization_stats.npy` and are auto-computed there on first use if the file is missing. To pre-compute them instead (required for multi-bucket roots, via `normalization_stats_path`):
 
 ```bash
 python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
   --config configs/dataloader/libero.yaml \
-  --output /path/to/LIBERO_LeRobot_v3/libero_normalization_stats.npy
+  --output /path/to/LIBERO_LeRobot_v3/meta/libero_normalization_stats.npy
 ```
 
 ### EEF10 data contract

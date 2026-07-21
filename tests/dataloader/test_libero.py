@@ -153,14 +153,13 @@ def _unit_stats(scale: float = 2.0) -> dict:
 
 def test_registry_and_yaml_include_libero():
     assert "libero" in list_registered_datasets()
-    for name in ('configs/dataloader/libero.yaml',):
-        config = OmegaConf.load(name)
-        assert config.type == "libero"
-        assert config.action_mode == "eef"
-        assert config.unify_action is True
-        assert list(config.unify_action_map) == ["0-9"]
-        assert "state_stats_mode" not in config
-        assert config.color_jitter.brightness == 0.2
+    config = OmegaConf.load("configs/dataloader/libero.yaml")
+    assert config.type == "libero"
+    assert config.action_mode == "eef"
+    assert config.unify_action is True
+    assert list(config.unify_action_map) == ["0-9"]
+    assert "state_stats_mode" not in config
+    assert config.color_jitter.brightness == 0.2
 
 
 def test_state8_to_eef10_rot6d_orthonormal_and_gripper_command():
@@ -278,6 +277,40 @@ def test_action_and_state_use_one_global_normalization_stats_block(tmp_path: Pat
     rot = list(ROT6D_DIMS_EEF10)
     np.testing.assert_allclose(got_action[:, rot], raw_action[:, rot], atol=1e-6)
     np.testing.assert_allclose(got_proprio[:, rot], raw_proprio[:, rot], atol=1e-6)
+
+
+def test_missing_default_stats_are_auto_built_once(tmp_path: Path):
+    _write_bucket(tmp_path)
+    default_path = tmp_path / "meta" / "libero_normalization_stats.npy"
+    assert not default_path.exists()
+    with _mock_decoder():
+        dataset = _dataset(tmp_path, normalize_mode="min-max")
+        sample = dataset[0]
+        raw_sample = _dataset(tmp_path)[0]
+
+    assert default_path.is_file()
+    payload = np.load(default_path, allow_pickle=True).item()
+    assert set(payload) == {"eef"}
+    smin = np.asarray(payload["eef"]["min"], np.float64)
+    smax = np.asarray(payload["eef"]["max"], np.float64)
+    rot = list(ROT6D_DIMS_EEF10)
+    np.testing.assert_allclose(smin[rot], -1.0)
+    np.testing.assert_allclose(smax[rot], 1.0)
+
+    # Normalization is applied against the auto-built pooled stats.
+    raw = raw_sample["action"].numpy()
+    got = sample["action"].numpy()
+    pos_grip = [0, 1, 2, 9]
+    expect = 2.0 * (raw[:, pos_grip] - smin[pos_grip]) / np.maximum(smax[pos_grip] - smin[pos_grip], 1e-8) - 1.0
+    np.testing.assert_allclose(got[:, pos_grip], expect, atol=1e-5)
+    np.testing.assert_allclose(got[:, rot], raw[:, rot], atol=1e-6)  # rot6d passthrough
+
+    # A second construction reuses the file instead of recomputing.
+    with _mock_decoder(), patch(
+        "openwam.dataloader.utils.stats_computation.libero_stats_computation.build_and_save_libero_stats",
+        side_effect=AssertionError("stats must not be recomputed when the default file exists"),
+    ):
+        _dataset(tmp_path, normalize_mode="min-max")
 
 
 def test_libero_stats_generate_deploy_artifact_and_roundtrip(tmp_path: Path):

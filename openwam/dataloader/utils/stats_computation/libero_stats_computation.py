@@ -85,6 +85,43 @@ def _compute_global_stats(dataset, reservoir_cap: int):
     return action_mode, raw_dim, stats, action_rows, state_rows
 
 
+def build_and_save_libero_stats(dataset, output: str | Path, reservoir_cap: int = 1_000_000):
+    """Compute pooled stats for ``dataset`` and atomically write ``output``.
+
+    Shared by the CLI below and the reader's default-path auto-build (rank 0
+    during ``__init__``; see ``LiberoDataset._build_default_stats``): the
+    tmp-file + ``os.replace`` write means concurrently polling ranks never
+    observe a torn file. Returns ``(action_mode, raw_dim, action_rows,
+    state_rows)`` for the caller's report.
+    """
+    import os
+    import socket
+    import uuid
+
+    output = Path(output)
+    action_mode, raw_dim, global_stats, action_rows, state_rows = _compute_global_stats(dataset, reservoir_cap)
+
+    payload = {}
+    if output.exists():
+        previous = np.load(output, allow_pickle=True).item()
+        if isinstance(previous, dict):
+            payload.update(previous)
+    payload.pop(f"{action_mode}_state", None)
+    payload[action_mode] = global_stats
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # pid alone collides across nodes on a shared filesystem; qualify with
+    # hostname + uuid like the LeRobotV3Reader deploy-stats writer.
+    tmp_path = output.with_name(f".{output.name}.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with tmp_path.open("wb") as f:
+            np.save(f, payload)
+        os.replace(tmp_path, output)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return action_mode, raw_dim, action_rows, state_rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/dataloader/libero.yaml")
@@ -100,19 +137,9 @@ def main() -> int:
     OmegaConf.update(cfg, "normalize_mode", None, merge=False)
     dataset = LiberoDataset.from_config(cfg, split=str(OmegaConf.select(cfg, "split", default="train")))
 
-    action_mode, raw_dim, global_stats, action_rows, state_rows = _compute_global_stats(
-        dataset, args.reservoir_cap
+    action_mode, raw_dim, action_rows, state_rows = build_and_save_libero_stats(
+        dataset, output, args.reservoir_cap
     )
-
-    payload = {}
-    if output.exists():
-        previous = np.load(output, allow_pickle=True).item()
-        if isinstance(previous, dict):
-            payload.update(previous)
-    payload.pop(f"{action_mode}_state", None)
-    payload[action_mode] = global_stats
-    output.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output, payload)
     print(
         f"wrote {output} mode={action_mode} pool=action_state dim={raw_dim} "
         f"action_rows={action_rows} state_rows={state_rows} total_rows={action_rows + state_rows}"

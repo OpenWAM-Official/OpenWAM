@@ -34,6 +34,9 @@ to identity.
 from __future__ import annotations
 
 import logging
+import os
+import time
+from pathlib import Path
 from typing import Any, ClassVar, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -196,6 +199,7 @@ class LiberoDataset(LeRobotV3Reader):
             ("language_instruction", "task", "prompt"),
         )
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
+        self._resolved_stats_path: Optional[str] = None  # set by _load_stats when normalization is on
         super().__init__(
             dataset_dir=dataset_dir,
             unify_action=unify_on,
@@ -252,20 +256,69 @@ class LiberoDataset(LeRobotV3Reader):
     def _load_stats(self, info: dict):
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             return None
-        if not self._source_stats_path:
-            raise FileNotFoundError(
-                "LIBERO normalize_mode is enabled but normalization_stats_path is unset. "
-                "Run python -m openwam.dataloader.utils.stats_computation.libero_stats_computation "
-                "or set normalize_mode=null."
-            )
+        if self._source_stats_path:
+            # An EXPLICIT path is never auto-built: multi-bucket runs share one
+            # POOLED stats file that must come from the offline
+            # libero_stats_computation script, and silently rebuilding it from
+            # a single bucket would corrupt that pooling. Missing file raises
+            # FileNotFoundError in load_stats_file.
+            stats_path = Path(self._source_stats_path)
+        else:
+            stats_path = self._dataset_dir / "meta" / "libero_normalization_stats.npy"
+            if not stats_path.is_file():
+                self._build_default_stats(stats_path)
+        self._resolved_stats_path = str(stats_path)
         global_stats = load_stats_file(
-            self._source_stats_path,
+            stats_path,
             action_mode=self.action_mode,
             normalize_mode=str(self._normalize_mode),
             dim=self._raw_action_dim,
         )
         self._write_deploy_normalizer_stats(global_stats, STAT_KEYS)
         return global_stats
+
+    def _build_default_stats(self, path: Path) -> None:
+        """Build the default per-bucket stats file, coordinated across ranks.
+
+        Rank 0 owns the full parquet scan (minutes over the complete dataset)
+        and writes atomically; other ranks poll for the file. ``dist.barrier()``
+        is deliberately avoided — a minutes-long scan would trip NCCL's
+        collective timeout (the ebench precedent).
+        """
+        # Lazy import: the stats module imports this reader at module level.
+        from openwam.dataloader.utils.stats_computation.libero_stats_computation import (
+            build_and_save_libero_stats,
+        )
+
+        try:
+            import torch.distributed as dist
+
+            dist_ready = dist.is_available() and dist.is_initialized()
+        except Exception:
+            dist_ready = False
+        if dist_ready:
+            rank = dist.get_rank()
+        else:
+            # torchrun sets RANK before init_process_group; honor it so
+            # pre-init constructions still elect a single builder.
+            rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+
+        if rank == 0:
+            logger.info(
+                "LIBERO(%s): no normalization stats at %s — computing from the dataset "
+                "(rank 0; other ranks wait)",
+                self._dataset_id,
+                path,
+            )
+            build_and_save_libero_stats(self, path)
+            return
+
+        deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
+        poll_interval = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
+        while not path.is_file():
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for rank 0 to build LIBERO stats: {path}")
+            time.sleep(poll_interval)
 
     def _read_state8(self, win) -> np.ndarray:
         state = np.stack(win["observation.state"].values).astype(np.float32)
@@ -323,9 +376,16 @@ class MultiLiberoDataset(MultiLeRobotV3Reader):
 
     def __init__(self, buckets: List[LiberoDataset]):
         super().__init__(buckets)
-        source_paths = {bucket._source_stats_path for bucket in self._buckets}
+        # Compare the RESOLVED paths: with normalization on and no explicit
+        # config path, every bucket auto-builds its own default stats file —
+        # different transforms per bucket must be rejected, not silently mixed.
+        source_paths = {bucket._resolved_stats_path for bucket in self._buckets}
         if len(source_paths) != 1:
-            raise ValueError("MultiLiberoDataset requires one shared normalization_stats_path")
+            raise ValueError(
+                "MultiLiberoDataset requires one shared normalization_stats_path "
+                "(pooled stats from the libero_stats_computation script); "
+                f"buckets resolved {sorted(str(p) for p in source_paths)}"
+            )
 
     @property
     def normalization_stats_path(self) -> Optional[str]:

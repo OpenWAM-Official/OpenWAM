@@ -41,15 +41,17 @@ multiview: true
 split: train
 enable_action_supervision: true
 
-# null disables in-reader normalization. Set to min-max or z-score after
-# generating normalization_stats.npy with:
+# null disables in-reader normalization. With min-max or z-score the reader
+# loads <dataset_dir>/meta/libero_normalization_stats.npy, auto-computing and
+# saving it there on first use if missing (rank 0 scans; other ranks wait).
+# Set normalization_stats_path to override — required for multi-bucket roots,
+# whose one shared pooled-stats file comes from:
 #   python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
 #     --config configs/dataloader/libero.yaml \
 #     --output /path/to/libero_normalization_stats.npy
-normalize_mode: null
-normalization_stats_path: null
-# The stats script pools action targets and achieved proprio into one global
-# `eef` block; both directions use this same transform.
+normalize_mode: min-max
+# The stats pool action targets and achieved proprio into one global `eef`
+# block; both directions use this same transform.
 
 # Load-time, temporally consistent augmentation (train split only).
 color_jitter:
