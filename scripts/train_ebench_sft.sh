@@ -22,18 +22,9 @@ LR="${LR:-1e-5}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 
-if [[ -z "${EBENCH_STATS_PATH:-}" ]]; then
-    if [[ -n "${EBENCH_BUCKETS:-}" ]]; then
-        EBENCH_STATS_PATH="${OUTPUT_DIR}/ebench_stats.npy"
-    else
-        EBENCH_STATS_PATH="${EBENCH_DATASET_DIR}/meta/ebench_stats.npy"
-    fi
-fi
-
 overrides=(
     dataloader=ebench
     dataloader.dataset_dir="${EBENCH_DATASET_DIR}"
-    dataloader.normalization_stats_path="${EBENCH_STATS_PATH}"
     dataloader.action_mode=ebench
     dataloader.unify_action=true
     'dataloader.unify_action_map=["0-9","34-43","68-70"]'

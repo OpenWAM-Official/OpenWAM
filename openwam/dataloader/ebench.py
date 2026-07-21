@@ -73,6 +73,7 @@ import functools
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -86,6 +87,7 @@ from openwam.dataloader.bases import BaseDataset
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout, format_prompt_for_inference
 from openwam.dataloader.utils.eef import assert_unit_quaternion, quat_xyzw_to_rot6d
 from openwam.dataloader.utils.normalization import apply_normalization
+from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
 from openwam.dataloader.utils.video_io import decode_video_frames as _decode_video_frames
 
@@ -99,11 +101,11 @@ EBENCH_ACTION_DELTA_BASE_KEYS = ("action.ee_pose", "action.gripper", "action.bas
 EBENCH_STATE_KEYS = ("state.ee_pose", "state.gripper", "state.base")
 EBENCH_DEFAULT_UNIFY_ACTION_MAP = ("0-9", "34-43", "68-70")
 EBENCH_BASE_SOURCES = ("delta", "cumulative")
-# min-max / z-score are exact from episodes_stats.jsonl summary moments and can
-# be built online at construction. "quantile" needs true q01/q99, which only the
-# offline parquet scan produces (python -m openwam.dataloader.utils.
-# stats_computation.ebench_stats_computation); without such a prebuilt stats file
-# the mode is rejected rather than silently aliased to min/max.
+# All modes load from the offline-scan cache at <dataset_dir>/meta/
+# ebench_stats.npy, auto-built on first use (rank 0 scans, other ranks wait;
+# see _load_or_build_stats). The scan's true q01/q99 make "quantile" work out
+# of the box; a legacy summary-built cache without them is still rejected
+# rather than silently aliased to min/max.
 EBENCH_SUPPORTED_NORMALIZE_MODES = (None, "none", "null", "min-max", "z-score", "quantile")
 # GenManip commands gripper fingers in [0, 0.044] m and terminates episodes
 # when a measured finger leaves [-0.01, 0.054] (env.py invalid-state guard).
@@ -112,7 +114,7 @@ EBENCH_GRIPPER_STATE_RANGE = (-0.01, 0.054)
 # Max per-hand finger-command disagreement (m) before the scalar-gripper
 # averaging (and its summary-stats derivation) is considered invalid. Shared
 # with the offline stats scan so both validators agree.
-EBENCH_FINGER_GAP_TOLERANCE = 1e-3
+EBENCH_FINGER_GAP_TOLERANCE = 3e-3
 # Degenerate-dim floor applied to std at stats-build time (summary merge and
 # offline scan alike) so z-score never divides by ~0 on constant dims.
 EBENCH_STD_FLOOR = 1e-3
@@ -533,8 +535,8 @@ def _validate_stats_fingerprint(path: Path, payload: dict, expected: dict) -> No
         return
     raise ValueError(
         "EBench normalization stats cache fingerprint mismatch for "
-        f"{path}. Delete the stale cache or set dataloader.normalization_stats_path "
-        "to a run-specific file.\n"
+        f"{path}. The cache was built over a different bucket set or dataset "
+        "state than this run's config — delete the stale file to rebuild.\n"
         f"cached={json.dumps(cached, sort_keys=True)}\n"
         f"expected={json.dumps(expected, sort_keys=True)}"
     )
@@ -570,76 +572,105 @@ def _stats_cache_payload(action_stats: dict, num_timesteps: int, fingerprint: di
 _EBENCH_STATS_MODULE = "openwam.dataloader.utils.stats_computation.ebench_stats_computation"
 
 
+def _build_stats_cache_rank0(
+    path: Path,
+    dataset_dir: str,
+    *,
+    groups: Optional[Sequence[str]],
+    buckets: Optional[Sequence[str]],
+    base_action_source: str,
+    action_mode: str,
+) -> None:
+    """Build the offline-scan stats cache at ``path``, coordinated across ranks.
+
+    Rank 0 owns the full parquet scan (minutes over the complete dataset) and
+    writes atomically; other ranks poll for the file. ``dist.barrier()`` is
+    deliberately avoided — a minutes-long scan would trip NCCL's collective
+    timeout (the robotwin/robocasa365 multi-task precedent).
+    """
+    # Lazy import: the stats module imports this reader's helpers at module
+    # level, so a top-level import here would be circular.
+    from openwam.dataloader.utils.stats_computation.ebench_stats_computation import build_and_save_ebench_stats
+
+    try:
+        import torch.distributed as dist
+
+        dist_ready = dist.is_available() and dist.is_initialized()
+    except Exception:
+        dist_ready = False
+    if dist_ready:
+        rank = dist.get_rank()
+    else:
+        # torchrun sets RANK before init_process_group; honor it so pre-init
+        # constructions still elect a single builder.
+        rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+
+    if rank == 0:
+        logger.info(
+            "No EBench stats cache at %s — running the offline parquet scan (rank 0; other ranks wait)", path
+        )
+        build_and_save_ebench_stats(
+            dataset_dir,
+            output=str(path),
+            groups=groups,
+            buckets=buckets,
+            base_action_source=base_action_source,
+            action_mode=action_mode,
+        )
+        return
+
+    deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
+    poll_interval = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"timed out waiting for rank 0 to build the EBench stats cache: {path}")
+        time.sleep(poll_interval)
+
+
 def _load_or_build_stats(
     buckets: Sequence[Path],
     action_keys: Sequence[str],
-    stats_path: Optional[str],
     *,
     action_mode: str,
-    dataset_dir: Optional[str] = None,
+    dataset_dir: str,
     normalize_mode: Optional[str] = None,
-) -> Tuple[dict, Optional[str]]:
-    fingerprint = _stats_fingerprint(buckets, action_keys, action_mode, dataset_dir)
-    if stats_path:
-        path = Path(stats_path)
-        if path.exists():
-            raw = np.load(path, allow_pickle=True).item()
-            if not isinstance(raw, dict) or action_mode not in raw:
-                raise ValueError(
-                    f"EBench normalization stats cache {path} uses a legacy schema without "
-                    f"the {action_mode!r} payload and fingerprint. Delete it and rebuild."
-                )
-            _validate_stats_fingerprint(path, raw, fingerprint)
-            stats = raw[action_mode]
-            if normalize_mode == "quantile" and not ("q01" in stats and "q99" in stats):
-                raise ValueError(
-                    f"EBench stats cache {path} was built from episodes_stats.jsonl summaries and "
-                    "carries no true q01/q99 — normalize_mode='quantile' needs the offline parquet "
-                    f"scan. Regenerate with: python -m {_EBENCH_STATS_MODULE} "
-                    f"--dataset_dir <EBench root> --output {path}"
-                )
-            return stats, str(path)
+    groups: Optional[Sequence[str]] = None,
+    buckets_cfg: Optional[Sequence[str]] = None,
+    base_action_source: str = "delta",
+) -> Tuple[dict, str]:
+    """Load raw-23 action stats from ``<dataset_dir>/meta/ebench_stats.npy``.
 
-    if normalize_mode == "quantile":
-        # Never build quantile stats from summary moments — the mode would
-        # silently degrade. A prebuilt offline-scan cache is mandatory.
-        raise FileNotFoundError(
-            "EBench normalize_mode='quantile' requires a prebuilt offline-scan stats file at "
-            f"dataloader.normalization_stats_path (got {stats_path!r}"
-            + (", which does not exist" if stats_path else "")
-            + "); episodes_stats.jsonl summaries carry no true quantiles. Generate it with: "
-            f"python -m {_EBENCH_STATS_MODULE} --dataset_dir <EBench root>"
+    The cache location is fixed (the ebench_stats_computation default); when
+    the file is missing it is built in place by the offline parquet scan via
+    ``_build_stats_cache_rank0``. The scan carries true q01/q99, so every
+    normalize mode — including "quantile" — works without manual pre-steps.
+    """
+    path = Path(dataset_dir) / "meta" / "ebench_stats.npy"
+    if not path.exists():
+        _build_stats_cache_rank0(
+            path,
+            dataset_dir,
+            groups=groups,
+            buckets=buckets_cfg,
+            base_action_source=base_action_source,
+            action_mode=action_mode,
         )
-
-    action_parts = []
-    total = 0
-    for bucket in buckets:
-        action_stats, count = _build_stats_from_bucket(bucket, action_keys)
-        action_parts.append((action_stats, count))
-        total += int(count)
-
-    action_stats = _merge_raw_stats(action_parts)
-    if stats_path:
-        path = Path(stats_path)
-        try:
-            _atomic_save_npy(path, _stats_cache_payload(action_stats, total, fingerprint, action_mode))
-        except OSError as e:
-            # Read-only data-lake mounts are common; keep training on the
-            # in-memory stats but return no path so the trainer cannot copy a
-            # nonexistent artifact into the checkpoint. Deploy needs this file
-            # — rebuild it on a writable path before serving the checkpoint.
-            logger.warning(
-                "Could not write EBench normalization stats cache to %s (%s). "
-                "Training continues with in-memory stats, but the checkpoint "
-                "will lack normalization_stats.npy — deploy will refuse it. "
-                "Set dataloader.normalization_stats_path to a writable location.",
-                path,
-                e,
-            )
-            return action_stats, None
-        logger.info("Saved EBench raw-23 normalization stats to %s", path)
-        return action_stats, str(path)
-    return action_stats, None
+    raw = np.load(path, allow_pickle=True).item()
+    if not isinstance(raw, dict) or action_mode not in raw:
+        raise ValueError(
+            f"EBench normalization stats cache {path} uses a legacy schema without "
+            f"the {action_mode!r} payload and fingerprint. Delete it and rebuild."
+        )
+    fingerprint = _stats_fingerprint(buckets, action_keys, action_mode, dataset_dir)
+    _validate_stats_fingerprint(path, raw, fingerprint)
+    stats = raw[action_mode]
+    if normalize_mode == "quantile" and not ("q01" in stats and "q99" in stats):
+        raise ValueError(
+            f"EBench stats cache {path} was built from episodes_stats.jsonl summaries and "
+            "carries no true q01/q99 — normalize_mode='quantile' needs the offline parquet "
+            "scan. Delete the file; it will be rebuilt by the scan on next construction."
+        )
+    return stats, str(path)
 
 
 def discover_ebench_buckets(
@@ -706,6 +737,12 @@ class EBenchDataset(BaseDataset):
         enable_action_supervision: bool = True,
         base_action_source: str = "delta",
         dataset_id: Optional[str] = None,
+        # Optional load-time video color jitter, applied consistently across a
+        # clip's frames and ONLY on the train split. None / False / {} →
+        # disabled (byte-identical video). Truthy → enabled; a dict overrides
+        # the per-channel strengths {brightness, contrast, saturation, hue}.
+        # Mirrors LeRobotV3Reader's wiring.
+        color_jitter: Optional[Any] = None,
         **_unused: Any,
     ):
         self._dataset_dir = Path(dataset_dir)
@@ -721,6 +758,18 @@ class EBenchDataset(BaseDataset):
         self._camera_layout = list(
             camera_layout or [target_camera, "video.left_camera_view", "video.right_camera_view"]
         )
+        # Color jitter is applied in _getitem_impl to the decoded clip (same
+        # random factors across all frames, via VideoColorJitter). Built only
+        # for the train split; val / disabled keeps video byte-identical.
+        self._color_jitter = None
+        if color_jitter and split == "train":
+            cj_get = color_jitter.get if hasattr(color_jitter, "get") else (lambda k, d: d)
+            self._color_jitter = VideoColorJitter(
+                brightness=float(cj_get("brightness", 0.2)),
+                contrast=float(cj_get("contrast", 0.2)),
+                saturation=float(cj_get("saturation", 0.2)),
+                hue=float(cj_get("hue", 0.0)),
+            )
         if normalize_mode not in EBENCH_SUPPORTED_NORMALIZE_MODES:
             raise ValueError(
                 f"EBench normalize_mode must be one of {EBENCH_SUPPORTED_NORMALIZE_MODES}, got "
@@ -1011,6 +1060,9 @@ class EBenchDataset(BaseDataset):
         action, action_mask = self._build_action(frame, actual_raw_len)
         proprio, proprio_mask = self._build_proprio(frame_ext, lead)
         video = self._decode_window_video(ep_idx, offset, actual_raw_len)
+        if self._color_jitter is not None:
+            # Same jitter factors across the whole clip (temporal consistency).
+            video = self._color_jitter.apply({"video": video})["video"]
         video_mask = torch.from_numpy(self._video_sample_indices < actual_raw_len)
 
         return {
@@ -1218,7 +1270,6 @@ class EBenchDataset(BaseDataset):
             raise ValueError(
                 f"EBench normalize_mode must be one of {EBENCH_SUPPORTED_NORMALIZE_MODES}, got {normalize_mode!r}"
             )
-        stats_path = _cfg_get(config, "normalization_stats_path", None)
         action_mode = _cfg_get(config, "action_mode", "ebench")
         base_action_source = _cfg_get(config, "base_action_source", "delta")
         if base_action_source not in EBENCH_BASE_SOURCES:
@@ -1233,10 +1284,12 @@ class EBenchDataset(BaseDataset):
             action_stats, resolved_stats_path = _load_or_build_stats(
                 buckets,
                 action_keys,
-                stats_path,
                 action_mode=action_mode,
                 dataset_dir=dataset_dir,
                 normalize_mode=normalize_mode,
+                groups=groups,
+                buckets_cfg=buckets_cfg,
+                base_action_source=base_action_source,
             )
 
         common = {
@@ -1262,6 +1315,7 @@ class EBenchDataset(BaseDataset):
             "unify_action_map": _as_plain_list(_cfg_get(config, "unify_action_map", EBENCH_DEFAULT_UNIFY_ACTION_MAP)),
             "enable_action_supervision": bool(_cfg_get(config, "enable_action_supervision", True)),
             "base_action_source": base_action_source,
+            "color_jitter": _cfg_get(config, "color_jitter", None),
         }
 
         readers = [

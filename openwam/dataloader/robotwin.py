@@ -608,14 +608,44 @@ class RoboTwinDataset(BaseDataset):
                         compute_normalization_stats,
                     )
 
-                    print(
-                        f"  [normalizer] No pre-computed stats at default location: {stats_path}\n"
-                        f"  [normalizer]   → computing now from {data_root} "
-                        f"and will save to: {stats_path}"
-                    )
-                    stats = compute_normalization_stats(data_root)
-                    atomic_save_stats_npy(stats_path, stats)
-                    print(f"  [normalizer] Saved newly-computed single-task stats → {stats_path}")
+                    # Rank-0 owns the computation; other ranks poll for the
+                    # atomically-renamed file (the multi-task path's poll-based
+                    # sync — dist.barrier() would trip NCCL's collective
+                    # timeout on a long compute).
+                    try:
+                        import torch.distributed as dist
+
+                        dist_ready = dist.is_available() and dist.is_initialized()
+                    except Exception:
+                        dist_ready = False
+                    if dist_ready:
+                        rank = dist.get_rank()
+                    else:
+                        # torchrun sets RANK before init_process_group; honor
+                        # it so pre-init constructions still elect one builder.
+                        rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+
+                    if rank == 0:
+                        print(
+                            f"  [normalizer] No pre-computed stats at default location: {stats_path}\n"
+                            f"  [normalizer]   → computing now from {data_root} "
+                            f"and will save to: {stats_path}"
+                        )
+                        stats = compute_normalization_stats(data_root)
+                        atomic_save_stats_npy(stats_path, stats)
+                        print(f"  [normalizer] Saved newly-computed single-task stats → {stats_path}")
+                    else:
+                        print(
+                            f"  [normalizer] Rank {rank} waiting for rank 0 to finish single-task stats at {stats_path}"
+                        )
+                        deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
+                        poll_interval_s = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
+                        while not os.path.exists(stats_path):
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError(
+                                    f"Timed out while waiting for rank 0 to produce single-task stats: {stats_path}"
+                                )
+                            time.sleep(poll_interval_s)
 
             if stats_path is not None:
                 mode_stats = load_mode_stats(stats_path, self.action_mode)

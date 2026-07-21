@@ -8,12 +8,13 @@ Contracts pinned here:
     hatch), base dims keep real stats, and the reader's EBENCH_STD_FLOOR is
     applied (not Accumulator.finalize's 1.0 substitution — GenManip's
     constant commanded base deltas hit exactly that difference);
-  * parity with the online episodes_stats.jsonl summary merge — the offline
-    file is a drop-in replacement for min-max/z-score;
+  * parity with the episodes_stats.jsonl summary merge (the offline module's
+    own guardrail baseline) on every stat min-max/z-score consume;
   * the written payload is accepted verbatim by the reader's
-    _load_or_build_stats (fingerprint cache-hit, no rebuild) and unlocks
+    _load_or_build_stats (fingerprint cache-hit, no re-scan) and unlocks
     normalize_mode="quantile" end-to-end, including deploy round trip;
-  * quantile without true quantiles stays rejected (summary-built cache).
+  * quantile off a legacy summary-built cache (no true quantiles) stays
+    rejected.
 
 Follows the family test style: compute functions called directly (never
 main()/subprocess), fixture bytes replayed for exact expectations.
@@ -28,8 +29,10 @@ import openwam.dataloader.ebench as ebench_mod
 from openwam.dataloader.ebench import (
     EBENCH_STD_FLOOR,
     EBenchDataset,
+    _build_stats_from_bucket,
     _ee_pose_gripper_base_to_raw23,
     _load_or_build_stats,
+    _merge_raw_stats,
 )
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
 from openwam.dataloader.utils.stats_computation.ebench_stats_computation import (
@@ -114,13 +117,13 @@ def test_std_floor_matches_reader_not_accumulator(bucket):
 
 
 def test_parity_with_online_summary_merge(bucket):
-    """Drop-in contract: offline scan == online episodes_stats.jsonl merge on
+    """Drop-in contract: offline scan == episodes_stats.jsonl summary merge on
     every stat min-max/z-score consume, for both base sources."""
     for keys, source in ((DELTA_KEYS, "delta"), (CUM_KEYS, "cumulative")):
         offline, _, _ = compute_ebench_stats([bucket], keys)
-        online, _ = _load_or_build_stats([bucket], keys, None, action_mode="ebench")
+        summary = _merge_raw_stats([_build_stats_from_bucket(bucket, keys)])
         for key in ("mean", "std", "min", "max"):
-            np.testing.assert_allclose(offline[key], online[key], atol=1e-4, err_msg=f"{source}:{key}")
+            np.testing.assert_allclose(offline[key], summary[key], atol=1e-4, err_msg=f"{source}:{key}")
 
 
 def test_base_source_selects_column(bucket):
@@ -219,32 +222,31 @@ def test_excluded_healthy_episode_still_accumulated(tmp_path):
     (b / "meta" / "excluded_episodes.json").write_text("[1]")  # bare-list schema
     stats, num_timesteps, n_files = compute_ebench_stats([b], DELTA_KEYS)
     assert num_timesteps == N_EPS * EP_LEN and n_files == N_EPS
-    online, _ = _load_or_build_stats([b], DELTA_KEYS, None, action_mode="ebench")
+    summary = _merge_raw_stats([_build_stats_from_bucket(b, DELTA_KEYS)])
     for key in ("mean", "std", "min", "max"):
-        np.testing.assert_allclose(stats[key], online[key], atol=1e-4, err_msg=key)
+        np.testing.assert_allclose(stats[key], summary[key], atol=1e-4, err_msg=key)
 
 
-def test_payload_accepted_by_reader_and_unlocks_quantile(bucket, tmp_path, monkeypatch):
+def test_payload_accepted_by_reader_and_unlocks_quantile(bucket, monkeypatch):
     root = bucket.parents[1]
-    out = tmp_path / "ebench_stats.npy"
-    out_path, stats = build_and_save_ebench_stats(
-        str(root), output=str(out), buckets=["simple_pnp/task1"], base_action_source="delta"
-    )
-    assert out_path == out
-    payload = np.load(out, allow_pickle=True).item()
+    out_path, stats = build_and_save_ebench_stats(str(root), buckets=["simple_pnp/task1"], base_action_source="delta")
+    assert out_path == root / "meta" / "ebench_stats.npy"  # the reader's fixed cache location
+    payload = np.load(out_path, allow_pickle=True).item()
     assert payload["pool"] == "action" and payload["source"] == "parquet_scan"
     assert "q01" in payload["ebench"] and "q99" in payload["ebench"]
 
     # The reader must cache-hit the offline file (fingerprint match), never
-    # falling back to the summary build.
-    def no_rebuild(*a, **k):
-        raise AssertionError("reader rebuilt stats despite a valid offline cache")
+    # re-running the scan.
+    import openwam.dataloader.utils.stats_computation.ebench_stats_computation as stats_mod
 
-    monkeypatch.setattr(ebench_mod, "_build_stats_from_bucket", no_rebuild)
+    def no_rebuild(*a, **k):
+        raise AssertionError("reader re-ran the offline scan despite a valid cache")
+
+    monkeypatch.setattr(stats_mod, "build_and_save_ebench_stats", no_rebuild)
     loaded, path = _load_or_build_stats(
-        [bucket], DELTA_KEYS, str(out), action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile"
+        [bucket], DELTA_KEYS, action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile"
     )
-    assert path == str(out)
+    assert path == str(out_path)
     np.testing.assert_allclose(loaded["q99"], stats["q99"], atol=1e-6)
 
     ds = EBenchDataset(str(bucket), action_stats=loaded, normalize_mode="quantile", unify_action=False, num_frames=9)
@@ -252,24 +254,27 @@ def test_payload_accepted_by_reader_and_unlocks_quantile(bucket, tmp_path, monke
     assert np.abs(sample["action"].numpy()).max() <= 1.0 + 1e-6
 
 
-def test_summary_cache_stays_rejected_for_quantile(bucket, tmp_path):
-    """An existing summary-built cache (no q01/q99) must not serve quantile."""
-    cache = tmp_path / "stats.npy"
-    _load_or_build_stats([bucket], DELTA_KEYS, str(cache), action_mode="ebench")  # writes summary cache
-    with pytest.raises(ValueError, match="ebench_stats_computation"):
-        _load_or_build_stats([bucket], DELTA_KEYS, str(cache), action_mode="ebench", normalize_mode="quantile")
+def test_summary_cache_stays_rejected_for_quantile(bucket):
+    """A legacy summary-built cache (no q01/q99) at the fixed location must
+    not serve quantile."""
+    root = bucket.parents[1]
+    summary = _merge_raw_stats([_build_stats_from_bucket(bucket, DELTA_KEYS)])
+    fingerprint = ebench_mod._stats_fingerprint([bucket], DELTA_KEYS, "ebench", str(root))
+    cache = root / "meta" / "ebench_stats.npy"
+    ebench_mod._atomic_save_npy(cache, ebench_mod._stats_cache_payload(summary, N_EPS * EP_LEN, fingerprint, "ebench"))
+    with pytest.raises(ValueError, match="q01"):
+        _load_or_build_stats([bucket], DELTA_KEYS, action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile")
 
 
-def test_quantile_train_deploy_round_trip(bucket, tmp_path):
+def test_quantile_train_deploy_round_trip(bucket):
     """Reader quantile normalize -> deploy Normalizer(q99) unnormalize ==
-    identity inside the [q01, q99] band (mirrors the min-max round trip)."""
+    identity inside the [q01, q99] band (mirrors the min-max round trip).
+    No manual pre-step: the loader auto-builds the offline cache itself."""
     from openwam.dataloader.transforms.normalize import YAML_TO_NORM_MODE, Normalizer
 
     root = bucket.parents[1]
-    out = tmp_path / "ebench_stats.npy"
-    build_and_save_ebench_stats(str(root), output=str(out), buckets=["simple_pnp/task1"])
     stats, _ = _load_or_build_stats(
-        [bucket], DELTA_KEYS, str(out), action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile"
+        [bucket], DELTA_KEYS, action_mode="ebench", dataset_dir=str(root), normalize_mode="quantile"
     )
     ds = EBenchDataset(str(bucket), action_stats=stats, normalize_mode="quantile", unify_action=False, num_frames=9)
     rng = np.random.default_rng(7)

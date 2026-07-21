@@ -2,7 +2,7 @@
 
 Covers the audit-driven fixes: delta/cumulative base rendering (yaw units,
 wrap, episode-start zeros), min-max default + normalize-mode whitelist,
-stats index arithmetic and fingerprint (source digest, RO tolerance),
+stats index arithmetic and fingerprint (source digest, RO fail-fast),
 __getitem__ retry + wrist black-slot tolerance, prompt/bucket fail-fast,
 excluded episodes, init-time data-value validation, and the ckpt loader's
 explicit-weights existence check. Video decoding is mocked (empty mp4 files
@@ -168,17 +168,23 @@ def _clear_parquet_cache():
 def _make_ds(bucket, **kw):
     kw.setdefault("num_frames", 9)
     kw.setdefault("video_stride", 4)
-    stats, path = _load_or_build_stats(
-        [bucket],
-        (
-            EBENCH_ACTION_KEYS
-            if kw.get("base_action_source", "delta") == "cumulative"
-            else ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS
-        ),
-        kw.pop("stats_path", None),
-        action_mode="ebench",
-        dataset_dir=str(bucket.parents[1]),
-    )
+    # Mirror from_config: stats only exist when normalization is on. The
+    # auto-build is a full parquet scan, so corrupt-data tests that target
+    # __getitem__ must construct with normalize_mode=None to get past it.
+    stats = None
+    if kw.get("normalize_mode", "min-max") not in (None, "none", "null"):
+        base_action_source = kw.get("base_action_source", "delta")
+        stats, _ = _load_or_build_stats(
+            [bucket],
+            (
+                EBENCH_ACTION_KEYS
+                if base_action_source == "cumulative"
+                else ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS
+            ),
+            action_mode="ebench",
+            dataset_dir=str(bucket.parents[1]),
+            base_action_source=base_action_source,
+        )
     return EBenchDataset(str(bucket), action_stats=stats, **kw)
 
 
@@ -236,43 +242,35 @@ def test_delta_proprio_matches_action_space_stats(bucket):
 # ---------------------------------------------------------------- normalization
 
 
-def test_default_mode_is_min_max_and_quantile_needs_offline_stats(bucket):
-    """quantile is supported ONLY off an offline parquet-scan cache: summary
-    stats (no true q01/q99) must be rejected with the run-the-module hint,
-    never silently aliased to min-max."""
+def test_default_mode_is_min_max_and_quantile_works_off_auto_build(bucket):
+    """The auto-built offline-scan cache carries true q01/q99, so quantile
+    works end-to-end with no manual pre-step; direct construction without
+    stats and misspelled modes stay rejected at init."""
     import inspect
 
     assert inspect.signature(EBenchDataset.__init__).parameters["normalize_mode"].default == "min-max"
-    # _make_ds hands summary-derived stats (no q01/q99) to __init__.
-    with pytest.raises(ValueError, match="ebench_stats_computation"):
-        _make_ds(bucket, normalize_mode="quantile")
-    # Direct construction without stats must also be rejected AT INIT (the
+    # Direct construction without stats must be rejected AT INIT (the
     # pre-change whitelist guarantee) — not deferred to __getitem__ retries.
     with pytest.raises(ValueError, match="ebench_stats_computation"):
         EBenchDataset(str(bucket), normalize_mode="quantile", num_frames=9)
-    # from_config path: no prebuilt stats file -> hard error, no summary build.
-    with pytest.raises(FileNotFoundError, match="ebench_stats_computation"):
-        _load_or_build_stats(
-            [bucket],
-            ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
-            None,
-            action_mode="ebench",
-            normalize_mode="quantile",
-        )
+    ds = _make_ds(bucket, normalize_mode="quantile", unify_action=False)
+    assert np.abs(ds[0]["action"].numpy()).max() <= 1.0 + 1e-6
     with pytest.raises(ValueError, match="normalize_mode"):
         _make_ds(bucket, normalize_mode="zscore")  # misspelling must not pass through
 
 
-def test_stats_payload_has_no_fake_quantiles(bucket, tmp_path):
+def test_auto_built_cache_is_offline_scan_with_true_quantiles(bucket):
     stats, path = _load_or_build_stats(
         [bucket],
         ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
-        str(tmp_path / "stats.npy"),
         action_mode="ebench",
+        dataset_dir=str(bucket.parents[1]),
     )
-    assert "q01" not in stats and "q99" not in stats
+    assert path == str(bucket.parents[1] / "meta" / "ebench_stats.npy")
+    assert "q01" in stats and "q99" in stats
     payload = np.load(path, allow_pickle=True).item()
-    assert "q01" not in payload["ebench"]
+    assert payload["source"] == "parquet_scan"
+    assert "q01" in payload["ebench"]
 
 
 def test_raw_stats_to_23_index_arithmetic():
@@ -307,31 +305,39 @@ def test_raw_stats_to_23_index_arithmetic():
     assert "q01" not in out
 
 
-def test_fingerprint_invalidates_on_source_change(bucket, tmp_path):
-    stats_path = str(tmp_path / "stats.npy")
-    _load_or_build_stats([bucket], ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS, stats_path, action_mode="ebench")
-    # cache hit with unchanged source
-    _load_or_build_stats([bucket], ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS, stats_path, action_mode="ebench")
+def test_fingerprint_invalidates_on_source_change(bucket):
+    root = str(bucket.parents[1])
+    keys = ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS
+    _load_or_build_stats([bucket], keys, action_mode="ebench", dataset_dir=root)
+    # cache hit with unchanged source — the scan must not re-run
+    cache = bucket.parents[1] / "meta" / "ebench_stats.npy"
+    mtime = cache.stat().st_mtime_ns
+    _load_or_build_stats([bucket], keys, action_mode="ebench", dataset_dir=root)
+    assert cache.stat().st_mtime_ns == mtime
     # in-place dataset update -> digest change -> hard error
     stats_file = bucket / "meta" / "episodes_stats.jsonl"
     stats_file.write_text(stats_file.read_text() + "\n")
     with pytest.raises(ValueError, match="fingerprint"):
-        _load_or_build_stats([bucket], ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS, stats_path, action_mode="ebench")
+        _load_or_build_stats([bucket], keys, action_mode="ebench", dataset_dir=root)
 
 
-def test_stats_write_failure_degrades_to_memory_only(bucket, tmp_path, monkeypatch):
-    # chmod-based RO simulation is unreliable under root; force the OSError.
+def test_stats_write_failure_fails_fast(bucket, monkeypatch):
+    """The old write-degrade path is gone: the cache location is fixed under
+    the dataset dir, so an unwritable mount must fail construction (deploy
+    needs the file, and other ranks would poll it forever)."""
+    import openwam.dataloader.utils.stats_computation.ebench_stats_computation as stats_mod
+
     def refuse(path, payload):
         raise OSError(30, "Read-only file system")
 
-    monkeypatch.setattr(ebench_mod, "_atomic_save_npy", refuse)
-    stats, path = _load_or_build_stats(
-        [bucket],
-        ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
-        str(tmp_path / "ro" / "stats.npy"),
-        action_mode="ebench",
-    )
-    assert stats is not None and path is None
+    monkeypatch.setattr(stats_mod, "_atomic_save_npy", refuse)
+    with pytest.raises(OSError, match="Read-only"):
+        _load_or_build_stats(
+            [bucket],
+            ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
+            action_mode="ebench",
+            dataset_dir=str(bucket.parents[1]),
+        )
 
 
 def test_non_finite_values_raise_not_zeroed(bucket):
@@ -396,6 +402,31 @@ def test_video_indices_pure_arange(bucket):
     np.testing.assert_array_equal(ds._video_sample_indices, [0, 4, 8])
     ds2 = _make_ds(bucket, normalize_mode=None, unify_action=False, num_frames=9, video_stride=5)
     np.testing.assert_array_equal(ds2._video_sample_indices, [0, 5])  # no last-frame append
+
+
+def test_color_jitter_train_only(bucket):
+    """color_jitter mirrors LeRobotV3Reader: train-split only, one factor set
+    per clip. The mocked decoder returns identical constant-color frames, so
+    (a) any pixel change proves the jitter ran, and (b) jittered frames staying
+    identical to each other proves temporal consistency."""
+    import random
+
+    cj = {"brightness": 0.5, "contrast": 0.3, "saturation": 0.3, "hue": 0.0}
+    base = np.asarray(_make_ds(bucket, normalize_mode=None, unify_action=False)[0]["video"][0])
+    random.seed(123)
+    jit = _make_ds(bucket, normalize_mode=None, unify_action=False, color_jitter=cj)[0]["video"]
+    assert not np.array_equal(np.asarray(jit[0]), base), "train-split jitter must alter pixels"
+    np.testing.assert_array_equal(np.asarray(jit[0]), np.asarray(jit[-1]))
+    # val split and the disabled default keep video byte-identical
+    # (the synthetic bucket only declares a train split; add val for the check)
+    info_p = bucket / "meta" / "info.json"
+    info = json.loads(info_p.read_text())
+    info["splits"]["val"] = f"0:{N_EPS}"
+    info_p.write_text(json.dumps(info))
+    val = _make_ds(bucket, normalize_mode=None, unify_action=False, color_jitter=cj, split="val")
+    assert val._color_jitter is None
+    np.testing.assert_array_equal(np.asarray(val[0]["video"][0]), base)
+    assert _make_ds(bucket, normalize_mode=None, unify_action=False)._color_jitter is None
 
 
 # ---------------------------------------------------------------- fail-fast paths
@@ -542,26 +573,17 @@ def test_stats_cache_survives_dataset_move(bucket, tmp_path):
     import shutil
 
     root_a = bucket.parents[1]
-    stats_path = tmp_path / "stats.npy"
-    _load_or_build_stats(
-        [bucket],
-        ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
-        str(stats_path),
-        action_mode="ebench",
-        dataset_dir=str(root_a),
-    )
+    keys = ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS
+    _load_or_build_stats([bucket], keys, action_mode="ebench", dataset_dir=str(root_a))
     root_b = tmp_path / "moved_root"
     shutil.copytree(root_a, root_b)
     moved_bucket = root_b / "simple_pnp" / "task1"
-    # same relative path + same bytes at a different mount -> cache hit, no error
-    stats, path = _load_or_build_stats(
-        [moved_bucket],
-        ebench_mod.EBENCH_ACTION_DELTA_BASE_KEYS,
-        str(stats_path),
-        action_mode="ebench",
-        dataset_dir=str(root_b),
-    )
-    assert path == str(stats_path)
+    cache_b = root_b / "meta" / "ebench_stats.npy"
+    mtime = cache_b.stat().st_mtime_ns
+    # same relative path + same bytes at a different mount -> cache hit, no rebuild
+    stats, path = _load_or_build_stats([moved_bucket], keys, action_mode="ebench", dataset_dir=str(root_b))
+    assert path == str(cache_b)
+    assert cache_b.stat().st_mtime_ns == mtime
 
 
 def test_min_max_train_deploy_round_trip(bucket):
