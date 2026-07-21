@@ -5,17 +5,18 @@ type: libero
 # A compatible HuggingFaceVLA/libero v3 conversion is also accepted.
 dataset_dir: /path/to/libero
 
-# Native LIBERO command: 7-D OSC action consumed directly by the eval env.
-action_mode: libero
+# Only EEF is supported. Raw EEF10 (world frame, full pose):
+# [xyz3, rot6d6, gripper1]. Proprio is the achieved observation.state rendered
+# to EEF10; the action target is the NEXT frame's achieved pose plus the
+# recorded gripper command (the eval bridge inverts back to the 7-D OSC delta).
+action_mode: eef
 
-# OpenWAM's current deploy normalizer shares action/proprio stats, while LIBERO
-# state is absolute 8-D EEF/gripper state and action is a 7-D delta command.
-# The reader therefore masks proprio out. Train with CLI overrides:
-#   model.architecture.action_dim=7
-#   model.architecture.use_proprioception=false
-unify_action: false
+# Normalize raw EEF10 first, then scatter into the unified 80-D left-arm slots.
+# All other unified slots stay masked.
+unify_action: true
+unify_action_map: ["0-9"]
 
-# nvidia/LIBERO_LeRobot_v3 uses wrist_image; HuggingFaceVLA/libero uses image2.
+# nvidia/LIBERO_LeRobot_v3 uses image/wrist_image; HuggingFaceVLA/libero uses
 head_camera_priority:
   - observation.images.image
   - observation.images.agentview_image
@@ -40,13 +41,17 @@ multiview: true
 split: train
 enable_action_supervision: true
 
-# Generate with:
+# null disables in-reader normalization. Set to min-max or z-score after
+# generating normalization_stats.npy with:
 #   python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
 #     --config configs/dataloader/libero.yaml \
 #     --output /path/to/libero_normalization_stats.npy
 normalize_mode: null
 normalization_stats_path: null
+# The stats script pools action targets and achieved proprio into one global
+# `eef` block; both directions use this same transform.
 
+# Load-time, temporally consistent augmentation (train split only).
 color_jitter:
   brightness: 0.2
   contrast: 0.2

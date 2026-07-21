@@ -160,10 +160,17 @@ def env_smoke(suite: str, task_id: int, camera_size: int, steps: int) -> None:
 
 
 def _check_egl_runtime() -> None:
+    # Non-EGL MuJoCo backends (osmesa on headless CPU nodes, glfw with a live
+    # display) do not touch the NVIDIA EGL stack, so only gate the EGL path.
+    if os.environ.get("MUJOCO_GL", "egl").lower() != "egl":
+        return
     egl_candidates = [Path(path) for path in glob("/usr/lib*/**/libEGL_nvidia.so*", recursive=True)]
     if egl_candidates and not any(path.is_file() and path.stat().st_size > 0 for path in egl_candidates):
         joined = ", ".join(str(path) for path in egl_candidates)
-        raise SystemExit(f"EGL runtime is not usable: NVIDIA EGL libraries are empty placeholders ({joined})")
+        raise SystemExit(
+            f"EGL runtime is not usable: NVIDIA EGL libraries are empty placeholders ({joined}). "
+            "Install a working NVIDIA EGL stack or set MUJOCO_GL=osmesa (requires libOSMesa)."
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

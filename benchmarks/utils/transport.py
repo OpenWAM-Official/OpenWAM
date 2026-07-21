@@ -6,6 +6,7 @@ fast. Payload construction and the ``ServerError`` model live in
 ``benchmarks.utils.client``; this module owns only the wire transport.
 """
 
+import inspect
 import json
 from typing import Optional
 
@@ -81,14 +82,20 @@ class WSPolicyClient:
         # proxy=None: never route loopback/intranet inference traffic through
         # HTTP(S)_PROXY / ALL_PROXY. websockets>=15 reads these env vars by
         # default, which breaks direct ws://127.0.0.1 connections behind a proxy.
-        self._ws = connect(
-            self.ws_url,
-            max_size=None,
-            compression=self.compression,
-            open_timeout=self.open_timeout,
-            ping_interval=None,
-            proxy=None,
-        )
+        #
+        # ping_interval / proxy only exist on newer sync clients (keepalive and
+        # proxy support landed in websockets 15). Older versions forward unknown
+        # kwargs into socket.create_connection and crash, so pass each knob only
+        # when the installed connect() actually declares it.
+        kwargs = {
+            "max_size": None,
+            "compression": self.compression,
+            "open_timeout": self.open_timeout,
+            "ping_interval": None,
+            "proxy": None,
+        }
+        supported = set(inspect.signature(connect).parameters)
+        self._ws = connect(self.ws_url, **{k: v for k, v in kwargs.items() if k in supported})
 
     def _roundtrip(self, message: dict, *, reconnect: bool = True) -> dict:
         body = json.dumps(message)

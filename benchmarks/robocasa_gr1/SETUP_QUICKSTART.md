@@ -45,20 +45,33 @@ for benchmark smoke/eval.
 Optional dataset download:
 
 ```bash
-huggingface-cli download \
-  --repo-type dataset nvidia/PhysicalAI-Robotics-GR00T-Teleop-Sim \
-  --local-dir /path/to/bench_deps/gr00t_teleop_sim
+hf download nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim \
+  --repo-type dataset \
+  --include "gr1_unified.*/**" \
+  --local-dir /path/to/bench_deps/robocasa-gr1-24k
+
+export ROBOCASA_GR1_PATH=/path/to/bench_deps/robocasa-gr1-tabletop-tasks
+export ROBOCASA_GR1_PYTHON="$CONDA_PREFIX/bin/python"
+export OPENWAM_PYTHON=/path/to/openwam/bin/python
+bash scripts/prepare_robocasa_gr1_eef33.sh \
+  /path/to/bench_deps/robocasa-gr1-24k \
+  /path/to/bench_deps/robocasa-gr1-eef33-v20 \
+  /path/to/bench_deps/robocasa-gr1-eef33-v30
 ```
 
-Dataset size:
+The public folders are LeRobot v2.0 with native 44-D joint/body state/action,
+not HDF5 and not EEF33. This integration does not train joint mode. The wrapper
+uses the exact RoboCasa MuJoCo model for base-frame FK, writes EEF33
+action/state, converts to v3, and computes separate action/state statistics.
 
-- HDF5: about `14GB`
+Approximate dataset size:
+
 - LeRobot: about `39GB`
 - Duration: about `81h`, `24k` trajectories at `20fps`
 
 ## 4. Export Paths
 
-Run these from `openwam`:
+Run these from OpenWAM:
 
 ```bash
 export ROBOCASA_GR1_PATH=/path/to/bench_deps/robocasa-gr1-tabletop-tasks
@@ -136,4 +149,6 @@ bash benchmarks/robocasa_gr1/single_eval.sh \
 - Default max episode steps: `720`
 - Default GR1 arms+waist Fourier-hands action dims:
   `left_hand=6`, `right_hand=6`, `left_arm=7`, `right_arm=7`, `waist=3`
+- The client sends base-frame EEF33 proprio and converts returned EEF33 actions
+  to the 29-D environment action with dual-arm IK plus direct hand/waist pass-through.
 - Do not open/merge the PR until render smoke passes on the target machine.

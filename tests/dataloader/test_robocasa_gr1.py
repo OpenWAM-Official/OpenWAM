@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -12,14 +13,17 @@ import pyarrow.parquet as pq
 from omegaconf import OmegaConf
 from PIL import Image
 
-from benchmarks.robocasa_gr1.openwam2robocasa_gr1_interface import action_vector_to_dict, build_state
 from openwam.dataloader.bases.lerobot_v3_reader import _read_data_table_cached
 from openwam.dataloader.registry import list_registered_datasets
-from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
+from openwam.dataloader.robocasa_gr1 import EEF33_DIM, MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
 from openwam.dataloader.transforms.builder import build_transforms
 from openwam.dataloader.transforms.video import VideoColorJitter
-from openwam.dataloader.utils.normalization import load_stats_file
-from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import _iter_bucket_arrays
+from openwam.dataloader.utils.gr1_kinematics import ROT6D_DIMS_EEF33
+from openwam.dataloader.utils.normalization import load_stats_file, pin_rot6d_identity
+from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import (
+    _compute_global_stats,
+    _iter_bucket_arrays,
+)
 from openwam.deploy.model_loader import _build_normalizer, _UnifyAwareNormalizer
 from openwam.train.utils.checkpointing import save_normalization_stats
 
@@ -35,10 +39,8 @@ def _write_bucket(bucket: Path, *, include_wrist: bool = False) -> None:
 
     features = {
         HEAD_CAM: {"dtype": "video"},
-        "eef_sim_pose_action": {"shape": [12]},
-        "gripper_open_scale_action": {"shape": [2]},
-        "eef_sim_pose_state": {"shape": [12]},
-        "gripper_open_scale_state": {"shape": [2]},
+        "eef33_action": {"shape": [EEF33_DIM]},
+        "eef33_state": {"shape": [EEF33_DIM]},
         "annotation.human.coarse_action": {"dtype": "string"},
         "task_index": {"dtype": "int64"},
     }
@@ -67,23 +69,21 @@ def _write_bucket(bucket: Path, *, include_wrist: bool = False) -> None:
         pa.Table.from_pandas(pd.DataFrame([episode_row])), bucket / "meta" / "episodes" / "chunk-000.parquet"
     )
 
-    eef = np.zeros((EP_LENGTH, 12), dtype=np.float32)
+    eef = np.zeros((EP_LENGTH, EEF33_DIM), dtype=np.float32)
     eef[:, 0] = np.linspace(0.0, 0.7, EP_LENGTH)
-    eef[:, 6] = np.linspace(1.0, 1.7, EP_LENGTH)
-    grip = np.stack(
-        [
-            np.linspace(0.0, 1.0, EP_LENGTH),
-            np.linspace(1.0, 0.0, EP_LENGTH),
-        ],
-        axis=1,
-    ).astype(np.float32)
+    eef[:, 3:9] = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
+    eef[:, 9:15] = np.linspace(0.0, 1.0, EP_LENGTH)[:, None]
+    eef[:, 15] = np.linspace(1.0, 1.7, EP_LENGTH)
+    eef[:, 18:24] = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)
+    eef[:, 24:30] = np.linspace(1.0, 0.0, EP_LENGTH)[:, None]
+    eef[:, 30:33] = np.linspace(-0.2, 0.2, EP_LENGTH)[:, None]
+    state = eef.copy()
+    state[:, [0, 1, 2, 15, 16, 17]] += 0.1
     df = pd.DataFrame(
         {
             "annotation.human.coarse_action": ["pick cup"] * EP_LENGTH,
-            "eef_sim_pose_action": list(eef),
-            "gripper_open_scale_action": list(grip),
-            "eef_sim_pose_state": list(eef + 0.1),
-            "gripper_open_scale_state": list(grip),
+            "eef33_action": list(eef),
+            "eef33_state": list(state),
             "task_index": [0] * EP_LENGTH,
         }
     )
@@ -124,13 +124,13 @@ def test_eef_sample_and_missing_wrist_black_slots(tmp_path: Path):
         ds = _dataset(tmp_path)
         sample = ds[0]
 
-    assert ds.action_dim == 20
+    assert ds.action_dim == EEF33_DIM
     assert ds.action_mode == "eef"
-    assert sample["action"].shape == (4, 20)
-    assert sample["action_mask"].shape == (4, 20)
+    assert sample["action"].shape == (4, EEF33_DIM)
+    assert sample["action_mask"].shape == (4, EEF33_DIM)
     assert sample["action_mask"].all()
-    assert sample["proprio"].shape == (1, 20)
-    assert sample["proprio_mask"].shape == (1, 20)
+    assert sample["proprio"].shape == (1, EEF33_DIM)
+    assert sample["proprio_mask"].shape == (1, EEF33_DIM)
     assert sample["prompt"] == "pick cup"
 
     img = sample["video"][0]
@@ -140,23 +140,26 @@ def test_eef_sample_and_missing_wrist_black_slots(tmp_path: Path):
     assert img.getpixel((250, 300)) == (0, 0, 0)
 
 
-def test_unify_mode_maps_eef20_to_80_and_masks_unmapped_dims(tmp_path: Path):
+def test_unify_mode_maps_eef33_to_80_and_masks_unmapped_dims(tmp_path: Path):
     _write_bucket(tmp_path)
     with _mock_decoder():
         ds = _dataset(
             tmp_path,
-            action_mode="unify",
+            action_mode="eef",
             unify_action=True,
-            unify_action_map=["0-9", "34-43"],
+            unify_action_map=["0-8", "10-15", "34-42", "44-49", "68-70"],
         )
         sample = ds[0]
 
     assert ds.action_dim == 80
     assert sample["action"].shape == (4, 80)
     assert sample["action_mask"].shape == (4, 80)
-    assert sample["action_mask"][0].sum().item() == 20
-    assert not sample["action_mask"][0, 10:34].any()
-    assert not sample["action_mask"][0, 44:68].any()
+    assert sample["action_mask"][0].sum().item() == EEF33_DIM
+    assert not sample["action_mask"][0, 9]
+    assert not sample["action_mask"][0, 16:34].any()
+    assert not sample["action_mask"][0, 43]
+    assert not sample["action_mask"][0, 50:68].any()
+    assert not sample["action_mask"][0, 71:80].any()
     assert sample["action"][0, 0].item() == 0.0
     assert sample["action"][0, 34].item() == 1.0
 
@@ -164,11 +167,11 @@ def test_unify_mode_maps_eef20_to_80_and_masks_unmapped_dims(tmp_path: Path):
 def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     _write_bucket(tmp_path)
     stats = {
-        "unify": {
-            "min": np.zeros(20, dtype=np.float32),
-            "max": np.ones(20, dtype=np.float32),
-            "mean": np.zeros(20, dtype=np.float32),
-            "std": np.ones(20, dtype=np.float32),
+        "eef": {
+            "min": np.zeros(EEF33_DIM, dtype=np.float32),
+            "max": np.ones(EEF33_DIM, dtype=np.float32),
+            "mean": np.zeros(EEF33_DIM, dtype=np.float32),
+            "std": np.ones(EEF33_DIM, dtype=np.float32),
         }
     }
     stats_path = tmp_path / "normalization_stats.npy"
@@ -177,9 +180,9 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     with _mock_decoder():
         ds = _dataset(
             tmp_path,
-            action_mode="unify",
+            action_mode="eef",
             unify_action=True,
-            unify_action_map=["0-9", "34-43"],
+            unify_action_map=["0-8", "10-15", "34-42", "44-49", "68-70"],
             normalize_mode="min-max",
             normalization_stats_path=str(stats_path),
         )
@@ -187,19 +190,21 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
 
     # raw EEF left x=0 -> min-max -1, then maps to unified slot 0.
     assert sample["action"][0, 0].item() == -1.0
+    # state x=0.1 uses the same [0, 1] global stats: 2*0.1-1 = -0.8.
+    np.testing.assert_allclose(sample["proprio"][0, 0].item(), -0.8, atol=1e-6)
     # raw EEF right x=1 -> min-max +1, then maps to unified slot 34.
     assert sample["action"][0, 34].item() == 1.0
     assert ds.normalization_stats_path == str(tmp_path / "meta" / "normalization_stats.npy")
     deploy_stats = np.load(ds.normalization_stats_path, allow_pickle=True).item()
-    assert set(deploy_stats["unify"]) == {"mean", "std", "min", "max", "q01", "q99"}
-    assert deploy_stats["unify"]["mean"].shape == (20,)
+    assert set(deploy_stats["eef"]) == {"mean", "std", "min", "max", "q01", "q99"}
+    assert deploy_stats["eef"]["mean"].shape == (EEF33_DIM,)
     cfg = OmegaConf.create(
         {
             "dataloader": {
                 "normalize_mode": "min-max",
-                "action_mode": "unify",
+                "action_mode": "eef",
                 "unify_action": True,
-                "unify_action_map": ["0-9", "34-43"],
+                "unify_action_map": ["0-8", "10-15", "34-42", "44-49", "68-70"],
             }
         }
     )
@@ -207,18 +212,53 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     assert isinstance(normalizer, _UnifyAwareNormalizer)
     raw = ds._raw_action(ds._load_data_table(0, 0).to_pandas())[:4]
     np.testing.assert_allclose(normalizer.unnormalize(sample["action"].numpy()), np.clip(raw, 0, 1), atol=1e-5)
+    np.testing.assert_allclose(normalizer.normalize(np.array([[0.1] * EEF33_DIM]))[0, 0], -0.8, atol=1e-6)
 
 
-def test_unify_mode_rejects_mismatched_base_flag(tmp_path: Path):
+def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Path):
     _write_bucket(tmp_path)
-    with np.testing.assert_raises_regex(ValueError, "requires unify_action=true"):
-        _dataset(tmp_path, action_mode="unify", unify_action=False)
+    base = {
+        "min": np.full(EEF33_DIM, -2.0, dtype=np.float32),
+        "max": np.full(EEF33_DIM, 2.0, dtype=np.float32),
+        "mean": np.zeros(EEF33_DIM, dtype=np.float32),
+        "std": np.full(EEF33_DIM, 2.0, dtype=np.float32),
+        "q01": np.full(EEF33_DIM, -2.0, dtype=np.float32),
+        "q99": np.full(EEF33_DIM, 2.0, dtype=np.float32),
+    }
+    pin_rot6d_identity(base, ROT6D_DIMS_EEF33)
+    stats_path = tmp_path / "normalization_stats.npy"
+    np.save(stats_path, {"eef": base})
+    ds = _dataset(
+        tmp_path,
+        action_mode="eef",
+        unify_action=True,
+        unify_action_map=["0-8", "10-15", "34-42", "44-49", "68-70"],
+        normalize_mode="min-max",
+        normalization_stats_path=str(stats_path),
+    )
+    raw = ds._raw_action(ds._load_data_table(0, 0).to_pandas())
+    normalized = ds._normalize_array(raw)
+    rot = list(ROT6D_DIMS_EEF33)
+    np.testing.assert_allclose(normalized[:, rot], raw[:, rot], atol=1e-7)
+    assert not np.allclose(normalized[:, [0, 9, 15, 24, 30]], raw[:, [0, 9, 15, 24, 30]])
+    for start in (3, 18):
+        first = raw[:, start : start + 3]
+        second = raw[:, start + 3 : start + 6]
+        np.testing.assert_allclose(np.linalg.norm(first, axis=-1), 1.0, atol=1e-6)
+        np.testing.assert_allclose(np.linalg.norm(second, axis=-1), 1.0, atol=1e-6)
+        np.testing.assert_allclose(np.sum(first * second, axis=-1), 0.0, atol=1e-6)
+
+
+def test_joint_mode_is_rejected(tmp_path: Path):
+    _write_bucket(tmp_path)
+    with np.testing.assert_raises_regex(ValueError, "supports only action_mode='eef'"):
+        _dataset(tmp_path, action_mode="joint", unify_action=False)
 
 
 def test_unify_mode_requires_explicit_map(tmp_path: Path):
     _write_bucket(tmp_path)
     with np.testing.assert_raises_regex(ValueError, "requires an explicit unify_action_map"):
-        _dataset(tmp_path, action_mode="unify", unify_action=True, unify_action_map=None)
+        _dataset(tmp_path, action_mode="eef", unify_action=True, unify_action_map=None)
 
 
 def test_missing_optional_prompt_column_is_not_projected(tmp_path: Path):
@@ -264,23 +304,41 @@ def test_dot_path_projection_fallback_stays_cached():
 
 def test_quantile_stats_are_materialized(tmp_path: Path):
     raw = {
-        "q01": np.full(20, -1.0, dtype=np.float32),
-        "q99": np.full(20, 1.0, dtype=np.float32),
+        "q01": np.full(EEF33_DIM, -1.0, dtype=np.float32),
+        "q99": np.full(EEF33_DIM, 1.0, dtype=np.float32),
     }
     path = tmp_path / "stats.npy"
     np.save(path, {"eef": raw})
-    stats = load_stats_file(path, action_mode="eef", normalize_mode="quantile", dim=20)
+    stats = load_stats_file(path, action_mode="eef", normalize_mode="quantile", dim=EEF33_DIM)
     assert set(stats) == {"min", "max", "mean", "std", "q01", "q99"}
     np.testing.assert_allclose(stats["q01"], -1.0)
 
 
-def test_stats_stream_pools_action_and_state(tmp_path: Path):
+def test_stats_stream_exposes_action_and_state_for_global_pool(tmp_path: Path):
     _write_bucket(tmp_path)
     arrays = list(_iter_bucket_arrays(_dataset(tmp_path)))
-    assert len(arrays) == 2
-    assert arrays[0].shape == arrays[1].shape == (EP_LENGTH, 20)
-    assert arrays[0][0, 0] == 0.0
-    np.testing.assert_allclose(arrays[1][0, 0], 0.1)
+    assert len(arrays) == 1
+    action, state = arrays[0]
+    assert action.shape == state.shape == (EP_LENGTH, EEF33_DIM)
+    assert action[0, 0] == 0.0
+    np.testing.assert_allclose(state[0, 0], 0.1)
+
+
+def test_stats_pool_action_and_state_rows_into_one_global_block(tmp_path: Path):
+    _write_bucket(tmp_path)
+    dataset = _dataset(tmp_path)
+    action, state = next(iter(_iter_bucket_arrays(dataset)))
+    mode, dim, stats, action_rows, state_rows = _compute_global_stats(dataset, reservoir_cap=10_000)
+
+    pooled = np.concatenate([action, state], axis=0)
+    assert mode == "eef"
+    assert dim == EEF33_DIM
+    assert action_rows == state_rows == EP_LENGTH
+    assert stats["num_timesteps"] == pooled.shape[0]
+    assert stats["pool"] == "action_state"
+    non_rot = [0, 1, 2, 9, 15, 16, 17, 24, 30, 31, 32]
+    np.testing.assert_allclose(np.asarray(stats["mean"])[non_rot], pooled.mean(0)[non_rot], atol=1e-7)
+    np.testing.assert_allclose(np.asarray(stats["min"])[non_rot], pooled.min(0)[non_rot], atol=1e-7)
 
 
 def test_color_jitter_defaults_are_02():
@@ -298,6 +356,15 @@ def test_color_jitter_defaults_are_02():
     assert built.saturation == 0.2
 
 
+def test_color_jitter_changes_pixels_consistently_across_frames():
+    source = Image.new("RGB", (32, 32), (80, 140, 200))
+    jitter = VideoColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)
+    random.seed(7)
+    frames = jitter({"video": [source.copy(), source.copy()]})["video"]
+    np.testing.assert_array_equal(np.asarray(frames[0]), np.asarray(frames[1]))
+    assert not np.array_equal(np.asarray(frames[0]), np.asarray(source))
+
+
 def test_robocasa_config_wires_reader_color_jitter():
     cfg = OmegaConf.load("configs/dataloader/robocasa_gr1.yaml")
     assert cfg.color_jitter.brightness == 0.2
@@ -309,22 +376,22 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
     for name in ("a", "b"):
         _write_bucket(root / name)
     source = tmp_path / "stats.npy"
-    base = np.arange(20, dtype=np.float32)
-    np.save(
-        source,
-        {
-            "eef": {
-                "min": base - 1,
-                "max": base + 1,
-                "mean": base,
-                "std": np.ones(20, dtype=np.float32),
-            }
-        },
-    )
+    base = np.arange(EEF33_DIM, dtype=np.float32)
+    source_stats = {
+        "min": base - 1,
+        "max": base + 1,
+        "mean": base,
+        "std": np.ones(EEF33_DIM, dtype=np.float32),
+        "q01": base - 1,
+        "q99": base + 1,
+    }
+    pin_rot6d_identity(source_stats, ROT6D_DIMS_EEF33)
+    np.save(source, {"eef": source_stats})
     cfg = OmegaConf.create(
         {
             "dataset_dir": str(root),
             "num_frames": 5,
+            "multiview": True,
             "prompt_columns": ["annotation.human.coarse_action"],
             "normalize_mode": "z-score",
             "normalization_stats_path": str(source),
@@ -337,20 +404,5 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
     checkpoint = tmp_path / "checkpoint"
     save_normalization_stats(str(checkpoint), ds)
     copied = np.load(checkpoint / "normalization_stats.npy", allow_pickle=True).item()
-    assert copied["eef"]["mean"].shape == (20,)
-
-
-def test_benchmark_fallback_key_order_is_deterministic():
-    obs = {"state.z": np.array([3.0]), "state.a": np.array([1.0, 2.0])}
-    assert build_state(obs) == [1.0, 2.0, 3.0]
-
-    class _Space:
-        def __init__(self, shape):
-            self.shape = shape
-
-    class _DictSpace:
-        spaces = {"action.z": _Space((1,)), "action.a": _Space((2,))}
-
-    mapped = action_vector_to_dict([1.0, 2.0, 3.0], _DictSpace())
-    np.testing.assert_array_equal(mapped["action.a"], [1.0, 2.0])
-    np.testing.assert_array_equal(mapped["action.z"], [3.0])
+    assert copied["eef"]["mean"].shape == (EEF33_DIM,)
+    assert set(copied) == {"eef"}

@@ -1,34 +1,25 @@
 type: robocasa_gr1
 
-# LeRobot v3 root or single bucket. Replace this with the real converted
-# RoboCasa GR1 dataset path before sample/debug training smoke.
-dataset_dir: /TODO/robocasa_gr1_lerobotv3
+# Input must already contain simulator-backed EEF33 columns. The public NVIDIA
+# joint44 files do not; enrich them before running the re-indexer:
+#   python scripts/enrich_robocasa_gr1_joint44_to_eef33.py \
+#     --input /path/to/robocasa-gr1-v20 \
+#     --output /path/to/robocasa-gr1-eef33-v20
+#   python scripts/convert_robocasa_gr1_v20_to_v30.py \
+#     --input /path/to/robocasa-gr1-eef33-v20 \
+#     --output /path/to/robocasa-gr1-eef33-v30
+dataset_dir: /TODO/robocasa_gr1_eef33_v30
 
-# joint: raw joint vectors from action/state columns; requires action_dim.
-# eef:   20D [L xyz+rot6d+grip, R xyz+rot6d+grip].
-# unify: normalize raw 20D EEF, then scatter through the shared base reader into
-#        the 80D pretraining space. Requires unify_action: true below.
+# Only EEF is supported. Raw EEF33:
+# [L xyz3+rot6d6+hand6, R xyz3+rot6d6+hand6, waist3].
 action_mode: eef
-action_dim: null
+eef_action_column: eef33_action
+eef_state_column: eef33_state
 
-# Default EEF path expects RoboCOIN-style standardized columns. If your
-# conversion exports final 20D vectors directly, set eef_action_column /
-# eef_state_column instead and null the pose+gripper columns.
-joint_action_column: action
-joint_state_column: observation.state
-eef_action_column: null
-eef_state_column: null
-eef_pose_action_column: eef_sim_pose_action
-eef_gripper_action_column: gripper_open_scale_action
-eef_pose_state_column: eef_sim_pose_state
-eef_gripper_state_column: gripper_open_scale_state
-
-# Prompt resolution tries available parquet columns first, then falls back to
-# meta/tasks.parquet via task_index. Missing/blank prompt metadata is an error.
-prompt_columns:
-  - annotation.human.coarse_action
-  - annotation.human.action.task_description
-  - task
+# Native annotation.human.coarse_action is an integer class ID, not text.
+# Resolve task_index through converted meta/tasks.parquet. Missing/blank prompt
+# metadata is an error.
+prompt_columns: []
 
 # Camera key resolution by info.json features priority. Missing wrist views are
 # rendered as black slots in multiview mode.
@@ -57,21 +48,20 @@ multiview: true
 split: train
 enable_action_supervision: true
 
-# null disables in-reader normalization. Set to min-max, z-score, or quantile after
+# null disables in-reader normalization. Set to min-max or z-score after
 # generating normalization_stats.npy with
 # openwam/dataloader/utils/stats_computation/robocasa_gr1_stats_computation.py.
 normalize_mode: null
 normalization_stats_path: null
+# The stats script pools EEF33 action and state rows into one global `eef`
+# block; both directions use this same transform.
 
-# Unify mode knobs. Default map slots canonical 20D EEF into the 80D space:
-# L xyz/rot6d/gripper -> [0:10], R xyz/rot6d/gripper -> [34:44].
-# Set action_mode: unify and unify_action: true together; eef/joint require false.
-unify_action: false
-unify_action_map:
-  - "0-9"
-  - "34-43"
-state_mask: null
-action_mask: null
+# Normalize EEF33 first, then scatter arm poses, Fourier hands, and waist into
+# the shared EEF/dex-hand/reserved slots. Gripper slots 9/43 stay unmapped.
+# All 33 raw dims are simulator-backed and always valid, so no per-dim
+# state_mask/action_mask is needed; the unified mask marks unmapped slots false.
+unify_action: true
+unify_action_map: ["0-8", "10-15", "34-42", "44-49", "68-70"]
 
 # Load-time, temporally consistent augmentation (train split only).
 color_jitter:
