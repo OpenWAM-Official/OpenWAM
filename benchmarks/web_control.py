@@ -694,6 +694,13 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
     title = "RoboTwin Control"
     csv_filename = "robotwin_results.csv"
     def build(self) -> dict[str, Any]:
+        # Episode-level dispatcher runs (parallel_eval.sh / dlc_parallel_eval.sh)
+        # publish a live `state.json` (and per-episode `results.jsonl`) to the
+        # shared log dir instead of the old `queue/` + whole-task `summary.tsv`
+        # layout. Prefer that source when present — it works over the shared FS
+        # even when the rank-0 dispatcher's HTTP port is unreachable (DLC).
+        if (self.root / "state.json").is_file() or (self.root / "results.jsonl").is_file():
+            return self._build_from_dispatcher()
         run_env = parse_key_values(self.root / "run.env")
         summary = self._collect_summary()
         fallback = self._collect_fallback_worker_results(set(summary["all_keys"]))
@@ -752,12 +759,178 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
     def build_state(self) -> dict[str, Any]:
         return self.build()
 
+    # -- episode-level dispatcher source (state.json / results.jsonl) ---------
+
+    def _dispatcher_jobs(self, run_env: dict[str, str]) -> tuple[list[dict[str, Any]], float]:
+        """Build the legacy job-row schema from the dispatcher's `state.json`
+        (live per-`(task,mode)` snapshot) or, failing that, by aggregating
+        `results.jsonl`. Adds `live_envs`/`committed`/`remaining` extras."""
+        state_path = self.root / "state.json"
+        results_path = self.root / "results.jsonl"
+        target_default = self._optional_int(run_env.get("test_num")) or 0
+
+        raw_jobs: list[dict[str, Any]] = []
+        source_mtime = 0.0
+        snap = None
+        if state_path.is_file():
+            try:
+                snap = json.loads(state_path.read_text(encoding="utf-8"))
+                source_mtime = path_mtime(state_path)
+            except (OSError, json.JSONDecodeError, ValueError):
+                snap = None
+        if snap and isinstance(snap.get("jobs"), list):
+            raw_jobs = snap["jobs"]
+        elif results_path.is_file():
+            # Aggregate per-episode records (finished run without a snapshot).
+            agg: dict[tuple[str, str], dict[str, int]] = {}
+            source_mtime = path_mtime(results_path)
+            try:
+                for line in results_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    key = (str(rec["task"]), str(rec["mode"]))
+                    a = agg.setdefault(key, {"done": 0, "suc": 0, "slh": 0})
+                    a["done"] += 1
+                    a["suc"] += 1 if rec.get("success") else 0
+                    a["slh"] += 1 if rec.get("step_limit_hit") else 0
+            except (OSError, json.JSONDecodeError, KeyError, ValueError):
+                pass
+            raw_jobs = [
+                {"task": t, "mode": m, "done": a["done"], "suc": a["suc"], "target": target_default,
+                 "committed": 0, "probing": 0, "live_envs": 0, "started": True,
+                 "step_limit_hits": a["slh"], "remaining": max(0, target_default - a["done"])}
+                for (t, m), a in agg.items()
+            ]
+
+        jobs: list[dict[str, Any]] = []
+        for j in raw_jobs:
+            done = int(j.get("done", 0))
+            target = int(j.get("target", target_default) or target_default)
+            suc = int(j.get("suc", 0))
+            live = int(j.get("live_envs", 0))
+            started = bool(j.get("started", False))
+            if target > 0 and done >= target:
+                status = "ok"
+            elif live > 0 or started or done > 0:
+                status = "running"
+            else:
+                status = "pending"
+            jobs.append(
+                {
+                    "task": j.get("task", ""),
+                    "mode": j.get("mode", ""),
+                    "node": "",
+                    "worker": "",
+                    "status": status,
+                    "exit_code": "",
+                    "log": "",
+                    "success_rate": (100.0 * suc / done) if done else None,
+                    "success": suc if done else None,
+                    "episodes": done,
+                    "step_limit_hits": int(j.get("step_limit_hits", 0)),
+                    "live_envs": live,
+                    "committed": int(j.get("committed", 0)),
+                    "remaining": int(j.get("remaining", max(0, target - done))),
+                    "target": target,
+                    "latest": "",
+                    "size": 0,
+                    "mtime": source_mtime,
+                    "mtime_iso": utc_iso(source_mtime) if source_mtime else "",
+                    "started_at": None,
+                    "started_at_iso": "",
+                    "duration_sec": None,
+                    "duration": "",
+                    "source": "dispatcher",
+                }
+            )
+        priority = {"failed": 0, "running": 1, "pending": 2, "ok": 3, "done": 4}
+        jobs.sort(key=lambda it: (priority.get(str(it.get("status", "")), 9), str(it.get("task", "")), str(it.get("mode", ""))))
+        return jobs, source_mtime
+
+    @staticmethod
+    def _dispatcher_queue(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        running = [{"task": j["task"], "mode": j["mode"], "node": "", "worker": "", "live_envs": j.get("live_envs", 0)}
+                   for j in jobs if j["status"] == "running"]
+        pending = [{"task": j["task"], "mode": j["mode"], "node": "", "worker": ""} for j in jobs if j["status"] == "pending"]
+        return {
+            "pending_count": len(pending),
+            "claimed_count": len(running),
+            "running_count": len(running),
+            "pending": pending,
+            "claimed": running,
+            "running": running,
+            "ready": True,
+            "done_nodes": [],
+        }
+
+    def _build_from_dispatcher(self) -> dict[str, Any]:
+        run_env = parse_key_values(self.root / "run.env")
+        jobs, source_mtime = self._dispatcher_jobs(run_env)
+        queue = self._dispatcher_queue(jobs)
+        logs = self._collect_logs()
+        summary_stub = {"rows": [], "ok": sum(1 for j in jobs if j["status"] == "ok"),
+                        "failed": 0, "duplicates": []}
+        nodes = self._collect_nodes(queue, summary_stub)
+        expected_keys = expected_job_keys(run_env)
+        validation = self._validate(run_env, expected_keys, jobs, summary_stub)
+        total = self._infer_total(run_env, expected_keys, summary_stub, queue, jobs)
+        progress = self._progress(total, jobs)
+        failures = self._collect_failures(jobs)
+        rates = self._success_aggregate(jobs)
+
+        newest_mtime = max(
+            [source_mtime, path_mtime(self.root / "run.env")]
+            + [float(item.get("mtime", 0.0)) for item in logs],
+            default=0.0,
+        )
+        state = {
+            "benchmark": self.benchmark,
+            "title": self.title,
+            "now": utc_iso(),
+            "log_dir": str(self.root),
+            "exists": self.root.is_dir(),
+            "run_env": run_env,
+            "summary": {
+                "path": "state.json",
+                "exists": (self.root / "state.json").is_file() or (self.root / "results.jsonl").is_file(),
+                "row_count": len(jobs),
+                "ok": summary_stub["ok"],
+                "failed": 0,
+                "duplicates": [],
+            },
+            "queue": queue,
+            "progress": progress,
+            "rates": rates,
+            "validation": validation,
+            "failures": failures,
+            "jobs": jobs,
+            "nodes": nodes,
+            "logs": logs,
+            "last_update": utc_iso(newest_mtime) if newest_mtime > 0 else "",
+        }
+        state["run"] = self._run_summary(state)
+        state["metrics"] = self._metrics_summary(state)
+        state["custom_metrics"] = self.build_custom_metrics(state)
+        return state
+
     def build_results_rows(self) -> list[dict[str, Any]]:
         snapshot = self.build()
         run_env = snapshot["run_env"]
         rows = []
         for job in snapshot["jobs"]:
-            full_log = self._full_log_stats_for_job(job)
+            if job.get("source") == "dispatcher":
+                # Authoritative per-episode counts already live on the job (from
+                # state.json / results.jsonl); there is no per-task log to grep.
+                full_log = {
+                    "success_rate": job.get("success_rate"),
+                    "success": job.get("success"),
+                    "episodes": job.get("episodes"),
+                    "step_limit_hits": job.get("step_limit_hits"),
+                }
+            else:
+                full_log = self._full_log_stats_for_job(job)
             rows.append(
                 {
                     "run_id": run_env.get("run_id", ""),

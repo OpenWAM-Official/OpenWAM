@@ -13,11 +13,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+CSV_FIELDNAMES = [
+    "run_id", "policy_name", "requested_mode", "task", "mode", "node", "worker",
+    "status", "exit_code", "success_rate", "episodes", "step_limit_hits", "log_path",
+]
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -187,6 +193,93 @@ def format_job_keys(keys: Sequence[Tuple[str, str]], limit: int = 8) -> str:
     return ", ".join(items)
 
 
+def export_from_results_jsonl(
+    log_dir: Path, output_csv: Path, run_env: Dict[str, str], strict: bool
+) -> int:
+    """Export from the episode-level dispatcher's ``results.jsonl`` (one line per
+    completed episode). Success rate / episode counts / step-limit hits are
+    aggregated per ``(task, mode)`` straight from the authoritative per-episode
+    records — no log grepping. Falls back to the legacy path when absent.
+    """
+    results_path = log_dir / "results.jsonl"
+    agg: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(
+        lambda: {"episodes": 0, "successes": 0, "step_limit_hits": 0}
+    )
+    bad_lines = 0
+    with results_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                key = (str(rec["task"]), str(rec["mode"]))
+            except (json.JSONDecodeError, KeyError):
+                bad_lines += 1
+                continue
+            a = agg[key]
+            a["episodes"] += 1
+            a["successes"] += 1 if rec.get("success") else 0
+            a["step_limit_hits"] += 1 if rec.get("step_limit_hit") else 0
+
+    failures: List[str] = []
+    if bad_lines:
+        failures.append(f"{bad_lines} malformed results.jsonl line(s)")
+
+    expected_keys = expected_job_keys(run_env)
+    if expected_keys is not None:
+        missing = sorted(expected_keys - set(agg))
+        if missing:
+            failures.append(f"missing task/mode (no episodes): {format_job_keys(missing)}")
+
+    target = run_env.get("test_num", "").strip()
+    target_n = int(target) if target.isdigit() else None
+
+    rows: List[Dict[str, str]] = []
+    for (task, mode) in sorted(agg):
+        a = agg[(task, mode)]
+        eps = a["episodes"]
+        rate = (a["successes"] / eps) if eps else 0.0
+        status = "ok" if (target_n is None or eps >= target_n) else "incomplete"
+        if target_n is not None and eps < target_n:
+            failures.append(f"{task}|{mode}: {eps}/{target_n} episodes")
+        rows.append(
+            {
+                "run_id": run_env.get("run_id", ""),
+                "policy_name": run_env.get("policy_name", ""),
+                "requested_mode": run_env.get("mode", ""),
+                "task": task,
+                "mode": mode,
+                "node": "",
+                "worker": "",
+                "status": status,
+                "exit_code": "",
+                "success_rate": f"{rate:.6f}",
+                "episodes": str(eps),
+                "step_limit_hits": str(a["step_limit_hits"]),
+                "log_path": str(results_path),
+            }
+        )
+
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with output_csv.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    total_eps = sum(int(r["episodes"]) for r in rows)
+    total_slh = sum(int(r["step_limit_hits"]) for r in rows)
+    print(f"[INFO] wrote CSV: {output_csv} (source: results.jsonl)")
+    print(f"[INFO] jobs={len(rows)} episodes={total_eps} step_limit_hits(total)={total_slh}")
+    if failures:
+        print("[WARN] issues while aggregating:", file=sys.stderr)
+        for item in failures:
+            print(f"  - {item}", file=sys.stderr)
+        if strict:
+            return 2
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     log_dir = args.log_dir.resolve()
@@ -195,8 +288,13 @@ def main() -> int:
         return 1
 
     output_csv = args.output.resolve() if args.output else log_dir / "results.csv"
-    summary_path = log_dir / "summary.tsv"
     run_env = load_run_env(log_dir / "run.env")
+
+    # Episode-level dispatcher runs are authoritative and per-episode; prefer them.
+    if (log_dir / "results.jsonl").is_file():
+        return export_from_results_jsonl(log_dir, output_csv, run_env, args.strict)
+
+    summary_path = log_dir / "summary.tsv"
 
     if summary_path.is_file():
         raw_rows = list(iter_summary_rows(summary_path))

@@ -288,7 +288,17 @@ def _install_robot_planner_fallbacks(robotwin_path: str) -> None:
     robot_pkg.robot = robot_mod
 
 
-def main() -> int:
+def bootstrap_robotwin_module(*, install_trace_hooks: bool = True):
+    """Prepare the RoboTwin runtime and return its loaded ``eval_policy`` module.
+
+    Does everything both entrypoints share: resolve ``ROBOTWIN_PATH``, set up a
+    writable runtime root + chdir + sys.path, prewarm CUDA/Curobo before SAPIEN,
+    patch the legacy ``warp.torch`` namespace, load ``script/eval_policy.py``,
+    install the optional planner fallback (``ROBOTWIN_ENABLE_PLANNER_FALLBACK=1``)
+    and the per-env exception trace hooks. Callers (``main`` here for whole-task
+    eval, ``episode_worker`` for episode-level eval) then monkeypatch / drive the
+    module as they need.
+    """
     robotwin_path = os.environ.get("ROBOTWIN_PATH")
     if not robotwin_path:
         raise SystemExit("ROBOTWIN_PATH must be set")
@@ -303,7 +313,13 @@ def main() -> int:
     module = _load_robotwin_eval_module(robotwin_path)
     if os.environ.get("ROBOTWIN_ENABLE_PLANNER_FALLBACK", "") == "1":
         _install_robot_planner_fallbacks(robotwin_path)
-    _install_env_trace_hooks(module)
+    if install_trace_hooks:
+        _install_env_trace_hooks(module)
+    return module
+
+
+def main() -> int:
+    module = bootstrap_robotwin_module()
     _install_test_num_override(module)
     usr_args = module.parse_args_and_config()
     module.main(usr_args)

@@ -19,13 +19,94 @@ These scripts assume the OpenWAM policy server is **already running**. They only
 |---|---|
 | `openwam2robotwin_interface.py` | RoboTwin client — talks to the WebSocket server. |
 | `policy_config.yml` | Config template; `host` / `port` are injected at runtime. |
-| `single_eval.sh` | Run evaluation on a single task. |
+| `single_eval.sh` | Run evaluation on a single task (whole-task, RoboTwin's native loop). |
 | `multi_eval.sh` | Run evaluation on multiple tasks sequentially. |
-| `parallel_eval.sh` | Run a shared local queue against already-running local/remote OpenWAM servers. |
-| `dlc_parallel_eval.sh` | DLC multi-node entrypoint; starts local OpenWAM servers and RoboTwin clients on every node, then uses a shared queue for cross-node parallel evaluation. |
+| `dispatcher.py` | Central **episode-level** scheduler (TCP): per-`(task,mode)` seed allocator + dynamic env-affinity/duplication + result aggregation. Has a `--self-test` fleet simulation and an optional live status HTTP endpoint. |
+| `episode_worker.py` | One worker process = one `(task,mode)` assignment: boots the env once, then streams that task's episodes from the dispatcher. `--dry-run` simulates episodes with no RoboTwin. |
+| `episode_eval.sh` | Env-setup shim (EGL/PYTHONPATH/CUDA) that execs one `episode_worker.py`. |
+| `parallel_eval.sh` | Single-machine multi-GPU eval against already-running servers, using episode-level dynamic scheduling (dispatcher + one supervisor loop per GPU). |
+| `dlc_parallel_eval.sh` | DLC multi-node entrypoint; rank 0 runs the dispatcher, every node starts local servers + slot supervisors that all claim episodes from it. |
 | `dlc_web_console.py` | Compatibility wrapper for the unified benchmark web control dashboard. |
-| `export_results_csv.py` | Export `summary.tsv` plus per-task `Success rate` lines into a CSV file. |
+| `export_results_csv.py` | Export to CSV. Prefers the dispatcher's `results.jsonl` (per-episode); falls back to `summary.tsv` + per-task `Success rate` grepping for legacy runs. |
 | `step_limits.yml` | Per-task `step_lim` overrides (see below). |
+
+## Episode-level dynamic scheduling
+
+`parallel_eval.sh` and `dlc_parallel_eval.sh` schedule a **single episode** as
+the unit of work, not a whole task. This eliminates the tail-idle waste of the
+old whole-task queue: when there are more free GPUs than unstarted tasks, idle
+GPUs join an in-progress task (spawn a duplicate env) to drain its remaining
+episodes in parallel, so no GPU sits idle while any episode remains.
+
+How it works:
+
+- A central **dispatcher** (`dispatcher.py`; TCP, rank 0 in DLC) owns, per
+  `(task, mode)`, a monotonic **seed allocator** and the episode counters. Every
+  raw seed is handed out at most once globally, so no scene is ever evaluated
+  twice (RoboTwin scenes are fully determined by their integer seed).
+- Each GPU **slot** runs a supervisor loop that keeps launching
+  `episode_worker.py`. A worker claims one `(task,mode)`, boots its RoboTwin env
+  **once**, and streams that task's episodes: `request_seed` → expert-check →
+  (valid) `request_commit` → policy rollout → `report_result`. The commit
+  handshake makes each job land on **exactly `--test-num` episodes** (no
+  overshoot). When the dispatcher drains the job, the worker exits and the
+  supervisor launches a fresh one for the next assignment.
+- **Duplication policy**: an idle slot first starts any unstarted task; when
+  none remain it joins the in-progress task with the longest ETA, but **only if**
+  that task still has at least `--min-remaining-for-dup` (θ) episodes left and is
+  under its env cap (`ceil(remaining/θ)`). This avoids booting an env that the
+  existing env(s) would finish before the new one is even ready.
+
+New flags (both scripts):
+
+| Flag | Default | Description |
+|---|---:|---|
+| `--test-num` | `100` | Episodes per `(task,mode)`. |
+| `--seed` | `0` | Base seed; `st_seed = 100000*(1+seed)`, matching RoboTwin. |
+| `--min-remaining-for-dup` | `8` | θ: don't spawn a new env for a task with fewer remaining episodes. |
+| `--no-dup` | off | Strict mode: exactly one env per task, never duplicate (most reproducible; equivalent to the old whole-task granularity per job). |
+| `--dispatch-port` | `8790` | Dispatcher TCP port. |
+| `--http-port` | `0` | Serve a live status page (`/` HTML, `/api/state` JSON); `0` = off. |
+
+Determinism note: the first `test_num` valid episodes of each task use the same
+scenes as an upstream single-process run (seeds are handed out in order and a
+seed's validity is policy-independent); only the assignment of episodes to GPUs
+is non-deterministic. Use `--no-dup` for the most reproducible, single-stream
+behavior.
+
+Outputs land in the log directory: `results.jsonl` (one line per completed
+episode — the authoritative record), `summary.tsv` (per-`(task,mode)` success
+rate), `state.json` (live snapshot, rewritten atomically as the run progresses),
+and `run.env` (parameters). Turn them into a CSV with `export_results_csv.py`.
+
+Live monitoring:
+
+- **`web_control.py`** (recommended, especially for DLC) reads `state.json` /
+  `results.jsonl` straight from the shared log directory — no network path to the
+  compute nodes needed:
+  `python benchmarks/web_control.py <log_dir> --benchmark robotwin --port 8765`.
+- **`--http-port`** on the dispatcher serves the same live data directly, but is
+  **off by default** and only useful when you can reach the dispatcher host
+  (single-machine `parallel_eval.sh`); on DLC the rank-0 port is usually not
+  routable, so prefer `web_control.py` on the shared FS.
+
+### Dry-run (no GPUs / no RoboTwin)
+
+Both the scheduling logic and the whole orchestration can be exercised without a
+simulator:
+
+```bash
+# Fleet simulation: models env-boot cost + episode time, prints dup-vs-no-dup
+# makespan/utilization and asserts exact counts + zero duplicate seeds.
+python benchmarks/robotwin/dispatcher.py --self-test
+
+# End-to-end orchestration smoke (dispatcher + supervisors + fake workers):
+NNODES=1 NODE_RANK=0 ROBOTWIN_RUN_ID=smoke ROBOTWIN_LOG_ROOT=/tmp/rt \
+DISPATCHER_ADVERTISE_HOST=127.0.0.1 \
+bash benchmarks/robotwin/dlc_parallel_eval.sh --dry-run \
+    -m demo_clean -n smoke -d /unused -w 4 --test-num 8 \
+    adjust_bottle open_laptop lift_pot
+```
 
 ## Per-task step_lim overrides
 
@@ -143,7 +224,18 @@ bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir tasks.txt
 
 ### DLC multi-node parallel evaluation
 
-`dlc_parallel_eval.sh` is the cluster entrypoint for large runs. Launch the same command on every DLC worker. Rank 0 creates one pending job file per `task|mode` in the shared log directory; each node starts one OpenWAM server per local worker, waits for the server to accept connections, then starts RoboTwin client workers that atomically claim pending job files with `mv`.
+> **Scheduling model updated.** `dlc_parallel_eval.sh` now uses the
+> **episode-level dispatcher** described in "Episode-level dynamic scheduling"
+> above: rank 0 runs a TCP dispatcher and publishes its address to
+> `<log_dir>/.dispatcher_addr`; every node starts local servers + slot
+> supervisors that claim *episodes* (not whole tasks) from it. The old
+> `queue/pending` + atomic-`mv` per-`task|mode` claim protocol and node-done
+> sentinels are **gone** — scheduling, seed dedup, and aggregation all live in
+> the dispatcher. Some paragraphs below still describe the old file-queue layout
+> for historical reference; the authoritative behavior and flags are in the
+> section above. Results are in `results.jsonl` / `summary.tsv` / `state.json`.
+
+`dlc_parallel_eval.sh` is the cluster entrypoint for large runs. Launch the same command on every DLC worker. Each node starts one OpenWAM server per local worker, waits for the server to accept connections, then starts RoboTwin slot supervisors that claim episodes from the rank-0 dispatcher.
 
 This script does **not** require pre-starting OpenWAM servers with `scripts/deploy_multi.sh`; it starts and cleans up its own local servers on every node. It still requires a RoboTwin Python environment for the simulator/client process.
 

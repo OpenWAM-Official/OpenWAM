@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Parallel RoboTwin evaluation across N OpenWAM servers with dynamic task distribution.
+# Parallel RoboTwin evaluation across N already-running OpenWAM servers, with
+# EPISODE-LEVEL dynamic scheduling via a central dispatcher.
 #
 # Pairs with scripts/deploy_multi.sh: worker i -> port = PORT_BASE + i.
-# Tasks are pulled from a shared queue guarded by flock, so faster workers pick
-# up remaining tasks automatically — no static partitioning or idle workers.
+#
+# Unlike the old whole-task queue, the schedulable unit here is a single
+# episode. Each GPU slot runs a supervisor loop that keeps launching
+# episode_worker processes; each worker claims one (task,mode) from the
+# dispatcher, boots its env once, and streams that task's episodes. When no
+# unstarted task remains, idle slots join an in-progress task (spawn a duplicate
+# env) to drain its tail in parallel — so GPUs stop idling at the end of a run.
 #
 # Usage:
 #   bash parallel_eval.sh -m <mode> -n <name> [options] <tasks...>
@@ -12,21 +18,29 @@
 #   -m, --mode           demo_clean | demo_randomized | all
 #   -n, --name           label for log directory naming
 #
-# Tasks (positional, after flags): same as multi_eval.sh.
+# Tasks (positional, after flags): task names, "all", or a task-list file.
 #
 # Options:
-#   -w, --num-workers    number of parallel workers (default: 8)
-#       --host           server host (default: 127.0.0.1)
-#       --port           base WebSocket port; worker i uses port+i (default: 8848)
-#       --gpu-start      first simulator GPU index (default: 0)
+#   -w, --num-workers          parallel GPU slots (default: 8)
+#       --host                 server host (default: 127.0.0.1)
+#       --port                 base WebSocket port; slot i uses port+i (default: 8848)
+#       --gpu-start            first simulator GPU index (default: 0)
+#       --test-num             episodes per (task,mode) (default: 100)
+#       --seed                 base seed (st_seed = 100000*(1+seed)) (default: 0)
+#       --min-remaining-for-dup N   don't spawn a new env for a task with fewer
+#                                   remaining episodes than N (default: 8)
+#       --no-dup               strict: exactly one env per task, no duplication
+#       --dispatch-port        dispatcher TCP port (default: 8790)
+#       --http-port            dispatcher live-status HTTP port (0=off, default: 0)
 #   -h, --help
 #
 # Environment:
 #   ROBOTWIN_PATH        path to the RoboTwin repository (required)
 #   ROBOTWIN_PYTHON      python for RoboTwin (or set ROBOTWIN_ENV conda env name)
+#   DISPATCHER_PYTHON    python for the dispatcher (stdlib only; default: ROBOTWIN_PYTHON)
 #   SIM_GPU_STRIDE       stride between consecutive simulator GPUs (default: 1)
 #
-# Ctrl+C terminates all workers.
+# Ctrl+C terminates the dispatcher and all workers.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,32 +61,7 @@ ROBOTWIN_ALL_TASKS=(
 )
 
 usage() {
-    cat >&2 <<'EOF'
-Usage:
-  bash parallel_eval.sh -m <mode> -n <name> [options] <tasks...>
-
-Required:
-  -m, --mode           demo_clean | demo_randomized | all
-  -n, --name           label for log directory naming
-
-Tasks (positional): task names, "all", or a task-list file (one per line).
-
-Options:
-  -w, --num-workers    parallel workers (default: 8)
-      --host           server host (default: 127.0.0.1)
-      --port           base WebSocket port; worker i uses port+i (default: 8848)
-      --gpu-start      first simulator GPU index (default: 0)
-  -h, --help
-
-Logs are written to ./robotwin_eval_logs/<name>_<mode>_parallel_<ts>/ by default;
-override with ROBOTWIN_LOG_ROOT.
-
-Example:
-  # Launch 8 servers first (on cuda:0..7, ws 8848..8855):
-  bash scripts/deploy_multi.sh /ckpt/openwam
-  # Then run the full task list in parallel, dynamically distributed:
-  bash benchmarks/robotwin/parallel_eval.sh -m demo_clean -n run1 all
-EOF
+    sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 trim() {
@@ -129,18 +118,33 @@ SERVER_HOST="${ROBOTWIN_POLICY_HOST:-127.0.0.1}"
 PORT_BASE="${ROBOTWIN_PORT:-8848}"
 GPU_START=0
 SIM_GPU_STRIDE="${SIM_GPU_STRIDE:-1}"
+TEST_NUM=100
+BASE_SEED=0
+MIN_REMAINING_FOR_DUP=8
+NO_DUP=0
+DISPATCH_PORT=8790
+HTTP_PORT=0
+DRY_RUN=0
+DRY_RUN_SLEEP_SEC="${DRY_RUN_SLEEP_SEC:-0.2}"
 
 while (( $# > 0 )); do
     case "$1" in
-        -m|--mode)          TASK_CONFIG="$2";     shift 2 ;;
-        -n|--name)          POLICY_NAME="$2";     shift 2 ;;
-        -w|--num-workers)   NUM_WORKERS="$2";     shift 2 ;;
-        --host)             SERVER_HOST="$2";     shift 2 ;;
-        --port)             PORT_BASE="$2";       shift 2 ;;
-        --gpu-start)        GPU_START="$2";       shift 2 ;;
-        -h|--help)          usage; exit 0 ;;
-        -*)                 echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
-        *)                  break ;;
+        -m|--mode)                 TASK_CONFIG="$2";            shift 2 ;;
+        -n|--name)                 POLICY_NAME="$2";            shift 2 ;;
+        -w|--num-workers)          NUM_WORKERS="$2";            shift 2 ;;
+        --host)                    SERVER_HOST="$2";            shift 2 ;;
+        --port)                    PORT_BASE="$2";              shift 2 ;;
+        --gpu-start)               GPU_START="$2";              shift 2 ;;
+        --test-num)                TEST_NUM="$2";               shift 2 ;;
+        --seed)                    BASE_SEED="$2";              shift 2 ;;
+        --min-remaining-for-dup)   MIN_REMAINING_FOR_DUP="$2";  shift 2 ;;
+        --no-dup)                  NO_DUP=1;                    shift ;;
+        --dispatch-port)           DISPATCH_PORT="$2";          shift 2 ;;
+        --http-port)               HTTP_PORT="$2";              shift 2 ;;
+        --dry-run|--dryrun)        DRY_RUN=1;                   shift ;;
+        -h|--help)                 usage; exit 0 ;;
+        -*)                        echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
+        *)                         break ;;
     esac
 done
 
@@ -157,10 +161,12 @@ fi
 (( NUM_WORKERS > 0 )) || { echo "[ERROR] --num-workers must be > 0" >&2; exit 1; }
 (( $# > 0 )) || { echo "[ERROR] No tasks specified." >&2; usage; exit 1; }
 
-if [[ -z "${ROBOTWIN_PYTHON:-}" ]]; then
+if (( ! DRY_RUN )) && [[ -z "${ROBOTWIN_PYTHON:-}" ]]; then
     ROBOTWIN_PYTHON="$(find_conda_python "${ROBOTWIN_ENV:-robotwin}")"
 fi
-export ROBOTWIN_PYTHON
+export ROBOTWIN_PYTHON="${ROBOTWIN_PYTHON:-}"
+WORKER_PYTHON="${ROBOTWIN_PYTHON:-python3}"
+DISPATCHER_PYTHON="${DISPATCHER_PYTHON:-${ROBOTWIN_PYTHON:-python3}}"
 
 mapfile -t TASKS < <(resolve_tasks "$@")
 
@@ -168,100 +174,60 @@ timestamp="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${ROBOTWIN_LOG_ROOT:-./robotwin_eval_logs/${POLICY_NAME}_${TASK_CONFIG}_parallel_${timestamp}}"
 mkdir -p "${LOG_DIR}"
 
-# Shared work queue: workers atomically pop "task|mode" pairs from here via flock.
-QUEUE_FILE="${LOG_DIR}/.queue.txt"
-LOCK_FILE="${LOG_DIR}/.queue.lock"
-: > "${QUEUE_FILE}"
-for task in "${TASKS[@]}"; do
-    for mode in "${MODES[@]}"; do
-        printf '%s|%s\n' "${task}" "${mode}" >> "${QUEUE_FILE}"
-    done
-done
-: > "${LOCK_FILE}"
+ADDR_FILE="${LOG_DIR}/.dispatcher_addr"
+RESULTS_FILE="${LOG_DIR}/results.jsonl"
+SUMMARY_FILE="${LOG_DIR}/summary.tsv"
+STATE_FILE="${LOG_DIR}/state.json"
+DISPATCHER_LOG="${LOG_DIR}/dispatcher.log"
+rm -f "${ADDR_FILE}"
 
 TOTAL_JOBS=$(( ${#TASKS[@]} * ${#MODES[@]} ))
-
-echo "[INFO] mode=${TASK_CONFIG}  name=${POLICY_NAME}"
-echo "[INFO] workers=${NUM_WORKERS}  host=${SERVER_HOST}  port_base=${PORT_BASE}"
+echo "[INFO] mode=${TASK_CONFIG} name=${POLICY_NAME} test_num=${TEST_NUM}"
+echo "[INFO] workers=${NUM_WORKERS} host=${SERVER_HOST} port_base=${PORT_BASE} dup_theta=${MIN_REMAINING_FOR_DUP} no_dup=${NO_DUP}"
 echo "[INFO] logs=${LOG_DIR}"
 echo "[INFO] tasks (${#TASKS[@]}): ${TASKS[*]}"
-echo "[INFO] modes (${#MODES[@]}): ${MODES[*]}  total_jobs=${TOTAL_JOBS}"
-echo ""
+echo "[INFO] modes (${#MODES[@]}): ${MODES[*]} total_jobs=${TOTAL_JOBS}"
 
 # ---------------------------------------------------------------------------
-# Worker: pop task from queue, run it, repeat until queue is empty.
+# Start the dispatcher
 # ---------------------------------------------------------------------------
 
-run_worker() {
-    local worker_idx="$1"
-    local sim_gpu=$((GPU_START + worker_idx * SIM_GPU_STRIDE))
-    local port=$((PORT_BASE + worker_idx))
-    local worker_dir="${LOG_DIR}/worker${worker_idx}"
-    local worker_log="${worker_dir}/worker.log"
-    local finished_file="${worker_dir}/finished.txt"
-    local failed_file="${worker_dir}/failed.txt"
+dispatcher_args=(
+    "${SCRIPT_DIR}/dispatcher.py"
+    --host 127.0.0.1 --port "${DISPATCH_PORT}"
+    --tasks "${TASKS[@]}"
+    --modes "${MODES[@]}"
+    --test-num "${TEST_NUM}"
+    --seed "${BASE_SEED}"
+    --min-remaining-for-dup "${MIN_REMAINING_FOR_DUP}"
+    --num-slots "${NUM_WORKERS}"
+    --results "${RESULTS_FILE}"
+    --summary "${SUMMARY_FILE}"
+    --state-file "${STATE_FILE}"
+    --addr-file "${ADDR_FILE}"
+)
+(( NO_DUP )) && dispatcher_args+=(--no-dup)
+(( HTTP_PORT > 0 )) && dispatcher_args+=(--http-port "${HTTP_PORT}")
 
-    mkdir -p "${worker_dir}"
-    : > "${finished_file}"
-    : > "${failed_file}"
+"${DISPATCHER_PYTHON}" "${dispatcher_args[@]}" >"${DISPATCHER_LOG}" 2>&1 &
+DISPATCHER_PID=$!
 
-    local tag="[worker${worker_idx}@gpu${sim_gpu}:${port}]"
-    echo "${tag} started" | tee -a "${worker_log}"
-
-    while :; do
-        # Atomically pop one "task|mode" item from the shared queue.
-        # fd 200 must be opened INSIDE the $() — otherwise the redirect applies
-        # to the enclosing shell and flock sees a closed descriptor, which we
-        # verified allows two workers to grab the same task.
-        local item task mode
-        item=$({
-            flock -x 200
-            head -n1 "${QUEUE_FILE}" || true
-            tail -n +2 "${QUEUE_FILE}" > "${QUEUE_FILE}.tmp" 2>/dev/null || true
-            mv -f "${QUEUE_FILE}.tmp" "${QUEUE_FILE}" 2>/dev/null || true
-        } 200>"${LOCK_FILE}")
-
-        [[ -z "${item}" ]] && break
-        task="${item%%|*}"
-        mode="${item#*|}"
-
-        local task_log="${LOG_DIR}/${task/\//_}_${mode}.log"
-        echo "${tag} starting task=${task} mode=${mode}" | tee -a "${worker_log}"
-
-        ROBOTWIN_PORT="${port}" ROBOTWIN_POLICY_HOST="${SERVER_HOST}" \
-        bash "${SCRIPT_DIR}/single_eval.sh" \
-            "${task}" "${mode}" "${POLICY_NAME}" \
-            "${sim_gpu}" \
-            "${port}" "${SERVER_HOST}" \
-            >"${task_log}" 2>&1 \
-            && eval_exit=0 || eval_exit=$?
-
-        grep --color=never "Success rate" "${task_log}" \
-            | sed "s|^|[RESULT] ${tag} ${task} (${mode}): |" || true
-
-        if (( eval_exit == 0 )); then
-            echo "${task}|${mode}" >> "${finished_file}"
-            echo "${tag} finished task=${task} mode=${mode}" | tee -a "${worker_log}"
-        else
-            echo "${task}|${mode}" >> "${failed_file}"
-            echo "${tag} FAILED task=${task} mode=${mode} (exit ${eval_exit}). See ${task_log}" \
-                | tee -a "${worker_log}" >&2
-        fi
-    done
-
-    echo "${tag} queue empty, exiting" | tee -a "${worker_log}"
-}
+# Wait for the dispatcher to publish its address.
+for _ in $(seq 1 60); do
+    [[ -s "${ADDR_FILE}" ]] && break
+    kill -0 "${DISPATCHER_PID}" 2>/dev/null || { echo "[ERROR] dispatcher died on startup; see ${DISPATCHER_LOG}" >&2; exit 1; }
+    sleep 0.5
+done
+[[ -s "${ADDR_FILE}" ]] || { echo "[ERROR] dispatcher did not become ready; see ${DISPATCHER_LOG}" >&2; kill "${DISPATCHER_PID}" 2>/dev/null || true; exit 1; }
+DISPATCHER_ADDR="$(tr -d '[:space:]' < "${ADDR_FILE}")"
+echo "[INFO] dispatcher at ${DISPATCHER_ADDR} (pid ${DISPATCHER_PID}); log ${DISPATCHER_LOG}"
 
 # ---------------------------------------------------------------------------
-# Launch workers, wait, then aggregate.
+# Cleanup
 # ---------------------------------------------------------------------------
 
 pids=()
 
-# Recursively signal a process and all its descendants. Descendants must be
-# killed first — otherwise they get reparented to init once the parent shell
-# dies and keep running (this was the Ctrl+C leak: single_eval.sh and the
-# python simulator were outliving the worker subshell).
 kill_tree() {
     local pid=$1 sig=${2:-TERM}
     [[ -z "$pid" ]] && return
@@ -274,57 +240,85 @@ kill_tree() {
 
 cleanup() {
     trap - INT TERM
-    echo ""
-    echo "[INFO] Interrupt received. Stopping ${#pids[@]} workers..." >&2
+    set +e  # teardown must not be aborted mid-way by set -e
+    echo "" >&2
+    echo "[INFO] Interrupt received. Stopping workers + dispatcher..." >&2
     for pid in "${pids[@]}"; do kill_tree "$pid" TERM; done
-    # Give children a moment to exit cleanly, then force-kill stragglers.
-    local deadline=$((SECONDS + 5)) still_alive=1
+    kill_tree "${DISPATCHER_PID}" TERM
+    local deadline=$((SECONDS + 5))
     while (( SECONDS < deadline )); do
-        still_alive=0
-        for pid in "${pids[@]}"; do
-            kill -0 "$pid" 2>/dev/null && { still_alive=1; break; }
+        local alive=0
+        for pid in "${pids[@]}" "${DISPATCHER_PID}"; do
+            kill -0 "$pid" 2>/dev/null && { alive=1; break; }
         done
-        (( still_alive )) || break
+        (( alive )) || break
         sleep 0.2
     done
-    if (( still_alive )); then
-        echo "[INFO] Escalating to SIGKILL for survivors..." >&2
-        for pid in "${pids[@]}"; do kill_tree "$pid" KILL; done
-    fi
+    for pid in "${pids[@]}" "${DISPATCHER_PID}"; do kill_tree "$pid" KILL; done
     wait 2>/dev/null || true
-    echo "[INFO] Workers stopped." >&2
     exit 130
 }
 trap cleanup INT TERM
 
+# ---------------------------------------------------------------------------
+# Slot supervisor: relaunch episode_worker until the dispatcher says "exit".
+# ---------------------------------------------------------------------------
+
+run_supervisor() {
+    local slot_idx="$1"
+    local sim_gpu=$((GPU_START + slot_idx * SIM_GPU_STRIDE))
+    local port=$((PORT_BASE + slot_idx))
+    local worker_dir="${LOG_DIR}/worker${slot_idx}"
+    local worker_log="${worker_dir}/worker.log"
+    mkdir -p "${worker_dir}"
+
+    local tag="[worker${slot_idx}@gpu${sim_gpu}:${port}]"
+    echo "${tag} supervisor started" | tee -a "${worker_log}"
+
+    local attempt=0
+    while :; do
+        attempt=$((attempt + 1))
+        local run_log="${worker_dir}/run$(printf '%03d' "${attempt}").log"
+        if (( DRY_RUN )); then
+            "${WORKER_PYTHON}" "${SCRIPT_DIR}/episode_worker.py" --dry-run \
+                --dispatcher "${DISPATCHER_ADDR}" --node 0 --worker "${slot_idx}" --gpu "${sim_gpu}" \
+                --dry-run-sleep "${DRY_RUN_SLEEP_SEC}" >"${run_log}" 2>&1 && rc=0 || rc=$?
+        else
+            ROBOTWIN_PYTHON="${ROBOTWIN_PYTHON}" \
+            bash "${SCRIPT_DIR}/episode_eval.sh" \
+                "${DISPATCHER_ADDR}" 0 "${slot_idx}" "${sim_gpu}" "${port}" "${SERVER_HOST}" "${POLICY_NAME}" "${BASE_SEED}" \
+                >"${run_log}" 2>&1 && rc=0 || rc=$?
+            grep --color=never "Success rate" "${run_log}" \
+                | sed "s|^|[RESULT] ${tag} |" || true
+        fi
+
+        case "${rc}" in
+            0) : ;;  # job drained -> claim another task
+            3) echo "${tag} no more work; supervisor exiting" | tee -a "${worker_log}"; break ;;
+            *) echo "${tag} worker error (rc=${rc}); see ${run_log}; supervisor exiting" | tee -a "${worker_log}" >&2; break ;;
+        esac
+    done
+}
+
 for ((i = 0; i < NUM_WORKERS; i++)); do
-    run_worker "$i" &
+    run_supervisor "$i" &
     pids+=($!)
 done
 
-echo "[INFO] Launched ${NUM_WORKERS} workers. PIDs: ${pids[*]}"
-echo "[INFO] Tail worker logs:  tail -f ${LOG_DIR}/worker*/worker.log"
-echo ""
+echo "[INFO] Launched ${NUM_WORKERS} slot supervisors. PIDs: ${pids[*]}"
+echo "[INFO] Tail:  tail -f ${LOG_DIR}/worker*/worker.log   |   dispatcher: tail -f ${DISPATCHER_LOG}"
 
-wait
+# Wait for all slots to finish claiming.
+for pid in "${pids[@]}"; do wait "$pid" || true; done
 
-# Aggregate results
-FINISHED_TASKS=()
-FAILED_TASKS=()
-for ((i = 0; i < NUM_WORKERS; i++)); do
-    finished_file="${LOG_DIR}/worker${i}/finished.txt"
-    failed_file="${LOG_DIR}/worker${i}/failed.txt"
-    [[ -s "${finished_file}" ]] && mapfile -t -O "${#FINISHED_TASKS[@]}" FINISHED_TASKS < "${finished_file}"
-    [[ -s "${failed_file}" ]]   && mapfile -t -O "${#FAILED_TASKS[@]}"   FAILED_TASKS   < "${failed_file}"
-done
+# Dispatcher exits once every job hits its target; give it a moment.
+wait "${DISPATCHER_PID}" 2>/dev/null || true
+trap - INT TERM
 
 echo ""
-echo "[SUMMARY] finished=${#FINISHED_TASKS[@]}  failed=${#FAILED_TASKS[@]}  total=${TOTAL_JOBS}"
-echo "[SUMMARY] logs=${LOG_DIR}"
-
-if (( ${#FAILED_TASKS[@]} > 0 )); then
-    echo "[ERROR] Failed tasks: ${FAILED_TASKS[*]}" >&2
-    exit 1
+if [[ -f "${SUMMARY_FILE}" ]]; then
+    echo "[SUMMARY] ${SUMMARY_FILE}"
+    column -t -s $'\t' < "${SUMMARY_FILE}" || cat "${SUMMARY_FILE}"
 fi
-
-echo "[INFO] All tasks finished successfully."
+echo "[INFO] logs=${LOG_DIR}"
+echo "[INFO] Export CSV:  ${DISPATCHER_PYTHON} ${SCRIPT_DIR}/export_results_csv.py ${LOG_DIR}"
