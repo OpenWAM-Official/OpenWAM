@@ -313,6 +313,11 @@ if [[ "${NODE_RANK}" == "0" ]]; then
     )
     (( NO_DUP )) && dispatcher_args+=(--no-dup)
     (( HTTP_PORT > 0 )) && dispatcher_args+=(--http-port "${HTTP_PORT}")
+    # Optional watchdog tuning via env (see README): stall/worker/idle timeouts + give-up cap.
+    [[ -n "${STALL_TIMEOUT:-}" ]]      && dispatcher_args+=(--stall-timeout "${STALL_TIMEOUT}")
+    [[ -n "${WORKER_TIMEOUT:-}" ]]     && dispatcher_args+=(--worker-timeout "${WORKER_TIMEOUT}")
+    [[ -n "${IDLE_GRACE:-}" ]]         && dispatcher_args+=(--idle-grace "${IDLE_GRACE}")
+    [[ -n "${MAX_ATTEMPT_FACTOR:-}" ]] && dispatcher_args+=(--max-attempt-factor "${MAX_ATTEMPT_FACTOR}")
 
     "${DISPATCHER_PYTHON}" "${dispatcher_args[@]}" >"${DISPATCHER_LOG}" 2>&1 &
     DISPATCHER_PID=$!

@@ -310,24 +310,46 @@ Tasks are positional after flags. They can be task names, comma-separated task n
 
 **Useful overrides:**
 
+Scheduling / run (see also "Episode-level dynamic scheduling" above):
+
 | Variable / flag | Default | Description |
 |---|---|---|
 | `ROBOTWIN_RUN_ID` | `latest` | Shared run id used in the log path; change it for reruns. |
-| `ROBOTWIN_LOG_ROOT` | `<ckpt_dir>/robotwin_eval_logs` | Shared filesystem root for queue, sentinels, and logs. |
-| `-w`, `--num-workers` | GPU count | Number of local OpenWAM servers and RoboTwin clients per node. |
+| `ROBOTWIN_LOG_ROOT` | `<ckpt_dir>/robotwin_eval_logs` | Shared-filesystem root for the dispatcher address, `results.jsonl`, `summary.tsv`, `state.json`, and logs. |
+| `-w`, `--num-workers` | GPU count | Local OpenWAM servers + RoboTwin slot supervisors per node. |
 | `--gpu-start` | `0` | First local GPU index. |
 | `SIM_GPU_STRIDE` | `1` | Stride between worker GPUs. |
-| `PORT_BASE`, `--port` | `8848` | Per-node local port base; worker `i` uses base `+ i`. |
-| `SERVER_PYTHON`, `--server-python` | `python` | Python executable used to launch each local policy server; must have OpenWAM server dependencies installed. |
-| `SERVER_SCRIPT`, `--server-script` | `<repo>/scripts/deploy.py` | Python script used to launch each local policy server. |
+| `PORT_BASE`, `--port` | `8848` | Per-node local policy-server port base; worker `i` uses base `+ i`. |
+| `--test-num` | `100` | Episodes per `(task,mode)`. |
+| `--seed` | `0` | Base seed (`st_seed = 100000*(1+seed)`). |
+| `--min-remaining-for-dup` | `8` | θ: don't add a duplicate env to a task with fewer remaining episodes. |
+| `--no-dup` | off | One env per task, never duplicate (most reproducible). |
+| `--dispatch-port` | `8790` | Dispatcher TCP port (rank 0 binds `0.0.0.0`). |
+| `--http-port` | `0` (off) | Dispatcher live-status HTTP port; prefer `web_control.py` on DLC. |
+| `DISPATCHER_PYTHON` | `SERVER_PYTHON` | Python that runs the dispatcher (stdlib only). |
+| `DISPATCHER_ADVERTISE_HOST` | `MASTER_ADDR` / `hostname -i` | Rank-0 host written to `.dispatcher_addr` for other nodes. |
+| `STALL_TIMEOUT` env | `1800` | Abort (incomplete) after this many seconds with no dispatcher RPC. |
+| `WORKER_TIMEOUT` env | `1200` | Reclaim a silent worker's in-flight seed after this long; **must exceed one rollout**. |
+| `IDLE_GRACE` env | `120` | Abort if zero workers are connected this long while jobs remain. |
+| `MAX_ATTEMPT_FACTOR` env | `50` | Give up on a task after `target × factor` seed attempts (`0` = unlimited). |
+
+Server / deploy passthrough:
+
+| Variable / flag | Default | Description |
+|---|---|---|
+| `SERVER_PYTHON`, `--server-python` | `python` | Python used to launch each local policy server; must have OpenWAM server deps. |
+| `SERVER_SCRIPT`, `--server-script` | `<repo>/scripts/deploy.py` | Script used to launch each local policy server. |
 | `--bind-host` | `127.0.0.1` | Host passed to `scripts/deploy.py --host`. |
-| `--client-host` | `127.0.0.1` | Host passed to RoboTwin clients. Keep this local unless clients must reach a non-local server. |
+| `--client-host` | `127.0.0.1` | Host RoboTwin clients use to reach their local server. |
 | `--ckpt-name` | latest checkpoint | Specific checkpoint filename passed to `scripts/deploy.py`. |
 | `--denoise-steps` | config default | Denoising step count passed to `scripts/deploy.py`. |
 | `--schedule-type` | config default | Schedule type passed to `scripts/deploy.py`. |
+| `--execution-mode` | config default | Execution mode (`sync`/`async`) passed to `scripts/deploy.py`. |
+| `--execution-horizon` | config default | Async execution horizon passed to `scripts/deploy.py`. |
+| `--inference-delay-steps` | config default | Async inference delay passed to `scripts/deploy.py`. |
 | `--shift` | config default | Flow-matching shift passed to `scripts/deploy.py`. |
-| `--dry-run` | off | Skip OpenWAM/RoboTwin startup and only exercise DLC/shared-filesystem task assignment. |
-| `--fresh` | off | Remove stale queue/sentinel metadata for the same run id before rank 0 initializes the queue. |
+| `--dry-run` | off | Skip servers/RoboTwin; run the dispatcher + simulated workers only. |
+| `--fresh` | off | Remove this run id's stale `.dispatcher_addr` / `results.jsonl` / `summary.tsv` / `state.json` / `.done` / `run.env` before rank 0 starts. |
 
 **Shared log directory:**
 
@@ -343,48 +365,54 @@ If `ROBOTWIN_LOG_ROOT` is set:
 <ROBOTWIN_LOG_ROOT>/<name>_<mode>_dlc_<run_id>
 ```
 
-This directory must be on a shared filesystem visible to every node because it stores the queue, sentinels, summary, and logs. The task queue is represented as per-job files under `queue/pending`; workers claim jobs with an atomic same-filesystem `mv` into `queue/claimed`, avoiding concurrent edits to a shared `.queue.txt`. Summary locking still uses an atomic `mkdir` lock directory (`summary.lock.d/`) instead of `flock`, which is safer on many DLC/NFS-style shared filesystems.
+This directory must be on a shared filesystem visible to every node: rank 0
+publishes the dispatcher address to `.dispatcher_addr`, and all nodes read it,
+write per-episode records to `results.jsonl`, and read the live `state.json`.
+There is no shared file queue any more — scheduling and seed dedup live in the
+dispatcher process (rank 0), so `queue/`, `.queue_ready`, `.queue.txt`, and the
+`summary.lock.d/` summary lock are gone.
 
 **Dry-run task assignment test:**
 
-Use `--dry-run` to validate that a DLC launch can coordinate all nodes and automatically distribute jobs before spending GPU time on policy servers or RoboTwin simulators. Dry-run mode still creates the shared queue, waits for all expected node ranks to rendezvous, starts the requested number of local worker loops per node, atomically claims jobs, writes `summary.tsv`, and runs rank-0 completeness checks; it does not require `ROBOTWIN_PATH`, `ROBOTWIN_PYTHON`, `SERVER_PYTHON`, or a real checkpoint directory.
+Use `--dry-run` to validate that a launch can coordinate all nodes and
+distribute episodes before spending GPU time. Dry-run starts the rank-0
+dispatcher and simulated workers (`episode_worker.py --dry-run`, no RoboTwin),
+which sleep for each episode instead of running a simulator, then writes
+`summary.tsv` and runs the rank-0 completeness check. It needs neither
+`ROBOTWIN_PATH`/`ROBOTWIN_PYTHON`/`SERVER_PYTHON` nor a real checkpoint.
 
 ```bash
 ROBOTWIN_LOG_ROOT=/shared/path/robotwin_eval_logs \
 ROBOTWIN_RUN_ID=dryrun_$(date +%Y%m%d_%H%M%S) \
+DISPATCHER_PYTHON=python3 \
 bash benchmarks/robotwin/dlc_parallel_eval.sh \
     --dry-run \
     -m all -n dryrun -d /unused/ckpt_dir \
-    -w 8 \
+    -w 8 --test-num 20 \
     adjust_bottle open_laptop
 ```
 
-Useful dry-run knobs:
-
-| Variable | Default | Description |
-|---|---:|---|
-| `DRY_RUN_SLEEP_SEC` | `1` | Simulated duration for each claimed job, useful for observing load balancing. |
-| `DRY_RUN_BARRIER_TIMEOUT_SEC` | `QUEUE_READY_TIMEOUT_SEC` | Max time rank 0 waits for every DLC node before workers start claiming jobs. |
+`DRY_RUN_SLEEP_SEC` (default `0.5`) sets the simulated per-episode rollout time,
+useful for watching the duplication/tail-fill behavior.
 
 Important files:
 
 ```text
 <log_dir>/
-  run.env
-  summary.tsv
-  .queue.txt       # manifest/debug copy
-  queue/
-    pending/
-    claimed/
-  summary.lock.d/
-  .queue_ready
+  run.env             # frozen parameters
+  .dispatcher_addr    # rank-0 host:port the workers connect to
+  results.jsonl       # one line per completed episode (authoritative)
+  summary.tsv         # per-(task,mode): success / episodes / rate / status
+  state.json          # live snapshot (progress, live_envs, remaining, ...)
+  .done               # touched on exit -> every node reaps local workers
+  dispatcher.log      # rank 0 only
   node0/
     servers/
       server_worker0_gpu0.log
-      server_worker1_gpu1.log
     worker0/
-      worker.log
-      adjust_bottle_demo_clean.log
+      worker.log        # supervisor loop for this GPU slot
+      run001.log        # one episode_worker process (one (task,mode) assignment)
+      run002.log        # ...next assignment on this slot
   node1/
     ...
 ```
@@ -392,16 +420,19 @@ Important files:
 Useful commands:
 
 ```bash
+# Rank-0 dispatcher log (scheduling decisions, stall/abort messages)
+tail -f <log_dir>/dispatcher.log
+
 # Server log for node0 worker0
 tail -f <log_dir>/node0/servers/server_worker0_gpu0.log
 
-# Client scheduling log for node0 worker0
+# Supervisor loop for node0 slot 0
 tail -f <log_dir>/node0/worker0/worker.log
 
-# Per-task RoboTwin eval log
-tail -f <log_dir>/node0/worker0/adjust_bottle_demo_clean.log
+# Latest episode_worker process on node0 slot 0
+tail -f "$(ls -t <log_dir>/node0/worker0/run*.log | head -1)"
 
-# Task-level status table
+# Per-(task,mode) status table
 column -t -s $'\t' < <log_dir>/summary.tsv
 ```
 
@@ -463,7 +494,11 @@ bash benchmarks/robotwin/dlc_parallel_eval.sh \
 
 ### Export evaluation results to CSV
 
-Use `export_results_csv.py` after a DLC run to combine `<log_dir>/summary.tsv` and each per-task log's last `Success rate` line into a single CSV.
+Use `export_results_csv.py` after a run to produce a single CSV. For
+episode-level runs it aggregates the authoritative per-episode `results.jsonl`
+(success / episodes / step-limit hits per `(task,mode)`); if that file is absent
+(legacy whole-task runs) it falls back to `summary.tsv` plus per-task
+`Success rate` log grepping.
 
 **Invocation:**
 
@@ -488,16 +523,16 @@ The CSV columns are:
 | `requested_mode` | Original `-m`, `--mode` value. |
 | `task` | RoboTwin task name. |
 | `mode` | Concrete task config: `demo_clean` or `demo_randomized`. |
-| `node` | Node rank that ran the job. |
-| `worker` | Local worker index that ran the job. |
-| `status` | `ok` or `failed` from `summary.tsv`. |
-| `exit_code` | Task process exit code. |
-| `success_rate` | Parsed numeric success rate from the task log; blank if not found. |
-| `episodes` | Number of `Success!` / `Fail!` verdicts parsed from the task log; `0` if the log is readable but has no verdicts yet; blank if the log is missing/unreadable. |
-| `step_limit_hits` | `Fail!` episodes truncated at `step_lim` (last `step: N / M` had `N >= M`). These ran out of steps rather than the model reaching a terminal state, so they are **not necessarily model errors** — a high count means `step_lim` may be too tight for this policy (see `step_limits.yml`), not that the model is worse. Same blank-vs-`0` convention as `episodes`. |
-| `log_path` | Full path to the per-task log used for parsing. |
+| `node` | Node rank (blank for episode-level runs — a task's episodes span nodes/workers). |
+| `worker` | Local worker index (blank for episode-level runs, same reason). |
+| `status` | `ok` (target reached), `exhausted` (gave up per max-attempts), or `incomplete`. Legacy runs: `ok`/`failed`. |
+| `exit_code` | Task process exit code (blank for episode-level runs). |
+| `success_rate` | Success rate. Episode-level: `successes/episodes` from `results.jsonl` (percent). Legacy: parsed from the task log. |
+| `episodes` | Completed episodes for the `(task,mode)`. Episode-level: count in `results.jsonl`. Legacy: `Success!`/`Fail!` verdicts in the log. |
+| `step_limit_hits` | Episodes truncated at `step_lim` (ran out of steps rather than reaching a terminal state) — **not necessarily model errors**; a high count means `step_lim` may be too tight (see `step_limits.yml`). |
+| `log_path` | `results.jsonl` for episode-level runs; the per-task log for legacy runs. |
 
-The exporter also validates run completeness when `run.env` is available: duplicate `task/mode` rows, missing rows, unexpected rows, or a row-count mismatch are reported. It searches nested `node*/worker*/*.log` files when `summary.tsv` is absent and strips ANSI escape sequences before parsing `Success rate`.
+The exporter also validates completeness when `run.env` is available: episode-level runs flag any `(task,mode)` that reached fewer than `test_num` episodes; legacy runs report duplicate/missing/unexpected rows.
 
 Strict parsing mode returns a non-zero exit code if any task log is missing, does not contain a parseable success rate, or fails the completeness checks above:
 
