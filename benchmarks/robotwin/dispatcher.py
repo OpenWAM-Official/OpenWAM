@@ -84,6 +84,8 @@ class Job:
     started: bool = False
     suc: int = 0  # successful episodes among done
     step_limit_hits: int = 0
+    attempts: int = 0  # seeds ever issued (for the max-attempts safety cap)
+    exhausted: bool = False  # gave up: too many seed attempts without reaching target
 
     @property
     def remaining(self) -> int:
@@ -93,6 +95,11 @@ class Job:
     @property
     def complete(self) -> bool:
         return self.done >= self.target
+
+    @property
+    def terminal(self) -> bool:
+        """No more work will be scheduled for this job (done or gave up)."""
+        return self.complete or self.exhausted
 
 
 @dataclass
@@ -108,6 +115,8 @@ class WorkerCtx:
     probe_seed: Optional[int] = None  # seed issued, expert-check pending
     commit_seed: Optional[int] = None  # seed committed, rollout in progress
     departed: bool = False  # live_envs already released (idempotency guard)
+    closed: bool = False  # connection fully torn down (active-count idempotency)
+    last_seen: float = 0.0  # last RPC time (for hung-worker reclaim)
 
     @property
     def tag(self) -> str:
@@ -133,6 +142,8 @@ class Scheduler:
         no_dup: bool = False,
         results_path: Optional[str] = None,
         per_job_target: Optional[Dict[JobKey, int]] = None,
+        max_attempt_factor: float = 50.0,
+        append_results: bool = False,
     ) -> None:
         st_seed = 100_000 * (1 + base_seed)  # mirrors RoboTwin main()
         self._jobs: Dict[JobKey, Job] = {}
@@ -142,21 +153,40 @@ class Scheduler:
         self._theta = max(0, int(min_remaining_for_dup))
         self._num_slots = max(1, int(num_slots))
         self._no_dup = bool(no_dup)
+        # H3 guard: cap seeds tried per job so a task whose expert-check almost
+        # never passes (misconfig / too hard) can't probe forever. 0/None = off.
+        self._max_attempt_factor = float(max_attempt_factor) if max_attempt_factor else 0.0
         self._lock = threading.Lock()
         self._next_wid = 0
         self._workers: Dict[int, WorkerCtx] = {}
+        # Liveness bookkeeping for the watchdog (H1/H2).
+        self._active = 0  # open worker connections
+        self._active_zero_since: Optional[float] = time.time()  # since when active==0
+        self._last_activity = time.time()  # last RPC of any kind
         self._results_path = results_path
-        self._results_fh = open(results_path, "a", encoding="utf-8") if results_path else None
-        # Seeds ever issued per job — asserts global dedup in tests / debugging.
-        self._issued: Dict[JobKey, set] = {key: set() for key in self._jobs}
+        if results_path and not append_results and os.path.exists(results_path) and os.path.getsize(results_path) > 0:
+            raise SystemExit(
+                f"[dispatcher] refusing to append to non-empty {results_path} (would double-count on restart). "
+                "Use a fresh --results path / run id, or pass --append-results to override."
+            )
+        self._results_fh = open(results_path, "a" if append_results else "w", encoding="utf-8") if results_path else None
+
+    def _max_attempts_for(self, job: Job) -> Optional[int]:
+        if self._max_attempt_factor <= 0:
+            return None
+        return max(job.target, math.ceil(job.target * self._max_attempt_factor))
 
     # -- worker lifecycle ---------------------------------------------------
 
     def new_worker(self, node: int = -1, worker: int = -1, gpu: int = -1, port: int = -1) -> WorkerCtx:
         with self._lock:
             ctx = WorkerCtx(wid=self._next_wid, node=node, worker=worker, gpu=gpu, port=port)
+            ctx.last_seen = time.time()
             self._next_wid += 1
             self._workers[ctx.wid] = ctx
+            self._active += 1
+            self._active_zero_since = None
+            self._last_activity = ctx.last_seen
             return ctx
 
     def _cap(self, job: Job) -> int:
@@ -185,7 +215,8 @@ class Scheduler:
             ctx.departed = False
 
             rescue = [
-                j for j in self._jobs.values() if j.started and j.remaining > 0 and j.live_envs == 0
+                j for j in self._jobs.values()
+                if j.started and not j.exhausted and j.remaining > 0 and j.live_envs == 0
             ]
             if rescue:
                 job = min(rescue, key=lambda j: (-j.remaining, j.order))
@@ -200,7 +231,7 @@ class Scheduler:
             best = None
             best_score = None
             for j in self._jobs.values():
-                if j.remaining <= 0 or self._no_dup:
+                if j.remaining <= 0 or j.exhausted or self._no_dup:
                     continue
                 if self._theta > 0 and j.remaining < self._theta:
                     continue
@@ -226,21 +257,37 @@ class Scheduler:
 
     def request_seed(self, ctx: WorkerCtx) -> dict:
         with self._lock:
+            self._touch_locked(ctx)
             job = self._job_of(ctx)
-            if job is None or job.done + job.committed >= job.target:
+            if job is None:
                 self._depart_locked(ctx)
                 return {"drain": True}
-            seed = job.next_seed
+            # A still-outstanding probe seed means the worker re-requested without
+            # reporting (protocol slip / crash-in-expert-check): reclaim it so
+            # `probing` doesn't leak.
+            if ctx.probe_seed is not None:
+                job.probing -= 1
+                ctx.probe_seed = None
+            if job.done + job.committed >= job.target or job.exhausted:
+                self._depart_locked(ctx)
+                return {"drain": True}
+            # H3: bail out of a task that keeps failing the expert check forever.
+            cap = self._max_attempts_for(job)
+            if cap is not None and job.attempts >= cap and job.done + job.committed < job.target:
+                job.exhausted = True
+                self._depart_locked(ctx)
+                return {"drain": True}
+            seed = job.next_seed  # monotonic -> globally unique by construction
             job.next_seed += 1
+            job.attempts += 1
             job.probing += 1
             ctx.probe_seed = seed
-            assert seed not in self._issued[ctx.key], f"seed {seed} reissued for {ctx.key}"
-            self._issued[ctx.key].add(seed)
             return {"seed": seed}
 
     def report_probe(self, ctx: WorkerCtx, seed: int, valid: bool) -> dict:
         """Expert-check failed (invalid seed). Valid probes go via request_commit."""
         with self._lock:
+            self._touch_locked(ctx)
             job = self._job_of(ctx)
             if job is not None and ctx.probe_seed is not None:
                 job.probing -= 1
@@ -250,19 +297,23 @@ class Scheduler:
     def request_commit(self, ctx: WorkerCtx, seed: int) -> dict:
         """Expert-check passed; decide whether this worker should run the rollout."""
         with self._lock:
+            self._touch_locked(ctx)
             job = self._job_of(ctx)
             if job is not None and ctx.probe_seed is not None:
                 job.probing -= 1
+            probed = ctx.probe_seed
             ctx.probe_seed = None
             if job is None or job.done + job.committed >= job.target:
                 self._depart_locked(ctx)
                 return {"commit": False}
             job.committed += 1
-            ctx.commit_seed = seed
+            # Trust our own issued seed, not the client-supplied argument.
+            ctx.commit_seed = probed if probed is not None else seed
             return {"commit": True}
 
     def report_result(self, ctx: WorkerCtx, seed: int, success: bool, step_limit_hit: bool = False) -> dict:
         with self._lock:
+            self._touch_locked(ctx)
             job = self._job_of(ctx)
             if job is not None and ctx.commit_seed is not None:
                 job.committed -= 1
@@ -271,7 +322,7 @@ class Scheduler:
                     job.suc += 1
                 if step_limit_hit:
                     job.step_limit_hits += 1
-                self._persist_result_locked(ctx, job, seed, success, step_limit_hit)
+                self._persist_result_locked(ctx, job, ctx.commit_seed, success, step_limit_hit)
             ctx.commit_seed = None
             return {"ok": True}
 
@@ -279,6 +330,7 @@ class Scheduler:
         """Connection dropped: return in-flight seed and free the env slot."""
         with self._lock:
             self._release_locked(ctx)
+            self._close_conn_locked(ctx)
 
     # -- internal -----------------------------------------------------------
 
@@ -312,6 +364,58 @@ class Scheduler:
         ctx.key = None
         ctx.departed = True
 
+    def _close_conn_locked(self, ctx: WorkerCtx) -> None:
+        """Idempotently drop a worker connection from the active count."""
+        if ctx.closed:
+            return
+        ctx.closed = True
+        self._workers.pop(ctx.wid, None)
+        self._active = max(0, self._active - 1)
+        if self._active == 0:
+            self._active_zero_since = time.time()
+
+    def _touch_locked(self, ctx: WorkerCtx) -> None:
+        now = time.time()
+        ctx.last_seen = now
+        self._last_activity = now
+
+    def reclaim_stalled(self, worker_timeout: float) -> int:
+        """H2: a worker whose socket is still open but that has sent no RPC for
+        ``worker_timeout`` (sim hang / GPU wedge) is presumed dead — return its
+        in-flight probe/commit and free its env slot so other workers can finish
+        the job. The seed it was running is abandoned (a fresh one is issued);
+        a late report from a revived worker is a no-op (its ctx is unbound)."""
+        if worker_timeout <= 0:
+            return 0
+        now = time.time()
+        reclaimed = 0
+        with self._lock:
+            for ctx in list(self._workers.values()):
+                if ctx.departed or ctx.closed:
+                    continue
+                if (ctx.commit_seed is not None or ctx.probe_seed is not None) and (now - ctx.last_seen) > worker_timeout:
+                    self._release_locked(ctx)  # returns in-flight, frees live_envs
+                    reclaimed += 1
+        return reclaimed
+
+    def stall_reason(self, stall_timeout: float, idle_grace: float) -> Optional[str]:
+        """Return a human string if the run is wedged (nothing will progress),
+        else None. Used by the watchdog to exit with an error instead of the
+        old silent infinite self-spin (H1/H2)."""
+        now = time.time()
+        with self._lock:
+            if all(j.terminal for j in self._jobs.values()):
+                return None
+            unfinished = sum(1 for j in self._jobs.values() if not j.terminal)
+            if self._active == 0 and self._active_zero_since is not None:
+                idle = now - self._active_zero_since
+                if idle > idle_grace:
+                    return f"no active workers for {int(idle)}s with {unfinished} unfinished job(s)"
+            silent = now - self._last_activity
+            if stall_timeout > 0 and silent > stall_timeout:
+                return f"no dispatcher activity for {int(silent)}s with {unfinished} unfinished job(s)"
+        return None
+
     def _persist_result_locked(self, ctx: WorkerCtx, job: Job, seed: int, success: bool, slh: bool) -> None:
         if self._results_fh is None:
             return
@@ -331,6 +435,12 @@ class Scheduler:
     # -- introspection ------------------------------------------------------
 
     def is_complete(self) -> bool:
+        """True when every job is terminal — reached its target OR gave up
+        (exhausted). Exhausted counts as terminal so the run always ends."""
+        with self._lock:
+            return all(j.terminal for j in self._jobs.values())
+
+    def all_targets_met(self) -> bool:
         with self._lock:
             return all(j.complete for j in self._jobs.values())
 
@@ -351,16 +461,22 @@ class Scheduler:
                         "suc": j.suc,
                         "step_limit_hits": j.step_limit_hits,
                         "remaining": j.remaining,
+                        "attempts": j.attempts,
+                        "exhausted": j.exhausted,
                     }
                 )
-            return {"jobs": jobs, "complete": all(j.complete for j in self._jobs.values())}
+            return {
+                "jobs": jobs,
+                "complete": all(j.terminal for j in self._jobs.values()),
+                "active_workers": self._active,
+            }
 
     def write_summary(self, path: str) -> None:
         with self._lock:
             lines = ["task\tmode\tsuccess\tepisodes\tsuccess_rate\tstep_limit_hits\tstatus"]
             for j in self._jobs.values():
                 rate = (j.suc / j.done) if j.done else 0.0
-                status = "ok" if j.complete else "incomplete"
+                status = "ok" if j.complete else ("exhausted" if j.exhausted else "incomplete")
                 lines.append(
                     f"{j.task}\t{j.mode}\t{j.suc}\t{j.done}\t{rate:.4f}\t{j.step_limit_hits}\t{status}"
                 )
@@ -801,6 +917,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     ap.add_argument("--http-port", type=int, default=0, help="serve live status HTML/JSON (0=off)")
     ap.add_argument("--state-file", default=None, help="periodically write snapshot JSON here")
+    ap.add_argument("--done-file", default=None,
+                    help="touch this on exit (complete/stall) so all nodes can tear down local workers")
+    # Liveness / watchdog (H1/H2/H3): keep the dispatcher from ever hanging silently.
+    ap.add_argument("--stall-timeout", type=float, default=1800.0,
+                    help="exit (incomplete) if no RPC of any kind for this many seconds (0=off)")
+    ap.add_argument("--worker-timeout", type=float, default=1200.0,
+                    help="reclaim a worker's in-flight seed if it is silent this long — must exceed one rollout (0=off)")
+    ap.add_argument("--idle-grace", type=float, default=120.0,
+                    help="exit (incomplete) if zero workers are connected for this long while jobs remain")
+    ap.add_argument("--max-attempt-factor", type=float, default=50.0,
+                    help="give up on a task after target*factor seed attempts (0=unlimited)")
+    ap.add_argument("--append-results", action="store_true",
+                    help="append to an existing results.jsonl instead of refusing (risks double-count)")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -817,6 +946,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         num_slots=args.num_slots,
         no_dup=args.no_dup,
         results_path=args.results,
+        max_attempt_factor=args.max_attempt_factor,
+        append_results=args.append_results,
     )
     disp = Dispatcher(sched, host=args.host, port=args.port)
     disp.start()
@@ -840,8 +971,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 json.dump(sched.snapshot(), f)
             os.replace(tmp, args.state_file)
 
+    stalled: Optional[str] = None
     try:
         while not sched.is_complete():
+            sched.reclaim_stalled(args.worker_timeout)  # H2: free hung workers' seeds
+            stalled = sched.stall_reason(args.stall_timeout, args.idle_grace)  # H1/H2 watchdog
+            if stalled:
+                print(f"[dispatcher] STALL: {stalled} — aborting instead of hanging", flush=True)
+                break
             _write_state()
             time.sleep(0.5)
     except KeyboardInterrupt:
@@ -853,6 +990,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         if status is not None:
             status.shutdown()
         disp.shutdown()
+        if args.done_file:  # signal every node to tear down local workers
+            try:
+                with open(args.done_file, "w", encoding="utf-8") as f:
+                    f.write("stall\n" if stalled else "complete\n")
+            except OSError:
+                pass
+
+    if stalled:
+        print(f"[dispatcher] ABORTED (stall): {stalled}", flush=True)
+        return 2
+    if not sched.all_targets_met():
+        print("[dispatcher] complete with exhausted job(s) — see summary status column", flush=True)
+        return 3
     print("[dispatcher] complete")
     return 0
 

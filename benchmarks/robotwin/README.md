@@ -68,6 +68,24 @@ New flags (both scripts):
 | `--dispatch-port` | `8790` | Dispatcher TCP port. |
 | `--http-port` | `0` | Serve a live status page (`/` HTML, `/api/state` JSON); `0` = off. |
 
+Liveness / watchdog (the dispatcher never hangs silently):
+
+- **Stall abort** — if no worker sends any request for `--stall-timeout` seconds
+  (default 1800), or zero workers are connected for `--idle-grace` seconds
+  (default 120) while jobs remain, the dispatcher writes an `incomplete`
+  `summary.tsv` and exits non-zero (2) instead of self-spinning forever (covers
+  every slot retiring, or all workers going silent).
+- **Hung-worker reclaim** — a worker whose socket is still open but silent for
+  `--worker-timeout` seconds (default 1200; must exceed one rollout) has its
+  in-flight seed returned and env slot freed so others finish the job. A late
+  report from a revived worker is ignored (no double count).
+- **Give-up cap** — a task whose expert-check almost never passes stops after
+  `target × --max-attempt-factor` seed attempts (default 50; `0` = unlimited),
+  is marked `exhausted` in `summary.tsv`, and the run still terminates (exit 3).
+- On exit (complete / exhausted / stall) the dispatcher touches a shared
+  `.done` file; each node's launcher reaps its local (even wedged) workers on
+  that signal, so no node's `wait` hangs on a stuck sim process.
+
 Determinism note: the first `test_num` valid episodes of each task use the same
 scenes as an upstream single-process run (seeds are handed out in order and a
 seed's validity is policy-independent); only the assignment of episodes to GPUs

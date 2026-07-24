@@ -178,8 +178,9 @@ ADDR_FILE="${LOG_DIR}/.dispatcher_addr"
 RESULTS_FILE="${LOG_DIR}/results.jsonl"
 SUMMARY_FILE="${LOG_DIR}/summary.tsv"
 STATE_FILE="${LOG_DIR}/state.json"
+DONE_FILE="${LOG_DIR}/.done"
 DISPATCHER_LOG="${LOG_DIR}/dispatcher.log"
-rm -f "${ADDR_FILE}"
+rm -f "${ADDR_FILE}" "${DONE_FILE}"
 
 TOTAL_JOBS=$(( ${#TASKS[@]} * ${#MODES[@]} ))
 echo "[INFO] mode=${TASK_CONFIG} name=${POLICY_NAME} test_num=${TEST_NUM}"
@@ -205,6 +206,7 @@ dispatcher_args=(
     --summary "${SUMMARY_FILE}"
     --state-file "${STATE_FILE}"
     --addr-file "${ADDR_FILE}"
+    --done-file "${DONE_FILE}"
 )
 (( NO_DUP )) && dispatcher_args+=(--no-dup)
 (( HTTP_PORT > 0 )) && dispatcher_args+=(--http-port "${HTTP_PORT}")
@@ -308,8 +310,17 @@ done
 echo "[INFO] Launched ${NUM_WORKERS} slot supervisors. PIDs: ${pids[*]}"
 echo "[INFO] Tail:  tail -f ${LOG_DIR}/worker*/worker.log   |   dispatcher: tail -f ${DISPATCHER_LOG}"
 
+# Reaper: when the dispatcher signals it is finished (complete OR stall/abort),
+# kill any straggler/wedged supervisors so `wait` below can never hang on a
+# hung sim process.
+supervisor_pids=("${pids[@]}")
+( while [[ ! -f "${DONE_FILE}" ]]; do sleep 2; done
+  for pid in "${supervisor_pids[@]}"; do kill_tree "$pid" TERM; done ) &
+REAPER_PID=$!
+
 # Wait for all slots to finish claiming.
 for pid in "${pids[@]}"; do wait "$pid" || true; done
+kill_tree "${REAPER_PID}" TERM 2>/dev/null || true
 
 # Dispatcher exits once every job hits its target; give it a moment.
 wait "${DISPATCHER_PID}" 2>/dev/null || true

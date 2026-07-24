@@ -13,6 +13,8 @@ import os
 import socket
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import dispatcher as D  # noqa: E402
@@ -240,6 +242,91 @@ def test_commit_false_at_boundary_discards_extra_valid_scene():
         assert sched.request_commit(c2, r2["seed"])["commit"] is False
     assert sched.snapshot()["jobs"][0]["done"] == 1
     assert sched.is_complete()
+
+
+# ---------------------------------------------------------------------------
+# liveness / watchdog (H1/H2/H3)
+# ---------------------------------------------------------------------------
+
+
+def test_h3_max_attempts_exhausts_unsolvable_job_and_completes():
+    # Expert never passes; without a cap this would probe forever. factor=2,
+    # target=5 -> max_attempts=10, after which the job is marked exhausted and
+    # is_complete() becomes True so the run terminates.
+    sched = D.Scheduler([("t", "m")], test_num=5, max_attempt_factor=2.0)
+    ran = _drain_one_worker(sched, ("t", "m"), valid=False, success=False)
+    assert ran == []
+    j = sched.snapshot()["jobs"][0]
+    assert j["exhausted"] is True and j["done"] == 0
+    assert j["attempts"] == 10  # target(5) * factor(2)
+    assert sched.is_complete()  # terminal via exhaustion
+    assert not sched.all_targets_met()
+
+
+def test_max_attempt_factor_zero_disables_cap():
+    sched = D.Scheduler([("t", "m")], test_num=1, max_attempt_factor=0.0)
+    # Odd-only valid; must still collect the 1 target valid without ever giving up.
+    ran = _drain_one_worker(sched, ("t", "m"), valid=lambda s: s % 2 == 1, success=True)
+    assert len(ran) == 1
+    assert sched.is_complete() and sched.all_targets_met()
+
+
+def test_reclaim_stalled_returns_committed_and_frees_env():
+    sched = D.Scheduler([("t", "m")], test_num=5)
+    c1 = sched.new_worker()
+    sched.assign_task(c1)
+    r = sched.request_seed(c1)
+    sched.request_commit(c1, r["seed"])  # committed +=1, live_envs=1
+    # worker_timeout=0 would be a no-op; force reclaim by making it hung "long ago".
+    c1.last_seen -= 10_000
+    reclaimed = sched.reclaim_stalled(worker_timeout=60)
+    assert reclaimed == 1
+    j = sched.snapshot()["jobs"][0]
+    assert j["committed"] == 0 and j["live_envs"] == 0 and j["done"] == 0
+    # A fresh worker can now rescue the job to completion.
+    c2 = sched.new_worker()
+    assert sched.assign_task(c2)["action"] == "run"
+
+
+def test_active_worker_tracking_and_stall_reason_when_all_gone():
+    sched = D.Scheduler([("t", "m")], test_num=5)
+    c1 = sched.new_worker()
+    sched.assign_task(c1)
+    assert sched.snapshot()["active_workers"] == 1
+    # Not stalled while a worker is connected.
+    assert sched.stall_reason(stall_timeout=1e9, idle_grace=1e9) is None
+    sched.release(c1)  # connection closes; no worker left, job unfinished
+    assert sched.snapshot()["active_workers"] == 0
+    # idle_grace=0 -> immediately reports the wedge instead of hanging.
+    reason = sched.stall_reason(stall_timeout=1e9, idle_grace=0.0)
+    assert reason and "no active workers" in reason
+
+
+def test_no_stall_reason_when_complete():
+    sched = D.Scheduler([("t", "m")], test_num=2)
+    _drain_one_worker(sched, ("t", "m"), valid=True, success=True)
+    assert sched.stall_reason(stall_timeout=0.0, idle_grace=0.0) is None
+
+
+def test_request_seed_reclaims_abandoned_probe_no_leak():
+    # Worker requests a seed then requests again without reporting -> probing
+    # must not leak (stays 1, not 2).
+    sched = D.Scheduler([("t", "m")], test_num=5)
+    c = sched.new_worker()
+    sched.assign_task(c)
+    sched.request_seed(c)
+    sched.request_seed(c)
+    assert sched.snapshot()["jobs"][0]["probing"] == 1
+
+
+def test_results_append_guard_refuses_nonempty(tmp_path):
+    p = tmp_path / "results.jsonl"
+    p.write_text('{"task":"t"}\n', encoding="utf-8")
+    with pytest.raises(SystemExit):
+        D.Scheduler([("t", "m")], test_num=1, results_path=str(p))
+    # append_results=True overrides.
+    sched = D.Scheduler([("t", "m")], test_num=1, results_path=str(p), append_results=True)
+    sched.close()
 
 
 # ---------------------------------------------------------------------------

@@ -240,6 +240,7 @@ ADDR_FILE="${LOG_DIR}/.dispatcher_addr"
 RESULTS_FILE="${LOG_DIR}/results.jsonl"
 SUMMARY_FILE="${LOG_DIR}/summary.tsv"
 STATE_FILE="${LOG_DIR}/state.json"
+DONE_FILE="${LOG_DIR}/.done"
 DISPATCHER_LOG="${LOG_DIR}/dispatcher.log"
 
 server_pids=()
@@ -282,7 +283,7 @@ mkdir -p "${NODE_DIR}" "${SERVER_LOG_DIR}"
 
 if [[ "${NODE_RANK}" == "0" ]]; then
     if (( FRESH_RUN )); then
-        rm -f "${ADDR_FILE}" "${RESULTS_FILE}" "${SUMMARY_FILE}" "${STATE_FILE}" "${LOG_DIR}/run.env"
+        rm -f "${ADDR_FILE}" "${RESULTS_FILE}" "${SUMMARY_FILE}" "${STATE_FILE}" "${DONE_FILE}" "${LOG_DIR}/run.env"
     elif [[ -f "${ADDR_FILE}" ]]; then
         echo "[rank0] ERROR: stale run metadata at ${LOG_DIR} (${ADDR_FILE})." >&2
         echo "[rank0] Use ROBOTWIN_RUN_ID=<new_id> or pass --fresh." >&2
@@ -308,6 +309,7 @@ if [[ "${NODE_RANK}" == "0" ]]; then
         --num-slots "$(( NNODES * NUM_WORKERS ))"
         --results "${RESULTS_FILE}" --summary "${SUMMARY_FILE}"
         --state-file "${STATE_FILE}" --addr-file "${ADDR_FILE}"
+        --done-file "${DONE_FILE}"
     )
     (( NO_DUP )) && dispatcher_args+=(--no-dup)
     (( HTTP_PORT > 0 )) && dispatcher_args+=(--http-port "${HTTP_PORT}")
@@ -408,8 +410,19 @@ for ((i = 0; i < NUM_WORKERS; i++)); do
 done
 echo "[node${NODE_RANK}] launched ${NUM_WORKERS} slot supervisors: ${worker_pids[*]}"
 
+# Reaper: once rank0's dispatcher signals done (complete OR stall/abort) it
+# touches the shared DONE_FILE; every node then tears down its local (possibly
+# wedged) workers so no node's `wait` hangs on a stuck sim process.
+reaper_supervisors=("${worker_pids[@]}")
+( trap - EXIT INT TERM
+  while [[ ! -f "${DONE_FILE}" ]]; do sleep 2; done
+  for pid in "${reaper_supervisors[@]}"; do kill_tree "${pid}" TERM; done ) &
+REAPER_PID=$!
+
 for pid in "${worker_pids[@]}"; do wait "${pid}" || true; done
 worker_pids=()
+kill_tree "${REAPER_PID}" TERM 2>/dev/null || true
+REAPER_PID=""
 echo "[node${NODE_RANK}] local supervisors finished"
 
 # ---------------------------------------------------------------------------
