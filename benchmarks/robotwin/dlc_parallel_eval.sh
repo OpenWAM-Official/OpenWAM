@@ -34,6 +34,7 @@
 #   ROBOTWIN_PYTHON      Python for RoboTwin (or set ROBOTWIN_ENV)
 #   ROBOTWIN_RUN_ID      shared run id; default: latest
 #   ROBOTWIN_LOG_ROOT    shared log root; default: <ckpt_dir>/robotwin_eval_logs
+#   ROBOTWIN_TEST_NUM    episodes per (task,mode); default: 100 (--test-num overrides)
 #   SERVER_PYTHON        Python used to launch local policy servers; default: python
 #   DISPATCHER_PYTHON    Python for the dispatcher (stdlib only); default: SERVER_PYTHON
 #   DISPATCHER_ADVERTISE_HOST  rank0 host advertised to other nodes (default: MASTER_ADDR / hostname -i)
@@ -160,7 +161,7 @@ SERVER_BIND_HOST="${SERVER_BIND_HOST:-127.0.0.1}"
 SERVER_CLIENT_HOST="${SERVER_CLIENT_HOST:-127.0.0.1}"
 SERVER_READY_TIMEOUT_SEC="${SERVER_READY_TIMEOUT_SEC:-900}"
 QUEUE_READY_TIMEOUT_SEC="${QUEUE_READY_TIMEOUT_SEC:-600}"
-TEST_NUM=100
+TEST_NUM="${ROBOTWIN_TEST_NUM:-100}"   # env-overridable (legacy single/whole-task flow); --test-num still wins
 BASE_SEED=0
 MIN_REMAINING_FOR_DUP=8
 NO_DUP=0
