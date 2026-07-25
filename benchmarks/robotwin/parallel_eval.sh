@@ -319,7 +319,8 @@ echo "[INFO] Tail:  tail -f ${LOG_DIR}/worker*/worker.log   |   dispatcher: tail
 # kill any straggler/wedged supervisors so `wait` below can never hang on a
 # hung sim process.
 supervisor_pids=("${pids[@]}")
-( while [[ ! -f "${DONE_FILE}" ]]; do sleep 2; done
+( trap - INT TERM
+  while [[ ! -f "${DONE_FILE}" ]]; do sleep 2; done
   for pid in "${supervisor_pids[@]}"; do kill_tree "$pid" TERM; done ) &
 REAPER_PID=$!
 
