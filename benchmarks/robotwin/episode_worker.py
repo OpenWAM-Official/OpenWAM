@@ -44,7 +44,7 @@ import dispatcher as D  # noqa: E402  (colocated module; stdlib-only)
 from eval_policy_wrapper import bootstrap_robotwin_module  # noqa: E402
 
 
-def _make_dispatcher_eval_policy(module, client: "D.DispatcherClient"):
+def _make_dispatcher_eval_policy(module, client: "D.DispatcherClient", heartbeat_every: int = 50):
     """Build a drop-in replacement for ``module.eval_policy`` that pulls seeds
     from ``client`` instead of running the ``while succ_seed < test_num`` loop.
 
@@ -135,6 +135,10 @@ def _make_dispatcher_eval_policy(module, client: "D.DispatcherClient"):
             while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
                 observation = TASK_ENV.get_obs()
                 eval_func(TASK_ENV, model, observation)
+                # Keep-alive so a long rollout (no other RPC is sent mid-episode)
+                # is not mistaken for a hung worker by the dispatcher watchdog.
+                if TASK_ENV.take_action_cnt % heartbeat_every == 0:
+                    client.heartbeat()
                 if TASK_ENV.eval_success:
                     succ = True
                     break
@@ -201,6 +205,7 @@ def _run_dry(client: "D.DispatcherClient", args) -> int:
             continue
         if not client.request_commit(seed).get("commit"):
             break
+        client.heartbeat()  # exercise the keep-alive path (real rollout sends these periodically)
         time.sleep(args.dry_run_sleep)
         client.report_result(seed, success=(rng.random() < args.dry_run_success_prob))
     return D.EXIT_RELAUNCH

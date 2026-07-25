@@ -307,6 +307,34 @@ def test_active_worker_tracking_and_stall_reason_when_all_gone():
     assert reason and "no active workers" in reason
 
 
+def test_h4_no_false_stall_before_any_worker_connects():
+    # Regression: the dispatcher comes up minutes before the first worker (the
+    # server loads a big model first). With _active_zero_since starting at now()
+    # the idle-grace watchdog would abort the whole run before anyone connects.
+    sched = D.Scheduler([("t", "m")], test_num=5)
+    assert sched.snapshot()["active_workers"] == 0
+    # Even with idle_grace=0, no worker has EVER connected -> must not stall.
+    assert sched.stall_reason(stall_timeout=1e9, idle_grace=0.0) is None
+    # Only after a worker connects and then all leave does idle-grace arm.
+    c = sched.new_worker()
+    sched.assign_task(c)
+    sched.release(c)
+    assert sched.stall_reason(stall_timeout=1e9, idle_grace=0.0) is not None
+
+
+def test_heartbeat_refreshes_liveness_so_slow_rollout_is_not_reclaimed():
+    sched = D.Scheduler([("t", "m")], test_num=5)
+    c = sched.new_worker()
+    sched.assign_task(c)
+    r = sched.request_seed(c)
+    sched.request_commit(c, r["seed"])  # committed; now "rolling out"
+    c.last_seen -= 10_000  # pretend a long time passed mid-rollout
+    # A heartbeat refreshes last_seen, so reclaim must NOT fire.
+    sched.heartbeat(c)
+    assert sched.reclaim_stalled(worker_timeout=60) == 0
+    assert sched.snapshot()["jobs"][0]["committed"] == 1
+
+
 def test_no_stall_reason_when_complete():
     sched = D.Scheduler([("t", "m")], test_num=2)
     _drain_one_worker(sched, ("t", "m"), valid=True, success=True)

@@ -75,10 +75,12 @@ Liveness / watchdog (the dispatcher never hangs silently):
   (default 120) while jobs remain, the dispatcher writes an `incomplete`
   `summary.tsv` and exits non-zero (2) instead of self-spinning forever (covers
   every slot retiring, or all workers going silent).
-- **Hung-worker reclaim** — a worker whose socket is still open but silent for
-  `--worker-timeout` seconds (default 1200; must exceed one rollout) has its
-  in-flight seed returned and env slot freed so others finish the job. A late
-  report from a revived worker is ignored (no double count).
+- **Hung-worker reclaim** — a worker emits a keep-alive heartbeat every ~50
+  rollout steps, so a genuinely hung one (socket open but silent for
+  `--worker-timeout` seconds, default 1200) has its in-flight seed returned and
+  env slot freed for others. Thanks to the heartbeat this need only exceed ~50
+  inference steps, not a whole episode. A late report from a revived worker is
+  ignored (no double count).
 - **Give-up cap** — a task whose expert-check almost never passes stops after
   `target × --max-attempt-factor` seed attempts (default 50; `0` = unlimited),
   is marked `exhausted` in `summary.tsv`, and the run still terminates (exit 3).
@@ -329,7 +331,7 @@ Scheduling / run (see also "Episode-level dynamic scheduling" above):
 | `DISPATCHER_PYTHON` | `SERVER_PYTHON` | Python that runs the dispatcher (stdlib only). |
 | `DISPATCHER_ADVERTISE_HOST` | `MASTER_ADDR` / `hostname -i` | Rank-0 host written to `.dispatcher_addr` for other nodes. |
 | `STALL_TIMEOUT` env | `1800` | Abort (incomplete) after this many seconds with no dispatcher RPC. |
-| `WORKER_TIMEOUT` env | `1200` | Reclaim a silent worker's in-flight seed after this long; **must exceed one rollout**. |
+| `WORKER_TIMEOUT` env | `1200` | Reclaim a worker silent (no heartbeat) this long; need only exceed ~50 inference steps, not a whole episode. |
 | `IDLE_GRACE` env | `120` | Abort if zero workers are connected this long while jobs remain. |
 | `MAX_ATTEMPT_FACTOR` env | `50` | Give up on a task after `target × factor` seed attempts (`0` = unlimited). |
 

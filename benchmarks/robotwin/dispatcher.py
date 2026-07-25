@@ -161,7 +161,13 @@ class Scheduler:
         self._workers: Dict[int, WorkerCtx] = {}
         # Liveness bookkeeping for the watchdog (H1/H2).
         self._active = 0  # open worker connections
-        self._active_zero_since: Optional[float] = time.time()  # since when active==0
+        # None until at least one worker has connected AND then all left. Must NOT
+        # start at now(): the dispatcher comes up minutes before the first worker
+        # (servers load a multi-GB model first), and a non-None value here would
+        # let the idle-grace watchdog false-abort the whole run before any worker
+        # ever connects (H4). new_worker() clears it; _close_conn_locked() stamps
+        # it only when active drops back to 0.
+        self._active_zero_since: Optional[float] = None
         self._last_activity = time.time()  # last RPC of any kind
         self._results_path = results_path
         if results_path and not append_results and os.path.exists(results_path) and os.path.getsize(results_path) > 0:
@@ -325,6 +331,14 @@ class Scheduler:
                 self._persist_result_locked(ctx, job, ctx.commit_seed, success, step_limit_hit)
             ctx.commit_seed = None
             return {"ok": True}
+
+    def heartbeat(self, ctx: WorkerCtx) -> dict:
+        """Keep-alive during a long rollout (no other RPC is sent then). Refreshes
+        liveness so a legitimately-slow episode is not mistaken for a hung worker
+        by reclaim_stalled / the stall watchdog."""
+        with self._lock:
+            self._touch_locked(ctx)
+        return {"ok": True}
 
     def release(self, ctx: WorkerCtx) -> None:
         """Connection dropped: return in-flight seed and free the env slot."""
@@ -531,6 +545,8 @@ class _Handler(socketserver.StreamRequestHandler):
             return {"ok": True}
         if t == "request_task":
             return sched.assign_task(ctx)
+        if t == "heartbeat":
+            return sched.heartbeat(ctx)
         if t == "request_seed":
             return sched.request_seed(ctx)
         if t == "report_probe":
@@ -620,6 +636,9 @@ class DispatcherClient:
 
     def request_seed(self) -> dict:
         return self._rpc({"type": "request_seed"})
+
+    def heartbeat(self) -> dict:
+        return self._rpc({"type": "heartbeat"})
 
     def report_probe(self, seed: int, valid: bool = False) -> dict:
         return self._rpc({"type": "report_probe", "seed": int(seed), "valid": bool(valid)})
