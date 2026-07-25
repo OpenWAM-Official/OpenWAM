@@ -395,6 +395,10 @@ class Scheduler:
                     continue
                 if (ctx.commit_seed is not None or ctx.probe_seed is not None) and (now - ctx.last_seen) > worker_timeout:
                     self._release_locked(ctx)  # returns in-flight, frees live_envs
+                    # Treat a wedged worker as gone for the watchdog too, so if it
+                    # was the last one the run aborts promptly (idle_grace) rather
+                    # than waiting out stall_timeout on its still-open zombie socket.
+                    self._close_conn_locked(ctx)
                     reclaimed += 1
         return reclaimed
 

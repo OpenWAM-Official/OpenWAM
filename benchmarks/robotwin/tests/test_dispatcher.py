@@ -283,6 +283,11 @@ def test_reclaim_stalled_returns_committed_and_frees_env():
     assert reclaimed == 1
     j = sched.snapshot()["jobs"][0]
     assert j["committed"] == 0 and j["live_envs"] == 0 and j["done"] == 0
+    # The wedged worker is also dropped from the active count, so if it was the
+    # last one the run can abort promptly via idle_grace instead of stall_timeout.
+    assert sched.snapshot()["active_workers"] == 0
+    reason = sched.stall_reason(stall_timeout=1e9, idle_grace=0.0)
+    assert reason and "no active workers" in reason
     # A fresh worker can now rescue the job to completion.
     c2 = sched.new_worker()
     assert sched.assign_task(c2)["action"] == "run"
