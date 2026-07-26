@@ -54,6 +54,7 @@ import argparse
 import json
 import math
 import os
+import signal
 import socket
 import socketserver
 import threading
@@ -85,6 +86,7 @@ class Job:
     suc: int = 0  # successful episodes among done
     step_limit_hits: int = 0
     attempts: int = 0  # seeds ever issued (for the max-attempts safety cap)
+    assign_count: int = 0  # times a worker was bound to this job (boot-failure guard)
     exhausted: bool = False  # gave up: too many seed attempts without reaching target
 
     @property
@@ -143,6 +145,7 @@ class Scheduler:
         results_path: Optional[str] = None,
         per_job_target: Optional[Dict[JobKey, int]] = None,
         max_attempt_factor: float = 50.0,
+        max_boot_failures: int = 3,
         append_results: bool = False,
     ) -> None:
         st_seed = 100_000 * (1 + base_seed)  # mirrors RoboTwin main()
@@ -156,6 +159,10 @@ class Scheduler:
         # H3 guard: cap seeds tried per job so a task whose expert-check almost
         # never passes (misconfig / too hard) can't probe forever. 0/None = off.
         self._max_attempt_factor = float(max_attempt_factor) if max_attempt_factor else 0.0
+        # Poison-job guard: a job bound this many times without ever producing a
+        # single seed request (worker keeps dying during env boot) is quarantined
+        # so RESCUE stops feeding the whole fleet into it. 0 = off.
+        self._max_boot_failures = max(0, int(max_boot_failures))
         self._lock = threading.Lock()
         self._next_wid = 0
         self._workers: Dict[int, WorkerCtx] = {}
@@ -219,6 +226,7 @@ class Scheduler:
             # Any previous binding is void once a worker asks for a new task.
             self._release_locked(ctx)
             ctx.departed = False
+            self._quarantine_poison_locked()  # drop un-bootable jobs before RESCUE feeds them workers
 
             rescue = [
                 j for j in self._jobs.values()
@@ -255,9 +263,27 @@ class Scheduler:
     def _bind_locked(self, ctx: WorkerCtx, job: Job) -> dict:
         job.started = True
         job.live_envs += 1
+        job.assign_count += 1
         ctx.key = (job.task, job.mode)
         ctx.departed = False
         return {"action": "run", "task": job.task, "mode": job.mode}
+
+    def _quarantine_poison_locked(self) -> None:
+        """Give up on a job that has been bound ``_max_boot_failures`` times but
+        never produced a single ``request_seed`` (worker keeps crashing during env
+        boot) and currently has no live env. Without this, RESCUE — which sorts by
+        ``-remaining`` and ignores theta — hands every freed worker straight back
+        to the un-runnable job and slowly drains the whole fleet. ``attempts > 0``
+        means at least one worker booted and pulled a seed, so a genuinely-working
+        (merely slow/failing) job is never quarantined here; the H3 seed cap
+        handles that case instead."""
+        cap = self._max_boot_failures
+        if cap <= 0:
+            return
+        for j in self._jobs.values():
+            if (not j.exhausted and not j.complete and j.attempts == 0
+                    and j.done == 0 and j.live_envs == 0 and j.assign_count >= cap):
+                j.exhausted = True
 
     # -- seed / commit / report --------------------------------------------
 
@@ -394,11 +420,16 @@ class Scheduler:
         self._last_activity = now
 
     def reclaim_stalled(self, worker_timeout: float) -> int:
-        """H2: a worker whose socket is still open but that has sent no RPC for
-        ``worker_timeout`` (sim hang / GPU wedge) is presumed dead — return its
-        in-flight probe/commit and free its env slot so other workers can finish
-        the job. The seed it was running is abandoned (a fresh one is issued);
-        a late report from a revived worker is a no-op (its ctx is unbound)."""
+        """H2: a worker bound to a job whose socket is still open but that has
+        sent no RPC for ``worker_timeout`` (sim hang / GPU wedge) is presumed
+        dead — return any in-flight probe/commit and free its env slot so other
+        workers can finish the job. The trigger is being *bound* (``ctx.key`` set)
+        and silent, not holding a seed: this also covers a worker that wedges
+        during env boot, after ``assign_task`` bound it but before its first
+        ``request_seed`` (no probe/commit yet) — otherwise that job's sole env is
+        stuck forever with no way for RESCUE/dup to step in. A legit boot is far
+        shorter than ``worker_timeout``, and rollouts refresh ``last_seen`` via
+        ``heartbeat``. A late report from a revived worker is a no-op (unbound)."""
         if worker_timeout <= 0:
             return 0
         now = time.time()
@@ -407,7 +438,7 @@ class Scheduler:
             for ctx in list(self._workers.values()):
                 if ctx.departed or ctx.closed:
                     continue
-                if (ctx.commit_seed is not None or ctx.probe_seed is not None) and (now - ctx.last_seen) > worker_timeout:
+                if ctx.key is not None and (now - ctx.last_seen) > worker_timeout:
                     self._release_locked(ctx)  # returns in-flight, frees live_envs
                     # Treat a wedged worker as gone for the watchdog too, so if it
                     # was the last one the run aborts promptly (idle_grace) rather
@@ -502,9 +533,14 @@ class Scheduler:
             f.write("\n".join(lines) + "\n")
 
     def close(self) -> None:
-        if self._results_fh is not None:
-            self._results_fh.close()
-            self._results_fh = None
+        # Under the lock: _persist_result_locked check-then-writes _results_fh
+        # inside the lock, so a handler thread still finishing a report_result
+        # during shutdown either flushes its line before we close or sees None
+        # after — never an AttributeError on a half-closed file.
+        with self._lock:
+            if self._results_fh is not None:
+                self._results_fh.close()
+                self._results_fh = None
 
 
 # ---------------------------------------------------------------------------
@@ -616,8 +652,17 @@ class DispatcherClient:
     until a ``drain`` or ``commit:false``, then ``close``.
     """
 
-    def __init__(self, host: str, port: int, timeout: Optional[float] = None) -> None:
+    def __init__(
+        self, host: str, port: int, timeout: Optional[float] = None, read_timeout: Optional[float] = None
+    ) -> None:
         self._sock = socket.create_connection((host, port), timeout=timeout)
+        # `timeout` bounded the *connect* only. Per-RPC reads block by default
+        # (read_timeout=None): a briefly-busy dispatcher (GC pause / 64-slot burst)
+        # must not be mistaken for a dead one and retire the GPU slot — a truly
+        # gone dispatcher still surfaces as EOF -> ConnectionError. Previously the
+        # connect timeout doubled as a permanent read deadline, so any slow RPC
+        # raised socket.timeout -> EXIT_ERROR -> the slot was retired for good.
+        self._sock.settimeout(read_timeout)
         self._fh = self._sock.makefile("rwb")
 
     def _rpc(self, obj: dict) -> dict:
@@ -994,7 +1039,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 json.dump(sched.snapshot(), f)
             os.replace(tmp, args.state_file)
 
+    # A bare SIGTERM (DLC preemption, `kill`, scheduler stop) would otherwise skip
+    # the finally below — no done-file, no summary, no clean server shutdown — and
+    # cross-node teardown hinges on that done-file. Route TERM through the same
+    # KeyboardInterrupt path Ctrl+C already takes so teardown always runs.
+    def _raise_kbint(*_a):
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, _raise_kbint)
+    except ValueError:
+        pass  # not on the main thread (embedded use) — SIGINT path still applies
+
     stalled: Optional[str] = None
+    interrupted = False
     try:
         while not sched.is_complete():
             sched.reclaim_stalled(args.worker_timeout)  # H2: free hung workers' seeds
@@ -1005,7 +1062,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             _write_state()
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("[dispatcher] interrupted")
+        interrupted = True
+        print("[dispatcher] interrupted (SIGINT/SIGTERM) — tearing down", flush=True)
     finally:
         _write_state()
         if args.summary:
@@ -1016,10 +1074,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.done_file:  # signal every node to tear down local workers
             try:
                 with open(args.done_file, "w", encoding="utf-8") as f:
-                    f.write("stall\n" if stalled else "complete\n")
+                    f.write("stall\n" if stalled else ("interrupted\n" if interrupted else "complete\n"))
             except OSError:
                 pass
 
+    if interrupted:
+        print("[dispatcher] torn down after interrupt", flush=True)
+        return 130
     if stalled:
         print(f"[dispatcher] ABORTED (stall): {stalled}", flush=True)
         return 2

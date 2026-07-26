@@ -41,7 +41,7 @@ SUCCESS_RATE_PATTERNS = (
 TASK_LOG_RE = re.compile(r"(?P<task>.+)_(?P<mode>demo_clean|demo_randomized)\.log$")
 CLAIMED_SUFFIX_RE = re.compile(r"\.node(?P<node>\d+)\.worker(?P<worker>\d+)$")
 LOG_FILE_PATTERNS = ("*.log", "*.out", "*.err", "stdout*", "stderr*")
-FINAL_JOB_STATUSES = {"ok", "failed", "done"}
+FINAL_JOB_STATUSES = {"ok", "failed", "done", "exhausted"}
 
 
 def parse_positive_int(value: str, *, default: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -785,18 +785,22 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             agg: dict[tuple[str, str], dict[str, int]] = {}
             source_mtime = path_mtime(results_path)
             try:
-                for line in results_path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
+                lines = results_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
                     rec = json.loads(line)
                     key = (str(rec["task"]), str(rec["mode"]))
-                    a = agg.setdefault(key, {"done": 0, "suc": 0, "slh": 0})
-                    a["done"] += 1
-                    a["suc"] += 1 if rec.get("success") else 0
-                    a["slh"] += 1 if rec.get("step_limit_hit") else 0
-            except (OSError, json.JSONDecodeError, KeyError, ValueError):
-                pass
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue  # one malformed / non-dict line must not drop the rest
+                a = agg.setdefault(key, {"done": 0, "suc": 0, "slh": 0})
+                a["done"] += 1
+                a["suc"] += 1 if rec.get("success") else 0
+                a["slh"] += 1 if rec.get("step_limit_hit") else 0
             raw_jobs = [
                 {"task": t, "mode": m, "done": a["done"], "suc": a["suc"], "target": target_default,
                  "committed": 0, "probing": 0, "live_envs": 0, "started": True,

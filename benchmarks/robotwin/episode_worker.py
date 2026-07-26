@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import sys
 import traceback
 from typing import Optional
@@ -205,8 +206,16 @@ def _run_dry(client: "D.DispatcherClient", args) -> int:
             continue
         if not client.request_commit(seed).get("commit"):
             break
-        client.heartbeat()  # exercise the keep-alive path (real rollout sends these periodically)
-        time.sleep(args.dry_run_sleep)
+        # Mimic a real rollout's *periodic* heartbeats spread through the sleep
+        # (not a single one upfront), so --dry-run can actually exercise / tune
+        # the worker-timeout watchdog the way a live rollout would.
+        remaining = args.dry_run_sleep
+        interval = max(0.01, args.dry_run_heartbeat)
+        while remaining > 0:
+            client.heartbeat()
+            step = min(interval, remaining)
+            time.sleep(step)
+            remaining -= step
         client.report_result(seed, success=(rng.random() < args.dry_run_success_prob))
     return D.EXIT_RELAUNCH
 
@@ -228,6 +237,7 @@ def main(argv: Optional[list] = None) -> int:
     # Dry-run: simulate episodes without RoboTwin (protocol/scheduling smoke).
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--dry-run-sleep", type=float, default=0.2, help="simulated rollout seconds")
+    ap.add_argument("--dry-run-heartbeat", type=float, default=0.1, help="simulated heartbeat interval during the rollout sleep")
     ap.add_argument("--dry-run-expert", type=float, default=0.05, help="simulated expert-check seconds")
     ap.add_argument("--dry-run-valid-prob", type=float, default=0.8)
     ap.add_argument("--dry-run-success-prob", type=float, default=0.5)
@@ -300,12 +310,33 @@ def main(argv: Optional[list] = None) -> int:
         module.main(usr_args)
         client.close()
         return D.EXIT_RELAUNCH
+    except (socket.timeout, TimeoutError):
+        # Dispatcher was briefly unresponsive (busy under 64-slot load / GC pause),
+        # not gone. Relaunch this slot rather than retiring the GPU for good —
+        # timeouts are transient, unlike a genuine error.
+        print("[episode_worker] dispatcher RPC timed out; relaunching this slot")
+        try:
+            client.close()
+        except OSError:
+            pass
+        return D.EXIT_RELAUNCH
     except ConnectionError:
         # Dispatcher went away (normally: it completed and shut down). Nothing
         # more this slot can do; rank0's completeness check is the source of
         # truth for whether the whole run actually finished.
         print("[episode_worker] dispatcher connection closed; assuming run complete")
         return D.EXIT_NO_MORE_WORK
+    except SystemExit:
+        # RoboTwin's class_decorator()/main() raise a *bare* SystemExit (a
+        # BaseException, not Exception) on setup failure — e.g. a missing task
+        # module. Without this it would slip past `except Exception`, skipping the
+        # traceback + client.close() and propagating an opaque exit code.
+        traceback.print_exc()
+        try:
+            client.close()
+        except OSError:
+            pass
+        return D.EXIT_ERROR
     except Exception:
         traceback.print_exc()
         try:

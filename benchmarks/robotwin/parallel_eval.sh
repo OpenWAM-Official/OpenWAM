@@ -125,6 +125,7 @@ NO_DUP=0
 DISPATCH_PORT=8790
 HTTP_PORT=0
 DRY_RUN=0
+APPEND_RESULTS=0
 DRY_RUN_SLEEP_SEC="${DRY_RUN_SLEEP_SEC:-0.2}"
 
 while (( $# > 0 )); do
@@ -141,6 +142,7 @@ while (( $# > 0 )); do
         --no-dup)                  NO_DUP=1;                    shift ;;
         --dispatch-port)           DISPATCH_PORT="$2";          shift 2 ;;
         --http-port)               HTTP_PORT="$2";              shift 2 ;;
+        --append-results)          APPEND_RESULTS=1;            shift ;;
         --dry-run|--dryrun)        DRY_RUN=1;                   shift ;;
         -h|--help)                 usage; exit 0 ;;
         -*)                        echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
@@ -209,6 +211,7 @@ dispatcher_args=(
     --done-file "${DONE_FILE}"
 )
 (( NO_DUP )) && dispatcher_args+=(--no-dup)
+(( APPEND_RESULTS )) && dispatcher_args+=(--append-results)
 (( HTTP_PORT > 0 )) && dispatcher_args+=(--http-port "${HTTP_PORT}")
 # Optional watchdog tuning via env (see README): stall/worker/idle timeouts + give-up cap.
 [[ -n "${STALL_TIMEOUT:-}" ]]      && dispatcher_args+=(--stall-timeout "${STALL_TIMEOUT}")
@@ -250,18 +253,20 @@ cleanup() {
     set +e  # teardown must not be aborted mid-way by set -e
     echo "" >&2
     echo "[INFO] Interrupt received. Stopping workers + dispatcher..." >&2
-    for pid in "${pids[@]}"; do kill_tree "$pid" TERM; done
+    # Include the .done reaper (${REAPER_PID}) — otherwise it survives cleanup and
+    # the final `wait` can hang on it (it blocks until the dispatcher writes .done).
+    for pid in "${pids[@]}" "${REAPER_PID:-}"; do kill_tree "$pid" TERM; done
     kill_tree "${DISPATCHER_PID}" TERM
     local deadline=$((SECONDS + 5))
     while (( SECONDS < deadline )); do
         local alive=0
-        for pid in "${pids[@]}" "${DISPATCHER_PID}"; do
+        for pid in "${pids[@]}" "${REAPER_PID:-}" "${DISPATCHER_PID}"; do
             kill -0 "$pid" 2>/dev/null && { alive=1; break; }
         done
         (( alive )) || break
         sleep 0.2
     done
-    for pid in "${pids[@]}" "${DISPATCHER_PID}"; do kill_tree "$pid" KILL; done
+    for pid in "${pids[@]}" "${REAPER_PID:-}" "${DISPATCHER_PID}"; do kill_tree "$pid" KILL; done
     wait 2>/dev/null || true
     exit 130
 }
@@ -272,6 +277,10 @@ trap cleanup INT TERM
 # ---------------------------------------------------------------------------
 
 run_supervisor() {
+    # Backgrounded (`run_supervisor & `) → this subshell inherits the parent's
+    # `trap cleanup INT TERM`. Reset it so Ctrl+C runs cleanup() exactly once (in
+    # the main shell), not N+1 concurrent teardowns racing each other.
+    trap - INT TERM
     local slot_idx="$1"
     local sim_gpu=$((GPU_START + slot_idx * SIM_GPU_STRIDE))
     local port=$((PORT_BASE + slot_idx))
@@ -327,15 +336,27 @@ REAPER_PID=$!
 # Wait for all slots to finish claiming.
 for pid in "${pids[@]}"; do wait "$pid" || true; done
 kill_tree "${REAPER_PID}" TERM 2>/dev/null || true
+REAPER_PID=""
 
-# Dispatcher exits once every job hits its target; give it a moment.
+# Dispatcher exits once every job hits its target (or the watchdog aborts).
 wait "${DISPATCHER_PID}" 2>/dev/null || true
+DISPATCHER_PID=""
 trap - INT TERM
 
 echo ""
 if [[ -f "${SUMMARY_FILE}" ]]; then
-    echo "[SUMMARY] ${SUMMARY_FILE}"
+    finished="$(awk -F '\t' 'NR>1 && $7=="ok" {c++} END {print c+0}' "${SUMMARY_FILE}")"
+    echo "[SUMMARY] finished_jobs=${finished}/${TOTAL_JOBS}  ->  ${SUMMARY_FILE}"
     column -t -s $'\t' < "${SUMMARY_FILE}" || cat "${SUMMARY_FILE}"
+    echo "[INFO] logs=${LOG_DIR}"
+    echo "[INFO] Export CSV:  ${DISPATCHER_PYTHON} ${SCRIPT_DIR}/export_results_csv.py ${LOG_DIR}"
+    # Propagate watchdog abort (H1 stall / H3 exhaustion) / crashes instead of the
+    # old unconditional exit 0, so callers/CI can see the run did not fully finish.
+    if (( finished != TOTAL_JOBS )); then
+        echo "[ERROR] incomplete: ${finished}/${TOTAL_JOBS} jobs reached target (stall/exhausted — see ${DISPATCHER_LOG} + summary status column)" >&2
+        exit 1
+    fi
+else
+    echo "[ERROR] no summary.tsv produced; see ${DISPATCHER_LOG}" >&2
+    exit 1
 fi
-echo "[INFO] logs=${LOG_DIR}"
-echo "[INFO] Export CSV:  ${DISPATCHER_PYTHON} ${SCRIPT_DIR}/export_results_csv.py ${LOG_DIR}"

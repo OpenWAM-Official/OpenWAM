@@ -41,7 +41,7 @@ SUCCESS_RATE_PATTERNS = (
 TASK_LOG_RE = re.compile(r"(?P<task>.+)_(?P<mode>demo_clean|demo_randomized)\.log$")
 CLAIMED_SUFFIX_RE = re.compile(r"\.node(?P<node>\d+)\.worker(?P<worker>\d+)$")
 LOG_FILE_PATTERNS = ("*.log", "*.out", "*.err", "stdout*", "stderr*")
-FINAL_JOB_STATUSES = {"ok", "failed", "done"}
+FINAL_JOB_STATUSES = {"ok", "failed", "done", "exhausted"}
 
 
 def parse_positive_int(value: str, *, default: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -785,18 +785,22 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             agg: dict[tuple[str, str], dict[str, int]] = {}
             source_mtime = path_mtime(results_path)
             try:
-                for line in results_path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
+                lines = results_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
                     rec = json.loads(line)
                     key = (str(rec["task"]), str(rec["mode"]))
-                    a = agg.setdefault(key, {"done": 0, "suc": 0, "slh": 0})
-                    a["done"] += 1
-                    a["suc"] += 1 if rec.get("success") else 0
-                    a["slh"] += 1 if rec.get("step_limit_hit") else 0
-            except (OSError, json.JSONDecodeError, KeyError, ValueError):
-                pass
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue  # one malformed / non-dict line must not drop the rest
+                a = agg.setdefault(key, {"done": 0, "suc": 0, "slh": 0})
+                a["done"] += 1
+                a["suc"] += 1 if rec.get("success") else 0
+                a["slh"] += 1 if rec.get("step_limit_hit") else 0
             raw_jobs = [
                 {"task": t, "mode": m, "done": a["done"], "suc": a["suc"], "target": target_default,
                  "committed": 0, "probing": 0, "live_envs": 0, "started": True,
@@ -811,8 +815,11 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             suc = int(j.get("suc", 0))
             live = int(j.get("live_envs", 0))
             started = bool(j.get("started", False))
+            exhausted = bool(j.get("exhausted", False))
             if target > 0 and done >= target:
                 status = "ok"
+            elif exhausted:
+                status = "exhausted"
             elif live > 0 or started or done > 0:
                 status = "running"
             else:
@@ -834,6 +841,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     "committed": int(j.get("committed", 0)),
                     "remaining": int(j.get("remaining", max(0, target - done))),
                     "target": target,
+                    "exhausted": exhausted,
                     "latest": "",
                     "size": 0,
                     "mtime": source_mtime,
@@ -845,9 +853,13 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     "source": "dispatcher",
                 }
             )
-        priority = {"failed": 0, "running": 1, "pending": 2, "ok": 3, "done": 4}
+        priority = {"failed": 0, "exhausted": 0, "running": 1, "pending": 2, "ok": 3, "done": 4}
         jobs.sort(key=lambda it: (priority.get(str(it.get("status", "")), 9), str(it.get("task", "")), str(it.get("mode", ""))))
-        return jobs, source_mtime
+        meta = {
+            "active_workers": snap.get("active_workers") if isinstance(snap, dict) else None,
+            "complete": snap.get("complete") if isinstance(snap, dict) else None,
+        }
+        return jobs, source_mtime, meta
 
     @staticmethod
     def _dispatcher_queue(jobs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -867,7 +879,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
 
     def _build_from_dispatcher(self) -> dict[str, Any]:
         run_env = parse_key_values(self.root / "run.env")
-        jobs, source_mtime = self._dispatcher_jobs(run_env)
+        jobs, source_mtime, snap_meta = self._dispatcher_jobs(run_env)
         queue = self._dispatcher_queue(jobs)
         logs = self._collect_logs()
         summary_stub = {"rows": [], "ok": sum(1 for j in jobs if j["status"] == "ok"),
@@ -913,7 +925,70 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
         state["run"] = self._run_summary(state)
         state["metrics"] = self._metrics_summary(state)
         state["custom_metrics"] = self.build_custom_metrics(state)
+        self._apply_dispatcher_realtime_extras(state, jobs, snap_meta)
         return state
+
+    def _apply_dispatcher_realtime_extras(
+        self, state: dict[str, Any], jobs: list[dict[str, Any]], snap_meta: dict[str, Any]
+    ) -> None:
+        """Surface episode-level dispatcher liveness in the shared UI: live-env /
+        active-worker cards, and Run Health warnings for exhausted (gave-up)
+        jobs and a wedged/stalled run. Reuses the existing ``custom_metrics`` and
+        ``validation.issues`` rendering, so no frontend fork is needed."""
+        active_workers = snap_meta.get("active_workers")
+        complete = snap_meta.get("complete")
+        live_total = sum(int(j.get("live_envs", 0) or 0) for j in jobs)
+        exhausted = [j for j in jobs if j.get("status") == "exhausted"]
+
+        cards: list[dict[str, Any]] = []
+        if active_workers is not None:
+            cards.append({
+                "id": "dispatcher_active_workers",
+                "label": "Active workers",
+                "value": str(active_workers),
+                "raw_value": active_workers,
+                "kind": "count",
+                "class": "" if active_workers else "warning",
+                "description": "Worker connections currently held by the dispatcher.",
+            })
+        cards.append({
+            "id": "dispatcher_live_envs",
+            "label": "Live envs",
+            "value": str(live_total),
+            "raw_value": live_total,
+            "kind": "count",
+            "class": "",
+            "description": "RoboTwin envs rolling out right now across all jobs (dup parallelism).",
+        })
+        state["custom_metrics"] = list(state.get("custom_metrics") or []) + cards
+        state["active_workers"] = active_workers
+
+        issues = state.setdefault("validation", {}).setdefault("issues", [])
+        for j in exhausted:
+            issues.append({
+                "level": "warn",
+                "message": (
+                    f"{j.get('task')}:{j.get('mode')} gave up (exhausted) at "
+                    f"{j.get('success')}/{j.get('target')} — raise --max-attempt-factor "
+                    "or check the task's expert"
+                ),
+            })
+        if complete and exhausted:
+            issues.append({
+                "level": "warn",
+                "message": f"run ended with {len(exhausted)} exhausted job(s) below target",
+            })
+        if (
+            active_workers == 0
+            and not complete
+            and any(j.get("status") in ("running", "pending", "exhausted") for j in jobs)
+        ):
+            issues.append({
+                "level": "warn",
+                "message": "no active workers but jobs remain — dispatcher may be waiting/stalled",
+            })
+        state["validation"]["issue_count"] = len(issues)
+        state["validation"]["ok"] = not any(i.get("level") == "error" for i in issues)
 
     def build_results_rows(self) -> list[dict[str, Any]]:
         snapshot = self.build()
@@ -1708,7 +1783,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
     @staticmethod
     def _progress(total: int, jobs: list[dict[str, Any]]) -> dict[str, Any]:
         ok = sum(1 for item in jobs if item.get("status") == "ok")
-        failed = sum(1 for item in jobs if item.get("status") == "failed")
+        failed = sum(1 for item in jobs if item.get("status") in ("failed", "exhausted"))
         done = sum(1 for item in jobs if item.get("status") == "done")
         completed = ok + failed + done
         running = sum(1 for item in jobs if item.get("status") == "running")
@@ -2338,6 +2413,7 @@ INDEX_HTML = r"""<!doctype html>
     .status.log { color: var(--muted); background: rgba(20, 29, 26, .08); }
     .status.warn { color: #87500b; background: var(--amber-soft); }
     .status.error { color: var(--red); background: var(--red-soft); }
+    .status.exhausted { color: #87500b; background: var(--amber-soft); }
     .status.info { color: var(--blue); background: var(--blue-soft); }
     .mono { font-family: var(--mono); }
     .muted { color: var(--muted); }
@@ -2484,6 +2560,7 @@ INDEX_HTML = r"""<!doctype html>
               <option value="pending">pending</option>
               <option value="ok">ok</option>
               <option value="done">done</option>
+              <option value="exhausted">exhausted</option>
               <option value="log">log</option>
             </select>
             <input id="jobFilter" placeholder="filter task/mode/path">

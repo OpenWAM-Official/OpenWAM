@@ -165,6 +165,7 @@ TEST_NUM="${ROBOTWIN_TEST_NUM:-100}"   # env-overridable (legacy single/whole-ta
 BASE_SEED=0
 MIN_REMAINING_FOR_DUP=8
 NO_DUP=0
+APPEND_RESULTS=0
 DISPATCH_PORT=8790
 HTTP_PORT=0
 DRY_RUN_SLEEP_SEC="${DRY_RUN_SLEEP_SEC:-0.5}"
@@ -195,6 +196,7 @@ while (( $# > 0 )); do
         --seed)                  BASE_SEED="$2"; shift 2 ;;
         --min-remaining-for-dup) MIN_REMAINING_FOR_DUP="$2"; shift 2 ;;
         --no-dup)                NO_DUP=1; shift ;;
+        --append-results)        APPEND_RESULTS=1; shift ;;
         --dispatch-port)         DISPATCH_PORT="$2"; shift 2 ;;
         --http-port)             HTTP_PORT="$2"; shift 2 ;;
         --dry-run|--dryrun)      DRY_RUN=1; shift ;;
@@ -247,11 +249,15 @@ DISPATCHER_LOG="${LOG_DIR}/dispatcher.log"
 server_pids=()
 worker_pids=()
 DISPATCHER_PID=""
+REAPER_PID=""
 
 kill_group() {
     for pid in "${worker_pids[@]}"; do kill_tree "${pid}" "$1"; done
     for pid in "${server_pids[@]}"; do kill_tree "${pid}" "$1"; done
     [[ -n "${DISPATCHER_PID}" ]] && kill_tree "${DISPATCHER_PID}" "$1"
+    # Include the .done reaper — otherwise it outlives cleanup and the final
+    # `wait` can block on it until the dispatcher writes .done.
+    [[ -n "${REAPER_PID}" ]] && kill_tree "${REAPER_PID}" "$1"
     return 0
 }
 
@@ -265,7 +271,7 @@ cleanup() {
     local deadline=$((SECONDS + 8))
     while (( SECONDS < deadline )); do
         local alive=0
-        for pid in "${worker_pids[@]}" "${server_pids[@]}" ${DISPATCHER_PID:+$DISPATCHER_PID}; do
+        for pid in "${worker_pids[@]}" "${server_pids[@]}" ${DISPATCHER_PID:+$DISPATCHER_PID} ${REAPER_PID:+$REAPER_PID}; do
             [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null && { alive=1; break; }
         done
         (( alive )) || break; sleep 0.2
@@ -313,6 +319,7 @@ if [[ "${NODE_RANK}" == "0" ]]; then
         --done-file "${DONE_FILE}"
     )
     (( NO_DUP )) && dispatcher_args+=(--no-dup)
+    (( APPEND_RESULTS )) && dispatcher_args+=(--append-results)
     (( HTTP_PORT > 0 )) && dispatcher_args+=(--http-port "${HTTP_PORT}")
     # Optional watchdog tuning via env (see README): stall/worker/idle timeouts + give-up cap.
     [[ -n "${STALL_TIMEOUT:-}" ]]      && dispatcher_args+=(--stall-timeout "${STALL_TIMEOUT}")
