@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import socket
 import sys
 import traceback
 from typing import Optional
@@ -310,10 +309,10 @@ def main(argv: Optional[list] = None) -> int:
         module.main(usr_args)
         client.close()
         return D.EXIT_RELAUNCH
-    except (socket.timeout, TimeoutError):
-        # Dispatcher was briefly unresponsive (busy under 64-slot load / GC pause),
-        # not gone. Relaunch this slot rather than retiring the GPU for good —
-        # timeouts are transient, unlike a genuine error.
+    except TimeoutError:
+        # An RPC read hit read_timeout: dispatcher is wedged, not gone. Relaunch
+        # this slot rather than retiring the GPU for good (timeouts are transient,
+        # unlike a genuine error). socket.timeout is a TimeoutError alias (py3.10+).
         print("[episode_worker] dispatcher RPC timed out; relaunching this slot")
         try:
             client.close()

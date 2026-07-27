@@ -498,3 +498,93 @@ def test_simulation_strict_mode():
     )
     assert res["ok"], res["problems"]
     assert res["episodes"] == 3 * 20
+
+
+# ---------------------------------------------------------------------------
+# liveness watchdog: boot-phase reclaim + poison-job quarantine (PR #49 review)
+# ---------------------------------------------------------------------------
+
+
+def test_reclaim_stalled_reclaims_boot_phase_worker():
+    # A worker bound to a job but silent before its first request_seed (wedged
+    # during env boot) must be reclaimed even though it holds no probe/commit seed.
+    sched = D.Scheduler([("t", "m")], test_num=5)
+    ctx = sched.new_worker()
+    assert sched.assign_task(ctx)["action"] == "run"
+    ctx.last_seen = 0.0  # silent since forever
+    assert sched.reclaim_stalled(worker_timeout=1.0) == 1
+    snap = sched.snapshot()["jobs"][0]
+    assert snap["live_envs"] == 0 and not snap["exhausted"]
+    # Job is a rescue candidate again — a fresh worker can pick it up.
+    c2 = sched.new_worker()
+    assert sched.assign_task(c2) == {"action": "run", "task": "t", "mode": "m"}
+
+
+def test_reclaim_stalled_disabled_when_timeout_zero():
+    sched = D.Scheduler([("t", "m")], test_num=5)
+    ctx = sched.new_worker()
+    sched.assign_task(ctx)
+    ctx.last_seen = 0.0
+    assert sched.reclaim_stalled(worker_timeout=0) == 0  # 0 = off
+
+
+def test_poison_job_quarantined_after_boot_crashes():
+    # Workers keep *crashing* at boot on job A (disconnect before pulling a seed).
+    # A must be quarantined (exhausted) and fresh workers steered to healthy B.
+    sched = D.Scheduler([("A", "m"), ("B", "m")], test_num=5, max_boot_failures=3)
+    for _ in range(3):
+        c = sched.new_worker()
+        assert sched.assign_task(c)["action"] == "run"  # rescue keeps picking A
+        sched.release(c)  # crash before request_seed == genuine boot failure
+    # Next assign triggers the quarantine sweep, then hands out B instead of A.
+    c = sched.new_worker()
+    assert sched.assign_task(c) == {"action": "run", "task": "B", "mode": "m"}
+    a = {j["task"]: j for j in sched.snapshot()["jobs"]}["A"]
+    assert a["exhausted"] and a["boot_failures"] >= 3 and a["attempts"] == 0
+
+
+def test_slow_boot_worker_not_quarantined_by_reclaim():
+    # REGRESSION (PR #49 re-review): a job that never crashes but is merely slow to
+    # boot — repeatedly freed by reclaim_stalled, not by a crash — must NOT be
+    # quarantined. Only genuine boot crashes count toward the poison guard.
+    sched = D.Scheduler([("A", "m")], test_num=5, max_boot_failures=3)
+    for _ in range(5):
+        c = sched.new_worker()
+        assert sched.assign_task(c)["action"] == "run"
+        c.last_seen = 0.0  # too slow -> reclaimed (still alive, not a crash)
+        assert sched.reclaim_stalled(worker_timeout=1.0) == 1
+    snap = sched.snapshot()["jobs"][0]
+    assert not snap["exhausted"], "healthy-but-slow job must never be permanently quarantined"
+    assert snap["boot_failures"] == 0
+    # Still schedulable: a worker that finally boots can make progress.
+    c = sched.new_worker()
+    assert sched.assign_task(c)["action"] == "run"
+    assert "seed" in sched.request_seed(c)
+
+
+def test_pulled_seed_disconnect_is_not_a_boot_failure():
+    # A worker that booted (pulled a seed) then died mid-rollout is a rescue case,
+    # not a boot failure — it must not push the job toward poison quarantine.
+    sched = D.Scheduler([("A", "m")], test_num=5, max_boot_failures=2)
+    for _ in range(3):
+        c = sched.new_worker()
+        sched.assign_task(c)
+        assert "seed" in sched.request_seed(c)  # booted OK
+        sched.release(c)  # crash mid-rollout
+    snap = sched.snapshot()["jobs"][0]
+    assert snap["boot_failures"] == 0 and not snap["exhausted"]
+
+
+def test_close_is_locked_and_idempotent(tmp_path):
+    # close() takes the lock (no AttributeError / dropped line if a report_result
+    # races shutdown) and is safe to call repeatedly.
+    results = tmp_path / "results.jsonl"
+    sched = D.Scheduler([("t", "m")], test_num=1, results_path=str(results))
+    ctx = sched.new_worker()
+    sched.assign_task(ctx)
+    r = sched.request_seed(ctx)
+    sched.request_commit(ctx, r["seed"])
+    sched.report_result(ctx, r["seed"], success=True)
+    sched.close()
+    sched.close()  # idempotent, no crash
+    assert results.read_text().strip()  # the result line was flushed before close

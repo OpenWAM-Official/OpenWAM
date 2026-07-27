@@ -86,7 +86,7 @@ class Job:
     suc: int = 0  # successful episodes among done
     step_limit_hits: int = 0
     attempts: int = 0  # seeds ever issued (for the max-attempts safety cap)
-    assign_count: int = 0  # times a worker was bound to this job (boot-failure guard)
+    boot_failures: int = 0  # workers that crashed at boot (never pulled a seed) — poison guard
     exhausted: bool = False  # gave up: too many seed attempts without reaching target
 
     @property
@@ -119,6 +119,8 @@ class WorkerCtx:
     departed: bool = False  # live_envs already released (idempotency guard)
     closed: bool = False  # connection fully torn down (active-count idempotency)
     last_seen: float = 0.0  # last RPC time (for hung-worker reclaim)
+    pulled_seed: bool = False  # ever got a seed on the current binding (booted OK)
+    reclaimed: bool = False  # freed by reclaim_stalled (slow, not a genuine crash)
 
     @property
     def tag(self) -> str:
@@ -263,26 +265,31 @@ class Scheduler:
     def _bind_locked(self, ctx: WorkerCtx, job: Job) -> dict:
         job.started = True
         job.live_envs += 1
-        job.assign_count += 1
         ctx.key = (job.task, job.mode)
         ctx.departed = False
+        ctx.pulled_seed = False
+        ctx.reclaimed = False
         return {"action": "run", "task": job.task, "mode": job.mode}
 
     def _quarantine_poison_locked(self) -> None:
-        """Give up on a job that has been bound ``_max_boot_failures`` times but
-        never produced a single ``request_seed`` (worker keeps crashing during env
-        boot) and currently has no live env. Without this, RESCUE — which sorts by
-        ``-remaining`` and ignores theta — hands every freed worker straight back
-        to the un-runnable job and slowly drains the whole fleet. ``attempts > 0``
-        means at least one worker booted and pulled a seed, so a genuinely-working
-        (merely slow/failing) job is never quarantined here; the H3 seed cap
-        handles that case instead."""
+        """Give up on a job whose workers keep *crashing during env boot*
+        (``boot_failures`` genuine disconnects before pulling any seed) and that
+        has no live env. Without this, RESCUE — which sorts by ``-remaining`` and
+        ignores theta — hands every freed worker straight back to the un-runnable
+        job and slowly drains the whole fleet.
+
+        Only genuine boot crashes count: a worker freed by ``reclaim_stalled`` for
+        being *slow* (still alive, just booting past ``worker_timeout`` under GPU/IO
+        contention) is flagged ``ctx.reclaimed`` and NOT counted, so a healthy but
+        slow job is never permanently sacrificed — it stays schedulable and its
+        first successful ``request_seed`` (``attempts > 0``) clears it from poison
+        consideration entirely."""
         cap = self._max_boot_failures
         if cap <= 0:
             return
         for j in self._jobs.values():
             if (not j.exhausted and not j.complete and j.attempts == 0
-                    and j.done == 0 and j.live_envs == 0 and j.assign_count >= cap):
+                    and j.done == 0 and j.live_envs == 0 and j.boot_failures >= cap):
                 j.exhausted = True
 
     # -- seed / commit / report --------------------------------------------
@@ -314,6 +321,7 @@ class Scheduler:
             job.attempts += 1
             job.probing += 1
             ctx.probe_seed = seed
+            ctx.pulled_seed = True  # booted OK -> a later disconnect isn't a boot failure
             return {"seed": seed}
 
     def report_probe(self, ctx: WorkerCtx, seed: int, valid: bool) -> dict:
@@ -399,6 +407,11 @@ class Scheduler:
                 job.committed -= 1
             if ctx.key is not None and not ctx.departed:
                 job.live_envs -= 1
+                # A worker bound to this job that crashed/disconnected before ever
+                # pulling a seed is a genuine env-boot failure (poison guard) — but
+                # NOT if reclaim_stalled freed it merely for being slow to boot.
+                if not ctx.pulled_seed and not ctx.reclaimed:
+                    job.boot_failures += 1
         ctx.probe_seed = None
         ctx.commit_seed = None
         ctx.key = None
@@ -439,6 +452,7 @@ class Scheduler:
                 if ctx.departed or ctx.closed:
                     continue
                 if ctx.key is not None and (now - ctx.last_seen) > worker_timeout:
+                    ctx.reclaimed = True  # slow, not a genuine crash: don't count as a boot failure
                     self._release_locked(ctx)  # returns in-flight, frees live_envs
                     # Treat a wedged worker as gone for the watchdog too, so if it
                     # was the last one the run aborts promptly (idle_grace) rather
@@ -511,6 +525,7 @@ class Scheduler:
                         "step_limit_hits": j.step_limit_hits,
                         "remaining": j.remaining,
                         "attempts": j.attempts,
+                        "boot_failures": j.boot_failures,
                         "exhausted": j.exhausted,
                     }
                 )
@@ -653,15 +668,16 @@ class DispatcherClient:
     """
 
     def __init__(
-        self, host: str, port: int, timeout: Optional[float] = None, read_timeout: Optional[float] = None
+        self, host: str, port: int, timeout: Optional[float] = None, read_timeout: Optional[float] = 600.0
     ) -> None:
         self._sock = socket.create_connection((host, port), timeout=timeout)
-        # `timeout` bounded the *connect* only. Per-RPC reads block by default
-        # (read_timeout=None): a briefly-busy dispatcher (GC pause / 64-slot burst)
-        # must not be mistaken for a dead one and retire the GPU slot — a truly
-        # gone dispatcher still surfaces as EOF -> ConnectionError. Previously the
-        # connect timeout doubled as a permanent read deadline, so any slow RPC
-        # raised socket.timeout -> EXIT_ERROR -> the slot was retired for good.
+        # `timeout` bounds the *connect*; `read_timeout` bounds each RPC read
+        # separately (default 600s — far above any real request/response, since the
+        # dispatcher replies immediately). So a briefly-busy dispatcher never trips
+        # it, while a truly wedged one eventually does (worker -> EXIT_RELAUNCH); a
+        # gone dispatcher still surfaces first as EOF -> ConnectionError. Previously
+        # the connect timeout doubled as the read deadline, so any slow RPC raised a
+        # timeout -> EXIT_ERROR and the GPU slot was retired for good. (None = block.)
         self._sock.settimeout(read_timeout)
         self._fh = self._sock.makefile("rwb")
 
@@ -1045,10 +1061,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # KeyboardInterrupt path Ctrl+C already takes so teardown always runs.
     def _raise_kbint(*_a):
         raise KeyboardInterrupt
-    try:
-        signal.signal(signal.SIGTERM, _raise_kbint)
-    except ValueError:
-        pass  # not on the main thread (embedded use) — SIGINT path still applies
+    signal.signal(signal.SIGTERM, _raise_kbint)  # TERM -> same graceful teardown as Ctrl+C
 
     stalled: Optional[str] = None
     interrupted = False

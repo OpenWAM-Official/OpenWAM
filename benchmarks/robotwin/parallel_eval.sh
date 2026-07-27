@@ -339,7 +339,9 @@ kill_tree "${REAPER_PID}" TERM 2>/dev/null || true
 REAPER_PID=""
 
 # Dispatcher exits once every job hits its target (or the watchdog aborts).
-wait "${DISPATCHER_PID}" 2>/dev/null || true
+# Preserve its exit code so stall(2)/exhausted(3)/complete(0) stay distinguishable.
+disp_rc=0
+wait "${DISPATCHER_PID}" 2>/dev/null || disp_rc=$?
 DISPATCHER_PID=""
 trap - INT TERM
 
@@ -354,7 +356,7 @@ if [[ -f "${SUMMARY_FILE}" ]]; then
     # old unconditional exit 0, so callers/CI can see the run did not fully finish.
     if (( finished != TOTAL_JOBS )); then
         echo "[ERROR] incomplete: ${finished}/${TOTAL_JOBS} jobs reached target (stall/exhausted — see ${DISPATCHER_LOG} + summary status column)" >&2
-        exit 1
+        exit $(( disp_rc != 0 ? disp_rc : 1 ))   # propagate dispatcher's 2=stall / 3=exhausted
     fi
 else
     echo "[ERROR] no summary.tsv produced; see ${DISPATCHER_LOG}" >&2
