@@ -87,6 +87,27 @@ def quat_xyzw_to_rot6d(quat: np.ndarray) -> np.ndarray:
     return np.concatenate([c0, c1], axis=-1).astype(quat.dtype)
 
 
+def quat_wxyz_to_rot6d(quat_wxyz: np.ndarray) -> np.ndarray:
+    """Convert (..., 4) quaternion [w, x, y, z] → (..., 6) rot6d.
+
+    Thin convention adapter over :func:`quat_xyzw_to_rot6d` for sources that
+    store the scalar part FIRST (Isaac / cuRobo / LeRobot ``quaternion.w`` field
+    order) rather than scipy's xyzw. Routing a wxyz array straight into
+    ``quat_xyzw_to_rot6d`` silently yields a wrong-but-unit rotation, which no
+    norm check can catch (see :func:`assert_unit_quaternion`) — so the reorder
+    must be explicit at every wxyz call site.
+
+    Accepts arbitrary leading dims; the last axis must be 4.
+    """
+    quat_wxyz = np.asarray(quat_wxyz, dtype=np.float32)
+    if quat_wxyz.shape[-1] != 4:
+        raise ValueError(f"quaternion must be 4-D wxyz, got shape {quat_wxyz.shape}")
+    leading = quat_wxyz.shape[:-1]
+    flat = quat_wxyz.reshape(-1, 4)
+    flat_xyzw = np.concatenate([flat[:, 1:4], flat[:, 0:1]], axis=-1)
+    return quat_xyzw_to_rot6d(flat_xyzw).reshape(*leading, 6).astype(np.float32)
+
+
 def assert_unit_quaternion(quat: np.ndarray, tol: float = 0.05, sample_n: int = 64) -> None:
     """Sanity check that ``quat`` entries are roughly unit-norm.
 
@@ -257,6 +278,7 @@ __all__ = [
     "RIGHT_ARM_DIM_MASK",
     "euler_xyz_to_rot6d",
     "quat_xyzw_to_rot6d",
+    "quat_wxyz_to_rot6d",
     "assert_unit_quaternion",
     "assemble_single_arm_left",
     "assemble_single_arm_right",
