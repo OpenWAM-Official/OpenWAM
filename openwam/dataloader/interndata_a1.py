@@ -1,0 +1,737 @@
+"""Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+from openwam.dataloader.bases.lerobot_v3_reader import LeRobotV3Reader
+from openwam.dataloader.bases.multi_lerobot_v3_reader import MultiLeRobotV3Reader
+from openwam.dataloader.utils.eef import (
+    ARM10_DIM,
+    EEF_DIM,
+    LEFT_ARM_DIM_MASK,
+    assert_unit_quaternion,
+    quat_wxyz_to_rot6d,
+)
+from openwam.dataloader.utils.lerobotv3 import build_multibucket
+from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
+
+logger = logging.getLogger(__name__)
+
+_ACTION_DIM = EEF_DIM
+
+
+
+
+_CONFIG_SENTINEL = object()
+
+
+ROBOT_TYPE_TO_EMBODIMENT: Dict[str, str] = {
+    "Franka": "franka",
+    "ARX Lift-2": "lift2",
+    "Genie-1": "genie1",
+    "AgileX Split Aloha": "split_aloha",
+}
+
+
+SINGLE_ARM_EMBODIMENTS = frozenset({"franka"})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+GRIPPER_FULL_OPEN = {
+    "franka": 0.08,
+    "lift2": 0.088,
+    "genie1": 5.74,
+    "split_aloha": 0.1,
+}
+
+GRIPPER_ALT_FULL_OPEN = {
+    "franka": 1.0,
+}
+
+
+_GRIPPER_SANE_MAX = 1.25
+
+
+def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> float:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+    primary = GRIPPER_FULL_OPEN.get(embodiment, 1.0)
+    alt = GRIPPER_ALT_FULL_OPEN.get(embodiment)
+    stats_path = bucket_dir / "meta" / "stats.json"
+    try:
+        with open(stats_path) as f:
+            observed_max = float(np.ravel(json.load(f)[grip_col]["max"])[0])
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        logger.debug(
+            "InternData-A1: no usable %s max in %s; assuming the %s stroke %.4f",
+            grip_col,
+            stats_path,
+            embodiment,
+            primary,
+        )
+        return primary
+
+    scale = primary
+    if alt is not None and observed_max > 0:
+
+        if abs(np.log(observed_max / alt)) < abs(np.log(observed_max / primary)):
+            scale = alt
+
+
+
+
+    if observed_max / scale > _GRIPPER_SANE_MAX:
+        logger.warning(
+            "InternData-A1 %s: %s max %.4f is %.2fx the assumed full-open stroke %.4f "
+            "for %r — out-of-range outliers, or GRIPPER_FULL_OPEN needs updating.",
+            bucket_dir,
+            grip_col,
+            observed_max,
+            observed_max / scale,
+            scale,
+            embodiment,
+        )
+    return scale
+
+
+
+
+_BIMANUAL_COLS: Tuple[str, ...] = (
+    "states.left_ee_to_robot_pose",
+    "states.left_gripper.position",
+    "states.right_ee_to_robot_pose",
+    "states.right_gripper.position",
+    "actions.left_ee_to_robot_pose",
+    "actions.left_gripper.position",
+    "actions.right_ee_to_robot_pose",
+    "actions.right_gripper.position",
+    "task_index",
+)
+
+_SINGLE_ARM_COLS: Tuple[str, ...] = (
+    "states.ee_to_robot_pose",
+    "states.gripper.position",
+    "actions.ee_to_robot_pose",
+    "actions.gripper.position",
+    "task_index",
+)
+
+
+_BIMANUAL_SIDES = {
+    "state": (
+        ("states.left_ee_to_robot_pose", "states.left_gripper.position"),
+        ("states.right_ee_to_robot_pose", "states.right_gripper.position"),
+    ),
+    "action": (
+        ("actions.left_ee_to_robot_pose", "actions.left_gripper.position"),
+        ("actions.right_ee_to_robot_pose", "actions.right_gripper.position"),
+    ),
+}
+_SINGLE_ARM_SIDES = {
+    "state": (("states.ee_to_robot_pose", "states.gripper.position"), None),
+    "action": (("actions.ee_to_robot_pose", "actions.gripper.position"), None),
+}
+
+
+_HEAD_CAMERA = "images.rgb.head"
+
+_LEFT_WRIST_BIMANUAL = "images.rgb.hand_left"
+_RIGHT_WRIST_BIMANUAL = "images.rgb.hand_right"
+_WRIST_SINGLE_ARM = "images.rgb.hand"
+
+
+def detect_arm_layout(features: Dict[str, Any]) -> str:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+    if "states.left_ee_to_robot_pose" in features and "states.right_ee_to_robot_pose" in features:
+        return "bimanual"
+    if "states.ee_to_robot_pose" in features:
+        return "single_arm"
+    raise ValueError(
+        "InternData-A1: info.features exposes neither the bimanual "
+        "(states.left_ee_to_robot_pose + states.right_ee_to_robot_pose) nor the "
+        "single-arm (states.ee_to_robot_pose) EEF schema; got keys "
+        f"{sorted(k for k in features if k.startswith('states.'))}"
+    )
+
+
+def embodiment_key(robot_type: str, arm_layout: str) -> str:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+    if robot_type in ROBOT_TYPE_TO_EMBODIMENT:
+        return ROBOT_TYPE_TO_EMBODIMENT[robot_type]
+    slug = "".join(c if c.isalnum() else "_" for c in str(robot_type).lower()).strip("_") or "unknown"
+    logger.warning(
+        "InternData-A1: unrecognized robot_type %r (%s layout) -> stats key %r. "
+        "Add it to ROBOT_TYPE_TO_EMBODIMENT and re-run interndata_a1_stats_computation.",
+        robot_type,
+        arm_layout,
+        slug,
+    )
+    return slug
+
+
+def discover_a1_buckets(root: Path) -> List[Path]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+    out: List[Path] = []
+    for dirpath, dirnames, _ in os.walk(root):
+        if os.path.isfile(os.path.join(dirpath, "meta", "info.json")):
+            out.append(Path(dirpath))
+            dirnames[:] = []
+            continue
+
+
+        dirnames[:] = [d for d in dirnames if d not in ("data", "videos")]
+    return sorted(out)
+
+
+class InternDataA1Dataset(LeRobotV3Reader):
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+    DATASET_NAME = "InternDataA1"
+    ACTION_DIM = _ACTION_DIM
+
+
+    NEEDED_COLS = _BIMANUAL_COLS
+    PROMPT_SOURCE = "task_index"
+    PROMPT_FILE_REQUIRED = True
+    STATS_DIM = _ACTION_DIM
+    STATS_STRICT_MINMAX = False
+    DEFAULT_NORMALIZE_MODE = "quantile"
+
+
+
+
+
+
+    DEPLOY_ACTION_MODE = None
+
+    def __init__(self, dataset_dir, *, a1_stats_root: Optional[str] = None, **kwargs):
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+        self._a1_stats_root = Path(a1_stats_root) if a1_stats_root else Path(dataset_dir)
+        super().__init__(dataset_dir, **kwargs)
+
+
+
+    def _resolve_cameras(self, info: dict):
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+        features = info.get("features", {}) or {}
+        self._arm_layout = detect_arm_layout(features)
+        self._robot_type = info.get("robot_type", "unknown")
+        self._embodiment = embodiment_key(self._robot_type, self._arm_layout)
+
+        if self._arm_layout == "bimanual":
+            self.NEEDED_COLS = _BIMANUAL_COLS
+            self._sides = _BIMANUAL_SIDES
+
+            self.ACTION_DIM_MASK = None
+            left_wrist, right_wrist = _LEFT_WRIST_BIMANUAL, _RIGHT_WRIST_BIMANUAL
+        else:
+            self.NEEDED_COLS = _SINGLE_ARM_COLS
+            self._sides = _SINGLE_ARM_SIDES
+
+            self.ACTION_DIM_MASK = LEFT_ARM_DIM_MASK
+
+            left_wrist, right_wrist = _WRIST_SINGLE_ARM, None
+
+        missing = [c for c in self.NEEDED_COLS if c != "task_index" and c not in features]
+        if missing:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {self._arm_layout} layout is missing "
+                f"feature(s) {missing} in info.json."
+            )
+
+
+
+        self._grip_scale = tuple(
+            resolve_gripper_scale(self._dataset_dir, self._embodiment, spec[1]) if spec is not None else 1.0
+            for spec in self._sides["state"]
+        )
+
+        head = _HEAD_CAMERA if _HEAD_CAMERA in features else None
+        if head is None:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: no {_HEAD_CAMERA!r} camera in info.features "
+                f"(has {sorted(k for k in features if k.startswith('images.'))})"
+            )
+
+
+        if left_wrist is not None and left_wrist not in features:
+            left_wrist = None
+        if right_wrist is not None and right_wrist not in features:
+            right_wrist = None
+        return head, left_wrist, right_wrist
+
+    def _train_min_window_len(self) -> int:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+        return 2
+
+    def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+        if actual_raw_len >= self._num_frames:
+            return actual_raw_len
+        return max(0, actual_raw_len - 1)
+
+    def _load_stats(self, info: dict):
+        """Public implementation. Dataset-specific audit notes were removed."""
+        if not self._normalize_mode or self._normalize_mode in ("none", "null"):
+            return None
+        stats_path = self._a1_stats_root / "meta" / f"stats_{self._embodiment}.json"
+        if not stats_path.exists():
+            raise FileNotFoundError(
+                f"normalize_mode={self._normalize_mode!r} but stats file is missing: {stats_path}. "
+                "Run python -m openwam.dataloader.utils.stats_computation."
+                "interndata_a1_stats_computation --dataset_dir <root>, or set normalize_mode=null."
+            )
+        with open(stats_path) as f:
+            raw = json.load(f)
+        eef_raw = raw.get("eef", {})
+
+
+
+
+
+        for k in ("mean", "std", "min", "max", "q01", "q99"):
+            if k not in eef_raw:
+                continue
+            width = len(eef_raw[k])
+            if width != _ACTION_DIM:
+                raise ValueError(
+                    f"InternData-A1 bucket {self._dataset_id}: 'eef' stats {k!r} width "
+                    f"{width} in {stats_path} != expected {_ACTION_DIM}. "
+                    "Re-run interndata_a1_stats_computation."
+                )
+        return materialize_eef_stats(
+            eef_raw,
+            self._normalize_mode,
+            dim=_ACTION_DIM,
+            strict_minmax=False,
+            source_hint=(
+                f"{stats_path}: eef.* — re-run python -m openwam.dataloader.utils."
+                "stats_computation.interndata_a1_stats_computation"
+            ),
+        )
+
+    def _post_init(self, info: dict) -> None:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+        if len(self._eps_df) == 0:
+            return
+        row = self._eps_df.iloc[0]
+        try:
+            table = self._load_data_table(int(row["data/chunk_index"]), int(row["data/file_index"]))
+            pose_col = self._sides["state"][0][0]
+            sample = np.stack(table.slice(0, 64).to_pandas()[pose_col].values).astype(np.float32)
+        except Exception as e:
+            logger.debug("%s(%s): quaternion probe skipped (%s)", self.DATASET_NAME, self._dataset_id, e)
+            return
+        assert_unit_quaternion(sample[:, 3:7])
+
+
+
+    def _arm10(self, win, spec, n: int, grip_scale: float) -> np.ndarray:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+        pose_col, grip_col = spec
+        pose = np.stack(win[pose_col].values[:n]).astype(np.float32)
+        grip = np.stack(win[grip_col].values[:n]).astype(np.float32).reshape(n, 1) / grip_scale
+        rot6d = quat_wxyz_to_rot6d(pose[:, 3:7])
+        return np.concatenate([pose[:, 0:3], rot6d, grip], axis=-1)
+
+    def _eef20(self, win, kind: str, n: int) -> np.ndarray:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+        left_spec, right_spec = self._sides[kind]
+        out = np.zeros((n, _ACTION_DIM), dtype=np.float32)
+        out[:, :ARM10_DIM] = self._arm10(win, left_spec, n, self._grip_scale[0])
+        if right_spec is not None:
+            out[:, ARM10_DIM:] = self._arm10(win, right_spec, n, self._grip_scale[1])
+        return out
+
+    def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
+        """Public implementation. Dataset-specific audit notes were removed."""
+        return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
+
+    def _action_20d(self, win) -> np.ndarray:
+        n = len(win)
+        return self._normalize_array(self._eef20(win, "action", n))
+
+    def _proprio_20d(self, win) -> np.ndarray:
+        return self._normalize_array(self._eef20(win, "state", 1))
+
+
+
+    @property
+    def robot_type(self) -> str:
+        return self._robot_type
+
+    @property
+    def embodiment(self) -> str:
+        return self._embodiment
+
+    @property
+    def arm_layout(self) -> str:
+        return self._arm_layout
+
+    @classmethod
+    def _multibucket_wrapper(cls):
+        return MultiInternDataA1Dataset
+
+
+
+    @classmethod
+    def from_config(cls, config, split: str = "train") -> Any:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+        from openwam.dataloader.utils import get_cfg as _get
+
+        dataset_dir = _get(config, "dataset_dir")
+        if dataset_dir is None:
+            raise ValueError(f"{cls.__name__}: missing dataset_dir")
+        root = Path(dataset_dir)
+
+        common: Dict[str, Any] = {"split": split}
+        for key in cls.CONFIG_KEYS:
+            v = _get(config, key, _CONFIG_SENTINEL)
+            if v is _CONFIG_SENTINEL:
+                continue
+
+
+
+            if v is None and key != "normalize_mode":
+                continue
+            common[key] = v
+
+
+
+        stats_root = _get(config, "stats_root") or str(root)
+        common["a1_stats_root"] = stats_root
+
+
+        if (root / "meta" / "info.json").is_file():
+            kwargs = dict(common)
+            dataset_id = _get(config, "dataset_id")
+            if dataset_id is not None:
+                kwargs["dataset_id"] = dataset_id
+            total_hours = _get(config, "total_hours")
+            if total_hours is not None:
+                kwargs["max_hours"] = float(total_hours)
+                kwargs["subsample_seed"] = int(_get(config, "seed", 42))
+            return cls(dataset_dir=str(root), **kwargs)
+
+        if not root.is_dir():
+            raise FileNotFoundError(f"{cls.__name__}: {root} does not exist")
+        sub_dirs = discover_a1_buckets(root)
+        if not sub_dirs:
+            raise FileNotFoundError(
+                f"{cls.__name__}: no buckets with meta/info.json found anywhere under {root}. "
+                "Did the tar.gz archives get extracted? (see a1_extract_v30.sh)"
+            )
+        logger.info("%s.from_config: root mode, %d buckets under %s", cls.__name__, len(sub_dirs), root)
+
+        def _per_bucket(sub: Path) -> Dict[str, Any]:
+
+
+
+            try:
+                return {"dataset_id": str(sub.relative_to(root))}
+            except ValueError:
+                return {"dataset_id": sub.name}
+
+        return build_multibucket(
+            cls,
+            sub_dirs,
+            common,
+            base_seed=int(_get(config, "seed", 42)),
+            total_hours=_get(config, "total_hours"),
+            wrapper_cls=cls._multibucket_wrapper(),
+            source_name=cls.__name__,
+            per_bucket_kwargs=_per_bucket,
+        )
+
+
+class MultiInternDataA1Dataset(MultiLeRobotV3Reader):
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+    def __init__(self, buckets):
+        super().__init__(buckets)
+        counts: Dict[str, int] = {}
+        windows: Dict[str, int] = {}
+        for b in self._buckets:
+            emb = getattr(b, "embodiment", "unknown")
+            counts[emb] = counts.get(emb, 0) + 1
+            windows[emb] = windows.get(emb, 0) + len(b)
+        logger.info(
+            "MultiInternDataA1Dataset: %d buckets, %d windows | %s",
+            len(self._buckets),
+            len(self),
+            ", ".join(f"{k}: {counts[k]} buckets/{windows[k]} windows" for k in sorted(counts)),
+        )
+        self._embodiment_bucket_counts = counts
+        self._embodiment_window_counts = windows
+
+    @property
+    def embodiment_bucket_counts(self) -> Dict[str, int]:
+        return dict(self._embodiment_bucket_counts)
+
+    @property
+    def embodiment_window_counts(self) -> Dict[str, int]:
+        return dict(self._embodiment_window_counts)
+
+
+__all__ = [
+    "InternDataA1Dataset",
+    "MultiInternDataA1Dataset",
+    "ROBOT_TYPE_TO_EMBODIMENT",
+    "SINGLE_ARM_EMBODIMENTS",
+    "GRIPPER_FULL_OPEN",
+    "GRIPPER_ALT_FULL_OPEN",
+    "detect_arm_layout",
+    "embodiment_key",
+    "discover_a1_buckets",
+    "resolve_gripper_scale",
+]

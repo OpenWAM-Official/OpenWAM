@@ -1,0 +1,609 @@
+"""Tests for the InternData-A1 v3.0 dataloader (openwam/dataloader/interndata_a1.py).
+
+Covers the A1-specific behavior the shared LeRobotV3Reader base does not:
+arm-layout auto-detection (bimanual vs unprefixed franka), recursive
+variable-depth bucket discovery, the wxyz->xyzw quaternion reorder, 20-D
+xyz+rot6d+gripper assembly with single-arm left-half placement, the
+episode-boundary action drop, and per-embodiment stats loading with rot6d
+identity pinning.
+
+Video decode is monkeypatched throughout, so no mp4 is needed.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+from PIL import Image
+
+from openwam.dataloader.interndata_a1 import (
+    ROBOT_TYPE_TO_EMBODIMENT,
+    InternDataA1Dataset,
+    MultiInternDataA1Dataset,
+    detect_arm_layout,
+    discover_a1_buckets,
+    embodiment_key,
+)
+from openwam.dataloader.utils.eef import (
+    ARM10_DIM,
+    EEF_DIM,
+    LEFT_ARM_DIM_MASK,
+    quat_wxyz_to_rot6d,
+    quat_xyzw_to_rot6d,
+)
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
+
+HEAD = "images.rgb.head"
+HAND = "images.rgb.hand"
+HAND_L = "images.rgb.hand_left"
+HAND_R = "images.rgb.hand_right"
+
+_POSE7 = {"dtype": "float32", "shape": [7]}
+_SCALAR = {"dtype": "float32", "shape": [1]}
+_VIDEO = {"dtype": "video", "shape": [360, 640, 3]}
+
+BIMANUAL_FEATURES = {
+    HEAD: _VIDEO,
+    HAND_L: _VIDEO,
+    HAND_R: _VIDEO,
+    "states.left_ee_to_robot_pose": _POSE7,
+    "states.left_gripper.position": _SCALAR,
+    "states.right_ee_to_robot_pose": _POSE7,
+    "states.right_gripper.position": _SCALAR,
+    "actions.left_ee_to_robot_pose": _POSE7,
+    "actions.left_gripper.position": _SCALAR,
+    "actions.right_ee_to_robot_pose": _POSE7,
+    "actions.right_gripper.position": _SCALAR,
+}
+SINGLE_ARM_FEATURES = {
+    HEAD: _VIDEO,
+    HAND: _VIDEO,
+    "states.ee_to_robot_pose": _POSE7,
+    "states.gripper.position": _SCALAR,
+    "actions.ee_to_robot_pose": _POSE7,
+    "actions.gripper.position": _SCALAR,
+}
+
+
+def _unit_quats(n: int, seed: int) -> np.ndarray:
+    """(n, 4) random unit quaternions in wxyz order."""
+    rng = np.random.RandomState(seed)
+    q = rng.randn(n, 4).astype(np.float32)
+    return q / np.linalg.norm(q, axis=1, keepdims=True)
+
+
+def _make_bucket(
+    root: Path,
+    rel: str,
+    *,
+    layout: str = "bimanual",
+    robot_type: str = "AgileX Split Aloha",
+    n_eps: int = 2,
+    ep_len: int = 40,
+    seed: int = 0,
+) -> Path:
+    """Write a synthetic LeRobot v3 A1 bucket at ``root/rel``.
+
+    Actions are written as the exact next state (``actions[t] == states[t+1]``,
+    last row clamped) to mirror the real dataset's relabeling.
+    """
+    d = root / rel
+    (d / "meta" / "episodes" / "chunk-000").mkdir(parents=True, exist_ok=True)
+    (d / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
+
+    bimanual = layout == "bimanual"
+    features = BIMANUAL_FEATURES if bimanual else SINGLE_ARM_FEATURES
+    cams = [HEAD, HAND_L, HAND_R] if bimanual else [HEAD, HAND]
+    sides = ["left", "right"] if bimanual else [None]
+
+    (d / "meta" / "info.json").write_text(
+        json.dumps(
+            {
+                "codebase_version": "v3.0",
+                "robot_type": robot_type,
+                "fps": 30.0,
+                "total_episodes": n_eps,
+                "splits": {"train": f"0:{n_eps}"},
+                "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+                "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+                "features": features,
+            }
+        )
+    )
+    pq.write_table(
+        pa.Table.from_pandas(pd.DataFrame({"task_index": [0]}, index=["Close the microwave"])),
+        d / "meta" / "tasks.parquet",
+    )
+
+    total = n_eps * ep_len
+    rng = np.random.RandomState(seed)
+    cols: dict = {"task_index": np.zeros(total, dtype=np.int64)}
+    for i, side in enumerate(sides):
+        pfx = f"{side}_" if side else ""
+        pos = rng.randn(total, 3).astype(np.float32)
+        quat = _unit_quats(total, seed + i)
+        state = np.concatenate([pos, quat], axis=-1)
+        grip = rng.rand(total, 1).astype(np.float32)
+        # actions[t] = states[t+1] within each episode; final row clamped.
+        act, act_grip = state.copy(), grip.copy()
+        for e in range(n_eps):
+            lo, hi = e * ep_len, (e + 1) * ep_len
+            act[lo : hi - 1] = state[lo + 1 : hi]
+            act[hi - 1] = state[hi - 1]
+            act_grip[lo : hi - 1] = grip[lo + 1 : hi]
+            act_grip[hi - 1] = grip[hi - 1]
+        cols[f"states.{pfx}ee_to_robot_pose"] = list(state)
+        cols[f"states.{pfx}gripper.position"] = list(grip)
+        cols[f"actions.{pfx}ee_to_robot_pose"] = list(act)
+        cols[f"actions.{pfx}gripper.position"] = list(act_grip)
+    pq.write_table(pa.Table.from_pandas(pd.DataFrame(cols)), d / "data" / "chunk-000" / "file-000.parquet")
+
+    rows = []
+    for e in range(n_eps):
+        row = {
+            "episode_index": e,
+            "length": ep_len,
+            "tasks": ["Close the microwave"],
+            "dataset_from_index": e * ep_len,
+            "dataset_to_index": (e + 1) * ep_len,
+            "data/chunk_index": 0,
+            "data/file_index": 0,
+        }
+        for c in cams:
+            row[f"videos/{c}/chunk_index"] = 0
+            row[f"videos/{c}/file_index"] = 0
+        rows.append(row)
+    pq.write_table(
+        pa.Table.from_pandas(pd.DataFrame(rows)),
+        d / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
+    )
+    return d
+
+
+@pytest.fixture
+def patch_decode(monkeypatch):
+    def fake_decode(path, frame_indices, height, width):
+        return [Image.new("RGB", (width, height)) for _ in frame_indices]
+
+    monkeypatch.setattr("openwam.dataloader.bases.lerobot_v3_reader._decode_video_frames", fake_decode)
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+
+class TestLayoutDetection:
+    def test_bimanual(self):
+        assert detect_arm_layout(BIMANUAL_FEATURES) == "bimanual"
+
+    def test_single_arm_unprefixed(self):
+        assert detect_arm_layout(SINGLE_ARM_FEATURES) == "single_arm"
+
+    def test_bimanual_wins_when_both_shapes_present(self):
+        """A bucket exposing both must not be read as single-arm (that would
+        silently drop the right arm)."""
+        assert detect_arm_layout({**BIMANUAL_FEATURES, "states.ee_to_robot_pose": _POSE7}) == "bimanual"
+
+    def test_unknown_schema_raises(self):
+        with pytest.raises(ValueError, match="neither the bimanual"):
+            detect_arm_layout({"states.joint.position": {"dtype": "float32", "shape": [7]}})
+
+
+class TestEmbodimentKey:
+    @pytest.mark.parametrize("robot_type,expected", sorted(ROBOT_TYPE_TO_EMBODIMENT.items()))
+    def test_known_types(self, robot_type, expected):
+        assert embodiment_key(robot_type, "bimanual") == expected
+
+    def test_unknown_type_slugs_rather_than_borrowing(self, caplog):
+        assert embodiment_key("Some New Bot v2", "bimanual") == "some_new_bot_v2"
+        assert "unrecognized robot_type" in caplog.text
+
+    def test_franka_is_the_only_single_arm_default(self):
+        assert ROBOT_TYPE_TO_EMBODIMENT["Franka"] == "franka"
+
+
+class TestQuaternionConvention:
+    """The dataset stores quaternion.w FIRST; feeding wxyz into the xyzw helper
+    produces a wrong-but-unit rotation that no norm check can catch."""
+
+    def test_matches_explicit_rotation_matrix_columns(self):
+        # 90 deg about z: wxyz = [cos45, 0, 0, sin45]
+        s = np.sqrt(0.5)
+        rot6d = quat_wxyz_to_rot6d(np.array([[s, 0.0, 0.0, s]], dtype=np.float32))[0]
+        # R = [[0,-1,0],[1,0,0],[0,0,1]] -> col0 = (0,1,0), col1 = (-1,0,0)
+        np.testing.assert_allclose(rot6d[:3], [0, 1, 0], atol=1e-6)
+        np.testing.assert_allclose(rot6d[3:], [-1, 0, 0], atol=1e-6)
+
+    def test_identity_quaternion(self):
+        rot6d = quat_wxyz_to_rot6d(np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32))[0]
+        np.testing.assert_allclose(rot6d, [1, 0, 0, 0, 1, 0], atol=1e-6)
+
+    def test_reorder_is_load_bearing(self):
+        """Regression guard: the two conventions must NOT agree, and the wrong
+        one must still look orthonormal — that is exactly why it needs a test."""
+        q = _unit_quats(16, seed=3)
+        right, wrong = quat_wxyz_to_rot6d(q), quat_xyzw_to_rot6d(q)
+        assert not np.allclose(right, wrong, atol=1e-3)
+        np.testing.assert_allclose(np.linalg.norm(wrong[:, :3], axis=1), 1.0, atol=1e-5)
+
+    def test_output_columns_are_orthonormal(self):
+        r = quat_wxyz_to_rot6d(_unit_quats(32, seed=7))
+        np.testing.assert_allclose(np.linalg.norm(r[:, :3], axis=1), 1.0, atol=1e-5)
+        np.testing.assert_allclose(np.linalg.norm(r[:, 3:], axis=1), 1.0, atol=1e-5)
+        np.testing.assert_allclose((r[:, :3] * r[:, 3:]).sum(axis=1), 0.0, atol=1e-5)
+
+    def test_rejects_wrong_width(self):
+        with pytest.raises(ValueError, match="4-D wxyz"):
+            quat_wxyz_to_rot6d(np.zeros((4, 3), dtype=np.float32))
+
+
+class TestBucketDiscovery:
+    def test_finds_both_nesting_depths(self, tmp_path):
+        _make_bucket(tmp_path, "articulation_tasks/split_aloha/close_microwave")
+        _make_bucket(tmp_path, "pick_and_place_tasks/franka/single_pick/google_scan-book", layout="single_arm")
+        found = {p.relative_to(tmp_path).as_posix() for p in discover_a1_buckets(tmp_path)}
+        assert found == {
+            "articulation_tasks/split_aloha/close_microwave",
+            "pick_and_place_tasks/franka/single_pick/google_scan-book",
+        }
+
+    def test_does_not_descend_into_a_bucket(self, tmp_path):
+        """A bucket's own data/ and videos/ must never be reported as buckets —
+        and the walk must not pay to traverse them."""
+        b = _make_bucket(tmp_path, "cat/emb/task")
+        (b / "data" / "chunk-000" / "meta").mkdir(parents=True, exist_ok=True)
+        (b / "data" / "chunk-000" / "meta" / "info.json").write_text("{}")
+        assert discover_a1_buckets(tmp_path) == [b]
+
+    def test_empty_root(self, tmp_path):
+        assert discover_a1_buckets(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# Reader
+# ---------------------------------------------------------------------------
+
+
+class TestBimanualReader:
+    def test_all_20_dims_supervised(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds.arm_layout == "bimanual"
+        assert ds.embodiment == "split_aloha"
+        assert ds.ACTION_DIM_MASK is None
+        s = ds[0]
+        assert s["action"].shape == (8, EEF_DIM)
+        assert s["proprio"].shape == (1, EEF_DIM)
+        assert bool(s["action_mask"][0].all())
+        assert bool(s["proprio_mask"].all())
+        assert s["prompt"] == "Close the microwave"
+
+    def test_resolves_three_cameras(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert (ds._head_camera, ds._left_wrist_camera, ds._right_wrist_camera) == (HEAD, HAND_L, HAND_R)
+
+    def test_rot6d_slots_are_orthonormal(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        a = ds[0]["action"].numpy()
+        for lo in (3, 13):
+            c0, c1 = a[:, lo : lo + 3], a[:, lo + 3 : lo + 6]
+            np.testing.assert_allclose(np.linalg.norm(c0, axis=1), 1.0, atol=1e-5)
+            np.testing.assert_allclose((c0 * c1).sum(axis=1), 0.0, atol=1e-5)
+
+
+class TestSingleArmFranka:
+    """Franka fills the LEFT half; the right half is zero padding, masked out."""
+
+    def test_left_half_placement_and_mask(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds.arm_layout == "single_arm"
+        assert ds.embodiment == "franka"
+        np.testing.assert_array_equal(ds.ACTION_DIM_MASK, LEFT_ARM_DIM_MASK)
+
+        s = ds[0]
+        a, p = s["action"].numpy(), s["proprio"].numpy()
+        # right half is exactly zero, left half carries real data
+        np.testing.assert_array_equal(a[:, ARM10_DIM:], 0.0)
+        np.testing.assert_array_equal(p[:, ARM10_DIM:], 0.0)
+        assert np.abs(a[:, :ARM10_DIM]).sum() > 0
+        # mask excludes the padding
+        assert int(s["action_mask"][0].sum()) == ARM10_DIM
+        assert int(s["proprio_mask"].sum()) == ARM10_DIM
+        assert not bool(s["action_mask"][:, ARM10_DIM:].any())
+
+    def test_single_wrist_camera_takes_the_left_slot(self, tmp_path, patch_decode):
+        """The wrist view must sit on the same side as the arm's action slots."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert (ds._head_camera, ds._left_wrist_camera, ds._right_wrist_camera) == (HEAD, HAND, None)
+
+
+class TestTemporalAlignment:
+    def test_action_is_row_aligned_next_state(self, tmp_path, patch_decode):
+        """actions[t] == states[t+1] in the source; the reader reads actions.*
+        row-aligned, so no extra shift may be introduced."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", ep_len=40)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        win = ds._load_data_table(0, 0).slice(0, 10).to_pandas()
+        action = ds._eef20(win, "action", 9)
+        state = ds._eef20(win, "state", 10)
+        np.testing.assert_allclose(action[:-1], state[1:9], atol=1e-6)
+
+    def test_full_window_keeps_every_step(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._n_supervised_action_steps(9) == 9
+
+    def test_episode_truncated_window_drops_the_clamped_last_action(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._n_supervised_action_steps(4) == 3
+        assert ds._n_supervised_action_steps(1) == 0
+
+    def test_last_window_of_episode_masks_the_fabricated_target(self, tmp_path, patch_decode):
+        """ep_len=12, num_frames=9 -> starts at offsets 0..10 (T_action=8).
+
+        offset 3 fits exactly: it spans rows 3..11, but T_action=8 already stops
+        at row 10, so the clamped row 11 is never used as a target and all 8
+        steps stay supervised. offset 10 is truncated to 2 rows (10, 11), and row
+        11 IS the clamped duplicate -> only 1 supervised step survives.
+        """
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=12)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert len(ds) == 11
+        assert int(ds[3]["action_mask"].any(dim=1).sum()) == 8
+        assert int(ds[len(ds) - 1]["action_mask"].any(dim=1).sum()) == 1
+
+    def test_min_window_len_keeps_every_train_window_supervised(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=6)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._train_min_window_len() == 2
+        for i in range(len(ds)):
+            assert int(ds[i]["action_mask"].any(dim=1).sum()) >= 1
+
+
+class TestGripperHarmonization:
+    """gripper.position is published on two different scales; the reader must
+    map every bucket onto a normalized [0, 1] aperture before assembly."""
+
+    def _write_bucket_stats(self, bucket: Path, cols: dict):
+        (bucket / "meta" / "stats.json").write_text(
+            json.dumps({c: {"min": [0.0], "max": [m]} for c, m in cols.items()})
+        )
+
+    def test_metric_bucket_is_divided_by_the_stroke(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        self._write_bucket_stats(d, {"states.gripper.position": 0.08})
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale[0] == pytest.approx(0.08)
+        raw = np.stack(ds._load_data_table(0, 0).slice(0, 9).to_pandas()["actions.gripper.position"].values)
+        np.testing.assert_allclose(ds[0]["action"].numpy()[:, 9], raw.ravel()[:8] / 0.08, atol=1e-5)
+
+    def test_binary_openness_bucket_is_left_alone(self, tmp_path, patch_decode):
+        """A normalized Franka bucket already store 0/1 — dividing them by
+        the 0.08 stroke would blow them up to 12.5."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        self._write_bucket_stats(d, {"states.gripper.position": 1.0})
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale[0] == 1.0
+        assert float(np.abs(ds[0]["action"].numpy()[:, 9]).max()) <= 1.0
+
+    def test_two_scales_land_on_the_same_aperture(self, tmp_path, patch_decode):
+        """A half-open gripper must read ~0.5 whichever scale its bucket used."""
+        metric = _make_bucket(tmp_path, "cat/franka/metric", layout="single_arm", robot_type="Franka", seed=1)
+        norm = _make_bucket(tmp_path, "cat/franka/norm", layout="single_arm", robot_type="Franka", seed=1)
+        self._write_bucket_stats(metric, {"states.gripper.position": 0.08})
+        self._write_bucket_stats(norm, {"states.gripper.position": 1.0})
+        # rewrite the metric bucket's gripper as the normalized one * 0.08
+        for bucket, factor in ((metric, 0.08), (norm, 1.0)):
+            p = bucket / "data" / "chunk-000" / "file-000.parquet"
+            t = pq.read_table(p).to_pandas()
+            for c in ("states.gripper.position", "actions.gripper.position"):
+                t[c] = [np.array([0.5 * factor], dtype=np.float32)] * len(t)
+            pq.write_table(pa.Table.from_pandas(t), p)
+        a = InternDataA1Dataset(str(metric), normalize_mode=None, num_frames=9, video_stride=4)[0]
+        b = InternDataA1Dataset(str(norm), normalize_mode=None, num_frames=9, video_stride=4)[0]
+        np.testing.assert_allclose(a["action"].numpy()[:, 9], 0.5, atol=1e-5)
+        np.testing.assert_allclose(b["action"].numpy()[:, 9], 0.5, atol=1e-5)
+
+    def test_missing_bucket_stats_falls_back_to_the_embodiment_stroke(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale == (pytest.approx(0.1), pytest.approx(0.1))
+
+    def test_single_gripper_embodiments_always_use_their_one_stroke(self, tmp_path, patch_decode):
+        """lift2 ships ONE gripper, so no per-bucket variant detection may fire —
+        even for a side whose observed max coincidentally looks like 1.0."""
+        d = _make_bucket(tmp_path, "cat/lift2/task", robot_type="ARX Lift-2")
+        self._write_bucket_stats(d, {"states.left_gripper.position": 0.088, "states.right_gripper.position": 1.0})
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale == (pytest.approx(0.088), pytest.approx(0.088))
+
+    def test_genie1_uses_the_documented_574_stroke(self, tmp_path, patch_decode):
+        """genie1's full-open is 5.74, NOT 1.0 — most episodes never fully open,
+        so a naive 'observed max ~ 1' read of this embodiment is wrong."""
+        d = _make_bucket(tmp_path, "cat/genie1/task", robot_type="Genie-1")
+        self._write_bucket_stats(d, {"states.left_gripper.position": 1.16, "states.right_gripper.position": 5.74})
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale == (pytest.approx(5.74), pytest.approx(5.74))
+
+    def test_half_open_franka_still_resolves_to_the_panda_stroke(self, tmp_path, patch_decode):
+        """Variant matching is in LOG space: 0.04 is 2x from 0.08 but 25x from
+        1.0, so a panda bucket that only ever half-opens must not flip to Robotiq."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        self._write_bucket_stats(d, {"states.gripper.position": 0.04})
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale[0] == pytest.approx(0.08)
+
+    def test_out_of_range_outlier_warns(self, tmp_path, patch_decode, caplog):
+        """A synthetic outlier — surfaced, not fatal."""
+        d = _make_bucket(tmp_path, "cat/genie1/task", robot_type="Genie-1")
+        self._write_bucket_stats(d, {"states.left_gripper.position": 100.0, "states.right_gripper.position": 1.0})
+        with caplog.at_level("WARNING"):
+            ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale == (pytest.approx(5.74), pytest.approx(5.74))
+        assert "the assumed full-open stroke" in caplog.text
+
+    def test_in_range_bucket_does_not_warn(self, tmp_path, patch_decode, caplog):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        self._write_bucket_stats(d, {"states.left_gripper.position": 0.1, "states.right_gripper.position": 0.1})
+        with caplog.at_level("WARNING"):
+            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert "full-open stroke" not in caplog.text
+
+    def test_never_opened_gripper_falls_back_to_the_stroke_and_stays_zero(self, tmp_path, patch_decode):
+        """max ~ 0 carries no scale information, but 0 / anything == 0."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        self._write_bucket_stats(d, {"states.left_gripper.position": 0.0, "states.right_gripper.position": 0.0})
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale[0] == pytest.approx(0.1)
+
+
+class TestStats:
+    def _write_stats(self, root: Path, embodiment: str, *, pin_rot6d: bool = True):
+        (root / "meta").mkdir(parents=True, exist_ok=True)
+        eef = {
+            "mean": [0.0] * EEF_DIM,
+            "std": [1.0] * EEF_DIM,
+            "min": [-2.0] * EEF_DIM,
+            "max": [2.0] * EEF_DIM,
+            "q01": [-2.0] * EEF_DIM,
+            "q99": [2.0] * EEF_DIM,
+        }
+        if pin_rot6d:
+            for dim in ROT6D_DIMS_EEF20:
+                eef["q01"][dim] = -1.0
+                eef["q99"][dim] = 1.0
+        (root / "meta" / f"stats_{embodiment}.json").write_text(json.dumps({"eef": eef}))
+
+    def test_missing_stats_file_raises_actionable_error(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        with pytest.raises(FileNotFoundError, match="interndata_a1_stats_computation"):
+            InternDataA1Dataset(str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile")
+
+    def test_normalize_mode_null_needs_no_stats(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._normalization_stats is None
+
+    def test_shared_stats_root_is_used_not_the_bucket_dir(self, tmp_path, patch_decode):
+        """Buckets sit at variable depth; stats live once at the dataset root."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        self._write_stats(tmp_path, "split_aloha")
+        ds = InternDataA1Dataset(
+            str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile", num_frames=9, video_stride=4
+        )
+        assert ds._normalization_stats is not None
+
+    def test_rot6d_dims_pass_through_normalization(self, tmp_path, patch_decode):
+        """Pinned rot6d stats must leave the rotation representation untouched,
+        while pos/gripper dims are rescaled."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        self._write_stats(tmp_path, "split_aloha")
+        raw = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        norm = InternDataA1Dataset(
+            str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile", num_frames=9, video_stride=4
+        )
+        a_raw = raw[0]["action"].numpy()
+        a_norm = norm[0]["action"].numpy()
+        np.testing.assert_allclose(a_norm[:, list(ROT6D_DIMS_EEF20)], a_raw[:, list(ROT6D_DIMS_EEF20)], atol=1e-6)
+        # xyz dims used q01/q99 = +-2 -> genuinely rescaled
+        assert not np.allclose(a_norm[:, 0:3], a_raw[:, 0:3], atol=1e-6)
+
+    def test_wrong_width_stats_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        (tmp_path / "meta").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "meta" / "stats_split_aloha.json").write_text(
+            json.dumps({"eef": {k: [0.0] * 10 for k in ("mean", "std", "min", "max", "q01", "q99")}})
+        )
+        with pytest.raises(ValueError, match="!= expected 20"):
+            InternDataA1Dataset(str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile")
+
+
+class TestUnifyScatter:
+    def test_single_arm_padding_stays_masked_after_scatter(self, tmp_path, patch_decode):
+        """The 80-D scatter must not resurrect franka's zero-padded right arm."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        ds = InternDataA1Dataset(
+            str(d),
+            normalize_mode=None,
+            num_frames=9,
+            video_stride=4,
+            unify_action=True,
+            unify_action_map=["0-9", "34-43"],
+        )
+        s = ds[0]
+        assert ds.action_dim == 80
+        assert s["action"].shape == (8, 80)
+        # left arm -> slots 0-9 valid; right-arm destinations 34-43 masked out
+        assert int(s["action_mask"][0].sum()) == ARM10_DIM
+        assert bool(s["action_mask"][0, :ARM10_DIM].all())
+        assert not bool(s["action_mask"][0, 34:44].any())
+
+    def test_bimanual_maps_both_arms(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset(
+            str(d),
+            normalize_mode=None,
+            num_frames=9,
+            video_stride=4,
+            unify_action=True,
+            unify_action_map=["0-9", "34-43"],
+        )
+        m = ds[0]["action_mask"][0]
+        assert int(m.sum()) == EEF_DIM
+        assert bool(m[:10].all()) and bool(m[34:44].all())
+
+
+class TestFromConfig:
+    def test_root_mode_discovers_and_aggregates_mixed_embodiments(self, tmp_path, patch_decode):
+        _make_bucket(tmp_path, "cat/split_aloha/taskA")
+        _make_bucket(tmp_path, "cat/franka/taskB/obj", layout="single_arm", robot_type="Franka")
+        _make_bucket(tmp_path, "cat/lift2/taskC", robot_type="ARX Lift-2")
+        ds = InternDataA1Dataset.from_config(
+            {"dataset_dir": str(tmp_path), "normalize_mode": None, "num_frames": 9, "video_stride": 4},
+            split="train",
+        )
+        assert isinstance(ds, MultiInternDataA1Dataset)
+        assert ds.embodiment_bucket_counts == {"franka": 1, "lift2": 1, "split_aloha": 1}
+        assert ds.action_dim == EEF_DIM
+        assert len(ds) == sum(len(b) for b in ds.buckets)
+        assert ds[0]["action"].shape == (8, EEF_DIM)
+
+    def test_single_bucket_mode(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        ds = InternDataA1Dataset.from_config(
+            {"dataset_dir": str(d), "normalize_mode": None, "num_frames": 9, "video_stride": 4},
+            split="train",
+        )
+        assert isinstance(ds, InternDataA1Dataset)
+
+    def test_bucket_ids_are_root_relative_paths(self, tmp_path, patch_decode):
+        """Bucket dir names repeat across tasks, so ids must disambiguate."""
+        _make_bucket(tmp_path, "cat/franka/taskA/google_scan-book", layout="single_arm", robot_type="Franka")
+        _make_bucket(tmp_path, "cat/franka/taskB/google_scan-book", layout="single_arm", robot_type="Franka")
+        ds = InternDataA1Dataset.from_config(
+            {"dataset_dir": str(tmp_path), "normalize_mode": None, "num_frames": 9, "video_stride": 4},
+            split="train",
+        )
+        ids = sorted(b._dataset_id for b in ds.buckets)
+        assert ids == ["cat/franka/taskA/google_scan-book", "cat/franka/taskB/google_scan-book"]
+
+    def test_empty_root_raises_pointing_at_extraction(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="extracted"):
+            InternDataA1Dataset.from_config({"dataset_dir": str(tmp_path)}, split="train")
+
+    def test_registered_under_interndata_a1(self):
+        from openwam.dataloader.registry import DATASET_REGISTRY
+
+        assert DATASET_REGISTRY["interndata_a1"] is InternDataA1Dataset
