@@ -8,7 +8,7 @@ type: robocasa_gr1
 #   python scripts/convert_robocasa_gr1_v20_to_v30.py \
 #     --input /path/to/robocasa-gr1-eef33-v20 \
 #     --output /path/to/robocasa-gr1-eef33-v30
-dataset_dir: /TODO/robocasa_gr1_eef33_v30
+dataset_dir: /path/to/robocasa-gr1-eef33-lerobot-v3
 
 # Only EEF is supported. Raw EEF33:
 # [L xyz3+rot6d6+hand6, R xyz3+rot6d6+hand6, waist3].
@@ -48,13 +48,16 @@ multiview: true
 split: train
 enable_action_supervision: true
 
-# null disables in-reader normalization. Set to min-max or z-score after
-# generating normalization_stats.npy with
-# openwam/dataloader/utils/stats_computation/robocasa_gr1_stats_computation.py.
-normalize_mode: null
-normalization_stats_path: null
-# The stats script pools EEF33 action and state rows into one global `eef`
-# block; both directions use this same transform.
+# min-max / z-score / quantile, or null to disable in-reader normalization.
+# The stats file location is fixed at <dataset_dir>/meta/normalization_stats.npy
+# and is auto-computed there on first use when missing (rank 0 scans the whole
+# root, other ranks wait) — every task bucket shares that one pooled file.
+# Delete it to force a rebuild; to build it up front:
+#   python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
+#     --config configs/dataloader/robocasa_gr1.yaml
+normalize_mode: min-max
+# The stats pool EEF33 action and state rows into one global `eef` block; both
+# directions use this same transform.
 
 # Normalize EEF33 first, then scatter arm poses, Fourier hands, and waist into
 # the shared EEF/dex-hand/reserved slots. Gripper slots 9/43 stay unmapped.

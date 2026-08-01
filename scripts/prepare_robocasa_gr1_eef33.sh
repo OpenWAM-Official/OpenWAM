@@ -42,13 +42,13 @@ root, dataset, output = map(Path, sys.argv[1:])
 cfg = OmegaConf.load(root / "configs/dataloader/robocasa_gr1.yaml")
 cfg.dataset_dir = str(dataset)
 cfg.normalize_mode = None
-cfg.normalization_stats_path = None
 OmegaConf.save(cfg, output)
 PY
+# No --output: the default is <dataset_dir>/meta/normalization_stats.npy, the
+# fixed location the reader loads (and would otherwise auto-build on first use).
 PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     "$OPENWAM_PYTHON" -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
-    --config "$TMP_CONFIG" \
-    --output "$EEF_V30/normalization_stats.npy"
+    --config "$TMP_CONFIG"
 
 echo "Prepared EEF33 dataset: $EEF_V30"
-echo "Stats: $EEF_V30/normalization_stats.npy"
+echo "Stats: $EEF_V30/meta/normalization_stats.npy"

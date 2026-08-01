@@ -15,7 +15,12 @@ from PIL import Image
 
 from openwam.dataloader.bases.lerobot_v3_reader import _read_data_table_cached
 from openwam.dataloader.registry import list_registered_datasets
-from openwam.dataloader.robocasa_gr1 import EEF33_DIM, MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
+from openwam.dataloader.robocasa_gr1 import (
+    EEF33_DIM,
+    NORMALIZATION_STATS_FILENAME,
+    MultiRoboCasaGR1Dataset,
+    RoboCasaGR1Dataset,
+)
 from openwam.dataloader.transforms.builder import build_transforms
 from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.gr1_kinematics import ROT6D_DIMS_EEF33
@@ -174,7 +179,7 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
             "std": np.ones(EEF33_DIM, dtype=np.float32),
         }
     }
-    stats_path = tmp_path / "normalization_stats.npy"
+    stats_path = tmp_path / "meta" / NORMALIZATION_STATS_FILENAME
     np.save(stats_path, stats)
 
     with _mock_decoder():
@@ -184,7 +189,6 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
             unify_action=True,
             unify_action_map=["0-8", "10-15", "34-42", "44-49", "68-70"],
             normalize_mode="min-max",
-            normalization_stats_path=str(stats_path),
         )
         sample = ds[0]
 
@@ -194,7 +198,10 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     np.testing.assert_allclose(sample["proprio"][0, 0].item(), -0.8, atol=1e-6)
     # raw EEF right x=1 -> min-max +1, then maps to unified slot 34.
     assert sample["action"][0, 34].item() == 1.0
-    assert ds.normalization_stats_path == str(tmp_path / "meta" / "normalization_stats.npy")
+    # Single-bucket mode: source stats and deploy artifact are the same file —
+    # the rewrite keeps the six stat vectors and drops nothing the reader needs.
+    assert ds.normalization_stats_path == str(stats_path)
+    assert ds._resolved_stats_path == str(stats_path)
     deploy_stats = np.load(ds.normalization_stats_path, allow_pickle=True).item()
     assert set(deploy_stats["eef"]) == {"mean", "std", "min", "max", "q01", "q99"}
     assert deploy_stats["eef"]["mean"].shape == (EEF33_DIM,)
@@ -226,15 +233,13 @@ def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Pat
         "q99": np.full(EEF33_DIM, 2.0, dtype=np.float32),
     }
     pin_rot6d_identity(base, ROT6D_DIMS_EEF33)
-    stats_path = tmp_path / "normalization_stats.npy"
-    np.save(stats_path, {"eef": base})
+    np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, {"eef": base})
     ds = _dataset(
         tmp_path,
         action_mode="eef",
         unify_action=True,
         unify_action_map=["0-8", "10-15", "34-42", "44-49", "68-70"],
         normalize_mode="min-max",
-        normalization_stats_path=str(stats_path),
     )
     raw = ds._raw_action(ds._load_data_table(0, 0).to_pandas())
     normalized = ds._normalize_array(raw)
@@ -371,11 +376,18 @@ def test_robocasa_config_wires_reader_color_jitter():
     assert "transforms" not in cfg
 
 
+def test_robocasa_config_normalizes_min_max_without_stats_path():
+    cfg = OmegaConf.load("configs/dataloader/robocasa_gr1.yaml")
+    assert cfg.normalize_mode == "min-max"
+    assert "normalization_stats_path" not in cfg
+
+
 def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
     root = tmp_path / "root"
     for name in ("a", "b"):
         _write_bucket(root / name)
-    source = tmp_path / "stats.npy"
+    source = root / "meta" / NORMALIZATION_STATS_FILENAME
+    source.parent.mkdir(parents=True)
     base = np.arange(EEF33_DIM, dtype=np.float32)
     source_stats = {
         "min": base - 1,
@@ -394,15 +406,88 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
             "multiview": True,
             "prompt_columns": ["annotation.human.coarse_action"],
             "normalize_mode": "z-score",
-            "normalization_stats_path": str(source),
         }
     )
     ds = RoboCasaGR1Dataset.from_config(cfg)
     assert isinstance(ds, MultiRoboCasaGR1Dataset)
-    assert ds.normalization_stats_path == str(root / "a" / "meta" / "normalization_stats.npy")
+    # Every bucket normalizes with the ONE root-level file...
+    assert {b._resolved_stats_path for b in ds.buckets} == {str(source)}
+    # ...while the deploy artifact is written per bucket (root/<bucket>/meta).
+    assert ds.normalization_stats_path == str(root / "a" / "meta" / NORMALIZATION_STATS_FILENAME)
     assert Path(ds.normalization_stats_path).is_file()
     checkpoint = tmp_path / "checkpoint"
     save_normalization_stats(str(checkpoint), ds)
     copied = np.load(checkpoint / "normalization_stats.npy", allow_pickle=True).item()
     assert copied["eef"]["mean"].shape == (EEF33_DIM,)
     assert set(copied) == {"eef"}
+
+
+def test_stats_are_autobuilt_at_the_fixed_root_path(tmp_path: Path):
+    root = tmp_path / "root"
+    for name in ("a", "b"):
+        _write_bucket(root / name)
+    stats_path = root / "meta" / NORMALIZATION_STATS_FILENAME
+    assert not stats_path.exists()
+
+    cfg = OmegaConf.create(
+        {
+            "dataset_dir": str(root),
+            "num_frames": 5,
+            "multiview": True,
+            "prompt_columns": ["annotation.human.coarse_action"],
+            "normalize_mode": "min-max",
+        }
+    )
+    ds = RoboCasaGR1Dataset.from_config(cfg)
+    assert isinstance(ds, MultiRoboCasaGR1Dataset)
+    assert stats_path.is_file()
+    assert {b._resolved_stats_path for b in ds.buckets} == {str(stats_path)}
+
+    # The auto-built file is exactly what the offline scan pools over both buckets.
+    built = np.load(stats_path, allow_pickle=True).item()["eef"]
+    _, _, expected, action_rows, state_rows = _compute_global_stats(ds, reservoir_cap=10_000)
+    assert built["pool"] == "action_state"
+    assert action_rows == state_rows == 2 * EP_LENGTH
+    np.testing.assert_allclose(np.asarray(built["min"]), np.asarray(expected["min"]), atol=1e-7)
+    np.testing.assert_allclose(np.asarray(built["max"]), np.asarray(expected["max"]), atol=1e-7)
+
+
+def test_normalize_mode_defaults_to_min_max_and_ignores_stats_path_key(tmp_path: Path):
+    _write_bucket(tmp_path)
+    stats = {
+        "eef": {
+            "min": np.zeros(EEF33_DIM, dtype=np.float32),
+            "max": np.ones(EEF33_DIM, dtype=np.float32),
+        }
+    }
+    np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, stats)
+    # A leftover normalization_stats_path is ignored: the key is no longer part
+    # of the config surface, and from_config always resolves the fixed path.
+    stale = tmp_path / "stale_stats.npy"
+    np.save(stale, {"eef": {"min": np.full(EEF33_DIM, -9.0), "max": np.full(EEF33_DIM, 9.0)}})
+    cfg = OmegaConf.create(
+        {
+            "dataset_dir": str(tmp_path),
+            "num_frames": 5,
+            "video_stride": 1,
+            "multiview": True,
+            "prompt_columns": ["annotation.human.coarse_action"],
+            "normalization_stats_path": str(stale),
+        }
+    )
+    ds = RoboCasaGR1Dataset.from_config(cfg)
+    assert ds._normalize_mode == "min-max"
+    assert ds._resolved_stats_path == str(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME)
+    # raw left x=0 with [0, 1] stats -> -1 (the stale [-9, 9] file would give ~0).
+    np.testing.assert_allclose(ds._normalize_array(np.zeros((1, EEF33_DIM), np.float32))[0, 0], -1.0, atol=1e-6)
+
+
+def test_missing_stats_without_from_config_raises(tmp_path: Path):
+    _write_bucket(tmp_path)
+    with np.testing.assert_raises_regex(FileNotFoundError, "normalization_stats.npy is missing"):
+        RoboCasaGR1Dataset(
+            dataset_dir=str(tmp_path),
+            num_frames=5,
+            multiview=True,
+            normalize_mode="min-max",
+        )

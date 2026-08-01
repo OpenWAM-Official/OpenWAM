@@ -126,18 +126,10 @@ robocasa-gr1-eef33-v30/<task-bucket>/
 原始 NVIDIA joint44 不包含 EEF33。转换器会拒绝缺少上述 EEF 列的数据，
 不会把 joint 伪装成 xyz+rot6d+gripper。
 
-## 6. 生成 RoboCasa normalization stats
+## 6. RoboCasa normalization stats
 
-将 `configs/dataloader/robocasa_gr1.yaml` 中的 `dataset_dir` 改为转换后的
-目录。配置仅支持 EEF33，并默认映射到 unified80：
-
-```bash
-python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
-  --config configs/dataloader/robocasa_gr1.yaml \
-  --output "${DATA_ROOT}/robocasa-gr1-eef33-v30/normalization_stats.npy"
-```
-
-随后配置：
+只需把 `configs/dataloader/robocasa_gr1.yaml` 中的 `dataset_dir` 改为转换后的
+目录即可。配置仅支持 EEF33，并默认映射到 unified80：
 
 ```yaml
 dataset_dir: /path/to/h200/storage/datasets/robocasa-gr1-eef33-v30
@@ -145,12 +137,21 @@ action_mode: eef
 unify_action: true
 unify_action_map: ["0-8", "10-15", "34-42", "44-49", "68-70"]
 normalize_mode: min-max
-normalization_stats_path: /path/to/h200/storage/datasets/robocasa-gr1-eef33-v30/normalization_stats.npy
+```
+
+统计文件路径固定为 `<dataset_dir>/meta/normalization_stats.npy`，**不再有
+`normalization_stats_path` 超参**。首次构建 dataloader 时若该文件不存在，会自动
+在该位置生成（rank 0 扫描整个 root，其余 rank 等待），所有 task bucket 共用这一份
+pooled 统计。想重算就删掉该文件；也可以提前手工生成：
+
+```bash
+python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
+  --config configs/dataloader/robocasa_gr1.yaml   # --output 缺省即上述固定路径
 ```
 
 stats 脚本会将 rotation6d 的 min/max 固定为 `-1/1`、mean/std 固定为
-`0/1`。action command 与 achieved state 分开统计，避免 hand command 和
-hand qpos 混用同一分布。
+`0/1`。action command 与 achieved state 汇入同一个 `eef` 统计块（pooled），
+因此两个方向使用完全相同的变换。
 
 可视化检查：
 
@@ -177,7 +178,6 @@ bash scripts/train.sh \
   dataloader.unify_action=true \
   'dataloader.unify_action_map=["0-8","10-15","34-42","44-49","68-70"]' \
   dataloader.normalize_mode=min-max \
-  dataloader.normalization_stats_path="${DATA_ROOT}/robocasa-gr1-eef33-v30/normalization_stats.npy" \
   model.architecture.action_dim=80 \
   model.architecture.state_dim=80 \
   training.batch_size=4 \

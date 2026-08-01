@@ -7,22 +7,45 @@ The reader accepts the FK-enriched 33-D EEF representation only::
 ``unify_action`` scatters those physical dimensions into the shared 80-D
 EEF/dex-hand/reserved layout. Native 44-D joint vectors are deliberately
 rejected: they must first pass through the simulator-backed FK enrichment.
+
+Normalization statistics live at ONE fixed, config-free location — the
+training root's ``meta/normalization_stats.npy`` — and are auto-built there on
+first use (see :meth:`RoboCasaGR1Dataset.from_config`). There is deliberately
+no ``normalization_stats_path`` config knob: a GR1 root holds ~25 task buckets,
+each constructed as its own reader, so a per-bucket path would give every task
+its own transform instead of the pooled one the deploy denormalizer assumes.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, ClassVar, List, Optional, Sequence, Tuple
+import os
+import time
+from pathlib import Path
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
+from openwam.dataloader.utils import get_cfg
 from openwam.dataloader.utils.normalization import STAT_KEYS, apply_normalization, load_stats_file
 
 logger = logging.getLogger(__name__)
 
 _ACTION_MODE = "eef"
 EEF33_DIM = 33
+
+# Fixed basename of the pooled EEF33 statistics, resolved against the training
+# root's meta/ dir. Same basename as the deploy denormalizer artifact
+# (LeRobotV3Reader._write_deploy_normalizer_stats), which is written per BUCKET
+# — in root mode those are different files (root/meta vs root/<bucket>/meta).
+# When dataset_dir points straight at a single bucket the two alias: the reader
+# then rewrites the file with just the six stat vectors (identical values, minus
+# the stats script's provenance fields), which is stable across reruns.
+NORMALIZATION_STATS_FILENAME = "normalization_stats.npy"
+
+# Sentinel distinguishing "key absent" from an explicit null in a config.
+_CONFIG_UNSET = object()
 
 
 def _as_list(value: Any) -> List[Any]:
@@ -53,11 +76,54 @@ def _pick_feature(features: dict, priorities: Sequence[str]) -> Optional[str]:
     return None
 
 
+def _config_with(config: Any, **overrides: Any) -> Dict[str, Any]:
+    """Shallow plain-dict copy of ``config`` with ``overrides`` applied.
+
+    Values are forwarded untouched (a DictConfig's nested nodes stay nodes),
+    exactly as ``LeRobotV3Reader.from_config`` already forwards them to the
+    reader ctor. Returning a plain dict — rather than mutating the caller's
+    config — keeps the injection out of Hydra's struct mode; ``get_cfg`` reads
+    dicts and DictConfigs alike.
+    """
+    if hasattr(config, "keys"):
+        plain = {key: config[key] for key in config.keys()}
+    else:
+        plain = dict(vars(config))
+    plain.update(overrides)
+    return plain
+
+
+def _stats_builder_rank() -> int:
+    """Rank that owns the stats scan (0 builds, the others wait)."""
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            return int(dist.get_rank())
+    except Exception:
+        pass
+    # torchrun sets RANK before init_process_group; honor it so pre-init
+    # constructions still elect a single builder.
+    return int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+
+
+def _wait_for_stats(path: Path) -> None:
+    deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
+    poll_interval = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
+    while not path.is_file():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"timed out waiting for rank 0 to build RoboCasaGR1 normalization stats: {path}")
+        time.sleep(poll_interval)
+
+
 class RoboCasaGR1Dataset(LeRobotV3Reader):
     """Single-bucket RoboCasa GR1 reader for LeRobot v3 datasets."""
 
     DATASET_NAME = "RoboCasaGR1"
     PROMPT_FILE_REQUIRED = False
+    # Bounded [-1, 1] targets by default; a config may still set z-score /
+    # quantile, or null to disable in-reader normalization entirely.
+    DEFAULT_NORMALIZE_MODE = "min-max"
 
     HEAD_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
         "observation.images.ego_view",
@@ -87,6 +153,11 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         "head_camera_priority",
         "left_wrist_camera_priority",
         "right_wrist_camera_priority",
+        # NOT a user-facing knob: from_config always overwrites this with the
+        # single path it resolved from dataset_dir, so a value left over in a
+        # yaml / CLI override is ignored rather than splitting the buckets
+        # across different transforms. It stays in CONFIG_KEYS because that is
+        # the channel the base from_config uses to hand kwargs to every bucket.
         "normalization_stats_path",
         "unify_action",
         "unify_action_map",
@@ -126,7 +197,11 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             )
         self.action_mode = mode
         self.DEPLOY_ACTION_MODE = _ACTION_MODE
+        # Set by from_config (the shared, root-level stats file). A directly
+        # constructed reader may pass one; otherwise _load_stats falls back to
+        # this bucket's own meta/ dir.
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
+        self._resolved_stats_path: Optional[str] = None  # set by _load_stats when normalization is on
 
         self._prompt_columns = [str(x) for x in _as_list(prompt_columns)]
         self._head_priority = tuple(str(x) for x in (head_camera_priority or self.HEAD_CAMERA_PRIORITY))
@@ -242,18 +317,34 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
     def _load_stats(self, info: dict):
         if not self._normalize_mode or self._normalize_mode in (None, "none", "null"):
             return None
-        if not self._source_stats_path:
+        # from_config hands every bucket the ONE pooled file it resolved from
+        # dataset_dir; a directly constructed reader falls back to its own
+        # meta/ dir. A missing file is fatal HERE — the auto-build lives in
+        # from_config, the only place that knows the training root.
+        stats_path = (
+            Path(self._source_stats_path)
+            if self._source_stats_path
+            else self._dataset_dir / "meta" / NORMALIZATION_STATS_FILENAME
+        )
+        if not stats_path.is_file():
             raise FileNotFoundError(
-                "RoboCasaGR1Dataset normalize_mode is enabled but normalization_stats_path is unset. "
-                "Run python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation "
-                "or set normalize_mode=null."
+                f"RoboCasaGR1({self._dataset_id}): normalize_mode={self._normalize_mode!r} but "
+                f"{stats_path} is missing. Build it with\n"
+                "  python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation "
+                f"--config configs/dataloader/robocasa_gr1.yaml --output {stats_path}\n"
+                "(construction through from_config builds it automatically), or set normalize_mode=null."
             )
+        self._resolved_stats_path = str(stats_path)
         global_stats = load_stats_file(
-            self._source_stats_path,
+            stats_path,
             action_mode=self.action_mode,
             normalize_mode=self._normalize_mode,
             dim=self._raw_action_dim,
         )
+        # Emit the deploy denormalizer artifact into THIS bucket's meta/. In
+        # single-bucket mode that is the file just read: it comes back with the
+        # same six stat vectors, so the reread is stable (see
+        # NORMALIZATION_STATS_FILENAME).
         self._write_deploy_normalizer_stats(global_stats, STAT_KEYS)
         return global_stats
 
@@ -291,6 +382,64 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         return result
 
     @classmethod
+    def from_config(cls, config, split: str = "train"):
+        """Resolve the ONE pooled stats file, then build the reader(s).
+
+        The path is fixed at ``<dataset_dir>/meta/normalization_stats.npy`` and
+        is NOT configurable: a GR1 root fans out into ~25 task buckets, each its
+        own reader, so resolution has to happen here (where the root is known)
+        rather than per bucket. Missing file → rank 0 scans the dataset and
+        writes it; the other ranks poll. ``dist.barrier()`` is deliberately
+        avoided — a minutes-long scan would trip NCCL's collective timeout (the
+        ebench / libero precedent).
+        """
+        normalize_mode = get_cfg(config, "normalize_mode", _CONFIG_UNSET)
+        if normalize_mode is _CONFIG_UNSET:
+            normalize_mode = cls.DEFAULT_NORMALIZE_MODE
+        if not normalize_mode or str(normalize_mode).strip().lower() in ("none", "null"):
+            # Normalization off: drop any stale path so it cannot reach a bucket.
+            return super().from_config(_config_with(config, normalization_stats_path=None), split)
+
+        dataset_dir = get_cfg(config, "dataset_dir")
+        if dataset_dir is None:
+            raise ValueError(f"{cls.__name__}: missing dataset_dir")
+        stats_path = Path(dataset_dir) / "meta" / NORMALIZATION_STATS_FILENAME
+        if not stats_path.is_file():
+            cls._build_shared_stats(config, stats_path)
+        return super().from_config(_config_with(config, normalization_stats_path=str(stats_path)), split)
+
+    @classmethod
+    def _build_shared_stats(cls, config, path: Path) -> None:
+        """Rank 0 pools EEF33 action+state rows into ``path``; other ranks wait."""
+        # Lazy import: the stats module imports this reader at module level.
+        from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import (
+            build_and_save_robocasa_gr1_stats,
+        )
+
+        if _stats_builder_rank() != 0:
+            _wait_for_stats(path)
+            return
+
+        logger.info(
+            "RoboCasaGR1: no normalization stats at %s — computing them from the dataset "
+            "(rank 0 scans; other ranks wait)",
+            path,
+        )
+        # Always pooled from the TRAIN split, whatever split was requested: a
+        # val reader must normalize with the transform training uses.
+        # normalize_mode=None keeps this probe out of the resolution above.
+        probe = super().from_config(_config_with(config, normalize_mode=None), "train")
+        action_mode, raw_dim, action_rows, state_rows = build_and_save_robocasa_gr1_stats(probe, path)
+        logger.info(
+            "RoboCasaGR1: wrote %s mode=%s pool=action_state dim=%d action_rows=%d state_rows=%d",
+            path,
+            action_mode,
+            raw_dim,
+            action_rows,
+            state_rows,
+        )
+
+    @classmethod
     def _multibucket_wrapper(cls):
         return MultiRoboCasaGR1Dataset
 
@@ -306,9 +455,17 @@ class MultiRoboCasaGR1Dataset(MultiLeRobotV3Reader):
             raise ValueError(f"MultiRoboCasaGR1Dataset requires homogeneous action_dim, got {sorted(dims)}")
         if len(modes) != 1:
             raise ValueError(f"MultiRoboCasaGR1Dataset requires homogeneous action_mode, got {sorted(modes)}")
-        stats_paths = {b._source_stats_path for b in self._buckets}
+        # Compare the RESOLVED paths (None when normalization is off): every
+        # bucket must normalize with the SAME pooled file, otherwise the deploy
+        # denormalizer — which carries a single bucket's stats — would
+        # un-normalize the other tasks with the wrong transform.
+        stats_paths = {b._resolved_stats_path for b in self._buckets}
         if len(stats_paths) != 1:
-            raise ValueError("MultiRoboCasaGR1Dataset requires one shared normalization_stats_path")
+            raise ValueError(
+                "MultiRoboCasaGR1Dataset requires one shared normalization stats file for all buckets "
+                f"(from_config resolves <dataset_dir>/meta/{NORMALIZATION_STATS_FILENAME}); buckets resolved "
+                f"{sorted(str(p) for p in stats_paths)}"
+            )
         logger.info(
             "MultiRoboCasaGR1Dataset: %d buckets, %d windows, action_mode=%s, action_dim=%d",
             len(self._buckets),
@@ -327,4 +484,9 @@ class MultiRoboCasaGR1Dataset(MultiLeRobotV3Reader):
         return RoboCasaGR1Dataset.from_config(config, split)
 
 
-__all__ = ["EEF33_DIM", "RoboCasaGR1Dataset", "MultiRoboCasaGR1Dataset"]
+__all__ = [
+    "EEF33_DIM",
+    "NORMALIZATION_STATS_FILENAME",
+    "RoboCasaGR1Dataset",
+    "MultiRoboCasaGR1Dataset",
+]

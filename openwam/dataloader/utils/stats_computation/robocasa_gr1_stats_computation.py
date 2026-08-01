@@ -1,21 +1,32 @@
 """Compute shared RoboCasa GR1 action/state normalization stats.
 
+The reader auto-builds this file on first use at its fixed location
+(``<dataset_dir>/meta/normalization_stats.npy``; see
+``RoboCasaGR1Dataset.from_config``), so this CLI is only needed to force a
+rebuild or to write the stats somewhere else.
+
 Example:
     python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
-      --config configs/dataloader/robocasa_gr1.yaml \
-      --output /path/to/normalization_stats.npy
+      --config configs/dataloader/robocasa_gr1.yaml
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import socket
+import uuid
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 from omegaconf import OmegaConf
 
-from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset, RoboCasaGR1Dataset
+from openwam.dataloader.robocasa_gr1 import (
+    NORMALIZATION_STATS_FILENAME,
+    MultiRoboCasaGR1Dataset,
+    RoboCasaGR1Dataset,
+)
 from openwam.dataloader.utils.gr1_kinematics import ROT6D_DIMS_EEF33
 from openwam.dataloader.utils.normalization import pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
@@ -76,25 +87,17 @@ def _compute_global_stats(dataset, reservoir_cap: int):
     return action_mode, raw_dim, stats, action_rows, state_rows
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/dataloader/robocasa_gr1.yaml")
-    parser.add_argument("--output", required=True, help="Output .npy path")
-    parser.add_argument("--reservoir-cap", type=int, default=1_000_000)
-    args = parser.parse_args()
+def build_and_save_robocasa_gr1_stats(dataset, output: str | Path, reservoir_cap: int = 1_000_000):
+    """Compute pooled stats for ``dataset`` and atomically write ``output``.
 
-    cfg = OmegaConf.load(args.config)
-    OmegaConf.update(cfg, "normalize_mode", None, merge=False)
-    dataset = RoboCasaGR1Dataset.from_config(cfg, split=str(OmegaConf.select(cfg, "split", default="train")))
+    Shared by the CLI below and the reader's fixed-path auto-build (rank 0 in
+    ``RoboCasaGR1Dataset.from_config``): the tmp-file + ``os.replace`` write
+    means concurrently polling ranks never observe a torn file. Returns
+    ``(action_mode, raw_dim, action_rows, state_rows)`` for the caller's report.
+    """
+    output = Path(output)
+    action_mode, raw_dim, global_stats, action_rows, state_rows = _compute_global_stats(dataset, reservoir_cap)
 
-    action_mode, raw_dim, global_stats, action_rows, state_rows = _compute_global_stats(
-        dataset, args.reservoir_cap
-    )
-
-    output = Path(args.output)
-    if output.suffix != ".npy":
-        raise ValueError("--output must end in .npy so checkpoints receive a deploy-compatible artifact")
-    output.parent.mkdir(parents=True, exist_ok=True)
     payload = {}
     if output.exists():
         previous = np.load(output, allow_pickle=True).item()
@@ -102,7 +105,45 @@ def main() -> int:
             payload.update(previous)
     payload.pop(f"{action_mode}_state", None)
     payload[action_mode] = global_stats
-    np.save(output, payload)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # pid alone collides across nodes on a shared filesystem; qualify with
+    # hostname + uuid like the LeRobotV3Reader deploy-stats writer.
+    tmp_path = output.with_name(f".{output.name}.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with tmp_path.open("wb") as f:
+            np.save(f, payload)
+        os.replace(tmp_path, output)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return action_mode, raw_dim, action_rows, state_rows
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="configs/dataloader/robocasa_gr1.yaml")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help=f"Output .npy path (default: <dataset_dir>/meta/{NORMALIZATION_STATS_FILENAME}, "
+        "the fixed location the reader loads)",
+    )
+    parser.add_argument("--reservoir-cap", type=int, default=1_000_000)
+    args = parser.parse_args()
+
+    cfg = OmegaConf.load(args.config)
+    OmegaConf.update(cfg, "normalize_mode", None, merge=False)
+    dataset_dir = OmegaConf.select(cfg, "dataset_dir")
+    if dataset_dir is None:
+        raise ValueError(f"{args.config} has no dataset_dir")
+    output = Path(args.output) if args.output else Path(str(dataset_dir)) / "meta" / NORMALIZATION_STATS_FILENAME
+    if output.suffix != ".npy":
+        raise ValueError("--output must end in .npy so checkpoints receive a deploy-compatible artifact")
+
+    dataset = RoboCasaGR1Dataset.from_config(cfg, split=str(OmegaConf.select(cfg, "split", default="train")))
+    action_mode, raw_dim, action_rows, state_rows = build_and_save_robocasa_gr1_stats(
+        dataset, output, args.reservoir_cap
+    )
     print(
         f"wrote {output} mode={action_mode} pool=action_state dim={raw_dim} "
         f"action_rows={action_rows} state_rows={state_rows} total_rows={action_rows + state_rows}"
