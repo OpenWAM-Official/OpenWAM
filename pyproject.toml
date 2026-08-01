@@ -35,7 +35,12 @@ dependencies = [
     "accelerate>=1.0,<2",
     "deepspeed>=0.18.5,<0.19",
     "peft>=0.10,<1",
-    "datasets>=2.18,<4",
+    # >=4 is required to read LeRobot v3 parquet written by datasets 4.x: those
+    # files declare the `List` feature type, which 3.x does not know
+    # ("Feature type 'List' not found"), so RoboCOIN cannot be opened through
+    # LeRobotDataset under the old <4 pin. The upper bound tracks lerobot's own
+    # `datasets>=4.0.0,<5.0.0` so the two cannot drift apart.
+    "datasets>=4.0,<5",
     "tqdm>=4.66,<5",
     "wandb>=0.16,<1",
     "hydra-core>=1.3,<2",
