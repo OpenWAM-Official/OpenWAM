@@ -47,6 +47,14 @@ Functions
 - quick_bucket_hours(bucket_dir)
     Cheap fps × sum(episode_lengths) / 3600 scan without building a full
     reader. Used by multi-bucket from_config to compute water-fill input.
+
+Exceptions
+----------
+- DataContractError
+    Raised by a reader that has PROVEN its data is broken (as opposed to an
+    IO / environment fault). ``build_multibucket`` tolerates every other
+    per-bucket exception by dropping the bucket with a warning; this one it
+    re-raises, so broken data cannot silently shrink the training set.
 """
 
 from __future__ import annotations
@@ -67,6 +75,26 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_DATA_PATH = "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
 _DEFAULT_VIDEO_PATH = "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+
+
+class DataContractError(RuntimeError):
+    """A per-bucket failure that proves the DATA is broken, not the environment.
+
+    :func:`build_multibucket` deliberately tolerates a bucket that fails to
+    construct — a truncated shard, an NFS blip, a stale stats file — by logging
+    a warning and dropping it, so one bad corner of a large multi-bucket root cannot
+    abort a training launch. That tolerance is wrong for a failure that means
+    the dataset itself violates the reader's contract (a prompt table that has
+    diverged from the episodes table, a mis-typed text column): dropping such a
+    bucket silently removes a slice of the training set behind a single WARNING,
+    which is exactly the silent data loss the warning was meant to surface.
+
+    A reader raises this (instead of a plain exception) when it has PROVEN a
+    data-contract violation. ``_build_one`` re-raises it so the launch fails
+    loudly with the reader's own diagnostic, in root mode as well as in
+    single-bucket mode. Environmental failures must keep using ordinary
+    exceptions so they stay tolerated.
+    """
 
 
 def parse_info_json(dataset_dir: Path) -> dict:
@@ -398,7 +426,9 @@ def build_multibucket(
                 raise RuntimeError(f"All {source_name} buckets failed the hour scan")
             logger.warning(
                 "%s: dropped %d bucket(s) during hour scan (unreadable meta): %s",
-                source_name, len(dropped_scan), ", ".join(dropped_scan),
+                source_name,
+                len(dropped_scan),
+                ", ".join(dropped_scan),
             )
         bucket_hours = [h for h in scanned if h is not None]
         total_avail = sum(bucket_hours)
@@ -437,6 +467,11 @@ def build_multibucket(
             kwargs["subsample_seed"] = base_seed + i * 7919
         try:
             return reader_cls(**kwargs)
+        except DataContractError:
+            # Proven broken data (see DataContractError): dropping the bucket
+            # would hide a slice of the training set behind a warning, so let
+            # the reader's own diagnostic abort the launch.
+            raise
         except Exception as e:
             logger.warning("%s: skipping %s: %s", source_name, sub.name, e)
             return None
@@ -456,13 +491,17 @@ def build_multibucket(
     if dropped:
         logger.warning(
             "%s: dropped %d / %d bucket(s) during load (construction failed or empty): %s",
-            source_name, len(dropped), len(sub_dirs), ", ".join(sorted(dropped)),
+            source_name,
+            len(dropped),
+            len(sub_dirs),
+            ", ".join(sorted(dropped)),
         )
     logger.info("%s: loaded %d / %d buckets", source_name, len(buckets), len(sub_dirs))
     return wrapper_cls(buckets)
 
 
 __all__ = [
+    "DataContractError",
     "parse_info_json",
     "load_episodes_parquet",
     "compute_file_local_offsets",
