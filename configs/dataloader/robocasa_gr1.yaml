@@ -56,8 +56,10 @@ enable_action_supervision: true
 #   python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
 #     --config configs/dataloader/robocasa_gr1.yaml
 normalize_mode: min-max
-# The stats pool EEF33 action and state rows into one global `eef` block; both
-# directions use this same transform.
+# Pose and waist dims pool action/state because they share physical units.
+# Fourier-hand actions are discrete commands while hand state is continuous
+# joint angle, so those 12 dims use directional `eef` / `eef_state` blocks.
+# Legacy action/state-pooled hand stats are rejected and rebuilt.
 
 # Normalize EEF33 first, then scatter arm poses, Fourier hands, and waist into
 # the shared EEF/dex-hand/reserved slots. Gripper slots 9/43 stay unmapped.

@@ -14,12 +14,16 @@ first use (see :meth:`RoboCasaGR1Dataset.from_config`). There is deliberately
 no ``normalization_stats_path`` config knob: a GR1 root holds ~25 task buckets,
 each constructed as its own reader, so a per-bucket path would give every task
 its own transform instead of the pooled one the deploy denormalizer assumes.
+Pose/waist dimensions share pooled action/state statistics. The 12 hand
+dimensions are directional because action stores discrete Fourier-hand
+commands while state stores continuous joint angles.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import pickle
 import time
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
@@ -28,21 +32,19 @@ import numpy as np
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
 from openwam.dataloader.utils import get_cfg
-from openwam.dataloader.utils.normalization import STAT_KEYS, apply_normalization, load_stats_file
+from openwam.dataloader.utils.normalization import apply_normalization, load_stats_file
 
 logger = logging.getLogger(__name__)
 
 _ACTION_MODE = "eef"
 EEF33_DIM = 33
 
-# Fixed basename of the pooled EEF33 statistics, resolved against the training
-# root's meta/ dir. Same basename as the deploy denormalizer artifact
-# (LeRobotV3Reader._write_deploy_normalizer_stats), which is written per BUCKET
-# — in root mode those are different files (root/meta vs root/<bucket>/meta).
-# When dataset_dir points straight at a single bucket the two alias: the reader
-# then rewrites the file with just the six stat vectors (identical values, minus
-# the stats script's provenance fields), which is stable across reruns.
+# Fixed basename of the directional EEF33 statistics, resolved against the
+# training root's meta/ dir. This same file is copied into checkpoints for
+# deployment because it carries both `eef` action and `eef_state` proprio
+# blocks; an action-only per-bucket rewrite would lose train/deploy parity.
 NORMALIZATION_STATS_FILENAME = "normalization_stats.npy"
+STATS_SCHEMA_VERSION = 2
 
 # Sentinel distinguishing "key absent" from an explicit null in a config.
 _CONFIG_UNSET = object()
@@ -107,10 +109,26 @@ def _stats_builder_rank() -> int:
     return int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
 
 
+def _stats_file_is_compatible(path: Path) -> bool:
+    """Return whether ``path`` carries directional GR1 hand statistics."""
+    if not path.is_file():
+        return False
+    try:
+        payload = np.load(path, allow_pickle=True).item()
+    except (OSError, ValueError, EOFError, pickle.UnpicklingError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("robocasa_gr1_stats_schema") == STATS_SCHEMA_VERSION
+        and isinstance(payload.get(_ACTION_MODE), dict)
+        and isinstance(payload.get(f"{_ACTION_MODE}_state"), dict)
+    )
+
+
 def _wait_for_stats(path: Path) -> None:
     deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
     poll_interval = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
-    while not path.is_file():
+    while not _stats_file_is_compatible(path):
         if time.monotonic() >= deadline:
             raise TimeoutError(f"timed out waiting for rank 0 to build RoboCasaGR1 normalization stats: {path}")
         time.sleep(poll_interval)
@@ -202,6 +220,7 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         # this bucket's own meta/ dir.
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
         self._resolved_stats_path: Optional[str] = None  # set by _load_stats when normalization is on
+        self._state_normalization_stats: Optional[dict] = None
 
         self._prompt_columns = [str(x) for x in _as_list(prompt_columns)]
         self._head_priority = tuple(str(x) for x in (head_camera_priority or self.HEAD_CAMERA_PRIORITY))
@@ -334,22 +353,38 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
                 f"--config configs/dataloader/robocasa_gr1.yaml --output {stats_path}\n"
                 "(construction through from_config builds it automatically), or set normalize_mode=null."
             )
+        if not _stats_file_is_compatible(stats_path):
+            raise ValueError(
+                f"RoboCasaGR1 normalization stats at {stats_path} use the legacy pooled-hand schema. "
+                "GR1 hand action is a discrete command while hand state is a continuous joint angle; "
+                "delete/rebuild this file with robocasa_gr1_stats_computation before training or deployment."
+            )
         self._resolved_stats_path = str(stats_path)
-        global_stats = load_stats_file(
+        action_stats = load_stats_file(
             stats_path,
             action_mode=self.action_mode,
             normalize_mode=self._normalize_mode,
             dim=self._raw_action_dim,
         )
-        # Emit the deploy denormalizer artifact into THIS bucket's meta/. In
-        # single-bucket mode that is the file just read: it comes back with the
-        # same six stat vectors, so the reread is stable (see
-        # NORMALIZATION_STATS_FILENAME).
-        self._write_deploy_normalizer_stats(global_stats, STAT_KEYS)
-        return global_stats
+        self._state_normalization_stats = load_stats_file(
+            stats_path,
+            action_mode=f"{self.action_mode}_state",
+            normalize_mode=self._normalize_mode,
+            dim=self._raw_action_dim,
+        )
+        # The source file is already the deploy artifact: it carries both the
+        # action block used by unnormalize() and the state block used by
+        # normalize(). Point checkpoint saving at it instead of rewriting a
+        # per-bucket action-only artifact.
+        self.normalization_stats_path = str(stats_path)
+        return action_stats
 
-    def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
-        return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
+    def _normalize_array(self, arr: np.ndarray, stats: Optional[dict] = None) -> np.ndarray:
+        return apply_normalization(
+            arr,
+            self._normalization_stats if stats is None else stats,
+            self._normalize_mode,
+        )
 
     def _action_20d(self, win) -> np.ndarray:
         raw = self._raw_action(win)
@@ -357,7 +392,7 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
 
     def _proprio_20d(self, win) -> np.ndarray:
         raw = self._read_vector_window(win, vector_col=self._state_column, label="state", first_only=True)
-        return self._normalize_array(raw)
+        return self._normalize_array(raw, self._state_normalization_stats)
 
     def _raw_action(self, win) -> np.ndarray:
         return self._read_vector_window(win, vector_col=self._action_column, label="action")
@@ -404,13 +439,13 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         if dataset_dir is None:
             raise ValueError(f"{cls.__name__}: missing dataset_dir")
         stats_path = Path(dataset_dir) / "meta" / NORMALIZATION_STATS_FILENAME
-        if not stats_path.is_file():
+        if not _stats_file_is_compatible(stats_path):
             cls._build_shared_stats(config, stats_path)
         return super().from_config(_config_with(config, normalization_stats_path=str(stats_path)), split)
 
     @classmethod
     def _build_shared_stats(cls, config, path: Path) -> None:
-        """Rank 0 pools EEF33 action+state rows into ``path``; other ranks wait."""
+        """Rank 0 builds directional hand stats into ``path``; other ranks wait."""
         # Lazy import: the stats module imports this reader at module level.
         from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import (
             build_and_save_robocasa_gr1_stats,
@@ -421,7 +456,7 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             return
 
         logger.info(
-            "RoboCasaGR1: no normalization stats at %s — computing them from the dataset "
+            "RoboCasaGR1: missing/incompatible directional stats at %s — computing them from the dataset "
             "(rank 0 scans; other ranks wait)",
             path,
         )
@@ -431,7 +466,7 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
         probe = super().from_config(_config_with(config, normalize_mode=None), "train")
         action_mode, raw_dim, action_rows, state_rows = build_and_save_robocasa_gr1_stats(probe, path)
         logger.info(
-            "RoboCasaGR1: wrote %s mode=%s pool=action_state dim=%d action_rows=%d state_rows=%d",
+            "RoboCasaGR1: wrote %s mode=%s pool=action_state_except_hand dim=%d action_rows=%d state_rows=%d",
             path,
             action_mode,
             raw_dim,
@@ -456,9 +491,7 @@ class MultiRoboCasaGR1Dataset(MultiLeRobotV3Reader):
         if len(modes) != 1:
             raise ValueError(f"MultiRoboCasaGR1Dataset requires homogeneous action_mode, got {sorted(modes)}")
         # Compare the RESOLVED paths (None when normalization is off): every
-        # bucket must normalize with the SAME pooled file, otherwise the deploy
-        # denormalizer — which carries a single bucket's stats — would
-        # un-normalize the other tasks with the wrong transform.
+        # bucket must normalize with the same directional action/state file.
         stats_paths = {b._resolved_stats_path for b in self._buckets}
         if len(stats_paths) != 1:
             raise ValueError(
@@ -487,6 +520,7 @@ class MultiRoboCasaGR1Dataset(MultiLeRobotV3Reader):
 __all__ = [
     "EEF33_DIM",
     "NORMALIZATION_STATS_FILENAME",
+    "STATS_SCHEMA_VERSION",
     "RoboCasaGR1Dataset",
     "MultiRoboCasaGR1Dataset",
 ]

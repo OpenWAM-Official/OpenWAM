@@ -18,12 +18,13 @@ from openwam.dataloader.registry import list_registered_datasets
 from openwam.dataloader.robocasa_gr1 import (
     EEF33_DIM,
     NORMALIZATION_STATS_FILENAME,
+    STATS_SCHEMA_VERSION,
     MultiRoboCasaGR1Dataset,
     RoboCasaGR1Dataset,
 )
 from openwam.dataloader.transforms.builder import build_transforms
 from openwam.dataloader.transforms.video import VideoColorJitter
-from openwam.dataloader.utils.gr1_kinematics import ROT6D_DIMS_EEF33
+from openwam.dataloader.utils.gr1_kinematics import HAND_DIMS_EEF33, ROT6D_DIMS_EEF33
 from openwam.dataloader.utils.normalization import load_stats_file, pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import (
     _compute_global_stats,
@@ -84,6 +85,8 @@ def _write_bucket(bucket: Path, *, include_wrist: bool = False) -> None:
     eef[:, 30:33] = np.linspace(-0.2, 0.2, EP_LENGTH)[:, None]
     state = eef.copy()
     state[:, [0, 1, 2, 15, 16, 17]] += 0.1
+    state[:, 9:15] += 10.0
+    state[:, 24:30] += 20.0
     df = pd.DataFrame(
         {
             "annotation.human.coarse_action": ["pick cup"] * EP_LENGTH,
@@ -117,6 +120,14 @@ def _dataset(bucket: Path, **overrides) -> RoboCasaGR1Dataset:
     }
     cfg.update(overrides)
     return RoboCasaGR1Dataset.from_config(OmegaConf.create(cfg), split="train")
+
+
+def _stats_payload(action_stats: dict, state_stats: dict | None = None) -> dict:
+    return {
+        "eef": action_stats,
+        "eef_state": action_stats if state_stats is None else state_stats,
+        "robocasa_gr1_stats_schema": STATS_SCHEMA_VERSION,
+    }
 
 
 def test_registry_includes_robocasa_gr1():
@@ -171,16 +182,16 @@ def test_unify_mode_maps_eef33_to_80_and_masks_unmapped_dims(tmp_path: Path):
 
 def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     _write_bucket(tmp_path)
-    stats = {
-        "eef": {
-            "min": np.zeros(EEF33_DIM, dtype=np.float32),
-            "max": np.ones(EEF33_DIM, dtype=np.float32),
-            "mean": np.zeros(EEF33_DIM, dtype=np.float32),
-            "std": np.ones(EEF33_DIM, dtype=np.float32),
-        }
+    action_stats = {
+        "min": np.zeros(EEF33_DIM, dtype=np.float32),
+        "max": np.ones(EEF33_DIM, dtype=np.float32),
+        "mean": np.zeros(EEF33_DIM, dtype=np.float32),
+        "std": np.ones(EEF33_DIM, dtype=np.float32),
     }
+    state_stats = {key: value.copy() for key, value in action_stats.items()}
+    state_stats["max"][list(HAND_DIMS_EEF33)] = 20.0
     stats_path = tmp_path / "meta" / NORMALIZATION_STATS_FILENAME
-    np.save(stats_path, stats)
+    np.save(stats_path, _stats_payload(action_stats, state_stats))
 
     with _mock_decoder():
         ds = _dataset(
@@ -194,16 +205,18 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
 
     # raw EEF left x=0 -> min-max -1, then maps to unified slot 0.
     assert sample["action"][0, 0].item() == -1.0
-    # state x=0.1 uses the same [0, 1] global stats: 2*0.1-1 = -0.8.
+    # Non-hand state x=0.1 still uses the shared [0, 1] stats: 2*0.1-1 = -0.8.
     np.testing.assert_allclose(sample["proprio"][0, 0].item(), -0.8, atol=1e-6)
+    # Hand state=10 uses state-only [0, 20] stats -> 0. The action-only
+    # transform would clip it to +1.
+    np.testing.assert_allclose(sample["proprio"][0, 10].item(), 0.0, atol=1e-6)
     # raw EEF right x=1 -> min-max +1, then maps to unified slot 34.
     assert sample["action"][0, 34].item() == 1.0
-    # Single-bucket mode: source stats and deploy artifact are the same file —
-    # the rewrite keeps the six stat vectors and drops nothing the reader needs.
+    # Single-bucket mode: the directional source file is the deploy artifact.
     assert ds.normalization_stats_path == str(stats_path)
     assert ds._resolved_stats_path == str(stats_path)
     deploy_stats = np.load(ds.normalization_stats_path, allow_pickle=True).item()
-    assert set(deploy_stats["eef"]) == {"mean", "std", "min", "max", "q01", "q99"}
+    assert {"eef", "eef_state", "robocasa_gr1_stats_schema"} <= set(deploy_stats)
     assert deploy_stats["eef"]["mean"].shape == (EEF33_DIM,)
     cfg = OmegaConf.create(
         {
@@ -220,6 +233,10 @@ def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     raw = ds._raw_action(ds._load_data_table(0, 0).to_pandas())[:4]
     np.testing.assert_allclose(normalizer.unnormalize(sample["action"].numpy()), np.clip(raw, 0, 1), atol=1e-5)
     np.testing.assert_allclose(normalizer.normalize(np.array([[0.1] * EEF33_DIM]))[0, 0], -0.8, atol=1e-6)
+    state_probe = np.zeros((1, EEF33_DIM), dtype=np.float32)
+    state_probe[:, list(HAND_DIMS_EEF33)] = 10.0
+    normalized_probe = normalizer.normalize(state_probe)
+    np.testing.assert_allclose(normalized_probe[0, 10], 0.0, atol=1e-6)
 
 
 def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Path):
@@ -233,7 +250,7 @@ def test_eef_normalization_preserves_rot6d_and_changes_xyz_gripper(tmp_path: Pat
         "q99": np.full(EEF33_DIM, 2.0, dtype=np.float32),
     }
     pin_rot6d_identity(base, ROT6D_DIMS_EEF33)
-    np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, {"eef": base})
+    np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, _stats_payload(base))
     ds = _dataset(
         tmp_path,
         action_mode="eef",
@@ -329,21 +346,38 @@ def test_stats_stream_exposes_action_and_state_for_global_pool(tmp_path: Path):
     np.testing.assert_allclose(state[0, 0], 0.1)
 
 
-def test_stats_pool_action_and_state_rows_into_one_global_block(tmp_path: Path):
+def test_stats_split_hand_commands_from_joint_angle_state(tmp_path: Path):
     _write_bucket(tmp_path)
     dataset = _dataset(tmp_path)
     action, state = next(iter(_iter_bucket_arrays(dataset)))
-    mode, dim, stats, action_rows, state_rows = _compute_global_stats(dataset, reservoir_cap=10_000)
+    mode, dim, action_stats, state_stats, action_rows, state_rows = _compute_global_stats(
+        dataset, reservoir_cap=10_000
+    )
 
     pooled = np.concatenate([action, state], axis=0)
     assert mode == "eef"
     assert dim == EEF33_DIM
     assert action_rows == state_rows == EP_LENGTH
-    assert stats["num_timesteps"] == pooled.shape[0]
-    assert stats["pool"] == "action_state"
-    non_rot = [0, 1, 2, 9, 15, 16, 17, 24, 30, 31, 32]
-    np.testing.assert_allclose(np.asarray(stats["mean"])[non_rot], pooled.mean(0)[non_rot], atol=1e-7)
-    np.testing.assert_allclose(np.asarray(stats["min"])[non_rot], pooled.min(0)[non_rot], atol=1e-7)
+    assert action_stats["num_timesteps"] == state_stats["num_timesteps"] == pooled.shape[0]
+    assert action_stats["pool"] == state_stats["pool"] == "action_state_except_hand"
+    assert action_stats["hand_pool"] == "action"
+    assert state_stats["hand_pool"] == "state"
+
+    hand = list(HAND_DIMS_EEF33)
+    non_hand_non_rot = sorted(set(range(EEF33_DIM)) - set(hand) - set(ROT6D_DIMS_EEF33))
+    np.testing.assert_allclose(
+        np.asarray(action_stats["mean"])[non_hand_non_rot],
+        pooled.mean(0)[non_hand_non_rot],
+        atol=1e-7,
+    )
+    np.testing.assert_allclose(
+        np.asarray(state_stats["mean"])[non_hand_non_rot],
+        pooled.mean(0)[non_hand_non_rot],
+        atol=1e-7,
+    )
+    np.testing.assert_allclose(np.asarray(action_stats["mean"])[hand], action.mean(0)[hand], atol=1e-7)
+    np.testing.assert_allclose(np.asarray(state_stats["mean"])[hand], state.mean(0)[hand], atol=1e-7)
+    assert not np.allclose(np.asarray(action_stats["mean"])[hand], np.asarray(state_stats["mean"])[hand])
 
 
 def test_color_jitter_defaults_are_02():
@@ -398,7 +432,9 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
         "q99": base + 1,
     }
     pin_rot6d_identity(source_stats, ROT6D_DIMS_EEF33)
-    np.save(source, {"eef": source_stats})
+    state_stats = {key: np.asarray(value).copy() for key, value in source_stats.items()}
+    state_stats["mean"][list(HAND_DIMS_EEF33)] += 10.0
+    np.save(source, _stats_payload(source_stats, state_stats))
     cfg = OmegaConf.create(
         {
             "dataset_dir": str(root),
@@ -410,16 +446,17 @@ def test_multibucket_forwards_generated_deploy_stats(tmp_path: Path):
     )
     ds = RoboCasaGR1Dataset.from_config(cfg)
     assert isinstance(ds, MultiRoboCasaGR1Dataset)
-    # Every bucket normalizes with the ONE root-level file...
+    # Every bucket normalizes with the one root-level directional file...
     assert {b._resolved_stats_path for b in ds.buckets} == {str(source)}
-    # ...while the deploy artifact is written per bucket (root/<bucket>/meta).
-    assert ds.normalization_stats_path == str(root / "a" / "meta" / NORMALIZATION_STATS_FILENAME)
+    # ...and checkpoint saving copies that same file with both directions.
+    assert ds.normalization_stats_path == str(source)
     assert Path(ds.normalization_stats_path).is_file()
     checkpoint = tmp_path / "checkpoint"
     save_normalization_stats(str(checkpoint), ds)
     copied = np.load(checkpoint / "normalization_stats.npy", allow_pickle=True).item()
     assert copied["eef"]["mean"].shape == (EEF33_DIM,)
-    assert set(copied) == {"eef"}
+    assert copied["eef_state"]["mean"].shape == (EEF33_DIM,)
+    assert copied["robocasa_gr1_stats_schema"] == STATS_SCHEMA_VERSION
 
 
 def test_stats_are_autobuilt_at_the_fixed_root_path(tmp_path: Path):
@@ -444,23 +481,26 @@ def test_stats_are_autobuilt_at_the_fixed_root_path(tmp_path: Path):
     assert {b._resolved_stats_path for b in ds.buckets} == {str(stats_path)}
 
     # The auto-built file is exactly what the offline scan pools over both buckets.
-    built = np.load(stats_path, allow_pickle=True).item()["eef"]
-    _, _, expected, action_rows, state_rows = _compute_global_stats(ds, reservoir_cap=10_000)
-    assert built["pool"] == "action_state"
+    payload = np.load(stats_path, allow_pickle=True).item()
+    built = payload["eef"]
+    built_state = payload["eef_state"]
+    _, _, expected, expected_state, action_rows, state_rows = _compute_global_stats(ds, reservoir_cap=10_000)
+    assert payload["robocasa_gr1_stats_schema"] == STATS_SCHEMA_VERSION
+    assert built["pool"] == built_state["pool"] == "action_state_except_hand"
     assert action_rows == state_rows == 2 * EP_LENGTH
     np.testing.assert_allclose(np.asarray(built["min"]), np.asarray(expected["min"]), atol=1e-7)
     np.testing.assert_allclose(np.asarray(built["max"]), np.asarray(expected["max"]), atol=1e-7)
+    np.testing.assert_allclose(np.asarray(built_state["min"]), np.asarray(expected_state["min"]), atol=1e-7)
+    np.testing.assert_allclose(np.asarray(built_state["max"]), np.asarray(expected_state["max"]), atol=1e-7)
 
 
 def test_normalize_mode_defaults_to_min_max_and_ignores_stats_path_key(tmp_path: Path):
     _write_bucket(tmp_path)
     stats = {
-        "eef": {
-            "min": np.zeros(EEF33_DIM, dtype=np.float32),
-            "max": np.ones(EEF33_DIM, dtype=np.float32),
-        }
+        "min": np.zeros(EEF33_DIM, dtype=np.float32),
+        "max": np.ones(EEF33_DIM, dtype=np.float32),
     }
-    np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, stats)
+    np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, _stats_payload(stats))
     # A leftover normalization_stats_path is ignored: the key is no longer part
     # of the config surface, and from_config always resolves the fixed path.
     stale = tmp_path / "stale_stats.npy"
@@ -485,6 +525,23 @@ def test_normalize_mode_defaults_to_min_max_and_ignores_stats_path_key(tmp_path:
 def test_missing_stats_without_from_config_raises(tmp_path: Path):
     _write_bucket(tmp_path)
     with np.testing.assert_raises_regex(FileNotFoundError, "normalization_stats.npy is missing"):
+        RoboCasaGR1Dataset(
+            dataset_dir=str(tmp_path),
+            num_frames=5,
+            multiview=True,
+            normalize_mode="min-max",
+        )
+
+
+def test_legacy_pooled_hand_stats_are_rejected(tmp_path: Path):
+    _write_bucket(tmp_path)
+    stats = {
+        "min": np.zeros(EEF33_DIM, dtype=np.float32),
+        "max": np.ones(EEF33_DIM, dtype=np.float32),
+    }
+    np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, {"eef": stats})
+
+    with np.testing.assert_raises_regex(ValueError, "legacy pooled-hand schema"):
         RoboCasaGR1Dataset(
             dataset_dir=str(tmp_path),
             num_frames=5,

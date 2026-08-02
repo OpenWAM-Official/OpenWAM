@@ -1,9 +1,14 @@
-"""Compute shared RoboCasa GR1 action/state normalization stats.
+"""Compute RoboCasa GR1 normalization stats with directional hand blocks.
 
 The reader auto-builds this file on first use at its fixed location
 (``<dataset_dir>/meta/normalization_stats.npy``; see
 ``RoboCasaGR1Dataset.from_config``), so this CLI is only needed to force a
 rebuild or to write the stats somewhere else.
+
+Arm pose and waist dimensions remain pooled across action/state. Fourier-hand
+action is a discrete command, whereas hand state is a continuous joint angle;
+those 12 dimensions are therefore stored separately under ``eef`` (action) and
+``eef_state`` (proprio).
 
 Example:
     python -m openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation \
@@ -24,10 +29,11 @@ from omegaconf import OmegaConf
 
 from openwam.dataloader.robocasa_gr1 import (
     NORMALIZATION_STATS_FILENAME,
+    STATS_SCHEMA_VERSION,
     MultiRoboCasaGR1Dataset,
     RoboCasaGR1Dataset,
 )
-from openwam.dataloader.utils.gr1_kinematics import ROT6D_DIMS_EEF33
+from openwam.dataloader.utils.gr1_kinematics import HAND_DIMS_EEF33, ROT6D_DIMS_EEF33
 from openwam.dataloader.utils.normalization import pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
@@ -52,7 +58,13 @@ def _iter_bucket_arrays(bucket: RoboCasaGR1Dataset):
 
 
 def _compute_global_stats(dataset, reservoir_cap: int):
-    """Pool every EEF33 action and state row into one normalization block."""
+    """Share pose/waist stats while keeping command-valued hand dims directional.
+
+    GR1 arm and waist actions are physical targets in the same space as state,
+    but the 12 Fourier-hand action dims are discrete commands while state holds
+    continuous joint angles. Pooling those unlike hand distributions compresses
+    proprio and changes the meaning of one affine transform by direction.
+    """
     buckets = list(_iter_buckets(dataset))
     if not buckets:
         raise ValueError("RoboCasa GR1 dataset has no buckets")
@@ -63,28 +75,45 @@ def _compute_global_stats(dataset, reservoir_cap: int):
     action_mode = next(iter(action_modes))
     raw_dim = next(iter(raw_dims))
 
-    accumulator = Accumulator(dim=raw_dim, reservoir_cap=reservoir_cap)
+    pooled_accumulator = Accumulator(dim=raw_dim, reservoir_cap=reservoir_cap)
+    action_accumulator = Accumulator(dim=raw_dim, reservoir_cap=reservoir_cap)
+    state_accumulator = Accumulator(dim=raw_dim, reservoir_cap=reservoir_cap)
     action_rows = 0
     state_rows = 0
     for bucket in buckets:
         for action, state in _iter_bucket_arrays(bucket):
             action = np.asarray(action, dtype=np.float32).reshape(-1, raw_dim)
             state = np.asarray(state, dtype=np.float32).reshape(-1, raw_dim)
-            accumulator.update_batch(action)
-            accumulator.update_batch(state)
+            pooled_accumulator.update_batch(action)
+            pooled_accumulator.update_batch(state)
+            action_accumulator.update_batch(action)
+            state_accumulator.update_batch(state)
             action_rows += action.shape[0]
             state_rows += state.shape[0]
     if action_rows == 0 or state_rows == 0:
         raise ValueError("cannot compute normalization stats from an empty dataset")
 
-    stats = accumulator.finalize()
-    stats["num_timesteps"] = accumulator.count
-    stats["pool"] = "action_state"
-    stats["action_rows"] = action_rows
-    stats["state_rows"] = state_rows
+    pooled_stats = pooled_accumulator.finalize()
+    action_only = action_accumulator.finalize()
+    state_only = state_accumulator.finalize()
+    action_stats = {}
+    state_stats = {}
+    hand_dims = np.asarray(HAND_DIMS_EEF33, dtype=np.int64)
+    for key in ("mean", "std", "min", "max", "q01", "q99"):
+        action_stats[key] = np.asarray(pooled_stats[key], dtype=np.float32).copy()
+        state_stats[key] = np.asarray(pooled_stats[key], dtype=np.float32).copy()
+        action_stats[key][hand_dims] = np.asarray(action_only[key], dtype=np.float32)[hand_dims]
+        state_stats[key][hand_dims] = np.asarray(state_only[key], dtype=np.float32)[hand_dims]
+    for stats, stream in ((action_stats, "action"), (state_stats, "state")):
+        stats["num_timesteps"] = pooled_accumulator.count
+        stats["pool"] = "action_state_except_hand"
+        stats["hand_pool"] = stream
+        stats["action_rows"] = action_rows
+        stats["state_rows"] = state_rows
     if action_mode == "eef":
-        pin_rot6d_identity(stats, ROT6D_DIMS_EEF33)
-    return action_mode, raw_dim, stats, action_rows, state_rows
+        pin_rot6d_identity(action_stats, ROT6D_DIMS_EEF33)
+        pin_rot6d_identity(state_stats, ROT6D_DIMS_EEF33)
+    return action_mode, raw_dim, action_stats, state_stats, action_rows, state_rows
 
 
 def build_and_save_robocasa_gr1_stats(dataset, output: str | Path, reservoir_cap: int = 1_000_000):
@@ -96,15 +125,18 @@ def build_and_save_robocasa_gr1_stats(dataset, output: str | Path, reservoir_cap
     ``(action_mode, raw_dim, action_rows, state_rows)`` for the caller's report.
     """
     output = Path(output)
-    action_mode, raw_dim, global_stats, action_rows, state_rows = _compute_global_stats(dataset, reservoir_cap)
+    action_mode, raw_dim, action_stats, state_stats, action_rows, state_rows = _compute_global_stats(
+        dataset, reservoir_cap
+    )
 
     payload = {}
     if output.exists():
         previous = np.load(output, allow_pickle=True).item()
         if isinstance(previous, dict):
             payload.update(previous)
-    payload.pop(f"{action_mode}_state", None)
-    payload[action_mode] = global_stats
+    payload[action_mode] = action_stats
+    payload[f"{action_mode}_state"] = state_stats
+    payload["robocasa_gr1_stats_schema"] = STATS_SCHEMA_VERSION
     output.parent.mkdir(parents=True, exist_ok=True)
     # pid alone collides across nodes on a shared filesystem; qualify with
     # hostname + uuid like the LeRobotV3Reader deploy-stats writer.
@@ -145,7 +177,7 @@ def main() -> int:
         dataset, output, args.reservoir_cap
     )
     print(
-        f"wrote {output} mode={action_mode} pool=action_state dim={raw_dim} "
+        f"wrote {output} mode={action_mode} pool=action_state_except_hand dim={raw_dim} "
         f"action_rows={action_rows} state_rows={state_rows} total_rows={action_rows + state_rows}"
     )
     return 0
