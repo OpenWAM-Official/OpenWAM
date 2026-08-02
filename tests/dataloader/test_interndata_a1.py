@@ -87,11 +87,16 @@ def _make_bucket(
     n_eps: int = 2,
     ep_len: int = 40,
     seed: int = 0,
+    fixed_quat: np.ndarray | None = None,
 ) -> Path:
     """Write a synthetic LeRobot v3 A1 bucket at ``root/rel``.
 
     Actions are written as the exact next state (``actions[t] == states[t+1]``,
     last row clamped) to mirror the real dataset's relabeling.
+
+    ``fixed_quat`` writes one known (4,) **wxyz** quaternion into every row of
+    every arm instead of random ones, so a test can assert the exact rot6d the
+    reader must emit for it.
     """
     d = root / rel
     (d / "meta" / "episodes" / "chunk-000").mkdir(parents=True, exist_ok=True)
@@ -127,7 +132,10 @@ def _make_bucket(
     for i, side in enumerate(sides):
         pfx = f"{side}_" if side else ""
         pos = rng.randn(total, 3).astype(np.float32)
-        quat = _unit_quats(total, seed + i)
+        if fixed_quat is None:
+            quat = _unit_quats(total, seed + i)
+        else:
+            quat = np.tile(np.asarray(fixed_quat, dtype=np.float32), (total, 1))
         state = np.concatenate([pos, quat], axis=-1)
         grip = rng.rand(total, 1).astype(np.float32)
         # actions[t] = states[t+1] within each episode; final row clamped.
@@ -205,7 +213,10 @@ class TestEmbodimentKey:
         assert embodiment_key("Some New Bot v2", "bimanual") == "some_new_bot_v2"
         assert "unrecognized robot_type" in caplog.text
 
-    def test_franka_is_the_only_single_arm_default(self):
+    def test_franka_maps_to_the_franka_stats_key(self):
+        """Named for what it checks: the robot_type -> stats-file-suffix mapping.
+        Franka's single-arm-ness is NOT a property of this table — it is detected
+        from info.features, and asserted in TestSingleArmFranka."""
         assert ROBOT_TYPE_TO_EMBODIMENT["Franka"] == "franka"
 
 
@@ -265,6 +276,36 @@ class TestBucketDiscovery:
     def test_empty_root(self, tmp_path):
         assert discover_a1_buckets(tmp_path) == []
 
+    def test_skips_killed_tar_staging_dirs(self, tmp_path):
+        """extract_interndata_a1_v30.sh stages into <cat>/<emb>/.partial_<name>/.
+        SIGKILL/OOM/preemption bypasses its cleanup, so a half-extracted tree
+        that already has meta/ must not be mistaken for a complete bucket — it
+        would construct fine and then die at __getitem__ mid-training."""
+        good = _make_bucket(tmp_path, "cat/emb/good")
+        _make_bucket(tmp_path, "cat/emb/.partial_halfdone/halfdone")
+        (tmp_path / ".extract_logs" / "sentinels").mkdir(parents=True)
+        assert discover_a1_buckets(tmp_path) == [good]
+
+    def test_follows_symlinked_buckets(self, tmp_path):
+        """Symlinking a subset instead of copying is the realistic way to carve a
+        slice out of a 2.1 TiB tree, and the base reader's root mode follows
+        symlinks — os.walk's followlinks=False default would report an empty
+        tree and raise the misleading 'did the archives get extracted?' error."""
+        elsewhere = _make_bucket(tmp_path / "store", "real_task")
+        farm = tmp_path / "farm" / "cat" / "emb"
+        farm.mkdir(parents=True)
+        (farm / "linked").symlink_to(elsewhere)
+        found = discover_a1_buckets(tmp_path / "farm")
+        assert [p.relative_to(tmp_path / "farm").as_posix() for p in found] == ["cat/emb/linked"]
+
+    def test_symlink_cycle_terminates(self, tmp_path):
+        """followlinks=True re-walks a cycle forever without the inode guard."""
+        good = _make_bucket(tmp_path, "cat/emb/good")
+        loop = tmp_path / "cat" / "loop"
+        loop.mkdir(parents=True, exist_ok=True)
+        (loop / "back").symlink_to(tmp_path)
+        assert discover_a1_buckets(tmp_path) == [good]
+
 
 # ---------------------------------------------------------------------------
 # Reader
@@ -298,6 +339,56 @@ class TestBimanualReader:
             c0, c1 = a[:, lo : lo + 3], a[:, lo + 3 : lo + 6]
             np.testing.assert_allclose(np.linalg.norm(c0, axis=1), 1.0, atol=1e-5)
             np.testing.assert_allclose((c0 * c1).sum(axis=1), 0.0, atol=1e-5)
+
+
+class TestReaderQuaternionConvention:
+    """Pin the wxyz convention through the REAL ``__getitem__`` path.
+
+    ``TestQuaternionConvention`` pins the helper, but nothing there stops the
+    reader from calling the *other* helper: swapping ``_arm10``'s
+    ``quat_wxyz_to_rot6d`` for ``quat_xyzw_to_rot6d`` leaves every other test in
+    this file green (orthonormality holds for the wrong rotation, and the
+    row-alignment test compares two outputs of the same ``_eef20``, so it is
+    self-consistent under the flip). Every rotation in every training batch would
+    be silently wrong. So these assert exact, hand-computed rot6d values.
+
+    Planted quaternion: wxyz ``[s, 0, 0, s]``, s = sqrt(1/2) — 90 deg about z.
+        R = [[0,-1,0],[1,0,0],[0,0,1]]  ->  rot6d = col0 ++ col1 = [0,1,0, -1,0,0]
+    Read as xyzw the SAME four numbers are 90 deg about x, giving [1,0,0, 0,0,1]:
+    a different, equally unit-norm, equally orthonormal answer.
+    """
+
+    S = float(np.sqrt(0.5))
+    WXYZ = np.array([S, 0.0, 0.0, S], dtype=np.float32)
+    EXPECTED = np.array([0.0, 1.0, 0.0, -1.0, 0.0, 0.0], dtype=np.float32)
+    # What the xyzw helper would produce from the same bytes (must NOT appear).
+    WRONG = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+
+    def test_expected_and_wrong_are_what_the_two_helpers_give(self):
+        """Guard the constants above against a helper change, so a failure below
+        is unambiguously the reader wiring and not a stale expectation here."""
+        q = self.WXYZ[None, :]
+        np.testing.assert_allclose(quat_wxyz_to_rot6d(q)[0], self.EXPECTED, atol=1e-6)
+        np.testing.assert_allclose(quat_xyzw_to_rot6d(q)[0], self.WRONG, atol=1e-6)
+
+    def test_bimanual_action_and_proprio_rot6d_are_the_wxyz_answer(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", fixed_quat=self.WXYZ)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        s = ds[0]
+        for arr in (s["action"].numpy(), s["proprio"].numpy()):
+            for lo in (3, 13):  # left and right rot6d slots
+                block = arr[:, lo : lo + 6]
+                np.testing.assert_allclose(block, np.tile(self.EXPECTED, (len(arr), 1)), atol=1e-6)
+                assert not np.allclose(block, self.WRONG, atol=1e-3)
+
+    def test_single_arm_action_rot6d_is_the_wxyz_answer(self, tmp_path, patch_decode):
+        """The franka path builds its left arm through the same ``_arm10``, but
+        via a different column set — cover it so neither branch can drift."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka", fixed_quat=self.WXYZ)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        a = ds[0]["action"].numpy()
+        np.testing.assert_allclose(a[:, 3:9], np.tile(self.EXPECTED, (len(a), 1)), atol=1e-6)
+        assert not np.allclose(a[:, 3:9], self.WRONG, atol=1e-3)
 
 
 class TestSingleArmFranka:
@@ -460,6 +551,50 @@ class TestGripperHarmonization:
         with caplog.at_level("WARNING"):
             InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
         assert "full-open stroke" not in caplog.text
+
+    def test_alt_stroke_pick_is_never_silent(self, tmp_path, patch_decode, caplog):
+        """A corroborated Robotiq bucket still logs — the pick rescales the whole
+        bucket's gripper dim by 12.5x off one order statistic."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        (d / "meta" / "stats.json").write_text(
+            json.dumps({"states.gripper.position": {"min": [0.0], "max": [1.0], "mean": [0.45]}})
+        )
+        with caplog.at_level("INFO"):
+            ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale[0] == pytest.approx(1.0)
+        assert "alt (second-variant) stroke" in caplog.text
+
+    def test_glitch_max_flipping_a_panda_bucket_warns(self, tmp_path, patch_decode, caplog):
+        """The log-space flip sits at sqrt(0.08*1.0)=0.283, and this dataset's sim
+        synthetic outliers can cross the decision boundary (an extreme outlier versus the normal stroke). One glitch row at
+        an in-range synthetic maximum therefore reclassifies a panda bucket as Robotiq and squashes
+        its real values 12.5x — and that maximum stays under _GRIPPER_SANE_MAX, so the
+        out-of-range warning never fires. The mean must escalate it."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        (d / "meta" / "stats.json").write_text(
+            json.dumps({"states.gripper.position": {"min": [0.0], "max": [0.4], "mean": [0.04]}})
+        )
+        with caplog.at_level("WARNING"):
+            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert "does not clear the primary stroke" in caplog.text
+
+    def test_missing_mean_does_not_silently_reassure(self, tmp_path, patch_decode, caplog):
+        """A stats.json without `mean` cannot corroborate, so the alt pick must
+        warn rather than pass unremarked."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        self._write_bucket_stats(d, {"states.gripper.position": 1.0})  # min/max only
+        with caplog.at_level("WARNING"):
+            ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert ds._grip_scale[0] == pytest.approx(1.0)
+        assert "does not clear the primary stroke" in caplog.text
+
+    def test_single_gripper_embodiment_never_logs_a_variant_pick(self, tmp_path, patch_decode, caplog):
+        """No alt stroke declared -> no detection, so no pick to report."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        self._write_bucket_stats(d, {"states.left_gripper.position": 0.1, "states.right_gripper.position": 0.1})
+        with caplog.at_level("INFO"):
+            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        assert "second-variant" not in caplog.text
 
     def test_never_opened_gripper_falls_back_to_the_stroke_and_stays_zero(self, tmp_path, patch_decode):
         """max ~ 0 carries no scale information, but 0 / anything == 0."""

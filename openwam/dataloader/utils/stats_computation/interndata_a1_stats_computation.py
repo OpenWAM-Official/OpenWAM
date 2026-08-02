@@ -60,12 +60,20 @@
 
 
 
+
+
+
+
+
+
+
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -73,6 +81,8 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from openwam.dataloader.interndata_a1 import (
+    _BIMANUAL_SIDES,
+    _SINGLE_ARM_SIDES,
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
@@ -91,21 +101,13 @@ RIGHT_ARM_DIMS_EEF20: Tuple[int, ...] = tuple(range(ARM10_DIM, EEF20_DIM))
 
 
 
+
+
+
+
 _SIDES: Dict[str, Dict[str, Sequence]] = {
-    "bimanual": {
-        "action": (
-            ("actions.left_ee_to_robot_pose", "actions.left_gripper.position"),
-            ("actions.right_ee_to_robot_pose", "actions.right_gripper.position"),
-        ),
-        "state": (
-            ("states.left_ee_to_robot_pose", "states.left_gripper.position"),
-            ("states.right_ee_to_robot_pose", "states.right_gripper.position"),
-        ),
-    },
-    "single_arm": {
-        "action": (("actions.ee_to_robot_pose", "actions.gripper.position"), None),
-        "state": (("states.ee_to_robot_pose", "states.gripper.position"), None),
-    },
+    "bimanual": _BIMANUAL_SIDES,
+    "single_arm": _SINGLE_ARM_SIDES,
 }
 
 
@@ -163,6 +165,8 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
 
 
 
+
+
     bucket_str, layout, embodiment = args
     bucket = Path(bucket_str)
     sides = _SIDES[layout]
@@ -203,7 +207,16 @@ def compute_stats_for_embodiment(
     tasks = [(str(d), layout, embodiment) for d in dirs]
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
-        for i, fut in enumerate(as_completed(futures), 1):
+
+
+
+
+
+
+
+
+
+        for i, fut in enumerate(futures, 1):
             name = futures[fut]
             try:
                 _, rows = fut.result()
@@ -245,6 +258,14 @@ def compute_stats_for_embodiment(
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--dataset_dir", required=True, help="extracted InternData-A1 v3.0 root")
+    parser.add_argument(
+        "--stats_root",
+        default=None,
+        help="where to write meta/stats_<embodiment>.json (default: --dataset_dir). Set this to a "
+        "writable directory when the dataset mount is read-only, and pass the SAME path as "
+        "dataloader.stats_root in interndata_a1.yaml — the reader resolves the file as "
+        "{stats_root}/meta/stats_{embodiment}.json.",
+    )
     parser.add_argument("--embodiment", default=None, help="compute for a single embodiment only")
     parser.add_argument("--workers", type=int, default=16, help="parallel bucket readers")
     parser.add_argument(
@@ -270,8 +291,13 @@ def main():
             raise SystemExit(f"embodiment {args.embodiment!r} not found; have {sorted(groups)}")
         groups = {args.embodiment: groups[args.embodiment]}
 
-    out_dir = root / "meta"
+
+
+    stats_root = Path(args.stats_root) if args.stats_root else root
+    out_dir = stats_root / "meta"
     out_dir.mkdir(parents=True, exist_ok=True)
+    if stats_root != root:
+        logger.info("writing stats to %s (dataset root %s left untouched)", out_dir, root)
     for emb in sorted(groups):
         logger.info("=== %s (%d buckets) ===", emb, len(groups[emb]["dirs"]))
         result = compute_stats_for_embodiment(

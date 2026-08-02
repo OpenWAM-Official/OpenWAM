@@ -14,8 +14,10 @@
 # Resumable: a per-archive sentinel is written only after tar exits 0, so an
 # interrupted run redoes just the archive it died on. Each archive unpacks into a
 # .partial_* staging dir that is renamed into place on success, so a killed tar
-# can never leave a half-tree that the sentinel logic or the reader mistakes for
-# a complete bucket.
+# can never leave a half-tree that the sentinel logic mistakes for a complete
+# bucket. A SIGKILL/OOM/preemption skips this script's cleanup and leaves the
+# .partial_* dir behind, so the reader's walk also skips dot-prefixed dirs
+# (discover_a1_buckets) rather than relying on that cleanup alone.
 set -uo pipefail
 
 if [[ $# -lt 2 ]]; then

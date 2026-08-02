@@ -1,0 +1,375 @@
+"""Tests for the InternData-A1 stats script.
+
+(openwam/dataloader/utils/stats_computation/interndata_a1_stats_computation.py)
+
+Mirrors the coverage its siblings already have (test_ebench_stats_computation.py,
+test_robocoin_compute_stats.py) and pins the three behaviours the script's own
+comments flag but nothing enforced:
+
+1. **Reader/stats parity.** ``_SIDES`` / ``_arm10`` / ``_eef20`` are duplicated
+   from the reader ("must stay bit-identical to ``InternDataA1Dataset._eef20``"),
+   so an edit to either copy would surface only as silently skewed normalization
+   — the stats would describe a distribution the reader never emits.
+2. **Identity pinning at generation time.** ``materialize_eef_stats`` only
+   *warns* on an unpinned file, so dropping ``pin_rot6d_identity`` would distort
+   every rotation with a green suite. Same for the single-arm right-half pin
+   that keeps franka's padding at exactly 0 instead of the -1 boundary.
+3. **Merge determinism.** q01/q99 come from a seeded reservoir whose surviving
+   rows depend on insertion order, so the parent must merge in a fixed order.
+
+The bucket builder is shared with the reader tests (same precedent as
+test_ebench_stats_computation.py importing from test_ebench_dataset).
+"""
+
+from __future__ import annotations
+
+import json
+from concurrent.futures import Future
+from pathlib import Path
+
+import numpy as np
+import pyarrow.parquet as pq
+import pytest
+
+import openwam.dataloader.utils.stats_computation.interndata_a1_stats_computation as a1s
+from openwam.dataloader.interndata_a1 import (
+    _BIMANUAL_SIDES,
+    _SINGLE_ARM_SIDES,
+    InternDataA1Dataset,
+    resolve_gripper_scale,
+)
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
+from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
+from tests.dataloader.test_interndata_a1 import _make_bucket
+
+BIMANUAL = ("bimanual", "AgileX Split Aloha", "split_aloha")
+SINGLE_ARM = ("single_arm", "Franka", "franka")
+
+
+def _group(dirs, layout: str, robot_type: str) -> dict:
+    return {"robot_type": robot_type, "arm_layout": layout, "dirs": list(dirs)}
+
+
+class _InlinePool:
+    """ProcessPoolExecutor stub that runs each task inline at submit time.
+
+    Keeps ``_scan_bucket`` in-process (covered, and no process-spawn cost) and
+    leaves every future already-done by the time the merge loop runs — which is
+    exactly the state in which ``as_completed``'s yield order stops tracking
+    submission order.
+    """
+
+    def __init__(self, max_workers=None):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def submit(self, fn, arg):
+        fut: Future = Future()
+        try:
+            fut.set_result(fn(arg))
+        except BaseException as e:  # noqa: BLE001 - mirror the real pool's contract
+            fut.set_exception(e)
+        return fut
+
+
+@pytest.fixture
+def inline_pool(monkeypatch):
+    monkeypatch.setattr(a1s, "ProcessPoolExecutor", _InlinePool)
+
+
+# ---------------------------------------------------------------------------
+# 1. Reader / stats parity
+# ---------------------------------------------------------------------------
+
+
+class TestReaderParity:
+    """The stats script and the reader must assemble byte-identical vectors."""
+
+    @pytest.mark.parametrize("layout,robot_type,_emb", [BIMANUAL, SINGLE_ARM])
+    @pytest.mark.parametrize("kind", ["action", "state"])
+    def test_eef20_is_bit_identical_to_the_reader(self, tmp_path, layout, robot_type, _emb, kind):
+        d = _make_bucket(tmp_path, "cat/emb/task", layout=layout, robot_type=robot_type)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        win = ds._load_data_table(0, 0).to_pandas()
+        reader_out = ds._eef20(win, kind, len(win))
+
+        sides = a1s._SIDES[layout]
+        table = pq.read_table(d / "data" / "chunk-000" / "file-000.parquet")
+        grip_scales = tuple(
+            resolve_gripper_scale(d, _emb, spec[1]) if spec is not None else 1.0 for spec in sides["state"]
+        )
+        stats_out = a1s._eef20(table, sides, kind, grip_scales)
+
+        assert stats_out.shape == reader_out.shape
+        np.testing.assert_array_equal(stats_out, reader_out)
+
+    def test_gripper_rescale_is_shared_not_reimplemented(self, tmp_path):
+        """A franka Robotiq bucket: both sides must pick the same 1.0 stroke, or
+        the stats describe a distribution 12.5x off what the reader emits."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        (d / "meta" / "stats.json").write_text(
+            json.dumps({"states.gripper.position": {"min": [0.0], "max": [1.0], "mean": [0.45]}})
+        )
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        win = ds._load_data_table(0, 0).to_pandas()
+        sides = a1s._SIDES["single_arm"]
+        grip_scales = tuple(
+            resolve_gripper_scale(d, "franka", spec[1]) if spec is not None else 1.0 for spec in sides["state"]
+        )
+        assert grip_scales[0] == pytest.approx(ds._grip_scale[0]) == 1.0
+        table = pq.read_table(d / "data" / "chunk-000" / "file-000.parquet")
+        np.testing.assert_array_equal(
+            a1s._eef20(table, sides, "action", grip_scales), ds._eef20(win, "action", len(win))
+        )
+
+    def test_each_side_gets_its_own_scale_in_both_implementations(self, tmp_path, monkeypatch):
+        """Every bimanual embodiment currently declares one stroke, so the two
+        sides always resolve to the SAME divisor — which means a left/right
+        scale mix-up in either `_eef20` is invisible to the parity test above.
+        Force distinct per-side scales so the side->scale routing is pinned now,
+        before a second bimanual variant ever makes it reachable."""
+        d = _make_bucket(tmp_path, "cat/emb/task")
+        scales = (0.1, 0.4)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
+        monkeypatch.setattr(ds, "_grip_scale", scales)
+        win = ds._load_data_table(0, 0).to_pandas()
+        table = pq.read_table(d / "data" / "chunk-000" / "file-000.parquet")
+
+        reader_out = ds._eef20(win, "action", len(win))
+        stats_out = a1s._eef20(table, a1s._SIDES["bimanual"], "action", scales)
+        np.testing.assert_array_equal(stats_out, reader_out)
+        # ...and the scales really did land on different arms.
+        assert not np.allclose(reader_out[:, 9], reader_out[:, 19])
+
+    def test_sides_tables_are_the_readers_own(self):
+        """The column tables are no longer restated in the stats script — it
+        imports the reader's. `is` rather than `==`: a re-introduced local copy
+        would compare equal on the day it was written and drift later, which is
+        exactly the failure the script's old "must stay in sync" comment named."""
+        assert a1s._SIDES["bimanual"] is _BIMANUAL_SIDES
+        assert a1s._SIDES["single_arm"] is _SINGLE_ARM_SIDES
+
+
+# ---------------------------------------------------------------------------
+# 2. Identity pinning at generation time
+# ---------------------------------------------------------------------------
+
+
+class TestIdentityPinning:
+    def test_rot6d_dims_are_pinned(self, tmp_path, inline_pool):
+        d = _make_bucket(tmp_path, "cat/emb/task")
+        out = a1s.compute_stats_for_embodiment("split_aloha", _group([d], "bimanual", "AgileX Split Aloha"))
+        eef = out["eef"]
+        assert out["rot6d_identity"] is True
+        for i in ROT6D_DIMS_EEF20:
+            assert (eef["min"][i], eef["max"][i]) == (-1.0, 1.0)
+            assert (eef["q01"][i], eef["q99"][i]) == (-1.0, 1.0)
+            assert (eef["mean"][i], eef["std"][i]) == (0.0, 1.0)
+
+    def test_no_rot6d_identity_leaves_the_measured_values(self, tmp_path, inline_pool):
+        d = _make_bucket(tmp_path, "cat/emb/task")
+        out = a1s.compute_stats_for_embodiment(
+            "split_aloha", _group([d], "bimanual", "AgileX Split Aloha"), rot6d_identity=False
+        )
+        eef = out["eef"]
+        assert out["rot6d_identity"] is False
+        # Random unit quaternions never produce exactly +-1 on all 12 rot6d dims.
+        assert not all(eef["q01"][i] == -1.0 and eef["q99"][i] == 1.0 for i in ROT6D_DIMS_EEF20)
+
+    def test_single_arm_right_half_is_pinned_so_padding_stays_zero(self, tmp_path, inline_pool):
+        """franka fills [0:10) only. Without the right-half pin the zero padding
+        would normalize onto the -1 boundary instead of staying at 0."""
+        d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+        out = a1s.compute_stats_for_embodiment("franka", _group([d], "single_arm", "Franka"))
+        eef = out["eef"]
+        assert out["arm_layout"] == "single_arm"
+        for i in range(10, 20):  # xyz, rot6d AND gripper of the padded right arm
+            assert (eef["q01"][i], eef["q99"][i]) == (-1.0, 1.0)
+            assert (eef["mean"][i], eef["std"][i]) == (0.0, 1.0)
+        # quantile-normalizing a 0 with q01/q99 = -/+1 leaves it at 0.
+        assert (0.0 - eef["q01"][10]) / (eef["q99"][10] - eef["q01"][10]) * 2 - 1 == 0.0
+
+    def test_bimanual_right_half_is_data_not_padding(self, tmp_path, inline_pool):
+        """The right-half pin must fire for single_arm ONLY — pinning a bimanual
+        bucket's real right arm would disable its normalization."""
+        d = _make_bucket(tmp_path, "cat/emb/task")
+        eef = a1s.compute_stats_for_embodiment("split_aloha", _group([d], "bimanual", "AgileX Split Aloha"))["eef"]
+        assert (eef["q01"][10], eef["q99"][10]) != (-1.0, 1.0)  # right xyz
+        assert (eef["q01"][19], eef["q99"][19]) != (-1.0, 1.0)  # right gripper
+
+    def test_written_file_round_trips_into_the_reader(self, tmp_path, inline_pool, monkeypatch):
+        """End-to-end: generated stats must satisfy the reader's own width check
+        and load under the default quantile mode."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        monkeypatch.setattr("sys.argv", ["prog", "--dataset_dir", str(tmp_path)])
+        a1s.main()
+        ds = InternDataA1Dataset(
+            str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile", num_frames=9, video_stride=4
+        )
+        assert ds._normalization_stats is not None
+
+
+# ---------------------------------------------------------------------------
+# 3. Merge determinism
+# ---------------------------------------------------------------------------
+
+
+class TestMergeDeterminism:
+    """q01/q99 come from a seeded Algorithm-R reservoir: which rows survive
+    depends on INSERTION order, so consuming as_completed made the file drift run
+    to run on identical data (mean/std/min/max are order-invariant and stayed
+    put, which is what let it go unnoticed)."""
+
+    @staticmethod
+    def _small_acc_factory(cap: int):
+        class _SmallAccumulator(Accumulator):
+            def __init__(self, dim: int = 20, **kw):
+                super().__init__(dim=dim, reservoir_cap=cap, seed=0)
+
+        return _SmallAccumulator
+
+    def _buckets(self, tmp_path):
+        # Distinct row counts so the merge order is identifiable from batch sizes.
+        return [
+            _make_bucket(tmp_path, f"cat/emb/task{i}", n_eps=1, ep_len=ep, seed=i)
+            for i, ep in enumerate((10, 12, 14, 16, 18, 20))
+        ]
+
+    def test_merges_in_submission_order_not_completion_order(self, tmp_path, inline_pool, monkeypatch):
+        dirs = self._buckets(tmp_path)
+        seen: list[int] = []
+        base = self._small_acc_factory(64)
+
+        class _Recording(base):  # type: ignore[valid-type,misc]
+            def update_batch(self, batch):
+                seen.append(len(batch))
+                return super().update_batch(batch)
+
+        monkeypatch.setattr(a1s, "Accumulator", _Recording)
+        a1s.compute_stats_for_embodiment("split_aloha", _group(dirs, "bimanual", "AgileX Split Aloha"))
+        # _scan_bucket returns action rows ++ state rows -> 2 * ep_len per bucket,
+        # and dirs are submitted in the order given.
+        assert seen == [2 * ep for ep in (10, 12, 14, 16, 18, 20)]
+
+    def test_quantiles_match_a_sequential_merge_of_the_same_buckets(self, tmp_path, inline_pool, monkeypatch):
+        """The reservoir is deliberately shrunk below the row count here — at the
+        1M production cap a small fixture never evicts, so order could not bite."""
+        dirs = self._buckets(tmp_path)
+        small = self._small_acc_factory(64)
+        monkeypatch.setattr(a1s, "Accumulator", small)
+        got = a1s.compute_stats_for_embodiment(
+            "split_aloha", _group(dirs, "bimanual", "AgileX Split Aloha"), rot6d_identity=False
+        )["eef"]
+
+        ref = small(dim=a1s.EEF20_DIM)
+        for d in dirs:  # same fixed order the script must use
+            _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+            ref.update_batch(rows)
+        expected = ref.finalize()
+        for key in ("mean", "std", "min", "max", "q01", "q99"):
+            np.testing.assert_allclose(got[key], expected[key], atol=0, rtol=0, err_msg=key)
+
+    def test_regenerating_reproduces_the_file_byte_for_byte(self, tmp_path, inline_pool, monkeypatch):
+        _make_bucket(tmp_path, "cat/split_aloha/task")
+        monkeypatch.setattr("sys.argv", ["prog", "--dataset_dir", str(tmp_path)])
+        out = tmp_path / "meta" / "stats_split_aloha.json"
+        a1s.main()
+        first = out.read_bytes()
+        a1s.main()
+        assert out.read_bytes() == first
+
+
+# ---------------------------------------------------------------------------
+# 4. Output location (read-only dataset mounts)
+# ---------------------------------------------------------------------------
+
+
+class TestStatsRoot:
+    def test_defaults_to_the_dataset_dir(self, tmp_path, inline_pool, monkeypatch):
+        _make_bucket(tmp_path, "cat/split_aloha/task")
+        monkeypatch.setattr("sys.argv", ["prog", "--dataset_dir", str(tmp_path)])
+        a1s.main()
+        assert (tmp_path / "meta" / "stats_split_aloha.json").is_file()
+
+    def test_stats_root_redirects_the_write_off_the_dataset_mount(self, tmp_path, inline_pool, monkeypatch):
+        """interndata_a1.yaml advertises stats_root for read-only mounts and the
+        reader wires a1_stats_root for it; without this flag the shipped tool
+        could not produce the files in the one scenario stats_root exists for."""
+        root = tmp_path / "readonly_mount"
+        elsewhere = tmp_path / "scratch"
+        d = _make_bucket(root, "cat/split_aloha/task")
+        monkeypatch.setattr("sys.argv", ["prog", "--dataset_dir", str(root), "--stats_root", str(elsewhere)])
+        a1s.main()
+        assert (elsewhere / "meta" / "stats_split_aloha.json").is_file()
+        assert not (root / "meta").exists()  # dataset mount untouched
+        # And the reader resolves the same path from dataloader.stats_root.
+        ds = InternDataA1Dataset(
+            str(d), a1_stats_root=str(elsewhere), normalize_mode="quantile", num_frames=9, video_stride=4
+        )
+        assert ds._normalization_stats is not None
+
+
+# ---------------------------------------------------------------------------
+# 5. Bucket classification
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyBuckets:
+    def test_groups_by_embodiment(self, tmp_path):
+        _make_bucket(tmp_path, "cat/split_aloha/a")
+        _make_bucket(tmp_path, "cat/split_aloha/b")
+        _make_bucket(tmp_path, "cat/franka/c", layout="single_arm", robot_type="Franka")
+        _make_bucket(tmp_path, "cat/lift2/d", robot_type="ARX Lift-2")
+        groups = a1s.classify_buckets(a1s.discover_a1_buckets(tmp_path))
+        assert {k: len(v["dirs"]) for k, v in groups.items()} == {"split_aloha": 2, "franka": 1, "lift2": 1}
+        assert groups["franka"]["arm_layout"] == "single_arm"
+        assert groups["split_aloha"]["arm_layout"] == "bimanual"
+
+    def test_one_unreadable_bucket_does_not_abort_the_scan(self, tmp_path, caplog):
+        good = _make_bucket(tmp_path, "cat/split_aloha/good")
+        bad = tmp_path / "cat" / "split_aloha" / "bad"
+        (bad / "meta").mkdir(parents=True)
+        (bad / "meta" / "info.json").write_text("{ not json")
+        with caplog.at_level("WARNING"):
+            groups = a1s.classify_buckets(a1s.discover_a1_buckets(tmp_path))
+        assert groups["split_aloha"]["dirs"] == [good]
+        assert "unreadable meta/info.json" in caplog.text
+
+    def test_empty_embodiment_raises_rather_than_writing_a_degenerate_file(self, tmp_path, inline_pool):
+        """Every bucket yielding 0 rows must fail loudly: the Accumulator would
+        otherwise finalize to min=+inf/max=-inf and poison every training run."""
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=1)
+        pq.write_table(
+            pq.read_table(d / "data" / "chunk-000" / "file-000.parquet").slice(0, 0),
+            d / "data" / "chunk-000" / "file-000.parquet",
+        )
+        with pytest.raises(RuntimeError, match="every bucket yielded 0 rows"):
+            a1s.compute_stats_for_embodiment("split_aloha", _group([d], "bimanual", "AgileX Split Aloha"))
+
+
+def test_scan_bucket_reads_action_and_state_rows(tmp_path):
+    """Both streams are pooled — actions[t] == states[t+1], the same signal
+    offset by one row — so the row count is 2x the parquet length."""
+    d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
+    name, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+    assert name == str(d)
+    assert rows.shape == (2 * 40, a1s.EEF20_DIM)
+    assert rows.dtype == np.float32
+
+
+def test_scan_bucket_of_a_single_arm_leaves_the_right_half_zero(tmp_path):
+    d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
+    _, rows = a1s._scan_bucket((str(d), "single_arm", "franka"))
+    np.testing.assert_array_equal(rows[:, 10:], 0.0)
+    assert np.abs(rows[:, :10]).sum() > 0
+
+
+def test_module_exports_stay_importable():
+    for name in a1s.__all__:
+        assert hasattr(a1s, name), name
+    assert Path(a1s.__file__).name == "interndata_a1_stats_computation.py"

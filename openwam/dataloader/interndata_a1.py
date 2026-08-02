@@ -178,7 +178,9 @@ ROBOT_TYPE_TO_EMBODIMENT: Dict[str, str] = {
 }
 
 
-SINGLE_ARM_EMBODIMENTS = frozenset({"franka"})
+
+
+
 
 
 
@@ -239,12 +241,26 @@ def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> f
 
 
 
+
+
+
+
     primary = GRIPPER_FULL_OPEN.get(embodiment, 1.0)
     alt = GRIPPER_ALT_FULL_OPEN.get(embodiment)
     stats_path = bucket_dir / "meta" / "stats.json"
     try:
         with open(stats_path) as f:
-            observed_max = float(np.ravel(json.load(f)[grip_col]["max"])[0])
+            blk = json.load(f)[grip_col]
+        observed_max = float(np.ravel(blk["max"])[0])
+
+
+
+
+
+        try:
+            observed_mean = float(np.ravel(blk["mean"])[0])
+        except (KeyError, TypeError, IndexError, ValueError):
+            observed_mean = float("nan")
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         logger.debug(
             "InternData-A1: no usable %s max in %s; assuming the %s stroke %.4f",
@@ -260,6 +276,47 @@ def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> f
 
         if abs(np.log(observed_max / alt)) < abs(np.log(observed_max / primary)):
             scale = alt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            if observed_mean > primary:
+                logger.info(
+                    "InternData-A1 %s: %s max %.4f -> alt (second-variant) stroke %.4f for %r "
+                    "(mean %.4f corroborates).",
+                    bucket_dir,
+                    grip_col,
+                    observed_max,
+                    alt,
+                    embodiment,
+                    observed_mean,
+                )
+            else:
+                logger.warning(
+                    "InternData-A1 %s: %s max %.4f selected the alt stroke %.4f for %r, but mean "
+                    "%.4f does not clear the primary stroke %.4f — if that max is a single glitch "
+                    "row this bucket's gripper is being squashed by %.1fx. Verify the bucket.",
+                    bucket_dir,
+                    grip_col,
+                    observed_max,
+                    alt,
+                    embodiment,
+                    observed_mean,
+                    primary,
+                    alt / primary,
+                )
+
+
 
 
 
@@ -372,15 +429,42 @@ def discover_a1_buckets(root: Path) -> List[Path]:
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     out: List[Path] = []
-    for dirpath, dirnames, _ in os.walk(root):
+    seen: set = set()
+    for dirpath, dirnames, _ in os.walk(root, followlinks=True):
+        try:
+            st = os.stat(dirpath)
+        except OSError:
+            dirnames[:] = []
+            continue
+        key = (st.st_dev, st.st_ino)
+        if key in seen:
+            dirnames[:] = []
+            continue
+        seen.add(key)
         if os.path.isfile(os.path.join(dirpath, "meta", "info.json")):
             out.append(Path(dirpath))
             dirnames[:] = []
             continue
 
 
-        dirnames[:] = [d for d in dirnames if d not in ("data", "videos")]
+
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in ("data", "videos")]
     return sorted(out)
 
 
@@ -669,7 +753,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
         if not sub_dirs:
             raise FileNotFoundError(
                 f"{cls.__name__}: no buckets with meta/info.json found anywhere under {root}. "
-                "Did the tar.gz archives get extracted? (see a1_extract_v30.sh)"
+                "Did the tar.gz archives get extracted? (see scripts/extract_interndata_a1_v30.sh)"
             )
         logger.info("%s.from_config: root mode, %d buckets under %s", cls.__name__, len(sub_dirs), root)
 
@@ -727,7 +811,6 @@ __all__ = [
     "InternDataA1Dataset",
     "MultiInternDataA1Dataset",
     "ROBOT_TYPE_TO_EMBODIMENT",
-    "SINGLE_ARM_EMBODIMENTS",
     "GRIPPER_FULL_OPEN",
     "GRIPPER_ALT_FULL_OPEN",
     "detect_arm_layout",
