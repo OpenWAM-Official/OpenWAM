@@ -131,8 +131,9 @@ class TestReaderParity:
         """Every bimanual embodiment currently declares one stroke, so the two
         sides always resolve to the SAME divisor — which means a left/right
         scale mix-up in either `_eef20` is invisible to the parity test above.
-        Force distinct per-side scales so the side->scale routing is pinned now,
-        before a second bimanual variant ever makes it reachable."""
+        Force distinct per-side scales and assert each arm's ABSOLUTE value, so a
+        mix-up applied to both copies at once — which the parity assert cannot
+        see, since it only compares the two against each other — still fails."""
         d = _make_bucket(tmp_path, "cat/emb/task")
         scales = (0.1, 0.4)
         ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
@@ -143,8 +144,20 @@ class TestReaderParity:
         reader_out = ds._eef20(win, "action", len(win))
         stats_out = a1s._eef20(table, a1s._SIDES["bimanual"], "action", scales)
         np.testing.assert_array_equal(stats_out, reader_out)
-        # ...and the scales really did land on different arms.
-        assert not np.allclose(reader_out[:, 9], reader_out[:, 19])
+
+        # Each arm's gripper must be its OWN raw column over its OWN divisor.
+        # (Asserting only that cols 9 and 19 differ is unfalsifiable here:
+        # _make_bucket draws each side's gripper independently, so they differ
+        # whatever the routing does.)
+        raw = {
+            side: np.stack(win[f"actions.{side}_gripper.position"].values).astype(np.float32).ravel()
+            for side in ("left", "right")
+        }
+        for col, side, scale in ((9, "left", scales[0]), (19, "right", scales[1])):
+            np.testing.assert_allclose(reader_out[:, col], raw[side] / scale, rtol=0, atol=1e-6)
+        # Sanity: the two divisors are distinct, so the assertions above are not
+        # accidentally identical.
+        assert scales[0] != scales[1]
 
     def test_sides_tables_are_the_readers_own(self):
         """The column tables are no longer restated in the stats script — it

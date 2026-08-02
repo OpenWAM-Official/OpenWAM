@@ -13,6 +13,8 @@ Video decode is monkeypatched throughout, so no mp4 is needed.
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -298,6 +300,48 @@ class TestBucketDiscovery:
         found = discover_a1_buckets(tmp_path / "farm")
         assert [p.relative_to(tmp_path / "farm").as_posix() for p in found] == ["cat/emb/linked"]
 
+    def test_multiply_reachable_bucket_keeps_a_readdir_independent_alias(self, tmp_path, monkeypatch):
+        """When a bucket is reachable by two paths, WHICH alias survives must not
+        depend on raw readdir order — that is a filesystem-instance property (ext4
+        htree hashing is seeded per mkfs), so the same tree on two machines would
+        otherwise keep different aliases. That shifts dataset_id, every later
+        bucket's index, the per-bucket subsample seeds in build_multibucket, and
+        the stats merge order (hence q01/q99).
+
+        The host's own readdir order is not trusted here: this reverses scandir,
+        so the assertion only holds if the walk sorts. Without the sort the
+        reversed order makes the 'zfarm/alias' path win instead.
+        """
+        real = _make_bucket(tmp_path, "astore/task1")
+        (tmp_path / "zfarm").mkdir(parents=True)
+        (tmp_path / "zfarm" / "alias").symlink_to(real)
+
+        _real_scandir = os.scandir
+
+        class _ReverseScandir:
+            def __init__(self, path="."):
+                with _real_scandir(path) as it:
+                    self._it = iter(sorted(it, key=lambda e: e.name, reverse=True))
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._it)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(os, "scandir", _ReverseScandir)
+        found = discover_a1_buckets(tmp_path)
+        assert [p.relative_to(tmp_path).as_posix() for p in found] == ["astore/task1"]
+
     def test_symlink_cycle_terminates(self, tmp_path):
         """followlinks=True re-walks a cycle forever without the inode guard."""
         good = _make_bucket(tmp_path, "cat/emb/good")
@@ -554,7 +598,13 @@ class TestGripperHarmonization:
 
     def test_alt_stroke_pick_is_never_silent(self, tmp_path, patch_decode, caplog):
         """A corroborated Robotiq bucket still logs — the pick rescales the whole
-        bucket's gripper dim by 12.5x off one order statistic."""
+        bucket's gripper dim by 12.5x off one order statistic.
+
+        The level is asserted, not just the text: `caplog.at_level("INFO")`
+        captures WARNING too, so a text-only assert would stay green if this
+        branch were collapsed into `logger.warning` — which would mean warning
+        fatigue on every legitimate alternate-stroke bucket.
+        """
         d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
         (d / "meta" / "stats.json").write_text(
             json.dumps({"states.gripper.position": {"min": [0.0], "max": [1.0], "mean": [0.45]}})
@@ -562,7 +612,11 @@ class TestGripperHarmonization:
         with caplog.at_level("INFO"):
             ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
         assert ds._grip_scale[0] == pytest.approx(1.0)
-        assert "alt (second-variant) stroke" in caplog.text
+        picks = [r for r in caplog.records if "alt (second-variant) stroke" in r.getMessage()]
+        assert len(picks) == 1
+        assert picks[0].levelno == logging.INFO
+        # A corroborated pick must NOT also trip the uncorroborated warning.
+        assert "does not clear the primary stroke" not in caplog.text
 
     def test_glitch_max_flipping_a_panda_bucket_warns(self, tmp_path, patch_decode, caplog):
         """The log-space flip sits at sqrt(0.08*1.0)=0.283, and this dataset's sim
@@ -625,6 +679,20 @@ class TestStats:
         d = _make_bucket(tmp_path, "cat/split_aloha/task")
         with pytest.raises(FileNotFoundError, match="interndata_a1_stats_computation"):
             InternDataA1Dataset(str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile")
+
+    def test_missing_stats_error_prescribes_the_stats_root_it_looked_in(self, tmp_path, patch_decode):
+        """The suggested command must carry --stats_root, pointing at the SAME
+        directory the failed lookup used. Otherwise the one scenario stats_root
+        exists for — a read-only dataset mount — hands the user a command that
+        writes where this lookup does not read, reproducing the same error."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task")
+        elsewhere = tmp_path / "scratch"
+        with pytest.raises(FileNotFoundError) as e:
+            InternDataA1Dataset(str(d), a1_stats_root=str(elsewhere), normalize_mode="quantile")
+        msg = str(e.value)
+        assert f"--stats_root {elsewhere}" in msg
+        # And it names the path it actually looked for, so the two agree.
+        assert str(elsewhere / "meta" / "stats_split_aloha.json") in msg
 
     def test_normalize_mode_null_needs_no_stats(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task")

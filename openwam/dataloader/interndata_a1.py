@@ -138,6 +138,12 @@
 
 
 
+
+
+
+
+
+
 from __future__ import annotations
 
 import json
@@ -444,12 +450,23 @@ def discover_a1_buckets(root: Path) -> List[Path]:
 
 
 
+
+
+
+
+
+
+
+
+
     out: List[Path] = []
     seen: set = set()
     for dirpath, dirnames, _ in os.walk(root, followlinks=True):
         try:
             st = os.stat(dirpath)
         except OSError:
+
+
             dirnames[:] = []
             continue
         key = (st.st_dev, st.st_ino)
@@ -464,7 +481,9 @@ def discover_a1_buckets(root: Path) -> List[Path]:
 
 
 
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in ("data", "videos")]
+
+
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d not in ("data", "videos"))
     return sorted(out)
 
 
@@ -588,10 +607,16 @@ class InternDataA1Dataset(LeRobotV3Reader):
             return None
         stats_path = self._a1_stats_root / "meta" / f"stats_{self._embodiment}.json"
         if not stats_path.exists():
+
+
+
+
+
             raise FileNotFoundError(
                 f"normalize_mode={self._normalize_mode!r} but stats file is missing: {stats_path}. "
                 "Run python -m openwam.dataloader.utils.stats_computation."
-                "interndata_a1_stats_computation --dataset_dir <root>, or set normalize_mode=null."
+                "interndata_a1_stats_computation --dataset_dir <extracted-root> "
+                f"--stats_root {self._a1_stats_root}, or set normalize_mode=null."
             )
         with open(stats_path) as f:
             raw = json.load(f)

@@ -167,6 +167,12 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
 
 
 
+
+
+
+
+
+
     bucket_str, layout, embodiment = args
     bucket = Path(bucket_str)
     sides = _SIDES[layout]
@@ -207,6 +213,8 @@ def compute_stats_for_embodiment(
     tasks = [(str(d), layout, embodiment) for d in dirs]
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
+
+
 
 
 
