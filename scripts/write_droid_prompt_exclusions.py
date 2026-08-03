@@ -1,0 +1,188 @@
+"""Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import date
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+
+from openwam.dataloader.oxe_droid import OxeDroidDataset, _clean_text
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+FALLBACK_COLS = list(OxeDroidDataset.PROMPT_FALLBACK_COLS)
+_TASK_TEXT: dict[int, str] | None = None
+_DATASET_DIR: Path | None = None
+
+
+def _init(dataset_dir: str) -> None:
+    global _TASK_TEXT, _DATASET_DIR
+    _DATASET_DIR = Path(dataset_dir)
+    tasks = pd.read_parquet(_DATASET_DIR / "meta" / "tasks.parquet")
+    _TASK_TEXT = dict(zip(tasks["task_index"].to_numpy().tolist(), tasks.index.to_numpy().tolist()))
+
+
+def _scan_shard(rel_path: str) -> dict:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    assert _TASK_TEXT is not None and _DATASET_DIR is not None
+    path = _DATASET_DIR / rel_path
+    cols = ["episode_index", "task_index", *FALLBACK_COLS]
+    df = pq.read_table(path, columns=cols, memory_map=True).to_pandas()
+    n = len(df)
+    task_idx = df["task_index"].to_numpy()
+
+
+    cleaned_by_task = {int(t): _clean_text(_TASK_TEXT.get(int(t))) for t in np.unique(task_idx)}
+    missing = sorted(t for t in cleaned_by_task if t not in _TASK_TEXT)
+    resolved = np.array([cleaned_by_task[int(t)] for t in task_idx], dtype=object)
+
+
+
+    for col in FALLBACK_COLS:
+        todo = resolved == ""
+        if not todo.any():
+            break
+        codes, uniques = pd.factorize(df[col], use_na_sentinel=False)
+        cleaned = np.array([_clean_text(u) for u in uniques], dtype=object)[codes]
+        hit = todo & (cleaned != "")
+        resolved[hit] = cleaned[hit]
+
+    unresolved = pd.Series(resolved == "")
+    by_ep = unresolved.groupby(df["episode_index"].to_numpy())
+    all_bad = by_ep.all()
+    any_bad = by_ep.any()
+    return {
+        "rows": n,
+        "unresolved_rows": int(unresolved.sum()),
+        "episodes_all_unresolved": [int(i) for i in all_bad[all_bad].index.tolist()],
+
+
+
+        "episodes_partially_unresolved": [int(i) for i in any_bad[any_bad & ~all_bad].index.tolist()],
+        "task_index_missing_from_tasks_parquet": missing,
+    }
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dataset-dir", required=True, help="DROID LeRobot v3 bucket root")
+    ap.add_argument("--workers", type=int, default=min(32, (os.cpu_count() or 8)))
+    ap.add_argument("--dry-run", action="store_true", help="Print the verdict, write nothing")
+    args = ap.parse_args()
+
+    root = Path(args.dataset_dir)
+    shards = sorted(p.relative_to(root).as_posix() for p in (root / "data").rglob("*.parquet"))
+    if not shards:
+        raise FileNotFoundError(f"no data parquet under {root}/data")
+    logger.info("scanning %d shards under %s with %d workers", len(shards), root, args.workers)
+
+    results = []
+    with ProcessPoolExecutor(max_workers=args.workers, initializer=_init, initargs=(str(root),)) as ex:
+        futs = [ex.submit(_scan_shard, s) for s in shards]
+        for i, f in enumerate(as_completed(futs), 1):
+            results.append(f.result())
+            if i % 50 == 0 or i == len(shards):
+                logger.info("  %d/%d shards", i, len(shards))
+
+    bad = sorted({e for r in results for e in r["episodes_all_unresolved"]})
+    partial = sorted({e for r in results for e in r["episodes_partially_unresolved"]})
+    missing = sorted({t for r in results for t in r["task_index_missing_from_tasks_parquet"]})
+    rows = sum(r["rows"] for r in results)
+    bad_rows = sum(r["unresolved_rows"] for r in results)
+
+    logger.info("rows scanned: %d", rows)
+    logger.info("unresolved rows: %d (%.3f%%)", bad_rows, bad_rows / max(rows, 1) * 100)
+    logger.info("episodes with NO resolvable prompt on any row: %d", len(bad))
+    if partial:
+        logger.warning(
+            "%d episodes are only PARTIALLY unresolvable — the all-or-nothing assumption this "
+            "exclusion list relies on does not hold for them. They are NOT excluded (some of "
+            "their windows are usable); _safe_get's retry handles them only if the bad run is "
+            "shorter than 64 windows. Investigate before trusting a training run: %s",
+            len(partial),
+            partial[:20],
+        )
+    if missing:
+        logger.error("task_index values absent from tasks.parquet: %s", missing[:20])
+
+    payload = {
+        "reason": (
+            "episodes whose prompt cannot be resolved from tasks.parquet or any "
+            "PROMPT_FALLBACK_COLS entry on any row; generated by "
+            "scripts/write_droid_prompt_exclusions.py"
+        ),
+        "generated": date.today().isoformat(),
+        "episode_indices": bad,
+        "stats": {
+            "rows_scanned": rows,
+            "unresolved_rows": bad_rows,
+            "episodes_all_unresolved": len(bad),
+            "episodes_partially_unresolved": len(partial),
+            "fallback_chain": FALLBACK_COLS,
+        },
+    }
+    out = root / "meta" / "excluded_episodes.json"
+    if args.dry_run:
+        logger.info("--dry-run: would write %s with %d episode_indices", out, len(bad))
+        return
+    if out.exists():
+        prev = json.loads(out.read_text())
+        logger.warning(
+            "%s already exists (reason=%r, %d indices) — overwriting. Merge by hand if it "
+            "carries exclusions from another cause (e.g. truncated video).",
+            out,
+            prev.get("reason", "")[:80],
+            len(prev.get("episode_indices", [])),
+        )
+    out.write_text(json.dumps(payload, indent=2))
+    logger.info("wrote %s (%d episodes excluded)", out, len(bad))
+
+
+if __name__ == "__main__":
+    main()

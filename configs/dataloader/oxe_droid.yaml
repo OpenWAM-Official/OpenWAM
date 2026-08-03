@@ -1,6 +1,6 @@
 type: oxe_droid
 
-dataset_dir: /path/to/OXE/DROID-Dataset
+dataset_dir: /path/to/pretrain_dataset/Droid
 
 num_frames: 33
 video_stride: 4
@@ -10,10 +10,6 @@ height: 384
 width: 320
 
 multiview: true
-
-head_camera_choices:
-  - observation.images.exterior_1_left
-  - observation.images.exterior_2_left
 
 split: train
 

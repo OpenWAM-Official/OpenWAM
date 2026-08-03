@@ -17,6 +17,9 @@
 
 
 
+
+
+
 from __future__ import annotations
 
 import argparse
@@ -63,14 +66,14 @@ SCHEMA: Dict[str, Dict] = {
     },
     "DROID": {
 
-        "state_cols": [
-            "observation.state.cartesian_position",
-            "observation.state.gripper_position",
-        ],
 
 
-        "action_cols": ["action.original"],
-        "state_fn": "droid_state",
+        "state_cols": ["state"],
+
+
+
+        "action_cols": ["other_information.action_tcp_pose"],
+        "state_fn": "euler7_state",
         "action_fn": "euler7_action",
     },
 }
@@ -84,10 +87,18 @@ def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
         assert_unit_quaternion(quat, tol=0.05, sample_n=min(64, len(quat)))
         return fractal_state_to_arm10(rows["observation.state"])
     if state_fn == "droid_state":
+
+
+
+
         return droid_state_to_arm10(
             rows["observation.state.cartesian_position"],
             rows["observation.state.gripper_position"],
         )
+    if state_fn == "euler7_state":
+
+
+        return euler7_action_to_arm10(rows[list(rows.keys())[0]])
     raise ValueError(f"unknown state_fn={state_fn}")
 
 
@@ -158,8 +169,22 @@ def compute_dataset_stats(
         "n_action_samples": n_action,
         "min": merged.min(axis=0).astype(np.float64).tolist(),
         "max": merged.max(axis=0).astype(np.float64).tolist(),
-        "mean": merged.mean(axis=0).astype(np.float64).tolist(),
-        "std": merged.std(axis=0).astype(np.float64).tolist(),
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        "mean": merged.mean(axis=0, dtype=np.float64).tolist(),
+        "std": merged.std(axis=0, dtype=np.float64).tolist(),
         "q01": np.quantile(merged, 0.01, axis=0).astype(np.float64).tolist(),
         "q99": np.quantile(merged, 0.99, axis=0).astype(np.float64).tolist(),
     }
@@ -202,6 +227,14 @@ def main():
     )
     parser.add_argument("--all", action="store_true", help="Process all 4 OXE datasets")
     parser.add_argument(
+        "--dataset-dir",
+        type=str,
+        default=None,
+        help="Bucket path to scan, overriding {root}/{dataset}-Dataset. Requires --dataset "
+        "(the schema to read it with) and is incompatible with --all. Use when a bucket lives "
+        "outside the OXE root, e.g. --dataset DROID --dataset-dir /path/to/pretrain_dataset/Droid",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Compute and print stats but do not write meta/eef_stats.json",
@@ -216,10 +249,12 @@ def main():
 
     if not args.dataset and not args.all:
         parser.error("must specify either --dataset NAME or --all")
+    if args.dataset_dir and args.all:
+        parser.error("--dataset-dir applies to a single bucket; use --dataset NAME, not --all")
     targets = list(SCHEMA.keys()) if args.all else [args.dataset]
     root = Path(args.root)
     for name in targets:
-        ds_dir = root / f"{name}-Dataset"
+        ds_dir = Path(args.dataset_dir) if args.dataset_dir else root / f"{name}-Dataset"
         if not ds_dir.is_dir():
             logger.warning("%s: directory %s missing, skipping", name, ds_dir)
             continue
