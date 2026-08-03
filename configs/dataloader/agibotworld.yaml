@@ -6,6 +6,10 @@ num_frames: 33
 video_stride: 4
 window_stride: 1
 
+use_segment_annotations: true
+
+segment_max_trim_ratio: 0.7
+
 height: 384
 width: 320
 
