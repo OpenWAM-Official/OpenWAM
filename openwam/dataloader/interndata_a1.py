@@ -570,6 +570,30 @@ def trim_digest(path) -> Optional[str]:
     return _TRIM_DIGEST_CACHE[key]
 
 
+def exclusion_digest(bucket) -> Optional[str]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+    import hashlib
+
+    p = Path(bucket) / "meta" / "excluded_episodes.json"
+    if not p.is_file():
+        return None
+    try:
+        with open(p) as fh:
+            idx = sorted({int(x) for x in json.load(fh)["episode_indices"]})
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+    if not idx:
+        return None
+    return hashlib.sha256(repr(idx).encode()).hexdigest()[:16]
+
+
 def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int, int]]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -706,6 +730,15 @@ class InternDataA1Dataset(LeRobotV3Reader):
             right_wrist = None
         return head, left_wrist, right_wrist
 
+    def _trim_min_len(self) -> int:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+        return self._num_frames if self._split == "val" else self._train_min_window_len()
+
     def _trim_key(self) -> Optional[str]:
         """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -792,7 +825,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
         lengths = eps_df["length"].to_numpy().copy()
         row_off = eps_df["_data_row_offset"].to_numpy().copy()
         cam_off = {c: eps_df[c].to_numpy().copy() for c in cam_cols}
-        min_len = self._num_frames if self._split == "val" else self._train_min_window_len()
+        min_len = self._trim_min_len()
 
         n_trim = n_skip = 0
         frames_before = int(lengths.sum())
@@ -895,6 +928,16 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
+        def _regen_hint() -> str:
+            return (
+                "Regenerate with the matching flags: python -m openwam.dataloader.utils."
+                "stats_computation.interndata_a1_stats_computation --dataset_dir <root> "
+                f"--stats_root {self._a1_stats_root}"
+                + (f" --trim_csv {self._trim_csv} --min_keep {self._trim_min_len()}"
+                   if self._trim_csv else "")
+                + ", or set normalize_mode=null."
+            )
+
         active = trim_digest(self._trim_csv)
         recorded = raw.get("trim_digest")
         if active != recorded:
@@ -905,13 +948,41 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"InternData-A1 bucket {self._dataset_id}: normalization stats in {stats_path} "
                 f"were computed with {_desc(recorded, raw.get('trim_csv'))}, but this reader is "
                 f"configured with {_desc(active, self._trim_csv)}. Trimmed and untrimmed stats "
-                "are not interchangeable. Regenerate with the matching flag: "
-                "python -m openwam.dataloader.utils.stats_computation."
-                "interndata_a1_stats_computation --dataset_dir <root> "
-                f"--stats_root {self._a1_stats_root}"
-                + (f" --trim_csv {self._trim_csv}" if self._trim_csv else "")
-                + ", or set normalize_mode=null."
+                f"are not interchangeable. {_regen_hint()}"
             )
+
+
+
+
+        if self._trim_csv is not None:
+            want_mk = self._trim_min_len()
+            got_mk = raw.get("trim_min_keep")
+            if got_mk is not None and int(got_mk) != want_mk:
+                raise ValueError(
+                    f"InternData-A1 bucket {self._dataset_id}: normalization stats in "
+                    f"{stats_path} were computed with --min_keep {got_mk}, but this reader's "
+                    f"minimum window length for split={self._split!r} is {want_mk}. Episodes "
+                    "between the two bounds are trimmed on one side and left whole on the "
+                    f"other, so the statistics describe a different population. {_regen_hint()}"
+                )
+
+
+
+
+
+
+
+        excl_map = raw.get("exclusions")
+        if excl_map is not None:
+            rec_excl = excl_map.get(self._dataset_id)
+            act_excl = exclusion_digest(self._dataset_dir)
+            if rec_excl != act_excl:
+                raise ValueError(
+                    f"InternData-A1 bucket {self._dataset_id}: normalization stats in "
+                    f"{stats_path} were computed with exclusion digest {rec_excl!r}, but this "
+                    f"bucket's meta/excluded_episodes.json now digests to {act_excl!r}. "
+                    f"Deleted episodes change which rows enter the normalizer. {_regen_hint()}"
+                )
 
         eef_raw = raw.get("eef", {})
 

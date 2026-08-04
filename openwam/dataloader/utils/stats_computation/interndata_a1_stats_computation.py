@@ -90,9 +90,10 @@ from openwam.dataloader.interndata_a1 import (
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
+
+
+    exclusion_digest,
     resolve_gripper_scale,
-
-
     resolve_trim_bounds,
     trim_digest,
 )
@@ -353,6 +354,9 @@ def compute_stats_for_embodiment(
         logger.warning("trim_csv given without a root; bucket ids are ambiguous, not trimming.")
         trim_csv = None
     tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv, min_len) for d in dirs]
+
+
+    exclusions = {_rel_id(d): exclusion_digest(d) for d in dirs}
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
 

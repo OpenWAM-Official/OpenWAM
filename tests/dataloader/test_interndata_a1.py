@@ -31,6 +31,7 @@ from openwam.dataloader.interndata_a1 import (
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
+    exclusion_digest,
     resolve_trim_bounds,
     trim_digest,
 )
@@ -966,3 +967,109 @@ class TestTrimTooShortIsLeftWhole:
         assert resolve_trim_bounds((1, None, 4), 4, 2) == (1, 4)    # leaves 3
         assert resolve_trim_bounds((1, None, 99), 4, 2) is None     # stale total_frames
         assert resolve_trim_bounds((0, None, 4), 4, 2) is None      # no-op
+
+
+class TestTrimMinKeepProvenance:
+    """The same trim CSV under a different ``--min_keep`` yields a different kept
+    population — episodes short enough to fall under the bound are left whole
+    instead of trimmed — and the CSV digest cannot see that."""
+
+    def _stats(self, root: Path, **extra):
+        (root / "meta").mkdir(parents=True, exist_ok=True)
+        eef = {
+            "mean": [0.0] * EEF_DIM, "std": [1.0] * EEF_DIM,
+            "min": [-2.0] * EEF_DIM, "max": [2.0] * EEF_DIM,
+            "q01": [-2.0] * EEF_DIM, "q99": [2.0] * EEF_DIM,
+        }
+        for dim in ROT6D_DIMS_EEF20:
+            eef["q01"][dim] = -1.0
+            eef["q99"][dim] = 1.0
+        (root / "meta" / "stats_split_aloha.json").write_text(json.dumps({"eef": eef, **extra}))
+
+    def _trim(self, path: Path) -> str:
+        path.write_text(
+            "dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
+            "cat/split_aloha/task,0,40,20,\n"
+        )
+        return str(path)
+
+    def test_min_keep_mismatch_is_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=40)
+        trim = self._trim(tmp_path / "trim.csv")
+        # Stats built with min_keep=33: the 40-frame episode's trim would leave
+        # 20 < 33, so the stats kept it whole. The train reader's bound is 2, so
+        # it trims to 20. Same digest, different population.
+        self._stats(tmp_path, trim_digest=trim_digest(trim), trim_min_keep=33)
+        with pytest.raises(ValueError, match="min_keep"):
+            InternDataA1Dataset(
+                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+                normalize_mode="quantile", trim_csv=trim, num_frames=9, video_stride=4,
+            )
+
+    def test_matching_min_keep_is_accepted(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=40)
+        trim = self._trim(tmp_path / "trim.csv")
+        self._stats(tmp_path, trim_digest=trim_digest(trim), trim_min_keep=2)
+        ds = InternDataA1Dataset(
+            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+            normalize_mode="quantile", trim_csv=trim, num_frames=9, video_stride=4,
+        )
+        assert ds._normalization_stats is not None
+
+
+class TestExclusionProvenance:
+    """Deletions are a second population filter, independent of the trim CSV:
+    the stats scanner honours ``meta/excluded_episodes.json``, so editing it
+    changes which rows entered the normalizer while ``trim_digest`` is unchanged."""
+
+    def _stats(self, root: Path, **extra):
+        eef = {
+            "mean": [0.0] * EEF_DIM, "std": [1.0] * EEF_DIM,
+            "min": [-2.0] * EEF_DIM, "max": [2.0] * EEF_DIM,
+            "q01": [-2.0] * EEF_DIM, "q99": [2.0] * EEF_DIM,
+        }
+        for dim in ROT6D_DIMS_EEF20:
+            eef["q01"][dim] = -1.0
+            eef["q99"][dim] = 1.0
+        (root / "meta").mkdir(parents=True, exist_ok=True)
+        (root / "meta" / "stats_split_aloha.json").write_text(json.dumps({"eef": eef, **extra}))
+
+    def test_exclusions_added_after_stats_were_built_is_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        self._stats(tmp_path, exclusions={"cat/split_aloha/task": None})  # built with none
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        with pytest.raises(ValueError, match="exclusion digest"):
+            InternDataA1Dataset(
+                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+                normalize_mode="quantile", num_frames=9, video_stride=4,
+            )
+
+    def test_matching_exclusions_are_accepted(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        self._stats(tmp_path, exclusions={"cat/split_aloha/task": exclusion_digest(d)})
+        ds = InternDataA1Dataset(
+            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+            normalize_mode="quantile", num_frames=9, video_stride=4,
+        )
+        assert ds._normalization_stats is not None
+
+    def test_stats_without_the_key_stay_loadable(self, tmp_path, patch_decode):
+        """Files predating this check must not become unloadable."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        self._stats(tmp_path)  # no "exclusions" key at all
+        ds = InternDataA1Dataset(
+            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+            normalize_mode="quantile", num_frames=9, video_stride=4,
+        )
+        assert ds._normalization_stats is not None
+
+    def test_digest_ignores_formatting_and_order(self, tmp_path):
+        a = _make_bucket(tmp_path, "a/split_aloha/t", n_eps=2, ep_len=4)
+        b = _make_bucket(tmp_path, "b/split_aloha/t", n_eps=2, ep_len=4)
+        (a / "meta" / "excluded_episodes.json").write_text('{"episode_indices": [1, 0]}')
+        (b / "meta" / "excluded_episodes.json").write_text(
+            '{\n  "episode_indices": [\n    0,\n    1\n  ]\n}\n'
+        )
+        assert exclusion_digest(a) == exclusion_digest(b)
