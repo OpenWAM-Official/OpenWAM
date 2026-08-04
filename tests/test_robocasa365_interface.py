@@ -473,3 +473,44 @@ def test_mask_torso_action_false_passes_torso():
     policy.reset()
     act = policy.act(_obs_base([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")
     assert float(act["action.base_motion"][3]) == pytest.approx(0.9)  # torso passed through
+
+
+def test_base_pose_planar5_matches_dataloader_formula():
+    """The client's base_pose_planar5 MUST equal the train-side quantity (dataloader
+    base_proprio='global_pose': _yaw_from_quat_xyzw + sin/cos) on the same pose — train/eval parity."""
+    from openwam.dataloader.robocasa365 import _yaw_from_quat_xyzw
+
+    rng = np.random.RandomState(7)
+    for _ in range(20):
+        yaw = rng.uniform(-np.pi, np.pi)
+        pose = np.array([rng.uniform(-5, 5), rng.uniform(-5, 5), 0.7,
+                         0.0, 0.0, np.sin(yaw / 2), np.cos(yaw / 2)], np.float32)
+        got = adapter.base_pose_planar5(pose)
+        expect_yaw = _yaw_from_quat_xyzw(pose[3:7])
+        assert got == pytest.approx(
+            [pose[0], pose[1], np.sin(expect_yaw), np.cos(expect_yaw), 0.0], abs=1e-5
+        )
+
+
+def test_policy_global_pose_sends_pose_stateless():
+    """base_proprio='global_pose': base5 = [x, y, sin(yaw), cos(yaw), 0] direct from the CURRENT obs —
+    already real on the first step (velocity mode sends zeros there), and needs no previous pose."""
+    fake = _FakeClient(action=list(range(25)))
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
+        base_proprio="global_pose",
+    )
+    policy.reset()
+    yaw = 0.8
+    policy.act(_obs_base([1.5, -2.0, 0.7], [0.0, 0.0, np.sin(yaw / 2), np.cos(yaw / 2)]), "x")
+    state = fake.last_payload["state"]
+    assert len(state) == 25
+    assert state[20:25] == pytest.approx([1.5, -2.0, np.sin(yaw), np.cos(yaw), 0.0], abs=1e-5)
+
+
+def test_policy_rejects_unknown_base_proprio():
+    with pytest.raises(ValueError, match="base_proprio"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+            mobile_base=True, base_proprio="pose",
+        )

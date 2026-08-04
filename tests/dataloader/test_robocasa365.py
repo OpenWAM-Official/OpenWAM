@@ -769,3 +769,81 @@ def test_single_repo_explicit_stats_path_honored(tmp_path):
     assert Path(explicit).exists(), "explicit stats path must be honored as the compute target"
     assert {d.normalization_stats_path for d in ds._datasets} == {explicit}
     assert not (Path(root) / "robocasa365_multitask_eef_stats.npy").exists()  # default location NOT used
+
+
+def test_base_proprio_global_pose_raw(tmp_path):
+    """base_proprio='global_pose': proprio base slots = [x, y, sin(yaw), cos(yaw), 0] (world planar
+    pose at the window's frame 0, raw when normalization is off); mask: 4 pose dims valid, spare
+    slot masked. Stateless — start=0 already carries the real pose (unlike velocity's zero)."""
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder():
+        ds = RoboCasa365Dataset(
+            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+            normalize_mode=None, unify_action=True, unify_action_map=["0-9", "34-43", "68-72"],
+            mobile_base=True, base_proprio="global_pose",
+        )
+        s = ds._build_sample(0, 0)
+    st = _make_state(EP_LENGTH, seed=0)
+    yaw = 2.0 * np.arctan2(st[0, 5], st[0, 6])  # quat [0, 0, sin(yaw/2), cos(yaw/2)]
+    expected = [st[0, 0], st[0, 1], np.sin(yaw), np.cos(yaw)]
+    assert s["proprio"].numpy()[0, 68:72] == pytest.approx(expected, abs=1e-5)
+    assert s["proprio_mask"].numpy()[0, 68:72].all()      # x, y, sin, cos observable
+    assert not s["proprio_mask"].numpy()[0, 72]           # spare slot masked
+
+
+def test_base_proprio_global_pose_normalized_stats_block(tmp_path):
+    """min-max + global_pose: the auto-computed stats file gains the 'eef_base_pose_proprio' block
+    (25-D) and the proprio normalizes with IT (pose is meters, not command space); the action keeps
+    the 'eef_base' command block."""
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder():
+        ds = RoboCasa365Dataset(
+            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+            normalize_mode="min-max", unify_action=True, unify_action_map=["0-9", "34-43", "68-72"],
+            mobile_base=True, base_proprio="global_pose",
+        )
+        s = ds._build_sample(0, 1)
+    blob = np.load(ds.normalization_stats_path, allow_pickle=True).item()
+    assert "eef_base_pose_proprio" in blob and len(blob["eef_base_pose_proprio"]["mean"]) == 25
+    # sin/cos dims pinned to the unit-circle range
+    assert blob["eef_base_pose_proprio"]["min"][22] == pytest.approx(-1.0)
+    assert blob["eef_base_pose_proprio"]["max"][23] == pytest.approx(1.0)
+    pose = s["proprio"].numpy()[0, 68:72]
+    assert (np.abs(pose) <= 1.0 + 1e-5).all()  # normalized into [-1, 1]
+    assert s["proprio_mask"].numpy()[0, 68:72].all()
+
+
+def test_base_proprio_global_pose_requires_mobile(tmp_path):
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder(), pytest.raises(ValueError, match="requires mobile_base"):
+        RoboCasa365Dataset(
+            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+            normalize_mode=None, base_proprio="global_pose",
+        )
+
+
+def test_binary_action_dims_passthrough(tmp_path):
+    """binary_action_dims=[9, 24]: the gripper + control_mode ACTION targets stay the RAW ±1 recorded
+    commands (identity through normalization, structural not incidental)."""
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder():
+        ds = RoboCasa365Dataset(
+            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+            normalize_mode="min-max", mobile_base=True, binary_action_dims=[9, 24],
+        )
+        s = ds._build_sample(0, 0)
+    ac = _make_action(EP_LENGTH, seed=0)
+    a = s["action"].numpy()
+    assert np.array_equal(a[:5, 9], ac[:5, 11].astype(np.float32))   # exact ±1 command, bit-identical
+    assert np.array_equal(a[:5, 24], ac[:5, 4].astype(np.float32))
+    assert set(np.unique(a[:5, 9])) <= {-1.0, 1.0}
+    assert set(np.unique(a[:5, 24])) <= {-1.0, 1.0}
+
+
+def test_binary_action_dims_rejects_continuous_dim(tmp_path):
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder(), pytest.raises(ValueError, match="two-point command dims"):
+        RoboCasa365Dataset(
+            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+            normalize_mode=None, mobile_base=True, binary_action_dims=[5],
+        )

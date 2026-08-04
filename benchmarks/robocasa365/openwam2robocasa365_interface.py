@@ -52,6 +52,7 @@ import numpy as np  # noqa: E402
 
 from benchmarks.utils import (  # noqa: E402
     WSPolicyClient,
+    base_pose_planar5,
     base_velocity_cmd,
     build_payload,
     eef20d_to_robocasa12d,
@@ -338,6 +339,7 @@ class OpenWAMRoboCasa365Policy:
         osc_rot_scale: Optional[float] = None,
         mobile_base: bool = False,
         mask_torso_action: bool = True,
+        base_proprio: str = "velocity",
         debug: bool = False,
         debug_dir: str = "./debug_robocasa365",
         _client=None,
@@ -358,6 +360,12 @@ class OpenWAMRoboCasa365Policy:
         # to 0 before the env — torso is a LIVE JOINT_POSITION delta actuator, and 0 → no motion
         # (scale_action(0)=0), reproducing the demos. Must match the ckpt's dataloader.mask_torso_action.
         self._mask_torso_action = bool(mask_torso_action)
+        # base_proprio: what fills the 5 proprio base slots — MUST match the ckpt's
+        # dataloader.base_proprio ("velocity" = historical A′ finite-diff; "global_pose" = world
+        # planar pose [x, y, sin(yaw), cos(yaw), 0]).
+        if base_proprio not in ("velocity", "global_pose"):
+            raise ValueError(f"base_proprio must be 'velocity' or 'global_pose', got {base_proprio!r}")
+        self._base_proprio = base_proprio
         # Expected proprio width for the fail-fast guard: 20-D EEF (+ 5-D base5 when mobile).
         self._state_dim = state_dim if state_dim is not None else (STATE_DIM_MOBILE if self._mobile_base else STATE_DIM)
         self._action_dim = action_dim
@@ -450,11 +458,15 @@ class OpenWAMRoboCasa365Policy:
         return twelve
 
     def _base5_proprio(self, obs: dict) -> np.ndarray:
-        """The 5-D base proprio ``[vx, vy, vyaw, 0, 0]``: body-frame base velocity rescaled into the
-        action command space (A′, ``base_velocity_cmd``) via a stateful finite-diff of the world base
-        pose (base_position + base_rotation) — the SAME derivation + rescale the dataloader uses at
-        train time, so no exposure bias. torso + control_mode are 0 (masked at train). The first step
-        of an episode (no previous pose) is all zeros. Updates the tracked previous pose."""
+        """The 5-D base proprio, in the ckpt's ``base_proprio`` representation (must match training):
+
+        * ``"global_pose"``: ``[x, y, sin(yaw), cos(yaw), 0]`` — the world planar base pose, direct
+          from the current obs (``base_pose_planar5``, bit-identical to the dataloader). Stateless.
+        * ``"velocity"`` (historical): ``[vx, vy, vyaw, 0, 0]`` — body-frame base velocity rescaled
+          into the action command space (A′, ``base_velocity_cmd``) via a stateful finite-diff of the
+          world base pose. The first step of an episode (no previous pose) is all zeros.
+
+        torso + control_mode slots have no achieved value → 0 (masked at train)."""
         missing = [k for k in BASE_POSE_KEYS if k not in obs]
         if missing:
             raise KeyError(f"mobile_base needs obs base-pose key(s): {missing}")
@@ -462,6 +474,8 @@ class OpenWAMRoboCasa365Policy:
             np.asarray(obs["state.base_position"], np.float32).reshape(-1)[:3],
             np.asarray(obs["state.base_rotation"], np.float32).reshape(-1)[:4],
         ])
+        if self._base_proprio == "global_pose":
+            return base_pose_planar5(cur)
         base5 = np.zeros(BASE_ACTION_DIM, np.float32)
         if self._prev_base_pose is not None:
             base5[0:BASE_VEL_DIM] = base_velocity_cmd(self._prev_base_pose, cur)

@@ -120,6 +120,9 @@ def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
         # mask_torso_action: when the ckpt masked torso out of the action loss (default), the client
         # zeros the torso command before the env. Must match the ckpt's dataloader.mask_torso_action.
         mask_torso_action=_parse_bool(cfg.get("mask_torso_action", True), "mask_torso_action"),
+        # base_proprio: the ckpt's proprio base representation ("velocity" historical default;
+        # "global_pose" for ckpts trained with dataloader.base_proprio=global_pose).
+        base_proprio=str(cfg.get("base_proprio", "velocity")),
         debug=_parse_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_robocasa365"),
     )

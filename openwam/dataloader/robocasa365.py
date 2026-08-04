@@ -44,12 +44,17 @@ RAW-27) — base is no longer a bypass channel with its own stats/deploy special
 
     raw25 = [ arm20 (single-arm EEF, left real + right zero) , base5 ]
     action  base5 = [x_vel, y_vel, yaw_vel, torso, control_mode]   (RoboCasa-native command, raw)
-    proprio base5 = [vx, vy, vyaw, 0(masked), 0(masked)]           (body-frame velocity, A′-rescaled)
+    proprio base5 = [vx, vy, vyaw, 0(masked), 0(masked)]           (base_proprio="velocity", historical)
+                  | [x, y, sin(yaw), cos(yaw), 0(masked)]          (base_proprio="global_pose")
 
 The action base command is passed direct-to-env at eval (arm bridged, base raw). The proprio base
-velocity is the finite-diff of ``observation.state`` base pose, rescaled into the action's command
-space (``× fps / _BASE_VEL_PHYS_MAX``) so it shares the action's base stats. torso (constant 0
-across the whole dataset) + control_mode have no achieved value, so those proprio slots are masked.
+block depends on ``base_proprio``: "velocity" (historical; absent config key) = finite-diff of the
+``observation.state`` base pose rescaled into the action's command space (``× fps /
+_BASE_VEL_PHYS_MAX``) so it shares the action's base stats; "global_pose" = the world planar base
+pose (its own ``eef_base_pose_proprio`` stats block — meters can't share command stats). torso
+(constant 0 across the whole dataset) + control_mode have no achieved value, so those proprio slots
+are masked. ``binary_action_dims`` (e.g. ``[9, 24]``: gripper + control_mode) keeps those two-point
+±1 action targets raw and has deploy snap the decoded output back to exact ±1.
 ``unify_action`` scatters the whole 25-D via ``["0-9", "34-43", "68-72"]``; deploy gathers 80->25 and
 un-normalizes with the single ``eef_base`` stats block. mobile_base and unify_action are decoupled
 (non-unify emits the raw 25-D directly). See ``docs/plans/robocasa365-unify-raw-vector-refactor.md``.
@@ -154,6 +159,16 @@ _ARM_MASK = np.asarray(LEFT_ARM_DIM_MASK, dtype=bool)
 _RAW_ACTION_MASK = np.concatenate([_ARM_MASK, np.array([True, True, True, True, True])])  # all base dims
 _RAW_ACTION_MASK_NO_TORSO = np.concatenate([_ARM_MASK, np.array([True, True, True, False, True])])  # torso[3] masked
 _RAW_PROPRIO_MASK = np.concatenate([_ARM_MASK, np.array([True, True, True, False, False])])
+# base_proprio="global_pose": proprio base5 = [x, y, sin(yaw), cos(yaw), 0] (world planar base pose;
+# slots 0-3 observable, slot 4 spare). sin/cos instead of raw yaw: no ±π seam — the planar reduction
+# of GR00T's rot6d base_rotation. Pose is meters/unit-circle, NOT command space, so the proprio can
+# no longer share the action's base stats: a separate proprio stats block is required (below).
+_RAW_PROPRIO_MASK_POSE = np.concatenate([_ARM_MASK, np.array([True, True, True, True, False])])
+_PROPRIO_POSE_STATS_KEY = "eef_base_pose_proprio"
+# The only two-point {-1, +1} command dims in raw25 (l_grip cmd, control_mode). binary_action_dims
+# may list these: their targets stay the RAW ±1 (identity, immune to stats drift) and the deploy
+# server snaps its decoded output back to exact ±1 (see openwam/deploy/model_loader.py).
+_BINARY_ACTION_DIMS_ALLOWED = (ARM10_DIM - 1, RAW_MOBILE_DIM - 1)  # (9, 24)
 
 # Multiview L-shape slot sizes (must match assemble_multiview_layout defaults at
 # height=384/width=320: top 256x320, each bottom 128x160).
@@ -356,6 +371,8 @@ class RoboCasa365Dataset(BaseDataset):
         unify_action_map: Optional[Any] = None,
         mobile_base: bool = False,
         mask_torso_action: bool = True,
+        base_proprio: str = "velocity",
+        binary_action_dims: Optional[Any] = None,
         color_jitter: Optional[Any] = None,
         **_unused,
     ):
@@ -407,12 +424,36 @@ class RoboCasa365Dataset(BaseDataset):
         # torso is a live sim actuator but constant 0 in the data → mask it out of the ACTION loss
         # (default) so a nonzero prediction can't drive it at eval; the eval client zeros it too.
         self._mask_torso_action = bool(mask_torso_action)
+        # base_proprio: what fills the 5 proprio base slots. "velocity" (historical; a ckpt config
+        # without the key trained this way) = A′-rescaled finite-diff body velocity in slots 0-2;
+        # "global_pose" = world planar pose [x, y, sin(yaw), cos(yaw), 0] (needs its own stats block).
+        if base_proprio not in ("velocity", "global_pose"):
+            raise ValueError(f"base_proprio must be 'velocity' or 'global_pose', got {base_proprio!r}")
+        if base_proprio == "global_pose" and not mobile_base:
+            raise ValueError("base_proprio='global_pose' requires mobile_base=True (there is no base5 proprio block)")
+        self._base_proprio = base_proprio
+        # binary_action_dims: raw dims whose targets are the two-point {-1, +1} command set. Identity
+        # in training (immune to stats drift); the deploy server snaps decoded outputs back to ±1.
+        if binary_action_dims is None:
+            self._binary_action_dims: tuple = ()
+        else:
+            dims = tuple(int(d) for d in binary_action_dims)
+            bad = [d for d in dims if d not in _BINARY_ACTION_DIMS_ALLOWED]
+            if bad:
+                raise ValueError(
+                    f"binary_action_dims {bad} not in the two-point command dims {_BINARY_ACTION_DIMS_ALLOWED} "
+                    "(l_grip cmd, control_mode); other dims are continuous and must not be snapped."
+                )
+            if RAW_MOBILE_DIM - 1 in dims and not mobile_base:
+                raise ValueError("binary_action_dims includes control_mode (24) but mobile_base=False (raw is 20-D)")
+            self._binary_action_dims = dims
         self._raw_dim = RAW_MOBILE_DIM if self._mobile_base else EEF_DIM  # 25 or 20
         if self._mobile_base:
             self._raw_action_mask = _RAW_ACTION_MASK_NO_TORSO if self._mask_torso_action else _RAW_ACTION_MASK
+            self._raw_proprio_mask = _RAW_PROPRIO_MASK_POSE if self._base_proprio == "global_pose" else _RAW_PROPRIO_MASK
         else:
             self._raw_action_mask = _ARM_MASK
-        self._raw_proprio_mask = _RAW_PROPRIO_MASK if self._mobile_base else _ARM_MASK
+            self._raw_proprio_mask = _ARM_MASK
         self._unify_dst_index = None
         self._unify_dim_mask = None  # proprio dim mask (80-D, scattered from _raw_proprio_mask)
         self._unify_action_dim_mask = None  # action dim mask (80-D, scattered from _raw_action_mask)
@@ -545,7 +586,12 @@ class RoboCasa365Dataset(BaseDataset):
         # Mobile → 25-D 'eef_base' ([arm20, base5]); non-mobile → 20-D 'eef' (repo-level bimanual
         # schema). The whole raw vector normalizes with this single block, so at deploy the server
         # gathers 80->raw and un-normalizes with it — no base special-casing (wayrise convergence).
+        # base_proprio="global_pose" is the one exception: pose (meters) cannot share the command-space
+        # base stats, so the PROPRIO normalizes with its own 'eef_base_pose_proprio' block instead
+        # (arm20 dims identical to 'eef_base'; base dims are pose stats) — dual of robocasa-gr1's
+        # separate hand command/state stats.
         self._stats: Optional[dict] = None
+        self._proprio_stats: Optional[dict] = None
         self.normalization_stats_path: Optional[str] = None
         if self.normalize_mode is not None:
             if self.normalize_mode not in _DEPLOY_RESOLVABLE_MODES:
@@ -575,11 +621,30 @@ class RoboCasa365Dataset(BaseDataset):
                         f"{_MOBILE_STATS_KEY} stats dim {self._stats['mean'].shape[0]} != {RAW_MOBILE_DIM}; "
                         "recompute stats."
                     )
+                self._proprio_stats = self._stats
+                if self._base_proprio == "global_pose":
+                    raw_p = full.get(_PROPRIO_POSE_STATS_KEY) if isinstance(full, dict) else None
+                    if raw_p is None:
+                        raise ValueError(
+                            f"base_proprio='global_pose' but stats file {stats_path} has no "
+                            f"{_PROPRIO_POSE_STATS_KEY!r} block (arm20 + planar base pose "
+                            "[x, y, sin_yaw, cos_yaw, 0]). Recompute stats "
+                            "(robocasa365_stats_computation --mobile-base emits it)."
+                        )
+                    self._proprio_stats = {
+                        k: np.asarray(raw_p[k], np.float32).reshape(-1) for k in ("mean", "std", "min", "max")
+                    }
+                    if self._proprio_stats["mean"].shape[0] != RAW_MOBILE_DIM:
+                        raise ValueError(
+                            f"{_PROPRIO_POSE_STATS_KEY} stats dim {self._proprio_stats['mean'].shape[0]} != "
+                            f"{RAW_MOBILE_DIM}; recompute stats."
+                        )
             else:
                 eef_raw = full.get("eef", full) if isinstance(full, dict) else full  # flat or {"eef": {...}}
                 self._stats = materialize_eef_stats(
                     eef_raw, self.normalize_mode, dim=EEF_DIM, strict_minmax=True, source_hint=stats_path
                 )
+                self._proprio_stats = self._stats
             self.normalization_stats_path = stats_path
             print(
                 f"  [normalizer] {self.normalize_mode}, dim={self._raw_dim}"
@@ -783,21 +848,38 @@ class RoboCasa365Dataset(BaseDataset):
                 base_act = np.concatenate(
                     [base_act, np.repeat(pad_row, self.num_action_steps - base_act.shape[0], axis=0)], axis=0
                 )
-            # PROPRIO base5 = [vx, vy, vyaw (A′ command-space), torso=0 (masked), control_mode=0 (masked)].
-            # velocity = finite-diff of base_position at the window's frame 0 (start-1 → start), rescaled
-            # into command space; start=0 has no previous frame → 0. The eval client reproduces this
-            # exactly (same finite-diff + rescale), so train/eval match (no exposure bias).
+            # PROPRIO base5, by self._base_proprio (the eval client reproduces the chosen mode
+            # exactly, so train/eval match — no exposure bias):
+            #   "global_pose": [x, y, sin(yaw), cos(yaw), 0] — world planar base pose at the window's
+            #     frame 0 (ground robot: z / roll / pitch constant; sin/cos = no ±π seam).
+            #   "velocity" (historical): [vx, vy, vyaw (A′ command-space), 0, 0] — finite-diff of the
+            #     base pose (start-1 → start); start=0 has no previous frame → 0.
             base_pro = np.zeros((1, BASE_ACTION_DIM), np.float32)
-            if start > 0:
+            if self._base_proprio == "global_pose":
+                cur = self._read_state(ep_global, start, start + 1)[0, 0:7]  # base_position(3) + base_rotation(4)
+                yaw = _yaw_from_quat_xyzw(cur[3:7])
+                base_pro[0, 0:4] = (cur[0], cur[1], np.sin(yaw), np.cos(yaw))
+            elif start > 0:
                 base_pose = self._read_state(ep_global, start - 1, start + 1)[:, 0:7]  # (2, 7) prev+cur
                 base_pro[0, 0:BASE_VEL_DIM] = base_velocity_cmd(base_pose, self._fps)
             action_raw = np.concatenate([action_raw, base_act.astype(np.float32)], axis=-1)  # (T, 25)
             proprio_raw = np.concatenate([proprio_raw, base_pro], axis=-1)  # (1, 25)
 
-        # Normalize the WHOLE raw vector with the ONE combined stats block (arm + base share it; the
-        # A′ rescale already put proprio velocity in the action's command space).
+        # Normalize the whole raw vectors. Action always uses the ONE combined command-space block;
+        # proprio uses the same block ("velocity": the A′ rescale put its velocity in command space)
+        # or its own pose block ("global_pose": meters/unit-circle can't share command stats).
         action = apply_normalization(action_raw, self._stats, self.normalize_mode).astype(np.float32)
-        proprio = apply_normalization(proprio_raw, self._stats, self.normalize_mode).astype(np.float32)
+        proprio = apply_normalization(proprio_raw, self._proprio_stats, self.normalize_mode).astype(np.float32)
+        # Two-point command dims (binary_action_dims): targets stay the RAW ±1 — identity regardless
+        # of what the stats say (min-max over ±1 data is identity today; this makes it structural).
+        # The deploy server snaps its decoded outputs back to exact ±1 (model_loader).
+        for d in self._binary_action_dims:
+            vals = action_raw[:n_valid_action, d]
+            if vals.size and np.any(np.abs(np.abs(vals) - 1.0) > 1e-4):
+                raise ValueError(
+                    f"binary action dim {d} has non-±1 values in {self.task_name}: {np.unique(vals)[:8]}"
+                )
+            action[:, d] = action_raw[:, d]
         # Static-window flag (robotwin parity) on the arm POSE dims [0:9] only (pos3 + rot6d6): base
         # velocity is a separate channel, and the gripper dim is a COMMAND on the action side vs an
         # achieved width on the proprio side (they legitimately differ), so both are excluded. First
@@ -911,6 +993,9 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             unify_action_map=get_cfg(config, "unify_action_map", None),
             mobile_base=bool(get_cfg(config, "mobile_base", False)),
             mask_torso_action=bool(get_cfg(config, "mask_torso_action", True)),
+            # Absent keys = historical behavior (what every pre-existing ckpt trained with).
+            base_proprio=str(get_cfg(config, "base_proprio", "velocity")),
+            binary_action_dims=get_cfg(config, "binary_action_dims", None),
             color_jitter=get_cfg(config, "color_jitter", None),
             seed=int(get_cfg(config, "seed", 42)),
         )

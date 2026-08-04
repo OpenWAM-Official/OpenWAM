@@ -235,6 +235,15 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
     norm_mode = OmegaConf.select(cfg, "dataloader.normalize_mode", default=None)
     action_mode = OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
     if dl is None or norm_mode in (None, "", "none", "null"):
+        # The command-aware features live inside the normalizer, so they cannot run without one.
+        if OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None) or (
+            OmegaConf.select(cfg, "dataloader.base_proprio", default="velocity") == "global_pose"
+        ):
+            raise ValueError(
+                "[normalizer] dataloader.binary_action_dims / base_proprio='global_pose' require an "
+                "active normalize_mode: the deploy-side binary snap and the pose proprio stats both "
+                "live in the normalizer. Enable normalize_mode in the checkpoint config."
+            )
         logger.info(
             "[normalizer] normalize_mode=%r disabled in saved config; action normalizer INACTIVE "
             "(actions and deploy proprio will be returned/used as-is).",
@@ -292,7 +301,75 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
         len(mode_stats["mean"]),
         stats_path,
     )
+
+    # Command-aware extras (keys absent in older ckpts = historical behavior, no wrapper):
+    #   binary_action_dims — two-point {-1, +1} command dims (robocasa365: l_grip 9, control_mode 24)
+    #     trained as raw ±1; snap the decoded output back to exact ±1.
+    #   base_proprio="global_pose" — the proprio normalizes with its own 'eef_base_pose_proprio'
+    #     stats block (pose is meters/unit-circle, not command space), while actions keep action_mode's.
+    binary_dims = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
+    base_proprio = OmegaConf.select(cfg, "dataloader.base_proprio", default="velocity")
+    if base_proprio not in ("velocity", "global_pose"):
+        raise ValueError(f"[normalizer] dataloader.base_proprio must be 'velocity' or 'global_pose', got {base_proprio!r}")
+    if binary_dims or base_proprio == "global_pose":
+        proprio_inner = normalizer
+        if base_proprio == "global_pose":
+            # Same literal as the reader's _PROPRIO_POSE_STATS_KEY (not imported: the reader module
+            # drags pandas/video deps into the serving process).
+            pose_stats = load_mode_stats(stats_path, "eef_base_pose_proprio")
+            if pose_stats is None:
+                raise KeyError(
+                    f"[normalizer] base_proprio='global_pose' but {stats_path} has no "
+                    "'eef_base_pose_proprio' block. Regenerate normalization_stats.npy "
+                    "(robocasa365_stats_computation --mobile-base emits it)."
+                )
+            proprio_inner = Normalizer(mode=YAML_TO_NORM_MODE[norm_mode], stats=pose_stats)
+        normalizer = _CommandAwareNormalizer(
+            action_inner=normalizer,
+            proprio_inner=proprio_inner,
+            binary_dims=tuple(int(d) for d in (binary_dims or ())),
+        )
+        logger.info(
+            "[normalizer] command-aware: base_proprio=%s binary_action_dims=%s",
+            base_proprio,
+            list(normalizer._binary_dims),
+        )
     return normalizer
+
+
+class _CommandAwareNormalizer:
+    """Raw-space normalizer wrapper for command-dim semantics the plain Normalizer can't express.
+
+    * ``unnormalize`` (action OUT): inner unnormalize, then snap each ``binary_dims`` dim to exact
+      {-1, +1}. Threshold 0.5 — NOT the ±1 midpoint 0 — deliberately preserves the downstream
+      conservative boundaries byte-for-byte (bridge confident-close ``>0.5``, env control_mode
+      ``>=0.5``): an uncertain mid-range output still lands on the safe side (open / arm mode).
+    * ``normalize`` (proprio IN): delegates to ``proprio_inner`` — the same object as
+      ``action_inner`` unless the ckpt trained with ``base_proprio='global_pose'``, whose pose
+      proprio has its own stats block.
+
+    Duck-typed to the ``Normalizer`` surface (``.unnormalize`` / ``.normalize`` / ``.stats``), so it
+    composes under :class:`_UnifyAwareNormalizer` unchanged (gather → unnormalize+snap in raw space;
+    normalize in raw space → scatter).
+    """
+
+    def __init__(self, action_inner, proprio_inner, binary_dims: tuple):
+        self._action_inner = action_inner
+        self._proprio_inner = proprio_inner
+        self._binary_dims = tuple(int(d) for d in binary_dims)
+
+    def unnormalize(self, x):
+        y = np.array(self._action_inner.unnormalize(x))
+        for d in self._binary_dims:
+            y[..., d] = np.where(y[..., d] > 0.5, 1.0, -1.0)
+        return y
+
+    def normalize(self, x):
+        return self._proprio_inner.normalize(x)
+
+    @property
+    def stats(self):
+        return getattr(self._action_inner, "stats", {})
 
 
 class _UnifyAwareNormalizer:

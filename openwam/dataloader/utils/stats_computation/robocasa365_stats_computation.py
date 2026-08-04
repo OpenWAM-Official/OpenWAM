@@ -22,7 +22,12 @@ Output schema (``.npy``, ``allow_pickle``)::
     #   whole dataset → its min==max is nudged to avoid divide-by-zero at normalize time).
 
 The PROPRIO base velocity does NOT get its own stats block: the reader rescales it into the action's
-command space (A′, see robocasa365._BASE_VEL_PHYS_MAX) so it shares the base5 command stats.
+command space (A′, see robocasa365._BASE_VEL_PHYS_MAX) so it shares the base5 command stats. The
+``base_proprio="global_pose"`` proprio DOES: pose is meters/unit-circle, not command space, so
+``include_base`` also emits ``eef_base_pose_proprio`` = concat(eef20, pose5 stats) where pose5 =
+``[x, y, sin(yaw), cos(yaw), 0]`` from ``observation.state`` (sin/cos dims pinned to the unit-circle
+[-1, +1] range; the spare dim 4 gets the constant-dim guard). Velocity-proprio ckpts ignore the
+extra block, so one stats run serves both modes.
 
 ``RoboCasa365Dataset`` auto-computes this on first use when ``normalize_mode`` is set and no stats file
 exists; run :func:`main` to precompute.
@@ -56,11 +61,24 @@ from openwam.dataloader.utils.stats_computation.robotwin_stats_computation impor
 _ACTION_BASE = slice(0, 5)
 
 
+def _planar_base_pose5(states: np.ndarray) -> np.ndarray:
+    """``(T, 5)`` planar world base pose ``[x, y, sin(yaw), cos(yaw), 0]`` from the 16-D state.
+
+    State layout: ``[0:3]`` base_position (world), ``[3:7]`` base_rotation (world quat xyzw). The
+    same quantity the reader's ``base_proprio="global_pose"`` proprio carries (its stats source).
+    """
+    x, y = states[:, 0], states[:, 1]
+    qx, qy, qz, qw = states[:, 3], states[:, 4], states[:, 5], states[:, 6]
+    yaw = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    return np.stack([x, y, np.sin(yaw), np.cos(yaw), np.zeros_like(x)], axis=-1).astype(np.float32)
+
+
 def _iter_episode_arrays(data_root: str, include_base: bool = False, task_name: str | None = None):
-    """Yield ``(arm10, base5)`` per episode from a v3 aggregated repo.
+    """Yield ``(arm10, base5, pose5)`` per episode from a v3 aggregated repo.
 
     ``arm10`` = raw ``(T, 10)`` arm pose from ``observation.state`` (always). ``base5`` = raw
-    ``(T, 5)`` base command from the ``action`` field when ``include_base`` else ``None``.
+    ``(T, 5)`` base command from the ``action`` field when ``include_base`` else ``None``; ``pose5``
+    = the planar world base pose from the state (``include_base`` only, see :func:`_planar_base_pose5`).
     ``task_name`` filters the v3 aggregated repo to one task. Each aggregated shard is read once and
     sliced per episode via its file-local row offset.
     """
@@ -85,7 +103,8 @@ def _iter_episode_arrays(data_root: str, include_base: bool = False, task_name: 
             states = np.stack(st[o : o + length]).astype(np.float32)  # (T, 16)
             arm10 = state_to_arm10(states)
             base5 = np.stack(ac[o : o + length]).astype(np.float32)[:, _ACTION_BASE] if include_base else None
-            yield arm10, base5
+            pose5 = _planar_base_pose5(states) if include_base else None
+            yield arm10, base5, pose5
 
 
 def _base_stats_block(base_chunks: list) -> dict:
@@ -117,13 +136,34 @@ def _pin_gripper_stats(eef10: dict) -> dict:
     return out
 
 
-def _finish(arm_chunks: list, base_chunks: list, total: int, include_base: bool, label: str) -> dict:
-    """Reduce accumulated arm (+ base) chunks to the persisted stats dict.
+def _pose_stats_block(pose_chunks: list) -> dict:
+    """5-D planar base pose stats ``[x, y, sin, cos, 0]`` for the ``eef_base_pose_proprio`` block.
 
-    Non-mobile → ``{"eef": 20-D}``; mobile → ``{"eef_base": 25-D}`` (concat of the 20-D arm block and
-    the 5-D base command block, so the whole [arm20, base5] vector shares ONE stats block). The arm
-    block is computed at 10-D (STATS_DIM) then left-padded to the 20-D bimanual schema; the gripper dim
-    is pinned to the [-1, +1] command range (see _pin_gripper_stats)."""
+    sin/cos dims are pinned to the unit-circle [-1, +1] range (representation bound, not the data
+    range — same philosophy as the gripper pin); the spare dim 4 (constant 0) gets the same
+    degenerate-dim guard as the base command block."""
+    p = compute_extended_stats(pose_chunks)
+    out = {k: np.asarray(p[k], np.float32).reshape(-1).copy() for k in STAT_KEYS}
+    if out["mean"].shape[0] != BASE_ACTION_DIM:
+        raise ValueError(f"pose stats dim {out['mean'].shape[0]} != {BASE_ACTION_DIM}")
+    for d in (2, 3):  # sin(yaw), cos(yaw)
+        out["min"][d], out["max"][d], out["q01"][d], out["q99"][d] = -1.0, 1.0, -1.0, 1.0
+        out["mean"][d], out["std"][d] = 0.0, 1.0
+    degenerate = (out["max"] - out["min"]) < 1e-6
+    out["max"] = np.where(degenerate, out["min"] + 1.0, out["max"]).astype(np.float32)
+    out["std"] = np.where(out["std"] < 1e-6, 1.0, out["std"]).astype(np.float32)
+    return out
+
+
+def _finish(arm_chunks: list, base_chunks: list, pose_chunks: list, total: int, include_base: bool, label: str) -> dict:
+    """Reduce accumulated arm (+ base command + base pose) chunks to the persisted stats dict.
+
+    Non-mobile → ``{"eef": 20-D}``; mobile → ``{"eef_base": 25-D, "eef_base_pose_proprio": 25-D}``
+    (both concat the same 20-D arm block with, respectively, the 5-D base COMMAND stats — the shared
+    action/velocity-proprio block — and the 5-D planar base POSE stats for the
+    ``base_proprio="global_pose"`` proprio). The arm block is computed at 10-D (STATS_DIM) then
+    left-padded to the 20-D bimanual schema; the gripper dim is pinned to the [-1, +1] command range
+    (see _pin_gripper_stats)."""
     if not arm_chunks:
         raise ValueError(f"No timesteps accumulated ({label})")
     eef10 = compute_extended_stats(arm_chunks)
@@ -140,7 +180,13 @@ def _finish(arm_chunks: list, base_chunks: list, total: int, include_base: bool,
     combined = {k: np.concatenate([eef20[k], base5[k]]).astype(np.float32) for k in STAT_KEYS}
     if combined["mean"].shape[0] != RAW_MOBILE_DIM:
         raise ValueError(f"combined {_MOBILE_STATS_KEY} dim {combined['mean'].shape[0]} != {RAW_MOBILE_DIM}")
-    return {_MOBILE_STATS_KEY: combined, "num_timesteps": int(total)}
+    pose5 = _pose_stats_block(pose_chunks)
+    pose_combined = {k: np.concatenate([eef20[k], pose5[k]]).astype(np.float32) for k in STAT_KEYS}
+    return {
+        _MOBILE_STATS_KEY: combined,
+        "eef_base_pose_proprio": pose_combined,  # robocasa365._PROPRIO_POSE_STATS_KEY
+        "num_timesteps": int(total),
+    }
 
 
 def compute_normalization_stats(data_root: str, include_base: bool = False, task_name: str | None = None) -> dict:
@@ -148,15 +194,16 @@ def compute_normalization_stats(data_root: str, include_base: bool = False, task
 
     ``task_name`` filters the v3 aggregated repo to one task (see :func:`_iter_episode_arrays`).
     """
-    arm_chunks, base_chunks, total = [], [], 0
-    for i, (arm10, base5) in enumerate(_iter_episode_arrays(data_root, include_base, task_name)):
+    arm_chunks, base_chunks, pose_chunks, total = [], [], [], 0
+    for i, (arm10, base5, pose5) in enumerate(_iter_episode_arrays(data_root, include_base, task_name)):
         arm_chunks.append(arm10)
         total += arm10.shape[0]
         if include_base:
             base_chunks.append(base5)
+            pose_chunks.append(pose5)
         if (i + 1) % 100 == 0:
             print(f"  [stats] {i + 1} episodes, {total} timesteps so far")
-    return _finish(arm_chunks, base_chunks, total, include_base, "stats")
+    return _finish(arm_chunks, base_chunks, pose_chunks, total, include_base, "stats")
 
 
 def compute_multitask_stats(roots: list, include_base: bool = False) -> dict:
@@ -166,16 +213,17 @@ def compute_multitask_stats(roots: list, include_base: bool = False) -> dict:
     robotwin's multi-task shared-stats contract: every task in a multi-task run must train in the SAME
     normalized space, so stats are pooled over all tasks. Same schema as the single-task path.
     """
-    arm_chunks, base_chunks, total = [], [], 0
+    arm_chunks, base_chunks, pose_chunks, total = [], [], [], 0
     for task_name, repo in roots:
         n0 = total
-        for arm10, base5 in _iter_episode_arrays(repo, include_base, task_name):
+        for arm10, base5, pose5 in _iter_episode_arrays(repo, include_base, task_name):
             arm_chunks.append(arm10)
             total += arm10.shape[0]
             if include_base:
                 base_chunks.append(base5)
+                pose_chunks.append(pose5)
         print(f"  [multitask-stats] {task_name}: +{total - n0} timesteps (running {total})")
-    return _finish(arm_chunks, base_chunks, total, include_base, f"multitask-stats over {len(roots)} tasks")
+    return _finish(arm_chunks, base_chunks, pose_chunks, total, include_base, f"multitask-stats over {len(roots)} tasks")
 
 
 def main():

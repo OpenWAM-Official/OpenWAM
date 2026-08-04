@@ -341,6 +341,21 @@ def base_velocity_cmd(prev_base_pose: np.ndarray, cur_base_pose: np.ndarray, fps
     )
 
 
+def base_pose_planar5(base_pose: np.ndarray) -> np.ndarray:
+    """``(5,)`` planar world base pose ``[x, y, sin(yaw), cos(yaw), 0]`` from a 7-D base pose.
+
+    Bit-identical to the dataloader's ``base_proprio="global_pose"`` proprio (the quantity a
+    global-pose ckpt trains on): sin/cos instead of raw yaw = no ±π seam (the planar reduction of a
+    rot6d yaw rotation). ``base_pose`` = ``base_position(3, world) + base_rotation(4, world quat
+    xyzw)``. Sent RAW; the server normalizes with the ``eef_base_pose_proprio`` stats block."""
+    p = np.asarray(base_pose, np.float64).reshape(-1)
+    if p.shape[0] < 7:
+        raise ValueError(f"base pose must be >=7D (pos3+quat4); got {p.shape}")
+    qx, qy, qz, qw = (float(v) for v in p[3:7])
+    yaw = float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)))
+    return np.array([p[0], p[1], np.sin(yaw), np.cos(yaw), 0.0], np.float32)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BEHAVIOR-1K / R1Pro (RAW-27 ↔ OmniGibson controllers)
 #

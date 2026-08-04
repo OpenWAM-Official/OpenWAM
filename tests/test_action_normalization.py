@@ -492,3 +492,84 @@ def test_build_normalizer_mobile_base_missing_block_raises(tmp_path):
     )
     with pytest.raises(KeyError, match="no 'eef_base' entry"):
         _build_normalizer(cfg, str(tmp_path))
+
+
+# --- _CommandAwareNormalizer (binary_action_dims + base_proprio=global_pose) ---
+
+
+def _eef_base_stats_25d(base_lo=None, base_hi=None):
+    """25-D [arm20, base5] stats: the 20-D arm block + a base5 block (default the ±1 command range).
+    The gripper dim (9) is pinned to the [-1, +1] command range, like the production stats
+    (_pin_gripper_stats), so its min-max normalization is the identity."""
+    arm = {k: np.array(v, np.float32) for k, v in _eef_stats_min_max().items()}
+    for k, v in (("min", -1.0), ("max", 1.0), ("q01", -1.0), ("q99", 1.0), ("mean", 0.0), ("std", 1.0)):
+        arm[k][9] = v
+    lo5 = np.asarray(base_lo if base_lo is not None else [-1.0] * 5, np.float32)
+    hi5 = np.asarray(base_hi if base_hi is not None else [1.0] * 5, np.float32)
+    return {
+        "mean": np.concatenate([arm["mean"], (lo5 + hi5) / 2]).astype(np.float32),
+        "std": np.concatenate([arm["std"], np.maximum((hi5 - lo5) / 4, 1e-6)]).astype(np.float32),
+        "min": np.concatenate([arm["min"], lo5]).astype(np.float32),
+        "max": np.concatenate([arm["max"], hi5]).astype(np.float32),
+        "q01": np.concatenate([arm["q01"], lo5]).astype(np.float32),
+        "q99": np.concatenate([arm["q99"], hi5]).astype(np.float32),
+    }
+
+
+def test_command_aware_binary_snap(tmp_path):
+    """binary_action_dims: the decoded output is snapped to exact ±1 at threshold 0.5 — the same
+    boundary the downstream bridge (confident-close >0.5) and env (control_mode >=0.5) apply, so an
+    uncertain mid-range output still lands on the safe side (open / arm mode)."""
+    stats = {"eef_base": _eef_base_stats_25d(), "num_timesteps": 10}
+    np.save(str(tmp_path / "normalization_stats.npy"), stats, allow_pickle=True)
+    cfg = OmegaConf.create({"dataloader": {
+        "normalize_mode": "min-max", "action_mode": "eef_base", "binary_action_dims": [9, 24],
+    }})
+    normalizer = _build_normalizer(cfg, str(tmp_path))
+    x = np.zeros(25, dtype=np.float32)
+    x[9], x[24] = 0.6, 0.4          # gripper leaning close; mode below threshold
+    out = normalizer.unnormalize(x)
+    assert out[9] == 1.0 and out[24] == -1.0
+    x[9], x[24] = 0.5, 0.51         # 0.5 exactly is NOT confident -> -1 (strict >)
+    out = normalizer.unnormalize(x)
+    assert out[9] == -1.0 and out[24] == 1.0
+    # non-binary dims untouched by the snap
+    assert out[20] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_command_aware_global_pose_split_stats(tmp_path):
+    """base_proprio='global_pose': proprio normalizes with the 'eef_base_pose_proprio' block (pose
+    range), actions keep un-normalizing with the 'eef_base' command block."""
+    pose_block = _eef_base_stats_25d(base_lo=[-10.0, -10.0, -1.0, -1.0, 0.0],
+                                     base_hi=[10.0, 10.0, 1.0, 1.0, 1.0])
+    stats = {"eef_base": _eef_base_stats_25d(), "eef_base_pose_proprio": pose_block, "num_timesteps": 10}
+    np.save(str(tmp_path / "normalization_stats.npy"), stats, allow_pickle=True)
+    cfg = OmegaConf.create({"dataloader": {
+        "normalize_mode": "min-max", "action_mode": "eef_base", "base_proprio": "global_pose",
+    }})
+    normalizer = _build_normalizer(cfg, str(tmp_path))
+    raw = np.zeros(25, dtype=np.float32)
+    raw[20] = 5.0  # x = 5 m -> min-max over [-10, 10] -> 0.5 under the POSE block
+    assert normalizer.normalize(raw)[20] == pytest.approx(0.5, abs=1e-5)
+    # action direction: normalized 0.5 on a command dim (±1 range) -> physical 0.5, NOT 5 m
+    a = np.zeros(25, dtype=np.float32)
+    a[20] = 0.5
+    assert normalizer.unnormalize(a)[20] == pytest.approx(0.5, abs=1e-5)
+
+
+def test_command_aware_missing_pose_block_raises(tmp_path):
+    stats = {"eef_base": _eef_base_stats_25d(), "num_timesteps": 10}
+    np.save(str(tmp_path / "normalization_stats.npy"), stats, allow_pickle=True)
+    cfg = OmegaConf.create({"dataloader": {
+        "normalize_mode": "min-max", "action_mode": "eef_base", "base_proprio": "global_pose",
+    }})
+    with pytest.raises(KeyError, match="eef_base_pose_proprio"):
+        _build_normalizer(cfg, str(tmp_path))
+
+
+def test_command_aware_requires_active_normalization(tmp_path):
+    cfg = OmegaConf.create({"dataloader": {
+        "normalize_mode": None, "action_mode": "eef_base", "binary_action_dims": [9, 24],
+    }})
+    with pytest.raises(ValueError, match="active normalize_mode"):
+        _build_normalizer(cfg, str(tmp_path))
