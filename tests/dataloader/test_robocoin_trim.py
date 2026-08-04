@@ -1,0 +1,474 @@
+"""Regression tests for RoboCOIN's CSV-driven dead-frame trimming.
+
+The end-to-end case uses a synthetic LeRobot v3 bucket whose action payload
+and decoded pixels both encode their source row/frame index.  This catches a
+trim offset being applied to parquet but not video (or vice versa).
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+import torch
+from PIL import Image
+
+from openwam.dataloader.robocoin import RoboCOINDataset, _load_trim_spec
+
+CAM = "observation.images.cam_head_rgb"
+TRIM_COLUMNS = (
+    "dataset",
+    "episode_index",
+    "total_frames",
+    "trim_head_to",
+    "trim_tail_from",
+)
+
+
+def _write_trim_csv(path: Path, rows: list[dict], columns=TRIM_COLUMNS) -> Path:
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def _trim_row(**overrides) -> dict:
+    row = {
+        "dataset": "bucket",
+        "episode_index": 0,
+        "total_frames": 10,
+        "trim_head_to": 2,
+        "trim_tail_from": 8,
+    }
+    row.update(overrides)
+    return row
+
+
+def _episodes(lengths: list[int]) -> pd.DataFrame:
+    starts = np.concatenate([[0], np.cumsum(lengths[:-1])]).astype(np.int64)
+    return pd.DataFrame(
+        {
+            "episode_index": np.arange(len(lengths), dtype=np.int64),
+            "length": lengths,
+            "_data_row_offset": starts,
+            f"_video_frame_offset/{CAM}": starts,
+            "_video_frame_offset/second_camera": starts + 100,
+        }
+    )
+
+
+def _filter(tmp_path: Path, eps: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
+    trim_csv = _write_trim_csv(tmp_path / "trim.csv", rows)
+    reader = RoboCOINDataset.__new__(RoboCOINDataset)
+    reader._trim_csv = trim_csv
+    reader._dataset_id = "bucket"
+    reader._fps = 30.0
+    return reader._filter_episodes(eps)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_trim_cache():
+    # _load_trim_spec caches by path for the many bucket readers.
+    # Tests reuse tmp_path names across separate pytest processes, so isolate it.
+    from openwam.dataloader import robocoin
+
+    robocoin._TRIM_SPEC_CACHE.clear()
+    yield
+    robocoin._TRIM_SPEC_CACHE.clear()
+
+
+class TestLoadTrimSpec:
+    def test_parses_empty_head_or_tail_and_skips_noop_rows(self, tmp_path):
+        path = _write_trim_csv(
+            tmp_path / "trim.csv",
+            [
+                {
+                    "dataset": "bucket-a",
+                    "episode_index": 0,
+                    "total_frames": 10,
+                    "trim_head_to": 2,
+                    "trim_tail_from": "",
+                },
+                {
+                    "dataset": "bucket-a",
+                    "episode_index": 1,
+                    "total_frames": 12,
+                    "trim_head_to": "",
+                    "trim_tail_from": 9,
+                },
+                {
+                    "dataset": "bucket-a",
+                    "episode_index": 2,
+                    "total_frames": 8,
+                    "trim_head_to": "",
+                    "trim_tail_from": "",
+                },
+                {
+                    "dataset": "bucket-b",
+                    "episode_index": 3,
+                    "total_frames": 6,
+                    "trim_head_to": 1,
+                    "trim_tail_from": 5,
+                },
+            ],
+        )
+
+        assert _load_trim_spec(path) == {
+            "bucket-a": {0: (2, None, 10), 1: (0, 9, 12)},
+            "bucket-b": {3: (1, 5, 6)},
+        }
+
+    def test_explicit_missing_path_fails_fast(self, tmp_path):
+        with pytest.raises((OSError, ValueError)):
+            _load_trim_spec(tmp_path / "does-not-exist.csv")
+
+    def test_empty_string_is_not_the_disabled_value(self):
+        # Only trim_csv=None is an opt-out; a configured empty path is invalid.
+        with pytest.raises((OSError, ValueError)):
+            _load_trim_spec("")
+
+    @pytest.mark.parametrize("missing", TRIM_COLUMNS)
+    def test_missing_required_column_fails_fast(self, tmp_path, missing):
+        columns = tuple(c for c in TRIM_COLUMNS if c != missing)
+        row = {
+            "dataset": "bucket",
+            "episode_index": 0,
+            "total_frames": 10,
+            "trim_head_to": 2,
+            "trim_tail_from": 8,
+        }
+        path = _write_trim_csv(tmp_path / f"missing-{missing}.csv", [row], columns)
+        with pytest.raises(ValueError):
+            _load_trim_spec(path)
+
+    def test_empty_total_frames_fails_fast(self, tmp_path):
+        path = _write_trim_csv(
+            tmp_path / "empty-total.csv",
+            [
+                {
+                    "dataset": "bucket",
+                    "episode_index": 0,
+                    "total_frames": "",
+                    "trim_head_to": 2,
+                    "trim_tail_from": 8,
+                }
+            ],
+        )
+        with pytest.raises(ValueError):
+            _load_trim_spec(path)
+
+    def test_failed_parse_is_not_cached(self, tmp_path):
+        from openwam.dataloader import robocoin
+
+        path = _write_trim_csv(
+            tmp_path / "repairable.csv",
+            [_trim_row()],
+            columns=tuple(c for c in TRIM_COLUMNS if c != "total_frames"),
+        )
+        with pytest.raises(ValueError):
+            _load_trim_spec(path)
+        assert str(path) not in robocoin._TRIM_SPEC_CACHE
+
+        _write_trim_csv(path, [_trim_row()])
+        assert _load_trim_spec(path) == {"bucket": {0: (2, 8, 10)}}
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"trim_head_to": -1, "trim_tail_from": ""},
+            {"trim_head_to": 11, "trim_tail_from": ""},
+            {"trim_head_to": "", "trim_tail_from": -1},
+            {"trim_head_to": "", "trim_tail_from": 11},
+            {"trim_head_to": 8, "trim_tail_from": 3},
+        ],
+        ids=["negative-head", "head-past-total", "negative-tail", "tail-past-total", "head-after-tail"],
+    )
+    def test_invalid_trim_bounds_fail_fast(self, tmp_path, overrides):
+        path = _write_trim_csv(tmp_path / "invalid-bounds.csv", [_trim_row(**overrides)])
+        with pytest.raises(ValueError):
+            _load_trim_spec(path)
+
+    def test_duplicate_dataset_episode_key_fails_fast(self, tmp_path):
+        path = _write_trim_csv(
+            tmp_path / "duplicate.csv",
+            [_trim_row(trim_head_to=1), _trim_row(trim_head_to=2)],
+        )
+        with pytest.raises(ValueError):
+            _load_trim_spec(path)
+
+
+class TestFilterEpisodes:
+    def test_head_tail_and_both_update_all_offsets(self, tmp_path):
+        eps = _episodes([10, 10, 10])
+        out = _filter(
+            tmp_path,
+            eps,
+            [
+                {
+                    "dataset": "bucket",
+                    "episode_index": 0,
+                    "total_frames": 10,
+                    "trim_head_to": 2,
+                    "trim_tail_from": "",
+                },
+                {
+                    "dataset": "bucket",
+                    "episode_index": 1,
+                    "total_frames": 10,
+                    "trim_head_to": "",
+                    "trim_tail_from": 7,
+                },
+                {
+                    "dataset": "bucket",
+                    "episode_index": 2,
+                    "total_frames": 10,
+                    "trim_head_to": 2,
+                    "trim_tail_from": 8,
+                },
+            ],
+        )
+
+        assert out["length"].tolist() == [8, 7, 6]
+        assert out["_data_row_offset"].tolist() == [2, 10, 22]
+        assert out[f"_video_frame_offset/{CAM}"].tolist() == [2, 10, 22]
+        assert out["_video_frame_offset/second_camera"].tolist() == [102, 110, 122]
+
+    def test_one_stale_entry_rejects_entire_bucket(self, tmp_path):
+        eps = _episodes([10, 10])
+        with pytest.raises(ValueError, match="[Ss][Tt][Aa][Ll][Ee]"):
+            _filter(
+                tmp_path,
+                eps,
+                [
+                    {
+                        "dataset": "bucket",
+                        "episode_index": 0,
+                        "total_frames": 999,
+                        "trim_head_to": 1,
+                        "trim_tail_from": 9,
+                    },
+                    {
+                        # This simulates an undetectable same-length collision.
+                        # Rejecting the bucket prevents this entry being applied.
+                        "dataset": "bucket",
+                        "episode_index": 1,
+                        "total_frames": 10,
+                        "trim_head_to": 2,
+                        "trim_tail_from": 8,
+                    },
+                ],
+            )
+
+    def test_zero_span_trim_drops_episode(self, tmp_path):
+        eps = _episodes([10, 10])
+        out = _filter(
+            tmp_path,
+            eps,
+            [
+                {
+                    "dataset": "bucket",
+                    "episode_index": 0,
+                    "total_frames": 10,
+                    "trim_head_to": 10,
+                    "trim_tail_from": "",
+                }
+            ],
+        )
+
+        assert out["episode_index"].tolist() == [1]
+        assert out["_data_row_offset"].tolist() == [10]
+        assert out[f"_video_frame_offset/{CAM}"].tolist() == [10]
+
+
+def _make_bucket(bucket: Path, lengths: list[int]) -> Path:
+    meta = bucket / "meta"
+    (meta / "episodes").mkdir(parents=True)
+    (meta / "info.json").write_text(
+        json.dumps(
+            {
+                "fps": 30.0,
+                "robot_type": "test_robot",
+                "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+                "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+                "features": {
+                    CAM: {"dtype": "video"},
+                    "eef_sim_pose_action": {},
+                    "gripper_open_scale_action": {},
+                    "eef_sim_pose_state": {},
+                    "gripper_open_scale_state": {},
+                },
+            }
+        )
+    )
+
+    rows = []
+    start = 0
+    for ep, length in enumerate(lengths):
+        rows.append(
+            {
+                "episode_index": ep,
+                "length": length,
+                "dataset_from_index": start,
+                "data/chunk_index": 0,
+                "data/file_index": 0,
+                f"videos/{CAM}/chunk_index": 0,
+                f"videos/{CAM}/file_index": 0,
+            }
+        )
+        start += length
+    pq.write_table(pa.Table.from_pandas(pd.DataFrame(rows)), meta / "episodes" / "chunk-000.parquet")
+    pd.DataFrame({"task_index": [0]}, index=pd.Index(["do the thing"], name="task")).to_parquet(meta / "tasks.parquet")
+
+    source_index = np.arange(start, dtype=np.float32)
+    eef = np.zeros((start, 12), dtype=np.float32)
+    eef[:, 0] = source_index
+    episode_index = np.concatenate([np.full(length, ep, dtype=np.int64) for ep, length in enumerate(lengths)])
+    frame_index = np.concatenate([np.arange(length, dtype=np.int64) for length in lengths])
+    data_dir = bucket / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pandas(
+            pd.DataFrame(
+                {
+                    "task_index": np.zeros(start, dtype=np.int64),
+                    "episode_index": episode_index,
+                    "frame_index": frame_index,
+                    "eef_sim_pose_action": list(eef),
+                    "gripper_open_scale_action": list(np.zeros((start, 2), dtype=np.float32)),
+                    "eef_sim_pose_state": list(eef),
+                    "gripper_open_scale_state": list(np.zeros((start, 2), dtype=np.float32)),
+                }
+            )
+        ),
+        data_dir / "file-000.parquet",
+    )
+    return bucket
+
+
+@pytest.fixture
+def patch_decode(monkeypatch):
+    def fake_decode(path, frame_indices, height, width):
+        del path
+        frames = []
+        for frame_index in frame_indices:
+            image = Image.new("RGB", (width, height), (0, 0, 0))
+            image.putpixel((0, 0), (int(frame_index), 0, 0))
+            frames.append(image)
+        return frames
+
+    monkeypatch.setattr("openwam.dataloader.bases.lerobot_v3_reader._decode_video_frames", fake_decode)
+
+
+def _decoded_index(image: Image.Image) -> int:
+    return image.getpixel((0, 0))[0]
+
+
+def test_root_from_config_preloads_bad_trim_csv_before_bucket_workers(tmp_path):
+    root = tmp_path / "root"
+    _make_bucket(root / "bucket-a", [8])
+    _make_bucket(root / "bucket-b", [8])
+    bad_csv = _write_trim_csv(
+        tmp_path / "bad.csv",
+        [_trim_row()],
+        columns=tuple(c for c in TRIM_COLUMNS if c != "total_frames"),
+    )
+
+    # build_multibucket deliberately tolerates an individual corrupt bucket.
+    # A shared trim_csv is global configuration, so it must be validated before
+    # entering those workers and preserve the actionable parse exception.
+    with pytest.raises(ValueError, match="trim_csv"):
+        RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(bad_csv)})
+
+
+def test_root_builder_does_not_retain_a_stale_bucket(tmp_path):
+    root = tmp_path / "root"
+    _make_bucket(root / "bucket-a", [8])
+    _make_bucket(root / "bucket-b", [8])
+    trim_csv = _write_trim_csv(
+        tmp_path / "stale.csv",
+        [
+            {
+                "dataset": "bucket-a",
+                "episode_index": 0,
+                "total_frames": 9,
+                "trim_head_to": 1,
+                "trim_tail_from": 7,
+            }
+        ],
+    )
+
+    ds = RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
+    assert [bucket._dataset_id for bucket in ds._buckets] == ["bucket-b"]
+
+
+def test_trimmed_video_and_action_remain_aligned_end_to_end(tmp_path, patch_decode):
+    lengths = [8, 8, 8, 8]
+    bucket = _make_bucket(tmp_path / "bucket", lengths)
+    trim_csv = _write_trim_csv(
+        tmp_path / "trim.csv",
+        [
+            {
+                "dataset": bucket.name,
+                "episode_index": 0,
+                "total_frames": 8,
+                "trim_head_to": 2,
+                "trim_tail_from": "",
+            },
+            {
+                "dataset": bucket.name,
+                "episode_index": 1,
+                "total_frames": 8,
+                "trim_head_to": "",
+                "trim_tail_from": 6,
+            },
+            {
+                "dataset": bucket.name,
+                "episode_index": 2,
+                "total_frames": 8,
+                "trim_head_to": 2,
+                "trim_tail_from": 6,
+            },
+            {
+                "dataset": bucket.name,
+                "episode_index": 3,
+                "total_frames": 8,
+                "trim_head_to": 8,
+                "trim_tail_from": "",
+            },
+        ],
+    )
+    ds = RoboCOINDataset(
+        dataset_dir=str(bucket),
+        num_frames=5,
+        video_stride=1,
+        height=32,
+        width=32,
+        multiview=False,
+        normalize_mode=None,
+        trim_csv=trim_csv,
+    )
+
+    assert ds._eps_df["episode_index"].tolist() == [0, 1, 2]
+    assert ds._eps_df["length"].tolist() == [6, 6, 4]
+    assert ds._ep_data_row_offset.tolist() == [2, 8, 18]
+    assert ds._ep_video_frame_offsets[CAM].tolist() == [2, 8, 18]
+    assert len(ds) == 16
+
+    seen = set()
+    for idx in range(len(ds)):
+        sample = ds[idx]
+        action_rows = sample["action"][sample["action_mask"].any(dim=1), 0].to(torch.int64).tolist()
+        video_rows = [
+            _decoded_index(frame) for frame, valid in zip(sample["video"], sample["video_mask"].tolist()) if valid
+        ]
+        assert action_rows == video_rows[: len(action_rows)]
+        seen.update(video_rows)
+
+    assert seen == set(range(2, 8)) | set(range(8, 14)) | set(range(18, 22))

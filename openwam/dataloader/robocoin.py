@@ -61,6 +61,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import re
@@ -233,6 +234,29 @@ WRIST_RIGHT_CANDIDATES = [
 
 
 _TRIM_SPEC_CACHE: dict = {}
+_TRIM_CSV_COLUMNS = (
+    "dataset",
+    "episode_index",
+    "total_frames",
+    "trim_head_to",
+    "trim_tail_from",
+)
+
+
+def _trim_csv_int(row, name: str, *, path: str, line_number: int, required: bool = False):
+    """Public implementation. Dataset-specific audit notes were removed."""
+    raw = row.get(name)
+    value = raw.strip() if isinstance(raw, str) else ""
+    if not value:
+        if required:
+            raise ValueError(f"RoboCOIN trim_csv {path}, line {line_number}: '{name}' is required")
+        return None
+    try:
+        return int(value)
+    except ValueError as e:
+        raise ValueError(
+            f"RoboCOIN trim_csv {path}, line {line_number}: '{name}' must be an integer, got {value!r}"
+        ) from e
 
 
 def _load_trim_spec(path) -> dict:
@@ -246,32 +270,88 @@ def _load_trim_spec(path) -> dict:
 
 
 
-    import csv
 
     key = str(path)
     if key in _TRIM_SPEC_CACHE:
         return _TRIM_SPEC_CACHE[key]
     spec: dict = {}
+    seen_entries = set()
     n = 0
     try:
         with open(key, newline="") as fh:
-            for row in csv.DictReader(fh):
-                def _int(name):
-                    v = (row.get(name) or "").strip()
-                    return int(v) if v else None
-                head = _int("trim_head_to") or 0
-                tail = _int("trim_tail_from")
+            reader = csv.DictReader(fh, strict=True)
+            fieldnames = reader.fieldnames
+            if fieldnames is None:
+                raise ValueError(f"RoboCOIN trim_csv {key}, line 1: missing CSV header")
+            missing = [name for name in _TRIM_CSV_COLUMNS if name not in fieldnames]
+            if missing:
+                raise ValueError(f"RoboCOIN trim_csv {key}, line 1: missing required column(s): {', '.join(missing)}")
+            duplicate = sorted({name for name in fieldnames if fieldnames.count(name) > 1})
+            if duplicate:
+                raise ValueError(f"RoboCOIN trim_csv {key}, line 1: duplicate column(s): {', '.join(duplicate)}")
+
+            for row in reader:
+                line_number = reader.line_num
+                if None in row:
+                    raise ValueError(
+                        f"RoboCOIN trim_csv {key}, line {line_number}: row has more values than the CSV header"
+                    )
+                dataset_raw = row.get("dataset")
+                dataset = dataset_raw.strip() if isinstance(dataset_raw, str) else ""
+                if not dataset:
+                    raise ValueError(f"RoboCOIN trim_csv {key}, line {line_number}: 'dataset' is required")
+                episode_index = _trim_csv_int(row, "episode_index", path=key, line_number=line_number, required=True)
+                total = _trim_csv_int(row, "total_frames", path=key, line_number=line_number, required=True)
+                head = _trim_csv_int(row, "trim_head_to", path=key, line_number=line_number)
+                tail = _trim_csv_int(row, "trim_tail_from", path=key, line_number=line_number)
+                if episode_index < 0:
+                    raise ValueError(
+                        f"RoboCOIN trim_csv {key}, line {line_number}: "
+                        f"'episode_index' must be >= 0, got {episode_index}"
+                    )
+                if total <= 0:
+                    raise ValueError(
+                        f"RoboCOIN trim_csv {key}, line {line_number}: 'total_frames' must be > 0, got {total}"
+                    )
+                for name, value in (("trim_head_to", head), ("trim_tail_from", tail)):
+                    if value is not None and not 0 <= value <= total:
+                        raise ValueError(
+                            f"RoboCOIN trim_csv {key}, line {line_number}: "
+                            f"'{name}' must be in [0, total_frames={total}], got {value}"
+                        )
+                head = head or 0
+                effective_tail = total if tail is None else tail
+                if head > effective_tail:
+                    raise ValueError(
+                        f"RoboCOIN trim_csv {key}, line {line_number}: trim_head_to={head} "
+                        f"must not exceed trim_tail_from={effective_tail}"
+                    )
+                entry_key = (dataset, episode_index)
+                if entry_key in seen_entries:
+                    raise ValueError(
+                        f"RoboCOIN trim_csv {key}, line {line_number}: duplicate entry for "
+                        f"dataset={dataset!r}, episode_index={episode_index}"
+                    )
+                seen_entries.add(entry_key)
                 if not head and tail is None:
                     continue
-                spec.setdefault(row["dataset"], {})[int(row["episode_index"])] = (
-                    head, tail, _int("total_frames"))
+                dataset_spec = spec.setdefault(dataset, {})
+                dataset_spec[episode_index] = (head, tail, total)
                 n += 1
-    except (OSError, KeyError, ValueError) as e:
-        logger.warning("RoboCOIN: trim_csv %s unusable (%s); trimming disabled.", key, e)
-        spec = {}
-    else:
-        logger.info("RoboCOIN: loaded %d trim entries across %d datasets from %s",
-                    n, len(spec), key)
+    except OSError as e:
+        raise OSError(
+            e.errno,
+            f"RoboCOIN trim_csv {key} could not be read: {e.strerror or e}",
+            key,
+        ) from e
+    except csv.Error as e:
+        line_number = getattr(locals().get("reader"), "line_num", "unknown")
+        raise ValueError(f"RoboCOIN trim_csv {key}, line {line_number}: malformed CSV: {e}") from e
+    except UnicodeError as e:
+        line_number = getattr(locals().get("reader"), "line_num", "unknown")
+        raise ValueError(f"RoboCOIN trim_csv {key}, line {line_number}: invalid text encoding: {e}") from e
+
+    logger.info("RoboCOIN: loaded %d trim entries across %d datasets from %s", n, len(spec), key)
     _TRIM_SPEC_CACHE[key] = spec
     return spec
 
@@ -454,17 +534,35 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 
+
         eps_df = super()._filter_episodes(eps_df)
-        if not self._trim_csv:
+        if self._trim_csv is None:
             return eps_df
         spec = _load_trim_spec(self._trim_csv).get(self._dataset_id)
         if not spec:
             return eps_df
 
+        episode_indices = eps_df["episode_index"].to_numpy()
+        lengths = eps_df["length"].to_numpy().copy()
+        stale = []
+        for pos, ep in enumerate(episode_indices):
+            entry = spec.get(int(ep))
+            if entry is not None and int(entry[2]) != int(lengths[pos]):
+                stale.append(int(ep))
+        if stale:
+            stale_ids = ",".join(map(str, stale[:10])) + ("..." if len(stale) > 10 else "")
+            raise ValueError(
+                "RoboCOIN(%s): trim list is STALE for %d matching episode(s) "
+                "(episode_index=%s): recorded total_frames disagrees with the manifest length. "
+                "Refusing to load this bucket because episode indices shift after physical deletion "
+                "and same-length collisions cannot be detected individually. Re-run "
+                "the public trim-manifest generator against the current corpus."
+                % (self._dataset_id, len(stale), stale_ids)
+            )
+
         cam_cols = [c for c in eps_df.columns if c.startswith("_video_frame_offset/")]
 
 
-        lengths = eps_df["length"].to_numpy().copy()
         row_off = eps_df["_data_row_offset"].to_numpy().copy()
         cam_off = {c: eps_df[c].to_numpy().copy() for c in cam_cols}
 
@@ -481,22 +579,21 @@ class RoboCOINDataset(LeRobotV3Reader):
 
         min_len = 1
 
-        n_trim = n_stale = n_degenerate = 0
+        keep = np.ones(len(eps_df), dtype=bool)
+        n_trim = n_degenerate = 0
         frames_before = int(lengths.sum())
-        for pos, ep in enumerate(eps_df["episode_index"].to_numpy()):
+        for pos, ep in enumerate(episode_indices):
             entry = spec.get(int(ep))
             if entry is None:
                 continue
-            head, tail_from, total = entry
+            head, tail_from, _ = entry
             length = int(lengths[pos])
-            if total is not None and int(total) != length:
-                n_stale += 1
-                continue
-            tail = length if tail_from is None else min(int(tail_from), length)
-            head = max(0, min(int(head), tail))
+            tail = length if tail_from is None else int(tail_from)
+            head = int(head)
             if head == 0 and tail == length:
                 continue
             if tail - head < min_len:
+                keep[pos] = False
                 n_degenerate += 1
                 continue
             lengths[pos] = tail - head
@@ -506,22 +603,14 @@ class RoboCOINDataset(LeRobotV3Reader):
                     cam_off[c][pos] += head
             n_trim += 1
 
-        if n_stale:
-            logger.warning(
-                "RoboCOIN(%s): %d trim entries skipped — recorded total_frames disagrees with "
-                "the manifest length. That mismatch is what a STALE trim list looks like: "
-                "episode indices shift when episodes are physically deleted, so the entry now "
-                "points at whichever episode inherited the index. Re-run "
-                "the public trim-manifest generator against the current corpus.",
-                self._dataset_id, n_stale,
-            )
         if n_degenerate:
             logger.warning(
-                "RoboCOIN(%s): %d trim entries skipped — the trim would leave < %d frames. "
-                "Kept whole rather than emitting a zero-length episode.",
-                self._dataset_id, n_degenerate, min_len,
+                "RoboCOIN(%s): dropped %d episode(s) whose trim leaves < %d frames.",
+                self._dataset_id,
+                n_degenerate,
+                min_len,
             )
-        if not n_trim:
+        if not n_trim and not n_degenerate:
             return eps_df
 
         eps_df = eps_df.copy()
@@ -529,14 +618,20 @@ class RoboCOINDataset(LeRobotV3Reader):
         eps_df["_data_row_offset"] = row_off
         for c in cam_cols:
             eps_df[c] = cam_off[c]
-        after = int(lengths.sum())
+        eps_df = eps_df[keep].reset_index(drop=True)
+        after = int(lengths[keep].sum())
         logger.info(
-            "RoboCOIN(%s): trimmed %d/%d episodes, %d -> %d frames (-%.1f%%, %.2f h removed)",
-            self._dataset_id, n_trim, len(eps_df), frames_before, after,
+            "RoboCOIN(%s): trimmed %d and dropped %d/%d episodes, %d -> %d frames (-%.1f%%, %.2f h removed)",
+            self._dataset_id,
+            n_trim,
+            n_degenerate,
+            len(keep),
+            frames_before,
+            after,
             100.0 * (frames_before - after) / max(frames_before, 1),
             (frames_before - after) / self._fps / 3600.0,
         )
-        return eps_df.reset_index(drop=True)
+        return eps_df
 
     def _add_data_offsets(self, eps) -> None:
 
@@ -732,6 +827,16 @@ class RoboCOINDataset(LeRobotV3Reader):
     @property
     def robot_type(self):
         return self._robot_type
+
+    @classmethod
+    def from_config(cls, config, split: str = "train"):
+        """Public implementation. Dataset-specific audit notes were removed."""
+        from openwam.dataloader.utils import get_cfg
+
+        trim_csv = get_cfg(config, "trim_csv")
+        if trim_csv is not None:
+            _load_trim_spec(trim_csv)
+        return super().from_config(config, split=split)
 
     @classmethod
     def _multibucket_wrapper(cls):
