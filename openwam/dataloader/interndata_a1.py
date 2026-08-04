@@ -542,6 +542,62 @@ def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optio
     return spec
 
 
+_TRIM_DIGEST_CACHE: Dict[str, str] = {}
+
+
+def trim_digest(path) -> Optional[str]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+    import hashlib
+
+    if not path:
+        return None
+    key = str(path)
+    if key in _TRIM_DIGEST_CACHE:
+        return _TRIM_DIGEST_CACHE[key]
+    h = hashlib.sha256()
+    try:
+        with open(key, "rb") as fh:
+            for blk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(blk)
+    except OSError:
+        return None
+    _TRIM_DIGEST_CACHE[key] = h.hexdigest()[:16]
+    return _TRIM_DIGEST_CACHE[key]
+
+
+def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int, int]]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    head, tail_from, total = entry
+    if total is not None and int(total) != int(length):
+        return None
+    tail = int(length) if tail_from is None else min(int(tail_from), int(length))
+    head = max(0, min(int(head), tail))
+    if head == 0 and tail == int(length):
+        return None
+    if tail - head < min_len:
+        return None
+    return head, tail
+
+
 class InternDataA1Dataset(LeRobotV3Reader):
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -738,26 +794,21 @@ class InternDataA1Dataset(LeRobotV3Reader):
         cam_off = {c: eps_df[c].to_numpy().copy() for c in cam_cols}
         min_len = self._num_frames if self._split == "val" else self._train_min_window_len()
 
-        n_trim = n_stale = 0
+        n_trim = n_skip = 0
         frames_before = int(lengths.sum())
         for pos, ep in enumerate(eps_df["episode_index"].to_numpy()):
             entry = spec.get(int(ep))
             if entry is None:
                 continue
-            head, tail_from, total = entry
             length = int(lengths[pos])
-            if total is not None and int(total) != length:
-                n_stale += 1
-                continue
-            tail = length if tail_from is None else min(int(tail_from), length)
-            head = max(0, min(int(head), tail))
-            if head == 0 and tail == length:
-                continue
-            if tail - head < min_len:
+            bounds = resolve_trim_bounds(entry, length, min_len)
+            if bounds is None:
 
 
-                n_stale += 1
+                if not (entry[0] == 0 and entry[1] in (None, length)):
+                    n_skip += 1
                 continue
+            head, tail = bounds
             lengths[pos] = tail - head
             if head:
                 row_off[pos] += head
@@ -765,14 +816,14 @@ class InternDataA1Dataset(LeRobotV3Reader):
                     cam_off[c][pos] += head
             n_trim += 1
 
-        if n_stale:
+        if n_skip:
             logger.warning(
                 "InternDataA1(%s): %d trim entries skipped — recorded total_frames disagrees "
                 "with the manifest length, or the trim would leave < %d frames. A total_frames "
                 "mismatch is what a STALE trim list looks like; regenerate it against this "
                 "corpus.",
                 self._dataset_id,
-                n_stale,
+                n_skip,
                 min_len,
             )
         if not n_trim:
@@ -835,6 +886,33 @@ class InternDataA1Dataset(LeRobotV3Reader):
             )
         with open(stats_path) as f:
             raw = json.load(f)
+
+
+
+
+
+
+
+
+
+        active = trim_digest(self._trim_csv)
+        recorded = raw.get("trim_digest")
+        if active != recorded:
+            def _desc(dig, path):
+                return f"trim_csv={path} (digest {dig})" if dig else "no trim_csv"
+
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: normalization stats in {stats_path} "
+                f"were computed with {_desc(recorded, raw.get('trim_csv'))}, but this reader is "
+                f"configured with {_desc(active, self._trim_csv)}. Trimmed and untrimmed stats "
+                "are not interchangeable. Regenerate with the matching flag: "
+                "python -m openwam.dataloader.utils.stats_computation."
+                "interndata_a1_stats_computation --dataset_dir <root> "
+                f"--stats_root {self._a1_stats_root}"
+                + (f" --trim_csv {self._trim_csv}" if self._trim_csv else "")
+                + ", or set normalize_mode=null."
+            )
+
         eef_raw = raw.get("eef", {})
 
 

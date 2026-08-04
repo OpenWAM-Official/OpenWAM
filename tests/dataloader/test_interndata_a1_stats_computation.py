@@ -386,3 +386,66 @@ def test_module_exports_stay_importable():
     for name in a1s.__all__:
         assert hasattr(a1s, name), name
     assert Path(a1s.__file__).name == "interndata_a1_stats_computation.py"
+
+
+# ---------------------------------------------------------------------------
+# Cleaned-view filtering: the stats must describe exactly what the reader emits
+# ---------------------------------------------------------------------------
+
+
+def _trim_file(path: Path, rows: str) -> str:
+    path.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n" + rows)
+    return str(path)
+
+
+class TestCleanedViewFiltering:
+    """A cleaned view symlinks ``data/``, so deleted episodes are still
+    physically in the parquet. The scanner has to honour
+    ``meta/excluded_episodes.json`` or the normalizer pools rows the reader
+    never emits."""
+
+    def test_excluded_episodes_are_dropped_from_the_scan(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
+        assert rows.shape[0] == 2 * 20  # only episode 1, both streams
+
+    def test_an_empty_kept_set_excludes_everything(self, tmp_path):
+        """``set()`` means "manifest read, nothing survives" — distinct from
+        ``None`` ("unreadable, cannot filter"). Collapsing the two would pool a
+        fully-deleted bucket's rows back into the statistics."""
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0, 1]}))
+        assert a1s._kept_episodes(d) == set()
+        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
+        assert rows.shape[0] == 0
+
+    def test_kept_episodes_is_none_only_when_the_manifest_is_unreadable(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
+        assert a1s._kept_episodes(d) == {0, 1}
+        for f in (d / "meta" / "episodes").rglob("*.parquet"):
+            f.unlink()
+        assert a1s._kept_episodes(d) is None
+
+
+class TestStatsTrimMatchesReader:
+    """Both paths call :func:`resolve_trim_bounds`, so a trim that the reader
+    declines to apply must not be applied here either."""
+
+    def test_a_too_short_trim_is_left_whole_like_the_reader_does(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=4)
+        trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,4,3,\n")  # leaves 1 < min_len 2
+        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        assert rows.shape[0] == 2 * 4, "stats trimmed an episode the reader keeps whole"
+
+    def test_a_valid_trim_is_applied(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=20)
+        trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,20,4,18\n")
+        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        assert rows.shape[0] == 2 * 14  # 18 - 4
+
+    def test_a_stale_total_frames_disables_the_entry(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=20)
+        trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,999,4,18\n")
+        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        assert rows.shape[0] == 2 * 20

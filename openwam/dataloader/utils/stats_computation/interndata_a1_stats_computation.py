@@ -91,6 +91,10 @@ from openwam.dataloader.interndata_a1 import (
     discover_a1_buckets,
     embodiment_key,
     resolve_gripper_scale,
+
+
+    resolve_trim_bounds,
+    trim_digest,
 )
 from openwam.dataloader.utils.eef import ARM10_DIM, quat_wxyz_to_rot6d
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
@@ -174,6 +178,16 @@ def _kept_episodes(bucket: Path) -> Optional[set]:
 
 
 
+
+
+
+
+
+
+
+
+
+
     files = sorted((bucket / "meta" / "episodes").rglob("*.parquet"))
     if not files:
         return None
@@ -183,23 +197,35 @@ def _kept_episodes(bucket: Path) -> Optional[set]:
             eps.update(int(x) for x in pq.read_table(f, columns=["episode_index"]).to_pydict()["episode_index"])
     except (OSError, KeyError, ValueError):
         return None
+
+    excl_path = bucket / "meta" / "excluded_episodes.json"
+    if excl_path.is_file():
+        with open(excl_path) as fh:
+            eps -= {int(x) for x in json.load(fh)["episode_indices"]}
     return eps
 
 
-def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]]) -> Optional[np.ndarray]:
+def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
+              min_len: int) -> Optional[np.ndarray]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
 
 
-    if not kept and not trim:
+
+
+
+
+
+    if kept is None and not trim:
         return None
     ep = np.asarray(table.column("episode_index").to_pylist(), dtype=np.int64)
     mask = np.ones(ep.shape[0], dtype=bool)
     uniq = np.unique(ep)
 
     if kept is not None and not set(uniq.tolist()) <= kept:
-        mask &= np.isin(ep, np.fromiter(kept, dtype=np.int64, count=len(kept)))
+        mask &= (np.isin(ep, np.fromiter(kept, dtype=np.int64, count=len(kept)))
+                 if kept else np.zeros(ep.shape[0], dtype=bool))
 
     if trim:
 
@@ -211,12 +237,13 @@ def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]]) -> O
             entry = trim.get(int(ep[g[0]]))
             if entry is None:
                 continue
-            head, tail_from, total = entry
             n = g.shape[0]
-            if total is not None and int(total) != n:
+
+
+            b = resolve_trim_bounds(entry, n, min_len)
+            if b is None:
                 continue
-            tail = n if tail_from is None else min(int(tail_from), n)
-            head = max(0, min(int(head), tail))
+            head, tail = b
             if head:
                 mask[g[:head]] = False
             if tail < n:
@@ -245,6 +272,7 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
     bucket_str, layout, embodiment = args[:3]
     dataset_id = args[3] if len(args) > 3 else None
     trim_csv = args[4] if len(args) > 4 else None
+    min_len = args[5] if len(args) > 5 else 2
     bucket = Path(bucket_str)
     sides = _SIDES[layout]
     cols = set()
@@ -281,7 +309,7 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
         table = pq.read_table(pth, columns=sorted(cols | {"episode_index"}) if use_ep else sorted(cols))
         if table.num_rows == 0:
             continue
-        mask = _row_mask(table, kept, trim) if use_ep else None
+        mask = _row_mask(table, kept, trim, min_len) if use_ep else None
         for kind in ("action", "state"):
             rows = _eef20(table, sides, kind, grip_scales)
             chunks.append(rows if mask is None else rows[mask])
@@ -298,6 +326,7 @@ def compute_stats_for_embodiment(
     workers: int = 16,
     root: Optional[Path] = None,
     trim_csv: Optional[str] = None,
+    min_len: int = 2,
 ) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -323,7 +352,7 @@ def compute_stats_for_embodiment(
     if trim_csv and root is None:
         logger.warning("trim_csv given without a root; bucket ids are ambiguous, not trimming.")
         trim_csv = None
-    tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv) for d in dirs]
+    tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv, min_len) for d in dirs]
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
 
@@ -397,6 +426,16 @@ def main():
         "missing from meta/episodes are excluded regardless — the cleaned view symlinks data/, "
         "so deleted episodes are still physically in the parquet.",
     )
+    parser.add_argument(
+        "--min_keep",
+        type=int,
+        default=2,
+        help="leave an episode untrimmed when the trim would leave fewer than this "
+        "many frames. MUST match the reader's minimum window length for the split "
+        "being trained (InternDataA1Dataset._train_min_window_len() == 2 for train; "
+        "num_frames for val) — otherwise the stats describe episodes the reader "
+        "never emits that way.",
+    )
     parser.add_argument("--workers", type=int, default=16, help="parallel bucket readers")
     parser.add_argument(
         "--no-rot6d-identity",
@@ -437,11 +476,16 @@ def main():
             workers=args.workers,
             root=root,
             trim_csv=args.trim_csv,
+            min_len=args.min_keep,
         )
 
 
 
         result["trim_csv"] = args.trim_csv
+
+
+        result["trim_digest"] = trim_digest(args.trim_csv)
+        result["trim_min_keep"] = args.min_keep if args.trim_csv else None
         out = out_dir / f"stats_{emb}.json"
 
 

@@ -31,6 +31,8 @@ from openwam.dataloader.interndata_a1 import (
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
+    resolve_trim_bounds,
+    trim_digest,
 )
 from openwam.dataloader.utils.eef import (
     ARM10_DIM,
@@ -130,7 +132,11 @@ def _make_bucket(
 
     total = n_eps * ep_len
     rng = np.random.RandomState(seed)
-    cols: dict = {"task_index": np.zeros(total, dtype=np.int64)}
+    cols: dict = {
+        "task_index": np.zeros(total, dtype=np.int64),
+        # Real A1 shards carry this; the cleaned-view filters key on it.
+        "episode_index": np.repeat(np.arange(n_eps, dtype=np.int64), ep_len),
+    }
     for i, side in enumerate(sides):
         pfx = f"{side}_" if side else ""
         pos = rng.randn(total, 3).astype(np.float32)
@@ -810,3 +816,153 @@ class TestFromConfig:
         from openwam.dataloader.registry import DATASET_REGISTRY
 
         assert DATASET_REGISTRY["interndata_a1"] is InternDataA1Dataset
+
+
+# ---------------------------------------------------------------------------
+# Cleaned-view / trim regression coverage
+# ---------------------------------------------------------------------------
+
+
+class TestCleanedViewOffsets:
+    """A cleaned view must not express deletions by dropping meta/episodes rows.
+
+    ``_data_row_offset`` is a ``groupby(chunk, file).cumsum()`` over the rows
+    currently in ``eps_df``. A cleaned view symlinks ``data/`` at the untouched
+    source shards, so a shortened manifest makes every deleted episode's length
+    vanish from that sum and slides each later episode onto earlier frames —
+    In one affected case, many episodes displaced, worst-case large offset
+    frames, with no error at runtime. ``meta/excluded_episodes.json`` is applied
+    after the offsets are computed, so it does not have this failure mode.
+    """
+
+    def test_excluded_first_episode_leaves_the_second_at_its_physical_offset(
+        self, tmp_path, patch_decode
+    ):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+
+        assert ds._eps_df["episode_index"].tolist() == [1]
+        # Episode 1 physically starts at row 4 of the shard; the exclusion must
+        # not renumber it to 0.
+        assert int(ds._ep_data_row_offset[0]) == 4
+        assert ds._ep_video_frame_offsets, "no camera offsets resolved"
+        for cam, off in ds._ep_video_frame_offsets.items():
+            assert int(off[0]) == 4, f"{cam} offset collapsed to {int(off[0])}"
+
+    def test_dropping_the_manifest_row_instead_would_have_shifted_it(self, tmp_path, patch_decode):
+        """Pins the failure mode itself, so the guarantee cannot silently lapse.
+
+        Same two-episode shard, but episode 0 removed from ``meta/episodes``
+        rather than excluded. The reader then places episode 1 at offset 0 while
+        its frames still live at row 4 — this asserts that wrong value, so if a
+        future change makes row-dropping safe (or unsafe in a new way) the test
+        speaks up instead of quietly passing.
+        """
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
+        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        t = pq.read_table(man)
+        pq.write_table(t.slice(1, 1), man)  # keep only episode 1
+
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+
+        assert ds._eps_df["episode_index"].tolist() == [1]
+        assert int(ds._ep_data_row_offset[0]) == 0  # WRONG on purpose: physical start is 4
+
+
+class TestTrimStatsProvenance:
+    """Trimmed and untrimmed stats are not interchangeable, and the numbers
+    alone cannot say which is which — so the pairing is checked, by content
+    digest rather than by path (the cleaned view gets relocated)."""
+
+    def _write_stats(self, root: Path, embodiment: str, **extra):
+        (root / "meta").mkdir(parents=True, exist_ok=True)
+        eef = {
+            "mean": [0.0] * EEF_DIM,
+            "std": [1.0] * EEF_DIM,
+            "min": [-2.0] * EEF_DIM,
+            "max": [2.0] * EEF_DIM,
+            "q01": [-2.0] * EEF_DIM,
+            "q99": [2.0] * EEF_DIM,
+        }
+        for dim in ROT6D_DIMS_EEF20:
+            eef["q01"][dim] = -1.0
+            eef["q99"][dim] = 1.0
+        (root / "meta" / f"stats_{embodiment}.json").write_text(json.dumps({"eef": eef, **extra}))
+
+    def _write_trim(self, path: Path, rows: str) -> Path:
+        path.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n" + rows)
+        return path
+
+    def test_untrimmed_stats_with_a_trimmed_reader_is_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=40)
+        self._write_stats(tmp_path, "split_aloha")  # no provenance recorded
+        trim = self._write_trim(tmp_path / "trim.csv", "cat/split_aloha/task,0,40,5,\n")
+        with pytest.raises(ValueError, match="not interchangeable"):
+            InternDataA1Dataset(
+                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+                normalize_mode="quantile", trim_csv=str(trim), num_frames=9, video_stride=4,
+            )
+
+    def test_trimmed_stats_with_an_untrimmed_reader_is_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=40)
+        trim = self._write_trim(tmp_path / "trim.csv", "cat/split_aloha/task,0,40,5,\n")
+        self._write_stats(tmp_path, "split_aloha", trim_digest=trim_digest(str(trim)))
+        with pytest.raises(ValueError, match="not interchangeable"):
+            InternDataA1Dataset(
+                str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile",
+                num_frames=9, video_stride=4,
+            )
+
+    def test_matching_digest_is_accepted(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=40)
+        trim = self._write_trim(tmp_path / "trim.csv", "cat/split_aloha/task,0,40,5,\n")
+        self._write_stats(tmp_path, "split_aloha", trim_digest=trim_digest(str(trim)))
+        ds = InternDataA1Dataset(
+            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+            normalize_mode="quantile", trim_csv=str(trim), num_frames=9, video_stride=4,
+        )
+        assert ds._normalization_stats is not None
+
+    def test_same_content_at_a_different_path_is_accepted(self, tmp_path, patch_decode):
+        """Digest, not path — otherwise relocating the cleaned view invalidates
+        a stats file that is in fact a perfect match."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=40)
+        row = "cat/split_aloha/task,0,40,5,\n"
+        a = self._write_trim(tmp_path / "trim.csv", row)
+        (tmp_path / "moved").mkdir()
+        b = self._write_trim(tmp_path / "moved" / "trim.csv", row)
+        self._write_stats(tmp_path, "split_aloha", trim_digest=trim_digest(str(a)))
+        ds = InternDataA1Dataset(
+            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+            normalize_mode="quantile", trim_csv=str(b), num_frames=9, video_stride=4,
+        )
+        assert ds._normalization_stats is not None
+
+
+class TestTrimTooShortIsLeftWhole:
+    """A trim that would leave less than one window keeps the episode intact —
+    and the stats path must make the identical call (they share
+    :func:`resolve_trim_bounds`), or the normalizer describes episodes the
+    reader never emits that way."""
+
+    def test_reader_leaves_a_too_short_trim_whole(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=4)
+        trim = tmp_path / "trim.csv"
+        trim.write_text(
+            "dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
+            "cat/split_aloha/task,0,4,3,\n"  # would leave 1 frame < min_len 2
+        )
+        ds = InternDataA1Dataset(
+            str(d), dataset_id="cat/split_aloha/task", normalize_mode=None,
+            trim_csv=str(trim), num_frames=2, video_stride=1,
+        )
+        assert int(ds._eps_df["length"].iloc[0]) == 4
+        assert int(ds._ep_data_row_offset[0]) == 0
+
+    def test_resolve_trim_bounds_rejects_the_short_case_and_accepts_a_valid_one(self):
+        assert resolve_trim_bounds((3, None, 4), 4, 2) is None      # leaves 1 < 2
+        assert resolve_trim_bounds((1, None, 4), 4, 2) == (1, 4)    # leaves 3
+        assert resolve_trim_bounds((1, None, 99), 4, 2) is None     # stale total_frames
+        assert resolve_trim_bounds((0, None, 4), 4, 2) is None      # no-op
