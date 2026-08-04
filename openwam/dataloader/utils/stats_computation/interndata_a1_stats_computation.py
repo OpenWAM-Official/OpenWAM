@@ -404,6 +404,10 @@ def compute_stats_for_embodiment(
         "embodiment": embodiment,
         "num_buckets": n_ok,
         "num_rows": int(n_rows),
+
+
+
+        "exclusions": exclusions,
         "rot6d_identity": bool(rot6d_identity),
         "layout_doc": "[L_xyz(0:3), L_rot6d(3:9), L_grip(9), R_xyz(10:13), R_rot6d(13:19), R_grip(19)]",
     }

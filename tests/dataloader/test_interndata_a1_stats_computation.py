@@ -36,6 +36,7 @@ from openwam.dataloader.interndata_a1 import (
     _BIMANUAL_SIDES,
     _SINGLE_ARM_SIDES,
     InternDataA1Dataset,
+    exclusion_digest,
     resolve_gripper_scale,
 )
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
@@ -449,3 +450,43 @@ class TestStatsTrimMatchesReader:
         trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,999,4,18\n")
         _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
         assert rows.shape[0] == 2 * 20
+
+
+class TestProvenanceIsEmitted:
+    """The generator must actually WRITE the provenance the reader validates.
+
+    Computing it and forgetting to put it in the returned dict is invisible to
+    every test that builds a stats file by hand — which is how an unwired
+    `exclusions` shipped once, caught only by the unused-variable lint.
+    """
+
+    def test_exclusions_reach_the_result(self, tmp_path):
+        a = _make_bucket(tmp_path, "cat/emb/a", n_eps=2, ep_len=8)
+        b = _make_bucket(tmp_path, "cat/emb/b", n_eps=2, ep_len=8)
+        (a / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+
+        out = a1s.compute_stats_for_embodiment(
+            "split_aloha",
+            _group([a, b], "bimanual", "AgileX Split Aloha"),
+            workers=1,
+            root=tmp_path,
+        )
+
+        assert "exclusions" in out, "generator dropped the exclusion provenance"
+        assert out["exclusions"]["cat/emb/a"] == exclusion_digest(a)
+        assert out["exclusions"]["cat/emb/b"] is None  # no exclusion file
+
+    def test_the_emitted_digest_is_what_the_reader_expects(self, tmp_path):
+        """Ties the two sides together: whatever the generator writes must be
+        exactly what the reader computes for the same bucket."""
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=3, ep_len=8)
+        (d / "meta" / "excluded_episodes.json").write_text(
+            json.dumps({"episode_indices": [2, 0]})  # unsorted on purpose
+        )
+        out = a1s.compute_stats_for_embodiment(
+            "split_aloha",
+            _group([d], "bimanual", "AgileX Split Aloha"),
+            workers=1,
+            root=tmp_path,
+        )
+        assert out["exclusions"]["cat/emb/task"] == exclusion_digest(d)
