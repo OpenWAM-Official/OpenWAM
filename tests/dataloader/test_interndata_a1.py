@@ -1073,3 +1073,30 @@ class TestExclusionProvenance:
             '{\n  "episode_indices": [\n    0,\n    1\n  ]\n}\n'
         )
         assert exclusion_digest(a) == exclusion_digest(b)
+
+    def test_single_bucket_mode_resolves_the_exclusion_entry_by_suffix(self, tmp_path, patch_decode):
+        """Without an explicit dataset_id the reader's id is the bare directory
+        name, while the stats map is keyed by bucket path. Looking it up
+        directly reported the bucket's own exclusions as unrecorded and rejected
+        valid data — it must resolve the same way the trim list does."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        self._stats(tmp_path, exclusions={"cat/split_aloha/task": exclusion_digest(d)})
+        ds = InternDataA1Dataset(  # no dataset_id
+            str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile",
+            num_frames=9, video_stride=4,
+        )
+        assert ds._normalization_stats is not None
+
+    def test_an_unrecorded_exclusion_is_still_rejected(self, tmp_path, patch_decode):
+        """The suffix fallback must not become a way to skip the check: a bucket
+        that excludes episodes but appears nowhere in the map is a genuine
+        mismatch."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        self._stats(tmp_path, exclusions={"other/split_aloha/elsewhere": "deadbeefdeadbeef"})
+        with pytest.raises(ValueError, match="exclusion digest"):
+            InternDataA1Dataset(
+                str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile",
+                num_frames=9, video_stride=4,
+            )

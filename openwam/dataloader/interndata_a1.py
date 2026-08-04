@@ -739,7 +739,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
         return self._num_frames if self._split == "val" else self._train_min_window_len()
 
-    def _trim_key(self) -> Optional[str]:
+    def _match_bucket_key(self, keys, what: str) -> Optional[str]:
         """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -753,26 +753,32 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        spec = _load_trim_spec(self._trim_csv)
-        if not spec:
-            return None
-        if self._dataset_id in spec:
+
+
+        if self._dataset_id in keys:
             return self._dataset_id
         name = self._dataset_dir.name
-        cands = [k for k in spec if k == name or k.endswith("/" + name)]
+        cands = [k for k in keys if k == name or k.endswith("/" + name)]
         if len(cands) == 1:
             return cands[0]
         if len(cands) > 1:
             logger.warning(
-                "InternDataA1(%s): trim_csv has %d buckets ending in %r (%s); "
-                "cannot tell which one this is, so NOT trimming. Pass an explicit "
-                "dataset_id matching the CSV's `dataset` column.",
+                "InternDataA1(%s): %s has %d buckets ending in %r (%s); cannot tell which "
+                "one this is. Pass an explicit dataset_id matching the bucket path relative "
+                "to the dataset root.",
                 self._dataset_id,
+                what,
                 len(cands),
                 name,
                 ", ".join(sorted(cands)[:4]),
             )
         return None
+
+    def _trim_key(self) -> Optional[str]:
+        spec = _load_trim_spec(self._trim_csv)
+        if not spec:
+            return None
+        return self._match_bucket_key(spec, "trim_csv")
 
     def _filter_episodes(self, eps_df):
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -974,8 +980,13 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
         excl_map = raw.get("exclusions")
         if excl_map is not None:
-            rec_excl = excl_map.get(self._dataset_id)
             act_excl = exclusion_digest(self._dataset_dir)
+
+
+
+
+            key = self._match_bucket_key(excl_map, "stats `exclusions`")
+            rec_excl = excl_map.get(key) if key is not None else None
             if rec_excl != act_excl:
                 raise ValueError(
                     f"InternData-A1 bucket {self._dataset_id}: normalization stats in "
