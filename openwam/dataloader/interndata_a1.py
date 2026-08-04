@@ -487,6 +487,61 @@ def discover_a1_buckets(root: Path) -> List[Path]:
     return sorted(out)
 
 
+_TRIM_SPEC_CACHE: Dict[str, Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]]] = {}
+
+
+def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    import csv
+
+    key = str(path)
+    if key in _TRIM_SPEC_CACHE:
+        return _TRIM_SPEC_CACHE[key]
+    spec: Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]] = {}
+    n = 0
+    try:
+        with open(key, newline="") as fh:
+            for row in csv.DictReader(fh):
+
+                def _int(name):
+                    v = (row.get(name) or "").strip()
+                    return int(v) if v else None
+
+                head = _int("trim_head_to") or 0
+                tail = _int("trim_tail_from")
+                if not head and tail is None:
+                    continue
+                spec.setdefault(row["dataset"], {})[int(row["episode_index"])] = (
+                    head,
+                    tail,
+                    _int("total_frames"),
+                )
+                n += 1
+    except (OSError, KeyError, ValueError) as e:
+        logger.warning("InternDataA1: trim_csv %s unusable (%s); trimming disabled.", key, e)
+        spec = {}
+    else:
+        logger.info(
+            "InternDataA1: loaded %d trim entries across %d buckets from %s", n, len(spec), key
+        )
+    _TRIM_SPEC_CACHE[key] = spec
+    return spec
+
+
 class InternDataA1Dataset(LeRobotV3Reader):
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -514,7 +569,17 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
     DEPLOY_ACTION_MODE = None
 
-    def __init__(self, dataset_dir, *, a1_stats_root: Optional[str] = None, **kwargs):
+
+    CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("trim_csv",)
+
+    def __init__(
+        self,
+        dataset_dir,
+        *,
+        a1_stats_root: Optional[str] = None,
+        trim_csv: Optional[str] = None,
+        **kwargs,
+    ):
         """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -522,7 +587,11 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
+
+
+
         self._a1_stats_root = Path(a1_stats_root) if a1_stats_root else Path(dataset_dir)
+        self._trim_csv = trim_csv
         super().__init__(dataset_dir, **kwargs)
 
 
@@ -580,6 +649,152 @@ class InternDataA1Dataset(LeRobotV3Reader):
         if right_wrist is not None and right_wrist not in features:
             right_wrist = None
         return head, left_wrist, right_wrist
+
+    def _trim_key(self) -> Optional[str]:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+        spec = _load_trim_spec(self._trim_csv)
+        if not spec:
+            return None
+        if self._dataset_id in spec:
+            return self._dataset_id
+        name = self._dataset_dir.name
+        cands = [k for k in spec if k == name or k.endswith("/" + name)]
+        if len(cands) == 1:
+            return cands[0]
+        if len(cands) > 1:
+            logger.warning(
+                "InternDataA1(%s): trim_csv has %d buckets ending in %r (%s); "
+                "cannot tell which one this is, so NOT trimming. Pass an explicit "
+                "dataset_id matching the CSV's `dataset` column.",
+                self._dataset_id,
+                len(cands),
+                name,
+                ", ".join(sorted(cands)[:4]),
+            )
+        return None
+
+    def _filter_episodes(self, eps_df):
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        eps_df = super()._filter_episodes(eps_df)
+        if not self._trim_csv:
+            return eps_df
+        key = self._trim_key()
+        if key is None:
+            return eps_df
+        spec = _load_trim_spec(self._trim_csv).get(key)
+        if not spec:
+            return eps_df
+
+        cam_cols = [c for c in eps_df.columns if c.startswith("_video_frame_offset/")]
+
+
+        lengths = eps_df["length"].to_numpy().copy()
+        row_off = eps_df["_data_row_offset"].to_numpy().copy()
+        cam_off = {c: eps_df[c].to_numpy().copy() for c in cam_cols}
+        min_len = self._num_frames if self._split == "val" else self._train_min_window_len()
+
+        n_trim = n_stale = 0
+        frames_before = int(lengths.sum())
+        for pos, ep in enumerate(eps_df["episode_index"].to_numpy()):
+            entry = spec.get(int(ep))
+            if entry is None:
+                continue
+            head, tail_from, total = entry
+            length = int(lengths[pos])
+            if total is not None and int(total) != length:
+                n_stale += 1
+                continue
+            tail = length if tail_from is None else min(int(tail_from), length)
+            head = max(0, min(int(head), tail))
+            if head == 0 and tail == length:
+                continue
+            if tail - head < min_len:
+
+
+                n_stale += 1
+                continue
+            lengths[pos] = tail - head
+            if head:
+                row_off[pos] += head
+                for c in cam_cols:
+                    cam_off[c][pos] += head
+            n_trim += 1
+
+        if n_stale:
+            logger.warning(
+                "InternDataA1(%s): %d trim entries skipped — recorded total_frames disagrees "
+                "with the manifest length, or the trim would leave < %d frames. A total_frames "
+                "mismatch is what a STALE trim list looks like; regenerate it against this "
+                "corpus.",
+                self._dataset_id,
+                n_stale,
+                min_len,
+            )
+        if not n_trim:
+            return eps_df
+
+        eps_df = eps_df.copy()
+        eps_df["length"] = lengths
+        eps_df["_data_row_offset"] = row_off
+        for c in cam_cols:
+            eps_df[c] = cam_off[c]
+        after = int(lengths.sum())
+        logger.info(
+            "InternDataA1(%s): trimmed %d/%d episodes, %d -> %d frames (-%.1f%%, %.2f h removed)",
+            self._dataset_id,
+            n_trim,
+            len(eps_df),
+            frames_before,
+            after,
+            100.0 * (frames_before - after) / max(frames_before, 1),
+            (frames_before - after) / self._fps / 3600.0,
+        )
+        return eps_df.reset_index(drop=True)
 
     def _train_min_window_len(self) -> int:
         """Public implementation. Dataset-specific audit notes were removed."""

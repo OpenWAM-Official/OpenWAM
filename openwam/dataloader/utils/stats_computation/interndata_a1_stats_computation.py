@@ -75,7 +75,7 @@ import json
 import logging
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -83,6 +83,10 @@ import pyarrow.parquet as pq
 from openwam.dataloader.interndata_a1 import (
     _BIMANUAL_SIDES,
     _SINGLE_ARM_SIDES,
+
+
+
+    _load_trim_spec,
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
@@ -159,6 +163,67 @@ def classify_buckets(buckets: Sequence[Path]) -> Dict[str, Dict]:
     return groups
 
 
+def _kept_episodes(bucket: Path) -> Optional[set]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+    files = sorted((bucket / "meta" / "episodes").rglob("*.parquet"))
+    if not files:
+        return None
+    eps: set = set()
+    try:
+        for f in files:
+            eps.update(int(x) for x in pq.read_table(f, columns=["episode_index"]).to_pydict()["episode_index"])
+    except (OSError, KeyError, ValueError):
+        return None
+    return eps
+
+
+def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]]) -> Optional[np.ndarray]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+    if not kept and not trim:
+        return None
+    ep = np.asarray(table.column("episode_index").to_pylist(), dtype=np.int64)
+    mask = np.ones(ep.shape[0], dtype=bool)
+    uniq = np.unique(ep)
+
+    if kept is not None and not set(uniq.tolist()) <= kept:
+        mask &= np.isin(ep, np.fromiter(kept, dtype=np.int64, count=len(kept)))
+
+    if trim:
+
+
+
+        order = np.argsort(ep, kind="stable")
+        bounds = np.flatnonzero(np.diff(ep[order])) + 1
+        for g in np.split(order, bounds):
+            entry = trim.get(int(ep[g[0]]))
+            if entry is None:
+                continue
+            head, tail_from, total = entry
+            n = g.shape[0]
+            if total is not None and int(total) != n:
+                continue
+            tail = n if tail_from is None else min(int(tail_from), n)
+            head = max(0, min(int(head), tail))
+            if head:
+                mask[g[:head]] = False
+            if tail < n:
+                mask[g[tail:]] = False
+    return mask
+
+
 def _scan_bucket(args) -> Tuple[str, np.ndarray]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -173,7 +238,13 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
 
 
 
-    bucket_str, layout, embodiment = args
+
+
+
+
+    bucket_str, layout, embodiment = args[:3]
+    dataset_id = args[3] if len(args) > 3 else None
+    trim_csv = args[4] if len(args) > 4 else None
     bucket = Path(bucket_str)
     sides = _SIDES[layout]
     cols = set()
@@ -185,13 +256,35 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
     grip_scales = tuple(
         resolve_gripper_scale(bucket, embodiment, spec[1]) if spec is not None else 1.0 for spec in sides["state"]
     )
+
+
+
+
+
+
+    trim = _load_trim_spec(trim_csv).get(dataset_id) if trim_csv else None
+    kept = _kept_episodes(bucket) if (trim_csv or (bucket / "meta" / "episodes").is_dir()) else None
+    need_ep = bool(trim) or kept is not None
+
     chunks: List[np.ndarray] = []
+    warned = False
     for pth in sorted((bucket / "data").rglob("*.parquet")):
-        table = pq.read_table(pth, columns=sorted(cols))
+
+
+
+
+        names = set(pq.ParquetFile(pth).schema_arrow.names)
+        use_ep = need_ep and "episode_index" in names
+        if need_ep and not use_ep and not warned:
+            logger.warning("%s: no episode_index column; scanning every row unfiltered", pth.parent)
+            warned = True
+        table = pq.read_table(pth, columns=sorted(cols | {"episode_index"}) if use_ep else sorted(cols))
         if table.num_rows == 0:
             continue
-        chunks.append(_eef20(table, sides, "action", grip_scales))
-        chunks.append(_eef20(table, sides, "state", grip_scales))
+        mask = _row_mask(table, kept, trim) if use_ep else None
+        for kind in ("action", "state"):
+            rows = _eef20(table, sides, kind, grip_scales)
+            chunks.append(rows if mask is None else rows[mask])
     if not chunks:
         return bucket_str, np.zeros((0, EEF20_DIM), dtype=np.float32)
     return bucket_str, np.concatenate(chunks, axis=0)
@@ -203,14 +296,34 @@ def compute_stats_for_embodiment(
     *,
     rot6d_identity: bool = True,
     workers: int = 16,
+    root: Optional[Path] = None,
+    trim_csv: Optional[str] = None,
 ) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
     dirs: List[Path] = group["dirs"]
     layout = group["arm_layout"]
     acc = Accumulator(dim=EEF20_DIM)
     n_rows = 0
     n_ok = 0
-    tasks = [(str(d), layout, embodiment) for d in dirs]
+
+    def _rel_id(d: Path) -> str:
+        if root is None:
+            return d.name
+        try:
+            return str(d.relative_to(root))
+        except ValueError:
+            return d.name
+
+    if trim_csv and root is None:
+        logger.warning("trim_csv given without a root; bucket ids are ambiguous, not trimming.")
+        trim_csv = None
+    tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv) for d in dirs]
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
 
@@ -275,6 +388,15 @@ def main():
         "{stats_root}/meta/stats_{embodiment}.json.",
     )
     parser.add_argument("--embodiment", default=None, help="compute for a single embodiment only")
+    parser.add_argument(
+        "--trim_csv",
+        default=None,
+        help="quality-audit trim list (same file the dataloader takes). Head/tail frames it "
+        "names are excluded from the statistics, so the normalizer describes what the reader "
+        "actually feeds the model instead of including motionless frames it skips. Episodes "
+        "missing from meta/episodes are excluded regardless — the cleaned view symlinks data/, "
+        "so deleted episodes are still physically in the parquet.",
+    )
     parser.add_argument("--workers", type=int, default=16, help="parallel bucket readers")
     parser.add_argument(
         "--no-rot6d-identity",
@@ -313,7 +435,13 @@ def main():
             groups[emb],
             rot6d_identity=not args.no_rot6d_identity,
             workers=args.workers,
+            root=root,
+            trim_csv=args.trim_csv,
         )
+
+
+
+        result["trim_csv"] = args.trim_csv
         out = out_dir / f"stats_{emb}.json"
 
 
