@@ -514,3 +514,11 @@ def test_policy_rejects_unknown_base_proprio():
             _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
             mobile_base=True, base_proprio="pose",
         )
+
+
+def test_policy_global_pose_requires_mobile():
+    with pytest.raises(ValueError, match="requires mobile_base"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(20))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+            mobile_base=False, base_proprio="global_pose",
+        )

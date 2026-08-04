@@ -23,10 +23,12 @@ Action spaces (two layers — don't conflate):
 
 Proprio: the client sends the model's single-arm EEF proprio (converted from the env's raw 16-D
 state). For a **mobile** checkpoint (``mobile_base: true``, the default), it appends the 5-D base
-proprio → **25-D** ``[arm20, base5]`` where ``base5 = [vx, vy, vyaw, 0, 0]``: the 3 body-frame base
-velocities are the finite-diff of the world base pose rescaled into the action command space (A′,
-``base_velocity_cmd``, exactly as the dataloader), and torso + control_mode have no achieved value so
-they are 0 (masked at train). A fixed-base ckpt sends the 20-D arm proprio.
+proprio → **25-D** ``[arm20, base5]``, in the ckpt's ``base_proprio`` representation:
+``"velocity"`` (historical) → ``base5 = [vx, vy, vyaw, 0, 0]``, the finite-diff of the world base
+pose rescaled into the action command space (A′, ``base_velocity_cmd``, exactly as the dataloader);
+``"global_pose"`` → ``base5 = [x, y, sin(yaw), cos(yaw), 0]``, the world planar base pose direct
+from the current obs (``base_pose_planar5``, stateless). torso + control_mode have no achieved value
+so those slots are 0 (masked at train). A fixed-base ckpt sends the 20-D arm proprio.
 
 Debug dumping follows the robotwin convention (``ep{N}/step_{N}/`` with per-camera
 JPGs + ``meta.json``) and adds a labeled ``cameras.png`` montage plus
@@ -365,6 +367,10 @@ class OpenWAMRoboCasa365Policy:
         # planar pose [x, y, sin(yaw), cos(yaw), 0]).
         if base_proprio not in ("velocity", "global_pose"):
             raise ValueError(f"base_proprio must be 'velocity' or 'global_pose', got {base_proprio!r}")
+        if base_proprio == "global_pose" and not self._mobile_base:
+            # Parity with the dataloader's guard: a fixed-base ckpt has no base5 proprio block, so a
+            # global_pose request is a config mistake, not a silently ignorable no-op.
+            raise ValueError("base_proprio='global_pose' requires mobile_base=True")
         self._base_proprio = base_proprio
         # Expected proprio width for the fail-fast guard: 20-D EEF (+ 5-D base5 when mobile).
         self._state_dim = state_dim if state_dim is not None else (STATE_DIM_MOBILE if self._mobile_base else STATE_DIM)

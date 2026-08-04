@@ -847,3 +847,23 @@ def test_binary_action_dims_rejects_continuous_dim(tmp_path):
             data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
             normalize_mode=None, mobile_base=True, binary_action_dims=[5],
         )
+
+
+def test_from_config_threads_base_proprio_and_binary_dims(tmp_path):
+    """MultiTask from_config threads the two new keys into every sub-dataset (absent = historical)."""
+    root = make_multitask_bucket(tmp_path, tasks=["taskA"])
+    cfg = {
+        "dataset_dir": str(root), "normalize_mode": "none", "multiview": False,
+        "height": 64, "width": 96, "mobile_base": True,
+        "base_proprio": "global_pose", "binary_action_dims": [9, 24],
+    }
+    with _mock_video_decoder():
+        ds = MultiTaskRoboCasa365Dataset.from_config(cfg)
+    sub = ds._datasets[0]
+    assert sub._base_proprio == "global_pose"
+    assert sub._binary_action_dims == (9, 24)
+    cfg.pop("base_proprio"), cfg.pop("binary_action_dims")
+    with _mock_video_decoder():
+        ds2 = MultiTaskRoboCasa365Dataset.from_config(cfg)
+    assert ds2._datasets[0]._base_proprio == "velocity"       # historical default
+    assert ds2._datasets[0]._binary_action_dims == ()
