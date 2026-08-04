@@ -343,12 +343,22 @@ def compute_stats_for_embodiment(
     n_ok = 0
 
     def _rel_id(d: Path) -> str:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
         if root is None:
             return d.name
         try:
-            return str(d.relative_to(root))
+            rel = str(d.relative_to(root))
         except ValueError:
             return d.name
+        return d.name if rel == "." else rel
 
     if trim_csv and root is None:
         logger.warning("trim_csv given without a root; bucket ids are ambiguous, not trimming.")
@@ -431,8 +441,9 @@ def main():
         help="quality-audit trim list (same file the dataloader takes). Head/tail frames it "
         "names are excluded from the statistics, so the normalizer describes what the reader "
         "actually feeds the model instead of including motionless frames it skips. Episodes "
-        "missing from meta/episodes are excluded regardless — the cleaned view symlinks data/, "
-        "so deleted episodes are still physically in the parquet.",
+        "listed in a bucket's meta/excluded_episodes.json are dropped regardless of this "
+        "flag: a cleaned view symlinks data/ (and meta/episodes) at the source, so deleted "
+        "episodes are still physically present in the parquet and listed in the manifest.",
     )
     parser.add_argument(
         "--min_keep",

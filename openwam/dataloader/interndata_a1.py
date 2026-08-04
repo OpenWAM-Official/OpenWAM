@@ -985,15 +985,34 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        excl_map = raw.get("exclusions")
-        if excl_map is not None:
-            act_excl = exclusion_digest(self._dataset_dir)
 
+        excl_map = raw.get("exclusions")
+        act_excl = exclusion_digest(self._dataset_dir)
+        if excl_map is None:
+
+
+
+
+            if act_excl is not None:
+                raise ValueError(
+                    f"InternData-A1 bucket {self._dataset_id}: {stats_path} predates exclusion "
+                    "provenance (no `exclusions` key), but this bucket excludes episodes via "
+                    "meta/excluded_episodes.json, so the stats may cover rows the reader never "
+                    f"emits. {_regen_hint()}"
+                )
+        else:
 
 
 
             key = self._match_bucket_key(excl_map, "stats `exclusions`")
-            rec_excl = excl_map.get(key) if key is not None else None
+            if key is None:
+                raise ValueError(
+                    f"InternData-A1 bucket {self._dataset_id}: {stats_path} records exclusion "
+                    f"provenance for {len(excl_map)} bucket(s) but none of them resolves to this "
+                    "one, so these stats were not computed over it (a bucket added after "
+                    f"generation, or a different dataset root). {_regen_hint()}"
+                )
+            rec_excl = excl_map[key]
             if rec_excl != act_excl:
                 raise ValueError(
                     f"InternData-A1 bucket {self._dataset_id}: normalization stats in "

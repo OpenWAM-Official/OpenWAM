@@ -490,3 +490,62 @@ class TestProvenanceIsEmitted:
             root=tmp_path,
         )
         assert out["exclusions"]["cat/emb/task"] == exclusion_digest(d)
+
+
+class TestDirectBucketParity:
+    """`--dataset_dir` pointed straight at a bucket is a supported mode, and it
+    is the one where the generator and the reader can silently disagree.
+
+    There `relative_to(root)` is `'.'` — a key no trim CSV holds and one the
+    reader (whose id is then the bare directory name) cannot suffix-match. Left
+    unnormalized the generator skips the trim while the reader applies it, and
+    writes `exclusions: {".": ...}` the reader then rejects. These go through the
+    real `main()` rather than the helpers, because that is the seam the unit
+    tests were blind to.
+    """
+
+    def _setup(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=40)
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        trim = tmp_path / "trim.csv"
+        trim.write_text(
+            "dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
+            "task,1,40,10,30\n"  # keyed by the bare bucket name, as the reader resolves it
+        )
+        return d, trim
+
+    def _run(self, monkeypatch, d, trim, out):
+        import sys
+
+        monkeypatch.setattr(sys, "argv", [
+            "prog", "--dataset_dir", str(d), "--stats_root", str(out),
+            "--trim_csv", str(trim), "--workers", "1", "--min_keep", "2",
+        ])
+        a1s.main()
+        return json.load(open(out / "meta" / "stats_split_aloha.json"))
+
+    def test_generator_applies_the_trim_and_the_exclusion(self, tmp_path, monkeypatch):
+        d, trim = self._setup(tmp_path)
+        out = tmp_path / "stats"
+        res = self._run(monkeypatch, d, trim, out)
+        # ep0 excluded; ep1 trimmed to [10, 30) = 20 frames, over action+state.
+        assert res["num_rows"] == 40, "generator ignored the trim or the exclusion"
+
+    def test_the_reader_accepts_what_the_generator_produced(self, tmp_path, monkeypatch):
+        d, trim = self._setup(tmp_path)
+        out = tmp_path / "stats"
+        self._run(monkeypatch, d, trim, out)
+        ds = InternDataA1Dataset(  # no dataset_id: id is the bare bucket name
+            str(d), a1_stats_root=str(out), trim_csv=str(trim),
+            normalize_mode="quantile", num_frames=9, video_stride=4,
+        )
+        assert ds._normalization_stats is not None
+        assert ds._eps_df["episode_index"].tolist() == [1]
+        assert int(ds._eps_df["length"].iloc[0]) == 20
+
+    def test_the_emitted_key_is_not_a_dot(self, tmp_path, monkeypatch):
+        d, trim = self._setup(tmp_path)
+        out = tmp_path / "stats"
+        res = self._run(monkeypatch, d, trim, out)
+        assert "." not in res["exclusions"], "direct-bucket key leaked as '.'"
+        assert res["exclusions"]["task"] == exclusion_digest(d)

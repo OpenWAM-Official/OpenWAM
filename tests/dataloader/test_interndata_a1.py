@@ -1070,16 +1070,39 @@ class TestExclusionProvenance:
         )
         assert ds._normalization_stats is not None
 
-    def test_stats_without_the_key_stay_loadable(self, tmp_path, patch_decode):
-        """Files predating this check must not become unloadable."""
+    def test_legacy_stats_load_only_when_nothing_is_excluded(self, tmp_path, patch_decode):
+        """Backward compatibility must not become a hole.
+
+        A file predating the check may well describe the full population. It is
+        safe to accept only while this bucket excludes nothing; the moment it
+        does, that file may cover rows the reader never emits.
+        """
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
-        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
         self._stats(tmp_path)  # no "exclusions" key at all
         ds = InternDataA1Dataset(
             str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
             normalize_mode="quantile", num_frames=9, video_stride=4,
         )
         assert ds._normalization_stats is not None
+
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        with pytest.raises(ValueError, match="predates exclusion provenance"):
+            InternDataA1Dataset(
+                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+                normalize_mode="quantile", num_frames=9, video_stride=4,
+            )
+
+    def test_a_map_that_cannot_resolve_this_bucket_is_rejected(self, tmp_path, patch_decode):
+        """A generated map lists EVERY scanned bucket (null for the ones that
+        exclude nothing), so an unresolvable entry means these stats were not
+        computed over this bucket — not that it has no exclusions."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        self._stats(tmp_path, exclusions={"other/split_aloha/different": None})
+        with pytest.raises(ValueError, match="none of them resolves to this one"):
+            InternDataA1Dataset(
+                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+                normalize_mode="quantile", num_frames=9, video_stride=4,
+            )
 
     def test_digest_ignores_formatting_and_order(self, tmp_path):
         a = _make_bucket(tmp_path, "a/split_aloha/t", n_eps=2, ep_len=4)
@@ -1111,7 +1134,7 @@ class TestExclusionProvenance:
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
         (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
         self._stats(tmp_path, exclusions={"other/split_aloha/elsewhere": "deadbeefdeadbeef"})
-        with pytest.raises(ValueError, match="exclusion digest"):
+        with pytest.raises(ValueError, match="none of them resolves to this one"):
             InternDataA1Dataset(
                 str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile",
                 num_frames=9, video_stride=4,
