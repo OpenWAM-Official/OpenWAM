@@ -852,14 +852,18 @@ class TestCleanedViewOffsets:
         for cam, off in ds._ep_video_frame_offsets.items():
             assert int(off[0]) == 4, f"{cam} offset collapsed to {int(off[0])}"
 
-    def test_dropping_the_manifest_row_instead_would_have_shifted_it(self, tmp_path, patch_decode):
-        """Pins the failure mode itself, so the guarantee cannot silently lapse.
+    def test_dropping_a_manifest_row_no_longer_shifts_the_survivor(self, tmp_path, patch_decode):
+        """The failure mode this class was written for, now closed at the source.
 
-        Same two-episode shard, but episode 0 removed from ``meta/episodes``
-        rather than excluded. The reader then places episode 1 at offset 0 while
-        its frames still live at row 4 — this asserts that wrong value, so if a
-        future change makes row-dropping safe (or unsafe in a new way) the test
-        speaks up instead of quietly passing.
+        `_add_data_offsets` rebuilds each offset from `dataset_from_index` and the
+        shards' real row counts, so it no longer depends on a cumsum over the
+        surviving rows — a shortened manifest cannot displace anything. This once
+        asserted the WRONG offset (0 instead of 4) to pin the hazard; it now
+        asserts the right one, so the guarantee is pinned rather than the bug.
+
+        excluded_episodes.json remains the correct way to express deletions —
+        it keeps meta/episodes intact and self-describing — but offsets are no
+        longer the reason why.
         """
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
         man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
@@ -869,7 +873,7 @@ class TestCleanedViewOffsets:
         ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
 
         assert ds._eps_df["episode_index"].tolist() == [1]
-        assert int(ds._ep_data_row_offset[0]) == 0  # WRONG on purpose: physical start is 4
+        assert int(ds._ep_data_row_offset[0]) == 4  # physical start, not 0
 
 
 class TestTrimStatsProvenance:
@@ -1139,3 +1143,47 @@ class TestExclusionProvenance:
                 str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile",
                 num_frames=9, video_stride=4,
             )
+
+
+class TestStaleShardIndex:
+    """`data/file_index` goes stale at shard boundaries — the episode that starts
+    a new shard keeps the previous file's index.
+
+    In affected multi-shard buckets, every one of the affected multi-shard buckets is
+    affected (~shards-1 episodes each, many episodes total), while all 22
+    single-shard buckets are clean. The base `groupby(chunk,file).cumsum()` then
+    points those episodes into the PREVIOUS shard — a valid row range that reads
+    back real numbers, so it pairs an episode with another one's frames and
+    raises nothing.
+    """
+
+    def _two_shard_bucket(self, tmp_path):
+        """Two shards, with the second episode's `data/file_index` left stale at 0."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
+        src = d / "data" / "chunk-000" / "file-000.parquet"
+        t = pq.read_table(src)
+        pq.write_table(t.slice(0, 4), src)                                   # shard 0: ep0
+        pq.write_table(t.slice(4, 4), d / "data" / "chunk-000" / "file-001.parquet")  # shard 1: ep1
+        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        m = pq.read_table(man).to_pydict()
+        m["data/file_index"] = [0, 0]          # ep1 is really in file-001 — this is the stale bit
+        m["dataset_from_index"] = [0, 4]       # global row index, correct
+        m["dataset_to_index"] = [4, 8]
+        pq.write_table(pa.Table.from_pydict(m), man)
+        return d
+
+    def test_the_boundary_episode_resolves_to_its_real_shard(self, tmp_path, patch_decode):
+        d = self._two_shard_bucket(tmp_path)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+        i = ds._eps_df.index[ds._eps_df["episode_index"] == 1][0]
+        pos = list(ds._eps_df.index).index(i)
+        assert int(ds._eps_df["data/file_index"].loc[i]) == 1, "still pointing at the stale shard"
+        assert int(ds._ep_data_row_offset[pos]) == 0, "offset should be file-local to file-001"
+
+    def test_the_unaffected_episode_is_untouched(self, tmp_path, patch_decode):
+        d = self._two_shard_bucket(tmp_path)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+        i = ds._eps_df.index[ds._eps_df["episode_index"] == 0][0]
+        pos = list(ds._eps_df.index).index(i)
+        assert int(ds._eps_df["data/file_index"].loc[i]) == 0
+        assert int(ds._ep_data_row_offset[pos]) == 0

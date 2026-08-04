@@ -189,6 +189,18 @@ def _kept_episodes(bucket: Path) -> Optional[set]:
 
 
 
+    eps = _manifest_episodes(bucket)
+    if eps is None:
+        return None
+    excl_path = bucket / "meta" / "excluded_episodes.json"
+    if excl_path.is_file():
+        with open(excl_path) as fh:
+            eps = eps - {int(x) for x in json.load(fh)["episode_indices"]}
+    return eps
+
+
+def _manifest_episodes(bucket: Path) -> Optional[set]:
+    """Public implementation. Dataset-specific audit notes were removed."""
     files = sorted((bucket / "meta" / "episodes").rglob("*.parquet"))
     if not files:
         return None
@@ -198,12 +210,41 @@ def _kept_episodes(bucket: Path) -> Optional[set]:
             eps.update(int(x) for x in pq.read_table(f, columns=["episode_index"]).to_pydict()["episode_index"])
     except (OSError, KeyError, ValueError):
         return None
-
-    excl_path = bucket / "meta" / "excluded_episodes.json"
-    if excl_path.is_file():
-        with open(excl_path) as fh:
-            eps -= {int(x) for x in json.load(fh)["episode_indices"]}
     return eps
+
+
+def _split_episodes(bucket: Path, split: str) -> Optional[set]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+    try:
+        with open(bucket / "meta" / "info.json") as f:
+            splits = json.load(f).get("splits")
+    except (OSError, ValueError):
+        return None
+    if not splits:
+        return None
+    eps = _manifest_episodes(bucket)
+    if eps is None:
+        return None
+    import pandas as pd
+
+    from openwam.dataloader.utils.lerobotv3 import apply_info_splits
+
+    df = pd.DataFrame({"episode_index": sorted(eps)})
+    try:
+        return set(apply_info_splits(df, split, splits, source_name=str(bucket))["episode_index"])
+    except Exception:
+        logger.warning("%s: unusable splits %r; not filtering by split", bucket, splits)
+        return None
 
 
 def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
@@ -274,6 +315,7 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
     dataset_id = args[3] if len(args) > 3 else None
     trim_csv = args[4] if len(args) > 4 else None
     min_len = args[5] if len(args) > 5 else 2
+    split = args[6] if len(args) > 6 else "train"
     bucket = Path(bucket_str)
     sides = _SIDES[layout]
     cols = set()
@@ -293,20 +335,29 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
 
     trim = _load_trim_spec(trim_csv).get(dataset_id) if trim_csv else None
     kept = _kept_episodes(bucket) if (trim_csv or (bucket / "meta" / "episodes").is_dir()) else None
+
+
+
+    if split:
+        in_split = _split_episodes(bucket, split)
+        if in_split is not None:
+            kept = in_split if kept is None else (kept & in_split)
     need_ep = bool(trim) or kept is not None
 
     chunks: List[np.ndarray] = []
-    warned = False
     for pth in sorted((bucket / "data").rglob("*.parquet")):
+
 
 
 
 
         names = set(pq.ParquetFile(pth).schema_arrow.names)
         use_ep = need_ep and "episode_index" in names
-        if need_ep and not use_ep and not warned:
-            logger.warning("%s: no episode_index column; scanning every row unfiltered", pth.parent)
-            warned = True
+        if need_ep and not use_ep:
+            raise ValueError(
+                f"{pth}: trim/exclusion filtering requested but the shard has no "
+                "`episode_index` column, so the rows cannot be selected."
+            )
         table = pq.read_table(pth, columns=sorted(cols | {"episode_index"}) if use_ep else sorted(cols))
         if table.num_rows == 0:
             continue
@@ -328,6 +379,7 @@ def compute_stats_for_embodiment(
     root: Optional[Path] = None,
     trim_csv: Optional[str] = None,
     min_len: int = 2,
+    split: str = "train",
 ) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -363,7 +415,7 @@ def compute_stats_for_embodiment(
     if trim_csv and root is None:
         logger.warning("trim_csv given without a root; bucket ids are ambiguous, not trimming.")
         trim_csv = None
-    tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv, min_len) for d in dirs]
+    tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv, min_len, split) for d in dirs]
 
 
     exclusions = {_rel_id(d): exclusion_digest(d) for d in dirs}
@@ -455,6 +507,14 @@ def main():
         "num_frames for val) — otherwise the stats describe episodes the reader "
         "never emits that way.",
     )
+    parser.add_argument(
+        "--split",
+        default="train",
+        help="which info.json split to pool. Normalization stats must come from the TRAINING "
+        "distribution, so this defaults to train and should rarely be changed — it exists so "
+        "the scan applies the same split ranges the reader does, rather than pooling every "
+        "episode on disk.",
+    )
     parser.add_argument("--workers", type=int, default=16, help="parallel bucket readers")
     parser.add_argument(
         "--no-rot6d-identity",
@@ -496,6 +556,7 @@ def main():
             root=root,
             trim_csv=args.trim_csv,
             min_len=args.min_keep,
+            split=args.split,
         )
 
 

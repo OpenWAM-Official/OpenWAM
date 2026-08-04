@@ -730,6 +730,66 @@ class InternDataA1Dataset(LeRobotV3Reader):
             right_wrist = None
         return head, left_wrist, right_wrist
 
+    def _add_data_offsets(self, eps) -> None:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        import re
+        from concurrent.futures import ThreadPoolExecutor
+
+        import pyarrow.parquet as pq
+
+        paths = sorted((self._dataset_dir / "data").glob("chunk-*/file-*.parquet"))
+        if not paths:
+            raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
+
+        def _read_meta(path):
+            chunk_m = re.search(r"chunk-(\d+)$", path.parent.name)
+            file_m = re.search(r"file-(\d+)$", path.stem)
+            if chunk_m is None or file_m is None:
+                return None
+            return (int(chunk_m.group(1)), int(file_m.group(1)),
+                    pq.ParquetFile(path).metadata.num_rows)
+
+        with ThreadPoolExecutor(max_workers=min(len(paths), 4)) as pool:
+            results = list(pool.map(_read_meta, paths))
+        data_files = [r for r in results if r is not None]
+        if not data_files:
+            raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
+
+        starts = np.concatenate([[0], np.cumsum([n for _, _, n in data_files])]).astype(np.int64)
+        global_starts = eps["dataset_from_index"].to_numpy().astype(np.int64)
+        file_pos = np.searchsorted(starts, global_starts, side="right") - 1
+        if (file_pos < 0).any() or (file_pos >= len(data_files)).any():
+            raise ValueError(
+                f"{self.DATASET_NAME}({self._dataset_id}): dataset_from_index outside the "
+                "data parquet row range"
+            )
+        eps["data/chunk_index"] = np.array([data_files[i][0] for i in file_pos], dtype=np.int64)
+        eps["data/file_index"] = np.array([data_files[i][1] for i in file_pos], dtype=np.int64)
+        eps["_data_row_offset"] = global_starts - starts[file_pos]
+
     def _trim_min_len(self) -> int:
         """Public implementation. Dataset-specific audit notes were removed."""
 
