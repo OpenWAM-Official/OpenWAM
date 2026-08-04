@@ -73,6 +73,7 @@ from pathlib import Path
 from typing import List
 
 import numpy as np
+import pandas as pd
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
 from openwam.dataloader.robocoin import GRIP_EXCLUDED_DIM_MASK, _build_dex_unify_map
@@ -162,6 +163,30 @@ _UNIFIED_STATS_FILENAME = "stats_g2a.json"
 
 _BUCKET_STATS_FILENAME = "stats.json"
 
+_SEGMENT_FLAG_COL = "segment_flag"
+_SEGMENT_DELTA_COL = "segment_delta"
+
+
+def _validate_trim_ratio(value) -> float | None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+    if value is None:
+        return None
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"segment_max_trim_ratio must be a float in (0, 1] or null; got {value!r}") from e
+    if not np.isfinite(ratio) or not 0.0 < ratio <= 1.0:
+        raise ValueError(
+            f"segment_max_trim_ratio must be a fraction in (0, 1] or null; got {ratio!r}. "
+            "Use 0.7 for '70% or more of the episode trimmed', not 70."
+        )
+    return ratio
+
 
 def _bucket_has_base_motion(dataset_dir) -> bool:
     """Public implementation. Dataset-specific audit notes were removed."""
@@ -247,11 +272,30 @@ class AgiBotWorldDataset(LeRobotV3Reader):
     DEFAULT_NORMALIZE_MODE = None
 
     WRIST_DECODE_TOLERATED = (Exception,)
+    CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("use_segment_annotations", "segment_max_trim_ratio")
 
 
 
-    def __init__(self, dataset_dir, *, unify_action: bool = False, unify_action_map=None, **kwargs):
+    def __init__(
+        self,
+        dataset_dir,
+        *,
+        unify_action: bool = False,
+        unify_action_map=None,
+        use_segment_annotations: bool = True,
+        segment_max_trim_ratio: float | None = None,
+        **kwargs,
+    ):
         """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
 
 
 
@@ -271,6 +315,15 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
         self._is_dex = Path(dataset_dir).name in _DEX_BUCKET_IDS
         self._has_move = unify_action and _bucket_has_base_motion(dataset_dir)
+        self._use_segment_annotations = bool(use_segment_annotations)
+        self._segment_max_trim_ratio = _validate_trim_ratio(segment_max_trim_ratio)
+        if self._segment_max_trim_ratio is not None and not self._use_segment_annotations:
+            logger.warning(
+                "AgiBotWorld %s: segment_max_trim_ratio=%s is ignored because "
+                "use_segment_annotations=False (there is no trim to measure).",
+                dataset_dir,
+                self._segment_max_trim_ratio,
+            )
         if unify_action:
 
 
@@ -285,6 +338,89 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
 
 
+
+    def _filter_episodes(self, eps_df: pd.DataFrame) -> pd.DataFrame:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        if not self._use_segment_annotations:
+            return eps_df.reset_index(drop=True)
+        if _SEGMENT_FLAG_COL not in eps_df.columns or _SEGMENT_DELTA_COL not in eps_df.columns:
+            logger.warning(
+                "AgiBotWorld(%s): segment annotation columns %s/%s missing; using full segments.",
+                self._dataset_id,
+                _SEGMENT_FLAG_COL,
+                _SEGMENT_DELTA_COL,
+            )
+            return eps_df.reset_index(drop=True)
+
+        out = eps_df.copy()
+        flag = out[_SEGMENT_FLAG_COL].fillna(0).astype(np.int64).to_numpy()
+        delta = np.maximum(0, out[_SEGMENT_DELTA_COL].fillna(0).astype(np.int64).to_numpy())
+        length = out["length"].astype(np.int64).to_numpy()
+
+        valid_start = np.zeros(len(out), dtype=np.int64)
+        valid_end = length.copy()
+        start_mask = flag == 1
+        end_mask = flag == 2
+        valid_start[start_mask] = np.minimum(delta[start_mask], length[start_mask])
+        valid_end[end_mask] = np.maximum(0, length[end_mask] - delta[end_mask])
+
+        keep = (flag != 3) & (valid_end > valid_start)
+        dropped_static = int(np.sum(flag == 3))
+        dropped_empty = int(np.sum((flag != 3) & (valid_end <= valid_start)))
+
+
+
+
+
+
+        dropped_over_trim = 0
+        if self._segment_max_trim_ratio is not None:
+            trimmed = np.maximum(0, length - np.maximum(0, valid_end - valid_start))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                trim_ratio = np.where(length > 0, trimmed / np.maximum(length, 1), 0.0)
+            over = (flag != 3) & keep & (trim_ratio >= self._segment_max_trim_ratio)
+            dropped_over_trim = int(np.sum(over))
+            keep = keep & ~over
+
+        out["_valid_start"] = valid_start
+        out["_valid_end"] = valid_end
+        out = out.loc[keep].reset_index(drop=True)
+        if dropped_static or dropped_empty or dropped_over_trim:
+            logger.info(
+                "AgiBotWorld(%s): segment annotations dropped %d static, %d empty-after-trim and "
+                "%d over-trimmed (>=%s of the episode) episodes; kept %d episodes.",
+                self._dataset_id,
+                dropped_static,
+                dropped_empty,
+                dropped_over_trim,
+                "n/a" if self._segment_max_trim_ratio is None else f"{self._segment_max_trim_ratio:.0%}",
+                len(out),
+            )
+        return out
 
     def _resolve_cameras(self, info: dict):
         """Public implementation. Dataset-specific audit notes were removed."""

@@ -23,6 +23,7 @@ from openwam2robocasa365_interface import (  # noqa: E402
     DEFAULT_STATE_KEYS,
     OpenWAMRoboCasa365Policy,
 )
+from prompt_template import format_prompt_for_inference  # noqa: E402
 
 
 def _load_config(path) -> dict:
@@ -138,7 +139,9 @@ def _rollout(env, policy, *, num_trials: int, max_steps: int, seed: int) -> int:
                 "reset obs has no 'annotation.human.task_description'; refusing to send an empty "
                 f"prompt to the policy. Got keys: {sorted(obs)}. Check the env's annotation key."
             )
-        instruction = obs["annotation.human.task_description"]
+        # Wrap in the training-time template (robotwin parity) — the raw env
+        # instruction is out-of-distribution text conditioning for the model.
+        instruction = format_prompt_for_inference(obs["annotation.human.task_description"])
         policy.reset()
         success = bool(info.get("success", False))
         for _ in range(max_steps):

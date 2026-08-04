@@ -96,6 +96,44 @@ def test_rollout_accumulates_success_and_terminates():
     assert pol.acts == 2 + 5  # trial 0: 2 steps then done; trial 1: 5 (max) steps
 
 
+def test_rollout_wraps_prompt_with_training_template():
+    """The prompt sent to the policy must be the env instruction wrapped in the SAME template the
+    dataloader applies at training time (format_prompt_for_inference) — robotwin parity; a raw
+    instruction is out-of-distribution text conditioning."""
+    seen = []
+
+    class _FakeEnv:
+        def reset(self, seed=None):
+            return ({"annotation.human.task_description": "open the drawer"}, {})
+
+        def step(self, action):
+            return ({}, 0.0, True, False, {"success": False})
+
+    class _FakePolicy:
+        def reset(self):
+            pass
+
+        def act(self, obs, prompt):
+            seen.append(prompt)
+            return {}
+
+    single_eval._rollout(_FakeEnv(), _FakePolicy(), num_trials=1, max_steps=3, seed=0)
+    from openwam.dataloader.transforms.multiview import format_prompt_for_inference as train_fmt
+
+    assert seen == [train_fmt("open the drawer")]
+
+
+def test_prompt_template_matches_training_dataloader():
+    """benchmarks/robocasa365/prompt_template.py must stay byte-for-byte identical to the
+    training-time wrapper (same pinned contract as robotwin's prompt_template)."""
+    import prompt_template
+
+    from openwam.dataloader.transforms.multiview import format_prompt_for_inference as train_fmt
+
+    for s in ("open the drawer", "", "pick the apple from the counter and place it in the sink."):
+        assert prompt_template.format_prompt_for_inference(s) == train_fmt(s)
+
+
 def test_build_policy_threads_mobile_base(monkeypatch):
     """_build_policy must forward dataloader.mobile_base to the policy and NOT pin state_dim (so the
     policy auto-derives 25 = arm20 + base5). Captures the ctor kwargs (the real ctor pings a live

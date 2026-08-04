@@ -392,6 +392,16 @@ class LeRobotV3Reader(BaseDataset):
                 self._subsample_seed,
             )
 
+        self._ep_valid_start = (
+            self._eps_df["_valid_start"].to_numpy().astype(np.int64)
+            if "_valid_start" in self._eps_df.columns
+            else np.zeros(len(self._eps_df), dtype=np.int64)
+        )
+        self._ep_valid_end = (
+            self._eps_df["_valid_end"].to_numpy().astype(np.int64)
+            if "_valid_end" in self._eps_df.columns
+            else self._eps_df["length"].to_numpy().astype(np.int64)
+        )
         self._ep_data_row_offset = self._eps_df["_data_row_offset"].to_numpy().astype(np.int64)
         self._ep_video_frame_offsets: Dict[str, np.ndarray] = {}
         for cam in self._video_cameras():
@@ -416,7 +426,7 @@ class LeRobotV3Reader(BaseDataset):
             )
 
         # ── window index ──────────────────────────────────────────────────
-        length = self._eps_df["length"].to_numpy().astype(np.int64)
+        length = np.maximum(0, self._ep_valid_end - self._ep_valid_start).astype(np.int64)
         min_window_len = self._num_frames if self._split == "val" else self._train_min_window_len()
         n_starts = np.where(
             length >= min_window_len,
@@ -511,6 +521,24 @@ class LeRobotV3Reader(BaseDataset):
         English half). Implementations MUST ``reset_index(drop=True)`` on the
         returned frame. The per-row ``_data_row_offset`` / ``_video_frame_offset``
         columns are preserved across row filtering, so alignment stays correct.
+
+        An implementation may additionally return two optional columns to trim
+        each episode instead of dropping it whole:
+
+        ``_valid_start`` / ``_valid_end``
+            Half-open ``[start, end)`` row range of the episode that may be
+            sampled. Absent → ``[0, length)``, i.e. byte-identical to before.
+            ``__init__`` builds the window index from ``end - start`` and
+            ``_getitem_impl`` offsets BOTH the parquet slice and the video decode
+            by ``start``, so the two stay aligned and no window can reach a
+            trimmed row or frame. AgiBotWorld uses this for the segment-boundary
+            cleanup (see :meth:`~openwam.dataloader.agibotworld.AgiBotWorldDataset._filter_episodes`).
+
+        Contract: emit them as a PAIR, with ``0 <= start < end <= length``. They
+        are consumed as given — an out-of-range value would silently read into
+        the neighbouring episode, since LeRobot v3 packs many episodes per
+        parquet shard and per mp4. Drop the episode rather than returning an
+        empty or inverted range.
         """
         return eps_df
 
@@ -739,10 +767,11 @@ class LeRobotV3Reader(BaseDataset):
 
     def _getitem_impl(self, idx: int) -> dict:
         ep_local = int(np.searchsorted(self._cum_n_starts, idx, side="right") - 1)
-        offset = (idx - int(self._cum_n_starts[ep_local])) * self._window_stride
+        valid_start = int(self._ep_valid_start[ep_local])
+        valid_end = int(self._ep_valid_end[ep_local])
+        offset = valid_start + (idx - int(self._cum_n_starts[ep_local])) * self._window_stride
         row = self._eps_df.iloc[ep_local]
-        ep_len = int(row["length"])
-        actual_raw_len = min(self._num_frames, ep_len - offset)
+        actual_raw_len = min(self._num_frames, valid_end - offset)
 
         # 1) parquet window rows
         local_start = int(self._ep_data_row_offset[ep_local]) + offset

@@ -7,12 +7,16 @@ the LeRobot v3 schema shape.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from openwam.dataloader.utils.lerobotv3 import (
+    DataContractError,
     apply_info_splits,
+    build_multibucket,
     compute_file_local_offsets,
     subsample_episodes_by_hours,
     water_fill_hours,
@@ -202,3 +206,62 @@ class TestSubsampleEpisodesByHours:
         # Each selected row keeps its _data_row_offset column intact.
         for _, row in out.iterrows():
             assert row["_data_row_offset"] == row["episode_index"] * 100
+
+
+# ---------------------------------------------------------------------------
+# build_multibucket error policy
+# ---------------------------------------------------------------------------
+
+
+def _fake_bucket_classes(failures: dict):
+    """Return (reader_cls, wrapper_cls) where ``failures[name]`` is raised."""
+
+    class _Bucket:
+        def __init__(self, dataset_dir, **_kw):
+            exc = failures.get(Path(dataset_dir).name)
+            if exc is not None:
+                raise exc
+            self.dataset_id = Path(dataset_dir).name
+
+        def __len__(self):
+            return 5
+
+    class _Wrapper:
+        def __init__(self, buckets):
+            self.buckets = list(buckets)
+
+    return _Bucket, _Wrapper
+
+
+class TestBuildMultibucketErrorPolicy:
+    """Which per-bucket failures are tolerated, and which abort the launch.
+
+    The tolerance is deliberate — one truncated shard in a large multi-bucket root must
+    not kill a training run — but it is exactly wrong for a failure that proves
+    the DATA is broken, because dropping that bucket removes a slice of the
+    training set behind a single WARNING.
+    """
+
+    SUBS = [Path("/nonexistent/root") / f"b{i}" for i in range(3)]
+
+    def test_environmental_failure_is_skipped(self, caplog):
+        reader, wrapper = _fake_bucket_classes({"b1": OSError("stale NFS handle")})
+        out = build_multibucket(
+            reader, self.SUBS, {"split": "train"}, base_seed=0, total_hours=None, wrapper_cls=wrapper
+        )
+        assert [b.dataset_id for b in out.buckets] == ["b0", "b2"]
+
+    def test_data_contract_error_aborts_the_build(self):
+        reader, wrapper = _fake_bucket_classes({"b1": DataContractError("prompt tables have diverged")})
+        with pytest.raises(DataContractError, match="diverged"):
+            build_multibucket(reader, self.SUBS, {"split": "train"}, base_seed=0, total_hours=None, wrapper_cls=wrapper)
+
+    def test_data_contract_error_is_not_a_keyerror_or_valueerror(self):
+        # Readers must raise DataContractError explicitly; the ordinary exception
+        # types stay tolerated so this cannot be triggered by accident.
+        reader, wrapper = _fake_bucket_classes({"b1": ValueError("looks fatal but is not typed as such")})
+        out = build_multibucket(
+            reader, self.SUBS, {"split": "train"}, base_seed=0, total_hours=None, wrapper_cls=wrapper
+        )
+        assert [b.dataset_id for b in out.buckets] == ["b0", "b2"]
+        assert issubclass(DataContractError, RuntimeError)
