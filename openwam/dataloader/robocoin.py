@@ -75,6 +75,7 @@ import pyarrow.parquet as pq
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
 from openwam.dataloader.utils.eef import EEF_DIM as _ACTION_DIM
 from openwam.dataloader.utils.eef import eef14_to_eef20
+from openwam.dataloader.utils.lerobotv3 import DataContractError
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 
 logger = logging.getLogger(__name__)
@@ -551,11 +552,11 @@ class RoboCOINDataset(LeRobotV3Reader):
                 stale.append(int(ep))
         if stale:
             stale_ids = ",".join(map(str, stale[:10])) + ("..." if len(stale) > 10 else "")
-            raise ValueError(
+            raise DataContractError(
                 "RoboCOIN(%s): trim list is STALE for %d matching episode(s) "
                 "(episode_index=%s): recorded total_frames disagrees with the manifest length. "
-                "Refusing to load this bucket because episode indices shift after physical deletion "
-                "and same-length collisions cannot be detected individually. Re-run "
+                "Refusing dataset construction because episode indices shift after physical "
+                "deletion and same-length collisions cannot be detected individually. Re-run "
                 "the public trim-manifest generator against the current corpus."
                 % (self._dataset_id, len(stale), stale_ids)
             )
@@ -833,9 +834,23 @@ class RoboCOINDataset(LeRobotV3Reader):
         """Public implementation. Dataset-specific audit notes were removed."""
         from openwam.dataloader.utils import get_cfg
 
+        dataset_dir = get_cfg(config, "dataset_dir")
         trim_csv = get_cfg(config, "trim_csv")
-        if trim_csv is not None:
-            _load_trim_spec(trim_csv)
+        if trim_csv is not None and dataset_dir is not None:
+            root = Path(dataset_dir)
+            if root.is_dir():
+                spec = _load_trim_spec(trim_csv)
+                if not (root / "meta" / "info.json").is_file():
+                    bucket_names = {
+                        path.name
+                        for path in root.iterdir()
+                        if path.is_dir() and (path / "meta" / "info.json").is_file()
+                    }
+                    if bucket_names and bucket_names.isdisjoint(spec):
+                        raise ValueError(
+                            f"RoboCOIN trim_csv {trim_csv}: none of its {len(spec)} dataset key(s) "
+                            f"match any bucket directory under {root}; trimming would silently no-op."
+                        )
         return super().from_config(config, split=split)
 
     @classmethod

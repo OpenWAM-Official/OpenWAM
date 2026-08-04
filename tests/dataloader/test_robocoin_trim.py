@@ -20,6 +20,7 @@ import torch
 from PIL import Image
 
 from openwam.dataloader.robocoin import RoboCOINDataset, _load_trim_spec
+from openwam.dataloader.utils.lerobotv3 import DataContractError
 
 CAM = "observation.images.cam_head_rgb"
 TRIM_COLUMNS = (
@@ -240,9 +241,9 @@ class TestFilterEpisodes:
         assert out[f"_video_frame_offset/{CAM}"].tolist() == [2, 10, 22]
         assert out["_video_frame_offset/second_camera"].tolist() == [102, 110, 122]
 
-    def test_one_stale_entry_rejects_entire_bucket(self, tmp_path):
+    def test_one_stale_entry_fails_closed_with_data_contract_error(self, tmp_path):
         eps = _episodes([10, 10])
-        with pytest.raises(ValueError, match="[Ss][Tt][Aa][Ll][Ee]"):
+        with pytest.raises(DataContractError, match="[Ss][Tt][Aa][Ll][Ee]"):
             _filter(
                 tmp_path,
                 eps,
@@ -387,7 +388,51 @@ def test_root_from_config_preloads_bad_trim_csv_before_bucket_workers(tmp_path):
         RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(bad_csv)})
 
 
-def test_root_builder_does_not_retain_a_stale_bucket(tmp_path):
+def test_root_mode_trim_csv_with_no_bucket_key_overlap_fails_fast(tmp_path):
+    root = tmp_path / "root"
+    _make_bucket(root / "bucket-a", [8])
+    _make_bucket(root / "bucket-b", [8])
+    trim_csv = _write_trim_csv(
+        tmp_path / "wrong-root.csv",
+        [
+            _trim_row(
+                dataset="bucket-from-another-root",
+                total_frames=8,
+                trim_head_to=1,
+                trim_tail_from=7,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError):
+        RoboCOINDataset.from_config(
+            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+        )
+
+
+def test_root_mode_trim_csv_with_partial_bucket_key_overlap_is_allowed(tmp_path):
+    root = tmp_path / "root"
+    _make_bucket(root / "bucket-a", [8])
+    _make_bucket(root / "bucket-b", [8])
+    trim_csv = _write_trim_csv(
+        tmp_path / "partial-root.csv",
+        [
+            _trim_row(dataset="bucket-a", total_frames=8, trim_head_to=1, trim_tail_from=7),
+            _trim_row(dataset="retired-bucket", total_frames=8, trim_head_to=2, trim_tail_from=6),
+        ],
+    )
+
+    ds = RoboCOINDataset.from_config(
+        {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+    )
+    lengths_by_bucket = {
+        bucket._dataset_id: bucket._eps_df["length"].tolist()
+        for bucket in ds._buckets
+    }
+    assert lengths_by_bucket == {"bucket-a": [6], "bucket-b": [8]}
+
+
+def test_root_mode_stale_bucket_fails_closed_globally(tmp_path):
     root = tmp_path / "root"
     _make_bucket(root / "bucket-a", [8])
     _make_bucket(root / "bucket-b", [8])
@@ -404,8 +449,10 @@ def test_root_builder_does_not_retain_a_stale_bucket(tmp_path):
         ],
     )
 
-    ds = RoboCOINDataset.from_config({"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None})
-    assert [bucket._dataset_id for bucket in ds._buckets] == ["bucket-b"]
+    with pytest.raises(DataContractError, match="[Ss][Tt][Aa][Ll][Ee]"):
+        RoboCOINDataset.from_config(
+            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+        )
 
 
 def test_trimmed_video_and_action_remain_aligned_end_to_end(tmp_path, patch_decode):
