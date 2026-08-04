@@ -960,7 +960,14 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        if self._trim_csv is not None:
+
+
+
+
+
+
+
+        if self._trim_csv is not None and self._split != "val":
             want_mk = self._trim_min_len()
             got_mk = raw.get("trim_min_keep")
             if got_mk is not None and int(got_mk) != want_mk:

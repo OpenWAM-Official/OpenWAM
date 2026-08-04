@@ -1006,6 +1006,22 @@ class TestTrimMinKeepProvenance:
                 normalize_mode="quantile", trim_csv=trim, num_frames=9, video_stride=4,
             )
 
+    def test_val_split_loads_the_train_generated_stats(self, tmp_path, patch_decode):
+        """Stats must come from the training distribution, so a val reader is
+        expected to load a train-generated file even though its own bound is
+        `num_frames`. Enforcing the match on val would make one stats file
+        unusable for every val run."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=40)
+        trim = self._trim(tmp_path / "trim.csv")
+        self._stats(tmp_path, trim_digest=trim_digest(trim), trim_min_keep=2)
+        ds = InternDataA1Dataset(
+            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+            normalize_mode="quantile", trim_csv=trim, num_frames=9, video_stride=4,
+            split="val",
+        )
+        assert ds._normalization_stats is not None
+        assert ds._trim_min_len() == 9  # its own bound is still num_frames
+
     def test_matching_min_keep_is_accepted(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=40)
         trim = self._trim(tmp_path / "trim.csv")
