@@ -370,6 +370,12 @@ class _CommandAwareNormalizer:
 
     def unnormalize(self, x):
         x = np.asarray(x)
+        for d in self._binary_dims:
+            if d >= x.shape[-1]:
+                raise ValueError(
+                    f"binary dim {d} out of range for a {x.shape[-1]}-D action — the input is not "
+                    "the raw-width vector this normalizer was built for (unify gather skipped?)."
+                )
         y = np.array(self._action_inner.unnormalize(x))
         for d in self._binary_dims:
             y[..., d] = np.where(x[..., d] > 0.5, 1.0, -1.0)
