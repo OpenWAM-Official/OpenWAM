@@ -1420,11 +1420,21 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        if self._match_bucket_key(dict.fromkeys(buckets), "stats population") is None:
+
+
+
+
+
+
+        known = list(buckets) + list(pop.get("empty_buckets") or [])
+
+
+
+        if self._match_bucket_key(dict.fromkeys(known), "stats population") is None:
             raise ValueError(
-                f"InternData-A1 bucket {self._dataset_id}: {stats_path} pools "
-                f"{len(buckets)} buckets, none of them this one — it was skipped during the "
-                f"scan (unreadable, or it produced no rows) while still loading the shared "
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} covers {len(known)} "
+                f"buckets, none of them this one — the scan refused it (unreadable metadata, "
+                f"or shards that disagree with the manifest) while it still loads the shared "
                 f"per-embodiment file, so its actions would be scaled by other buckets' "
                 f"numbers. {rerun}."
             )

@@ -497,6 +497,7 @@ def compute_stats_for_embodiment(
 
 
     scanned_buckets: List[str] = []
+    empty_buckets: List[str] = []
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
 
@@ -520,7 +521,14 @@ def compute_stats_for_embodiment(
             if not len(rows):
 
 
-                logger.warning("  [%s] %s produced 0 rows", embodiment, name)
+
+
+
+
+
+
+                logger.info("  [%s] %s has no train rows (val-only?)", embodiment, name)
+                empty_buckets.append(_rel_id(Path(name)))
                 continue
             scanned_buckets.append(_rel_id(Path(name)))
             acc.update_batch(rows)
@@ -537,6 +545,12 @@ def compute_stats_for_embodiment(
         "trim_active": bool(trim_csv),
         "min_keep": int(min_len),
         "buckets": sorted(scanned_buckets),
+
+
+
+
+
+        "empty_buckets": sorted(empty_buckets),
     }
 
     stats = acc.finalize()

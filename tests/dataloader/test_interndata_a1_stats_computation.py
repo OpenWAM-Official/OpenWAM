@@ -645,7 +645,8 @@ class TestPopulationContractEndToEnd:
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
         res = self._run(monkeypatch, d, tmp_path / "stats")
         assert res["population"] == {
-            "split": "train", "trim_active": False, "min_keep": 2, "buckets": ["task"]}
+            "split": "train", "trim_active": False, "min_keep": 2,
+            "buckets": ["task"], "empty_buckets": []}
 
     def test_val_stats_are_refused_by_a_train_reader(self, tmp_path, monkeypatch):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
@@ -691,3 +692,66 @@ class TestPopulationContractEndToEnd:
         with pytest.raises(ValueError, match="none of them this one|manifest ends at"):
             InternDataA1Dataset(str(bad), dataset_id="cat/emb/bad", a1_stats_root=str(out),
                                 normalize_mode="quantile", num_frames=2, video_stride=1)
+
+
+class TestValOnlyBucketReusesTrainStats:
+    """A val-only bucket must borrow the train distribution, not be refused.
+
+    Establishing "stats always come from train" while also demanding the bucket
+    appear among the TRAIN contributors is contradictory: a bucket whose
+    `info.json` declares `train=0:0, val=0:2` cannot be a train contributor and
+    is still a perfectly valid bucket to evaluate. Refusing it rejected the
+    configuration the train-derived rule exists to support.
+    """
+
+    def _two_buckets(self, tmp_path):
+        a = _make_bucket(tmp_path, "cat/emb/a", n_eps=2, ep_len=8)
+        b = _make_bucket(tmp_path, "cat/emb/b", n_eps=2, ep_len=8)
+        for bucket, splits in ((a, {"train": "0:2"}), (b, {"train": "0:0", "val": "0:2"})):
+            info = json.loads((bucket / "meta" / "info.json").read_text())
+            info["splits"] = splits
+            (bucket / "meta" / "info.json").write_text(json.dumps(info))
+        return a, b
+
+    def _generate(self, monkeypatch, root, out):
+        import sys
+        monkeypatch.setattr(sys, "argv", [
+            "prog", "--dataset_dir", str(root), "--stats_root", str(out), "--workers", "1"])
+        a1s.main()
+        return json.load(open(out / "meta" / "stats_split_aloha.json"))
+
+    def test_the_val_only_bucket_is_recorded_as_empty_not_dropped(self, tmp_path, monkeypatch):
+        self._two_buckets(tmp_path)
+        pop = self._generate(monkeypatch, tmp_path, tmp_path / "stats")["population"]
+        assert pop["buckets"] == ["cat/emb/a"]
+        assert pop["empty_buckets"] == ["cat/emb/b"]
+
+    def test_the_val_only_bucket_has_windows_without_normalization(self, tmp_path):
+        """Pins the premise: B is a real bucket, not an empty one."""
+        _, b = self._two_buckets(tmp_path)
+        r = InternDataA1Dataset(str(b), dataset_id="cat/emb/b", normalize_mode=None,
+                                num_frames=2, video_stride=1, split="val")
+        assert len(r) > 0
+
+    def test_the_val_only_bucket_loads_the_train_stats(self, tmp_path, monkeypatch):
+        _, b = self._two_buckets(tmp_path)
+        out = tmp_path / "stats"
+        self._generate(monkeypatch, tmp_path, out)
+        r = InternDataA1Dataset(str(b), dataset_id="cat/emb/b", a1_stats_root=str(out),
+                                normalize_mode="quantile", num_frames=2, video_stride=1,
+                                split="val")
+        assert r._normalization_stats is not None
+        assert len(r) > 0
+
+    def test_a_bucket_the_scan_refused_is_still_rejected(self, tmp_path, monkeypatch):
+        """The distinction that makes the above safe rather than an exemption."""
+        a, b = self._two_buckets(tmp_path)
+        p = b / "data" / "chunk-000" / "file-000.parquet"
+        pq.write_table(pq.read_table(p).slice(0, 15), p)   # truncated -> scan raises
+        out = tmp_path / "stats"
+        pop = self._generate(monkeypatch, tmp_path, out)["population"]
+        assert "cat/emb/b" not in pop["buckets"] + pop["empty_buckets"]
+        with pytest.raises(ValueError, match="none of them this one|manifest ends at"):
+            InternDataA1Dataset(str(b), dataset_id="cat/emb/b", a1_stats_root=str(out),
+                                normalize_mode="quantile", num_frames=2, video_stride=1,
+                                split="val")
