@@ -788,6 +788,13 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 
+    def _load_excluded_episode_indices(self) -> set[int]:
+        """Public implementation. Dataset-specific audit notes were removed."""
+        self._excluded_episodes_snapshot = load_excluded_episodes_snapshot(
+            self._dataset_dir
+        )
+        return set(self._excluded_episodes_snapshot.episode_indices)
+
     def _resolve_cameras(self, info: dict):
         """Public implementation. Dataset-specific audit notes were removed."""
 

@@ -17,6 +17,15 @@
 
 
 
+
+
+
+
+
+
+
+
+
 from __future__ import annotations
 
 import argparse
@@ -26,9 +35,19 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 
+from openwam.dataloader.oxe_droid import (
+    DROID_DATA_POPULATION_DIGEST_KEY,
+    load_droid_prompt_exclusions,
+)
 from openwam.dataloader.utils.eef import assert_unit_quaternion
+from openwam.dataloader.utils.lerobotv3 import (
+    digest_lerobot_v3_data_population,
+    read_lerobot_v3_population_shard,
+    resolve_lerobot_v3_data_population,
+)
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_ARM10, pin_rot6d_identity
 from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
@@ -63,14 +82,14 @@ SCHEMA: Dict[str, Dict] = {
     },
     "DROID": {
 
-        "state_cols": [
-            "observation.state.cartesian_position",
-            "observation.state.gripper_position",
-        ],
 
 
-        "action_cols": ["action.original"],
-        "state_fn": "droid_state",
+        "state_cols": ["state"],
+
+
+
+        "action_cols": ["other_information.action_tcp_pose"],
+        "state_fn": "euler7_state",
         "action_fn": "euler7_action",
     },
 }
@@ -84,10 +103,18 @@ def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
         assert_unit_quaternion(quat, tol=0.05, sample_n=min(64, len(quat)))
         return fractal_state_to_arm10(rows["observation.state"])
     if state_fn == "droid_state":
+
+
+
+
         return droid_state_to_arm10(
             rows["observation.state.cartesian_position"],
             rows["observation.state.gripper_position"],
         )
+    if state_fn == "euler7_state":
+
+
+        return euler7_action_to_arm10(rows[list(rows.keys())[0]])
     raise ValueError(f"unknown state_fn={state_fn}")
 
 
@@ -98,9 +125,8 @@ def _convert_action(rows: Dict[str, np.ndarray], action_fn: str) -> np.ndarray:
     raise ValueError(f"unknown action_fn={action_fn}")
 
 
-def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
+def _table_rows(table: pa.Table, cols: List[str]) -> Dict[str, np.ndarray]:
     """Public implementation. Dataset-specific audit notes were removed."""
-    table = pq.read_table(path, memory_map=True, columns=cols)
     out: Dict[str, np.ndarray] = {}
     for c in cols:
         col_data = table.column(c).to_pylist()
@@ -112,32 +138,63 @@ def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
     return out
 
 
-def compute_dataset_stats(
-    dataset_dir: Path, dataset_name: str, rot6d_identity: bool = True
-) -> Tuple[dict, int, int]:
+def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    return _table_rows(pq.read_table(path, memory_map=True, columns=cols), cols)
+
+
+def compute_dataset_stats(dataset_dir: Path, dataset_name: str, rot6d_identity: bool = True) -> Tuple[dict, int, int]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
 
 
     spec = SCHEMA[dataset_name]
-    parquet_paths = sorted((dataset_dir / "data").rglob("*.parquet"))
-    if not parquet_paths:
-        raise FileNotFoundError(f"No parquet shards under {dataset_dir}/data")
-    logger.info("%s: scanning %d parquet shards under %s/data", dataset_name, len(parquet_paths), dataset_dir)
+    excluded_episode_indices: set[int] = set()
+    droid_population = None
+    if dataset_name == "DROID":
+        droid_population = resolve_lerobot_v3_data_population(dataset_dir)
+        _, excluded_episode_indices = load_droid_prompt_exclusions(
+            dataset_dir,
+            population=droid_population,
+        )
+        shard_inputs = list(droid_population.shards)
+        logger.info("%s: scanning %d manifest-addressed data shards", dataset_name, len(shard_inputs))
+    else:
+        shard_inputs = sorted((dataset_dir / "data").rglob("*.parquet"))
+        if not shard_inputs:
+            raise FileNotFoundError(f"No parquet shards under {dataset_dir}/data")
+        logger.info("%s: scanning %d parquet shards under %s/data", dataset_name, len(shard_inputs), dataset_dir)
 
     state_arrs: List[np.ndarray] = []
     action_arrs: List[np.ndarray] = []
-    for i, p in enumerate(parquet_paths, start=1):
-        state_rows = _load_shard(p, spec["state_cols"])
-        action_rows = _load_shard(p, spec["action_cols"])
+    for i, shard_input in enumerate(shard_inputs, start=1):
+        if droid_population is not None:
+            columns = list(dict.fromkeys(["episode_index", *spec["state_cols"], *spec["action_cols"]]))
+            table = read_lerobot_v3_population_shard(dataset_dir, shard_input, columns)
+            if excluded_episode_indices:
+                episode_indices = table.column("episode_index").combine_chunks().to_numpy(zero_copy_only=False)
+                keep = ~np.isin(episode_indices, list(excluded_episode_indices))
+                if not keep.any():
+                    continue
+                table = table.filter(pa.array(keep))
+            state_rows = _table_rows(table, spec["state_cols"])
+            action_rows = _table_rows(table, spec["action_cols"])
+        else:
+            p = shard_input
+            state_rows = _load_shard(p, spec["state_cols"])
+            action_rows = _load_shard(p, spec["action_cols"])
+        if not state_rows or not action_rows:
+            continue
         state10 = _convert_state(state_rows, spec["state_fn"])
         action10 = _convert_action(action_rows, spec["action_fn"])
         state_arrs.append(state10)
         action_arrs.append(action10)
-        if i % 50 == 0 or i == len(parquet_paths):
-            logger.info("  %s: processed %d/%d shards", dataset_name, i, len(parquet_paths))
+        if i % 50 == 0 or i == len(shard_inputs):
+            logger.info("  %s: processed %d/%d shards", dataset_name, i, len(shard_inputs))
 
+    if not state_arrs:
+        raise ValueError(f"{dataset_name}: every parquet row is excluded; cannot compute stats")
     state_all = np.concatenate(state_arrs, axis=0)
     action_all = np.concatenate(action_arrs, axis=0)
     n_state = int(len(state_all))
@@ -158,11 +215,28 @@ def compute_dataset_stats(
         "n_action_samples": n_action,
         "min": merged.min(axis=0).astype(np.float64).tolist(),
         "max": merged.max(axis=0).astype(np.float64).tolist(),
-        "mean": merged.mean(axis=0).astype(np.float64).tolist(),
-        "std": merged.std(axis=0).astype(np.float64).tolist(),
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        "mean": merged.mean(axis=0, dtype=np.float64).tolist(),
+        "std": merged.std(axis=0, dtype=np.float64).tolist(),
         "q01": np.quantile(merged, 0.01, axis=0).astype(np.float64).tolist(),
         "q99": np.quantile(merged, 0.99, axis=0).astype(np.float64).tolist(),
     }
+    if dataset_name == "DROID":
+        stats["excluded_episode_indices"] = sorted(excluded_episode_indices)
+        stats[DROID_DATA_POPULATION_DIGEST_KEY] = digest_lerobot_v3_data_population(droid_population)
     if rot6d_identity:
 
         pin_rot6d_identity(stats, ROT6D_DIMS_ARM10)
@@ -202,6 +276,14 @@ def main():
     )
     parser.add_argument("--all", action="store_true", help="Process all 4 OXE datasets")
     parser.add_argument(
+        "--dataset-dir",
+        type=str,
+        default=None,
+        help="Bucket path to scan, overriding {root}/{dataset}-Dataset. Requires --dataset "
+        "(the schema to read it with) and is incompatible with --all. Use when a bucket lives "
+        "outside the OXE root, e.g. --dataset DROID --dataset-dir /path/to/pretrain_dataset/Droid",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Compute and print stats but do not write meta/eef_stats.json",
@@ -216,16 +298,16 @@ def main():
 
     if not args.dataset and not args.all:
         parser.error("must specify either --dataset NAME or --all")
+    if args.dataset_dir and args.all:
+        parser.error("--dataset-dir applies to a single bucket; use --dataset NAME, not --all")
     targets = list(SCHEMA.keys()) if args.all else [args.dataset]
     root = Path(args.root)
     for name in targets:
-        ds_dir = root / f"{name}-Dataset"
+        ds_dir = Path(args.dataset_dir) if args.dataset_dir else root / f"{name}-Dataset"
         if not ds_dir.is_dir():
             logger.warning("%s: directory %s missing, skipping", name, ds_dir)
             continue
-        stats, n_state, n_action = compute_dataset_stats(
-            ds_dir, name, rot6d_identity=not args.no_rot6d_identity
-        )
+        stats, n_state, n_action = compute_dataset_stats(ds_dir, name, rot6d_identity=not args.no_rot6d_identity)
         _print_stats_table(stats, name)
         if not args.dry_run:
             out_path = ds_dir / "meta" / "eef_stats.json"

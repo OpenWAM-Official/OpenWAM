@@ -80,7 +80,6 @@ from openwam.dataloader.utils.lerobotv3 import (
     build_multibucket,
     compute_file_local_offsets,
     load_episodes_parquet,
-    load_excluded_episodes_snapshot,
     load_tasks_annotated,
     parse_info_json,
     resolve_prompt_by_episode,
@@ -330,6 +329,11 @@ class LeRobotV3Reader(BaseDataset):
         # LeRobot v2.1: per-episode parquet + meta/episodes.jsonl) can supply
         # the same eps DataFrame contract without reimplementing __init__.
         self._eps_df = self._build_episode_index(info)
+        # Stable universe for scan_dataset's over-exclusion guardrail. Capture
+        # it before this reader applies the mutable exclusion artifact; using a
+        # post-exclusion length plus a later artifact snapshot races concurrent
+        # exclusion writers and can overstate the denominator.
+        self._n_episodes_before_exclusions = int(len(self._eps_df))
 
         # ── per-bucket episode exclusion (data-quality blacklist) ─────────
         # meta/excluded_episodes.json holds episode_index values that must not
@@ -338,8 +342,7 @@ class LeRobotV3Reader(BaseDataset):
         # alignment-safe filter path as info splits; physically deleting
         # episodes-parquet rows would shift the groupby-cumsum offsets of
         # later episodes in each (chunk, file) shard and misalign them.
-        self._excluded_episodes_snapshot = load_excluded_episodes_snapshot(self._dataset_dir)
-        excluded = self._excluded_episodes_snapshot.episode_indices
+        excluded = self._load_excluded_episode_indices()
         if excluded:
             n_before = len(self._eps_df)
             self._eps_df = self._eps_df[~self._eps_df["episode_index"].isin(excluded)].reset_index(drop=True)
@@ -503,6 +506,23 @@ class LeRobotV3Reader(BaseDataset):
         self._add_episode_offsets(eps)
         info_splits = info.get("splits", {}) or {}
         return apply_info_splits(eps, self._split, info_splits, source_name=f"{self.DATASET_NAME}({self._dataset_id})")
+
+    def _load_excluded_episode_indices(self) -> set[int]:
+        """Return the episode blacklist used by the construction-time filter.
+
+        The default reads the generic scanner artifact. Subclasses that already
+        validated and cached this artifact while building their episode index
+        may return that canonical snapshot, preventing a second read from
+        observing a concurrent atomic replacement.
+        """
+        path = self._dataset_dir / "meta" / "excluded_episodes.json"
+        if not path.exists():
+            return set()
+
+        import json
+
+        with open(path) as f:
+            return set(json.load(f)["episode_indices"])
 
     def _train_min_window_len(self) -> int:
         """Min episode length to yield a train window. 1 = any single labeled step."""
