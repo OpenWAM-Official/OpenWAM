@@ -549,3 +549,62 @@ class TestDirectBucketParity:
         res = self._run(monkeypatch, d, trim, out)
         assert "." not in res["exclusions"], "direct-bucket key leaked as '.'"
         assert res["exclusions"]["task"] == exclusion_digest(d)
+
+
+class TestCoverageOnlyAfterSuccess:
+    """A bucket that failed to scan must not appear in `exclusions`.
+
+    The loader reads a resolvable entry there as proof that these statistics
+    covered that bucket. Building the map up front listed skipped buckets too,
+    so a bucket that raised — contributing no rows at all — still had its reader
+    accept the file.
+    """
+
+    def test_a_failed_bucket_is_absent_from_coverage(self, tmp_path):
+        good = _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
+        bad = _make_bucket(tmp_path, "cat/emb/bad", n_eps=2, ep_len=8)
+        # Strip episode_index so the scan of `bad` raises (trim/exclusions cannot
+        # select rows without it).
+        (bad / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        p = bad / "data" / "chunk-000" / "file-000.parquet"
+        t = pq.read_table(p)
+        pq.write_table(t.drop(["episode_index"]), p)
+
+        out = a1s.compute_stats_for_embodiment(
+            "split_aloha", _group([good, bad], "bimanual", "AgileX Split Aloha"),
+            workers=1, root=tmp_path,
+        )
+        assert out["num_buckets"] == 1
+        assert "cat/emb/good" in out["exclusions"]
+        assert "cat/emb/bad" not in out["exclusions"], "a skipped bucket was recorded as covered"
+
+
+class TestSplitFailuresDoNotFailOpen:
+    """"Cannot determine the population" must never degrade into "use every row".
+
+    The reader raises on the same metadata and refuses the bucket, so pooling it
+    here would put rows into the normalizer that training can never load.
+    """
+
+    def test_a_malformed_split_spec_raises(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
+        info = json.loads((d / "meta" / "info.json").read_text())
+        info["splits"] = {"train": "not-a-range"}
+        (d / "meta" / "info.json").write_text(json.dumps(info))
+        with pytest.raises(ValueError, match="unusable splits"):
+            a1s._split_episodes(d, "train")
+
+    def test_an_unreadable_manifest_raises(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
+        for f in (d / "meta" / "episodes").rglob("*.parquet"):
+            f.unlink()
+        with pytest.raises(ValueError, match="population is unknown"):
+            a1s._split_episodes(d, "train")
+
+    def test_absent_splits_are_empty_for_val_not_everything(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
+        info = json.loads((d / "meta" / "info.json").read_text())
+        info.pop("splits", None)
+        (d / "meta" / "info.json").write_text(json.dumps(info))
+        assert a1s._split_episodes(d, "train") is None      # unrestricted
+        assert a1s._split_episodes(d, "val") == set()       # not "everything"

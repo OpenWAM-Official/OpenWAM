@@ -85,14 +85,12 @@ from openwam.dataloader.interndata_a1 import (
     _SINGLE_ARM_SIDES,
 
 
-
     _load_trim_spec,
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
-
-
     exclusion_digest,
+    resolve_bucket_key,
     resolve_gripper_scale,
     resolve_trim_bounds,
     trim_digest,
@@ -228,13 +226,16 @@ def _split_episodes(bucket: Path, split: str) -> Optional[set]:
     try:
         with open(bucket / "meta" / "info.json") as f:
             splits = json.load(f).get("splits")
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{bucket}: cannot read meta/info.json for split resolution ({e})") from e
     if not splits:
-        return None
+
+
+
+        return None if split == "train" else set()
     eps = _manifest_episodes(bucket)
     if eps is None:
-        return None
+        raise ValueError(f"{bucket}: meta/episodes is unreadable, so the population is unknown")
     import pandas as pd
 
     from openwam.dataloader.utils.lerobotv3 import apply_info_splits
@@ -242,9 +243,11 @@ def _split_episodes(bucket: Path, split: str) -> Optional[set]:
     df = pd.DataFrame({"episode_index": sorted(eps)})
     try:
         return set(apply_info_splits(df, split, splits, source_name=str(bucket))["episode_index"])
-    except Exception:
-        logger.warning("%s: unusable splits %r; not filtering by split", bucket, splits)
-        return None
+    except Exception as e:
+
+
+
+        raise ValueError(f"{bucket}: unusable splits {splits!r} ({e})") from e
 
 
 def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
@@ -333,7 +336,16 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
 
 
 
-    trim = _load_trim_spec(trim_csv).get(dataset_id) if trim_csv else None
+
+
+
+
+    trim = None
+    if trim_csv:
+        spec = _load_trim_spec(trim_csv)
+        key = resolve_bucket_key(spec, dataset_id or bucket.name, bucket.name,
+                                 what="trim_csv", source=f"stats({dataset_id})")
+        trim = spec.get(key) if key is not None else None
     kept = _kept_episodes(bucket) if (trim_csv or (bucket / "meta" / "episodes").is_dir()) else None
 
 
@@ -418,7 +430,9 @@ def compute_stats_for_embodiment(
     tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv, min_len, split) for d in dirs]
 
 
-    exclusions = {_rel_id(d): exclusion_digest(d) for d in dirs}
+
+
+    exclusions: Dict[str, Optional[str]] = {}
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
 
@@ -439,6 +453,7 @@ def compute_stats_for_embodiment(
             except Exception as e:
                 logger.warning("  [%s] skipping %s (%s)", embodiment, name, e)
                 continue
+            exclusions[_rel_id(Path(name))] = exclusion_digest(Path(name))
             if len(rows):
                 acc.update_batch(rows)
                 n_rows += len(rows)
@@ -470,6 +485,10 @@ def compute_stats_for_embodiment(
 
 
         "exclusions": exclusions,
+
+
+
+        "split": split,
         "rot6d_identity": bool(rot6d_identity),
         "layout_doc": "[L_xyz(0:3), L_rot6d(3:9), L_grip(9), R_xyz(10:13), R_rot6d(13:19), R_grip(19)]",
     }

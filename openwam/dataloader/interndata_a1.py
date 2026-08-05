@@ -594,6 +594,46 @@ def exclusion_digest(bucket) -> Optional[str]:
     return hashlib.sha256(repr(idx).encode()).hexdigest()[:16]
 
 
+class AmbiguousBucketKey(LookupError):
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+def resolve_bucket_key(keys, dataset_id: str, dir_name: str, *, what: str,
+                       source: str) -> Optional[str]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    if dataset_id in keys:
+        return dataset_id
+    cands = sorted(k for k in keys if k == dir_name or k.endswith("/" + dir_name))
+    if len(cands) == 1:
+        return cands[0]
+    if len(cands) > 1:
+        raise AmbiguousBucketKey(
+            f"{source}: {what} has {len(cands)} buckets whose path ends in {dir_name!r} "
+            f"({', '.join(cands[:4])}{' ...' if len(cands) > 4 else ''}). Bucket leaf names "
+            "repeat across tasks, so this one cannot be identified from its directory name. "
+            "Pass dataset_id (or --dataset_dir at the corpus root) so buckets are keyed by "
+            "their path relative to the root, which is what these files key on."
+        )
+    return None
+
+
 def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int, int]]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -779,6 +819,22 @@ class InternDataA1Dataset(LeRobotV3Reader):
             raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
 
         starts = np.concatenate([[0], np.cumsum([n for _, _, n in data_files])]).astype(np.int64)
+
+
+
+
+
+
+
+        manifest_end = int(eps["dataset_to_index"].to_numpy().max())
+        if manifest_end != int(starts[-1]):
+            raise ValueError(
+                f"{self.DATASET_NAME}({self._dataset_id}): the data shards hold {int(starts[-1])} "
+                f"rows but the manifest ends at {manifest_end}. A shard is missing, truncated or "
+                "out of order — resolving offsets against this would map episodes onto another "
+                "episode's rows."
+            )
+
         global_starts = eps["dataset_from_index"].to_numpy().astype(np.int64)
         file_pos = np.searchsorted(starts, global_starts, side="right") - 1
         if (file_pos < 0).any() or (file_pos >= len(data_files)).any():
@@ -786,9 +842,35 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"{self.DATASET_NAME}({self._dataset_id}): dataset_from_index outside the "
                 "data parquet row range"
             )
+
         eps["data/chunk_index"] = np.array([data_files[i][0] for i in file_pos], dtype=np.int64)
         eps["data/file_index"] = np.array([data_files[i][1] for i in file_pos], dtype=np.int64)
         eps["_data_row_offset"] = global_starts - starts[file_pos]
+
+    def _add_episode_offsets(self, eps) -> None:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        super()._add_episode_offsets(eps)
+        for cam in self._video_cameras():
+            col = f"videos/{cam}/from_timestamp"
+            if col in eps.columns:
+                eps[self._video_offset_col(cam)] = np.rint(
+                    eps[col].to_numpy().astype(np.float64) * self._fps
+                ).astype(np.int64)
 
     def _trim_min_len(self) -> int:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -815,24 +897,8 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        if self._dataset_id in keys:
-            return self._dataset_id
-        name = self._dataset_dir.name
-        cands = [k for k in keys if k == name or k.endswith("/" + name)]
-        if len(cands) == 1:
-            return cands[0]
-        if len(cands) > 1:
-            logger.warning(
-                "InternDataA1(%s): %s has %d buckets ending in %r (%s); cannot tell which "
-                "one this is. Pass an explicit dataset_id matching the bucket path relative "
-                "to the dataset root.",
-                self._dataset_id,
-                what,
-                len(cands),
-                name,
-                ", ".join(sorted(cands)[:4]),
-            )
-        return None
+        return resolve_bucket_key(keys, self._dataset_id, self._dataset_dir.name,
+                                  what=what, source=f"InternDataA1({self._dataset_id})")
 
     def _trim_key(self) -> Optional[str]:
         spec = _load_trim_spec(self._trim_csv)
@@ -1015,6 +1081,19 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"were computed with {_desc(recorded, raw.get('trim_csv'))}, but this reader is "
                 f"configured with {_desc(active, self._trim_csv)}. Trimmed and untrimmed stats "
                 f"are not interchangeable. {_regen_hint()}"
+            )
+
+
+
+
+
+
+        gen_split = raw.get("split")
+        if gen_split is not None and gen_split != "train":
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: normalization stats in {stats_path} "
+                f"were generated from split={gen_split!r}. Stats must come from the training "
+                f"distribution — a val reader consumes train-derived stats too. {_regen_hint()}"
             )
 
 

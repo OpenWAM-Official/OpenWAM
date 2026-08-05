@@ -26,12 +26,14 @@ from PIL import Image
 
 from openwam.dataloader.interndata_a1 import (
     ROBOT_TYPE_TO_EMBODIMENT,
+    AmbiguousBucketKey,
     InternDataA1Dataset,
     MultiInternDataA1Dataset,
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
     exclusion_digest,
+    resolve_bucket_key,
     resolve_trim_bounds,
     trim_digest,
 )
@@ -175,6 +177,10 @@ def _make_bucket(
         for c in cams:
             row[f"videos/{c}/chunk_index"] = 0
             row[f"videos/{c}/file_index"] = 0
+            # Real manifests carry these; the reader derives each camera's frame
+            # offset from from_timestamp rather than a cumsum over surviving rows.
+            row[f"videos/{c}/from_timestamp"] = (e * ep_len) / 30.0
+            row[f"videos/{c}/to_timestamp"] = ((e + 1) * ep_len) / 30.0
         rows.append(row)
     pq.write_table(
         pa.Table.from_pandas(pd.DataFrame(rows)),
@@ -874,6 +880,13 @@ class TestCleanedViewOffsets:
 
         assert ds._eps_df["episode_index"].tolist() == [1]
         assert int(ds._ep_data_row_offset[0]) == 4  # physical start, not 0
+        # And EVERY camera, not just the parquet rows. Checking only the data
+        # offset once let a half-fix advertise alignment safety while the video
+        # offsets still collapsed to 0 — pairing episode 1's actions with
+        # episode 0's frames, which is worse than either error alone.
+        assert ds._ep_video_frame_offsets, "no camera offsets resolved"
+        for cam, off in ds._ep_video_frame_offsets.items():
+            assert int(off[0]) == 4, f"{cam} offset collapsed to {int(off[0])}"
 
 
 class TestTrimStatsProvenance:
@@ -1187,3 +1200,101 @@ class TestStaleShardIndex:
         pos = list(ds._eps_df.index).index(i)
         assert int(ds._eps_df["data/file_index"].loc[i]) == 0
         assert int(ds._ep_data_row_offset[pos]) == 0
+
+
+class TestShardCompleteness:
+    """A missing middle shard must fail loudly, not resolve onto another episode.
+
+    The cumulative boundaries close over whatever files exist, so with file-001
+    gone every episode start still lands inside the total found on disk — and
+    each later episode maps to a plausible row of the wrong file. The manifest's
+    own end index is the independent witness.
+    """
+
+    def test_a_missing_middle_shard_is_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=3, ep_len=4)
+        src = d / "data" / "chunk-000" / "file-000.parquet"
+        t = pq.read_table(src)
+        pq.write_table(t.slice(0, 4), src)                                            # ep0
+        pq.write_table(t.slice(8, 4), d / "data" / "chunk-000" / "file-002.parquet")  # ep2; ep1's shard absent
+        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        m = pq.read_table(man).to_pydict()
+        m["dataset_from_index"] = [0, 4, 8]
+        m["dataset_to_index"] = [4, 8, 12]
+        pq.write_table(pa.Table.from_pydict(m), man)
+
+        with pytest.raises(ValueError, match="shard is missing"):
+            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+
+    def test_complete_shards_are_accepted(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
+        src = d / "data" / "chunk-000" / "file-000.parquet"
+        t = pq.read_table(src)
+        pq.write_table(t.slice(0, 4), src)
+        pq.write_table(t.slice(4, 4), d / "data" / "chunk-000" / "file-001.parquet")
+        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        m = pq.read_table(man).to_pydict()
+        m["dataset_from_index"] = [0, 4]
+        m["dataset_to_index"] = [4, 8]
+        pq.write_table(pa.Table.from_pydict(m), man)
+        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+        assert len(ds._eps_df) == 2
+
+
+class TestStatsSplitProvenance:
+    """Normalization must be derived from the training distribution — a val
+    reader consumes train-derived stats too — so the check is on how the file
+    was GENERATED, not on who is reading it."""
+
+    def _stats(self, root: Path, **extra):
+        eef = {
+            "mean": [0.0] * EEF_DIM, "std": [1.0] * EEF_DIM,
+            "min": [-2.0] * EEF_DIM, "max": [2.0] * EEF_DIM,
+            "q01": [-2.0] * EEF_DIM, "q99": [2.0] * EEF_DIM,
+        }
+        for dim in ROT6D_DIMS_EEF20:
+            eef["q01"][dim] = -1.0
+            eef["q99"][dim] = 1.0
+        (root / "meta").mkdir(parents=True, exist_ok=True)
+        (root / "meta" / "stats_split_aloha.json").write_text(json.dumps({"eef": eef, **extra}))
+
+    def test_val_generated_stats_are_refused_by_a_train_reader(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        self._stats(tmp_path, split="val")
+        with pytest.raises(ValueError, match="generated from split"):
+            InternDataA1Dataset(
+                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+                normalize_mode="quantile", num_frames=9, video_stride=4,
+            )
+
+    def test_train_generated_stats_are_accepted_by_a_val_reader(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        self._stats(tmp_path, split="train")
+        ds = InternDataA1Dataset(
+            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
+            normalize_mode="quantile", num_frames=9, video_stride=4, split="val",
+        )
+        assert ds._normalization_stats is not None
+
+
+class TestAmbiguousBucketName:
+    """`<cat>/<emb>/<task>/<object>` is a documented depth, so repeating leaf
+    names is expected — the error must say that, and prescribe something that
+    actually helps (regenerating produces the same names)."""
+
+    def test_the_message_names_the_real_cause_and_a_working_remedy(self):
+        with pytest.raises(AmbiguousBucketKey) as e:
+            resolve_bucket_key(
+                {"a/emb/task/obj": None, "b/emb/task/obj": None},
+                dataset_id="obj", dir_name="obj", what="trim_csv", source="test",
+            )
+        msg = str(e.value)
+        assert "repeat across tasks" in msg
+        assert "dataset_id" in msg
+        assert "regenerat" not in msg.lower(), "must not prescribe a remedy that reproduces it"
+
+    def test_a_unique_suffix_still_resolves(self):
+        assert resolve_bucket_key(
+            {"a/emb/task": None, "b/emb/other": None},
+            dataset_id="task", dir_name="task", what="trim_csv", source="test",
+        ) == "a/emb/task"
