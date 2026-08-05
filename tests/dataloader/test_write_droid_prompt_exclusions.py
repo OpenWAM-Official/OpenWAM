@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +13,7 @@ import pytest
 
 from openwam.dataloader.oxe_droid import (
     DROID_PROMPT_EXCLUSION_SCHEMA_VERSION,
+    DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION,
     DROID_PROMPT_INPUTS_DIGEST_KEY,
     OxeDroidDataset,
     load_droid_prompt_exclusions,
@@ -40,7 +42,26 @@ def _write_bucket(
 ) -> Path:
     root = tmp_path / "Droid"
     (root / "meta").mkdir(parents=True)
+    (root / "meta" / "episodes").mkdir()
     (root / "data" / "chunk-000").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text(
+        json.dumps(
+            {
+                "fps": 10,
+                "total_frames": len(fallback),
+                "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+            }
+        )
+    )
+    pd.DataFrame(
+        {
+            "episode_index": [episode_index],
+            "length": [len(fallback)],
+            "dataset_from_index": [0],
+            "data/chunk_index": [0],
+            "data/file_index": [0],
+        }
+    ).to_parquet(root / "meta" / "episodes" / "chunk-000.parquet")
     pd.DataFrame(
         {"task_index": [0]},
         index=pd.Index([task_text], name="task"),
@@ -123,7 +144,7 @@ def test_existing_exclusions_are_unioned_and_provenance_is_preserved(tmp_path):
     assert payload["droid_prompt_exclusions"]["latest_scan"]["episode_indices"] == [0]
     digest = payload["droid_prompt_exclusions"]["latest_scan"][DROID_PROMPT_INPUTS_DIGEST_KEY]
     assert digest["algorithm"] == "sha256"
-    assert digest["format_version"] == 1
+    assert digest["format_version"] == DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION
     assert len(digest["value"]) == 64
 
 
@@ -242,22 +263,121 @@ def test_info_row_count_mismatch_does_not_publish(tmp_path):
     result = _run_generator(root)
 
     assert result.returncode != 0
-    assert "prompt scan covered 1 rows" in result.stderr
+    assert "episodes manifest addresses 1 rows" in result.stderr
     assert out.read_bytes() == original
 
 
-def test_publish_refuses_to_overwrite_artifact_changed_during_scan(tmp_path):
+def test_generator_refuses_rglob_backup_when_manifest_target_is_missing(tmp_path):
+    root = _write_bucket(tmp_path, task_text="task", data_task_index=0, fallback=[""])
+    out = root / "meta" / "excluded_episodes.json"
+    original = b'{"episode_indices":[999],"reason":"truncated video"}\n'
+    out.write_bytes(original)
+    (root / "data" / "chunk-000" / "file-000.parquet").rename(root / "data" / "chunk-000" / "backup.parquet")
+
+    result = _run_generator(root)
+
+    assert result.returncode != 0
+    assert "file-000.parquet" in result.stderr
+    assert out.read_bytes() == original
+
+
+def test_generator_ignores_unreferenced_backup_parquet(tmp_path):
+    root = _write_bucket(tmp_path, task_text="task", data_task_index=0, fallback=[""])
+    backup = pd.read_parquet(root / "data" / "chunk-000" / "file-000.parquet")
+    backup["episode_index"] = 999
+    backup.to_parquet(root / "data" / "chunk-000" / "backup.parquet")
+
+    result = _run_generator(root)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((root / "meta" / "excluded_episodes.json").read_text())
+    assert payload["episode_indices"] == []
+    assert payload["droid_prompt_exclusions"]["latest_scan"]["stats"]["rows_scanned"] == 1
+
+
+def test_generator_honors_nondefault_info_data_path(tmp_path):
+    root = _write_bucket(tmp_path, task_text="task", data_task_index=0, fallback=[""])
+    custom_dir = root / "custom"
+    custom_dir.mkdir()
+    (root / "data" / "chunk-000" / "file-000.parquet").rename(custom_dir / "shard-0.parquet")
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["data_path"] = "custom/shard-{file_index}.parquet"
+    info_path.write_text(json.dumps(info))
+
+    result = _run_generator(root)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads((root / "meta" / "excluded_episodes.json").read_text())["episode_indices"] == []
+
+
+def test_generator_rejects_manifest_episode_mapping_that_disagrees_with_rows(tmp_path):
+    root = _write_bucket(tmp_path, task_text="", data_task_index=0, fallback=["", "valid fallback"])
+    data_path = root / "data" / "chunk-000" / "file-000.parquet"
+    frame_data = pd.read_parquet(data_path)
+    frame_data["episode_index"] = [0, 1]
+    frame_data.to_parquet(data_path)
+    pd.DataFrame(
+        {
+            "episode_index": [1, 0],
+            "length": [1, 1],
+            "dataset_from_index": [0, 1],
+            "data/chunk_index": [0, 0],
+            "data/file_index": [0, 0],
+        }
+    ).to_parquet(root / "meta" / "episodes" / "chunk-000.parquet")
+    out = root / "meta" / "excluded_episodes.json"
+    original = b'{"episode_indices":[999],"reason":"truncated video"}\n'
+    out.write_bytes(original)
+
+    result = _run_generator(root)
+
+    assert result.returncode != 0
+    assert "episode_index" in result.stderr
+    assert out.read_bytes() == original
+
+
+def test_publish_reloads_and_merges_artifact_changed_during_scan(tmp_path, monkeypatch):
     generator = _load_generator_module()
-    out = tmp_path / "excluded_episodes.json"
-    preflight = b'{"episode_indices":[1]}'
-    newer = b'{"episode_indices":[1,2]}'
-    out.write_bytes(newer)
+    root = _write_bucket(tmp_path, task_text="", data_task_index=0, fallback=[""])
+    out = root / "meta" / "excluded_episodes.json"
+    out.write_text(json.dumps({"episode_indices": [1], "reason": "video scan"}))
 
-    with pytest.raises(SystemExit, match="changed during the prompt scan"):
-        generator._atomic_write_text(out, '{"episode_indices":[3]}', expected=preflight)
+    class _ImmediateFuture:
+        def __init__(self, value):
+            self._value = value
 
-    assert out.read_bytes() == newer
-    assert list(tmp_path.glob("*.tmp")) == []
+        def result(self):
+            return self._value
+
+    class _ImmediateExecutor:
+        def __init__(self, *, initializer, initargs, **_kwargs):
+            initializer(*initargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def submit(self, function, *args):
+            return _ImmediateFuture(function(*args))
+
+    @contextmanager
+    def _inject_concurrent_update(_paths):
+        out.write_text(json.dumps({"episode_indices": [1, 2], "reason": "video scan"}))
+        yield
+
+    monkeypatch.setattr(generator, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(generator, "as_completed", lambda futures: futures)
+    monkeypatch.setattr(generator, "locked_exclusion_files", _inject_concurrent_update)
+    monkeypatch.setattr(sys, "argv", [str(_SCRIPT), "--dataset-dir", str(root), "--workers", "1"])
+
+    generator.main()
+
+    payload = json.loads(out.read_text())
+    assert payload["episode_indices"] == [0, 1, 2]
+    assert payload["droid_prompt_exclusions"]["independently_owned_episode_indices"] == [1, 2]
 
 
 def test_prompt_inputs_digest_is_stable_across_worker_completion_order(tmp_path):
@@ -265,6 +385,19 @@ def test_prompt_inputs_digest_is_stable_across_worker_completion_order(tmp_path)
     first_shard = pd.read_parquet(root / "data" / "chunk-000" / "file-000.parquet")
     first_shard["episode_index"] = 1
     first_shard.to_parquet(root / "data" / "chunk-000" / "file-001.parquet")
+    pd.DataFrame(
+        {
+            "episode_index": [0, 1],
+            "length": [1, 1],
+            "dataset_from_index": [0, 1],
+            "data/chunk_index": [0, 0],
+            "data/file_index": [0, 1],
+        }
+    ).to_parquet(root / "meta" / "episodes" / "chunk-000.parquet")
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["total_frames"] = 2
+    info_path.write_text(json.dumps(info))
 
     first = _run_generator(root)
     assert first.returncode == 0, first.stderr

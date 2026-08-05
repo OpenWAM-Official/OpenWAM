@@ -48,6 +48,9 @@
 
 
 
+
+
+
 from __future__ import annotations
 
 import argparse
@@ -70,10 +73,15 @@ from openwam.dataloader.oxe_droid import (
     DROID_PROMPT_INPUTS_DIGEST_KEY,
     OxeDroidDataset,
     _clean_text,
-    _read_droid_prompt_source_table,
     _sha256_file,
     compute_droid_prompt_inputs_digest,
     digest_droid_prompt_shard,
+    read_droid_prompt_population_shard,
+)
+from openwam.dataloader.utils.exclusion_io import atomic_publish_text, locked_exclusion_files
+from openwam.dataloader.utils.lerobotv3 import (
+    LeRobotV3DataShard,
+    resolve_lerobot_v3_data_population,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -95,12 +103,13 @@ def _init(dataset_dir: str, task_text: dict[int, str]) -> None:
     _TASK_TEXT = task_text
 
 
-def _scan_shard(rel_path: str) -> dict:
+def _scan_shard(shard: LeRobotV3DataShard) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
     assert _TASK_TEXT is not None and _DATASET_DIR is not None
+    rel_path = shard.relative_path
     path = _DATASET_DIR / rel_path
     revision_before = _file_revision(path)
-    table = _read_droid_prompt_source_table(path)
+    table = read_droid_prompt_population_shard(_DATASET_DIR, shard)
     shard_digest = digest_droid_prompt_shard(table)
     revision_after = _file_revision(path)
     if revision_after != revision_before:
@@ -155,19 +164,6 @@ def _parse_episode_indices(value, field: str) -> set[int]:
     return set(value)
 
 
-def _atomic_write_text(path: Path, text: str, expected: bytes | None) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        current = path.read_bytes() if path.exists() else None
-        if current != expected:
-            raise SystemExit(f"{path} changed during the prompt scan; refusing to overwrite newer exclusions")
-        tmp.replace(path)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
 def _is_original_generator_artifact(previous: dict, existing: set[int]) -> bool:
     """Public implementation. Dataset-specific audit notes were removed."""
     if set(previous) != {"reason", "generated", "episode_indices", "stats"}:
@@ -202,10 +198,10 @@ def _is_original_generator_artifact(previous: dict, existing: set[int]) -> bool:
     )
 
 
-def _load_existing_ownership(out: Path) -> tuple[dict, dict, set[int], bytes | None]:
+def _load_existing_ownership(out: Path) -> tuple[dict, dict, set[int]]:
     """Public implementation. Dataset-specific audit notes were removed."""
     if not out.exists():
-        return {}, {}, set(), None
+        return {}, {}, set()
     try:
         snapshot = out.read_bytes()
         previous = json.loads(snapshot)
@@ -233,15 +229,15 @@ def _load_existing_ownership(out: Path) -> tuple[dict, dict, set[int], bytes | N
                 raise ValueError(
                     "episode_indices must equal the union of prompt-owned and independently-owned exclusions"
                 )
-            return previous, previous_prompt, independently_owned, snapshot
+            return previous, previous_prompt, independently_owned
         if _is_original_generator_artifact(previous, existing):
 
 
 
-            return {}, {}, set(), snapshot
+            return {}, {}, set()
 
 
-        return previous, {}, existing, snapshot
+        return previous, {}, existing
     except (KeyError, TypeError, ValueError) as exc:
         raise SystemExit(f"existing exclusion file {out} is malformed ({exc}); refusing to replace it") from exc
 
@@ -269,6 +265,20 @@ def _validate_total_frames(root: Path, rows_scanned: int) -> None:
         )
 
 
+def _validate_source_snapshot(root, population, tasks_path, tasks_sha256, results, rows) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    _validate_total_frames(root, rows)
+    current_population = resolve_lerobot_v3_data_population(root)
+    if current_population != population:
+        raise SystemExit("info.json or the episodes manifest changed during the prompt scan; refusing to publish")
+    if _sha256_file(tasks_path) != tasks_sha256:
+        raise SystemExit(f"{tasks_path} changed during the prompt scan; refusing to publish exclusions")
+    for result in results:
+        path = root / result["rel_path"]
+        if _file_revision(path) != tuple(result["source_revision"]):
+            raise SystemExit(f"{path} changed during the prompt scan; refusing to publish exclusions")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset-dir", required=True, help="DROID LeRobot v3 bucket root")
@@ -278,10 +288,9 @@ def main() -> None:
 
     root = Path(args.dataset_dir)
     out = root / "meta" / "excluded_episodes.json"
-    previous, previous_prompt, independently_owned, existing_snapshot = _load_existing_ownership(out)
-    shards = sorted(p.relative_to(root).as_posix() for p in (root / "data").rglob("*.parquet"))
-    if not shards:
-        raise FileNotFoundError(f"no data parquet under {root}/data")
+    _load_existing_ownership(out)
+    population = resolve_lerobot_v3_data_population(root)
+    shards = population.shards
     tasks_path = root / "meta" / "tasks.parquet"
     tasks_bytes = tasks_path.read_bytes()
     tasks_sha256 = hashlib.sha256(tasks_bytes).hexdigest()
@@ -291,7 +300,7 @@ def main() -> None:
 
     results = []
     with ProcessPoolExecutor(max_workers=args.workers, initializer=_init, initargs=(str(root), task_text)) as ex:
-        futs = [ex.submit(_scan_shard, s) for s in shards]
+        futs = [ex.submit(_scan_shard, shard) for shard in shards]
         for i, f in enumerate(as_completed(futs), 1):
             results.append(f.result())
             if i % 50 == 0 or i == len(shards):
@@ -320,21 +329,17 @@ def main() -> None:
             "prompt scan violated reader invariants; refusing to publish an exclusion file "
             f"(partially unresolved episodes={len(partial)}, missing task_index values={len(missing)})"
         )
-    _validate_total_frames(root, rows)
-    if _sha256_file(tasks_path) != tasks_sha256:
-        raise SystemExit(f"{tasks_path} changed during the prompt scan; refusing to publish exclusions")
     shard_digests = {}
     for result in results:
         rel_path = result["rel_path"]
         if rel_path in shard_digests:
             raise SystemExit(f"prompt scan returned duplicate shard result for {rel_path}")
-        if _file_revision(root / rel_path) != tuple(result["source_revision"]):
-            raise SystemExit(f"{root / rel_path} changed during the prompt scan; refusing to publish exclusions")
         shard_digests[rel_path] = result["prompt_inputs_shard_digest"]
     prompt_inputs_digest = compute_droid_prompt_inputs_digest(
         root,
         shard_digests=shard_digests,
         tasks_sha256=tasks_sha256,
+        population=population,
     )
 
     stats = {
@@ -345,35 +350,38 @@ def main() -> None:
         "task_index_missing_from_tasks_parquet": len(missing),
         "fallback_chain": FALLBACK_COLS,
     }
-    merged = sorted(independently_owned | set(bad))
-    prompt_payload = {
-        **previous_prompt,
-        "reason": PROMPT_REASON,
-        "schema_version": DROID_PROMPT_EXCLUSION_SCHEMA_VERSION,
-        "fallback_chain": FALLBACK_COLS,
-        "episode_indices": bad,
-        DROID_PROMPT_INDEPENDENT_EXCLUSIONS_KEY: sorted(independently_owned),
-        "latest_scan": {
-            "generated": date.today().isoformat(),
+    with locked_exclusion_files([out]):
+        _validate_source_snapshot(root, population, tasks_path, tasks_sha256, results, rows)
+        previous, previous_prompt, independently_owned = _load_existing_ownership(out)
+        merged = sorted(independently_owned | set(bad))
+        prompt_payload = {
+            **previous_prompt,
+            "reason": PROMPT_REASON,
+            "schema_version": DROID_PROMPT_EXCLUSION_SCHEMA_VERSION,
+            "fallback_chain": FALLBACK_COLS,
             "episode_indices": bad,
-            "stats": stats,
-            DROID_PROMPT_INPUTS_DIGEST_KEY: prompt_inputs_digest,
-        },
-    }
-    payload = {
-        **previous,
-        "episode_indices": merged,
-        DROID_PROMPT_EXCLUSION_KEY: prompt_payload,
-    }
-    if args.dry_run:
-        logger.info(
-            "--dry-run: would merge %d prompt exclusions into %s (%d total episode_indices)",
-            len(bad),
-            out,
-            len(merged),
-        )
-        return
-    _atomic_write_text(out, json.dumps(payload, indent=2) + "\n", expected=existing_snapshot)
+            DROID_PROMPT_INDEPENDENT_EXCLUSIONS_KEY: sorted(independently_owned),
+            "latest_scan": {
+                "generated": date.today().isoformat(),
+                "episode_indices": bad,
+                "stats": stats,
+                DROID_PROMPT_INPUTS_DIGEST_KEY: prompt_inputs_digest,
+            },
+        }
+        payload = {
+            **previous,
+            "episode_indices": merged,
+            DROID_PROMPT_EXCLUSION_KEY: prompt_payload,
+        }
+        if args.dry_run:
+            logger.info(
+                "--dry-run: would merge %d prompt exclusions into %s (%d total episode_indices)",
+                len(bad),
+                out,
+                len(merged),
+            )
+            return
+        atomic_publish_text(out, json.dumps(payload, indent=2) + "\n")
     logger.info(
         "wrote %s (%d prompt exclusions, %d existing exclusions preserved, %d total)",
         out,

@@ -60,6 +60,9 @@
 
 
 
+
+
+
 from __future__ import annotations
 
 import hashlib
@@ -73,10 +76,18 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 
 from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.eef import LEFT_ARM_DIM_MASK, single_arm_20d
+from openwam.dataloader.utils.lerobotv3 import (
+    LeRobotV3DataPopulation,
+    LeRobotV3DataShard,
+    apply_info_splits,
+    digest_lerobot_v3_data_population,
+    read_lerobot_v3_population_shard,
+    resolve_lerobot_v3_data_population,
+)
+from openwam.dataloader.utils.normalization import materialize_eef_stats
 from openwam.dataloader.utils.oxe_schema import euler7_action_to_arm10
 
 
@@ -91,11 +102,12 @@ _PLACEHOLDER_RE = re.compile(
 
 
 
-DROID_PROMPT_EXCLUSION_SCHEMA_VERSION = 2
+DROID_PROMPT_EXCLUSION_SCHEMA_VERSION = 3
 DROID_PROMPT_EXCLUSION_KEY = "droid_prompt_exclusions"
 DROID_PROMPT_INDEPENDENT_EXCLUSIONS_KEY = "independently_owned_episode_indices"
 DROID_PROMPT_INPUTS_DIGEST_KEY = "prompt_inputs_digest"
-DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION = 1
+DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION = 2
+DROID_DATA_POPULATION_DIGEST_KEY = "data_population_digest"
 DROID_PROMPT_FALLBACK_COLS = (
     "other_information.language_instruction_2",
     "other_information.language_instruction_3",
@@ -144,13 +156,19 @@ def _sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _read_droid_prompt_source_table(path: Path) -> pa.Table:
+def read_droid_prompt_population_shard(
+    dataset_dir: str | Path,
+    shard: LeRobotV3DataShard,
+) -> pa.Table:
+    """Public implementation. Dataset-specific audit notes were removed."""
     try:
-        return pq.read_table(path, columns=list(DROID_PROMPT_SOURCE_COLUMNS), memory_map=True)
-    except pa.ArrowInvalid as exc:
-        if "Dot path" not in str(exc):
-            raise
-        return pq.read_table(path, memory_map=True).select(list(DROID_PROMPT_SOURCE_COLUMNS))
+        return read_lerobot_v3_population_shard(
+            Path(dataset_dir),
+            shard,
+            DROID_PROMPT_SOURCE_COLUMNS,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError(f"prompt source population is invalid ({exc})") from exc
 
 
 def digest_droid_prompt_shard(table: pa.Table) -> str:
@@ -223,25 +241,24 @@ def compute_droid_prompt_inputs_digest(
     *,
     shard_digests: Mapping[str, str] | None = None,
     tasks_sha256: str | None = None,
+    population: LeRobotV3DataPopulation | None = None,
 ) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
     root = Path(dataset_dir)
-    tasks_digest = tasks_sha256 or _sha256_file(root / "meta" / "tasks.parquet")
-    shard_paths = sorted((root / "data").rglob("*.parquet"))
-    if not shard_paths:
-        raise FileNotFoundError(f"no data parquet under {root}/data")
-    relative_paths = [path.relative_to(root).as_posix() for path in shard_paths]
+    resolved_population = population or resolve_lerobot_v3_data_population(root)
+    tasks_digest = tasks_sha256 if tasks_sha256 is not None else _sha256_file(root / "meta" / "tasks.parquet")
+    relative_paths = [shard.relative_path for shard in resolved_population.shards]
     if shard_digests is None:
         resolved_shard_digests = {
-            relative_path: digest_droid_prompt_shard(_read_droid_prompt_source_table(path))
-            for relative_path, path in zip(relative_paths, shard_paths)
+            shard.relative_path: digest_droid_prompt_shard(read_droid_prompt_population_shard(root, shard))
+            for shard in resolved_population.shards
         }
     else:
         resolved_shard_digests = dict(shard_digests)
         if set(resolved_shard_digests) != set(relative_paths):
-            raise ValueError("prompt shard digest paths do not match the current data shard set")
+            raise ValueError("prompt shard digest paths do not match the manifest-addressed shard set")
 
-    hasher = hashlib.sha256(b"openwam:droid-prompt-inputs:v1\0")
+    hasher = hashlib.sha256(b"openwam:droid-prompt-inputs:v2\0")
     _digest_framed_text(hasher, "meta/tasks.parquet")
     try:
         tasks_digest_bytes = bytes.fromhex(tasks_digest)
@@ -250,6 +267,9 @@ def compute_droid_prompt_inputs_digest(
     if len(tasks_digest_bytes) != hashlib.sha256().digest_size:
         raise ValueError("tasks_sha256 must be a 64-character hexadecimal SHA-256 digest")
     _digest_framed_bytes(hasher, tasks_digest_bytes)
+    population_digest = digest_lerobot_v3_data_population(resolved_population)
+    _digest_framed_text(hasher, DROID_DATA_POPULATION_DIGEST_KEY)
+    _digest_framed_bytes(hasher, bytes.fromhex(population_digest))
     for relative_path in relative_paths:
         _digest_framed_text(hasher, relative_path)
         digest = resolved_shard_digests[relative_path]
@@ -283,9 +303,14 @@ def _parse_prompt_inputs_digest(value) -> dict:
     return value
 
 
-def load_droid_prompt_exclusions(dataset_dir: str | Path) -> tuple[dict, set[int]]:
+def load_droid_prompt_exclusions(
+    dataset_dir: str | Path,
+    *,
+    population: LeRobotV3DataPopulation | None = None,
+) -> tuple[dict, set[int]]:
     """Public implementation. Dataset-specific audit notes were removed."""
-    path = Path(dataset_dir) / "meta" / "excluded_episodes.json"
+    root = Path(dataset_dir)
+    path = root / "meta" / "excluded_episodes.json"
     if not path.exists():
         raise FileNotFoundError(
             f"{path} is missing. Run scripts/write_droid_prompt_exclusions.py before constructing OXE-DROID."
@@ -348,8 +373,17 @@ def load_droid_prompt_exclusions(dataset_dir: str | Path) -> tuple[dict, set[int
         for field in ("episodes_partially_unresolved", "task_index_missing_from_tasks_parquet"):
             if _parse_nonnegative_int(scan_stats[field], f"latest_scan.stats.{field}") != 0:
                 raise ValueError(f"latest_scan.stats.{field} must be zero for a completed scan")
+        resolved_population = population or resolve_lerobot_v3_data_population(root)
+        if rows_scanned != resolved_population.total_rows:
+            raise ValueError(
+                f"latest_scan.stats.rows_scanned={rows_scanned} but the data manifest addresses "
+                f"{resolved_population.total_rows} rows"
+            )
         recorded_inputs_digest = _parse_prompt_inputs_digest(latest_scan[DROID_PROMPT_INPUTS_DIGEST_KEY])
-        current_inputs_digest = compute_droid_prompt_inputs_digest(dataset_dir)
+        current_inputs_digest = compute_droid_prompt_inputs_digest(
+            root,
+            population=resolved_population,
+        )
         if current_inputs_digest != recorded_inputs_digest:
             raise ValueError(f"{DROID_PROMPT_INPUTS_DIGEST_KEY} does not match tasks.parquet and prompt source columns")
     except (KeyError, OSError, TypeError, ValueError) as exc:
@@ -391,18 +425,25 @@ class OxeDroidDataset(LeRobotV3Reader):
     STATS_STRICT_MINMAX = True
 
     def _build_episode_index(self, info: dict) -> pd.DataFrame:
-        payload, self._droid_excluded_episode_indices = load_droid_prompt_exclusions(self._dataset_dir)
-        expected_rows = info.get("total_frames")
-        scanned_rows = payload[DROID_PROMPT_EXCLUSION_KEY]["latest_scan"]["stats"]["rows_scanned"]
-        if expected_rows is not None and (
-            type(expected_rows) is not int or expected_rows < 0 or scanned_rows != expected_rows
-        ):
-            raise ValueError(
-                f"{self._dataset_dir}/meta/excluded_episodes.json is stale: its prompt scan covered "
-                f"{scanned_rows} rows but meta/info.json declares {expected_rows}. "
-                "Re-run scripts/write_droid_prompt_exclusions.py."
-            )
-        return super()._build_episode_index(info)
+        population = resolve_lerobot_v3_data_population(self._dataset_dir, info=info)
+        _, self._droid_excluded_episode_indices = load_droid_prompt_exclusions(
+            self._dataset_dir,
+            population=population,
+        )
+        self._droid_data_population_digest = digest_lerobot_v3_data_population(population)
+        eps = population.episodes.copy()
+        self._add_episode_offsets(eps)
+        info_splits = info.get("splits", {}) or {}
+        return apply_info_splits(
+            eps,
+            self._split,
+            info_splits,
+            source_name=f"{self.DATASET_NAME}({self._dataset_id})",
+        )
+
+    def _load_excluded_episode_indices(self) -> set[int]:
+        """Public implementation. Dataset-specific audit notes were removed."""
+        return set(self._droid_excluded_episode_indices)
 
     def _load_stats(self, info: dict) -> Optional[dict]:
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
@@ -416,9 +457,15 @@ class OxeDroidDataset(LeRobotV3Reader):
                 raw["excluded_episode_indices"],
                 "excluded_episode_indices",
             )
+            stats_population_digest = raw[DROID_DATA_POPULATION_DIGEST_KEY]
+            if (
+                not isinstance(stats_population_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", stats_population_digest) is None
+            ):
+                raise ValueError(f"{DROID_DATA_POPULATION_DIGEST_KEY} must be a lowercase SHA-256 digest")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
-                f"{stats_path} has missing or invalid excluded_episode_indices provenance ({exc}). "
+                f"{stats_path} has missing or invalid DROID population provenance ({exc}). "
                 "Re-run oxe_stats_computation for DROID."
             ) from exc
         if stats_excluded != self._droid_excluded_episode_indices:
@@ -426,7 +473,18 @@ class OxeDroidDataset(LeRobotV3Reader):
                 f"{stats_path} excluded_episode_indices do not match meta/excluded_episodes.json. "
                 "Re-run oxe_stats_computation for DROID after updating exclusions."
             )
-        return super()._load_stats(info)
+        if stats_population_digest != self._droid_data_population_digest:
+            raise ValueError(
+                f"{stats_path} {DROID_DATA_POPULATION_DIGEST_KEY} does not match the current data manifest. "
+                "Re-run oxe_stats_computation for DROID."
+            )
+        return materialize_eef_stats(
+            raw,
+            self._normalize_mode,
+            dim=self.STATS_DIM,
+            strict_minmax=self.STATS_STRICT_MINMAX,
+            source_hint=str(stats_path),
+        )
 
     def _resolve_prompt(self, row, win: pd.DataFrame) -> str:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -471,6 +529,7 @@ class OxeDroidDataset(LeRobotV3Reader):
 
 
 __all__ = [
+    "DROID_DATA_POPULATION_DIGEST_KEY",
     "DROID_PROMPT_EXCLUSION_KEY",
     "DROID_PROMPT_EXCLUSION_SCHEMA_VERSION",
     "DROID_PROMPT_FALLBACK_COLS",
@@ -482,4 +541,5 @@ __all__ = [
     "compute_droid_prompt_inputs_digest",
     "digest_droid_prompt_shard",
     "load_droid_prompt_exclusions",
+    "read_droid_prompt_population_shard",
 ]
