@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pickle
 import socket
 import uuid
 from pathlib import Path
@@ -131,7 +132,13 @@ def build_and_save_robocasa_gr1_stats(dataset, output: str | Path, reservoir_cap
 
     payload = {}
     if output.exists():
-        previous = np.load(output, allow_pickle=True).item()
+        try:
+            previous = np.load(output, allow_pickle=True).item()
+        except (OSError, ValueError, EOFError, pickle.UnpicklingError):
+            # Compatibility checking intentionally routes unreadable/truncated
+            # files into this rebuild path. Treat them as having no reusable
+            # payload so the atomic write below can replace them.
+            previous = None
         if isinstance(previous, dict):
             payload.update(previous)
     payload[action_mode] = action_stats

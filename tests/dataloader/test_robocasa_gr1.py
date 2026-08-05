@@ -494,6 +494,30 @@ def test_stats_are_autobuilt_at_the_fixed_root_path(tmp_path: Path):
     np.testing.assert_allclose(np.asarray(built_state["max"]), np.asarray(expected_state["max"]), atol=1e-7)
 
 
+def test_corrupt_stats_file_is_replaced_during_autobuild(tmp_path: Path):
+    root = tmp_path / "root"
+    _write_bucket(root / "a")
+    stats_path = root / "meta" / NORMALIZATION_STATS_FILENAME
+    stats_path.parent.mkdir(parents=True)
+    stats_path.write_bytes(b"truncated")
+
+    cfg = OmegaConf.create(
+        {
+            "dataset_dir": str(root),
+            "num_frames": 5,
+            "multiview": True,
+            "prompt_columns": ["annotation.human.coarse_action"],
+            "normalize_mode": "min-max",
+        }
+    )
+    ds = RoboCasaGR1Dataset.from_config(cfg)
+
+    assert isinstance(ds, MultiRoboCasaGR1Dataset)
+    payload = np.load(stats_path, allow_pickle=True).item()
+    assert payload["robocasa_gr1_stats_schema"] == STATS_SCHEMA_VERSION
+    assert {"eef", "eef_state"} <= set(payload)
+
+
 def test_normalize_mode_defaults_to_min_max_and_ignores_stats_path_key(tmp_path: Path):
     _write_bucket(tmp_path)
     stats = {
