@@ -1212,12 +1212,48 @@ class TestManifestRangeValidation:
         assert len(r) > 0
 
     def test_shards_are_ordered_by_index_not_lexically(self, tmp_path):
-        """`file-10` follows `file-9`; a lexical sort puts it second."""
+        """`file-1000` follows `file-999`; a lexical sort puts it first.
+
+        Both names are canonical (`{:03d}` widens past three digits), so this is
+        reachable on a corpus with over a thousand shards.
+        """
         b = tmp_path / "b"
         (b / "data" / "chunk-000").mkdir(parents=True)
-        for i in (0, 2, 10):
-            pq.write_table(pa.table({"x": [i]}), b / "data" / "chunk-000" / f"file-{i}.parquet")
-        assert [f for _, f, _ in iter_data_shards(b)] == [0, 2, 10]
+        for i in (0, 999, 1000):
+            pq.write_table(pa.table({"x": [i]}),
+                           b / "data" / "chunk-000" / f"file-{i:03d}.parquet")
+        assert [f for _, f, _ in iter_data_shards(b)] == [0, 999, 1000]
+
+    def test_a_non_canonical_shard_name_is_not_a_shard(self, tmp_path, patch_decode):
+        """`file-0.parquet` is a name the data_path template cannot produce.
+
+        Sampling rebuilds the path from `info.json[data_path]` with `{:03d}`, so
+        an unpadded file is enumerable but unreadable: the scan pooled its rows
+        and the reader built windows over them, and only the first real data
+        load failed — on a different, non-existent path. Rejecting it at
+        enumeration turns that into an immediate, accurate error.
+        """
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
+        shard = d / "data" / "chunk-000" / "file-000.parquet"
+        shard.rename(shard.with_name("file-0.parquet"))
+        assert parse_shard_path(shard.with_name("file-0.parquet")) is None
+        assert iter_data_shards(d) == []
+        with pytest.raises(FileNotFoundError, match="No data parquet files"):
+            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+
+    def test_an_aliased_shard_name_is_not_a_shard(self, tmp_path):
+        """`file-00.parquet` would otherwise claim shard 0 alongside `file-000`."""
+        b = tmp_path / "b"
+        (b / "data" / "chunk-000").mkdir(parents=True)
+        for name in ("file-000.parquet", "file-00.parquet"):
+            pq.write_table(pa.table({"x": [0]}), b / "data" / "chunk-000" / name)
+        assert [f for _, f, _ in iter_data_shards(b)] == [0]
+
+    def test_a_canonical_shard_under_a_non_canonical_chunk_is_rejected(self, tmp_path):
+        b = tmp_path / "b"
+        (b / "data" / "chunk-0").mkdir(parents=True)
+        pq.write_table(pa.table({"x": [0]}), b / "data" / "chunk-0" / "file-000.parquet")
+        assert iter_data_shards(b) == []
 
 
 class TestExclusionParser:

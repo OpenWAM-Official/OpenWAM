@@ -507,12 +507,25 @@ def parse_shard_path(path) -> Optional[Tuple[int, int]]:
 
 
 
+
+
+
+
+
+
+
+
+
+
     p = Path(path)
     chunk = _CHUNK_DIR_RE.fullmatch(p.parent.name)
     shard = _SHARD_FILE_RE.fullmatch(p.name)
     if chunk is None or shard is None:
         return None
-    return int(chunk.group(1)), int(shard.group(1))
+    ci, fi = int(chunk.group(1)), int(shard.group(1))
+    if p.parent.name != f"chunk-{ci:03d}" or p.name != f"file-{fi:03d}.parquet":
+        return None
+    return ci, fi
 
 
 def iter_data_shards(bucket) -> List[Tuple[int, int, Path]]:
