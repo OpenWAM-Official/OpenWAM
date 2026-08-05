@@ -532,8 +532,15 @@ def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optio
                 )
                 n += 1
     except (OSError, KeyError, ValueError) as e:
-        logger.warning("InternDataA1: trim_csv %s unusable (%s); trimming disabled.", key, e)
-        spec = {}
+
+
+
+
+
+        raise ValueError(
+            f"InternDataA1: trim_csv {key} could not be read ({e}). Fix the path or set "
+            "trim_csv=null to run untrimmed — it will not be skipped silently."
+        ) from e
     else:
         logger.info(
             "InternDataA1: loaded %d trim entries across %d buckets from %s", n, len(spec), key
