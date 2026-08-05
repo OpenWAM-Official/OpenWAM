@@ -472,9 +472,9 @@ class TestProvenanceIsEmitted:
             root=tmp_path,
         )
 
-        assert "exclusions" in out, "generator dropped the exclusion provenance"
-        assert out["exclusions"]["cat/emb/a"] == exclusion_digest(a)
-        assert out["exclusions"]["cat/emb/b"] is None  # no exclusion file
+        assert "populations" in out, "generator dropped the population provenance"
+        assert out["populations"]["cat/emb/a"]["exclusions"] == exclusion_digest(a)
+        assert out["populations"]["cat/emb/b"]["exclusions"] is None  # no exclusion file
 
     def test_the_emitted_digest_is_what_the_reader_expects(self, tmp_path):
         """Ties the two sides together: whatever the generator writes must be
@@ -489,7 +489,7 @@ class TestProvenanceIsEmitted:
             workers=1,
             root=tmp_path,
         )
-        assert out["exclusions"]["cat/emb/task"] == exclusion_digest(d)
+        assert out["populations"]["cat/emb/task"]["exclusions"] == exclusion_digest(d)
 
 
 class TestDirectBucketParity:
@@ -547,8 +547,8 @@ class TestDirectBucketParity:
         d, trim = self._setup(tmp_path)
         out = tmp_path / "stats"
         res = self._run(monkeypatch, d, trim, out)
-        assert "." not in res["exclusions"], "direct-bucket key leaked as '.'"
-        assert res["exclusions"]["task"] == exclusion_digest(d)
+        assert "." not in res["populations"], "direct-bucket key leaked as '.'"
+        assert res["populations"]["task"]["exclusions"] == exclusion_digest(d)
 
 
 class TestCoverageOnlyAfterSuccess:
@@ -575,8 +575,8 @@ class TestCoverageOnlyAfterSuccess:
             workers=1, root=tmp_path,
         )
         assert out["num_buckets"] == 1
-        assert "cat/emb/good" in out["exclusions"]
-        assert "cat/emb/bad" not in out["exclusions"], "a skipped bucket was recorded as covered"
+        assert "cat/emb/good" in out["populations"]
+        assert "cat/emb/bad" not in out["populations"], "a skipped bucket was recorded as covered"
 
 
 class TestSplitFailuresDoNotFailOpen:

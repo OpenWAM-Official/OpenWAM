@@ -598,7 +598,7 @@ class AmbiguousBucketKey(LookupError):
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
-def resolve_bucket_key(keys, dataset_id: str, dir_name: str, *, what: str,
+def resolve_bucket_key(keys, dataset_id: str, bucket_dir, *, what: str,
                        source: str) -> Optional[str]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -618,20 +618,60 @@ def resolve_bucket_key(keys, dataset_id: str, dir_name: str, *, what: str,
 
 
 
+
+
+
+
+
     if dataset_id in keys:
         return dataset_id
-    cands = sorted(k for k in keys if k == dir_name or k.endswith("/" + dir_name))
-    if len(cands) == 1:
-        return cands[0]
+
+    if "/" in dataset_id:
+        return None
+
+
+
+    parts = Path(bucket_dir).resolve().parts
+    for n in range(min(len(parts), 6), 0, -1):
+        cand = "/".join(parts[-n:])
+        if cand in keys:
+            return cand
+
+
+
+    leaf = Path(bucket_dir).name
+    cands = sorted(k for k in keys if k == leaf or k.endswith("/" + leaf))
     if len(cands) > 1:
         raise AmbiguousBucketKey(
-            f"{source}: {what} has {len(cands)} buckets whose path ends in {dir_name!r} "
-            f"({', '.join(cands[:4])}{' ...' if len(cands) > 4 else ''}). Bucket leaf names "
-            "repeat across tasks, so this one cannot be identified from its directory name. "
-            "Pass dataset_id (or --dataset_dir at the corpus root) so buckets are keyed by "
-            "their path relative to the root, which is what these files key on."
+            f"{source}: {what} has {len(cands)} buckets whose path ends in {leaf!r} "
+            f"({', '.join(cands[:4])}{' ...' if len(cands) > 4 else ''}), and none of them "
+            "matches this bucket's own path. Bucket leaf names repeat across tasks, so this "
+            "one cannot be identified from its directory name. Pass dataset_id (or point "
+            "--dataset_dir at the corpus root) so buckets are keyed by their path relative "
+            "to the root, which is what these files key on."
         )
     return None
+
+
+def split_spec_digest(bucket, split: str) -> Optional[str]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+    import hashlib
+
+    try:
+        with open(Path(bucket) / "meta" / "info.json") as fh:
+            splits = json.load(fh).get("splits") or {}
+    except (OSError, ValueError):
+        return None
+    spec = splits.get(split)
+    if spec is None:
+        return None
+    return hashlib.sha256(f"{split}={spec!r}".encode()).hexdigest()[:16]
 
 
 def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int, int]]:
@@ -843,9 +883,27 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 "data parquet row range"
             )
 
+
+
+
+
+        offsets = global_starts - starts[file_pos]
+        lengths = eps["dataset_to_index"].to_numpy().astype(np.int64) - global_starts
+        capacity = np.array([data_files[i][2] for i in file_pos], dtype=np.int64)
+        overflow = np.flatnonzero(offsets + lengths > capacity)
+        if overflow.size:
+            i = int(overflow[0])
+            raise ValueError(
+                f"{self.DATASET_NAME}({self._dataset_id}): episode "
+                f"{int(eps['episode_index'].to_numpy()[i])} needs rows "
+                f"[{int(offsets[i])}, {int(offsets[i] + lengths[i])}) of a shard holding only "
+                f"{int(capacity[i])}. The shard set does not match the manifest — resolving "
+                "offsets against it would map episodes onto another episode's rows."
+            )
+
         eps["data/chunk_index"] = np.array([data_files[i][0] for i in file_pos], dtype=np.int64)
         eps["data/file_index"] = np.array([data_files[i][1] for i in file_pos], dtype=np.int64)
-        eps["_data_row_offset"] = global_starts - starts[file_pos]
+        eps["_data_row_offset"] = offsets
 
     def _add_episode_offsets(self, eps) -> None:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -867,10 +925,31 @@ class InternDataA1Dataset(LeRobotV3Reader):
         super()._add_episode_offsets(eps)
         for cam in self._video_cameras():
             col = f"videos/{cam}/from_timestamp"
-            if col in eps.columns:
-                eps[self._video_offset_col(cam)] = np.rint(
-                    eps[col].to_numpy().astype(np.float64) * self._fps
-                ).astype(np.int64)
+            if col not in eps.columns:
+
+
+
+
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} has no "
+                    f"{col!r} in meta/episodes, so its frame offset cannot be resolved."
+                )
+            ts = eps[col].to_numpy().astype(np.float64)
+            if not np.isfinite(ts).all() or (ts < 0).any():
+                bad = int((~np.isfinite(ts)).sum() + (ts < 0).sum())
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} has {bad} "
+                    "non-finite or negative from_timestamp values; casting those would "
+                    "produce INT64_MIN or negative frame indices and read black slots."
+                )
+            frames = ts * self._fps
+            if np.abs(frames - np.rint(frames)).max() > 0.25:
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} has "
+                    "from_timestamp values that are not on frame boundaries at "
+                    f"fps={self._fps}; the offsets would be rounded onto neighbouring frames."
+                )
+            eps[self._video_offset_col(cam)] = np.rint(frames).astype(np.int64)
 
     def _trim_min_len(self) -> int:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -897,7 +976,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        return resolve_bucket_key(keys, self._dataset_id, self._dataset_dir.name,
+        return resolve_bucket_key(keys, self._dataset_id, self._dataset_dir,
                                   what=what, source=f"InternDataA1({self._dataset_id})")
 
     def _trim_key(self) -> Optional[str]:
@@ -1089,7 +1168,13 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
         gen_split = raw.get("split")
-        if gen_split is not None and gen_split != "train":
+        if gen_split is None:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} records no `split`, so "
+                "there is no evidence it was generated from the training distribution. "
+                f"{_regen_hint()}"
+            )
+        if gen_split != "train":
             raise ValueError(
                 f"InternData-A1 bucket {self._dataset_id}: normalization stats in {stats_path} "
                 f"were generated from split={gen_split!r}. Stats must come from the training "
@@ -1106,14 +1191,18 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        if self._trim_csv is not None and self._split != "val":
-            want_mk = self._trim_min_len()
+        if self._trim_csv is not None:
+
+
+
+
+            want_mk = self._train_min_window_len()
             got_mk = raw.get("trim_min_keep")
             if got_mk is not None and int(got_mk) != want_mk:
                 raise ValueError(
                     f"InternData-A1 bucket {self._dataset_id}: normalization stats in "
-                    f"{stats_path} were computed with --min_keep {got_mk}, but this reader's "
-                    f"minimum window length for split={self._split!r} is {want_mk}. Episodes "
+                    f"{stats_path} were computed with --min_keep {got_mk}, but the training "
+                    f"minimum window length is {want_mk}. Episodes "
                     "between the two bounds are trimmed on one side and left whole on the "
                     f"other, so the statistics describe a different population. {_regen_hint()}"
                 )
@@ -1125,40 +1214,37 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        excl_map = raw.get("exclusions")
+
+        pops = raw.get("populations")
+        if pops is None:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} carries no per-bucket "
+                "population provenance, so there is no evidence these numbers were computed "
+                f"over the rows this reader emits. {_regen_hint()}"
+            )
+        key = self._match_bucket_key(pops, "stats `populations`")
+        if key is None:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} records populations for "
+                f"{len(pops)} bucket(s), none of which is this one — these statistics were not "
+                f"computed over it. {_regen_hint()}"
+            )
+        rec = pops[key] or {}
         act_excl = exclusion_digest(self._dataset_dir)
-        if excl_map is None:
-
-
-
-
-            if act_excl is not None:
-                raise ValueError(
-                    f"InternData-A1 bucket {self._dataset_id}: {stats_path} predates exclusion "
-                    "provenance (no `exclusions` key), but this bucket excludes episodes via "
-                    "meta/excluded_episodes.json, so the stats may cover rows the reader never "
-                    f"emits. {_regen_hint()}"
-                )
-        else:
-
-
-
-            key = self._match_bucket_key(excl_map, "stats `exclusions`")
-            if key is None:
-                raise ValueError(
-                    f"InternData-A1 bucket {self._dataset_id}: {stats_path} records exclusion "
-                    f"provenance for {len(excl_map)} bucket(s) but none of them resolves to this "
-                    "one, so these stats were not computed over it (a bucket added after "
-                    f"generation, or a different dataset root). {_regen_hint()}"
-                )
-            rec_excl = excl_map[key]
-            if rec_excl != act_excl:
-                raise ValueError(
-                    f"InternData-A1 bucket {self._dataset_id}: normalization stats in "
-                    f"{stats_path} were computed with exclusion digest {rec_excl!r}, but this "
-                    f"bucket's meta/excluded_episodes.json now digests to {act_excl!r}. "
-                    f"Deleted episodes change which rows enter the normalizer. {_regen_hint()}"
-                )
+        if rec.get("exclusions") != act_excl:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: stats were computed with exclusion "
+                f"digest {rec.get('exclusions')!r}, but meta/excluded_episodes.json now digests "
+                f"to {act_excl!r}. Deleted episodes change which rows enter the normalizer. "
+                f"{_regen_hint()}"
+            )
+        act_split = split_spec_digest(self._dataset_dir, "train")
+        if rec.get("split") != act_split:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: stats were computed against train "
+                f"split {rec.get('split')!r}, but info.json now defines it as {act_split!r}. "
+                f"The training population moved. {_regen_hint()}"
+            )
 
         eef_raw = raw.get("eef", {})
 

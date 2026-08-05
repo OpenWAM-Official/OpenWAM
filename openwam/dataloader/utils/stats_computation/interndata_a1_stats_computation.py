@@ -93,6 +93,7 @@ from openwam.dataloader.interndata_a1 import (
     resolve_bucket_key,
     resolve_gripper_scale,
     resolve_trim_bounds,
+    split_spec_digest,
     trim_digest,
 )
 from openwam.dataloader.utils.eef import ARM10_DIM, quat_wxyz_to_rot6d
@@ -228,14 +229,18 @@ def _split_episodes(bucket: Path, split: str) -> Optional[set]:
             splits = json.load(f).get("splits")
     except (OSError, ValueError) as e:
         raise ValueError(f"{bucket}: cannot read meta/info.json for split resolution ({e})") from e
+
+
+
+
+    eps = _manifest_episodes(bucket)
+    if eps is None:
+        raise ValueError(f"{bucket}: meta/episodes is unreadable, so the population is unknown")
     if not splits:
 
 
 
         return None if split == "train" else set()
-    eps = _manifest_episodes(bucket)
-    if eps is None:
-        raise ValueError(f"{bucket}: meta/episodes is unreadable, so the population is unknown")
     import pandas as pd
 
     from openwam.dataloader.utils.lerobotv3 import apply_info_splits
@@ -343,7 +348,7 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
     trim = None
     if trim_csv:
         spec = _load_trim_spec(trim_csv)
-        key = resolve_bucket_key(spec, dataset_id or bucket.name, bucket.name,
+        key = resolve_bucket_key(spec, dataset_id or bucket.name, bucket,
                                  what="trim_csv", source=f"stats({dataset_id})")
         trim = spec.get(key) if key is not None else None
     kept = _kept_episodes(bucket) if (trim_csv or (bucket / "meta" / "episodes").is_dir()) else None
@@ -357,7 +362,10 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
     need_ep = bool(trim) or kept is not None
 
     chunks: List[np.ndarray] = []
-    for pth in sorted((bucket / "data").rglob("*.parquet")):
+
+
+
+    for pth in sorted((bucket / "data").glob("chunk-*/file-*.parquet")):
 
 
 
@@ -432,7 +440,7 @@ def compute_stats_for_embodiment(
 
 
 
-    exclusions: Dict[str, Optional[str]] = {}
+    populations: Dict[str, Dict[str, Optional[str]]] = {}
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
 
@@ -453,10 +461,19 @@ def compute_stats_for_embodiment(
             except Exception as e:
                 logger.warning("  [%s] skipping %s (%s)", embodiment, name, e)
                 continue
-            exclusions[_rel_id(Path(name))] = exclusion_digest(Path(name))
-            if len(rows):
-                acc.update_batch(rows)
-                n_rows += len(rows)
+            if not len(rows):
+
+
+
+                logger.warning("  [%s] %s produced 0 rows; not recording coverage",
+                               embodiment, name)
+                continue
+            populations[_rel_id(Path(name))] = {
+                "exclusions": exclusion_digest(Path(name)),
+                "split": split_spec_digest(Path(name), "train"),
+            }
+            acc.update_batch(rows)
+            n_rows += len(rows)
             n_ok += 1
             if i % 20 == 0 or i == len(tasks):
                 logger.info("  [%s] %d/%d buckets, %d rows", embodiment, i, len(tasks), n_rows)
@@ -484,7 +501,7 @@ def compute_stats_for_embodiment(
 
 
 
-        "exclusions": exclusions,
+        "populations": populations,
 
 
 

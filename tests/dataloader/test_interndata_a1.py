@@ -35,6 +35,7 @@ from openwam.dataloader.interndata_a1 import (
     exclusion_digest,
     resolve_bucket_key,
     resolve_trim_bounds,
+    split_spec_digest,
     trim_digest,
 )
 from openwam.dataloader.utils.eef import (
@@ -187,6 +188,25 @@ def _make_bucket(
         d / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
     )
     return d
+
+
+def _provenance(bucket: Path) -> dict:
+    """The provenance fields every generated stats file carries.
+
+    Kept in one place so a test that only cares about, say, vector widths does
+    not have to restate the population bookkeeping — and so tightening that
+    bookkeeping does not require editing every unrelated test.
+    """
+    key = "/".join(bucket.parts[-3:])
+    return {
+        "split": "train",
+        "populations": {
+            key: {
+                "exclusions": exclusion_digest(bucket),
+                "split": split_spec_digest(bucket, "train"),
+            }
+        },
+    }
 
 
 @pytest.fixture
@@ -672,7 +692,8 @@ class TestGripperHarmonization:
 
 
 class TestStats:
-    def _write_stats(self, root: Path, embodiment: str, *, pin_rot6d: bool = True):
+    def _write_stats(self, root: Path, embodiment: str, *, pin_rot6d: bool = True,
+                     bucket: Path | None = None):
         (root / "meta").mkdir(parents=True, exist_ok=True)
         eef = {
             "mean": [0.0] * EEF_DIM,
@@ -686,7 +707,10 @@ class TestStats:
             for dim in ROT6D_DIMS_EEF20:
                 eef["q01"][dim] = -1.0
                 eef["q99"][dim] = 1.0
-        (root / "meta" / f"stats_{embodiment}.json").write_text(json.dumps({"eef": eef}))
+        body = {"eef": eef}
+        if bucket is not None:
+            body.update(_provenance(bucket))
+        (root / "meta" / f"stats_{embodiment}.json").write_text(json.dumps(body))
 
     def test_missing_stats_file_raises_actionable_error(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task")
@@ -715,7 +739,7 @@ class TestStats:
     def test_shared_stats_root_is_used_not_the_bucket_dir(self, tmp_path, patch_decode):
         """Buckets sit at variable depth; stats live once at the dataset root."""
         d = _make_bucket(tmp_path, "cat/split_aloha/task")
-        self._write_stats(tmp_path, "split_aloha")
+        self._write_stats(tmp_path, "split_aloha", bucket=d)
         ds = InternDataA1Dataset(
             str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile", num_frames=9, video_stride=4
         )
@@ -725,7 +749,7 @@ class TestStats:
         """Pinned rot6d stats must leave the rotation representation untouched,
         while pos/gripper dims are rescaled."""
         d = _make_bucket(tmp_path, "cat/split_aloha/task")
-        self._write_stats(tmp_path, "split_aloha")
+        self._write_stats(tmp_path, "split_aloha", bucket=d)
         raw = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
         norm = InternDataA1Dataset(
             str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile", num_frames=9, video_stride=4
@@ -740,7 +764,10 @@ class TestStats:
         d = _make_bucket(tmp_path, "cat/split_aloha/task")
         (tmp_path / "meta").mkdir(parents=True, exist_ok=True)
         (tmp_path / "meta" / "stats_split_aloha.json").write_text(
-            json.dumps({"eef": {k: [0.0] * 10 for k in ("mean", "std", "min", "max", "q01", "q99")}})
+            json.dumps({
+                "eef": {k: [0.0] * 10 for k in ("mean", "std", "min", "max", "q01", "q99")},
+                **_provenance(d),   # provenance is checked first; this test is about width
+            })
         )
         with pytest.raises(ValueError, match="!= expected 20"):
             InternDataA1Dataset(str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile")
@@ -894,7 +921,7 @@ class TestTrimStatsProvenance:
     alone cannot say which is which — so the pairing is checked, by content
     digest rather than by path (the cleaned view gets relocated)."""
 
-    def _write_stats(self, root: Path, embodiment: str, **extra):
+    def _write_stats(self, root: Path, embodiment: str, bucket: Path | None = None, **extra):
         (root / "meta").mkdir(parents=True, exist_ok=True)
         eef = {
             "mean": [0.0] * EEF_DIM,
@@ -907,7 +934,11 @@ class TestTrimStatsProvenance:
         for dim in ROT6D_DIMS_EEF20:
             eef["q01"][dim] = -1.0
             eef["q99"][dim] = 1.0
-        (root / "meta" / f"stats_{embodiment}.json").write_text(json.dumps({"eef": eef, **extra}))
+        body = {"eef": eef}
+        if bucket is not None:
+            body.update(_provenance(bucket))
+        body.update(extra)
+        (root / "meta" / f"stats_{embodiment}.json").write_text(json.dumps(body))
 
     def _write_trim(self, path: Path, rows: str) -> Path:
         path.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n" + rows)
@@ -915,7 +946,7 @@ class TestTrimStatsProvenance:
 
     def test_untrimmed_stats_with_a_trimmed_reader_is_rejected(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=40)
-        self._write_stats(tmp_path, "split_aloha")  # no provenance recorded
+        self._write_stats(tmp_path, "split_aloha", bucket=d)  # no trim provenance
         trim = self._write_trim(tmp_path / "trim.csv", "cat/split_aloha/task,0,40,5,\n")
         with pytest.raises(ValueError, match="not interchangeable"):
             InternDataA1Dataset(
@@ -926,7 +957,7 @@ class TestTrimStatsProvenance:
     def test_trimmed_stats_with_an_untrimmed_reader_is_rejected(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=40)
         trim = self._write_trim(tmp_path / "trim.csv", "cat/split_aloha/task,0,40,5,\n")
-        self._write_stats(tmp_path, "split_aloha", trim_digest=trim_digest(str(trim)))
+        self._write_stats(tmp_path, "split_aloha", bucket=d, trim_digest=trim_digest(str(trim)))
         with pytest.raises(ValueError, match="not interchangeable"):
             InternDataA1Dataset(
                 str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile",
@@ -936,7 +967,7 @@ class TestTrimStatsProvenance:
     def test_matching_digest_is_accepted(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=40)
         trim = self._write_trim(tmp_path / "trim.csv", "cat/split_aloha/task,0,40,5,\n")
-        self._write_stats(tmp_path, "split_aloha", trim_digest=trim_digest(str(trim)))
+        self._write_stats(tmp_path, "split_aloha", bucket=d, trim_digest=trim_digest(str(trim)))
         ds = InternDataA1Dataset(
             str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
             normalize_mode="quantile", trim_csv=str(trim), num_frames=9, video_stride=4,
@@ -951,7 +982,7 @@ class TestTrimStatsProvenance:
         a = self._write_trim(tmp_path / "trim.csv", row)
         (tmp_path / "moved").mkdir()
         b = self._write_trim(tmp_path / "moved" / "trim.csv", row)
-        self._write_stats(tmp_path, "split_aloha", trim_digest=trim_digest(str(a)))
+        self._write_stats(tmp_path, "split_aloha", bucket=d, trim_digest=trim_digest(str(a)))
         ds = InternDataA1Dataset(
             str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
             normalize_mode="quantile", trim_csv=str(b), num_frames=9, video_stride=4,
@@ -991,7 +1022,7 @@ class TestTrimMinKeepProvenance:
     population — episodes short enough to fall under the bound are left whole
     instead of trimmed — and the CSV digest cannot see that."""
 
-    def _stats(self, root: Path, **extra):
+    def _stats(self, root: Path, bucket: Path | None = None, **extra):
         (root / "meta").mkdir(parents=True, exist_ok=True)
         eef = {
             "mean": [0.0] * EEF_DIM, "std": [1.0] * EEF_DIM,
@@ -1001,7 +1032,11 @@ class TestTrimMinKeepProvenance:
         for dim in ROT6D_DIMS_EEF20:
             eef["q01"][dim] = -1.0
             eef["q99"][dim] = 1.0
-        (root / "meta" / "stats_split_aloha.json").write_text(json.dumps({"eef": eef, **extra}))
+        body = {"eef": eef}
+        if bucket is not None:
+            body.update(_provenance(bucket))
+        body.update(extra)
+        (root / "meta" / "stats_split_aloha.json").write_text(json.dumps(body))
 
     def _trim(self, path: Path) -> str:
         path.write_text(
@@ -1016,7 +1051,7 @@ class TestTrimMinKeepProvenance:
         # Stats built with min_keep=33: the 40-frame episode's trim would leave
         # 20 < 33, so the stats kept it whole. The train reader's bound is 2, so
         # it trims to 20. Same digest, different population.
-        self._stats(tmp_path, trim_digest=trim_digest(trim), trim_min_keep=33)
+        self._stats(tmp_path, bucket=d, trim_digest=trim_digest(trim), trim_min_keep=33)
         with pytest.raises(ValueError, match="min_keep"):
             InternDataA1Dataset(
                 str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
@@ -1030,7 +1065,7 @@ class TestTrimMinKeepProvenance:
         unusable for every val run."""
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=40)
         trim = self._trim(tmp_path / "trim.csv")
-        self._stats(tmp_path, trim_digest=trim_digest(trim), trim_min_keep=2)
+        self._stats(tmp_path, bucket=d, trim_digest=trim_digest(trim), trim_min_keep=2)
         ds = InternDataA1Dataset(
             str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
             normalize_mode="quantile", trim_csv=trim, num_frames=9, video_stride=4,
@@ -1042,7 +1077,7 @@ class TestTrimMinKeepProvenance:
     def test_matching_min_keep_is_accepted(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=1, ep_len=40)
         trim = self._trim(tmp_path / "trim.csv")
-        self._stats(tmp_path, trim_digest=trim_digest(trim), trim_min_keep=2)
+        self._stats(tmp_path, bucket=d, trim_digest=trim_digest(trim), trim_min_keep=2)
         ds = InternDataA1Dataset(
             str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
             normalize_mode="quantile", trim_csv=trim, num_frames=9, video_stride=4,
@@ -1050,10 +1085,14 @@ class TestTrimMinKeepProvenance:
         assert ds._normalization_stats is not None
 
 
-class TestExclusionProvenance:
-    """Deletions are a second population filter, independent of the trim CSV:
-    the stats scanner honours ``meta/excluded_episodes.json``, so editing it
-    changes which rows entered the normalizer while ``trim_digest`` is unchanged."""
+class TestPopulationProvenance:
+    """Deletions and the train-split definition both change which rows reached the
+    normalizer without touching the trim digest, so both are recorded per bucket.
+
+    "Not recorded" must never read as "recorded as none": a generated map lists
+    every bucket that actually contributed, so an absent entry means these stats
+    were not computed over this bucket.
+    """
 
     def _stats(self, root: Path, **extra):
         eef = {
@@ -1065,180 +1104,74 @@ class TestExclusionProvenance:
             eef["q01"][dim] = -1.0
             eef["q99"][dim] = 1.0
         (root / "meta").mkdir(parents=True, exist_ok=True)
-        (root / "meta" / "stats_split_aloha.json").write_text(json.dumps({"eef": eef, **extra}))
+        body = {"eef": eef, "split": "train"}
+        body.update(extra)
+        (root / "meta" / "stats_split_aloha.json").write_text(json.dumps(body))
 
-    def test_exclusions_added_after_stats_were_built_is_rejected(self, tmp_path, patch_decode):
+    def _pop(self, d: Path, key: str):
+        return {key: {"exclusions": exclusion_digest(d), "split": split_spec_digest(d, "train")}}
+
+    def _build(self, d: Path, root: Path, **kw):
+        return InternDataA1Dataset(
+            str(d), a1_stats_root=str(root), normalize_mode="quantile",
+            num_frames=9, video_stride=4, **kw,
+        )
+
+    def test_matching_provenance_is_accepted(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
-        self._stats(tmp_path, exclusions={"cat/split_aloha/task": None})  # built with none
+        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
+        self._stats(tmp_path, populations=self._pop(d, "cat/split_aloha/task"))
+        assert self._build(d, tmp_path, dataset_id="cat/split_aloha/task")._normalization_stats is not None
+
+    def test_exclusions_edited_after_generation_is_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        self._stats(tmp_path, populations=self._pop(d, "cat/split_aloha/task"))
         (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
         with pytest.raises(ValueError, match="exclusion digest"):
-            InternDataA1Dataset(
-                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
-                normalize_mode="quantile", num_frames=9, video_stride=4,
-            )
+            self._build(d, tmp_path, dataset_id="cat/split_aloha/task")
 
-    def test_matching_exclusions_are_accepted(self, tmp_path, patch_decode):
+    def test_an_edited_train_split_range_is_rejected(self, tmp_path, patch_decode):
+        """Recording the split's NAME is not enough — the range can move under it."""
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
-        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
-        self._stats(tmp_path, exclusions={"cat/split_aloha/task": exclusion_digest(d)})
-        ds = InternDataA1Dataset(
-            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
-            normalize_mode="quantile", num_frames=9, video_stride=4,
-        )
-        assert ds._normalization_stats is not None
+        self._stats(tmp_path, populations=self._pop(d, "cat/split_aloha/task"))
+        info = json.loads((d / "meta" / "info.json").read_text())
+        info["splits"] = {"train": "1:2"}
+        (d / "meta" / "info.json").write_text(json.dumps(info))
+        with pytest.raises(ValueError, match="train split"):
+            self._build(d, tmp_path, dataset_id="cat/split_aloha/task")
 
-    def test_legacy_stats_load_only_when_nothing_is_excluded(self, tmp_path, patch_decode):
-        """Backward compatibility must not become a hole.
+    def test_stats_without_the_map_are_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        self._stats(tmp_path)  # no populations key
+        with pytest.raises(ValueError, match="no per-bucket population provenance"):
+            self._build(d, tmp_path, dataset_id="cat/split_aloha/task")
 
-        A file predating the check may well describe the full population. It is
-        safe to accept only while this bucket excludes nothing; the moment it
-        does, that file may cover rows the reader never emits.
+    def test_a_map_that_does_not_cover_this_bucket_is_rejected(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
+        self._stats(tmp_path, populations={"other/split_aloha/elsewhere": {"exclusions": None, "split": None}})
+        with pytest.raises(ValueError, match="none of which is this one"):
+            self._build(d, tmp_path, dataset_id="cat/split_aloha/task")
+
+    def test_a_same_leaf_sibling_must_not_satisfy_the_check(self, tmp_path, patch_decode):
+        """The reported hole: a sparse map holding only the OTHER same-leaf bucket.
+
+        A unique suffix proves nothing about identity when the map is sparse —
+        coverage maps list only successfully scanned buckets — so `bad/.../apple`
+        used to resolve to `good/.../apple` and accept its statistics.
         """
-        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
-        self._stats(tmp_path)  # no "exclusions" key at all
-        ds = InternDataA1Dataset(
-            str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
-            normalize_mode="quantile", num_frames=9, video_stride=4,
-        )
-        assert ds._normalization_stats is not None
+        good = _make_bucket(tmp_path, "good/split_aloha/apple", n_eps=2, ep_len=20)
+        bad = _make_bucket(tmp_path, "bad/split_aloha/apple", n_eps=2, ep_len=20)
+        self._stats(tmp_path, populations=self._pop(good, "good/split_aloha/apple"))
+        with pytest.raises(ValueError, match="none of which is this one"):
+            self._build(bad, tmp_path)          # unqualified id: "apple"
+        with pytest.raises(ValueError, match="none of which is this one"):
+            self._build(bad, tmp_path, dataset_id="bad/split_aloha/apple")
 
-        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
-        with pytest.raises(ValueError, match="predates exclusion provenance"):
-            InternDataA1Dataset(
-                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
-                normalize_mode="quantile", num_frames=9, video_stride=4,
-            )
-
-    def test_a_map_that_cannot_resolve_this_bucket_is_rejected(self, tmp_path, patch_decode):
-        """A generated map lists EVERY scanned bucket (null for the ones that
-        exclude nothing), so an unresolvable entry means these stats were not
-        computed over this bucket — not that it has no exclusions."""
-        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
-        self._stats(tmp_path, exclusions={"other/split_aloha/different": None})
-        with pytest.raises(ValueError, match="none of them resolves to this one"):
-            InternDataA1Dataset(
-                str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
-                normalize_mode="quantile", num_frames=9, video_stride=4,
-            )
-
-    def test_digest_ignores_formatting_and_order(self, tmp_path):
-        a = _make_bucket(tmp_path, "a/split_aloha/t", n_eps=2, ep_len=4)
-        b = _make_bucket(tmp_path, "b/split_aloha/t", n_eps=2, ep_len=4)
-        (a / "meta" / "excluded_episodes.json").write_text('{"episode_indices": [1, 0]}')
-        (b / "meta" / "excluded_episodes.json").write_text(
-            '{\n  "episode_indices": [\n    0,\n    1\n  ]\n}\n'
-        )
-        assert exclusion_digest(a) == exclusion_digest(b)
-
-    def test_single_bucket_mode_resolves_the_exclusion_entry_by_suffix(self, tmp_path, patch_decode):
-        """Without an explicit dataset_id the reader's id is the bare directory
-        name, while the stats map is keyed by bucket path. Looking it up
-        directly reported the bucket's own exclusions as unrecorded and rejected
-        valid data — it must resolve the same way the trim list does."""
+    def test_single_bucket_mode_resolves_from_its_own_path(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
         (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
-        self._stats(tmp_path, exclusions={"cat/split_aloha/task": exclusion_digest(d)})
-        ds = InternDataA1Dataset(  # no dataset_id
-            str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile",
-            num_frames=9, video_stride=4,
-        )
-        assert ds._normalization_stats is not None
-
-    def test_an_unrecorded_exclusion_is_still_rejected(self, tmp_path, patch_decode):
-        """The suffix fallback must not become a way to skip the check: a bucket
-        that excludes episodes but appears nowhere in the map is a genuine
-        mismatch."""
-        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
-        (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
-        self._stats(tmp_path, exclusions={"other/split_aloha/elsewhere": "deadbeefdeadbeef"})
-        with pytest.raises(ValueError, match="none of them resolves to this one"):
-            InternDataA1Dataset(
-                str(d), a1_stats_root=str(tmp_path), normalize_mode="quantile",
-                num_frames=9, video_stride=4,
-            )
-
-
-class TestStaleShardIndex:
-    """`data/file_index` goes stale at shard boundaries — the episode that starts
-    a new shard keeps the previous file's index.
-
-    In affected multi-shard buckets, every one of the affected multi-shard buckets is
-    affected (~shards-1 episodes each, many episodes total), while all 22
-    single-shard buckets are clean. The base `groupby(chunk,file).cumsum()` then
-    points those episodes into the PREVIOUS shard — a valid row range that reads
-    back real numbers, so it pairs an episode with another one's frames and
-    raises nothing.
-    """
-
-    def _two_shard_bucket(self, tmp_path):
-        """Two shards, with the second episode's `data/file_index` left stale at 0."""
-        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
-        src = d / "data" / "chunk-000" / "file-000.parquet"
-        t = pq.read_table(src)
-        pq.write_table(t.slice(0, 4), src)                                   # shard 0: ep0
-        pq.write_table(t.slice(4, 4), d / "data" / "chunk-000" / "file-001.parquet")  # shard 1: ep1
-        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
-        m = pq.read_table(man).to_pydict()
-        m["data/file_index"] = [0, 0]          # ep1 is really in file-001 — this is the stale bit
-        m["dataset_from_index"] = [0, 4]       # global row index, correct
-        m["dataset_to_index"] = [4, 8]
-        pq.write_table(pa.Table.from_pydict(m), man)
-        return d
-
-    def test_the_boundary_episode_resolves_to_its_real_shard(self, tmp_path, patch_decode):
-        d = self._two_shard_bucket(tmp_path)
-        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
-        i = ds._eps_df.index[ds._eps_df["episode_index"] == 1][0]
-        pos = list(ds._eps_df.index).index(i)
-        assert int(ds._eps_df["data/file_index"].loc[i]) == 1, "still pointing at the stale shard"
-        assert int(ds._ep_data_row_offset[pos]) == 0, "offset should be file-local to file-001"
-
-    def test_the_unaffected_episode_is_untouched(self, tmp_path, patch_decode):
-        d = self._two_shard_bucket(tmp_path)
-        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
-        i = ds._eps_df.index[ds._eps_df["episode_index"] == 0][0]
-        pos = list(ds._eps_df.index).index(i)
-        assert int(ds._eps_df["data/file_index"].loc[i]) == 0
-        assert int(ds._ep_data_row_offset[pos]) == 0
-
-
-class TestShardCompleteness:
-    """A missing middle shard must fail loudly, not resolve onto another episode.
-
-    The cumulative boundaries close over whatever files exist, so with file-001
-    gone every episode start still lands inside the total found on disk — and
-    each later episode maps to a plausible row of the wrong file. The manifest's
-    own end index is the independent witness.
-    """
-
-    def test_a_missing_middle_shard_is_rejected(self, tmp_path, patch_decode):
-        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=3, ep_len=4)
-        src = d / "data" / "chunk-000" / "file-000.parquet"
-        t = pq.read_table(src)
-        pq.write_table(t.slice(0, 4), src)                                            # ep0
-        pq.write_table(t.slice(8, 4), d / "data" / "chunk-000" / "file-002.parquet")  # ep2; ep1's shard absent
-        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
-        m = pq.read_table(man).to_pydict()
-        m["dataset_from_index"] = [0, 4, 8]
-        m["dataset_to_index"] = [4, 8, 12]
-        pq.write_table(pa.Table.from_pydict(m), man)
-
-        with pytest.raises(ValueError, match="shard is missing"):
-            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
-
-    def test_complete_shards_are_accepted(self, tmp_path, patch_decode):
-        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
-        src = d / "data" / "chunk-000" / "file-000.parquet"
-        t = pq.read_table(src)
-        pq.write_table(t.slice(0, 4), src)
-        pq.write_table(t.slice(4, 4), d / "data" / "chunk-000" / "file-001.parquet")
-        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
-        m = pq.read_table(man).to_pydict()
-        m["dataset_from_index"] = [0, 4]
-        m["dataset_to_index"] = [4, 8]
-        pq.write_table(pa.Table.from_pydict(m), man)
-        ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
-        assert len(ds._eps_df) == 2
+        self._stats(tmp_path, populations=self._pop(d, "cat/split_aloha/task"))
+        assert self._build(d, tmp_path)._normalization_stats is not None  # no dataset_id
 
 
 class TestStatsSplitProvenance:
@@ -1260,7 +1193,7 @@ class TestStatsSplitProvenance:
 
     def test_val_generated_stats_are_refused_by_a_train_reader(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
-        self._stats(tmp_path, split="val")
+        self._stats(tmp_path, split="val", populations={"cat/split_aloha/task": {"exclusions": None, "split": None}})
         with pytest.raises(ValueError, match="generated from split"):
             InternDataA1Dataset(
                 str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
@@ -1269,7 +1202,9 @@ class TestStatsSplitProvenance:
 
     def test_train_generated_stats_are_accepted_by_a_val_reader(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=20)
-        self._stats(tmp_path, split="train")
+        self._stats(tmp_path, split="train", populations={
+            "cat/split_aloha/task": {"exclusions": exclusion_digest(d),
+                                     "split": split_spec_digest(d, "train")}})
         ds = InternDataA1Dataset(
             str(d), dataset_id="cat/split_aloha/task", a1_stats_root=str(tmp_path),
             normalize_mode="quantile", num_frames=9, video_stride=4, split="val",
@@ -1278,23 +1213,34 @@ class TestStatsSplitProvenance:
 
 
 class TestAmbiguousBucketName:
-    """`<cat>/<emb>/<task>/<object>` is a documented depth, so repeating leaf
-    names is expected — the error must say that, and prescribe something that
-    actually helps (regenerating produces the same names)."""
+    """Ambiguity is reported only when the bucket's own PATH cannot disambiguate,
+    and the message must not prescribe a remedy that reproduces it."""
 
-    def test_the_message_names_the_real_cause_and_a_working_remedy(self):
+    def test_the_path_disambiguates_without_error(self, tmp_path):
+        d = tmp_path / "a" / "emb" / "obj"
+        d.mkdir(parents=True)
+        assert resolve_bucket_key(
+            {"a/emb/obj": None, "b/emb/obj": None},
+            dataset_id="obj", bucket_dir=d, what="trim_csv", source="test",
+        ) == "a/emb/obj"
+
+    def test_message_names_the_real_cause_and_a_working_remedy(self, tmp_path):
+        d = tmp_path / "c" / "emb" / "obj"      # path matches neither key
+        d.mkdir(parents=True)
         with pytest.raises(AmbiguousBucketKey) as e:
             resolve_bucket_key(
-                {"a/emb/task/obj": None, "b/emb/task/obj": None},
-                dataset_id="obj", dir_name="obj", what="trim_csv", source="test",
+                {"a/emb/obj": None, "b/emb/obj": None},
+                dataset_id="obj", bucket_dir=d, what="trim_csv", source="test",
             )
         msg = str(e.value)
         assert "repeat across tasks" in msg
         assert "dataset_id" in msg
-        assert "regenerat" not in msg.lower(), "must not prescribe a remedy that reproduces it"
+        assert "regenerat" not in msg.lower()
 
-    def test_a_unique_suffix_still_resolves(self):
+    def test_a_qualified_id_that_misses_stays_a_miss(self, tmp_path):
+        d = tmp_path / "b" / "emb" / "obj"
+        d.mkdir(parents=True)
         assert resolve_bucket_key(
-            {"a/emb/task": None, "b/emb/other": None},
-            dataset_id="task", dir_name="task", what="trim_csv", source="test",
-        ) == "a/emb/task"
+            {"a/emb/obj": None},
+            dataset_id="a/emb/other", bucket_dir=d, what="trim_csv", source="test",
+        ) is None
