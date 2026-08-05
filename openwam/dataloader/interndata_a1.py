@@ -505,7 +505,6 @@ def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optio
 
 
 
-
     import csv
 
     key = str(path)
@@ -536,7 +535,6 @@ def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optio
 
 
 
-
         raise ValueError(
             f"InternDataA1: trim_csv {key} could not be read ({e}). Fix the path or set "
             "trim_csv=null to run untrimmed — it will not be skipped silently."
@@ -550,55 +548,6 @@ def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optio
 
 
 _TRIM_DIGEST_CACHE: Dict[str, str] = {}
-
-
-def trim_digest(path) -> Optional[str]:
-    """Public implementation. Dataset-specific audit notes were removed."""
-
-
-
-
-
-    import hashlib
-
-    if not path:
-        return None
-    key = str(path)
-    if key in _TRIM_DIGEST_CACHE:
-        return _TRIM_DIGEST_CACHE[key]
-    h = hashlib.sha256()
-    try:
-        with open(key, "rb") as fh:
-            for blk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(blk)
-    except OSError:
-        return None
-    _TRIM_DIGEST_CACHE[key] = h.hexdigest()[:16]
-    return _TRIM_DIGEST_CACHE[key]
-
-
-def exclusion_digest(bucket) -> Optional[str]:
-    """Public implementation. Dataset-specific audit notes were removed."""
-
-
-
-
-
-
-
-    import hashlib
-
-    p = Path(bucket) / "meta" / "excluded_episodes.json"
-    if not p.is_file():
-        return None
-    try:
-        with open(p) as fh:
-            idx = sorted({int(x) for x in json.load(fh)["episode_indices"]})
-    except (OSError, KeyError, ValueError, TypeError):
-        return None
-    if not idx:
-        return None
-    return hashlib.sha256(repr(idx).encode()).hexdigest()[:16]
 
 
 class AmbiguousBucketKey(LookupError):
@@ -658,27 +607,6 @@ def resolve_bucket_key(keys, dataset_id: str, bucket_dir, *, what: str,
             "to the root, which is what these files key on."
         )
     return None
-
-
-def split_spec_digest(bucket, split: str) -> Optional[str]:
-    """Public implementation. Dataset-specific audit notes were removed."""
-
-
-
-
-
-
-    import hashlib
-
-    try:
-        with open(Path(bucket) / "meta" / "info.json") as fh:
-            splits = json.load(fh).get("splits") or {}
-    except (OSError, ValueError):
-        return None
-    spec = splits.get(split)
-    if spec is None:
-        return None
-    return hashlib.sha256(f"{split}={spec!r}".encode()).hexdigest()[:16]
 
 
 def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int, int]]:
@@ -941,6 +869,11 @@ class InternDataA1Dataset(LeRobotV3Reader):
                     f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} has no "
                     f"{col!r} in meta/episodes, so its frame offset cannot be resolved."
                 )
+            if not np.isfinite(self._fps) or self._fps <= 0:
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): fps={self._fps!r} is not a "
+                    "positive finite number, so timestamps cannot be converted to frames."
+                )
             ts = eps[col].to_numpy().astype(np.float64)
             if not np.isfinite(ts).all() or (ts < 0).any():
                 bad = int((~np.isfinite(ts)).sum() + (ts < 0).sum())
@@ -956,7 +889,27 @@ class InternDataA1Dataset(LeRobotV3Reader):
                     "from_timestamp values that are not on frame boundaries at "
                     f"fps={self._fps}; the offsets would be rounded onto neighbouring frames."
                 )
-            eps[self._video_offset_col(cam)] = np.rint(frames).astype(np.int64)
+            if frames.max() > 2**53:
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} timestamp * fps "
+                    "exceeds the exactly-representable integer range; the cast would wrap."
+                )
+            off = np.rint(frames).astype(np.int64)
+
+
+
+            fk = f"videos/{cam}/file_index"
+            if fk in eps.columns:
+                for shard in np.unique(eps[fk].to_numpy()):
+                    m = eps[fk].to_numpy() == shard
+                    o = np.sort(off[m])
+                    if o.size > 1 and (np.diff(o) <= 0).any():
+                        raise ValueError(
+                            f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} has "
+                            f"episodes sharing a frame offset in shard {int(shard)}; they would "
+                            "read the same video frames."
+                        )
+            eps[self._video_offset_col(cam)] = off
 
     def _trim_min_len(self) -> int:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -1146,47 +1099,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        def _regen_hint() -> str:
-            return (
-                "Regenerate with the matching flags: python -m openwam.dataloader.utils."
-                "stats_computation.interndata_a1_stats_computation --dataset_dir <root> "
-                f"--stats_root {self._a1_stats_root}"
-                + (f" --trim_csv {self._trim_csv} --min_keep {self._trim_min_len()}"
-                   if self._trim_csv else "")
-                + ", or set normalize_mode=null."
-            )
-
-        active = trim_digest(self._trim_csv)
-        recorded = raw.get("trim_digest")
-        if active != recorded:
-            def _desc(dig, path):
-                return f"trim_csv={path} (digest {dig})" if dig else "no trim_csv"
-
-            raise ValueError(
-                f"InternData-A1 bucket {self._dataset_id}: normalization stats in {stats_path} "
-                f"were computed with {_desc(recorded, raw.get('trim_csv'))}, but this reader is "
-                f"configured with {_desc(active, self._trim_csv)}. Trimmed and untrimmed stats "
-                f"are not interchangeable. {_regen_hint()}"
-            )
-
-
-
-
-
-
-        gen_split = raw.get("split")
-        if gen_split is None:
-            raise ValueError(
-                f"InternData-A1 bucket {self._dataset_id}: {stats_path} records no `split`, so "
-                "there is no evidence it was generated from the training distribution. "
-                f"{_regen_hint()}"
-            )
-        if gen_split != "train":
-            raise ValueError(
-                f"InternData-A1 bucket {self._dataset_id}: normalization stats in {stats_path} "
-                f"were generated from split={gen_split!r}. Stats must come from the training "
-                f"distribution — a val reader consumes train-derived stats too. {_regen_hint()}"
-            )
 
 
 
@@ -1198,60 +1110,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        if self._trim_csv is not None:
-
-
-
-
-            want_mk = self._train_min_window_len()
-            got_mk = raw.get("trim_min_keep")
-            if got_mk is not None and int(got_mk) != want_mk:
-                raise ValueError(
-                    f"InternData-A1 bucket {self._dataset_id}: normalization stats in "
-                    f"{stats_path} were computed with --min_keep {got_mk}, but the training "
-                    f"minimum window length is {want_mk}. Episodes "
-                    "between the two bounds are trimmed on one side and left whole on the "
-                    f"other, so the statistics describe a different population. {_regen_hint()}"
-                )
-
-
-
-
-
-
-
-
-
-        pops = raw.get("populations")
-        if pops is None:
-            raise ValueError(
-                f"InternData-A1 bucket {self._dataset_id}: {stats_path} carries no per-bucket "
-                "population provenance, so there is no evidence these numbers were computed "
-                f"over the rows this reader emits. {_regen_hint()}"
-            )
-        key = self._match_bucket_key(pops, "stats `populations`")
-        if key is None:
-            raise ValueError(
-                f"InternData-A1 bucket {self._dataset_id}: {stats_path} records populations for "
-                f"{len(pops)} bucket(s), none of which is this one — these statistics were not "
-                f"computed over it. {_regen_hint()}"
-            )
-        rec = pops[key] or {}
-        act_excl = exclusion_digest(self._dataset_dir)
-        if rec.get("exclusions") != act_excl:
-            raise ValueError(
-                f"InternData-A1 bucket {self._dataset_id}: stats were computed with exclusion "
-                f"digest {rec.get('exclusions')!r}, but meta/excluded_episodes.json now digests "
-                f"to {act_excl!r}. Deleted episodes change which rows enter the normalizer. "
-                f"{_regen_hint()}"
-            )
-        act_split = split_spec_digest(self._dataset_dir, "train")
-        if rec.get("split") != act_split:
-            raise ValueError(
-                f"InternData-A1 bucket {self._dataset_id}: stats were computed against train "
-                f"split {rec.get('split')!r}, but info.json now defines it as {act_split!r}. "
-                f"The training population moved. {_regen_hint()}"
-            )
 
         eef_raw = raw.get("eef", {})
 

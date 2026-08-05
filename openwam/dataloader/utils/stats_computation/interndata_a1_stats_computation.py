@@ -89,12 +89,9 @@ from openwam.dataloader.interndata_a1 import (
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
-    exclusion_digest,
     resolve_bucket_key,
     resolve_gripper_scale,
     resolve_trim_bounds,
-    split_spec_digest,
-    trim_digest,
 )
 from openwam.dataloader.utils.eef import ARM10_DIM, quat_wxyz_to_rot6d
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
@@ -440,7 +437,9 @@ def compute_stats_for_embodiment(
 
 
 
-    populations: Dict[str, Dict[str, Optional[str]]] = {}
+
+
+    scanned_buckets: List[str] = []
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
 
@@ -464,14 +463,9 @@ def compute_stats_for_embodiment(
             if not len(rows):
 
 
-
-                logger.warning("  [%s] %s produced 0 rows; not recording coverage",
-                               embodiment, name)
+                logger.warning("  [%s] %s produced 0 rows", embodiment, name)
                 continue
-            populations[_rel_id(Path(name))] = {
-                "exclusions": exclusion_digest(Path(name)),
-                "split": split_spec_digest(Path(name), "train"),
-            }
+            scanned_buckets.append(_rel_id(Path(name)))
             acc.update_batch(rows)
             n_rows += len(rows)
             n_ok += 1
@@ -500,11 +494,7 @@ def compute_stats_for_embodiment(
         "num_rows": int(n_rows),
 
 
-
-        "populations": populations,
-
-
-
+        "scanned_buckets": sorted(scanned_buckets),
         "split": split,
         "rot6d_identity": bool(rot6d_identity),
         "layout_doc": "[L_xyz(0:3), L_rot6d(3:9), L_grip(9), R_xyz(10:13), R_rot6d(13:19), R_grip(19)]",
@@ -598,9 +588,6 @@ def main():
 
 
         result["trim_csv"] = args.trim_csv
-
-
-        result["trim_digest"] = trim_digest(args.trim_csv)
         result["trim_min_keep"] = args.min_keep if args.trim_csv else None
         out = out_dir / f"stats_{emb}.json"
 
