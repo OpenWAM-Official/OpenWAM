@@ -220,8 +220,31 @@ def load_from_checkpoint_dir(
     _bd = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
     architecture.binary_command_dims = tuple(int(d) for d in (_bd or ()))
 
+    # 8. Representation contract advertised to eval clients (PolicyServer PONG). Bound HERE — to the
+    # TRAINING cfg, before merge_deploy_cfg lets deploy overrides win — so a deploy yaml carrying
+    # stray dataloader.* keys can never make the PONG advertise values the architecture isn't
+    # actually using (normalizer stats selection, binary dims, torso masking all derive from the
+    # training cfg at this point).
+    architecture.repr_contract = repr_contract_from_cfg(cfg)
+
     logger.info("Model loaded successfully on %s", device)
     return cfg, architecture
+
+
+def repr_contract_from_cfg(cfg: DictConfig) -> dict:
+    """Ckpt representation-contract fields a mismatched eval config would violate SILENTLY.
+
+    All are semantics the action/proprio widths cannot reveal: velocity vs global_pose proprio are
+    both 25-D; mask_torso_action changes what reaches a LIVE actuator; binary_action_dims changes
+    the decode of two command dims. Defaults = the historical behavior of ckpts predating each key.
+    """
+    dims = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
+    return {
+        "base_proprio": str(OmegaConf.select(cfg, "dataloader.base_proprio", default="velocity")),
+        "mobile_base": bool(OmegaConf.select(cfg, "dataloader.mobile_base", default=False)),
+        "mask_torso_action": bool(OmegaConf.select(cfg, "dataloader.mask_torso_action", default=True)),
+        "binary_action_dims": [int(d) for d in (dims or [])],
+    }
 
 
 def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):

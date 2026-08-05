@@ -467,7 +467,12 @@ def test_mask_torso_action_zeros_torso():
 
 def test_mask_torso_action_false_passes_torso():
     # mask_torso_action=False: the model's torso prediction is passed through to the env.
-    fake = _FakeClient(action=_SERVER25_TORSO09)
+    # (The non-historical False requires server confirmation in the handshake — advertise it.)
+    fake = _FakeClient(
+        action=_SERVER25_TORSO09,
+        pong={"type": "pong", "base_proprio": "velocity", "mobile_base": True,
+              "mask_torso_action": False},
+    )
     policy = adapter.OpenWAMRoboCasa365Policy(
         _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, mask_torso_action=False
     )
@@ -572,3 +577,35 @@ def test_handshake_mobile_base_mismatch_raises():
             ),
             osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
         )
+
+
+def test_handshake_mask_torso_mismatch_raises_both_directions():
+    for server_val, client_val in ((False, True), (True, False)):
+        with pytest.raises(RuntimeError, match="mask_torso_action mismatch"):
+            adapter.OpenWAMRoboCasa365Policy(
+                _client=_FakeClient(
+                    action=list(range(25)),
+                    pong={"type": "pong", "base_proprio": "velocity", "mobile_base": True,
+                          "mask_torso_action": server_val},
+                ),
+                osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
+                mask_torso_action=client_val,
+            )
+
+
+def test_handshake_mask_torso_false_requires_server_field():
+    """The non-historical False needs server confirmation: an unconfirmed False would send a
+    possibly-unsupervised torso output to the live actuator."""
+    with pytest.raises(RuntimeError, match="did not advertise the checkpoint's torso"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(25))),  # bare pong: old server
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, mask_torso_action=False,
+        )
+
+
+def test_handshake_mask_torso_default_tolerates_old_server():
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+        mobile_base=True,  # mask_torso_action defaults to the historical True
+    )
+    assert policy._mask_torso_action is True

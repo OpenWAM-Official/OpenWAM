@@ -41,8 +41,8 @@ The wire contract (message types) lives in ``benchmarks/utils/transport.py``
 """
 
 from benchmarks.utils.action_conversion import (
-    base_velocity_body,
     base_pose_planar5,
+    base_velocity_body,
     base_velocity_cmd,
     ebench_obs_to_raw23,
     ebench_quat_wxyz_to_rot6d,

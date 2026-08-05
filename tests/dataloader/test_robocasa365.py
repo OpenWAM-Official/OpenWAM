@@ -872,8 +872,10 @@ def test_from_config_threads_base_proprio_and_binary_dims(tmp_path):
 def _skewed_stats_file(tmp_path, mode_mean=-0.86, mode_std=0.51):
     """25-D eef_base stats with class-imbalanced z-score stats on the binary dims (9, 24) and a
     single-class min-max range on dim 24 (min==max=+1 nudged by the degenerate guard to [1, 2])."""
-    lo = np.full(25, -1.0, np.float32); hi = np.full(25, 1.0, np.float32)
-    mean = np.zeros(25, np.float32); std = np.ones(25, np.float32)
+    lo = np.full(25, -1.0, np.float32)
+    hi = np.full(25, 1.0, np.float32)
+    mean = np.zeros(25, np.float32)
+    std = np.ones(25, np.float32)
     for d in (9, 24):
         mean[d], std[d] = mode_mean, mode_std
     lo[24], hi[24] = 1.0, 2.0  # single-class min-max after the degenerate nudge

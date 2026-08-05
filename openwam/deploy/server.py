@@ -167,18 +167,16 @@ class PolicyServer:
     def _ckpt_contract(self) -> dict:
         """Representation-contract fields advertised in the PONG for client-side validation.
 
-        Two proprio representations can share the same width (velocity vs global_pose are both
-        25-D), so a mismatched eval config corrupts evaluation SILENTLY — the client must be able
-        to compare its config against what the checkpoint actually trained with.
+        Source is ``architecture.repr_contract`` — bound by ``load_model`` to the TRAINING cfg
+        BEFORE ``merge_deploy_cfg`` (where deploy overrides win). Reading the merged ``self.cfg``
+        here would let a deploy yaml carrying stray ``dataloader.*`` keys make the PONG advertise
+        values the architecture isn't using (its normalizer/binary dims were built from the
+        training cfg) — re-opening exactly the silent mismatch the handshake exists to kill.
+        Engines without an architecture (or pre-contract load paths) advertise nothing — clients
+        then apply their old-server compatibility rules.
         """
-        from omegaconf import OmegaConf
-
-        dims = OmegaConf.select(self.cfg, "dataloader.binary_action_dims", default=None)
-        return {
-            "base_proprio": str(OmegaConf.select(self.cfg, "dataloader.base_proprio", default="velocity")),
-            "mobile_base": bool(OmegaConf.select(self.cfg, "dataloader.mobile_base", default=False)),
-            "binary_action_dims": [int(d) for d in (dims or [])],
-        }
+        contract = getattr(getattr(self.engine, "architecture", None), "repr_contract", None)
+        return dict(contract) if contract else {}
 
     def predict(self, obs: dict) -> dict:
         """Synchronous prediction for a single observation.

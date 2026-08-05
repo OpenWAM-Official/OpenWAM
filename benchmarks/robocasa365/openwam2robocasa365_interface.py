@@ -415,6 +415,24 @@ class OpenWAMRoboCasa365Policy:
                 f"mobile_base mismatch: eval config says {self._mobile_base} but the server's "
                 f"checkpoint trained with mobile_base={bool(server_mb)}. Fix the eval policy config."
             )
+        # mask_torso_action drives a LIVE actuator: ckpt=False + client=True silently zeroes a
+        # supervised torso prediction; ckpt=True + client=False sends an UNSUPERVISED torso output
+        # to the actuator (safety risk). Same asymmetric compat as base_proprio: a client on the
+        # historical default (True) tolerates an old server that can't advertise; a client set to
+        # the non-historical False REQUIRES server confirmation.
+        server_mt = pong.get("mask_torso_action")
+        if server_mt is not None and bool(server_mt) != self._mask_torso_action:
+            raise RuntimeError(
+                f"mask_torso_action mismatch: eval config says {self._mask_torso_action} but the "
+                f"server's checkpoint trained with {bool(server_mt)}. Fix the eval policy config "
+                "(True zeroes the torso command; False passes the model's torso output through)."
+            )
+        if server_mt is None and not self._mask_torso_action:
+            raise RuntimeError(
+                "mask_torso_action=False but the server did not advertise the checkpoint's torso "
+                "masking — an unconfirmed False would send a possibly-unsupervised torso output to "
+                "the live actuator. Update the server (or use the historical default True)."
+            )
         print(
             f"[OpenWAMRoboCasa365Policy] action_dim={action_dim} state_dim={self._state_dim} "
             f"mobile_base={self._mobile_base} mask_torso_action={self._mask_torso_action} "
