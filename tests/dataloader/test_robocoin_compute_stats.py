@@ -16,6 +16,7 @@ import pytest
 
 from openwam.dataloader.robocoin import RoboCOINDataset
 from openwam.dataloader.utils.lerobotv3 import DataContractError
+from openwam.dataloader.utils.stats_computation import robocoin_stats_computation as stats_module
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
     Accumulator,
     compute_stats_for_robot_type,
@@ -173,6 +174,55 @@ class TestTrimmedPopulationStats:
         assert result["eef"]["min"][0] == pytest.approx(2.0)
         assert result["eef"]["max"][0] == pytest.approx(7.0)
 
+    def test_stats_ignore_sorting_earlier_non_numeric_backup_shard(self, tmp_path):
+        _, bucket = _make_encoded_stats_bucket(tmp_path)
+        real_path = bucket / "data" / "chunk-000" / "file-000.parquet"
+        backup_path = bucket / "data" / "chunk--backup" / "file-old.parquet"
+        backup_path.parent.mkdir()
+        backup = pd.read_parquet(real_path)
+        for column in ("eef_sim_pose_action", "eef_sim_pose_state"):
+            values = np.stack(backup[column].values).astype(np.float32)
+            values[:, 0] = 999
+            backup[column] = list(values)
+        backup.to_parquet(backup_path, index=False)
+
+        result = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket)],
+            rot6d_identity=False,
+            trim_csv=str(_make_trim_csv(tmp_path)),
+        )
+
+        assert result["eef"]["num_files"] == 1
+        assert result["eef"]["min"][0] == pytest.approx(2.0)
+        assert result["eef"]["max"][0] == pytest.approx(7.0)
+
+    def test_stats_fail_if_trim_csv_changes_during_scan(self, tmp_path, monkeypatch):
+        _, bucket = _make_encoded_stats_bucket(tmp_path)
+        trim_csv = _make_trim_csv(tmp_path)
+        replacement = _write_trim_csv(
+            tmp_path / "replacement.csv",
+            [_trim_row(trim_head_to=3, trim_tail_from=7)],
+        )
+        original_read_parquet = stats_module.pd.read_parquet
+        replaced = False
+
+        def replace_before_read(*args, **kwargs):
+            nonlocal replaced
+            if not replaced:
+                replacement.replace(trim_csv)
+                replaced = True
+            return original_read_parquet(*args, **kwargs)
+
+        monkeypatch.setattr(stats_module.pd, "read_parquet", replace_before_read)
+        with pytest.raises(DataContractError, match="changed while.*stats scan"):
+            compute_stats_for_robot_type(
+                "test_robot",
+                [str(bucket)],
+                rot6d_identity=False,
+                trim_csv=str(trim_csv),
+            )
+
 
 def test_untrimmed_stats_keep_legacy_nonstandard_parquet_discovery(tmp_path):
     _, bucket = _make_encoded_stats_bucket(tmp_path)
@@ -287,3 +337,61 @@ class TestReaderTrimStatsProvenance:
         )
         assert reader._eps_df["length"].tolist() == [10]
         assert reader._normalization_stats is not None
+
+    def test_reader_rejects_new_stats_if_csv_changes_after_offsets(self, tmp_path, monkeypatch):
+        root, bucket = _make_encoded_stats_bucket(tmp_path)
+        trim_csv = _make_trim_csv(tmp_path)
+
+        replacement = _write_trim_csv(
+            tmp_path / "replacement-for-b-stats.csv",
+            [_trim_row(trim_head_to=3, trim_tail_from=7)],
+        )
+        replacement.replace(trim_csv)
+        stats_b = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket)],
+            rot6d_identity=False,
+            trim_csv=str(trim_csv),
+        )
+        _write_stats(root, stats_b)
+
+        restore_a = _write_trim_csv(tmp_path / "restore-a.csv", [_trim_row()])
+        restore_a.replace(trim_csv)
+        replace_with_b = _write_trim_csv(
+            tmp_path / "replace-with-b.csv",
+            [_trim_row(trim_head_to=3, trim_tail_from=7)],
+        )
+        original_add_offsets = RoboCOINDataset._add_data_offsets
+
+        def add_offsets_then_replace(self, eps):
+            original_add_offsets(self, eps)
+            replace_with_b.replace(trim_csv)
+
+        monkeypatch.setattr(RoboCOINDataset, "_add_data_offsets", add_offsets_then_replace)
+        with pytest.raises(DataContractError):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_reader_rejects_csv_change_without_normalization(self, tmp_path, monkeypatch):
+        _, bucket = _make_encoded_stats_bucket(tmp_path)
+        trim_csv = _make_trim_csv(tmp_path)
+        replacement = _write_trim_csv(
+            tmp_path / "replacement.csv",
+            [_trim_row(trim_head_to=3, trim_tail_from=7)],
+        )
+        original_add_offsets = RoboCOINDataset._add_data_offsets
+
+        def add_offsets_then_replace(self, eps):
+            original_add_offsets(self, eps)
+            replacement.replace(trim_csv)
+
+        monkeypatch.setattr(RoboCOINDataset, "_add_data_offsets", add_offsets_then_replace)
+        with pytest.raises(DataContractError, match="changed while reader construction"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode=None,
+                trim_csv=str(trim_csv),
+            )

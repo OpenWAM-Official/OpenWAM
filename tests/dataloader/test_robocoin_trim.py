@@ -76,15 +76,13 @@ def _filter(tmp_path: Path, eps: pd.DataFrame, rows: list[dict]) -> pd.DataFrame
 
 @pytest.fixture(autouse=True)
 def _isolate_trim_cache():
-    # Trim parsing/digests are cached for the many bucket readers.
+    # Immutable trim snapshots are cached for the many bucket readers.
     # Tests reuse tmp_path names across separate pytest processes, so isolate it.
     from openwam.dataloader import robocoin
 
-    robocoin._TRIM_SPEC_CACHE.clear()
-    robocoin._TRIM_DIGEST_CACHE.clear()
+    robocoin._TRIM_SNAPSHOT_CACHE.clear()
     yield
-    robocoin._TRIM_SPEC_CACHE.clear()
-    robocoin._TRIM_DIGEST_CACHE.clear()
+    robocoin._TRIM_SNAPSHOT_CACHE.clear()
 
 
 class TestLoadTrimSpec:
@@ -177,7 +175,7 @@ class TestLoadTrimSpec:
         )
         with pytest.raises(ValueError):
             _load_trim_spec(path)
-        assert str(path) not in robocoin._TRIM_SPEC_CACHE
+        assert str(path) not in robocoin._TRIM_SNAPSHOT_CACHE
 
         _write_trim_csv(path, [_trim_row()])
         assert _load_trim_spec(path) == {"bucket": {0: (2, 8, 10)}}
@@ -447,6 +445,58 @@ def test_root_mode_trim_csv_with_partial_bucket_key_overlap_is_allowed(tmp_path)
         for bucket in ds._buckets
     }
     assert lengths_by_bucket == {"bucket-a": [6], "bucket-b": [8]}
+
+
+def test_root_mode_pins_one_snapshot_for_all_bucket_constructors(tmp_path, monkeypatch):
+    from openwam.dataloader import robocoin
+
+    root = tmp_path / "root"
+    _make_bucket(root / "bucket-a", [10])
+    _make_bucket(root / "bucket-b", [10])
+    trim_csv = _write_trim_csv(
+        tmp_path / "trim.csv",
+        [_trim_row(dataset="bucket-a")],
+    )
+    original_load = robocoin._load_trim_snapshot
+    loads = []
+
+    def record_load(path):
+        snapshot = original_load(path)
+        loads.append(snapshot)
+        return snapshot
+
+    monkeypatch.setattr(robocoin, "_load_trim_snapshot", record_load)
+    ds = RoboCOINDataset.from_config(
+        {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+    )
+
+    assert len(loads) == 1
+    assert {bucket._dataset_id: bucket._eps_df["length"].tolist() for bucket in ds._buckets} == {
+        "bucket-a": [6],
+        "bucket-b": [10],
+    }
+    assert all(bucket._trim_snapshot is None for bucket in ds._buckets)
+
+
+def test_root_mode_rejects_csv_change_during_fanout_without_normalization(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    _make_bucket(root / "bucket", [10])
+    trim_csv = _write_trim_csv(tmp_path / "trim.csv", [_trim_row()])
+    replacement = _write_trim_csv(
+        tmp_path / "replacement.csv",
+        [_trim_row(trim_head_to=3, trim_tail_from=7)],
+    )
+    original_add_offsets = RoboCOINDataset._add_data_offsets
+
+    def add_offsets_then_replace(self, eps):
+        original_add_offsets(self, eps)
+        replacement.replace(trim_csv)
+
+    monkeypatch.setattr(RoboCOINDataset, "_add_data_offsets", add_offsets_then_replace)
+    with pytest.raises(DataContractError, match="changed while from_config reader construction"):
+        RoboCOINDataset.from_config(
+            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+        )
 
 
 def test_root_mode_unknown_episode_id_fails_closed_against_full_manifest(tmp_path):

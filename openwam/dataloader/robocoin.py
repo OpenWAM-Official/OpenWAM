@@ -63,11 +63,14 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import List
 
 import numpy as np
@@ -82,6 +85,18 @@ from openwam.dataloader.utils.normalization import apply_normalization, material
 logger = logging.getLogger(__name__)
 
 _STATE_DIM = _ACTION_DIM
+
+
+def _discover_data_parquets(dataset_dir: Path):
+    """Public implementation. Dataset-specific audit notes were removed."""
+    data_files = []
+    for path in sorted((Path(dataset_dir) / "data").glob("chunk-*/file-*.parquet")):
+        chunk_m = re.search(r"chunk-(\d+)$", path.parent.name)
+        file_m = re.search(r"file-(\d+)$", path.stem)
+        if chunk_m is not None and file_m is not None:
+            data_files.append((path, int(chunk_m.group(1)), int(file_m.group(1))))
+    return data_files
+
 
 
 _NEEDED_COLS = (
@@ -235,8 +250,7 @@ WRIST_RIGHT_CANDIDATES = [
 ]
 
 
-_TRIM_SPEC_CACHE: dict = {}
-_TRIM_DIGEST_CACHE: dict = {}
+_TRIM_SNAPSHOT_CACHE: dict = {}
 _TRIM_SCHEMA_VERSION = 1
 _TRIM_MIN_LEN = 1
 _TRIM_ZERO_SPAN_POLICY = "drop"
@@ -247,6 +261,42 @@ _TRIM_CSV_COLUMNS = (
     "trim_head_to",
     "trim_tail_from",
 )
+
+
+@dataclass(frozen=True)
+class _TrimSnapshot:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+    path: str
+    spec: dict
+    sha256: str
+
+    @property
+    def provenance(self) -> dict:
+        return {
+            "schema_version": _TRIM_SCHEMA_VERSION,
+            "sha256": self.sha256,
+            "min_len": _TRIM_MIN_LEN,
+            "zero_span_policy": _TRIM_ZERO_SPAN_POLICY,
+        }
+
+
+class _TrimSnapshotConfig:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+    def __init__(self, base, snapshot: _TrimSnapshot):
+        self._base = base
+        self._trim_snapshot = snapshot
+
+    def __getattr__(self, key):
+        return getattr(self._base, key)
+
+    def get(self, key, default=None):
+        if key == "_trim_snapshot":
+            return self._trim_snapshot
+        if hasattr(self._base, "get"):
+            return self._base.get(key, default)
+        return getattr(self._base, key, default)
 
 
 def _trim_csv_int(row, name: str, *, path: str, line_number: int, required: bool = False):
@@ -265,8 +315,10 @@ def _trim_csv_int(row, name: str, *, path: str, line_number: int, required: bool
         ) from e
 
 
-def _load_trim_spec(path) -> dict:
+def _load_trim_snapshot(path) -> _TrimSnapshot:
     """Public implementation. Dataset-specific audit notes were removed."""
+
+
 
 
 
@@ -287,14 +339,27 @@ def _load_trim_spec(path) -> dict:
             key,
         ) from e
     signature = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
-    cached = _TRIM_SPEC_CACHE.get(key)
+    cached = _TRIM_SNAPSHOT_CACHE.get(key)
     if cached is not None and cached[0] == signature:
         return cached[1]
+    try:
+        raw = Path(key).read_bytes()
+    except OSError as e:
+        raise OSError(
+            e.errno,
+            f"RoboCOIN trim_csv {key} could not be read: {e.strerror or e}",
+            key,
+        ) from e
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as e:
+        raise ValueError(f"RoboCOIN trim_csv {key}, line unknown: invalid text encoding: {e}") from e
+
     spec: dict = {}
     seen_entries = set()
     n = 0
     try:
-        with open(key, newline="") as fh:
+        with io.StringIO(text, newline="") as fh:
             reader = csv.DictReader(fh, strict=True)
             fieldnames = reader.fieldnames
             if fieldnames is None:
@@ -354,42 +419,43 @@ def _load_trim_spec(path) -> dict:
                 dataset_spec = spec.setdefault(dataset, {})
                 dataset_spec[episode_index] = (head, tail, total)
                 n += 1
-    except OSError as e:
-        raise OSError(
-            e.errno,
-            f"RoboCOIN trim_csv {key} could not be read: {e.strerror or e}",
-            key,
-        ) from e
     except csv.Error as e:
         line_number = getattr(locals().get("reader"), "line_num", "unknown")
         raise ValueError(f"RoboCOIN trim_csv {key}, line {line_number}: malformed CSV: {e}") from e
-    except UnicodeError as e:
-        line_number = getattr(locals().get("reader"), "line_num", "unknown")
-        raise ValueError(f"RoboCOIN trim_csv {key}, line {line_number}: invalid text encoding: {e}") from e
 
     logger.info("RoboCOIN: loaded %d trim entries across %d datasets from %s", n, len(spec), key)
-    _TRIM_SPEC_CACHE[key] = (signature, spec)
-    return spec
+    immutable_spec = MappingProxyType(
+        {dataset: MappingProxyType(entries) for dataset, entries in spec.items()}
+    )
+    snapshot = _TrimSnapshot(path=key, spec=immutable_spec, sha256=hashlib.sha256(raw).hexdigest())
+    _TRIM_SNAPSHOT_CACHE[key] = (signature, snapshot)
+    return snapshot
 
 
-def _trim_provenance(path) -> dict:
+def _load_trim_spec(path) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
-    key = str(path)
-    csv_path = Path(key)
-    stat = csv_path.stat()
-    signature = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
-    cached = _TRIM_DIGEST_CACHE.get(key)
-    if cached is None or cached[0] != signature:
-        digest = hashlib.sha256(csv_path.read_bytes()).hexdigest()
-        _TRIM_DIGEST_CACHE[key] = (signature, digest)
-    else:
-        digest = cached[1]
     return {
-        "schema_version": _TRIM_SCHEMA_VERSION,
-        "sha256": digest,
-        "min_len": _TRIM_MIN_LEN,
-        "zero_span_policy": _TRIM_ZERO_SPAN_POLICY,
+        dataset: dict(entries)
+        for dataset, entries in _load_trim_snapshot(path).spec.items()
     }
+
+
+def _assert_trim_snapshot_current(snapshot: _TrimSnapshot, *, context: str) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    try:
+        actual_sha256 = hashlib.sha256(Path(snapshot.path).read_bytes()).hexdigest()
+    except OSError as e:
+        raise OSError(
+            e.errno,
+            f"RoboCOIN trim_csv {snapshot.path} could not be re-read after {context}: {e.strerror or e}",
+            snapshot.path,
+        ) from e
+    if actual_sha256 != snapshot.sha256:
+        raise DataContractError(
+            f"RoboCOIN trim_csv {snapshot.path} changed while {context}; "
+            f"started with sha256={snapshot.sha256}, now sha256={actual_sha256}. "
+            "Refusing mixed trim spans/provenance; retry with an immutable CSV."
+        )
 
 
 def _validate_trim_manifest(dataset_id: str, manifest, spec: dict) -> dict:
@@ -485,7 +551,7 @@ class RoboCOINDataset(LeRobotV3Reader):
     PROMPT_FILE_REQUIRED = False
 
 
-    CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("trim_csv",)
+    CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("trim_csv", "_trim_snapshot")
 
 
     WRIST_DECODE_TOLERATED = (Exception,)
@@ -493,7 +559,7 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
     def __init__(self, dataset_dir, *, unify_action: bool = False, unify_action_map=None,
-                 trim_csv=None, **kwargs):
+                 trim_csv=None, _trim_snapshot=None, **kwargs):
         """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -509,6 +575,17 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
         self._trim_csv = trim_csv
+        trim_snapshot_was_provided = _trim_snapshot is not None
+        if _trim_snapshot is not None:
+            if trim_csv is None or not isinstance(_trim_snapshot, _TrimSnapshot):
+                raise ValueError("_trim_snapshot requires a matching non-null trim_csv")
+            if _trim_snapshot.path != str(trim_csv):
+                raise ValueError(
+                    f"_trim_snapshot path {_trim_snapshot.path!r} does not match trim_csv {str(trim_csv)!r}"
+                )
+        if _trim_snapshot is None and trim_csv is not None:
+            _trim_snapshot = _load_trim_snapshot(trim_csv)
+        self._trim_snapshot = _trim_snapshot
         self._dex_unify = False
         self._k_left = 0
         self._k_right = 0
@@ -544,6 +621,22 @@ class RoboCOINDataset(LeRobotV3Reader):
                     dataset_dir, len(aL), len(aR), len(sL), len(sR), MAX_HAND_DOF,
                 )
         super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
+        if self._trim_snapshot is not None and not trim_snapshot_was_provided:
+            _assert_trim_snapshot_current(self._trim_snapshot, context="reader construction")
+
+
+        self._trim_snapshot = None
+
+    def _get_trim_snapshot(self):
+        """Public implementation. Dataset-specific audit notes were removed."""
+        if self._trim_csv is None:
+            return None
+        snapshot = getattr(self, "_trim_snapshot", None)
+        if snapshot is None:
+
+            snapshot = _load_trim_snapshot(self._trim_csv)
+            self._trim_snapshot = snapshot
+        return snapshot
 
 
 
@@ -622,7 +715,7 @@ class RoboCOINDataset(LeRobotV3Reader):
         eps_df = super()._filter_episodes(eps_df)
         if self._trim_csv is None:
             return eps_df
-        spec = _load_trim_spec(self._trim_csv).get(self._dataset_id)
+        spec = self._get_trim_snapshot().spec.get(self._dataset_id)
         if not spec:
             if hasattr(self, "_trim_spans"):
                 del self._trim_spans
@@ -716,7 +809,7 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
         if self._trim_csv is not None:
-            spec = _load_trim_spec(self._trim_csv).get(self._dataset_id, {})
+            spec = self._get_trim_snapshot().spec.get(self._dataset_id, {})
             self._trim_spans = _validate_trim_manifest(self._dataset_id, eps, spec)
 
 
@@ -733,14 +826,11 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 
-        paths = sorted((self._dataset_dir / "data").glob("chunk-*/file-*.parquet"))
+        paths = _discover_data_parquets(self._dataset_dir)
 
-        def _read_meta(path):
-            chunk_m = re.search(r"chunk-(\d+)$", path.parent.name)
-            file_m = re.search(r"file-(\d+)$", path.stem)
-            if chunk_m is None or file_m is None:
-                return None
-            return (int(chunk_m.group(1)), int(file_m.group(1)), pq.ParquetFile(path).metadata.num_rows)
+        def _read_meta(entry):
+            path, chunk_index, file_index = entry
+            return (chunk_index, file_index, pq.ParquetFile(path).metadata.num_rows)
 
         if not paths:
             raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
@@ -748,10 +838,7 @@ class RoboCOINDataset(LeRobotV3Reader):
 
         n_workers = min(len(paths), 4)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            results = list(pool.map(_read_meta, paths))
-        data_files = [r for r in results if r is not None]
-        if not data_files:
-            raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
+            data_files = list(pool.map(_read_meta, paths))
 
         starts = np.concatenate([[0], np.cumsum([n for _, _, n in data_files])]).astype(np.int64)
         global_starts = eps["dataset_from_index"].to_numpy().astype(np.int64)
@@ -786,7 +873,7 @@ class RoboCOINDataset(LeRobotV3Reader):
                     "or configure the matching trim_csv."
                 )
         else:
-            expected_provenance = _trim_provenance(self._trim_csv)
+            expected_provenance = self._get_trim_snapshot().provenance
             actual_provenance = raw.get("trim_provenance")
             if not has_trim_provenance or actual_provenance != expected_provenance:
                 raise DataContractError(
@@ -937,10 +1024,12 @@ class RoboCOINDataset(LeRobotV3Reader):
 
         dataset_dir = get_cfg(config, "dataset_dir")
         trim_csv = get_cfg(config, "trim_csv")
+        snapshot = None
         if trim_csv is not None and dataset_dir is not None:
             root = Path(dataset_dir)
             if root.is_dir():
-                spec = _load_trim_spec(trim_csv)
+                snapshot = _load_trim_snapshot(trim_csv)
+                spec = snapshot.spec
                 if not (root / "meta" / "info.json").is_file():
                     bucket_names = {
                         path.name
@@ -952,7 +1041,12 @@ class RoboCOINDataset(LeRobotV3Reader):
                             f"RoboCOIN trim_csv {trim_csv}: none of its {len(spec)} dataset key(s) "
                             f"match any bucket directory under {root}; trimming would silently no-op."
                         )
-        return super().from_config(config, split=split)
+        if snapshot is not None:
+            config = _TrimSnapshotConfig(config, snapshot)
+        dataset = super().from_config(config, split=split)
+        if snapshot is not None:
+            _assert_trim_snapshot_current(snapshot, context="from_config reader construction")
+        return dataset
 
     @classmethod
     def _multibucket_wrapper(cls):

@@ -81,10 +81,11 @@ import pyarrow.parquet as pq
 from openwam.dataloader.robocoin import (
     _TRIM_MIN_LEN,
     MAX_HAND_DOF,
+    _assert_trim_snapshot_current,
+    _discover_data_parquets,
     _eef14_to_eef20,
     _finger_indices,
-    _load_trim_spec,
-    _trim_provenance,
+    _load_trim_snapshot,
     _validate_trim_manifest,
     dex_finger_layout,
 )
@@ -341,6 +342,8 @@ def compute_stats_for_robot_type(
     dataset_dirs: list,
     rot6d_identity: bool = True,
     trim_csv=None,
+    *,
+    _trim_snapshot=None,
 ) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -360,7 +363,14 @@ def compute_stats_for_robot_type(
 
 
     trim_enabled = trim_csv is not None
-    trim_spec = _load_trim_spec(trim_csv) if trim_enabled else {}
+    if _trim_snapshot is not None and (
+        not trim_enabled or _trim_snapshot.path != str(trim_csv)
+    ):
+        raise ValueError("_trim_snapshot requires a matching non-null trim_csv")
+    trim_snapshot = _trim_snapshot
+    if trim_enabled and trim_snapshot is None:
+        trim_snapshot = _load_trim_snapshot(trim_csv)
+    trim_spec = trim_snapshot.spec if trim_enabled else {}
     acc = Accumulator(dim=20)
     total_files = 0
     grip_files = 0
@@ -416,7 +426,7 @@ def compute_stats_for_robot_type(
                 )
         if trim_enabled:
 
-            file_paths = sorted(data_dir.glob("chunk-*/file-*.parquet"))
+            file_paths = [path for path, _, _ in _discover_data_parquets(Path(ds_dir))]
         else:
 
 
@@ -549,7 +559,8 @@ def compute_stats_for_robot_type(
         hand["layout"] = "left_fingers + right_fingers"
         result["hand"] = hand
     if trim_enabled:
-        result["trim_provenance"] = _trim_provenance(trim_csv)
+        result["trim_provenance"] = trim_snapshot.provenance
+        _assert_trim_snapshot_current(trim_snapshot, context=f"stats scan for robot_type {rtype!r}")
     return result
 
 
@@ -573,15 +584,16 @@ def main():
     groups = discover_datasets_by_robot_type(args.dataset_dir)
     print(f"Found {len(groups)} robot types: {sorted(groups.keys())}")
 
+    trim_snapshot = None
     if args.trim_csv is not None:
-        trim_spec = _load_trim_spec(args.trim_csv)
+        trim_snapshot = _load_trim_snapshot(args.trim_csv)
+        trim_spec = trim_snapshot.spec
         bucket_names = {Path(ds_dir).name for ds_list in groups.values() for ds_dir in ds_list}
         if bucket_names and bucket_names.isdisjoint(trim_spec):
             raise ValueError(
                 f"RoboCOIN trim_csv {args.trim_csv}: none of its {len(trim_spec)} dataset key(s) "
                 f"match any bucket directory under {args.dataset_dir}; stats would be untrimmed."
             )
-        _trim_provenance(args.trim_csv)
 
     out_dir = os.path.join(args.dataset_dir, "meta")
     os.makedirs(out_dir, exist_ok=True)
@@ -597,6 +609,7 @@ def main():
             ds_list,
             rot6d_identity=not args.no_rot6d_identity,
             trim_csv=args.trim_csv,
+            _trim_snapshot=trim_snapshot,
         )
         stats = result["eef"]
 
