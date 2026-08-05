@@ -112,6 +112,25 @@ mobile_base: true
 # predict torso (e.g. for a future dataset that actually commands it); the eval flag must then match.
 mask_torso_action: true
 #
+# base_proprio: what fills the 5 proprio base slots (mobile_base only). MUST also be set in the eval
+# policy config for the resulting checkpoint (both modes are 25-D — the deploy handshake fails fast
+# on a mismatch, see benchmarks/robocasa365/policy_config.yml).
+#   "velocity"    (historical default; any ckpt whose config lacks the key trained this way):
+#                 [vx, vy, vyaw, 0, 0] — body-frame finite-diff of the base pose, A'-rescaled into
+#                 the action command space so it shares the 'eef_base' stats block.
+#   "global_pose": [x, y, sin(yaw), cos(yaw), 0] — world planar base pose (a global anchor,
+#                 GR00T-parity). Meters/unit-circle can't share command stats → the proprio
+#                 normalizes with the 'eef_base_pose_proprio' stats block (emitted by the stats
+#                 script; REGENERATE stats when enabling this — the loader rejects an old file).
+base_proprio: velocity
+#
+# binary_action_dims: raw action dims whose targets are the two-point {-1, +1} command set —
+# robocasa365 allows exactly [9, 24] (l_grip command, control_mode). Targets stay RAW ±1 through
+# normalization (identity, immune to stats drift); the deploy server snaps its decoded output back
+# to exact ±1 (threshold 0.5, the conservative bridge/env boundary). null (historical default) =
+# plain continuous regression, matching every pre-existing checkpoint.
+binary_action_dims: null
+#
 # Model head + proprio dims must be 80 when unify_action=true. As of the main merge,
 # configs/model/dual_system.yaml already defaults to action_dim=80 / state_dim=80 (the unified
 # cross-robot head), so NO override is needed for the default model. Only if you point at a model

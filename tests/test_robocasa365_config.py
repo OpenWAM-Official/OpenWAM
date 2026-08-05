@@ -189,3 +189,26 @@ def test_repo_template_declares_base_proprio():
     tmpl = Path(single_eval.__file__).parent / "policy_config.yml"
     cfg = _yaml.safe_load(tmpl.read_text())
     assert cfg.get("base_proprio") == "velocity"
+
+
+def test_hydra_compose_overrides_base_proprio_and_binary_dims():
+    """PR #57: the training entry configs/dataloader/robocasa365.yaml must declare the new keys with
+    historical defaults, so the STANDARD override syntax works (Hydra struct mode rejects overrides
+    of undeclared keys with ConfigCompositionException — '+dataloader....' is not the documented
+    launch command)."""
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    cfg_dir = os.path.abspath("configs")
+    with initialize_config_dir(config_dir=cfg_dir, version_base=None):
+        cfg = compose(config_name="train", overrides=["dataloader=robocasa365"])
+        assert cfg.dataloader.base_proprio == "velocity"        # historical defaults declared
+        assert cfg.dataloader.binary_action_dims is None
+        cfg2 = compose(config_name="train", overrides=[
+            "dataloader=robocasa365",
+            "dataloader.base_proprio=global_pose",
+            "dataloader.binary_action_dims=[9,24]",
+        ])
+        assert cfg2.dataloader.base_proprio == "global_pose"
+        assert list(cfg2.dataloader.binary_action_dims) == [9, 24]
