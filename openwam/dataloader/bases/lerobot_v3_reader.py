@@ -80,6 +80,7 @@ from openwam.dataloader.utils.lerobotv3 import (
     build_multibucket,
     compute_file_local_offsets,
     load_episodes_parquet,
+    load_excluded_episodes_snapshot,
     load_tasks_annotated,
     parse_info_json,
     resolve_prompt_by_episode,
@@ -337,12 +338,9 @@ class LeRobotV3Reader(BaseDataset):
         # alignment-safe filter path as info splits; physically deleting
         # episodes-parquet rows would shift the groupby-cumsum offsets of
         # later episodes in each (chunk, file) shard and misalign them.
-        excl_path = self._dataset_dir / "meta" / "excluded_episodes.json"
-        if excl_path.exists():
-            import json
-
-            with open(excl_path) as f:
-                excluded = set(json.load(f)["episode_indices"])
+        self._excluded_episodes_snapshot = load_excluded_episodes_snapshot(self._dataset_dir)
+        excluded = self._excluded_episodes_snapshot.episode_indices
+        if excluded:
             n_before = len(self._eps_df)
             self._eps_df = self._eps_df[~self._eps_df["episode_index"].isin(excluded)].reset_index(drop=True)
             if len(self._eps_df) < n_before:

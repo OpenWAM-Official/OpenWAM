@@ -84,12 +84,19 @@ from openwam.dataloader.robocoin import (
     _assert_trim_snapshot_current,
     _discover_data_parquets,
     _eef14_to_eef20,
+    _excluded_episodes_provenance,
     _finger_indices,
     _load_trim_snapshot,
     _validate_trim_manifest,
     dex_finger_layout,
 )
-from openwam.dataloader.utils.lerobotv3 import DataContractError, load_episodes_parquet
+from openwam.dataloader.utils.lerobotv3 import (
+    DataContractError,
+    assert_excluded_episodes_snapshot_current,
+    load_episodes_parquet,
+    load_excluded_episodes_snapshot,
+    parse_info_json,
+)
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
 
 
@@ -280,7 +287,11 @@ def _classify_dataset(ds_dir: str, *, fail_closed: bool = False):
     return "other", None
 
 
-def _trimmed_global_spans(ds_dir: str, dataset_spec: dict):
+def _trimmed_global_spans(
+    ds_dir: str,
+    dataset_spec: dict,
+    excluded_episode_indices: tuple[int, ...],
+):
     """Public implementation. Dataset-specific audit notes were removed."""
     dataset_id = Path(ds_dir).name
     manifest = load_episodes_parquet(Path(ds_dir))
@@ -295,6 +306,7 @@ def _trimmed_global_spans(ds_dir: str, dataset_spec: dict):
             "episode_index, dataset_from_index, and length columns"
         ) from e
 
+    excluded = set(excluded_episode_indices)
     raw_spans = []
     kept_spans = []
     for episode_id, start, length in zip(episode_ids, starts, lengths):
@@ -304,6 +316,8 @@ def _trimmed_global_spans(ds_dir: str, dataset_spec: dict):
                 f"dataset_from_index={start}, length={length}"
             )
         raw_spans.append((start, start + length, episode_id))
+        if episode_id in excluded:
+            continue
         head, tail = trim_spans.get(episode_id, (0, length))
         if tail - head >= _TRIM_MIN_LEN:
             kept_spans.append((start + head, start + tail))
@@ -371,6 +385,7 @@ def compute_stats_for_robot_type(
     if trim_enabled and trim_snapshot is None:
         trim_snapshot = _load_trim_snapshot(trim_csv)
     trim_spec = trim_snapshot.spec if trim_enabled else {}
+    exclusion_snapshots = {}
     acc = Accumulator(dim=20)
     total_files = 0
     grip_files = 0
@@ -389,11 +404,21 @@ def compute_stats_for_robot_type(
     nogrip_example = None
 
     for ds_dir in dataset_dirs:
+        dataset_id = Path(ds_dir).name
         data_dir = Path(ds_dir) / "data"
         if not data_dir.is_dir():
             if trim_enabled:
                 raise FileNotFoundError(f"RoboCOIN stats: missing data directory {data_dir}")
             continue
+        exclusion_snapshot = None
+        if trim_enabled:
+            if dataset_id in exclusion_snapshots:
+                raise DataContractError(
+                    f"RoboCOIN stats for robot_type {rtype!r}: duplicate dataset directory "
+                    f"name {dataset_id!r} cannot be represented in exclusion provenance"
+                )
+            exclusion_snapshot = load_excluded_episodes_snapshot(Path(ds_dir))
+            exclusion_snapshots[dataset_id] = exclusion_snapshot
         kind, layout = _classify_dataset(ds_dir, fail_closed=trim_enabled)
         if kind == "grip":
             grip_example = grip_example or ds_dir
@@ -426,7 +451,14 @@ def compute_stats_for_robot_type(
                 )
         if trim_enabled:
 
-            file_paths = [path for path, _, _ in _discover_data_parquets(Path(ds_dir))]
+            info = parse_info_json(Path(ds_dir))
+            file_paths = [
+                path
+                for path, _, _ in _discover_data_parquets(
+                    Path(ds_dir),
+                    info["data_path"],
+                )
+            ]
         else:
 
 
@@ -449,7 +481,9 @@ def compute_stats_for_robot_type(
         manifest_end = 0
         if trim_enabled:
             kept_spans, manifest_end = _trimmed_global_spans(
-                ds_dir, trim_spec.get(Path(ds_dir).name, {})
+                ds_dir,
+                trim_spec.get(dataset_id, {}),
+                exclusion_snapshot.episode_indices,
             )
 
         file_entries = []
@@ -560,7 +594,15 @@ def compute_stats_for_robot_type(
         result["hand"] = hand
     if trim_enabled:
         result["trim_provenance"] = trim_snapshot.provenance
+        result["excluded_episodes_provenance"] = _excluded_episodes_provenance(
+            exclusion_snapshots
+        )
         _assert_trim_snapshot_current(trim_snapshot, context=f"stats scan for robot_type {rtype!r}")
+        for snapshot in exclusion_snapshots.values():
+            assert_excluded_episodes_snapshot_current(
+                snapshot,
+                context=f"stats scan for robot_type {rtype!r}",
+            )
     return result
 
 

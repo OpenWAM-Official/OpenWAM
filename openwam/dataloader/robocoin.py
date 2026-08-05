@@ -79,7 +79,12 @@ import pyarrow.parquet as pq
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
 from openwam.dataloader.utils.eef import EEF_DIM as _ACTION_DIM
 from openwam.dataloader.utils.eef import eef14_to_eef20
-from openwam.dataloader.utils.lerobotv3 import DataContractError
+from openwam.dataloader.utils.lerobotv3 import (
+    DataContractError,
+    ExcludedEpisodesSnapshot,
+    assert_excluded_episodes_snapshot_current,
+    load_excluded_episodes_snapshot,
+)
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 
 logger = logging.getLogger(__name__)
@@ -87,15 +92,46 @@ logger = logging.getLogger(__name__)
 _STATE_DIM = _ACTION_DIM
 
 
-def _discover_data_parquets(dataset_dir: Path):
+def _discover_data_parquets(dataset_dir: Path, data_path_template: str):
     """Public implementation. Dataset-specific audit notes were removed."""
-    data_files = []
+    if not isinstance(data_path_template, str) or not data_path_template:
+        raise DataContractError(
+            f"RoboCOIN({Path(dataset_dir).name}): info.json data_path must be a non-empty string, "
+            f"got {data_path_template!r}"
+        )
+    data_files = {}
     for path in sorted((Path(dataset_dir) / "data").glob("chunk-*/file-*.parquet")):
         chunk_m = re.search(r"chunk-(\d+)$", path.parent.name)
         file_m = re.search(r"file-(\d+)$", path.stem)
         if chunk_m is not None and file_m is not None:
-            data_files.append((path, int(chunk_m.group(1)), int(file_m.group(1))))
-    return data_files
+            coordinates = (int(chunk_m.group(1)), int(file_m.group(1)))
+            previous = data_files.get(coordinates)
+            if previous is not None:
+                raise DataContractError(
+                    f"RoboCOIN({Path(dataset_dir).name}): duplicate numeric data shard "
+                    f"coordinates {coordinates}: {previous} and {path}"
+                )
+            data_files[coordinates] = path
+
+    result = []
+    for (chunk_index, file_index), path in sorted(data_files.items()):
+        try:
+            expected = Path(dataset_dir) / data_path_template.format(
+                chunk_index=chunk_index,
+                file_index=file_index,
+            )
+        except (IndexError, KeyError, ValueError) as e:
+            raise DataContractError(
+                f"RoboCOIN({Path(dataset_dir).name}): invalid info.json data_path "
+                f"template {data_path_template!r}: {e}"
+            ) from e
+        if path != expected:
+            raise DataContractError(
+                f"RoboCOIN({Path(dataset_dir).name}): non-canonical numeric data shard {path}; "
+                f"info.json data_path resolves coordinates {(chunk_index, file_index)} to {expected}"
+            )
+        result.append((path, chunk_index, file_index))
+    return result
 
 
 
@@ -254,6 +290,8 @@ _TRIM_SNAPSHOT_CACHE: dict = {}
 _TRIM_SCHEMA_VERSION = 1
 _TRIM_MIN_LEN = 1
 _TRIM_ZERO_SPAN_POLICY = "drop"
+_EXCLUDED_EPISODES_SCHEMA_VERSION = 1
+_EXCLUDED_EPISODES_POLICY = "drop_matching_episode_index_before_trim"
 _TRIM_CSV_COLUMNS = (
     "dataset",
     "episode_index",
@@ -261,6 +299,103 @@ _TRIM_CSV_COLUMNS = (
     "trim_head_to",
     "trim_tail_from",
 )
+
+
+def _excluded_episodes_provenance(
+    snapshots: dict[str, ExcludedEpisodesSnapshot],
+) -> dict:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    return {
+        "schema_version": _EXCLUDED_EPISODES_SCHEMA_VERSION,
+        "policy": _EXCLUDED_EPISODES_POLICY,
+        "datasets": {
+            dataset_id: {"episode_indices": list(snapshot.episode_indices)}
+            for dataset_id, snapshot in sorted(snapshots.items())
+        },
+    }
+
+
+def _validate_excluded_episodes_provenance(
+    actual,
+    *,
+    dataset_dir: Path,
+    dataset_id: str,
+    current_snapshot: ExcludedEpisodesSnapshot,
+    num_datasets,
+    stats_path: Path,
+) -> tuple[ExcludedEpisodesSnapshot, ...]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    expected_keys = {"schema_version", "policy", "datasets"}
+    if (
+        not isinstance(actual, dict)
+        or set(actual) != expected_keys
+        or type(actual.get("schema_version")) is not int
+        or actual.get("schema_version") != _EXCLUDED_EPISODES_SCHEMA_VERSION
+        or actual.get("policy") != _EXCLUDED_EPISODES_POLICY
+        or not isinstance(actual.get("datasets"), dict)
+    ):
+        raise DataContractError(
+            f"RoboCOIN bucket {dataset_id}: stats {stats_path} excluded_episodes_provenance "
+            "has a missing or incompatible schema/policy. Regenerate stats with the configured trim CSV."
+        )
+
+    datasets = actual["datasets"]
+    if type(num_datasets) is not int or num_datasets != len(datasets):
+        raise DataContractError(
+            f"RoboCOIN bucket {dataset_id}: stats {stats_path} declares num_datasets="
+            f"{num_datasets!r} but excluded_episodes_provenance has {len(datasets)} dataset entries. "
+            "Regenerate stats with the configured trim CSV."
+        )
+    if dataset_id not in datasets:
+        raise DataContractError(
+            f"RoboCOIN bucket {dataset_id}: stats {stats_path} excluded_episodes_provenance "
+            "does not include this bucket. Regenerate stats with the configured trim CSV."
+        )
+
+    root = Path(dataset_dir).parent
+    snapshots = []
+    for contributor, entry in datasets.items():
+        if not isinstance(contributor, str) or not contributor:
+            raise DataContractError(
+                f"RoboCOIN bucket {dataset_id}: stats {stats_path} has invalid contributor "
+                f"name {contributor!r} in excluded_episodes_provenance"
+            )
+        contributor_path = Path(contributor)
+        if (
+            contributor in (".", "..")
+            or contributor_path.is_absolute()
+            or len(contributor_path.parts) != 1
+        ):
+            raise DataContractError(
+                f"RoboCOIN bucket {dataset_id}: stats {stats_path} has invalid contributor "
+                f"name {contributor!r} in excluded_episodes_provenance"
+            )
+        bucket_dir = root / contributor
+        if not bucket_dir.is_dir():
+            raise DataContractError(
+                f"RoboCOIN bucket {dataset_id}: stats {stats_path} references missing contributor "
+                f"directory {bucket_dir} in excluded_episodes_provenance"
+            )
+        snapshot = (
+            current_snapshot
+            if contributor == dataset_id
+            else load_excluded_episodes_snapshot(bucket_dir)
+        )
+        snapshots.append(snapshot)
+        expected_entry = {"episode_indices": list(snapshot.episode_indices)}
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"episode_indices"}
+            or not isinstance(entry.get("episode_indices"), list)
+            or any(type(value) is not int for value in entry["episode_indices"])
+            or entry != expected_entry
+        ):
+            raise DataContractError(
+                f"RoboCOIN bucket {dataset_id}: stats {stats_path} excluded_episodes_provenance "
+                f"for contributor {contributor!r} does not match the current exclusion population; "
+                f"expected {expected_entry}, got {entry}. Regenerate stats with the configured trim CSV."
+            )
+    return tuple(snapshots)
 
 
 @dataclass(frozen=True)
@@ -623,6 +758,19 @@ class RoboCOINDataset(LeRobotV3Reader):
         super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
         if self._trim_snapshot is not None and not trim_snapshot_was_provided:
             _assert_trim_snapshot_current(self._trim_snapshot, context="reader construction")
+        if self._trim_csv is not None:
+            exclusion_snapshots = getattr(
+                self,
+                "_stats_exclusion_snapshots",
+                (self._excluded_episodes_snapshot,),
+            )
+            for exclusion_snapshot in exclusion_snapshots:
+                assert_excluded_episodes_snapshot_current(
+                    exclusion_snapshot,
+                    context="reader construction",
+                )
+            if hasattr(self, "_stats_exclusion_snapshots"):
+                del self._stats_exclusion_snapshots
 
 
         self._trim_snapshot = None
@@ -826,7 +974,7 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 
-        paths = _discover_data_parquets(self._dataset_dir)
+        paths = _discover_data_parquets(self._dataset_dir, self._data_path_template)
 
         def _read_meta(entry):
             path, chunk_index, file_index = entry
@@ -865,12 +1013,13 @@ class RoboCOINDataset(LeRobotV3Reader):
         with open(stats_path) as f:
             raw = json.load(f)
         has_trim_provenance = "trim_provenance" in raw
+        has_excluded_provenance = "excluded_episodes_provenance" in raw
         if self._trim_csv is None:
-            if has_trim_provenance:
+            if has_trim_provenance or has_excluded_provenance:
                 raise DataContractError(
                     f"RoboCOIN bucket {self._dataset_id}: stats {stats_path} were computed for a "
-                    "trimmed population but trim_csv is disabled. Regenerate legacy untrimmed stats "
-                    "or configure the matching trim_csv."
+                    "trimmed/filtered population but trim_csv is disabled. Regenerate legacy "
+                    "untrimmed stats or configure the matching trim_csv."
                 )
         else:
             expected_provenance = self._get_trim_snapshot().provenance
@@ -882,6 +1031,14 @@ class RoboCOINDataset(LeRobotV3Reader):
                     f"{expected_provenance}, got {actual_provenance}. Regenerate stats with the "
                     "configured trim CSV."
                 )
+            self._stats_exclusion_snapshots = _validate_excluded_episodes_provenance(
+                raw.get("excluded_episodes_provenance"),
+                dataset_dir=self._dataset_dir,
+                dataset_id=self._dataset_id,
+                current_snapshot=self._excluded_episodes_snapshot,
+                num_datasets=raw.get("eef", {}).get("num_datasets"),
+                stats_path=stats_path,
+            )
         eef_stats = materialize_eef_stats(
             raw.get("eef", {}),
             self._normalize_mode,

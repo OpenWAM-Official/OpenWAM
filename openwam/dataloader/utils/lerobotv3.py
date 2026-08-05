@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -95,6 +96,49 @@ class DataContractError(RuntimeError):
     single-bucket mode. Environmental failures must keep using ordinary
     exceptions so they stay tolerated.
     """
+
+
+@dataclass(frozen=True)
+class ExcludedEpisodesSnapshot:
+    """Immutable effective population from one excluded-episodes file read."""
+
+    path: str
+    episode_indices: tuple[int, ...]
+
+
+def load_excluded_episodes_snapshot(dataset_dir: Path) -> ExcludedEpisodesSnapshot:
+    """Load the canonical per-bucket episode blacklist as sorted unique IDs."""
+    path = Path(dataset_dir) / "meta" / "excluded_episodes.json"
+    if not path.exists():
+        return ExcludedEpisodesSnapshot(path=str(path), episode_indices=())
+    try:
+        payload = json.loads(path.read_bytes())
+    except (UnicodeError, json.JSONDecodeError) as e:
+        raise DataContractError(f"Malformed LeRobot episode exclusions {path}: {e}") from e
+    if not isinstance(payload, dict) or "episode_indices" not in payload:
+        raise DataContractError(
+            f"Malformed LeRobot episode exclusions {path}: expected an object with 'episode_indices'"
+        )
+    values = payload["episode_indices"]
+    if not isinstance(values, list) or any(type(value) is not int or value < 0 for value in values):
+        raise DataContractError(
+            f"Malformed LeRobot episode exclusions {path}: 'episode_indices' must be a list of non-negative integers"
+        )
+    return ExcludedEpisodesSnapshot(path=str(path), episode_indices=tuple(sorted(set(values))))
+
+
+def assert_excluded_episodes_snapshot_current(
+    snapshot: ExcludedEpisodesSnapshot,
+    *,
+    context: str,
+) -> None:
+    """Fail if a bucket's effective exclusion population changed after loading."""
+    actual = load_excluded_episodes_snapshot(Path(snapshot.path).parent.parent)
+    if actual.episode_indices != snapshot.episode_indices:
+        raise DataContractError(
+            f"RoboCOIN episode exclusions {snapshot.path} changed while {context}; "
+            f"expected {list(snapshot.episode_indices)}, got {list(actual.episode_indices)}"
+        )
 
 
 def parse_info_json(dataset_dir: Path) -> dict:

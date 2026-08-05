@@ -447,6 +447,26 @@ def test_root_mode_trim_csv_with_partial_bucket_key_overlap_is_allowed(tmp_path)
     assert lengths_by_bucket == {"bucket-a": [6], "bucket-b": [8]}
 
 
+def test_reader_rejects_noncanonical_numeric_data_shard(tmp_path):
+    bucket = _make_bucket(tmp_path / "bucket", [8])
+    canonical = bucket / "data" / "chunk-000" / "file-000.parquet"
+    canonical.rename(canonical.with_name("file-0.parquet"))
+
+    with pytest.raises(DataContractError, match="non-canonical numeric data shard"):
+        RoboCOINDataset(dataset_dir=str(bucket), normalize_mode=None)
+
+
+def test_reader_rejects_non_string_data_path_template(tmp_path):
+    bucket = _make_bucket(tmp_path / "bucket", [8])
+    info_path = bucket / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["data_path"] = None
+    info_path.write_text(json.dumps(info))
+
+    with pytest.raises(DataContractError, match="data_path must be a non-empty string"):
+        RoboCOINDataset(dataset_dir=str(bucket), normalize_mode=None)
+
+
 def test_root_mode_pins_one_snapshot_for_all_bucket_constructors(tmp_path, monkeypatch):
     from openwam.dataloader import robocoin
 

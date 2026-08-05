@@ -61,6 +61,12 @@ def _write_stats(root, payload):
     return path
 
 
+def _write_exclusions(bucket, episode_indices):
+    path = bucket / "meta" / "excluded_episodes.json"
+    path.write_text(json.dumps({"episode_indices": episode_indices}))
+    return path
+
+
 @pytest.fixture
 def trimmed_stats_case(tmp_path):
     root, bucket = _make_encoded_stats_bucket(tmp_path)
@@ -133,6 +139,41 @@ class TestTrimmedPopulationStats:
         assert provenance["sha256"] == hashlib.sha256(trim_csv.read_bytes()).hexdigest()
         assert provenance["min_len"] == 1
         assert provenance["zero_span_policy"] == "drop"
+        assert round_tripped["excluded_episodes_provenance"] == {
+            "schema_version": 1,
+            "policy": "drop_matching_episode_index_before_trim",
+            "datasets": {"bucket": {"episode_indices": []}},
+        }
+
+    def test_stats_exclude_blacklisted_episode_and_serialize_population(self, tmp_path):
+        root = tmp_path / "root"
+        bucket = _make_bucket(root / "bucket", [10, 10])
+        data_path = bucket / "data" / "chunk-000" / "file-000.parquet"
+        df = pd.read_parquet(data_path)
+        source_values = np.array(
+            [100, 100, 2, 3, 4, 5, 6, 7, 100, 100] + [999] * 10,
+            dtype=np.float32,
+        )
+        for column in ("eef_sim_pose_action", "eef_sim_pose_state"):
+            eef = np.stack(df[column].values).astype(np.float32)
+            eef[:, 0] = source_values
+            df[column] = list(eef)
+        df.to_parquet(data_path, index=False)
+        _write_exclusions(bucket, [1])
+
+        result = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket)],
+            rot6d_identity=False,
+            trim_csv=str(_make_trim_csv(tmp_path)),
+        )
+
+        assert result["eef"]["num_timesteps"] == 12
+        assert result["eef"]["min"][0] == pytest.approx(2.0)
+        assert result["eef"]["max"][0] == pytest.approx(7.0)
+        assert result["excluded_episodes_provenance"]["datasets"] == {
+            "bucket": {"episode_indices": [1]}
+        }
 
     @pytest.mark.parametrize(
         ("episode_index", "total_frames"),
@@ -197,6 +238,20 @@ class TestTrimmedPopulationStats:
         assert result["eef"]["min"][0] == pytest.approx(2.0)
         assert result["eef"]["max"][0] == pytest.approx(7.0)
 
+    def test_stats_reject_duplicate_numeric_shard_coordinates(self, tmp_path):
+        _, bucket = _make_encoded_stats_bucket(tmp_path)
+        canonical = bucket / "data" / "chunk-000" / "file-000.parquet"
+        alias = canonical.with_name("file-0.parquet")
+        pd.read_parquet(canonical).to_parquet(alias, index=False)
+
+        with pytest.raises(DataContractError, match="duplicate numeric data shard coordinates"):
+            compute_stats_for_robot_type(
+                "test_robot",
+                [str(bucket)],
+                rot6d_identity=False,
+                trim_csv=str(_make_trim_csv(tmp_path)),
+            )
+
     def test_stats_fail_if_trim_csv_changes_during_scan(self, tmp_path, monkeypatch):
         _, bucket = _make_encoded_stats_bucket(tmp_path)
         trim_csv = _make_trim_csv(tmp_path)
@@ -221,6 +276,30 @@ class TestTrimmedPopulationStats:
                 [str(bucket)],
                 rot6d_identity=False,
                 trim_csv=str(trim_csv),
+            )
+
+    def test_stats_fail_if_exclusions_change_during_scan(self, tmp_path, monkeypatch):
+        _, bucket = _make_encoded_stats_bucket(tmp_path)
+        exclusions = _write_exclusions(bucket, [])
+        replacement = bucket / "meta" / "replacement-exclusions.json"
+        replacement.write_text(json.dumps({"episode_indices": [0]}))
+        original_read_parquet = stats_module.pd.read_parquet
+        replaced = False
+
+        def replace_before_read(*args, **kwargs):
+            nonlocal replaced
+            if not replaced:
+                replacement.replace(exclusions)
+                replaced = True
+            return original_read_parquet(*args, **kwargs)
+
+        monkeypatch.setattr(stats_module.pd, "read_parquet", replace_before_read)
+        with pytest.raises(DataContractError, match="changed while.*stats scan"):
+            compute_stats_for_robot_type(
+                "test_robot",
+                [str(bucket)],
+                rot6d_identity=False,
+                trim_csv=str(_make_trim_csv(tmp_path)),
             )
 
 
@@ -252,6 +331,144 @@ class TestReaderTrimStatsProvenance:
         )
         assert reader._eps_df["length"].tolist() == [6]
         assert reader._normalization_stats is not None
+
+    def test_missing_exclusion_provenance_is_rejected(self, trimmed_stats_case):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        payload = json.loads(json.dumps(result))
+        payload.pop("excluded_episodes_provenance")
+        _write_stats(root, payload)
+
+        with pytest.raises(DataContractError, match="excluded_episodes_provenance"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("schema_version", True),
+            ("policy", "keep"),
+            ("episode_indices", [True]),
+        ],
+    )
+    def test_mismatched_exclusion_provenance_is_rejected(
+        self,
+        trimmed_stats_case,
+        field,
+        bad_value,
+    ):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        payload = json.loads(json.dumps(result))
+        if field == "episode_indices":
+            payload["excluded_episodes_provenance"]["datasets"]["bucket"][field] = bad_value
+        else:
+            payload["excluded_episodes_provenance"][field] = bad_value
+        _write_stats(root, payload)
+
+        with pytest.raises(DataContractError, match="excluded_episodes_provenance"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_changed_current_bucket_exclusions_are_rejected(self, trimmed_stats_case):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        _write_stats(root, result)
+        _write_exclusions(bucket, [0])
+
+        with pytest.raises(DataContractError, match="current exclusion population"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_changed_sibling_exclusions_in_pooled_stats_are_rejected(self, tmp_path):
+        root = tmp_path / "root"
+        bucket_a = _make_bucket(root / "bucket-a", [10])
+        bucket_b = _make_bucket(root / "bucket-b", [10])
+        trim_csv = _write_trim_csv(
+            tmp_path / "trim.csv",
+            [_trim_row(dataset="bucket-a")],
+        )
+        result = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket_a), str(bucket_b)],
+            rot6d_identity=False,
+            trim_csv=str(trim_csv),
+        )
+        _write_stats(root, result)
+        _write_exclusions(bucket_b, [0])
+
+        with pytest.raises(DataContractError, match="contributor 'bucket-b'.*current exclusion population"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket_a),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_reader_fails_if_sibling_exclusions_change_during_construction(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        root = tmp_path / "root"
+        bucket_a = _make_bucket(root / "bucket-a", [10])
+        bucket_b = _make_bucket(root / "bucket-b", [10])
+        trim_csv = _write_trim_csv(
+            tmp_path / "trim.csv",
+            [_trim_row(dataset="bucket-a")],
+        )
+        result = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket_a), str(bucket_b)],
+            rot6d_identity=False,
+            trim_csv=str(trim_csv),
+        )
+        _write_stats(root, result)
+        target = bucket_b / "meta" / "excluded_episodes.json"
+        replacement = bucket_b / "meta" / "replacement-exclusions.json"
+        replacement.write_text(json.dumps({"episode_indices": [0]}))
+        original_post_init = RoboCOINDataset._post_init
+
+        def post_init_then_replace(self, info):
+            original_post_init(self, info)
+            replacement.replace(target)
+
+        monkeypatch.setattr(RoboCOINDataset, "_post_init", post_init_then_replace)
+        with pytest.raises(DataContractError, match="changed while reader construction"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket_a),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_reader_fails_if_exclusions_change_during_construction(
+        self,
+        trimmed_stats_case,
+        monkeypatch,
+    ):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        _write_stats(root, result)
+        target = bucket / "meta" / "excluded_episodes.json"
+        replacement = bucket / "meta" / "replacement-exclusions.json"
+        replacement.write_text(json.dumps({"episode_indices": [0]}))
+        original_load_prompts = RoboCOINDataset._load_prompts
+
+        def load_prompts_then_replace(self):
+            original_load_prompts(self)
+            replacement.replace(target)
+
+        monkeypatch.setattr(RoboCOINDataset, "_load_prompts", load_prompts_then_replace)
+        with pytest.raises(DataContractError, match="changed while reader construction"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
 
     def test_missing_provenance_is_rejected_when_trim_is_enabled(self, trimmed_stats_case):
         root, bucket, trim_csv, result = trimmed_stats_case
@@ -328,6 +545,7 @@ class TestReaderTrimStatsProvenance:
         root, bucket, _, result = trimmed_stats_case
         legacy_payload = json.loads(json.dumps(result))
         legacy_payload.pop("trim_provenance")
+        legacy_payload.pop("excluded_episodes_provenance")
         _write_stats(root, legacy_payload)
 
         reader = RoboCOINDataset(
