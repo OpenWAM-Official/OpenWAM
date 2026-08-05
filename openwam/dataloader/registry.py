@@ -79,6 +79,7 @@ def _register_builtins():
     from openwam.dataloader.ebench import EBenchDataset
     from openwam.dataloader.ego4d import Ego4DDataset
     from openwam.dataloader.egodex import EgoDexDataset
+    from openwam.dataloader.interndata_a1 import InternDataA1Dataset
     from openwam.dataloader.libero import MultiLiberoDataset
     from openwam.dataloader.mixture import MixtureDataset
     from openwam.dataloader.oxe_bcz import OxeBczDataset
@@ -105,6 +106,10 @@ def _register_builtins():
     register_dataset("oxe_fractal")(OxeFractalDataset)
     register_dataset("oxe_droid")(OxeDroidDataset)
     register_dataset("robocasa365")(MultiTaskRoboCasa365Dataset)
+    # Registered on the SINGLE-bucket class: its from_config returns either one
+    # bucket or a MultiInternDataA1Dataset depending on whether dataset_dir
+    # points at a bucket or at the dataset root.
+    register_dataset("interndata_a1")(InternDataA1Dataset)
 
 
 _register_builtins()
