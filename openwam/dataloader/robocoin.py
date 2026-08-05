@@ -120,7 +120,7 @@ def _discover_data_parquets(dataset_dir: Path, data_path_template: str):
                 chunk_index=chunk_index,
                 file_index=file_index,
             )
-        except (IndexError, KeyError, ValueError) as e:
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as e:
             raise DataContractError(
                 f"RoboCOIN({Path(dataset_dir).name}): invalid info.json data_path "
                 f"template {data_path_template!r}: {e}"

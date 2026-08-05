@@ -467,6 +467,17 @@ def test_reader_rejects_non_string_data_path_template(tmp_path):
         RoboCOINDataset(dataset_dir=str(bucket), normalize_mode=None)
 
 
+def test_reader_rejects_malformed_string_data_path_template(tmp_path):
+    bucket = _make_bucket(tmp_path / "bucket", [8])
+    info_path = bucket / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["data_path"] = "data/chunk-{chunk_index.foo}/file-{file_index}.parquet"
+    info_path.write_text(json.dumps(info))
+
+    with pytest.raises(DataContractError, match="invalid info.json data_path template"):
+        RoboCOINDataset(dataset_dir=str(bucket), normalize_mode=None)
+
+
 def test_root_mode_pins_one_snapshot_for_all_bucket_constructors(tmp_path, monkeypatch):
     from openwam.dataloader import robocoin
 
