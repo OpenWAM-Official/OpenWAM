@@ -46,9 +46,13 @@
 
 
 
+
+
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import logging
 import os
@@ -58,14 +62,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 
 from openwam.dataloader.oxe_droid import (
     DROID_PROMPT_EXCLUSION_KEY,
     DROID_PROMPT_EXCLUSION_SCHEMA_VERSION,
     DROID_PROMPT_INDEPENDENT_EXCLUSIONS_KEY,
+    DROID_PROMPT_INPUTS_DIGEST_KEY,
     OxeDroidDataset,
     _clean_text,
+    _read_droid_prompt_source_table,
+    _sha256_file,
+    compute_droid_prompt_inputs_digest,
+    digest_droid_prompt_shard,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -81,19 +89,23 @@ _TASK_TEXT: dict[int, str] | None = None
 _DATASET_DIR: Path | None = None
 
 
-def _init(dataset_dir: str) -> None:
+def _init(dataset_dir: str, task_text: dict[int, str]) -> None:
     global _TASK_TEXT, _DATASET_DIR
     _DATASET_DIR = Path(dataset_dir)
-    tasks = pd.read_parquet(_DATASET_DIR / "meta" / "tasks.parquet")
-    _TASK_TEXT = dict(zip(tasks["task_index"].to_numpy().tolist(), tasks.index.to_numpy().tolist()))
+    _TASK_TEXT = task_text
 
 
 def _scan_shard(rel_path: str) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
     assert _TASK_TEXT is not None and _DATASET_DIR is not None
     path = _DATASET_DIR / rel_path
-    cols = ["episode_index", "task_index", *FALLBACK_COLS]
-    df = pq.read_table(path, columns=cols, memory_map=True).to_pandas()
+    revision_before = _file_revision(path)
+    table = _read_droid_prompt_source_table(path)
+    shard_digest = digest_droid_prompt_shard(table)
+    revision_after = _file_revision(path)
+    if revision_after != revision_before:
+        raise RuntimeError(f"{path} changed while its prompt inputs were being scanned")
+    df = table.to_pandas()
     n = len(df)
     task_idx = df["task_index"].to_numpy()
 
@@ -118,6 +130,9 @@ def _scan_shard(rel_path: str) -> dict:
     all_bad = by_ep.all()
     any_bad = by_ep.any()
     return {
+        "rel_path": rel_path,
+        "source_revision": revision_after,
+        "prompt_inputs_shard_digest": shard_digest,
         "rows": n,
         "unresolved_rows": int(unresolved.sum()),
         "episodes_all_unresolved": [int(i) for i in all_bad[all_bad].index.tolist()],
@@ -127,6 +142,11 @@ def _scan_shard(rel_path: str) -> dict:
         "episodes_partially_unresolved": [int(i) for i in any_bad[any_bad & ~all_bad].index.tolist()],
         "task_index_missing_from_tasks_parquet": missing,
     }
+
+
+def _file_revision(path: Path) -> tuple[int, int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
 def _parse_episode_indices(value, field: str) -> set[int]:
@@ -262,10 +282,15 @@ def main() -> None:
     shards = sorted(p.relative_to(root).as_posix() for p in (root / "data").rglob("*.parquet"))
     if not shards:
         raise FileNotFoundError(f"no data parquet under {root}/data")
+    tasks_path = root / "meta" / "tasks.parquet"
+    tasks_bytes = tasks_path.read_bytes()
+    tasks_sha256 = hashlib.sha256(tasks_bytes).hexdigest()
+    tasks = pd.read_parquet(io.BytesIO(tasks_bytes))
+    task_text = dict(zip(tasks["task_index"].to_numpy().tolist(), tasks.index.to_numpy().tolist()))
     logger.info("scanning %d shards under %s with %d workers", len(shards), root, args.workers)
 
     results = []
-    with ProcessPoolExecutor(max_workers=args.workers, initializer=_init, initargs=(str(root),)) as ex:
+    with ProcessPoolExecutor(max_workers=args.workers, initializer=_init, initargs=(str(root), task_text)) as ex:
         futs = [ex.submit(_scan_shard, s) for s in shards]
         for i, f in enumerate(as_completed(futs), 1):
             results.append(f.result())
@@ -296,6 +321,21 @@ def main() -> None:
             f"(partially unresolved episodes={len(partial)}, missing task_index values={len(missing)})"
         )
     _validate_total_frames(root, rows)
+    if _sha256_file(tasks_path) != tasks_sha256:
+        raise SystemExit(f"{tasks_path} changed during the prompt scan; refusing to publish exclusions")
+    shard_digests = {}
+    for result in results:
+        rel_path = result["rel_path"]
+        if rel_path in shard_digests:
+            raise SystemExit(f"prompt scan returned duplicate shard result for {rel_path}")
+        if _file_revision(root / rel_path) != tuple(result["source_revision"]):
+            raise SystemExit(f"{root / rel_path} changed during the prompt scan; refusing to publish exclusions")
+        shard_digests[rel_path] = result["prompt_inputs_shard_digest"]
+    prompt_inputs_digest = compute_droid_prompt_inputs_digest(
+        root,
+        shard_digests=shard_digests,
+        tasks_sha256=tasks_sha256,
+    )
 
     stats = {
         "rows_scanned": rows,
@@ -317,6 +357,7 @@ def main() -> None:
             "generated": date.today().isoformat(),
             "episode_indices": bad,
             "stats": stats,
+            DROID_PROMPT_INPUTS_DIGEST_KEY: prompt_inputs_digest,
         },
     }
     payload = {

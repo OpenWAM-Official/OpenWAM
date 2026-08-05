@@ -10,7 +10,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from openwam.dataloader.oxe_droid import OxeDroidDataset
+from openwam.dataloader.oxe_droid import (
+    DROID_PROMPT_EXCLUSION_SCHEMA_VERSION,
+    DROID_PROMPT_INPUTS_DIGEST_KEY,
+    OxeDroidDataset,
+    load_droid_prompt_exclusions,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO_ROOT / "scripts" / "write_droid_prompt_exclusions.py"
@@ -113,9 +118,13 @@ def test_existing_exclusions_are_unioned_and_provenance_is_preserved(tmp_path):
     assert payload["scanner"] == previous["scanner"]
     assert payload["droid_prompt_exclusions"]["episode_indices"] == [0]
     assert payload["droid_prompt_exclusions"]["independently_owned_episode_indices"] == [999]
-    assert payload["droid_prompt_exclusions"]["schema_version"] == 1
+    assert payload["droid_prompt_exclusions"]["schema_version"] == DROID_PROMPT_EXCLUSION_SCHEMA_VERSION
     assert payload["droid_prompt_exclusions"]["fallback_chain"] == list(OxeDroidDataset.PROMPT_FALLBACK_COLS)
     assert payload["droid_prompt_exclusions"]["latest_scan"]["episode_indices"] == [0]
+    digest = payload["droid_prompt_exclusions"]["latest_scan"][DROID_PROMPT_INPUTS_DIGEST_KEY]
+    assert digest["algorithm"] == "sha256"
+    assert digest["format_version"] == 1
+    assert len(digest["value"]) == 64
 
 
 def test_rerun_replaces_prompt_owned_exclusions_and_preserves_unrelated_ones(tmp_path):
@@ -249,6 +258,28 @@ def test_publish_refuses_to_overwrite_artifact_changed_during_scan(tmp_path):
 
     assert out.read_bytes() == newer
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_prompt_inputs_digest_is_stable_across_worker_completion_order(tmp_path):
+    root = _write_bucket(tmp_path, task_text="task", data_task_index=0, fallback=[""], episode_index=0)
+    first_shard = pd.read_parquet(root / "data" / "chunk-000" / "file-000.parquet")
+    first_shard["episode_index"] = 1
+    first_shard.to_parquet(root / "data" / "chunk-000" / "file-001.parquet")
+
+    first = _run_generator(root)
+    assert first.returncode == 0, first.stderr
+    out = root / "meta" / "excluded_episodes.json"
+    first_digest = json.loads(out.read_text())["droid_prompt_exclusions"]["latest_scan"][DROID_PROMPT_INPUTS_DIGEST_KEY]
+
+    second = _run_generator(root, "--workers", "2")
+    assert second.returncode == 0, second.stderr
+    second_digest = json.loads(out.read_text())["droid_prompt_exclusions"]["latest_scan"][
+        DROID_PROMPT_INPUTS_DIGEST_KEY
+    ]
+
+    assert second_digest == first_digest
+    _, canonical = load_droid_prompt_exclusions(root)
+    assert canonical == set()
 
 
 @pytest.mark.parametrize(

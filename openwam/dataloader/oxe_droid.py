@@ -59,15 +59,21 @@
 
 
 
+
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import ClassVar, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.eef import LEFT_ARM_DIM_MASK, single_arm_20d
@@ -85,15 +91,18 @@ _PLACEHOLDER_RE = re.compile(
 
 
 
-DROID_PROMPT_EXCLUSION_SCHEMA_VERSION = 1
+DROID_PROMPT_EXCLUSION_SCHEMA_VERSION = 2
 DROID_PROMPT_EXCLUSION_KEY = "droid_prompt_exclusions"
 DROID_PROMPT_INDEPENDENT_EXCLUSIONS_KEY = "independently_owned_episode_indices"
+DROID_PROMPT_INPUTS_DIGEST_KEY = "prompt_inputs_digest"
+DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION = 1
 DROID_PROMPT_FALLBACK_COLS = (
     "other_information.language_instruction_2",
     "other_information.language_instruction_3",
     "annotation.substask",
     "annotation.instruction_add",
 )
+DROID_PROMPT_SOURCE_COLUMNS = ("episode_index", "task_index", *DROID_PROMPT_FALLBACK_COLS)
 
 
 def _clean_text(value) -> str:
@@ -115,6 +124,162 @@ def _parse_episode_indices(value, field: str) -> set[int]:
 def _parse_nonnegative_int(value, field: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(f"{field} must be a non-negative integer")
+    return value
+
+
+def _digest_framed_bytes(hasher, value: bytes | bytearray | memoryview) -> None:
+    hasher.update(len(value).to_bytes(8, "little"))
+    hasher.update(value)
+
+
+def _digest_framed_text(hasher, value: str) -> None:
+    _digest_framed_bytes(hasher, value.encode("utf-8"))
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _read_droid_prompt_source_table(path: Path) -> pa.Table:
+    try:
+        return pq.read_table(path, columns=list(DROID_PROMPT_SOURCE_COLUMNS), memory_map=True)
+    except pa.ArrowInvalid as exc:
+        if "Dot path" not in str(exc):
+            raise
+        return pq.read_table(path, memory_map=True).select(list(DROID_PROMPT_SOURCE_COLUMNS))
+
+
+def digest_droid_prompt_shard(table: pa.Table) -> str:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+    missing = [column for column in DROID_PROMPT_SOURCE_COLUMNS if column not in table.column_names]
+    if missing:
+        raise ValueError(f"prompt source table is missing columns {missing}")
+    table = table.select(list(DROID_PROMPT_SOURCE_COLUMNS))
+    hasher = hashlib.sha256(b"openwam:droid-prompt-shard:v1\0")
+    hasher.update(table.num_rows.to_bytes(8, "little"))
+    for column_name in DROID_PROMPT_SOURCE_COLUMNS:
+        _digest_framed_text(hasher, column_name)
+        column = table.column(column_name)
+        if column_name in ("episode_index", "task_index"):
+            array = column.combine_chunks()
+            if array.null_count:
+                raise ValueError(f"{column_name} contains null values")
+            try:
+                array = pc.cast(array, pa.int64(), safe=True)
+            except (pa.ArrowInvalid, pa.ArrowNotImplementedError) as exc:
+                raise ValueError(f"{column_name} must contain integer values") from exc
+            values = np.asarray(array.to_numpy(zero_copy_only=False), dtype="<i8")
+            _digest_framed_text(hasher, "int64")
+            _digest_framed_bytes(hasher, values.tobytes(order="C"))
+            continue
+
+        normalized_chunks = []
+        for chunk in column.chunks:
+            if pa.types.is_dictionary(chunk.type):
+                chunk = pc.dictionary_decode(chunk)
+            if pa.types.is_null(chunk.type):
+                chunk = pa.nulls(len(chunk), type=pa.large_string())
+            elif pa.types.is_string(chunk.type) or pa.types.is_large_string(chunk.type):
+                chunk = pc.cast(chunk, pa.large_string())
+            else:
+                raise ValueError(f"{column_name} must contain string or null values, got {chunk.type}")
+            normalized_chunks.append(chunk)
+        array = pa.chunked_array(normalized_chunks, type=pa.large_string()).combine_chunks()
+        valid = np.asarray(array.is_valid().to_numpy(zero_copy_only=False), dtype=np.uint8)
+        normalized = pc.fill_null(array, "")
+        _, offsets_buffer, data_buffer = normalized.buffers()
+        if offsets_buffer is None:
+            raise ValueError(f"{column_name} has no string offsets")
+        buffer_offsets = np.frombuffer(memoryview(offsets_buffer), dtype=np.int64)
+        start = normalized.offset
+        offsets = np.asarray(buffer_offsets[start : start + len(normalized) + 1], dtype="<i8").copy()
+        data_start = int(offsets[0])
+        data_end = int(offsets[-1])
+        offsets -= data_start
+        if data_buffer is None:
+            data = b""
+        else:
+            data = memoryview(data_buffer)[data_start:data_end]
+        _digest_framed_text(hasher, "large_string")
+        _digest_framed_bytes(hasher, valid.tobytes(order="C"))
+        _digest_framed_bytes(hasher, offsets.tobytes(order="C"))
+        _digest_framed_bytes(hasher, data)
+    return hasher.hexdigest()
+
+
+def compute_droid_prompt_inputs_digest(
+    dataset_dir: str | Path,
+    *,
+    shard_digests: Mapping[str, str] | None = None,
+    tasks_sha256: str | None = None,
+) -> dict:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    root = Path(dataset_dir)
+    tasks_digest = tasks_sha256 or _sha256_file(root / "meta" / "tasks.parquet")
+    shard_paths = sorted((root / "data").rglob("*.parquet"))
+    if not shard_paths:
+        raise FileNotFoundError(f"no data parquet under {root}/data")
+    relative_paths = [path.relative_to(root).as_posix() for path in shard_paths]
+    if shard_digests is None:
+        resolved_shard_digests = {
+            relative_path: digest_droid_prompt_shard(_read_droid_prompt_source_table(path))
+            for relative_path, path in zip(relative_paths, shard_paths)
+        }
+    else:
+        resolved_shard_digests = dict(shard_digests)
+        if set(resolved_shard_digests) != set(relative_paths):
+            raise ValueError("prompt shard digest paths do not match the current data shard set")
+
+    hasher = hashlib.sha256(b"openwam:droid-prompt-inputs:v1\0")
+    _digest_framed_text(hasher, "meta/tasks.parquet")
+    try:
+        tasks_digest_bytes = bytes.fromhex(tasks_digest)
+    except ValueError as exc:
+        raise ValueError("tasks_sha256 must be a 64-character hexadecimal SHA-256 digest") from exc
+    if len(tasks_digest_bytes) != hashlib.sha256().digest_size:
+        raise ValueError("tasks_sha256 must be a 64-character hexadecimal SHA-256 digest")
+    _digest_framed_bytes(hasher, tasks_digest_bytes)
+    for relative_path in relative_paths:
+        _digest_framed_text(hasher, relative_path)
+        digest = resolved_shard_digests[relative_path]
+        try:
+            digest_bytes = bytes.fromhex(digest)
+        except ValueError as exc:
+            raise ValueError(f"invalid SHA-256 digest for {relative_path}") from exc
+        if len(digest_bytes) != hashlib.sha256().digest_size:
+            raise ValueError(f"invalid SHA-256 digest for {relative_path}")
+        _digest_framed_bytes(hasher, digest_bytes)
+    return {
+        "algorithm": "sha256",
+        "format_version": DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION,
+        "value": hasher.hexdigest(),
+    }
+
+
+def _parse_prompt_inputs_digest(value) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{DROID_PROMPT_INPUTS_DIGEST_KEY} must be an object")
+    if value.get("algorithm") != "sha256":
+        raise ValueError(f"{DROID_PROMPT_INPUTS_DIGEST_KEY}.algorithm must be 'sha256'")
+    format_version = value.get("format_version")
+    if type(format_version) is not int or format_version != DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION:
+        raise ValueError(
+            f"{DROID_PROMPT_INPUTS_DIGEST_KEY}.format_version must be {DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION}"
+        )
+    digest = value.get("value")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError(f"{DROID_PROMPT_INPUTS_DIGEST_KEY}.value must be a lowercase SHA-256 digest")
     return value
 
 
@@ -183,7 +348,11 @@ def load_droid_prompt_exclusions(dataset_dir: str | Path) -> tuple[dict, set[int
         for field in ("episodes_partially_unresolved", "task_index_missing_from_tasks_parquet"):
             if _parse_nonnegative_int(scan_stats[field], f"latest_scan.stats.{field}") != 0:
                 raise ValueError(f"latest_scan.stats.{field} must be zero for a completed scan")
-    except (KeyError, TypeError, ValueError) as exc:
+        recorded_inputs_digest = _parse_prompt_inputs_digest(latest_scan[DROID_PROMPT_INPUTS_DIGEST_KEY])
+        current_inputs_digest = compute_droid_prompt_inputs_digest(dataset_dir)
+        if current_inputs_digest != recorded_inputs_digest:
+            raise ValueError(f"{DROID_PROMPT_INPUTS_DIGEST_KEY} does not match tasks.parquet and prompt source columns")
+    except (KeyError, OSError, TypeError, ValueError) as exc:
         raise ValueError(
             f"{path} is stale or malformed ({exc}). Re-run scripts/write_droid_prompt_exclusions.py."
         ) from exc
@@ -306,6 +475,11 @@ __all__ = [
     "DROID_PROMPT_EXCLUSION_SCHEMA_VERSION",
     "DROID_PROMPT_FALLBACK_COLS",
     "DROID_PROMPT_INDEPENDENT_EXCLUSIONS_KEY",
+    "DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION",
+    "DROID_PROMPT_INPUTS_DIGEST_KEY",
+    "DROID_PROMPT_SOURCE_COLUMNS",
     "OxeDroidDataset",
+    "compute_droid_prompt_inputs_digest",
+    "digest_droid_prompt_shard",
     "load_droid_prompt_exclusions",
 ]
