@@ -66,6 +66,15 @@ base command is folded INTO the raw vector → raw **25-D `[arm20, base5]`** (ac
 layout), scattered to the unified 80-D via ONE map `["0-9","34-43","68-72"]` (arm → `[0:10)`+`[34:44)`,
 base5 → `[68:73)`) — like BEHAVIOR's RAW-27, base is not a bypass channel.
 
+**`base_proprio` MUST match the checkpoint** (`policy_config.yml` key, default `velocity`): the proprio
+base5 slots carry either the A′ finite-diff velocity (`velocity`, historical — any ckpt whose config
+lacks `dataloader.base_proprio`) or the world planar pose `[x, y, sin(yaw), cos(yaw), 0]`
+(`global_pose`). Both are 25-D, so a mismatch would corrupt evaluation *silently*; the server
+advertises its representation in the ping PONG and the client fails fast on mismatch (a
+`global_pose` client also refuses servers too old to advertise it). Checkpoints trained with
+`dataloader.binary_action_dims` (gripper 9 / control_mode 24 kept as raw ±1 targets) need no eval
+config: the server reads it from the ckpt config and snaps decoded outputs back to exact ±1.
+
 ## Training data + dataloader
 
 The trainer side is `openwam.dataloader.robocasa365.MultiTaskRoboCasa365Dataset`

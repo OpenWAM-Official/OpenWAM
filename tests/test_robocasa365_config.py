@@ -160,3 +160,32 @@ def test_build_policy_defaults_fixed_base(monkeypatch):
     monkeypatch.setattr(single_eval, "OpenWAMRoboCasa365Policy", _Capture)
     single_eval._build_policy({"osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
     assert captured["mobile_base"] is False
+
+
+def test_build_policy_threads_base_proprio(monkeypatch):
+    """_build_policy must forward base_proprio (default 'velocity' — the historical representation);
+    a global_pose ckpt evaluated with a template that omits the key would otherwise silently fall
+    back to velocity (both 25-D, invisible to the width check)."""
+    captured = {}
+
+    class _Capture:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr(single_eval, "OpenWAMRoboCasa365Policy", _Capture)
+    single_eval._build_policy({"mobile_base": True, "base_proprio": "global_pose",
+                               "osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
+    assert captured["base_proprio"] == "global_pose"
+    captured.clear()
+    single_eval._build_policy({"mobile_base": True, "osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
+    assert captured["base_proprio"] == "velocity"
+
+
+def test_repo_template_declares_base_proprio():
+    """The in-repo template must carry the key explicitly (PR #57 B5): the manual PR-body reminder is
+    not a substitute for the default path being correct."""
+    import yaml as _yaml
+
+    tmpl = Path(single_eval.__file__).parent / "policy_config.yml"
+    cfg = _yaml.safe_load(tmpl.read_text())
+    assert cfg.get("base_proprio") == "velocity"

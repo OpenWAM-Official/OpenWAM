@@ -213,6 +213,13 @@ def load_from_checkpoint_dir(
     # 6. Attach the action normalizer built from saved normalization_stats.npy + config.
     architecture.attach_normalizer(_build_normalizer(cfg, ckpt_dir))
 
+    # 7. Binary command dims for the FINAL legality projection (WAMPolicy.predict_action, AFTER all
+    # executor arithmetic — temporal ensembling can re-mix the snapped ±1 values into mid-band).
+    # Authoritative source is the CKPT's dataloader config, never the deploy yaml: the training data
+    # decided which dims are two-point commands, deploy config must not be able to alter that.
+    _bd = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
+    architecture.binary_command_dims = tuple(int(d) for d in (_bd or ()))
+
     logger.info("Model loaded successfully on %s", device)
     return cfg, architecture
 
@@ -235,15 +242,10 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
     norm_mode = OmegaConf.select(cfg, "dataloader.normalize_mode", default=None)
     action_mode = OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
     if dl is None or norm_mode in (None, "", "none", "null"):
-        # The command-aware features live inside the normalizer, so they cannot run without one.
-        if OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None) or (
-            OmegaConf.select(cfg, "dataloader.base_proprio", default="velocity") == "global_pose"
-        ):
-            raise ValueError(
-                "[normalizer] dataloader.binary_action_dims / base_proprio='global_pose' require an "
-                "active normalize_mode: the deploy-side binary snap and the pose proprio stats both "
-                "live in the normalizer. Enable normalize_mode in the checkpoint config."
-            )
+        # binary_action_dims / base_proprio='global_pose' stay fully consistent here: with
+        # normalization off the model trains and serves in RAW space for every dim (binary targets
+        # are raw ±1 by construction; the pose proprio is raw meters, no stats block needed), and the
+        # binary legality projection runs in WAMPolicy.predict_action independently of the normalizer.
         logger.info(
             "[normalizer] normalize_mode=%r disabled in saved config; action normalizer INACTIVE "
             "(actions and deploy proprio will be returned/used as-is).",
@@ -340,13 +342,21 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
 class _CommandAwareNormalizer:
     """Raw-space normalizer wrapper for command-dim semantics the plain Normalizer can't express.
 
-    * ``unnormalize`` (action OUT): inner unnormalize, then snap each ``binary_dims`` dim to exact
-      {-1, +1}. Threshold 0.5 — NOT the ±1 midpoint 0 — deliberately preserves the downstream
-      conservative boundaries byte-for-byte (bridge confident-close ``>0.5``, env control_mode
-      ``>=0.5``): an uncertain mid-range output still lands on the safe side (open / arm mode).
+    * ``unnormalize`` (action OUT): continuous dims go through the inner stats inverse; each
+      ``binary_dims`` dim is judged in the PRE-unnormalize space — the raw ±1 space the model was
+      trained in, since those targets bypassed normalization (robocasa365 binary_action_dims) — and
+      overridden to exact {-1, +1}. Judging the post-inverse value instead would corrupt the class
+      under any non-identity stats (z-score: a correct +1 becomes ~-0.35 and snaps to -1).
+      Threshold 0.5 — NOT the ±1 midpoint 0 — deliberately preserves the downstream conservative
+      boundaries byte-for-byte (bridge confident-close ``>0.5``, env control_mode ``>=0.5``): an
+      uncertain mid-range output still lands on the safe side (open / arm mode).
     * ``normalize`` (proprio IN): delegates to ``proprio_inner`` — the same object as
       ``action_inner`` unless the ckpt trained with ``base_proprio='global_pose'``, whose pose
       proprio has its own stats block.
+
+    NOTE: executors may still do arithmetic on the unnormalized actions (temporal ensembling mixes
+    overlapping chunks) — legality of the binary dims after that is restored by the FINAL projection
+    in ``WAMPolicy.predict_action`` (binary_command_dims), which runs after all executor arithmetic.
 
     Duck-typed to the ``Normalizer`` surface (``.unnormalize`` / ``.normalize`` / ``.stats``), so it
     composes under :class:`_UnifyAwareNormalizer` unchanged (gather → unnormalize+snap in raw space;
@@ -359,9 +369,10 @@ class _CommandAwareNormalizer:
         self._binary_dims = tuple(int(d) for d in binary_dims)
 
     def unnormalize(self, x):
+        x = np.asarray(x)
         y = np.array(self._action_inner.unnormalize(x))
         for d in self._binary_dims:
-            y[..., d] = np.where(y[..., d] > 0.5, 1.0, -1.0)
+            y[..., d] = np.where(x[..., d] > 0.5, 1.0, -1.0)
         return y
 
     def normalize(self, x):

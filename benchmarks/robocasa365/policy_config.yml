@@ -53,6 +53,14 @@ state_dim: null
 # (client on, ckpt off — or vice versa) fails fast at the server.
 mobile_base: false
 
+# base_proprio: the ckpt's proprio base representation — MUST match dataloader.base_proprio in the
+# checkpoint config. "velocity" (historical; ckpts whose config lacks the key) = [vx, vy, vyaw, 0, 0]
+# (A′-rescaled finite-diff); "global_pose" = [x, y, sin(yaw), cos(yaw), 0] (world planar base pose,
+# its own eef_base_pose_proprio stats block). BOTH are 25-D, so a mismatch is NOT caught by the width
+# check — the server advertises its representation in the PONG and the client fails fast on mismatch,
+# but keep this explicit and correct.
+base_proprio: velocity
+
 # mask_torso_action: when the ckpt masked torso out of the action loss (dataloader default true), the
 # client zeros the torso command before the env — torso is a live JOINT_POSITION delta actuator but is
 # constant 0 in the data, so a nonzero prediction would wrongly drive it. MUST match the checkpoint.

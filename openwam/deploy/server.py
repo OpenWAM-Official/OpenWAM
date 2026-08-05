@@ -164,6 +164,22 @@ class PolicyServer:
             d.img_width,
         )
 
+    def _ckpt_contract(self) -> dict:
+        """Representation-contract fields advertised in the PONG for client-side validation.
+
+        Two proprio representations can share the same width (velocity vs global_pose are both
+        25-D), so a mismatched eval config corrupts evaluation SILENTLY — the client must be able
+        to compare its config against what the checkpoint actually trained with.
+        """
+        from omegaconf import OmegaConf
+
+        dims = OmegaConf.select(self.cfg, "dataloader.binary_action_dims", default=None)
+        return {
+            "base_proprio": str(OmegaConf.select(self.cfg, "dataloader.base_proprio", default="velocity")),
+            "mobile_base": bool(OmegaConf.select(self.cfg, "dataloader.mobile_base", default=False)),
+            "binary_action_dims": [int(d) for d in (dims or [])],
+        }
+
     def predict(self, obs: dict) -> dict:
         """Synchronous prediction for a single observation.
 
@@ -238,7 +254,7 @@ class PolicyServer:
                             result["type"] = ACTION
                             await websocket.send(json.dumps(result))
                         elif msg_type == PING:
-                            await websocket.send(json.dumps({"type": PONG}))
+                            await websocket.send(json.dumps({"type": PONG, **self._ckpt_contract()}))
                         else:
                             await websocket.send(
                                 json.dumps(

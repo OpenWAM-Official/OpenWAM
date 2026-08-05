@@ -706,7 +706,7 @@ class RoboCasa365Dataset(BaseDataset):
         return arr.copy()
 
     def denormalize_action(self, action) -> np.ndarray:
-        """Invert normalization + un-unify for the active mode (no-op when disabled).
+        """Invert the TRAINING action transform: un-unify, un-normalize, binary-dim override.
 
         Generic: gather the unified 80-D back to the raw width via the ONE map, then un-normalize with
         the single combined stats block (NO base special-casing — the same contract as the deploy
@@ -714,11 +714,20 @@ class RoboCasa365Dataset(BaseDataset):
           * unify off → the raw head (20-D arm EEF / 25-D ``[arm20, base5]`` mobile).
           * unify on  → un-unified raw (80-D → 20-D / 25-D).
         base5 = raw ``[x/y/yaw vel, torso, control_mode]``; its stats live inside the combined block.
+
+        ``binary_action_dims`` bypassed normalization at train time (targets stayed raw ±1), so those
+        dims must NOT go through the stats inverse — under a non-identity mode (z-score, or any stats
+        drift) it would corrupt them. They are judged in the PRE-unnormalize space (the ±1 space the
+        model was trained in) and overridden to exact ±1 (``> 0.5`` — the conservative boundary the
+        bridge/env apply). Mirrors the deploy ``_CommandAwareNormalizer``.
         """
         arr = np.asarray(action, dtype=np.float32)
         if self._unify_dst_index is not None:
             arr = unmap_from_unify(arr, self._unify_dst_index).astype(np.float32)  # (..., 80) -> (..., raw_dim)
-        return self._unnormalize(arr, self._stats)
+        out = self._unnormalize(arr, self._stats)
+        for d in self._binary_action_dims:
+            out[..., d] = np.where(arr[..., d] > 0.5, 1.0, -1.0)
+        return out
 
     def __len__(self) -> int:
         return len(self._val_samples) if self._val_samples is not None else len(self._window_index)
@@ -856,7 +865,7 @@ class RoboCasa365Dataset(BaseDataset):
             #     base pose (start-1 → start); start=0 has no previous frame → 0.
             base_pro = np.zeros((1, BASE_ACTION_DIM), np.float32)
             if self._base_proprio == "global_pose":
-                cur = self._read_state(ep_global, start, start + 1)[0, 0:7]  # base_position(3) + base_rotation(4)
+                cur = state[0, 0:7]  # window frame 0, already read above: base_position(3) + base_rotation(4)
                 yaw = _yaw_from_quat_xyzw(cur[3:7])
                 base_pro[0, 0:4] = (cur[0], cur[1], np.sin(yaw), np.cos(yaw))
             elif start > 0:

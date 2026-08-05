@@ -867,3 +867,42 @@ def test_from_config_threads_base_proprio_and_binary_dims(tmp_path):
         ds2 = MultiTaskRoboCasa365Dataset.from_config(cfg)
     assert ds2._datasets[0]._base_proprio == "velocity"       # historical default
     assert ds2._datasets[0]._binary_action_dims == ()
+
+
+def _skewed_stats_file(tmp_path, mode_mean=-0.86, mode_std=0.51):
+    """25-D eef_base stats with class-imbalanced z-score stats on the binary dims (9, 24) and a
+    single-class min-max range on dim 24 (min==max=+1 nudged by the degenerate guard to [1, 2])."""
+    lo = np.full(25, -1.0, np.float32); hi = np.full(25, 1.0, np.float32)
+    mean = np.zeros(25, np.float32); std = np.ones(25, np.float32)
+    for d in (9, 24):
+        mean[d], std[d] = mode_mean, mode_std
+    lo[24], hi[24] = 1.0, 2.0  # single-class min-max after the degenerate nudge
+    blob = {"eef_base": {"mean": mean, "std": std, "min": lo, "max": hi}, "num_timesteps": 1}
+    p = tmp_path / "skewed_stats.npy"
+    np.save(str(p), blob, allow_pickle=True)
+    return str(p)
+
+
+@pytest.mark.parametrize("mode,unify", [("z-score", False), ("z-score", True), ("min-max", True)])
+def test_denormalize_action_binary_dims_exact(tmp_path, mode, unify):
+    """denormalize_action must invert the TRAINING transform: binary dims bypassed stats, so the
+    inverse must bypass them too. Old code sent them through the stats inverse — z-score with
+    mean=-0.86/std=0.51 returned a perfect -1 as -1.37 (or +1 as -0.35); the single-class min-max
+    range [1, 2] returned +1 as 2.0."""
+    b = make_robocasa_bucket(tmp_path)
+    kw = dict(unify_action=True, unify_action_map=["0-9", "34-43", "68-72"]) if unify else {}
+    with _mock_video_decoder():
+        ds = RoboCasa365Dataset(
+            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+            normalize_mode=mode, normalization_stats_path=_skewed_stats_file(tmp_path),
+            mobile_base=True, binary_action_dims=[9, 24], **kw,
+        )
+    width = 80 if unify else 25
+    a = np.zeros((3, width), np.float32)
+    gi, mi = (9, 72) if unify else (9, 24)
+    a[:, gi] = (1.0, -1.0, 1.0)
+    a[:, mi] = (-1.0, 1.0, 1.0)
+    out = ds.denormalize_action(a)
+    assert out.shape[-1] == 25
+    assert np.array_equal(out[:, 9], np.float32([1, -1, 1]))
+    assert np.array_equal(out[:, 24], np.float32([-1, 1, 1]))

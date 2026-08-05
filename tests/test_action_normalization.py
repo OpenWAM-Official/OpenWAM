@@ -567,9 +567,60 @@ def test_command_aware_missing_pose_block_raises(tmp_path):
         _build_normalizer(cfg, str(tmp_path))
 
 
-def test_command_aware_requires_active_normalization(tmp_path):
+def test_command_aware_null_normalize_is_supported(tmp_path):
+    """normalize_mode=null + binary/global_pose is a CONSISTENT config (training allows it): every
+    dim serves in raw space (binary targets are raw ±1 by construction, pose proprio is raw meters)
+    and the legality projection lives in WAMPolicy, independent of the normalizer. Deploy must
+    return None, not raise — a trainable config must be deployable."""
     cfg = OmegaConf.create({"dataloader": {
         "normalize_mode": None, "action_mode": "eef_base", "binary_action_dims": [9, 24],
+        "base_proprio": "global_pose",
     }})
-    with pytest.raises(ValueError, match="active normalize_mode"):
-        _build_normalizer(cfg, str(tmp_path))
+    assert _build_normalizer(cfg, str(tmp_path)) is None  # no stats file needed either
+
+
+def test_command_aware_binary_survives_nonneutral_zscore(tmp_path):
+    """THE B1 regression (wayrise): binary targets bypassed normalization at train time, so the model
+    emits them in raw ±1 space — the stats inverse must NOT touch them. With class-imbalanced z-score
+    stats (control_mode +1 ≈ 7% → mean≈-0.86, std≈0.51) the old post-inverse judgment turned a
+    correct +1 into (1·0.51 - 0.86) = -0.35 → snapped to the WRONG class."""
+    stats = _eef_base_stats_25d()
+    for d in (9, 24):
+        stats["mean"][d], stats["std"][d] = -0.86, 0.51
+    np.save(str(tmp_path / "normalization_stats.npy"), {"eef_base": stats, "num_timesteps": 10}, allow_pickle=True)
+    cfg = OmegaConf.create({"dataloader": {
+        "normalize_mode": "z-score", "action_mode": "eef_base", "binary_action_dims": [9, 24],
+    }})
+    normalizer = _build_normalizer(cfg, str(tmp_path))
+    x = np.zeros(25, dtype=np.float32)
+    x[9], x[24] = 1.0, 1.0
+    out = normalizer.unnormalize(x)
+    assert out[9] == 1.0 and out[24] == 1.0        # class preserved (old code: -1)
+    x[9], x[24] = -1.0, -1.0
+    out = normalizer.unnormalize(x)
+    assert out[9] == -1.0 and out[24] == -1.0
+    # continuous dims still go through the stats inverse (z-score: x*std + mean)
+    x2 = np.zeros(25, dtype=np.float32)
+    x2[20] = 1.0
+    assert _build_normalizer(cfg, str(tmp_path)).unnormalize(x2)[20] == pytest.approx(
+        1.0 * stats["std"][20] + stats["mean"][20], abs=1e-5
+    )
+
+
+def test_command_aware_binary_zscore_under_unify(tmp_path):
+    """Same regression through the unify wrapper: gather 80→25 happens BEFORE the command-aware
+    inner, so the pre-inverse judgment must still see the raw ±1 (unified dim 72 → raw 24)."""
+    stats = _eef_base_stats_25d()
+    for d in (9, 24):
+        stats["mean"][d], stats["std"][d] = -0.86, 0.51
+    np.save(str(tmp_path / "normalization_stats.npy"), {"eef_base": stats, "num_timesteps": 10}, allow_pickle=True)
+    cfg = OmegaConf.create({"dataloader": {
+        "normalize_mode": "z-score", "action_mode": "eef_base", "binary_action_dims": [9, 24],
+        "unify_action": True, "unify_action_map": ["0-9", "34-43", "68-72"],
+    }})
+    normalizer = _build_normalizer(cfg, str(tmp_path))
+    u = np.zeros(80, dtype=np.float32)
+    u[9], u[72] = 1.0, -1.0           # unified: l_grip at 9, control_mode at 72
+    out = normalizer.unnormalize(u)
+    assert out.shape[-1] == 25
+    assert out[9] == 1.0 and out[24] == -1.0

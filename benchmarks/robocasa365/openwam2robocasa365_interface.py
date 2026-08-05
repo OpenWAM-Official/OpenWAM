@@ -391,6 +391,30 @@ class OpenWAMRoboCasa365Policy:
         pong = self._client.ping()
         if pong.get("type") != transport.PONG:
             raise RuntimeError(f"OpenWAM server ping returned unexpected response: {pong}")
+        # Representation-contract handshake. velocity vs global_pose proprio are BOTH 25-D, so a
+        # mismatched eval config corrupts evaluation silently — the width check cannot catch it.
+        # Asymmetric compat: a "global_pose" client REQUIRES the server to advertise its
+        # representation (an old server would silently normalize the pose proprio with command
+        # stats); a "velocity" client tolerates absence (old server + historical ckpt is fine).
+        server_bp = pong.get("base_proprio")
+        if self._base_proprio == "global_pose" and server_bp is None:
+            raise RuntimeError(
+                "base_proprio='global_pose' but the server did not advertise its proprio "
+                "representation: the deploy code is too old for a global-pose checkpoint and would "
+                "silently normalize the pose proprio with command stats. Update the server."
+            )
+        if server_bp is not None and server_bp != self._base_proprio:
+            raise RuntimeError(
+                f"base_proprio mismatch: eval config sends {self._base_proprio!r} but the server's "
+                f"checkpoint trained with {server_bp!r}. Both are the same width, so this would "
+                "corrupt evaluation silently — fix base_proprio in the eval policy config."
+            )
+        server_mb = pong.get("mobile_base")
+        if server_mb is not None and bool(server_mb) != self._mobile_base:
+            raise RuntimeError(
+                f"mobile_base mismatch: eval config says {self._mobile_base} but the server's "
+                f"checkpoint trained with mobile_base={bool(server_mb)}. Fix the eval policy config."
+            )
         print(
             f"[OpenWAMRoboCasa365Policy] action_dim={action_dim} state_dim={self._state_dim} "
             f"mobile_base={self._mobile_base} mask_torso_action={self._mask_torso_action} "

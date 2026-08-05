@@ -121,13 +121,14 @@ def test_transform_image_none_is_passthrough():
 # --- policy class with a fake WS client ---
 
 class _FakeClient:
-    def __init__(self, action):
+    def __init__(self, action, pong=None):
         self._action = list(action)
         self.last_payload = None
         self.reset_called = False
+        self._pong = pong or {"type": "pong"}
 
     def ping(self):
-        return {"type": "pong"}
+        return dict(self._pong)
 
     def reset(self):
         self.reset_called = True
@@ -495,7 +496,10 @@ def test_base_pose_planar5_matches_dataloader_formula():
 def test_policy_global_pose_sends_pose_stateless():
     """base_proprio='global_pose': base5 = [x, y, sin(yaw), cos(yaw), 0] direct from the CURRENT obs —
     already real on the first step (velocity mode sends zeros there), and needs no previous pose."""
-    fake = _FakeClient(action=list(range(25)))
+    fake = _FakeClient(
+        action=list(range(25)),
+        pong={"type": "pong", "base_proprio": "global_pose", "mobile_base": True},
+    )
     policy = adapter.OpenWAMRoboCasa365Policy(
         _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
         base_proprio="global_pose",
@@ -521,4 +525,50 @@ def test_policy_global_pose_requires_mobile():
         adapter.OpenWAMRoboCasa365Policy(
             _client=_FakeClient(action=list(range(20))), osc_pos_scale=0.05, osc_rot_scale=0.5,
             mobile_base=False, base_proprio="global_pose",
+        )
+
+
+# --- representation-contract handshake (PR #57 B5) ---
+
+
+def test_handshake_global_pose_requires_server_field():
+    """A global_pose client must REFUSE a server that doesn't advertise its representation (an old
+    server would silently normalize the pose proprio with command stats)."""
+    with pytest.raises(RuntimeError, match="did not advertise"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(25))),  # bare pong: old server
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, base_proprio="global_pose",
+        )
+
+
+def test_handshake_base_proprio_mismatch_raises():
+    """velocity client vs global_pose ckpt (or vice versa): both 25-D, width check is blind — the
+    handshake must fail fast instead of silently corrupting evaluation."""
+    with pytest.raises(RuntimeError, match="base_proprio mismatch"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(
+                action=list(range(25)),
+                pong={"type": "pong", "base_proprio": "global_pose", "mobile_base": True},
+            ),
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, base_proprio="velocity",
+        )
+
+
+def test_handshake_velocity_tolerates_old_server():
+    """Historical pairing (velocity client + server without contract fields) keeps working."""
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+        mobile_base=True,
+    )
+    assert policy._base_proprio == "velocity"
+
+
+def test_handshake_mobile_base_mismatch_raises():
+    with pytest.raises(RuntimeError, match="mobile_base mismatch"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(
+                action=list(range(25)),
+                pong={"type": "pong", "base_proprio": "velocity", "mobile_base": False},
+            ),
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
         )
