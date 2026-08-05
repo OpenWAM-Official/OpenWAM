@@ -20,6 +20,11 @@
 
 
 
+
+
+
+
+
 from __future__ import annotations
 
 import argparse
@@ -29,8 +34,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 
+from openwam.dataloader.oxe_droid import load_droid_prompt_exclusions
 from openwam.dataloader.utils.eef import assert_unit_quaternion
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_ARM10, pin_rot6d_identity
 from openwam.dataloader.utils.oxe_schema import (
@@ -109,9 +116,11 @@ def _convert_action(rows: Dict[str, np.ndarray], action_fn: str) -> np.ndarray:
     raise ValueError(f"unknown action_fn={action_fn}")
 
 
-def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
+def _load_shard(path: Path, cols: List[str], keep: np.ndarray | None = None) -> Dict[str, np.ndarray]:
     """Public implementation. Dataset-specific audit notes were removed."""
     table = pq.read_table(path, memory_map=True, columns=cols)
+    if keep is not None:
+        table = table.filter(pa.array(keep))
     out: Dict[str, np.ndarray] = {}
     for c in cols:
         col_data = table.column(c).to_pylist()
@@ -123,15 +132,16 @@ def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
     return out
 
 
-def compute_dataset_stats(
-    dataset_dir: Path, dataset_name: str, rot6d_identity: bool = True
-) -> Tuple[dict, int, int]:
+def compute_dataset_stats(dataset_dir: Path, dataset_name: str, rot6d_identity: bool = True) -> Tuple[dict, int, int]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
 
 
     spec = SCHEMA[dataset_name]
+    excluded_episode_indices: set[int] = set()
+    if dataset_name == "DROID":
+        _, excluded_episode_indices = load_droid_prompt_exclusions(dataset_dir)
     parquet_paths = sorted((dataset_dir / "data").rglob("*.parquet"))
     if not parquet_paths:
         raise FileNotFoundError(f"No parquet shards under {dataset_dir}/data")
@@ -140,8 +150,19 @@ def compute_dataset_stats(
     state_arrs: List[np.ndarray] = []
     action_arrs: List[np.ndarray] = []
     for i, p in enumerate(parquet_paths, start=1):
-        state_rows = _load_shard(p, spec["state_cols"])
-        action_rows = _load_shard(p, spec["action_cols"])
+        keep = None
+        if excluded_episode_indices:
+            episode_indices = (
+                pq.read_table(p, memory_map=True, columns=["episode_index"])
+                .column("episode_index")
+                .combine_chunks()
+                .to_numpy(zero_copy_only=False)
+            )
+            keep = ~np.isin(episode_indices, list(excluded_episode_indices))
+            if not keep.any():
+                continue
+        state_rows = _load_shard(p, spec["state_cols"], keep=keep)
+        action_rows = _load_shard(p, spec["action_cols"], keep=keep)
         state10 = _convert_state(state_rows, spec["state_fn"])
         action10 = _convert_action(action_rows, spec["action_fn"])
         state_arrs.append(state10)
@@ -149,6 +170,8 @@ def compute_dataset_stats(
         if i % 50 == 0 or i == len(parquet_paths):
             logger.info("  %s: processed %d/%d shards", dataset_name, i, len(parquet_paths))
 
+    if not state_arrs:
+        raise ValueError(f"{dataset_name}: every parquet row is excluded; cannot compute stats")
     state_all = np.concatenate(state_arrs, axis=0)
     action_all = np.concatenate(action_arrs, axis=0)
     n_state = int(len(state_all))
@@ -188,6 +211,8 @@ def compute_dataset_stats(
         "q01": np.quantile(merged, 0.01, axis=0).astype(np.float64).tolist(),
         "q99": np.quantile(merged, 0.99, axis=0).astype(np.float64).tolist(),
     }
+    if dataset_name == "DROID":
+        stats["excluded_episode_indices"] = sorted(excluded_episode_indices)
     if rot6d_identity:
 
         pin_rot6d_identity(stats, ROT6D_DIMS_ARM10)
@@ -258,9 +283,7 @@ def main():
         if not ds_dir.is_dir():
             logger.warning("%s: directory %s missing, skipping", name, ds_dir)
             continue
-        stats, n_state, n_action = compute_dataset_stats(
-            ds_dir, name, rot6d_identity=not args.no_rot6d_identity
-        )
+        stats, n_state, n_action = compute_dataset_stats(ds_dir, name, rot6d_identity=not args.no_rot6d_identity)
         _print_stats_table(stats, name)
         if not args.dry_run:
             out_path = ds_dir / "meta" / "eef_stats.json"
