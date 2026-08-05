@@ -342,7 +342,7 @@ def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
     return mask
 
 
-def _scan_bucket(args) -> Tuple[str, np.ndarray]:
+def _scan_bucket(args) -> Tuple[str, np.ndarray, bool]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -402,6 +402,12 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
             kept = in_split if kept is None else (kept & in_split)
     need_ep = bool(trim) or kept is not None
 
+
+
+
+
+    population_empty = kept is not None and len(kept) == 0
+
     chunks: List[np.ndarray] = []
 
 
@@ -439,9 +445,28 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
         for kind in ("action", "state"):
             rows = _eef20(table, sides, kind, grip_scales)
             chunks.append(rows if mask is None else rows[mask])
-    if not chunks:
-        return bucket_str, np.zeros((0, EEF20_DIM), dtype=np.float32)
-    return bucket_str, np.concatenate(chunks, axis=0)
+    out = (np.zeros((0, EEF20_DIM), dtype=np.float32) if not chunks
+           else np.concatenate(chunks, axis=0))
+
+
+
+
+
+
+
+
+
+
+
+    if len(out) == 0 and not population_empty:
+        raise ValueError(
+            f"{bucket}: the {split!r} split expects "
+            f"{'every episode' if kept is None else f'{len(kept)} episode(s)'} but no shard row "
+            "carries them. The shards do not hold the episodes the manifest assigns to this "
+            "split — pooling this as an empty population would let its reader load another "
+            "bucket's statistics and read another episode's rows."
+        )
+    return bucket_str, out, bool(population_empty)
 
 
 def compute_stats_for_embodiment(
@@ -514,7 +539,7 @@ def compute_stats_for_embodiment(
         for i, fut in enumerate(futures, 1):
             name = futures[fut]
             try:
-                _, rows = fut.result()
+                _, rows, population_empty = fut.result()
             except Exception as e:
                 logger.warning("  [%s] skipping %s (%s)", embodiment, name, e)
                 continue
@@ -524,10 +549,12 @@ def compute_stats_for_embodiment(
 
 
 
-
-
-
-                logger.info("  [%s] %s has no train rows (val-only?)", embodiment, name)
+                if not population_empty:
+                    logger.warning(
+                        "  [%s] %s produced 0 rows without an empty population; not covered",
+                        embodiment, name)
+                    continue
+                logger.info("  [%s] %s has no %s rows (val-only?)", embodiment, name, split)
                 empty_buckets.append(_rel_id(Path(name)))
                 continue
             scanned_buckets.append(_rel_id(Path(name)))

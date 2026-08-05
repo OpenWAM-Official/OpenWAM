@@ -281,7 +281,7 @@ class TestMergeDeterminism:
 
         ref = small(dim=a1s.EEF20_DIM)
         for d in dirs:  # same fixed order the script must use
-            _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+            _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
             ref.update_batch(rows)
         expected = ref.finalize()
         for key in ("mean", "std", "min", "max", "q01", "q99"):
@@ -369,7 +369,7 @@ def test_scan_bucket_reads_action_and_state_rows(tmp_path):
     """Both streams are pooled — actions[t] == states[t+1], the same signal
     offset by one row — so the row count is 2x the parquet length."""
     d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
-    name, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+    name, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
     assert name == str(d)
     assert rows.shape == (2 * 40, a1s.EEF20_DIM)
     assert rows.dtype == np.float32
@@ -377,7 +377,7 @@ def test_scan_bucket_reads_action_and_state_rows(tmp_path):
 
 def test_scan_bucket_of_a_single_arm_leaves_the_right_half_zero(tmp_path):
     d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
-    _, rows = a1s._scan_bucket((str(d), "single_arm", "franka"))
+    _, rows, _ = a1s._scan_bucket((str(d), "single_arm", "franka"))
     np.testing.assert_array_equal(rows[:, 10:], 0.0)
     assert np.abs(rows[:, :10]).sum() > 0
 
@@ -407,7 +407,7 @@ class TestCleanedViewFiltering:
     def test_excluded_episodes_are_dropped_from_the_scan(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
         (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
-        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
+        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
         assert rows.shape[0] == 2 * 20  # only episode 1, both streams
 
     def test_an_empty_kept_set_excludes_everything(self, tmp_path):
@@ -417,7 +417,7 @@ class TestCleanedViewFiltering:
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
         (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0, 1]}))
         assert a1s._kept_episodes(d) == set()
-        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
+        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
         assert rows.shape[0] == 0
 
     def test_kept_episodes_is_none_only_when_the_manifest_is_unreadable(self, tmp_path):
@@ -435,19 +435,19 @@ class TestStatsTrimMatchesReader:
     def test_a_too_short_trim_is_left_whole_like_the_reader_does(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=4)
         trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,4,3,\n")  # leaves 1 < min_len 2
-        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
         assert rows.shape[0] == 2 * 4, "stats trimmed an episode the reader keeps whole"
 
     def test_a_valid_trim_is_applied(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=20)
         trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,20,4,18\n")
-        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
         assert rows.shape[0] == 2 * 14  # 18 - 4
 
     def test_a_stale_total_frames_disables_the_entry(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=20)
         trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,999,4,18\n")
-        _, rows = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
         assert rows.shape[0] == 2 * 20
 
 
@@ -601,9 +601,9 @@ class TestScannerRefusesWhatTheReaderRefuses:
 
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=4)
         src = d / "data" / "chunk-000" / "file-000.parquet"
-        _, rows_before = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+        _, rows_before, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
         shutil.copy(src, src.with_name("file-000.backup.parquet"))
-        _, rows_after = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+        _, rows_after, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
         assert len(rows_after) == len(rows_before), "a non-shard file entered the statistics"
 
     def test_overlapping_manifest_ranges_are_refused(self, tmp_path):
@@ -755,3 +755,68 @@ class TestValOnlyBucketReusesTrainStats:
             InternDataA1Dataset(str(b), dataset_id="cat/emb/b", a1_stats_root=str(out),
                                 normalize_mode="quantile", num_frames=2, video_stride=1,
                                 split="val")
+
+
+class TestZeroRowsIsNotProofOfAnEmptyPopulation:
+    """A substituted physical slice survives every count-and-envelope check.
+
+    Ranges, grand total and the shard's `episode_index` min/max are all
+    preserved when one episode's rows are overwritten with another's, so the
+    only symptom is that the mask for the expected episode selects nothing.
+    Read as "empty population" that bucket gets certified as covered, and its
+    reader then loads another bucket's statistics while reading another
+    episode's rows.
+    """
+
+    def _substituted(self, tmp_path):
+        """3 episodes x 4 rows, split train=1:2, rows [4:8] replaced by ep2's."""
+        import pyarrow as pa
+        d = _make_bucket(tmp_path, "cat/emb/bad", n_eps=3, ep_len=4)
+        info = json.loads((d / "meta" / "info.json").read_text())
+        info["splits"] = {"train": "1:2"}
+        (d / "meta" / "info.json").write_text(json.dumps(info))
+        p = d / "data" / "chunk-000" / "file-000.parquet"
+        t = pq.read_table(p).to_pydict()
+        for k, v in t.items():
+            t[k] = v[:4] + v[8:12] + v[8:12]      # ep0, ep2, ep2 — total and envelope intact
+        pq.write_table(pa.Table.from_pydict(t), p)
+        return d
+
+    def test_the_premise_holds_total_and_envelope_are_unchanged(self, tmp_path):
+        d = self._substituted(tmp_path)
+        t = pq.read_table(d / "data" / "chunk-000" / "file-000.parquet")
+        eps = t.column("episode_index").to_pylist()
+        assert t.num_rows == 12, "grand total must still match the manifest"
+        assert (min(eps), max(eps)) == (0, 2), "envelope must still contain episode 1"
+        assert 1 not in eps, "episode 1's rows are the ones that were replaced"
+
+    def test_the_scanner_refuses_it_instead_of_calling_it_empty(self, tmp_path):
+        d = self._substituted(tmp_path)
+        with pytest.raises(ValueError, match="no shard row carries them"):
+            a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/bad"))
+
+    def test_it_is_absent_from_both_coverage_lists(self, tmp_path, monkeypatch):
+        """So its reader still refuses the shared file, as it did before."""
+        import sys
+        _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
+        bad = self._substituted(tmp_path)
+        out = tmp_path / "stats"
+        monkeypatch.setattr(sys, "argv", [
+            "prog", "--dataset_dir", str(tmp_path), "--stats_root", str(out), "--workers", "1"])
+        a1s.main()
+        pop = json.load(open(out / "meta" / "stats_split_aloha.json"))["population"]
+        assert pop["buckets"] == ["cat/emb/good"]
+        assert "cat/emb/bad" not in pop["empty_buckets"], "a substituted slice was called empty"
+        with pytest.raises(ValueError, match="none of them this one"):
+            InternDataA1Dataset(str(bad), dataset_id="cat/emb/bad", a1_stats_root=str(out),
+                                normalize_mode="quantile", num_frames=2, video_stride=1)
+
+    def test_a_genuinely_empty_train_split_is_still_reported_empty(self, tmp_path):
+        """The distinction must not collapse the other way."""
+        d = _make_bucket(tmp_path, "cat/emb/valonly", n_eps=2, ep_len=8)
+        info = json.loads((d / "meta" / "info.json").read_text())
+        info["splits"] = {"train": "0:0", "val": "0:2"}
+        (d / "meta" / "info.json").write_text(json.dumps(info))
+        _, rows, population_empty = a1s._scan_bucket(
+            (str(d), "bimanual", "split_aloha", "cat/emb/valonly"))
+        assert len(rows) == 0 and population_empty is True
