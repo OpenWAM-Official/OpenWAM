@@ -48,7 +48,7 @@ architecture:
   #   <action_sees_video>  video can't see action, action sees all video
   #   <video_sees_action>  video sees action (except first-frame rows), action sees only first frame
   #   <isolated>           video can't see action, action sees only first frame
-  attention_mask_mode: action_sees_video
+  attention_mask_mode: mutual
   # v↔v visibility. Modes:
   #   <bidirectional>       every frame attends every frame (no temporal order)
   #   <per_frame_causal>    frame t attends frames 0..t; full attention within a frame

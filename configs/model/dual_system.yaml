@@ -57,7 +57,7 @@ architecture:
   #   isolated           video can't see action, action sees only first frame
   # joint_self_attn only; joint_cross_attn ignores this (no joint mask);
   # idm locks action_sees_video internally (do not override).
-  attention_mask_mode: action_sees_video
+  attention_mask_mode: mutual
   # v↔v block layout; idm also uses it for the teacher-forcing + cache-prefill submasks.
   video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
 
