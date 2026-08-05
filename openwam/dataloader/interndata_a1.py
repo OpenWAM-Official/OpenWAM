@@ -149,6 +149,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -487,6 +488,169 @@ def discover_a1_buckets(root: Path) -> List[Path]:
     return sorted(out)
 
 
+
+
+
+
+
+
+
+
+_CHUNK_DIR_RE = re.compile(r"chunk-(\d+)")
+_SHARD_FILE_RE = re.compile(r"file-(\d+)\.parquet")
+
+
+def parse_shard_path(path) -> Optional[Tuple[int, int]]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+    p = Path(path)
+    chunk = _CHUNK_DIR_RE.fullmatch(p.parent.name)
+    shard = _SHARD_FILE_RE.fullmatch(p.name)
+    if chunk is None or shard is None:
+        return None
+    return int(chunk.group(1)), int(shard.group(1))
+
+
+def iter_data_shards(bucket) -> List[Tuple[int, int, Path]]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+    out: List[Tuple[int, int, Path]] = []
+    for pth in (Path(bucket) / "data").glob("chunk-*/file-*.parquet"):
+        ids = parse_shard_path(pth)
+        if ids is not None:
+            out.append((ids[0], ids[1], pth))
+    return sorted(out, key=lambda t: (t[0], t[1]))
+
+
+def load_excluded_episodes(bucket) -> set:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+    path = Path(bucket) / "meta" / "excluded_episodes.json"
+    if not path.is_file():
+        return set()
+    with open(path) as fh:
+        raw = json.load(fh)["episode_indices"]
+    out = set()
+    for x in raw:
+        if isinstance(x, bool) or not isinstance(x, int):
+            raise ValueError(
+                f"{path}: episode_indices must be JSON integers, got {x!r} "
+                f"({type(x).__name__}). The reader matches these against an integer "
+                "episode_index column verbatim, so a quoted or float value excludes "
+                "nothing there while excluding here — the two sides would then "
+                "normalise over different populations with no error anywhere."
+            )
+        out.add(int(x))
+    return out
+
+
+def validate_manifest_ranges(from_idx, to_idx, lengths, episode_idx, who: str) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    from_idx = np.asarray(from_idx, dtype=np.int64)
+    to_idx = np.asarray(to_idx, dtype=np.int64)
+    lengths = np.asarray(lengths, dtype=np.int64)
+    episode_idx = np.asarray(episode_idx, dtype=np.int64)
+
+    if (from_idx < 0).any() or (to_idx < from_idx).any():
+        i = int(np.flatnonzero((from_idx < 0) | (to_idx < from_idx))[0])
+        raise ValueError(
+            f"{who}: episode {int(episode_idx[i])} has a malformed manifest range "
+            f"[{int(from_idx[i])}, {int(to_idx[i])})."
+        )
+    bad = np.flatnonzero(to_idx - from_idx != lengths)
+    if bad.size:
+        i = int(bad[0])
+        raise ValueError(
+            f"{who}: episode {int(episode_idx[i])} spans "
+            f"[{int(from_idx[i])}, {int(to_idx[i])}) = {int(to_idx[i] - from_idx[i])} rows but "
+            f"declares length={int(lengths[i])}. The reader sizes windows from one and "
+            "bounds them with the other, so they must describe the same episode."
+        )
+
+
+
+
+
+
+
+    order = np.argsort(from_idx, kind="stable")
+    fs, ts = from_idx[order], to_idx[order]
+    if fs.size > 1:
+        overlap = np.flatnonzero(fs[1:] < ts[:-1])
+        if overlap.size:
+            k = int(overlap[0])
+            raise ValueError(
+                f"{who}: episode {int(episode_idx[order][k + 1])} starts at row "
+                f"{int(fs[k + 1])} but episode {int(episode_idx[order][k])} runs to "
+                f"{int(ts[k])}. Overlapping manifest ranges make two episodes read the "
+                "same rows — the totals and the per-episode capacity check both pass "
+                "while the data is paired with the wrong episode."
+            )
+
+
+def _shard_episode_bounds(pf) -> Optional[Tuple[int, int]]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+    try:
+        col = pf.schema_arrow.names.index("episode_index")
+    except ValueError:
+        return None
+    lo = hi = None
+    meta = pf.metadata
+    for g in range(meta.num_row_groups):
+        st = meta.row_group(g).column(col).statistics
+        if st is None or not st.has_min_max:
+            return None
+        lo = st.min if lo is None else min(lo, st.min)
+        hi = st.max if hi is None else max(hi, st.max)
+    if lo is None or hi is None:
+        return None
+    return int(lo), int(hi)
+
+
 _TRIM_SPEC_CACHE: Dict[str, Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]]] = {}
 
 
@@ -770,30 +934,37 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        import re
         from concurrent.futures import ThreadPoolExecutor
 
         import pyarrow.parquet as pq
 
-        paths = sorted((self._dataset_dir / "data").glob("chunk-*/file-*.parquet"))
-        if not paths:
+        shards = iter_data_shards(self._dataset_dir)
+        if not shards:
             raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
 
-        def _read_meta(path):
-            chunk_m = re.search(r"chunk-(\d+)$", path.parent.name)
-            file_m = re.search(r"file-(\d+)$", path.stem)
-            if chunk_m is None or file_m is None:
-                return None
-            return (int(chunk_m.group(1)), int(file_m.group(1)),
-                    pq.ParquetFile(path).metadata.num_rows)
+        def _read_meta(entry):
+            chunk, file_idx, path = entry
+            pf = pq.ParquetFile(path)
+            return chunk, file_idx, pf.metadata.num_rows, _shard_episode_bounds(pf)
 
-        with ThreadPoolExecutor(max_workers=min(len(paths), 4)) as pool:
-            results = list(pool.map(_read_meta, paths))
-        data_files = [r for r in results if r is not None]
-        if not data_files:
-            raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
+        with ThreadPoolExecutor(max_workers=min(len(shards), 4)) as pool:
+            data_files = list(pool.map(_read_meta, shards))
 
-        starts = np.concatenate([[0], np.cumsum([n for _, _, n in data_files])]).astype(np.int64)
+        who = f"{self.DATASET_NAME}({self._dataset_id})"
+
+
+
+
+
+        validate_manifest_ranges(
+            eps["dataset_from_index"].to_numpy(),
+            eps["dataset_to_index"].to_numpy(),
+            eps["length"].to_numpy(),
+            eps["episode_index"].to_numpy(),
+            who,
+        )
+
+        starts = np.concatenate([[0], np.cumsum([n for _, _, n, _ in data_files])]).astype(np.int64)
 
 
 
@@ -804,19 +975,15 @@ class InternDataA1Dataset(LeRobotV3Reader):
         manifest_end = int(eps["dataset_to_index"].to_numpy().max())
         if manifest_end != int(starts[-1]):
             raise ValueError(
-                f"{self.DATASET_NAME}({self._dataset_id}): the data shards hold {int(starts[-1])} "
-                f"rows but the manifest ends at {manifest_end}. A shard is missing, truncated or "
-                "out of order — resolving offsets against this would map episodes onto another "
-                "episode's rows."
+                f"{who}: the data shards hold {int(starts[-1])} rows but the manifest ends at "
+                f"{manifest_end}. A shard is missing, truncated or out of order — resolving "
+                "offsets against this would map episodes onto another episode's rows."
             )
 
         global_starts = eps["dataset_from_index"].to_numpy().astype(np.int64)
         file_pos = np.searchsorted(starts, global_starts, side="right") - 1
         if (file_pos < 0).any() or (file_pos >= len(data_files)).any():
-            raise ValueError(
-                f"{self.DATASET_NAME}({self._dataset_id}): dataset_from_index outside the "
-                "data parquet row range"
-            )
+            raise ValueError(f"{who}: dataset_from_index outside the data parquet row range")
 
 
 
@@ -829,12 +996,34 @@ class InternDataA1Dataset(LeRobotV3Reader):
         if overflow.size:
             i = int(overflow[0])
             raise ValueError(
-                f"{self.DATASET_NAME}({self._dataset_id}): episode "
-                f"{int(eps['episode_index'].to_numpy()[i])} needs rows "
+                f"{who}: episode {int(eps['episode_index'].to_numpy()[i])} needs rows "
                 f"[{int(offsets[i])}, {int(offsets[i] + lengths[i])}) of a shard holding only "
                 f"{int(capacity[i])}. The shard set does not match the manifest — resolving "
                 "offsets against it would map episodes onto another episode's rows."
             )
+
+
+
+
+
+
+
+
+
+        ep_vals = eps["episode_index"].to_numpy()
+        for i, pos in enumerate(file_pos):
+            bounds = data_files[pos][3]
+            if bounds is None:
+                continue
+            ep = int(ep_vals[i])
+            if not bounds[0] <= ep <= bounds[1]:
+                raise ValueError(
+                    f"{who}: the manifest puts episode {ep} in shard "
+                    f"chunk-{data_files[pos][0]:03d}/file-{data_files[pos][1]:03d}, but that "
+                    f"shard only holds episodes {bounds[0]}..{bounds[1]}. The shard set does "
+                    "not match the manifest (a copied, reordered or substituted shard passes "
+                    "the row-count checks above while holding another episode's data)."
+                )
 
         eps["data/chunk_index"] = np.array([data_files[i][0] for i in file_pos], dtype=np.int64)
         eps["data/file_index"] = np.array([data_files[i][1] for i in file_pos], dtype=np.int64)
@@ -898,17 +1087,55 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
+
+
+
+
+
+
+
+
+
+            ck = f"videos/{cam}/chunk_index"
             fk = f"videos/{cam}/file_index"
             if fk in eps.columns:
-                for shard in np.unique(eps[fk].to_numpy()):
-                    m = eps[fk].to_numpy() == shard
-                    o = np.sort(off[m])
-                    if o.size > 1 and (np.diff(o) <= 0).any():
-                        raise ValueError(
-                            f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} has "
-                            f"episodes sharing a frame offset in shard {int(shard)}; they would "
-                            "read the same video frames."
-                        )
+                ep_len = eps["length"].to_numpy().astype(np.int64)
+                chunk_of = (eps[ck].to_numpy().astype(np.int64) if ck in eps.columns
+                            else np.zeros(len(off), dtype=np.int64))
+                file_of = eps[fk].to_numpy().astype(np.int64)
+                ep_vals = eps["episode_index"].to_numpy()
+                shard_key = np.stack([chunk_of, file_of], axis=1)
+                for shard in np.unique(shard_key, axis=0):
+                    m = np.flatnonzero((chunk_of == shard[0]) & (file_of == shard[1]))
+                    order = m[np.argsort(off[m], kind="stable")]
+                    for a, b in zip(order, order[1:]):
+                        if off[a] + ep_len[a] > off[b]:
+                            raise ValueError(
+                                f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r}, video "
+                                f"shard chunk-{int(shard[0]):03d}/file-{int(shard[1]):03d}: "
+                                f"episode {int(ep_vals[a])} covers frames "
+                                f"[{int(off[a])}, {int(off[a] + ep_len[a])}) which overlaps "
+                                f"episode {int(ep_vals[b])} starting at {int(off[b])}. One of "
+                                "them would read the other's frames."
+                            )
+
+
+
+
+
+            tcol = f"videos/{cam}/to_timestamp"
+            if tcol in eps.columns:
+                span = (eps[tcol].to_numpy().astype(np.float64) - ts) * self._fps
+                declared = eps["length"].to_numpy().astype(np.int64)
+                bad = np.flatnonzero(np.isfinite(span) & (np.abs(span - declared) > 0.5))
+                if bad.size:
+                    i = int(bad[0])
+                    raise ValueError(
+                        f"{self.DATASET_NAME}({self._dataset_id}): camera {cam!r} episode "
+                        f"{int(eps['episode_index'].to_numpy()[i])} spans {span[i]:.2f} video "
+                        f"frames between from/to_timestamp but declares length="
+                        f"{int(declared[i])}. The manifest describes two different episodes."
+                    )
             eps[self._video_offset_col(cam)] = off
 
     def _trim_min_len(self) -> int:
@@ -1071,6 +1298,91 @@ class InternDataA1Dataset(LeRobotV3Reader):
             return actual_raw_len
         return max(0, actual_raw_len - 1)
 
+    def _check_stats_population(self, raw: dict, stats_path) -> None:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        pop = raw.get("population")
+        rerun = (
+            "Re-run python -m openwam.dataloader.utils.stats_computation."
+            f"interndata_a1_stats_computation --dataset_dir {self._dataset_dir} "
+            f"--stats_root {self._a1_stats_root}"
+        )
+        if not isinstance(pop, dict):
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} has no 'population' "
+                f"block, so there is no way to tell whether it describes the rows this reader "
+                f"loads (split, trimming and keep-bound all change the distribution). {rerun}."
+            )
+
+        want_split = self._split
+        if pop.get("split") != want_split:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} was computed over the "
+                f"{pop.get('split')!r} split but this reader loads {want_split!r}. "
+                f"{rerun} --split {want_split}."
+            )
+
+        want_trim = bool(self._trim_csv)
+        if bool(pop.get("trim_active")) != want_trim:
+            state = "with" if pop.get("trim_active") else "without"
+            mine = "is" if want_trim else "is not"
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} was computed {state} a "
+                f"trim list but this reader {mine} trimming. Trimming removes the motionless "
+                f"head/tail, so the two describe different distributions. {rerun}"
+                + (f" --trim_csv {self._trim_csv}" if want_trim else "") + "."
+            )
+
+        want_keep = self._trim_min_len()
+        if want_trim and int(pop.get("min_keep", -1)) != int(want_keep):
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} used --min_keep="
+                f"{pop.get('min_keep')} but this reader keeps episodes down to {want_keep} "
+                f"frames. The same trim CSV under a different bound keeps a different set of "
+                f"episodes. {rerun} --trim_csv {self._trim_csv} --min_keep {want_keep}."
+            )
+
+        buckets = pop.get("buckets")
+        if not isinstance(buckets, list):
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} has no bucket list in "
+                f"its 'population' block. {rerun}."
+            )
+
+
+
+        if self._match_bucket_key(dict.fromkeys(buckets), "stats population") is None:
+            raise ValueError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} pools "
+                f"{len(buckets)} buckets, none of them this one — it was skipped during the "
+                f"scan (unreadable, or it produced no rows) while still loading the shared "
+                f"per-embodiment file, so its actions would be scaled by other buckets' "
+                f"numbers. {rerun}."
+            )
+
     def _load_stats(self, info: dict):
         """Public implementation. Dataset-specific audit notes were removed."""
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
@@ -1091,25 +1403,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
         with open(stats_path) as f:
             raw = json.load(f)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        self._check_stats_population(raw, stats_path)
 
         eef_raw = raw.get("eef", {})
 

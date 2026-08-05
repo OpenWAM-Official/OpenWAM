@@ -567,3 +567,127 @@ class TestSplitFailuresDoNotFailOpen:
         (d / "meta" / "info.json").write_text(json.dumps(info))
         assert a1s._split_episodes(d, "train") is None      # unrestricted
         assert a1s._split_episodes(d, "val") == set()       # not "everything"
+
+
+class TestScannerRefusesWhatTheReaderRefuses:
+    """`len(rows) > 0` proves rows were read, not that a reader can consume them.
+
+    Each case below yielded a healthy row count here while
+    ``InternDataA1Dataset`` raised on the same bucket — statistics describing a
+    population that never reaches training, with nothing downstream able to tell.
+    Both sides now enumerate shards and validate the manifest through the same
+    functions, so these are parity assertions rather than a second rule set.
+    """
+
+    def _scan(self, d, **kw):
+        return a1s._scan_bucket((str(d), "bimanual", "split_aloha", kw.pop("dsid", "task")),
+                                **kw) if kw else a1s._scan_bucket(
+            (str(d), "bimanual", "split_aloha"))
+
+    def test_a_truncated_shard_is_refused_like_the_reader_refuses_it(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=4)
+        p = d / "data" / "chunk-000" / "file-000.parquet"
+        t = pq.read_table(p)
+        pq.write_table(t.slice(0, t.num_rows - 1), p)   # manifest says 8, shard holds 7
+
+        with pytest.raises(ValueError, match="manifest ends at 8"):
+            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+        with pytest.raises(ValueError, match="manifest ends at 8"):
+            a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+
+    def test_a_stray_backup_parquet_does_not_double_the_population(self, tmp_path):
+        """`file-000.backup.parquet` matched the old glob; the reader never read it."""
+        import shutil
+
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=4)
+        src = d / "data" / "chunk-000" / "file-000.parquet"
+        _, rows_before = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+        shutil.copy(src, src.with_name("file-000.backup.parquet"))
+        _, rows_after = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+        assert len(rows_after) == len(rows_before), "a non-shard file entered the statistics"
+
+    def test_overlapping_manifest_ranges_are_refused(self, tmp_path):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=3, ep_len=4)
+        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        m = pq.read_table(man).to_pydict()
+        m["dataset_from_index"], m["dataset_to_index"] = [0, 2, 8], [4, 6, 12]
+        m["length"] = [4, 4, 4]
+        import pyarrow as pa
+        pq.write_table(pa.Table.from_pydict(m), man)
+        with pytest.raises(ValueError, match="Overlapping manifest ranges"):
+            a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+
+    def test_quoted_exclusion_indices_are_refused_on_both_sides(self, tmp_path):
+        """`["0"]` excluded episode 0 here and nothing in the reader."""
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=4)
+        (d / "meta" / "excluded_episodes.json").write_text(
+            json.dumps({"episode_indices": ["0"]}))
+        with pytest.raises(ValueError, match="must be JSON integers"):
+            a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+
+
+class TestPopulationContractEndToEnd:
+    """Through the real `main()` and the real reader — no hand-written stats.
+
+    Every provenance defect so far survived a green suite because the tests
+    wrote the stats file themselves and so could not observe what the generator
+    actually emits. These run the CLI and hand its output to a reader.
+    """
+
+    def _run(self, monkeypatch, d, out, *extra):
+        import sys
+        monkeypatch.setattr(sys, "argv", [
+            "prog", "--dataset_dir", str(d), "--stats_root", str(out), "--workers", "1", *extra])
+        a1s.main()
+        return json.load(open(out / "meta" / "stats_split_aloha.json"))
+
+    def test_the_generator_records_what_it_scanned(self, tmp_path, monkeypatch):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
+        res = self._run(monkeypatch, d, tmp_path / "stats")
+        assert res["population"] == {
+            "split": "train", "trim_active": False, "min_keep": 2, "buckets": ["task"]}
+
+    def test_val_stats_are_refused_by_a_train_reader(self, tmp_path, monkeypatch):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
+        out = tmp_path / "stats"
+        # info.json ships splits {"train": "0:N"}, so give it a val range to scan.
+        info = json.loads((d / "meta" / "info.json").read_text())
+        info["splits"] = {"train": "0:1", "val": "1:2"}
+        (d / "meta" / "info.json").write_text(json.dumps(info))
+        res = self._run(monkeypatch, d, out, "--split", "val")
+        assert res["population"]["split"] == "val"
+        with pytest.raises(ValueError, match="computed over the 'val' split"):
+            InternDataA1Dataset(str(d), a1_stats_root=str(out), normalize_mode="quantile",
+                                num_frames=2, video_stride=1)
+
+    def test_untrimmed_stats_are_refused_by_a_trimming_reader(self, tmp_path, monkeypatch):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
+        out = tmp_path / "stats"
+        self._run(monkeypatch, d, out)                      # generated WITHOUT --trim_csv
+        trim = tmp_path / "trim.csv"
+        trim.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
+                        "task,0,8,2,6\n")
+        with pytest.raises(ValueError, match="without a trim list but this reader is"):
+            InternDataA1Dataset(str(d), a1_stats_root=str(out), trim_csv=str(trim),
+                                normalize_mode="quantile", num_frames=2, video_stride=1)
+
+    def test_a_bucket_skipped_by_the_scan_is_refused_by_its_own_reader(self, tmp_path, monkeypatch):
+        """The exact case the shared per-embodiment file makes possible.
+
+        `bad` fails to scan, so only `good`'s rows are pooled — but both readers
+        load the same `stats_split_aloha.json`, and `bad` used to accept it.
+        """
+        good = _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
+        bad = _make_bucket(tmp_path, "cat/emb/bad", n_eps=2, ep_len=8)
+        p = bad / "data" / "chunk-000" / "file-000.parquet"
+        pq.write_table(pq.read_table(p).slice(0, 15), p)     # truncated: scan raises
+
+        out = tmp_path / "stats"
+        res = self._run(monkeypatch, tmp_path, out)
+        assert res["population"]["buckets"] == ["cat/emb/good"]
+
+        InternDataA1Dataset(str(good), dataset_id="cat/emb/good", a1_stats_root=str(out),
+                            normalize_mode="quantile", num_frames=2, video_stride=1)
+        with pytest.raises(ValueError, match="none of them this one|manifest ends at"):
+            InternDataA1Dataset(str(bad), dataset_id="cat/emb/bad", a1_stats_root=str(out),
+                                normalize_mode="quantile", num_frames=2, video_stride=1)

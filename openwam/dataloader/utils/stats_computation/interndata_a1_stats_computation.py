@@ -89,9 +89,12 @@ from openwam.dataloader.interndata_a1 import (
     detect_arm_layout,
     discover_a1_buckets,
     embodiment_key,
+    iter_data_shards,
+    load_excluded_episodes,
     resolve_bucket_key,
     resolve_gripper_scale,
     resolve_trim_bounds,
+    validate_manifest_ranges,
 )
 from openwam.dataloader.utils.eef import ARM10_DIM, quat_wxyz_to_rot6d
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
@@ -188,11 +191,11 @@ def _kept_episodes(bucket: Path) -> Optional[set]:
     eps = _manifest_episodes(bucket)
     if eps is None:
         return None
-    excl_path = bucket / "meta" / "excluded_episodes.json"
-    if excl_path.is_file():
-        with open(excl_path) as fh:
-            eps = eps - {int(x) for x in json.load(fh)["episode_indices"]}
-    return eps
+
+
+
+
+    return eps - load_excluded_episodes(bucket)
 
 
 def _manifest_episodes(bucket: Path) -> Optional[set]:
@@ -207,6 +210,47 @@ def _manifest_episodes(bucket: Path) -> Optional[set]:
     except (OSError, KeyError, ValueError):
         return None
     return eps
+
+
+def _assert_reader_can_load(bucket: Path, shards: Sequence) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+
+
+
+
+    files = sorted((bucket / "meta" / "episodes").rglob("*.parquet"))
+    if not files:
+        return
+    cols = ["episode_index", "dataset_from_index", "dataset_to_index", "length"]
+    frm, to, length, epi = [], [], [], []
+    for f in files:
+        names = set(pq.ParquetFile(f).schema_arrow.names)
+        if not set(cols) <= names:
+            return
+        d = pq.read_table(f, columns=cols).to_pydict()
+        epi += d["episode_index"]
+        frm += d["dataset_from_index"]
+        to += d["dataset_to_index"]
+        length += d["length"]
+
+    validate_manifest_ranges(frm, to, length, epi, str(bucket))
+
+    total = sum(pq.ParquetFile(p).metadata.num_rows for _, _, p in shards)
+    manifest_end = int(max(to))
+    if manifest_end != total:
+        raise ValueError(
+            f"{bucket}: the data shards hold {total} rows but the manifest ends at "
+            f"{manifest_end}. The reader refuses this bucket, so statistics pooled from "
+            "it would describe rows that are never trained on."
+        )
 
 
 def _split_episodes(bucket: Path, split: str) -> Optional[set]:
@@ -362,7 +406,20 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray]:
 
 
 
-    for pth in sorted((bucket / "data").glob("chunk-*/file-*.parquet")):
+
+    shards = iter_data_shards(bucket)
+    if not shards:
+        raise ValueError(f"{bucket}: no data shards under data/chunk-*/file-*.parquet")
+
+
+
+
+
+
+
+    _assert_reader_can_load(bucket, shards)
+
+    for _, _, pth in shards:
 
 
 
@@ -475,6 +532,13 @@ def compute_stats_for_embodiment(
     if n_rows == 0:
         raise RuntimeError(f"embodiment {embodiment!r}: every bucket yielded 0 rows")
 
+    population = {
+        "split": split,
+        "trim_active": bool(trim_csv),
+        "min_keep": int(min_len),
+        "buckets": sorted(scanned_buckets),
+    }
+
     stats = acc.finalize()
     if rot6d_identity:
 
@@ -494,8 +558,22 @@ def compute_stats_for_embodiment(
         "num_rows": int(n_rows),
 
 
-        "scanned_buckets": sorted(scanned_buckets),
-        "split": split,
+
+
+
+
+
+
+
+
+
+
+        "population": population,
+
+
+
+        "scanned_buckets": population["buckets"],
+        "split": population["split"],
         "rot6d_identity": bool(rot6d_identity),
         "layout_doc": "[L_xyz(0:3), L_rot6d(3:9), L_grip(9), R_xyz(10:13), R_rot6d(13:19), R_grip(19)]",
     }
