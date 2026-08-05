@@ -76,13 +76,15 @@ def _filter(tmp_path: Path, eps: pd.DataFrame, rows: list[dict]) -> pd.DataFrame
 
 @pytest.fixture(autouse=True)
 def _isolate_trim_cache():
-    # _load_trim_spec caches by path for the many bucket readers.
+    # Trim parsing/digests are cached for the many bucket readers.
     # Tests reuse tmp_path names across separate pytest processes, so isolate it.
     from openwam.dataloader import robocoin
 
     robocoin._TRIM_SPEC_CACHE.clear()
+    robocoin._TRIM_DIGEST_CACHE.clear()
     yield
     robocoin._TRIM_SPEC_CACHE.clear()
+    robocoin._TRIM_DIGEST_CACHE.clear()
 
 
 class TestLoadTrimSpec:
@@ -179,6 +181,14 @@ class TestLoadTrimSpec:
 
         _write_trim_csv(path, [_trim_row()])
         assert _load_trim_spec(path) == {"bucket": {0: (2, 8, 10)}}
+
+    def test_cache_refreshes_when_same_path_is_replaced(self, tmp_path):
+        path = _write_trim_csv(tmp_path / "replaceable.csv", [_trim_row(trim_head_to=2)])
+        assert _load_trim_spec(path) == {"bucket": {0: (2, 8, 10)}}
+
+        replacement = _write_trim_csv(tmp_path / "replacement.csv", [_trim_row(trim_head_to=3)])
+        replacement.replace(path)
+        assert _load_trim_spec(path) == {"bucket": {0: (3, 8, 10)}}
 
     @pytest.mark.parametrize(
         "overrides",
@@ -353,6 +363,13 @@ def _make_bucket(bucket: Path, lengths: list[int]) -> Path:
     return bucket
 
 
+def _set_info_splits(bucket: Path, splits: dict) -> None:
+    info_path = bucket / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["splits"] = splits
+    info_path.write_text(json.dumps(info))
+
+
 @pytest.fixture
 def patch_decode(monkeypatch):
     def fake_decode(path, frame_indices, height, width):
@@ -430,6 +447,77 @@ def test_root_mode_trim_csv_with_partial_bucket_key_overlap_is_allowed(tmp_path)
         for bucket in ds._buckets
     }
     assert lengths_by_bucket == {"bucket-a": [6], "bucket-b": [8]}
+
+
+def test_root_mode_unknown_episode_id_fails_closed_against_full_manifest(tmp_path):
+    root = tmp_path / "root"
+    bucket = _make_bucket(root / "bucket", [8, 8])
+    _set_info_splits(bucket, {"train": "0:1", "val": "1:2"})
+    trim_csv = _write_trim_csv(
+        tmp_path / "unknown-episode.csv",
+        [
+            _trim_row(
+                dataset="bucket",
+                episode_index=99,
+                total_frames=8,
+                trim_head_to=1,
+                trim_tail_from=7,
+            )
+        ],
+    )
+
+    with pytest.raises(DataContractError, match="[Uu]nknown.*episode"):
+        RoboCOINDataset.from_config(
+            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+        )
+
+
+def test_root_mode_trim_entry_outside_selected_split_is_not_unknown(tmp_path):
+    root = tmp_path / "root"
+    bucket = _make_bucket(root / "bucket", [8, 8])
+    _set_info_splits(bucket, {"train": "0:1", "val": "1:2"})
+    trim_csv = _write_trim_csv(
+        tmp_path / "val-episode.csv",
+        [
+            _trim_row(
+                dataset="bucket",
+                episode_index=1,
+                total_frames=8,
+                trim_head_to=1,
+                trim_tail_from=7,
+            )
+        ],
+    )
+
+    ds = RoboCOINDataset.from_config(
+        {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+    )
+    assert [bucket._dataset_id for bucket in ds._buckets] == ["bucket"]
+    assert ds._buckets[0]._eps_df["episode_index"].tolist() == [0]
+    assert ds._buckets[0]._eps_df["length"].tolist() == [8]
+
+
+def test_root_mode_stale_trim_entry_outside_selected_split_fails_closed(tmp_path):
+    root = tmp_path / "root"
+    bucket = _make_bucket(root / "bucket", [8, 8])
+    _set_info_splits(bucket, {"train": "0:1", "val": "1:2"})
+    trim_csv = _write_trim_csv(
+        tmp_path / "stale-val-episode.csv",
+        [
+            _trim_row(
+                dataset="bucket",
+                episode_index=1,
+                total_frames=9,
+                trim_head_to=1,
+                trim_tail_from=7,
+            )
+        ],
+    )
+
+    with pytest.raises(DataContractError, match="[Ss][Tt][Aa][Ll][Ee]"):
+        RoboCOINDataset.from_config(
+            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+        )
 
 
 def test_root_mode_stale_bucket_fails_closed_globally(tmp_path):

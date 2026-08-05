@@ -1,15 +1,76 @@
-"""Tests for the RoboCOIN stats Accumulator (mean/std/min/max + reservoir q01/q99).
+"""Tests for RoboCOIN stats accumulation and trim-population provenance.
 
 mean/std/min/max are streamed exactly; q01/q99 come from a bounded reservoir
-sample, so they are asserted against the true quantiles with a small sampling
-tolerance.
+sample. Synthetic bucket tests additionally pin trim-aware population selection
+and the on-disk provenance contract consumed by ``RoboCOINDataset``.
 """
 
 from __future__ import annotations
 
-import numpy as np
+import hashlib
+import json
 
-from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
+import numpy as np
+import pandas as pd
+import pytest
+
+from openwam.dataloader.robocoin import RoboCOINDataset
+from openwam.dataloader.utils.lerobotv3 import DataContractError
+from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
+    Accumulator,
+    compute_stats_for_robot_type,
+)
+from tests.dataloader.test_robocoin_trim import _make_bucket, _trim_row, _write_trim_csv
+
+
+def _make_encoded_stats_bucket(tmp_path):
+    root = tmp_path / "root"
+    bucket = _make_bucket(root / "bucket", [10])
+    data_path = bucket / "data" / "chunk-000" / "file-000.parquet"
+    df = pd.read_parquet(data_path)
+    source_values = np.array([100, 100, 2, 3, 4, 5, 6, 7, 100, 100], dtype=np.float32)
+    for column in ("eef_sim_pose_action", "eef_sim_pose_state"):
+        eef = np.stack(df[column].values).astype(np.float32)
+        eef[:, 0] = source_values
+        df[column] = list(eef)
+    df.to_parquet(data_path, index=False)
+    return root, bucket
+
+
+def _make_trim_csv(tmp_path, *, episode_index=0, total_frames=10):
+    return _write_trim_csv(
+        tmp_path / "trim.csv",
+        [
+            _trim_row(
+                dataset="bucket",
+                episode_index=episode_index,
+                total_frames=total_frames,
+                trim_head_to=2,
+                trim_tail_from=8,
+            )
+        ],
+    )
+
+
+def _write_stats(root, payload):
+    meta = root / "meta"
+    meta.mkdir(exist_ok=True)
+    path = meta / "stats_test_robot.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
+@pytest.fixture
+def trimmed_stats_case(tmp_path):
+    root, bucket = _make_encoded_stats_bucket(tmp_path)
+    trim_csv = _make_trim_csv(tmp_path)
+    result = compute_stats_for_robot_type(
+        "test_robot",
+        [str(bucket)],
+        rot6d_identity=False,
+        trim_csv=str(trim_csv),
+    )
+    return root, bucket, trim_csv, result
 
 
 class TestAccumulator:
@@ -50,3 +111,179 @@ class TestAccumulator:
         # N (500) < cap → reservoir holds every row → quantiles are exact.
         np.testing.assert_allclose(out["q01"], np.quantile(data, 0.01, axis=0), atol=1e-5)
         np.testing.assert_allclose(out["q99"], np.quantile(data, 0.99, axis=0), atol=1e-5)
+
+
+class TestTrimmedPopulationStats:
+    def test_stats_use_only_kept_rows_and_serialize_trim_provenance(self, trimmed_stats_case):
+        _, _, trim_csv, result = trimmed_stats_case
+        eef = result["eef"]
+
+        # Six kept frames in [2, 8), pooled once from action and once from state.
+        assert eef["num_timesteps"] == 12
+        assert eef["min"][0] == pytest.approx(2.0)
+        assert eef["max"][0] == pytest.approx(7.0)
+
+        # The complete output must survive the CLI's JSON serialization without
+        # losing either the exact input digest or the trim-policy parameters.
+        round_tripped = json.loads(json.dumps(result))
+        provenance = round_tripped["trim_provenance"]
+        assert provenance == result["trim_provenance"]
+        assert provenance["schema_version"] == 1
+        assert provenance["sha256"] == hashlib.sha256(trim_csv.read_bytes()).hexdigest()
+        assert provenance["min_len"] == 1
+        assert provenance["zero_span_policy"] == "drop"
+
+    @pytest.mark.parametrize(
+        ("episode_index", "total_frames"),
+        [(0, 9), (99, 10)],
+        ids=["stale-length", "unknown-episode"],
+    )
+    def test_stale_or_unknown_trim_spec_fails_closed(self, tmp_path, episode_index, total_frames):
+        _, bucket = _make_encoded_stats_bucket(tmp_path)
+        trim_csv = _make_trim_csv(
+            tmp_path,
+            episode_index=episode_index,
+            total_frames=total_frames,
+        )
+
+        with pytest.raises(DataContractError):
+            compute_stats_for_robot_type(
+                "test_robot",
+                [str(bucket)],
+                rot6d_identity=False,
+                trim_csv=str(trim_csv),
+            )
+
+    def test_trim_span_crossing_parquet_boundary_uses_physical_global_rows(self, tmp_path):
+        _, bucket = _make_encoded_stats_bucket(tmp_path)
+        first_path = bucket / "data" / "chunk-000" / "file-000.parquet"
+        second_path = bucket / "data" / "chunk-000" / "file-001.parquet"
+        df = pd.read_parquet(first_path)
+        df.iloc[:5].to_parquet(first_path, index=False)
+        df.iloc[5:].to_parquet(second_path, index=False)
+        trim_csv = _make_trim_csv(tmp_path)
+
+        result = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket)],
+            rot6d_identity=False,
+            trim_csv=str(trim_csv),
+        )
+        assert result["eef"]["num_timesteps"] == 12
+        assert result["eef"]["min"][0] == pytest.approx(2.0)
+        assert result["eef"]["max"][0] == pytest.approx(7.0)
+
+
+def test_untrimmed_stats_keep_legacy_nonstandard_parquet_discovery(tmp_path):
+    _, bucket = _make_encoded_stats_bucket(tmp_path)
+    original = bucket / "data" / "chunk-000" / "file-000.parquet"
+    legacy_dir = bucket / "data" / "legacy"
+    legacy_dir.mkdir()
+    original.rename(legacy_dir / "shard.parquet")
+
+    result = compute_stats_for_robot_type(
+        "test_robot",
+        [str(bucket)],
+        rot6d_identity=False,
+        trim_csv=None,
+    )
+    assert result["eef"]["num_timesteps"] == 20
+
+
+class TestReaderTrimStatsProvenance:
+    def test_matching_provenance_is_accepted(self, trimmed_stats_case):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        _write_stats(root, result)
+
+        reader = RoboCOINDataset(
+            dataset_dir=str(bucket),
+            normalize_mode="min-max",
+            trim_csv=str(trim_csv),
+        )
+        assert reader._eps_df["length"].tolist() == [6]
+        assert reader._normalization_stats is not None
+
+    def test_missing_provenance_is_rejected_when_trim_is_enabled(self, trimmed_stats_case):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        payload = json.loads(json.dumps(result))
+        payload.pop("trim_provenance")
+        _write_stats(root, payload)
+
+        with pytest.raises(DataContractError):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    @pytest.mark.parametrize(
+        "missing_field",
+        ["schema_version", "sha256", "min_len", "zero_span_policy"],
+    )
+    def test_each_missing_provenance_field_is_rejected(self, trimmed_stats_case, missing_field):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        payload = json.loads(json.dumps(result))
+        payload["trim_provenance"].pop(missing_field)
+        _write_stats(root, payload)
+
+        with pytest.raises(DataContractError):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("schema_version", 2),
+            ("sha256", "0" * 64),
+            ("min_len", 2),
+            ("zero_span_policy", "keep"),
+        ],
+    )
+    def test_each_mismatched_provenance_field_is_rejected(
+        self,
+        trimmed_stats_case,
+        field,
+        bad_value,
+    ):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        payload = json.loads(json.dumps(result))
+        payload["trim_provenance"][field] = bad_value
+        _write_stats(root, payload)
+
+        with pytest.raises(DataContractError):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_trimmed_stats_are_rejected_when_reader_trim_is_disabled(self, trimmed_stats_case):
+        root, bucket, _, result = trimmed_stats_case
+        _write_stats(root, result)
+
+        with pytest.raises(DataContractError):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=None,
+            )
+
+    def test_legacy_stats_without_provenance_are_accepted_when_trim_is_disabled(
+        self,
+        trimmed_stats_case,
+    ):
+        root, bucket, _, result = trimmed_stats_case
+        legacy_payload = json.loads(json.dumps(result))
+        legacy_payload.pop("trim_provenance")
+        _write_stats(root, legacy_payload)
+
+        reader = RoboCOINDataset(
+            dataset_dir=str(bucket),
+            normalize_mode="min-max",
+            trim_csv=None,
+        )
+        assert reader._eps_df["length"].tolist() == [10]
+        assert reader._normalization_stats is not None

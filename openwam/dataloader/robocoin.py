@@ -62,6 +62,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import re
@@ -235,6 +236,10 @@ WRIST_RIGHT_CANDIDATES = [
 
 
 _TRIM_SPEC_CACHE: dict = {}
+_TRIM_DIGEST_CACHE: dict = {}
+_TRIM_SCHEMA_VERSION = 1
+_TRIM_MIN_LEN = 1
+_TRIM_ZERO_SPAN_POLICY = "drop"
 _TRIM_CSV_COLUMNS = (
     "dataset",
     "episode_index",
@@ -273,8 +278,18 @@ def _load_trim_spec(path) -> dict:
 
 
     key = str(path)
-    if key in _TRIM_SPEC_CACHE:
-        return _TRIM_SPEC_CACHE[key]
+    try:
+        stat = Path(key).stat()
+    except OSError as e:
+        raise OSError(
+            e.errno,
+            f"RoboCOIN trim_csv {key} could not be read: {e.strerror or e}",
+            key,
+        ) from e
+    signature = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+    cached = _TRIM_SPEC_CACHE.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
     spec: dict = {}
     seen_entries = set()
     n = 0
@@ -353,8 +368,75 @@ def _load_trim_spec(path) -> dict:
         raise ValueError(f"RoboCOIN trim_csv {key}, line {line_number}: invalid text encoding: {e}") from e
 
     logger.info("RoboCOIN: loaded %d trim entries across %d datasets from %s", n, len(spec), key)
-    _TRIM_SPEC_CACHE[key] = spec
+    _TRIM_SPEC_CACHE[key] = (signature, spec)
     return spec
+
+
+def _trim_provenance(path) -> dict:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    key = str(path)
+    csv_path = Path(key)
+    stat = csv_path.stat()
+    signature = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+    cached = _TRIM_DIGEST_CACHE.get(key)
+    if cached is None or cached[0] != signature:
+        digest = hashlib.sha256(csv_path.read_bytes()).hexdigest()
+        _TRIM_DIGEST_CACHE[key] = (signature, digest)
+    else:
+        digest = cached[1]
+    return {
+        "schema_version": _TRIM_SCHEMA_VERSION,
+        "sha256": digest,
+        "min_len": _TRIM_MIN_LEN,
+        "zero_span_policy": _TRIM_ZERO_SPAN_POLICY,
+    }
+
+
+def _validate_trim_manifest(dataset_id: str, manifest, spec: dict) -> dict:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+    if not spec:
+        return {}
+    try:
+        episode_ids = [int(ep) for ep in manifest["episode_index"].to_numpy()]
+        lengths = [int(length) for length in manifest["length"].to_numpy()]
+    except (KeyError, TypeError, ValueError) as e:
+        raise DataContractError(
+            f"RoboCOIN({dataset_id}): full manifest must carry integer episode_index and length columns"
+        ) from e
+    manifest_lengths = dict(zip(episode_ids, lengths))
+    if len(manifest_lengths) != len(episode_ids):
+        raise DataContractError(f"RoboCOIN({dataset_id}): full manifest has duplicate episode_index values")
+
+    unknown = sorted(set(spec).difference(manifest_lengths))
+    if unknown:
+        unknown_ids = ",".join(map(str, unknown[:10])) + ("..." if len(unknown) > 10 else "")
+        raise DataContractError(
+            f"RoboCOIN({dataset_id}): trim list references {len(unknown)} unknown episode_index "
+            f"value(s) absent from the full pre-split manifest (episode_index={unknown_ids}). "
+            "Refusing dataset construction; re-run "
+            "the public trim-manifest generator against the current corpus."
+        )
+
+    stale = sorted(ep for ep, (_, _, total) in spec.items() if int(total) != manifest_lengths[ep])
+    if stale:
+        stale_ids = ",".join(map(str, stale[:10])) + ("..." if len(stale) > 10 else "")
+        raise DataContractError(
+            f"RoboCOIN({dataset_id}): trim list is STALE for {len(stale)} matching episode(s) "
+            f"(episode_index={stale_ids}): recorded total_frames disagrees with the full manifest "
+            "length. Refusing dataset construction because episode indices shift after physical "
+            "deletion and same-length collisions cannot be detected individually. Re-run "
+            "the public trim-manifest generator against the current corpus."
+        )
+
+    return {
+        ep: (int(head), manifest_lengths[ep] if tail is None else int(tail))
+        for ep, (head, tail, _) in spec.items()
+    }
 
 
 def _resolve_robocoin_cameras(features: dict) -> tuple:
@@ -536,30 +618,27 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 
+
         eps_df = super()._filter_episodes(eps_df)
         if self._trim_csv is None:
             return eps_df
         spec = _load_trim_spec(self._trim_csv).get(self._dataset_id)
         if not spec:
+            if hasattr(self, "_trim_spans"):
+                del self._trim_spans
             return eps_df
+
+        trim_spans = getattr(self, "_trim_spans", None)
+        if trim_spans is None:
+
+
+
+            trim_spans = _validate_trim_manifest(self._dataset_id, eps_df, spec)
+        else:
+            del self._trim_spans
 
         episode_indices = eps_df["episode_index"].to_numpy()
         lengths = eps_df["length"].to_numpy().copy()
-        stale = []
-        for pos, ep in enumerate(episode_indices):
-            entry = spec.get(int(ep))
-            if entry is not None and int(entry[2]) != int(lengths[pos]):
-                stale.append(int(ep))
-        if stale:
-            stale_ids = ",".join(map(str, stale[:10])) + ("..." if len(stale) > 10 else "")
-            raise DataContractError(
-                "RoboCOIN(%s): trim list is STALE for %d matching episode(s) "
-                "(episode_index=%s): recorded total_frames disagrees with the manifest length. "
-                "Refusing dataset construction because episode indices shift after physical "
-                "deletion and same-length collisions cannot be detected individually. Re-run "
-                "the public trim-manifest generator against the current corpus."
-                % (self._dataset_id, len(stale), stale_ids)
-            )
 
         cam_cols = [c for c in eps_df.columns if c.startswith("_video_frame_offset/")]
 
@@ -578,19 +657,17 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 
-        min_len = 1
+        min_len = _TRIM_MIN_LEN
 
         keep = np.ones(len(eps_df), dtype=bool)
         n_trim = n_degenerate = 0
         frames_before = int(lengths.sum())
         for pos, ep in enumerate(episode_indices):
-            entry = spec.get(int(ep))
-            if entry is None:
+            span = trim_spans.get(int(ep))
+            if span is None:
                 continue
-            head, tail_from, _ = entry
+            head, tail = span
             length = int(lengths[pos])
-            tail = length if tail_from is None else int(tail_from)
-            head = int(head)
             if head == 0 and tail == length:
                 continue
             if tail - head < min_len:
@@ -635,6 +712,12 @@ class RoboCOINDataset(LeRobotV3Reader):
         return eps_df
 
     def _add_data_offsets(self, eps) -> None:
+
+
+
+        if self._trim_csv is not None:
+            spec = _load_trim_spec(self._trim_csv).get(self._dataset_id, {})
+            self._trim_spans = _validate_trim_manifest(self._dataset_id, eps, spec)
 
 
         self._add_data_offsets_from_files(eps)
@@ -694,6 +777,24 @@ class RoboCOINDataset(LeRobotV3Reader):
             )
         with open(stats_path) as f:
             raw = json.load(f)
+        has_trim_provenance = "trim_provenance" in raw
+        if self._trim_csv is None:
+            if has_trim_provenance:
+                raise DataContractError(
+                    f"RoboCOIN bucket {self._dataset_id}: stats {stats_path} were computed for a "
+                    "trimmed population but trim_csv is disabled. Regenerate legacy untrimmed stats "
+                    "or configure the matching trim_csv."
+                )
+        else:
+            expected_provenance = _trim_provenance(self._trim_csv)
+            actual_provenance = raw.get("trim_provenance")
+            if not has_trim_provenance or actual_provenance != expected_provenance:
+                raise DataContractError(
+                    f"RoboCOIN bucket {self._dataset_id}: stats {stats_path} trim_provenance "
+                    f"does not exactly match trim_csv {self._trim_csv}; expected "
+                    f"{expected_provenance}, got {actual_provenance}. Regenerate stats with the "
+                    "configured trim CSV."
+                )
         eef_stats = materialize_eef_stats(
             raw.get("eef", {}),
             self._normalize_mode,

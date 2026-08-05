@@ -62,20 +62,33 @@
 
 
 
+
+
+
+
+
+
+
 import argparse
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
 from openwam.dataloader.robocoin import (
+    _TRIM_MIN_LEN,
     MAX_HAND_DOF,
     _eef14_to_eef20,
     _finger_indices,
+    _load_trim_spec,
+    _trim_provenance,
+    _validate_trim_manifest,
     dex_finger_layout,
 )
+from openwam.dataloader.utils.lerobotv3 import DataContractError, load_episodes_parquet
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
 
 
@@ -219,7 +232,7 @@ _GRIP_COLS = ("gripper_open_scale_action", "gripper_open_scale_state")
 _HAND_RAW_COLS = ["action", "observation.state"]
 
 
-def _classify_dataset(ds_dir: str):
+def _classify_dataset(ds_dir: str, *, fail_closed: bool = False):
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -242,6 +255,8 @@ def _classify_dataset(ds_dir: str):
         with open(os.path.join(ds_dir, "meta", "info.json")) as f:
             feats = json.load(f).get("features", {})
     except (OSError, ValueError):
+        if fail_closed:
+            raise
         return "other", None
     if all(c in feats for c in _GRIP_COLS):
         return "grip", None
@@ -264,7 +279,69 @@ def _classify_dataset(ds_dir: str):
     return "other", None
 
 
-def compute_stats_for_robot_type(rtype: str, dataset_dirs: list, rot6d_identity: bool = True) -> dict:
+def _trimmed_global_spans(ds_dir: str, dataset_spec: dict):
+    """Public implementation. Dataset-specific audit notes were removed."""
+    dataset_id = Path(ds_dir).name
+    manifest = load_episodes_parquet(Path(ds_dir))
+    trim_spans = _validate_trim_manifest(dataset_id, manifest, dataset_spec)
+    try:
+        episode_ids = [int(ep) for ep in manifest["episode_index"].to_numpy()]
+        starts = [int(start) for start in manifest["dataset_from_index"].to_numpy()]
+        lengths = [int(length) for length in manifest["length"].to_numpy()]
+    except (KeyError, TypeError, ValueError) as e:
+        raise DataContractError(
+            f"RoboCOIN({dataset_id}): full manifest must carry integer "
+            "episode_index, dataset_from_index, and length columns"
+        ) from e
+
+    raw_spans = []
+    kept_spans = []
+    for episode_id, start, length in zip(episode_ids, starts, lengths):
+        if start < 0 or length < 0:
+            raise DataContractError(
+                f"RoboCOIN({dataset_id}): invalid manifest span for episode_index={episode_id}: "
+                f"dataset_from_index={start}, length={length}"
+            )
+        raw_spans.append((start, start + length, episode_id))
+        head, tail = trim_spans.get(episode_id, (0, length))
+        if tail - head >= _TRIM_MIN_LEN:
+            kept_spans.append((start + head, start + tail))
+
+    raw_spans.sort()
+    for previous, current in zip(raw_spans, raw_spans[1:]):
+        if current[0] < previous[1]:
+            raise DataContractError(
+                f"RoboCOIN({dataset_id}): overlapping global manifest spans for "
+                f"episode_index={previous[2]} and {current[2]}"
+            )
+    kept_spans.sort()
+    manifest_end = max((end for _, end, _ in raw_spans), default=0)
+    return kept_spans, manifest_end
+
+
+def _slice_file_to_global_spans(df, file_start: int, file_end: int, kept_spans):
+    """Public implementation. Dataset-specific audit notes were removed."""
+    pieces = []
+    for span_start, span_end in kept_spans:
+        if span_end <= file_start:
+            continue
+        if span_start >= file_end:
+            break
+        local_start = max(span_start, file_start) - file_start
+        local_end = min(span_end, file_end) - file_start
+        if local_start < local_end:
+            pieces.append(df.iloc[local_start:local_end])
+    if not pieces:
+        return df.iloc[0:0]
+    return pd.concat(pieces, ignore_index=True)
+
+
+def compute_stats_for_robot_type(
+    rtype: str,
+    dataset_dirs: list,
+    rot6d_identity: bool = True,
+    trim_csv=None,
+) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -279,6 +356,11 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list, rot6d_identity:
 
 
 
+
+
+
+    trim_enabled = trim_csv is not None
+    trim_spec = _load_trim_spec(trim_csv) if trim_enabled else {}
     acc = Accumulator(dim=20)
     total_files = 0
     grip_files = 0
@@ -297,10 +379,12 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list, rot6d_identity:
     nogrip_example = None
 
     for ds_dir in dataset_dirs:
-        data_dir = os.path.join(ds_dir, "data")
-        if not os.path.isdir(data_dir):
+        data_dir = Path(ds_dir) / "data"
+        if not data_dir.is_dir():
+            if trim_enabled:
+                raise FileNotFoundError(f"RoboCOIN stats: missing data directory {data_dir}")
             continue
-        kind, layout = _classify_dataset(ds_dir)
+        kind, layout = _classify_dataset(ds_dir, fail_closed=trim_enabled)
         if kind == "grip":
             grip_example = grip_example or ds_dir
         elif kind in ("dex", "nogrip"):
@@ -330,53 +414,109 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list, rot6d_identity:
                     f"A per-robot-type 'hand' stats block cannot describe both; the reader "
                     f"slices it by each bucket's own kL/kR. Split these into distinct robot_types."
                 )
-        for chunk in sorted(os.listdir(data_dir)):
-            chunk_path = os.path.join(data_dir, chunk)
-            if not os.path.isdir(chunk_path):
-                continue
-            for fname in sorted(os.listdir(chunk_path)):
-                if not fname.endswith(".parquet"):
+        if trim_enabled:
+
+            file_paths = sorted(data_dir.glob("chunk-*/file-*.parquet"))
+        else:
+
+
+            file_paths = []
+            for chunk in sorted(os.listdir(data_dir)):
+                chunk_path = data_dir / chunk
+                if not chunk_path.is_dir():
                     continue
-                fpath = os.path.join(chunk_path, fname)
-                try:
+                file_paths.extend(
+                    chunk_path / fname
+                    for fname in sorted(os.listdir(chunk_path))
+                    if fname.endswith(".parquet")
+                )
+        if not file_paths:
+            if trim_enabled:
+                raise FileNotFoundError(f"RoboCOIN stats: no data parquet files under {data_dir}")
+            continue
+
+        kept_spans = None
+        manifest_end = 0
+        if trim_enabled:
+            kept_spans, manifest_end = _trimmed_global_spans(
+                ds_dir, trim_spec.get(Path(ds_dir).name, {})
+            )
+
+        file_entries = []
+        physical_end = 0
+        for fpath in file_paths:
+            try:
+                parquet_file = pq.ParquetFile(fpath)
+                present = set(parquet_file.schema_arrow.names)
+                n_rows = int(parquet_file.metadata.num_rows)
+                file_entries.append((fpath, physical_end, physical_end + n_rows, present))
+                physical_end += n_rows
+            except Exception as e:
+                if trim_enabled:
+                    raise
+                print(f"  Warning: skipping {fpath}: {e}")
+        if trim_enabled and manifest_end > physical_end:
+            raise DataContractError(
+                f"RoboCOIN({Path(ds_dir).name}): manifest ends at global row {manifest_end}, "
+                f"past the physical parquet row count {physical_end}"
+            )
+
+        for fpath, file_start, file_end, present in file_entries:
+            try:
 
 
 
 
 
-                    present = set(pq.ParquetFile(fpath).schema_arrow.names)
-                    has_grip = all(c in present for c in _GRIP_COLS)
-                    cols = list(_NEEDED_COLS) if has_grip else list(_EEF_COLS)
-                    if layout is not None:
-                        cols = cols + _HAND_RAW_COLS
-                    df = pd.read_parquet(fpath, columns=cols)
-
-                    eef_a = np.stack(df["eef_sim_pose_action"].values).astype(np.float32)
-                    eef_s = np.stack(df["eef_sim_pose_state"].values).astype(np.float32)
-                    if has_grip:
-                        grip_a = np.stack(df["gripper_open_scale_action"].values).astype(np.float32)
-                        grip_s = np.stack(df["gripper_open_scale_state"].values).astype(np.float32)
-                    else:
-                        grip_a = np.zeros((len(eef_a), 2), dtype=np.float32)
-                        grip_s = np.zeros((len(eef_s), 2), dtype=np.float32)
-
-                    action_20d = _eef14_to_eef20(eef_a, grip_a)
-                    state_20d = _eef14_to_eef20(eef_s, grip_s)
-                    acc.update_batch(np.concatenate([action_20d, state_20d], axis=0))
-                    total_files += 1
-                    grip_files += int(has_grip)
-
-
-                    if layout is not None:
-                        act_arr = np.stack(df["action"].values).astype(np.float32)
-                        state_arr = np.stack(df["observation.state"].values).astype(np.float32)
-                        fingers = np.concatenate(
-                            [act_arr[:, idx_act_lr], state_arr[:, idx_state_lr]], axis=0
+                has_grip = all(c in present for c in _GRIP_COLS)
+                cols = list(_NEEDED_COLS) if has_grip else list(_EEF_COLS)
+                if layout is not None:
+                    cols = cols + _HAND_RAW_COLS
+                df = pd.read_parquet(fpath, columns=cols)
+                if trim_enabled:
+                    expected_rows = file_end - file_start
+                    if len(df) != expected_rows:
+                        raise DataContractError(
+                            f"RoboCOIN({Path(ds_dir).name}): {fpath} metadata declares "
+                            f"{expected_rows} rows but reading returned {len(df)}"
                         )
-                        hand_acc.update_batch(fingers)
-                        hand_files += 1
-                except Exception as e:
-                    print(f"  Warning: skipping {fpath}: {e}")
+                    df = _slice_file_to_global_spans(df, file_start, file_end, kept_spans)
+
+                total_files += 1
+                grip_files += int(has_grip)
+                if layout is not None:
+                    hand_files += 1
+                if len(df) == 0:
+                    continue
+
+                eef_a = np.stack(df["eef_sim_pose_action"].values).astype(np.float32)
+                eef_s = np.stack(df["eef_sim_pose_state"].values).astype(np.float32)
+                if has_grip:
+                    grip_a = np.stack(df["gripper_open_scale_action"].values).astype(np.float32)
+                    grip_s = np.stack(df["gripper_open_scale_state"].values).astype(np.float32)
+                else:
+                    grip_a = np.zeros((len(eef_a), 2), dtype=np.float32)
+                    grip_s = np.zeros((len(eef_s), 2), dtype=np.float32)
+
+                action_20d = _eef14_to_eef20(eef_a, grip_a)
+                state_20d = _eef14_to_eef20(eef_s, grip_s)
+                acc.update_batch(np.concatenate([action_20d, state_20d], axis=0))
+
+
+                if layout is not None:
+                    act_arr = np.stack(df["action"].values).astype(np.float32)
+                    state_arr = np.stack(df["observation.state"].values).astype(np.float32)
+                    fingers = np.concatenate(
+                        [act_arr[:, idx_act_lr], state_arr[:, idx_state_lr]], axis=0
+                    )
+                    hand_acc.update_batch(fingers)
+            except Exception as e:
+                if trim_enabled:
+                    raise
+                print(f"  Warning: skipping {fpath}: {e}")
+
+    if trim_enabled and acc.count == 0:
+        raise DataContractError(f"RoboCOIN stats for robot_type {rtype!r}: trimming left no EEF rows")
 
     stats = acc.finalize()
     if rot6d_identity:
@@ -408,6 +548,8 @@ def compute_stats_for_robot_type(rtype: str, dataset_dirs: list, rot6d_identity:
         hand["pool"] = "action+state"
         hand["layout"] = "left_fingers + right_fingers"
         result["hand"] = hand
+    if trim_enabled:
+        result["trim_provenance"] = _trim_provenance(trim_csv)
     return result
 
 
@@ -415,6 +557,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_dir", required=True)
     parser.add_argument("--robot_type", default=None, help="Compute stats for a single robot type only")
+    parser.add_argument(
+        "--trim_csv",
+        default=None,
+        help="Apply the same leading/trailing episode trims as the RoboCOIN reader",
+    )
     parser.add_argument(
         "--no-rot6d-identity",
         action="store_true",
@@ -426,6 +573,16 @@ def main():
     groups = discover_datasets_by_robot_type(args.dataset_dir)
     print(f"Found {len(groups)} robot types: {sorted(groups.keys())}")
 
+    if args.trim_csv is not None:
+        trim_spec = _load_trim_spec(args.trim_csv)
+        bucket_names = {Path(ds_dir).name for ds_list in groups.values() for ds_dir in ds_list}
+        if bucket_names and bucket_names.isdisjoint(trim_spec):
+            raise ValueError(
+                f"RoboCOIN trim_csv {args.trim_csv}: none of its {len(trim_spec)} dataset key(s) "
+                f"match any bucket directory under {args.dataset_dir}; stats would be untrimmed."
+            )
+        _trim_provenance(args.trim_csv)
+
     out_dir = os.path.join(args.dataset_dir, "meta")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -435,7 +592,12 @@ def main():
         ds_list = groups[rtype]
         print(f"\n{'=' * 60}")
         print(f"Computing stats for {rtype} ({len(ds_list)} datasets)...")
-        result = compute_stats_for_robot_type(rtype, ds_list, rot6d_identity=not args.no_rot6d_identity)
+        result = compute_stats_for_robot_type(
+            rtype,
+            ds_list,
+            rot6d_identity=not args.no_rot6d_identity,
+            trim_csv=args.trim_csv,
+        )
         stats = result["eef"]
 
         out_path = os.path.join(out_dir, f"stats_{rtype}.json")
