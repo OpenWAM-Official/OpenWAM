@@ -1117,6 +1117,20 @@ class TestVideoOffsetValidation:
             InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
 
 
+    def test_a_non_finite_video_span_is_rejected_not_skipped(self, tmp_path, patch_decode):
+        """`isfinite AND mismatch` let NaN fall through the witness entirely."""
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
+        man = d / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        m = pq.read_table(man).to_pydict()
+        tk = "videos/images.rgb.head/to_timestamp"
+        if tk not in m:
+            pytest.skip("fixture carries no to_timestamp column")
+        m[tk] = [float("nan"), m[tk][1]]
+        pq.write_table(pa.Table.from_pydict(m), man)
+        with pytest.raises(ValueError, match="describes two different episodes"):
+            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+
+
 class TestManifestRangeValidation:
     """Counts and capacities are both satisfied by ranges that overlap."""
 
@@ -1231,6 +1245,27 @@ class TestExclusionParser:
         with pytest.raises(ValueError, match="must be JSON integers"):
             load_excluded_episodes(b)
 
+    def test_the_actual_reader_refuses_quoted_indices_too(self, tmp_path, patch_decode):
+        """The helper being strict is worthless if the reader never calls it.
+
+        The base keeps the JSON values verbatim and matches them against an
+        integer column, so `["0"]` excluded nothing there while the generator
+        excluded episode 0. Asserting on the helper alone did not catch that —
+        this instantiates the reader.
+        """
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
+        (d / "meta" / "excluded_episodes.json").write_text(
+            json.dumps({"episode_indices": ["0"]}))
+        with pytest.raises(ValueError, match="must be JSON integers"):
+            InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+
+    def test_the_actual_reader_still_applies_integer_exclusions(self, tmp_path, patch_decode):
+        d = _make_bucket(tmp_path, "cat/split_aloha/task", n_eps=2, ep_len=4)
+        (d / "meta" / "excluded_episodes.json").write_text(
+            json.dumps({"episode_indices": [0]}))
+        r = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=2, video_stride=1)
+        assert r._eps_df["episode_index"].tolist() == [1]
+
     def test_plain_integers_are_accepted(self, tmp_path):
         b = tmp_path / "b"
         (b / "meta").mkdir(parents=True)
@@ -1261,10 +1296,25 @@ class TestStatsPopulationContract:
                                    normalize_mode="quantile", num_frames=2,
                                    video_stride=1, **kw)
 
-    def test_val_derived_stats_are_refused_by_a_train_reader(self, tmp_path, patch_decode):
+    def test_val_derived_stats_are_refused(self, tmp_path, patch_decode):
         d = self._bucket_and_stats(tmp_path, split="val")
         with pytest.raises(ValueError, match="computed over the 'val' split"):
             self._read(d, tmp_path)
+
+    def test_train_derived_stats_are_accepted_by_a_val_reader(self, tmp_path, patch_decode):
+        """A val reader must LOAD train stats, not demand val-derived ones.
+
+        There is one stats file per embodiment and it describes the training
+        distribution by definition. Comparing the recorded split against the
+        reader's own split refused every val run against a correctly generated
+        file — a regression with no failing test until this one.
+        """
+        d = self._bucket_and_stats(tmp_path, split="train")
+        info = json.loads((d / "meta" / "info.json").read_text())
+        info["splits"] = {"train": "0:1", "val": "1:2"}
+        (d / "meta" / "info.json").write_text(json.dumps(info))
+        r = self._read(d, tmp_path, split="val")
+        assert r._normalization_stats is not None
 
     def test_untrimmed_stats_are_refused_by_a_trimming_reader(self, tmp_path, patch_decode):
         d = self._bucket_and_stats(tmp_path, trim_active=False)

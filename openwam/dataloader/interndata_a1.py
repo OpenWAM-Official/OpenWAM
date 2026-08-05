@@ -634,6 +634,17 @@ def _shard_episode_bounds(pf) -> Optional[Tuple[int, int]]:
 
 
 
+
+
+
+
+
+
+
+
+
+
+
     try:
         col = pf.schema_arrow.names.index("episode_index")
     except ValueError:
@@ -643,7 +654,10 @@ def _shard_episode_bounds(pf) -> Optional[Tuple[int, int]]:
     for g in range(meta.num_row_groups):
         st = meta.row_group(g).column(col).statistics
         if st is None or not st.has_min_max:
-            return None
+            vals = pf.read(columns=["episode_index"]).column("episode_index")
+            if len(vals) == 0:
+                return None
+            return int(min(vals.to_pylist())), int(max(vals.to_pylist()))
         lo = st.min if lo is None else min(lo, st.min)
         hi = st.max if hi is None else max(hi, st.max)
     if lo is None or hi is None:
@@ -851,6 +865,12 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
         self._a1_stats_root = Path(a1_stats_root) if a1_stats_root else Path(dataset_dir)
         self._trim_csv = trim_csv
+
+
+
+
+
+        load_excluded_episodes(dataset_dir)
         super().__init__(dataset_dir, **kwargs)
 
 
@@ -1127,7 +1147,10 @@ class InternDataA1Dataset(LeRobotV3Reader):
             if tcol in eps.columns:
                 span = (eps[tcol].to_numpy().astype(np.float64) - ts) * self._fps
                 declared = eps["length"].to_numpy().astype(np.int64)
-                bad = np.flatnonzero(np.isfinite(span) & (np.abs(span - declared) > 0.5))
+
+
+
+                bad = np.flatnonzero(~np.isfinite(span) | (np.abs(span - declared) > 0.5))
                 if bad.size:
                     i = int(bad[0])
                     raise ValueError(
@@ -1337,12 +1360,19 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"loads (split, trimming and keep-bound all change the distribution). {rerun}."
             )
 
-        want_split = self._split
-        if pop.get("split") != want_split:
+
+
+
+
+
+
+
+        if pop.get("split") != "train":
             raise ValueError(
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} was computed over the "
-                f"{pop.get('split')!r} split but this reader loads {want_split!r}. "
-                f"{rerun} --split {want_split}."
+                f"{pop.get('split')!r} split. Normalization statistics must describe the "
+                f"training distribution — a val-derived file would scale training by numbers "
+                f"drawn from data the model never fits. {rerun} --split train."
             )
 
         want_trim = bool(self._trim_csv)
@@ -1356,7 +1386,10 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 + (f" --trim_csv {self._trim_csv}" if want_trim else "") + "."
             )
 
-        want_keep = self._trim_min_len()
+
+
+
+        want_keep = self._train_min_window_len()
         if want_trim and int(pop.get("min_keep", -1)) != int(want_keep):
             raise ValueError(
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} used --min_keep="
