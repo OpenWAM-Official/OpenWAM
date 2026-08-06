@@ -251,7 +251,15 @@ class OpenWAMTrainer:
         optimizer, dataloader, scheduler = self.prepare_accelerate(optimizer, dataloader, scheduler)
 
         if self._run_seed is not None:
-            wire_sampler_seed(dataloader, int(self._run_seed), rank=self._rank)
+            from openwam.dataloader.mixture import MixtureDataset
+
+            if isinstance(self.dataset, MixtureDataset):
+                logger.info(
+                    "Skipping DataLoader sampler seed wiring for MixtureDataset; "
+                    "its index-map shuffle is seeded by the dataset itself."
+                )
+            else:
+                wire_sampler_seed(dataloader, int(self._run_seed), rank=self._rank)
 
         all_params = [p for group in optimizer.param_groups for p in group["params"]]
 
@@ -393,18 +401,32 @@ class OpenWAMTrainer:
     def build_dataloader(self, batch_size: int) -> torch.utils.data.DataLoader:
         """Build the training DataLoader.
 
+        ``MixtureDataset`` already owns a shuffled virtual index map and
+        reshuffles it in ``set_epoch``.  Do not wrap it in PyTorch's
+        ``RandomSampler``: on the large mixture that would build a
+        second full-size permutation (and convert it to Python integers) in
+        every rank.  Other datasets keep the standard DataLoader shuffle.
+
         When ``cfg.project.seed`` is set, wires a per-rank ``generator`` and a
         ``worker_init_fn`` so dataset-side randomness is reproducible across
         runs while keeping per-epoch / per-worker variation.
         """
+        from openwam.dataloader.mixture import MixtureDataset
+
         t = self.cfg.training
+        shuffle = not isinstance(self.dataset, MixtureDataset)
         kwargs: dict = dict(
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=shuffle,
             num_workers=int(t.dataset_num_workers),
             collate_fn=list,
             pin_memory=True,
         )
+        if not shuffle:
+            logger.info(
+                "DataLoader shuffle disabled for MixtureDataset; its shuffled index map "
+                "is reshuffled by dataset.set_epoch(epoch)."
+            )
         if self._run_seed is not None:
             from openwam.train.utils.seeding import dataloader_worker_init_fn, make_dataloader_generator
 

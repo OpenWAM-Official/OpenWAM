@@ -190,8 +190,11 @@ class TestSetEpoch:
     def test_set_epoch_idempotent_with_same_arg(self, fake_dataset_factory):
         a = fake_dataset_factory(30)
         m = MixtureDataset([a], weights=None, seed=42)
+        initial_map = m._index_map
+        m.set_epoch(0)
+        assert m._index_map is initial_map
+
         m.set_epoch(3)
-        order_a = m._index_map.copy()
+        epoch_3_map = m._index_map
         m.set_epoch(3)
-        order_b = m._index_map.copy()
-        assert (order_a == order_b).all()
+        assert m._index_map is epoch_3_map

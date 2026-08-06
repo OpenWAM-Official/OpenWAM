@@ -207,7 +207,18 @@ class MixtureDataset(BaseDataset):
 
 
 
-        self._seed = self._base_seed + int(epoch) * 7919
+
+
+
+
+
+
+
+
+        new_seed = self._base_seed + int(epoch) * 7919
+        if new_seed == self._seed:
+            return
+        self._seed = new_seed
         self._build_index_map()
 
     def _build_index_map(self):
