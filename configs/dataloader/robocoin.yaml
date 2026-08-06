@@ -2,6 +2,7 @@ type: robocoin
 
 dataset_dir: /path/to/pretrain_dataset/RoboCOIN_clean
 
+
 num_frames: 33
 video_stride: 4
 window_stride: 1

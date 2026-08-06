@@ -6,8 +6,11 @@ Each OXE dataset has its own raw state/action representation:
     ``action = [x,y,z,roll,pitch,yaw,gripper] (7)`` (Euler XYZ).
   * Fractal: ``state = [x,y,z,rx,ry,rz,rw,gripper] (8)`` (quat xyzw),
     ``action = [x,y,z,roll,pitch,yaw,gripper] (7)`` (Euler XYZ).
-  * DROID: pose plus a raw gripper **closedness** signal (``0=open``,
-    ``1=closed``).  DROID-specific converters invert that final scalar to the
+  * DROID: arm-side wrist / gripper-mount pose plus a raw gripper
+    **closedness** signal (``0=open``, ``1=closed``).  The re-converted bucket
+    stores the achieved pose and gripper scalar in separate columns, while its
+    commanded wrist stream stores both in one 7-D column.  DROID-specific
+    converters assemble the two layouts and invert only the final scalar to the
     canonical open scale (``0=closed``, ``1=open``).
 
 These helpers normalize all four data sources to a single 10-D EEF
@@ -59,17 +62,44 @@ def euler7_action_to_arm10(action: np.ndarray) -> np.ndarray:
 
 
 def droid_euler7_to_arm10(value: np.ndarray) -> np.ndarray:
-    """Current DROID ``(..., 7)`` pose stream -> canonical 10-D EEF.
+    """Current DROID commanded wrist ``(..., 7)`` -> canonical 10-D EEF.
 
-    Both ``state[6]`` and ``other_information.action_tcp_pose[6]`` in the
-    re-converted DROID bucket use the DROID controller's *closedness* convention
-    (``0=open``, ``1=closed``).  The shared action space uses an openness scale,
-    so only the gripper scalar is inverted; xyz and Euler->rot6d are identical
-    to :func:`euler7_action_to_arm10`.
+    ``other_information.action_wrist_pose`` contains
+    ``[x,y,z,roll,pitch,yaw,closedness]``.  The shared action space uses an
+    openness scale, so only the gripper scalar is inverted; xyz and
+    Euler->rot6d are identical to :func:`euler7_action_to_arm10`.
     """
     out = euler7_action_to_arm10(value)
     out[..., 9] = 1.0 - out[..., 9]
     return out
+
+
+def droid_pose6_closedness_to_arm10(pose: np.ndarray, closedness: np.ndarray) -> np.ndarray:
+    """DROID achieved wrist/gripper-mount pose + closedness -> 10-D EEF.
+
+    Args:
+        pose: ``(..., 6)`` from
+            ``other_information.observation_gripper_pose6d`` in Euler XYZ.
+            Despite the source's ``gripper`` spelling, this is the rigid
+            arm-side mount pose, not the moving-finger/task TCP pose.
+        closedness: ``(..., 1)`` copied from ``state[..., 6:7]``; DROID raw
+            convention ``0=open, 1=closed``.
+
+    The explicit two-input helper prevents the old TCP xyz stored in
+    ``state[..., :6]`` from silently re-entering the unified arm-side frame.
+    """
+    pose = np.asarray(pose)
+    closedness = np.asarray(closedness)
+    if pose.shape[-1] != 6:
+        raise ValueError(f"DROID gripper-mount pose must have width 6, got shape {pose.shape}")
+    if closedness.shape[-1] != 1:
+        raise ValueError(f"DROID closedness must have width 1, got shape {closedness.shape}")
+    if pose.shape[:-1] != closedness.shape[:-1]:
+        raise ValueError(
+            "DROID pose and closedness leading shapes must match, got "
+            f"{pose.shape} and {closedness.shape}"
+        )
+    return droid_euler7_to_arm10(np.concatenate([pose, closedness], axis=-1))
 
 
 # ---------------------------------------------------------------------------
@@ -97,8 +127,10 @@ def fractal_state_to_arm10(state: np.ndarray) -> np.ndarray:
 def droid_state_to_arm10(cartesian: np.ndarray, gripper: np.ndarray) -> np.ndarray:
     """Legacy two-column DROID state assembly.
 
-    The current re-converted bucket stores one ``state[7]`` column and uses
-    :func:`droid_euler7_to_arm10`; this helper remains for old conversion tools.
+    The current re-converted bucket assembles
+    ``other_information.observation_gripper_pose6d`` with ``state[6]`` through
+    :func:`droid_pose6_closedness_to_arm10`; this helper remains for old
+    conversion tools.
 
     Args:
         cartesian: ``(..., 6)`` from ``observation.state.cartesian_position``
@@ -119,6 +151,7 @@ __all__ = [
     "ARM10_DIM",
     "bcz_state_to_arm10",
     "droid_euler7_to_arm10",
+    "droid_pose6_closedness_to_arm10",
     "euler7_action_to_arm10",
     "fractal_state_to_arm10",
     "droid_state_to_arm10",

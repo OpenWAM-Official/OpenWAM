@@ -12,6 +12,15 @@ can reuse the same rot6d / 20-D assembly logic without copy-paste.
 Single-arm OXE readers fill the **left** half ``[0:10]`` with real data
 and zero-pad the right half ``[10:20]``; the per-dim portion of the
 2-D action_mask / proprio_mask handles the right-arm exclusion downstream.
+
+For active real-robot mixture sources, ``pos + rot6d`` follows one verifiable
+endpoint *category*: a terminal-arm frame rigidly attached to the arm chain and
+independent of gripper/finger articulation. This is intentionally broader and
+more accurate than either ``flange`` or ``TCP``: depending on the published
+robot model the exact frame is an arm flange, wrist-yaw link, hand base, last
+arm link, gripper mount, or potentially a fixed tool frame. It does not assert
+that different robots share a literal local origin/axis calibration; their
+poses remain expressed in their dataset's documented robot-base frame.
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ from openwam.dataloader.utils.normalization import apply_normalization
 
 EEF_DIM = 20
 ARM10_DIM = 10  # pos(3) + rot6d(6) + grip(1)
+EEF_POSE_FRAME_CONTRACT = "rigid_terminal_arm_frame_independent_of_gripper_motion"
 
 
 def euler_xyz_to_rot6d(euler: np.ndarray) -> np.ndarray:
@@ -274,6 +284,7 @@ def build_proprio_mask_2d(
 __all__ = [
     "EEF_DIM",
     "ARM10_DIM",
+    "EEF_POSE_FRAME_CONTRACT",
     "LEFT_ARM_DIM_MASK",
     "RIGHT_ARM_DIM_MASK",
     "euler_xyz_to_rot6d",

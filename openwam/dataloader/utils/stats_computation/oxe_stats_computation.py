@@ -29,6 +29,8 @@
 
 
 
+
+
 from __future__ import annotations
 
 import argparse
@@ -60,6 +62,7 @@ from openwam.dataloader.utils.normalization import ROT6D_DIMS_ARM10, pin_rot6d_i
 from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
     droid_euler7_to_arm10,
+    droid_pose6_closedness_to_arm10,
     droid_state_to_arm10,
     euler7_action_to_arm10,
     fractal_state_to_arm10,
@@ -92,13 +95,12 @@ SCHEMA: Dict[str, Dict] = {
     "DROID": {
 
 
-
-        "state_cols": ["state"],
-
+        "state_cols": ["other_information.observation_gripper_pose6d", "state"],
 
 
-        "action_cols": ["other_information.action_tcp_pose"],
-        "state_fn": "droid_euler7",
+
+        "action_cols": ["other_information.action_wrist_pose"],
+        "state_fn": "droid_gripper_pose6",
         "action_fn": "droid_euler7",
     },
 }
@@ -126,6 +128,11 @@ def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
         return euler7_action_to_arm10(rows[list(rows.keys())[0]])
     if state_fn == "droid_euler7":
         return droid_euler7_to_arm10(rows[list(rows.keys())[0]])
+    if state_fn == "droid_gripper_pose6":
+        return droid_pose6_closedness_to_arm10(
+            rows["other_information.observation_gripper_pose6d"],
+            rows["state"][:, 6:7],
+        )
     raise ValueError(f"unknown state_fn={state_fn}")
 
 

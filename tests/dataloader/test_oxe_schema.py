@@ -12,6 +12,7 @@ import numpy as np
 from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
     droid_euler7_to_arm10,
+    droid_pose6_closedness_to_arm10,
     droid_state_to_arm10,
     euler7_action_to_arm10,
     fractal_state_to_arm10,
@@ -141,3 +142,16 @@ class TestDroidEuler7ToArm10:
         generic = euler7_action_to_arm10(value)
 
         np.testing.assert_allclose(droid[:, :9], generic[:, :9], atol=1e-7)
+
+
+class TestDroidPose6ClosednessToArm10:
+    def test_assembles_arm_side_pose_and_inverts_only_closedness(self):
+        pose = np.array([[0.1, 0.2, 0.3, 0.4, -0.5, 0.6]], dtype=np.float32)
+        closedness = np.array([[0.25]], dtype=np.float32)
+
+        out = droid_pose6_closedness_to_arm10(pose, closedness)
+        reference = droid_euler7_to_arm10(np.concatenate([pose, closedness], axis=-1))
+
+        np.testing.assert_allclose(out, reference, atol=1e-7)
+        np.testing.assert_allclose(out[:, :3], pose[:, :3], atol=1e-7)
+        np.testing.assert_allclose(out[:, 9], [0.75], atol=1e-7)

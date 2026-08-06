@@ -88,7 +88,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from openwam.dataloader.bases import LeRobotV3Reader
-from openwam.dataloader.utils.eef import LEFT_ARM_DIM_MASK, single_arm_20d
+from openwam.dataloader.utils.eef import EEF_POSE_FRAME_CONTRACT, LEFT_ARM_DIM_MASK, single_arm_20d
 from openwam.dataloader.utils.lerobotv3 import (
     LeRobotV3DataPopulation,
     LeRobotV3DataShard,
@@ -98,7 +98,7 @@ from openwam.dataloader.utils.lerobotv3 import (
     resolve_lerobot_v3_data_population,
 )
 from openwam.dataloader.utils.normalization import materialize_eef_stats
-from openwam.dataloader.utils.oxe_schema import droid_euler7_to_arm10
+from openwam.dataloader.utils.oxe_schema import droid_euler7_to_arm10, droid_pose6_closedness_to_arm10
 
 
 
@@ -122,9 +122,13 @@ DROID_STATS_POPULATION_KEY = "stats_population"
 DROID_STATS_POPULATION_SCHEMA_VERSION = 1
 DROID_STATS_POPULATION_POLICY = "info_split_then_prompt_exclusion"
 DROID_EEF_STATS_CONTRACT_KEY = "droid_eef_stats_contract"
-DROID_EEF_STATS_CONTRACT_VERSION = 1
+DROID_EEF_STATS_CONTRACT_VERSION = 2
 DROID_EEF_STATS_CONTRACT = {
     "schema_version": DROID_EEF_STATS_CONTRACT_VERSION,
+    "pose_frame_semantics": EEF_POSE_FRAME_CONTRACT,
+    "action_pose_source": "other_information.action_wrist_pose",
+    "state_pose_source": "other_information.observation_gripper_pose6d",
+    "state_gripper_source": "state[6]",
     "raw_gripper_semantics": "closedness:0=open,1=closed",
     "output_gripper_semantics": "openness:0=closed,1=open",
     "gripper_transform": "1-raw",
@@ -144,9 +148,11 @@ def _validate_droid_eef_stats_contract(value) -> None:
         raise ValueError(f"expected exactly {DROID_EEF_STATS_CONTRACT!r}")
     if type(value["schema_version"]) is not int or value["schema_version"] != DROID_EEF_STATS_CONTRACT_VERSION:
         raise ValueError(f"schema_version must be integer {DROID_EEF_STATS_CONTRACT_VERSION}")
-    for key in ("raw_gripper_semantics", "output_gripper_semantics", "gripper_transform"):
-        if not isinstance(value[key], str) or value[key] != DROID_EEF_STATS_CONTRACT[key]:
-            raise ValueError(f"{key} must be {DROID_EEF_STATS_CONTRACT[key]!r}")
+    for key, expected in DROID_EEF_STATS_CONTRACT.items():
+        if key == "schema_version":
+            continue
+        if not isinstance(value[key], str) or value[key] != expected:
+            raise ValueError(f"{key} must be {expected!r}")
 
 
 def _clean_text(value) -> str:
@@ -499,7 +505,8 @@ class OxeDroidDataset(LeRobotV3Reader):
     PROMPT_FALLBACK_COLS: ClassVar[Tuple[str, ...]] = DROID_PROMPT_FALLBACK_COLS
     NEEDED_COLS = (
         "state",
-        "other_information.action_tcp_pose",
+        "other_information.observation_gripper_pose6d",
+        "other_information.action_wrist_pose",
         "task_index",
     ) + PROMPT_FALLBACK_COLS
     ACTION_DIM_MASK = LEFT_ARM_DIM_MASK
@@ -582,8 +589,8 @@ class OxeDroidDataset(LeRobotV3Reader):
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 f"{stats_path} {DROID_EEF_STATS_CONTRACT_KEY} is stale or invalid; expected "
-                "the canonical 0=closed, 1=open DROID gripper transform. Re-run "
-                f"oxe_stats_computation for DROID ({exc})."
+                "the rigid terminal-arm pose frame and 0=closed, 1=open gripper transform. "
+                f"Re-run oxe_stats_computation for DROID ({exc})."
             ) from exc
         stats = materialize_eef_stats(
             raw,
@@ -628,14 +635,16 @@ class OxeDroidDataset(LeRobotV3Reader):
     def _action_20d(self, win: pd.DataFrame) -> np.ndarray:
 
 
-        action = np.stack(win["other_information.action_tcp_pose"].values).astype(np.float32)
+        action = np.stack(win["other_information.action_wrist_pose"].values).astype(np.float32)
         return single_arm_20d(droid_euler7_to_arm10(action), self._normalization_stats, self._normalize_mode)
 
     def _proprio_20d(self, win: pd.DataFrame) -> Optional[np.ndarray]:
 
 
+        pose = np.stack(win["other_information.observation_gripper_pose6d"].values[:1]).astype(np.float32)
         state = np.stack(win["state"].values[:1]).astype(np.float32)
-        return single_arm_20d(droid_euler7_to_arm10(state), self._normalization_stats, self._normalize_mode)
+        arm10 = droid_pose6_closedness_to_arm10(pose, state[:, 6:7])
+        return single_arm_20d(arm10, self._normalization_stats, self._normalize_mode)
 
 
 __all__ = [

@@ -83,19 +83,27 @@ def test_droid_stats_exclude_reader_blacklist_population(tmp_path):
     (root / "meta").mkdir(parents=True)
     (root / "data" / "chunk-000").mkdir(parents=True)
     n_rows = 60
-    kept = np.zeros((n_rows, 7), dtype=np.float32)
-    kept[:, 0] = 1.0
+    kept_state = np.zeros((n_rows, 7), dtype=np.float32)
+    kept_state[:, :6] = 1_000.0  # Old task-TCP state pose: must not enter stats.
+    kept_pose = np.zeros((n_rows, 6), dtype=np.float32)
+    kept_pose[:, 0] = 1.0
+    kept_action = np.zeros((n_rows, 7), dtype=np.float32)
+    kept_action[:, 0] = 1.0
+    kept_tcp_action = np.zeros((n_rows, 7), dtype=np.float32)
+    kept_tcp_action[:, :6] = 2_000.0  # Old task-TCP action: must not enter stats.
     # Deliberately malformed 2-D poses: filtering must happen in Arrow before
     # numpy conversion, matching the reader's episode-level exclusion behavior.
-    excluded = np.zeros((n_rows, 2), dtype=np.float32)
-    excluded[:, 0] = 100.0
-    values = list(kept) + list(excluded)
+    excluded_pose = np.zeros((n_rows, 2), dtype=np.float32)
+    excluded_pose[:, 0] = 100.0
+    excluded_state = np.zeros((n_rows, 7), dtype=np.float32)
     pd.DataFrame(
         {
             "episode_index": [0] * n_rows + [1] * n_rows,
             "task_index": [0] * (n_rows * 2),
-            "state": values,
-            "other_information.action_tcp_pose": values,
+            "state": list(kept_state) + list(excluded_state),
+            "other_information.observation_gripper_pose6d": list(kept_pose) + list(excluded_pose),
+            "other_information.action_wrist_pose": list(kept_action) + list(excluded_pose),
+            "other_information.action_tcp_pose": list(kept_tcp_action) + list(excluded_pose),
             **{column: [""] * (n_rows * 2) for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
         }
     ).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
@@ -121,15 +129,20 @@ def test_droid_stats_aggregate_canonical_openness_not_raw_closedness(tmp_path):
     (root / "meta").mkdir(parents=True)
     (root / "data" / "chunk-000").mkdir(parents=True)
     state_values = np.zeros((4, 7), dtype=np.float32)
+    state_values[:, :6] = 1_000.0  # Legacy task-TCP state pose sentinel.
     state_values[:, 6] = [0.1, 0.2, 0.3, 0.4]
+    observation_pose_values = np.zeros((4, 6), dtype=np.float32)
     action_values = np.zeros((4, 7), dtype=np.float32)
     action_values[:, 6] = [0.15, 0.25, 0.35, 0.45]
+    tcp_action_values = np.full((4, 7), 2_000.0, dtype=np.float32)
     pd.DataFrame(
         {
             "episode_index": [0] * 4,
             "task_index": [0] * 4,
             "state": list(state_values),
-            "other_information.action_tcp_pose": list(action_values),
+            "other_information.observation_gripper_pose6d": list(observation_pose_values),
+            "other_information.action_wrist_pose": list(action_values),
+            "other_information.action_tcp_pose": list(tcp_action_values),
             **{column: [""] * 4 for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
         }
     ).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
@@ -141,6 +154,8 @@ def test_droid_stats_aggregate_canonical_openness_not_raw_closedness(tmp_path):
 
     stats, _, _ = compute_dataset_stats(root, "DROID", rot6d_identity=False)
 
+    assert stats["min"][0] == 0.0
+    assert stats["max"][0] == 0.0
     assert stats["min"][9] == pytest.approx(0.55)
     assert stats["max"][9] == pytest.approx(0.9)
     assert stats["mean"][9] == pytest.approx(0.725)
@@ -153,13 +168,16 @@ def test_droid_stats_fail_clearly_when_every_row_is_excluded(tmp_path):
     root = tmp_path / "Droid"
     (root / "meta").mkdir(parents=True)
     (root / "data" / "chunk-000").mkdir(parents=True)
-    values = list(np.zeros((120, 7), dtype=np.float32))
+    state_values = list(np.zeros((120, 7), dtype=np.float32))
+    pose_values = list(np.zeros((120, 6), dtype=np.float32))
+    action_values = list(np.zeros((120, 7), dtype=np.float32))
     pd.DataFrame(
         {
             "episode_index": [0] * 120,
             "task_index": [0] * 120,
-            "state": values,
-            "other_information.action_tcp_pose": values,
+            "state": state_values,
+            "other_information.observation_gripper_pose6d": pose_values,
+            "other_information.action_wrist_pose": action_values,
             **{column: [""] * 120 for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
         }
     ).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
@@ -175,13 +193,16 @@ def test_droid_stats_ignore_unreferenced_backup_parquet(tmp_path):
     root = tmp_path / "Droid"
     (root / "meta").mkdir(parents=True)
     (root / "data" / "chunk-000").mkdir(parents=True)
-    values = list(np.zeros((2, 7), dtype=np.float32))
+    state_values = list(np.zeros((2, 7), dtype=np.float32))
+    pose_values = list(np.zeros((2, 6), dtype=np.float32))
+    action_values = list(np.zeros((2, 7), dtype=np.float32))
     frame = pd.DataFrame(
         {
             "episode_index": [0, 0],
             "task_index": [0, 0],
-            "state": values,
-            "other_information.action_tcp_pose": values,
+            "state": state_values,
+            "other_information.observation_gripper_pose6d": pose_values,
+            "other_information.action_wrist_pose": action_values,
             **{column: [""] * 2 for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
         }
     )
@@ -204,14 +225,17 @@ def test_droid_stats_ignore_unaddressed_tail_rows_in_referenced_shard(tmp_path):
     root = tmp_path / "Droid"
     (root / "meta").mkdir(parents=True)
     (root / "data" / "chunk-000").mkdir(parents=True)
-    valid = np.zeros(7, dtype=np.float32)
+    valid_state = np.zeros(7, dtype=np.float32)
+    valid_pose = np.zeros(6, dtype=np.float32)
+    valid_action = np.zeros(7, dtype=np.float32)
     malformed_tail = np.zeros(2, dtype=np.float32)
     pd.DataFrame(
         {
             "episode_index": [0, 999],
             "task_index": [0, 0],
-            "state": [valid, malformed_tail],
-            "other_information.action_tcp_pose": [valid, malformed_tail],
+            "state": [valid_state, malformed_tail],
+            "other_information.observation_gripper_pose6d": [valid_pose, malformed_tail],
+            "other_information.action_wrist_pose": [valid_action, malformed_tail],
             **{column: ["", ""] for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
         }
     ).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
@@ -230,13 +254,16 @@ def test_droid_stats_do_not_substitute_backup_for_missing_manifest_file(tmp_path
     root = tmp_path / "Droid"
     (root / "meta").mkdir(parents=True)
     (root / "data" / "chunk-000").mkdir(parents=True)
-    values = list(np.zeros((2, 7), dtype=np.float32))
+    state_values = list(np.zeros((2, 7), dtype=np.float32))
+    pose_values = list(np.zeros((2, 6), dtype=np.float32))
+    action_values = list(np.zeros((2, 7), dtype=np.float32))
     pd.DataFrame(
         {
             "episode_index": [0, 0],
             "task_index": [0, 0],
-            "state": values,
-            "other_information.action_tcp_pose": values,
+            "state": state_values,
+            "other_information.observation_gripper_pose6d": pose_values,
+            "other_information.action_wrist_pose": action_values,
             **{column: [""] * 2 for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
         }
     ).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
@@ -254,13 +281,16 @@ def test_droid_stats_reject_manifest_episode_mapping_mismatch(tmp_path):
     root = tmp_path / "Droid"
     (root / "meta").mkdir(parents=True)
     (root / "data" / "chunk-000").mkdir(parents=True)
-    values = list(np.zeros((2, 7), dtype=np.float32))
+    state_values = list(np.zeros((2, 7), dtype=np.float32))
+    pose_values = list(np.zeros((2, 6), dtype=np.float32))
+    action_values = list(np.zeros((2, 7), dtype=np.float32))
     pd.DataFrame(
         {
             "episode_index": [0, 1],
             "task_index": [0, 0],
-            "state": values,
-            "other_information.action_tcp_pose": values,
+            "state": state_values,
+            "other_information.observation_gripper_pose6d": pose_values,
+            "other_information.action_wrist_pose": action_values,
             **{column: [""] * 2 for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
         }
     ).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
