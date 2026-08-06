@@ -44,6 +44,7 @@ from openwam.dataloader.utils.eef import (
     quat_wxyz_to_rot6d,
     quat_xyzw_to_rot6d,
 )
+from openwam.dataloader.utils.lerobotv3 import DataContractError
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
 
 HEAD = "images.rgb.head"
@@ -807,6 +808,26 @@ class TestFromConfig:
         assert len(ds) == sum(len(b) for b in ds.buckets)
         assert ds[0]["action"].shape == (8, EEF_DIM)
 
+    def test_root_mode_rejects_removed_pooled_contributor(self, tmp_path, patch_decode):
+        _make_bucket(tmp_path, "cat/split_aloha/current")
+        (tmp_path / "meta").mkdir(exist_ok=True)
+        (tmp_path / "meta" / "stats_split_aloha.json").write_text(
+            json.dumps(
+                {
+                    "population": {
+                        "buckets": ["cat/split_aloha/current", "cat/split_aloha/removed"],
+                        "empty_buckets": [],
+                    }
+                }
+            )
+        )
+
+        with pytest.raises(DataContractError, match="contributor set no longer matches"):
+            InternDataA1Dataset.from_config(
+                {"dataset_dir": str(tmp_path), "normalize_mode": "quantile"},
+                split="train",
+            )
+
     def test_single_bucket_mode(self, tmp_path, patch_decode):
         d = _make_bucket(tmp_path, "cat/split_aloha/task")
         ds = InternDataA1Dataset.from_config(
@@ -1334,7 +1355,7 @@ class TestStatsPopulationContract:
 
     def test_val_derived_stats_are_refused(self, tmp_path, patch_decode):
         d = self._bucket_and_stats(tmp_path, split="val")
-        with pytest.raises(ValueError, match="computed over the 'val' split"):
+        with pytest.raises(DataContractError, match="computed over the 'val' split"):
             self._read(d, tmp_path)
 
     def test_train_derived_stats_are_accepted_by_a_val_reader(self, tmp_path, patch_decode):
@@ -1357,12 +1378,12 @@ class TestStatsPopulationContract:
         csv = tmp_path / "trim.csv"
         csv.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
                        "cat/split_aloha/task,0,8,2,6\n")
-        with pytest.raises(ValueError, match="without a trim list but this reader is trimming"):
+        with pytest.raises(DataContractError, match="without a trim list but this reader is trimming"):
             self._read(d, tmp_path, trim_csv=str(csv))
 
     def test_trimmed_stats_are_refused_by_an_untrimmed_reader(self, tmp_path, patch_decode):
         d = self._bucket_and_stats(tmp_path, trim_active=True)
-        with pytest.raises(ValueError, match="with a trim list but this reader is not"):
+        with pytest.raises(DataContractError, match="with a trim list but this reader is not"):
             self._read(d, tmp_path)
 
     def test_a_different_keep_bound_is_refused(self, tmp_path, patch_decode):
@@ -1370,13 +1391,13 @@ class TestStatsPopulationContract:
         csv = tmp_path / "trim.csv"
         csv.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
                        "cat/split_aloha/task,0,8,2,6\n")
-        with pytest.raises(ValueError, match="--min_keep=33"):
+        with pytest.raises(DataContractError, match="--min_keep=33"):
             self._read(d, tmp_path, trim_csv=str(csv))
 
     def test_a_bucket_absent_from_the_scan_is_refused(self, tmp_path, patch_decode):
         """The bucket dropped out of the scan but still loads the shared file."""
         d = self._bucket_and_stats(tmp_path, buckets=["cat/split_aloha/other"])
-        with pytest.raises(ValueError, match="none of them this one"):
+        with pytest.raises(DataContractError, match="none of them this one"):
             self._read(d, tmp_path)
 
     def test_a_stats_file_without_the_block_is_refused(self, tmp_path, patch_decode):
@@ -1385,8 +1406,38 @@ class TestStatsPopulationContract:
         eef = {k: [0.0] * EEF_DIM for k in ("mean", "min", "q01")}
         eef.update({k: [1.0] * EEF_DIM for k in ("std", "max", "q99")})
         (tmp_path / "meta" / "stats_split_aloha.json").write_text(json.dumps({"eef": eef}))
-        with pytest.raises(ValueError, match="no 'population' block"):
+        with pytest.raises(DataContractError, match="no 'population' block"):
             self._read(d, tmp_path)
+
+    def test_root_mode_does_not_silently_drop_a_bucket_missing_from_stats(self, tmp_path, patch_decode):
+        """DataContractError must escape build_multibucket's tolerant wrapper."""
+        _make_bucket(tmp_path, "cat/split_aloha/good", n_eps=2, ep_len=8)
+        _make_bucket(tmp_path, "cat/split_aloha/bad", n_eps=2, ep_len=8)
+        (tmp_path / "meta").mkdir(parents=True, exist_ok=True)
+        eef = {k: [0.0] * EEF_DIM for k in ("mean", "min", "q01")}
+        eef.update({k: [1.0] * EEF_DIM for k in ("std", "max", "q99")})
+        population = {
+            "split": "train",
+            "trim_active": False,
+            "min_keep": 2,
+            "buckets": ["cat/split_aloha/good"],
+            "empty_buckets": [],
+        }
+        (tmp_path / "meta" / "stats_split_aloha.json").write_text(
+            json.dumps({"eef": eef, "population": population})
+        )
+
+        with pytest.raises(DataContractError, match="contributor set no longer matches"):
+            InternDataA1Dataset.from_config(
+                {
+                    "dataset_dir": str(tmp_path),
+                    "stats_root": str(tmp_path),
+                    "normalize_mode": "quantile",
+                    "num_frames": 2,
+                    "video_stride": 1,
+                },
+                split="train",
+            )
 
     def test_a_matching_population_loads(self, tmp_path, patch_decode):
         d = self._bucket_and_stats(tmp_path)

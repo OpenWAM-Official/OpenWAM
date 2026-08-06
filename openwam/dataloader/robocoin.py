@@ -68,7 +68,7 @@ import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import List
@@ -82,8 +82,11 @@ from openwam.dataloader.utils.eef import eef14_to_eef20
 from openwam.dataloader.utils.lerobotv3 import (
     DataContractError,
     ExcludedEpisodesSnapshot,
+    apply_info_splits,
     assert_excluded_episodes_snapshot_current,
+    load_episodes_parquet,
     load_excluded_episodes_snapshot,
+    parse_info_json,
 )
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 
@@ -292,6 +295,8 @@ _TRIM_MIN_LEN = 1
 _TRIM_ZERO_SPAN_POLICY = "drop"
 _EXCLUDED_EPISODES_SCHEMA_VERSION = 1
 _EXCLUDED_EPISODES_POLICY = "drop_matching_episode_index_before_trim"
+_STATS_POPULATION_SCHEMA_VERSION = 2
+_STATS_POPULATION_POLICY = "info_split_then_exclusion_then_trim"
 _TRIM_CSV_COLUMNS = (
     "dataset",
     "episode_index",
@@ -323,7 +328,7 @@ def _validate_excluded_episodes_provenance(
     current_snapshot: ExcludedEpisodesSnapshot,
     num_datasets,
     stats_path: Path,
-) -> tuple[ExcludedEpisodesSnapshot, ...]:
+) -> dict[str, ExcludedEpisodesSnapshot]:
     """Public implementation. Dataset-specific audit notes were removed."""
     expected_keys = {"schema_version", "policy", "datasets"}
     if (
@@ -353,7 +358,7 @@ def _validate_excluded_episodes_provenance(
         )
 
     root = Path(dataset_dir).parent
-    snapshots = []
+    snapshots = {}
     for contributor, entry in datasets.items():
         if not isinstance(contributor, str) or not contributor:
             raise DataContractError(
@@ -381,7 +386,7 @@ def _validate_excluded_episodes_provenance(
             if contributor == dataset_id
             else load_excluded_episodes_snapshot(bucket_dir)
         )
-        snapshots.append(snapshot)
+        snapshots[contributor] = snapshot
         expected_entry = {"episode_indices": list(snapshot.episode_indices)}
         if (
             not isinstance(entry, dict)
@@ -395,7 +400,103 @@ def _validate_excluded_episodes_provenance(
                 f"for contributor {contributor!r} does not match the current exclusion population; "
                 f"expected {expected_entry}, got {entry}. Regenerate stats with the configured trim CSV."
             )
-    return tuple(snapshots)
+    return snapshots
+
+
+def _validate_stats_population_provenance(
+    actual,
+    *,
+    dataset_dir: Path,
+    current_dataset_id: str,
+    current_info: dict,
+    trim_snapshot: _TrimSnapshot,
+    exclusion_snapshots: dict[str, ExcludedEpisodesSnapshot],
+    num_datasets,
+    stats_path: Path,
+) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+    expected_header = {
+        "schema_version": _STATS_POPULATION_SCHEMA_VERSION,
+        "split": "train",
+        "policy": _STATS_POPULATION_POLICY,
+    }
+    if (
+        not isinstance(actual, dict)
+        or {key: actual.get(key) for key in expected_header} != expected_header
+        or set(actual) != {*expected_header, "datasets"}
+        or not isinstance(actual.get("datasets"), dict)
+    ):
+        raise DataContractError(
+            f"RoboCOIN bucket {current_dataset_id}: stats {stats_path} population must be "
+            "train-derived with the reader's split/exclusion/trim order; "
+            f"expected schema/header {expected_header}, got {actual}. Regenerate stats "
+            "with --split train and the configured trim CSV."
+        )
+    datasets = actual["datasets"]
+    if (
+        type(num_datasets) is not int
+        or len(datasets) != num_datasets
+        or set(datasets) != set(exclusion_snapshots)
+    ):
+        raise DataContractError(
+            f"RoboCOIN bucket {current_dataset_id}: stats {stats_path} population datasets "
+            "do not exactly match the pooled exclusion contributors; regenerate stats."
+        )
+
+    root = Path(dataset_dir).parent
+
+    def _expected(contributor: str, snapshot: ExcludedEpisodesSnapshot) -> dict:
+        bucket_dir = root / contributor
+        info = current_info if contributor == current_dataset_id else parse_info_json(bucket_dir)
+        _spans, _manifest_end, expected_entry = _stats_population_spans(
+            bucket_dir,
+            dataset_id=contributor,
+            split="train",
+            dataset_spec=trim_snapshot.spec.get(contributor, {}),
+            excluded_episode_indices=snapshot.episode_indices,
+            info=info,
+        )
+        return expected_entry
+
+
+
+
+    current_expected = _expected(current_dataset_id, exclusion_snapshots[current_dataset_id])
+    current_actual = datasets.get(current_dataset_id)
+    if current_actual != current_expected:
+        raise DataContractError(
+            f"RoboCOIN bucket {current_dataset_id}: stats {stats_path} effective train "
+            "population no longer matches its manifest/split/exclusion/trim spans; "
+            f"expected {current_expected}, got {current_actual}. Regenerate stats."
+        )
+
+    population_digest = hashlib.sha256(
+        json.dumps(actual, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    cache_key = (str(stats_path.resolve()), population_digest)
+    if cache_key in trim_snapshot.population_validation_cache:
+        return
+
+    for contributor, snapshot in exclusion_snapshots.items():
+        if contributor == current_dataset_id:
+            continue
+        expected_entry = _expected(contributor, snapshot)
+        actual_entry = datasets.get(contributor)
+        if actual_entry != expected_entry:
+            raise DataContractError(
+                f"RoboCOIN bucket {current_dataset_id}: stats {stats_path} effective train "
+                f"population for contributor {contributor!r} no longer matches its "
+                "manifest/split/exclusion/trim spans; "
+                f"expected {expected_entry}, got {actual_entry}. Regenerate stats."
+            )
+    trim_snapshot.population_validation_cache.add(cache_key)
 
 
 @dataclass(frozen=True)
@@ -405,6 +506,13 @@ class _TrimSnapshot:
     path: str
     spec: dict
     sha256: str
+
+
+    population_validation_cache: set[tuple[str, str]] = field(
+        default_factory=set,
+        compare=False,
+        repr=False,
+    )
 
     @property
     def provenance(self) -> dict:
@@ -640,6 +748,83 @@ def _validate_trim_manifest(dataset_id: str, manifest, spec: dict) -> dict:
     }
 
 
+def _stats_population_spans(
+    dataset_dir,
+    *,
+    dataset_id: str,
+    split: str,
+    dataset_spec: dict,
+    excluded_episode_indices,
+    info: dict | None = None,
+):
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+
+    root = Path(dataset_dir)
+    manifest = load_episodes_parquet(root)
+    trim_spans = _validate_trim_manifest(dataset_id, manifest, dataset_spec)
+    if info is None:
+        info = parse_info_json(root)
+    selected = apply_info_splits(
+        manifest,
+        split,
+        info.get("splits", {}) or {},
+        source_name=f"RoboCOIN stats population({dataset_id})",
+    )
+    selected_ids = set(int(ep) for ep in selected["episode_index"].to_numpy())
+    try:
+        episode_ids = [int(ep) for ep in manifest["episode_index"].to_numpy()]
+        starts = [int(start) for start in manifest["dataset_from_index"].to_numpy()]
+        lengths = [int(length) for length in manifest["length"].to_numpy()]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DataContractError(
+            f"RoboCOIN({dataset_id}): full manifest must carry integer "
+            "episode_index, dataset_from_index, and length columns"
+        ) from exc
+
+    excluded = set(int(ep) for ep in excluded_episode_indices)
+    raw_spans = []
+    kept = []
+    for episode_id, start, length in zip(episode_ids, starts, lengths):
+        if start < 0 or length < 0:
+            raise DataContractError(
+                f"RoboCOIN({dataset_id}): invalid manifest span for episode_index={episode_id}: "
+                f"dataset_from_index={start}, length={length}"
+            )
+        raw_spans.append((start, start + length, episode_id))
+        if episode_id not in selected_ids or episode_id in excluded:
+            continue
+        head, tail = trim_spans.get(episode_id, (0, length))
+        if tail - head >= _TRIM_MIN_LEN:
+            kept.append((start + head, start + tail, episode_id))
+
+    raw_spans.sort()
+    for previous, current in zip(raw_spans, raw_spans[1:]):
+        if current[0] < previous[1]:
+            raise DataContractError(
+                f"RoboCOIN({dataset_id}): overlapping global manifest spans for "
+                f"episode_index={previous[2]} and {current[2]}"
+            )
+    kept.sort()
+    hasher = hashlib.sha256(b"openwam:robocoin-stats-population:v1\0")
+    for start, end, episode_id in kept:
+        for value in (episode_id, start, end):
+            hasher.update(int(value).to_bytes(8, "little", signed=False))
+    entry = {
+        "effective_population_digest": hasher.hexdigest(),
+        "num_episodes": len(kept),
+        "num_rows": sum(end - start for start, end, _episode_id in kept),
+    }
+    manifest_end = max((end for _start, end, _episode_id in raw_spans), default=0)
+    return [(start, end) for start, end, _episode_id in kept], manifest_end, entry
+
+
 def _resolve_robocoin_cameras(features: dict) -> tuple:
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -720,6 +905,10 @@ class RoboCOINDataset(LeRobotV3Reader):
                 )
         if _trim_snapshot is None and trim_csv is not None:
             _trim_snapshot = _load_trim_snapshot(trim_csv)
+
+
+
+            _trim_snapshot.population_validation_cache.clear()
         self._trim_snapshot = _trim_snapshot
         self._dex_unify = False
         self._k_left = 0
@@ -1038,7 +1227,7 @@ class RoboCOINDataset(LeRobotV3Reader):
                     f"{expected_provenance}, got {actual_provenance}. Regenerate stats with the "
                     "configured trim CSV."
                 )
-            self._stats_exclusion_snapshots = _validate_excluded_episodes_provenance(
+            exclusion_snapshots = _validate_excluded_episodes_provenance(
                 raw.get("excluded_episodes_provenance"),
                 dataset_dir=self._dataset_dir,
                 dataset_id=self._dataset_id,
@@ -1046,12 +1235,24 @@ class RoboCOINDataset(LeRobotV3Reader):
                 num_datasets=raw.get("eef", {}).get("num_datasets"),
                 stats_path=stats_path,
             )
+            _validate_stats_population_provenance(
+                raw.get("population"),
+                dataset_dir=self._dataset_dir,
+                current_dataset_id=self._dataset_id,
+                current_info=info,
+                trim_snapshot=self._get_trim_snapshot(),
+                exclusion_snapshots=exclusion_snapshots,
+                num_datasets=raw.get("eef", {}).get("num_datasets"),
+                stats_path=stats_path,
+            )
+            self._stats_exclusion_snapshots = tuple(exclusion_snapshots.values())
         eef_stats = materialize_eef_stats(
             raw.get("eef", {}),
             self._normalize_mode,
             dim=_ACTION_DIM,
             strict_minmax=False,
             source_hint=f"{stats_path}: eef.* — re-run python -m openwam.dataloader.utils.stats_computation.robocoin_stats_computation",
+            force_rot6d_identity=True,
         )
 
 
@@ -1193,6 +1394,7 @@ class RoboCOINDataset(LeRobotV3Reader):
             root = Path(dataset_dir)
             if root.is_dir():
                 snapshot = _load_trim_snapshot(trim_csv)
+                snapshot.population_validation_cache.clear()
                 spec = snapshot.spec
                 if not (root / "meta" / "info.json").is_file():
                     bucket_names = {

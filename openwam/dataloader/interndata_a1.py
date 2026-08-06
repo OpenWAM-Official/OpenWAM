@@ -146,10 +146,14 @@
 
 from __future__ import annotations
 
+import csv
+import hashlib
+import io
 import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -164,7 +168,7 @@ from openwam.dataloader.utils.eef import (
     assert_unit_quaternion,
     quat_wxyz_to_rot6d,
 )
-from openwam.dataloader.utils.lerobotv3 import build_multibucket
+from openwam.dataloader.utils.lerobotv3 import DataContractError, build_multibucket
 from openwam.dataloader.utils.normalization import apply_normalization, materialize_eef_stats
 
 logger = logging.getLogger(__name__)
@@ -328,10 +332,13 @@ def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> f
 
 
 
+
+
     if observed_max / scale > _GRIPPER_SANE_MAX:
         logger.warning(
-            "InternData-A1 %s: %s max %.4f is %.2fx the assumed full-open stroke %.4f "
-            "for %r — out-of-range outliers, or GRIPPER_FULL_OPEN needs updating.",
+            "InternData-A1 %s: raw source stats %s max %.4f is %.2fx the assumed "
+            "full-open stroke %.4f for %r — the source stats may include excluded/trimmed "
+            "rows; otherwise this is an out-of-range outlier or GRIPPER_FULL_OPEN needs updating.",
             bucket_dir,
             grip_col,
             observed_max,
@@ -678,67 +685,119 @@ def _shard_episode_bounds(pf) -> Optional[Tuple[int, int]]:
     return int(lo), int(hi)
 
 
-_TRIM_SPEC_CACHE: Dict[str, Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]]] = {}
+@dataclass(frozen=True)
+class _A1TrimSnapshot:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+    path: str
+    sha256: str
+    spec: Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]]
+
+    @property
+    def provenance(self) -> dict:
+        return {"schema_version": 1, "sha256": self.sha256}
 
 
-def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]]:
+
+
+_TRIM_SPEC_CACHE: Dict[str, Tuple[Tuple[int, int, int, int], _A1TrimSnapshot]] = {}
+
+
+def _trim_file_signature(path: Path) -> Tuple[int, int, int, int]:
+    stat = path.stat()
+    return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def _load_trim_snapshot(path) -> _A1TrimSnapshot:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
 
 
 
-
-
-
-
-
-
-
-
-    import csv
-
     key = str(path)
-    if key in _TRIM_SPEC_CACHE:
-        return _TRIM_SPEC_CACHE[key]
-    spec: Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]] = {}
-    n = 0
+    trim_path = Path(key)
     try:
-        with open(key, newline="") as fh:
-            for row in csv.DictReader(fh):
+        signature_before = _trim_file_signature(trim_path)
+        cached = _TRIM_SPEC_CACHE.get(key)
+        if cached is not None and cached[0] == signature_before:
+            return cached[1]
+        raw = trim_path.read_bytes()
+        signature_after = _trim_file_signature(trim_path)
+        if signature_before != signature_after:
+            raise DataContractError(
+                f"InternDataA1 trim_csv {key} changed while it was being read; retry with an immutable file."
+            )
 
-                def _int(name):
-                    v = (row.get(name) or "").strip()
-                    return int(v) if v else None
+        spec: Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]] = {}
+        seen = set()
+        n = 0
+        reader = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
+        required = {"dataset", "episode_index", "total_frames", "trim_head_to", "trim_tail_from"}
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            missing = sorted(required.difference(reader.fieldnames or ()))
+            raise ValueError(f"missing required column(s): {missing}")
+        for row in reader:
 
-                head = _int("trim_head_to") or 0
-                tail = _int("trim_tail_from")
-                if not head and tail is None:
-                    continue
-                spec.setdefault(row["dataset"], {})[int(row["episode_index"])] = (
-                    head,
-                    tail,
-                    _int("total_frames"),
+            def _int(name):
+                value = (row.get(name) or "").strip()
+                return int(value) if value else None
+
+            dataset = (row.get("dataset") or "").strip()
+            if not dataset:
+                raise ValueError("empty dataset key")
+            episode_index = _int("episode_index")
+            if episode_index is None or episode_index < 0:
+                raise ValueError(f"invalid episode_index={episode_index!r}")
+            entry_key = (dataset, episode_index)
+            if entry_key in seen:
+                raise ValueError(f"duplicate entry for dataset={dataset!r}, episode_index={episode_index}")
+            seen.add(entry_key)
+
+            head = _int("trim_head_to") or 0
+            tail = _int("trim_tail_from")
+            total = _int("total_frames")
+            if head < 0 or (tail is not None and tail < 0) or (total is not None and total <= 0):
+                raise ValueError(
+                    f"invalid bounds for dataset={dataset!r}, episode_index={episode_index}: "
+                    f"head={head}, tail={tail}, total={total}"
                 )
-                n += 1
-    except (OSError, KeyError, ValueError) as e:
-
-
-
-
+            if not head and tail is None:
+                continue
+            spec.setdefault(dataset, {})[episode_index] = (head, tail, total)
+            n += 1
+    except (OSError, UnicodeError, csv.Error, KeyError, ValueError) as e:
         raise ValueError(
             f"InternDataA1: trim_csv {key} could not be read ({e}). Fix the path or set "
             "trim_csv=null to run untrimmed — it will not be skipped silently."
         ) from e
-    else:
-        logger.info(
-            "InternDataA1: loaded %d trim entries across %d buckets from %s", n, len(spec), key
+
+    snapshot = _A1TrimSnapshot(
+        path=key,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        spec=spec,
+    )
+    _TRIM_SPEC_CACHE[key] = (signature_after, snapshot)
+    logger.info("InternDataA1: loaded %d trim entries across %d buckets from %s", n, len(spec), key)
+    return snapshot
+
+
+def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    return _load_trim_snapshot(path).spec
+
+
+def _assert_trim_snapshot_current(snapshot: _A1TrimSnapshot, *, context: str) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    try:
+        actual_sha256 = hashlib.sha256(Path(snapshot.path).read_bytes()).hexdigest()
+    except OSError as e:
+        raise DataContractError(f"InternDataA1 trim_csv {snapshot.path} disappeared during {context}: {e}") from e
+    if actual_sha256 != snapshot.sha256:
+        raise DataContractError(
+            f"InternDataA1 trim_csv {snapshot.path} changed during {context}; "
+            f"expected sha256={snapshot.sha256}, got {actual_sha256}."
         )
-    _TRIM_SPEC_CACHE[key] = spec
-    return spec
-
-
-_TRIM_DIGEST_CACHE: Dict[str, str] = {}
 
 
 class AmbiguousBucketKey(LookupError):
@@ -828,6 +887,113 @@ def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int,
     return head, tail
 
 
+def effective_a1_population_provenance(eps_df, trim_spec: Optional[Dict[int, Tuple]], min_len: int) -> dict:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
+    required = ("episode_index", "dataset_from_index", "length")
+    missing = [column for column in required if column not in eps_df.columns]
+    if missing:
+        raise DataContractError(f"InternDataA1 effective population is missing manifest columns {missing}")
+
+    trim_spec = trim_spec or {}
+    records = []
+    for _, row in eps_df.iterrows():
+        episode_index = int(row["episode_index"])
+        global_start = int(row["dataset_from_index"])
+        length = int(row["length"])
+        if episode_index < 0 or global_start < 0 or length <= 0:
+            raise DataContractError(
+                "InternDataA1 effective population contains an invalid manifest record: "
+                f"episode_index={episode_index}, dataset_from_index={global_start}, length={length}"
+            )
+        entry = trim_spec.get(episode_index)
+        bounds = resolve_trim_bounds(entry, length, min_len) if entry is not None else None
+        head, tail = bounds if bounds is not None else (0, length)
+        records.append((episode_index, global_start, length, int(head), int(tail)))
+
+    records.sort(key=lambda record: record[0])
+    if len({record[0] for record in records}) != len(records):
+        raise DataContractError("InternDataA1 effective population has duplicate episode_index values")
+
+    hasher = hashlib.sha256(b"openwam:interndata-a1-effective-population:v1\0")
+    num_rows = 0
+    for record in records:
+        for value in record:
+            hasher.update(value.to_bytes(8, "little", signed=False))
+        num_rows += record[4] - record[3]
+    return {
+        "schema_version": 1,
+        "sha256": hasher.hexdigest(),
+        "num_episodes": len(records),
+        "num_rows": int(num_rows),
+    }
+
+
+def _validate_a1_root_stats_contributors(
+    root: Path,
+    stats_root: Path,
+    sub_dirs: List[Path],
+) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+    current: Dict[str, set[str]] = {}
+    for sub in sub_dirs:
+        try:
+            info = json.loads((sub / "meta" / "info.json").read_text())
+            layout = detect_arm_layout(info.get("features", {}) or {})
+            embodiment = embodiment_key(info.get("robot_type", "unknown"), layout)
+            dataset_id = str(sub.relative_to(root))
+        except Exception as exc:
+            raise DataContractError(
+                f"InternData-A1 cannot classify pooled stats contributor {sub}: {exc}"
+            ) from exc
+        current.setdefault(embodiment, set()).add(dataset_id)
+
+    for embodiment, current_buckets in sorted(current.items()):
+        stats_path = stats_root / "meta" / f"stats_{embodiment}.json"
+        try:
+            raw = json.loads(stats_path.read_text())
+            population = raw["population"]
+            contributed = population["buckets"]
+            empty = population.get("empty_buckets", [])
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise DataContractError(
+                f"InternData-A1 pooled stats {stats_path} has no readable contributor population; "
+                "regenerate stats."
+            ) from exc
+        if (
+            not isinstance(contributed, list)
+            or not isinstance(empty, list)
+            or not all(isinstance(name, str) and name for name in [*contributed, *empty])
+            or len(set(contributed)) != len(contributed)
+            or len(set(empty)) != len(empty)
+            or set(contributed).intersection(empty)
+        ):
+            raise DataContractError(
+                f"InternData-A1 pooled stats {stats_path} has a malformed contributor set; regenerate stats."
+            )
+        recorded_buckets = set(contributed) | set(empty)
+        if recorded_buckets != current_buckets:
+            missing = sorted(current_buckets - recorded_buckets)
+            extra = sorted(recorded_buckets - current_buckets)
+            raise DataContractError(
+                f"InternData-A1 pooled stats {stats_path} contributor set no longer matches "
+                f"the current {embodiment} root population (missing={missing}, extra={extra}); "
+                "regenerate stats."
+            )
+
+
 class InternDataA1Dataset(LeRobotV3Reader):
     """Public implementation. Dataset-specific audit notes were removed."""
 
@@ -864,6 +1030,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
         *,
         a1_stats_root: Optional[str] = None,
         trim_csv: Optional[str] = None,
+        _trim_snapshot: Optional[_A1TrimSnapshot] = None,
         **kwargs,
     ):
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -878,15 +1045,42 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
         self._a1_stats_root = Path(a1_stats_root) if a1_stats_root else Path(dataset_dir)
         self._trim_csv = trim_csv
+        trim_snapshot_was_provided = _trim_snapshot is not None
+        if _trim_snapshot is not None:
+            if trim_csv is None or not isinstance(_trim_snapshot, _A1TrimSnapshot):
+                raise ValueError("_trim_snapshot requires a matching non-null trim_csv")
+            if _trim_snapshot.path != str(trim_csv):
+                raise ValueError(
+                    f"_trim_snapshot path {_trim_snapshot.path!r} does not match trim_csv {str(trim_csv)!r}"
+                )
+        elif trim_csv is not None:
+            _trim_snapshot = _load_trim_snapshot(trim_csv)
+        self._trim_snapshot = _trim_snapshot
 
 
 
 
 
-        load_excluded_episodes(dataset_dir)
+        self._a1_excluded_episode_indices = tuple(sorted(load_excluded_episodes(dataset_dir)))
         super().__init__(dataset_dir, **kwargs)
+        current_exclusions = tuple(sorted(load_excluded_episodes(dataset_dir)))
+        if current_exclusions != self._a1_excluded_episode_indices:
+            raise DataContractError(
+                f"InternDataA1 bucket {self._dataset_id}: excluded_episodes.json changed during reader "
+                f"construction; expected {list(self._a1_excluded_episode_indices)}, "
+                f"got {list(current_exclusions)}."
+            )
+        if self._trim_snapshot is not None and not trim_snapshot_was_provided:
+            _assert_trim_snapshot_current(self._trim_snapshot, context="reader construction")
 
 
+        self._trim_snapshot = None
+
+
+
+    def _load_excluded_episode_indices(self) -> set[int]:
+        """Public implementation. Dataset-specific audit notes were removed."""
+        return set(self._a1_excluded_episode_indices)
 
     def _resolve_cameras(self, info: dict):
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -1203,10 +1397,19 @@ class InternDataA1Dataset(LeRobotV3Reader):
                                   what=what, source=f"InternDataA1({self._dataset_id})")
 
     def _trim_key(self) -> Optional[str]:
-        spec = _load_trim_spec(self._trim_csv)
+        spec = self._get_trim_snapshot().spec
         if not spec:
             return None
         return self._match_bucket_key(spec, "trim_csv")
+
+    def _get_trim_snapshot(self) -> _A1TrimSnapshot:
+        snapshot = getattr(self, "_trim_snapshot", None)
+        if snapshot is None:
+            if not self._trim_csv:
+                raise ValueError("InternDataA1 trim snapshot requested while trim_csv is disabled")
+            snapshot = _load_trim_snapshot(self._trim_csv)
+            self._trim_snapshot = snapshot
+        return snapshot
 
     def _filter_episodes(self, eps_df):
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -1244,12 +1447,21 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
         eps_df = super()._filter_episodes(eps_df)
-        if not self._trim_csv:
-            return eps_df
-        key = self._trim_key()
-        if key is None:
-            return eps_df
-        spec = _load_trim_spec(self._trim_csv).get(key)
+        spec = None
+        if self._trim_csv:
+            key = self._trim_key()
+            if key is not None:
+                spec = self._get_trim_snapshot().spec.get(key)
+
+        min_len = self._trim_min_len()
+
+
+
+        self._a1_effective_population = effective_a1_population_provenance(
+            eps_df,
+            spec,
+            min_len,
+        )
         if not spec:
             return eps_df
 
@@ -1259,8 +1471,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
         lengths = eps_df["length"].to_numpy().copy()
         row_off = eps_df["_data_row_offset"].to_numpy().copy()
         cam_off = {c: eps_df[c].to_numpy().copy() for c in cam_cols}
-        min_len = self._trim_min_len()
-
         n_trim = n_skip = 0
         frames_before = int(lengths.sum())
         for pos, ep in enumerate(eps_df["episode_index"].to_numpy()):
@@ -1357,9 +1567,6 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-
-
-
         pop = raw.get("population")
         rerun = (
             "Re-run python -m openwam.dataloader.utils.stats_computation."
@@ -1367,7 +1574,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
             f"--stats_root {self._a1_stats_root}"
         )
         if not isinstance(pop, dict):
-            raise ValueError(
+            raise DataContractError(
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} has no 'population' "
                 f"block, so there is no way to tell whether it describes the rows this reader "
                 f"loads (split, trimming and keep-bound all change the distribution). {rerun}."
@@ -1381,7 +1588,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
         if pop.get("split") != "train":
-            raise ValueError(
+            raise DataContractError(
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} was computed over the "
                 f"{pop.get('split')!r} split. Normalization statistics must describe the "
                 f"training distribution — a val-derived file would scale training by numbers "
@@ -1392,7 +1599,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
         if bool(pop.get("trim_active")) != want_trim:
             state = "with" if pop.get("trim_active") else "without"
             mine = "is" if want_trim else "is not"
-            raise ValueError(
+            raise DataContractError(
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} was computed {state} a "
                 f"trim list but this reader {mine} trimming. Trimming removes the motionless "
                 f"head/tail, so the two describe different distributions. {rerun}"
@@ -1403,8 +1610,15 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
         want_keep = self._train_min_window_len()
-        if want_trim and int(pop.get("min_keep", -1)) != int(want_keep):
-            raise ValueError(
+        try:
+            recorded_keep = int(pop.get("min_keep", -1))
+        except (TypeError, ValueError) as exc:
+            raise DataContractError(
+                f"InternData-A1 bucket {self._dataset_id}: {stats_path} has invalid "
+                f"population.min_keep={pop.get('min_keep')!r}. {rerun}."
+            ) from exc
+        if want_trim and recorded_keep != int(want_keep):
+            raise DataContractError(
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} used --min_keep="
                 f"{pop.get('min_keep')} but this reader keeps episodes down to {want_keep} "
                 f"frames. The same trim CSV under a different bound keeps a different set of "
@@ -1412,10 +1626,16 @@ class InternDataA1Dataset(LeRobotV3Reader):
             )
 
         buckets = pop.get("buckets")
-        if not isinstance(buckets, list):
-            raise ValueError(
+        empty_buckets = pop.get("empty_buckets", [])
+        if (
+            not isinstance(buckets, list)
+            or not all(isinstance(key, str) and key for key in buckets)
+            or not isinstance(empty_buckets, list)
+            or not all(isinstance(key, str) and key for key in empty_buckets)
+        ):
+            raise DataContractError(
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} has no bucket list in "
-                f"its 'population' block. {rerun}."
+                f"its 'population' block, or carries malformed bucket identifiers. {rerun}."
             )
 
 
@@ -1426,18 +1646,85 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 
-        known = list(buckets) + list(pop.get("empty_buckets") or [])
+        known = list(buckets) + list(empty_buckets)
 
 
 
-        if self._match_bucket_key(dict.fromkeys(known), "stats population") is None:
-            raise ValueError(
+        try:
+            population_key = self._match_bucket_key(dict.fromkeys(known), "stats population")
+        except (AmbiguousBucketKey, TypeError, ValueError) as exc:
+            raise DataContractError(
+                f"InternData-A1 bucket {self._dataset_id}: cannot resolve this bucket in the "
+                f"stats population from {stats_path}: {exc}. {rerun}."
+            ) from exc
+        if population_key is None:
+            raise DataContractError(
                 f"InternData-A1 bucket {self._dataset_id}: {stats_path} covers {len(known)} "
                 f"buckets, none of them this one — the scan refused it (unreadable metadata, "
                 f"or shards that disagree with the manifest) while it still loads the shared "
                 f"per-embodiment file, so its actions would be scaled by other buckets' "
                 f"numbers. {rerun}."
             )
+
+
+
+
+
+        if want_trim:
+            if pop.get("schema_version") != 2:
+                raise DataContractError(
+                    f"InternData-A1 bucket {self._dataset_id}: {stats_path} predates fail-closed "
+                    "trim/exclusion population provenance. Regenerate the normalization stats."
+                )
+            expected_trim = self._get_trim_snapshot().provenance
+            if pop.get("trim_provenance") != expected_trim:
+                raise DataContractError(
+                    f"InternData-A1 bucket {self._dataset_id}: {stats_path} trim provenance does "
+                    f"not match {self._trim_csv}; expected {expected_trim}, got "
+                    f"{pop.get('trim_provenance')}. Regenerate normalization stats."
+                )
+
+            bucket_provenance = pop.get("bucket_provenance")
+            if (
+                not isinstance(bucket_provenance, dict)
+                or not all(isinstance(key, str) and key for key in bucket_provenance)
+            ):
+                raise DataContractError(
+                    f"InternData-A1 bucket {self._dataset_id}: {stats_path} has no per-bucket "
+                    "population provenance; regenerate normalization stats."
+                )
+            try:
+                provenance_key = self._match_bucket_key(bucket_provenance, "stats bucket provenance")
+            except (AmbiguousBucketKey, TypeError, ValueError) as exc:
+                raise DataContractError(
+                    f"InternData-A1 bucket {self._dataset_id}: cannot resolve this bucket in "
+                    f"{stats_path} population provenance: {exc}. Regenerate normalization stats."
+                ) from exc
+            if provenance_key is None or not isinstance(bucket_provenance.get(provenance_key), dict):
+                raise DataContractError(
+                    f"InternData-A1 bucket {self._dataset_id}: {stats_path} has no population "
+                    "certificate for this bucket; regenerate normalization stats."
+                )
+            recorded = bucket_provenance[provenance_key]
+            current_exclusions = list(self._a1_excluded_episode_indices)
+            if recorded.get("excluded_episode_indices") != current_exclusions:
+                raise DataContractError(
+                    f"InternData-A1 bucket {self._dataset_id}: excluded_episodes.json changed after "
+                    f"{stats_path} was generated; stats recorded "
+                    f"{recorded.get('excluded_episode_indices')}, current={current_exclusions}."
+                )
+
+
+
+
+
+            if self._split == "train":
+                current_effective = getattr(self, "_a1_effective_population", None)
+                if recorded.get("effective_population") != current_effective:
+                    raise DataContractError(
+                        f"InternData-A1 bucket {self._dataset_id}: effective split/exclusion/trim "
+                        f"population changed after {stats_path} was generated; regenerate stats."
+                    )
 
     def _load_stats(self, info: dict):
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -1477,7 +1764,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
                     f"{width} in {stats_path} != expected {_ACTION_DIM}. "
                     "Re-run interndata_a1_stats_computation."
                 )
-        return materialize_eef_stats(
+        stats = materialize_eef_stats(
             eef_raw,
             self._normalize_mode,
             dim=_ACTION_DIM,
@@ -1486,7 +1773,9 @@ class InternDataA1Dataset(LeRobotV3Reader):
                 f"{stats_path}: eef.* — re-run python -m openwam.dataloader.utils."
                 "stats_computation.interndata_a1_stats_computation"
             ),
+            force_rot6d_identity=True,
         )
+        return stats
 
     def _post_init(self, info: dict) -> None:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -1600,6 +1889,10 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
         stats_root = _get(config, "stats_root") or str(root)
         common["a1_stats_root"] = stats_root
+        trim_snapshot = None
+        if common.get("trim_csv"):
+            trim_snapshot = _load_trim_snapshot(common["trim_csv"])
+            common["_trim_snapshot"] = trim_snapshot
 
 
         if (root / "meta" / "info.json").is_file():
@@ -1611,7 +1904,10 @@ class InternDataA1Dataset(LeRobotV3Reader):
             if total_hours is not None:
                 kwargs["max_hours"] = float(total_hours)
                 kwargs["subsample_seed"] = int(_get(config, "seed", 42))
-            return cls(dataset_dir=str(root), **kwargs)
+            dataset = cls(dataset_dir=str(root), **kwargs)
+            if trim_snapshot is not None:
+                _assert_trim_snapshot_current(trim_snapshot, context="from_config reader construction")
+            return dataset
 
         if not root.is_dir():
             raise FileNotFoundError(f"{cls.__name__}: {root} does not exist")
@@ -1623,6 +1919,10 @@ class InternDataA1Dataset(LeRobotV3Reader):
             )
         logger.info("%s.from_config: root mode, %d buckets under %s", cls.__name__, len(sub_dirs), root)
 
+        normalize_mode = common.get("normalize_mode", cls.DEFAULT_NORMALIZE_MODE)
+        if normalize_mode and normalize_mode not in ("none", "null"):
+            _validate_a1_root_stats_contributors(root, Path(stats_root), sub_dirs)
+
         def _per_bucket(sub: Path) -> Dict[str, Any]:
 
 
@@ -1632,7 +1932,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
             except ValueError:
                 return {"dataset_id": sub.name}
 
-        return build_multibucket(
+        dataset = build_multibucket(
             cls,
             sub_dirs,
             common,
@@ -1642,6 +1942,9 @@ class InternDataA1Dataset(LeRobotV3Reader):
             source_name=cls.__name__,
             per_bucket_kwargs=_per_bucket,
         )
+        if trim_snapshot is not None:
+            _assert_trim_snapshot_current(trim_snapshot, context="from_config reader construction")
+        return dataset
 
 
 class MultiInternDataA1Dataset(MultiLeRobotV3Reader):

@@ -24,6 +24,8 @@ import pytest
 from PIL import Image
 
 from openwam.dataloader.agibotworld import AgiBotWorldDataset, _validate_trim_ratio
+from openwam.dataloader.utils.lerobotv3 import DataContractError
+from openwam.dataloader.utils.stats_computation.agibotworld_stats_computation import _partial_bucket
 
 FPS = 15.0
 HEAD = "observation.images.head"
@@ -355,3 +357,133 @@ class TestTrimmedOffsetAlignment:
         # every kept frame of all three episodes must appear
         expected = set(range(25, 120)) | set(range(120, 120 + 95)) | set(range(240, 360))
         assert seen == expected
+
+
+# ---------------------------------------------------------------------------
+# Normalization stats must use and attest to the same trimmed population
+# ---------------------------------------------------------------------------
+
+
+class TestTrimAwareStats:
+    @staticmethod
+    def _stats_block(dim: int) -> dict:
+        return {
+            "mean": [0.0] * dim,
+            "std": [1.0] * dim,
+            "min": [-1.0] * dim,
+            "max": [1.0] * dim,
+            "q01": [-1.0] * dim,
+            "q99": [1.0] * dim,
+        }
+
+    def test_partial_bucket_excludes_trimmed_and_blacklisted_rows(self, tmp_path):
+        bucket = _make_bucket(
+            tmp_path / "root" / "b",
+            [
+                {"length": 10, "flag": 1, "delta": 2},  # keep global rows 2..9
+                {"length": 10, "flag": 2, "delta": 3},  # keep global rows 10..16
+                {"length": 10, "flag": 3, "delta": 0},  # static: drop
+                {"length": 10, "flag": 0, "delta": 0},  # generic exclusion: drop
+                {"length": 10, "flag": 1, "delta": 8},  # >=70% trimmed: drop
+            ],
+        )
+        (bucket / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [3]}))
+
+        name, partial, population = _partial_bucket(str(bucket), "train", True, 0.7)
+
+        assert name == "b"
+        assert population["num_episodes"] == 2
+        assert population["num_rows"] == 15
+        assert population["excluded_episode_indices"] == [3]
+        assert partial["action.ee_base"]["count"] == 15
+        assert partial["observation.state.ee_base"]["count"] == 15
+        # ee_base[0] encodes the global physical row in the fixture.  These
+        # bounds prove that neither prefix/suffix outside the kept spans leaked.
+        assert partial["action.ee_base"]["min"][0] == pytest.approx(2.0)
+        assert partial["action.ee_base"]["max"][0] == pytest.approx(16.0)
+
+    def test_reader_accepts_matching_population_and_rejects_trim_policy_drift(self, tmp_path):
+        root = tmp_path / "root"
+        bucket = _make_bucket(
+            root / "b",
+            [{"length": 40, "flag": 1, "delta": 4}, {"length": 40, "flag": 0, "delta": 0}],
+        )
+        _, _partial, bucket_population = _partial_bucket(str(bucket), "train", True, 0.7)
+        stats = {
+            "robot_type": "g2a",
+            "population": {
+                "schema_version": 1,
+                "split": "train",
+                "use_segment_annotations": True,
+                "segment_max_trim_ratio": 0.7,
+                "buckets": {"b": bucket_population},
+            },
+            "action.ee_base": self._stats_block(18),
+            "observation.state.ee_base": self._stats_block(18),
+            "action.gripper": self._stats_block(2),
+            "observation.state.gripper": self._stats_block(2),
+        }
+        (root / "meta").mkdir(exist_ok=True)
+        stats_path = root / "meta" / "stats_g2a.json"
+        stats_path.write_text(json.dumps(stats))
+
+        ds = _reader(bucket, normalize_mode="quantile", segment_max_trim_ratio=0.7)
+        # Reader-side materialization pins rot6d fields to identity regardless
+        # of the affine stats stored on disk.
+        np.testing.assert_array_equal(ds._action_norm_stats["mean"][3:9], np.zeros(6))
+        np.testing.assert_array_equal(ds._action_norm_stats["std"][3:9], np.ones(6))
+
+        stats["population"]["segment_max_trim_ratio"] = 0.8
+        stats_path.write_text(json.dumps(stats))
+        with pytest.raises(DataContractError, match="generated with"):
+            _reader(bucket, normalize_mode="quantile", segment_max_trim_ratio=0.7)
+
+    def test_reader_rejects_non_train_stats(self, tmp_path):
+        root = tmp_path / "root"
+        bucket = _make_bucket(root / "b", [{"length": 40, "flag": 0, "delta": 0}])
+        _, _partial, bucket_population = _partial_bucket(str(bucket), "train", True, 0.7)
+        stats = {
+            "robot_type": "g2a",
+            "population": {
+                "schema_version": 1,
+                "split": "val",
+                "use_segment_annotations": True,
+                "segment_max_trim_ratio": 0.7,
+                "buckets": {"b": bucket_population},
+            },
+            "action.ee_base": self._stats_block(18),
+            "observation.state.ee_base": self._stats_block(18),
+            "action.gripper": self._stats_block(2),
+            "observation.state.gripper": self._stats_block(2),
+        }
+        (root / "meta").mkdir(exist_ok=True)
+        (root / "meta" / "stats_g2a.json").write_text(json.dumps(stats))
+
+        with pytest.raises(DataContractError, match="train-derived"):
+            _reader(bucket, normalize_mode="quantile", segment_max_trim_ratio=0.7)
+
+    def test_reader_rejects_removed_pooled_contributor(self, tmp_path):
+        root = tmp_path / "root"
+        bucket = _make_bucket(root / "b", [{"length": 40, "flag": 0, "delta": 0}])
+        _, _partial, bucket_population = _partial_bucket(str(bucket), "train", True, 0.7)
+        stats = {
+            "robot_type": "g2a",
+            "population": {
+                "schema_version": 1,
+                "split": "train",
+                "use_segment_annotations": True,
+                "segment_max_trim_ratio": 0.7,
+                # ``removed`` no longer exists on disk but still polluted the
+                # pooled numbers in this stale file.
+                "buckets": {"b": bucket_population, "removed": bucket_population},
+            },
+            "action.ee_base": self._stats_block(18),
+            "observation.state.ee_base": self._stats_block(18),
+            "action.gripper": self._stats_block(2),
+            "observation.state.gripper": self._stats_block(2),
+        }
+        (root / "meta").mkdir(exist_ok=True)
+        (root / "meta" / "stats_g2a.json").write_text(json.dumps(stats))
+
+        with pytest.raises(DataContractError, match="pooled contributor set"):
+            _reader(bucket, normalize_mode="quantile", segment_max_trim_ratio=0.7)

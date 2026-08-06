@@ -1,7 +1,8 @@
 """Mixture-level integration test for OXE readers.
 
 Verifies:
-  1. ``mixture.yaml`` composes its robot/ego entries under Hydra defaults.
+  1. ``mixture.yaml`` composes exactly the requested five sources under Hydra
+     defaults.
   2. The composed ``cfg.datasets.<name>`` blocks contain the inherited
      fields from ``configs/dataloader/<name>.yaml``.
   3. A mixture built from synthetic OXE buckets + FakeActionDataset
@@ -15,10 +16,10 @@ import os
 
 import pytest
 
-# mixture.yaml composes these under Hydra defaults (robot: robocoin, oxe_droid;
-# ego: egodex). bcz/bridge/fractal stay registered but are no longer part of the
-# default mixture — see TestMixtureRegistryDispatch.
-MIXTURE_ENTRIES = ("robocoin", "oxe_droid", "egodex")
+# ``agiworld`` is the user-facing dataset name; its registered config/type in
+# this repository is ``agibotworld``.  The tuple is order-sensitive because the
+# Hydra defaults order is part of the mixture's stable source-index contract.
+MIXTURE_ENTRIES = ('agibotworld', 'robocoin', 'oxe_droid', 'interndata_a1')
 
 
 class TestMixtureYamlComposition:
@@ -28,9 +29,7 @@ class TestMixtureYamlComposition:
         config_dir = os.path.abspath("configs/dataloader")
         with initialize_config_dir(config_dir=config_dir, version_base=None):
             cfg = compose(config_name="mixture")
-        names = list(cfg.datasets.keys())
-        for required in MIXTURE_ENTRIES:
-            assert required in names, f"mixture missing {required}"
+        assert tuple(cfg.datasets.keys()) == MIXTURE_ENTRIES
 
     def test_blocks_inherit_dataset_dir(self):
         from hydra import compose, initialize_config_dir
@@ -53,15 +52,15 @@ class TestMixtureYamlComposition:
 
 
 class TestMixtureRegistryDispatch:
-    """The mixture engine dispatches via the registry — make sure all 4
-    OXE types are registered and callable."""
+    """Only the active OXE reader participates in config dispatch."""
 
-    def test_all_four_oxe_types_registered(self):
+    def test_only_oxe_droid_is_registered(self):
         from openwam.dataloader.registry import list_registered_datasets
 
-        names = list_registered_datasets()
-        for required in ("oxe_bcz", "oxe_bridge", "oxe_fractal", "oxe_droid"):
-            assert required in names, f"{required} not in registry"
+        names = set(list_registered_datasets())
+        assert "oxe_droid" in names
+        deprecated = {'ego4d', 'egodex', 'oxe_bcz', 'oxe_bridge', 'oxe_fractal'}
+        assert not names.intersection(deprecated)
 
 
 class TestMixtureSampleShapes:
@@ -71,8 +70,13 @@ class TestMixtureSampleShapes:
     """
 
     @pytest.fixture
-    def fake_dataset(self, fake_dataset_factory):
-        return fake_dataset_factory(n=4, action_dim=20)
+    def fake_dataset(self):
+        # Import directly instead of depending on a sibling conftest fixture;
+        # this file is also collected in suites whose import mode does not
+        # expose tests/dataloader/conftest.py fixtures by name.
+        from tests.dataloader.conftest import FakeActionDataset
+
+        return FakeActionDataset(n=4, action_dim=20)
 
     def test_fake_dataset_emits_legacy_1d_mask(self, fake_dataset):
         s = fake_dataset[0]

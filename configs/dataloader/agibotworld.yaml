@@ -1,6 +1,6 @@
 type: agibotworld
 
-dataset_dir: /path/to/AgiBotWorld-Beta
+dataset_dir: /path/to/pretrain_dataset/AgiBotWorld-Beta
 
 num_frames: 33
 video_stride: 4

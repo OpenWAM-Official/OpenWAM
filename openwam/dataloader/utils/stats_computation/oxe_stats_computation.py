@@ -26,6 +26,7 @@
 
 
 
+
 from __future__ import annotations
 
 import argparse
@@ -40,11 +41,14 @@ import pyarrow.parquet as pq
 
 from openwam.dataloader.oxe_droid import (
     DROID_DATA_POPULATION_DIGEST_KEY,
+    DROID_STATS_POPULATION_KEY,
     load_droid_prompt_exclusions,
+    resolve_droid_stats_population,
 )
 from openwam.dataloader.utils.eef import assert_unit_quaternion
 from openwam.dataloader.utils.lerobotv3 import (
     digest_lerobot_v3_data_population,
+    parse_info_json,
     read_lerobot_v3_population_shard,
     resolve_lerobot_v3_data_population,
 )
@@ -143,7 +147,13 @@ def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
     return _table_rows(pq.read_table(path, memory_map=True, columns=cols), cols)
 
 
-def compute_dataset_stats(dataset_dir: Path, dataset_name: str, rot6d_identity: bool = True) -> Tuple[dict, int, int]:
+def compute_dataset_stats(
+    dataset_dir: Path,
+    dataset_name: str,
+    rot6d_identity: bool = True,
+    *,
+    split: str = "train",
+) -> Tuple[dict, int, int]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -152,12 +162,22 @@ def compute_dataset_stats(dataset_dir: Path, dataset_name: str, rot6d_identity: 
     spec = SCHEMA[dataset_name]
     excluded_episode_indices: set[int] = set()
     droid_population = None
+    droid_stats_population = None
+    droid_stats_episode_indices = None
     if dataset_name == "DROID":
-        droid_population = resolve_lerobot_v3_data_population(dataset_dir)
+        info = parse_info_json(dataset_dir)
+        droid_population = resolve_lerobot_v3_data_population(dataset_dir, info=info)
         _, excluded_episode_indices = load_droid_prompt_exclusions(
             dataset_dir,
             population=droid_population,
         )
+        selected, droid_stats_population = resolve_droid_stats_population(
+            droid_population,
+            info,
+            excluded_episode_indices,
+            split=split,
+        )
+        droid_stats_episode_indices = selected["episode_index"].to_numpy(dtype=np.int64, copy=False)
         shard_inputs = list(droid_population.shards)
         logger.info("%s: scanning %d manifest-addressed data shards", dataset_name, len(shard_inputs))
     else:
@@ -172,12 +192,11 @@ def compute_dataset_stats(dataset_dir: Path, dataset_name: str, rot6d_identity: 
         if droid_population is not None:
             columns = list(dict.fromkeys(["episode_index", *spec["state_cols"], *spec["action_cols"]]))
             table = read_lerobot_v3_population_shard(dataset_dir, shard_input, columns)
-            if excluded_episode_indices:
-                episode_indices = table.column("episode_index").combine_chunks().to_numpy(zero_copy_only=False)
-                keep = ~np.isin(episode_indices, list(excluded_episode_indices))
-                if not keep.any():
-                    continue
-                table = table.filter(pa.array(keep))
+            episode_indices = table.column("episode_index").combine_chunks().to_numpy(zero_copy_only=False)
+            keep = np.isin(episode_indices, droid_stats_episode_indices)
+            if not keep.any():
+                continue
+            table = table.filter(pa.array(keep))
             state_rows = _table_rows(table, spec["state_cols"])
             action_rows = _table_rows(table, spec["action_cols"])
         else:
@@ -235,8 +254,14 @@ def compute_dataset_stats(dataset_dir: Path, dataset_name: str, rot6d_identity: 
         "q99": np.quantile(merged, 0.99, axis=0).astype(np.float64).tolist(),
     }
     if dataset_name == "DROID":
+        if n_state != droid_stats_population["num_rows"] or n_action != droid_stats_population["num_rows"]:
+            raise ValueError(
+                f"DROID stats scan selected {n_state} state/{n_action} action rows but the "
+                f"effective train population declares {droid_stats_population['num_rows']} rows"
+            )
         stats["excluded_episode_indices"] = sorted(excluded_episode_indices)
         stats[DROID_DATA_POPULATION_DIGEST_KEY] = digest_lerobot_v3_data_population(droid_population)
+        stats[DROID_STATS_POPULATION_KEY] = droid_stats_population
     if rot6d_identity:
 
         pin_rot6d_identity(stats, ROT6D_DIMS_ARM10)
@@ -289,6 +314,11 @@ def main():
         help="Compute and print stats but do not write meta/eef_stats.json",
     )
     parser.add_argument(
+        "--split",
+        default="train",
+        help="info.json split used for DROID normalization statistics (default: train)",
+    )
+    parser.add_argument(
         "--no-rot6d-identity",
         action="store_true",
         help="Disable pinning rot6d stats to identity (rot6d would then be per-dim normalized "
@@ -307,7 +337,12 @@ def main():
         if not ds_dir.is_dir():
             logger.warning("%s: directory %s missing, skipping", name, ds_dir)
             continue
-        stats, n_state, n_action = compute_dataset_stats(ds_dir, name, rot6d_identity=not args.no_rot6d_identity)
+        stats, n_state, n_action = compute_dataset_stats(
+            ds_dir,
+            name,
+            rot6d_identity=not args.no_rot6d_identity,
+            split=args.split,
+        )
         _print_stats_table(stats, name)
         if not args.dry_run:
             out_path = ds_dir / "meta" / "eef_stats.json"

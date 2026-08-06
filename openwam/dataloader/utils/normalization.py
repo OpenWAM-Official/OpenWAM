@@ -153,6 +153,7 @@ def materialize_eef_stats(
     dim: int,
     strict_minmax: bool,
     source_hint: str = "",
+    force_rot6d_identity: bool = False,
 ) -> dict:
     """Validate + materialize an in-reader normalization stats dict.
 
@@ -173,6 +174,10 @@ def materialize_eef_stats(
             ``_load_eef_stats`` behavior). When False, fall back to neutral
             defaults (preserves RoboCOIN ``_load_stats`` behavior).
         source_hint: appended to the missing-field error for actionable guidance.
+        force_rot6d_identity: pin the canonical rot6d slots to identity at load
+            time. Readers whose action contract forbids rot6d normalization set
+            this even though current generators already emit pinned files; this
+            makes the loader safe against stale or hand-edited stats.
     """
     required = ("min", "max")
     if mode == "z-score":
@@ -197,11 +202,15 @@ def materialize_eef_stats(
         "q99": np.array(raw.get("q99", [1.0] * dim), dtype=np.float32),
     }
 
-    # Stale-stats guard: the rot6d identity pin happens at stats-GENERATION time,
+    rot6d_dims = _ROT6D_DIMS_BY_WIDTH.get(dim)
+    if force_rot6d_identity and rot6d_dims is not None:
+        pin_rot6d_identity(out, rot6d_dims)
+
+    # Stale-stats guard: the rot6d identity pin normally happens at
+    # stats-GENERATION time,
     # so a stats file written by a pre-pin script silently keeps the distorted
     # per-dim rot6d normalization. Warn (don't raise — --no-rot6d-identity is a
     # legitimate escape hatch) when the mode-relevant fields aren't identity.
-    rot6d_dims = _ROT6D_DIMS_BY_WIDTH.get(dim)
     fields = _MODE_IDENTITY_FIELDS.get(mode)
     if rot6d_dims is not None and fields is not None:
         idx = list(rot6d_dims)

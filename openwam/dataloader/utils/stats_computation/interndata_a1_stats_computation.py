@@ -83,11 +83,13 @@ import pyarrow.parquet as pq
 from openwam.dataloader.interndata_a1 import (
     _BIMANUAL_SIDES,
     _SINGLE_ARM_SIDES,
+    _assert_trim_snapshot_current,
 
 
-    _load_trim_spec,
+    _load_trim_snapshot,
     detect_arm_layout,
     discover_a1_buckets,
+    effective_a1_population_provenance,
     embodiment_key,
     iter_data_shards,
     load_excluded_episodes,
@@ -97,6 +99,11 @@ from openwam.dataloader.interndata_a1 import (
     validate_manifest_ranges,
 )
 from openwam.dataloader.utils.eef import ARM10_DIM, quat_wxyz_to_rot6d
+from openwam.dataloader.utils.lerobotv3 import (
+    apply_info_splits,
+    load_episodes_parquet,
+    parse_info_json,
+)
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
@@ -155,13 +162,22 @@ def _bucket_info(bucket: Path) -> Tuple[str, str, str]:
 
 def classify_buckets(buckets: Sequence[Path]) -> Dict[str, Dict]:
     """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+
     groups: Dict[str, Dict] = {}
     for b in buckets:
         try:
             emb, robot_type, layout = _bucket_info(b)
         except Exception as e:
-            logger.warning("skipping %s (unreadable meta/info.json: %s)", b, e)
-            continue
+            raise RuntimeError(
+                f"Refusing to compute partial InternData-A1 stats: discovered bucket {b} "
+                f"has unreadable meta/info.json ({type(e).__name__}: {e})"
+            ) from e
         g = groups.setdefault(emb, {"robot_type": robot_type, "arm_layout": layout, "dirs": []})
         g["dirs"].append(b)
     return groups
@@ -342,7 +358,7 @@ def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
     return mask
 
 
-def _scan_bucket(args) -> Tuple[str, np.ndarray, bool]:
+def _scan_bucket(args) -> Tuple[str, np.ndarray, bool, dict]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -387,19 +403,33 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray, bool]:
 
 
     trim = None
+    trim_snapshot = None
     if trim_csv:
-        spec = _load_trim_spec(trim_csv)
-        key = resolve_bucket_key(spec, dataset_id or bucket.name, bucket,
+        trim_snapshot = _load_trim_snapshot(trim_csv)
+        key = resolve_bucket_key(trim_snapshot.spec, dataset_id or bucket.name, bucket,
                                  what="trim_csv", source=f"stats({dataset_id})")
-        trim = spec.get(key) if key is not None else None
-    kept = _kept_episodes(bucket) if (trim_csv or (bucket / "meta" / "episodes").is_dir()) else None
+        trim = trim_snapshot.spec.get(key) if key is not None else None
 
 
 
-    if split:
-        in_split = _split_episodes(bucket, split)
-        if in_split is not None:
-            kept = in_split if kept is None else (kept & in_split)
+
+
+    manifest = load_episodes_parquet(bucket)
+    info = parse_info_json(bucket)
+    selected = apply_info_splits(
+        manifest,
+        split,
+        info.get("splits", {}) or {},
+        source_name=f"InternDataA1 stats({dataset_id or bucket.name})",
+    )
+    excluded_snapshot = tuple(sorted(load_excluded_episodes(bucket)))
+    if excluded_snapshot:
+        selected = selected[~selected["episode_index"].isin(excluded_snapshot)].reset_index(drop=True)
+    kept = set(int(ep) for ep in selected["episode_index"].to_numpy())
+    bucket_provenance = {
+        "excluded_episode_indices": list(excluded_snapshot),
+        "effective_population": effective_a1_population_provenance(selected, trim, min_len),
+    }
     need_ep = bool(trim) or kept is not None
 
 
@@ -466,7 +496,15 @@ def _scan_bucket(args) -> Tuple[str, np.ndarray, bool]:
             "split — pooling this as an empty population would let its reader load another "
             "bucket's statistics and read another episode's rows."
         )
-    return bucket_str, out, bool(population_empty)
+    current_exclusions = tuple(sorted(load_excluded_episodes(bucket)))
+    if current_exclusions != excluded_snapshot:
+        raise ValueError(
+            f"{bucket}: excluded_episodes.json changed during stats scan; "
+            f"expected {list(excluded_snapshot)}, got {list(current_exclusions)}"
+        )
+    if trim_snapshot is not None:
+        _assert_trim_snapshot_current(trim_snapshot, context=f"stats scan for {dataset_id or bucket.name}")
+    return bucket_str, out, bool(population_empty), bucket_provenance
 
 
 def compute_stats_for_embodiment(
@@ -514,15 +552,15 @@ def compute_stats_for_embodiment(
     if trim_csv and root is None:
         logger.warning("trim_csv given without a root; bucket ids are ambiguous, not trimming.")
         trim_csv = None
+    trim_snapshot = _load_trim_snapshot(trim_csv) if trim_csv else None
     tasks = [(str(d), layout, embodiment, _rel_id(d), trim_csv, min_len, split) for d in dirs]
-
-
-
 
 
 
     scanned_buckets: List[str] = []
     empty_buckets: List[str] = []
+    bucket_provenance: Dict[str, dict] = {}
+    scan_failures: List[Tuple[str, str]] = []
     with ProcessPoolExecutor(max_workers=min(workers, max(1, len(tasks)))) as pool:
         futures = {pool.submit(_scan_bucket, t): t[0] for t in tasks}
 
@@ -539,9 +577,11 @@ def compute_stats_for_embodiment(
         for i, fut in enumerate(futures, 1):
             name = futures[fut]
             try:
-                _, rows, population_empty = fut.result()
+                _, rows, population_empty, provenance = fut.result()
             except Exception as e:
-                logger.warning("  [%s] skipping %s (%s)", embodiment, name, e)
+                rel_id = _rel_id(Path(name))
+                scan_failures.append((rel_id, f"{type(e).__name__}: {e}"))
+                logger.error("  [%s] failed %s (%s)", embodiment, name, e)
                 continue
             if not len(rows):
 
@@ -550,27 +590,41 @@ def compute_stats_for_embodiment(
 
 
                 if not population_empty:
-                    logger.warning(
-                        "  [%s] %s produced 0 rows without an empty population; not covered",
-                        embodiment, name)
+                    rel_id = _rel_id(Path(name))
+                    message = "produced 0 rows without an empty-by-construction population"
+                    scan_failures.append((rel_id, message))
+                    logger.error("  [%s] %s %s", embodiment, name, message)
                     continue
                 logger.info("  [%s] %s has no %s rows (val-only?)", embodiment, name, split)
-                empty_buckets.append(_rel_id(Path(name)))
+                rel_id = _rel_id(Path(name))
+                empty_buckets.append(rel_id)
+                bucket_provenance[rel_id] = provenance
                 continue
-            scanned_buckets.append(_rel_id(Path(name)))
+            rel_id = _rel_id(Path(name))
+            scanned_buckets.append(rel_id)
+            bucket_provenance[rel_id] = provenance
             acc.update_batch(rows)
             n_rows += len(rows)
             n_ok += 1
             if i % 20 == 0 or i == len(tasks):
                 logger.info("  [%s] %d/%d buckets, %d rows", embodiment, i, len(tasks), n_rows)
 
+    if scan_failures:
+        details = "; ".join(f"{bucket}: {error}" for bucket, error in scan_failures)
+        raise RuntimeError(
+            f"Refusing to write partial InternData-A1 stats for embodiment {embodiment!r}: "
+            f"{len(scan_failures)} non-empty bucket scan(s) failed: {details}"
+        )
     if n_rows == 0:
         raise RuntimeError(f"embodiment {embodiment!r}: every bucket yielded 0 rows")
 
     population = {
+        "schema_version": 2,
         "split": split,
         "trim_active": bool(trim_csv),
         "min_keep": int(min_len),
+        "trim_provenance": trim_snapshot.provenance if trim_snapshot is not None else None,
+        "bucket_provenance": {key: bucket_provenance[key] for key in sorted(bucket_provenance)},
         "buckets": sorted(scanned_buckets),
 
 
@@ -579,6 +633,8 @@ def compute_stats_for_embodiment(
 
         "empty_buckets": sorted(empty_buckets),
     }
+    if trim_snapshot is not None:
+        _assert_trim_snapshot_current(trim_snapshot, context=f"stats scan for embodiment {embodiment}")
 
     stats = acc.finalize()
     if rot6d_identity:
@@ -597,14 +653,6 @@ def compute_stats_for_embodiment(
         "embodiment": embodiment,
         "num_buckets": n_ok,
         "num_rows": int(n_rows),
-
-
-
-
-
-
-
-
 
 
 
@@ -686,11 +734,14 @@ def main():
 
 
 
+
+
+
     stats_root = Path(args.stats_root) if args.stats_root else root
     out_dir = stats_root / "meta"
-    out_dir.mkdir(parents=True, exist_ok=True)
     if stats_root != root:
         logger.info("writing stats to %s (dataset root %s left untouched)", out_dir, root)
+    results = {}
     for emb in sorted(groups):
         logger.info("=== %s (%d buckets) ===", emb, len(groups[emb]["dirs"]))
         result = compute_stats_for_embodiment(
@@ -708,6 +759,11 @@ def main():
 
         result["trim_csv"] = args.trim_csv
         result["trim_min_keep"] = args.min_keep if args.trim_csv else None
+        results[emb] = result
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for emb in sorted(results):
+        result = results[emb]
         out = out_dir / f"stats_{emb}.json"
 
 

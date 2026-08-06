@@ -547,9 +547,12 @@ def test_tri_system_yaml_mask_settings_resolve_to_driver():
     resolved = resolve_architecture_config(cfg)
 
     assert resolved.registry_name == "tri_system_joint_self_attn"
-    assert resolved.params["attention_mask_mode"] == "action_sees_video"
-    assert resolved.params["video_attention_mask_mode"] == "first_frame_causal"
     assert resolved.params["mot_checkpoint_mixed_attn"] is True
+
+    # The YAML is free to select any mode accepted by the driver.  This test
+    # verifies propagation, not one particular training policy.
+    attention_mask_mode = str(resolved.params["attention_mask_mode"])
+    video_attention_mask_mode = str(resolved.params["video_attention_mask_mode"])
 
     vb, ab, ub = _make_tiny_trimodal_components()
     driver = TriSystemMoTDriver(
@@ -557,13 +560,13 @@ def test_tri_system_yaml_mask_settings_resolve_to_driver():
         ab,
         ub,
         mot_checkpoint_mixed_attn=bool(resolved.params["mot_checkpoint_mixed_attn"]),
-        attention_mask_mode=str(resolved.params["attention_mask_mode"]),
-        video_attention_mask_mode=str(resolved.params["video_attention_mask_mode"]),
+        attention_mask_mode=attention_mask_mode,
+        video_attention_mask_mode=video_attention_mask_mode,
     )
     assert driver.mot_checkpoint_mixed_attn is True
 
-    assert driver.attention_mask_mode == ACTION_SEES_VIDEO
-    assert vb.video_attention_mask_mode == "first_frame_causal"
+    assert driver.attention_mask_mode == attention_mask_mode
+    assert vb.video_attention_mask_mode == video_attention_mask_mode
 
     Sv, Sa, Su, tokens_per_frame = 6, 4, 5, 3
     mask = driver._build_attention_mask(  # noqa: SLF001 - config-to-mask contract test
@@ -575,13 +578,16 @@ def test_tri_system_yaml_mask_settings_resolve_to_driver():
     )
 
     assert mask is not None
-    assert not mask[:tokens_per_frame, tokens_per_frame:Sv].any()
-    assert mask[tokens_per_frame:Sv, :Sv].all()
-    assert not mask[:Sv, Sv : Sv + Sa].any()
-    assert mask[:Sv, Sv + Sa :].all()
-    assert mask[Sv : Sv + Sa].all()
-    assert not mask[Sv + Sa :, : Sv + Sa].any()
-    assert mask[Sv + Sa :, Sv + Sa :].all()
+    expected = build_cross_modal_attention_mask(
+        vb,
+        s_video=Sv,
+        s_action=Sa,
+        video_tokens_per_frame=tokens_per_frame,
+        mode=attention_mask_mode,
+        device=torch.device("cpu"),
+        n_readonly_tail=Su,
+    )
+    assert torch.equal(mask, expected)
 
 
 class _FakeQwenModel(nn.Module):

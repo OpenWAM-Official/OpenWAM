@@ -108,6 +108,9 @@ DROID_PROMPT_INDEPENDENT_EXCLUSIONS_KEY = "independently_owned_episode_indices"
 DROID_PROMPT_INPUTS_DIGEST_KEY = "prompt_inputs_digest"
 DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION = 2
 DROID_DATA_POPULATION_DIGEST_KEY = "data_population_digest"
+DROID_STATS_POPULATION_KEY = "stats_population"
+DROID_STATS_POPULATION_SCHEMA_VERSION = 1
+DROID_STATS_POPULATION_POLICY = "info_split_then_prompt_exclusion"
 DROID_PROMPT_FALLBACK_COLS = (
     "other_information.language_instruction_2",
     "other_information.language_instruction_3",
@@ -154,6 +157,60 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def resolve_droid_stats_population(
+    population: LeRobotV3DataPopulation,
+    info: dict,
+    excluded_episode_indices,
+    *,
+    split: str = "train",
+) -> tuple[pd.DataFrame, dict]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+    selected = apply_info_splits(
+        population.episodes,
+        split,
+        info.get("splits", {}) or {},
+        source_name="OXE-DROID normalization stats",
+    )
+    excluded = set(int(value) for value in excluded_episode_indices)
+    if excluded:
+        selected = selected[~selected["episode_index"].isin(excluded)].reset_index(drop=True)
+
+    required = (
+        "episode_index",
+        "dataset_from_index",
+        "length",
+        "data/chunk_index",
+        "data/file_index",
+        "_data_row_offset",
+    )
+    missing = [column for column in required if column not in selected.columns]
+    if missing:
+        raise ValueError(f"DROID stats population is missing manifest columns {missing}")
+
+    hasher = hashlib.sha256(b"openwam:droid-stats-population:v1\0")
+    ordered = selected.sort_values("episode_index", kind="stable")
+    for row in ordered.loc[:, required].itertuples(index=False, name=None):
+        for value in row:
+            integer = int(value)
+            if integer < 0:
+                raise ValueError("DROID stats population manifest values must be non-negative")
+            hasher.update(integer.to_bytes(8, "little", signed=False))
+    provenance = {
+        "schema_version": DROID_STATS_POPULATION_SCHEMA_VERSION,
+        "split": split,
+        "policy": DROID_STATS_POPULATION_POLICY,
+        "effective_population_digest": hasher.hexdigest(),
+        "num_episodes": int(len(ordered)),
+        "num_rows": int(ordered["length"].sum()),
+    }
+    return selected, provenance
 
 
 def read_droid_prompt_population_shard(
@@ -431,6 +488,12 @@ class OxeDroidDataset(LeRobotV3Reader):
             population=population,
         )
         self._droid_data_population_digest = digest_lerobot_v3_data_population(population)
+        _, self._droid_stats_population = resolve_droid_stats_population(
+            population,
+            info,
+            self._droid_excluded_episode_indices,
+            split="train",
+        )
         eps = population.episodes.copy()
         self._add_episode_offsets(eps)
         info_splits = info.get("splits", {}) or {}
@@ -458,6 +521,7 @@ class OxeDroidDataset(LeRobotV3Reader):
                 "excluded_episode_indices",
             )
             stats_population_digest = raw[DROID_DATA_POPULATION_DIGEST_KEY]
+            stats_population = raw[DROID_STATS_POPULATION_KEY]
             if (
                 not isinstance(stats_population_digest, str)
                 or re.fullmatch(r"[0-9a-f]{64}", stats_population_digest) is None
@@ -478,13 +542,20 @@ class OxeDroidDataset(LeRobotV3Reader):
                 f"{stats_path} {DROID_DATA_POPULATION_DIGEST_KEY} does not match the current data manifest. "
                 "Re-run oxe_stats_computation for DROID."
             )
-        return materialize_eef_stats(
+        if stats_population != self._droid_stats_population:
+            raise ValueError(
+                f"{stats_path} {DROID_STATS_POPULATION_KEY} does not match the current train "
+                "split/exclusion population. Re-run oxe_stats_computation for DROID."
+            )
+        stats = materialize_eef_stats(
             raw,
             self._normalize_mode,
             dim=self.STATS_DIM,
             strict_minmax=self.STATS_STRICT_MINMAX,
             source_hint=str(stats_path),
+            force_rot6d_identity=True,
         )
+        return stats
 
     def _resolve_prompt(self, row, win: pd.DataFrame) -> str:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -537,9 +608,13 @@ __all__ = [
     "DROID_PROMPT_INPUTS_DIGEST_FORMAT_VERSION",
     "DROID_PROMPT_INPUTS_DIGEST_KEY",
     "DROID_PROMPT_SOURCE_COLUMNS",
+    "DROID_STATS_POPULATION_KEY",
+    "DROID_STATS_POPULATION_POLICY",
+    "DROID_STATS_POPULATION_SCHEMA_VERSION",
     "OxeDroidDataset",
     "compute_droid_prompt_inputs_digest",
     "digest_droid_prompt_shard",
     "load_droid_prompt_exclusions",
     "read_droid_prompt_population_shard",
+    "resolve_droid_stats_population",
 ]

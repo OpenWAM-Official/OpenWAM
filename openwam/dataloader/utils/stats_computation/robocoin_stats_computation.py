@@ -79,7 +79,6 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from openwam.dataloader.robocoin import (
-    _TRIM_MIN_LEN,
     MAX_HAND_DOF,
     _assert_trim_snapshot_current,
     _discover_data_parquets,
@@ -87,13 +86,12 @@ from openwam.dataloader.robocoin import (
     _excluded_episodes_provenance,
     _finger_indices,
     _load_trim_snapshot,
-    _validate_trim_manifest,
+    _stats_population_spans,
     dex_finger_layout,
 )
 from openwam.dataloader.utils.lerobotv3 import (
     DataContractError,
     assert_excluded_episodes_snapshot_current,
-    load_episodes_parquet,
     load_excluded_episodes_snapshot,
     parse_info_json,
 )
@@ -287,53 +285,6 @@ def _classify_dataset(ds_dir: str, *, fail_closed: bool = False):
     return "other", None
 
 
-def _trimmed_global_spans(
-    ds_dir: str,
-    dataset_spec: dict,
-    excluded_episode_indices: tuple[int, ...],
-):
-    """Public implementation. Dataset-specific audit notes were removed."""
-    dataset_id = Path(ds_dir).name
-    manifest = load_episodes_parquet(Path(ds_dir))
-    trim_spans = _validate_trim_manifest(dataset_id, manifest, dataset_spec)
-    try:
-        episode_ids = [int(ep) for ep in manifest["episode_index"].to_numpy()]
-        starts = [int(start) for start in manifest["dataset_from_index"].to_numpy()]
-        lengths = [int(length) for length in manifest["length"].to_numpy()]
-    except (KeyError, TypeError, ValueError) as e:
-        raise DataContractError(
-            f"RoboCOIN({dataset_id}): full manifest must carry integer "
-            "episode_index, dataset_from_index, and length columns"
-        ) from e
-
-    excluded = set(excluded_episode_indices)
-    raw_spans = []
-    kept_spans = []
-    for episode_id, start, length in zip(episode_ids, starts, lengths):
-        if start < 0 or length < 0:
-            raise DataContractError(
-                f"RoboCOIN({dataset_id}): invalid manifest span for episode_index={episode_id}: "
-                f"dataset_from_index={start}, length={length}"
-            )
-        raw_spans.append((start, start + length, episode_id))
-        if episode_id in excluded:
-            continue
-        head, tail = trim_spans.get(episode_id, (0, length))
-        if tail - head >= _TRIM_MIN_LEN:
-            kept_spans.append((start + head, start + tail))
-
-    raw_spans.sort()
-    for previous, current in zip(raw_spans, raw_spans[1:]):
-        if current[0] < previous[1]:
-            raise DataContractError(
-                f"RoboCOIN({dataset_id}): overlapping global manifest spans for "
-                f"episode_index={previous[2]} and {current[2]}"
-            )
-    kept_spans.sort()
-    manifest_end = max((end for _, end, _ in raw_spans), default=0)
-    return kept_spans, manifest_end
-
-
 def _slice_file_to_global_spans(df, file_start: int, file_end: int, kept_spans):
     """Public implementation. Dataset-specific audit notes were removed."""
     pieces = []
@@ -357,9 +308,11 @@ def compute_stats_for_robot_type(
     rot6d_identity: bool = True,
     trim_csv=None,
     *,
+    split: str = "train",
     _trim_snapshot=None,
 ) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
+
 
 
 
@@ -386,6 +339,7 @@ def compute_stats_for_robot_type(
         trim_snapshot = _load_trim_snapshot(trim_csv)
     trim_spec = trim_snapshot.spec if trim_enabled else {}
     exclusion_snapshots = {}
+    population_datasets = {}
     acc = Accumulator(dim=20)
     total_files = 0
     grip_files = 0
@@ -480,11 +434,15 @@ def compute_stats_for_robot_type(
         kept_spans = None
         manifest_end = 0
         if trim_enabled:
-            kept_spans, manifest_end = _trimmed_global_spans(
+            kept_spans, manifest_end, population_entry = _stats_population_spans(
                 ds_dir,
-                trim_spec.get(dataset_id, {}),
-                exclusion_snapshot.episode_indices,
+                dataset_id=dataset_id,
+                dataset_spec=trim_spec.get(dataset_id, {}),
+                excluded_episode_indices=exclusion_snapshot.episode_indices,
+                split=split,
+                info=info,
             )
+            population_datasets[dataset_id] = population_entry
 
         file_entries = []
         physical_end = 0
@@ -593,6 +551,12 @@ def compute_stats_for_robot_type(
         hand["layout"] = "left_fingers + right_fingers"
         result["hand"] = hand
     if trim_enabled:
+        result["population"] = {
+            "schema_version": 2,
+            "split": split,
+            "policy": "info_split_then_exclusion_then_trim",
+            "datasets": dict(sorted(population_datasets.items())),
+        }
         result["trim_provenance"] = trim_snapshot.provenance
         result["excluded_episodes_provenance"] = _excluded_episodes_provenance(
             exclusion_snapshots
@@ -610,6 +574,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_dir", required=True)
     parser.add_argument("--robot_type", default=None, help="Compute stats for a single robot type only")
+    parser.add_argument(
+        "--split",
+        default="train",
+        help="info.json split used for normalization statistics (default: train)",
+    )
     parser.add_argument(
         "--trim_csv",
         default=None,
@@ -651,6 +620,7 @@ def main():
             ds_list,
             rot6d_identity=not args.no_rot6d_identity,
             trim_csv=args.trim_csv,
+            split=args.split,
             _trim_snapshot=trim_snapshot,
         )
         stats = result["eef"]

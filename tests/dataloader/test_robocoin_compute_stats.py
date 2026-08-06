@@ -16,12 +16,18 @@ import pytest
 
 from openwam.dataloader.robocoin import RoboCOINDataset
 from openwam.dataloader.utils.lerobotv3 import DataContractError
+from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
 from openwam.dataloader.utils.stats_computation import robocoin_stats_computation as stats_module
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
     Accumulator,
     compute_stats_for_robot_type,
 )
-from tests.dataloader.test_robocoin_trim import _make_bucket, _trim_row, _write_trim_csv
+from tests.dataloader.test_robocoin_trim import (
+    _make_bucket,
+    _set_info_splits,
+    _trim_row,
+    _write_trim_csv,
+)
 
 
 def _make_encoded_stats_bucket(tmp_path):
@@ -144,6 +150,42 @@ class TestTrimmedPopulationStats:
             "policy": "drop_matching_episode_index_before_trim",
             "datasets": {"bucket": {"episode_indices": []}},
         }
+        population = round_tripped["population"]
+        assert {key: population[key] for key in ("schema_version", "split", "policy")} == {
+            "schema_version": 2,
+            "split": "train",
+            "policy": "info_split_then_exclusion_then_trim",
+        }
+        assert population["datasets"]["bucket"]["num_episodes"] == 1
+        assert population["datasets"]["bucket"]["num_rows"] == 6
+        assert len(population["datasets"]["bucket"]["effective_population_digest"]) == 64
+
+    def test_stats_apply_train_split_before_exclusion_and_trim(self, tmp_path):
+        root = tmp_path / "root"
+        bucket = _make_bucket(root / "bucket", [10, 10])
+        _set_info_splits(bucket, {"train": "0:1", "val": "1:2"})
+        data_path = bucket / "data" / "chunk-000" / "file-000.parquet"
+        df = pd.read_parquet(data_path)
+        encoded = np.array([100, 100, 2, 3, 4, 5, 6, 7, 100, 100] + [999] * 10, dtype=np.float32)
+        for column in ("eef_sim_pose_action", "eef_sim_pose_state"):
+            values = np.stack(df[column].values).astype(np.float32)
+            values[:, 0] = encoded
+            df[column] = list(values)
+        df.to_parquet(data_path, index=False)
+
+        result = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket)],
+            rot6d_identity=False,
+            trim_csv=str(_make_trim_csv(tmp_path)),
+            split="train",
+        )
+
+        # Six kept train rows, pooled from action and state.  The val episode's
+        # sentinel value must not enter any statistic.
+        assert result["eef"]["num_timesteps"] == 12
+        assert result["eef"]["min"][0] == pytest.approx(2.0)
+        assert result["eef"]["max"][0] == pytest.approx(7.0)
 
     def test_stats_exclude_blacklisted_episode_and_serialize_population(self, tmp_path):
         root = tmp_path / "root"
@@ -331,6 +373,11 @@ class TestReaderTrimStatsProvenance:
         )
         assert reader._eps_df["length"].tolist() == [6]
         assert reader._normalization_stats is not None
+        dims = list(ROT6D_DIMS_EEF20)
+        np.testing.assert_array_equal(reader._normalization_stats["mean"][dims], 0.0)
+        np.testing.assert_array_equal(reader._normalization_stats["std"][dims], 1.0)
+        np.testing.assert_array_equal(reader._normalization_stats["min"][dims], -1.0)
+        np.testing.assert_array_equal(reader._normalization_stats["max"][dims], 1.0)
 
     def test_missing_exclusion_provenance_is_rejected(self, trimmed_stats_case):
         root, bucket, trim_csv, result = trimmed_stats_case
@@ -341,6 +388,67 @@ class TestReaderTrimStatsProvenance:
         with pytest.raises(DataContractError, match="excluded_episodes_provenance"):
             RoboCOINDataset(
                 dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_non_train_stats_population_is_rejected(self, trimmed_stats_case):
+        root, bucket, trim_csv, result = trimmed_stats_case
+        result["population"]["split"] = "val"
+        _write_stats(root, result)
+
+        with pytest.raises(DataContractError, match="train-derived"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_info_split_drift_after_stats_is_rejected(self, tmp_path):
+        root = tmp_path / "root"
+        bucket = _make_bucket(root / "bucket", [10, 10])
+        trim_csv = _make_trim_csv(tmp_path)
+        result = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket)],
+            rot6d_identity=False,
+            trim_csv=str(trim_csv),
+            split="train",
+        )
+        _write_stats(root, result)
+
+        # The generated stats covered both episodes. Narrowing train afterwards
+        # must invalidate the stored physical-span digest even though the
+        # top-level label still truthfully says "train".
+        _set_info_splits(bucket, {"train": "0:1", "val": "1:2"})
+        with pytest.raises(DataContractError, match="effective train population"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="min-max",
+                trim_csv=str(trim_csv),
+            )
+
+    def test_sibling_info_split_drift_invalidates_pooled_stats(self, tmp_path):
+        root = tmp_path / "root"
+        bucket_a = _make_bucket(root / "bucket-a", [10])
+        bucket_b = _make_bucket(root / "bucket-b", [10, 10])
+        trim_csv = _write_trim_csv(
+            tmp_path / "trim.csv",
+            [_trim_row(dataset="bucket-a")],
+        )
+        result = compute_stats_for_robot_type(
+            "test_robot",
+            [str(bucket_a), str(bucket_b)],
+            rot6d_identity=False,
+            trim_csv=str(trim_csv),
+            split="train",
+        )
+        _write_stats(root, result)
+
+        _set_info_splits(bucket_b, {"train": "0:1", "val": "1:2"})
+        with pytest.raises(DataContractError, match="contributor 'bucket-b'.*no longer matches"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket_a),
                 normalize_mode="min-max",
                 trim_csv=str(trim_csv),
             )

@@ -2,7 +2,7 @@
 
 Both :class:`~openwam.dataloader.robocoin.MultiRobotCOINDataset` (355
 RoboCOIN per-task buckets across 10 robot types) and
-:class:`~openwam.dataloader.egodex.MultiBucketEgoDexDataset` (118 EgoDex
+:class:`~openwam.dataloader.deprecated.egodex.MultiBucketEgoDexDataset` (118 EgoDex
 per-task buckets) follow the same pattern: collect N homogeneous sub-readers
 ("buckets"), expose ``len = Σ len(b_i)``, and dispatch ``__getitem__(idx)``
 to the right bucket via binary search over cumulative lengths.

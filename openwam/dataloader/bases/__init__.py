@@ -8,13 +8,13 @@ Three classes live here:
 - ``LeRobotV3Reader`` — unified single-bucket LeRobot v3 reader base.
   Direct parent of all 4 OXE readers (BC-Z / Bridge / Fractal / DROID),
   :class:`~openwam.dataloader.robocoin.RoboCOINDataset`, and
-  :class:`~openwam.dataloader.egodex.EgoDexDataset` — equal siblings, no
+  :class:`~openwam.dataloader.deprecated.egodex.EgoDexDataset` — equal siblings, no
   per-family intermediate base.
 
 - ``MultiLeRobotV3Reader`` — concrete base for the "aggregate N homogeneous
   LeRobot v3 buckets into one Dataset" pattern. Subclassed by
   :class:`~openwam.dataloader.robocoin.MultiRobotCOINDataset` and
-  :class:`~openwam.dataloader.egodex.MultiBucketEgoDexDataset`.
+  :class:`~openwam.dataloader.deprecated.egodex.MultiBucketEgoDexDataset`.
 
 All are re-exported here so callers can ``from openwam.dataloader.bases
 import BaseDataset, LeRobotV3Reader, MultiLeRobotV3Reader`` without caring

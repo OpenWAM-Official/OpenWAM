@@ -32,7 +32,7 @@ architecture:
   framework: dual_system
   variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm (idm = Wan only)
   # action_dim/state_dim default 80 (unified cross-robot action space, unify_action=true).
-  # For dataloaders shipping unify_action=false (robotwin, oxe_bcz/bridge/fractal)
+  # For dataloaders shipping unify_action=false (robotwin and deprecated OXE variants)
   # override both to the raw width: robotwin action_mode=eef (20D) → 20; action_mode=joint (14D qpos) → 14.
   action_dim: 80
 

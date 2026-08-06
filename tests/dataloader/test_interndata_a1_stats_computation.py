@@ -38,6 +38,7 @@ from openwam.dataloader.interndata_a1 import (
     InternDataA1Dataset,
     resolve_gripper_scale,
 )
+from openwam.dataloader.utils.lerobotv3 import DataContractError
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 from tests.dataloader.test_interndata_a1 import _make_bucket
@@ -281,7 +282,7 @@ class TestMergeDeterminism:
 
         ref = small(dim=a1s.EEF20_DIM)
         for d in dirs:  # same fixed order the script must use
-            _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+            _, rows, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
             ref.update_batch(rows)
         expected = ref.finalize()
         for key in ("mean", "std", "min", "max", "q01", "q99"):
@@ -343,25 +344,22 @@ class TestClassifyBuckets:
         assert groups["franka"]["arm_layout"] == "single_arm"
         assert groups["split_aloha"]["arm_layout"] == "bimanual"
 
-    def test_one_unreadable_bucket_does_not_abort_the_scan(self, tmp_path, caplog):
-        good = _make_bucket(tmp_path, "cat/split_aloha/good")
+    def test_one_unreadable_bucket_aborts_classification(self, tmp_path):
+        _make_bucket(tmp_path, "cat/split_aloha/good")
         bad = tmp_path / "cat" / "split_aloha" / "bad"
         (bad / "meta").mkdir(parents=True)
         (bad / "meta" / "info.json").write_text("{ not json")
-        with caplog.at_level("WARNING"):
-            groups = a1s.classify_buckets(a1s.discover_a1_buckets(tmp_path))
-        assert groups["split_aloha"]["dirs"] == [good]
-        assert "unreadable meta/info.json" in caplog.text
+        with pytest.raises(RuntimeError, match="Refusing to compute partial.*unreadable meta/info.json"):
+            a1s.classify_buckets(a1s.discover_a1_buckets(tmp_path))
 
-    def test_empty_embodiment_raises_rather_than_writing_a_degenerate_file(self, tmp_path, inline_pool):
-        """Every bucket yielding 0 rows must fail loudly: the Accumulator would
-        otherwise finalize to min=+inf/max=-inf and poison every training run."""
+    def test_nonempty_manifest_with_zero_physical_rows_fails_closed(self, tmp_path, inline_pool):
+        """A corrupt non-empty bucket must not become a degenerate stats file."""
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=1)
         pq.write_table(
             pq.read_table(d / "data" / "chunk-000" / "file-000.parquet").slice(0, 0),
             d / "data" / "chunk-000" / "file-000.parquet",
         )
-        with pytest.raises(RuntimeError, match="every bucket yielded 0 rows"):
+        with pytest.raises(RuntimeError, match="Refusing to write partial.*non-empty bucket"):
             a1s.compute_stats_for_embodiment("split_aloha", _group([d], "bimanual", "AgileX Split Aloha"))
 
 
@@ -369,7 +367,7 @@ def test_scan_bucket_reads_action_and_state_rows(tmp_path):
     """Both streams are pooled — actions[t] == states[t+1], the same signal
     offset by one row — so the row count is 2x the parquet length."""
     d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
-    name, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+    name, rows, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
     assert name == str(d)
     assert rows.shape == (2 * 40, a1s.EEF20_DIM)
     assert rows.dtype == np.float32
@@ -377,7 +375,7 @@ def test_scan_bucket_reads_action_and_state_rows(tmp_path):
 
 def test_scan_bucket_of_a_single_arm_leaves_the_right_half_zero(tmp_path):
     d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
-    _, rows, _ = a1s._scan_bucket((str(d), "single_arm", "franka"))
+    _, rows, _, _ = a1s._scan_bucket((str(d), "single_arm", "franka"))
     np.testing.assert_array_equal(rows[:, 10:], 0.0)
     assert np.abs(rows[:, :10]).sum() > 0
 
@@ -407,7 +405,7 @@ class TestCleanedViewFiltering:
     def test_excluded_episodes_are_dropped_from_the_scan(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
         (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0]}))
-        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
+        _, rows, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
         assert rows.shape[0] == 2 * 20  # only episode 1, both streams
 
     def test_an_empty_kept_set_excludes_everything(self, tmp_path):
@@ -417,7 +415,7 @@ class TestCleanedViewFiltering:
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=20)
         (d / "meta" / "excluded_episodes.json").write_text(json.dumps({"episode_indices": [0, 1]}))
         assert a1s._kept_episodes(d) == set()
-        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
+        _, rows, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", None))
         assert rows.shape[0] == 0
 
     def test_kept_episodes_is_none_only_when_the_manifest_is_unreadable(self, tmp_path):
@@ -435,19 +433,19 @@ class TestStatsTrimMatchesReader:
     def test_a_too_short_trim_is_left_whole_like_the_reader_does(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=4)
         trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,4,3,\n")  # leaves 1 < min_len 2
-        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        _, rows, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
         assert rows.shape[0] == 2 * 4, "stats trimmed an episode the reader keeps whole"
 
     def test_a_valid_trim_is_applied(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=20)
         trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,20,4,18\n")
-        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        _, rows, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
         assert rows.shape[0] == 2 * 14  # 18 - 4
 
     def test_a_stale_total_frames_disables_the_entry(self, tmp_path):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=1, ep_len=20)
         trim = _trim_file(tmp_path / "trim.csv", "cat/emb/task,0,999,4,18\n")
-        _, rows, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
+        _, rows, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/task", trim, 2))
         assert rows.shape[0] == 2 * 20
 
 
@@ -510,17 +508,69 @@ class TestDirectBucketParity:
         assert "." not in res["scanned_buckets"], "direct-bucket key leaked as '.'"
         assert res["scanned_buckets"] == ["task"]
 
+    def test_reader_rejects_stats_after_trim_csv_content_changes(self, tmp_path, monkeypatch):
+        d, trim = self._setup(tmp_path)
+        out = tmp_path / "stats"
+        self._run(monkeypatch, d, trim, out)
 
-class TestCoverageOnlyAfterSuccess:
-    """A bucket that failed to scan must not appear in `exclusions`.
+        # Keep the same path and bucket key, but change the effective span after
+        # the stats were generated.  A path-only or trim-enabled boolean check
+        # would accept the stale normalizer.
+        trim.write_text(
+            "dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
+            "task,1,40,5,30\n"
+        )
+        with pytest.raises(DataContractError, match="trim provenance"):
+            InternDataA1Dataset(
+                str(d), a1_stats_root=str(out), trim_csv=str(trim),
+                normalize_mode="quantile", num_frames=9, video_stride=4,
+            )
 
-    The loader reads a resolvable entry there as proof that these statistics
-    covered that bucket. Building the map up front listed skipped buckets too,
-    so a bucket that raised — contributing no rows at all — still had its reader
-    accept the file.
-    """
+    def test_reader_rejects_stats_after_exclusions_change(self, tmp_path, monkeypatch):
+        d, trim = self._setup(tmp_path)
+        out = tmp_path / "stats"
+        self._run(monkeypatch, d, trim, out)
 
-    def test_a_failed_bucket_is_absent_from_coverage(self, tmp_path):
+        # The old stats exclude episode 0.  Removing that exclusion changes the
+        # population without changing the shared stats path or trim artifact.
+        (d / "meta" / "excluded_episodes.json").write_text(
+            json.dumps({"episode_indices": []})
+        )
+        with pytest.raises(DataContractError, match="excluded_episodes.json changed"):
+            InternDataA1Dataset(
+                str(d), a1_stats_root=str(out), trim_csv=str(trim),
+                normalize_mode="quantile", num_frames=9, video_stride=4,
+            )
+
+    def test_capped_reader_still_checks_the_full_train_population(self, tmp_path, monkeypatch):
+        d = _make_bucket(tmp_path, "cat/emb/task", n_eps=3, ep_len=40)
+        trim = tmp_path / "trim.csv"
+        trim.write_text(
+            "dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
+            "task,1,40,5,30\n"
+        )
+        out = tmp_path / "stats"
+        self._run(monkeypatch, d, trim, out)
+
+        # Narrow the train split after stats generation. max_hours is applied
+        # only after A1 captures its full pre-subsample train certificate, so it
+        # must not exempt this reader from the population check.
+        info_path = d / "meta" / "info.json"
+        info = json.loads(info_path.read_text())
+        info["splits"] = {"train": "0:2", "val": "2:3"}
+        info_path.write_text(json.dumps(info))
+        with pytest.raises(DataContractError, match="effective.*population changed"):
+            InternDataA1Dataset(
+                str(d), a1_stats_root=str(out), trim_csv=str(trim),
+                normalize_mode="quantile", num_frames=9, video_stride=4,
+                max_hours=1.0,
+            )
+
+
+class TestFailClosedCoverage:
+    """A real bucket failure aborts the shared stats instead of shrinking it."""
+
+    def test_a_failed_nonempty_bucket_aborts_the_embodiment(self, tmp_path):
         good = _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
         bad = _make_bucket(tmp_path, "cat/emb/bad", n_eps=2, ep_len=8)
         # Strip episode_index so the scan of `bad` raises (trim/exclusions cannot
@@ -530,12 +580,54 @@ class TestCoverageOnlyAfterSuccess:
         t = pq.read_table(p)
         pq.write_table(t.drop(["episode_index"]), p)
 
-        out = a1s.compute_stats_for_embodiment(
-            "split_aloha", _group([good, bad], "bimanual", "AgileX Split Aloha"),
-            workers=1, root=tmp_path,
+        with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/emb/bad"):
+            a1s.compute_stats_for_embodiment(
+                "split_aloha", _group([good, bad], "bimanual", "AgileX Split Aloha"),
+                workers=1, root=tmp_path,
+            )
+
+    def test_cli_publishes_no_embodiment_when_a_later_one_fails(
+        self, tmp_path, monkeypatch, inline_pool
+    ):
+        """The CLI is transactional across its requested embodiment set."""
+        _make_bucket(
+            tmp_path,
+            "cat/franka/good",
+            n_eps=2,
+            ep_len=8,
+            layout="single_arm",
+            robot_type="Franka",
         )
-        assert out["num_buckets"] == 1
-        assert out["scanned_buckets"] == ["cat/emb/good"], "a skipped bucket was listed as scanned"
+        bad = _make_bucket(tmp_path, "cat/split_aloha/bad", n_eps=2, ep_len=8)
+        p = bad / "data" / "chunk-000" / "file-000.parquet"
+        pq.write_table(pq.read_table(p).slice(0, 15), p)
+
+        out = tmp_path / "published"
+        meta = out / "meta"
+        meta.mkdir(parents=True)
+        old = {
+            meta / "stats_franka.json": "old-franka\n",
+            meta / "stats_split_aloha.json": "old-split\n",
+        }
+        for path, content in old.items():
+            path.write_text(content)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "prog",
+                "--dataset_dir",
+                str(tmp_path),
+                "--stats_root",
+                str(out),
+                "--workers",
+                "1",
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/split_aloha/bad"):
+            a1s.main()
+        assert {path: path.read_text() for path in old} == old
+        assert not list(meta.glob("*.json.tmp"))
 
 
 class TestSplitFailuresDoNotFailOpen:
@@ -601,9 +693,9 @@ class TestScannerRefusesWhatTheReaderRefuses:
 
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=4)
         src = d / "data" / "chunk-000" / "file-000.parquet"
-        _, rows_before, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+        _, rows_before, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
         shutil.copy(src, src.with_name("file-000.backup.parquet"))
-        _, rows_after, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
+        _, rows_after, _, _ = a1s._scan_bucket((str(d), "bimanual", "split_aloha"))
         assert len(rows_after) == len(rows_before), "a non-shard file entered the statistics"
 
     def test_overlapping_manifest_ranges_are_refused(self, tmp_path):
@@ -644,9 +736,15 @@ class TestPopulationContractEndToEnd:
     def test_the_generator_records_what_it_scanned(self, tmp_path, monkeypatch):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
         res = self._run(monkeypatch, d, tmp_path / "stats")
-        assert res["population"] == {
+        pop = res["population"]
+        assert {key: pop[key] for key in ("split", "trim_active", "min_keep", "buckets", "empty_buckets")} == {
             "split": "train", "trim_active": False, "min_keep": 2,
             "buckets": ["task"], "empty_buckets": []}
+        assert pop["schema_version"] == 2
+        assert pop["trim_provenance"] is None
+        assert pop["bucket_provenance"]["task"]["excluded_episode_indices"] == []
+        assert pop["bucket_provenance"]["task"]["effective_population"]["num_episodes"] == 2
+        assert pop["bucket_provenance"]["task"]["effective_population"]["num_rows"] == 16
 
     def test_val_stats_are_refused_by_a_train_reader(self, tmp_path, monkeypatch):
         d = _make_bucket(tmp_path, "cat/emb/task", n_eps=2, ep_len=8)
@@ -657,7 +755,7 @@ class TestPopulationContractEndToEnd:
         (d / "meta" / "info.json").write_text(json.dumps(info))
         res = self._run(monkeypatch, d, out, "--split", "val")
         assert res["population"]["split"] == "val"
-        with pytest.raises(ValueError, match="computed over the 'val' split"):
+        with pytest.raises(DataContractError, match="computed over the 'val' split"):
             InternDataA1Dataset(str(d), a1_stats_root=str(out), normalize_mode="quantile",
                                 num_frames=2, video_stride=1)
 
@@ -668,30 +766,21 @@ class TestPopulationContractEndToEnd:
         trim = tmp_path / "trim.csv"
         trim.write_text("dataset,episode_index,total_frames,trim_head_to,trim_tail_from\n"
                         "task,0,8,2,6\n")
-        with pytest.raises(ValueError, match="without a trim list but this reader is"):
+        with pytest.raises(DataContractError, match="without a trim list but this reader is"):
             InternDataA1Dataset(str(d), a1_stats_root=str(out), trim_csv=str(trim),
                                 normalize_mode="quantile", num_frames=2, video_stride=1)
 
-    def test_a_bucket_skipped_by_the_scan_is_refused_by_its_own_reader(self, tmp_path, monkeypatch):
-        """The exact case the shared per-embodiment file makes possible.
-
-        `bad` fails to scan, so only `good`'s rows are pooled — but both readers
-        load the same `stats_split_aloha.json`, and `bad` used to accept it.
-        """
-        good = _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
+    def test_cli_refuses_to_publish_when_one_bucket_scan_fails(self, tmp_path, monkeypatch):
+        """One good bucket must not turn a failed embodiment into partial stats."""
+        _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
         bad = _make_bucket(tmp_path, "cat/emb/bad", n_eps=2, ep_len=8)
         p = bad / "data" / "chunk-000" / "file-000.parquet"
         pq.write_table(pq.read_table(p).slice(0, 15), p)     # truncated: scan raises
 
         out = tmp_path / "stats"
-        res = self._run(monkeypatch, tmp_path, out)
-        assert res["population"]["buckets"] == ["cat/emb/good"]
-
-        InternDataA1Dataset(str(good), dataset_id="cat/emb/good", a1_stats_root=str(out),
-                            normalize_mode="quantile", num_frames=2, video_stride=1)
-        with pytest.raises(ValueError, match="none of them this one|manifest ends at"):
-            InternDataA1Dataset(str(bad), dataset_id="cat/emb/bad", a1_stats_root=str(out),
-                                normalize_mode="quantile", num_frames=2, video_stride=1)
+        with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/emb/bad"):
+            self._run(monkeypatch, tmp_path, out)
+        assert not (out / "meta" / "stats_split_aloha.json").exists()
 
 
 class TestValOnlyBucketReusesTrainStats:
@@ -743,18 +832,15 @@ class TestValOnlyBucketReusesTrainStats:
         assert r._normalization_stats is not None
         assert len(r) > 0
 
-    def test_a_bucket_the_scan_refused_is_still_rejected(self, tmp_path, monkeypatch):
-        """The distinction that makes the above safe rather than an exemption."""
-        a, b = self._two_buckets(tmp_path)
+    def test_a_corrupt_val_only_bucket_still_aborts_generation(self, tmp_path, monkeypatch):
+        """Empty-by-split is allowed only when the bucket itself validates."""
+        _, b = self._two_buckets(tmp_path)
         p = b / "data" / "chunk-000" / "file-000.parquet"
         pq.write_table(pq.read_table(p).slice(0, 15), p)   # truncated -> scan raises
         out = tmp_path / "stats"
-        pop = self._generate(monkeypatch, tmp_path, out)["population"]
-        assert "cat/emb/b" not in pop["buckets"] + pop["empty_buckets"]
-        with pytest.raises(ValueError, match="none of them this one|manifest ends at"):
-            InternDataA1Dataset(str(b), dataset_id="cat/emb/b", a1_stats_root=str(out),
-                                normalize_mode="quantile", num_frames=2, video_stride=1,
-                                split="val")
+        with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/emb/b"):
+            self._generate(monkeypatch, tmp_path, out)
+        assert not (out / "meta" / "stats_split_aloha.json").exists()
 
 
 class TestZeroRowsIsNotProofOfAnEmptyPopulation:
@@ -795,21 +881,16 @@ class TestZeroRowsIsNotProofOfAnEmptyPopulation:
         with pytest.raises(ValueError, match="no shard row carries them"):
             a1s._scan_bucket((str(d), "bimanual", "split_aloha", "cat/emb/bad"))
 
-    def test_it_is_absent_from_both_coverage_lists(self, tmp_path, monkeypatch):
-        """So its reader still refuses the shared file, as it did before."""
+    def test_substituted_rows_abort_generation(self, tmp_path, monkeypatch):
         import sys
         _make_bucket(tmp_path, "cat/emb/good", n_eps=2, ep_len=8)
-        bad = self._substituted(tmp_path)
+        self._substituted(tmp_path)
         out = tmp_path / "stats"
         monkeypatch.setattr(sys, "argv", [
             "prog", "--dataset_dir", str(tmp_path), "--stats_root", str(out), "--workers", "1"])
-        a1s.main()
-        pop = json.load(open(out / "meta" / "stats_split_aloha.json"))["population"]
-        assert pop["buckets"] == ["cat/emb/good"]
-        assert "cat/emb/bad" not in pop["empty_buckets"], "a substituted slice was called empty"
-        with pytest.raises(ValueError, match="none of them this one"):
-            InternDataA1Dataset(str(bad), dataset_id="cat/emb/bad", a1_stats_root=str(out),
-                                normalize_mode="quantile", num_frames=2, video_stride=1)
+        with pytest.raises(RuntimeError, match="Refusing to write partial.*cat/emb/bad"):
+            a1s.main()
+        assert not (out / "meta" / "stats_split_aloha.json").exists()
 
     def test_a_genuinely_empty_train_split_is_still_reported_empty(self, tmp_path):
         """The distinction must not collapse the other way."""
@@ -817,6 +898,6 @@ class TestZeroRowsIsNotProofOfAnEmptyPopulation:
         info = json.loads((d / "meta" / "info.json").read_text())
         info["splits"] = {"train": "0:0", "val": "0:2"}
         (d / "meta" / "info.json").write_text(json.dumps(info))
-        _, rows, population_empty = a1s._scan_bucket(
+        _, rows, population_empty, _ = a1s._scan_bucket(
             (str(d), "bimanual", "split_aloha", "cat/emb/valonly"))
         assert len(rows) == 0 and population_empty is True

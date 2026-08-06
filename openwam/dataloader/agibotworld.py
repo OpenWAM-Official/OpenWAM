@@ -67,6 +67,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -77,6 +78,11 @@ import pandas as pd
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
 from openwam.dataloader.robocoin import GRIP_EXCLUDED_DIM_MASK, _build_dex_unify_map
+from openwam.dataloader.utils.lerobotv3 import (
+    DataContractError,
+    digest_lerobot_v3_data_population,
+    resolve_lerobot_v3_data_population,
+)
 from openwam.dataloader.utils.normalization import (
     ROT6D_DIMS_EEF20,
     apply_normalization,
@@ -186,6 +192,73 @@ def _validate_trim_ratio(value) -> float | None:
             "Use 0.7 for '70% or more of the episode trimmed', not 70."
         )
     return ratio
+
+
+def _apply_segment_annotations(
+    eps_df: pd.DataFrame,
+    *,
+    use_segment_annotations: bool,
+    segment_max_trim_ratio: float | None,
+) -> tuple[pd.DataFrame, dict]:
+    """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+    ratio = _validate_trim_ratio(segment_max_trim_ratio)
+    summary = {
+        "missing_columns": False,
+        "dropped_static": 0,
+        "dropped_empty": 0,
+        "dropped_over_trim": 0,
+    }
+    if not use_segment_annotations:
+        return eps_df.reset_index(drop=True), summary
+    if _SEGMENT_FLAG_COL not in eps_df.columns or _SEGMENT_DELTA_COL not in eps_df.columns:
+        summary["missing_columns"] = True
+        return eps_df.reset_index(drop=True), summary
+
+    out = eps_df.copy()
+    flag = out[_SEGMENT_FLAG_COL].fillna(0).astype(np.int64).to_numpy()
+    delta = np.maximum(0, out[_SEGMENT_DELTA_COL].fillna(0).astype(np.int64).to_numpy())
+    length = out["length"].astype(np.int64).to_numpy()
+
+    valid_start = np.zeros(len(out), dtype=np.int64)
+    valid_end = length.copy()
+    start_mask = flag == 1
+    end_mask = flag == 2
+    valid_start[start_mask] = np.minimum(delta[start_mask], length[start_mask])
+    valid_end[end_mask] = np.maximum(0, length[end_mask] - delta[end_mask])
+
+    keep = (flag != 3) & (valid_end > valid_start)
+    summary["dropped_static"] = int(np.sum(flag == 3))
+    summary["dropped_empty"] = int(np.sum((flag != 3) & (valid_end <= valid_start)))
+
+    if ratio is not None:
+        trimmed = np.maximum(0, length - np.maximum(0, valid_end - valid_start))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            trim_ratio = np.where(length > 0, trimmed / np.maximum(length, 1), 0.0)
+        over = (flag != 3) & keep & (trim_ratio >= ratio)
+        summary["dropped_over_trim"] = int(np.sum(over))
+        keep = keep & ~over
+
+    out["_valid_start"] = valid_start
+    out["_valid_end"] = valid_end
+    return out.loc[keep].reset_index(drop=True), summary
+
+
+def _effective_segment_population_digest(eps_df: pd.DataFrame) -> str:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    hasher = hashlib.sha256(b"openwam:agibotworld-segment-population:v1\0")
+    ordered = eps_df.sort_values("episode_index", kind="stable")
+    for _, row in ordered.iterrows():
+        start = int(row.get("_valid_start", 0))
+        end = int(row.get("_valid_end", row["length"]))
+        for value in (int(row["episode_index"]), start, end):
+            hasher.update(value.to_bytes(8, "little", signed=False))
+    return hasher.hexdigest()
 
 
 def _bucket_has_base_motion(dataset_dir) -> bool:
@@ -365,50 +438,21 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
 
-        if not self._use_segment_annotations:
-            return eps_df.reset_index(drop=True)
-        if _SEGMENT_FLAG_COL not in eps_df.columns or _SEGMENT_DELTA_COL not in eps_df.columns:
+        out, summary = _apply_segment_annotations(
+            eps_df,
+            use_segment_annotations=self._use_segment_annotations,
+            segment_max_trim_ratio=self._segment_max_trim_ratio,
+        )
+        if summary["missing_columns"]:
             logger.warning(
                 "AgiBotWorld(%s): segment annotation columns %s/%s missing; using full segments.",
                 self._dataset_id,
                 _SEGMENT_FLAG_COL,
                 _SEGMENT_DELTA_COL,
             )
-            return eps_df.reset_index(drop=True)
-
-        out = eps_df.copy()
-        flag = out[_SEGMENT_FLAG_COL].fillna(0).astype(np.int64).to_numpy()
-        delta = np.maximum(0, out[_SEGMENT_DELTA_COL].fillna(0).astype(np.int64).to_numpy())
-        length = out["length"].astype(np.int64).to_numpy()
-
-        valid_start = np.zeros(len(out), dtype=np.int64)
-        valid_end = length.copy()
-        start_mask = flag == 1
-        end_mask = flag == 2
-        valid_start[start_mask] = np.minimum(delta[start_mask], length[start_mask])
-        valid_end[end_mask] = np.maximum(0, length[end_mask] - delta[end_mask])
-
-        keep = (flag != 3) & (valid_end > valid_start)
-        dropped_static = int(np.sum(flag == 3))
-        dropped_empty = int(np.sum((flag != 3) & (valid_end <= valid_start)))
-
-
-
-
-
-
-        dropped_over_trim = 0
-        if self._segment_max_trim_ratio is not None:
-            trimmed = np.maximum(0, length - np.maximum(0, valid_end - valid_start))
-            with np.errstate(invalid="ignore", divide="ignore"):
-                trim_ratio = np.where(length > 0, trimmed / np.maximum(length, 1), 0.0)
-            over = (flag != 3) & keep & (trim_ratio >= self._segment_max_trim_ratio)
-            dropped_over_trim = int(np.sum(over))
-            keep = keep & ~over
-
-        out["_valid_start"] = valid_start
-        out["_valid_end"] = valid_end
-        out = out.loc[keep].reset_index(drop=True)
+        dropped_static = summary["dropped_static"]
+        dropped_empty = summary["dropped_empty"]
+        dropped_over_trim = summary["dropped_over_trim"]
         if dropped_static or dropped_empty or dropped_over_trim:
             logger.info(
                 "AgiBotWorld(%s): segment annotations dropped %d static, %d empty-after-trim and "
@@ -486,6 +530,77 @@ class AgiBotWorldDataset(LeRobotV3Reader):
             )
         with open(stats_path) as f:
             raw = json.load(f)
+
+
+
+
+        population = raw.get("population")
+        if not isinstance(population, dict) or population.get("schema_version") != 1:
+            raise DataContractError(
+                f"AgiBotWorld stats {stats_path} predates trim-population provenance. "
+                "Regenerate it with agibotworld_stats_computation before loading normalized data."
+            )
+        recorded_buckets = population.get("buckets")
+        if not isinstance(recorded_buckets, dict) or not all(
+            isinstance(name, str) and name for name in recorded_buckets
+        ):
+            raise DataContractError(
+                f"AgiBotWorld stats {stats_path} has a malformed pooled contributor map; regenerate stats."
+            )
+
+
+
+
+
+        current_buckets = {
+            path.name
+            for path in self._dataset_dir.parent.iterdir()
+            if path.is_dir() and (path / "meta" / "info.json").is_file()
+        }
+        recorded_bucket_names = set(recorded_buckets)
+        if recorded_bucket_names != current_buckets:
+            missing = sorted(current_buckets - recorded_bucket_names)
+            extra = sorted(recorded_bucket_names - current_buckets)
+            raise DataContractError(
+                f"AgiBotWorld stats {stats_path} pooled contributor set no longer matches "
+                f"the current dataset root (missing={missing}, extra={extra}); regenerate stats."
+            )
+        if population.get("split") != "train":
+            raise DataContractError(
+                f"AgiBotWorld stats {stats_path} were generated from split={population.get('split')!r}; "
+                "normalization statistics must be train-derived. Regenerate with --split train."
+            )
+        expected_annotations = bool(population.get("use_segment_annotations"))
+        expected_ratio = _validate_trim_ratio(population.get("segment_max_trim_ratio"))
+        if expected_annotations != self._use_segment_annotations or expected_ratio != self._segment_max_trim_ratio:
+            raise DataContractError(
+                f"AgiBotWorld stats {stats_path} were generated with "
+                f"use_segment_annotations={expected_annotations}, segment_max_trim_ratio={expected_ratio}, "
+                f"but bucket {self._dataset_id} loads with "
+                f"use_segment_annotations={self._use_segment_annotations}, "
+                f"segment_max_trim_ratio={self._segment_max_trim_ratio}. Regenerate stats with matching settings."
+            )
+        bucket_population = recorded_buckets.get(self._dataset_id)
+        if not isinstance(bucket_population, dict):
+            raise DataContractError(
+                f"AgiBotWorld bucket {self._dataset_id} has no population record in {stats_path}; regenerate stats."
+            )
+        disk_population = resolve_lerobot_v3_data_population(self._dataset_dir, info=info)
+        disk_digest = digest_lerobot_v3_data_population(disk_population)
+        if bucket_population.get("data_population_digest") != disk_digest:
+            raise DataContractError(
+                f"AgiBotWorld bucket {self._dataset_id} manifest/data mapping changed after {stats_path} was generated; "
+                "regenerate normalization stats."
+            )
+
+
+        if self._split == population.get("split") and self._max_hours is None:
+            effective_digest = _effective_segment_population_digest(self._eps_df)
+            if bucket_population.get("effective_population_digest") != effective_digest:
+                raise DataContractError(
+                    f"AgiBotWorld bucket {self._dataset_id} segment/exclusion population changed after "
+                    f"{stats_path} was generated; regenerate normalization stats."
+                )
 
         def _mat(key: str, dim: int):
             if key not in raw:
