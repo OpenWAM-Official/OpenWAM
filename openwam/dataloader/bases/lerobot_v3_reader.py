@@ -32,6 +32,8 @@ Class attributes:
     the default :meth:`_resolve_cameras`.
   * ``ACTION_DIM_MASK``     — per-dim validity mask (``LEFT_ARM_DIM_MASK`` for
     single-arm OXE; ``None`` = all dims valid, for bimanual RoboCOIN).
+  * ``PROPRIO_DIM_MASK``    — optional state-specific validity mask; ``None``
+    inherits ``ACTION_DIM_MASK`` for backward compatibility.
   * ``ACTION_DIM``          — per-step action/proprio width (20 = EEF).
   * ``PROMPT_FILE_REQUIRED``— default :meth:`_load_prompts` behavior on a
     missing ``tasks.parquet`` (True = raise, False = empty map).
@@ -136,6 +138,11 @@ class LeRobotV3Reader(BaseDataset):
     LEFT_WRIST_CAMERA: ClassVar[Optional[str]] = None
     RIGHT_WRIST_CAMERA: ClassVar[Optional[str]] = None
     ACTION_DIM_MASK: ClassVar[Optional[np.ndarray]] = None
+    # Optional proprio-specific raw-dimension mask.  ``None`` preserves the
+    # historical contract by inheriting ``ACTION_DIM_MASK``; readers whose
+    # action/state schemas differ may set an instance value in
+    # ``_resolve_cameras``.
+    PROPRIO_DIM_MASK: ClassVar[Optional[np.ndarray]] = None
     ACTION_DIM: ClassVar[int] = EEF_DIM
     # Prompt convention: "task_index" (tasks.parquet, index=text — RoboCOIN /
     # EgoDex) or "episode_annotated" (tasks_annotated.parquet by episode_index — OXE).
@@ -402,13 +409,30 @@ class LeRobotV3Reader(BaseDataset):
         # reader's instance ACTION_DIM_MASK may be set in _resolve_cameras
         # (some readers set it per-embodiment), which runs after that block.
         self._unify_dim_mask: Optional[np.ndarray] = None
+        self._unify_proprio_dim_mask: Optional[np.ndarray] = None
         if self._unify:
             self._unify_dim_mask = np.zeros(self._unify_dim, dtype=bool)
-            raw_mask = self.ACTION_DIM_MASK
-            if raw_mask is None:
+            action_raw_mask = self.ACTION_DIM_MASK
+            if action_raw_mask is None:
                 self._unify_dim_mask[self._unify_dst_index] = True
             else:
-                self._unify_dim_mask[self._unify_dst_index] = np.asarray(raw_mask, dtype=bool)
+                self._unify_dim_mask[self._unify_dst_index] = np.asarray(action_raw_mask, dtype=bool)
+
+            # Most LeRobot sources expose action and proprio in the same raw
+            # schema, so an unset proprio mask inherits the action mask.  A
+            # source may override this when a field exists only on one stream
+            # (for example, a commanded mobile-base velocity with no measured
+            # state velocity).
+            proprio_raw_mask = self.PROPRIO_DIM_MASK
+            if proprio_raw_mask is None:
+                proprio_raw_mask = action_raw_mask
+            self._unify_proprio_dim_mask = np.zeros(self._unify_dim, dtype=bool)
+            if proprio_raw_mask is None:
+                self._unify_proprio_dim_mask[self._unify_dst_index] = True
+            else:
+                self._unify_proprio_dim_mask[self._unify_dst_index] = np.asarray(
+                    proprio_raw_mask, dtype=bool
+                )
 
         logger.info(
             "%s(%s, %s): %d eps, %d windows, fps=%.1f, multiview=%s, normalize=%s, supervision=%s",
@@ -936,11 +960,14 @@ class LeRobotV3Reader(BaseDataset):
 
         proprio = np.asarray(proprio_20d, dtype=np.float32)
         if self._unify:
-            # Same scatter + ACTION_DIM_MASK-honoring mask as _finalize_action.
+            # Same scatter as action, but honor the proprio-specific mask when
+            # the source's action/state field availability differs.
             proprio, _ = map_to_unify(proprio, self._unify_dst_index, self._unify_dim)
-            dim_mask = self._unify_dim_mask
+            dim_mask = self._unify_proprio_dim_mask
         else:
-            dim_mask = self.ACTION_DIM_MASK
+            dim_mask = self.PROPRIO_DIM_MASK
+            if dim_mask is None:
+                dim_mask = self.ACTION_DIM_MASK
 
         mask = build_proprio_mask_2d(
             action_dim=self.ACTION_DIM,

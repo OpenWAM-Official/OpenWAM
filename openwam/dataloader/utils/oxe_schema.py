@@ -6,9 +6,9 @@ Each OXE dataset has its own raw state/action representation:
     ``action = [x,y,z,roll,pitch,yaw,gripper] (7)`` (Euler XYZ).
   * Fractal: ``state = [x,y,z,rx,ry,rz,rw,gripper] (8)`` (quat xyzw),
     ``action = [x,y,z,roll,pitch,yaw,gripper] (7)`` (Euler XYZ).
-  * DROID: ``observation.state.cartesian_position (6) +
-    observation.state.gripper_position (1) = 7`` (Euler XYZ),
-    ``action.original = [x,y,z,roll,pitch,yaw,gripper] (7)`` (Euler XYZ).
+  * DROID: pose plus a raw gripper **closedness** signal (``0=open``,
+    ``1=closed``).  DROID-specific converters invert that final scalar to the
+    canonical open scale (``0=closed``, ``1=open``).
 
 These helpers normalize all four data sources to a single 10-D EEF
 representation ``[pos(3) + rot6d(6) + grip(1)]`` so the reader and
@@ -47,14 +47,29 @@ def bcz_state_to_arm10(state: np.ndarray) -> np.ndarray:
 def euler7_action_to_arm10(action: np.ndarray) -> np.ndarray:
     """``(..., 7)`` ``[x,y,z,roll,pitch,yaw,gripper]`` → ``(..., 10)`` EEF.
 
-    Used by BC-Z / Bridge / Fractal / DROID action streams (all share this layout
-    after the dataset's own conversion).
+    Used by BC-Z / Bridge / Fractal action streams. Current DROID has the same
+    pose layout but opposite raw gripper direction, so it must use
+    :func:`droid_euler7_to_arm10` instead.
     """
     pos = action[..., 0:3]
     euler = action[..., 3:6]
     grip = action[..., 6:7]
     rot6d = euler_xyz_to_rot6d(euler)
     return np.concatenate([pos, rot6d, grip], axis=-1).astype(np.float32)
+
+
+def droid_euler7_to_arm10(value: np.ndarray) -> np.ndarray:
+    """Current DROID ``(..., 7)`` pose stream -> canonical 10-D EEF.
+
+    Both ``state[6]`` and ``other_information.action_tcp_pose[6]`` in the
+    re-converted DROID bucket use the DROID controller's *closedness* convention
+    (``0=open``, ``1=closed``).  The shared action space uses an openness scale,
+    so only the gripper scalar is inverted; xyz and Euler->rot6d are identical
+    to :func:`euler7_action_to_arm10`.
+    """
+    out = euler7_action_to_arm10(value)
+    out[..., 9] = 1.0 - out[..., 9]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -75,30 +90,35 @@ def fractal_state_to_arm10(state: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# DROID: state assembled from two separate parquet columns
+# Legacy DROID conversion: state assembled from two separate parquet columns
 # ---------------------------------------------------------------------------
 
 
 def droid_state_to_arm10(cartesian: np.ndarray, gripper: np.ndarray) -> np.ndarray:
-    """DROID state assembly.
+    """Legacy two-column DROID state assembly.
+
+    The current re-converted bucket stores one ``state[7]`` column and uses
+    :func:`droid_euler7_to_arm10`; this helper remains for old conversion tools.
 
     Args:
         cartesian: ``(..., 6)`` from ``observation.state.cartesian_position``
             (Euler XYZ representation: ``[x,y,z,roll,pitch,yaw]``).
-        gripper:   ``(..., 1)`` from ``observation.state.gripper_position``
-            (scalar in ``[0, 1]``).
+        gripper:   ``(..., 1)`` from ``observation.state.gripper_position``;
+            DROID closedness in ``[0, 1]`` (``0=open``, ``1=closed``).
 
     Returns: ``(..., 10)`` EEF tensor.
     """
     pos = cartesian[..., 0:3]
     euler = cartesian[..., 3:6]
     rot6d = euler_xyz_to_rot6d(euler)
-    return np.concatenate([pos, rot6d, gripper], axis=-1).astype(np.float32)
+    openness = 1.0 - gripper
+    return np.concatenate([pos, rot6d, openness], axis=-1).astype(np.float32)
 
 
 __all__ = [
     "ARM10_DIM",
     "bcz_state_to_arm10",
+    "droid_euler7_to_arm10",
     "euler7_action_to_arm10",
     "fractal_state_to_arm10",
     "droid_state_to_arm10",

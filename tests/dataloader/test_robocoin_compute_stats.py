@@ -14,13 +14,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from openwam.dataloader.robocoin import RoboCOINDataset
+from openwam.dataloader.robocoin import (
+    ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS,
+    RoboCOINDataset,
+    robocoin_bucket_exclusions_provenance,
+)
 from openwam.dataloader.utils.lerobotv3 import DataContractError
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
 from openwam.dataloader.utils.stats_computation import robocoin_stats_computation as stats_module
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
     Accumulator,
     compute_stats_for_robot_type,
+    discover_datasets_by_robot_type,
 )
 from tests.dataloader.test_robocoin_trim import (
     _make_bucket,
@@ -71,6 +76,13 @@ def _write_exclusions(bucket, episode_indices):
     path = bucket / "meta" / "excluded_episodes.json"
     path.write_text(json.dumps({"episode_indices": episode_indices}))
     return path
+
+
+def _set_robot_type(bucket, robot_type):
+    info_path = bucket / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["robot_type"] = robot_type
+    info_path.write_text(json.dumps(info))
 
 
 @pytest.fixture
@@ -124,6 +136,50 @@ class TestAccumulator:
         # N (500) < cap → reservoir holds every row → quantiles are exact.
         np.testing.assert_allclose(out["q01"], np.quantile(data, 0.01, axis=0), atol=1e-5)
         np.testing.assert_allclose(out["q99"], np.quantile(data, 0.99, axis=0), atol=1e-5)
+
+
+class TestWholeBucketExclusion:
+    def test_discovery_and_direct_compute_share_the_same_exclusion(self, tmp_path):
+        root = tmp_path / "root"
+        kept = _make_bucket(root / "kept-airbot", [10])
+        excluded_name = next(iter(ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS))
+        excluded = _make_bucket(root / excluded_name, [10])
+        _set_robot_type(kept, "airbot_mmk2")
+        _set_robot_type(excluded, "airbot_mmk2")
+
+        groups = discover_datasets_by_robot_type(str(root))
+        assert groups == {"airbot_mmk2": [str(kept)]}
+
+        result = compute_stats_for_robot_type(
+            "airbot_mmk2",
+            [str(kept), str(excluded)],
+            rot6d_identity=False,
+        )
+        assert result["eef"]["num_datasets"] == 1
+        assert result["eef"]["num_timesteps"] == 20  # action + state
+        assert result["whole_bucket_exclusions_provenance"] == (
+            robocoin_bucket_exclusions_provenance("airbot_mmk2")
+        )
+
+    def test_affected_robot_type_rejects_stats_without_exclusion_provenance(self, tmp_path):
+        root = tmp_path / "root"
+        bucket = _make_bucket(root / "kept-airbot", [40])
+        _set_robot_type(bucket, "airbot_mmk2")
+        payload = compute_stats_for_robot_type(
+            "airbot_mmk2", [str(bucket)], rot6d_identity=False
+        )
+        payload.pop("whole_bucket_exclusions_provenance")
+        meta = root / "meta"
+        meta.mkdir(exist_ok=True)
+        (meta / "stats_airbot_mmk2.json").write_text(json.dumps(payload))
+
+        with pytest.raises(DataContractError, match="whole_bucket_exclusions_provenance"):
+            RoboCOINDataset(
+                dataset_dir=str(bucket),
+                normalize_mode="quantile",
+                num_frames=5,
+                video_stride=1,
+            )
 
 
 class TestTrimmedPopulationStats:

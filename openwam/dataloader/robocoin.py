@@ -59,6 +59,8 @@
 
 
 
+
+
 from __future__ import annotations
 
 import csv
@@ -84,6 +86,7 @@ from openwam.dataloader.utils.lerobotv3 import (
     ExcludedEpisodesSnapshot,
     apply_info_splits,
     assert_excluded_episodes_snapshot_current,
+    build_multibucket,
     load_episodes_parquet,
     load_excluded_episodes_snapshot,
     parse_info_json,
@@ -93,6 +96,65 @@ from openwam.dataloader.utils.normalization import apply_normalization, material
 logger = logging.getLogger(__name__)
 
 _STATE_DIM = _ACTION_DIM
+
+
+
+
+
+
+
+ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS = MappingProxyType(
+    {
+        "Airbot_MMK2_storage_peach_pear": MappingProxyType(
+            {
+                "robot_type": "airbot_mmk2",
+                "reason": (
+                    "the public action-unit contract is incompatible with the required unified hand representation; "
+                    "pooling this bucket would violate shared hand normalization semantics"
+                ),
+            }
+        ),
+    }
+)
+_WHOLE_BUCKET_EXCLUSIONS_SCHEMA_VERSION = 1
+_WHOLE_BUCKET_EXCLUSIONS_POLICY = "drop_whole_bucket_before_reader_and_stats_discovery"
+
+
+def is_robocoin_bucket_excluded(dataset_dir) -> bool:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    return Path(dataset_dir).name in ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS
+
+
+def robocoin_bucket_exclusions_provenance(robot_type: str) -> dict:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    datasets = {
+        dataset_id: dict(entry)
+        for dataset_id, entry in ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS.items()
+        if entry["robot_type"] == str(robot_type)
+    }
+    return {
+        "schema_version": _WHOLE_BUCKET_EXCLUSIONS_SCHEMA_VERSION,
+        "policy": _WHOLE_BUCKET_EXCLUSIONS_POLICY,
+        "datasets": dict(sorted(datasets.items())),
+    }
+
+
+def _validate_whole_bucket_exclusions_provenance(actual, *, robot_type, stats_path) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    expected = robocoin_bucket_exclusions_provenance(robot_type)
+    if expected["datasets"]:
+        if actual != expected:
+            raise DataContractError(
+                f"RoboCOIN stats {stats_path} whole_bucket_exclusions_provenance does not "
+                f"match the repository exclusion contract for robot_type={robot_type!r}; "
+                f"expected {expected}, got {actual}. Regenerate stats."
+            )
+    elif actual is not None and actual != expected:
+        raise DataContractError(
+            f"RoboCOIN stats {stats_path} has incompatible "
+            f"whole_bucket_exclusions_provenance for robot_type={robot_type!r}; "
+            f"expected {expected}, got {actual}. Regenerate stats."
+        )
 
 
 def _discover_data_parquets(dataset_dir: Path, data_path_template: str):
@@ -894,6 +956,12 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 
+        if is_robocoin_bucket_excluded(dataset_dir):
+            exclusion = ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS[Path(dataset_dir).name]
+            raise DataContractError(
+                f"RoboCOIN bucket {Path(dataset_dir).name!r} is excluded as a whole: "
+                f"{exclusion['reason']}"
+            )
         self._trim_csv = trim_csv
         trim_snapshot_was_provided = _trim_snapshot is not None
         if _trim_snapshot is not None:
@@ -1208,6 +1276,11 @@ class RoboCOINDataset(LeRobotV3Reader):
             )
         with open(stats_path) as f:
             raw = json.load(f)
+        _validate_whole_bucket_exclusions_provenance(
+            raw.get("whole_bucket_exclusions_provenance"),
+            robot_type=self._robot_type,
+            stats_path=stats_path,
+        )
         has_trim_provenance = "trim_provenance" in raw
         has_excluded_provenance = "excluded_episodes_provenance" in raw
         if self._trim_csv is None:
@@ -1400,7 +1473,11 @@ class RoboCOINDataset(LeRobotV3Reader):
                     bucket_names = {
                         path.name
                         for path in root.iterdir()
-                        if path.is_dir() and (path / "meta" / "info.json").is_file()
+                        if (
+                            path.is_dir()
+                            and (path / "meta" / "info.json").is_file()
+                            and not is_robocoin_bucket_excluded(path)
+                        )
                     }
                     if bucket_names and bucket_names.isdisjoint(spec):
                         raise ValueError(
@@ -1409,7 +1486,58 @@ class RoboCOINDataset(LeRobotV3Reader):
                         )
         if snapshot is not None:
             config = _TrimSnapshotConfig(config, snapshot)
-        dataset = super().from_config(config, split=split)
+
+        root = Path(dataset_dir) if dataset_dir is not None else None
+
+
+        if root is None or (root / "meta" / "info.json").is_file():
+            dataset = super().from_config(config, split=split)
+        else:
+
+
+
+
+            if not root.is_dir():
+                raise FileNotFoundError(f"{cls.__name__}: {root} does not exist")
+            discovered = sorted(
+                path
+                for path in root.iterdir()
+                if path.is_dir() and (path / "meta" / "info.json").is_file()
+            )
+            excluded = [path for path in discovered if is_robocoin_bucket_excluded(path)]
+            sub_dirs = [path for path in discovered if not is_robocoin_bucket_excluded(path)]
+            if excluded:
+                logger.info(
+                    "%s.from_config: excluding %d whole bucket(s): %s",
+                    cls.__name__,
+                    len(excluded),
+                    ", ".join(path.name for path in excluded),
+                )
+            if not sub_dirs:
+                raise FileNotFoundError(
+                    f"{cls.__name__}: no non-excluded sub-buckets with meta/info.json under {root}"
+                )
+
+            missing = object()
+            common = {"split": split}
+            for key in cls.CONFIG_KEYS:
+                value = get_cfg(config, key, missing)
+                if value is missing:
+                    continue
+                if value is None and key != "normalize_mode":
+                    continue
+                common[key] = value
+            base_seed = int(get_cfg(config, "seed", 42))
+            total_hours = get_cfg(config, "total_hours")
+            dataset = build_multibucket(
+                cls,
+                sub_dirs,
+                common,
+                base_seed=base_seed,
+                total_hours=total_hours,
+                wrapper_cls=MultiRobotCOINDataset,
+                source_name=cls.__name__,
+            )
         if snapshot is not None:
             _assert_trim_snapshot_current(snapshot, context="from_config reader construction")
         return dataset
@@ -1450,4 +1578,10 @@ class MultiRobotCOINDataset(MultiLeRobotV3Reader):
         return RoboCOINDataset.from_config(config, split)
 
 
-__all__ = ["RoboCOINDataset", "MultiRobotCOINDataset"]
+__all__ = [
+    "RoboCOINDataset",
+    "MultiRobotCOINDataset",
+    "ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS",
+    "is_robocoin_bucket_excluded",
+    "robocoin_bucket_exclusions_provenance",
+]

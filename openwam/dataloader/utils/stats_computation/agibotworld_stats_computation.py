@@ -48,6 +48,16 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
 import argparse
 import json
 import os
@@ -59,9 +69,13 @@ import pyarrow as pa
 
 from openwam.dataloader.agibotworld import (
     _DEX_BUCKET_IDS,
+    _GRIPPER_CONTRACT,
+    _STATS_SCHEMA_VERSION,
+    _action_gripper_to_open_convention,
     _apply_segment_annotations,
-    _bucket_has_base_motion,
+    _bucket_base_motion_flags,
     _effective_segment_population_digest,
+    _state_gripper_to_open_convention,
     _validate_trim_ratio,
 )
 from openwam.dataloader.utils.lerobotv3 import (
@@ -89,7 +103,7 @@ WORKER_CAP = 200_000
 GLOBAL_CAP = 1_000_000
 
 
-def _columns_for(name: str, moving: bool):
+def _columns_for(name: str, action_moving: bool, state_moving: bool):
     """Public implementation. Dataset-specific audit notes were removed."""
     is_dex = name in _DEX_BUCKET_IDS
     cols = ["action.ee_base", "observation.state.ee_base"]
@@ -97,8 +111,10 @@ def _columns_for(name: str, moving: bool):
         cols += ["action.dex", "observation.state.dex"]
     else:
         cols += ["action.gripper", "observation.state.gripper"]
-    if moving:
-        cols += ["action.robot_velocity", "observation.state.robot_velocity"]
+    if action_moving:
+        cols.append("action.robot_velocity")
+    if state_moving:
+        cols.append("observation.state.robot_velocity")
     return cols
 
 
@@ -110,8 +126,11 @@ def _partial_bucket(
 ):
     """Public implementation. Dataset-specific audit notes were removed."""
     name = os.path.basename(bucket_dir.rstrip("/"))
-    moving = _bucket_has_base_motion(bucket_dir)
-    want = {c: _COL_WIDTH[c] for c in _columns_for(name, moving)}
+    action_moving, state_moving = _bucket_base_motion_flags(bucket_dir)
+    want = {
+        c: _COL_WIDTH[c]
+        for c in _columns_for(name, action_moving, state_moving)
+    }
     accs = {c: Accumulator(dim=d, reservoir_cap=WORKER_CAP) for c, d in want.items()}
 
     root = Path(bucket_dir).resolve()
@@ -138,15 +157,35 @@ def _partial_bucket(
         )
         for _, row in eps.iterrows()
     }
-    expected_rows = sum(end - start for start, end in kept.values())
-    observed_rows = 0
+    sampleable = {ep: span for ep, span in kept.items() if span[1] - span[0] >= 2}
+    expected_state_rows = sum(end - start for start, end in sampleable.values())
+    expected_action_rows = sum(end - start - 1 for start, end in sampleable.values())
+    observed_state_rows = 0
+    observed_action_rows = 0
+
+    action_cols = tuple(c for c in want if c.startswith("action."))
+    state_cols = tuple(c for c in want if c.startswith("observation.state."))
+
+    def _update_columns(slices, cols):
+        if not slices:
+            return
+        kept_table = pa.concat_tables(slices) if len(slices) > 1 else slices[0]
+        df = kept_table.to_pandas()
+        for c in cols:
+            values = np.stack(df[c].values).astype(np.float32)
+            if c == "action.gripper":
+                values = _action_gripper_to_open_convention(values)
+            elif c == "observation.state.gripper":
+                values = _state_gripper_to_open_convention(values)
+            accs[c].update_batch(values)
 
     for shard in data_population.shards:
         table = read_lerobot_v3_population_shard(root, shard, tuple(want))
-        slices = []
+        action_slices = []
+        state_slices = []
         cursor = 0
         for episode_range in shard.ranges:
-            span = kept.get(episode_range.episode_index)
+            span = sampleable.get(episode_range.episode_index)
             if span is not None:
                 start, end = span
                 if not 0 <= start < end <= episode_range.length:
@@ -154,19 +193,20 @@ def _partial_bucket(
                         f"AgiBotWorld stats({name}): invalid kept span {start}:{end} for "
                         f"episode_index={episode_range.episode_index} length={episode_range.length}"
                     )
-                slices.append(table.slice(cursor + start, end - start))
-                observed_rows += end - start
+                state_slices.append(table.slice(cursor + start, end - start))
+                action_slices.append(table.slice(cursor + start, end - start - 1))
+                observed_state_rows += end - start
+                observed_action_rows += end - start - 1
             cursor += episode_range.length
-        if not slices:
-            continue
-        kept_table = pa.concat_tables(slices) if len(slices) > 1 else slices[0]
-        df = kept_table.to_pandas()
-        for c in want:
-            accs[c].update_batch(np.stack(df[c].values).astype(np.float32))
 
-    if observed_rows != expected_rows:
+        _update_columns(action_slices, action_cols)
+        _update_columns(state_slices, state_cols)
+
+    if observed_action_rows != expected_action_rows or observed_state_rows != expected_state_rows:
         raise ValueError(
-            f"AgiBotWorld stats({name}): manifest scan kept {observed_rows} rows, expected {expected_rows}"
+            f"AgiBotWorld stats({name}): manifest scan observed action/state rows "
+            f"{observed_action_rows}/{observed_state_rows}, expected "
+            f"{expected_action_rows}/{expected_state_rows}"
         )
     assert_excluded_episodes_snapshot_current(exclusion_snapshot, context=f"AgiBotWorld stats scan for {name}")
 
@@ -186,7 +226,10 @@ def _partial_bucket(
         "data_population_digest": digest_lerobot_v3_data_population(data_population),
         "effective_population_digest": _effective_segment_population_digest(eps),
         "num_episodes": int(len(eps)),
-        "num_rows": int(expected_rows),
+        "num_sampleable_episodes": int(len(sampleable)),
+        "num_rows": int(expected_state_rows),
+        "num_action_rows": int(expected_action_rows),
+        "num_state_rows": int(expected_state_rows),
         "excluded_episode_indices": list(exclusion_snapshot.episode_indices),
     }
     return name, out, population
@@ -338,11 +381,12 @@ def main():
 
     result = {
         "robot_type": "g2a",
+        "gripper_contract": _GRIPPER_CONTRACT,
         "num_buckets": len(contributed),
         "num_skipped": len(skipped),
         "num_failed": len(failed),
         "population": {
-            "schema_version": 1,
+            "schema_version": _STATS_SCHEMA_VERSION,
             "split": args.split,
             "use_segment_annotations": use_segment_annotations,
             "segment_max_trim_ratio": segment_max_trim_ratio,

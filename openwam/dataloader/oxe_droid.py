@@ -63,6 +63,16 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
 from __future__ import annotations
 
 import hashlib
@@ -88,7 +98,7 @@ from openwam.dataloader.utils.lerobotv3 import (
     resolve_lerobot_v3_data_population,
 )
 from openwam.dataloader.utils.normalization import materialize_eef_stats
-from openwam.dataloader.utils.oxe_schema import euler7_action_to_arm10
+from openwam.dataloader.utils.oxe_schema import droid_euler7_to_arm10
 
 
 
@@ -111,6 +121,14 @@ DROID_DATA_POPULATION_DIGEST_KEY = "data_population_digest"
 DROID_STATS_POPULATION_KEY = "stats_population"
 DROID_STATS_POPULATION_SCHEMA_VERSION = 1
 DROID_STATS_POPULATION_POLICY = "info_split_then_prompt_exclusion"
+DROID_EEF_STATS_CONTRACT_KEY = "droid_eef_stats_contract"
+DROID_EEF_STATS_CONTRACT_VERSION = 1
+DROID_EEF_STATS_CONTRACT = {
+    "schema_version": DROID_EEF_STATS_CONTRACT_VERSION,
+    "raw_gripper_semantics": "closedness:0=open,1=closed",
+    "output_gripper_semantics": "openness:0=closed,1=open",
+    "gripper_transform": "1-raw",
+}
 DROID_PROMPT_FALLBACK_COLS = (
     "other_information.language_instruction_2",
     "other_information.language_instruction_3",
@@ -118,6 +136,17 @@ DROID_PROMPT_FALLBACK_COLS = (
     "annotation.instruction_add",
 )
 DROID_PROMPT_SOURCE_COLUMNS = ("episode_index", "task_index", *DROID_PROMPT_FALLBACK_COLS)
+
+
+def _validate_droid_eef_stats_contract(value) -> None:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    if not isinstance(value, dict) or set(value) != set(DROID_EEF_STATS_CONTRACT):
+        raise ValueError(f"expected exactly {DROID_EEF_STATS_CONTRACT!r}")
+    if type(value["schema_version"]) is not int or value["schema_version"] != DROID_EEF_STATS_CONTRACT_VERSION:
+        raise ValueError(f"schema_version must be integer {DROID_EEF_STATS_CONTRACT_VERSION}")
+    for key in ("raw_gripper_semantics", "output_gripper_semantics", "gripper_transform"):
+        if not isinstance(value[key], str) or value[key] != DROID_EEF_STATS_CONTRACT[key]:
+            raise ValueError(f"{key} must be {DROID_EEF_STATS_CONTRACT[key]!r}")
 
 
 def _clean_text(value) -> str:
@@ -522,6 +551,7 @@ class OxeDroidDataset(LeRobotV3Reader):
             )
             stats_population_digest = raw[DROID_DATA_POPULATION_DIGEST_KEY]
             stats_population = raw[DROID_STATS_POPULATION_KEY]
+            stats_contract = raw[DROID_EEF_STATS_CONTRACT_KEY]
             if (
                 not isinstance(stats_population_digest, str)
                 or re.fullmatch(r"[0-9a-f]{64}", stats_population_digest) is None
@@ -529,7 +559,7 @@ class OxeDroidDataset(LeRobotV3Reader):
                 raise ValueError(f"{DROID_DATA_POPULATION_DIGEST_KEY} must be a lowercase SHA-256 digest")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
-                f"{stats_path} has missing or invalid DROID population provenance ({exc}). "
+                f"{stats_path} has missing or invalid DROID normalization provenance ({exc}). "
                 "Re-run oxe_stats_computation for DROID."
             ) from exc
         if stats_excluded != self._droid_excluded_episode_indices:
@@ -547,6 +577,14 @@ class OxeDroidDataset(LeRobotV3Reader):
                 f"{stats_path} {DROID_STATS_POPULATION_KEY} does not match the current train "
                 "split/exclusion population. Re-run oxe_stats_computation for DROID."
             )
+        try:
+            _validate_droid_eef_stats_contract(stats_contract)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{stats_path} {DROID_EEF_STATS_CONTRACT_KEY} is stale or invalid; expected "
+                "the canonical 0=closed, 1=open DROID gripper transform. Re-run "
+                f"oxe_stats_computation for DROID ({exc})."
+            ) from exc
         stats = materialize_eef_stats(
             raw,
             self._normalize_mode,
@@ -589,18 +627,22 @@ class OxeDroidDataset(LeRobotV3Reader):
 
     def _action_20d(self, win: pd.DataFrame) -> np.ndarray:
 
+
         action = np.stack(win["other_information.action_tcp_pose"].values).astype(np.float32)
-        return single_arm_20d(euler7_action_to_arm10(action), self._normalization_stats, self._normalize_mode)
+        return single_arm_20d(droid_euler7_to_arm10(action), self._normalization_stats, self._normalize_mode)
 
     def _proprio_20d(self, win: pd.DataFrame) -> Optional[np.ndarray]:
 
 
         state = np.stack(win["state"].values[:1]).astype(np.float32)
-        return single_arm_20d(euler7_action_to_arm10(state), self._normalization_stats, self._normalize_mode)
+        return single_arm_20d(droid_euler7_to_arm10(state), self._normalization_stats, self._normalize_mode)
 
 
 __all__ = [
     "DROID_DATA_POPULATION_DIGEST_KEY",
+    "DROID_EEF_STATS_CONTRACT",
+    "DROID_EEF_STATS_CONTRACT_KEY",
+    "DROID_EEF_STATS_CONTRACT_VERSION",
     "DROID_PROMPT_EXCLUSION_KEY",
     "DROID_PROMPT_EXCLUSION_SCHEMA_VERSION",
     "DROID_PROMPT_FALLBACK_COLS",

@@ -19,7 +19,11 @@ import pytest
 import torch
 from PIL import Image
 
-from openwam.dataloader.robocoin import RoboCOINDataset, _load_trim_spec
+from openwam.dataloader.robocoin import (
+    ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS,
+    RoboCOINDataset,
+    _load_trim_spec,
+)
 from openwam.dataloader.utils.lerobotv3 import DataContractError
 
 CAM = "observation.images.cam_head_rgb"
@@ -445,6 +449,50 @@ def test_root_mode_trim_csv_with_partial_bucket_key_overlap_is_allowed(tmp_path)
         for bucket in ds._buckets
     }
     assert lengths_by_bucket == {"bucket-a": [6], "bucket-b": [8]}
+
+
+def test_root_mode_drops_whole_bucket_exclusion_before_fanout(tmp_path):
+    root = tmp_path / "root"
+    kept = _make_bucket(root / "kept-bucket", [40])
+    excluded_name = next(iter(ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS))
+    _make_bucket(root / excluded_name, [40])
+
+    ds = RoboCOINDataset.from_config(
+        {"dataset_dir": str(root), "normalize_mode": None}
+    )
+
+    assert [bucket._dataset_dir for bucket in ds._buckets] == [kept]
+
+
+def test_direct_reader_rejects_whole_bucket_exclusion(tmp_path):
+    excluded_name = next(iter(ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS))
+    bucket = _make_bucket(tmp_path / excluded_name, [40])
+
+    with pytest.raises(DataContractError, match="excluded as a whole"):
+        RoboCOINDataset(dataset_dir=str(bucket), normalize_mode=None)
+
+
+def test_excluded_bucket_does_not_count_as_trim_csv_overlap(tmp_path):
+    root = tmp_path / "root"
+    _make_bucket(root / "kept-bucket", [40])
+    excluded_name = next(iter(ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS))
+    _make_bucket(root / excluded_name, [40])
+    trim_csv = _write_trim_csv(
+        tmp_path / "excluded-only.csv",
+        [
+            _trim_row(
+                dataset=excluded_name,
+                total_frames=40,
+                trim_head_to=1,
+                trim_tail_from=39,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="silently no-op"):
+        RoboCOINDataset.from_config(
+            {"dataset_dir": str(root), "trim_csv": str(trim_csv), "normalize_mode": None}
+        )
 
 
 def test_reader_rejects_noncanonical_numeric_data_shard(tmp_path):

@@ -8,6 +8,8 @@ import pytest
 
 from openwam.dataloader.oxe_droid import (
     DROID_DATA_POPULATION_DIGEST_KEY,
+    DROID_EEF_STATS_CONTRACT,
+    DROID_EEF_STATS_CONTRACT_KEY,
     DROID_PROMPT_EXCLUSION_SCHEMA_VERSION,
     DROID_PROMPT_INPUTS_DIGEST_KEY,
     OxeDroidDataset,
@@ -108,9 +110,43 @@ def test_droid_stats_exclude_reader_blacklist_population(tmp_path):
     assert stats["n_samples"] == n_rows * 2
     assert stats["max"][0] == 1.0
     assert stats["excluded_episode_indices"] == [1]
+    assert stats[DROID_EEF_STATS_CONTRACT_KEY] == DROID_EEF_STATS_CONTRACT
     assert stats[DROID_DATA_POPULATION_DIGEST_KEY] == digest_lerobot_v3_data_population(
         resolve_lerobot_v3_data_population(root)
     )
+
+
+def test_droid_stats_aggregate_canonical_openness_not_raw_closedness(tmp_path):
+    root = tmp_path / "Droid"
+    (root / "meta").mkdir(parents=True)
+    (root / "data" / "chunk-000").mkdir(parents=True)
+    state_values = np.zeros((4, 7), dtype=np.float32)
+    state_values[:, 6] = [0.1, 0.2, 0.3, 0.4]
+    action_values = np.zeros((4, 7), dtype=np.float32)
+    action_values[:, 6] = [0.15, 0.25, 0.35, 0.45]
+    pd.DataFrame(
+        {
+            "episode_index": [0] * 4,
+            "task_index": [0] * 4,
+            "state": list(state_values),
+            "other_information.action_tcp_pose": list(action_values),
+            **{column: [""] * 4 for column in OxeDroidDataset.PROMPT_FALLBACK_COLS},
+        }
+    ).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
+    pd.DataFrame({"task_index": [0]}, index=pd.Index(["task"], name="task")).to_parquet(
+        root / "meta" / "tasks.parquet"
+    )
+    _write_manifest(root, [4])
+    _write_exclusions(root, canonical=[])
+
+    stats, _, _ = compute_dataset_stats(root, "DROID", rot6d_identity=False)
+
+    assert stats["min"][9] == pytest.approx(0.55)
+    assert stats["max"][9] == pytest.approx(0.9)
+    assert stats["mean"][9] == pytest.approx(0.725)
+    assert stats["q01"][9] == pytest.approx(0.5535)
+    assert stats["q99"][9] == pytest.approx(0.8965)
+    assert stats[DROID_EEF_STATS_CONTRACT_KEY] == DROID_EEF_STATS_CONTRACT
 
 
 def test_droid_stats_fail_clearly_when_every_row_is_excluded(tmp_path):

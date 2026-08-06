@@ -65,6 +65,17 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
 from __future__ import annotations
 
 import hashlib
@@ -116,6 +127,26 @@ _MOVE_SRC_DIMS = (0, 2)
 _MOVE_DIM = len(_MOVE_SRC_DIMS)
 _MOVE_SLOTS = (68, 70)
 _MOVE_EPS = 1e-6
+
+
+
+
+
+
+
+_GRIPPER_STATE_OPEN_POSITION_M = 0.035
+_GRIPPER_STATE_CLOSED_POSITION_M = 0.125
+_GRIPPER_CONTRACT = {
+    "schema_version": 1,
+    "raw_action_semantics": "0_open_1_closed_command",
+    "action_transform": "1-x",
+    "raw_state_semantics": "closing_actuator_position_m",
+    "state_transform": "clip((closed_position_m-x)/(closed_position_m-open_position_m),0,1)",
+    "open_endpoint_m": _GRIPPER_STATE_OPEN_POSITION_M,
+    "closed_endpoint_m": _GRIPPER_STATE_CLOSED_POSITION_M,
+    "output_semantics": "0_closed_1_open_aperture_fraction",
+}
+_STATS_SCHEMA_VERSION = 3
 
 
 
@@ -261,7 +292,7 @@ def _effective_segment_population_digest(eps_df: pd.DataFrame) -> str:
     return hasher.hexdigest()
 
 
-def _bucket_has_base_motion(dataset_dir) -> bool:
+def _bucket_base_motion_flags(dataset_dir) -> tuple[bool, bool]:
     """Public implementation. Dataset-specific audit notes were removed."""
 
 
@@ -279,7 +310,7 @@ def _bucket_has_base_motion(dataset_dir) -> bool:
             "AgiBotWorld %s: no %s — treating base as stationary (move slots unmapped).",
             dataset_dir, _BUCKET_STATS_FILENAME,
         )
-        return False
+        return False, False
     try:
         with open(p) as f:
             st = json.load(f)
@@ -288,16 +319,37 @@ def _bucket_has_base_motion(dataset_dir) -> bool:
             "AgiBotWorld %s: could not read %s (%s) — treating base as stationary (move slots unmapped).",
             dataset_dir, p.name, e,
         )
-        return False
-    moved = False
+        return False, False
+
+    flags = []
     for key in ("action.robot_velocity", "observation.state.robot_velocity"):
         blk = st.get(key)
         if not blk:
+            flags.append(False)
             continue
         lo = np.abs(np.asarray(blk.get("min", [0.0]), dtype=np.float64)).max()
         hi = np.abs(np.asarray(blk.get("max", [0.0]), dtype=np.float64)).max()
-        moved = moved or max(lo, hi) > _MOVE_EPS
-    return moved
+        flags.append(bool(max(lo, hi) > _MOVE_EPS))
+    return flags[0], flags[1]
+
+
+def _bucket_has_base_motion(dataset_dir) -> bool:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    return any(_bucket_base_motion_flags(dataset_dir))
+
+
+def _action_gripper_to_open_convention(grip: np.ndarray) -> np.ndarray:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    return (1.0 - np.asarray(grip, dtype=np.float32)).astype(np.float32, copy=False)
+
+
+def _state_gripper_to_open_convention(grip: np.ndarray) -> np.ndarray:
+    """Public implementation. Dataset-specific audit notes were removed."""
+    raw = np.asarray(grip, dtype=np.float32)
+    span = _GRIPPER_STATE_CLOSED_POSITION_M - _GRIPPER_STATE_OPEN_POSITION_M
+    return np.clip((_GRIPPER_STATE_CLOSED_POSITION_M - raw) / span, 0.0, 1.0).astype(
+        np.float32, copy=False
+    )
 
 
 def _eef18_to_eef20(ee18: np.ndarray, grip2: np.ndarray) -> np.ndarray:
@@ -385,9 +437,19 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
 
-
         self._is_dex = Path(dataset_dir).name in _DEX_BUCKET_IDS
-        self._has_move = unify_action and _bucket_has_base_motion(dataset_dir)
+
+
+        action_moves, state_moves = (
+            _bucket_base_motion_flags(dataset_dir) if unify_action else (False, False)
+        )
+        self._action_has_move = bool(action_moves)
+        self._proprio_has_move = bool(state_moves)
+        self._has_move = self._action_has_move or self._proprio_has_move
+
+
+        self.ACTION_DIM_MASK = None
+        self.PROPRIO_DIM_MASK = None
         self._use_segment_annotations = bool(use_segment_annotations)
         self._segment_max_trim_ratio = _validate_trim_ratio(segment_max_trim_ratio)
         if self._segment_max_trim_ratio is not None and not self._use_segment_annotations:
@@ -408,6 +470,13 @@ class AgiBotWorldDataset(LeRobotV3Reader):
             else:
                 self.ACTION_DIM = _EEF_RAW_DIM + move_dim
                 unify_action_map = ["0-9", "34-43"] + move_slots
+            if self._has_move:
+                action_mask = np.ones(self.ACTION_DIM, dtype=bool)
+                proprio_mask = np.ones(self.ACTION_DIM, dtype=bool)
+                action_mask[-_MOVE_DIM:] = self._action_has_move
+                proprio_mask[-_MOVE_DIM:] = self._proprio_has_move
+                self.ACTION_DIM_MASK = action_mask
+                self.PROPRIO_DIM_MASK = proprio_mask
         super().__init__(dataset_dir, unify_action=unify_action, unify_action_map=unify_action_map, **kwargs)
 
 
@@ -488,12 +557,14 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
                 self.NEEDED_COLS = _POSE_ONLY_COLS
                 self.ACTION_DIM_MASK = GRIP_EXCLUDED_DIM_MASK
+                self.PROPRIO_DIM_MASK = GRIP_EXCLUDED_DIM_MASK
         else:
             self.NEEDED_COLS = (_GRIP_COLS + move_cols) if self._unify else _GRIP_COLS
         return self.HEAD_CAMERA, self.LEFT_WRIST_CAMERA, self.RIGHT_WRIST_CAMERA
 
     def _load_stats(self, info: dict):
         """Public implementation. Dataset-specific audit notes were removed."""
+
 
 
 
@@ -531,14 +602,23 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         with open(stats_path) as f:
             raw = json.load(f)
 
+        if raw.get("gripper_contract") != _GRIPPER_CONTRACT:
+            raise DataContractError(
+                f"AgiBotWorld stats {stats_path} use gripper_contract="
+                f"{raw.get('gripper_contract')!r}; expected {_GRIPPER_CONTRACT!r}. "
+                "Regenerate stats with the current canonical direction and endpoint calibration."
+            )
+
 
 
 
         population = raw.get("population")
-        if not isinstance(population, dict) or population.get("schema_version") != 1:
+        if not isinstance(population, dict) or population.get("schema_version") != _STATS_SCHEMA_VERSION:
             raise DataContractError(
-                f"AgiBotWorld stats {stats_path} predates trim-population provenance. "
-                "Regenerate it with agibotworld_stats_computation before loading normalized data."
+                f"AgiBotWorld stats {stats_path} use stale population schema "
+                f"{None if not isinstance(population, dict) else population.get('schema_version')!r}; "
+                f"expected {_STATS_SCHEMA_VERSION}. Regenerate it to bind the canonical gripper "
+                "contract, independent action/state velocity populations, and terminal-action exclusion."
             )
         recorded_buckets = population.get("buckets")
         if not isinstance(recorded_buckets, dict) or not all(
@@ -632,7 +712,21 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
 
-                vel = _mat(f"{prefix}.robot_velocity", 3)
+
+                stream_moves = self._action_has_move if prefix == "action" else self._proprio_has_move
+                if stream_moves:
+
+
+                    vel = _mat(f"{prefix}.robot_velocity", 3)
+                else:
+                    vel = {
+                        "mean": np.zeros(3, dtype=np.float32),
+                        "std": np.ones(3, dtype=np.float32),
+                        "min": -np.ones(3, dtype=np.float32),
+                        "max": np.ones(3, dtype=np.float32),
+                        "q01": -np.ones(3, dtype=np.float32),
+                        "q99": np.ones(3, dtype=np.float32),
+                    }
                 src = list(_MOVE_SRC_DIMS)
                 for k in _STAT_FIELDS:
                     combined[k] = np.concatenate([combined[k], vel[k][src]]).astype(np.float32)
@@ -643,6 +737,22 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
         return self._action_norm_stats
+
+    def _train_min_window_len(self) -> int:
+        """Public implementation. Dataset-specific audit notes were removed."""
+        return 2
+
+    def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
+        """Public implementation. Dataset-specific audit notes were removed."""
+
+
+
+
+
+
+        if actual_raw_len >= self._num_frames:
+            return actual_raw_len
+        return max(0, actual_raw_len - 1)
 
     def _normalize_array(self, arr: np.ndarray, stats) -> np.ndarray:
         """Public implementation. Dataset-specific audit notes were removed."""
@@ -656,7 +766,12 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
 
         if not self._is_dex:
-            return np.stack(win[col].values[:n]).astype(np.float32)
+            grip = np.stack(win[col].values[:n]).astype(np.float32)
+            if col == "action.gripper":
+                grip = _action_gripper_to_open_convention(grip)
+            else:
+                grip = _state_gripper_to_open_convention(grip)
+            return grip
         return np.zeros((n, 2), dtype=np.float32)
 
     def _dex_pose_fingers(self, ee18: np.ndarray, dex12: np.ndarray) -> np.ndarray:
@@ -679,7 +794,13 @@ class AgiBotWorldDataset(LeRobotV3Reader):
 
         if not self._has_move:
             return raw
-        vel = np.stack(win[col].values[:n]).astype(np.float32)[:, _MOVE_SRC_DIMS]
+        stream_moves = self._action_has_move if col.startswith("action.") else self._proprio_has_move
+        if stream_moves:
+            vel = np.stack(win[col].values[:n]).astype(np.float32)[:, _MOVE_SRC_DIMS]
+        else:
+
+
+            vel = np.zeros((n, _MOVE_DIM), dtype=np.float32)
         return np.concatenate([raw, vel], axis=-1)
 
     def _action_20d(self, win) -> np.ndarray:

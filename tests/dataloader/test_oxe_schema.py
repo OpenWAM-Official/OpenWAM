@@ -11,6 +11,7 @@ import numpy as np
 
 from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
+    droid_euler7_to_arm10,
     droid_state_to_arm10,
     euler7_action_to_arm10,
     fractal_state_to_arm10,
@@ -114,11 +115,29 @@ class TestDroidStateToArm10:
         out = droid_state_to_arm10(cart, grip)
         np.testing.assert_allclose(out[0, :3], [0.1, 0.2, 0.3], atol=1e-6)
         np.testing.assert_allclose(out[0, 3:9], [1, 0, 0, 0, 1, 0], atol=1e-6)
-        assert out[0, 9] == np.float32(0.8)
+        np.testing.assert_allclose(out[0, 9], 0.2, atol=1e-7)
 
     def test_scalar_gripper_shape(self):
         # Even if gripper is shape (T, 1), the output works.
         cart = np.zeros((3, 6), dtype=np.float32)
         grip = np.array([[0.1], [0.5], [0.9]], dtype=np.float32)
         out = droid_state_to_arm10(cart, grip)
-        np.testing.assert_allclose(out[:, 9], [0.1, 0.5, 0.9], atol=1e-6)
+        np.testing.assert_allclose(out[:, 9], [0.9, 0.5, 0.1], atol=1e-6)
+
+
+class TestDroidEuler7ToArm10:
+    def test_closedness_is_inverted_to_canonical_openness(self):
+        value = np.zeros((3, 7), dtype=np.float32)
+        value[:, 6] = [0.0, 0.25, 1.0]
+
+        out = droid_euler7_to_arm10(value)
+
+        np.testing.assert_allclose(out[:, 9], [1.0, 0.75, 0.0], atol=1e-7)
+
+    def test_pose_conversion_matches_generic_converter(self):
+        value = np.array([[0.1, 0.2, 0.3, 0.4, -0.5, 0.6, 0.25]], dtype=np.float32)
+
+        droid = droid_euler7_to_arm10(value)
+        generic = euler7_action_to_arm10(value)
+
+        np.testing.assert_allclose(droid[:, :9], generic[:, :9], atol=1e-7)

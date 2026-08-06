@@ -23,7 +23,12 @@ import pyarrow.parquet as pq
 import pytest
 from PIL import Image
 
-from openwam.dataloader.agibotworld import AgiBotWorldDataset, _validate_trim_ratio
+from openwam.dataloader.agibotworld import (
+    _GRIPPER_CONTRACT,
+    _STATS_SCHEMA_VERSION,
+    AgiBotWorldDataset,
+    _validate_trim_ratio,
+)
 from openwam.dataloader.utils.lerobotv3 import DataContractError
 from openwam.dataloader.utils.stats_computation.agibotworld_stats_computation import _partial_bucket
 
@@ -61,7 +66,16 @@ class TestValidateTrimRatio:
 # ---------------------------------------------------------------------------
 
 
-def _make_bucket(bucket: Path, episodes: list[dict], *, with_segment_cols: bool = True) -> Path:
+def _make_bucket(
+    bucket: Path,
+    episodes: list[dict],
+    *,
+    with_segment_cols: bool = True,
+    action_velocity=None,
+    state_velocity=None,
+    action_gripper=None,
+    state_gripper=None,
+) -> Path:
     """Write a minimal grippered AgiBotWorld bucket.
 
     ``episodes`` items: ``{"length": int, "flag": int, "delta": int}``. All
@@ -82,11 +96,6 @@ def _make_bucket(bucket: Path, episodes: list[dict], *, with_segment_cols: bool 
             }
         )
     )
-    # stationary base: keeps _bucket_has_base_motion False without a warning
-    (meta / "stats.json").write_text(
-        json.dumps({"action.robot_velocity": {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}})
-    )
-
     rows, cum = [], 0
     for ep, spec in enumerate(episodes):
         row = {
@@ -112,6 +121,36 @@ def _make_bucket(bucket: Path, episodes: list[dict], *, with_segment_cols: bool 
     # data shard: ee_base[0] encodes the GLOBAL row index so a misaligned slice
     # is detectable from the action payload alone.
     total = cum
+
+    def _values(value, dim):
+        if value is None:
+            return np.zeros((total, dim), dtype=np.float32)
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.shape == (dim,):
+            arr = np.broadcast_to(arr, (total, dim)).copy()
+        if arr.shape != (total, dim):
+            raise ValueError(f"expected {(total, dim)}, got {arr.shape}")
+        return arr
+
+    action_vel = _values(action_velocity, 3)
+    state_vel = _values(state_velocity, 3)
+    action_grip = _values(action_gripper, 2)
+    state_grip = _values(state_gripper, 2)
+    (meta / "stats.json").write_text(
+        json.dumps(
+            {
+                "action.robot_velocity": {
+                    "min": action_vel.min(axis=0).tolist(),
+                    "max": action_vel.max(axis=0).tolist(),
+                },
+                "observation.state.robot_velocity": {
+                    "min": state_vel.min(axis=0).tolist(),
+                    "max": state_vel.max(axis=0).tolist(),
+                },
+            }
+        )
+    )
+
     gidx = np.arange(total, dtype=np.float32)
     ee = np.zeros((total, 18), dtype=np.float32)
     ee[:, 0] = gidx
@@ -128,8 +167,10 @@ def _make_bucket(bucket: Path, episodes: list[dict], *, with_segment_cols: bool 
                     "frame_index": frame_index,
                     "action.ee_base": list(ee),
                     "observation.state.ee_base": list(ee),
-                    "action.gripper": list(np.zeros((total, 2), dtype=np.float32)),
-                    "observation.state.gripper": list(np.zeros((total, 2), dtype=np.float32)),
+                    "action.gripper": list(action_grip),
+                    "observation.state.gripper": list(state_grip),
+                    "action.robot_velocity": list(action_vel),
+                    "observation.state.robot_velocity": list(state_vel),
                 }
             )
         ),
@@ -182,19 +223,19 @@ class TestSegmentFlags:
         ds = _reader(_make_bucket(tmp_path / "b", [{"length": 100, "flag": 0, "delta": 0}]))
         assert ds._ep_valid_start.tolist() == [0]
         assert ds._ep_valid_end.tolist() == [100]
-        assert len(ds) == 100
+        assert len(ds) == 99  # final one-row start has no real next-state target
 
     def test_flag1_trims_prefix(self, tmp_path):
         ds = _reader(_make_bucket(tmp_path / "b", [{"length": 100, "flag": 1, "delta": 30}]))
         assert ds._ep_valid_start.tolist() == [30]
         assert ds._ep_valid_end.tolist() == [100]
-        assert len(ds) == 70
+        assert len(ds) == 69
 
     def test_flag2_trims_suffix(self, tmp_path):
         ds = _reader(_make_bucket(tmp_path / "b", [{"length": 100, "flag": 2, "delta": 30}]))
         assert ds._ep_valid_start.tolist() == [0]
         assert ds._ep_valid_end.tolist() == [70]
-        assert len(ds) == 70
+        assert len(ds) == 69
 
     def test_flag3_dropped(self, tmp_path):
         ds = _reader(
@@ -208,7 +249,7 @@ class TestSegmentFlags:
             )
         )
         assert ds._eps_df["episode_index"].tolist() == [0, 2]
-        assert len(ds) == 150
+        assert len(ds) == 148
 
     def test_delta_at_or_over_length_drops_episode(self, tmp_path):
         # delta >= length leaves nothing: must drop, never produce a negative span.
@@ -230,12 +271,12 @@ class TestSegmentFlags:
         ds = _reader(_make_bucket(tmp_path / "b", eps), use_segment_annotations=False)
         assert len(ds._eps_df) == 2
         assert ds._ep_valid_start.tolist() == [0, 0]
-        assert len(ds) == 200
+        assert len(ds) == 198
 
     def test_missing_columns_falls_back(self, tmp_path, caplog):
         eps = [{"length": 100, "flag": 0, "delta": 0}]
         ds = _reader(_make_bucket(tmp_path / "b", eps, with_segment_cols=False))
-        assert len(ds) == 100
+        assert len(ds) == 99
         assert "segment annotation columns" in caplog.text
 
 
@@ -260,7 +301,7 @@ class TestMaxTrimRatio:
         # "70% or more trimmed" — an episode trimmed to exactly the threshold goes.
         ds = _reader(_make_bucket(tmp_path / "b", self.EPS), segment_max_trim_ratio=0.7)
         assert ds._eps_df["episode_index"].tolist() == [0, 3]
-        assert len(ds) == 90 + 100
+        assert len(ds) == 89 + 99
 
     def test_higher_threshold_keeps_more(self, tmp_path):
         # 0.8 spares the 70%-trimmed episode and still drops the 90% one.
@@ -316,20 +357,21 @@ class TestTrimmedOffsetAlignment:
 
     def test_window_count_matches_trimmed_span(self, tmp_path):
         ds = self._ds(tmp_path)
-        assert len(ds) == 95 + 95 + 120
+        assert len(ds) == 94 + 94 + 119
 
     def test_last_window_of_suffix_trimmed_episode_stops_at_valid_end(self, tmp_path, patch_decode):
         ds = self._ds(tmp_path)
-        ep1_first = 95  # episode 0 contributed 95 windows
-        last = ep1_first + 94  # last window of episode 1
+        ep1_first = 94  # episode 0 contributed 94 supervised-window starts
+        last = ep1_first + 93  # last window of episode 1
         s = ds[last]
-        # episode 1 valid range is [0, 95); its last window starts at 94 and has
-        # exactly one real frame, so the mask must mark one frame and the payload
+        # episode 1 valid range is [0, 95); its last window starts at 93 and has
+        # two real rows (one real next-state action), so the video mask samples
+        # one frame and the payload
         # must stay inside episode 1 (global rows 120..239).
         assert int(s["video_mask"].sum()) == 1
         assert int(s["action_mask"].any(dim=1).sum()) == 1
-        assert s["action"][0, 0].item() == pytest.approx(120.0 + 94.0)
-        assert _decoded_index(s["video"][0]) == 120 + 94
+        assert s["action"][0, 0].item() == pytest.approx(120.0 + 93.0)
+        assert _decoded_index(s["video"][0]) == 120 + 93
 
     def test_no_window_reads_past_its_own_episode(self, tmp_path, patch_decode):
         ds = self._ds(tmp_path)
@@ -354,9 +396,153 @@ class TestTrimmedOffsetAlignment:
         # (trimmed suffix, global 120+95 .. 120+119) must be absent.
         assert not (seen & set(range(0, 25)))
         assert not (seen & set(range(120 + 95, 240)))
-        # every kept frame of all three episodes must appear
-        expected = set(range(25, 120)) | set(range(120, 120 + 95)) | set(range(240, 360))
+        # Every kept row with a real successor must appear. The last kept row of
+        # each episode (119/214/359) is a clamped action and stays unsupervised.
+        expected = set(range(25, 119)) | set(range(120, 214)) | set(range(240, 359))
         assert seen == expected
+
+
+# ---------------------------------------------------------------------------
+# Independent action/state movement masks + canonical gripper direction
+# ---------------------------------------------------------------------------
+
+
+class TestPhysicalSemantics:
+    @staticmethod
+    def _unified_reader(bucket: Path) -> AgiBotWorldDataset:
+        return AgiBotWorldDataset(
+            dataset_dir=str(bucket),
+            num_frames=NUM_FRAMES,
+            video_stride=VIDEO_STRIDE,
+            height=384,
+            width=320,
+            multiview=True,
+            unify_action=True,
+            normalize_mode=None,
+        )
+
+    def test_command_only_base_motion_keeps_action_and_masks_proprio(
+        self, tmp_path, patch_decode
+    ):
+        bucket = _make_bucket(
+            tmp_path / "b",
+            [{"length": 40, "flag": 0, "delta": 0}],
+            action_velocity=[1.25, 0.0, -0.5],
+            state_velocity=[0.0, 0.0, 0.0],
+            action_gripper=[0.0, 1.0],  # source: left open, right closed
+            state_gripper=[0.035, 0.125],  # source actuator: left open, right closed
+        )
+        sample = self._unified_reader(bucket)[0]
+
+        # Source action 0=open / 1=closed is inverted into 0=closed / 1=open.
+        assert sample["action"][0, 9].item() == pytest.approx(1.0)
+        assert sample["action"][0, 43].item() == pytest.approx(0.0)
+        # State closing-actuator endpoints become the same canonical aperture fraction.
+        assert sample["proprio"][0, 9].item() == pytest.approx(1.0)
+        assert sample["proprio"][0, 43].item() == pytest.approx(0.0)
+
+        assert sample["action_mask"][:, 68].all()
+        assert sample["action_mask"][:, 70].all()
+        assert not sample["proprio_mask"][:, 68].any()
+        assert not sample["proprio_mask"][:, 70].any()
+        # Masked values are kept numerically neutral as well.
+        assert sample["proprio"][0, 68].item() == 0.0
+        assert sample["proprio"][0, 70].item() == 0.0
+        assert sample["action"][0, 68].item() == pytest.approx(1.25)
+        assert sample["action"][0, 70].item() == pytest.approx(-0.5)
+
+    def test_state_only_base_motion_masks_action_independently(self, tmp_path, patch_decode):
+        bucket = _make_bucket(
+            tmp_path / "b",
+            [{"length": 40, "flag": 0, "delta": 0}],
+            action_velocity=[0.0, 0.0, 0.0],
+            state_velocity=[0.25, 0.0, 0.4],
+        )
+        sample = self._unified_reader(bucket)[0]
+
+        assert not sample["action_mask"][:, 68].any()
+        assert not sample["action_mask"][:, 70].any()
+        assert sample["proprio_mask"][:, 68].all()
+        assert sample["proprio_mask"][:, 70].all()
+        assert sample["action"][0, 68].item() == 0.0
+        assert sample["action"][0, 70].item() == 0.0
+        assert sample["proprio"][0, 68].item() == pytest.approx(0.25)
+        assert sample["proprio"][0, 70].item() == pytest.approx(0.4)
+
+    def test_non_unified_path_does_not_require_base_motion_stats(self, tmp_path, patch_decode):
+        bucket = _make_bucket(
+            tmp_path / "b",
+            [{"length": 40, "flag": 0, "delta": 0}],
+        )
+        (bucket / "meta" / "stats.json").unlink()
+
+        ds = AgiBotWorldDataset(
+            dataset_dir=str(bucket),
+            num_frames=NUM_FRAMES,
+            video_stride=VIDEO_STRIDE,
+            normalize_mode=None,
+            unify_action=False,
+        )
+        sample = ds[0]
+        assert sample["action"].shape[-1] == 20
+        assert sample["proprio"].shape[-1] == 20
+
+    def test_stats_use_independent_motion_population_and_invert_action_gripper(self, tmp_path):
+        bucket = _make_bucket(
+            tmp_path / "b",
+            [{"length": 10, "flag": 0, "delta": 0}],
+            action_velocity=[1.0, 0.0, -1.0],
+            state_velocity=[0.0, 0.0, 0.0],
+            action_gripper=[0.2, 0.8],
+            state_gripper=[0.035, 0.125],
+        )
+        _, partial, _ = _partial_bucket(str(bucket), "train", True, 0.7)
+
+        assert "action.robot_velocity" in partial
+        assert "observation.state.robot_velocity" not in partial
+        np.testing.assert_allclose(partial["action.gripper"]["mean"], [0.8, 0.2])
+        np.testing.assert_allclose(partial["observation.state.gripper"]["mean"], [1.0, 0.0])
+
+
+class TestTemporalAlignment:
+    def test_truncated_tail_drops_clamped_final_target(self, tmp_path, patch_decode):
+        bucket = _make_bucket(
+            tmp_path / "b",
+            [{"length": 12, "flag": 0, "delta": 0}],
+        )
+        ds = AgiBotWorldDataset(
+            dataset_dir=str(bucket),
+            num_frames=9,
+            video_stride=4,
+            normalize_mode=None,
+        )
+
+        assert ds._n_supervised_action_steps(9) == 9
+        assert ds._n_supervised_action_steps(4) == 3
+        assert ds._n_supervised_action_steps(1) == 0
+        # Offset 3 is a full 9-row window: T_action=8 already omits the final
+        # source row. Offset 10 has two rows and must supervise only the first.
+        assert int(ds[3]["action_mask"].any(dim=1).sum()) == 8
+        assert int(ds[len(ds) - 1]["action_mask"].any(dim=1).sum()) == 1
+
+    def test_one_row_episode_is_not_sampleable(self, tmp_path, patch_decode):
+        bucket = _make_bucket(
+            tmp_path / "b",
+            [
+                {"length": 1, "flag": 0, "delta": 0},
+                {"length": 4, "flag": 0, "delta": 0},
+            ],
+        )
+        ds = AgiBotWorldDataset(
+            dataset_dir=str(bucket),
+            num_frames=9,
+            video_stride=4,
+            normalize_mode=None,
+        )
+
+        assert ds._train_min_window_len() == 2
+        assert len(ds) == 3
+        assert all(ds[i]["action_mask"].any() for i in range(len(ds)))
 
 
 # ---------------------------------------------------------------------------
@@ -394,13 +580,16 @@ class TestTrimAwareStats:
         assert name == "b"
         assert population["num_episodes"] == 2
         assert population["num_rows"] == 15
+        assert population["num_action_rows"] == 13
+        assert population["num_state_rows"] == 15
         assert population["excluded_episode_indices"] == [3]
-        assert partial["action.ee_base"]["count"] == 15
+        assert partial["action.ee_base"]["count"] == 13
         assert partial["observation.state.ee_base"]["count"] == 15
         # ee_base[0] encodes the global physical row in the fixture.  These
         # bounds prove that neither prefix/suffix outside the kept spans leaked.
         assert partial["action.ee_base"]["min"][0] == pytest.approx(2.0)
-        assert partial["action.ee_base"]["max"][0] == pytest.approx(16.0)
+        assert partial["action.ee_base"]["max"][0] == pytest.approx(15.0)
+        assert partial["observation.state.ee_base"]["max"][0] == pytest.approx(16.0)
 
     def test_reader_accepts_matching_population_and_rejects_trim_policy_drift(self, tmp_path):
         root = tmp_path / "root"
@@ -411,8 +600,9 @@ class TestTrimAwareStats:
         _, _partial, bucket_population = _partial_bucket(str(bucket), "train", True, 0.7)
         stats = {
             "robot_type": "g2a",
+            "gripper_contract": _GRIPPER_CONTRACT,
             "population": {
-                "schema_version": 1,
+                "schema_version": _STATS_SCHEMA_VERSION,
                 "split": "train",
                 "use_segment_annotations": True,
                 "segment_max_trim_ratio": 0.7,
@@ -433,6 +623,12 @@ class TestTrimAwareStats:
         np.testing.assert_array_equal(ds._action_norm_stats["mean"][3:9], np.zeros(6))
         np.testing.assert_array_equal(ds._action_norm_stats["std"][3:9], np.ones(6))
 
+        stats["gripper_contract"] = {**_GRIPPER_CONTRACT, "open_endpoint_m": 0.036}
+        stats_path.write_text(json.dumps(stats))
+        with pytest.raises(DataContractError, match="gripper_contract"):
+            _reader(bucket, normalize_mode="quantile", segment_max_trim_ratio=0.7)
+
+        stats["gripper_contract"] = _GRIPPER_CONTRACT
         stats["population"]["segment_max_trim_ratio"] = 0.8
         stats_path.write_text(json.dumps(stats))
         with pytest.raises(DataContractError, match="generated with"):
@@ -444,8 +640,9 @@ class TestTrimAwareStats:
         _, _partial, bucket_population = _partial_bucket(str(bucket), "train", True, 0.7)
         stats = {
             "robot_type": "g2a",
+            "gripper_contract": _GRIPPER_CONTRACT,
             "population": {
-                "schema_version": 1,
+                "schema_version": _STATS_SCHEMA_VERSION,
                 "split": "val",
                 "use_segment_annotations": True,
                 "segment_max_trim_ratio": 0.7,
@@ -468,8 +665,9 @@ class TestTrimAwareStats:
         _, _partial, bucket_population = _partial_bucket(str(bucket), "train", True, 0.7)
         stats = {
             "robot_type": "g2a",
+            "gripper_contract": _GRIPPER_CONTRACT,
             "population": {
-                "schema_version": 1,
+                "schema_version": _STATS_SCHEMA_VERSION,
                 "split": "train",
                 "use_segment_annotations": True,
                 "segment_max_trim_ratio": 0.7,

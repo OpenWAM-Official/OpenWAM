@@ -27,6 +27,8 @@
 
 
 
+
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +43,8 @@ import pyarrow.parquet as pq
 
 from openwam.dataloader.oxe_droid import (
     DROID_DATA_POPULATION_DIGEST_KEY,
+    DROID_EEF_STATS_CONTRACT,
+    DROID_EEF_STATS_CONTRACT_KEY,
     DROID_STATS_POPULATION_KEY,
     load_droid_prompt_exclusions,
     resolve_droid_stats_population,
@@ -55,6 +59,7 @@ from openwam.dataloader.utils.lerobotv3 import (
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_ARM10, pin_rot6d_identity
 from openwam.dataloader.utils.oxe_schema import (
     bcz_state_to_arm10,
+    droid_euler7_to_arm10,
     droid_state_to_arm10,
     euler7_action_to_arm10,
     fractal_state_to_arm10,
@@ -93,8 +98,8 @@ SCHEMA: Dict[str, Dict] = {
 
 
         "action_cols": ["other_information.action_tcp_pose"],
-        "state_fn": "euler7_state",
-        "action_fn": "euler7_action",
+        "state_fn": "droid_euler7",
+        "action_fn": "droid_euler7",
     },
 }
 
@@ -119,6 +124,8 @@ def _convert_state(rows: Dict[str, np.ndarray], state_fn: str) -> np.ndarray:
 
 
         return euler7_action_to_arm10(rows[list(rows.keys())[0]])
+    if state_fn == "droid_euler7":
+        return droid_euler7_to_arm10(rows[list(rows.keys())[0]])
     raise ValueError(f"unknown state_fn={state_fn}")
 
 
@@ -126,6 +133,8 @@ def _convert_action(rows: Dict[str, np.ndarray], action_fn: str) -> np.ndarray:
     if action_fn == "euler7_action":
 
         return euler7_action_to_arm10(rows[list(rows.keys())[0]])
+    if action_fn == "droid_euler7":
+        return droid_euler7_to_arm10(rows[list(rows.keys())[0]])
     raise ValueError(f"unknown action_fn={action_fn}")
 
 
@@ -262,6 +271,7 @@ def compute_dataset_stats(
         stats["excluded_episode_indices"] = sorted(excluded_episode_indices)
         stats[DROID_DATA_POPULATION_DIGEST_KEY] = digest_lerobot_v3_data_population(droid_population)
         stats[DROID_STATS_POPULATION_KEY] = droid_stats_population
+        stats[DROID_EEF_STATS_CONTRACT_KEY] = dict(DROID_EEF_STATS_CONTRACT)
     if rot6d_identity:
 
         pin_rot6d_identity(stats, ROT6D_DIMS_ARM10)

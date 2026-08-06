@@ -88,6 +88,8 @@ from openwam.dataloader.robocoin import (
     _load_trim_snapshot,
     _stats_population_spans,
     dex_finger_layout,
+    is_robocoin_bucket_excluded,
+    robocoin_bucket_exclusions_provenance,
 )
 from openwam.dataloader.utils.lerobotv3 import (
     DataContractError,
@@ -213,6 +215,9 @@ def discover_datasets_by_robot_type(root: str) -> dict:
     """Public implementation. Dataset-specific audit notes were removed."""
     groups = {}
     for name in sorted(os.listdir(root)):
+        if is_robocoin_bucket_excluded(name):
+            print(f"  Excluding whole RoboCOIN bucket from stats discovery: {name}")
+            continue
         info_path = os.path.join(root, name, "meta", "info.json")
         if not os.path.isfile(info_path):
             continue
@@ -328,6 +333,19 @@ def compute_stats_for_robot_type(
 
 
 
+
+    dataset_dirs = list(dataset_dirs)
+    excluded_dirs = [ds_dir for ds_dir in dataset_dirs if is_robocoin_bucket_excluded(ds_dir)]
+    dataset_dirs = [ds_dir for ds_dir in dataset_dirs if not is_robocoin_bucket_excluded(ds_dir)]
+    if excluded_dirs:
+        print(
+            "  Excluding whole RoboCOIN bucket(s) from stats population: "
+            + ", ".join(sorted(Path(path).name for path in excluded_dirs))
+        )
+    if not dataset_dirs:
+        raise DataContractError(
+            f"RoboCOIN stats for robot_type {rtype!r}: no non-excluded dataset directories"
+        )
 
     trim_enabled = trim_csv is not None
     if _trim_snapshot is not None and (
@@ -540,7 +558,10 @@ def compute_stats_for_robot_type(
 
     stats["grip_present"] = total_files > 0 and grip_files == total_files
 
-    result = {"eef": stats}
+    result = {
+        "eef": stats,
+        "whole_bucket_exclusions_provenance": robocoin_bucket_exclusions_provenance(rtype),
+    }
     if hand_acc is not None and hand_acc.count > 0:
         hand = hand_acc.finalize()
         hand["dof_left"] = hand_dims[0]
