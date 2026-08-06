@@ -20,6 +20,7 @@ import pytest
 # this repository is ``agibotworld``.  The tuple is order-sensitive because the
 # Hydra defaults order is part of the mixture's stable source-index contract.
 MIXTURE_ENTRIES = ('agibotworld', 'robocoin', 'oxe_droid', 'interndata_a1')
+EXPECTED_TOTAL_HOURS = {'agibotworld': 1376.28, 'robocoin': 526.435, 'oxe_droid': 772.656, 'interndata_a1': 1514.548}
 
 
 class TestMixtureYamlComposition:
@@ -41,6 +42,9 @@ class TestMixtureYamlComposition:
         for name in MIXTURE_ENTRIES:
             assert cfg.datasets[name].get("dataset_dir"), f"{name} missing dataset_dir"
             assert cfg.datasets[name].get("type") == name
+        actual_hours = {name: float(cfg.datasets[name].total_hours) for name in MIXTURE_ENTRIES}
+        assert actual_hours == pytest.approx(EXPECTED_TOTAL_HOURS)
+        assert sum(actual_hours.values()) == pytest.approx(6000.0)
 
     def test_proportional_weight_strategy_default(self):
         from hydra import compose, initialize_config_dir

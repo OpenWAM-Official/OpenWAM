@@ -79,6 +79,7 @@ from openwam.dataloader.utils.lerobotv3 import (
     apply_info_splits,
     build_multibucket,
     compute_file_local_offsets,
+    effective_episode_frames,
     load_episodes_parquet,
     load_tasks_annotated,
     parse_info_json,
@@ -366,49 +367,9 @@ class LeRobotV3Reader(BaseDataset):
 
         # ── optional episode-level subsample to fit a per-bucket hour budget ──
         if self._max_hours is not None:
-            n_before = len(self._eps_df)
-            if n_before == 0:
-                raise ValueError(
-                    f"{self.DATASET_NAME}({self._dataset_id}): eps_df is already empty before "
-                    "subsample (likely split/info.json mismatch)."
-                )
-            self._eps_df = subsample_episodes_by_hours(
-                self._eps_df,
-                target_hours=float(self._max_hours),
-                fps=self._fps,
-                seed=self._subsample_seed,
-            )
-            if len(self._eps_df) == 0:
-                raise ValueError(
-                    f"{self.DATASET_NAME}({self._dataset_id}): subsampling to max_hours="
-                    f"{self._max_hours}h left 0 episodes. target_hours may be smaller than any episode."
-                )
-            logger.info(
-                "%s(%s): subsampled %d/%d episodes (max_hours=%.3f, seed=%d)",
-                self.DATASET_NAME,
-                self._dataset_id,
-                len(self._eps_df),
-                n_before,
-                self._max_hours,
-                self._subsample_seed,
-            )
+            self._select_episodes_by_hours(float(self._max_hours), self._subsample_seed)
 
-        self._ep_valid_start = (
-            self._eps_df["_valid_start"].to_numpy().astype(np.int64)
-            if "_valid_start" in self._eps_df.columns
-            else np.zeros(len(self._eps_df), dtype=np.int64)
-        )
-        self._ep_valid_end = (
-            self._eps_df["_valid_end"].to_numpy().astype(np.int64)
-            if "_valid_end" in self._eps_df.columns
-            else self._eps_df["length"].to_numpy().astype(np.int64)
-        )
-        self._ep_data_row_offset = self._eps_df["_data_row_offset"].to_numpy().astype(np.int64)
-        self._ep_video_frame_offsets: Dict[str, np.ndarray] = {}
-        for cam in self._video_cameras():
-            col = self._video_offset_col(cam)
-            if col in self._eps_df.columns:
-                self._ep_video_frame_offsets[cam] = self._eps_df[col].to_numpy().astype(np.int64)
+        self._rebuild_episode_arrays()
         if self._head_camera_choices:
             # Fail fast on a mistyped choice: a camera without video index
             # columns would otherwise surface as an opaque empty-head-decode
@@ -425,17 +386,6 @@ class LeRobotV3Reader(BaseDataset):
                 self._dataset_id,
                 self._head_camera_choices,
             )
-
-        # ── window index ──────────────────────────────────────────────────
-        length = np.maximum(0, self._ep_valid_end - self._ep_valid_start).astype(np.int64)
-        min_window_len = self._num_frames if self._split == "val" else self._train_min_window_len()
-        n_starts = np.where(
-            length >= min_window_len,
-            (length - min_window_len) // self._window_stride + 1,
-            0,
-        ).astype(np.int64)
-        self._cum_n_starts = np.concatenate([[0], np.cumsum(n_starts)]).astype(np.int64)
-        self._n_total = int(self._cum_n_starts[-1])
 
         # ── prompts + per-dataset normalization stats (hooks) ─────────────
         self._load_prompts()
@@ -472,6 +422,100 @@ class LeRobotV3Reader(BaseDataset):
             self._normalize_mode,
             self._enable_action_supervision,
         )
+
+    def _select_episodes_by_hours(self, target_hours: float, seed: int) -> None:
+        """Select whole episodes against a post-filter, effective-hour budget.
+
+        This helper only changes ``_eps_df``.  The caller must rebuild the
+        derived episode/window arrays afterwards.  Keeping selection separate
+        lets root-mode multi-bucket construction first build every leaf against
+        its complete split/exclusion/trim population, water-fill using those
+        *effective* capacities, and then apply each allocation in place.
+        """
+        n_before = len(self._eps_df)
+        if n_before == 0:
+            raise ValueError(
+                f"{self.DATASET_NAME}({self._dataset_id}): eps_df is already empty before "
+                "subsample (likely split/info.json mismatch)."
+            )
+        self._max_hours = float(target_hours)
+        self._subsample_seed = int(seed)
+        self._eps_df = subsample_episodes_by_hours(
+            self._eps_df,
+            target_hours=self._max_hours,
+            fps=self._fps,
+            seed=self._subsample_seed,
+            episode_frames=self._sampleable_episode_frames(self._eps_df),
+        )
+        if len(self._eps_df) == 0:
+            raise ValueError(
+                f"{self.DATASET_NAME}({self._dataset_id}): subsampling to max_hours="
+                f"{self._max_hours}h left 0 episodes."
+            )
+        logger.info(
+            "%s(%s): subsampled %d/%d episodes (max_hours=%.3f effective h, seed=%d)",
+            self.DATASET_NAME,
+            self._dataset_id,
+            len(self._eps_df),
+            n_before,
+            self._max_hours,
+            self._subsample_seed,
+        )
+
+    def _rebuild_episode_arrays(self) -> None:
+        """Rebuild every array derived from the current ``_eps_df`` rows."""
+        effective_length = effective_episode_frames(self._eps_df)
+        self._ep_valid_start = (
+            self._eps_df["_valid_start"].to_numpy().astype(np.int64)
+            if "_valid_start" in self._eps_df.columns
+            else np.zeros(len(self._eps_df), dtype=np.int64)
+        )
+        self._ep_valid_end = (
+            self._eps_df["_valid_end"].to_numpy().astype(np.int64)
+            if "_valid_end" in self._eps_df.columns
+            else self._eps_df["length"].to_numpy().astype(np.int64)
+        )
+        self._ep_data_row_offset = self._eps_df["_data_row_offset"].to_numpy().astype(np.int64)
+        self._ep_video_frame_offsets = {}
+        for cam in self._video_cameras():
+            col = self._video_offset_col(cam)
+            if col in self._eps_df.columns:
+                self._ep_video_frame_offsets[cam] = self._eps_df[col].to_numpy().astype(np.int64)
+
+        min_window_len = self._num_frames if self._split == "val" else self._train_min_window_len()
+        n_starts = np.where(
+            effective_length >= min_window_len,
+            (effective_length - min_window_len) // self._window_stride + 1,
+            0,
+        ).astype(np.int64)
+        self._cum_n_starts = np.concatenate([[0], np.cumsum(n_starts)]).astype(np.int64)
+        self._n_total = int(self._cum_n_starts[-1])
+
+    def _sampleable_episode_frames(self, eps_df: pd.DataFrame) -> np.ndarray:
+        """Effective frames, with non-window-producing episodes charged as zero."""
+        frames = effective_episode_frames(eps_df)
+        min_window_len = self._num_frames if self._split == "val" else self._train_min_window_len()
+        return np.where(frames >= min_window_len, frames, 0).astype(np.int64)
+
+    def _apply_effective_hour_budget(self, target_hours: float, seed: int) -> None:
+        """Apply a root-mode water-fill allocation to an initialized leaf.
+
+        Multi-bucket construction deliberately initializes leaves uncapped so
+        their split/exclusion/trim filters and data-contract checks run against
+        the complete population.  It then calls this method once with the
+        effective-hours allocation.  Prompt tables, normalization stats and
+        static action masks do not depend on the selected episode subset; only
+        the episode dispatch arrays need rebuilding. This must run before the
+        multi-bucket wrapper snapshots child lengths into its cumulative index.
+        """
+        self._select_episodes_by_hours(target_hours, seed)
+        self._rebuild_episode_arrays()
+
+    @property
+    def effective_hours(self) -> float:
+        """Post-split/exclusion/trim footage represented by this leaf."""
+        frames = self._sampleable_episode_frames(self._eps_df)
+        return float(frames.sum()) / self._fps / 3600.0
 
     # ----- hooks (defaults) -------------------------------------------------
 

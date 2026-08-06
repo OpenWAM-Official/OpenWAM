@@ -50,14 +50,20 @@ Functions
     Each bucket gets at most its own ``bucket_hours[i]``; surplus from
     under-budgetable buckets is redistributed among the rest.
 
+- effective_episode_frames(eps_df, length_col="length")
+    Validate and return each row's post-trim sampleable span.
+
 - subsample_episodes_by_hours(eps_df, target_hours, fps, seed, ...)
-    Random subset of ``eps_df`` rows totalling >= ``target_hours`` of raw
-    footage. Seeded permutation + greedy prefix; preserves original row
-    order so downstream offset columns stay valid.
+    Random subset of ``eps_df`` rows totalling >= ``target_hours`` of effective
+    post-trim footage. ``_valid_start/_valid_end`` take precedence when present;
+    otherwise the (possibly trim-adjusted) ``length`` column is used. Seeded
+    permutation + greedy prefix; preserves original row order so downstream
+    offset columns stay valid.
 
 - quick_bucket_hours(bucket_dir)
-    Cheap fps × sum(episode_lengths) / 3600 scan without building a full
-    reader. Used by multi-bucket from_config to compute water-fill input.
+    Raw-manifest diagnostic: cheap fps × sum(episode_lengths) / 3600 scan
+    without building a full reader. Effective multi-bucket budgets deliberately
+    do not use it because it cannot see split/exclusion/trim filters.
 
 Exceptions
 ----------
@@ -519,20 +525,60 @@ def water_fill_hours(bucket_hours: List[float], total_budget: float) -> List[flo
     return alloc
 
 
+def effective_episode_frames(eps_df: pd.DataFrame, length_col: str = "length") -> np.ndarray:
+    """Return validated post-trim frame counts for each episode row.
+
+    Readers that physically shift offsets during trimming also replace
+    ``length`` and therefore need no special handling. Segment-based readers
+    retain nominal ``length`` and provide the sampleable half-open range through
+    the paired ``_valid_start`` / ``_valid_end`` columns.
+    """
+    nominal = eps_df[length_col].to_numpy(dtype=np.int64)
+    if np.any(nominal < 0):
+        raise ValueError(f"episode {length_col!r} values must be non-negative")
+    if length_col != "length":
+        return nominal
+
+    has_start = "_valid_start" in eps_df.columns
+    has_end = "_valid_end" in eps_df.columns
+    if has_start != has_end:
+        missing = "_valid_end" if has_start else "_valid_start"
+        raise ValueError(f"episode table has only one valid-range column; missing {missing!r}")
+    if not has_start:
+        return nominal
+
+    valid_start = eps_df["_valid_start"].to_numpy(dtype=np.int64)
+    valid_end = eps_df["_valid_end"].to_numpy(dtype=np.int64)
+    invalid = (valid_start < 0) | (valid_end < valid_start) | (valid_end > nominal)
+    if np.any(invalid):
+        bad_pos = np.flatnonzero(invalid)[:5]
+        preview = ", ".join(
+            f"row {int(i)}: [{int(valid_start[i])}, {int(valid_end[i])}) / length {int(nominal[i])}"
+            for i in bad_pos
+        )
+        raise ValueError(f"episode valid ranges must satisfy 0 <= start <= end <= length ({preview})")
+    return valid_end - valid_start
+
+
 def subsample_episodes_by_hours(
     eps_df: pd.DataFrame,
     target_hours: float,
     fps: float,
     seed: int,
     length_col: str = "length",
+    episode_frames: Optional[np.ndarray] = None,
 ) -> pd.DataFrame:
-    """Random subset of ``eps_df`` rows totalling >= target_hours of footage.
+    """Random subset totalling >= ``target_hours`` of effective footage.
 
     Selection: seeded permutation over rows, then greedy prefix until
-    cumulative ``length_col`` >= target_hours * fps * 3600. Returns rows
-    in their *original* eps_df order — important because downstream
-    offset columns (``_data_row_offset`` / ``_video_frame_offset``) are
-    computed per-row and must stay aligned.
+    cumulative effective length >= target_hours * fps * 3600.  When the
+    standard ``length`` column is requested, optional ``_valid_start`` and
+    ``_valid_end`` columns define the count; this is how segment-trimmed
+    datasets budget only frames that can actually be sampled. Readers that
+    implement trimming by mutating ``length`` need no special case. Returns
+    rows in their *original* eps_df order — important because downstream offset
+    columns (``_data_row_offset`` / ``_video_frame_offset``) are computed per-row
+    and must stay aligned.
 
     If the full eps_df already fits in target_hours, returns it unchanged
     (identity short-circuit, no permutation overhead).
@@ -542,7 +588,12 @@ def subsample_episodes_by_hours(
         target_hours: Target total duration in hours. Must be > 0.
         fps: Frame rate (from info.json).
         seed: Random seed for the permutation.
-        length_col: Name of the column holding episode lengths in frames.
+        length_col: Name of the nominal episode-length column. For the default
+            ``"length"``, ``_valid_start/_valid_end`` override its sampled span
+            when both are present.
+        episode_frames: Optional explicit non-negative frame count per row.
+            Reader-level callers use this to zero episodes that cannot produce a
+            window. When omitted, :func:`effective_episode_frames` is used.
 
     Returns:
         Filtered DataFrame (same columns, subset of rows, in original order,
@@ -551,41 +602,57 @@ def subsample_episodes_by_hours(
     Raises:
         ValueError if target_hours <= 0.
     """
-    if target_hours <= 0:
+    if not np.isfinite(target_hours) or target_hours <= 0:
         raise ValueError(f"target_hours must be > 0, got {target_hours}")
-    target_frames = int(target_hours * 3600 * fps)
-    lengths = eps_df[length_col].to_numpy()
-    if int(lengths.sum()) <= target_frames:
+    target_float = float(target_hours) * 3600.0 * float(fps)
+    # ``250 / fps / 3600`` can round-trip as 250.00000000000003. Nudge one
+    # representable float toward -inf before ceil so an exactly frame-aligned
+    # request does not spuriously demand a sixth 50-frame episode.
+    target_frames = max(1, int(np.ceil(np.nextafter(target_float, -np.inf))))
+    if episode_frames is None:
+        lengths = effective_episode_frames(eps_df, length_col=length_col)
+    else:
+        raw = np.asarray(episode_frames)
+        if raw.shape != (len(eps_df),):
+            raise ValueError(f"episode_frames shape {raw.shape} != ({len(eps_df)},)")
+        lengths = raw.astype(np.int64)
+        if np.any(raw != lengths) or np.any(lengths < 0):
+            raise ValueError("episode_frames must contain non-negative integer frame counts")
+    available_frames = int(lengths.sum())
+    if available_frames <= 0:
+        raise ValueError("episode population contains no positive sampleable frame span")
+    if available_frames <= target_frames:
         return eps_df.reset_index(drop=True)
 
     rng = np.random.RandomState(seed)
     perm = rng.permutation(len(eps_df))
     cum = 0
-    cut = 0
+    selected = []
     for idx in perm:
+        if lengths[idx] <= 0:
+            continue
         cum += int(lengths[idx])
-        cut += 1
+        selected.append(int(idx))
         if cum >= target_frames:
             break
-    selected = sorted(perm[:cut].tolist())
-    return eps_df.iloc[selected].reset_index(drop=True)
+    return eps_df.iloc[sorted(selected)].reset_index(drop=True)
 
 
 def quick_bucket_hours(bucket_dir: Path) -> float:
-    """Cheap scan: fps × sum(episode_lengths) / 3600. No reader construction.
+    """Raw-manifest diagnostic: fps × sum(length) / 3600.
 
-    Used by multi-bucket ``from_config`` to compute the water-fill input
-    without paying the full per-bucket reader build cost (which would do
-    parquet metadata scans + camera resolution + stats loading + LRU
-    cache install + offset cumsums).
+    This intentionally does *not* represent effective sampleable hours: it
+    cannot observe split, exclusion, trim, or valid-range filters. Root-mode
+    budgeting therefore builds each reader's filtered metadata population and
+    uses ``reader.effective_hours`` instead.
 
     .. note::
         Returns the FULL bucket total — every row in ``meta/episodes/*.parquet``
         contributes, regardless of any ``info.json["splits"]`` declarations.
         The reader's actual loaded hours after applying ``apply_info_splits``
         can be slightly smaller for buckets that carry an explicit train/val
-        partition; this asymmetry is the split-induced undershoot documented
-        in ``plans/data_budget_total_hours.md`` §7.
+        partition, which is why this raw diagnostic must not drive effective
+        budgeting.
 
     Args:
         bucket_dir: Path to a bucket containing ``meta/info.json`` and
@@ -657,9 +724,13 @@ def build_multibucket(
 
     Shared multi-bucket root-mode builder for RoboCOIN / EgoDex (and any future
     LeRobot v3 reader family). Honors an optional ``total_hours`` water-fill
-    budget, builds buckets in parallel, and is **robust**: a bucket whose
-    construction raises is skipped (logged), empty buckets are filtered, and
-    only an all-failed result raises.
+    budget over the readers' effective post-split/exclusion/trim population.
+    Leaves are initialized uncapped once, their exact effective capacities are
+    water-filled, and the resulting whole-episode subsets are applied in place.
+    This avoids estimating from the raw manifest, which overstates capacity for
+    trimmed datasets. Construction is **robust**: a bucket whose construction
+    raises is skipped (logged), empty buckets are filtered, and only an
+    all-failed result raises.
 
     Args:
         reader_cls: the per-bucket reader class to instantiate.
@@ -674,69 +745,17 @@ def build_multibucket(
     """
     if total_hours is not None:
         total_hours = float(total_hours)
-        if total_hours <= 0:
+        if not np.isfinite(total_hours) or total_hours <= 0:
             raise ValueError(f"{source_name} total_hours must be > 0 or null/unset; got {total_hours}.")
-
-        def _quick_hours_or_none(sub: Path) -> Optional[float]:
-            # Per-bucket tolerance, mirroring _build_one below: a bucket whose meta
-            # is unreadable (e.g. a truncated episodes parquet) would abort the
-            # whole build here, while the same bucket under total_hours=None is
-            # skipped with a warning at construction. Drop it from the hour scan
-            # (and from sub_dirs) so both paths degrade identically.
-            try:
-                return quick_bucket_hours(sub)
-            except Exception as e:
-                logger.warning("%s: skipping %s (hour scan failed): %s", source_name, sub.name, e)
-                return None
-
-        with ThreadPoolExecutor(max_workers=min(len(sub_dirs), 16)) as pool:
-            scanned = list(pool.map(_quick_hours_or_none, sub_dirs))
-        dropped_scan = sorted(sub.name for sub, h in zip(sub_dirs, scanned) if h is None)
-        if dropped_scan:
-            sub_dirs = [sub for sub, h in zip(sub_dirs, scanned) if h is not None]
-            if not sub_dirs:
-                raise RuntimeError(f"All {source_name} buckets failed the hour scan")
-            logger.warning(
-                "%s: dropped %d bucket(s) during hour scan (unreadable meta): %s",
-                source_name,
-                len(dropped_scan),
-                ", ".join(dropped_scan),
-            )
-        bucket_hours = [h for h in scanned if h is not None]
-        total_avail = sum(bucket_hours)
-        if total_hours > total_avail - 1e-3:
-            # Over budget: every bucket would get its full hours, so subsampling
-            # is a (potentially lossy due to float rounding) no-op — skip it.
-            allocations: List[Optional[float]] = [None] * len(sub_dirs)
-            logger.warning(
-                "%s total_hours=%.1f exceeds available raw footage %.1fh; "
-                "loading full dataset (train-split subset of it).",
-                source_name,
-                total_hours,
-                total_avail,
-            )
-        else:
-            allocations = water_fill_hours(bucket_hours, total_hours)
-            logger.info(
-                "%s total_hours=%.1f → allocated %.2fh across %d buckets (water-fill).",
-                source_name,
-                total_hours,
-                sum(a for a in allocations if a is not None),
-                len(sub_dirs),
-            )
     else:
-        allocations = [None] * len(sub_dirs)
         logger.info("%s: total_hours unset, loading full dataset", source_name)
 
     def _build_one(args):
-        i, sub, alloc = args
+        _, sub = args
         kwargs = dict(common)
         kwargs["dataset_dir"] = str(sub)
         if per_bucket_kwargs is not None:
             kwargs.update(per_bucket_kwargs(sub))
-        if alloc is not None:
-            kwargs["max_hours"] = float(alloc)
-            kwargs["subsample_seed"] = base_seed + i * 7919
         try:
             return reader_cls(**kwargs)
         except DataContractError:
@@ -748,12 +767,45 @@ def build_multibucket(
             logger.warning("%s: skipping %s: %s", source_name, sub.name, e)
             return None
 
-    build_args = list(zip(range(len(sub_dirs)), sub_dirs, allocations))
+    build_args = list(enumerate(sub_dirs))
     with ThreadPoolExecutor(max_workers=min(len(sub_dirs), 16)) as pool:
         results = list(pool.map(_build_one, build_args))
-    buckets = [r for r in results if r is not None and len(r) > 0]
-    if not buckets:
+    loaded = [(i, sub, r) for i, (sub, r) in enumerate(zip(sub_dirs, results)) if r is not None and len(r) > 0]
+    if not loaded:
         raise RuntimeError(f"All {source_name} buckets failed to load")
+
+    if total_hours is not None:
+        bucket_hours = [float(reader.effective_hours) for _, _, reader in loaded]
+        total_avail = sum(bucket_hours)
+        if total_hours > total_avail - 1e-3:
+            # Over budget: every bucket already represents the complete effective
+            # population, so applying a near-equal cap only risks a float-rounding
+            # loss. Keep each initialized leaf unchanged.
+            logger.warning(
+                "%s total_hours=%.3f exceeds available effective footage %.3fh; "
+                "loading the full post-split/exclusion/trim population.",
+                source_name,
+                total_hours,
+                total_avail,
+            )
+        else:
+            allocations = water_fill_hours(bucket_hours, total_hours)
+            for (original_i, _, reader), allocation in zip(loaded, allocations):
+                reader._apply_effective_hour_budget(allocation, base_seed + original_i * 7919)
+            realized = sum(float(reader.effective_hours) for _, _, reader in loaded if len(reader) > 0)
+            logger.info(
+                "%s total_hours=%.3f → allocated %.3f effective h across %d buckets; "
+                "whole-episode realization %.3fh.",
+                source_name,
+                total_hours,
+                sum(allocations),
+                len(loaded),
+                realized,
+            )
+
+    buckets = [reader for _, _, reader in loaded if len(reader) > 0]
+    if not buckets:
+        raise RuntimeError(f"All {source_name} buckets became empty after effective-hour subsampling")
     # _build_one swallows per-bucket construction errors (missing/corrupt data,
     # and — for RoboCOIN — stats-integrity validation raised in _load_stats) into
     # a warning + None, so a misconfigured bucket is dropped rather than aborting
@@ -779,6 +831,7 @@ __all__ = [
     "compute_file_local_offsets",
     "apply_info_splits",
     "water_fill_hours",
+    "effective_episode_frames",
     "subsample_episodes_by_hours",
     "quick_bucket_hours",
     "load_tasks_annotated",

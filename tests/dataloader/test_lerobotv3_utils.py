@@ -188,6 +188,52 @@ class TestSubsampleEpisodesByHours:
         assert actual_hours >= target
         assert actual_hours < target + (100 / 30.0 / 3600.0) + 1e-9
 
+    def test_effective_valid_range_drives_budget(self):
+        """Segment-trimmed episodes are charged only for sampleable frames."""
+        df = _make_eps_df(20, ep_length=100)
+        df["_valid_start"] = 10
+        df["_valid_end"] = 60  # 50 effective frames per episode, not 100
+        target = 250.0 / 30.0 / 3600.0
+        out = subsample_episodes_by_hours(df, target_hours=target, fps=30.0, seed=42)
+        assert len(out) == 5
+        effective_frames = (out["_valid_end"] - out["_valid_start"]).sum()
+        assert effective_frames == 250
+
+    def test_zero_window_episode_cannot_satisfy_tiny_positive_budget(self):
+        df = _make_eps_df(2, ep_length=10)
+        explicit = np.array([0, 10], dtype=np.int64)
+        out = subsample_episodes_by_hours(
+            df,
+            target_hours=1e-12,
+            fps=30.0,
+            seed=1,  # permutation visits zero-weight episode 0 first
+            episode_frames=explicit,
+        )
+        assert out["episode_index"].to_list() == [1]
+
+    def test_all_zero_sampleable_frames_raise(self):
+        df = _make_eps_df(2, ep_length=10)
+        with pytest.raises(ValueError, match="no positive sampleable frame"):
+            subsample_episodes_by_hours(
+                df,
+                target_hours=0.1,
+                fps=30.0,
+                seed=42,
+                episode_frames=np.zeros(2, dtype=np.int64),
+            )
+
+    def test_unpaired_or_out_of_bounds_valid_range_raises(self):
+        unpaired = _make_eps_df(2, ep_length=10)
+        unpaired["_valid_start"] = 1
+        with pytest.raises(ValueError, match="missing '_valid_end'"):
+            subsample_episodes_by_hours(unpaired, target_hours=0.1, fps=30.0, seed=42)
+
+        out_of_bounds = _make_eps_df(2, ep_length=10)
+        out_of_bounds["_valid_start"] = 0
+        out_of_bounds["_valid_end"] = [11, 10]
+        with pytest.raises(ValueError, match="start <= end <= length"):
+            subsample_episodes_by_hours(out_of_bounds, target_hours=0.1, fps=30.0, seed=42)
+
     def test_negative_target_raises(self):
         df = _make_eps_df(10)
         with pytest.raises(ValueError, match="target_hours must be > 0"):
