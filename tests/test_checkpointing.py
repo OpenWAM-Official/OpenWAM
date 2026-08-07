@@ -16,6 +16,7 @@ from openwam.train.utils.checkpointing import (
     load_full_state,
     manage_checkpoints,
     save_full_state,
+    verify_resume_normalization_stats,
 )
 
 
@@ -140,3 +141,109 @@ def test_full_state_meta_round_trip(tmp_path):
     state_dir = tmp_path / "accel_state_step_42"
     assert (state_dir / "trainer_state.json").is_file()  # atomic completion marker present
     assert load_full_state(acc, str(state_dir)) == {"global_step": 42, "opt_step": 10, "epoch": 3}
+
+
+# --- verify_resume_normalization_stats ---
+
+
+def test_verify_resume_normalization_stats_noop_without_dataset_path(tmp_path):
+    class _Dataset:
+        normalization_stats_path = None
+
+    verify_resume_normalization_stats(str(tmp_path), _Dataset())
+
+
+def test_verify_resume_normalization_stats_missing_checkpoint_artifact(tmp_path):
+    import numpy as np
+
+    src = tmp_path / "dataset_stats.npy"
+    np.save(src, {"eef": {"min": np.zeros(2)}})
+    (tmp_path / "run").mkdir()
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    with pytest.raises(FileNotFoundError, match="finetune_ckpt_path"):
+        verify_resume_normalization_stats(str(tmp_path / "run"), _Dataset())
+
+
+def test_verify_resume_normalization_stats_mismatch(tmp_path):
+    import numpy as np
+
+    src = tmp_path / "dataset_stats.npy"
+    dst_dir = tmp_path / "run"
+    dst_dir.mkdir()
+    np.save(src, {"eef": {"min": np.zeros(2, dtype=np.float32)}})
+    np.save(dst_dir / "normalization_stats.npy", {"eef": {"min": np.ones(2, dtype=np.float32)}})
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    with pytest.raises(ValueError, match="finetune_ckpt_path"):
+        verify_resume_normalization_stats(str(dst_dir), _Dataset())
+
+
+def test_verify_resume_normalization_stats_match(tmp_path):
+    import numpy as np
+
+    payload = {"eef": {"min": np.arange(3, dtype=np.float32), "max": np.arange(3, dtype=np.float32) + 1}}
+    src = tmp_path / "dataset_stats.npy"
+    dst_dir = tmp_path / "run"
+    dst_dir.mkdir()
+    np.save(src, payload)
+    np.save(dst_dir / "normalization_stats.npy", payload)
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    verify_resume_normalization_stats(str(dst_dir), _Dataset())
+
+
+def test_verify_resume_normalization_stats_rejects_allclose_only_match(tmp_path):
+    import numpy as np
+
+    src = tmp_path / "dataset_stats.npy"
+    dst_dir = tmp_path / "run"
+    dst_dir.mkdir()
+    np.save(src, {"eef": {"min": np.ones(2, dtype=np.float32)}})
+    # np.allclose accepts this delta at values near 1, but strict resume must not.
+    np.save(
+        dst_dir / "normalization_stats.npy",
+        {"eef": {"min": np.ones(2, dtype=np.float32) + np.float32(1e-6)}},
+    )
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    with pytest.raises(ValueError, match="finetune_ckpt_path"):
+        verify_resume_normalization_stats(str(dst_dir), _Dataset())
+
+
+def test_setup_output_dir_verifies_stats_before_reusing_resume_run(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from omegaconf import OmegaConf
+
+    import openwam.train.openwam_trainer as trainer_module
+
+    run_dir = tmp_path / "run"
+    state_dir = run_dir / "accel_state_step_12"
+    state_dir.mkdir(parents=True)
+    (state_dir / "trainer_state.json").write_text("{}")
+
+    calls = []
+    monkeypatch.setattr(
+        trainer_module,
+        "verify_resume_normalization_stats",
+        lambda output_dir, dataset: calls.append((output_dir, dataset)),
+    )
+    trainer = object.__new__(trainer_module.OpenWAMTrainer)
+    trainer.cfg = OmegaConf.create({"training": {"output_path": str(tmp_path / "unused")}})
+    trainer.accelerator = SimpleNamespace(is_main_process=True)
+    trainer.dataset = object()
+
+    output_path, resume_state_dir = trainer.setup_output_dir(debug=False, resume_path=str(run_dir))
+
+    assert output_path == str(run_dir)
+    assert resume_state_dir == str(state_dir)
+    assert calls == [(str(run_dir), trainer.dataset)]

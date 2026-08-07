@@ -62,6 +62,85 @@ def save_normalization_stats(output_dir: str, dataset) -> None:
     logger.info("[normalizer] Copied action stats into checkpoint dir:\n  src: %s\n  dst: %s", src, dst)
 
 
+def _normalization_stats_values_equal(left, right) -> bool:
+    """Deep equality for nested normalization_stats.npy payloads."""
+    import numpy as np
+
+    if isinstance(left, dict) and isinstance(right, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(_normalization_stats_values_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _normalization_stats_values_equal(a, b) for a, b in zip(left, right)
+        )
+    left_arr = np.asarray(left) if isinstance(left, np.ndarray) or isinstance(right, np.ndarray) else None
+    if left_arr is not None:
+        right_arr = np.asarray(right)
+        if left_arr.shape != right_arr.shape:
+            return False
+        if np.issubdtype(left_arr.dtype, np.floating) or np.issubdtype(right_arr.dtype, np.floating):
+            # Strict resume must preserve the exact transform. Tolerant
+            # comparison can accept small regenerated-stat differences even
+            # though restored weights and optimizer state were trained in the
+            # original coordinates.
+            return bool(np.array_equal(left_arr, right_arr, equal_nan=True))
+        return bool(np.array_equal(left_arr, right_arr))
+    return left == right
+
+
+def verify_resume_normalization_stats(output_dir: str, dataset) -> None:
+    """Fail fast when a resumed run's deploy stats diverge from the dataset's.
+
+    Strict resume reuses the checkpoint-directory ``normalization_stats.npy``
+    rather than refreshing it from the dataset. If that artifact is missing,
+    unreadable, legacy, or not equal to the dataset's current stats, training
+    would normalize with one transform while deployment kept another — and
+    restored weights/optimizer state remain in the old coordinates. Direct the
+    user to ``finetune_ckpt_path`` instead of silently continuing or replacing.
+    """
+    import pickle
+
+    import numpy as np
+
+    src = getattr(dataset, "normalization_stats_path", None)
+    if not src:
+        return
+
+    dst = os.path.join(output_dir, "normalization_stats.npy")
+    if not os.path.isfile(dst):
+        raise FileNotFoundError(
+            f"resume blocked: {dst} is missing while the dataset reports "
+            f"normalization_stats_path={src}. Use finetune_ckpt_path to warm-start "
+            "with freshly copied stats, or restore the run's normalization_stats.npy."
+        )
+    if not os.path.isfile(src):
+        raise FileNotFoundError(
+            f"resume blocked: dataset normalization_stats_path={src} does not exist "
+            f"while comparing against checkpoint artifact {dst}."
+        )
+
+    try:
+        ckpt_payload = np.load(dst, allow_pickle=True).item()
+        data_payload = np.load(src, allow_pickle=True).item()
+    except (OSError, ValueError, EOFError, pickle.UnpicklingError) as exc:
+        raise ValueError(
+            f"resume blocked: failed to read normalization stats for comparison "
+            f"(checkpoint={dst}, dataset={src}): {exc}. "
+            "Use finetune_ckpt_path to warm-start instead of resume_ckpt_path."
+        ) from exc
+
+    if not _normalization_stats_values_equal(ckpt_payload, data_payload):
+        raise ValueError(
+            "resume blocked: checkpoint normalization_stats.npy does not match the "
+            f"dataset stats at {src}. Restored weights/optimizer were trained under "
+            "different normalization coordinates than the current dataset transform. "
+            "Use finetune_ckpt_path to warm-start instead of resume_ckpt_path.\n"
+            f"  checkpoint: {dst}\n"
+            f"  dataset:    {src}"
+        )
+
+
 # --- Checkpoint I/O (read/write training state) ---
 
 

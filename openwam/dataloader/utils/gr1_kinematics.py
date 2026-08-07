@@ -54,6 +54,7 @@ EEF33_UNIFY_DST = np.asarray(
 )
 
 ROT6D_DIMS_EEF33 = tuple(range(3, 9)) + tuple(range(18, 24))
+HAND_DIMS_EEF33 = tuple(range(9, 15)) + tuple(range(24, 30))
 
 STATE_KEYS = (
     "state.left_arm",

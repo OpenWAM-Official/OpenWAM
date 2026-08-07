@@ -19,6 +19,8 @@ import torch
 from openwam.dataloader.transforms.base import InvertibleModalityTransform
 from openwam.dataloader.utils.normalization import NORM_EPS, apply_normalization
 
+_NORMALIZE_STATS_KEY = "_normalize_stats"
+
 
 class NormMode(str, Enum):
     Q99 = "q99"
@@ -39,6 +41,9 @@ class Normalizer(InvertibleModalityTransform):
             - mean_std: {mean, std}
             - binary: (no stats needed)
             - scale: {min, max}
+            A reserved ``_normalize_stats`` block may provide different
+            statistics for ``normalize`` (proprio input); top-level statistics
+            remain the source for ``unnormalize`` (model action output).
         binary_threshold: Threshold for binary mode.
         eps: Small constant to avoid division by zero.
     """
@@ -52,7 +57,9 @@ class Normalizer(InvertibleModalityTransform):
     ):
         super().__init__(apply_to=["action"])
         self.mode = NormMode(mode)
-        self.stats = stats or {}
+        raw_stats = stats or {}
+        self.stats = {key: value for key, value in raw_stats.items() if key != _NORMALIZE_STATS_KEY}
+        self.normalize_stats = raw_stats.get(_NORMALIZE_STATS_KEY, self.stats)
         self.binary_threshold = binary_threshold
         self.eps = eps
 
@@ -61,12 +68,16 @@ class Normalizer(InvertibleModalityTransform):
         self._scale = None
         self._offset = None
         self._mode_stats = None
+        self._normalize_scale = None
+        self._normalize_offset = None
+        self._normalize_mode_stats = None
         if stats:
             self._precompute()
 
     def set_stats(self, stats: Dict[str, np.ndarray]):
         """Update statistics (e.g., after loading from cache)."""
-        self.stats = stats
+        self.stats = {key: value for key, value in stats.items() if key != _NORMALIZE_STATS_KEY}
+        self.normalize_stats = stats.get(_NORMALIZE_STATS_KEY, self.stats)
         self._precompute()
 
     def _precompute(self):
@@ -99,12 +110,40 @@ class Normalizer(InvertibleModalityTransform):
             self._scale = 1.0 / np.maximum(abs_max, self.eps)
             self._offset = np.zeros_like(lo)
 
+        # Deployment can be directional: model actions are unnormalized with
+        # action statistics, while raw proprio is normalized with state
+        # statistics. Existing checkpoints omit the reserved state block and
+        # retain the symmetric behavior above.
+        ns = self.normalize_stats
+        if self.mode == NormMode.Q99:
+            q01 = np.asarray(ns["q01"], dtype=np.float32)
+            q99 = np.asarray(ns["q99"], dtype=np.float32)
+            range_ = np.maximum(q99 - q01, self.eps)
+            self._normalize_scale = 2.0 / range_
+            self._normalize_offset = q01 + range_ / 2.0
+            self._normalize_mode_stats = {"q01": q01, "q99": q99}
+        elif self.mode == NormMode.MIN_MAX:
+            lo = np.asarray(ns["min"], dtype=np.float32)
+            hi = np.asarray(ns["max"], dtype=np.float32)
+            range_ = np.maximum(hi - lo, self.eps)
+            self._normalize_scale = 2.0 / range_
+            self._normalize_offset = lo + range_ / 2.0
+            self._normalize_mode_stats = {"min": lo, "max": hi}
+        elif self.mode == NormMode.MEAN_STD:
+            self._normalize_offset = np.asarray(ns["mean"], dtype=np.float32)
+            self._normalize_scale = 1.0 / np.maximum(np.asarray(ns["std"], dtype=np.float32), self.eps)
+        elif self.mode == NormMode.SCALE:
+            lo = np.asarray(ns["min"], dtype=np.float32)
+            hi = np.asarray(ns["max"], dtype=np.float32)
+            self._normalize_scale = 1.0 / np.maximum(np.maximum(np.abs(lo), np.abs(hi)), self.eps)
+            self._normalize_offset = np.zeros_like(lo)
+
     def normalize(self, x: np.ndarray) -> np.ndarray:
         """Normalize a raw array."""
         if self.mode == NormMode.BINARY:
             return (x > self.binary_threshold).astype(np.float32)
 
-        if self._scale is None:
+        if self._normalize_scale is None:
             return x
 
         if self.mode in (NormMode.MIN_MAX, NormMode.Q99):
@@ -116,9 +155,9 @@ class Normalizer(InvertibleModalityTransform):
             # apply_normalization uses NORM_EPS; self.eps is deliberately not
             # honored here — parity requires the training-side eps.
             mode = "min-max" if self.mode == NormMode.MIN_MAX else "quantile"
-            return apply_normalization(x, self._mode_stats, mode).astype(np.float32)
+            return apply_normalization(x, self._normalize_mode_stats, mode).astype(np.float32)
 
-        return ((x - self._offset) * self._scale).astype(np.float32)
+        return ((x - self._normalize_offset) * self._normalize_scale).astype(np.float32)
 
     def unnormalize(self, x: np.ndarray) -> np.ndarray:
         """Reverse normalization."""
@@ -174,12 +213,21 @@ def load_mode_stats(stats_path: str, action_mode: str) -> Optional[dict]:
     """Load ``normalization_stats.npy`` and return the sub-dict for the requested mode.
 
     Expected schema: ``{"joint": {...}, "eef": {...}, "num_timesteps": ...}``.
+    When a sibling ``<action_mode>_state`` block exists it is attached under a
+    reserved internal key so :class:`Normalizer` uses it for proprio
+    normalization while preserving the action block for unnormalization.
     Returns the per-mode stats dict, or ``None`` if the file does not contain
     the requested mode.
     """
     raw = np.load(stats_path, allow_pickle=True).item()
     if action_mode in raw and isinstance(raw[action_mode], dict):
-        return raw[action_mode]
+        stats = dict(raw[action_mode])
+        state_key = f"{action_mode}_state"
+        if state_key in raw:
+            if not isinstance(raw[state_key], dict):
+                raise TypeError(f"{stats_path}:{state_key} must be a stats dict")
+            stats[_NORMALIZE_STATS_KEY] = raw[state_key]
+        return stats
     return None
 
 
