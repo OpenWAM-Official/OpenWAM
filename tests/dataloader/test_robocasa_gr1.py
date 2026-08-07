@@ -21,17 +21,18 @@ from openwam.dataloader.robocasa_gr1 import (
     STATS_SCHEMA_VERSION,
     MultiRoboCasaGR1Dataset,
     RoboCasaGR1Dataset,
+    _stats_file_is_compatible,
 )
 from openwam.dataloader.transforms.builder import build_transforms
 from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.gr1_kinematics import HAND_DIMS_EEF33, ROT6D_DIMS_EEF33
-from openwam.dataloader.utils.normalization import load_stats_file, pin_rot6d_identity
+from openwam.dataloader.utils.normalization import STAT_KEYS, load_stats_file, pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocasa_gr1_stats_computation import (
     _compute_global_stats,
     _iter_bucket_arrays,
 )
 from openwam.deploy.model_loader import _build_normalizer, _UnifyAwareNormalizer
-from openwam.train.utils.checkpointing import save_normalization_stats
+from openwam.train.utils.checkpointing import save_normalization_stats, verify_resume_normalization_stats
 
 EP_LENGTH = 8
 HEAD_CAM = "observation.images.ego_view"
@@ -130,6 +131,24 @@ def _stats_payload(action_stats: dict, state_stats: dict | None = None) -> dict:
     }
 
 
+def _complete_stats_block(
+    *,
+    min_v: float = 0.0,
+    max_v: float = 1.0,
+    mean_v: float = 0.0,
+    std_v: float = 1.0,
+) -> dict:
+    """Schema-v2 compatible block with finite ``STAT_KEYS`` vectors of shape ``(33,)``."""
+    return {
+        "min": np.full(EEF33_DIM, min_v, dtype=np.float32),
+        "max": np.full(EEF33_DIM, max_v, dtype=np.float32),
+        "mean": np.full(EEF33_DIM, mean_v, dtype=np.float32),
+        "std": np.full(EEF33_DIM, std_v, dtype=np.float32),
+        "q01": np.full(EEF33_DIM, min_v, dtype=np.float32),
+        "q99": np.full(EEF33_DIM, max_v, dtype=np.float32),
+    }
+
+
 def test_registry_includes_robocasa_gr1():
     assert "robocasa_gr1" in list_registered_datasets()
 
@@ -182,14 +201,10 @@ def test_unify_mode_maps_eef33_to_80_and_masks_unmapped_dims(tmp_path: Path):
 
 def test_unify_normalizes_raw_eef_before_mapping(tmp_path: Path):
     _write_bucket(tmp_path)
-    action_stats = {
-        "min": np.zeros(EEF33_DIM, dtype=np.float32),
-        "max": np.ones(EEF33_DIM, dtype=np.float32),
-        "mean": np.zeros(EEF33_DIM, dtype=np.float32),
-        "std": np.ones(EEF33_DIM, dtype=np.float32),
-    }
+    action_stats = _complete_stats_block(min_v=0.0, max_v=1.0, mean_v=0.0, std_v=1.0)
     state_stats = {key: value.copy() for key, value in action_stats.items()}
     state_stats["max"][list(HAND_DIMS_EEF33)] = 20.0
+    state_stats["q99"][list(HAND_DIMS_EEF33)] = 20.0
     stats_path = tmp_path / "meta" / NORMALIZATION_STATS_FILENAME
     np.save(stats_path, _stats_payload(action_stats, state_stats))
 
@@ -520,10 +535,7 @@ def test_corrupt_stats_file_is_replaced_during_autobuild(tmp_path: Path):
 
 def test_normalize_mode_defaults_to_min_max_and_ignores_stats_path_key(tmp_path: Path):
     _write_bucket(tmp_path)
-    stats = {
-        "min": np.zeros(EEF33_DIM, dtype=np.float32),
-        "max": np.ones(EEF33_DIM, dtype=np.float32),
-    }
+    stats = _complete_stats_block(min_v=0.0, max_v=1.0)
     np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, _stats_payload(stats))
     # A leftover normalization_stats_path is ignored: the key is no longer part
     # of the config surface, and from_config always resolves the fixed path.
@@ -559,16 +571,131 @@ def test_missing_stats_without_from_config_raises(tmp_path: Path):
 
 def test_legacy_pooled_hand_stats_are_rejected(tmp_path: Path):
     _write_bucket(tmp_path)
-    stats = {
-        "min": np.zeros(EEF33_DIM, dtype=np.float32),
-        "max": np.ones(EEF33_DIM, dtype=np.float32),
-    }
+    stats = _complete_stats_block()
     np.save(tmp_path / "meta" / NORMALIZATION_STATS_FILENAME, {"eef": stats})
 
-    with np.testing.assert_raises_regex(ValueError, "legacy pooled-hand schema"):
+    with np.testing.assert_raises_regex(ValueError, "legacy or malformed"):
         RoboCasaGR1Dataset(
             dataset_dir=str(tmp_path),
             num_frames=5,
             multiview=True,
             normalize_mode="min-max",
         )
+
+
+def test_malformed_schema_v2_stats_are_rebuilt(tmp_path: Path):
+    """Empty schema-v2 blocks must not count as compatible (KeyError: missing [min, max])."""
+    root = tmp_path / "root"
+    _write_bucket(root / "a")
+    stats_path = root / "meta" / NORMALIZATION_STATS_FILENAME
+    stats_path.parent.mkdir(parents=True)
+    np.save(
+        stats_path,
+        {
+            "robocasa_gr1_stats_schema": STATS_SCHEMA_VERSION,
+            "eef": {},
+            "eef_state": {},
+        },
+    )
+    assert not _stats_file_is_compatible(stats_path)
+
+    cfg = OmegaConf.create(
+        {
+            "dataset_dir": str(root),
+            "num_frames": 5,
+            "multiview": True,
+            "prompt_columns": ["annotation.human.coarse_action"],
+            "normalize_mode": "min-max",
+        }
+    )
+    ds = RoboCasaGR1Dataset.from_config(cfg)
+    payload = np.load(stats_path, allow_pickle=True).item()
+    assert payload["robocasa_gr1_stats_schema"] == STATS_SCHEMA_VERSION
+    for block_name in ("eef", "eef_state"):
+        for key in STAT_KEYS:
+            assert np.asarray(payload[block_name][key]).shape == (EEF33_DIM,)
+    assert _stats_file_is_compatible(stats_path)
+    assert isinstance(ds, MultiRoboCasaGR1Dataset)
+
+
+def test_unsupported_newer_stats_schema_fails_fast(tmp_path: Path):
+    """A future schema must not be overwritten by schema-v2 auto-rebuild."""
+    root = tmp_path / "root"
+    _write_bucket(root / "a")
+    stats_path = root / "meta" / NORMALIZATION_STATS_FILENAME
+    stats_path.parent.mkdir(parents=True)
+    original = {
+        "robocasa_gr1_stats_schema": STATS_SCHEMA_VERSION + 1,
+        "eef": _complete_stats_block(),
+        "eef_state": _complete_stats_block(),
+        "future_marker": "keep-me",
+    }
+    np.save(stats_path, original)
+
+    cfg = OmegaConf.create(
+        {
+            "dataset_dir": str(root),
+            "num_frames": 5,
+            "multiview": True,
+            "prompt_columns": ["annotation.human.coarse_action"],
+            "normalize_mode": "min-max",
+        }
+    )
+    with np.testing.assert_raises_regex(ValueError, "unsupported schema"):
+        RoboCasaGR1Dataset.from_config(cfg)
+    payload = np.load(stats_path, allow_pickle=True).item()
+    assert payload["robocasa_gr1_stats_schema"] == STATS_SCHEMA_VERSION + 1
+    assert payload["future_marker"] == "keep-me"
+
+
+def test_resume_rejects_legacy_checkpoint_stats(tmp_path: Path):
+    """Legacy checkpoint artifact must not silently diverge from schema-v2 training stats."""
+    root = tmp_path / "root"
+    _write_bucket(root / "a")
+    dataset_stats = root / "meta" / NORMALIZATION_STATS_FILENAME
+    dataset_stats.parent.mkdir(parents=True)
+    np.save(dataset_stats, _stats_payload(_complete_stats_block()))
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    # Legacy pooled eef-only artifact retained in the resumed run dir.
+    np.save(run_dir / "normalization_stats.npy", {"eef": _complete_stats_block(min_v=-1.0, max_v=1.0)})
+
+    class _Dataset:
+        normalization_stats_path = str(dataset_stats)
+
+    with np.testing.assert_raises_regex(ValueError, "finetune_ckpt_path"):
+        verify_resume_normalization_stats(str(run_dir), _Dataset())
+
+
+def test_resume_rejects_mismatched_schema_v2_stats(tmp_path: Path):
+    root = tmp_path / "root"
+    dataset_stats = root / "meta" / NORMALIZATION_STATS_FILENAME
+    dataset_stats.parent.mkdir(parents=True)
+    np.save(dataset_stats, _stats_payload(_complete_stats_block(min_v=0.0, max_v=1.0)))
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    np.save(run_dir / "normalization_stats.npy", _stats_payload(_complete_stats_block(min_v=-2.0, max_v=2.0)))
+
+    class _Dataset:
+        normalization_stats_path = str(dataset_stats)
+
+    with np.testing.assert_raises_regex(ValueError, "finetune_ckpt_path"):
+        verify_resume_normalization_stats(str(run_dir), _Dataset())
+
+
+def test_resume_allows_matching_normalization_stats(tmp_path: Path):
+    payload = _stats_payload(_complete_stats_block(min_v=-0.5, max_v=1.5))
+    dataset_stats = tmp_path / "dataset" / "meta" / NORMALIZATION_STATS_FILENAME
+    dataset_stats.parent.mkdir(parents=True)
+    np.save(dataset_stats, payload)
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    np.save(run_dir / "normalization_stats.npy", payload)
+
+    class _Dataset:
+        normalization_stats_path = str(dataset_stats)
+
+    verify_resume_normalization_stats(str(run_dir), _Dataset())

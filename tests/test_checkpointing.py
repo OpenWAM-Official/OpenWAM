@@ -16,6 +16,7 @@ from openwam.train.utils.checkpointing import (
     load_full_state,
     manage_checkpoints,
     save_full_state,
+    verify_resume_normalization_stats,
 )
 
 
@@ -140,3 +141,59 @@ def test_full_state_meta_round_trip(tmp_path):
     state_dir = tmp_path / "accel_state_step_42"
     assert (state_dir / "trainer_state.json").is_file()  # atomic completion marker present
     assert load_full_state(acc, str(state_dir)) == {"global_step": 42, "opt_step": 10, "epoch": 3}
+
+
+# --- verify_resume_normalization_stats ---
+
+
+def test_verify_resume_normalization_stats_noop_without_dataset_path(tmp_path):
+    class _Dataset:
+        normalization_stats_path = None
+
+    verify_resume_normalization_stats(str(tmp_path), _Dataset())
+
+
+def test_verify_resume_normalization_stats_missing_checkpoint_artifact(tmp_path):
+    import numpy as np
+
+    src = tmp_path / "dataset_stats.npy"
+    np.save(src, {"eef": {"min": np.zeros(2)}})
+    (tmp_path / "run").mkdir()
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    with pytest.raises(FileNotFoundError, match="finetune_ckpt_path"):
+        verify_resume_normalization_stats(str(tmp_path / "run"), _Dataset())
+
+
+def test_verify_resume_normalization_stats_mismatch(tmp_path):
+    import numpy as np
+
+    src = tmp_path / "dataset_stats.npy"
+    dst_dir = tmp_path / "run"
+    dst_dir.mkdir()
+    np.save(src, {"eef": {"min": np.zeros(2, dtype=np.float32)}})
+    np.save(dst_dir / "normalization_stats.npy", {"eef": {"min": np.ones(2, dtype=np.float32)}})
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    with pytest.raises(ValueError, match="finetune_ckpt_path"):
+        verify_resume_normalization_stats(str(dst_dir), _Dataset())
+
+
+def test_verify_resume_normalization_stats_match(tmp_path):
+    import numpy as np
+
+    payload = {"eef": {"min": np.arange(3, dtype=np.float32), "max": np.arange(3, dtype=np.float32) + 1}}
+    src = tmp_path / "dataset_stats.npy"
+    dst_dir = tmp_path / "run"
+    dst_dir.mkdir()
+    np.save(src, payload)
+    np.save(dst_dir / "normalization_stats.npy", payload)
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    verify_resume_normalization_stats(str(dst_dir), _Dataset())

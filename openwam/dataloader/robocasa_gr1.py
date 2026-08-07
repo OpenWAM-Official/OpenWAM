@@ -32,7 +32,7 @@ import numpy as np
 
 from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
 from openwam.dataloader.utils import get_cfg
-from openwam.dataloader.utils.normalization import apply_normalization, load_stats_file
+from openwam.dataloader.utils.normalization import STAT_KEYS, apply_normalization, load_stats_file
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,10 @@ STATS_SCHEMA_VERSION = 2
 
 # Sentinel distinguishing "key absent" from an explicit null in a config.
 _CONFIG_UNSET = object()
+
+# Stats-file triage used by from_config auto-rebuild vs fail-fast paths.
+_STATS_COMPATIBLE = "compatible"
+_STATS_REBUILDABLE = "rebuildable"
 
 
 def _as_list(value: Any) -> List[Any]:
@@ -109,20 +113,66 @@ def _stats_builder_rank() -> int:
     return int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
 
 
-def _stats_file_is_compatible(path: Path) -> bool:
-    """Return whether ``path`` carries directional GR1 hand statistics."""
-    if not path.is_file():
+def _stats_block_is_compatible(block: Any) -> bool:
+    """True when ``block`` carries finite ``STAT_KEYS`` vectors of shape ``(33,)``."""
+    if not isinstance(block, dict):
         return False
+    for key in STAT_KEYS:
+        if key not in block:
+            return False
+        arr = np.asarray(block[key])
+        if arr.shape != (EEF33_DIM,) or not np.isfinite(arr).all():
+            return False
+    return True
+
+
+def _classify_stats_file(path: Path) -> str:
+    """Classify a GR1 stats artifact as compatible or rebuildable.
+
+    Raises:
+        ValueError: schema version newer than this code understands. Those files
+            must not be overwritten with schema-v2 by auto-rebuild.
+    """
+    if not path.is_file():
+        return _STATS_REBUILDABLE
     try:
         payload = np.load(path, allow_pickle=True).item()
     except (OSError, ValueError, EOFError, pickle.UnpicklingError):
-        return False
-    return (
-        isinstance(payload, dict)
-        and payload.get("robocasa_gr1_stats_schema") == STATS_SCHEMA_VERSION
-        and isinstance(payload.get(_ACTION_MODE), dict)
-        and isinstance(payload.get(f"{_ACTION_MODE}_state"), dict)
-    )
+        return _STATS_REBUILDABLE
+    if not isinstance(payload, dict):
+        return _STATS_REBUILDABLE
+
+    schema = payload.get("robocasa_gr1_stats_schema")
+    if schema is None:
+        # Pre-schema pooled-hand artifacts are eligible for directional rebuild.
+        return _STATS_REBUILDABLE
+    if not isinstance(schema, (int, np.integer)) or isinstance(schema, bool):
+        return _STATS_REBUILDABLE
+    schema_i = int(schema)
+    if schema_i > STATS_SCHEMA_VERSION:
+        raise ValueError(
+            f"RoboCasaGR1 normalization stats at {path} use unsupported schema "
+            f"version {schema_i} (this code understands {STATS_SCHEMA_VERSION}). "
+            "Upgrade OpenWAM rather than overwriting the artifact with an older schema."
+        )
+    if schema_i < STATS_SCHEMA_VERSION:
+        return _STATS_REBUILDABLE
+    if _stats_block_is_compatible(payload.get(_ACTION_MODE)) and _stats_block_is_compatible(
+        payload.get(f"{_ACTION_MODE}_state")
+    ):
+        return _STATS_COMPATIBLE
+    # Schema claims current version but vectors are missing/wrong-shaped/non-finite.
+    return _STATS_REBUILDABLE
+
+
+def _stats_file_is_compatible(path: Path) -> bool:
+    """Return whether ``path`` carries valid directional GR1 hand statistics.
+
+    Missing, unreadable, legacy, or malformed current-schema files return
+    ``False`` so ``from_config`` can rebuild them. Unsupported newer schema
+    versions raise ``ValueError`` instead of being treated as rebuildable.
+    """
+    return _classify_stats_file(path) == _STATS_COMPATIBLE
 
 
 def _wait_for_stats(path: Path) -> None:
@@ -355,7 +405,9 @@ class RoboCasaGR1Dataset(LeRobotV3Reader):
             )
         if not _stats_file_is_compatible(stats_path):
             raise ValueError(
-                f"RoboCasaGR1 normalization stats at {stats_path} use the legacy pooled-hand schema. "
+                f"RoboCasaGR1 normalization stats at {stats_path} are legacy or malformed "
+                f"(need schema={STATS_SCHEMA_VERSION} with finite {STAT_KEYS} vectors of shape "
+                f"({EEF33_DIM},) under both '{_ACTION_MODE}' and '{_ACTION_MODE}_state'). "
                 "GR1 hand action is a discrete command while hand state is a continuous joint angle; "
                 "delete/rebuild this file with robocasa_gr1_stats_computation before training or deployment."
             )

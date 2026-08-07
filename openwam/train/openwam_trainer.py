@@ -39,6 +39,7 @@ from openwam.train.utils.checkpointing import (
     save_full_state,
     save_normalization_stats,
     save_weights,
+    verify_resume_normalization_stats,
 )
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
@@ -446,6 +447,10 @@ class OpenWAMTrainer:
         if resume_state_dir is not None:
             output_path = os.path.dirname(resume_state_dir)
             logger.info("[resume] reusing run dir %s (state=%s)", output_path, os.path.basename(resume_state_dir))
+            # Keep the checkpoint-dir deploy artifact; refuse resume when it
+            # diverges from the dataset transform (legacy or regenerated stats).
+            if self.dataset is not None:
+                verify_resume_normalization_stats(output_path, self.dataset)
             return output_path, resume_state_dir
 
         if is_main:
