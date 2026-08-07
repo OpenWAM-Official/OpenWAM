@@ -66,6 +66,12 @@ base command is folded INTO the raw vector → raw **25-D `[arm20, base5]`** (ac
 layout), scattered to the unified 80-D via ONE map `["0-9","34-43","68-72"]` (arm → `[0:10)`+`[34:44)`,
 base5 → `[68:73)`) — like BEHAVIOR's RAW-27, base is not a bypass channel.
 
+**Gripper convention (post-flip)**: checkpoints train the PRETRAIN open-scale gripper
+(**-1=close, +1=open** — RoboCasa's native `gripper_close` is negated at read time; the achieved-width
+proprio maps open->+1). The client bridge confident-closes at `< -0.5` and the server PONG must
+advertise `gripper_convention: pretrain` — this client REFUSES checkpoints that cannot confirm it
+(an old +1=close ckpt would have every grasp silently inverted; use pre-flip client code for those).
+
 **`base_proprio` MUST match the checkpoint** (`policy_config.yml` key, default `velocity`): the proprio
 base5 slots carry either the A′ finite-diff velocity (`velocity`, historical — any ckpt whose config
 lacks `dataloader.base_proprio`) or the world planar pose `[x, y, sin(yaw), cos(yaw), 0]`

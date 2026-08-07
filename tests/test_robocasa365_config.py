@@ -205,10 +205,11 @@ def test_hydra_compose_overrides_base_proprio_and_binary_dims():
         cfg = compose(config_name="train", overrides=["dataloader=robocasa365"])
         assert cfg.dataloader.base_proprio == "velocity"        # historical defaults declared
         assert cfg.dataloader.binary_action_dims is None
+        assert cfg.dataloader.gripper_convention == "pretrain"  # convention marker declared
         cfg2 = compose(config_name="train", overrides=[
             "dataloader=robocasa365",
             "dataloader.base_proprio=global_pose",
-            "dataloader.binary_action_dims=[9,24]",
+            "dataloader.binary_action_dims=[24]",
         ])
         assert cfg2.dataloader.base_proprio == "global_pose"
-        assert list(cfg2.dataloader.binary_action_dims) == [9, 24]
+        assert list(cfg2.dataloader.binary_action_dims) == [24]

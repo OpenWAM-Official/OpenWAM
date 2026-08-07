@@ -125,13 +125,16 @@ _ACTION_BASE = slice(0, 5)
 BASE_ACTION_DIM = 5
 _ACTION_GRIPPER = 11  # LeRobot action field gripper_close: recorded binary command {-1=open, +1=close}
 BASE_VEL_DIM = 3  # the 3 base-velocity dims within base5 (proprio populates these; torso+mode masked)
-# Gripper is rendered into the [-1, +1] COMMAND space (matching the env's action.gripper_close, +1=close):
-#   ACTION gripper = the recorded command (exact timing, no actuation lag).
-#   PROPRIO gripper = the ACHIEVED finger-separation width linearly mapped to [-1, +1] via _gripper_width_to_cmd
-#     (open width _GRIPPER_WIDTH_OPEN → -1, closed 0 → +1), so both share the gripper stats and the deploy
-#     bridge decides open/close by CONFIDENT-CLOSE (>0.5 → close; neutral/uncertain ~0 output defaults to
-#     open, avoiding spurious grasps) — no width binarization / actuation-lag delay.
-_GRIPPER_WIDTH_OPEN = 0.1  # finger-separation width mapped to -1 (fully open); 0 (closed) → +1
+# Gripper lives in the PRETRAIN open-scale convention (-1=close, +1=open) — the normalized gripper
+# space the pretrained model learned (robotwin raw 1=open/0=closed under min-max, BEHAVIOR ±1 open-
+# scale, robocoin gripper_open_scale). RoboCasa's native ``gripper_close`` is the OPPOSITE polarity
+# (+1=close), so this reader flips at the boundary and the eval bridge flips back:
+#   ACTION gripper = MINUS the recorded command (exact timing, no actuation lag).
+#   PROPRIO gripper = the ACHIEVED finger-separation width linearly mapped to [-1, +1] via
+#     _gripper_width_to_cmd (closed 0 → -1, open _GRIPPER_WIDTH_OPEN → +1), so both share the gripper
+#     stats and the deploy bridge decides open/close by CONFIDENT-CLOSE (< -0.5 → close;
+#     neutral/uncertain ~0 output defaults to open, avoiding spurious grasps).
+_GRIPPER_WIDTH_OPEN = 0.1  # finger-separation width mapped to +1 (fully open); 0 (closed) → -1
 # The mobile raw vector folds the base command INTO the pre-unify vector (like BEHAVIOR's RAW-27):
 #   raw25 = [arm20 (single-arm EEF, left real + right zero), base5]. unify then maps the WHOLE 25-D via
 # one map (["0-9","34-43","68-72"]); base is NOT a bypass channel. Deploy gathers 80->25 and
@@ -165,10 +168,13 @@ _RAW_PROPRIO_MASK = np.concatenate([_ARM_MASK, np.array([True, True, True, False
 # no longer share the action's base stats: a separate proprio stats block is required (below).
 _RAW_PROPRIO_MASK_POSE = np.concatenate([_ARM_MASK, np.array([True, True, True, True, False])])
 _PROPRIO_POSE_STATS_KEY = "eef_base_pose_proprio"
-# The only two-point {-1, +1} command dims in raw25 (l_grip cmd, control_mode). binary_action_dims
-# may list these: their targets stay the RAW ±1 (identity, immune to stats drift) and the deploy
-# server snaps its decoded output back to exact ±1 (see openwam/deploy/model_loader.py).
-_BINARY_ACTION_DIMS_ALLOWED = (ARM10_DIM - 1, RAW_MOBILE_DIM - 1)  # (9, 24)
+# Two-point {-1, +1} command dims binary_action_dims may list: targets stay the RAW ±1 (identity,
+# immune to stats drift) and the deploy server snaps its decoded output back to exact ±1 (see
+# openwam/deploy/model_loader.py). control_mode (24) ONLY: the gripper (9) is deliberately excluded —
+# under the pretrain convention (-1=close) the snap's uncertain pole (-1) would be CLOSE, inverting
+# the conservative default; gripper outputs are saturated and the bridge's confident-close binarizes
+# them anyway, so it needs no snap.
+_BINARY_ACTION_DIMS_ALLOWED = (RAW_MOBILE_DIM - 1,)  # (24,)
 
 # Multiview L-shape slot sizes (must match assemble_multiview_layout defaults at
 # height=384/width=320: top 256x320, each bottom 128x160).
@@ -256,10 +262,13 @@ def _compute_shared_stats_rank0_synced(shared_path: str, roots: list, include_ba
 
 
 def _gripper_width_to_cmd(width: np.ndarray) -> np.ndarray:
-    """Achieved finger-separation width → [-1, +1] gripper COMMAND space (closed→+1, open→-1), matching
-    the RoboCasa ``action.gripper_close`` convention (+1=close). Linear over ``[0, _GRIPPER_WIDTH_OPEN]``,
-    clipped. The eval client reproduces this exactly (benchmarks/utils.robocasa_state_to_eef20d)."""
-    return np.clip(1.0 - 2.0 * np.asarray(width) / _GRIPPER_WIDTH_OPEN, -1.0, 1.0).astype(np.float32)
+    """Achieved finger-separation width → [-1, +1] gripper OPEN-SCALE (open→+1, closed→-1) — the
+    PRETRAIN convention (robotwin raw 1=open/0=closed, BEHAVIOR open-scale +1=open, robocoin
+    gripper_open_scale), NOT RoboCasa's native ``gripper_close`` (+1=close): the post-train proprio
+    must live in the same normalized gripper space the pretrained model learned. Linear over
+    ``[0, _GRIPPER_WIDTH_OPEN]``, clipped. The eval client reproduces this exactly
+    (benchmarks/utils.robocasa_state_to_eef20d)."""
+    return np.clip(2.0 * np.asarray(width) / _GRIPPER_WIDTH_OPEN - 1.0, -1.0, 1.0).astype(np.float32)
 
 
 def state_to_arm10(state: np.ndarray) -> np.ndarray:
@@ -373,6 +382,7 @@ class RoboCasa365Dataset(BaseDataset):
         mask_torso_action: bool = True,
         base_proprio: str = "velocity",
         binary_action_dims: Optional[Any] = None,
+        gripper_convention: str = "pretrain",
         color_jitter: Optional[Any] = None,
         **_unused,
     ):
@@ -424,6 +434,16 @@ class RoboCasa365Dataset(BaseDataset):
         # torso is a live sim actuator but constant 0 in the data → mask it out of the ACTION loss
         # (default) so a nonzero prediction can't drive it at eval; the eval client zeros it too.
         self._mask_torso_action = bool(mask_torso_action)
+        # gripper_convention: a declared MARKER, not a switch — this reader always emits the pretrain
+        # open-scale (-1=close, +1=open; recorded gripper_close negated, width map open->+1). The key
+        # exists so the ckpt config carries the convention into the deploy handshake (repr_contract):
+        # a config explicitly claiming the old convention must fail here, not train something else.
+        if gripper_convention != "pretrain":
+            raise ValueError(
+                f"gripper_convention={gripper_convention!r} unsupported: this reader emits the "
+                "pretrain open-scale (-1=close, +1=open) only. The old RoboCasa-native (+1=close) "
+                "training path was removed; use pre-flip code to reproduce it."
+            )
         # base_proprio: what fills the 5 proprio base slots. "velocity" (historical; a ckpt config
         # without the key trained this way) = A′-rescaled finite-diff body velocity in slots 0-2;
         # "global_pose" = world planar pose [x, y, sin(yaw), cos(yaw), 0] (needs its own stats block).
@@ -441,8 +461,10 @@ class RoboCasa365Dataset(BaseDataset):
             bad = [d for d in dims if d not in _BINARY_ACTION_DIMS_ALLOWED]
             if bad:
                 raise ValueError(
-                    f"binary_action_dims {bad} not in the two-point command dims {_BINARY_ACTION_DIMS_ALLOWED} "
-                    "(l_grip cmd, control_mode); other dims are continuous and must not be snapped."
+                    f"binary_action_dims {bad} not in the allowed dims {_BINARY_ACTION_DIMS_ALLOWED} "
+                    "(control_mode only). The gripper (9) is excluded under the pretrain convention: "
+                    "the snap's uncertain pole (-1) would mean CLOSE — the bridge's confident-close "
+                    "handles gripper binarization instead. Other dims are continuous."
                 )
             if RAW_MOBILE_DIM - 1 in dims and not mobile_base:
                 raise ValueError("binary_action_dims includes control_mode (24) but mobile_base=False (raw is 20-D)")
@@ -846,7 +868,10 @@ class RoboCasa365Dataset(BaseDataset):
             grip_cmd = np.concatenate(
                 [grip_cmd, np.repeat(pad_row, self.num_action_steps - grip_cmd.shape[0], axis=0)], axis=0
             )
-        action_raw[:, ARM10_DIM - 1] = grip_cmd[:, 0]  # dim 9 = left-arm gripper
+        # dim 9 = left-arm gripper, NEGATED into the pretrain convention (-1=close, +1=open): the
+        # recorded RoboCasa command is +1=close, but the pretrained model's gripper dim was trained
+        # on open-scale (+1=open) across robotwin/BEHAVIOR/robocoin — post-train must match it.
+        action_raw[:, ARM10_DIM - 1] = -grip_cmd[:, 0]
         if self._mobile_base:
             # ACTION base5 = RoboCasa-native command (raw) aligned to the action steps: command at
             # frame start+i drives the transition to step i. Padded rows land past n_valid_action so
@@ -1005,6 +1030,9 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             # Absent keys = historical behavior (what every pre-existing ckpt trained with).
             base_proprio=str(get_cfg(config, "base_proprio", "velocity")),
             binary_action_dims=get_cfg(config, "binary_action_dims", None),
+            # Marker, validated (only "pretrain" is trainable); declare it in the training yaml so
+            # the ckpt config advertises the gripper convention through the deploy handshake.
+            gripper_convention=str(get_cfg(config, "gripper_convention", "pretrain")),
             color_jitter=get_cfg(config, "color_jitter", None),
             seed=int(get_cfg(config, "seed", 42)),
         )

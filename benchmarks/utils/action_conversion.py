@@ -171,11 +171,15 @@ def eef20d_to_robocasa12d(
             ckpt passes the model's real control_mode (gym thresholds it at 0.5 → -1/+1).
         clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
 
-    Gripper: the model dim ``act[9]`` is the gripper COMMAND in ``[-1, +1]`` (+1=close, -1=open, matching
-    the recorded ``action.gripper_close``). Close only on a CONFIDENT command: ``close (1.0) iff act[9] >
-    0.5``, else open — an uncertain / neutral output (~0, the flow-matching prior mean) defaults to open,
-    avoiding spurious grasps. No width binarization — the model predicts the command directly, so there
-    is no actuation-lag delay (unlike deriving open/close from the achieved finger-separation width).
+    Gripper: the model dim ``act[9]`` is the PRETRAIN open-scale in ``[-1, +1]`` (**-1=close, +1=open**
+    — the training reader negates RoboCasa's native ``gripper_close`` so post-train matches the
+    pretrained gripper space; robotwin/BEHAVIOR/robocoin all train +1=open). Close only on a
+    CONFIDENT command: ``close (1.0) iff act[9] < -0.5``, else open — an uncertain / neutral output
+    (~0, the flow-matching prior mean) defaults to open, avoiding spurious grasps. No width
+    binarization — the model predicts the command directly, so there is no actuation-lag delay
+    (unlike deriving open/close from the achieved finger-separation width). Downstream, the robocasa
+    gym wrapper re-binarizes at 0.5 (>=0.5 -> close, <0.5 -> open), so the emitted {1.0, 0.0} are
+    real close/open commands.
 
     ENV CONTRACT (MEASURED on the real robocasa/OpenDrawer env, PandaOmron / default_pandaomron.json):
     the eef action convention is **delta** (zero action -> no EEF motion; constant action -> constant
@@ -209,11 +213,13 @@ def eef20d_to_robocasa12d(
         pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
         rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
 
-    # Gripper: model dim [9] is the COMMAND in [-1,+1] (+1=close, -1=open; matches action.gripper_close
-    # and the proprio's rendered width). Close only on a CONFIDENT command: close (1.0) iff act[9] > 0.5,
-    # else open (0.0). An uncertain / neutral output (~0, the flow-matching prior mean) defaults to open,
-    # avoiding spurious grasps. No width binarization, so no actuation-lag delay.
-    gripper_cmd = 1.0 if float(act[9]) > 0.5 else 0.0
+    # Gripper: model dim [9] is the PRETRAIN open-scale in [-1,+1] (-1=close, +1=open — the reader
+    # NEGATES RoboCasa's native +1=close so post-train matches the pretrained gripper space). Close
+    # only on a CONFIDENT command: close (1.0) iff act[9] < -0.5, else open (0.0). An uncertain /
+    # neutral output (~0, the flow-matching prior mean) defaults to open, avoiding spurious grasps.
+    # ENV CONTRACT (measured + gym_wrapper.py:125): the wrapper binarizes at 0.5 — >=0.5 -> +1
+    # (close), <0.5 -> -1 (open) — so 0.0 here IS a real open command, not a hold.
+    gripper_cmd = 1.0 if float(act[9]) < -0.5 else 0.0
 
     base = np.zeros(4, np.float64) if base_motion is None else np.asarray(base_motion, np.float64).reshape(-1)
     if base.shape[0] != 4:
@@ -252,15 +258,15 @@ def robotwin_endpose_to_eef20d(
 
 
 # Gripper render (MUST stay in lockstep with openwam.dataloader.robocasa365._gripper_width_to_cmd):
-# achieved finger-separation width → [-1,+1] command space (open width → -1, closed 0 → +1).
+# achieved finger-separation width → [-1,+1] PRETRAIN open-scale (closed 0 → -1, open width → +1).
 _RC365_GRIPPER_WIDTH_OPEN = 0.1
 
 
 def rc365_gripper_width_to_cmd(width) -> float:
-    """Achieved finger-separation width → [-1,+1] gripper command space (closed→+1, open→-1). Bit-
-    identical to the dataloader's ``_gripper_width_to_cmd`` so the proprio gripper the client sends
-    matches training."""
-    return float(np.clip(1.0 - 2.0 * float(width) / _RC365_GRIPPER_WIDTH_OPEN, -1.0, 1.0))
+    """Achieved finger-separation width → [-1,+1] gripper OPEN-SCALE (closed→-1, open→+1) — the
+    pretrain convention (-1=close, +1=open). Bit-identical to the dataloader's
+    ``_gripper_width_to_cmd`` so the proprio gripper the client sends matches training."""
+    return float(np.clip(2.0 * float(width) / _RC365_GRIPPER_WIDTH_OPEN - 1.0, -1.0, 1.0))
 
 
 def robocasa_state_to_eef20d(

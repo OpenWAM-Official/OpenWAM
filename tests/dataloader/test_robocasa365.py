@@ -211,8 +211,9 @@ class TestGetItem:
         a = state_to_arm10(st)[0]
         assert a[:3] == pytest.approx([0.1, -0.2, 0.3])
         assert a[3:9] == pytest.approx([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])  # identity rotation -> rot6d
-        # gripper = width 0.04 rendered to command space: 1 - 20*0.04 = 0.2
-        assert a[9] == pytest.approx(0.2)
+        # gripper = width 0.04 rendered to the pretrain open-scale: 2*0.04/0.1 - 1 = -0.2
+        # (-1=closed, +1=open — flipped from RoboCasa's native +1=close)
+        assert a[9] == pytest.approx(-0.2)
 
     def test_proprio_20d_left_filled_right_zero(self, tmp_path):
         s = self._sample(tmp_path, multiview=False, height=64, width=96)
@@ -631,10 +632,11 @@ def test_action_gripper_is_command_proprio_is_rendered_width(tmp_path):
         s = ds._build_sample(0, 0)
     st = _make_state(EP_LENGTH, seed=0)   # episode 0 = seed 0 (see _write_v3_repo)
     ac = _make_action(EP_LENGTH, seed=0)
-    # proprio gripper (frame 0) = rendered achieved width
+    # proprio gripper (frame 0) = rendered achieved width (open-scale: open -> +1)
     assert s["proprio"].numpy()[0, 9] == pytest.approx(_gripper_width_to_cmd(st[0, 14] - st[0, 15]), abs=1e-5)
-    # action gripper (step i) = the recorded command at frame i (idx 11), NOT the next-frame width
-    assert s["action"].numpy()[:5, 9] == pytest.approx(ac[:5, 11], abs=1e-5)
+    # action gripper (step i) = MINUS the recorded command at frame i (idx 11): the recorded
+    # gripper_close is +1=close, the trained target is the pretrain open-scale (-1=close)
+    assert s["action"].numpy()[:5, 9] == pytest.approx(-ac[:5, 11], abs=1e-5)
 
 
 def test_gripper_stats_pinned_to_command_range(tmp_path):
@@ -823,26 +825,47 @@ def test_base_proprio_global_pose_requires_mobile(tmp_path):
 
 
 def test_binary_action_dims_passthrough(tmp_path):
-    """binary_action_dims=[9, 24]: the gripper + control_mode ACTION targets stay the RAW ±1 recorded
-    commands (identity through normalization, structural not incidental)."""
+    """binary_action_dims=[24]: the control_mode ACTION target stays the RAW ±1 recorded command
+    (identity through normalization, structural not incidental). The gripper (9) is NOT allowed —
+    but its (negated) target must still be exact ±1 through the pinned identity stats."""
     b = make_robocasa_bucket(tmp_path)
     with _mock_video_decoder():
         ds = RoboCasa365Dataset(
             data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
-            normalize_mode="min-max", mobile_base=True, binary_action_dims=[9, 24],
+            normalize_mode="min-max", mobile_base=True, binary_action_dims=[24],
         )
         s = ds._build_sample(0, 0)
     ac = _make_action(EP_LENGTH, seed=0)
     a = s["action"].numpy()
-    assert np.array_equal(a[:5, 9], ac[:5, 11].astype(np.float32))   # exact ±1 command, bit-identical
-    assert np.array_equal(a[:5, 24], ac[:5, 4].astype(np.float32))
-    assert set(np.unique(a[:5, 9])) <= {-1.0, 1.0}
+    assert np.array_equal(a[:5, 24], ac[:5, 4].astype(np.float32))   # exact ±1, bit-identical
     assert set(np.unique(a[:5, 24])) <= {-1.0, 1.0}
+    assert np.array_equal(a[:5, 9], -ac[:5, 11].astype(np.float32))  # negated recorded command
+    assert set(np.unique(a[:5, 9])) <= {-1.0, 1.0}
+
+
+def test_binary_action_dims_rejects_gripper(tmp_path):
+    """dim 9 is excluded from binary_action_dims: under the pretrain convention the snap's uncertain
+    pole (-1) would mean CLOSE — the bridge's confident-close handles the gripper instead."""
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder(), pytest.raises(ValueError, match="control_mode only"):
+        RoboCasa365Dataset(
+            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+            normalize_mode=None, mobile_base=True, binary_action_dims=[9, 24],
+        )
+
+
+def test_gripper_convention_marker_validated(tmp_path):
+    b = make_robocasa_bucket(tmp_path)
+    with _mock_video_decoder(), pytest.raises(ValueError, match="pretrain open-scale"):
+        RoboCasa365Dataset(
+            data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
+            normalize_mode=None, gripper_convention="robocasa",
+        )
 
 
 def test_binary_action_dims_rejects_continuous_dim(tmp_path):
     b = make_robocasa_bucket(tmp_path)
-    with _mock_video_decoder(), pytest.raises(ValueError, match="two-point command dims"):
+    with _mock_video_decoder(), pytest.raises(ValueError, match="allowed dims"):
         RoboCasa365Dataset(
             data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
             normalize_mode=None, mobile_base=True, binary_action_dims=[5],
@@ -855,13 +878,14 @@ def test_from_config_threads_base_proprio_and_binary_dims(tmp_path):
     cfg = {
         "dataset_dir": str(root), "normalize_mode": "none", "multiview": False,
         "height": 64, "width": 96, "mobile_base": True,
-        "base_proprio": "global_pose", "binary_action_dims": [9, 24],
+        "base_proprio": "global_pose", "binary_action_dims": [24],
+        "gripper_convention": "pretrain",
     }
     with _mock_video_decoder():
         ds = MultiTaskRoboCasa365Dataset.from_config(cfg)
     sub = ds._datasets[0]
     assert sub._base_proprio == "global_pose"
-    assert sub._binary_action_dims == (9, 24)
+    assert sub._binary_action_dims == (24,)
     cfg.pop("base_proprio"), cfg.pop("binary_action_dims")
     with _mock_video_decoder():
         ds2 = MultiTaskRoboCasa365Dataset.from_config(cfg)
@@ -897,14 +921,12 @@ def test_denormalize_action_binary_dims_exact(tmp_path, mode, unify):
         ds = RoboCasa365Dataset(
             data_root=str(b), task_name="OpenDrawer", multiview=False, height=64, width=96,
             normalize_mode=mode, normalization_stats_path=_skewed_stats_file(tmp_path),
-            mobile_base=True, binary_action_dims=[9, 24], **kw,
+            mobile_base=True, binary_action_dims=[24], **kw,
         )
     width = 80 if unify else 25
     a = np.zeros((3, width), np.float32)
-    gi, mi = (9, 72) if unify else (9, 24)
-    a[:, gi] = (1.0, -1.0, 1.0)
+    mi = 72 if unify else 24
     a[:, mi] = (-1.0, 1.0, 1.0)
     out = ds.denormalize_action(a)
     assert out.shape[-1] == 25
-    assert np.array_equal(out[:, 9], np.float32([1, -1, 1]))
     assert np.array_equal(out[:, 24], np.float32([-1, 1, 1]))

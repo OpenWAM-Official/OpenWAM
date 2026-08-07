@@ -125,11 +125,21 @@ mask_torso_action: true
 base_proprio: velocity
 #
 # binary_action_dims: raw action dims whose targets are the two-point {-1, +1} command set —
-# robocasa365 allows exactly [9, 24] (l_grip command, control_mode). Targets stay RAW ±1 through
-# normalization (identity, immune to stats drift); the deploy server snaps its decoded output back
-# to exact ±1 (threshold 0.5, the conservative bridge/env boundary). null (historical default) =
-# plain continuous regression, matching every pre-existing checkpoint.
+# robocasa365 allows exactly [24] (control_mode). Targets stay RAW ±1 through normalization
+# (identity, immune to stats drift); the deploy server snaps its decoded output back to exact ±1
+# (threshold 0.5, the conservative boundary). The gripper (9) is deliberately NOT allowed: under the
+# pretrain convention (-1=close) the snap's uncertain pole would mean CLOSE, and the eval bridge's
+# confident-close binarizes the gripper anyway. null (historical default) = plain continuous
+# regression, matching every pre-existing checkpoint.
 binary_action_dims: null
+#
+# gripper_convention: a RECORDED marker (validated, not a switch — the reader always trains the
+# PRETRAIN open-scale gripper: -1=close, +1=open; RoboCasa's native gripper_close(+1=close) is
+# negated at read time, the achieved-width proprio maps open->+1). Keep this key declared so the
+# checkpoint config advertises the convention through the deploy handshake — a pretrain-convention
+# eval client REFUSES checkpoints that cannot confirm it (an old +1=close ckpt evaluated with the
+# new bridge would silently invert every grasp).
+gripper_convention: pretrain
 #
 # Model head + proprio dims must be 80 when unify_action=true. As of the main merge,
 # configs/model/dual_system.yaml already defaults to action_dim=80 / state_dim=80 (the unified

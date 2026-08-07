@@ -391,6 +391,18 @@ class OpenWAMRoboCasa365Policy:
         pong = self._client.ping()
         if pong.get("type") != transport.PONG:
             raise RuntimeError(f"OpenWAM server ping returned unexpected response: {pong}")
+        # Gripper convention gate, UNCONDITIONAL: this client's bridge and proprio render are
+        # hard-coded to the pretrain open-scale (-1=close, +1=open). Any ckpt that cannot confirm
+        # training with it (old +1=close ckpts, or servers too old to advertise) would have every
+        # grasp silently inverted — there is no compatible fallback, so absent == refuse. This
+        # deliberately narrows old-server compatibility: pre-flip ckpts need pre-flip client code.
+        if pong.get("gripper_convention") != "pretrain":
+            raise RuntimeError(
+                f"gripper convention mismatch: this client requires a ckpt trained with the pretrain "
+                f"open-scale gripper (-1=close, +1=open) but the server advertises "
+                f"{pong.get('gripper_convention')!r} (None = old ckpt or old server). Evaluating it "
+                "here would silently invert every grasp; use pre-flip client code for old ckpts."
+            )
         # Representation-contract handshake. velocity vs global_pose proprio are BOTH 25-D, so a
         # mismatched eval config corrupts evaluation silently — the width check cannot catch it.
         # Asymmetric compat: a "global_pose" client REQUIRES the server to advertise its

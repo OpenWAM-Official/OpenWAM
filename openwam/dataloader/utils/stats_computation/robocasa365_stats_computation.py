@@ -124,11 +124,12 @@ def _base_stats_block(base_chunks: list) -> dict:
 def _pin_gripper_stats(eef10: dict) -> dict:
     """Pin the gripper dim (dim 9 of the 10-D arm) normalize range to the [-1, +1] COMMAND space.
 
-    The gripper is a command (ACTION = the recorded binary command; PROPRIO = the achieved width
-    rendered into [-1, +1]), so its min/max are pinned to [-1, +1] instead of the achieved-width data
-    range. Then the model's ±1 output de-normalizes to EXACTLY ±1 (a +1 close reaches the sim as +1, a -1
-    open as -1; the deploy bridge thresholds at 0.5 — confident-close), and normalizing the rendered proprio
-    is the identity. mean/std are set command-neutral (0/1) for the z-score path."""
+    The gripper lives in the pretrain open-scale (-1=close, +1=open: ACTION = the NEGATED recorded
+    binary command; PROPRIO = the achieved width rendered into [-1, +1], open->+1), so its min/max
+    are pinned to [-1, +1] instead of the achieved-width data range. Then the model's ±1 output
+    de-normalizes to EXACTLY ±1 (the deploy bridge confident-closes at < -0.5), and normalizing the
+    rendered proprio is the identity. mean/std are set command-neutral (0/1) for the z-score path.
+    The symmetric pin is polarity-invariant, so no stats regeneration was needed for the flip."""
     out = {k: np.array(eef10[k], dtype=np.float32) for k in eef10}
     g = STATS_DIM - 1  # dim 9 = gripper
     out["min"][g], out["max"][g], out["q01"][g], out["q99"][g] = -1.0, 1.0, -1.0, 1.0

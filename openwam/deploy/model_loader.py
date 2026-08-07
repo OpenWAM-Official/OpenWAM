@@ -239,11 +239,16 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
     the decode of two command dims. Defaults = the historical behavior of ckpts predating each key.
     """
     dims = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
+    # gripper_convention: a RECORDED marker (not a behavior switch — the reader is hard-coded to the
+    # pretrain convention). None = the ckpt config predates the marker, i.e. it was trained with the
+    # old RoboCasa-native +1=close gripper; a pretrain-convention client must REFUSE such ckpts
+    # (evaluating one would silently invert every grasp).
     return {
         "base_proprio": str(OmegaConf.select(cfg, "dataloader.base_proprio", default="velocity")),
         "mobile_base": bool(OmegaConf.select(cfg, "dataloader.mobile_base", default=False)),
         "mask_torso_action": bool(OmegaConf.select(cfg, "dataloader.mask_torso_action", default=True)),
         "binary_action_dims": [int(d) for d in (dims or [])],
+        "gripper_convention": OmegaConf.select(cfg, "dataloader.gripper_convention", default=None),
     }
 
 
