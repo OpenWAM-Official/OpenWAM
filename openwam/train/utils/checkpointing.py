@@ -80,7 +80,11 @@ def _normalization_stats_values_equal(left, right) -> bool:
         if left_arr.shape != right_arr.shape:
             return False
         if np.issubdtype(left_arr.dtype, np.floating) or np.issubdtype(right_arr.dtype, np.floating):
-            return bool(np.allclose(left_arr, right_arr, equal_nan=True))
+            # Strict resume must preserve the exact transform. Tolerant
+            # comparison can accept small regenerated-stat differences even
+            # though restored weights and optimizer state were trained in the
+            # original coordinates.
+            return bool(np.array_equal(left_arr, right_arr, equal_nan=True))
         return bool(np.array_equal(left_arr, right_arr))
     return left == right
 

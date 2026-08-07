@@ -120,8 +120,15 @@ def _stats_block_is_compatible(block: Any) -> bool:
     for key in STAT_KEYS:
         if key not in block:
             return False
-        arr = np.asarray(block[key])
-        if arr.shape != (EEF33_DIM,) or not np.isfinite(arr).all():
+        try:
+            arr = np.asarray(block[key])
+            is_real_numeric = np.issubdtype(arr.dtype, np.number) and not np.issubdtype(
+                arr.dtype, np.complexfloating
+            )
+            finite = bool(np.isfinite(arr).all()) if is_real_numeric else False
+        except (TypeError, ValueError):
+            return False
+        if arr.shape != (EEF33_DIM,) or not is_real_numeric or not finite:
             return False
     return True
 

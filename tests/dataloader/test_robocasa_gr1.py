@@ -618,6 +618,21 @@ def test_malformed_schema_v2_stats_are_rebuilt(tmp_path: Path):
     assert isinstance(ds, MultiRoboCasaGR1Dataset)
 
 
+def test_schema_v2_rejects_non_numeric_non_finite_and_wrong_shape_vectors(tmp_path: Path):
+    stats_path = tmp_path / NORMALIZATION_STATS_FILENAME
+    malformed_values = (
+        np.full(EEF33_DIM, "not-a-number"),
+        np.full(EEF33_DIM, np.nan, dtype=np.float32),
+        np.zeros(EEF33_DIM - 1, dtype=np.float32),
+        np.zeros(EEF33_DIM, dtype=np.complex64),
+    )
+    for malformed in malformed_values:
+        payload = _stats_payload(_complete_stats_block())
+        payload["eef"]["min"] = malformed
+        np.save(stats_path, payload)
+        assert not _stats_file_is_compatible(stats_path)
+
+
 def test_unsupported_newer_stats_schema_fails_fast(tmp_path: Path):
     """A future schema must not be overwritten by schema-v2 auto-rebuild."""
     root = tmp_path / "root"
