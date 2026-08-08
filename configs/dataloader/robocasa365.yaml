@@ -84,6 +84,10 @@ action_mode: eef_base
 normalize_mode: min-max
 # Explicit stats .npy/.json; null = auto-resolve under the (single) repo. REQUIRED (non-null) when
 # dataset_dir is a list of repos — the pooled stats over all tasks×repos are computed there on first use.
+# When enabling base_proprio=global_pose: point this at a NEW file AND use a FRESH output dir —
+# save_normalization_stats skips the copy if the output dir already holds a normalization_stats.npy
+# (checkpointing.py), so a stale file there would ship an old stats schema inside the checkpoint
+# (caught at deploy as an eef_base_pose_proprio KeyError, but avoid the round-trip).
 normalization_stats_path: /path/to/robocasa365_v3/robocasa365_multitask_eefbase_stats.npy
 
 # ── Unified 80-D action space (cross-robot shared head) + mobile base ────────

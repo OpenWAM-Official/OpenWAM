@@ -47,6 +47,11 @@ RAW-27) — base is no longer a bypass channel with its own stats/deploy special
     proprio base5 = [vx, vy, vyaw, 0(masked), 0(masked)]           (base_proprio="velocity", historical)
                   | [x, y, sin(yaw), cos(yaw), 0(masked)]          (base_proprio="global_pose")
 
+NOTE ``global_pose`` is a SINGLE-EMBODIMENT representation: it repurposes unified proprio slots
+[68:72) (world x/y in meters, sin/cos) whose A′ command-space semantics other suites still rely on
+(BEHAVIOR/ebench put base velocities there, robocasa_gr1 its waist). Do NOT co-train a global_pose
+run with datasets sharing those base slots — the same-slot-same-space invariant no longer holds.
+
 The action base command is passed direct-to-env at eval (arm bridged, base raw). The proprio base
 block depends on ``base_proprio``: "velocity" (historical; absent config key) = finite-diff of the
 ``observation.state`` base pose rescaled into the action's command space (``× fps /
