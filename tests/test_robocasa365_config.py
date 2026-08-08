@@ -160,3 +160,55 @@ def test_build_policy_defaults_fixed_base(monkeypatch):
     monkeypatch.setattr(single_eval, "OpenWAMRoboCasa365Policy", _Capture)
     single_eval._build_policy({"osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
     assert captured["mobile_base"] is False
+
+
+def test_build_policy_threads_base_proprio(monkeypatch):
+    """_build_policy must forward base_proprio (default 'velocity' — the historical representation);
+    a global_pose ckpt evaluated with a template that omits the key would otherwise silently fall
+    back to velocity (both 25-D, invisible to the width check)."""
+    captured = {}
+
+    class _Capture:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr(single_eval, "OpenWAMRoboCasa365Policy", _Capture)
+    single_eval._build_policy({"mobile_base": True, "base_proprio": "global_pose",
+                               "osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
+    assert captured["base_proprio"] == "global_pose"
+    captured.clear()
+    single_eval._build_policy({"mobile_base": True, "osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
+    assert captured["base_proprio"] == "velocity"
+
+
+def test_repo_template_declares_base_proprio():
+    """The in-repo template must carry the key explicitly (PR #57 B5): the manual PR-body reminder is
+    not a substitute for the default path being correct."""
+    import yaml as _yaml
+
+    tmpl = Path(single_eval.__file__).parent / "policy_config.yml"
+    cfg = _yaml.safe_load(tmpl.read_text())
+    assert cfg.get("base_proprio") == "velocity"
+
+
+def test_hydra_compose_overrides_base_proprio_and_binary_dims():
+    """PR #57: the training entry configs/dataloader/robocasa365.yaml must declare the new keys with
+    historical defaults, so the STANDARD override syntax works (Hydra struct mode rejects overrides
+    of undeclared keys with ConfigCompositionException — '+dataloader....' is not the documented
+    launch command)."""
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    cfg_dir = os.path.abspath("configs")
+    with initialize_config_dir(config_dir=cfg_dir, version_base=None):
+        cfg = compose(config_name="train", overrides=["dataloader=robocasa365"])
+        assert cfg.dataloader.base_proprio == "velocity"        # historical defaults declared
+        assert cfg.dataloader.binary_action_dims is None
+        cfg2 = compose(config_name="train", overrides=[
+            "dataloader=robocasa365",
+            "dataloader.base_proprio=global_pose",
+            "dataloader.binary_action_dims=[9,24]",
+        ])
+        assert cfg2.dataloader.base_proprio == "global_pose"
+        assert list(cfg2.dataloader.binary_action_dims) == [9, 24]

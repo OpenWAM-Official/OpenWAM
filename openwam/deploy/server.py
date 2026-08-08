@@ -164,6 +164,20 @@ class PolicyServer:
             d.img_width,
         )
 
+    def _ckpt_contract(self) -> dict:
+        """Representation-contract fields advertised in the PONG for client-side validation.
+
+        Source is ``architecture.repr_contract`` — bound by ``load_model`` to the TRAINING cfg
+        BEFORE ``merge_deploy_cfg`` (where deploy overrides win). Reading the merged ``self.cfg``
+        here would let a deploy yaml carrying stray ``dataloader.*`` keys make the PONG advertise
+        values the architecture isn't using (its normalizer/binary dims were built from the
+        training cfg) — re-opening exactly the silent mismatch the handshake exists to kill.
+        Engines without an architecture (or pre-contract load paths) advertise nothing — clients
+        then apply their old-server compatibility rules.
+        """
+        contract = getattr(getattr(self.engine, "architecture", None), "repr_contract", None)
+        return dict(contract) if contract else {}
+
     def predict(self, obs: dict) -> dict:
         """Synchronous prediction for a single observation.
 
@@ -238,7 +252,7 @@ class PolicyServer:
                             result["type"] = ACTION
                             await websocket.send(json.dumps(result))
                         elif msg_type == PING:
-                            await websocket.send(json.dumps({"type": PONG}))
+                            await websocket.send(json.dumps({"type": PONG, **self._ckpt_contract()}))
                         else:
                             await websocket.send(
                                 json.dumps(

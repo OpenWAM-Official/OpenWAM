@@ -59,8 +59,31 @@ class WAMPolicy:
             )
 
     def predict_action(self, obs: dict) -> np.ndarray:
-        """Return the next action for the given (already preprocessed) observation."""
-        return self._executor.predict_action(self._build_conditions(obs))
+        """Return the next action for the given (already preprocessed) observation.
+
+        The final legality projection for two-point command dims
+        (``architecture.binary_command_dims``, from the CKPT's dataloader.binary_action_dims) runs
+        HERE — after all executor arithmetic. The normalizer already emits exact ±1 for those dims,
+        but temporal ensembling mixes overlapping chunks (old +1, new -1, decay 0.5 → -0.33), and a
+        mid-band value must never reach a consumer. ``snap ∘ avg ≠ avg ∘ snap``: the projection is
+        only sound AFTER the last mixing step, i.e. at this facade boundary (covers the WS server and
+        any direct WAMPolicy consumer). Threshold 0.5 keeps the conservative downstream boundary; on
+        ensembled ±1 values it acts as a stale-biased majority vote — a legality guarantee, not an
+        optimal fusion (if ensembling is ever re-enabled for real, binary dims should be newest-wins
+        at the executor level instead).
+        """
+        action = self._executor.predict_action(self._build_conditions(obs))
+        dims = getattr(getattr(self.engine, "architecture", None), "binary_command_dims", ()) or ()
+        if dims:
+            action = np.array(action)
+            for d in dims:
+                if d >= action.shape[-1]:
+                    raise ValueError(
+                        f"binary_command_dims includes {d} but the action is {action.shape[-1]}-D; "
+                        "the ckpt config and the served action width disagree."
+                    )
+                action[..., d] = np.where(action[..., d] > 0.5, 1.0, -1.0)
+        return action
 
     def reset(self):
         """Clear executor state between episodes."""

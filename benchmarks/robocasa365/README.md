@@ -66,6 +66,15 @@ base command is folded INTO the raw vector → raw **25-D `[arm20, base5]`** (ac
 layout), scattered to the unified 80-D via ONE map `["0-9","34-43","68-72"]` (arm → `[0:10)`+`[34:44)`,
 base5 → `[68:73)`) — like BEHAVIOR's RAW-27, base is not a bypass channel.
 
+**`base_proprio` MUST match the checkpoint** (`policy_config.yml` key, default `velocity`): the proprio
+base5 slots carry either the A′ finite-diff velocity (`velocity`, historical — any ckpt whose config
+lacks `dataloader.base_proprio`) or the world planar pose `[x, y, sin(yaw), cos(yaw), 0]`
+(`global_pose`). Both are 25-D, so a mismatch would corrupt evaluation *silently*; the server
+advertises its representation in the ping PONG and the client fails fast on mismatch (a
+`global_pose` client also refuses servers too old to advertise it). Checkpoints trained with
+`dataloader.binary_action_dims` (gripper 9 / control_mode 24 kept as raw ±1 targets) need no eval
+config: the server reads it from the ckpt config and snaps decoded outputs back to exact ±1.
+
 ## Training data + dataloader
 
 The trainer side is `openwam.dataloader.robocasa365.MultiTaskRoboCasa365Dataset`
@@ -99,11 +108,15 @@ scripts/train.sh dataloader=robocasa365 \
 EEF** (full base-relative pose from `observation.state`, bridged to 12-D OSC at eval) in unified
 slots `[0:10)`; the **5-D base command** (raw from the LeRobot `action` field: `[x_vel, y_vel,
 yaw_vel, torso, control_mode]`, direct-to-env at eval) maps to `[68:73)`. **Proprio mirrors the
-layout**: the arm current pose plus the **body-frame base velocity** in `[68:71)` (finite-diff of
-the base pose, rescaled into the action command space so it shares the base stats — **A′**), with
-torso + control_mode masked (no achieved value). ONE combined **25-D `eef_base`** stats block
-normalizes the whole `[arm20, base5]` vector; deploy gathers 80→25 and un-normalizes with it (no
-base special-casing — the eval client sends 25-D proprio and bridges arm→OSC, base5 direct).
+layout**, with the base slots in the ckpt's `base_proprio` representation: `velocity` (historical
+default) = the **body-frame base velocity** in `[68:71)` (finite-diff of the base pose, rescaled
+into the action command space so it shares the base stats — **A′**); `global_pose` = the world
+planar pose `[x, y, sin(yaw), cos(yaw)]` in `[68:72)`. torso + control_mode stay masked (no
+achieved value). ONE combined **25-D `eef_base`** stats block normalizes actions and the velocity
+proprio; a `global_pose` proprio is the one exception — it normalizes with its own
+**`eef_base_pose_proprio`** block (meters/unit-circle can't share command stats). Deploy gathers
+80→25 and un-normalizes actions with `eef_base` (no base special-casing — the eval client sends
+25-D proprio and bridges arm→OSC, base5 direct).
 `configs/model/dual_system.yaml` **defaults** `action_dim/state_dim=80`, so **no override is
 needed** for the default model (only a model config that hardcodes 20 would need
 `model.architecture.action_dim=80 model.architecture.state_dim=80`).

@@ -121,13 +121,14 @@ def test_transform_image_none_is_passthrough():
 # --- policy class with a fake WS client ---
 
 class _FakeClient:
-    def __init__(self, action):
+    def __init__(self, action, pong=None):
         self._action = list(action)
         self.last_payload = None
         self.reset_called = False
+        self._pong = pong or {"type": "pong"}
 
     def ping(self):
-        return {"type": "pong"}
+        return dict(self._pong)
 
     def reset(self):
         self.reset_called = True
@@ -466,10 +467,145 @@ def test_mask_torso_action_zeros_torso():
 
 def test_mask_torso_action_false_passes_torso():
     # mask_torso_action=False: the model's torso prediction is passed through to the env.
-    fake = _FakeClient(action=_SERVER25_TORSO09)
+    # (The non-historical False requires server confirmation in the handshake — advertise it.)
+    fake = _FakeClient(
+        action=_SERVER25_TORSO09,
+        pong={"type": "pong", "base_proprio": "velocity", "mobile_base": True,
+              "mask_torso_action": False},
+    )
     policy = adapter.OpenWAMRoboCasa365Policy(
         _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, mask_torso_action=False
     )
     policy.reset()
     act = policy.act(_obs_base([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]), "x")
     assert float(act["action.base_motion"][3]) == pytest.approx(0.9)  # torso passed through
+
+
+def test_base_pose_planar5_matches_dataloader_formula():
+    """The client's base_pose_planar5 MUST equal the train-side quantity (dataloader
+    base_proprio='global_pose': _yaw_from_quat_xyzw + sin/cos) on the same pose — train/eval parity."""
+    from openwam.dataloader.robocasa365 import _yaw_from_quat_xyzw
+
+    rng = np.random.RandomState(7)
+    for _ in range(20):
+        yaw = rng.uniform(-np.pi, np.pi)
+        pose = np.array([rng.uniform(-5, 5), rng.uniform(-5, 5), 0.7,
+                         0.0, 0.0, np.sin(yaw / 2), np.cos(yaw / 2)], np.float32)
+        got = adapter.base_pose_planar5(pose)
+        expect_yaw = _yaw_from_quat_xyzw(pose[3:7])
+        assert got == pytest.approx(
+            [pose[0], pose[1], np.sin(expect_yaw), np.cos(expect_yaw), 0.0], abs=1e-5
+        )
+
+
+def test_policy_global_pose_sends_pose_stateless():
+    """base_proprio='global_pose': base5 = [x, y, sin(yaw), cos(yaw), 0] direct from the CURRENT obs —
+    already real on the first step (velocity mode sends zeros there), and needs no previous pose."""
+    fake = _FakeClient(
+        action=list(range(25)),
+        pong={"type": "pong", "base_proprio": "global_pose", "mobile_base": True},
+    )
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
+        base_proprio="global_pose",
+    )
+    policy.reset()
+    yaw = 0.8
+    policy.act(_obs_base([1.5, -2.0, 0.7], [0.0, 0.0, np.sin(yaw / 2), np.cos(yaw / 2)]), "x")
+    state = fake.last_payload["state"]
+    assert len(state) == 25
+    assert state[20:25] == pytest.approx([1.5, -2.0, np.sin(yaw), np.cos(yaw), 0.0], abs=1e-5)
+
+
+def test_policy_rejects_unknown_base_proprio():
+    with pytest.raises(ValueError, match="base_proprio"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+            mobile_base=True, base_proprio="pose",
+        )
+
+
+def test_policy_global_pose_requires_mobile():
+    with pytest.raises(ValueError, match="requires mobile_base"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(20))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+            mobile_base=False, base_proprio="global_pose",
+        )
+
+
+# --- representation-contract handshake (PR #57 B5) ---
+
+
+def test_handshake_global_pose_requires_server_field():
+    """A global_pose client must REFUSE a server that doesn't advertise its representation (an old
+    server would silently normalize the pose proprio with command stats)."""
+    with pytest.raises(RuntimeError, match="did not advertise"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(25))),  # bare pong: old server
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, base_proprio="global_pose",
+        )
+
+
+def test_handshake_base_proprio_mismatch_raises():
+    """velocity client vs global_pose ckpt (or vice versa): both 25-D, width check is blind — the
+    handshake must fail fast instead of silently corrupting evaluation."""
+    with pytest.raises(RuntimeError, match="base_proprio mismatch"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(
+                action=list(range(25)),
+                pong={"type": "pong", "base_proprio": "global_pose", "mobile_base": True},
+            ),
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, base_proprio="velocity",
+        )
+
+
+def test_handshake_velocity_tolerates_old_server():
+    """Historical pairing (velocity client + server without contract fields) keeps working."""
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+        mobile_base=True,
+    )
+    assert policy._base_proprio == "velocity"
+
+
+def test_handshake_mobile_base_mismatch_raises():
+    with pytest.raises(RuntimeError, match="mobile_base mismatch"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(
+                action=list(range(25)),
+                pong={"type": "pong", "base_proprio": "velocity", "mobile_base": False},
+            ),
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
+        )
+
+
+def test_handshake_mask_torso_mismatch_raises_both_directions():
+    for server_val, client_val in ((False, True), (True, False)):
+        with pytest.raises(RuntimeError, match="mask_torso_action mismatch"):
+            adapter.OpenWAMRoboCasa365Policy(
+                _client=_FakeClient(
+                    action=list(range(25)),
+                    pong={"type": "pong", "base_proprio": "velocity", "mobile_base": True,
+                          "mask_torso_action": server_val},
+                ),
+                osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
+                mask_torso_action=client_val,
+            )
+
+
+def test_handshake_mask_torso_false_requires_server_field():
+    """The non-historical False needs server confirmation: an unconfirmed False would send a
+    possibly-unsupervised torso output to the live actuator."""
+    with pytest.raises(RuntimeError, match="did not advertise the checkpoint's torso"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(25))),  # bare pong: old server
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, mask_torso_action=False,
+        )
+
+
+def test_handshake_mask_torso_default_tolerates_old_server():
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+        mobile_base=True,  # mask_torso_action defaults to the historical True
+    )
+    assert policy._mask_torso_action is True

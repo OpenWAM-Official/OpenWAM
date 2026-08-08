@@ -23,10 +23,12 @@ Action spaces (two layers — don't conflate):
 
 Proprio: the client sends the model's single-arm EEF proprio (converted from the env's raw 16-D
 state). For a **mobile** checkpoint (``mobile_base: true``, the default), it appends the 5-D base
-proprio → **25-D** ``[arm20, base5]`` where ``base5 = [vx, vy, vyaw, 0, 0]``: the 3 body-frame base
-velocities are the finite-diff of the world base pose rescaled into the action command space (A′,
-``base_velocity_cmd``, exactly as the dataloader), and torso + control_mode have no achieved value so
-they are 0 (masked at train). A fixed-base ckpt sends the 20-D arm proprio.
+proprio → **25-D** ``[arm20, base5]``, in the ckpt's ``base_proprio`` representation:
+``"velocity"`` (historical) → ``base5 = [vx, vy, vyaw, 0, 0]``, the finite-diff of the world base
+pose rescaled into the action command space (A′, ``base_velocity_cmd``, exactly as the dataloader);
+``"global_pose"`` → ``base5 = [x, y, sin(yaw), cos(yaw), 0]``, the world planar base pose direct
+from the current obs (``base_pose_planar5``, stateless). torso + control_mode have no achieved value
+so those slots are 0 (masked at train). A fixed-base ckpt sends the 20-D arm proprio.
 
 Debug dumping follows the robotwin convention (``ep{N}/step_{N}/`` with per-camera
 JPGs + ``meta.json``) and adds a labeled ``cameras.png`` montage plus
@@ -52,6 +54,7 @@ import numpy as np  # noqa: E402
 
 from benchmarks.utils import (  # noqa: E402
     WSPolicyClient,
+    base_pose_planar5,
     base_velocity_cmd,
     build_payload,
     eef20d_to_robocasa12d,
@@ -338,6 +341,7 @@ class OpenWAMRoboCasa365Policy:
         osc_rot_scale: Optional[float] = None,
         mobile_base: bool = False,
         mask_torso_action: bool = True,
+        base_proprio: str = "velocity",
         debug: bool = False,
         debug_dir: str = "./debug_robocasa365",
         _client=None,
@@ -358,6 +362,16 @@ class OpenWAMRoboCasa365Policy:
         # to 0 before the env — torso is a LIVE JOINT_POSITION delta actuator, and 0 → no motion
         # (scale_action(0)=0), reproducing the demos. Must match the ckpt's dataloader.mask_torso_action.
         self._mask_torso_action = bool(mask_torso_action)
+        # base_proprio: what fills the 5 proprio base slots — MUST match the ckpt's
+        # dataloader.base_proprio ("velocity" = historical A′ finite-diff; "global_pose" = world
+        # planar pose [x, y, sin(yaw), cos(yaw), 0]).
+        if base_proprio not in ("velocity", "global_pose"):
+            raise ValueError(f"base_proprio must be 'velocity' or 'global_pose', got {base_proprio!r}")
+        if base_proprio == "global_pose" and not self._mobile_base:
+            # Parity with the dataloader's guard: a fixed-base ckpt has no base5 proprio block, so a
+            # global_pose request is a config mistake, not a silently ignorable no-op.
+            raise ValueError("base_proprio='global_pose' requires mobile_base=True")
+        self._base_proprio = base_proprio
         # Expected proprio width for the fail-fast guard: 20-D EEF (+ 5-D base5 when mobile).
         self._state_dim = state_dim if state_dim is not None else (STATE_DIM_MOBILE if self._mobile_base else STATE_DIM)
         self._action_dim = action_dim
@@ -377,6 +391,48 @@ class OpenWAMRoboCasa365Policy:
         pong = self._client.ping()
         if pong.get("type") != transport.PONG:
             raise RuntimeError(f"OpenWAM server ping returned unexpected response: {pong}")
+        # Representation-contract handshake. velocity vs global_pose proprio are BOTH 25-D, so a
+        # mismatched eval config corrupts evaluation silently — the width check cannot catch it.
+        # Asymmetric compat: a "global_pose" client REQUIRES the server to advertise its
+        # representation (an old server would silently normalize the pose proprio with command
+        # stats); a "velocity" client tolerates absence (old server + historical ckpt is fine).
+        server_bp = pong.get("base_proprio")
+        if self._base_proprio == "global_pose" and server_bp is None:
+            raise RuntimeError(
+                "base_proprio='global_pose' but the server did not advertise its proprio "
+                "representation: the deploy code is too old for a global-pose checkpoint and would "
+                "silently normalize the pose proprio with command stats. Update the server."
+            )
+        if server_bp is not None and server_bp != self._base_proprio:
+            raise RuntimeError(
+                f"base_proprio mismatch: eval config sends {self._base_proprio!r} but the server's "
+                f"checkpoint trained with {server_bp!r}. Both are the same width, so this would "
+                "corrupt evaluation silently — fix base_proprio in the eval policy config."
+            )
+        server_mb = pong.get("mobile_base")
+        if server_mb is not None and bool(server_mb) != self._mobile_base:
+            raise RuntimeError(
+                f"mobile_base mismatch: eval config says {self._mobile_base} but the server's "
+                f"checkpoint trained with mobile_base={bool(server_mb)}. Fix the eval policy config."
+            )
+        # mask_torso_action drives a LIVE actuator: ckpt=False + client=True silently zeroes a
+        # supervised torso prediction; ckpt=True + client=False sends an UNSUPERVISED torso output
+        # to the actuator (safety risk). Same asymmetric compat as base_proprio: a client on the
+        # historical default (True) tolerates an old server that can't advertise; a client set to
+        # the non-historical False REQUIRES server confirmation.
+        server_mt = pong.get("mask_torso_action")
+        if server_mt is not None and bool(server_mt) != self._mask_torso_action:
+            raise RuntimeError(
+                f"mask_torso_action mismatch: eval config says {self._mask_torso_action} but the "
+                f"server's checkpoint trained with {bool(server_mt)}. Fix the eval policy config "
+                "(True zeroes the torso command; False passes the model's torso output through)."
+            )
+        if server_mt is None and not self._mask_torso_action:
+            raise RuntimeError(
+                "mask_torso_action=False but the server did not advertise the checkpoint's torso "
+                "masking — an unconfirmed False would send a possibly-unsupervised torso output to "
+                "the live actuator. Update the server (or use the historical default True)."
+            )
         print(
             f"[OpenWAMRoboCasa365Policy] action_dim={action_dim} state_dim={self._state_dim} "
             f"mobile_base={self._mobile_base} mask_torso_action={self._mask_torso_action} "
@@ -450,11 +506,15 @@ class OpenWAMRoboCasa365Policy:
         return twelve
 
     def _base5_proprio(self, obs: dict) -> np.ndarray:
-        """The 5-D base proprio ``[vx, vy, vyaw, 0, 0]``: body-frame base velocity rescaled into the
-        action command space (A′, ``base_velocity_cmd``) via a stateful finite-diff of the world base
-        pose (base_position + base_rotation) — the SAME derivation + rescale the dataloader uses at
-        train time, so no exposure bias. torso + control_mode are 0 (masked at train). The first step
-        of an episode (no previous pose) is all zeros. Updates the tracked previous pose."""
+        """The 5-D base proprio, in the ckpt's ``base_proprio`` representation (must match training):
+
+        * ``"global_pose"``: ``[x, y, sin(yaw), cos(yaw), 0]`` — the world planar base pose, direct
+          from the current obs (``base_pose_planar5``, bit-identical to the dataloader). Stateless.
+        * ``"velocity"`` (historical): ``[vx, vy, vyaw, 0, 0]`` — body-frame base velocity rescaled
+          into the action command space (A′, ``base_velocity_cmd``) via a stateful finite-diff of the
+          world base pose. The first step of an episode (no previous pose) is all zeros.
+
+        torso + control_mode slots have no achieved value → 0 (masked at train)."""
         missing = [k for k in BASE_POSE_KEYS if k not in obs]
         if missing:
             raise KeyError(f"mobile_base needs obs base-pose key(s): {missing}")
@@ -462,6 +522,8 @@ class OpenWAMRoboCasa365Policy:
             np.asarray(obs["state.base_position"], np.float32).reshape(-1)[:3],
             np.asarray(obs["state.base_rotation"], np.float32).reshape(-1)[:4],
         ])
+        if self._base_proprio == "global_pose":
+            return base_pose_planar5(cur)
         base5 = np.zeros(BASE_ACTION_DIM, np.float32)
         if self._prev_base_pose is not None:
             base5[0:BASE_VEL_DIM] = base_velocity_cmd(self._prev_base_pose, cur)
