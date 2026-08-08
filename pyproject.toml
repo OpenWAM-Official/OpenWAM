@@ -21,6 +21,10 @@ dependencies = [
     "pyarrow>=14,<22",
     "PyYAML>=6,<7",
     "safetensors>=0.4,<1",
+    # cosmos3_edge backbone: AutoencoderKLWan + the vendored transformer's
+    # support imports (all stable since 0.38; see
+    # openwam/model/video_backbone/cosmos3/_vendor/README.md).
+    "diffusers>=0.38,<1",
     "einops>=0.7,<1",
     "sentencepiece>=0.1.99,<1",
     "protobuf>=4.25,<7",
