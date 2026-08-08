@@ -12,7 +12,8 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.24,<3",
     "Pillow>=10,<13",
-    "torch>=2.0.0,<3",
+    # cosmos3 uses SDPA's enable_gqa (torch 2.5+); repo intent is 2.7.1+cu128.
+    "torch>=2.5,<3",
     "torchvision>=0.15,<1",
     "transformers>=5.5,<6",
     "imageio>=2.28,<3",

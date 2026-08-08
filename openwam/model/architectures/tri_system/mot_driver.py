@@ -385,6 +385,13 @@ class TriSystemMoTDriver:
         # (CosmosPredict25) ``shape[1]`` is just ``T`` — wrong. Going through f and
         # the shared ``compute_video_tokens_per_frame`` helper is the only
         # formulation that works for both layouts.
+        if int(getattr(vstate, "prefix_kv_len", 0) or 0) > 0:
+            raise NotImplementedError(
+                "TriSystemMoTDriver does not support video backbones that prepend prefix K/V "
+                "tokens (e.g. cosmos3_edge's cached und text stream): the three-way K/V concat "
+                "would misalign against the query-length mask. Use dual_system, or extend this "
+                "driver's mask the way DualSystemMoTDriver.run_joint_loop does."
+            )
         s_video = int(vstate.grid_frames) * self._video_tokens_per_frame(vstate)
         s_action = self._get_action_tokens(astate).shape[1]
         s_understanding = ustate.und_tokens.shape[1]

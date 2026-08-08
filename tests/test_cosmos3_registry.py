@@ -53,6 +53,14 @@ def test_bad_max_text_tokens_raises():
         )
 
 
+def test_freeze_und_false_rejected():
+    with pytest.raises(NotImplementedError, match="freeze_und"):
+        build_video_backbone(
+            "cosmos3_edge",
+            _cfg(name="cosmos3_edge", model_path="/tmp/x", freeze_und=False),
+        )
+
+
 def test_nonexistent_model_path_fails_fast(tmp_path):
     # With diffusers installed this is a FileNotFoundError on the missing
     # transformer/ subfolder; without diffusers it is the install-hint

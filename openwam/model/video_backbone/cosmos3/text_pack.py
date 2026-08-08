@@ -99,10 +99,15 @@ def tokenize_prompt(
         ids = ids[: max_length - 2]
     eos = tokenizer.eos_token_id
     start_of_generation = tokenizer.convert_tokens_to_ids(START_OF_GENERATION_TOKEN)
-    if eos is None or start_of_generation is None:
+    # Fast tokenizers map unknown tokens to unk_token_id instead of None, so a
+    # wrong/partial tokenizer dir would otherwise slip a silent [eos, unk] tail
+    # into every prompt instead of the generation marker.
+    unk = getattr(tokenizer, "unk_token_id", None)
+    if eos is None or start_of_generation is None or (unk is not None and start_of_generation == unk):
         raise ValueError(
             "Cosmos3 tokenizer must define eos_token_id and the "
-            f"'{START_OF_GENERATION_TOKEN}' token; got eos={eos!r}, start={start_of_generation!r}."
+            f"'{START_OF_GENERATION_TOKEN}' token; got eos={eos!r}, start={start_of_generation!r} "
+            f"(unk={unk!r}). Check that text_tokenizer/ is complete and from the Cosmos3 bundle."
         )
     return list(ids) + [int(eos), int(start_of_generation)]
 
@@ -191,6 +196,7 @@ def build_joint_positions(
     base_fps: float = 24.0,
     temporal_compression_factor: int = 4,
     float_positions: bool = True,
+    reset_spatial_indices: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Positions for the padded und block and the vision block.
 
@@ -209,6 +215,7 @@ def build_joint_positions(
         fps=fps if float_positions else None,
         base_fps=base_fps,
         temporal_compression_factor=temporal_compression_factor,
+        reset_spatial_indices=reset_spatial_indices,
     )
     if float_positions:
         vision_pos = vision_pos.to(torch.float32)

@@ -36,7 +36,7 @@ def test_component_specs_emission(tmp_path):
     assert generate_cosmos3_component_specs(str(tmp_path / "missing"), has_vae=True) is None
 
 
-def test_artifact_copy(tmp_path):
+def test_artifact_copy_repairs_partial_state(tmp_path):
     bundle = _fake_bundle(tmp_path)
     out = tmp_path / "ckpt"
     out.mkdir()
@@ -51,6 +51,10 @@ def test_artifact_copy(tmp_path):
     # Idempotent: second call leaves the populated dir untouched.
     copy_cosmos3_artifacts(str(out), str(bundle))
     assert sorted(p.name for p in (out / "text_tokenizer").iterdir()) == copied
+    # Repair: a partial copy (interrupted save) is completed, not frozen.
+    (out / "text_tokenizer" / "tokenizer.json").unlink()
+    copy_cosmos3_artifacts(str(out), str(bundle))
+    assert (out / "text_tokenizer" / "tokenizer.json").exists()
 
 
 def test_save_deploy_assets_embeds_spec_and_copies(tmp_path):

@@ -5,6 +5,7 @@ deploy hooks must be wired (real validation errors, not NotImplementedError);
 save_deploy_assets must no-op without mutating cfg when model_path is unreadable.
 """
 
+import pytest
 from omegaconf import OmegaConf
 
 from openwam.model.video_backbone import Cosmos3EdgeVideoBackbone, VideoBackbone
@@ -45,6 +46,30 @@ def test_decode_hook_is_wired_not_stub():
         pass  # the real gate: no VAE attached
     except NotImplementedError as exc:  # pragma: no cover
         raise AssertionError("decode_video is an unwired stub") from exc
+
+
+def _validating_instance():
+    vb = _bare_instance()
+    object.__setattr__(vb, "_temporal_compression", 4)
+    return vb
+
+
+def test_deploy_cfg_gt1_rejected_loudly():
+    vb = _validating_instance()
+    with pytest.raises(NotImplementedError, match="cfg_scale"):
+        vb.preprocess_input_for_inference(prompt="x", first_frame_image=object(), cfg_scale=2.0)
+
+
+def test_deploy_num_frames_must_be_4k_plus_1():
+    vb = _validating_instance()
+    with pytest.raises(ValueError, match="4k\\+1"):
+        vb.preprocess_input_for_inference(prompt="x", first_frame_image=object(), num_frames=32)
+
+
+def test_deploy_multi_image_list_rejected():
+    vb = _validating_instance()
+    with pytest.raises(ValueError, match="exactly one"):
+        vb.preprocess_input_for_inference(prompt="x", first_frame_image=[object(), object()])
 
 
 def test_save_deploy_assets_noop_on_unreadable_model_path(tmp_path):

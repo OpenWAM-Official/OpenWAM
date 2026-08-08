@@ -295,6 +295,7 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
             base_fps=float(net.config.base_fps),
             temporal_compression_factor=self._temporal_compression,
             float_positions=float_pos,
+            reset_spatial_indices=bool(net.config.unified_3d_mrope_reset_spatial_ids),
         )
         return vision_pos.unsqueeze(1)  # [3, 1, N] — broadcast over batch
 
@@ -379,39 +380,51 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         first_frame_image = kw.get("first_frame_image")
         if first_frame_image is None:
             raise ValueError("cosmos3_edge deploy path is first-frame conditioned; pass `first_frame_image`.")
+        if isinstance(first_frame_image, list):
+            if len(first_frame_image) != 1:
+                raise ValueError(
+                    "cosmos3_edge deploy accepts exactly one conditioning image; got a list of "
+                    f"{len(first_frame_image)} — the B=1 prompt encoding (und K/V cache) cannot "
+                    "broadcast over an image batch."
+                )
+            first_frame_image = first_frame_image[0]
         num_frames = int(kw.get("num_frames", 29))
+        if (num_frames - 1) % self._temporal_compression != 0:
+            raise ValueError(
+                f"cosmos3_edge num_frames must be 4k+1 (causal Wan2.2 VAE grid); got {num_frames}. "
+                f"Nearest valid: {((num_frames - 1) // self._temporal_compression) * self._temporal_compression + 1}."
+            )
         height = int(kw.get("height", 480))
         width = int(kw.get("width", 832))
         fps = float(kw.get("fps", _DEFAULT_FPS))
         seed = kw.get("seed")
         cfg_scale = float(kw.get("cfg_scale", 1.0))
-        cfg_merge = bool(kw.get("cfg_merge", False))
-        if cfg_merge and cfg_scale > 1.0:
+        if cfg_scale > 1.0:
             raise NotImplementedError(
-                "cosmos3_edge cannot run batched-CFG (cfg_merge): the cached und K/V lists are "
-                "per-prompt and cannot be merged along the batch axis. Use separate CFG passes."
+                "cosmos3_edge deploy CFG (cfg_scale > 1.0) is not wired yet: the shared CFG pass "
+                "swaps only `context`, which the cosmos3 gen blocks never read (text conditioning "
+                "rides the cached und K/V), so guidance would silently be a no-op at 2x cost. Run "
+                "cfg_scale=1.0, or implement an und-bundle-swapping CFG pass first."
             )
         shift = kw.get("shift")
         prompt_embed_cache = kw.get("prompt_embed_cache")
 
         from openwam.model.video_backbone.cosmos_predict25._vae_utils import _pil_video_to_tensor
 
-        # Deploy may hand a single PIL image or a list (predict2.5 contract).
-        ref_frames = first_frame_image if isinstance(first_frame_image, list) else [first_frame_image]
-        frame_t = _pil_video_to_tensor([[r] for r in ref_frames]).to(self.device)
+        frame_t = _pil_video_to_tensor([[first_frame_image]]).to(self.device)
         with torch.no_grad():
             first_frame_latents = self._encode_frames(frame_t)  # (1, 48, 1, h, w)
 
-            def _cached_encode(p: str) -> dict:
-                if prompt_embed_cache is not None and p in prompt_embed_cache:
-                    return prompt_embed_cache[p]
-                enc = self._encode_prompts([p], num_frames=num_frames, height=height, width=width, fps=fps)
+            # The templated text (and the und rope offsets) bake in geometry, so
+            # the cache key must carry it — a bare-prompt key would silently
+            # reuse stale conditioning across resolutions/durations.
+            cache_key = (str(prompt), num_frames, height, width, fps)
+            if prompt_embed_cache is not None and cache_key in prompt_embed_cache:
+                enc = prompt_embed_cache[cache_key]
+            else:
+                enc = self._encode_prompts([str(prompt)], num_frames=num_frames, height=height, width=width, fps=fps)
                 if prompt_embed_cache is not None:
-                    prompt_embed_cache[p] = enc
-                return enc
-
-            enc = _cached_encode(str(prompt))
-            uncond_enc = _cached_encode("") if cfg_scale > 1.0 else None
+                    prompt_embed_cache[cache_key] = enc
 
         t_lat = 1 + (num_frames - 1) // self._temporal_compression
         h_lat = first_frame_latents.shape[3]
@@ -420,13 +433,13 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         if seed is not None:
             generator = torch.Generator(device="cpu").manual_seed(int(seed))
         latents = torch.randn(
-            (first_frame_latents.shape[0], _COSMOS3_LATENT_CHANNELS, t_lat, h_lat, w_lat),
+            (1, _COSMOS3_LATENT_CHANNELS, t_lat, h_lat, w_lat),
             generator=generator,
             dtype=torch.float32,
         ).to(device=self.device, dtype=self.dtype)
         latents[:, :, :1] = first_frame_latents.to(latents.dtype)
 
-        out = {
+        return {
             "latents": latents,
             "context": enc["context"],
             "und_mask": enc["context_mask"],
@@ -446,14 +459,6 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
             "tiled": bool(kw.get("tiled", True)),
             "uncond_context": None,
         }
-        if uncond_enc is not None:
-            out["uncond_context"] = uncond_enc["context"]
-            out["uncond_und_mask"] = uncond_enc["context_mask"]
-            out["uncond_und_kv"] = uncond_enc["und_kv"]
-            out["uncond_vision_positions"] = self._vision_positions(
-                uncond_enc["und_len_padded"], (t_lat, h_lat, w_lat), fps
-            )
-        return out
 
     def decode_video(self, latents: Tensor, *, tiled: bool = True) -> list:
         _ = tiled  # AutoencoderKLWan.decode has no tiling arg on this path
@@ -493,3 +498,11 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         super().set_dtype_device(dtype, device)
         self._latents_mean = self._latents_mean.to(device=device)
         self._latents_std = self._latents_std.to(device=device)
+        # The blanket cast above defeats the vendored transformer's
+        # _keep_in_fp32_modules contract (from_pretrained honors it, plain .to()
+        # does not) — re-pin the timestep embedder to fp32 so the sinusoid MLP
+        # keeps timestep resolution; dit_forward follows this dtype (te_dtype)
+        # and casts the result back to the model dtype.
+        te = getattr(self.dit, "time_embedder", None)
+        if te is not None:
+            te.to(dtype=torch.float32)

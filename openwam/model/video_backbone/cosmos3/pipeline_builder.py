@@ -187,6 +187,36 @@ _COSMOS3_VAE_KWARGS: dict = dict(
     ],
 )
 
+# Weightless config fields whose values change model behavior without changing
+# any tensor shape — asserted against the loaded bundle at build time.
+_WEIGHTLESS_CONFIG_KEYS = (
+    "intermediate_size",
+    "num_key_value_heads",
+    "hidden_act",
+    "qk_norm_for_text",
+    "use_und_k_norm_for_gen",
+    "rms_norm_eps",
+    "rope_theta",
+    "rope_axes_dim",
+    "unified_3d_mrope_reset_spatial_ids",
+    "unified_3d_mrope_temporal_modality_margin",
+    "latent_patch_size",
+    "latent_channel",
+    "patch_latent_dim",
+    "timestep_scale",
+    "base_fps",
+    "enable_fps_modulation",
+)
+
+
+def _norm_cfg_value(value):
+    if isinstance(value, (list, tuple)):
+        return [_norm_cfg_value(v) for v in value]
+    if isinstance(value, float):
+        return round(value, 12)
+    return value
+
+
 _UND_PATHWAY_LAYER_CHILDREN = (
     "input_layernorm",
     "post_attention_layernorm",
@@ -298,6 +328,13 @@ def build_cosmos3_pipeline(
     use_system_prompt = bool(_cfg_get(cfg, "use_system_prompt", False))
     prompt_templates = bool(_cfg_get(cfg, "prompt_templates", True))
     freeze_und = bool(_cfg_get(cfg, "freeze_und", True))
+    if not freeze_und:
+        raise NotImplementedError(
+            "cosmos3_edge freeze_und=false is not supported: the und tower always runs under "
+            "no_grad (dit_forward.run_und_tower), so its parameters can never receive gradients "
+            "— the flag would silently allocate optimizer state for weights that never train. "
+            "Remove the override, or implement a grad-enabled und path first."
+        )
     max_text_tokens = int(_cfg_get(cfg, "max_text_tokens", 512))
     if max_text_tokens < 8:
         raise ValueError(f"cosmos3_edge max_text_tokens must be >= 8, got {max_text_tokens}.")
@@ -361,6 +398,20 @@ def build_cosmos3_pipeline(
             "Loaded Cosmos3 transformer geometry does not match the cosmos3_edge entry "
             f"(hidden={net_cfg.hidden_size}, layers={net_cfg.num_hidden_layers}, "
             f"heads={net_cfg.num_attention_heads}, head_dim={net_cfg.head_dim})."
+        )
+    # Weightless config fields carry behavior a strict state_dict load cannot
+    # catch (rotary phases, timestep scale, mRoPE margins, norm eps, ...). A
+    # revised bundle changing any of them must fail loudly, not train wrong.
+    mismatches = {
+        key: (getattr(net_cfg, key, None), _COSMOS3_EDGE_NET_KWARGS[key])
+        for key in _WEIGHTLESS_CONFIG_KEYS
+        if _norm_cfg_value(getattr(net_cfg, key, None)) != _norm_cfg_value(_COSMOS3_EDGE_NET_KWARGS[key])
+    }
+    if mismatches:
+        raise ValueError(
+            "Cosmos3 bundle config diverges from the cosmos3_edge entry on weightless "
+            f"fields {mismatches} (got, expected). Update _COSMOS3_EDGE_NET_KWARGS and port "
+            "any behavioral change (text_pack positions / dit_forward) before training."
         )
     if not deploy:
         n_heads_frozen = _freeze_unused_native_heads(net)
