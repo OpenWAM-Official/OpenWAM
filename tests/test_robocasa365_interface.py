@@ -125,7 +125,9 @@ class _FakeClient:
         self._action = list(action)
         self.last_payload = None
         self.reset_called = False
-        self._pong = pong or {"type": "pong"}
+        # Default = a NEW server's minimal contract (pretrain gripper convention advertised);
+        # tests exercising OLD servers pass an explicit bare {"type": "pong"}.
+        self._pong = pong or {"type": "pong", "gripper_convention": "pretrain"}
 
     def ping(self):
         return dict(self._pong)
@@ -146,7 +148,7 @@ class _NoPredictClient:
     """ping/reset OK, but predict must never be called (fail-fast guard)."""
 
     def ping(self):
-        return {"type": "pong"}
+        return {"type": "pong", "gripper_convention": "pretrain"}
 
     def reset(self):
         return {"type": "reset_ack"}
@@ -219,7 +221,7 @@ def test_bridge_pos_delta_and_order():
     eef20d = np.zeros(20, np.float32)
     eef20d[0:3] = [0.025, 0.0, 0.0]      # absolute target pos
     eef20d[3:9] = _IDENT_R6D             # no rotation
-    eef20d[9] = -0.7                     # gripper command -0.7 (<0) -> OPEN
+    eef20d[9] = 0.7                      # gripper open-scale +0.7 (not < -0.5) -> OPEN
     out = eef20d_to_robocasa12d(
         eef20d, proprio_eef_pos=[0.0, 0.0, 0.0], proprio_eef_rot6d=_IDENT_R6D,
         pos_scale=0.05, rot_scale=0.5,
@@ -227,7 +229,7 @@ def test_bridge_pos_delta_and_order():
     assert out.shape == (12,)
     assert out[0:3] == pytest.approx([0.5, 0.0, 0.0], abs=1e-5)   # eef_pos delta/scale
     assert out[3:6] == pytest.approx([0.0, 0.0, 0.0], abs=1e-5)   # eef_rot (identity)
-    assert out[6] == pytest.approx(0.0)                          # gripper OPEN (cmd -0.7, not > 0.5)
+    assert out[6] == pytest.approx(0.0)                          # gripper OPEN (+0.7, not < -0.5)
     assert out[7:11] == pytest.approx([0.0, 0.0, 0.0, 0.0])      # base_motion default 0
     assert out[11] == pytest.approx(-1.0)                        # control_mode default -1
     # slices line up with the env adapter's ACTION_SLICES
@@ -235,9 +237,9 @@ def test_bridge_pos_delta_and_order():
 
 
 def test_bridge_gripper_threshold_at_half():
-    """Model gripper dim [9] is the COMMAND in [-1,+1] (+1=close, -1=open). The bridge closes only on a
-    CONFIDENT command: >0.5 -> close (1.0), else open (0.0) — an uncertain/neutral output (~0) defaults
-    to open (no spurious grasp). No width binarization / actuation-lag delay."""
+    """Model gripper dim [9] is the PRETRAIN open-scale in [-1,+1] (-1=close, +1=open). The bridge
+    closes only on a CONFIDENT command: < -0.5 -> close (1.0), else open (0.0) — an uncertain/neutral
+    output (~0) defaults to open (no spurious grasp). No width binarization / actuation-lag delay."""
     from benchmarks.utils import eef20d_to_robocasa12d
 
     def _grip(cmd):
@@ -248,12 +250,12 @@ def test_bridge_gripper_threshold_at_half():
                                     pos_scale=0.05, rot_scale=0.5)
         return float(out[6])
 
-    assert _grip(1.0) == pytest.approx(1.0)    # confident close (+1) -> close
-    assert _grip(0.6) == pytest.approx(1.0)    # >0.5 -> close
-    assert _grip(0.5) == pytest.approx(0.0)    # exactly 0.5 (not >) -> open
-    assert _grip(0.2) == pytest.approx(0.0)    # weak/uncertain (0 < x <= 0.5) -> open (no spurious grasp)
+    assert _grip(-1.0) == pytest.approx(1.0)   # confident close (-1) -> close
+    assert _grip(-0.6) == pytest.approx(1.0)   # < -0.5 -> close
+    assert _grip(-0.5) == pytest.approx(0.0)   # exactly -0.5 (not <) -> open
+    assert _grip(-0.2) == pytest.approx(0.0)   # weak/uncertain -> open (no spurious grasp)
     assert _grip(0.0) == pytest.approx(0.0)    # neutral -> open
-    assert _grip(-1.0) == pytest.approx(0.0)   # open (-1) -> open
+    assert _grip(1.0) == pytest.approx(0.0)    # open (+1) -> open
 
 
 def test_bridge_pos_clipped_to_unit():
@@ -470,8 +472,8 @@ def test_mask_torso_action_false_passes_torso():
     # (The non-historical False requires server confirmation in the handshake — advertise it.)
     fake = _FakeClient(
         action=_SERVER25_TORSO09,
-        pong={"type": "pong", "base_proprio": "velocity", "mobile_base": True,
-              "mask_torso_action": False},
+        pong={"type": "pong", "gripper_convention": "pretrain",
+              "base_proprio": "velocity", "mobile_base": True, "mask_torso_action": False},
     )
     policy = adapter.OpenWAMRoboCasa365Policy(
         _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, mask_torso_action=False
@@ -503,7 +505,8 @@ def test_policy_global_pose_sends_pose_stateless():
     already real on the first step (velocity mode sends zeros there), and needs no previous pose."""
     fake = _FakeClient(
         action=list(range(25)),
-        pong={"type": "pong", "base_proprio": "global_pose", "mobile_base": True},
+        pong={"type": "pong", "gripper_convention": "pretrain",
+                      "base_proprio": "global_pose", "mobile_base": True},
     )
     policy = adapter.OpenWAMRoboCasa365Policy(
         _client=fake, osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
@@ -553,19 +556,38 @@ def test_handshake_base_proprio_mismatch_raises():
         adapter.OpenWAMRoboCasa365Policy(
             _client=_FakeClient(
                 action=list(range(25)),
-                pong={"type": "pong", "base_proprio": "global_pose", "mobile_base": True},
+                pong={"type": "pong", "gripper_convention": "pretrain",
+                      "base_proprio": "global_pose", "mobile_base": True},
             ),
             osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True, base_proprio="velocity",
         )
 
 
-def test_handshake_velocity_tolerates_old_server():
-    """Historical pairing (velocity client + server without contract fields) keeps working."""
+def test_handshake_velocity_tolerates_missing_optional_fields():
+    """A NEW server (gripper convention advertised) may omit base_proprio/mask_torso fields; a
+    velocity/default client tolerates their absence (asymmetric compat)."""
     policy = adapter.OpenWAMRoboCasa365Policy(
-        _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
-        mobile_base=True,
+        _client=_FakeClient(action=list(range(25))),  # default pong: gripper_convention only
+        osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
     )
     assert policy._base_proprio == "velocity"
+
+
+def test_handshake_gripper_gate_refuses_old_servers():
+    """After the pretrain gripper flip there is NO compatible pairing with a server that cannot
+    confirm the convention (old ckpt or old code): every grasp would silently invert. The gate is
+    unconditional and precedes every other contract check."""
+    with pytest.raises(RuntimeError, match="gripper convention mismatch"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(25)), pong={"type": "pong"}),  # bare old server
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
+        )
+    with pytest.raises(RuntimeError, match="gripper convention mismatch"):
+        adapter.OpenWAMRoboCasa365Policy(
+            _client=_FakeClient(action=list(range(25)),
+                                pong={"type": "pong", "gripper_convention": "robocasa"}),
+            osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
+        )
 
 
 def test_handshake_mobile_base_mismatch_raises():
@@ -573,7 +595,8 @@ def test_handshake_mobile_base_mismatch_raises():
         adapter.OpenWAMRoboCasa365Policy(
             _client=_FakeClient(
                 action=list(range(25)),
-                pong={"type": "pong", "base_proprio": "velocity", "mobile_base": False},
+                pong={"type": "pong", "gripper_convention": "pretrain",
+                      "base_proprio": "velocity", "mobile_base": False},
             ),
             osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
         )
@@ -585,7 +608,8 @@ def test_handshake_mask_torso_mismatch_raises_both_directions():
             adapter.OpenWAMRoboCasa365Policy(
                 _client=_FakeClient(
                     action=list(range(25)),
-                    pong={"type": "pong", "base_proprio": "velocity", "mobile_base": True,
+                    pong={"type": "pong", "gripper_convention": "pretrain",
+                          "base_proprio": "velocity", "mobile_base": True,
                           "mask_torso_action": server_val},
                 ),
                 osc_pos_scale=0.05, osc_rot_scale=0.5, mobile_base=True,
@@ -603,9 +627,10 @@ def test_handshake_mask_torso_false_requires_server_field():
         )
 
 
-def test_handshake_mask_torso_default_tolerates_old_server():
+def test_handshake_mask_torso_default_tolerates_missing_field():
     policy = adapter.OpenWAMRoboCasa365Policy(
-        _client=_FakeClient(action=list(range(25))), osc_pos_scale=0.05, osc_rot_scale=0.5,
+        _client=_FakeClient(action=list(range(25))),  # new-server pong without mask_torso field
+        osc_pos_scale=0.05, osc_rot_scale=0.5,
         mobile_base=True,  # mask_torso_action defaults to the historical True
     )
     assert policy._mask_torso_action is True

@@ -18,7 +18,8 @@ TRAINING_DL = {
     "base_proprio": "global_pose",
     "mobile_base": True,
     "mask_torso_action": False,
-    "binary_action_dims": [9, 24],
+    "binary_action_dims": [24],
+    "gripper_convention": "pretrain",
 }
 
 
@@ -29,7 +30,8 @@ def test_repr_contract_from_cfg_reads_training_values():
         "base_proprio": "global_pose",
         "mobile_base": True,
         "mask_torso_action": False,
-        "binary_action_dims": [9, 24],
+        "binary_action_dims": [24],
+        "gripper_convention": "pretrain",
     }
 
 
@@ -40,6 +42,7 @@ def test_repr_contract_defaults_are_historical():
         "mobile_base": False,
         "mask_torso_action": True,
         "binary_action_dims": [],
+        "gripper_convention": None,  # pre-marker ckpt: clients must refuse (old gripper convention)
     }
 
 
@@ -61,7 +64,8 @@ def test_pong_contract_survives_malicious_deploy_overrides():
     assert pong["base_proprio"] == "global_pose"
     assert pong["mobile_base"] is True
     assert pong["mask_torso_action"] is False
-    assert pong["binary_action_dims"] == [9, 24]
+    assert pong["binary_action_dims"] == [24]
+    assert pong["gripper_convention"] == "pretrain"
 
 
 def test_pong_contract_empty_without_architecture():
