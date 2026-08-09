@@ -49,6 +49,7 @@ from benchmarks.utils.action_conversion import (
     ebench_render_state_base,
     ebench_wrap_angle_rad,
     eef10_to_libero7d,
+    eef10_to_vlabench_ee,
     eef20d_to_ee16d,
     eef20d_to_robocasa12d,
     libero_gripper_qpos_to_cmd,
@@ -61,7 +62,9 @@ from benchmarks.utils.action_conversion import (
     robocasa_state_to_eef20d,
     robotwin_endpose_to_eef20d,
     rot6d_to_axis_angle,
+    rot6d_to_euler_xyz,
     rot6d_to_quat_xyzw,
+    vlabench_obs_to_eef10,
 )
 from benchmarks.utils.client import (
     ServerError,
@@ -84,6 +87,7 @@ __all__ = [
     "ebench_render_state_base",
     "ebench_wrap_angle_rad",
     "eef10_to_libero7d",
+    "eef10_to_vlabench_ee",
     "eef20d_to_ee16d",
     "eef20d_to_robocasa12d",
     "encode_numpy_b64",
@@ -98,6 +102,8 @@ __all__ = [
     "robocasa_state_to_eef20d",
     "robotwin_endpose_to_eef20d",
     "rot6d_to_axis_angle",
+    "rot6d_to_euler_xyz",
     "rot6d_to_quat_xyzw",
     "server_error_from_body",
+    "vlabench_obs_to_eef10",
 ]

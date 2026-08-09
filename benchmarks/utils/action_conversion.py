@@ -828,3 +828,115 @@ def raw23_to_ebench_action(action: np.ndarray, base_action_source: str) -> dict:
         "base_motion": [float(v) for v in a[20:23]],
         "base_is_rel": base_action_source == "delta",
     }
+
+
+# ---------------------------------------------------------------------------
+# VLABench (MuJoCo / dm_control, Franka Panda single arm, absolute EE pose)
+# ---------------------------------------------------------------------------
+VLABENCH_EEF10_DIM = 10
+# Franka finger separation per finger at fully open (m). VLABench's evaluator
+# consumes a 2-finger gripper target, so an "open" command is [0.04, 0.04].
+VLABENCH_GRIPPER_OPEN_WIDTH = 0.04
+# The dataset's ACTION gripper column is the commanded finger width binarized by
+# VLABench's converter with ``> 0.03 -> 1`` against that 0.04 open width, so
+# 1 = OPEN. (The STATE column uses the opposite polarity — see
+# openwam/dataloader/vlabench.py. Both are passed through verbatim.)
+VLABENCH_GRIPPER_OPEN_THRESHOLD = 0.5
+# Fallback robot base position used by VLABench's LeRobot converter when an
+# episode config carries no explicit ``robot.position``.
+VLABENCH_ROBOT_BASE_DEFAULT = (0.0, -0.4, 0.78)
+
+
+def rot6d_to_euler_xyz(r6d: np.ndarray) -> np.ndarray:
+    """``(6,)`` rot6d -> ``(3,)`` extrinsic Euler XYZ ``[roll, pitch, yaw]`` (rad).
+
+    Exact inverse of the dataloader's ``euler_xyz_to_rot6d``, which builds
+    ``R = Rz @ Ry @ Rx`` and keeps its first two columns. Decomposing that R::
+
+        pitch_y = asin(-R[2, 0])
+        roll_x  = atan2(R[2, 1], R[2, 2])
+        yaw_z   = atan2(R[1, 0], R[0, 0])
+
+    At gimbal lock (``|R[2,0]| -> 1``, i.e. ``cos(pitch) -> 0``) roll and yaw are
+    degenerate; roll is pinned to 0 and the combined rotation folded into yaw.
+    Matches ``scipy.spatial.transform.Rotation.as_euler("xyz")`` (lowercase =
+    extrinsic), the convention VLABench's own converter used.
+    """
+    R = _rot6d_to_matrix(np.asarray(r6d, np.float64).reshape(-1))
+    sy = -R[2, 0]
+    cy_sq = R[0, 0] ** 2 + R[1, 0] ** 2
+    if cy_sq < 1e-12:  # gimbal lock
+        pitch = np.arcsin(np.clip(sy, -1.0, 1.0))
+        return np.array([0.0, pitch, np.arctan2(-R[0, 1], R[1, 1])], np.float64)
+    return np.array(
+        [
+            np.arctan2(R[2, 1], R[2, 2]),
+            np.arcsin(np.clip(sy, -1.0, 1.0)),
+            np.arctan2(R[1, 0], R[0, 0]),
+        ],
+        np.float64,
+    )
+
+
+def vlabench_obs_to_eef10(ee_state: np.ndarray, robot_base: np.ndarray) -> np.ndarray:
+    """Live VLABench ``ee_state`` -> RAW 10-D EEF proprio (unnormalized).
+
+    Mirrors the dataloader on the same physical state. VLABench's
+    ``robot.get_ee_state()`` returns ``[pos(3), quat_wxyz(4), open_state(1)]`` in
+    the WORLD frame; the training converter subtracted the robot base position
+    and stored Euler XYZ, so this does the same:
+
+        eef10 = [pos - robot_base (3), rot6d(quat) (6), open_state (1)]
+
+    ``open_state`` is forwarded verbatim, including the upstream Franka polarity
+    inversion (1 = closed) — the dataset's state column carries the same value
+    from the same accessor, so consistency is what matters.
+    """
+    ee = np.asarray(ee_state, np.float64).reshape(-1)
+    if ee.shape[0] < 8:
+        raise ValueError(f"VLABench ee_state must be at least 8-D [pos3, quat_wxyz4, grip1], got {ee.shape[0]}")
+    base = np.asarray(robot_base, np.float64).reshape(-1)
+    if base.shape[0] != 3:
+        raise ValueError(f"robot_base must be 3-D, got {base.shape[0]}")
+    pos = ee[0:3] - base
+    quat_wxyz = ee[3:7]
+    quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], np.float32)
+    rot6d = quat_xyzw_to_rot6d(quat_xyzw[None])[0]
+    return np.concatenate([pos.astype(np.float32), rot6d, np.float32([ee[7]])], axis=-1).astype(np.float32)
+
+
+def eef10_to_vlabench_ee(
+    action: np.ndarray,
+    robot_base: np.ndarray,
+    *,
+    gripper_open_threshold: float = VLABENCH_GRIPPER_OPEN_THRESHOLD,
+    gripper_open_width: float = VLABENCH_GRIPPER_OPEN_WIDTH,
+) -> tuple:
+    """Model EEF10 -> the ``(pos, euler, gripper_state)`` VLABench's evaluator wants.
+
+    The evaluator runs IK on an ABSOLUTE WORLD-frame target, so the robot base
+    offset the dataloader removed is added back here. The gripper is thresholded
+    to VLABench's 2-finger command: open = ``[w, w]``, closed = ``[0, 0]``, with
+    1 = OPEN per the dataset's action convention.
+
+    Args:
+        action: ``(10,)`` EEF10 ``[xyz3, rot6d6, grip1]``, robot-base frame,
+            already denormalized to physical units by the server.
+        robot_base: ``(3,)`` robot base position in the world frame
+            (``env.get_robot_frame_position()``, injected as ``obs["robot_frame"]``).
+
+    Returns:
+        ``(target_pos(3,), target_euler(3,), gripper_state(2,))``, all float64
+        world-frame, ready for ``agent.predict``'s ``control_mode="ee"`` contract.
+    """
+    act = np.asarray(action, np.float64).reshape(-1)
+    if act.shape[0] != VLABENCH_EEF10_DIM:
+        raise ValueError(f"expected a {VLABENCH_EEF10_DIM}-D EEF action, got {act.shape[0]}")
+    base = np.asarray(robot_base, np.float64).reshape(-1)
+    if base.shape[0] != 3:
+        raise ValueError(f"robot_base must be 3-D, got {base.shape[0]}")
+    target_pos = act[0:3] + base
+    target_euler = rot6d_to_euler_xyz(act[3:9])
+    is_open = float(act[9]) >= float(gripper_open_threshold)
+    gripper_state = np.full(2, float(gripper_open_width)) if is_open else np.zeros(2)
+    return target_pos, target_euler, gripper_state

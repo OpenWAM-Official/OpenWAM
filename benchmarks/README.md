@@ -17,6 +17,7 @@ Bundled clients:
 - [RoboTwin](robotwin/README.md)
 - [LIBERO](libero/README.md)
 - [RoboCasa GR1](robocasa_gr1/README.md)
+- [VLABench](vlabench/README.md)
 
 ## 1. What the client sends
 

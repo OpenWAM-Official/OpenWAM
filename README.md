@@ -45,7 +45,8 @@ OpenWAM/
 ├── benchmarks/
 │   ├── robotwin/      # RoboTwin eval client, single / multi / DLC-parallel eval scripts
 │   ├── libero/        # LIBERO WebSocket eval client
-│   └── robocasa_gr1/  # RoboCasa GR1 tabletop eval client
+│   ├── robocasa_gr1/  # RoboCasa GR1 tabletop eval client
+│   └── vlabench/      # VLABench eval client, single / multi-GPU track sweeps
 ├── assets_repo/       # Architecture diagrams
 └── third_party/       # Vendored externals (Cosmos-Predict2.5 submodule)
 ```
@@ -73,6 +74,7 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 | SimplerEnv eval | Planned | Requires external environment setup |
 | LIBERO eval | Supported | LIBERO; see `benchmarks/libero/` |
 | RoboCasa GR1 eval | Supported | GR1 tabletop tasks; see `benchmarks/robocasa_gr1/` |
+| VLABench eval | Supported | 10 primitive tasks across 6 evaluation tracks; see `benchmarks/vlabench/` |
 | Calvin eval | Planned | Requires external environment setup |
 | BEHAVIOR-1K eval | Planned | Requires external environment setup |
 

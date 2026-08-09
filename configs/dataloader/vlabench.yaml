@@ -1,0 +1,84 @@
+# VLABench primitive finetune dataset (LeRobot v3, Franka Panda single-arm).
+# Reader: openwam/dataloader/vlabench.py (type "vlabench").
+#
+# The official VLABench standard finetune release: 10 primitive tasks x 500
+# episodes = 5000 episodes / 575k frames / 128 task variants at 10 fps.
+#   https://huggingface.co/datasets/VLABench/vlabench_primitive_ft_dataset
+type: vlabench
+
+# ── Dataset root ────────────────────────────────────────────────────────────
+# state = actions = [x,y,z,roll,pitch,yaw,gripper], absolute EE pose in the
+# ROBOT BASE frame (VLABench's converter subtracts the base position), turned
+# into raw EEF10 [xyz3, rot6d6, grip1] by the reader.
+#
+# NOTE the two gripper columns use OPPOSITE polarity (state 1 = closed, action
+# 1 = open) because of an acknowledged upstream Franka bug. Both are passed
+# through verbatim so training and rollout stay on the same convention — see
+# the reader docstring before "fixing" either side.
+#
+# WARNING: this dataset's meta/episodes is CORRUPT upstream — it writes
+# dataset_from_index = length * episode_index, and mis-assigns
+# data/chunk_index / data/file_index in step with it (3952 of 5000 episodes
+# point at the wrong shard). Any loader that trusts those columns trains on
+# video paired with a DIFFERENT episode's actions and prompt. The reader
+# rebuilds the mapping from real parquet row counts; see
+# openwam/dataloader/vlabench.py::_add_data_offsets.
+# Placeholder per CONTRIBUTING.md's config policy — machine-specific dataset
+# mounts must not land in shared configs. Point it at your local copy with a
+# Hydra override: dataloader.dataset_dir=/path/to/vlabench_primitive_ft_lerobot_video
+dataset_dir: /TODO/vlabench_primitive_ft_lerobot_video
+
+# ── Action mode ─────────────────────────────────────────────────────────────
+# VLABench is EEF-only. This key is not consumed by the reader — it is the
+# DEPLOY side of the contract: the policy server reads
+# `dataloader.action_mode` from the checkpoint's saved config to pick which key
+# to load out of normalization_stats.npy, and defaults to "joint" when absent.
+# It MUST match VLABenchDataset.DEPLOY_ACTION_MODE, which is the key the reader
+# WRITES into that file; a mismatch fails the deploy with a missing-stats
+# KeyError. tests/dataloader/test_vlabench_offsets.py pins the two together.
+action_mode: eef
+
+# ── Unified 80-D action space (cross-robot shared head) ─────────────────────
+# The 80-D semantic layout (see configs/dataloader/robotwin.yaml for the full
+# table) starts with the left arm:
+#   [ 0: 3) left eef xyz   [ 3: 9) left eef rot6d   [ 9] left gripper
+# VLABench is single-arm, so its raw EEF10 maps 1:1 onto slots 0-9 — the same
+# pretrained semantic dims the OpenWAM pretrain mixture used for its left arm.
+# Normalization runs FIRST (in the reader), then the scatter; the deploy
+# denormalizer inverts in that same order.
+unify_action: true
+unify_action_map: ["0-9"]
+
+# ── Window / stride ─────────────────────────────────────────────────────────
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+# ── Image size ──────────────────────────────────────────────────────────────
+# multiview=true → L-shape canvas (384H x 320W):
+#   top    256H x 320W → image (head / front camera)
+#   bot-L  128H x 160W → wrist_image
+#   bot-R  128H x 160W → second_image (second external view)
+height: 384
+width: 320
+multiview: true
+
+# ── Train / val split ───────────────────────────────────────────────────────
+split: train
+
+# ── Action / proprio normalization ──────────────────────────────────────────
+# Reads {dataset_dir}/meta/eef_stats.json (state + action pooled, 10-D) and
+# writes {dataset_dir}/meta/normalization_stats.npy for the deploy server.
+# Regenerate the source stats with:
+#   python -m openwam.dataloader.utils.stats_computation.vlabench_stats_computation \
+#       --dataset-dir {dataset_dir}
+normalize_mode: min-max
+
+enable_action_supervision: true
+
+# Load-time, temporally consistent augmentation (train split only).
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0

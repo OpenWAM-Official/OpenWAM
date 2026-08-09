@@ -197,6 +197,11 @@ AGENTS.md
 # Policy-server / client per-step debug artifacts
 server_debug/
 debug_images/
+debug_vlabench/
+
+# Benchmark client eval outputs (metrics, videos, per-job logs).
+# The glob also covers archived runs kept alongside, e.g. _eval_out_bad/.
+benchmarks/vlabench/_eval_out*/
 
 # Scratch experiments — large checkpoints/logs, never commit
 sandbox/

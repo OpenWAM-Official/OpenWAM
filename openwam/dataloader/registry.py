@@ -85,6 +85,7 @@ def _register_builtins():
     from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset
     from openwam.dataloader.robocoin import MultiRobotCOINDataset
     from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
+    from openwam.dataloader.vlabench import VLABenchDataset
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
     register_dataset("agibotworld")(MultiAgiBotWorldDataset)
@@ -100,6 +101,7 @@ def _register_builtins():
     # bucket or a MultiInternDataA1Dataset depending on whether dataset_dir
     # points at a bucket or at the dataset root.
     register_dataset("interndata_a1")(InternDataA1Dataset)
+    register_dataset("vlabench")(VLABenchDataset)
 
 
 _register_builtins()

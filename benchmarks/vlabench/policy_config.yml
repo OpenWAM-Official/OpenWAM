@@ -1,0 +1,75 @@
+# OpenWAM VLABench benchmark client config.
+#
+# This file is a template. `single_eval.sh` patches host/port at runtime; all
+# other fields can be overridden by copying the file and passing
+# `POLICY_CONFIG_PATH=/path/to/custom.yml`.
+
+policy_name: openwam
+
+# OpenWAM policy server connection.
+host: "127.0.0.1"
+port: 8848
+request_timeout: 300
+
+# ── Benchmark selection ─────────────────────────────────────────────────────
+# eval_track pins the episodes so runs are comparable across machines. The
+# VLABench README is explicit about preferring this over seed sampling:
+#   "there is a risk of improperly initialized episodes. We recommend using
+#    the 'evaluation_tracks' method for evaluation."
+# Set to null to fall back to seed-sampled episodes (seed = 42 + episode_id).
+#   track_1_in_distribution   task learning on in-domain episodes
+#   track_2_cross_category    object category / instance generalization
+#   track_3_common_sense      common-sense target description
+#   track_4_semantic_instruction   semantically rich instructions
+#   track_6_unseen_texture    unseen backgrounds and table textures
+eval_track: track_1_in_distribution
+
+# null = every task in the track. Otherwise a list, e.g. [select_fruit, select_toy].
+# The 10 primitive tasks of the standard finetune set are:
+#   add_condiment insert_flower select_book select_chemistry_tube select_drink
+#   select_fruit select_mahjong select_painting select_poker select_toy
+tasks: null
+
+n_episodes: 50
+metrics: [success_rate, intention_score, progress_score]
+visualization: false
+# Output root. Matches the default in single_eval.sh / multi_eval.sh
+# (both resolve it to this directory and pass --save-dir explicitly, so this
+# value only takes effect when single_eval.py is invoked directly).
+# Gitignored; override per run with VLABENCH_SAVE_DIR.
+save_dir: benchmarks/vlabench/_eval_out
+
+# ── Observation mapping ─────────────────────────────────────────────────────
+# obs["rgb"] camera order, verified against the live MuJoCo model and
+# VLABench's LeRobot converter:
+#   0 "right"                   -> dataset second_image
+#   1 "left"                    -> unused
+#   2 "forward"                 -> dataset image
+#   3 "franka/Franka_wrist_cam" -> dataset wrist_image
+head_camera_index: 2
+left_wrist_camera_index: 3
+right_wrist_camera_index: 0
+
+# ── Action / proprio contract ───────────────────────────────────────────────
+# Raw EEF10 [xyz3, rot6d6, grip1] both ways. The checkpoint scatters into the
+# unified 80-D left-arm slots; the deploy server gathers back to EEF10 and
+# unnormalizes, so nothing here needs the 80-D width.
+send_state: true
+state_dim: 10
+action_dim: 10
+
+# ── Gripper ─────────────────────────────────────────────────────────────────
+# The dataset's ACTION gripper is binarized with 1 = OPEN (commanded finger
+# width > 0.03 against a 0.04 m open width). NOTE the STATE column has the
+# OPPOSITE polarity due to an upstream Franka bug — the client forwards the
+# proprio verbatim rather than correcting it, because the eval env reads the
+# same accessor. See openwam/dataloader/vlabench.py.
+gripper_open_threshold: 0.5
+gripper_open_width: 0.04
+
+# Robot base position used only when obs["robot_frame"] is absent; matches the
+# fallback in VLABench's own LeRobot converter.
+robot_base_fallback: [0.0, -0.4, 0.78]
+
+debug: false
+debug_dir: "./debug_vlabench"
