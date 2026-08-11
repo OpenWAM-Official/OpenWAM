@@ -43,6 +43,53 @@ python scripts/download_assets.py        # ~17 GB
 
 The client needs only `numpy`, `Pillow` and `websockets` on top of that.
 
+## Training Data
+
+The `vlabench` dataloader consumes the official primitive finetune release —
+LeRobot v3 parquet + AV1 MP4, 5000 episodes / 575,101 frames / 128 instruction
+variants, ~13 GB:
+
+```bash
+hf download VLABench/vlabench_primitive_ft_lerobot_video \
+  --repo-type dataset \
+  --local-dir /path/to/vlabench_primitive_ft_lerobot_video
+```
+
+> Not `VLABench/vlabench_primitive_ft_dataset` — that redirects to
+> `VLABench/raw_primitive_datasets`, the pre-conversion tarballs, which this
+> reader cannot read.
+
+`configs/dataloader/vlabench.yaml` ships `dataset_dir: /TODO/...` as a
+placeholder (per CONTRIBUTING §Config Change Policy machine-specific mounts do
+not belong in shared configs), so point it at your copy with a Hydra override.
+
+Normalization statistics are read from `<dataset_dir>/meta/eef_stats.json` and
+are **not** auto-computed — generate them once before the first run:
+
+```bash
+python -m openwam.dataloader.utils.stats_computation.vlabench_stats_computation \
+  --dataset-dir /path/to/vlabench_primitive_ft_lerobot_video
+```
+
+Add `--dry-run` to print the table without writing. The rot6d dims are pinned to
+identity so normalization is a pass-through on the rotation representation; the
+reader warns loudly if it loads a stats file that predates that pin.
+
+Finetuning from the pretrained mixture (the 10 raw EEF dims land on slots 0-9 of
+the unified 80-D space, which are pretrained semantic dims):
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 bash scripts/train.sh \
+  dataloader=vlabench \
+  dataloader.dataset_dir=/path/to/vlabench_primitive_ft_lerobot_video \
+  training.finetune_ckpt_path=/path/to/OpenWAM_Pretrained \
+  training.num_epochs=null training.max_steps=6000 \
+  training.batch_size=24 training.output_path=/path/to/output
+```
+
+The resulting checkpoint is self-contained (`config.yaml` + `tokenizer/` +
+`normalization_stats.npy`), so `scripts/deploy.sh` below needs nothing else.
+
 ## Smoke Tests
 
 Preflight the VLABench install and the adapter's observation contract without a
