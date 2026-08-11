@@ -122,7 +122,7 @@ class VLABenchDataset(LeRobotV3Reader):
         The video metadata needs no repair — one mp4 per episode, correct
         indices, ``to_timestamp - from_timestamp == length / fps`` throughout.
         """
-        paths = sorted((self._dataset_dir / "data").glob("chunk-*/file-*.parquet"))
+        paths = list((self._dataset_dir / "data").glob("chunk-*/file-*.parquet"))
         if not paths:
             raise FileNotFoundError(f"No data parquet files under {self._dataset_dir}/data")
 
@@ -138,6 +138,12 @@ class VLABenchDataset(LeRobotV3Reader):
         data_files = [r for r in results if r is not None]
         if not data_files:
             raise FileNotFoundError(f"No usable data parquet files under {self._dataset_dir}/data")
+        # Order by the PARSED (chunk, file) ints, not by path string: lexicographic
+        # order only coincides with numeric order while file_index stays 3 digits
+        # ("file-1000" sorts before "file-999"). This release keeps it there via
+        # chunks_size=1000, but nothing here reads or enforces that, and the
+        # cumulative row offsets below are only valid in true packing order.
+        data_files.sort(key=lambda r: (r[0], r[1]))
 
         file_rows = np.array([n for _, _, n in data_files], dtype=np.int64)
         starts = np.concatenate([[0], np.cumsum(file_rows)]).astype(np.int64)

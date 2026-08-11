@@ -3,7 +3,9 @@
 #
 # The official VLABench standard finetune release: 10 primitive tasks x 500
 # episodes = 5000 episodes / 575k frames / 128 task variants at 10 fps.
-#   https://huggingface.co/datasets/VLABench/vlabench_primitive_ft_dataset
+#   https://huggingface.co/datasets/VLABench/vlabench_primitive_ft_lerobot_video
+# (NOT vlabench_primitive_ft_dataset — that redirects to VLABench/raw_primitive_datasets,
+#  the pre-conversion tarballs, which this reader cannot consume.)
 type: vlabench
 
 # ── Dataset root ────────────────────────────────────────────────────────────

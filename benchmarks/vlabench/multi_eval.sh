@@ -150,7 +150,11 @@ worker() {
         local track task; read -r track task <<< "${job}"
         local log="${save_root}/logs/${track}__${task}.log"
         echo "[w${wid} gpu${gpu} :${port}] ${track}/${task}"
-        CUDA_VISIBLE_DEVICES="${gpu}" MUJOCO_EGL_DEVICE_ID=0 \
+        # EGL enumerates devices independently of CUDA_VISIBLE_DEVICES, so a
+        # hardcoded 0 would pin every worker's rendering to physical GPU 0 while
+        # compute ran elsewhere. Default to this worker's GPU (cf.
+        # benchmarks/robocasa_gr1/single_eval.sh); still overridable.
+        CUDA_VISIBLE_DEVICES="${gpu}" MUJOCO_EGL_DEVICE_ID="${MUJOCO_EGL_DEVICE_ID:-${gpu}}" \
         VLABENCH_SAVE_DIR="${save_root}/by_task/${task}" \
             bash "${SCRIPT_DIR}/single_eval.sh" "${task}" "${track}" "${n_episodes}" "${port}" \
             > "${log}" 2>&1

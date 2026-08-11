@@ -57,7 +57,7 @@ VLABENCH_PYTHON=/path/to/envs/vlabench/bin/python \
 | Mode | Checks |
 |---|---|
 | `env` (default) | Loads one task and asserts the observation contract the adapter depends on: camera count / order, `ee_state`, robot base frame, instruction. |
-| `loop` | `env` plus a full closed loop against an in-process mock OpenWAM server that echoes proprio back as the action (hold-still policy). |
+| `loop` | `env` plus a full closed loop against an in-process mock OpenWAM server that echoes proprio back as the action (hold-still policy). Pass a `host:port` as argument 4 to drive a real server instead — the cheapest preflight before committing GPUs to a track sweep. |
 
 Smoke knobs:
 
@@ -66,6 +66,7 @@ Smoke knobs:
 | `VLABENCH_SMOKE_MODE` | `env` | Mode, when not passed as argument 1. |
 | `VLABENCH_SMOKE_TASK` | `select_fruit` | Task to instantiate, when not passed as argument 2. |
 | argument 3 | `8` | Max steps for the `loop` mode rollout. |
+| `VLABENCH_SMOKE_SERVER` | (unset) | Argument 4. `loop` mode only: `host:port` of a REAL server to drive instead of the mock — exercises the wire action width, server-side denormalization and latency. |
 
 ## Run
 
