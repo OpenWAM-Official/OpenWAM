@@ -264,9 +264,16 @@ def _gen_block_forward(
     und_mask: Tensor,
     cos_gen: Tensor,
     sin_gen: Tensor,
+    gen_mask: Optional[Tensor] = None,
 ) -> Tensor:
     """One decoder layer's gen half: bidirectional attention over
-    ``[und K/V ; gen K/V]`` (GQA) + gen MLP. Mirrors the upstream layer body."""
+    ``[und K/V ; gen K/V]`` (GQA) + gen MLP. Mirrors the upstream layer body.
+
+    ``gen_mask`` is an optional ``(S, S)`` (or ``(B, 1, S, S)``) bool mask over
+    the gen block of the key axis — the shared-backbone path passes the joint
+    cross-modal mask there so injected action/state tokens obey the configured
+    visibility. ``None`` keeps the gen block fully visible (the plain video path).
+    """
     b, s, _ = gen_seq.shape
     attn = layer.self_attn
     n_heads = q_heads = attn.num_attention_heads
@@ -285,9 +292,13 @@ def _gen_block_forward(
     all_k = torch.cat([k_und.to(k.dtype), k], dim=1)
     all_v = torch.cat([v_und.to(v.dtype), v], dim=1)
     l_und = k_und.shape[1]
-    # (B, 1, S_q, L_und + S): und columns gated by the padding mask, gen fully visible.
+    # (B, 1, S_q, L_und + S): und columns gated by the padding mask; the gen
+    # block is fully visible unless the caller supplied a cross-modal mask.
     mask = torch.ones((b, 1, s, l_und + s), dtype=torch.bool, device=gen_seq.device)
     mask[:, :, :, :l_und] = und_mask.view(b, 1, 1, l_und)
+    if gen_mask is not None:
+        gm = gen_mask if gen_mask.dim() == 4 else gen_mask.view(1, 1, s, s)
+        mask[:, :, :, l_und:] = gm.to(device=mask.device, dtype=torch.bool)
 
     out = F.scaled_dot_product_attention(
         q.transpose(1, 2), all_k.transpose(1, 2), all_v.transpose(1, 2), attn_mask=mask, enable_gqa=True
@@ -300,6 +311,9 @@ def _gen_block_forward(
 def run_block(net, block_id: int, state: BlockLoopState) -> BlockLoopState:
     layer = net.layers[block_id]
     k_und, v_und = state.extras["und_kv"][block_id]
+    # Shared-backbone mode rides the same block forward: action/state tokens are
+    # just extra gen tokens (Cosmos3 has no AdaLN, so there is no per-frame
+    # modulation to expand — unlike the predict2.5 shared path).
     state.hidden_states = gradient_checkpoint_forward(
         _gen_block_forward,
         state.use_gradient_checkpointing,
@@ -311,6 +325,7 @@ def run_block(net, block_id: int, state: BlockLoopState) -> BlockLoopState:
         state.extras["und_mask"],
         state.extras["cos_gen"],
         state.extras["sin_gen"],
+        state.extras.get("shared_attention_mask"),
     )
     return state
 

@@ -370,6 +370,108 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         return block_split.state_post_attn(state, attn_out, post_state)
 
     # ================================================================
+    # IDM teacher-forcing branch merge/split
+    # ================================================================
+
+    def merge_idm_video_branches(self, noisy: BlockLoopState, cond: BlockLoopState):
+        """Concatenate the IDM noisy + cond branches — delegates to ``idm_merge``."""
+        from openwam.model.video_backbone.cosmos3 import idm_merge
+
+        return idm_merge.merge_branches(noisy, cond)
+
+    def split_idm_video_branches(self, merged: BlockLoopState, noisy: BlockLoopState, cond: BlockLoopState):
+        """Inverse of :meth:`merge_idm_video_branches` — delegates to ``idm_merge``."""
+        from openwam.model.video_backbone.cosmos3 import idm_merge
+
+        return idm_merge.split_branches(merged, noisy, cond)
+
+    # ================================================================
+    # Shared-backbone: action/state tokens ride the gen stream
+    # ================================================================
+
+    def assert_ready_for_shared_tokens(self, state: BlockLoopState) -> None:
+        """Cosmos3 has no AdaLN — timestep conditioning is additive per token and
+        is applied to injected tokens in :meth:`inject_shared_tokens`, so the Wan
+        4D-``time_mod`` precondition does not apply. No-op."""
+        return None
+
+    def inject_shared_tokens(
+        self,
+        state: BlockLoopState,
+        action_tokens: Tensor,
+        n_action: int,
+        *,
+        state_tokens: Optional[Tensor] = None,
+        n_state: int = 0,
+        timestep: Optional[Tensor] = None,
+    ) -> BlockLoopState:
+        """Append ``[action][state]`` tokens to the flat gen sequence.
+
+        The gen stream is already ``(B, S, D)``, so injection is a concat plus an
+        additive timestep embedding and identity rotary rows for the new tokens.
+        Pair with :meth:`extract_shared_tokens`.
+        """
+        from openwam.model.video_backbone.cosmos3 import shared_block
+
+        n_action = int(n_action or 0)
+        n_state = int(n_state or 0)
+        n_tail = n_action + n_state
+        if n_tail <= 0:
+            return state
+        if timestep is None:
+            raise ValueError("inject_shared_tokens requires `timestep` for action/state token conditioning.")
+
+        gen = state.hidden_states
+        b, _, dim = gen.shape
+        pieces = [gen]
+        for n_tok, tokens, name in ((n_action, action_tokens, "action"), (n_state, state_tokens, "state")):
+            if not n_tok:
+                continue
+            tok = shared_block.validate_shared_tokens(tokens, n_tok, name, b, dim).to(gen.dtype)
+            emb = shared_block.shared_token_timestep_embedding(self.dit, timestep, n_tok, b, gen.dtype)
+            pieces.append(tok + emb)
+
+        state.hidden_states = torch.cat(pieces, dim=1)
+        cos, sin = shared_block.extend_rotary_with_shared_tokens(
+            state.extras["cos_gen"], state.extras["sin_gen"], n_tail
+        )
+        new_extras = dict(state.extras)
+        new_extras["cos_gen"] = cos
+        new_extras["sin_gen"] = sin
+        new_extras["shared_mode"] = True
+        state.extras = new_extras
+        return state
+
+    def extract_shared_tokens(
+        self, state: BlockLoopState, n_action: int, *, n_state: int = 0
+    ) -> Tuple[BlockLoopState, Tensor]:
+        """Slice the action tail off the gen sequence and leave shared mode."""
+        n_action = int(n_action or 0)
+        n_state = int(n_state or 0)
+        n_tail = n_action + n_state
+        total = int(state.hidden_states.shape[1])
+        s_video = int(state.grid_frames) * int(state.grid_height) * int(state.grid_width)
+        if n_tail <= 0 or n_tail >= total:
+            raise ValueError(
+                f"extract_shared_tokens: n_action={n_action}, n_state={n_state} but sequence length is "
+                f"{total} (was inject_shared_tokens called first with the same lengths?)."
+            )
+        if total - n_tail != s_video:
+            raise ValueError(
+                f"extract_shared_tokens: video token count {total - n_tail} != grid T·H·W={s_video} "
+                "(grid changed between inject and extract?)."
+            )
+        action_tokens = state.hidden_states[:, s_video : s_video + n_action, :]
+        state.hidden_states = state.hidden_states[:, :s_video, :]
+        new_extras = dict(state.extras)
+        new_extras["cos_gen"] = new_extras["cos_gen"][:, :s_video]
+        new_extras["sin_gen"] = new_extras["sin_gen"][:, :s_video]
+        for key in ("shared_mode", "shared_attention_mask"):
+            new_extras.pop(key, None)
+        state.extras = new_extras
+        return state, action_tokens
+
+    # ================================================================
     # Deploy
     # ================================================================
 

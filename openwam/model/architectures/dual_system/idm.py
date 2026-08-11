@@ -33,6 +33,7 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.architectures.utils.mask_modes import widen_mask_for_prefix_kv
 from openwam.model.compile_options import (
     compile_enabled,
     idm_compile_cfg,
@@ -131,6 +132,9 @@ class IDMMoTDriver(DualSystemMoTDriver):
             video_tokens_per_frame=video_tokens_per_frame,
             device=merged_vstate.hidden_states.device,
         )
+        # Backbones whose per-layer keys carry a prefix with no matching query
+        # rows (Cosmos3's cached und text stream) need the extra key columns.
+        attn_mask = widen_mask_for_prefix_kv(attn_mask, merged_vstate)
 
         # Run the standard joint loop with the merged video state
         for layer_id in range(self.num_layers):
@@ -165,9 +169,12 @@ class IDMMoTDriver(DualSystemMoTDriver):
     def prefill_video_cache(self, vstate):
         """Run the frozen video branch once and cache per-layer K/V for IDM inference.
 
-        Returns ``(kv_cache, video_seq_len)`` where ``video_seq_len`` is the token
-        count (T·H·W) callers need for the action mask — so they need not re-derive
-        it via the private ``_video_tokens_per_frame``.
+        Returns ``(kv_cache, video_key_len)`` where ``video_key_len`` is the cached
+        per-layer key length callers need to size the action mask — so they need
+        not re-derive it via the private ``_video_tokens_per_frame``. For backbones
+        without a prefix K/V block this equals the video token count (T·H·W); with
+        one (Cosmos3's und text stream) it additionally covers the prefix, which
+        is exactly what the Stage-2 action mask must span.
         """
         # Token count (T·H·W), not hidden_states.shape[1] — that is T for 5D-grid
         # backbones (CosmosPredict25). Mirrors run_joint_loop's s_video formula.
@@ -178,13 +185,17 @@ class IDMMoTDriver(DualSystemMoTDriver):
             video_tokens_per_frame=video_tokens_per_frame,
             device=vstate.hidden_states.device,
         )
+        attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
         kv_cache: list[dict[str, Tensor]] = []
         for layer_id in range(self.num_layers):
             q_v, k_v, v_v, vpost = self.vb.pre_attn_at_layer(layer_id, vstate)
             mixed_v = self._mixed_attention(q_v, k_v, v_v, attn_mask)
             vstate = self.vb.post_attn_at_layer(layer_id, vstate, mixed_v.contiguous(), vpost)
             kv_cache.append({"k": k_v, "v": v_v})
-        return kv_cache, video_seq_len
+        # The cached keys include any backbone prefix (Cosmos3 und stream), so
+        # report the actual cached key length — Stage 2 sizes its action mask
+        # from this, and for prefix-free backbones it equals video_seq_len.
+        return kv_cache, int(kv_cache[0]["k"].shape[1]) if kv_cache else video_seq_len
 
     def run_action_with_video_cache(
         self,
@@ -193,7 +204,13 @@ class IDMMoTDriver(DualSystemMoTDriver):
         video_kv_cache: list[dict[str, Tensor]],
         video_seq_len: int,
     ):
-        """Run only the action branch, attending to cached frozen-video K/V."""
+        """Run only the action branch, attending to cached frozen-video K/V.
+
+        ``video_seq_len`` is the cached per-layer KEY length returned by
+        :meth:`prefill_video_cache` — for backbones with a prefix K/V block
+        (Cosmos3's und text stream) that covers the prefix too, so the action
+        rows attend the text exactly as they do in the joint loop.
+        """
         if len(video_kv_cache) != self.num_layers:
             raise ValueError(f"video_kv_cache must contain {self.num_layers} layers, got {len(video_kv_cache)}.")
         payload = astate.payload

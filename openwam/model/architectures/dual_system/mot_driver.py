@@ -26,6 +26,7 @@ from openwam.model.architectures.utils.mask_modes import (
     build_cross_modal_attention_mask,
     set_video_attention_mask_mode,
     validate_attention_mask_mode,
+    widen_mask_for_prefix_kv,
 )
 
 if TYPE_CHECKING:
@@ -342,24 +343,10 @@ class DualSystemMoTDriver:
         )
 
         # Backbones may prepend prefix K/V tokens (keys without matching query
-        # rows — e.g. Cosmos3's cached und text stream). Widen the mask with
-        # the corresponding leading key columns: visible to every query row
-        # (video attends its text natively; action reading text mirrors the
-        # cross-attn context of the other variants), per-sample padding gated
-        # by ``prefix_kv_mask``. ``_step_impl`` needs no change — it splits the
-        # attention output by query lengths, and SDPA handles rectangular masks.
-        prefix = int(getattr(vstate, "prefix_kv_len", 0) or 0)
-        if prefix > 0:
-            s_total = attn_mask.shape[-1]
-            prefix_mask = getattr(vstate, "prefix_kv_mask", None)
-            if prefix_mask is None:
-                cols = torch.ones((s_total, prefix), dtype=torch.bool, device=attn_mask.device)
-                attn_mask = torch.cat([cols, attn_mask], dim=-1)
-            else:
-                bsz = prefix_mask.shape[0]
-                cols = prefix_mask.view(bsz, 1, 1, prefix).expand(bsz, 1, s_total, prefix)
-                base = attn_mask.view(1, 1, s_total, s_total).expand(bsz, 1, s_total, s_total)
-                attn_mask = torch.cat([cols, base], dim=-1)
+        # rows — e.g. Cosmos3's cached und text stream). ``_step_impl`` needs no
+        # change: it splits the attention output by query lengths, and SDPA
+        # handles the resulting rectangular mask.
+        attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
 
         for layer_id in range(self.num_layers):
             vstate, astate = self.step(
