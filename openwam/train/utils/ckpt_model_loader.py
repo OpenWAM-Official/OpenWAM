@@ -71,6 +71,12 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool):
     params["video_backbone"] = vb_params
     vb_params["_source"] = OmegaConf.to_container(ckpt_cfg.model.video_backbone, resolve=True)
     vb_params["_ckpt_dir"] = ckpt_dir
+    # Finetune loads safetensors a few lines below, so a backbone may leave an
+    # empty shell for that load to fill. Resume must not: `load_state` runs only
+    # after `accelerator.prepare`, and `set_dtype_device` (openwam_trainer.py:126)
+    # touches the module first — on a meta shell that raises "Cannot copy out of
+    # meta tensor". Backbones without a shell path ignore the key.
+    vb_params["_materialize_weights"] = not weights_required
 
     logger.info("[%s] building architecture from self-contained ckpt dir: %s", tag, ckpt_dir)
     architecture = build_architecture(resolved_arch.registry_name, params)

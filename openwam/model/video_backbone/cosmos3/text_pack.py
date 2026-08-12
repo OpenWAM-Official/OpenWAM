@@ -81,6 +81,13 @@ def _templated_ids(tokenizer: Any, conversations: list, *, add_generation_prompt
     return list(ids)
 
 
+def _common_suffix_len(a: Sequence[int], b: Sequence[int]) -> int:
+    n = 0
+    while n < len(a) and n < len(b) and a[len(a) - 1 - n] == b[len(b) - 1 - n]:
+        n += 1
+    return n
+
+
 def tokenize_prompt(
     tokenizer: Any,
     text: str,
@@ -94,12 +101,14 @@ def tokenize_prompt(
     Mirrors the pipeline's ``_tokenize`` + ``_add_special_tokens``. ``max_length``
     caps the templated ids before the two special tokens are appended.
 
-    Truncation cuts the prompt *body*, never the tail. ``add_generation_prompt``
-    appends the assistant header at the END of the templated ids, so a plain
-    right-truncation would silently delete it and hand the model a mid-sentence
-    cut followed by ``[eos, <|vision_start|>]`` — a differently-shaped sequence
-    than anything it was trained on. The header is recovered as the delta
-    against the un-prompted template and re-appended after the cut.
+    Truncation cuts the prompt *body*, never the tail. The whole constant tail
+    matters, not just the assistant header: a chat template emits
+    ``<user content> <|im_end|> <assistant header>``, so a plain right-cut
+    deletes the turn terminator *and* the header and hands the model a
+    mid-sentence stop followed by ``[eos, <|vision_start|>]`` — a shape it never
+    saw in training. The tail is recovered as the longest common suffix against
+    the same template rendered with empty content, which is exactly the part
+    that does not depend on the prompt.
     """
     conversations = []
     if use_system_prompt:
@@ -108,15 +117,11 @@ def tokenize_prompt(
     ids = _templated_ids(tokenizer, conversations, add_generation_prompt=True)
     if max_length is not None and len(ids) > max_length - 2:
         budget = max_length - 2
-        body = _templated_ids(tokenizer, conversations, add_generation_prompt=False)
-        # The generation prompt is a pure suffix iff the un-prompted ids are a
-        # prefix of the prompted ones; templates that interleave differently
-        # fall back to the plain cut rather than guessing.
-        if len(body) < len(ids) and ids[: len(body)] == body:
-            suffix = ids[len(body) :]
-            ids = body[: max(0, budget - len(suffix))] + suffix
-        else:
-            ids = ids[:budget]
+        empty = list(conversations[:-1]) + [{"role": conversations[-1]["role"], "content": ""}]
+        tail_len = _common_suffix_len(ids, _templated_ids(tokenizer, empty, add_generation_prompt=True))
+        # Clamp the result too: a tail longer than the budget would otherwise
+        # push the final length back over max_length.
+        ids = (ids[: max(0, budget - tail_len)] + ids[len(ids) - tail_len :])[:budget] if tail_len else ids[:budget]
     eos = tokenizer.eos_token_id
     start_of_generation = tokenizer.convert_tokens_to_ids(START_OF_GENERATION_TOKEN)
     # Fast tokenizers map unknown tokens to unk_token_id instead of None, so a

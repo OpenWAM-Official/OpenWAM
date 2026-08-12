@@ -81,44 +81,55 @@ def test_prompt_templates_can_drop_the_duration_sentence():
 
 
 class _StubTokenizer:
-    """Chat template = ``[BOS] <body ids> [ASSISTANT_HDR]``, one id per char."""
+    """Chat template = ``[BOS] <body> <|im_end|> [ASSISTANT_HDR]``, one id per char."""
 
     eos_token_id = 90
     unk_token_id = 99
+    pad_token_id = 0
+    _END = 79  # the user turn's terminator, e.g. <|im_end|>
     _HDR = [80, 81]
 
     def apply_chat_template(self, conversations, *, tokenize, add_generation_prompt, return_dict):
-        body = [1] + [ord(c) % 60 + 2 for c in conversations[-1]["content"]]
+        body = [1] + [ord(c) % 60 + 2 for c in conversations[-1]["content"]] + [self._END]
         return body + (self._HDR if add_generation_prompt else [])
 
     def convert_tokens_to_ids(self, token):
         return 91 if token == text_pack.START_OF_GENERATION_TOKEN else self.unk_token_id
 
 
-def test_tokenize_truncation_preserves_the_generation_prompt():
-    """Right-truncating the templated ids would delete the assistant header the
-    template appends last, handing the model a mid-sentence cut followed by
-    ``[eos, <|vision_start|>]``. The header must survive the cut."""
+def test_tokenize_truncation_preserves_the_whole_constant_tail():
+    """A right-cut deletes the turn terminator AND the assistant header.
+
+    Both are constant tail, independent of the prompt, and the model never saw
+    a sequence that jumps from mid-sentence straight to ``[eos, vision_start]``.
+    """
     tok = _StubTokenizer()
-    long_text = "x" * 200
+    tail = [_StubTokenizer._END, *_StubTokenizer._HDR]
 
     untruncated = text_pack.tokenize_prompt(tok, "hi")
-    assert untruncated[-4:] == [*_StubTokenizer._HDR, tok.eos_token_id, 91]
+    assert untruncated[-5:] == [*tail, tok.eos_token_id, 91]
 
-    ids = text_pack.tokenize_prompt(tok, long_text, max_length=32)
+    ids = text_pack.tokenize_prompt(tok, "x" * 200, max_length=32)
     assert len(ids) == 32
-    # Tail is intact: assistant header, then the two special tokens.
-    assert ids[-4:] == [*_StubTokenizer._HDR, tok.eos_token_id, 91]
-    # And the body is a genuine prefix of the untruncated body (a cut, not a shift).
-    full_body = tok.apply_chat_template(
-        [{"role": "user", "content": long_text}], tokenize=True, add_generation_prompt=False, return_dict=False
+    assert ids[-5:] == [*tail, tok.eos_token_id, 91]
+    # The kept body is a genuine prefix of the untruncated body: a cut, not a shift.
+    full = tok.apply_chat_template(
+        [{"role": "user", "content": "x" * 200}], tokenize=True, add_generation_prompt=True, return_dict=False
     )
-    assert ids[:-4] == full_body[: 32 - 4]
+    assert ids[: 32 - 5] == full[: 32 - 5]
 
 
-def test_tokenize_falls_back_when_the_header_is_not_a_suffix():
-    """Templates that do not append the generation prompt as a pure suffix must
-    take the plain cut rather than a guessed reconstruction."""
+def test_tokenize_truncation_never_exceeds_max_length():
+    """Clamp the assembled result too: a tail longer than the budget would
+    otherwise push the output back over the cap."""
+    tok = _StubTokenizer()
+    for max_length in (8, 9, 12, 40):
+        ids = text_pack.tokenize_prompt(tok, "y" * 200, max_length=max_length)
+        assert len(ids) <= max_length, f"max_length={max_length} produced {len(ids)} ids"
+
+
+def test_tokenize_falls_back_when_the_tail_is_not_a_suffix():
+    """Templates whose constant part is not a pure suffix take the plain cut."""
 
     class _Interleaving(_StubTokenizer):
         def apply_chat_template(self, conversations, *, tokenize, add_generation_prompt, return_dict):

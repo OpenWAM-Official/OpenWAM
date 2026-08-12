@@ -111,6 +111,41 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
             raise ValueError(f"text_dropout_p must be in [0, 1]; got {text_dropout_p!r}.")
         self._text_dropout_p = float(text_dropout_p)
         self._text_dropout_rng = random.Random(text_dropout_seed)
+        self._pristine_inv_freq = self._capture_pristine_inv_freq()
+
+    def _capture_pristine_inv_freq(self) -> Optional[Tensor]:
+        """Keep an fp32 copy of the rotary table that no dtype cast can reach.
+
+        Held as a plain attribute, deliberately: ``nn.Module._apply`` walks
+        parameters and registered buffers, so a plain tensor survives every
+        ``.to(dtype=)`` / ``.bfloat16()`` performed on the module — including
+        DeepSpeed's ``self.module.bfloat16()`` inside ``_configure_distributed_model``,
+        which casts floating-point *buffers* and runs between the trainer's two
+        ``set_dtype_device`` calls. Snapshotting inside ``set_dtype_device``
+        cannot survive that: by the second call the buffer is already bf16, and
+        upcasting a rounded value recovers the dtype, not the bits.
+
+        Falls back to recomputing from config when the live buffer is already
+        non-fp32 at construction (a caller that pre-cast the net), since a
+        rounded snapshot would be worse than the exact closed form.
+        """
+        rope = getattr(self.dit, "rotary_emb", None)
+        inv_freq = getattr(rope, "inv_freq", None) if rope is not None else None
+        if inv_freq is None:
+            return None
+        if inv_freq.dtype == torch.float32:
+            return inv_freq.detach().to(device="cpu", copy=True)
+        cfg = getattr(self.dit, "config", None)
+        head_dim = getattr(cfg, "head_dim", None)
+        rope_theta = getattr(cfg, "rope_theta", None)
+        if head_dim is None or rope_theta is None:
+            logger.warning("cosmos3_edge: rotary inv_freq is %s at build and cannot be recomputed.", inv_freq.dtype)
+            return None
+        logger.warning(
+            "cosmos3_edge: rotary inv_freq was already %s at build; recomputing the fp32 table from config.",
+            inv_freq.dtype,
+        )
+        return dit_forward.rotary_inv_freq(int(head_dim), float(rope_theta))
 
     # ================================================================
     # Structural metadata
@@ -619,32 +654,41 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
     # ================================================================
 
     def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
-        # Snapshot the rotary frequency table BEFORE the blanket cast below.
-        # `.to(dtype=)` casts buffers too, and this one is not covered by the
-        # vendored transformer's ``_keep_in_fp32_modules`` (which lists only
-        # ``time_embedder``), so it would be rounded to bf16 — and re-pinning the
-        # dtype afterwards is not enough, because upcasting a rounded value does
-        # not recover the bits. Cosmos3VLTextRotaryEmbedding deliberately runs
-        # the position matmul in fp32 with autocast disabled, but that protects
-        # the product, not an already-rounded frequency table. bf16 costs ~0.37%
-        # relative precision on inv_freq, which the vision stream's temporal
-        # offset (und_len + unified_3d_mrope_temporal_modality_margin = 15000)
-        # multiplies into a phase error large enough to scramble cos/sin
-        # (cosine similarity ~0.85 against the fp32 phases) while leaving the
-        # text positions (0..und_len) visually intact.
-        rope = getattr(self.dit, "rotary_emb", None)
-        inv_freq = getattr(rope, "inv_freq", None) if rope is not None else None
-        inv_freq_fp32 = inv_freq.detach().clone() if inv_freq is not None else None
-
         super().set_dtype_device(dtype, device)
         self._latents_mean = self._latents_mean.to(device=device)
         self._latents_std = self._latents_std.to(device=device)
 
-        # Same story as inv_freq, but here the dtype alone is what matters: the
-        # timestep sinusoid MLP keeps its resolution in fp32, and dit_forward
-        # follows this dtype (te_dtype) before casting the result back.
+        # Restore the rotary table from the build-time fp32 copy. It is NOT
+        # snapshotted here: this method runs twice on the training path
+        # (openwam_trainer.py:126 and :530) with ``accelerator.prepare()`` in
+        # between, and DeepSpeed's ``_configure_distributed_model`` calls
+        # ``self.module.bfloat16()``, which casts floating-point buffers. A
+        # snapshot taken at the second call is therefore already rounded, and
+        # upcasting it back recovers the dtype but not the bits.
+        #
+        # Why it matters: bf16 costs ~0.37% relative precision on inv_freq,
+        # which the vision stream's temporal offset (und_len +
+        # unified_3d_mrope_temporal_modality_margin = 15000) multiplies into a
+        # phase error large enough to scramble cos/sin (cosine ~0.77 against the
+        # fp32 phases, 6.6 rad max) while leaving the text positions intact.
+        # Cosmos3VLTextRotaryEmbedding runs the position matmul in fp32 with
+        # autocast disabled, but that protects the product, not the table.
+        rope = getattr(self.dit, "rotary_emb", None)
+        if rope is not None and self._pristine_inv_freq is not None:
+            rope.register_buffer("inv_freq", self._pristine_inv_freq.to(device=device), persistent=False)
+
+        # The timestep-embedding MLP. Upstream lists it in
+        # ``_keep_in_fp32_modules``, and this pin holds wherever OpenWAM owns
+        # the dtype: deploy, eager training, and any non-ZeRO path. It does NOT
+        # survive DeepSpeed ZeRO — ``_update_model_bit16_weights`` rebinds each
+        # ``p.data`` back into the flattened bf16 group after a step — so under
+        # ZeRO the MLP runs bf16 from step 1. That is a real train/deploy
+        # difference, bounded to this 256→2048 MLP: the sinusoid itself is
+        # computed by the parameter-free ``time_proj`` on an fp32 input in both
+        # cases (see dit_forward.prepare_block_loop), so the frequency content
+        # is identical and only the projection's arithmetic precision differs.
+        # Left pinned rather than dropped because the paths where it does hold
+        # are the ones that serve the checkpoint.
         te = getattr(self.dit, "time_embedder", None)
         if te is not None:
             te.to(dtype=torch.float32)
-        if inv_freq_fp32 is not None:
-            rope.register_buffer("inv_freq", inv_freq_fp32.to(device=device), persistent=False)

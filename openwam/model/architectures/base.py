@@ -312,12 +312,21 @@ class BaseWAMArchitecture(ABC, nn.Module):
         text_dim = None if text_dim in (None, 0) else int(text_dim)
         if source is not None:
             ckpt_dir = vb_cfg.get("_ckpt_dir") if isinstance(vb_cfg, dict) else getattr(vb_cfg, "_ckpt_dir", None)
+            # Resume builds from ckpt_dir but never loads a state_dict here (see
+            # train/utils/ckpt_model_loader), so a backbone that would otherwise
+            # leave a meta shell has to allocate real storage instead.
+            materialize = bool(
+                vb_cfg.get("_materialize_weights")
+                if isinstance(vb_cfg, dict)
+                else getattr(vb_cfg, "_materialize_weights", False)
+            )
             self.video_backbone = build_video_backbone(
                 vb_name,
                 cfg,
                 source=source,
                 device="cpu",
                 ckpt_dir=ckpt_dir,
+                materialize_weights=materialize,
                 external_encoder=external_encoder,
                 text_dim=text_dim,
             )

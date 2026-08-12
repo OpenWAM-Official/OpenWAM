@@ -47,14 +47,16 @@ MINI = dict(
 )
 
 
-def _build_state(net, ids, lat, ncp=0):
+def _build_state(net, ids, lat, ncp=0, *, padded_und: bool = True):
+    """``padded_und=False`` reproduces the unpadded production shape, where the
+    backbone passes ``und_mask=None`` all the way into SDPA."""
     text_pos = text_pack.text_mrope_positions(ids.numel(), float_positions=True)
     grid = text_pack.patch_grid(*lat.shape[2:], int(net.config.latent_patch_size))
     _, vis_pos = text_pack.build_joint_positions(
         ids.numel(), grid, modality_margin=15000, fps=24.0, temporal_compression_factor=4
     )
     cos_und, sin_und = dit_forward.compute_rotary(net, text_pos.unsqueeze(1), lat.device, lat.dtype)
-    und_mask = torch.ones(lat.shape[0], ids.numel(), dtype=torch.bool)
+    und_mask = torch.ones(lat.shape[0], ids.numel(), dtype=torch.bool) if padded_und else None
     ids_b = ids.unsqueeze(0).expand(lat.shape[0], -1)
     context, und_kv = dit_forward.run_und_tower(net, ids_b, und_mask, cos_und, sin_und)
     state = dit_forward.prepare_block_loop(
@@ -70,16 +72,18 @@ def _build_state(net, ids, lat, ncp=0):
     return state
 
 
-def test_split_parity_matches_run_block():
+@pytest.mark.parametrize("padded_und", [True, False], ids=["und_mask_tensor", "und_mask_none"])
+def test_split_parity_matches_run_block(padded_und):
     torch.manual_seed(0)
     net = Cosmos3OmniTransformer(**MINI).eval()
     ids = torch.tensor([1, 2, 3, 4])
     lat = torch.randn(1, MINI["latent_channel"], 3, 2, 2)
 
     with torch.no_grad():
-        ref = _build_state(net, ids, lat)
-        split = _build_state(net, ids, lat)
-        assert split.prefix_kv_len == 4 and split.prefix_kv_mask is not None
+        ref = _build_state(net, ids, lat, padded_und=padded_und)
+        split = _build_state(net, ids, lat, padded_und=padded_und)
+        assert split.prefix_kv_len == 4
+        assert (split.prefix_kv_mask is not None) is padded_und
 
         for i in range(len(net.layers)):
             ref = dit_forward.run_block(net, i, ref)
@@ -123,7 +127,8 @@ class _TinyActionBackbone(nn.Module):
         return astate
 
 
-def test_driver_isolated_mode_matches_run_block_loop():
+@pytest.mark.parametrize("padded_und", [True, False], ids=["und_mask_tensor", "und_mask_none"])
+def test_driver_isolated_mode_matches_run_block_loop(padded_und):
     torch.manual_seed(0)
     net = Cosmos3OmniTransformer(**MINI).eval()
     ids = torch.tensor([1, 2, 3, 4])
@@ -145,11 +150,11 @@ def test_driver_isolated_mode_matches_run_block_loop():
     driver = DualSystemMoTDriver(vb, ab, attention_mask_mode="isolated")
 
     with torch.no_grad():
-        ref = _build_state(net, ids, lat)
+        ref = _build_state(net, ids, lat, padded_und=padded_und)
         for i in range(len(net.layers)):
             ref = dit_forward.run_block(net, i, ref)
 
-        joint = _build_state(net, ids, lat)
+        joint = _build_state(net, ids, lat, padded_und=padded_und)
         astate = types.SimpleNamespace(payload=types.SimpleNamespace(x_action=torch.randn(1, 5, MINI["hidden_size"])))
         joint_v, joint_a = driver.run_joint_loop(joint, astate)
 

@@ -40,6 +40,7 @@ __all__ = [
     "patchify_latents",
     "unpatchify_tokens",
     "compute_rotary",
+    "rotary_inv_freq",
     "run_und_tower",
     "prepare_block_loop",
     "run_block",
@@ -95,6 +96,18 @@ def compute_rotary(net, position_ids_3bn: Tensor, device, dtype) -> Tuple[Tensor
     """cos/sin ``(B, N, head_dim)`` from the vendored rotary module (fp32 matmul inside)."""
     cos, sin = net.rotary_emb(position_ids_3bn.to(device), device=device, dtype=dtype)
     return cos, sin
+
+
+def rotary_inv_freq(head_dim: int, rope_theta: float) -> Tensor:
+    """The rotary frequency table, recomputed in fp32 from config alone.
+
+    Single source for the two places that need it without a trustworthy tensor
+    to copy: the deploy meta shell (``inv_freq`` is non-persistent, so it is
+    absent from the state_dict) and the fp32 repair in ``set_dtype_device``
+    when no pristine copy was captured. Mirrors
+    ``Cosmos3VLTextRotaryEmbedding.__init__`` exactly.
+    """
+    return 1.0 / (float(rope_theta) ** (torch.arange(0, int(head_dim), 2, dtype=torch.float32) / int(head_dim)))
 
 
 def _und_attention_mask(und_mask: Tensor) -> Tensor:
@@ -287,7 +300,7 @@ def _gen_block_forward(
     gen_seq: Tensor,
     k_und: Tensor,
     v_und: Tensor,
-    und_mask: Tensor,
+    und_mask: Optional[Tensor],
     cos_gen: Tensor,
     sin_gen: Tensor,
     gen_mask: Optional[Tensor] = None,

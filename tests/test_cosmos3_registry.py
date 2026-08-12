@@ -115,3 +115,133 @@ def test_nonexistent_model_path_fails_fast(tmp_path):
             "cosmos3_edge",
             _cfg(name="cosmos3_edge", model_path=str(tmp_path / "nonexistent")),
         )
+
+
+def test_resume_path_materializes_the_shell(tmp_path, monkeypatch):
+    """``resume_ckpt_path`` must not be left holding a meta shell.
+
+    Resume builds from ``ckpt_dir`` like deploy and finetune, but deliberately
+    skips the safetensors load (accelerate's ``load_state`` restores the weights
+    only after ``prepare``). Nothing therefore materializes the shell before
+    ``set_dtype_device``, which raises "Cannot copy out of meta tensor" on a
+    meta parameter — i.e. a cosmos3 run could be trained but never resumed.
+    """
+    pytest.importorskip("diffusers")
+    pytest.importorskip("accelerate")
+    import torch
+    from transformers import PreTrainedTokenizerFast
+
+    from openwam.model.video_backbone.cosmos3 import pipeline_builder as pb
+
+    (tmp_path / "text_tokenizer").mkdir()
+    monkeypatch.setattr(
+        PreTrainedTokenizerFast, "from_pretrained", classmethod(lambda cls, *a, **k: object()), raising=True
+    )
+    # The 3.1B shell is free on meta but ~6 GiB once materialized, so swap in a
+    # tiny transformer for the allocation while keeping the real code path.
+    tiny = dict(
+        attention_bias=False,
+        head_dim=6,
+        hidden_size=12,
+        intermediate_size=24,
+        latent_channel=2,
+        latent_patch_size=1,
+        num_attention_heads=2,
+        num_hidden_layers=2,
+        num_key_value_heads=1,
+        patch_latent_dim=2,
+        qk_norm_for_text=False,
+        use_und_k_norm_for_gen=True,
+        hidden_act="relu2",
+        rms_norm_eps=1e-5,
+        rope_axes_dim=[1, 1, 1],
+        rope_theta=1e8,
+        vocab_size=32,
+    )
+    monkeypatch.setattr(pb, "_COSMOS3_EDGE_NET_KWARGS", tiny)
+    monkeypatch.setattr(
+        pb, "_COSMOS3_EDGE_GEOMETRY", dict(dim=12, num_layers=2, num_heads=2, head_dim=6, context_dim=12)
+    )
+    monkeypatch.setattr(pb, "_WEIGHTLESS_CONFIG_KEYS", ())
+
+    class _TinyVAE(torch.nn.Module):
+        def __init__(self, **kw):
+            super().__init__()
+            self.conv = torch.nn.Conv3d(1, 1, 1)
+            self.config = type("C", (), {"latents_mean": [0.0], "latents_std": [1.0]})()
+
+    monkeypatch.setattr(pb, "_COSMOS3_VAE_KWARGS", {})
+    # The builder imports AutoencoderKLWan inside the function, so patch it at
+    # the source module rather than on pb.
+    monkeypatch.setattr("diffusers.AutoencoderKLWan", _TinyVAE, raising=False)
+
+    cfg = _cfg(name="cosmos3_edge", model_path=str(tmp_path))
+    deploy_holder = pb.build_cosmos3_pipeline(cfg, ckpt_dir=str(tmp_path))
+    assert any(p.is_meta for p in deploy_holder.net.parameters()), "deploy should still get the cheap meta shell"
+
+    resume_holder = pb.build_cosmos3_pipeline(cfg, ckpt_dir=str(tmp_path), materialize_weights=True)
+    assert not any(p.is_meta for p in resume_holder.net.parameters())
+    assert not any(b.is_meta for b in resume_holder.net.buffers())
+    # Zeroed, not uninitialized: load_state overwrites everything, but NaN/Inf
+    # from raw `to_empty` storage can be read by DeepSpeed while flattening.
+    assert all(torch.all(p == 0) for p in resume_holder.net.parameters())
+    # The rotary table is re-registered in fp32 after materialization.
+    assert resume_holder.net.rotary_emb.inv_freq.dtype == torch.float32
+    assert torch.any(resume_holder.net.rotary_emb.inv_freq != 0)
+    # set_dtype_device is what used to blow up on the meta shell.
+    from openwam.model.video_backbone import Cosmos3EdgeVideoBackbone
+
+    vb = Cosmos3EdgeVideoBackbone(
+        net=resume_holder.net,
+        vae=None,
+        tokenizer=None,
+        dim=12,
+        num_layers=2,
+        num_heads=2,
+        head_dim=6,
+        context_dim=12,
+    )
+    vb.set_dtype_device(torch.bfloat16, torch.device("cpu"))
+
+
+def test_ckpt_loader_marks_resume_but_not_finetune(tmp_path, monkeypatch):
+    """The flag must come from the finetune/resume distinction, not from ckpt_dir.
+
+    Both paths set ``_ckpt_dir``; only resume skips the weight load, so only
+    resume needs real storage.
+    """
+    from omegaconf import OmegaConf
+
+    from openwam.train.utils import ckpt_model_loader
+
+    OmegaConf.save(
+        OmegaConf.create({"model": {"video_backbone": {"name": "cosmos3_edge", "model_path": "/nonexistent"}}}),
+        tmp_path / "config.yaml",
+    )
+    captured = {}
+
+    class _Arch:
+        registry_name = "dual_system_joint_self_attn"
+        params = {"video_backbone": {}}
+
+    class _Built:
+        def load_checkpoint(self, weights):
+            captured["loaded"] = weights
+
+    def _capture(name, params):
+        captured["vb"] = params["video_backbone"]
+        return _Built()
+
+    monkeypatch.setattr("openwam.model.resolve_architecture_config", lambda _m: _Arch(), raising=True)
+    monkeypatch.setattr("openwam.model.build_architecture", _capture, raising=True)
+    monkeypatch.setattr(ckpt_model_loader, "find_latest_weights", lambda d: "w.safetensors", raising=True)
+
+    ckpt_model_loader.build_architecture_from_ckpt_dir(str(tmp_path), weights_required=False)
+    assert captured["vb"]["_materialize_weights"] is True, "resume must request real storage"
+    assert captured["vb"]["_ckpt_dir"] == str(tmp_path)
+    assert "loaded" not in captured, "resume must not load safetensors — that is why it needs real storage"
+
+    captured.clear()
+    ckpt_model_loader.build_architecture_from_ckpt_dir(str(tmp_path), weights_required=True)
+    assert captured["vb"]["_materialize_weights"] is False, "finetune loads weights; the meta shell is fine"
+    assert captured["loaded"] == "w.safetensors"

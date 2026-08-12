@@ -317,11 +317,49 @@ def _freeze_unused_native_heads(net) -> int:
     return frozen
 
 
+def _materialize_shell(module, what: str):
+    """Give a meta shell real zeroed storage on CPU.
+
+    ``to_empty`` allocates without initializing, so the tensors would hold
+    whatever was in memory — including NaN/Inf, which DeepSpeed's ZeRO setup can
+    read while flattening parameter groups. Zeroing keeps that deterministic;
+    every value is overwritten by ``load_state`` before the first step.
+    """
+    import torch
+
+    module = module.to_empty(device="cpu")
+    with torch.no_grad():
+        for p in module.parameters():
+            p.zero_()
+        for b in module.buffers():
+            if b.is_floating_point():
+                b.zero_()
+    logger.info("cosmos3_edge: materialized the %s shell for resume (zeroed; load_state overwrites)", what)
+    return module
+
+
 def build_cosmos3_pipeline(
-    source: Any, *, device: Optional[str] = None, ckpt_dir: Optional[str] = None, **_unused
+    source: Any,
+    *,
+    device: Optional[str] = None,
+    ckpt_dir: Optional[str] = None,
+    materialize_weights: bool = False,
+    **_unused,
 ) -> types.SimpleNamespace:
-    """Build the Cosmos3-Edge components. Train path loads real weights from
-    ``model_path``; deploy path (``ckpt_dir`` set) builds meta shells."""
+    """Build the Cosmos3-Edge components.
+
+    Train path loads real weights from ``model_path``. A ``ckpt_dir`` build
+    produces an empty shell that something else fills: deploy and finetune both
+    load a state_dict right after, so the shell can stay on ``meta``.
+
+    ``materialize_weights`` is the resume path's opt-out. ``resume_ckpt_path``
+    goes through the same ``ckpt_dir`` construction but deliberately skips the
+    safetensors load (``ckpt_model_loader``: accelerate's ``load_state``
+    restores a strict superset after ``prepare``) — so nothing materializes the
+    shell before ``set_dtype_device`` runs, and a meta shell raises "Cannot copy
+    out of meta tensor" there. With this flag the shell gets real (zeroed)
+    storage instead, which ``load_state`` then overwrites.
+    """
     cfg = _video_backbone_cfg(source)
 
     # --- Phase A: pure-Python validation before any heavy import -------------
@@ -378,13 +416,20 @@ def build_cosmos3_pipeline(
 
         with init_empty_weights():
             net = vendor.Cosmos3OmniTransformer(**_COSMOS3_EDGE_NET_KWARGS)
+        if materialize_weights:
+            # Cast while still on meta (free) so materializing allocates bf16 —
+            # matching the finetune path's footprint instead of an fp32 peak.
+            net = net.to(dtype=torch.bfloat16)
+            net = _materialize_shell(net, "transformer")
         # Non-persistent buffers are absent from the state_dict, so the meta
         # shell must materialize them itself or the post-load `.to()` raises
         # "Cannot copy out of meta tensor". The only one is the rotary
         # inv_freq, fully determined by config — recompute it here.
-        head_dim = int(_COSMOS3_EDGE_NET_KWARGS["head_dim"])
-        rope_theta = float(_COSMOS3_EDGE_NET_KWARGS["rope_theta"])
-        inv_freq = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+        from openwam.model.video_backbone.cosmos3.dit_forward import rotary_inv_freq
+
+        inv_freq = rotary_inv_freq(
+            int(_COSMOS3_EDGE_NET_KWARGS["head_dim"]), float(_COSMOS3_EDGE_NET_KWARGS["rope_theta"])
+        )
         net.rotary_emb.register_buffer("inv_freq", inv_freq, persistent=False)
         leftover = [n for n, b in net.named_buffers() if b.is_meta]
         if leftover:
@@ -447,6 +492,8 @@ def build_cosmos3_pipeline(
 
         with init_empty_weights():
             vae = AutoencoderKLWan(**_COSMOS3_VAE_KWARGS)
+        if materialize_weights:
+            vae = _materialize_shell(vae.to(dtype=torch.bfloat16), "vae")
         vae_leftover = [n for n, b in vae.named_buffers() if b.is_meta]
         if vae_leftover:
             raise RuntimeError(f"cosmos3_edge VAE deploy shell has unmaterialized meta buffers: {vae_leftover}")

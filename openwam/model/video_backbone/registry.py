@@ -34,6 +34,7 @@ def build_video_backbone(
     source: Any = None,
     device: Optional[str] = None,
     ckpt_dir: Optional[str] = None,
+    materialize_weights: bool = False,
     external_encoder: Any = None,
     text_dim: Optional[int] = None,
 ) -> VideoBackbone:
@@ -55,6 +56,12 @@ def build_video_backbone(
         source:   Optional explicit deploy-time source.
         device:   Forwarded to ``from_pretrained`` when ``source`` is set.
         ckpt_dir: Forwarded to ``from_pretrained`` when ``source`` is set.
+        materialize_weights: Forwarded when ``source`` is set. Tells a backbone
+                  that builds empty shells from ``ckpt_dir`` that nothing will
+                  load a state_dict into it, so it must allocate real storage
+                  rather than leaving parameters on ``meta``. Set by the
+                  training RESUME path, where accelerate's ``load_state``
+                  fills the weights only after ``prepare``.
         external_encoder: Optional pre-built :class:`VideoEncoder` to swap in
                   for the backbone's native VAE. Forwarded to
                   ``cls.from_pretrained`` on BOTH paths — training (built
@@ -77,6 +84,8 @@ def build_video_backbone(
             kw["device"] = device
         if ckpt_dir is not None:
             kw["ckpt_dir"] = ckpt_dir
+        if materialize_weights:
+            kw["materialize_weights"] = True
         if external_encoder is not None:
             kw["external_encoder"] = external_encoder
         if text_dim is not None:
