@@ -43,6 +43,13 @@ def test_cli_execution_overrides_fail_fast_on_invalid_ranges():
         _apply_execution_cli_overrides(OmegaConf.create({}), args)
 
 
+def test_cli_inference_mode_rejects_invalid_value():
+    from openwam.deploy.server import _build_argparser
+
+    with pytest.raises(SystemExit):
+        _build_argparser().parse_args(["--inference-mode", "unsupported"])
+
+
 # --- Unified CLI: the package entrypoint is a strict superset of scripts/deploy.py ---
 
 
@@ -87,6 +94,45 @@ def test_cli_async_denoising_overrides_parse():
     assert args.lead_modality == "video"
     assert args.variance_shift_alpha == 9.0
     assert args.linear_offset == 0.2
+
+
+def test_cli_async_denoising_overrides_require_async_mode():
+    from openwam.deploy.server import _apply_inference_overrides, _build_argparser
+
+    args = _build_argparser().parse_args(["--variance-shift-alpha", "9"])
+    with pytest.raises(ValueError, match="--denoise-mode async"):
+        _apply_inference_overrides(OmegaConf.create({}), args)
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "match"),
+    [
+        ("--variance-shift-alpha", "0", "variance_shift_alpha must be >= 1"),
+        ("--linear-offset", "-0.1", "linear_offset must satisfy"),
+        ("--linear-offset", "1", "linear_offset must satisfy"),
+    ],
+)
+def test_cli_async_denoising_overrides_validate_ranges(flag, value, match):
+    from openwam.deploy.server import _apply_inference_overrides, _build_argparser
+
+    args = _build_argparser().parse_args(["--denoise-mode", "async", flag, value])
+    with pytest.raises(ValueError, match=match):
+        _apply_inference_overrides(OmegaConf.create({}), args)
+
+
+@pytest.mark.parametrize(
+    ("inference", "match"),
+    [
+        ({"denoise_mode": "unsupported"}, "Unsupported denoise mode"),
+        ({"denoise_mode": "sync", "variance_shift_alpha": 9.0}, "require denoise_mode='async'"),
+        ({"inference_mode": "sync", "inference_horizon": 8}, "require inference_mode='async'"),
+    ],
+)
+def test_deploy_inference_config_is_validated_at_startup(inference, match):
+    from openwam.deploy.server import _validate_inference_config
+
+    with pytest.raises(ValueError, match=match):
+        _validate_inference_config(OmegaConf.create({"inference": inference}))
 
 
 def test_cli_dotlist_overrides_coexist_with_value_flags():

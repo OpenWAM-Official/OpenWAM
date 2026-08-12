@@ -194,7 +194,6 @@ while (( $# > 0 )); do
         --inference-mode)        DEPLOY_ARGS+=(--inference-mode "$2"); shift 2 ;;
         --inference-horizon)     DEPLOY_ARGS+=(--inference-horizon "$2"); shift 2 ;;
         --inference-delay-steps) DEPLOY_ARGS+=(--inference-delay-steps "$2"); shift 2 ;;
-        --shift)                 DEPLOY_ARGS+=(--shift "$2"); shift 2 ;;
         --test-num)              TEST_NUM="$2"; shift 2 ;;
         --seed)                  BASE_SEED="$2"; shift 2 ;;
         --min-remaining-for-dup) MIN_REMAINING_FOR_DUP="$2"; shift 2 ;;

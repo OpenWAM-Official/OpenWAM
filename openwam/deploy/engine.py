@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import torch
 
-from openwam.deploy.denoise_schedule import make_schedule
+from openwam.deploy.denoise_schedule import make_schedule, normalize_denoise_config
 from openwam.model.architectures.base import BaseWAMArchitecture
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         action_backbone=None,
     ):
         super().__init__(cfg, architecture=architecture, action_backbone=action_backbone)
+        normalize_denoise_config(getattr(cfg, "inference", None))
 
         self._architecture_generate_accepts_extra_kwargs: Optional[bool] = None
         self._architecture_generate_kwarg_names: Optional[set[str]] = None
@@ -266,7 +267,7 @@ class JointInferenceEngine(BaseInferenceEngine):
         """
         inf_cfg = self.cfg.inference
 
-        denoise_mode = conditions.get("denoise_mode", inf_cfg.denoise_mode)
+        denoise_mode = conditions.get("denoise_mode", getattr(inf_cfg, "denoise_mode", "sync"))
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
         lead_modality = conditions.get("lead_modality", getattr(inf_cfg, "lead_modality", "video"))
         variance_shift_alpha = conditions.get("variance_shift_alpha", getattr(inf_cfg, "variance_shift_alpha", 1.0))

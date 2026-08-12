@@ -346,9 +346,10 @@ def build_server_from_config(
     from openwam.deploy import JointInferenceEngine
     from openwam.deploy.model_loader import load_from_checkpoint_dir
 
-    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name)
     deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
+    _validate_inference_config(deploy_cfg)
     _normalize_compile_enabled_in_cfg(deploy_cfg)
+    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name)
     merged = merge_deploy_cfg(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=merged, architecture=architecture)
     return PolicyServer(engine=engine, cfg=merged)
@@ -443,7 +444,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         choices=["sync", "async"],
         default=None,
         dest="denoise_mode",
-        help="Override inference.denoise_mode.",
+        help="Override inference.denoise_mode trajectory (separate from inference_mode).",
     )
     parser.add_argument(
         "--lead-modality",
@@ -458,14 +459,14 @@ def _build_argparser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         dest="variance_shift_alpha",
-        help="Override inference.variance_shift_alpha (async denoising only).",
+        help="Override inference.variance_shift_alpha (async denoising only, >= 1).",
     )
     parser.add_argument(
         "--linear-offset",
         type=float,
         default=None,
         dest="linear_offset",
-        help="Override inference.linear_offset (async denoising only).",
+        help="Override inference.linear_offset (async denoising only, 0 <= value < 1).",
     )
     parser.add_argument(
         "--compile-enabled",
@@ -478,7 +479,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         choices=("sync", "async"),
         default=None,
         dest="inference_mode",
-        help="Override inference.inference_mode.",
+        help="Override inference.inference_mode executor (separate from denoise_mode).",
     )
     parser.add_argument(
         "--inference-horizon",
@@ -509,6 +510,23 @@ def _apply_execution_cli_overrides(cfg, args):
     return apply_execution_cli_overrides(cfg, args)
 
 
+def _validate_denoise_config(cfg):
+    """Validate denoising settings."""
+    from omegaconf import OmegaConf
+
+    from openwam.deploy.denoise_schedule import normalize_denoise_config
+
+    normalize_denoise_config(OmegaConf.select(cfg, "inference", default=None))
+
+
+def _validate_inference_config(cfg):
+    """Validate denoising and executor settings before model loading."""
+    from openwam.deploy.executors import resolve_execution_config
+
+    _validate_denoise_config(cfg)
+    resolve_execution_config(cfg)
+
+
 def _load_deploy_yaml(config_path: Optional[str] = None):
     """Load the deploy yaml (Hydra defaults list stripped) as the base config."""
     from omegaconf import OmegaConf
@@ -522,19 +540,30 @@ def _load_deploy_yaml(config_path: Optional[str] = None):
 
 
 def _apply_inference_overrides(cfg, args):
-    """Write the inference CLI flags into cfg.inference (CLI wins over yaml)."""
+    """Apply denoising CLI flags and validate the resulting config."""
     from omegaconf import OmegaConf
 
     if args.denoise_steps is not None:
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.denoise_mode is not None:
         OmegaConf.update(cfg, "inference.denoise_mode", args.denoise_mode, merge=False)
+
+    async_overrides = ("lead_modality", "variance_shift_alpha", "linear_offset")
+    if any(getattr(args, name, None) is not None for name in async_overrides):
+        mode = str(OmegaConf.select(cfg, "inference.denoise_mode", default="sync")).strip().lower()
+        if mode != "async":
+            raise ValueError(
+                "--lead-modality, --variance-shift-alpha, and --linear-offset require "
+                "--denoise-mode async or inference.denoise_mode=async"
+            )
+
     if args.lead_modality is not None:
         OmegaConf.update(cfg, "inference.lead_modality", args.lead_modality, merge=False)
     if args.variance_shift_alpha is not None:
         OmegaConf.update(cfg, "inference.variance_shift_alpha", args.variance_shift_alpha, merge=False)
     if args.linear_offset is not None:
         OmegaConf.update(cfg, "inference.linear_offset", args.linear_offset, merge=False)
+    _validate_denoise_config(cfg)
     return cfg
 
 
@@ -555,12 +584,13 @@ def main(argv: Optional[list[str]] = None):
     if args.overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
 
-    cfg = _apply_inference_overrides(cfg, args)
-    _apply_compile_enabled_override(cfg, args.compile_enabled)
     try:
+        cfg = _apply_inference_overrides(cfg, args)
         cfg = _apply_execution_cli_overrides(cfg, args)
+        _validate_inference_config(cfg)
     except ValueError as exc:
         parser.error(str(exc))
+    _apply_compile_enabled_override(cfg, args.compile_enabled)
 
     # Checkpoint dir: CLI --ckpt-dir > checkpoint_path in the deploy yaml.
     ckpt_dir = args.ckpt_dir

@@ -272,6 +272,14 @@ def test_unrelated_config_resolves_to_sync():
     assert resolved.mode == "sync"
 
 
+@pytest.mark.parametrize("field", ["inference_horizon", "inference_delay_steps"])
+def test_sync_config_rejects_async_timing_fields(field):
+    cfg = {"mode": "sync", field: 1}
+
+    with pytest.raises(ValueError, match="require inference_mode='async'"):
+        normalize_execution_config(cfg)
+
+
 def test_async_config_dataclass_roundtrip_preserves_delay_settings():
     cfg = normalize_execution_config({"mode": "async", "inference_horizon": 8, "inference_delay_steps": 4})
 

@@ -196,22 +196,24 @@ server: { host: "0.0.0.0", port: 8848 }
 
 inference:
   denoise_steps: 10             # denoising steps
-  denoise_mode: sync            # sync | async
+  denoise_mode: sync            # denoising trajectory: sync | async
   lead_modality: video          # async denoising only: action | video
-  variance_shift_alpha: 1.0     # async denoising only: lead curve shift
-  linear_offset: 0.0            # async denoising only: lag start delay
-  inference_mode: sync          # sync | async
-  inference_horizon: null       # async inference only: actions per chunk
+  variance_shift_alpha: 1.0     # async denoising only: lead curve shift, >= 1
+  linear_offset: 0.0            # async denoising only: lag delay, 0 <= value < 1
+  inference_mode: sync          # inference executor: sync | async
+  inference_horizon: null       # async executor only: null = policy.execute_horizon
   inference_delay_steps: null
 
 optimization:
   decode_video: false     # false = actions-only (skip VAE decode, faster)
   dit_cache: { enabled: false, cosine_threshold: 0.99, max_skips: 3 }
-  compile: { mode: auto } # auto | none; per-architecture compile paths selected from the checkpoint config
+  compile: { enabled: true }
   prompt_embed_cache: { maxsize: 32 }
 ```
 
-`compile.mode: auto` selects the architecture-specific compile path from the loaded checkpoint (`self_attn` / `cross_attn` / `idm` / `tri_system`); `none` runs eager. On dual-system architectures the first request may carry `torch.compile` warmup latency — use `--compile-mode none` when startup latency matters more than throughput.
+`denoise_mode` selects the video/action trajectory within one denoising pass; nontrivial async settings correspond to `training.timestep_sampling: variance_shift`, currently supported for `joint_self_attn`. `linear_offset` is an inference-time lag delay. `inference_mode` independently selects the sync or background-prefetch executor.
+
+Compile paths are selected from the checkpoint architecture. On dual-system architectures the first request may carry `torch.compile` warmup latency; use `--compile-enabled false` to run eager.
 
 Common per-launch CLI overrides:
 
@@ -219,7 +221,7 @@ Common per-launch CLI overrides:
 bash scripts/deploy.sh /path/to/checkpoint_dir \
   --device cuda:1 --port 9000 \
   --denoise-steps 10 --denoise-mode sync \
-  --compile-mode auto \
+  --compile-enabled false \
   --ckpt-name checkpoint_step_10000.safetensors
 ```
 

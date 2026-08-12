@@ -47,6 +47,41 @@ def test_make_schedule_sync():
     assert result[-1] == (0.0, 0.0)
 
 
+def test_make_schedule_rejects_invalid_mode():
+    from openwam.deploy.denoise_schedule import make_schedule
+
+    v, a = _two_stub_schedulers()
+    with pytest.raises(ValueError, match="Unsupported denoise mode"):
+        make_schedule("unsupported", v, a)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"alpha": 0.0}, "variance_shift_alpha must be >= 1"),
+        ({"alpha": 0.5}, "variance_shift_alpha must be >= 1"),
+        ({"alpha": float("nan")}, "variance_shift_alpha must be a finite number"),
+        ({"offset": -0.1}, "linear_offset must satisfy"),
+        ({"offset": 1.0}, "linear_offset must satisfy"),
+        ({"offset": float("inf")}, "linear_offset must be a finite number"),
+    ],
+)
+def test_make_schedule_rejects_invalid_async_parameters(kwargs, match):
+    from openwam.deploy.denoise_schedule import make_schedule
+
+    v, a = _two_stub_schedulers()
+    with pytest.raises(ValueError, match=match):
+        make_schedule("async", v, a, **kwargs)
+
+
+def test_make_schedule_rejects_inactive_async_parameters():
+    from openwam.deploy.denoise_schedule import make_schedule
+
+    v, a = _two_stub_schedulers()
+    with pytest.raises(ValueError, match="require denoise_mode='async'"):
+        make_schedule("sync", v, a, alpha=9.0)
+
+
 def test_build_timestep_sampler_default_is_none():
     from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
 
@@ -184,6 +219,14 @@ def test_variance_shift_timestep_sampler():
     torch.manual_seed(0)
     v2, a2 = s.sample_timesteps(64, device="cpu")
     assert torch.allclose(v_t, v2) and torch.allclose(a_t, a2)
+
+
+@pytest.mark.parametrize("alpha", [0.0, 0.5, float("nan"), float("inf")])
+def test_variance_shift_timestep_sampler_rejects_invalid_alpha(alpha):
+    from openwam.model.architectures.utils.timestep_sampling import VarianceShiftTimestepSampler
+
+    with pytest.raises(ValueError, match="alpha must be finite and >= 1"):
+        VarianceShiftTimestepSampler(alpha=alpha)
 
 
 def test_action_scheduler_is_action_scheduler_instance():

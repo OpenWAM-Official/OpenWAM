@@ -26,11 +26,79 @@ Two denoising modes are supported:
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import List, Tuple
 
 import torch
 
 Schedule = List[Tuple[float, float]]
+VALID_DENOISE_MODES = ("sync", "async")
+
+
+@dataclass(frozen=True)
+class DenoiseConfig:
+    denoise_mode: str = "sync"
+    lead_modality: str = "video"
+    variance_shift_alpha: float = 1.0
+    linear_offset: float = 0.0
+
+
+def _config_value(cfg, name: str, default):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(name, default)
+    return getattr(cfg, name, default)
+
+
+def _finite_float(value, name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite number, got {value!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    return value
+
+
+def normalize_denoise_config(cfg=None) -> DenoiseConfig:
+    """Normalize and validate deploy denoising settings."""
+    mode = str(_config_value(cfg, "denoise_mode", "sync")).strip().lower()
+    if mode not in VALID_DENOISE_MODES:
+        raise ValueError(f"Unsupported denoise mode {mode!r}; expected one of {VALID_DENOISE_MODES}")
+
+    lead = str(_config_value(cfg, "lead_modality", "video")).strip().lower()
+    if lead not in ("action", "video"):
+        raise ValueError(f"lead_modality must be 'action' or 'video', got {lead!r}")
+
+    alpha = _finite_float(_config_value(cfg, "variance_shift_alpha", 1.0), "variance_shift_alpha")
+    if alpha < 1.0:
+        raise ValueError(f"variance_shift_alpha must be >= 1, got {alpha!r}")
+
+    offset = _finite_float(_config_value(cfg, "linear_offset", 0.0), "linear_offset")
+    if not 0.0 <= offset < 1.0:
+        raise ValueError(f"linear_offset must satisfy 0 <= value < 1, got {offset!r}")
+
+    if mode == "sync":
+        inactive = []
+        if lead != "video":
+            inactive.append("lead_modality")
+        if alpha != 1.0:
+            inactive.append("variance_shift_alpha")
+        if offset != 0.0:
+            inactive.append("linear_offset")
+        if inactive:
+            raise ValueError(f"{', '.join(inactive)} require denoise_mode='async'")
+
+    return DenoiseConfig(
+        denoise_mode=mode,
+        lead_modality=lead,
+        variance_shift_alpha=alpha,
+        linear_offset=offset,
+    )
 
 
 def schedule_sync(
@@ -91,11 +159,8 @@ def schedule_variance_shift(
     Eq. 4) so it reaches "clean" earlier; the **lag** stream takes ``u``,
     optionally delayed by ``offset``: cleanness stays 0 (sigma 1) until global
     progress passes ``offset``, then advances linearly (the piecewise variant).
-    Each stream's sigma is ``alpha_shift(1 - cleanness, shift_stream)`` -- the
-    SAME grid the backbone applies at training time (``set_timesteps_wan`` /
-    ``ActionScheduler.set_timesteps``). A variance_shift-trained checkpoint and
-    this schedule therefore stay point-wise in-distribution (the delayed head
-    rides the grid's sigma=1 endpoint).
+    Each stream's sigma stays on the backbone's training grid via
+    ``alpha_shift(1 - cleanness, shift_stream)``.
 
     Computed in float32 on the schedulers' own base grid
     (``linspace(1, 0, n+1)[:-1]``), with the lead curve applied as the
@@ -115,13 +180,24 @@ def schedule_variance_shift(
             ``num_train_timesteps`` attribute is read).
         num_steps: Number of denoising steps per stream.
         lead: Which stream denoises earlier -- ``"action"`` or ``"video"``.
-        alpha: Lead-curve strength, must be ``>= 1`` (``>1`` leads; ``1`` = sync diagonal; ``<1`` inverts lead/lag).
-        offset: Fraction of pre-shift progress to delay the lag stream's start (clamped to [0, 0.999]; ``0`` = pure curve).
+        alpha: Lead-curve strength, must be ``>= 1`` (``>1`` leads;
+            ``1`` = sync diagonal).
+        offset: Fraction of pre-shift progress to delay the lag stream's start;
+            must satisfy ``0 <= offset < 1``.
         shift_video: alpha-shift for the video stream's sigma grid.
         shift_action: alpha-shift for the action stream's sigma grid.
     """
-    if lead not in ("action", "video"):
-        raise ValueError(f"variance_shift lead must be 'action' or 'video', got {lead!r}.")
+    options = normalize_denoise_config(
+        {
+            "denoise_mode": "async",
+            "lead_modality": lead,
+            "variance_shift_alpha": alpha,
+            "linear_offset": offset,
+        }
+    )
+    lead = options.lead_modality
+    alpha = options.variance_shift_alpha
+    offset = options.linear_offset
     num_train_v = float(getattr(video_scheduler, "num_train_timesteps", 1000))
     num_train_a = float(getattr(action_scheduler, "num_train_timesteps", 1000))
 
@@ -131,11 +207,10 @@ def schedule_variance_shift(
     # leaves s bitwise untouched at alpha=1; the lag stream stays on s unless
     # delayed by offset below.
     lead_sigma = _alpha_shift(s, 1.0 / alpha)
-    off = min(max(float(offset), 0.0), 0.999)
-    if off > 0.0:
+    if offset > 0.0:
         # lag cleanness = clamp((u - off)/(1 - off), 0, 1) in sigma form;
         # the off == 0 passthrough keeps alpha=1 bitwise == sync.
-        lag_sigma = torch.clamp(s / (1.0 - off), max=1.0)
+        lag_sigma = torch.clamp(s / (1.0 - offset), max=1.0)
     else:
         lag_sigma = s
     if lead == "video":
@@ -182,26 +257,35 @@ def make_schedule(
         offset: ``async`` only -- delay the lag stream's start
             (``0`` = pure curve; ``>0`` = piecewise offset).
     """
-    if mode == "sync":
+    options = normalize_denoise_config(
+        {
+            "denoise_mode": mode,
+            "lead_modality": lead,
+            "variance_shift_alpha": alpha,
+            "linear_offset": offset,
+        }
+    )
+    if options.denoise_mode == "sync":
         return schedule_sync(
             video_scheduler, action_scheduler, num_steps=num_steps, shift=shift, shift_video=shift_video
         )
-    if mode == "async":
-        return schedule_variance_shift(
-            video_scheduler,
-            action_scheduler,
-            num_steps=num_steps,
-            lead=lead,
-            alpha=alpha,
-            offset=offset,
-            shift_video=shift if shift_video is None else shift_video,
-            shift_action=shift,
-        )
-    raise NotImplementedError(f"denoise_mode={mode!r} is not supported; choose 'sync' or 'async'.")
+    return schedule_variance_shift(
+        video_scheduler,
+        action_scheduler,
+        num_steps=num_steps,
+        lead=options.lead_modality,
+        alpha=options.variance_shift_alpha,
+        offset=options.linear_offset,
+        shift_video=shift if shift_video is None else shift_video,
+        shift_action=shift,
+    )
 
 
 __all__ = [
     "Schedule",
+    "DenoiseConfig",
+    "VALID_DENOISE_MODES",
+    "normalize_denoise_config",
     "schedule_sync",
     "schedule_variance_shift",
     "make_schedule",

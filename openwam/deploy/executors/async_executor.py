@@ -87,13 +87,17 @@ def normalize_execution_config(exec_cfg=None, policy_cfg=None) -> ExecutionConfi
         raise ValueError(f"Unsupported inference mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
 
     inference_horizon = _select(exec_cfg, "inference_horizon", default=None)
-    if inference_horizon is None:
+    configured_inference_horizon = inference_horizon
+    if mode == "async" and inference_horizon is None:
         inference_horizon = _select(policy_cfg, "execute_horizon", default=None)
 
     inference_delay_steps = _select(exec_cfg, "inference_delay_steps", default=None)
 
     inference_horizon = _coerce_optional_int(inference_horizon, "inference_horizon")
     inference_delay_steps = _coerce_optional_int(inference_delay_steps, "inference_delay_steps")
+
+    if mode == "sync" and (configured_inference_horizon is not None or inference_delay_steps is not None):
+        raise ValueError("inference_horizon and inference_delay_steps require inference_mode='async'")
 
     if mode == "async":
         if inference_horizon is not None and inference_horizon <= 0:

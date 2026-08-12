@@ -9,13 +9,13 @@ server:
 # Every field has a same-name CLI override (--denoise-steps, --inference-mode, ...).
 inference:
   denoise_steps: 10
-  denoise_mode: sync          # sync | async
+  denoise_mode: sync          # trajectory: sync | async; separate from inference_mode
   lead_modality: video        # denoise_mode=async: action | video
-  variance_shift_alpha: 1.0   # denoise_mode=async: lead curve shift; 1 = none
-  linear_offset: 0.0          # denoise_mode=async: lag start delay; 0 = none
+  variance_shift_alpha: 1.0   # denoise_mode=async: lead curve shift; >= 1
+  linear_offset: 0.0          # denoise_mode=async: lag start delay; 0 <= value < 1
 
-  inference_mode: sync        # sync | async
-  inference_horizon: null     # inference_mode=async: actions per chunk
+  inference_mode: sync        # executor: sync | async; separate from denoise_mode
+  inference_horizon: null     # inference_mode=async: actions per chunk; null = policy.execute_horizon
   inference_delay_steps: null # inference_mode=async: latency in steps
 
 # --- Deploy-time optimizations (cfg.optimization) ---

@@ -19,13 +19,12 @@ Convention note (easy to trip on): the timesteps returned here are consumed by
 (smaller == cleaner). Both sides are internally consistent; mind the direction
 when comparing train vs inference code. ``VarianceShiftTimestepSampler`` and
 the deploy async variance-shift trajectory both place each stream on
-``alpha_shift(1 - cleanness, shift_stream)`` -- the same grid -- so a
-variance_shift-trained checkpoint and its deploy schedule are point-wise
-in-distribution (up to the training grid's 1/num_train quantization).
+``alpha_shift(1 - cleanness, shift_stream)`` when deploy ``linear_offset=0``.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -67,6 +66,8 @@ class VarianceShiftTimestepSampler:
         self.num_train_timesteps = int(num_train_timesteps)
         self._lead = lead
         self._alpha = float(alpha)
+        if not math.isfinite(self._alpha) or self._alpha < 1.0:
+            raise ValueError(f"variance_shift alpha must be finite and >= 1, got {self._alpha!r}.")
 
     def sample_timesteps(
         self,
