@@ -147,3 +147,71 @@ def test_backbone_exposes_idm_methods():
     vb = Cosmos3EdgeVideoBackbone.__new__(Cosmos3EdgeVideoBackbone)
     assert callable(vb.merge_idm_video_branches)
     assert callable(vb.split_idm_video_branches)
+
+
+def test_prefix_widening_preserves_rank_and_stays_shared():
+    """Rank in == rank out, and an all-True gate must not materialize per sample."""
+    # 4D mask with no per-sample gate used to crash (2D pad cat'd onto 4D).
+    st = types.SimpleNamespace(prefix_kv_len=3, prefix_kv_mask=None)
+    m4 = torch.ones((2, 1, 5, 5), dtype=torch.bool)
+    w4 = widen_mask_for_prefix_kv(m4, st)
+    assert w4.shape == (2, 1, 5, 8)
+
+    # An all-True gate keeps the cheap batch-shared 2D mask.
+    st_all = types.SimpleNamespace(prefix_kv_len=3, prefix_kv_mask=torch.ones(4, 3, dtype=torch.bool))
+    w2 = widen_mask_for_prefix_kv(torch.ones((5, 5), dtype=torch.bool), st_all)
+    assert w2.shape == (5, 8) and w2.all()
+
+
+def _stage2_action_mask(driver, s_action, key_len, prefix_mask):
+    return driver.build_cached_action_mask(
+        s_action=s_action, video_key_len=key_len, device=torch.device("cpu"), prefix_kv_mask=prefix_mask
+    )
+
+
+def test_stage2_action_mask_gates_padded_und_columns():
+    """Regression: the cached Stage-2 mask must close padded und columns.
+
+    An all-ones mask over the cached key length would open every und slot,
+    including right-padding that the joint loop masks out — a silent wrong
+    answer the moment IDM inference is batched with unequal prompt lengths.
+    """
+    from openwam.model.architectures.dual_system.idm import IDMMoTDriver
+
+    driver = IDMMoTDriver.__new__(IDMMoTDriver)
+    prefix, s_video, s_action = 4, 10, 3
+    prefix_mask = torch.tensor([[True, True, True, True], [True, True, False, False]])
+    mask = _stage2_action_mask(driver, s_action=s_action, key_len=prefix + s_video, prefix_mask=prefix_mask)
+
+    # Key axis is [prefix | video | action]; queries are the action rows only.
+    assert mask.shape == (2, 1, s_action, prefix + s_video + s_action)
+    # Sample 0: all four und columns open. Sample 1: last two are padding.
+    assert mask[0, 0, :, :prefix].all()
+    assert mask[1, 0, :, :2].all() and not mask[1, 0, :, 2:prefix].any()
+    # Video + action columns stay fully visible for both samples.
+    assert mask[:, :, :, prefix:].all()
+
+
+def test_stage2_action_mask_matches_joint_loop_action_rows():
+    """The cached mask must equal the action-query row slice of the joint mask."""
+    from openwam.model.architectures.dual_system.idm import IDMMoTDriver
+
+    driver = IDMMoTDriver.__new__(IDMMoTDriver)
+    prefix, s_video, s_action = 4, 10, 3
+    prefix_mask = torch.tensor([[True, True, False, False]])
+
+    cached = _stage2_action_mask(driver, s_action, prefix + s_video, prefix_mask)
+    # Joint loop: square [video, action] mask (action rows all-True under
+    # action_sees_video), then widened by the same prefix gate.
+    joint = torch.ones((s_video + s_action, s_video + s_action), dtype=torch.bool)
+    joint = widen_mask_for_prefix_kv(joint, types.SimpleNamespace(prefix_kv_len=prefix, prefix_kv_mask=prefix_mask))
+    assert torch.equal(cached, joint[:, :, s_video:, :])
+
+
+def test_stage2_action_mask_prefix_free_is_all_ones():
+    """Wan / predict2.5 (no prefix) keep the byte-identical 2D all-ones mask."""
+    from openwam.model.architectures.dual_system.idm import IDMMoTDriver
+
+    driver = IDMMoTDriver.__new__(IDMMoTDriver)
+    mask = _stage2_action_mask(driver, s_action=3, key_len=10, prefix_mask=None)
+    assert mask.shape == (3, 13) and mask.all()

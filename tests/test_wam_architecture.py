@@ -1143,7 +1143,7 @@ def test_dual_system_idm_action_cache_tensor_loop_matches_eager_full_mask_path()
         grid_width=1,
         extras={},
     )
-    video_kv_cache, _ = driver.prefill_video_cache(vstate)
+    video_kv_cache, _, _ = driver.prefill_video_cache(vstate)
 
     with torch.no_grad():
         eager_state = ab.prepare_state(

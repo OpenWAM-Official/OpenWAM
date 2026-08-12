@@ -141,18 +141,25 @@ def widen_mask_for_prefix_kv(mask, state):
 
     Returns ``mask`` unchanged when the state declares no prefix, so callers can
     apply this unconditionally and backbones without a prefix stay byte-identical.
+
+    Rank is preserved: a 2-D ``(S_q, S_k)`` mask widens to 2-D and a 4-D
+    ``(B, 1, S_q, S_k)`` mask to 4-D. The batch axis is only introduced when the
+    per-sample gate actually differs across samples — an all-True
+    ``prefix_kv_mask`` (every B=1 case, and any uniform-length batch) keeps the
+    cheap batch-shared 2-D mask instead of materializing B copies of it.
     """
     prefix = int(getattr(state, "prefix_kv_len", 0) or 0)
     if prefix <= 0:
         return mask
-    rows, cols = mask.shape[-2], mask.shape[-1]
+    rows = mask.shape[-2]
     prefix_mask = getattr(state, "prefix_kv_mask", None)
-    if prefix_mask is None:
-        pad = torch.ones((rows, prefix), dtype=torch.bool, device=mask.device)
+    if prefix_mask is None or bool(prefix_mask.all()):
+        pad_shape = (*mask.shape[:-1], prefix)
+        pad = torch.ones(pad_shape, dtype=torch.bool, device=mask.device)
         return torch.cat([pad, mask], dim=-1)
     bsz = prefix_mask.shape[0]
     pad = prefix_mask.view(bsz, 1, 1, prefix).expand(bsz, 1, rows, prefix)
-    base = mask if mask.dim() == 4 else mask.view(1, 1, rows, cols).expand(bsz, 1, rows, cols)
+    base = mask if mask.dim() == 4 else mask.view(1, 1, rows, mask.shape[-1]).expand(bsz, 1, rows, mask.shape[-1])
     return torch.cat([pad, base], dim=-1)
 
 

@@ -347,6 +347,17 @@ class TriSystemMoTDriver:
         compiled boundary, then this method keeps the hot path on per-layer
         tensor/tuple pre/post helpers.
         """
+        # Same three-way K/V concat as run_joint_loop, so the same restriction
+        # applies. Today a prefix-KV backbone fails earlier with AttributeError
+        # (cosmos3 defines no ``pre_attn_at_layer_for_compile``), but check here
+        # too so the reason is stated rather than inferred.
+        if int(getattr(vstate, "prefix_kv_len", 0) or 0) > 0:
+            raise NotImplementedError(
+                "TriSystemMoTDriver does not support video backbones that prepend prefix K/V "
+                "tokens (e.g. cosmos3_edge's cached und text stream): the three-way K/V concat "
+                "would misalign against the query-length mask. Use dual_system, or extend this "
+                "driver's mask the way DualSystemMoTDriver.run_joint_loop does."
+            )
         for layer_id in range(self.num_layers):
             q_v, k_v, v_v, vpost = self.vb.pre_attn_at_layer_for_compile(layer_id, vstate)
             q_a, k_a, v_a, apost = self.ab.pre_attn_at_layer_for_compile(layer_id, astate)

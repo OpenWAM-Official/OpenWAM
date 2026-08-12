@@ -584,7 +584,7 @@ def test_idm_video_cache_matches_joint_loop():
     _, astate_joint = driver.run_joint_loop(vstate_joint, astate_joint)
     pred_joint = arch.action_backbone.extract_prediction(astate_joint)
 
-    video_kv_cache, _ = driver.prefill_video_cache(vstate_cache)
+    video_kv_cache, _, _ = driver.prefill_video_cache(vstate_cache)
     astate_cache = driver.run_action_with_video_cache(
         astate_cache,
         video_kv_cache=video_kv_cache,

@@ -85,7 +85,7 @@ def test_idm_train_action_matches_deploy_stage2():
     _, _, astate_train = driver.run_idm_training_loop(vstate_noisy_train, vstate_cond_train, astate_train)
     pred_train = arch.action_backbone.extract_prediction(astate_train)
 
-    kv_cache, _ = driver.prefill_video_cache(vstate_cond_deploy)
+    kv_cache, _, _ = driver.prefill_video_cache(vstate_cond_deploy)
     astate_deploy = driver.run_action_with_video_cache(
         astate_deploy,
         video_kv_cache=kv_cache,
@@ -471,7 +471,7 @@ def test_idm_train_deploy_consistency_gpu():
     )
     _, _, astate_train = driver.run_idm_training_loop(vstate_noisy_train, vstate_cond_train, astate_train)
     pred_train = arch.action_backbone.extract_prediction(astate_train)
-    kv_cache, _ = driver.prefill_video_cache(vstate_cond_deploy)
+    kv_cache, _, _ = driver.prefill_video_cache(vstate_cond_deploy)
     astate_deploy = driver.run_action_with_video_cache(
         astate_deploy,
         video_kv_cache=kv_cache,

@@ -16,9 +16,11 @@ under ``no_grad`` and caches the per-layer gen-facing K/V; the und final hidden
 (``text_dim == 2048``). There is no cross-attention and no external text
 encoder; timestep conditioning is additive on noisy-frame tokens only.
 
-Scope today: ``dual_system`` / ``joint_cross_attn`` training + deploy.
-``joint_self_attn`` (MoT with und-prefix-KV + GQA KV-expand) lands in Phase 2;
-IDM / shared-backbone raise via the ABC defaults.
+Supported architectures: ``dual_system`` / {``joint_cross_attn``,
+``joint_self_attn``, ``idm``} and ``shared_backbone`` / {``vanilla``, ``moe``},
+all verified on real weights for both training and deploy. ``joint_self_attn``
+and ``idm`` ride MoT via the und-prefix-KV declaration + GQA KV-expand;
+``tri_system`` is rejected (its driver does not widen the joint mask).
 """
 
 from __future__ import annotations
@@ -175,13 +177,9 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
 
     @classmethod
     def from_pretrained(cls, source: Any, *, device=None, ckpt_dir=None, **kw) -> "Cosmos3EdgeVideoBackbone":
-        from openwam.model.video_backbone.cosmos3.pipeline_builder import (
-            _video_backbone_cfg,
-            build_cosmos3_pipeline,
-        )
+        from openwam.model.video_backbone.cosmos3.pipeline_builder import build_cosmos3_pipeline
 
         holder = build_cosmos3_pipeline(source, device=device, ckpt_dir=ckpt_dir, **kw)
-        cfg_for_loader = _video_backbone_cfg(source)
         shift = float(getattr(holder, "shift_video", 5.0))
         backbone = cls(
             net=holder.net,
@@ -202,7 +200,6 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
             text_dropout_p=holder.text_dropout_p,
             text_dropout_seed=holder.text_dropout_seed,
         )
-        del cfg_for_loader
         return backbone
 
     # ================================================================
