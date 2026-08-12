@@ -511,12 +511,21 @@ def _apply_execution_cli_overrides(cfg, args):
 
 
 def _validate_denoise_config(cfg):
-    """Validate denoising settings."""
+    """Validate denoising settings and warn when ``async`` is a no-op."""
     from omegaconf import OmegaConf
 
-    from openwam.deploy.denoise_schedule import normalize_denoise_config
+    from openwam.deploy.denoise_schedule import denoise_async_is_noop, normalize_denoise_config
 
-    normalize_denoise_config(OmegaConf.select(cfg, "inference", default=None))
+    resolved = normalize_denoise_config(OmegaConf.select(cfg, "inference", default=None))
+    if denoise_async_is_noop(resolved):
+        logger.warning(
+            "inference.denoise_mode='async' with variance_shift_alpha=%s and linear_offset=%s "
+            "reproduces the sync trajectory bit-for-bit; set variance_shift_alpha > 1 and/or "
+            "linear_offset > 0 for the schedule to actually shift.",
+            resolved.variance_shift_alpha,
+            resolved.linear_offset,
+        )
+    return resolved
 
 
 def _validate_inference_config(cfg):
@@ -543,26 +552,41 @@ def _apply_inference_overrides(cfg, args):
     """Apply denoising CLI flags and validate the resulting config."""
     from omegaconf import OmegaConf
 
+    from openwam.deploy.denoise_schedule import DenoiseConfig
+
     if args.denoise_steps is not None:
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.denoise_mode is not None:
         OmegaConf.update(cfg, "inference.denoise_mode", args.denoise_mode, merge=False)
 
-    async_overrides = ("lead_modality", "variance_shift_alpha", "linear_offset")
-    if any(getattr(args, name, None) is not None for name in async_overrides):
-        mode = str(OmegaConf.select(cfg, "inference.denoise_mode", default="sync")).strip().lower()
-        if mode != "async":
-            raise ValueError(
-                "--lead-modality, --variance-shift-alpha, and --linear-offset require "
-                "--denoise-mode async or inference.denoise_mode=async"
-            )
+    defaults = DenoiseConfig()
+    async_controls = (
+        ("lead_modality", "--lead-modality", defaults.lead_modality),
+        ("variance_shift_alpha", "--variance-shift-alpha", defaults.variance_shift_alpha),
+        ("linear_offset", "--linear-offset", defaults.linear_offset),
+    )
+    mode = str(OmegaConf.select(cfg, "inference.denoise_mode", default=defaults.denoise_mode)).strip().lower()
+    # Compare against the default instead of testing flag presence, so the CLI
+    # is no stricter than the identical value written in the yaml — the flags
+    # stay safe to emit unconditionally from a wrapper script.
+    conflicting = [flag for name, flag, default in async_controls if getattr(args, name, None) not in (None, default)]
+    if conflicting and mode != "async":
+        verb = "requires" if len(conflicting) == 1 else "require"
+        raise ValueError(f"{', '.join(conflicting)} {verb} --denoise-mode async or inference.denoise_mode=async")
 
-    if args.lead_modality is not None:
-        OmegaConf.update(cfg, "inference.lead_modality", args.lead_modality, merge=False)
-    if args.variance_shift_alpha is not None:
-        OmegaConf.update(cfg, "inference.variance_shift_alpha", args.variance_shift_alpha, merge=False)
-    if args.linear_offset is not None:
-        OmegaConf.update(cfg, "inference.linear_offset", args.linear_offset, merge=False)
+    for name, _flag, _default in async_controls:
+        value = getattr(args, name, None)
+        if value is not None:
+            OmegaConf.update(cfg, f"inference.{name}", value, merge=False)
+
+    if args.denoise_mode == "sync":
+        # An explicit switch down to sync resets its dependents rather than
+        # erroring on values the yaml already holds: running the sync baseline
+        # against an async-tuned deploy is the A/B people ask for most, and
+        # `--denoise-mode` is documented as a same-name override of the yaml.
+        for name, _flag, default in async_controls:
+            OmegaConf.update(cfg, f"inference.{name}", default, merge=False)
+
     _validate_denoise_config(cfg)
     return cfg
 

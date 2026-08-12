@@ -7,6 +7,8 @@ server:
 
 # --- Inference (cfg.inference) ---
 # Every field has a same-name CLI override (--denoise-steps, --inference-mode, ...).
+# --denoise-mode sync / --inference-mode sync reset their async-only fields below,
+# so an async-tuned yaml can be run as the sync baseline with a single flag.
 inference:
   denoise_steps: 10
   denoise_mode: sync          # trajectory: sync | async; separate from inference_mode

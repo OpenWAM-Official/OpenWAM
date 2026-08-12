@@ -64,11 +64,22 @@ def _finite_float(value, name: str) -> float:
     return value
 
 
-def normalize_denoise_config(cfg=None) -> DenoiseConfig:
-    """Normalize and validate deploy denoising settings."""
+def normalize_denoise_config(cfg=None, *, reset_inactive: bool = False) -> DenoiseConfig:
+    """Normalize and validate deploy denoising settings.
+
+    ``reset_inactive`` drops the async-only controls back to their defaults
+    under ``denoise_mode="sync"`` instead of rejecting them. Callers handed an
+    already-resolved config — per-request ``conditions``, :func:`make_schedule`
+    — cannot tell a user-written value from one inherited from the yaml, so
+    they build what they are given; the config-shape check stays strict where
+    "explicitly supplied" is knowable (startup validation and the CLI layer).
+    """
     mode = str(_config_value(cfg, "denoise_mode", "sync")).strip().lower()
     if mode not in VALID_DENOISE_MODES:
         raise ValueError(f"Unsupported denoise mode {mode!r}; expected one of {VALID_DENOISE_MODES}")
+
+    if mode == "sync" and reset_inactive:
+        return DenoiseConfig()
 
     lead = str(_config_value(cfg, "lead_modality", "video")).strip().lower()
     if lead not in ("action", "video"):
@@ -91,13 +102,29 @@ def normalize_denoise_config(cfg=None) -> DenoiseConfig:
         if offset != 0.0:
             inactive.append("linear_offset")
         if inactive:
-            raise ValueError(f"{', '.join(inactive)} require denoise_mode='async'")
+            verb = "requires" if len(inactive) == 1 else "require"
+            raise ValueError(f"{', '.join(inactive)} {verb} denoise_mode='async'")
 
     return DenoiseConfig(
         denoise_mode=mode,
         lead_modality=lead,
         variance_shift_alpha=alpha,
         linear_offset=offset,
+    )
+
+
+def denoise_async_is_noop(config: DenoiseConfig) -> bool:
+    """True when ``async`` reproduces the ``sync`` trajectory bit-for-bit.
+
+    ``alpha=1, offset=0`` is the diagonal, so a run labelled ``async`` at the
+    shipped defaults produces exactly the ``sync`` schedule — worth a warning
+    rather than silently attributing the numbers to a shifted trajectory.
+    """
+    defaults = DenoiseConfig()
+    return (
+        config.denoise_mode == "async"
+        and config.variance_shift_alpha == defaults.variance_shift_alpha
+        and config.linear_offset == defaults.linear_offset
     )
 
 
@@ -256,6 +283,11 @@ def make_schedule(
             ``1`` = diagonal = sync).
         offset: ``async`` only -- delay the lag stream's start
             (``0`` = pure curve; ``>0`` = piecewise offset).
+
+    ``mode="sync"`` ignores the three ``async`` arguments rather than
+    rejecting them: this is the one call on the per-request path, so a
+    config-shape rule here would surface as a per-request ``ValueError``.
+    The shape check lives at startup and in the CLI layer instead.
     """
     options = normalize_denoise_config(
         {
@@ -263,7 +295,8 @@ def make_schedule(
             "lead_modality": lead,
             "variance_shift_alpha": alpha,
             "linear_offset": offset,
-        }
+        },
+        reset_inactive=True,
     )
     if options.denoise_mode == "sync":
         return schedule_sync(
@@ -286,6 +319,7 @@ __all__ = [
     "DenoiseConfig",
     "VALID_DENOISE_MODES",
     "normalize_denoise_config",
+    "denoise_async_is_noop",
     "schedule_sync",
     "schedule_variance_shift",
     "make_schedule",

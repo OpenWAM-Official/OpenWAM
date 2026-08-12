@@ -74,12 +74,48 @@ def test_make_schedule_rejects_invalid_async_parameters(kwargs, match):
         make_schedule("async", v, a, **kwargs)
 
 
-def test_make_schedule_rejects_inactive_async_parameters():
-    from openwam.deploy.denoise_schedule import make_schedule
+def test_make_schedule_sync_ignores_inactive_async_parameters():
+    """Per-request path builds what it is handed; the shape check lives at startup."""
+    from openwam.deploy.denoise_schedule import make_schedule, schedule_sync
 
-    v, a = _two_stub_schedulers()
-    with pytest.raises(ValueError, match="require denoise_mode='async'"):
-        make_schedule("sync", v, a, alpha=9.0)
+    v, a = _two_schedulers()
+    expected = schedule_sync(v, a, num_steps=20, shift=5.0)
+
+    v, a = _two_schedulers()
+    assert make_schedule("sync", v, a, num_steps=20, shift=5.0, lead="action", alpha=9.0, offset=0.3) == expected
+
+
+def test_normalize_denoise_config_rejects_inactive_controls_by_default():
+    from openwam.deploy.denoise_schedule import normalize_denoise_config
+
+    with pytest.raises(ValueError, match="denoise_mode='async'"):
+        normalize_denoise_config({"denoise_mode": "sync", "variance_shift_alpha": 9.0})
+
+
+def test_normalize_denoise_config_reset_inactive_drops_async_controls():
+    from openwam.deploy.denoise_schedule import DenoiseConfig, normalize_denoise_config
+
+    resolved = normalize_denoise_config(
+        {"denoise_mode": "sync", "lead_modality": "action", "variance_shift_alpha": 9.0, "linear_offset": 0.3},
+        reset_inactive=True,
+    )
+    assert resolved == DenoiseConfig()
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [
+        ({"denoise_mode": "async"}, True),
+        ({"denoise_mode": "async", "variance_shift_alpha": 1.0, "linear_offset": 0.0}, True),
+        ({"denoise_mode": "async", "variance_shift_alpha": 3.0}, False),
+        ({"denoise_mode": "async", "linear_offset": 0.1}, False),
+        ({"denoise_mode": "sync"}, False),
+    ],
+)
+def test_denoise_async_is_noop(cfg, expected):
+    from openwam.deploy.denoise_schedule import denoise_async_is_noop, normalize_denoise_config
+
+    assert denoise_async_is_noop(normalize_denoise_config(cfg)) is expected
 
 
 def test_build_timestep_sampler_default_is_none():

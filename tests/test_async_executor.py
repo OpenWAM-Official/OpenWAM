@@ -276,7 +276,7 @@ def test_unrelated_config_resolves_to_sync():
 def test_sync_config_rejects_async_timing_fields(field):
     cfg = {"mode": "sync", field: 1}
 
-    with pytest.raises(ValueError, match="require inference_mode='async'"):
+    with pytest.raises(ValueError, match="inference_mode='async'"):
         normalize_execution_config(cfg)
 
 

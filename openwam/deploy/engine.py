@@ -256,7 +256,9 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - seed (int, optional): random seed, default 42
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): precomputed video latents
-                - denoise_mode (str, optional): "sync" or "async"
+                - denoise_mode (str, optional): "sync" or "async"; "sync" ignores
+                  the three async controls below, including any inherited from cfg,
+                  so a request can downgrade to the sync trajectory on its own
                 - lead_modality (str, optional): "async" only; "action" or "video"
                 - variance_shift_alpha (float, optional): "async" only; lead curve shift
                 - linear_offset (float, optional): "async" only; lag start delay

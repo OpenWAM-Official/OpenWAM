@@ -211,7 +211,7 @@ optimization:
   prompt_embed_cache: { maxsize: 32 }
 ```
 
-`denoise_mode` selects the video/action trajectory within one denoising pass; nontrivial async settings correspond to `training.timestep_sampling: variance_shift`, currently supported for `joint_self_attn`. `linear_offset` is an inference-time lag delay. `inference_mode` independently selects the sync or background-prefetch executor.
+`denoise_mode` selects the video/action trajectory within one denoising pass; nontrivial async settings correspond to `training.timestep_sampling: variance_shift`, currently supported for `joint_self_attn`. `linear_offset` is an inference-time lag delay. `inference_mode` independently selects the sync or background-prefetch executor. Passing `--denoise-mode sync` or `--inference-mode sync` resets that axis's async-only fields to their defaults, so an async-tuned deploy yaml runs as the sync baseline without unsetting each field; supplying an async-only flag with a nontrivial value alongside `sync` is still an error.
 
 Compile paths are selected from the checkpoint architecture. On dual-system architectures the first request may carry `torch.compile` warmup latency; use `--compile-enabled false` to run eager.
 
