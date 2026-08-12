@@ -27,7 +27,11 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-__all__ = ["extend_rotary_with_shared_tokens", "shared_token_timestep_embedding"]
+__all__ = [
+    "extend_rotary_with_shared_tokens",
+    "shared_token_timestep_embedding",
+    "validate_shared_tokens",
+]
 
 
 def extend_rotary_with_shared_tokens(cos: Tensor, sin: Tensor, n_shared: int) -> Tuple[Tensor, Tensor]:

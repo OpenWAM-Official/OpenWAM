@@ -156,3 +156,95 @@ def test_driver_isolated_mode_matches_run_block_loop():
     diff = (joint_v.hidden_states - ref.hidden_states).abs().max().item()
     assert diff < 1e-5, f"isolated-mode video stream deviates from run_block: {diff}"
     assert torch.isfinite(joint_a.payload.x_action).all()
+
+
+def _padded_state(net, poison: bool, pad: int = 2):
+    """B=2 state whose second prompt is right-padded; optionally poison the
+    padded und K/V so a masking mistake shows up as a numeric change."""
+    torch.manual_seed(7)
+    ids = torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 0, 0]])
+    und_mask = torch.tensor([[True] * 5, [True] * (5 - pad) + [False] * pad])
+    lat = torch.randn(2, MINI["latent_channel"], 2, 2, 2)
+    text_pos = text_pack.text_mrope_positions(5, float_positions=True)
+    grid = text_pack.patch_grid(*lat.shape[2:], int(net.config.latent_patch_size))
+    _, vis_pos = text_pack.build_joint_positions(
+        5, grid, modality_margin=15000, fps=24.0, temporal_compression_factor=4
+    )
+    cos_u, sin_u = dit_forward.compute_rotary(net, text_pos.unsqueeze(1), lat.device, lat.dtype)
+    ctx, und_kv = dit_forward.run_und_tower(net, ids, und_mask, cos_u, sin_u)
+    if poison:
+        und_kv = [(k.clone(), v.clone()) for k, v in und_kv]
+        for k, v in und_kv:  # sample 1's padded slots only
+            k[1, 5 - pad : 5] = 1e4
+            v[1, 5 - pad : 5] = 1e4
+    return dit_forward.prepare_block_loop(
+        net,
+        latents=lat,
+        timestep=torch.full((2,), 500.0),
+        context=ctx,
+        und_mask=und_mask,
+        und_kv=und_kv,
+        vision_positions=vis_pos.unsqueeze(1),
+        num_clean_prefix_frames=0,
+    )
+
+
+@pytest.mark.parametrize("mode", ["action_sees_video", "mutual", "isolated"])
+def test_joint_loop_keeps_padded_und_keys_out(mode):
+    """Padded und keys must not reach the video or action stream through MoT.
+
+    ``run_joint_loop`` widens its cross-modal mask by ``prefix_kv_len`` and gates
+    the prefix columns with ``prefix_kv_mask``. Poisoning the padded und K/V is
+    the end-to-end check that the gate survives the widening for every mask mode
+    — the mask helper's own unit tests cannot see a wiring mistake here.
+    """
+    torch.manual_seed(0)
+    net = Cosmos3OmniTransformer(**MINI).eval()
+    vb = Cosmos3EdgeVideoBackbone(
+        net=net,
+        vae=None,
+        tokenizer=None,
+        dim=MINI["hidden_size"],
+        num_layers=MINI["num_hidden_layers"],
+        num_heads=MINI["num_attention_heads"],
+        head_dim=MINI["head_dim"],
+        context_dim=MINI["hidden_size"],
+    ).eval()
+    ab = _TinyActionBackbone(
+        MINI["hidden_size"], MINI["num_hidden_layers"], MINI["num_attention_heads"], MINI["head_dim"]
+    ).eval()
+    driver = DualSystemMoTDriver(vb, ab, attention_mask_mode=mode, mot_checkpoint_mixed_attn=False)
+
+    outs = []
+    for poison in (False, True):
+        state = _padded_state(net, poison)
+        astate = types.SimpleNamespace(
+            payload=types.SimpleNamespace(
+                x_action=torch.arange(2 * 3 * MINI["hidden_size"]).float().view(2, 3, -1) * 1e-2
+            )
+        )
+        with torch.no_grad():
+            v, a = driver.run_joint_loop(state, astate)
+        outs.append((v.hidden_states, a.payload.x_action))
+
+    d_video = (outs[0][0] - outs[1][0]).abs().max().item()
+    d_action = (outs[0][1] - outs[1][1]).abs().max().item()
+    assert d_video < 1e-6, f"{mode}: padded und keys leaked into the video stream ({d_video:.3e})"
+    assert d_action < 1e-6, f"{mode}: padded und keys leaked into the action stream ({d_action:.3e})"
+
+
+def test_padded_und_poison_is_detectable():
+    """Positive control for the test above: without the gate the poison must move
+    the output, otherwise the leak assertions would pass vacuously."""
+    torch.manual_seed(0)
+    net = Cosmos3OmniTransformer(**MINI).eval()
+    outs = []
+    for poison in (False, True):
+        state = _padded_state(net, poison)
+        state.prefix_kv_mask = None  # drop the gate
+        state.extras = {**state.extras, "und_mask": None}
+        with torch.no_grad():
+            for i in range(len(net.layers)):
+                state = dit_forward.run_block(net, i, state)
+            outs.append(dit_forward.finalize_block_loop(net, state))
+    assert (outs[0] - outs[1]).abs().max().item() > 1e-3, "poison is inert; the leak tests prove nothing"

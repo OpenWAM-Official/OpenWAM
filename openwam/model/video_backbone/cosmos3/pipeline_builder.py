@@ -36,6 +36,16 @@ _COSMOS3_INSTALL_HINT = (
 # context_dim == hidden_size: the action-stream context is the und final hidden.
 _COSMOS3_EDGE_GEOMETRY = dict(dim=2048, num_layers=28, num_heads=16, head_dim=128, context_dim=2048)
 
+# Frame rate attributed to training/inference clips. It feeds two things: the
+# vision mRoPE temporal scaling (inert while it equals the model's ``base_fps``
+# of 24) and the duration sentence in the prompt templates. Nothing in OpenWAM's
+# dataloader stack reports a clip fps — and after ``video_stride`` sub-sampling
+# the clip rate is not the source rate anyway — so this is an assumption, not a
+# measurement. Left at 24 to keep existing checkpoints reproducible; override
+# ``model.video_backbone.fps`` (or drop the duration sentence with
+# ``prompt_duration_template=false``) when the real rate is known.
+_DEFAULT_CLIP_FPS = 24.0
+
 # Full init kwargs of the released Edge transformer — used verbatim for the
 # deploy-time meta shell so a checkpoint deploys without the original bundle.
 _COSMOS3_EDGE_NET_KWARGS: dict = dict(
@@ -327,6 +337,10 @@ def build_cosmos3_pipeline(
     shift_video = float(_cfg_get(cfg, "shift_video", 5.0))
     use_system_prompt = bool(_cfg_get(cfg, "use_system_prompt", False))
     prompt_templates = bool(_cfg_get(cfg, "prompt_templates", True))
+    duration_template = bool(_cfg_get(cfg, "prompt_duration_template", True))
+    clip_fps = float(_cfg_get(cfg, "fps", _DEFAULT_CLIP_FPS))
+    if clip_fps <= 0.0:
+        raise ValueError(f"cosmos3_edge fps must be > 0, got {clip_fps!r}.")
     freeze_und = bool(_cfg_get(cfg, "freeze_und", True))
     if not freeze_und:
         raise NotImplementedError(
@@ -465,6 +479,8 @@ def build_cosmos3_pipeline(
         shift_video=shift_video,
         use_system_prompt=use_system_prompt,
         prompt_templates=prompt_templates,
+        duration_template=duration_template,
+        clip_fps=clip_fps,
         max_text_tokens=max_text_tokens,
         text_dropout_p=text_dropout,
         text_dropout_seed=dropout_seed,

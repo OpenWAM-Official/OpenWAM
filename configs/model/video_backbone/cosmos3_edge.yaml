@@ -39,6 +39,18 @@ use_system_prompt: false
 prompt_templates: true
 max_text_tokens: 512
 
+# Clip frame rate, used for the duration sentence in the prompt templates and
+# for the vision mRoPE temporal scaling (inert while it equals the model's
+# base_fps of 24). NOTE: this is an ASSUMPTION, not a measurement — nothing in
+# the dataloader stack reports a clip fps, and `video_stride` sub-sampling means
+# the clip rate is not the source rate either (robotwin: num_frames=33,
+# video_stride=4 → 9 frames spanning 32 raw frames). Left at 24 so existing
+# checkpoints stay reproducible. Set the real rate when known, or drop the
+# (then-false) duration sentence with prompt_duration_template=false; the
+# resolution sentence is derived from the actual frames and stays correct.
+fps: 24.0
+prompt_duration_template: true
+
 # CFG dropout: substitutes "" for prompts with prob p, only when training=True.
 # Seed via +model.video_backbone.text_encoder_dropout_seed=<int> for repro.
 text_encoder_dropout: 0.0

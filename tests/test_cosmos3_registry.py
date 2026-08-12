@@ -53,6 +53,11 @@ def test_bad_max_text_tokens_raises():
         )
 
 
+def test_bad_fps_raises():
+    with pytest.raises(ValueError, match="fps"):
+        build_video_backbone("cosmos3_edge", _cfg(name="cosmos3_edge", model_path="/tmp/x", fps=0))
+
+
 def test_freeze_und_false_rejected():
     with pytest.raises(NotImplementedError, match="freeze_und"):
         build_video_backbone(

@@ -69,6 +69,18 @@ def apply_prompt_templates(
     return text
 
 
+def _templated_ids(tokenizer: Any, conversations: list, *, add_generation_prompt: bool) -> List[int]:
+    ids = tokenizer.apply_chat_template(
+        conversations,
+        tokenize=True,
+        add_generation_prompt=add_generation_prompt,
+        return_dict=False,
+    )
+    if not isinstance(ids, list):  # some transformers versions return BatchEncoding-likes
+        ids = list(ids["input_ids"] if hasattr(ids, "__getitem__") else ids)
+    return list(ids)
+
+
 def tokenize_prompt(
     tokenizer: Any,
     text: str,
@@ -80,23 +92,31 @@ def tokenize_prompt(
     """Chat-template tokenize one prompt and append ``[eos, <|vision_start|>]``.
 
     Mirrors the pipeline's ``_tokenize`` + ``_add_special_tokens``. ``max_length``
-    truncates the *templated* ids before the two special tokens are appended, so
-    the generation marker always survives.
+    caps the templated ids before the two special tokens are appended.
+
+    Truncation cuts the prompt *body*, never the tail. ``add_generation_prompt``
+    appends the assistant header at the END of the templated ids, so a plain
+    right-truncation would silently delete it and hand the model a mid-sentence
+    cut followed by ``[eos, <|vision_start|>]`` — a differently-shaped sequence
+    than anything it was trained on. The header is recovered as the delta
+    against the un-prompted template and re-appended after the cut.
     """
     conversations = []
     if use_system_prompt:
         conversations.append({"role": "system", "content": SYSTEM_PROMPT_IMAGE if is_image else SYSTEM_PROMPT_VIDEO})
     conversations.append({"role": "user", "content": text})
-    ids = tokenizer.apply_chat_template(
-        conversations,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_dict=False,
-    )
-    if not isinstance(ids, list):  # some transformers versions return BatchEncoding-likes
-        ids = list(ids["input_ids"] if hasattr(ids, "__getitem__") else ids)
+    ids = _templated_ids(tokenizer, conversations, add_generation_prompt=True)
     if max_length is not None and len(ids) > max_length - 2:
-        ids = ids[: max_length - 2]
+        budget = max_length - 2
+        body = _templated_ids(tokenizer, conversations, add_generation_prompt=False)
+        # The generation prompt is a pure suffix iff the un-prompted ids are a
+        # prefix of the prompted ones; templates that interleave differently
+        # fall back to the plain cut rather than guessing.
+        if len(body) < len(ids) and ids[: len(body)] == body:
+            suffix = ids[len(body) :]
+            ids = body[: max(0, budget - len(suffix))] + suffix
+        else:
+            ids = ids[:budget]
     eos = tokenizer.eos_token_id
     start_of_generation = tokenizer.convert_tokens_to_ids(START_OF_GENERATION_TOKEN)
     # Fast tokenizers map unknown tokens to unk_token_id instead of None, so a

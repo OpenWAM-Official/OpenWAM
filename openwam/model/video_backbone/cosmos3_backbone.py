@@ -67,6 +67,8 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         shift_video: float = 5.0,
         use_system_prompt: bool = False,
         prompt_templates: bool = True,
+        duration_template: bool = True,
+        clip_fps: float = _DEFAULT_FPS,
         max_text_tokens: int = 512,
         text_dropout_p: float = 0.0,
         text_dropout_seed: Optional[int] = None,
@@ -98,6 +100,12 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
 
         self._use_system_prompt = bool(use_system_prompt)
         self._prompt_templates = bool(prompt_templates)
+        self._duration_template = bool(duration_template)
+        # Clip frame rate. Nothing in the dataloader stack reports one, so this
+        # is a configured assumption rather than a measurement — see
+        # ``_DEFAULT_CLIP_FPS`` in pipeline_builder. Callers may still override
+        # per call via the ``fps`` kwarg.
+        self._clip_fps = float(clip_fps)
         self._max_text_tokens = int(max_text_tokens)
         if not 0.0 <= float(text_dropout_p) <= 1.0:
             raise ValueError(f"text_dropout_p must be in [0, 1]; got {text_dropout_p!r}.")
@@ -196,6 +204,8 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
             shift_video=shift,
             use_system_prompt=holder.use_system_prompt,
             prompt_templates=holder.prompt_templates,
+            duration_template=getattr(holder, "duration_template", True),
+            clip_fps=getattr(holder, "clip_fps", _DEFAULT_FPS),
             max_text_tokens=holder.max_text_tokens,
             text_dropout_p=holder.text_dropout_p,
             text_dropout_seed=holder.text_dropout_seed,
@@ -249,7 +259,14 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         texts = prompts
         if self._prompt_templates:
             texts = [
-                text_pack.apply_prompt_templates(p, num_frames=num_frames, height=height, width=width, fps=fps)
+                text_pack.apply_prompt_templates(
+                    p,
+                    num_frames=num_frames,
+                    height=height,
+                    width=width,
+                    fps=fps,
+                    add_duration_template=self._duration_template,
+                )
                 for p in prompts
             ]
         ids = [
@@ -317,7 +334,7 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         if self.training and self._text_dropout_p > 0.0:
             prompts = [p if self._text_dropout_rng.random() >= self._text_dropout_p else "" for p in prompts]
 
-        fps = float(kw.get("fps", _DEFAULT_FPS))
+        fps = float(kw.get("fps", self._clip_fps))
         with torch.no_grad():
             latents = self._encode_frames(frames_t)
             enc = self._encode_prompts(prompts, num_frames=t_pix, height=h_pix, width=w_pix, fps=fps)
@@ -500,7 +517,6 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
             )
         height = int(kw.get("height", 480))
         width = int(kw.get("width", 832))
-        fps = float(kw.get("fps", _DEFAULT_FPS))
         seed = kw.get("seed")
         cfg_scale = float(kw.get("cfg_scale", 1.0))
         if cfg_scale > 1.0:
@@ -512,6 +528,10 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
             )
         shift = kw.get("shift")
         prompt_embed_cache = kw.get("prompt_embed_cache")
+        # Read after the argument gates: every check above is pure-argument, so
+        # a caller passing a bad request gets the specific error rather than an
+        # AttributeError from touching instance state first.
+        fps = float(kw.get("fps", self._clip_fps))
 
         from openwam.model.video_backbone.cosmos_predict25._vae_utils import _pil_video_to_tensor
 

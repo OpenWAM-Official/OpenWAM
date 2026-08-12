@@ -68,3 +68,62 @@ def test_vision_positions_fps_scaling():
 def test_patch_grid_ceil():
     assert text_pack.patch_grid(8, 30, 52, 2) == (8, 15, 26)
     assert text_pack.patch_grid(3, 5, 7, 2) == (3, 3, 4)
+
+
+def test_prompt_templates_can_drop_the_duration_sentence():
+    """The duration sentence asserts a clip fps nothing in the dataloader stack
+    reports; it must be droppable without losing the (measured) resolution one."""
+    text = text_pack.apply_prompt_templates(
+        "A robot.", num_frames=9, height=384, width=320, fps=24.0, add_duration_template=False
+    )
+    assert text == "A robot. This video is of 384x320 resolution."
+    assert "seconds long" not in text
+
+
+class _StubTokenizer:
+    """Chat template = ``[BOS] <body ids> [ASSISTANT_HDR]``, one id per char."""
+
+    eos_token_id = 90
+    unk_token_id = 99
+    _HDR = [80, 81]
+
+    def apply_chat_template(self, conversations, *, tokenize, add_generation_prompt, return_dict):
+        body = [1] + [ord(c) % 60 + 2 for c in conversations[-1]["content"]]
+        return body + (self._HDR if add_generation_prompt else [])
+
+    def convert_tokens_to_ids(self, token):
+        return 91 if token == text_pack.START_OF_GENERATION_TOKEN else self.unk_token_id
+
+
+def test_tokenize_truncation_preserves_the_generation_prompt():
+    """Right-truncating the templated ids would delete the assistant header the
+    template appends last, handing the model a mid-sentence cut followed by
+    ``[eos, <|vision_start|>]``. The header must survive the cut."""
+    tok = _StubTokenizer()
+    long_text = "x" * 200
+
+    untruncated = text_pack.tokenize_prompt(tok, "hi")
+    assert untruncated[-4:] == [*_StubTokenizer._HDR, tok.eos_token_id, 91]
+
+    ids = text_pack.tokenize_prompt(tok, long_text, max_length=32)
+    assert len(ids) == 32
+    # Tail is intact: assistant header, then the two special tokens.
+    assert ids[-4:] == [*_StubTokenizer._HDR, tok.eos_token_id, 91]
+    # And the body is a genuine prefix of the untruncated body (a cut, not a shift).
+    full_body = tok.apply_chat_template(
+        [{"role": "user", "content": long_text}], tokenize=True, add_generation_prompt=False, return_dict=False
+    )
+    assert ids[:-4] == full_body[: 32 - 4]
+
+
+def test_tokenize_falls_back_when_the_header_is_not_a_suffix():
+    """Templates that do not append the generation prompt as a pure suffix must
+    take the plain cut rather than a guessed reconstruction."""
+
+    class _Interleaving(_StubTokenizer):
+        def apply_chat_template(self, conversations, *, tokenize, add_generation_prompt, return_dict):
+            body = [1] + [ord(c) % 60 + 2 for c in conversations[-1]["content"]]
+            return ([7] + body) if add_generation_prompt else body
+
+    ids = text_pack.tokenize_prompt(_Interleaving(), "y" * 200, max_length=20)
+    assert len(ids) == 20 and ids[0] == 7
