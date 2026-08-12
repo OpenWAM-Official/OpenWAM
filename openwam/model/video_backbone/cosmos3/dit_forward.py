@@ -104,11 +104,22 @@ def _und_attention_mask(und_mask: Tensor) -> Tensor:
     return causal.unsqueeze(0).unsqueeze(0) & und_mask.view(b, 1, 1, length)
 
 
+# ``und_mask is None`` is the canonical "every und token is real" signal. It is
+# decided host-side at pack time (all prompts the same length ⇒ no padding), and
+# it matters for speed, not just tidiness: an explicit bool ``attn_mask``
+# disqualifies both fused SDPA kernels — flash rejects any non-null mask, and
+# the memory-efficient kernel rejects unequal q/kv head counts under
+# ``enable_gqa`` — so a mask that carries no information costs an order of
+# magnitude in time and memory. Passing ``None`` also keeps
+# ``widen_mask_for_prefix_kv`` free of a ``.all()`` device sync, which would
+# otherwise break the compiled MoT graph.
+
+
 @torch.no_grad()
 def run_und_tower(
     net,
     input_ids: Tensor,
-    und_mask: Tensor,
+    und_mask: Optional[Tensor],
     cos_und: Tensor,
     sin_und: Tensor,
 ) -> Tuple[Tensor, List[Tuple[Tensor, Tensor]]]:
@@ -117,6 +128,10 @@ def run_und_tower(
     The und pathway is frozen and computationally independent of gen, so it runs
     under ``no_grad`` — its per-layer K/V enter gen attention as constants (same
     regime as predict2.5's frozen Reason1 live encoding).
+
+    ``und_mask`` is the ``(B, L)`` real-token mask, or ``None`` when no prompt in
+    the batch is padded — the unpadded case then runs as plain causal attention
+    (``is_causal=True``, no explicit mask), which keeps the fused kernels.
 
     Returns ``(context, und_kv)`` where ``context`` is ``net.norm``-finalized
     hidden states ``(B, L, D)`` and ``und_kv[i] = (k_for_gen, v)`` with shapes
@@ -130,7 +145,8 @@ def run_und_tower(
     head_dim = int(net.config.head_dim)
 
     und_seq = net.embed_tokens(input_ids)
-    attn_mask = _und_attention_mask(und_mask)
+    attn_mask = None if und_mask is None else _und_attention_mask(und_mask)
+    is_causal = und_mask is None
 
     und_kv: List[Tuple[Tensor, Tensor]] = []
     for layer in net.layers:
@@ -148,7 +164,12 @@ def run_und_tower(
         und_kv.append((k_for_gen, v))
 
         out = F.scaled_dot_product_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=attn_mask, enable_gqa=True
+            q.transpose(1, 2),
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+            attn_mask=attn_mask,
+            is_causal=is_causal,
+            enable_gqa=True,
         )
         attn_out = attn.to_out(out.transpose(1, 2).reshape(b, length, n_heads * head_dim))
         residual = und_seq + attn_out
@@ -225,10 +246,10 @@ def prepare_block_loop(
         cos_gen = cos_gen.expand(b, -1, -1)
         sin_gen = sin_gen.expand(b, -1, -1)
 
-    if und_mask is None:
-        l_und = und_kv[0][0].shape[1]
-        und_mask = torch.ones((und_kv[0][0].shape[0], l_und), dtype=torch.bool, device=tokens.device)
-    if context_mask is None:
+    # ``und_mask is None`` means "no und padding" and is carried through as
+    # None all the way to SDPA (see the note above _und_attention_mask); it is
+    # NOT normalized into an all-True tensor here.
+    if context_mask is None and und_mask is not None:
         context_mask = und_mask
 
     zero = torch.zeros((), dtype=target_dtype, device=tokens.device)
@@ -292,13 +313,19 @@ def _gen_block_forward(
     all_k = torch.cat([k_und.to(k.dtype), k], dim=1)
     all_v = torch.cat([v_und.to(v.dtype), v], dim=1)
     l_und = k_und.shape[1]
-    # (B, 1, S_q, L_und + S): und columns gated by the padding mask; the gen
-    # block is fully visible unless the caller supplied a cross-modal mask.
-    mask = torch.ones((b, 1, s, l_und + s), dtype=torch.bool, device=gen_seq.device)
-    mask[:, :, :, :l_und] = und_mask.view(b, 1, 1, l_und)
-    if gen_mask is not None:
-        gm = gen_mask if gen_mask.dim() == 4 else gen_mask.view(1, 1, s, s)
-        mask[:, :, :, l_und:] = gm.to(device=mask.device, dtype=torch.bool)
+    if und_mask is None and gen_mask is None:
+        # Nothing to express: every und key is real and the gen block is fully
+        # visible. Passing None here is what lets SDPA reach a fused kernel.
+        mask = None
+    else:
+        # (B, 1, S_q, L_und + S): und columns gated by the padding mask; the gen
+        # block is fully visible unless the caller supplied a cross-modal mask.
+        mask = torch.ones((b, 1, s, l_und + s), dtype=torch.bool, device=gen_seq.device)
+        if und_mask is not None:
+            mask[:, :, :, :l_und] = und_mask.view(b, 1, 1, l_und)
+        if gen_mask is not None:
+            gm = gen_mask if gen_mask.dim() == 4 else gen_mask.view(1, 1, s, s)
+            mask[:, :, :, l_und:] = gm.to(device=mask.device, dtype=torch.bool)
 
     out = F.scaled_dot_product_attention(
         q.transpose(1, 2), all_k.transpose(1, 2), all_v.transpose(1, 2), attn_mask=mask, enable_gqa=True

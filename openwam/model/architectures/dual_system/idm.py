@@ -178,7 +178,11 @@ class IDMMoTDriver(DualSystemMoTDriver):
           this equals the video token count (T·H·W); with one (Cosmos3's und text
           stream) it additionally covers the prefix.
         - ``prefix_kv_mask`` is the per-sample gate for those leading prefix
-          columns, or ``None`` when there is no prefix (or none of it is padding).
+          columns. It is ``None`` in exactly two cases: the backbone declares no
+          prefix at all, or it declares one that carries no padding (backbones
+          signal that by leaving ``prefix_kv_mask`` unset — see
+          :func:`widen_mask_for_prefix_kv`). ``None`` therefore means "no column
+          needs closing", never "there is no prefix" on its own.
           Stage 2 MUST honor it: an all-ones action mask over ``video_key_len``
           would open padded und slots that the joint loop masks out, so a batch
           with unequal prompt lengths would silently attend padding. Pass it to

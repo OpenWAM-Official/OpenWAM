@@ -143,17 +143,20 @@ def widen_mask_for_prefix_kv(mask, state):
     apply this unconditionally and backbones without a prefix stay byte-identical.
 
     Rank is preserved: a 2-D ``(S_q, S_k)`` mask widens to 2-D and a 4-D
-    ``(B, 1, S_q, S_k)`` mask to 4-D. The batch axis is only introduced when the
-    per-sample gate actually differs across samples — an all-True
-    ``prefix_kv_mask`` (every B=1 case, and any uniform-length batch) keeps the
-    cheap batch-shared 2-D mask instead of materializing B copies of it.
+    ``(B, 1, S_q, S_k)`` mask to 4-D. The batch axis is only introduced when a
+    per-sample gate is actually present — ``prefix_kv_mask is None`` means every
+    prefix key is real (every B=1 case, and any uniform-length batch), which
+    keeps the cheap batch-shared 2-D mask instead of materializing B copies.
+    Backbones must signal "no padding" with ``None`` rather than an all-True
+    tensor: testing the tensor here would force a device sync and, inside the
+    compiled MoT region, a dynamo graph break.
     """
     prefix = int(getattr(state, "prefix_kv_len", 0) or 0)
     if prefix <= 0:
         return mask
     rows = mask.shape[-2]
     prefix_mask = getattr(state, "prefix_kv_mask", None)
-    if prefix_mask is None or bool(prefix_mask.all()):
+    if prefix_mask is None:
         pad_shape = (*mask.shape[:-1], prefix)
         pad = torch.ones(pad_shape, dtype=torch.bool, device=mask.device)
         return torch.cat([pad, mask], dim=-1)

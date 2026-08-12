@@ -265,7 +265,12 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         input_ids, und_mask, seq_lens = text_pack.pad_und_batch(ids, pad_token_id=int(pad_id))
         input_ids = input_ids.to(self.device)
-        und_mask = und_mask.to(self.device)
+        # Whether any prompt is padded is host-side knowledge (Python list
+        # lengths), so decide it here and hand ``None`` down when there is no
+        # padding — that is what keeps SDPA on a fused kernel and keeps the
+        # compiled MoT graph free of a ``.all()`` device sync. Every B=1 request
+        # and any uniform-length batch takes this path.
+        und_mask = und_mask.to(self.device) if len(set(len(i) for i in ids)) > 1 else None
 
         net = self.dit
         float_pos = bool(net.config.enable_fps_modulation)
@@ -594,14 +599,32 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
     # ================================================================
 
     def set_dtype_device(self, dtype: torch.dtype, device: torch.device) -> None:
+        # Snapshot the rotary frequency table BEFORE the blanket cast below.
+        # `.to(dtype=)` casts buffers too, and this one is not covered by the
+        # vendored transformer's ``_keep_in_fp32_modules`` (which lists only
+        # ``time_embedder``), so it would be rounded to bf16 — and re-pinning the
+        # dtype afterwards is not enough, because upcasting a rounded value does
+        # not recover the bits. Cosmos3VLTextRotaryEmbedding deliberately runs
+        # the position matmul in fp32 with autocast disabled, but that protects
+        # the product, not an already-rounded frequency table. bf16 costs ~0.37%
+        # relative precision on inv_freq, which the vision stream's temporal
+        # offset (und_len + unified_3d_mrope_temporal_modality_margin = 15000)
+        # multiplies into a phase error large enough to scramble cos/sin
+        # (cosine similarity ~0.85 against the fp32 phases) while leaving the
+        # text positions (0..und_len) visually intact.
+        rope = getattr(self.dit, "rotary_emb", None)
+        inv_freq = getattr(rope, "inv_freq", None) if rope is not None else None
+        inv_freq_fp32 = inv_freq.detach().clone() if inv_freq is not None else None
+
         super().set_dtype_device(dtype, device)
         self._latents_mean = self._latents_mean.to(device=device)
         self._latents_std = self._latents_std.to(device=device)
-        # The blanket cast above defeats the vendored transformer's
-        # _keep_in_fp32_modules contract (from_pretrained honors it, plain .to()
-        # does not) — re-pin the timestep embedder to fp32 so the sinusoid MLP
-        # keeps timestep resolution; dit_forward follows this dtype (te_dtype)
-        # and casts the result back to the model dtype.
+
+        # Same story as inv_freq, but here the dtype alone is what matters: the
+        # timestep sinusoid MLP keeps its resolution in fp32, and dit_forward
+        # follows this dtype (te_dtype) before casting the result back.
         te = getattr(self.dit, "time_embedder", None)
         if te is not None:
             te.to(dtype=torch.float32)
+        if inv_freq_fp32 is not None:
+            rope.register_buffer("inv_freq", inv_freq_fp32.to(device=device), persistent=False)

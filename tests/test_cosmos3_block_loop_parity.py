@@ -161,6 +161,67 @@ def test_batched_engine_consistent_with_single():
     assert torch.allclose(batched[:1], single, atol=1e-6)
 
 
+def test_none_und_mask_matches_all_true_tensor():
+    """``und_mask=None`` (the fused-kernel fast path) must be numerically identical
+    to passing an explicit all-True mask — it is an optimization, not a variant."""
+    net = _build(MINI)
+    ids = torch.tensor([1, 2, 3, 4])
+    lat = torch.randn(1, MINI["latent_channel"], 3, 2, 2)
+    text_pos, vis_pos, _ = _positions(net, ids.numel(), (3, 2, 2))
+    all_true = torch.ones(1, ids.numel(), dtype=torch.bool)
+
+    outs = []
+    for und_mask in (all_true, None):
+        with torch.no_grad():
+            cos_u, sin_u = dit_forward.compute_rotary(net, text_pos.unsqueeze(1), lat.device, lat.dtype)
+            ctx, und_kv = dit_forward.run_und_tower(net, ids.unsqueeze(0), und_mask, cos_u, sin_u)
+            state = dit_forward.prepare_block_loop(
+                net,
+                latents=lat,
+                timestep=torch.tensor([500.0]),
+                context=ctx,
+                und_mask=und_mask,
+                und_kv=und_kv,
+                vision_positions=vis_pos.unsqueeze(1),
+                num_clean_prefix_frames=1,
+            )
+            for i in range(len(net.layers)):
+                state = dit_forward.run_block(net, i, state)
+            outs.append((ctx, dit_forward.finalize_block_loop(net, state), state.prefix_kv_mask))
+
+    (ctx_a, out_a, pm_a), (ctx_b, out_b, pm_b) = outs
+    assert torch.allclose(ctx_a, ctx_b, atol=1e-6), "und tower diverges between masked and causal paths"
+    assert torch.allclose(out_a, out_b, atol=1e-6), "gen stream diverges when the all-True mask is dropped"
+    assert pm_a is not None and pm_b is None  # None propagates to the widen helper
+
+
+def test_rotary_inv_freq_survives_dtype_cast():
+    """set_dtype_device must keep the rotary frequency table in fp32.
+
+    bf16 costs ~0.37% on inv_freq, which the vision stream's 15000-token
+    modality offset multiplies into a phase error that scrambles cos/sin.
+    """
+    from openwam.model.video_backbone import Cosmos3EdgeVideoBackbone
+
+    net = _build(MINI)
+    vb = Cosmos3EdgeVideoBackbone(
+        net=net,
+        vae=None,
+        tokenizer=None,
+        dim=MINI["hidden_size"],
+        num_layers=MINI["num_hidden_layers"],
+        num_heads=MINI["num_attention_heads"],
+        head_dim=MINI["head_dim"],
+        context_dim=MINI["hidden_size"],
+    )
+    before = net.rotary_emb.inv_freq.clone()
+    vb.set_dtype_device(torch.bfloat16, torch.device("cpu"))
+    assert net.rotary_emb.inv_freq.dtype == torch.float32
+    assert torch.equal(net.rotary_emb.inv_freq, before)
+    # The timestep embedder keeps its own fp32 pin too.
+    assert next(net.time_embedder.parameters()).dtype == torch.float32
+
+
 def test_freeze_unused_native_heads():
     from openwam.model.video_backbone.cosmos3.pipeline_builder import _freeze_unused_native_heads
 

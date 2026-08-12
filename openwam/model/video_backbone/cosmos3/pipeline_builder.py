@@ -413,13 +413,19 @@ def build_cosmos3_pipeline(
             f"fields {mismatches} (got, expected). Update _COSMOS3_EDGE_NET_KWARGS and port "
             "any behavioral change (text_pack positions / dit_forward) before training."
         )
-    if not deploy:
-        n_heads_frozen = _freeze_unused_native_heads(net)
-        if n_heads_frozen:
-            logger.info("cosmos3_edge: froze unused native action/sound heads (%.1fM params)", n_heads_frozen / 1e6)
-    if freeze_und and not deploy:
-        n_frozen = _freeze_und_pathway(net)
-        logger.info("cosmos3_edge: froze und pathway + embeddings (%.1fM params)", n_frozen / 1e6)
+    # Freeze unconditionally. Gating this on ``deploy`` would be wrong: the
+    # training finetune/resume path also sets ``ckpt_dir`` (see
+    # train/utils/ckpt_model_loader.py), so a resumed run would put the whole
+    # frozen und tower (1.69B with the embeddings and native heads) into the
+    # optimizer for parameters that can never receive a gradient — the very
+    # thing ``freeze_und=false`` is rejected for above. On the deploy meta-shell
+    # this is a harmless no-op: ``load_state_dict`` preserves ``requires_grad``
+    # and no optimizer exists there.
+    n_heads_frozen = _freeze_unused_native_heads(net)
+    if n_heads_frozen:
+        logger.info("cosmos3_edge: froze unused native action/sound heads (%.1fM params)", n_heads_frozen / 1e6)
+    n_frozen = _freeze_und_pathway(net)
+    logger.info("cosmos3_edge: froze und pathway + embeddings (%.1fM params)", n_frozen / 1e6)
 
     # --- Phase D: VAE --------------------------------------------------------
     if deploy:
