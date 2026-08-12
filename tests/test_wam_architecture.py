@@ -1681,7 +1681,7 @@ def test_base_generate_dit_cache_reuses_joint_action_prediction(monkeypatch):
 
 
 def test_base_generate_frozen_lag_stream_stays_in_forward_context(monkeypatch):
-    """A sigma plateau (vs_offset delay) freezes a stream's *update* only: its
+    """A sigma plateau (linear_offset delay) freezes a stream's *update* only: its
     tokens/timestep must stay in every forward, because v→a-visible attention
     masks (mutual / video_sees_action) read them."""
 
@@ -1736,7 +1736,7 @@ def test_base_generate_frozen_lag_stream_stays_in_forward_context(monkeypatch):
         def update(self, velocity, sigma, action_velocity=None):  # noqa: ARG002
             self.action_updates.append(action_velocity is not None)
 
-    # variance_shift offset=0.5 shape: sigma_a plateaus at 1.0 for the first
+    # linear_offset=0.5 shape: sigma_a plateaus at 1.0 for the first
     # two transitions, then catches up.
     schedule = [(1000.0, 1000.0), (750.0, 1000.0), (500.0, 1000.0), (250.0, 500.0), (0.0, 0.0)]
     cache = _RecordingCache()

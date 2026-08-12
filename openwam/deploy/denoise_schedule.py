@@ -12,19 +12,16 @@ timestep series via the duck-typed minimum interface:
 describing the per-iteration noise levels for the joint denoising loop,
 terminated with a ``(0.0, 0.0)`` sentinel.
 
-Two strategies are supported:
+Two denoising modes are supported:
 
 - ``sync``           — both streams advance in lockstep on their own
   deterministic timestep series (default; unchanged behavior).
-- ``variance_shift`` — Latent-Forcing-style ordered trajectory: one
+- ``async``          — Latent-Forcing-style trajectory: one
   stream denoises earlier than the other along an alpha-shift curve
   (``alpha``, arXiv:2602.11401) and/or a linear ``offset`` delaying the
   lag stream, with ``lead`` choosing which stream leads. Each stream
   rides its own ``alpha_shift`` grid (matching training), and
   ``alpha=1, offset=0`` reproduces ``sync`` bit-for-bit.
-
-The removed strategies (video_leading / cascade / action_only) live in
-git history; ``make_schedule`` raises ``NotImplementedError`` for them.
 """
 
 from __future__ import annotations
@@ -153,7 +150,7 @@ def schedule_variance_shift(
 
 
 def make_schedule(
-    strategy: str,
+    mode: str,
     video_scheduler,
     action_scheduler,
     num_steps: int = 50,
@@ -164,14 +161,10 @@ def make_schedule(
     alpha: float = 1.0,
     offset: float = 0.0,
 ) -> Schedule:
-    """Dispatcher kept as the single entry point for building a schedule.
+    """Build the schedule for a synchronous or asynchronous denoising trajectory.
 
     Args:
-        strategy: ``"sync"`` (deterministic lockstep, default) or
-            ``"variance_shift"`` (Latent-Forcing ordered curve). Any other
-            value raises ``NotImplementedError`` (the removed
-            video_leading/cascade/action_only strategies live in git
-            history).
+        mode: ``"sync"`` (lockstep) or ``"async"`` (shifted trajectory).
         video_scheduler: Video stream's scheduler (e.g.
             ``architecture.video_scheduler``).
         action_scheduler: Action stream's scheduler (e.g.
@@ -182,18 +175,18 @@ def make_schedule(
         shift_video: Optional override of the video α-shift only. Typically
             sourced from ``arch.video_backbone.shift_video`` so train and
             inference sigma grids match.
-        lead: ``variance_shift`` only -- which stream denoises earlier
+        lead: ``async`` only -- which stream denoises earlier
             (``"action"`` or ``"video"``).
-        alpha: ``variance_shift`` only -- lead-curve strength (``>1`` leads;
+        alpha: ``async`` only -- lead-curve strength (``>1`` leads;
             ``1`` = diagonal = sync).
-        offset: ``variance_shift`` only -- delay the lag stream's start
+        offset: ``async`` only -- delay the lag stream's start
             (``0`` = pure curve; ``>0`` = piecewise offset).
     """
-    if strategy == "sync":
+    if mode == "sync":
         return schedule_sync(
             video_scheduler, action_scheduler, num_steps=num_steps, shift=shift, shift_video=shift_video
         )
-    if strategy == "variance_shift":
+    if mode == "async":
         return schedule_variance_shift(
             video_scheduler,
             action_scheduler,
@@ -204,10 +197,7 @@ def make_schedule(
             shift_video=shift if shift_video is None else shift_video,
             shift_action=shift,
         )
-    raise NotImplementedError(
-        f"schedule_type={strategy!r} is not supported; choose 'sync' or 'variance_shift'. "
-        "independent/video_leading/cascade/action_only live in git history."
-    )
+    raise NotImplementedError(f"denoise_mode={mode!r} is not supported; choose 'sync' or 'async'.")
 
 
 __all__ = [

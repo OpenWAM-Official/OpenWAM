@@ -49,7 +49,7 @@ Response (action message, Server → Client):
 
 - **Image sizing / aspect ratio.** Server reads the checkpoint's `config.yaml` and resizes for you. Send the native camera output.
 - **Action units.** For normalized checkpoints, the returned action is already denormalized to **physical units** (eef: xyz in meters, rot6d unitless, gripper 0-1; joint: radians). Feed it directly to your controller — do not multiply by any mean/std. If the checkpoint was trained with normalization disabled, deploy leaves actions and state in that raw training scale.
-- **Execution mode / chunking.** Whether the server runs the sync executor (buffer-and-replan) or the async one (background prefetch, `inference.execution_mode: async`) is invisible on the wire: the protocol is always one obs in, one action out.
+- **Execution mode / chunking.** Whether the server runs the sync executor (buffer-and-replan) or the async one (background prefetch, `inference.inference_mode: async`) is invisible on the wire: the protocol is always one obs in, one action out.
 
 ## 3. Camera field rules
 

@@ -6,7 +6,7 @@ action diffusion timesteps come from ``sampler.sample_timesteps(...)`` instead
 of the default ``torch.randint`` draw. This module implements that hook.
 
 ``VarianceShiftTimestepSampler`` is the training-time counterpart to the
-deploy-side ``schedule_type="variance_shift"`` schedule. Default
+deploy-side ``denoise_mode="async"`` schedule. Default
 training behavior is unchanged: the trainer only builds a sampler when
 ``training.timestep_sampling`` selects one; otherwise ``compute_loss`` keeps its
 legacy ``torch.randint`` path bit-for-bit.
@@ -18,7 +18,7 @@ Convention note (easy to trip on): the timesteps returned here are consumed by
 ``openwam.deploy.denoise_schedule``, where a schedule entry IS the sigma value
 (smaller == cleaner). Both sides are internally consistent; mind the direction
 when comparing train vs inference code. ``VarianceShiftTimestepSampler`` and
-the deploy ``variance_shift`` schedule both place each stream on
+the deploy async variance-shift trajectory both place each stream on
 ``alpha_shift(1 - cleanness, shift_stream)`` -- the same grid -- so a
 variance_shift-trained checkpoint and its deploy schedule are point-wise
 in-distribution (up to the training grid's 1/num_train quantization).
@@ -36,7 +36,7 @@ DEFAULT_NUM_TRAIN_TIMESTEPS = 1000
 class VarianceShiftTimestepSampler:
     """Latent-Forcing variance-shift correlated timestep sampler.
 
-    Training counterpart to ``schedule_type="variance_shift"``: instead of two
+    Training counterpart to ``denoise_mode="async"``: instead of two
     independent draws, draw one global ``u`` per sample and place the two
     streams on the alpha-shift curve -- the lead stream's cleanness is
     ``f_alpha(u) >= u`` so its sampled timestep is, on average, further denoised
@@ -46,8 +46,8 @@ class VarianceShiftTimestepSampler:
 
     Implements the same ``decoupled_sampler`` contract; ``compute_loss`` maps
     the returned timesteps onto the backbone sigma grid
-    (``alpha_shift(1 - cleanness, shift)``), the same grid the deploy
-    ``variance_shift`` schedule rides -- so train and deploy match point-wise.
+    (``alpha_shift(1 - cleanness, shift)``), the same grid the deploy async
+    trajectory rides -- so train and deploy match point-wise.
 
     Args:
         num_train_timesteps: Training timestep resolution (default 1000).

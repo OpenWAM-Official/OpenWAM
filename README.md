@@ -195,13 +195,13 @@ device: cuda:0
 server: { host: "0.0.0.0", port: 8848 }
 
 inference:
-  denoise_steps: 10       # denoising steps (FastWAM-Joint default)
-  schedule_type: sync     # sync (lockstep) | variance_shift (Latent-Forcing ordered; joint_self_attn ckpts)
-  vs_lead: video          # variance_shift only: which stream denoises first (action | video)
-  vs_alpha: 1.0           # variance_shift only: lead-curve strength (>1 leads; 1 = sync diagonal)
-  vs_offset: 0.0          # variance_shift only: delay the lag stream's start (0 = pure curve)
-  execution_mode: sync    # sync | async
-  execution_horizon: null # async only: actions per chunk (null = policy default)
+  denoise_steps: 10             # denoising steps
+  denoise_mode: sync            # sync | async
+  lead_modality: video          # async denoising only: action | video
+  variance_shift_alpha: 1.0     # async denoising only: lead curve shift
+  linear_offset: 0.0            # async denoising only: lag start delay
+  inference_mode: sync          # sync | async
+  inference_horizon: null       # async inference only: actions per chunk
   inference_delay_steps: null
 
 optimization:
@@ -218,7 +218,7 @@ Common per-launch CLI overrides:
 ```bash
 bash scripts/deploy.sh /path/to/checkpoint_dir \
   --device cuda:1 --port 9000 \
-  --denoise-steps 10 --schedule-type sync \
+  --denoise-steps 10 --denoise-mode sync \
   --compile-mode auto \
   --ckpt-name checkpoint_step_10000.safetensors
 ```

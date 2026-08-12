@@ -1,5 +1,4 @@
-"""Verify that the sync and variance_shift schedules produce valid output and
-that removed strategies are rejected loudly."""
+"""Verify synchronous and asynchronous denoising schedules."""
 
 import pytest
 
@@ -7,8 +6,7 @@ import pytest
 def _two_schedulers():
     """Build a (video, action) scheduler pair for tests.
 
-    Both implement the same shifted-sigmoid Wan-equivalent formula, so
-    schedule outputs are identical to the legacy single-template path.
+    Both implement the same shifted-sigmoid Wan-equivalent formula.
     """
     from openwam.model.action_backbone.scheduler import ActionScheduler
     from openwam.model.video_backbone.wan.shared.diffusion import FlowMatchScheduler
@@ -49,20 +47,6 @@ def test_make_schedule_sync():
     assert result[-1] == (0.0, 0.0)
 
 
-@pytest.mark.parametrize(
-    "removed",
-    ["video_leading", "cascade", "action_only", "independent", "bogus"],
-)
-def test_make_schedule_rejects_removed_strategies(removed):
-    from openwam.deploy.denoise_schedule import make_schedule
-
-    # make_schedule raises on an unknown strategy before touching the
-    # schedulers, so a lightweight stub pair suffices.
-    v, a = _two_stub_schedulers()
-    with pytest.raises(NotImplementedError, match="not supported"):
-        make_schedule(removed, v, a, num_steps=20, shift=5.0)
-
-
 def test_build_timestep_sampler_default_is_none():
     from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
 
@@ -80,11 +64,11 @@ def test_build_timestep_sampler_rejects_unknown():
         build_timestep_sampler("independent_uniform_shift")
 
 
-def test_make_schedule_variance_shift_structure():
+def test_make_schedule_async_structure():
     from openwam.deploy.denoise_schedule import make_schedule
 
     v, a = _two_stub_schedulers()
-    result = make_schedule("variance_shift", v, a, num_steps=20, lead="action", alpha=9.0)
+    result = make_schedule("async", v, a, num_steps=20, lead="action", alpha=9.0)
     assert len(result) == 21  # num_steps pairs + (0.0, 0.0) sentinel
     assert result[-1] == (0.0, 0.0)
 
@@ -118,7 +102,7 @@ def test_variance_shift_alpha1_matches_sync_bitwise():
     v, a = _two_schedulers()
     sync = make_schedule("sync", v, a, num_steps=50, shift=5.0, shift_video=3.0)
     for lead in ("video", "action"):
-        vs = make_schedule("variance_shift", v, a, num_steps=50, shift=5.0, shift_video=3.0, lead=lead, alpha=1.0)
+        vs = make_schedule("async", v, a, num_steps=50, shift=5.0, shift_video=3.0, lead=lead, alpha=1.0)
         assert vs == sync  # exact float equality, not approx
 
 
@@ -164,8 +148,8 @@ def test_schedule_variance_shift_offset_zero_is_noop_bitwise():
     from openwam.deploy.denoise_schedule import make_schedule
 
     v, a = _two_schedulers()
-    default = make_schedule("variance_shift", v, a, num_steps=50, shift=5.0, lead="action", alpha=9.0)
-    explicit = make_schedule("variance_shift", v, a, num_steps=50, shift=5.0, lead="action", alpha=9.0, offset=0.0)
+    default = make_schedule("async", v, a, num_steps=50, shift=5.0, lead="action", alpha=9.0)
+    explicit = make_schedule("async", v, a, num_steps=50, shift=5.0, lead="action", alpha=9.0, offset=0.0)
     assert explicit == default  # exact float equality, not approx
 
 

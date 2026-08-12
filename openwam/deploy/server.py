@@ -438,34 +438,34 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Override inference.denoise_steps",
     )
     parser.add_argument(
-        "--schedule-type",
+        "--denoise-mode",
         type=str,
-        choices=["sync", "variance_shift"],
+        choices=["sync", "async"],
         default=None,
-        dest="schedule_type",
-        help="Override inference.schedule_type: 'sync' | 'variance_shift' (Latent-Forcing ordered)",
+        dest="denoise_mode",
+        help="Override inference.denoise_mode.",
     )
     parser.add_argument(
-        "--vs-lead",
+        "--lead-modality",
         type=str,
         choices=["action", "video"],
         default=None,
-        dest="vs_lead",
-        help="Override inference.vs_lead (variance_shift only): which stream denoises earlier",
+        dest="lead_modality",
+        help="Override inference.lead_modality (async denoising only).",
     )
     parser.add_argument(
-        "--vs-alpha",
+        "--variance-shift-alpha",
         type=float,
         default=None,
-        dest="vs_alpha",
-        help="Override inference.vs_alpha (variance_shift only): lead-curve strength (>1 leads; 1 = diagonal)",
+        dest="variance_shift_alpha",
+        help="Override inference.variance_shift_alpha (async denoising only).",
     )
     parser.add_argument(
-        "--vs-offset",
+        "--linear-offset",
         type=float,
         default=None,
-        dest="vs_offset",
-        help="Override inference.vs_offset (variance_shift only): delay the lagging stream's start (0..1)",
+        dest="linear_offset",
+        help="Override inference.linear_offset (async denoising only).",
     )
     parser.add_argument(
         "--compile-enabled",
@@ -474,18 +474,18 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Enable architecture-specific compile fast paths: true or false.",
     )
     parser.add_argument(
-        "--execution-mode",
+        "--inference-mode",
         choices=("sync", "async"),
         default=None,
-        dest="execution_mode",
-        help="Override inference.execution_mode.",
+        dest="inference_mode",
+        help="Override inference.inference_mode.",
     )
     parser.add_argument(
-        "--execution-horizon",
+        "--inference-horizon",
         type=int,
         default=None,
-        dest="execution_horizon",
-        help="Override inference.execution_horizon (async only).",
+        dest="inference_horizon",
+        help="Override inference.inference_horizon (async only).",
     )
     parser.add_argument(
         "--inference-delay-steps",
@@ -503,7 +503,7 @@ def _build_argparser() -> argparse.ArgumentParser:
 
 
 def _apply_execution_cli_overrides(cfg, args):
-    """Apply execution-mode CLI flags to the deploy config."""
+    """Apply inference executor CLI flags to the deploy config."""
     from openwam.deploy.executors import apply_execution_cli_overrides
 
     return apply_execution_cli_overrides(cfg, args)
@@ -527,14 +527,14 @@ def _apply_inference_overrides(cfg, args):
 
     if args.denoise_steps is not None:
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
-    if args.schedule_type is not None:
-        OmegaConf.update(cfg, "inference.schedule_type", args.schedule_type, merge=False)
-    if args.vs_lead is not None:
-        OmegaConf.update(cfg, "inference.vs_lead", args.vs_lead, merge=False)
-    if args.vs_alpha is not None:
-        OmegaConf.update(cfg, "inference.vs_alpha", args.vs_alpha, merge=False)
-    if args.vs_offset is not None:
-        OmegaConf.update(cfg, "inference.vs_offset", args.vs_offset, merge=False)
+    if args.denoise_mode is not None:
+        OmegaConf.update(cfg, "inference.denoise_mode", args.denoise_mode, merge=False)
+    if args.lead_modality is not None:
+        OmegaConf.update(cfg, "inference.lead_modality", args.lead_modality, merge=False)
+    if args.variance_shift_alpha is not None:
+        OmegaConf.update(cfg, "inference.variance_shift_alpha", args.variance_shift_alpha, merge=False)
+    if args.linear_offset is not None:
+        OmegaConf.update(cfg, "inference.linear_offset", args.linear_offset, merge=False)
     return cfg
 
 
@@ -585,9 +585,9 @@ def main(argv: Optional[list[str]] = None):
         ckpt_name=args.ckpt_name,
     )
     logging.getLogger("deploy").info(
-        "Inference engine ready — steps=%d schedule=%s",
+        "Inference engine ready — steps=%d denoise_mode=%s",
         OmegaConf.select(server.cfg, "inference.denoise_steps", default=20),
-        OmegaConf.select(server.cfg, "inference.schedule_type", default="sync"),
+        OmegaConf.select(server.cfg, "inference.denoise_mode", default="sync"),
     )
     server.run(host=host, port=port)
 

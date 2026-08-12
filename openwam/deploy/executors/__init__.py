@@ -4,7 +4,7 @@ Two interchangeable mechanisms behind one interface
 (``predict_action(conditions)`` / ``reset()`` / ``shutdown()``):
 :class:`SyncInferenceExecutor` (default; buffer-and-replan) and
 :class:`AsyncInferenceExecutor` (threaded prefetch). Selected via
-``inference.execution_mode``.
+``inference.inference_mode``.
 """
 
 from openwam.deploy.executors.async_executor import (

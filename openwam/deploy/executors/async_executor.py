@@ -23,15 +23,15 @@ from openwam.deploy.engine import BaseInferenceEngine
 logger = logging.getLogger(__name__)
 
 VALID_EXECUTION_MODES = ("sync", "async")
-EXECUTION_CLI_NUMERIC_OVERRIDES = ("execution_horizon", "inference_delay_steps")
+EXECUTION_CLI_NUMERIC_OVERRIDES = ("inference_horizon", "inference_delay_steps")
 
 
 @dataclass(frozen=True)
 class ExecutionConfig:
-    """Normalized execution-mode config; horizon/delay fields apply to async mode only."""
+    """Normalized inference executor config."""
 
     mode: str = "sync"
-    execution_horizon: Optional[int] = None
+    inference_horizon: Optional[int] = None
     inference_delay_steps: Optional[int] = None
 
     @property
@@ -84,32 +84,32 @@ def normalize_execution_config(exec_cfg=None, policy_cfg=None) -> ExecutionConfi
     mode = _select(exec_cfg, "mode", default=None)
     mode = "sync" if mode is None else str(mode).strip().lower()
     if mode not in VALID_EXECUTION_MODES:
-        raise ValueError(f"Unsupported execution mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
+        raise ValueError(f"Unsupported inference mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
 
-    execution_horizon = _select(exec_cfg, "execution_horizon", default=None)
-    if execution_horizon is None:
-        execution_horizon = _select(policy_cfg, "execute_horizon", default=None)
+    inference_horizon = _select(exec_cfg, "inference_horizon", default=None)
+    if inference_horizon is None:
+        inference_horizon = _select(policy_cfg, "execute_horizon", default=None)
 
     inference_delay_steps = _select(exec_cfg, "inference_delay_steps", default=None)
 
-    execution_horizon = _coerce_optional_int(execution_horizon, "execution_horizon")
+    inference_horizon = _coerce_optional_int(inference_horizon, "inference_horizon")
     inference_delay_steps = _coerce_optional_int(inference_delay_steps, "inference_delay_steps")
 
     if mode == "async":
-        if execution_horizon is not None and execution_horizon <= 0:
-            raise ValueError("execution_horizon must be positive")
+        if inference_horizon is not None and inference_horizon <= 0:
+            raise ValueError("inference_horizon must be positive")
         if inference_delay_steps is not None and inference_delay_steps < 0:
             raise ValueError("inference_delay_steps must be non-negative")
         if (
-            execution_horizon is not None
+            inference_horizon is not None
             and inference_delay_steps is not None
-            and inference_delay_steps >= execution_horizon
+            and inference_delay_steps >= inference_horizon
         ):
-            raise ValueError("inference_delay_steps must be < execution_horizon")
+            raise ValueError("inference_delay_steps must be < inference_horizon")
 
     return ExecutionConfig(
         mode=mode,
-        execution_horizon=execution_horizon,
+        inference_horizon=inference_horizon,
         inference_delay_steps=inference_delay_steps,
     )
 
@@ -121,49 +121,44 @@ def _arg_value(args, name: str, default=None):
 
 
 def apply_execution_cli_overrides(root_cfg, args):
-    """Apply execution-mode CLI flags to ``cfg.inference`` and validate."""
+    """Apply inference executor CLI flags to ``cfg.inference`` and validate."""
     from omegaconf import OmegaConf
 
-    execution_mode = _arg_value(args, "execution_mode")
-    if execution_mode is not None:
-        mode = str(execution_mode).strip().lower()
+    inference_mode = _arg_value(args, "inference_mode")
+    if inference_mode is not None:
+        mode = str(inference_mode).strip().lower()
         if mode not in VALID_EXECUTION_MODES:
-            raise ValueError(f"Unsupported execution mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
-        OmegaConf.update(root_cfg, "inference.execution_mode", mode, merge=False)
+            raise ValueError(f"Unsupported inference mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
+        OmegaConf.update(root_cfg, "inference.inference_mode", mode, merge=False)
 
     has_timing_override = any(_arg_value(args, name) is not None for name in EXECUTION_CLI_NUMERIC_OVERRIDES)
     if has_timing_override:
         resolved = resolve_execution_config(root_cfg)
         if resolved.mode != "async":
             raise ValueError(
-                "--execution-horizon and --inference-delay-steps require "
-                "--execution-mode async or inference.execution_mode=async"
+                "--inference-horizon and --inference-delay-steps require "
+                "--inference-mode async or inference.inference_mode=async"
             )
 
-    execution_horizon = _arg_value(args, "execution_horizon")
-    if execution_horizon is not None:
-        OmegaConf.update(root_cfg, "inference.execution_horizon", execution_horizon, merge=False)
+    inference_horizon = _arg_value(args, "inference_horizon")
+    if inference_horizon is not None:
+        OmegaConf.update(root_cfg, "inference.inference_horizon", inference_horizon, merge=False)
 
     inference_delay_steps = _arg_value(args, "inference_delay_steps")
     if inference_delay_steps is not None:
         OmegaConf.update(root_cfg, "inference.inference_delay_steps", inference_delay_steps, merge=False)
 
-    if execution_mode is not None or has_timing_override:
+    if inference_mode is not None or has_timing_override:
         resolve_execution_config(root_cfg)
 
     return root_cfg
 
 
 def resolve_execution_config(root_cfg, policy_cfg=None) -> ExecutionConfig:
-    """Resolve ``inference.execution_*`` from the config tree; reject the removed legacy section."""
-    if _select(root_cfg, "optimization.async_inference", default=None) is not None:
-        raise ValueError(
-            "optimization.async_inference has been removed; use inference.execution_mode "
-            "(sync|async) + inference.execution_horizon / inference.inference_delay_steps."
-        )
+    """Resolve executor settings from the inference config."""
     exec_cfg = {
-        "mode": _select(root_cfg, "inference.execution_mode", default=None),
-        "execution_horizon": _select(root_cfg, "inference.execution_horizon", default=None),
+        "mode": _select(root_cfg, "inference.inference_mode", default=None),
+        "inference_horizon": _select(root_cfg, "inference.inference_horizon", default=None),
         "inference_delay_steps": _select(root_cfg, "inference.inference_delay_steps", default=None),
     }
     return normalize_execution_config(exec_cfg, policy_cfg=policy_cfg)
@@ -174,27 +169,27 @@ class AsyncInferenceExecutor:
 
     Args:
         engine: Inference engine to run.
-        execution_horizon: Number of actions to execute from each generated
+        inference_horizon: Number of actions to execute from each generated
             chunk before switching to a fresh chunk. ``None`` means use the
             generated action horizon.
         inference_delay_steps: Expected inference latency expressed in action
             steps. ``None`` chooses a conservative auto threshold of half the
-            resolved execution horizon.
+            resolved inference horizon.
     """
 
     def __init__(
         self,
         engine: BaseInferenceEngine,
-        execution_horizon: Optional[int] = None,
+        inference_horizon: Optional[int] = None,
         inference_delay_steps: Optional[int] = None,
     ):
         self.engine = engine
-        if execution_horizon is not None and execution_horizon <= 0:
-            raise ValueError("execution_horizon must be positive")
+        if inference_horizon is not None and inference_horizon <= 0:
+            raise ValueError("inference_horizon must be positive")
         if inference_delay_steps is not None and inference_delay_steps < 0:
             raise ValueError("inference_delay_steps must be non-negative")
 
-        self.execution_horizon = execution_horizon
+        self.inference_horizon = inference_horizon
         self.inference_delay_steps = inference_delay_steps
         self._background_enabled = True
 
@@ -206,7 +201,7 @@ class AsyncInferenceExecutor:
         self._lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self._action_horizon: Optional[int] = None
-        self._resolved_execution_horizon: Optional[int] = execution_horizon
+        self._resolved_inference_horizon: Optional[int] = inference_horizon
         self._resolved_inference_delay_steps: Optional[int] = inference_delay_steps
         self._current_step = 0
         self._last_skip_steps = 0
@@ -266,32 +261,32 @@ class AsyncInferenceExecutor:
         if action_horizon <= 0:
             raise RuntimeError("Inference result did not contain any actions")
 
-        execution_horizon = self._resolve_execution_horizon(action_horizon)
-        inference_delay_steps = self._resolve_inference_delay_steps(execution_horizon)
+        inference_horizon = self._resolve_inference_horizon(action_horizon)
+        inference_delay_steps = self._resolve_inference_delay_steps(inference_horizon)
 
         self._action_horizon = action_horizon
-        self._resolved_execution_horizon = execution_horizon
+        self._resolved_inference_horizon = inference_horizon
         self._resolved_inference_delay_steps = inference_delay_steps
         self._last_skip_steps = int(skip_steps)
         self._action_buffer.clear()
         start = int(skip_steps)
-        end = min(action_horizon, start + execution_horizon)
+        end = min(action_horizon, start + inference_horizon)
         if start >= end:
             raise RuntimeError(f"Async inference result is stale: skip_steps={start}, action_horizon={action_horizon}")
         for action in actions[start:end]:
             self._action_buffer.append(action)
 
-    def _resolve_execution_horizon(self, action_horizon: int) -> int:
-        execution_horizon = self.execution_horizon if self.execution_horizon is not None else action_horizon
-        if execution_horizon > action_horizon:
-            raise ValueError(f"execution_horizon ({execution_horizon}) must be <= action horizon ({action_horizon})")
-        return execution_horizon
+    def _resolve_inference_horizon(self, action_horizon: int) -> int:
+        inference_horizon = self.inference_horizon if self.inference_horizon is not None else action_horizon
+        if inference_horizon > action_horizon:
+            raise ValueError(f"inference_horizon ({inference_horizon}) must be <= action horizon ({action_horizon})")
+        return inference_horizon
 
-    def _resolve_inference_delay_steps(self, execution_horizon: int) -> int:
+    def _resolve_inference_delay_steps(self, inference_horizon: int) -> int:
         if self.inference_delay_steps is None:
-            return max(0, execution_horizon // 2)
-        if self.inference_delay_steps >= execution_horizon:
-            raise ValueError("inference_delay_steps must be < execution_horizon")
+            return max(0, inference_horizon // 2)
+        if self.inference_delay_steps >= inference_horizon:
+            raise ValueError("inference_delay_steps must be < inference_horizon")
         return self.inference_delay_steps
 
     def _maybe_start_async_inference(self, conditions: dict):
@@ -354,7 +349,7 @@ class AsyncInferenceExecutor:
             pending_start_step = self._pending_start_step
             current_step = self._current_step
             action_horizon = self._action_horizon
-            execution_horizon = self._resolved_execution_horizon
+            inference_horizon = self._resolved_inference_horizon
             inference_delay_steps = self.inference_delay_steps
             resolved_inference_delay_steps = self._resolved_inference_delay_steps
             last_skip_steps = self._last_skip_steps
@@ -370,7 +365,7 @@ class AsyncInferenceExecutor:
             "pending_start_step": pending_start_step,
             "current_step": current_step,
             "action_horizon": action_horizon,
-            "execution_horizon": execution_horizon,
+            "inference_horizon": inference_horizon,
             "inference_delay_steps": inference_delay_steps,
             "resolved_inference_delay_steps": resolved_inference_delay_steps,
             "lead_time_steps": resolved_inference_delay_steps,

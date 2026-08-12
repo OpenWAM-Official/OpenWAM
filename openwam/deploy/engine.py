@@ -254,16 +254,11 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - width (int, optional): defaults from cfg
                 - seed (int, optional): random seed, default 42
                 - tiled (bool, optional): tiled VAE decoding, default True
-                - input_video_latents (Tensor, optional): for action_only mode
-                - schedule_type (str, optional): override schedule type
-                  ("sync" lockstep | "variance_shift" Latent-Forcing ordered
-                  curve/offset)
-                - vs_lead (str, optional): "variance_shift" only — which stream
-                  denoises earlier ("action" | "video")
-                - vs_alpha (float, optional): "variance_shift" only — lead-curve
-                  strength (>1 leads; 1 = sync diagonal)
-                - vs_offset (float, optional): "variance_shift" only — delay the
-                  lag stream's start (0 = pure curve; >0 = piecewise offset)
+                - input_video_latents (Tensor, optional): precomputed video latents
+                - denoise_mode (str, optional): "sync" or "async"
+                - lead_modality (str, optional): "async" only; "action" or "video"
+                - variance_shift_alpha (float, optional): "async" only; lead curve shift
+                - linear_offset (float, optional): "async" only; lag start delay
                 - denoise_steps (int, optional): override num denoising steps
 
         Returns:
@@ -271,16 +266,11 @@ class JointInferenceEngine(BaseInferenceEngine):
         """
         inf_cfg = self.cfg.inference
 
-        # Build schedule: "sync" (lockstep) or "variance_shift" (Latent-Forcing
-        # ordered trajectory); make_schedule raises on anything else.
-        schedule_type = conditions.get("schedule_type", inf_cfg.schedule_type)
+        denoise_mode = conditions.get("denoise_mode", inf_cfg.denoise_mode)
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
-        # ``variance_shift`` controls (Latent-Forcing-style ordered trajectory):
-        # which stream denoises earlier + curve strength + optional offset.
-        # Ignored by sync.
-        vs_lead = conditions.get("vs_lead", getattr(inf_cfg, "vs_lead", "video"))
-        vs_alpha = conditions.get("vs_alpha", getattr(inf_cfg, "vs_alpha", 1.0))
-        vs_offset = conditions.get("vs_offset", getattr(inf_cfg, "vs_offset", 0.0))
+        lead_modality = conditions.get("lead_modality", getattr(inf_cfg, "lead_modality", "video"))
+        variance_shift_alpha = conditions.get("variance_shift_alpha", getattr(inf_cfg, "variance_shift_alpha", 1.0))
+        linear_offset = conditions.get("linear_offset", getattr(inf_cfg, "linear_offset", 0.0))
         # Single source of truth for each stream's α-shift is the backbone
         # property — ``action_backbone.shift_action`` and
         # ``video_backbone.shift_video`` — set via the model yaml and saved in
@@ -300,15 +290,15 @@ class JointInferenceEngine(BaseInferenceEngine):
         )
 
         schedule = make_schedule(
-            schedule_type,
+            denoise_mode,
             video_scheduler=self.architecture.video_scheduler,
             action_scheduler=self.architecture.action_scheduler,
             num_steps=denoise_steps,
             shift=shift,
             shift_video=shift_video,
-            lead=vs_lead,
-            alpha=vs_alpha,
-            offset=vs_offset,
+            lead=lead_modality,
+            alpha=variance_shift_alpha,
+            offset=linear_offset,
         )
 
         # Reset dit cache for each generation

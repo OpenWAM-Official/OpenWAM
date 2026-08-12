@@ -73,11 +73,14 @@ class TestDeploymentYaml:
         assert OmegaConf.select(cfg, "inference.cfg_scale") is None
         assert OmegaConf.select(cfg, "inference.cfg_merge") is None
 
-    def test_inference_schedule_type(self):
+    def test_inference_denoise_mode(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "inference.schedule_type") is not None
+        assert OmegaConf.select(cfg, "inference.denoise_mode") == "sync"
+        assert OmegaConf.select(cfg, "inference.lead_modality") == "video"
+        assert OmegaConf.select(cfg, "inference.variance_shift_alpha") == 1.0
+        assert OmegaConf.select(cfg, "inference.linear_offset") == 0.0
 
     def test_optimization_section_exists(self):
         from omegaconf import OmegaConf
@@ -102,13 +105,13 @@ class TestDeploymentYaml:
         cfg = self._load()
         assert not OmegaConf.select(cfg, "optimization.dit_cache.enabled")
 
-    def test_execution_mode_defaults_sync(self):
+    def test_inference_mode_defaults_sync(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert OmegaConf.select(cfg, "inference.execution_mode") == "sync"
+        assert OmegaConf.select(cfg, "inference.inference_mode") == "sync"
+        assert OmegaConf.select(cfg, "inference.inference_horizon") is None
         assert OmegaConf.select(cfg, "inference.inference_delay_steps") is None
-        assert OmegaConf.select(cfg, "optimization.async_inference") is None
 
     def test_server_defaults_present(self):
         from omegaconf import OmegaConf
@@ -150,14 +153,14 @@ class TestDeployConfigLoading:
             "host",
             "port",
             "denoise_steps",
-            "schedule_type",
-            "vs_lead",
-            "vs_alpha",
-            "vs_offset",
+            "denoise_mode",
+            "lead_modality",
+            "variance_shift_alpha",
+            "linear_offset",
             "shift",
             "compile_enabled",
-            "execution_mode",
-            "execution_horizon",
+            "inference_mode",
+            "inference_horizon",
             "inference_delay_steps",
         ):
             setattr(args, attr, None)
@@ -196,14 +199,16 @@ class TestDeployConfigLoading:
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.schedule_type = "variance_shift"
-        args.vs_lead = "video"
-        args.vs_offset = 0.25
+        args.denoise_mode = "async"
+        args.lead_modality = "video"
+        args.variance_shift_alpha = 9.0
+        args.linear_offset = 0.25
 
         cfg = deploy._apply_inference_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "inference.schedule_type") == "variance_shift"
-        assert OmegaConf.select(cfg, "inference.vs_lead") == "video"
-        assert OmegaConf.select(cfg, "inference.vs_offset") == 0.25
+        assert OmegaConf.select(cfg, "inference.denoise_mode") == "async"
+        assert OmegaConf.select(cfg, "inference.lead_modality") == "video"
+        assert OmegaConf.select(cfg, "inference.variance_shift_alpha") == 9.0
+        assert OmegaConf.select(cfg, "inference.linear_offset") == 0.25
 
     def test_cli_compile_enabled_false_disables_compile(self):
         from omegaconf import OmegaConf
@@ -374,17 +379,17 @@ class TestDeployConfigLoading:
         with pytest.raises(SystemExit):
             policy_server._build_argparser().parse_args(["--compile-enabled", "self-attn"])
 
-    def test_cli_execution_mode_override(self):
+    def test_cli_inference_mode_override(self):
         from omegaconf import OmegaConf
 
         deploy = self._policy_server()
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.execution_mode = "async"
+        args.inference_mode = "async"
 
         cfg = deploy._apply_execution_cli_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "inference.execution_mode") == "async"
+        assert OmegaConf.select(cfg, "inference.inference_mode") == "async"
 
     def test_cli_execution_numeric_overrides(self):
         from omegaconf import OmegaConf
@@ -393,13 +398,13 @@ class TestDeployConfigLoading:
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.execution_mode = "async"
-        args.execution_horizon = 24
+        args.inference_mode = "async"
+        args.inference_horizon = 24
         args.inference_delay_steps = 6
 
         cfg = deploy._apply_execution_cli_overrides(cfg, args)
-        assert OmegaConf.select(cfg, "inference.execution_mode") == "async"
-        assert OmegaConf.select(cfg, "inference.execution_horizon") == 24
+        assert OmegaConf.select(cfg, "inference.inference_mode") == "async"
+        assert OmegaConf.select(cfg, "inference.inference_horizon") == 24
         assert OmegaConf.select(cfg, "inference.inference_delay_steps") == 6
 
     def test_cli_execution_numeric_overrides_require_async(self):
@@ -407,9 +412,9 @@ class TestDeployConfigLoading:
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.execution_horizon = 24
+        args.inference_horizon = 24
 
-        with pytest.raises(ValueError, match="--execution-mode async"):
+        with pytest.raises(ValueError, match="--inference-mode async"):
             deploy._apply_execution_cli_overrides(cfg, args)
 
     def test_cli_async_numeric_overrides_fail_fast_on_invalid_ranges(self):
@@ -417,17 +422,17 @@ class TestDeployConfigLoading:
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.execution_mode = "async"
-        args.execution_horizon = 0
-        with pytest.raises(ValueError, match="execution_horizon must be positive"):
+        args.inference_mode = "async"
+        args.inference_horizon = 0
+        with pytest.raises(ValueError, match="inference_horizon must be positive"):
             deploy._apply_execution_cli_overrides(cfg, args)
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
-        args.execution_mode = "async"
-        args.execution_horizon = 4
+        args.inference_mode = "async"
+        args.inference_horizon = 4
         args.inference_delay_steps = 4
-        with pytest.raises(ValueError, match="inference_delay_steps must be < execution_horizon"):
+        with pytest.raises(ValueError, match="inference_delay_steps must be < inference_horizon"):
             deploy._apply_execution_cli_overrides(cfg, args)
 
     def test_none_args_do_not_override(self):
@@ -445,10 +450,10 @@ class TestDeployConfigLoading:
             "host",
             "port",
             "denoise_steps",
-            "schedule_type",
+            "denoise_mode",
             "shift",
-            "execution_mode",
-            "execution_horizon",
+            "inference_mode",
+            "inference_horizon",
             "inference_delay_steps",
         ):
             setattr(args, attr, None)
@@ -516,7 +521,7 @@ class TestJointEngineCompileFlags:
             {
                 "inference": {
                     "denoise_steps": 10,
-                    "schedule_type": "sync",
+                    "denoise_mode": "sync",
                     "shift": 5.0,
                     "num_frames": 33,
                     "height": 384,

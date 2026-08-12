@@ -544,7 +544,7 @@ def _real_video_action_schedulers():
 
 @pytest.mark.parametrize("lead", ["action", "video"])
 def test_variance_shift_alpha1_equals_sync(lead):
-    """alpha=1 variance_shift must reproduce the sync schedule exactly.
+    """An alpha=1 async trajectory must reproduce the sync schedule exactly.
 
     Direction B puts each stream on ``alpha_shift(1 - u, shift_stream)`` with
     ``u = k/num_steps``; at ``alpha=1`` both streams take ``u``, which is what
@@ -555,7 +555,7 @@ def test_variance_shift_alpha1_equals_sync(lead):
     v, a = _real_video_action_schedulers()
     shift, num_steps = 5.0, 32
     sync = make_schedule("sync", v, a, num_steps=num_steps, shift=shift)
-    vs = make_schedule("variance_shift", v, a, num_steps=num_steps, shift=shift, lead=lead, alpha=1.0)
+    vs = make_schedule("async", v, a, num_steps=num_steps, shift=shift, lead=lead, alpha=1.0)
     assert len(sync) == len(vs)
     for (sv, sa), (vv, va) in zip(sync, vs):
         assert abs(sv - vv) < 1e-4 and abs(sa - va) < 1e-4

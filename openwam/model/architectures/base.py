@@ -1532,7 +1532,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if not video_stepping and not action_stepping:
                 continue
 
-            # A frozen stream (sigma plateau, e.g. vs_offset delay) still rides
+            # A frozen stream (sigma plateau, e.g. linear_offset delay) still rides
             # the forward context: under a v→a-visible attention mask, dropping
             # its tokens would change the other stream's prediction. Freezing
             # only gates the *update* below, never the forward inputs.

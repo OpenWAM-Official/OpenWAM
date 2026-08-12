@@ -187,9 +187,12 @@ while (( $# > 0 )); do
         --client-host)           SERVER_CLIENT_HOST="$2"; shift 2 ;;
         --ckpt-name)             DEPLOY_ARGS+=(--ckpt-name "$2"); shift 2 ;;
         --denoise-steps)         DEPLOY_ARGS+=(--denoise-steps "$2"); shift 2 ;;
-        --schedule-type)         DEPLOY_ARGS+=(--schedule-type "$2"); shift 2 ;;
-        --execution-mode)        DEPLOY_ARGS+=(--execution-mode "$2"); shift 2 ;;
-        --execution-horizon)     DEPLOY_ARGS+=(--execution-horizon "$2"); shift 2 ;;
+        --denoise-mode)          DEPLOY_ARGS+=(--denoise-mode "$2"); shift 2 ;;
+        --lead-modality)         DEPLOY_ARGS+=(--lead-modality "$2"); shift 2 ;;
+        --variance-shift-alpha)  DEPLOY_ARGS+=(--variance-shift-alpha "$2"); shift 2 ;;
+        --linear-offset)         DEPLOY_ARGS+=(--linear-offset "$2"); shift 2 ;;
+        --inference-mode)        DEPLOY_ARGS+=(--inference-mode "$2"); shift 2 ;;
+        --inference-horizon)     DEPLOY_ARGS+=(--inference-horizon "$2"); shift 2 ;;
         --inference-delay-steps) DEPLOY_ARGS+=(--inference-delay-steps "$2"); shift 2 ;;
         --shift)                 DEPLOY_ARGS+=(--shift "$2"); shift 2 ;;
         --test-num)              TEST_NUM="$2"; shift 2 ;;

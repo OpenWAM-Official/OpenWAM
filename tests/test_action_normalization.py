@@ -202,7 +202,7 @@ def test_joint_engine_normalizes_raw_deploy_state_before_generate():
     arch = _CaptureDeployArchitecture(normalizer)
     cfg = OmegaConf.create(
         {
-            "inference": {"denoise_steps": 2, "schedule_type": "sync", "shift": 5.0},
+            "inference": {"denoise_steps": 2, "denoise_mode": "sync", "shift": 5.0},
             "optimization": {"decode_video": False},
         }
     )

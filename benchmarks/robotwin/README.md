@@ -345,9 +345,12 @@ Server / deploy passthrough:
 | `--client-host` | `127.0.0.1` | Host RoboTwin clients use to reach their local server. |
 | `--ckpt-name` | latest checkpoint | Specific checkpoint filename passed to `scripts/deploy.py`. |
 | `--denoise-steps` | config default | Denoising step count passed to `scripts/deploy.py`. |
-| `--schedule-type` | config default | Schedule type passed to `scripts/deploy.py`. |
-| `--execution-mode` | config default | Execution mode (`sync`/`async`) passed to `scripts/deploy.py`. |
-| `--execution-horizon` | config default | Async execution horizon passed to `scripts/deploy.py`. |
+| `--denoise-mode` | config default | Denoising mode (`sync`/`async`). |
+| `--lead-modality` | config default | Leading modality for async denoising. |
+| `--variance-shift-alpha` | config default | Lead curve shift for async denoising. |
+| `--linear-offset` | config default | Lag start delay for async denoising. |
+| `--inference-mode` | config default | Inference mode (`sync`/`async`). |
+| `--inference-horizon` | config default | Async inference horizon. |
 | `--inference-delay-steps` | config default | Async inference delay passed to `scripts/deploy.py`. |
 | `--shift` | config default | Flow-matching shift passed to `scripts/deploy.py`. |
 | `--dry-run` | off | Skip servers/RoboTwin; run the dispatcher + simulated workers only. |

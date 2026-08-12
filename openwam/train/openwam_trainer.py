@@ -143,7 +143,7 @@ class OpenWAMTrainer:
         # bit-identical to upstream). "variance_shift" routes curve-correlated
         # per-stream timesteps through the decoupled_sampler hook
         # (Latent-Forcing; the training-time counterpart to the deploy
-        # schedule_type="variance_shift"). See
+        # denoise_mode="async"). See
         # openwam.model.architectures.utils.timestep_sampling.
         from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
 

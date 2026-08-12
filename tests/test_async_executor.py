@@ -73,7 +73,7 @@ class IndexedEngine(MockEngine):
 
 def test_async_executor_basic():
     engine = MockEngine(num_frames=5, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=5, inference_delay_steps=0)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=5, inference_delay_steps=0)
 
     action = executor.predict_action({"obs": "dummy"})
     assert action.shape == (7,)
@@ -83,7 +83,7 @@ def test_async_executor_basic():
 
 def test_async_executor_buffer_exhaustion_without_background():
     engine = MockEngine(num_frames=3, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=3, inference_delay_steps=0)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=3, inference_delay_steps=0)
     executor._background_enabled = False  # deterministic: no background generation
 
     for _ in range(3):
@@ -98,9 +98,9 @@ def test_async_executor_buffer_exhaustion_without_background():
     executor.shutdown()
 
 
-def test_async_executor_execution_horizon_discards_tail():
+def test_async_executor_inference_horizon_discards_tail():
     engine = MockEngine(num_frames=5, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=2, inference_delay_steps=0)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=2, inference_delay_steps=0)
     executor._background_enabled = False  # deterministic: no background generation
 
     for _ in range(2):
@@ -116,7 +116,7 @@ def test_async_executor_execution_horizon_discards_tail():
 
 def test_async_executor_starts_background_at_delay_threshold():
     engine = MockEngine(num_frames=5, latency=0.01)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=4, inference_delay_steps=2)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=4, inference_delay_steps=2)
 
     executor.predict_action({"obs": "step0"})
     assert executor.stats["num_background_inferences"] == 0
@@ -137,7 +137,7 @@ def test_async_executor_starts_background_at_delay_threshold():
 
 def test_async_executor_reset():
     engine = MockEngine(num_frames=5, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=5, inference_delay_steps=0)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=5, inference_delay_steps=0)
     executor._background_enabled = False  # deterministic: no background generation
 
     executor.predict_action({"obs": "dummy"})
@@ -149,7 +149,7 @@ def test_async_executor_reset():
 
 def test_async_executor_reset_drains_running_future_before_reuse():
     engine = BlockingSecondCallEngine()
-    executor = AsyncInferenceExecutor(engine, execution_horizon=2, inference_delay_steps=1)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=2, inference_delay_steps=1)
 
     executor.predict_action({"obs": "first"})
     executor.predict_action({"obs": "second"})
@@ -174,7 +174,7 @@ def test_async_executor_reset_drains_running_future_before_reuse():
 
 def test_async_executor_clears_failed_pending_future_before_reuse():
     engine = FailingSecondCallEngine()
-    executor = AsyncInferenceExecutor(engine, execution_horizon=2, inference_delay_steps=1)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=2, inference_delay_steps=1)
 
     np.testing.assert_allclose(executor.predict_action({"obs": "step0"}), np.ones(7) * 1.0)
     np.testing.assert_allclose(executor.predict_action({"obs": "step1"}), np.ones(7) * 1.0)
@@ -189,9 +189,9 @@ def test_async_executor_clears_failed_pending_future_before_reuse():
     executor.shutdown()
 
 
-def test_async_executor_switches_at_execution_horizon_and_skips_stale_prefix():
+def test_async_executor_switches_at_inference_horizon_and_skips_stale_prefix():
     engine = IndexedEngine(num_frames=10, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=6, inference_delay_steps=3)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=6, inference_delay_steps=3)
 
     np.testing.assert_allclose(executor.predict_action({"obs": "step0"}), [100.0])
     np.testing.assert_allclose(executor.predict_action({"obs": "step1"}), [101.0])
@@ -213,7 +213,7 @@ def test_async_executor_switches_at_execution_horizon_and_skips_stale_prefix():
 
 def test_async_executor_stats():
     engine = MockEngine(num_frames=3, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=3, inference_delay_steps=0)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=3, inference_delay_steps=0)
     executor._background_enabled = False  # deterministic: no background generation
 
     executor.predict_action({"obs": "dummy"})
@@ -221,15 +221,15 @@ def test_async_executor_stats():
     assert stats["num_inferences"] == 1
     assert stats["num_sync_inferences"] == 1
     assert stats["buffer_size"] == 2
-    assert stats["execution_horizon"] == 3
+    assert stats["inference_horizon"] == 3
     assert stats["resolved_inference_delay_steps"] == 0
 
     executor.shutdown()
 
 
-def test_async_executor_auto_delay_uses_half_execution_horizon():
+def test_async_executor_auto_delay_uses_half_inference_horizon():
     engine = MockEngine(num_frames=8, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=6, inference_delay_steps=None)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=6, inference_delay_steps=None)
     executor._background_enabled = False  # deterministic: no background generation
 
     executor.predict_action({"obs": "dummy"})
@@ -238,19 +238,19 @@ def test_async_executor_auto_delay_uses_half_execution_horizon():
     executor.shutdown()
 
 
-def test_async_executor_rejects_execution_horizon_larger_than_action_horizon():
+def test_async_executor_rejects_inference_horizon_larger_than_action_horizon():
     engine = MockEngine(num_frames=3, latency=0.0)
-    executor = AsyncInferenceExecutor(engine, execution_horizon=4, inference_delay_steps=0)
+    executor = AsyncInferenceExecutor(engine, inference_horizon=4, inference_delay_steps=0)
 
-    with pytest.raises(ValueError, match="execution_horizon"):
+    with pytest.raises(ValueError, match="inference_horizon"):
         executor.predict_action({"obs": "dummy"})
 
     executor.shutdown()
 
 
 @pytest.mark.parametrize("delay_steps", [4, 5])
-def test_async_config_rejects_delay_at_or_larger_than_execution_horizon(delay_steps):
-    cfg = {"mode": "async", "execution_horizon": 4, "inference_delay_steps": delay_steps}
+def test_async_config_rejects_delay_at_or_larger_than_inference_horizon(delay_steps):
+    cfg = {"mode": "async", "inference_horizon": 4, "inference_delay_steps": delay_steps}
 
     with pytest.raises(ValueError, match="inference_delay_steps"):
         normalize_execution_config(cfg)
@@ -258,9 +258,9 @@ def test_async_config_rejects_delay_at_or_larger_than_execution_horizon(delay_st
 
 @pytest.mark.parametrize("value", [1.2, "1.2"])
 def test_async_config_rejects_non_integral_step_values(value):
-    cfg = {"mode": "async", "execution_horizon": value, "inference_delay_steps": 0}
+    cfg = {"mode": "async", "inference_horizon": value, "inference_delay_steps": 0}
 
-    with pytest.raises(ValueError, match="execution_horizon must be an integer"):
+    with pytest.raises(ValueError, match="inference_horizon must be an integer"):
         normalize_execution_config(cfg)
 
 
@@ -273,10 +273,10 @@ def test_unrelated_config_resolves_to_sync():
 
 
 def test_async_config_dataclass_roundtrip_preserves_delay_settings():
-    cfg = normalize_execution_config({"mode": "async", "execution_horizon": 8, "inference_delay_steps": 4})
+    cfg = normalize_execution_config({"mode": "async", "inference_horizon": 8, "inference_delay_steps": 4})
 
     roundtrip = normalize_execution_config(cfg)
-    assert roundtrip.execution_horizon == 8
+    assert roundtrip.inference_horizon == 8
     assert roundtrip.inference_delay_steps == 4
 
 

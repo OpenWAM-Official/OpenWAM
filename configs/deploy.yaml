@@ -6,21 +6,17 @@ server:
   port: 8848                   # WebSocket port
 
 # --- Inference (cfg.inference) ---
-# Every field has a same-name CLI override (--denoise-steps, --execution-mode, ...).
+# Every field has a same-name CLI override (--denoise-steps, --inference-mode, ...).
 inference:
-  denoise_steps: 10           # Denoising steps (FastWAM-Joint default)
-  schedule_type: sync         # Within one denoise pass: how video/action timesteps advance (NOT execution_mode below).
-                              #   <sync>           both streams lockstep (default)
-                              #   <variance_shift> Latent-Forcing ordered trajectory: one stream
-                              #                    denoises earlier (curve, see vs_* below)
-  # --- variance_shift (Latent-Forcing) only ---
-  vs_lead: video              # which stream denoises first  <action> | <video>
-  vs_alpha: 1.0               # lead-curve strength  (>1 leads; 1 = diagonal = sync)
-  vs_offset: 0.0              # 0 = pure curve; >0 = delay the lagging stream's start (piecewise)
+  denoise_steps: 10
+  denoise_mode: sync          # sync | async
+  lead_modality: video        # denoise_mode=async: action | video
+  variance_shift_alpha: 1.0   # denoise_mode=async: lead curve shift; 1 = none
+  linear_offset: 0.0          # denoise_mode=async: lag start delay; 0 = none
 
-  execution_mode: sync        # sync | async — Sync/AsyncInferenceExecutor
-  execution_horizon: null     # async only: actions per chunk; null = policy.execute_horizon
-  inference_delay_steps: null # async only: inference latency in steps; null = half horizon
+  inference_mode: sync        # sync | async
+  inference_horizon: null     # inference_mode=async: actions per chunk
+  inference_delay_steps: null # inference_mode=async: latency in steps
 
 # --- Deploy-time optimizations (cfg.optimization) ---
 optimization:

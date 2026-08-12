@@ -35,7 +35,7 @@ class WAMPolicy:
             - ``ensemble_decay``: Exponential decay weight for older
               predictions.  Lower = trust newer predictions more (default 0.5).
         execution_config: ExecutionConfig-like (mode sync|async +
-            execution_horizon / inference_delay_steps, async-only).
+            inference_horizon / inference_delay_steps, async-only).
     """
 
     def __init__(self, engine: BaseInferenceEngine, cfg, execution_config=None):
@@ -47,7 +47,7 @@ class WAMPolicy:
         if self._async:
             self._executor = AsyncInferenceExecutor(
                 engine=engine,
-                execution_horizon=self._execution_config.execution_horizon,
+                inference_horizon=self._execution_config.inference_horizon,
                 inference_delay_steps=self._execution_config.inference_delay_steps,
             )
         else:
