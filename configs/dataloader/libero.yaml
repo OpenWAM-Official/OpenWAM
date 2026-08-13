@@ -9,6 +9,8 @@ dataset_dir: /path/to/libero
 # [xyz3, rot6d6, gripper1]. Proprio is the achieved observation.state rendered
 # to EEF10; the action target is the NEXT frame's achieved pose plus the
 # recorded gripper command (the eval bridge inverts back to the 7-D OSC delta).
+# The gripper channel is an OPEN-SCALE (-1 = closed, +1 = open), matching the
+# pretraining mixture and inverted from LIBERO's own action[6] (+1 = close).
 action_mode: eef
 
 # Normalize raw EEF10 first, then scatter into the unified 80-D left-arm slots.
@@ -51,7 +53,9 @@ enable_action_supervision: true
 #     --output /path/to/libero_normalization_stats.npy
 normalize_mode: min-max
 # The stats pool action targets and achieved proprio into one global `eef`
-# block; both directions use this same transform.
+# block; both directions use this same transform. The block records the gripper
+# direction it was computed under; a file predating the open-scale flip is
+# rejected under z-score (its `mean` is stale) and warned about otherwise.
 
 # Load-time, temporally consistent augmentation (train split only).
 color_jitter:

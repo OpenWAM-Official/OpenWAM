@@ -16,11 +16,13 @@ from PIL import Image
 from openwam.dataloader.libero import (
     ACTION7_DIM,
     EEF10_DIM,
+    GRIPPER_CONVENTION,
     LIBERO_GRIPPER_WIDTH_OPEN,
     ROT6D_DIMS_EEF10,
     STATE8_DIM,
     LiberoDataset,
     MultiLiberoDataset,
+    gripper_cmd_to_open_scale,
     gripper_qpos_to_cmd,
     state8_to_eef10,
 )
@@ -146,6 +148,7 @@ def _unit_stats(scale: float = 2.0) -> dict:
         "std": np.full(EEF10_DIM, scale, dtype=np.float32),
         "q01": np.full(EEF10_DIM, -scale, dtype=np.float32),
         "q99": np.full(EEF10_DIM, scale, dtype=np.float32),
+        "gripper_convention": GRIPPER_CONVENTION,
     }
     pin_rot6d_identity(stats, ROT6D_DIMS_EEF10)
     return stats
@@ -174,9 +177,25 @@ def test_state8_to_eef10_rot6d_orthonormal_and_gripper_command():
     # Zero rotation -> identity rot6d.
     identity = state8_to_eef10(np.zeros((1, STATE8_DIM), dtype=np.float32))
     np.testing.assert_allclose(identity[0, 3:9], [1, 0, 0, 0, 1, 0], atol=1e-7)
-    # Gripper: fully open width -> -1, closed -> +1 (matches action[6] convention).
-    assert gripper_qpos_to_cmd(np.array(LIBERO_GRIPPER_WIDTH_OPEN)) == -1.0
-    assert gripper_qpos_to_cmd(np.array(0.0)) == 1.0
+    # Gripper OPEN-SCALE: fully closed width -> -1, fully open -> +1. This is
+    # the opposite of LIBERO's recorded action[6] (+1 = close), which the reader
+    # negates via gripper_cmd_to_open_scale.
+    assert gripper_qpos_to_cmd(np.array(0.0)) == -1.0
+    assert gripper_qpos_to_cmd(np.array(LIBERO_GRIPPER_WIDTH_OPEN)) == 1.0
+    assert gripper_qpos_to_cmd(np.array(LIBERO_GRIPPER_WIDTH_OPEN / 2)) == 0.0
+    # Out-of-range widths clip to the endpoints rather than extrapolating.
+    assert gripper_qpos_to_cmd(np.array(-0.1)) == -1.0
+    assert gripper_qpos_to_cmd(np.array(0.2)) == 1.0
+
+
+def test_gripper_cmd_to_open_scale_negates_recorded_command():
+    # LIBERO records a binary +-1 command with +1 = close; the trained channel
+    # is +1 = open, so the render is a negation.
+    np.testing.assert_allclose(
+        gripper_cmd_to_open_scale(np.array([1.0, -1.0, 0.0], dtype=np.float32)),
+        [-1.0, 1.0, 0.0],
+        atol=1e-7,
+    )
 
 
 def test_libero_sample_uses_next_state_targets_and_eef10_proprio(tmp_path: Path):
@@ -197,7 +216,8 @@ def test_libero_sample_uses_next_state_targets_and_eef10_proprio(tmp_path: Path)
     achieved = state8_to_eef10(state)
     got = sample["action"].numpy()
     np.testing.assert_allclose(got[:, 0:9], achieved[1:5, 0:9], atol=1e-6)
-    np.testing.assert_allclose(got[:, 9], action7[0:4, 6], atol=1e-6)
+    # Action gripper is the recorded command negated into the open-scale.
+    np.testing.assert_allclose(got[:, 9], gripper_cmd_to_open_scale(action7[0:4, 6]), atol=1e-6)
     np.testing.assert_allclose(sample["proprio"].numpy()[0], achieved[0], atol=1e-6)
 
     assert sample["prompt"] == "pick up the red mug"
@@ -277,6 +297,34 @@ def test_action_and_state_use_one_global_normalization_stats_block(tmp_path: Pat
     rot = list(ROT6D_DIMS_EEF10)
     np.testing.assert_allclose(got_action[:, rot], raw_action[:, rot], atol=1e-6)
     np.testing.assert_allclose(got_proprio[:, rot], raw_proprio[:, rot], atol=1e-6)
+
+
+def test_stats_gripper_convention_guard(tmp_path: Path):
+    """A stats file bound to a different gripper direction must not be usable."""
+    _write_bucket(tmp_path)
+
+    mismatched = tmp_path / "mismatched_stats.npy"
+    stats = _unit_stats(2.0)
+    stats["gripper_convention"] = "plus1_closed_minus1_open"
+    np.save(mismatched, {"eef": stats})
+    with pytest.raises(ValueError, match="gripper_convention"):
+        _dataset(tmp_path, normalize_mode="min-max", normalization_stats_path=str(mismatched))
+
+    # No marker at all = pre-flip file. Only `mean` is stale, so min-max is
+    # allowed (with a warning) while z-score, which consumes `mean`, is not.
+    legacy = tmp_path / "legacy_stats.npy"
+    legacy_stats = _unit_stats(2.0)
+    del legacy_stats["gripper_convention"]
+    np.save(legacy, {"eef": legacy_stats})
+    _dataset(tmp_path, normalize_mode="min-max", normalization_stats_path=str(legacy))
+    with pytest.raises(ValueError, match="predate"):
+        _dataset(tmp_path, normalize_mode="z-score", normalization_stats_path=str(legacy))
+
+
+def test_generated_stats_record_the_gripper_convention(tmp_path: Path):
+    _write_bucket(tmp_path)
+    _, _, stats, _, _ = _compute_global_stats(_dataset(tmp_path), reservoir_cap=10_000)
+    assert stats["gripper_convention"] == GRIPPER_CONVENTION
 
 
 def test_missing_default_stats_are_auto_built_once(tmp_path: Path):

@@ -4,6 +4,7 @@ Targets the official ``nvidia/LIBERO_LeRobot_v3`` schema and the compatible
 ``HuggingFaceVLA/libero`` conversion:
 
 * action: 7-D OSC delta command ``[dpos3, drot_axis_angle3, gripper1]``
+  (the raw ``gripper1`` is LIBERO's own convention: ``+1 = close``)
 * observation.state: 8-D ``[eef_pos3, eef_axis_angle3, gripper_qpos2]`` (world frame)
 * observation.images.image: agent-view RGB
 * observation.images.wrist_image or image2: wrist RGB
@@ -11,24 +12,37 @@ Targets the official ``nvidia/LIBERO_LeRobot_v3`` schema and the compatible
 
 The reader trains on the repo-standard single-arm **EEF10** representation::
 
-    eef10 = [xyz(3), rot6d(6), gripper_cmd(1)]        (world frame, full pose)
+    eef10 = [xyz(3), rot6d(6), gripper_open_scale(1)]   (world frame, full pose)
+
+The trained gripper channel (dim 9) is an **open-scale**: ``-1 = closed,
++1 = open``. This is the direction the pretraining mixture uses (AgiBotWorld /
+RoboCOIN / DROID / InternData-A1 all emit ``0 = closed, 1 = open`` before
+normalization), and it is the OPPOSITE of LIBERO's own recorded command, whose
+raw ``action[6]`` is ``+1 = close``. Both the achieved proprio and the action
+target are rendered into the open-scale here, and the eval bridge negates it
+back to the env's command space — see :func:`gripper_qpos_to_cmd`,
+:func:`gripper_cmd_to_open_scale`, and
+``benchmarks.utils.action_conversion.libero_open_scale_to_gripper_cmd``.
 
 * PROPRIO at window frame 0: the achieved ``observation.state`` rendered to
-  EEF10 (axis-angle -> rot6d; finger separation width -> [-1, +1] command
-  space, +1 = close — the same convention as the recorded ``action[6]``).
+  EEF10 (axis-angle -> rot6d; finger separation width -> [-1, +1] open-scale,
+  +1 = open — the same channel convention as the action gripper).
 * ACTION target at step ``t``: the **next frame's achieved pose**
   (``state[t+1]`` -> xyz + rot6d) plus the **recorded gripper command**
-  ``action[t][6]`` — a full absolute pose target, NOT the env's per-step OSC
-  delta. The final window step has no ``t+1`` target and is masked out of the
-  loss (``_n_supervised_action_steps``). The eval bridge
-  (``benchmarks/utils/action_conversion.eef10_to_libero7d``) inverts the full
-  pose back to the env's 7-D OSC delta using live controller scales.
+  ``action[t][6]`` negated into the open-scale — a full absolute pose target,
+  NOT the env's per-step OSC delta. The final window step has no ``t+1`` target
+  and is masked out of the loss (``_n_supervised_action_steps``). The eval
+  bridge (``benchmarks/utils/action_conversion.eef10_to_libero7d``) inverts the
+  full pose back to the env's 7-D OSC delta using live controller scales, and
+  negates the gripper back to ``+1 = close``.
 
 ``unify_action: true`` scatters the 10 physical dims into the unified 80-D
 space via ``unify_action_map: ["0-9"]`` (left-arm slots; everything else stays
 masked). Action targets and achieved proprio share one global ``eef``
 normalization-statistics block computed from both pools; rot6d dims are pinned
-to identity.
+to identity. The stats block records :data:`GRIPPER_CONVENTION` so a stats file
+computed under the pre-flip (``+1 = close``) convention cannot be paired
+silently with open-scale data.
 """
 
 from __future__ import annotations
@@ -48,6 +62,7 @@ from openwam.dataloader.utils.normalization import (
     STAT_KEYS,
     apply_normalization,
     load_stats_file,
+    load_stats_metadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,10 +73,18 @@ STATE8_DIM = 8
 ACTION7_DIM = 7
 # Panda finger separation at fully open (m): gripper_qpos ~= [0.04, -0.04] open,
 # [~0, ~0] closed -> width = qpos[0] - qpos[1] in [0, 0.08]. Rendered into the
-# recorded command space (+1 = close, -1 = open) so proprio and action gripper
+# trained OPEN-SCALE (-1 = closed, +1 = open) so proprio and action gripper
 # share one convention. Kept in lockstep with
 # benchmarks/utils/action_conversion.LIBERO_GRIPPER_WIDTH_OPEN.
 LIBERO_GRIPPER_WIDTH_OPEN = 0.08
+
+# Direction of the trained gripper channel (EEF10 dim 9). Persisted into the
+# normalization stats payload by libero_stats_computation and verified at load
+# time: a stats file predating the open-scale flip carries a stale `mean` (the
+# quantity z-score consumes), and pairing it with open-scale data would offset
+# the gripper. min-max / quantile happen to be sign-symmetric here (min/max and
+# q01/q99 are +-1), so the guard warns rather than hard-fails on a legacy file.
+GRIPPER_CONVENTION = "minus1_closed_plus1_open"
 
 
 def axis_angle_to_matrix(aa: np.ndarray) -> np.ndarray:
@@ -99,23 +122,37 @@ def matrix_to_rot6d(R: np.ndarray) -> np.ndarray:
 
 
 def gripper_qpos_to_cmd(width: np.ndarray) -> np.ndarray:
-    """Achieved finger separation width -> [-1, +1] command space (+1 = close).
+    """Achieved finger separation width -> [-1, +1] open-scale (+1 = open).
 
-    Linear over ``[0, LIBERO_GRIPPER_WIDTH_OPEN]``, clipped. The eval client
-    reproduces this exactly (``benchmarks.utils.libero_gripper_qpos_to_cmd``).
+    Linear over ``[0, LIBERO_GRIPPER_WIDTH_OPEN]``, clipped: a fully closed
+    hand (width 0) renders to -1 and a fully open one (width 0.08) to +1. The
+    eval client reproduces this exactly
+    (``benchmarks.utils.libero_gripper_qpos_to_cmd``).
     """
-    return np.clip(1.0 - 2.0 * np.asarray(width, np.float64) / LIBERO_GRIPPER_WIDTH_OPEN, -1.0, 1.0).astype(
+    return np.clip(2.0 * np.asarray(width, np.float64) / LIBERO_GRIPPER_WIDTH_OPEN - 1.0, -1.0, 1.0).astype(
         np.float32
     )
+
+
+def gripper_cmd_to_open_scale(cmd: np.ndarray) -> np.ndarray:
+    """LIBERO's recorded gripper command (+1 = close) -> open-scale (+1 = open).
+
+    LIBERO records a binary +-1 command in ``action[6]``; the trained channel
+    runs the other way, so the render is a plain negation. The eval bridge's
+    ``libero_open_scale_to_gripper_cmd`` is its exact inverse — change the two
+    in lockstep.
+    """
+    return np.clip(-np.asarray(cmd, np.float64), -1.0, 1.0).astype(np.float32)
 
 
 def state8_to_eef10(state: np.ndarray) -> np.ndarray:
     """``(T, 8)`` observation.state -> ``(T, 10)`` raw EEF10 (achieved, unnormalized).
 
-    ``[pos3, rot6d(axis-angle), gripper_cmd]`` — the gripper is the ACHIEVED
-    finger-separation width rendered into command space. This is the PROPRIO
-    gripper; the ACTION gripper is replaced with the recorded command in
-    ``_action_20d`` (both live in the same [-1, +1] space).
+    ``[pos3, rot6d(axis-angle), gripper_open_scale]`` — the gripper is the
+    ACHIEVED finger-separation width rendered into the open-scale. This is the
+    PROPRIO gripper; the ACTION gripper is replaced with the negated recorded
+    command in ``_raw_action_eef10`` (both live in the same [-1, +1] open-scale,
+    -1 = closed).
     """
     state = np.asarray(state, dtype=np.float64)
     if state.ndim != 2 or state.shape[1] != STATE8_DIM:
@@ -274,8 +311,43 @@ class LiberoDataset(LeRobotV3Reader):
             normalize_mode=str(self._normalize_mode),
             dim=self._raw_action_dim,
         )
+        self._check_gripper_convention(stats_path)
         self._write_deploy_normalizer_stats(global_stats, STAT_KEYS)
         return global_stats
+
+    def _check_gripper_convention(self, stats_path: Path) -> None:
+        """Reject stats computed under a different gripper direction.
+
+        An explicit mismatch is fatal. A file with no marker predates the
+        open-scale flip: only its ``mean`` (z-score) is actually stale, since
+        min/max and q01/q99 are +-1 and therefore sign-symmetric — so warn, and
+        escalate to an error only for the mode that would really be distorted.
+        """
+        recorded = load_stats_metadata(stats_path, action_mode=self.action_mode).get("gripper_convention")
+        if recorded == GRIPPER_CONVENTION:
+            return
+        rebuild = (
+            "Rerun openwam.dataloader.utils.stats_computation.libero_stats_computation "
+            f"to regenerate {stats_path}."
+        )
+        if recorded is not None:
+            raise ValueError(
+                f"LIBERO stats {stats_path} declare gripper_convention={recorded!r}, but this "
+                f"reader emits {GRIPPER_CONVENTION!r}. {rebuild}"
+            )
+        if str(self._normalize_mode) == "z-score":
+            raise ValueError(
+                f"LIBERO stats {stats_path} carry no gripper_convention marker, so they predate "
+                f"the {GRIPPER_CONVENTION!r} flip; their `mean` has the wrong sign on the gripper "
+                f"dim and normalize_mode='z-score' consumes it. {rebuild}"
+            )
+        logger.warning(
+            "LIBERO stats %s carry no gripper_convention marker (they predate the %r flip). "
+            "min-max / quantile are sign-symmetric on this dim so training is unaffected, but %s",
+            stats_path,
+            GRIPPER_CONVENTION,
+            rebuild,
+        )
 
     def _build_default_stats(self, path: Path) -> None:
         """Build the default per-bucket stats file, coordinated across ranks.
@@ -334,15 +406,18 @@ class LiberoDataset(LeRobotV3Reader):
 
     def _raw_action_eef10(self, win) -> np.ndarray:
         """``(L, 10)`` raw absolute EEF10 targets: next-frame achieved pose +
-        recorded gripper command. The final row has no ``t+1`` and is a clamped
-        copy — it carries no supervision (see ``_n_supervised_action_steps``)."""
+        recorded gripper command rendered into the open-scale. The final row has
+        no ``t+1`` and is a clamped copy — it carries no supervision (see
+        ``_n_supervised_action_steps``)."""
         state = self._read_state8(win)
         action7 = self._read_action7(win)
         eef10 = state8_to_eef10(state)  # (L, 10) achieved
         target = np.empty_like(eef10)
         if eef10.shape[0] > 1:
             target[:-1, 0:9] = eef10[1:, 0:9]  # next-frame achieved pose
-            target[:-1, 9] = action7[:-1, 6]  # recorded gripper COMMAND (exact timing)
+            # Recorded gripper COMMAND at exact timing, negated: LIBERO records
+            # +1 = close, the trained channel is +1 = open.
+            target[:-1, 9] = gripper_cmd_to_open_scale(action7[:-1, 6])
         target[-1] = target[-2] if eef10.shape[0] > 1 else eef10[0]
         return target
 
@@ -401,12 +476,14 @@ ROT6D_DIMS_EEF10 = ROT6D_DIMS_ARM10
 __all__ = [
     "ACTION7_DIM",
     "EEF10_DIM",
+    "GRIPPER_CONVENTION",
     "LIBERO_GRIPPER_WIDTH_OPEN",
     "ROT6D_DIMS_EEF10",
     "STATE8_DIM",
     "LiberoDataset",
     "MultiLiberoDataset",
     "axis_angle_to_matrix",
+    "gripper_cmd_to_open_scale",
     "gripper_qpos_to_cmd",
     "matrix_to_rot6d",
     "state8_to_eef10",

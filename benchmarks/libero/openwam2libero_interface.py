@@ -15,6 +15,11 @@ model's unified output back to raw EEF10 and unnormalizes it, so this client:
   delta (``eef10_to_libero7d``) using the live controller scales, with the
   CURRENT achieved EEF pose as the delta reference.
 
+The trained gripper channel is an open-scale (``-1 = closed, +1 = open``);
+``eef10_to_libero7d`` negates it back to LIBERO's own ``+1 = close`` command, so
+nothing here handles the gripper directly. A checkpoint trained before that flip
+will drive the gripper inverted — retrain or pin an older client.
+
 ``action_mode: native`` keeps the legacy passthrough for checkpoints trained
 directly on the 7-D OSC command.
 """

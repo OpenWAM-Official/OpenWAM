@@ -113,7 +113,9 @@ def test_libero_policy_reuses_ws_and_rotates_images(monkeypatch):
         def predict(self, payload):
             self.predictions.append(payload)
             # Raw EEF10 full pose == the current obs pose (identity rot) -> the
-            # bridge must emit a zero OSC delta with the gripper passed through.
+            # bridge must emit a zero OSC delta. The trailing -1 is the trained
+            # open-scale gripper meaning CLOSED, which the bridge negates into
+            # LIBERO's own +1 = close command.
             return {"action": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0]}
 
         def close(self):
@@ -144,14 +146,16 @@ def test_libero_policy_reuses_ws_and_rotates_images(monkeypatch):
 
     assert action.shape == (7,)
     np.testing.assert_allclose(action[:6], np.zeros(6), atol=1e-5)
-    assert action[6] == -1.0
+    # Trained open-scale -1 (closed) reaches the env as its native +1 (close).
+    assert action[6] == 1.0
     assert ws.resets == 1
     assert ws.closed == 0
     assert ws.predictions[0]["images"]["head_camera"] == "first=4"
-    # The proprio sent is the raw EEF10 (identity rot6d, fully open gripper -> -1).
+    # The proprio sent is the raw EEF10 (identity rot6d; qpos [0.04, -0.04] is a
+    # fully open hand, which the open-scale renders as +1).
     sent_state = ws.predictions[0]["state"]
     assert len(sent_state) == 10
-    np.testing.assert_allclose(sent_state, [0, 0, 0, 1, 0, 0, 0, 1, 0, -1], atol=1e-6)
+    np.testing.assert_allclose(sent_state, [0, 0, 0, 1, 0, 0, 0, 1, 0, 1], atol=1e-6)
     policy.close()
     assert ws.closed == 1
 

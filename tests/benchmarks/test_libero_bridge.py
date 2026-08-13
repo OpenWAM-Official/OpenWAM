@@ -11,10 +11,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from benchmarks.utils import eef10_to_libero7d, libero_gripper_qpos_to_cmd, libero_obs_to_eef10
+from benchmarks.utils import (
+    eef10_to_libero7d,
+    libero_gripper_qpos_to_cmd,
+    libero_obs_to_eef10,
+    libero_open_scale_to_gripper_cmd,
+)
 from openwam.dataloader.libero import (
     LIBERO_GRIPPER_WIDTH_OPEN,
     axis_angle_to_matrix,
+    gripper_cmd_to_open_scale,
     gripper_qpos_to_cmd,
     matrix_to_rot6d,
     state8_to_eef10,
@@ -50,8 +56,20 @@ def test_gripper_render_is_shared_between_train_and_eval():
         assert libero_gripper_qpos_to_cmd(width) == pytest.approx(
             float(gripper_qpos_to_cmd(np.array(width))), abs=1e-7
         )
-    assert libero_gripper_qpos_to_cmd(LIBERO_GRIPPER_WIDTH_OPEN) == -1.0  # open
-    assert libero_gripper_qpos_to_cmd(0.0) == 1.0  # closed
+    # OPEN-SCALE: fully open width -> +1, fully closed -> -1.
+    assert libero_gripper_qpos_to_cmd(LIBERO_GRIPPER_WIDTH_OPEN) == 1.0  # open
+    assert libero_gripper_qpos_to_cmd(0.0) == -1.0  # closed
+
+
+def test_gripper_open_scale_inverse_is_shared_between_train_and_eval():
+    """The bridge's negation is the exact inverse of the dataloader's render."""
+    for cmd in (-1.0, -0.4, 0.0, 0.4, 1.0):
+        open_scale = float(gripper_cmd_to_open_scale(np.array(cmd)))
+        assert libero_open_scale_to_gripper_cmd(open_scale) == pytest.approx(cmd, abs=1e-7)
+    # LIBERO's env command space: +1 closes. A trained "open" (+1) must reach
+    # the env as -1, or the gripper runs inverted for the whole episode.
+    assert libero_open_scale_to_gripper_cmd(1.0) == -1.0
+    assert libero_open_scale_to_gripper_cmd(-1.0) == 1.0
 
 
 def test_bridge_zero_delta_is_zero_command():
@@ -59,20 +77,22 @@ def test_bridge_zero_delta_is_zero_command():
     out = eef10_to_libero7d(eef10, ref_pos=[0.1, 0.2, 0.3], ref_rot6d=_IDENT_R6D)
     assert out.shape == (7,)
     assert out[:6] == pytest.approx(np.zeros(6), abs=1e-6)
-    assert out[6] == pytest.approx(-1.0)
+    # Trained -1 (closed) -> env +1 (close).
+    assert out[6] == pytest.approx(1.0)
 
 
 def test_bridge_pos_delta_scaling_and_clip():
     eef10 = np.concatenate([[0.025, 0.0, 0.0], _IDENT_R6D, [0.3]]).astype(np.float32)
     out = eef10_to_libero7d(eef10, ref_pos=[0.0, 0.0, 0.0], ref_rot6d=_IDENT_R6D, pos_scale=0.05, rot_scale=0.5)
     assert out[0:3] == pytest.approx([0.5, 0.0, 0.0], abs=1e-5)
-    # Gripper is a CONTINUOUS command in [-1, +1]: passed through, not thresholded.
-    assert out[6] == pytest.approx(0.3, abs=1e-6)
+    # Gripper is CONTINUOUS in [-1, +1]: negated into the env convention, not
+    # thresholded.
+    assert out[6] == pytest.approx(-0.3, abs=1e-6)
 
     huge = np.concatenate([[1.0, 0.0, 0.0], _IDENT_R6D, [2.0]]).astype(np.float32)
     out = eef10_to_libero7d(huge, ref_pos=[0.0, 0.0, 0.0], ref_rot6d=_IDENT_R6D, pos_scale=0.05, rot_scale=0.5)
     assert out[0] == pytest.approx(1.0)
-    assert out[6] == pytest.approx(1.0)  # command clipped to +1
+    assert out[6] == pytest.approx(-1.0)  # negated, then clipped to -1
 
 
 def test_bridge_rotation_axis_angle():

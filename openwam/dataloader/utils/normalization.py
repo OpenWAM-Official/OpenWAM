@@ -256,6 +256,22 @@ def load_stats_file(
     return stats
 
 
+def load_stats_metadata(path: str | Path, *, action_mode: Optional[str]) -> Mapping:
+    """Return the RAW stats mapping so callers can read non-stat-vector fields.
+
+    ``load_stats_file`` materializes only the six stat vectors; readers that
+    persist a provenance/convention marker alongside them (e.g. LIBERO's
+    ``gripper_convention``) read it through here. Shares ``_load_raw_stats``'s
+    per-process cache, so this costs no extra I/O when the stats file has
+    already been loaded.
+
+    The returned mapping IS the cached object — treat it as read-only. Copy it
+    (``dict(...)``, as ``load_stats_file`` does) before mutating, or every later
+    reader in this process sees the edit.
+    """
+    return _load_raw_stats(str(Path(path).expanduser().resolve()), action_mode)
+
+
 @functools.lru_cache(maxsize=8)
 def _load_raw_stats(path: str, action_mode: Optional[str]) -> Mapping:
     stats_path = Path(path)
@@ -277,6 +293,7 @@ def _load_raw_stats(path: str, action_mode: Optional[str]) -> Mapping:
 __all__ = [
     "apply_normalization",
     "load_stats_file",
+    "load_stats_metadata",
     "materialize_eef_stats",
     "pin_rot6d_identity",
     "ROT6D_DIMS_ARM10",

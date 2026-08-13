@@ -576,6 +576,11 @@ def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
 #   * proprio: live obs (robot0_eef_pos / robot0_eef_quat / robot0_gripper_qpos)
 #     -> EEF10, byte-consistent with the dataloader's state8_to_eef10.
 #   * action: EEF10 full pose -> 7-D OSC delta using the live controller scales.
+#
+# The trained gripper channel (EEF10 dim 9) is an OPEN-SCALE: -1 = closed,
+# +1 = open (the pretraining-mixture direction). LIBERO's own action[6] runs the
+# other way (+1 = close), so this bridge negates on the way out. Keep in lockstep
+# with openwam.dataloader.libero.GRIPPER_CONVENTION.
 
 LIBERO_EEF10_DIM = 10
 LIBERO_ACTION7_DIM = 7
@@ -590,12 +595,23 @@ LIBERO_OSC_ROT_SCALE_DEFAULT = 0.5
 
 
 def libero_gripper_qpos_to_cmd(width) -> float:
-    """Achieved finger-separation width -> [-1, +1] command space (+1 = close).
+    """Achieved finger-separation width -> [-1, +1] OPEN-SCALE (+1 = open).
 
     Bit-identical to the dataloader's ``gripper_qpos_to_cmd`` so the proprio
-    gripper the client sends matches training.
+    gripper the client sends matches training. Note the trained channel runs
+    OPPOSITE to LIBERO's own ``action[6]`` command (+1 = close); converting back
+    is :func:`libero_open_scale_to_gripper_cmd`.
     """
-    return float(np.clip(1.0 - 2.0 * float(width) / LIBERO_GRIPPER_WIDTH_OPEN, -1.0, 1.0))
+    return float(np.clip(2.0 * float(width) / LIBERO_GRIPPER_WIDTH_OPEN - 1.0, -1.0, 1.0))
+
+
+def libero_open_scale_to_gripper_cmd(value) -> float:
+    """Trained open-scale gripper (+1 = open) -> LIBERO env command (+1 = close).
+
+    Exact inverse of the dataloader's ``gripper_cmd_to_open_scale``; the env's
+    gripper stays CONTINUOUS in [-1, +1] (no RoboCasa-style 0/1 thresholding).
+    """
+    return float(np.clip(-float(value), -1.0, 1.0))
 
 
 def libero_obs_to_eef10(
@@ -639,8 +655,9 @@ def eef10_to_libero7d(
     The dual of ``eef20d_to_robocasa12d`` reduced to a fixed-base single arm:
     position difference divided by the controller position scale, rotation via
     ``R_target @ R_ref.T`` -> axis-angle divided by the rotation scale, gripper
-    command clipped and passed through (LIBERO's gripper is CONTINUOUS
-    [-1, +1], +1 = close — no RoboCasa-style 0/1 thresholding).
+    NEGATED from the trained open-scale (+1 = open) back into LIBERO's own
+    command space (+1 = close) and clipped. LIBERO's gripper stays CONTINUOUS in
+    [-1, +1] — no RoboCasa-style 0/1 thresholding.
 
     Args:
         action: (10,) EEF10 ``[xyz3, rot6d6, grip1]`` (world frame, physical).
@@ -672,7 +689,7 @@ def eef10_to_libero7d(
         pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
         rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
 
-    grip_cmd = float(np.clip(act[9], -1.0, 1.0))
+    grip_cmd = libero_open_scale_to_gripper_cmd(act[9])
     return np.concatenate([pos_cmd, rot_cmd, [grip_cmd]]).astype(np.float32)
 
 

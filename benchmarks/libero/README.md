@@ -71,20 +71,28 @@ The reader trains on the repo-standard single-arm **EEF10** representation
 `[xyz3, rot6d6, gripper1]` (world frame, full pose), not on LIBERO's native 7-D
 OSC delta:
 
+- **Gripper direction.** The trained channel (dim 9) is an **open-scale**:
+  `-1 = closed, +1 = open` — the same direction as the pretraining mixture, and
+  the OPPOSITE of LIBERO's own `action[6]` (`+1 = close`). The dataloader
+  negates on the way in; the eval client negates back on the way out
+  (`libero_open_scale_to_gripper_cmd`), so the env always receives its native
+  convention. Checkpoints trained before this flip are **not** compatible with
+  the current client.
 - **Proprio** at window frame 0 is the achieved 8-D `observation.state`
-  rendered to EEF10 (axis-angle → rot6d; finger separation → [-1, +1] command
-  space, +1 = close).
+  rendered to EEF10 (axis-angle → rot6d; finger separation → [-1, +1]
+  open-scale, +1 = open).
 - **Action target** at step `t` is the **next frame's achieved pose**
   (`state[t+1]` → xyz + rot6d) plus the recorded gripper command `action[t][6]`
-  — a full absolute pose target. The final window step has no `t+1` and is
-  masked out of the loss.
+  negated into the open-scale — a full absolute pose target. The final window
+  step has no `t+1` and is masked out of the loss.
 - With `unify_action: true` and `unify_action_map: ["0-9"]` the 10 physical
   dims scatter into the unified 80-D pretraining space (left-arm slots); all
   other slots stay masked, so `model.architecture.action_dim=80` needs no
   LIBERO-specific override.
 - Action targets and achieved proprio are pooled into one global `eef`
   normalization block and both use that same transform; rot6d dims are pinned
-  to identity and never normalized.
+  to identity and never normalized. The gripper dim IS normalized, so the block
+  records its `gripper_convention` and the reader refuses a mismatched file.
 
 The stored videos already follow the 180-degree-rotated LIBERO convention. The
 evaluation client applies the same transform to live simulator observations.

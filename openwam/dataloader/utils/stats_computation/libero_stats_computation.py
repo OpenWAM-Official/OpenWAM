@@ -5,6 +5,10 @@ achieved proprio rows are accumulated into one global ``eef`` statistics block.
 Both training directions therefore use exactly the same transform. rot6d dims
 (3:9) are pinned to identity so normalization never distorts rotation.
 
+The gripper dim (9) IS normalized, so these numbers are tied to the reader's
+gripper direction; the payload records it as ``gripper_convention`` and the
+reader validates the match at load time.
+
 Example:
     python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
       --config configs/dataloader/libero.yaml \
@@ -20,7 +24,12 @@ from typing import Iterable
 import numpy as np
 from omegaconf import OmegaConf
 
-from openwam.dataloader.libero import ROT6D_DIMS_EEF10, LiberoDataset, MultiLiberoDataset
+from openwam.dataloader.libero import (
+    GRIPPER_CONVENTION,
+    ROT6D_DIMS_EEF10,
+    LiberoDataset,
+    MultiLiberoDataset,
+)
 from openwam.dataloader.utils.normalization import pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
@@ -81,6 +90,10 @@ def _compute_global_stats(dataset, reservoir_cap: int):
     stats["pool"] = "action_state"
     stats["action_rows"] = action_rows
     stats["state_rows"] = state_rows
+    # Bind the gripper direction these numbers were accumulated under, so the
+    # reader can refuse a file computed before/after the open-scale flip
+    # (LiberoDataset._check_gripper_convention).
+    stats["gripper_convention"] = GRIPPER_CONVENTION
     pin_rot6d_identity(stats, ROT6D_DIMS_EEF10)
     return action_mode, raw_dim, stats, action_rows, state_rows
 
