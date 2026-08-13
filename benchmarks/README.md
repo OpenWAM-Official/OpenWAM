@@ -18,6 +18,7 @@ Bundled clients:
 - [LIBERO](libero/README.md)
 - [RoboCasa GR1](robocasa_gr1/README.md)
 - [VLABench](vlabench/README.md)
+- [RoboDojo](robodojo/README.md)
 
 ## 1. What the client sends
 

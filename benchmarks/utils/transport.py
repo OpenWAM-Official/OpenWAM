@@ -126,6 +126,10 @@ class WSPolicyClient:
     def predict(self, payload: dict) -> dict:
         return self._roundtrip({**payload, "type": OBS})
 
+    def predict_once(self, payload: dict) -> dict:
+        """Send one observation without retrying an ambiguous action request."""
+        return self._roundtrip({**payload, "type": OBS}, reconnect=False)
+
     def reset(self) -> dict:
         return self._roundtrip({"type": RESET})
 

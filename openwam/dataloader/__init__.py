@@ -6,6 +6,10 @@ from openwam.dataloader.registry import (
     list_registered_datasets,
     register_dataset,
 )
+from openwam.dataloader.robodojo import (
+    MultiTaskRoboDojoDataset,
+    RoboDojoDataset,
+)
 from openwam.dataloader.robotwin import (
     EEF_ACTION_DIM,
     EEF_GRIPPER_INDICES,
@@ -17,4 +21,4 @@ from openwam.dataloader.robotwin import (
     RoboTwinDataset,
 )
 
-__all__ = ['BaseDataset', 'RoboTwinDataset', 'MultiTaskRoboTwinDataset', 'EBenchDataset', 'MultiEBenchDataset', 'DATASET_REGISTRY', 'register_dataset', 'build_dataset', 'list_registered_datasets', 'ROBOTWIN_TRAIN_TASKS', 'ROBOTWIN_HOLDOUT_TASKS', 'ROBOTWIN_ALL_TASKS', 'EEF_ACTION_DIM', 'EEF_GRIPPER_INDICES', 'JOINT_GRIPPER_INDICES']
+__all__ = ['BaseDataset', 'RoboTwinDataset', 'MultiTaskRoboTwinDataset', 'RoboDojoDataset', 'MultiTaskRoboDojoDataset', 'EBenchDataset', 'MultiEBenchDataset', 'DATASET_REGISTRY', 'register_dataset', 'build_dataset', 'list_registered_datasets', 'ROBOTWIN_TRAIN_TASKS', 'ROBOTWIN_HOLDOUT_TASKS', 'ROBOTWIN_ALL_TASKS', 'EEF_ACTION_DIM', 'EEF_GRIPPER_INDICES', 'JOINT_GRIPPER_INDICES']

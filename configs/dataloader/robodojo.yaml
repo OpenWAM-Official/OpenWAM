@@ -1,0 +1,38 @@
+type: robodojo
+
+# Formal layout only:
+#   <dataset_dir>/<task>/arx_x5/data/episode_*.hdf5
+# Historical flat data at <dataset_dir>/arx_x5/data is rejected.
+dataset_dir: /path/to/RoboDojo
+task_name: null                  # task name = single task; null = multi-task discovery
+train_tasks: null                # optional explicit allowlist
+holdout_tasks: null              # excluded from train; selected for val
+split: train
+
+embodiment: arx_x5
+action_mode: eef                 # only supported mode; raw representation is EEF20
+
+# Dual-X5 base poses live in openwam/robodojo/contract.py (dual_x5.yml values).
+# Stats must be computed explicitly; the dataloader never scans to synthesize them.
+normalization_stats_path: /path/to/robodojo_arx_x5_eef20_stats.npy
+normalize_mode: min-max          # min-max, z-score, quantile, or null
+
+# Raw EEF20 is normalized first, then scattered into the shared 80-D layout:
+# left [xyz3, rot6d6, grip1] -> 0:10; right -> 34:44.
+unify_action: true
+unify_action_map: ["0-9", "34-43"]
+
+# State/action remain at the raw frame rate. video_stride affects video only.
+num_frames: 33
+video_stride: 4
+window_stride: 1
+repeat: 1
+val_ratio: 0.0
+seed: 42
+
+# Three source streams are assembled with the repository L-shape helper.
+height: 384
+width: 320
+multiview: true
+camera_layout: [cam_head, cam_left_wrist, cam_right_wrist]
+target_camera: cam_head
