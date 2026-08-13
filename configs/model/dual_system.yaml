@@ -6,12 +6,13 @@
 #   joint_self_attn:  MoTJointDriver runs one mixed self-attention per layer;
 #                     requires num_layers/num_heads/head_dim parity across backbones.
 #   idm:              teacher-forcing training + two-stage inference. Supported
-#                     on Wan and CosmosPredict25 (the backbone owns the
-#                     noisy/cond branch merge; Cosmos uses per-frame timesteps).
+#                     on Wan, CosmosPredict25 and Cosmos3-Edge (the backbone owns
+#                     the noisy/cond branch merge; Cosmos uses per-frame timesteps,
+#                     Cosmos3 concatenates on the token axis — no AdaLN to merge).
 # Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos_predict25.
 
 defaults:
-  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25
+  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25 | cosmos3_edge
   - action_backbone: separate_action_dit # ActionDiT (dual/tri only support ActionDiT)
   - _self_
 
@@ -20,7 +21,9 @@ defaults:
 # only on the from_scratch external-encoder path). The list spans backbones:
 # `text_encoder`/`vae` are Wan; `reason1` is the CosmosPredict25 text-encoder child
 # (Cosmos `vae` is also a real child, so the same `video_backbone.vae` entry
-# covers it). Each no-ops on backbones that lack the path.
+# covers it). Cosmos3-Edge has no text-encoder child at all — its und (text) tower
+# lives inside the transformer and is frozen by the builder — but its `vae` is a
+# real child too. Each entry no-ops on backbones that lack the path.
 freeze:
   - video_backbone.text_encoder
   - video_backbone.reason1
@@ -30,7 +33,7 @@ freeze:
 
 architecture:
   framework: dual_system
-  variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm (idm = Wan only)
+  variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm (all three on Wan / CosmosPredict25 / Cosmos3-Edge)
   # action_dim/state_dim default 80 (unified cross-robot action space, unify_action=true).
   # For dataloaders shipping unify_action=false (robotwin and deprecated OXE variants)
   # override both to the raw width: robotwin action_mode=eef (20D) → 20; action_mode=joint (14D qpos) → 14.

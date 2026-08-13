@@ -38,6 +38,14 @@ class BlockLoopState:
     # Per-block VACE hints: dual_system IDM merges across branches; tri_system rejects.
     vace_hints: Optional[list] = None
 
+    # Prefix K/V tokens the backbone prepends to its per-layer keys/values but
+    # NOT to its queries (e.g. Cosmos3's cached und text stream). The MoT driver
+    # widens the joint mask by this many leading key columns — visible to every
+    # query row, gated per-sample by ``prefix_kv_mask`` (True = attend). Zero
+    # for backbones whose K and Q sequences coincide (Wan, CosmosPredict25).
+    prefix_kv_len: int = 0
+    prefix_kv_mask: Optional[Tensor] = None  # (B, prefix_kv_len) bool
+
     # Loop config threaded from prepare() into run_block()
     use_gradient_checkpointing: bool = False
     use_gradient_checkpointing_offload: bool = False
@@ -227,9 +235,7 @@ class VideoBackbone(ABC, nn.Module):
     # Optional: IDM teacher-forcing branch merge/split (default raise)
     # ================================================================
 
-    def merge_idm_video_branches(
-        self, noisy: BlockLoopState, cond: BlockLoopState
-    ) -> Tuple[BlockLoopState, int, int]:
+    def merge_idm_video_branches(self, noisy: BlockLoopState, cond: BlockLoopState) -> Tuple[BlockLoopState, int, int]:
         """Concatenate the IDM noisy + cond video branches into one state along
         the frame/sequence axis for a single MoT pass.
 

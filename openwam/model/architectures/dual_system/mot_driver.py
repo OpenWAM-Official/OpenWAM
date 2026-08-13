@@ -26,6 +26,7 @@ from openwam.model.architectures.utils.mask_modes import (
     build_cross_modal_attention_mask,
     set_video_attention_mask_mode,
     validate_attention_mask_mode,
+    widen_mask_for_prefix_kv,
 )
 
 if TYPE_CHECKING:
@@ -340,6 +341,12 @@ class DualSystemMoTDriver:
             video_tokens_per_frame=self._video_tokens_per_frame(vstate),
             device=vstate.hidden_states.device,
         )
+
+        # Backbones may prepend prefix K/V tokens (keys without matching query
+        # rows — e.g. Cosmos3's cached und text stream). ``_step_impl`` needs no
+        # change: it splits the attention output by query lengths, and SDPA
+        # handles the resulting rectangular mask.
+        attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
 
         for layer_id in range(self.num_layers):
             vstate, astate = self.step(

@@ -584,7 +584,7 @@ def test_idm_video_cache_matches_joint_loop():
     _, astate_joint = driver.run_joint_loop(vstate_joint, astate_joint)
     pred_joint = arch.action_backbone.extract_prediction(astate_joint)
 
-    video_kv_cache, _ = driver.prefill_video_cache(vstate_cache)
+    video_kv_cache, _, _ = driver.prefill_video_cache(vstate_cache)
     astate_cache = driver.run_action_with_video_cache(
         astate_cache,
         video_kv_cache=video_kv_cache,
@@ -593,3 +593,100 @@ def test_idm_video_cache_matches_joint_loop():
     pred_cache = arch.action_backbone.extract_prediction(astate_cache)
 
     assert torch.allclose(pred_joint, pred_cache, atol=1e-5, rtol=1e-5)
+
+
+def test_idm_generate_forwards_the_prefix_gate_to_stage_two(monkeypatch):
+    """generate() must hand Stage 2 the gate ``prefill_video_cache`` returned.
+
+    The driver-level tests cover ``build_cached_action_mask`` and
+    ``run_action_with_video_cache``; this covers the caller that connects them.
+    Setting either forwarding site in ``generate()`` to ``None`` restores the
+    original und-padding leak with every other test green, because nothing else
+    asserts the value ever leaves ``prefill_video_cache``.
+    """
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+    vb = _GenerateVideoBackbone()
+    arch = _make_idm_with_video(vb)
+    arch.eval()
+    driver = arch._mot_driver
+
+    sentinel = torch.tensor([[True, True, False]])
+    seen = {}
+    real_prefill = driver.prefill_video_cache
+    real_stage2 = driver.run_action_with_video_cache
+
+    def spy_prefill(vstate):
+        cache, key_len, _gate = real_prefill(vstate)
+        seen["produced"] = sentinel  # stand in for a padded batch's gate
+        return cache, key_len, sentinel
+
+    def spy_stage2(astate, *, video_kv_cache, video_seq_len, prefix_kv_mask=None):
+        seen["forwarded"] = prefix_kv_mask
+        # The real Stage 2 would size its mask from the gate; the fake backbone
+        # has no prefix, so just record and run without it.
+        return real_stage2(astate, video_kv_cache=video_kv_cache, video_seq_len=video_seq_len)
+
+    monkeypatch.setattr(driver, "prefill_video_cache", spy_prefill)
+    monkeypatch.setattr(driver, "run_action_with_video_cache", spy_stage2)
+
+    arch.generate(
+        schedule=[(1.0, 1.0), (0.0, 0.5), (0.0, 0.0)],
+        prompt="",
+        num_frames=3,
+        action_num_frames=5,
+        decode_video=False,
+        seed=0,
+    )
+
+    assert "forwarded" in seen, "Stage 2 was never reached"
+    assert seen["forwarded"] is sentinel, (
+        "generate() dropped prefill_video_cache's prefix gate instead of forwarding it to Stage 2"
+    )
+
+
+def test_idm_generate_forwards_the_prefix_gate_on_the_compiled_path(monkeypatch):
+    """Same contract for the compiled Stage-2 branch, which builds its own mask.
+
+    The eager branch delegates to ``run_action_with_video_cache``; the compiled
+    branch calls ``build_cached_action_mask`` directly, so it is a second,
+    independently-mutable forwarding site.
+    """
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+    vb = _GenerateVideoBackbone()
+    arch = _make_idm_with_video(vb)
+    arch.eval()
+    driver = arch._mot_driver
+
+    sentinel = torch.tensor([[True, True, False]])
+    calls = []
+    real_prefill = driver.prefill_video_cache
+    real_build = driver.build_cached_action_mask
+
+    def spy_prefill(vstate):
+        cache, key_len, _gate = real_prefill(vstate)
+        return cache, key_len, sentinel
+
+    def spy_build(*, s_action, video_key_len, device, prefix_kv_mask=None):
+        # Record every call: the forced fallback re-enters via the eager branch,
+        # which would otherwise overwrite the compiled branch's argument.
+        calls.append(prefix_kv_mask)
+        return real_build(s_action=s_action, video_key_len=video_key_len, device=device, prefix_kv_mask=None)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("force the documented eager fallback after the mask is built")
+
+    monkeypatch.setattr(driver, "prefill_video_cache", spy_prefill)
+    monkeypatch.setattr(driver, "build_cached_action_mask", spy_build)
+    arch._compiled_idm_action_cache_loop = _boom
+
+    arch.generate(
+        schedule=[(1.0, 1.0), (0.0, 0.5), (0.0, 0.0)],
+        prompt="",
+        num_frames=3,
+        action_num_frames=5,
+        decode_video=False,
+        seed=0,
+    )
+
+    assert calls, "the compiled Stage-2 branch was never entered"
+    assert calls[0] is sentinel, "the compiled path built its action mask without prefill_video_cache's prefix gate"

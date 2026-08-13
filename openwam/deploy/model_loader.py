@@ -164,9 +164,10 @@ def load_from_checkpoint_dir(
         model_path = OmegaConf.select(cfg, "model.video_backbone.model_path", default=None)
         if model_path is not None:
             vb_name = str(OmegaConf.select(cfg, "model.video_backbone.name", default=""))
-            if vb_name.startswith("cosmos_predict25_"):
-                # Cosmos carries fields the path-only string source would
-                # lose: `shift_video`, `model_variant`, `text_encoder_path`.
+            if vb_name.startswith(("cosmos_predict25_", "cosmos3_")):
+                # Cosmos families carry fields the path-only string source would
+                # lose (predict2.5: `shift_video` / `model_variant` /
+                # `text_encoder_path`; cosmos3: `shift_video` / prompt knobs).
                 # `from_pretrained` accepts a dict natively (via
                 # `_video_backbone_cfg`). Wan never hits this branch.
                 vb_params["_source"] = {k: v for k, v in vb_params.items() if not str(k).startswith("_")}

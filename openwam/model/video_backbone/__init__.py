@@ -30,6 +30,7 @@ __all__ = [
     "Wan22Ti2v",
     "Wan21",
     "CosmosPredict25VideoBackbone",
+    "Cosmos3EdgeVideoBackbone",
     "build_video_backbone",
     "register_video_backbone",
     "_VIDEO_BACKBONE_REGISTRY",
@@ -49,3 +50,9 @@ from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict
 
 register_video_backbone("cosmos_predict25_2b")(CosmosPredict25VideoBackbone)
 register_video_backbone("cosmos_predict25_14b")(CosmosPredict25VideoBackbone)
+
+# Cosmos3-Edge backbone. CPU-only-CI safe — the vendored transformer (which
+# pulls ``diffusers``) is deferred to ``from_pretrained``.
+from openwam.model.video_backbone.cosmos3_backbone import Cosmos3EdgeVideoBackbone  # noqa: E402
+
+register_video_backbone("cosmos3_edge")(Cosmos3EdgeVideoBackbone)

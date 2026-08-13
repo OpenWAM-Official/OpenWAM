@@ -71,6 +71,12 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool):
     params["video_backbone"] = vb_params
     vb_params["_source"] = OmegaConf.to_container(ckpt_cfg.model.video_backbone, resolve=True)
     vb_params["_ckpt_dir"] = ckpt_dir
+    # Finetune loads safetensors a few lines below, so a backbone may leave an
+    # empty shell for that load to fill. Resume must not: `load_state` runs only
+    # after `accelerator.prepare`, and `set_dtype_device` (openwam_trainer.py:126)
+    # touches the module first — on a meta shell that raises "Cannot copy out of
+    # meta tensor". Backbones without a shell path ignore the key.
+    vb_params["_materialize_weights"] = not weights_required
 
     logger.info("[%s] building architecture from self-contained ckpt dir: %s", tag, ckpt_dir)
     architecture = build_architecture(resolved_arch.registry_name, params)
@@ -101,15 +107,24 @@ def propagate_component_specs(ckpt_cfg: DictConfig, cfg: DictConfig) -> None:
             logger.info("[self-contained] propagated model.video_backbone.%s specs from ckpt config", key)
 
 
+# Tokenizer artifact dirs written by save_deploy_assets, per backbone family:
+# Wan uses ``tokenizer/``, cosmos3_edge uses ``text_tokenizer/``. Relaying only
+# the first would produce a checkpoint that carries the ``components`` marker
+# (so it claims self-containment) but no tokenizer for the deploy build to read.
+_CKPT_ARTIFACT_DIRS = ("tokenizer", "text_tokenizer")
+
+
 def copy_ckpt_artifacts(ckpt_dir: str, output_dir: str) -> None:
-    """Relay ``<ckpt_dir>/tokenizer`` into the new run dir.
+    """Relay the checkpoint's tokenizer artifact dirs into the new run dir.
 
     Same reason as propagate_component_specs: keeps the self-containment chain
-    alive when the tokenizer's original model_path source is unreachable.
+    alive when the tokenizer's original model_path source is unreachable. Only
+    the dirs that exist are copied, so this no-ops per backbone as appropriate.
     """
     ckpt_dir, _explicit_weights = _resolve_ckpt_source(ckpt_dir)
-    src = os.path.join(ckpt_dir, "tokenizer")
-    dst = os.path.join(output_dir, "tokenizer")
-    if os.path.isdir(src) and not os.path.isdir(dst):
-        shutil.copytree(src, dst)
-        logger.info("[self-contained] relayed tokenizer dir: %s -> %s", src, dst)
+    for name in _CKPT_ARTIFACT_DIRS:
+        src = os.path.join(ckpt_dir, name)
+        dst = os.path.join(output_dir, name)
+        if os.path.isdir(src) and not os.path.isdir(dst):
+            shutil.copytree(src, dst)
+            logger.info("[self-contained] relayed tokenizer dir: %s -> %s", src, dst)

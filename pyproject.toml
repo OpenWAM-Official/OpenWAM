@@ -12,7 +12,8 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.24,<3",
     "Pillow>=10,<13",
-    "torch>=2.0.0,<3",
+    # cosmos3 uses SDPA's enable_gqa (torch 2.5+); repo intent is 2.7.1+cu128.
+    "torch>=2.5,<3",
     "torchvision>=0.15,<1",
     "transformers>=5.5,<6",
     "imageio>=2.28,<3",
@@ -66,7 +67,16 @@ include = ["openwam", "openwam.*"]
 # matching CUDA wheels from PyTorch's index, e.g.:
 #   pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e '.[cuda,dev]'
 # cu128 is required for Blackwell (sm_120) GPUs.
-cuda = ["torch>=2.0.0,<3", "torchvision>=0.15,<1"]
+cuda = ["torch>=2.5,<3", "torchvision>=0.15,<1"]
+# Cosmos3-Edge video backbone (Cosmos3EdgeVideoBackbone). Unlike the
+# predict2.5 extra this one is installable: the vendored transformer under
+# openwam/model/video_backbone/cosmos3/_vendor/ only needs diffusers for
+# AutoencoderKLWan and a handful of support imports, all stable since 0.38.
+# Kept out of the base dependencies because nothing else under openwam/ imports
+# diffusers and the module-level import of cosmos3_backbone is deliberately
+# diffusers-free — build_cosmos3_pipeline lazy-imports it and raises an install
+# hint when missing, so CPU-only CI passes without this extra.
+cosmos3 = ["diffusers>=0.38,<1"]
 # Cosmos-Predict2.5 video backbone (CosmosPredict25VideoBackbone).
 #
 # The cosmos-oss / cosmos-cuda / cosmos-predict2 distributions are not published
@@ -84,7 +94,8 @@ cuda = ["torch>=2.0.0,<3", "torchvision>=0.15,<1"]
 #     git submodule update --init third_party/cosmos-predict2.5
 #     bash scripts/install_cosmos_predict25.sh
 cosmos_predict25 = []
-# Dev / test toolchain — pytest is referenced by Makefile (`make test`) and tests/conftest.py; ruff drives `make lint` / `make format`.
+# Dev / test toolchain — pytest is referenced by Makefile (`make test`,
+# `make test-full`) and tests/conftest.py; ruff drives `make lint` / `make format`.
 # Kept out of the base dependencies so non-dev installs stay slim.
 dev = [
     "pytest>=8,<10",

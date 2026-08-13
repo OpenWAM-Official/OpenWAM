@@ -243,7 +243,7 @@ def test_idm_train_action_matches_deploy_stage2_cosmos():
     pred_train = arch.action_backbone.extract_prediction(astate_train)
 
     video_seq_len = int(cond_deploy.grid_frames) * driver._video_tokens_per_frame(cond_deploy)
-    kv_cache, _ = driver.prefill_video_cache(cond_deploy)
+    kv_cache, _, _ = driver.prefill_video_cache(cond_deploy)
     astate_deploy = driver.run_action_with_video_cache(
         astate_deploy, video_kv_cache=kv_cache, video_seq_len=video_seq_len
     )

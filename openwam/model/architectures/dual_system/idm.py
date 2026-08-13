@@ -21,6 +21,7 @@ A teacher-forcing attention mask ensures:
 from __future__ import annotations
 
 import logging
+import types
 from typing import Callable, Optional, Tuple
 
 import torch
@@ -33,6 +34,7 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
+from openwam.model.architectures.utils.mask_modes import widen_mask_for_prefix_kv
 from openwam.model.compile_options import (
     compile_enabled,
     idm_compile_cfg,
@@ -131,6 +133,9 @@ class IDMMoTDriver(DualSystemMoTDriver):
             video_tokens_per_frame=video_tokens_per_frame,
             device=merged_vstate.hidden_states.device,
         )
+        # Backbones whose per-layer keys carry a prefix with no matching query
+        # rows (Cosmos3's cached und text stream) need the extra key columns.
+        attn_mask = widen_mask_for_prefix_kv(attn_mask, merged_vstate)
 
         # Run the standard joint loop with the merged video state
         for layer_id in range(self.num_layers):
@@ -165,9 +170,23 @@ class IDMMoTDriver(DualSystemMoTDriver):
     def prefill_video_cache(self, vstate):
         """Run the frozen video branch once and cache per-layer K/V for IDM inference.
 
-        Returns ``(kv_cache, video_seq_len)`` where ``video_seq_len`` is the token
-        count (T·H·W) callers need for the action mask — so they need not re-derive
-        it via the private ``_video_tokens_per_frame``.
+        Returns ``(kv_cache, video_key_len, prefix_kv_mask)``:
+
+        - ``video_key_len`` is the cached per-layer key length callers need to
+          size the action mask — so they need not re-derive it via the private
+          ``_video_tokens_per_frame``. For backbones without a prefix K/V block
+          this equals the video token count (T·H·W); with one (Cosmos3's und text
+          stream) it additionally covers the prefix.
+        - ``prefix_kv_mask`` is the per-sample gate for those leading prefix
+          columns. It is ``None`` in exactly two cases: the backbone declares no
+          prefix at all, or it declares one that carries no padding (backbones
+          signal that by leaving ``prefix_kv_mask`` unset — see
+          :func:`widen_mask_for_prefix_kv`). ``None`` therefore means "no column
+          needs closing", never "there is no prefix" on its own.
+          Stage 2 MUST honor it: an all-ones action mask over ``video_key_len``
+          would open padded und slots that the joint loop masks out, so a batch
+          with unequal prompt lengths would silently attend padding. Pass it to
+          :meth:`build_cached_action_mask`.
         """
         # Token count (T·H·W), not hidden_states.shape[1] — that is T for 5D-grid
         # backbones (CosmosPredict25). Mirrors run_joint_loop's s_video formula.
@@ -178,13 +197,51 @@ class IDMMoTDriver(DualSystemMoTDriver):
             video_tokens_per_frame=video_tokens_per_frame,
             device=vstate.hidden_states.device,
         )
+        attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
         kv_cache: list[dict[str, Tensor]] = []
         for layer_id in range(self.num_layers):
             q_v, k_v, v_v, vpost = self.vb.pre_attn_at_layer(layer_id, vstate)
             mixed_v = self._mixed_attention(q_v, k_v, v_v, attn_mask)
             vstate = self.vb.post_attn_at_layer(layer_id, vstate, mixed_v.contiguous(), vpost)
             kv_cache.append({"k": k_v, "v": v_v})
-        return kv_cache, video_seq_len
+        # The cached keys include any backbone prefix (Cosmos3 und stream), so
+        # report the actual cached key length — Stage 2 sizes its action mask
+        # from this, and for prefix-free backbones it equals video_seq_len. The
+        # prefix gate travels with it so Stage 2 can reproduce the joint loop's
+        # masking of padded und columns.
+        key_len = int(kv_cache[0]["k"].shape[1]) if kv_cache else video_seq_len
+        prefix_mask = getattr(vstate, "prefix_kv_mask", None)
+        if int(getattr(vstate, "prefix_kv_len", 0) or 0) <= 0:
+            prefix_mask = None
+        return kv_cache, key_len, prefix_mask
+
+    def build_cached_action_mask(
+        self,
+        *,
+        s_action: int,
+        video_key_len: int,
+        device: torch.device,
+        prefix_kv_mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        """Stage-2 action mask over ``[cached video keys ; action keys]``.
+
+        Action attends every cached video key and every action key — the
+        action-query row slice of the ``action_sees_video`` joint mask, which for
+        dual_system (no readonly tail) reduces to all-ones. The one exception is
+        the prefix block: padded und columns must stay closed, exactly as
+        :func:`widen_mask_for_prefix_kv` does in the joint loop, so the cached
+        and joint paths agree on what the action stream can see.
+        """
+        prefix = 0 if prefix_kv_mask is None else int(prefix_kv_mask.shape[1])
+        base = torch.ones(
+            (int(s_action), int(video_key_len) - prefix + int(s_action)),
+            dtype=torch.bool,
+            device=device,
+        )
+        if prefix == 0:
+            return base
+        gate = types.SimpleNamespace(prefix_kv_len=prefix, prefix_kv_mask=prefix_kv_mask)
+        return widen_mask_for_prefix_kv(base, gate)
 
     def run_action_with_video_cache(
         self,
@@ -192,8 +249,16 @@ class IDMMoTDriver(DualSystemMoTDriver):
         *,
         video_kv_cache: list[dict[str, Tensor]],
         video_seq_len: int,
+        prefix_kv_mask: Optional[Tensor] = None,
     ):
-        """Run only the action branch, attending to cached frozen-video K/V."""
+        """Run only the action branch, attending to cached frozen-video K/V.
+
+        ``video_seq_len`` is the cached per-layer KEY length returned by
+        :meth:`prefill_video_cache` — for backbones with a prefix K/V block
+        (Cosmos3's und text stream) that covers the prefix too. Pass that call's
+        ``prefix_kv_mask`` alongside it so padded und columns stay closed; the
+        action rows then see exactly what the joint loop lets them see.
+        """
         if len(video_kv_cache) != self.num_layers:
             raise ValueError(f"video_kv_cache must contain {self.num_layers} layers, got {len(video_kv_cache)}.")
         payload = astate.payload
@@ -201,18 +266,11 @@ class IDMMoTDriver(DualSystemMoTDriver):
             raise RuntimeError("IDM cached action path requires ActionDiT.prepare_state payload.")
 
         s_action = int(payload.x_action.shape[1])
-        # Stage-2 action mask: action attends every frozen-video token + every
-        # action token. That is exactly the action-query rows of the
-        # action_sees_video joint mask (a→v all-True, a→a all-True; dual_system
-        # carries no readonly tail), which reduces to an all-ones mask — built
-        # directly so IDM stays free of attention_mask_mode. Shape
-        # (s_action, video_seq_len + s_action) is intentionally identical to the
-        # a-query row slice of MoTDriver._build_attention_mask, so the cached
-        # Stage-2 path and the joint-loop path stay byte-equivalent.
-        action_mask = torch.ones(
-            (s_action, int(video_seq_len) + s_action),
-            dtype=torch.bool,
+        action_mask = self.build_cached_action_mask(
+            s_action=s_action,
+            video_key_len=int(video_seq_len),
             device=payload.x_action.device,
+            prefix_kv_mask=prefix_kv_mask,
         )
 
         for layer_id in range(self.num_layers):
@@ -1066,17 +1124,19 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         driver = self._mot_driver
         if driver is None:
             driver = self.build_mot_driver()
-        # prefill returns the token count (T·H·W) directly — no need to re-derive it
-        # via the private _video_tokens_per_frame.
-        video_kv_cache, video_seq_len = driver.prefill_video_cache(cond_vstate)
+        # prefill returns the cached per-layer KEY length (which covers a backbone
+        # prefix K/V block, if any) plus the gate for that prefix — no need to
+        # re-derive either via the private _video_tokens_per_frame.
+        video_kv_cache, video_seq_len, video_prefix_mask = driver.prefill_video_cache(cond_vstate)
         compiled_action_cache_inputs = None
         if getattr(self, "_compiled_idm_action_cache_loop", None) is not None:
             video_k_tuple, video_v_tuple = driver.video_kv_cache_to_tuples(video_kv_cache)
             action_seq_len = int(action_latents.shape[1])
-            action_mask = torch.ones(
-                (action_seq_len, video_seq_len + action_seq_len),
-                dtype=torch.bool,
+            action_mask = driver.build_cached_action_mask(
+                s_action=action_seq_len,
+                video_key_len=video_seq_len,
                 device=action_latents.device,
+                prefix_kv_mask=video_prefix_mask,
             )
             action_context_dtype = ab._embed_actions(action_latents).dtype
             action_context_emb, action_context_attn_mask = ab._prepare_context(
@@ -1153,6 +1213,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
                     astate,
                     video_kv_cache=video_kv_cache,
                     video_seq_len=video_seq_len,
+                    prefix_kv_mask=video_prefix_mask,
                 )
                 action_noise_pred = ab.extract_prediction(astate)
 
