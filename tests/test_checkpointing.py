@@ -94,10 +94,22 @@ def test_resume_position_already_aligned_unchanged():
 # --- finalize_keep_weights_only ---
 
 
-def test_finalize_keeps_only_final_weights(tmp_path):
-    for s in (100, 200, 300):
+def test_finalize_keeps_configured_recent_weights_and_removes_all_state(tmp_path):
+    for s in (100, 200, 300, 400):
         (tmp_path / f"checkpoint_step_{s}.safetensors").write_text("x")
         _make_accel_state(tmp_path, s, marker=True)
+    finalize_keep_weights_only(str(tmp_path), keep_last_k=3)
+    remaining = sorted(p.name for p in tmp_path.iterdir())
+    assert remaining == [
+        "checkpoint_step_200.safetensors",
+        "checkpoint_step_300.safetensors",
+        "checkpoint_step_400.safetensors",
+    ]
+
+
+def test_finalize_default_keeps_only_final_weight(tmp_path):
+    for s in (100, 200, 300):
+        (tmp_path / f"checkpoint_step_{s}.safetensors").write_text("x")
     finalize_keep_weights_only(str(tmp_path))
     remaining = sorted(p.name for p in tmp_path.iterdir())
     assert remaining == ["checkpoint_step_300.safetensors"]

@@ -293,7 +293,7 @@ class OpenWAMTrainer:
             )
             if already_done:
                 logger.info("[resume] global_step=%d already complete; finishing.", global_step)
-                self.finish_training(output_path, global_step, save_steps, is_main, wandb_run)
+                self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)
                 return
             if skip_first > 0 and self._run_seed is None:
                 logger.warning(
@@ -380,11 +380,11 @@ class OpenWAMTrainer:
 
                 if max_steps and global_step >= max_steps:
                     pbar.close()
-                    self.finish_training(output_path, global_step, save_steps, is_main, wandb_run)
+                    self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)
                     return
 
         pbar.close()
-        self.finish_training(output_path, global_step, save_steps, is_main, wandb_run)
+        self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)
 
     # (3) Called by train() first — AdamW over the per-module (action/video) LR param groups.
     def build_optimizer(self) -> torch.optim.Optimizer:
@@ -661,17 +661,26 @@ class OpenWAMTrainer:
             )
 
     # (11) Called on every train() exit — final weights, drop resume state, close wandb.
-    def finish_training(self, output_path: str, global_step: int, save_steps, is_main: bool, wandb_run) -> None:
+    def finish_training(
+        self,
+        output_path: str,
+        global_step: int,
+        save_steps,
+        keep_last_k: int,
+        is_main: bool,
+        wandb_run,
+    ) -> None:
         """Unified teardown for every exit path: final weights, drop resume state, close wandb.
 
         Falsy ``save_steps`` = a profiling/no-write run, so no final artifact (matches the
         periodic-save gating). After the final weights land, ``finalize_keep_weights_only``
-        removes every ``accel_state_step_*`` and all but the final weights (rank-0, post-barrier).
+        removes every ``accel_state_step_*`` and retains the configured number of recent
+        weight checkpoints (rank-0, post-barrier).
         """
         if save_steps:
             save_weights(self.accelerator, self.architecture, output_path, global_step, final=True)
         self.accelerator.wait_for_everyone()
         if is_main:
-            finalize_keep_weights_only(output_path)
+            finalize_keep_weights_only(output_path, keep_last_k)
         if wandb_run is not None:
             wandb_run.finish()

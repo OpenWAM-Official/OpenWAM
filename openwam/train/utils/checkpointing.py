@@ -318,11 +318,11 @@ def manage_checkpoints(output_dir: str, keep_last_k: int):
             logger.warning("Failed to remove old accelerate state dir %s: %s", old, e)
 
 
-def finalize_keep_weights_only(output_dir: str):
-    """Training-complete cleanup: drop all resume state, keep only the final weights.
+def finalize_keep_weights_only(output_dir: str, keep_last_k: int = 1):
+    """Training-complete cleanup: drop all resume state, keep recent weights.
 
     Removes every ``accel_state_step_*`` dir and every ``checkpoint_step_*.safetensors``
-    except the highest step. Rank-0 only — caller must guard.
+    except the most recent *keep_last_k*. Rank-0 only — caller must guard.
     """
     import shutil
 
@@ -336,7 +336,8 @@ def finalize_keep_weights_only(output_dir: str):
 
     files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*.safetensors"))
     files.sort(key=lambda p: step_num(p, "checkpoint_step_"))
-    for old in files[:-1]:
+    num_to_remove = max(0, len(files) - keep_last_k)
+    for old in files[:num_to_remove]:
         if os.path.isfile(old):
             os.remove(old)
-            logger.info("Removed non-final checkpoint: %s", old)
+            logger.info("Removed old checkpoint after training completion: %s", old)
