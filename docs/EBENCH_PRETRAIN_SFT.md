@@ -184,6 +184,22 @@ bash scripts/train.sh \
     training.output_path=/path/to/train_runs/openwam_ebench_sft
 ```
 
+**Config precedence.** The checkpoint dir's `config.yaml` is the *reconstruction
+base* — it alone carries the `components` / `tokenizer` specs that rebuild the
+module skeletons without the original backbone dir — and this run's `model`
+config is layered on top, so every `model.*` value above (and every yaml default
+behind it) wins. The merge is printed at launch (`[finetune] override
+model.<key>: <ckpt> -> <live>`), and the merged result is what lands in the new
+run's `config.yaml`, so deploying that checkpoint rebuilds the model that
+actually trained. Two keys cannot be overridden and raise instead, because the
+checkpoint's saved component specs are bound to them:
+`model.video_backbone.name` and `model.architecture.framework`.
+
+`training.resume_ckpt_path` is the exception: it continues one run and reuses
+that run's directory and `config.yaml` untouched, so there the checkpoint's
+`model` config stays authoritative and any live divergence is warned about
+rather than applied.
+
 Smoke-run on two buckets (note: the bucket subset fingerprints its own stats
 cache at the fixed location — see the normalization section above):
 

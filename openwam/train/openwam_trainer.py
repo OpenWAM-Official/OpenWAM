@@ -90,10 +90,12 @@ class OpenWAMTrainer:
         # Build architecture (creates video_backbone internally from config).
         from openwam.model import build_architecture, resolve_architecture_config
 
-        # Finetune/resume: build from the self-contained checkpoint dir alone
+        # Finetune/resume: build from the self-contained checkpoint dir
         # (skeletons from its config.yaml component specs, weights from its
         # safetensors) so model.video_backbone.model_path need not exist on
-        # this host. Weights land here, BEFORE the freeze below.
+        # this host. Weights land here, BEFORE the freeze below. The ckpt config
+        # is the reconstruction BASE only — on finetune this run's cfg.model is
+        # layered on top (see ckpt_model_loader.merge_ckpt_model_cfg).
         finetune_path = cfg_get(t, "finetune_ckpt_path", None) or None
         resume_path = cfg_get(t, "resume_ckpt_path", None) or None
         if finetune_path and resume_path:
@@ -103,12 +105,29 @@ class OpenWAMTrainer:
             from openwam.train.utils.ckpt_model_loader import (
                 build_architecture_from_ckpt_dir,
                 propagate_component_specs,
+                warn_live_model_cfg_ignored,
             )
 
+            # Finetune starts a NEW run: the ckpt config is only the
+            # reconstruction base (it alone carries the component/tokenizer
+            # specs), and this run's cfg.model overrides it — merged in place, so
+            # the architecture built here and the config save_config() writes to
+            # the new run dir are the same one. Resume continues ONE run whose
+            # config.yaml is already on disk and is reused untouched, so there the
+            # ckpt config stays authoritative and divergence is only reported.
             resolved_arch, self.architecture, ckpt_cfg = build_architecture_from_ckpt_dir(
-                self._ckpt_source_dir, weights_required=finetune_path is not None
+                self._ckpt_source_dir,
+                weights_required=finetune_path is not None,
+                override_cfg=cfg if finetune_path is not None else None,
             )
-            propagate_component_specs(ckpt_cfg, cfg)
+            if finetune_path is not None:
+                # The merge replaced the cfg.model node, so `m` (bound above)
+                # still points at the pre-merge one — rebind it before `freeze`
+                # and the architecture logging below read from it.
+                m = cfg.model
+            else:
+                warn_live_model_cfg_ignored(ckpt_cfg, cfg, self._ckpt_source_dir)
+                propagate_component_specs(ckpt_cfg, cfg)
         else:
             resolved_arch = resolve_architecture_config(m)
             self.architecture = build_architecture(resolved_arch.registry_name, resolved_arch.params)
