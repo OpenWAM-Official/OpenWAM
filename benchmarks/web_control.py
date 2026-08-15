@@ -42,6 +42,11 @@ TASK_LOG_RE = re.compile(r"(?P<task>.+)_(?P<mode>demo_clean|demo_randomized)\.lo
 CLAIMED_SUFFIX_RE = re.compile(r"\.node(?P<node>\d+)\.worker(?P<worker>\d+)$")
 LOG_FILE_PATTERNS = ("*.log", "*.out", "*.err", "stdout*", "stderr*")
 FINAL_JOB_STATUSES = {"ok", "failed", "done", "exhausted"}
+# RoboTwin re-prints a cumulative ``Success rate: X/Y`` after every episode, so a
+# running task's parsed X/Y is its partial result so far, not a stale snapshot.
+# Those partials feed the live rate; the final-only rate stays alongside it as
+# the comparable benchmark number.
+LIVE_JOB_STATUSES = FINAL_JOB_STATUSES | {"running"}
 
 
 def parse_positive_int(value: str, *, default: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -635,6 +640,13 @@ class GenericLogAdapter(BenchmarkConsoleAdapter):
                 "weighted_success_rate": None,
                 "mean_task_success_rate": None,
                 "parsed_task_count": 0,
+                "running_success": 0,
+                "running_total": 0,
+                "running_task_count": 0,
+                "live_success": 0,
+                "live_total": 0,
+                "live_success_rate": None,
+                "live_task_count": 0,
             },
             "validation": {
                 "ok": True,
@@ -686,6 +698,11 @@ class GenericLogAdapter(BenchmarkConsoleAdapter):
             "weighted_success": 0,
             "weighted_total": 0,
             "parsed_task_count": 0,
+            "live_success": 0,
+            "live_total": 0,
+            "live_success_rate": None,
+            "completed_success_rate": None,
+            "running_task_count": 0,
         }
 
 
@@ -1129,11 +1146,23 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
     @staticmethod
     def _metrics_summary(state: dict[str, Any]) -> dict[str, Any]:
         rates = state.get("rates", {})
+        # Explicit None checks, not `or`: a real 0.0% must not fall through to
+        # the next candidate.
+        success_rate = rates.get("live_success_rate")
+        if success_rate is None:
+            success_rate = rates.get("weighted_success_rate")
+        if success_rate is None:
+            success_rate = rates.get("mean_task_success_rate")
         return {
-            "success_rate": rates.get("weighted_success_rate") or rates.get("mean_task_success_rate"),
+            "success_rate": success_rate,
             "weighted_success": rates.get("weighted_success", 0),
             "weighted_total": rates.get("weighted_total", 0),
             "parsed_task_count": rates.get("parsed_task_count", 0),
+            "live_success": rates.get("live_success", 0),
+            "live_total": rates.get("live_total", 0),
+            "live_success_rate": rates.get("live_success_rate"),
+            "completed_success_rate": rates.get("weighted_success_rate"),
+            "running_task_count": rates.get("running_task_count", 0),
         }
 
     def build_custom_metrics(self, state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1146,18 +1175,34 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             ("demo_randomized", "demo_randomized Success"),
         )
         stats: dict[str, dict[str, Any]] = {
-            mode: {"success": 0, "episodes": 0, "rates": []}
+            mode: {
+                "success": 0,
+                "episodes": 0,
+                "rates": [],
+                "live_success": 0,
+                "live_episodes": 0,
+                "running_tasks": 0,
+            }
             for mode, _label in targets
         }
         for job in jobs:
             mode = str(job.get("mode", ""))
-            if mode not in stats or job.get("status") not in FINAL_JOB_STATUSES:
+            status = job.get("status")
+            if mode not in stats or status not in LIVE_JOB_STATUSES:
                 continue
+            is_final = status in FINAL_JOB_STATUSES
             success = cls._optional_int(job.get("success"))
             episodes = cls._optional_int(job.get("episodes"))
             if success is not None and episodes is not None and episodes > 0:
-                stats[mode]["success"] += success
-                stats[mode]["episodes"] += episodes
+                stats[mode]["live_success"] += success
+                stats[mode]["live_episodes"] += episodes
+                if is_final:
+                    stats[mode]["success"] += success
+                    stats[mode]["episodes"] += episodes
+                else:
+                    stats[mode]["running_tasks"] += 1
+            if not is_final:
+                continue
             rate = cls._optional_float(job.get("success_rate"))
             if rate is not None:
                 stats[mode]["rates"].append(rate)
@@ -1167,11 +1212,27 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             mode_stats = stats[mode]
             weighted_success = int(mode_stats["success"])
             weighted_total = int(mode_stats["episodes"])
+            live_success = int(mode_stats["live_success"])
+            live_total = int(mode_stats["live_episodes"])
+            running_tasks = int(mode_stats["running_tasks"])
             rates = mode_stats["rates"]
-            if weighted_total > 0:
-                raw_value = 100.0 * weighted_success / weighted_total
-                source = "weighted_success"
-                description = f"{weighted_success}/{weighted_total} successful episodes for {mode}."
+            if live_total > 0:
+                raw_value = 100.0 * live_success / live_total
+                source = "live_weighted_success"
+                description = f"{live_success}/{live_total} successful episodes for {mode}"
+                if running_tasks:
+                    completed_rate = (
+                        f"{100.0 * weighted_success / weighted_total:.2f}%"
+                        f" ({weighted_success}/{weighted_total})"
+                        if weighted_total
+                        else "n/a"
+                    )
+                    description += (
+                        f", including partials from {running_tasks} running task(s)."
+                        f" Completed tasks only: {completed_rate}."
+                    )
+                else:
+                    description += "."
             elif rates:
                 raw_value = sum(rates) / len(rates)
                 source = "mean_success_rate"
@@ -1179,7 +1240,7 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
             else:
                 raw_value = None
                 source = "none"
-                description = f"No completed {mode} tasks with parsed success data yet."
+                description = f"No {mode} episodes with parsed success data yet."
             metrics.append(
                 {
                     "id": f"robotwin_{mode}_success_rate",
@@ -1194,6 +1255,9 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
                     "weighted_success": weighted_success,
                     "weighted_total": weighted_total,
                     "parsed_task_count": len(rates),
+                    "live_success": live_success,
+                    "live_total": live_total,
+                    "running_task_count": running_tasks,
                 }
             )
         return metrics
@@ -1744,25 +1808,53 @@ class SnapshotBuilder(BenchmarkConsoleAdapter):
 
     @staticmethod
     def _success_aggregate(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        """Episode-weighted success, both live and completed-only.
+
+        ``live_*`` pools every episode evaluated so far, including the partial
+        counts of still-running tasks, and is what the console displays. The
+        ``weighted_*`` pair keeps its completed-tasks-only meaning so the
+        comparable end-of-run number stays available. ``mean_task_success_rate``
+        deliberately stays completed-only: averaging per-task rates would let a
+        task at 3/3 outweigh its own final 100-episode result.
+        """
         weighted_success = 0
         weighted_total = 0
+        running_success = 0
+        running_total = 0
+        running_task_count = 0
         rates: list[float] = []
         for job in jobs:
-            if job.get("status") not in FINAL_JOB_STATUSES:
+            status = job.get("status")
+            if status not in LIVE_JOB_STATUSES:
                 continue
+            is_final = status in FINAL_JOB_STATUSES
             success = job.get("success")
             episodes = job.get("episodes")
             if success is not None and episodes:
-                weighted_success += int(success)
-                weighted_total += int(episodes)
-            if job.get("success_rate") is not None:
+                if is_final:
+                    weighted_success += int(success)
+                    weighted_total += int(episodes)
+                else:
+                    running_success += int(success)
+                    running_total += int(episodes)
+                    running_task_count += 1
+            if is_final and job.get("success_rate") is not None:
                 rates.append(float(job["success_rate"]))
+        live_success = weighted_success + running_success
+        live_total = weighted_total + running_total
         return {
             "weighted_success": weighted_success,
             "weighted_total": weighted_total,
             "weighted_success_rate": (100.0 * weighted_success / weighted_total) if weighted_total else None,
             "mean_task_success_rate": (sum(rates) / len(rates)) if rates else None,
             "parsed_task_count": len(rates),
+            "running_success": running_success,
+            "running_total": running_total,
+            "running_task_count": running_task_count,
+            "live_success": live_success,
+            "live_total": live_total,
+            "live_success_rate": (100.0 * live_success / live_total) if live_total else None,
+            "live_task_count": len(rates) + running_task_count,
         }
 
     @staticmethod
@@ -2723,6 +2815,22 @@ INDEX_HTML = r"""<!doctype html>
         .join(" ");
     }
 
+    function successTooltip(rates) {
+      if (!rates.live_total) return "No episodes with parsed success data yet.";
+      const parts = [`${rates.live_success}/${rates.live_total} successful episodes so far`];
+      if (rates.running_total) {
+        parts.push(
+          `includes ${rates.running_success}/${rates.running_total} from ${rates.running_task_count} running task(s)`
+        );
+      }
+      parts.push(
+        rates.weighted_total
+          ? `completed tasks only: ${fmtPercent(rates.weighted_success_rate)} (${rates.weighted_success}/${rates.weighted_total})`
+          : "no task has finished yet"
+      );
+      return parts.join("; ") + ".";
+    }
+
     function card(label, value, cls = "", title = "") {
       const extra = safeClassNames(cls);
       const titleAttr = title ? ` title="${esc(title)}"` : "";
@@ -2751,14 +2859,16 @@ INDEX_HTML = r"""<!doctype html>
       const progress = data.progress || {};
       const rates = data.rates || {};
       const percent = Number(progress.percent || 0);
-      const success = rates.weighted_success_rate ?? rates.mean_task_success_rate;
+      const success = rates.live_success_rate ?? rates.weighted_success_rate ?? rates.mean_task_success_rate;
+      const successTitle = successTooltip(rates);
       const customCards = (data.custom_metrics || []).map((metric) =>
         card(metric.label || metric.id || "Metric", metricValue(metric), metric.class || "", metric.description || "")
       );
       $("cards").innerHTML = [
         card("Total", progress.total ?? 0),
         card("Complete", progress.completed ?? 0),
-        card("Success", fmtPercent(success)),
+        card("Success", fmtPercent(success), "", successTitle),
+        card("Episodes", fmtEpisodes(rates.live_success, rates.live_total), "", successTitle),
         card("Failed", progress.failed ?? 0, "failed"),
         card("Running", progress.running ?? 0, "running"),
         card("Pending", progress.pending ?? 0),
@@ -2783,8 +2893,9 @@ INDEX_HTML = r"""<!doctype html>
         ["queue_ready", data.queue?.ready ? "yes" : "no"],
         ["eta", progress.eta || "-"],
         ["longest_running", progress.longest_running || "-"],
-        ["parsed_rates", rates.parsed_task_count ?? 0],
-        ["weighted_success", rates.weighted_total ? `${rates.weighted_success}/${rates.weighted_total}` : "-"],
+        ["parsed_rates", `${rates.live_task_count ?? rates.parsed_task_count ?? 0} (done ${rates.parsed_task_count ?? 0}, running ${rates.running_task_count ?? 0})`],
+        ["live_success", rates.live_total ? `${rates.live_success}/${rates.live_total} = ${fmtPercent(rates.live_success_rate)}` : "-"],
+        ["weighted_success", rates.weighted_total ? `${rates.weighted_success}/${rates.weighted_total} = ${fmtPercent(rates.weighted_success_rate)}` : "-"],
         ["ckpt_dir", env.ckpt_dir || "-"],
       ];
       $("metaGrid").innerHTML = items.map(([k, v]) => `<div class="meta"><b>${esc(k)}</b><span title="${esc(v)}">${esc(v)}</span></div>`).join("");

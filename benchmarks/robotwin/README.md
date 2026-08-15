@@ -461,6 +461,23 @@ node/worker/server logs, and a live tail pane. The dashboard also exposes
 `/api/state`, `/api/tail?file=<relative-log-path>`, raw log links, and a CSV
 download at `/api/results.csv`. Use `--host 127.0.0.1` for local-only access.
 
+**Live vs. completed success rate:** RoboTwin re-prints a cumulative
+`Success rate: X/Y` after every episode, so a running task's parsed `X/Y` is
+its partial result so far. The `Success` and `Episodes` cards and the two
+per-mode cards therefore report the **live** episode-weighted rate, pooling
+every episode evaluated so far including those partials — hover any of them for
+the breakdown. `/api/state` carries both flavours:
+
+| Field | Meaning |
+|---|---|
+| `rates.live_success_rate`, `live_success`, `live_total` | Episode-weighted over completed **and** running tasks. What the cards show. |
+| `rates.running_success`, `running_total`, `running_task_count` | The in-progress contribution on its own. |
+| `rates.weighted_success_rate`, `weighted_success`, `weighted_total` | Completed tasks only — the comparable end-of-run number. |
+| `rates.mean_task_success_rate`, `parsed_task_count` | Unweighted mean of per-task rates, completed tasks only. |
+
+Quote `weighted_success_rate` when reporting a finished run; `live_success_rate`
+drifts while tasks are mid-flight and is only meaningful as a progress readout.
+
 Useful console knobs:
 
 | Option | Default | Description |
