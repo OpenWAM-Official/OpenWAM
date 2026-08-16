@@ -105,7 +105,7 @@ class TestDeploymentYaml:
         cfg = self._load()
         assert not OmegaConf.select(cfg, "optimization.dit_cache.enabled")
 
-    def test_inference_mode_defaults_sync(self):
+    def test_inference_execution_defaults(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
@@ -407,15 +407,20 @@ class TestDeployConfigLoading:
         assert OmegaConf.select(cfg, "inference.inference_horizon") == 24
         assert OmegaConf.select(cfg, "inference.inference_delay_steps") == 6
 
-    def test_cli_execution_numeric_overrides_require_async(self):
+    def test_cli_inference_horizon_override_supports_sync(self):
+        from omegaconf import OmegaConf
+
         deploy = self._policy_server()
 
         cfg = deploy._load_deploy_yaml()
         args = self._blank_args()
+        args.inference_mode = "sync"
         args.inference_horizon = 24
 
-        with pytest.raises(ValueError, match="--inference-mode async"):
-            deploy._apply_execution_cli_overrides(cfg, args)
+        cfg = deploy._apply_execution_cli_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "inference.inference_mode") == "sync"
+        assert OmegaConf.select(cfg, "inference.inference_horizon") == 24
+        assert OmegaConf.select(cfg, "inference.inference_delay_steps") is None
 
     def test_cli_async_numeric_overrides_fail_fast_on_invalid_ranges(self):
         deploy = self._policy_server()

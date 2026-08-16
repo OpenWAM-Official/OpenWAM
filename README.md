@@ -203,8 +203,8 @@ inference:
   variance_shift_alpha: 1.0     # async denoising only: lead curve shift, >= 1
   linear_offset: 0.0            # async denoising only: lag delay, 0 <= value < 1
   inference_mode: sync          # inference executor: sync | async
-  inference_horizon: null       # async executor only: null = policy.execute_horizon
-  inference_delay_steps: null
+  inference_horizon: null       # both executors: actions per chunk; null = full generated chunk
+  inference_delay_steps: null   # async executor only: expected latency in action steps
 
 optimization:
   decode_video: false     # false = actions-only (skip VAE decode, faster)
@@ -213,7 +213,7 @@ optimization:
   prompt_embed_cache: { maxsize: 32 }
 ```
 
-`denoise_mode` selects the video/action trajectory within one denoising pass; nontrivial async settings correspond to `training.timestep_sampling: variance_shift`, currently supported for `joint_self_attn`. `linear_offset` is an inference-time lag delay. `inference_mode` independently selects the sync or background-prefetch executor. Passing `--denoise-mode sync` or `--inference-mode sync` resets that axis's async-only fields to their defaults, so an async-tuned deploy yaml runs as the sync baseline without unsetting each field; supplying an async-only flag with a nontrivial value alongside `sync` is still an error.
+`denoise_mode` selects the video/action trajectory within one denoising pass; nontrivial async settings correspond to `training.timestep_sampling: variance_shift`, currently supported for `joint_self_attn`. `linear_offset` is an inference-time lag delay. `inference_mode` independently selects the sync or background-prefetch executor, while `inference_horizon` bounds the number of actions consumed from each generated chunk in either mode. Passing `--denoise-mode sync` or `--inference-mode sync` resets that axis's async-only fields to their defaults, so an async-tuned deploy yaml runs as the sync baseline without unsetting each field; supplying an async-only flag with a nontrivial value alongside `sync` is still an error.
 
 Compile paths are selected from the checkpoint architecture. On dual-system architectures the first request may carry `torch.compile` warmup latency; use `--compile-enabled false` to run eager.
 

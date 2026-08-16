@@ -83,7 +83,7 @@ TASK_ID_KEY = "task_id"  # int64 tensor [idx]
 class BehaviorBridge:
     """Stateful obs→action bridge backed by a running OpenWAM policy server.
 
-    The OpenWAM server (south) manages action chunking / temporal ensembling
+    The OpenWAM server (south) manages action chunking and replanning
     internally, so the bridge sends one obs per step and returns the one action
     the server pops — matching the OmniGibson client's one-action-per-step
     contract.

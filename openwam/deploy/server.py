@@ -144,11 +144,10 @@ class PolicyServer:
         from openwam.deploy.executors import resolve_execution_config
         from openwam.deploy.policy import WAMPolicy
 
-        policy_cfg = getattr(self.cfg, "policy", self.cfg)
-        execution_config = resolve_execution_config(self.cfg, policy_cfg=policy_cfg)
+        execution_config = resolve_execution_config(self.cfg)
         self._policy = WAMPolicy(
             engine=self.engine,
-            cfg=policy_cfg,
+            cfg=self.cfg,
             execution_config=execution_config,
         )
 
@@ -486,7 +485,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         dest="inference_horizon",
-        help="Override inference.inference_horizon (async only).",
+        help="Override inference.inference_horizon (actions executed per generated chunk in both modes).",
     )
     parser.add_argument(
         "--inference-delay-steps",

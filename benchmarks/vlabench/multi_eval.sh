@@ -4,8 +4,8 @@
 # ONE SERVER PER WORKER — this is a hard constraint, not a tuning choice.
 # The OpenWAM policy server holds a SINGLE receding-horizon policy on the
 # server object (`ServerImpl._policy`, see openwam/deploy/server.py), so its
-# action-chunk buffer, ensemble buffer and step counter are shared by every
-# connected client. Point two simulators at one server and each `predict()`
+# action-chunk buffer and executor step state are shared by every connected
+# client. Point two simulators at one server and each `predict()`
 # pops actions generated for the OTHER simulator's observation, while either
 # one's `reset()` wipes the buffer for both. Success rates collapse to noise
 # with no error surfaced anywhere.

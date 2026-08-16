@@ -76,7 +76,7 @@ def _coerce_optional_int(value, name: str) -> Optional[int]:
     raise ValueError(f"{name} must be an integer, got {value!r}")
 
 
-def normalize_execution_config(exec_cfg=None, policy_cfg=None) -> ExecutionConfig:
+def normalize_execution_config(exec_cfg=None) -> ExecutionConfig:
     """Normalize into :class:`ExecutionConfig`; only "sync"/"async" are accepted."""
     if exec_cfg is None:
         return ExecutionConfig()
@@ -87,31 +87,18 @@ def normalize_execution_config(exec_cfg=None, policy_cfg=None) -> ExecutionConfi
         raise ValueError(f"Unsupported inference mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
 
     inference_horizon = _select(exec_cfg, "inference_horizon", default=None)
-    configured_inference_horizon = inference_horizon
-    if mode == "async" and inference_horizon is None:
-        inference_horizon = _select(policy_cfg, "execute_horizon", default=None)
-
     inference_delay_steps = _select(exec_cfg, "inference_delay_steps", default=None)
 
     inference_horizon = _coerce_optional_int(inference_horizon, "inference_horizon")
     inference_delay_steps = _coerce_optional_int(inference_delay_steps, "inference_delay_steps")
 
-    if mode == "sync":
-        inactive = [
-            name
-            for name, value in (
-                ("inference_horizon", configured_inference_horizon),
-                ("inference_delay_steps", inference_delay_steps),
-            )
-            if value is not None
-        ]
-        if inactive:
-            verb = "requires" if len(inactive) == 1 else "require"
-            raise ValueError(f"{', '.join(inactive)} {verb} inference_mode='async'")
+    if inference_horizon is not None and inference_horizon <= 0:
+        raise ValueError("inference_horizon must be positive")
+
+    if mode == "sync" and inference_delay_steps is not None:
+        raise ValueError("inference_delay_steps requires inference_mode='async'")
 
     if mode == "async":
-        if inference_horizon is not None and inference_horizon <= 0:
-            raise ValueError("inference_horizon must be positive")
         if inference_delay_steps is not None and inference_delay_steps < 0:
             raise ValueError("inference_delay_steps must be non-negative")
         if (
@@ -146,47 +133,44 @@ def apply_execution_cli_overrides(root_cfg, args):
             raise ValueError(f"Unsupported inference mode {mode!r}; expected one of {VALID_EXECUTION_MODES}")
         OmegaConf.update(root_cfg, "inference.inference_mode", mode, merge=False)
 
-    supplied_timing = [name for name in EXECUTION_CLI_NUMERIC_OVERRIDES if _arg_value(args, name) is not None]
-    has_timing_override = bool(supplied_timing)
-    if has_timing_override:
-        # Read the mode directly rather than resolving: under an async yaml a
-        # full resolve would report the yaml's own timing fields instead of the
-        # flag the user actually passed.
+    inference_horizon = _arg_value(args, "inference_horizon")
+    inference_delay_steps = _arg_value(args, "inference_delay_steps")
+
+    # The horizon controls chunk execution in both modes. Only the prefetch
+    # delay belongs to the async executor.
+    if inference_delay_steps is not None:
         effective_mode = str(_select(root_cfg, "inference.inference_mode", default="sync") or "sync").strip().lower()
         if effective_mode != "async":
-            flags = [f"--{name.replace('_', '-')}" for name in supplied_timing]
-            verb = "requires" if len(flags) == 1 else "require"
-            raise ValueError(f"{', '.join(flags)} {verb} --inference-mode async or inference.inference_mode=async")
+            raise ValueError(
+                "--inference-delay-steps requires --inference-mode async "
+                "or inference.inference_mode=async"
+            )
 
-    inference_horizon = _arg_value(args, "inference_horizon")
     if inference_horizon is not None:
         OmegaConf.update(root_cfg, "inference.inference_horizon", inference_horizon, merge=False)
 
-    inference_delay_steps = _arg_value(args, "inference_delay_steps")
     if inference_delay_steps is not None:
         OmegaConf.update(root_cfg, "inference.inference_delay_steps", inference_delay_steps, merge=False)
 
     if mode == "sync":
-        # Explicit switch down to sync resets its dependents — the async-only
-        # timing fields have no neutral CLI value (`--inference-horizon` is
-        # `type=int`), so without this there is no way back to the baseline.
-        for name in EXECUTION_CLI_NUMERIC_OVERRIDES:
-            OmegaConf.update(root_cfg, f"inference.{name}", None, merge=False)
+        # Keep the mode-independent horizon, but clear the async-only delay so
+        # an async-tuned yaml can switch to sync with one flag.
+        OmegaConf.update(root_cfg, "inference.inference_delay_steps", None, merge=False)
 
-    if inference_mode is not None or has_timing_override:
+    if inference_mode is not None or inference_horizon is not None or inference_delay_steps is not None:
         resolve_execution_config(root_cfg)
 
     return root_cfg
 
 
-def resolve_execution_config(root_cfg, policy_cfg=None) -> ExecutionConfig:
+def resolve_execution_config(root_cfg) -> ExecutionConfig:
     """Resolve executor settings from the inference config."""
     exec_cfg = {
         "mode": _select(root_cfg, "inference.inference_mode", default=None),
         "inference_horizon": _select(root_cfg, "inference.inference_horizon", default=None),
         "inference_delay_steps": _select(root_cfg, "inference.inference_delay_steps", default=None),
     }
-    return normalize_execution_config(exec_cfg, policy_cfg=policy_cfg)
+    return normalize_execution_config(exec_cfg)
 
 
 class AsyncInferenceExecutor:

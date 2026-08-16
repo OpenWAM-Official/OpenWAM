@@ -3,8 +3,8 @@
 ``WAMPolicy`` is the seam between the server (which hands it preprocessed
 observations) and the execution mechanism (which schedules engine calls):
 
-- sync mode (default): :class:`SyncInferenceExecutor` — buffer-and-replan
-  with receding horizon + temporal ensembling.
+- sync mode (default): :class:`SyncInferenceExecutor` — blocking
+  buffer-and-replan with a bounded execution horizon.
 - async mode: :class:`AsyncInferenceExecutor` — double-buffered background
   inference overlapping generation with execution.
 
@@ -27,22 +27,16 @@ class WAMPolicy:
 
     Args:
         engine: Inference engine that generates action chunks.
-        cfg: Config object with optional fields (sync mode):
-            - ``execute_horizon``: Number of actions to execute before
-              re-generating.  ``None`` means use the full chunk (greedy).
-            - ``temporal_ensemble``: Enable temporal ensembling of
-              overlapping predictions (default True when receding-horizon).
-            - ``ensemble_decay``: Exponential decay weight for older
-              predictions.  Lower = trust newer predictions more (default 0.5).
-        execution_config: ExecutionConfig-like (mode sync|async +
-            inference_horizon / inference_delay_steps, async-only).
+        cfg: Root config, retained for policy-level consumers.
+        execution_config: ExecutionConfig-like. ``inference_horizon`` applies
+            to both modes; ``inference_delay_steps`` applies only to async.
     """
 
     def __init__(self, engine: BaseInferenceEngine, cfg, execution_config=None):
         self.cfg = cfg
         self.engine = engine
 
-        self._execution_config = normalize_execution_config(execution_config, policy_cfg=cfg)
+        self._execution_config = normalize_execution_config(execution_config)
         self._async = self._execution_config.enabled
         if self._async:
             self._executor = AsyncInferenceExecutor(
@@ -53,9 +47,7 @@ class WAMPolicy:
         else:
             self._executor = SyncInferenceExecutor(
                 engine=engine,
-                execute_horizon=getattr(cfg, "execute_horizon", None),
-                temporal_ensemble=getattr(cfg, "temporal_ensemble", True),
-                ensemble_decay=getattr(cfg, "ensemble_decay", 0.5),
+                inference_horizon=self._execution_config.inference_horizon,
             )
 
     def predict_action(self, obs: dict) -> np.ndarray:
@@ -64,13 +56,9 @@ class WAMPolicy:
         The final legality projection for two-point command dims
         (``architecture.binary_command_dims``, from the CKPT's dataloader.binary_action_dims) runs
         HERE — after all executor arithmetic. The normalizer already emits exact ±1 for those dims,
-        but temporal ensembling mixes overlapping chunks (old +1, new -1, decay 0.5 → -0.33), and a
-        mid-band value must never reach a consumer. ``snap ∘ avg ≠ avg ∘ snap``: the projection is
-        only sound AFTER the last mixing step, i.e. at this facade boundary (covers the WS server and
-        any direct WAMPolicy consumer). Threshold 0.5 keeps the conservative downstream boundary; on
-        ensembled ±1 values it acts as a stale-biased majority vote — a legality guarantee, not an
-        optimal fusion (if ensembling is ever re-enabled for real, binary dims should be newest-wins
-        at the executor level instead).
+        and this final boundary also protects engines or checkpoints that emit
+        values between the two legal commands. Threshold 0.5 preserves the
+        downstream command contract for the WS server and direct consumers.
         """
         action = self._executor.predict_action(self._build_conditions(obs))
         dims = getattr(getattr(self.engine, "architecture", None), "binary_command_dims", ()) or ()

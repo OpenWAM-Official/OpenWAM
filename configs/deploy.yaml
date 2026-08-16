@@ -7,8 +7,8 @@ server:
 
 # --- Inference (cfg.inference) ---
 # Every field has a same-name CLI override (--denoise-steps, --inference-mode, ...).
-# --denoise-mode sync / --inference-mode sync reset their async-only fields below,
-# so an async-tuned yaml can be run as the sync baseline with a single flag.
+# Switching either mode to sync resets only that mode's async-only fields, so
+# an async-tuned yaml can be run as the sync baseline with a single flag.
 inference:
   denoise_steps: 10
   denoise_mode: sync          # trajectory: sync | async; separate from inference_mode
@@ -16,9 +16,9 @@ inference:
   variance_shift_alpha: 1.0   # denoise_mode=async: lead curve shift; >= 1
   linear_offset: 0.0          # denoise_mode=async: lag start delay; 0 <= value < 1
 
-  inference_mode: sync        # executor: sync | async; separate from denoise_mode
-  inference_horizon: null     # inference_mode=async: actions per chunk; null = policy.execute_horizon
-  inference_delay_steps: null # inference_mode=async: latency in steps
+  inference_mode: sync       # executor: sync | async; separate from denoise_mode
+  inference_horizon: null       # sync/async: actions executed per generated chunk; null = full chunk
+  inference_delay_steps: null # inference_mode=async only: expected latency in action steps
 
 # --- Deploy-time optimizations (cfg.optimization) ---
 optimization:

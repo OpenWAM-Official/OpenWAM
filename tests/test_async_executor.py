@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from openwam.deploy.executors.async_executor import AsyncInferenceExecutor, normalize_execution_config
+from openwam.deploy.executors.sync_executor import SyncInferenceExecutor
 
 
 class MockEngine:
@@ -112,6 +113,26 @@ def test_async_executor_inference_horizon_discards_tail():
     assert engine.call_count == 2
 
     executor.shutdown()
+
+
+def test_sync_executor_inference_horizon_discards_tail_without_mixing():
+    engine = IndexedEngine(num_frames=5, latency=0.0)
+    executor = SyncInferenceExecutor(engine, inference_horizon=2)
+
+    np.testing.assert_allclose(executor.predict_action({"obs": "step0"}), [100.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step1"}), [101.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step2"}), [200.0])
+    assert engine.call_count == 2
+
+
+def test_sync_executor_full_chunk_when_inference_horizon_is_none():
+    engine = IndexedEngine(num_frames=3, latency=0.0)
+    executor = SyncInferenceExecutor(engine, inference_horizon=None)
+
+    np.testing.assert_allclose(executor.predict_action({"obs": "step0"}), [100.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step1"}), [101.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step2"}), [102.0])
+    np.testing.assert_allclose(executor.predict_action({"obs": "step3"}), [200.0])
 
 
 def test_async_executor_starts_background_at_delay_threshold():
@@ -257,7 +278,7 @@ def test_async_config_rejects_delay_at_or_larger_than_inference_horizon(delay_st
 
 
 @pytest.mark.parametrize("value", [1.2, "1.2"])
-def test_async_config_rejects_non_integral_step_values(value):
+def test_execution_config_rejects_non_integral_horizon(value):
     cfg = {"mode": "async", "inference_horizon": value, "inference_delay_steps": 0}
 
     with pytest.raises(ValueError, match="inference_horizon must be an integer"):
@@ -272,9 +293,15 @@ def test_unrelated_config_resolves_to_sync():
     assert resolved.mode == "sync"
 
 
-@pytest.mark.parametrize("field", ["inference_horizon", "inference_delay_steps"])
-def test_sync_config_rejects_async_timing_fields(field):
-    cfg = {"mode": "sync", field: 1}
+def test_sync_config_accepts_inference_horizon():
+    cfg = normalize_execution_config({"mode": "sync", "inference_horizon": 10})
+
+    assert cfg.inference_horizon == 10
+    assert cfg.inference_delay_steps is None
+
+
+def test_sync_config_rejects_async_delay():
+    cfg = {"mode": "sync", "inference_delay_steps": 1}
 
     with pytest.raises(ValueError, match="inference_mode='async'"):
         normalize_execution_config(cfg)
@@ -292,7 +319,7 @@ def test_wam_policy_mode_none_keeps_sync_buffer_path():
     from openwam.deploy.policy import WAMPolicy
 
     engine = MockEngine(num_frames=3, latency=0.0)
-    cfg = SimpleNamespace(execute_horizon=None, temporal_ensemble=False)
+    cfg = SimpleNamespace()
     policy = WAMPolicy(engine=engine, cfg=cfg, execution_config={"mode": "sync"})
 
     assert policy._async is False
@@ -302,3 +329,19 @@ def test_wam_policy_mode_none_keeps_sync_buffer_path():
     np.testing.assert_allclose(first, np.ones(7) * 1.0)
     np.testing.assert_allclose(second, np.ones(7) * 1.0)
     assert engine.call_count == 1
+
+
+def test_wam_policy_sync_reads_inference_horizon_from_execution_config():
+    from openwam.deploy.policy import WAMPolicy
+
+    engine = MockEngine(num_frames=4, latency=0.0)
+    policy = WAMPolicy(
+        engine=engine,
+        cfg=SimpleNamespace(),
+        execution_config={"mode": "sync", "inference_horizon": 2},
+    )
+
+    policy.predict_action({"prompt": "step0"})
+    policy.predict_action({"prompt": "step1"})
+    policy.predict_action({"prompt": "step2"})
+    assert engine.call_count == 2

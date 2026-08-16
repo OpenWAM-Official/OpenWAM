@@ -350,7 +350,7 @@ Server / deploy passthrough:
 | `--variance-shift-alpha` | config default | Lead curve shift for async denoising. |
 | `--linear-offset` | config default | Lag start delay for async denoising. |
 | `--inference-mode` | config default | Inference mode (`sync`/`async`). |
-| `--inference-horizon` | config default | Async inference horizon; defaults to `policy.execute_horizon`. |
+| `--inference-horizon` | config default | Actions consumed per generated chunk in both sync and async modes. |
 | `--inference-delay-steps` | config default | Async inference delay passed to `scripts/deploy.py`. |
 | `--dry-run` | off | Skip servers/RoboTwin; run the dispatcher + simulated workers only. |
 | `--fresh` | off | Remove this run id's stale `.dispatcher_addr` / `results.jsonl` / `summary.tsv` / `state.json` / `.done` / `run.env` before rank 0 starts. |

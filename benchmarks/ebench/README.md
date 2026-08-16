@@ -55,10 +55,10 @@ OpenWAM policy server(:8848;每 worker 一个,executor 有状态)
 | `video.left/right_camera_view` | `images.left/right_wrist_camera` |
 | `instruction` | `prompt_template.format_prompt_for_inference()` 包装后作为 `prompt` |
 | `state.ee_pose/gripper/base` | RAW-23 proprio(`ebench_obs_to_raw23`;base 经 `ebench_render_state_base` 渲染进指令空间——delta 模式为相邻步测量差分,yaw wrap 后 rad→deg;server 端归一化) |
-| `obs["reset"]==True` | south `reset`(清 action buffer/ensemble)+ 桥内 prev_base 清零 + 重读 instruction |
+| `obs["reset"]==True` | south `reset`(清 action buffer)+ 桥内 prev_base 清零 + 重读 instruction |
 
 仅单步 `step()`:`/step_chunk` 只回末帧 obs,与 OpenWAM executor "一 obs 一 action" 不兼容。
-replan 频率是 server 端的事(`execute_horizon`,默认贪心吃满 32-step chunk)。
+replan 频率是 server 端的事(`inference.inference_horizon`; `null` 时默认贪心吃满 32-step chunk)。
 
 ## 本地评测(需 Isaac Sim 4.1.0 机器)
 
@@ -113,7 +113,7 @@ EBENCH_PYTHON=... bash benchmarks/ebench/single_eval.sh --url http://127.0.0.1:8
   不可达时桥打 UNVERIFIED 警告。
 - 配置可放 `--config benchmarks/ebench/policy_config.yml`(CLI 优先)。
 - 吞吐:794 实例 generalist ≈ 1.79M sim 步;每次 replan 一次视频模型推理,预算见
-  `openwam/deploy` 的 `execute_horizon`。
+  `inference.inference_horizon`。
 
 ## Isaac Sim 实测前检查单(gate-3 输出)
 

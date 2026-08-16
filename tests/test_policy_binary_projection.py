@@ -1,10 +1,8 @@
-"""WAMPolicy final legality projection for two-point command dims (PR #57 B2).
+"""WAMPolicy final legality projection for two-point command dims.
 
-The normalizer emits exact ±1 for ``binary_action_dims``, but executors may do arithmetic AFTER it:
-``SyncInferenceExecutor`` temporal-ensembles overlapping chunks (old +1, new -1, decay 0.5 →
--0.333). ``snap ∘ avg ≠ avg ∘ snap`` — the projection is only sound after the LAST mixing step, so
-it lives at the ``WAMPolicy.predict_action`` boundary, driven by ``architecture.binary_command_dims``
-(set by ``load_model`` from the CKPT's ``dataloader.binary_action_dims``).
+The normalizer normally emits exact ±1 for ``binary_action_dims``. The policy
+boundary still enforces that wire contract for raw or legacy engine outputs,
+driven by ``architecture.binary_command_dims``.
 """
 
 from types import SimpleNamespace
@@ -35,27 +33,25 @@ def _chunk(t, mode_value):
     return c
 
 
-def _policy(engine, **cfg_kw):
-    cfg = SimpleNamespace(execute_horizon=None, temporal_ensemble=True, ensemble_decay=0.5)
-    for k, v in cfg_kw.items():
-        setattr(cfg, k, v)
-    p = WAMPolicy(engine=engine, cfg=cfg)
+def _policy(engine, inference_horizon=None):
+    p = WAMPolicy(
+        engine=engine,
+        cfg=SimpleNamespace(),
+        execution_config={"mode": "sync", "inference_horizon": inference_horizon},
+    )
     p._build_conditions = lambda obs: obs  # bypass image/prompt assembly — not under test
     return p
 
 
-def test_projection_snaps_ensembled_midband_to_exact_binary():
-    """Overlapping-chunk disagreement (wayrise's minimal repro): old chunk +1, new chunk -1,
-    execute_horizon=2 < chunk length 4 → the ensembled value at the regen step is
-    (0.5·(+1) + 1·(-1)) / 1.5 = -1/3 — and the policy must still return an EXACT ±1."""
-    policy = _policy(_FakeEngine([_chunk(4, +1.0), _chunk(4, -1.0)]), execute_horizon=2)
+def test_replan_uses_fresh_chunk_without_temporal_mixing():
+    policy = _policy(_FakeEngine([_chunk(4, +1.0), _chunk(4, -1.0)]), inference_horizon=2)
     a0 = policy.predict_action({})
     a1 = policy.predict_action({})
-    a2 = policy.predict_action({})  # regen + ensemble over the 2 remaining old steps
+    a2 = policy.predict_action({})
     for a in (a0, a1, a2):
-        assert float(a[MODE]) in (-1.0, 1.0), f"mid-band leaked: {a[MODE]}"
+        assert float(a[MODE]) in (-1.0, 1.0)
     assert a0[MODE] == 1.0 and a1[MODE] == 1.0
-    assert a2[MODE] == -1.0  # -1/3 → conservative snap (>0.5 required for +1)
+    assert a2[MODE] == -1.0
 
 
 def test_projection_noop_without_binary_dims():

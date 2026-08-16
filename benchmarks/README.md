@@ -66,7 +66,6 @@ Within one episode, just keep calling `client.predict(payload)`. The server cach
 **You must call `client.reset()` between episodes.** The server keeps per-episode executor state that leaks across episode boundaries otherwise:
 
 - the action chunk buffer — pending actions from the last inference
-- the ensemble buffer — overlapping predictions used in receding-horizon mode
 - the step counter (and, in async mode, any in-flight background inference)
 
 Reset drops all of this and returns `{"type": "reset_ack"}`. It does **not** touch model weights or server-level config, so it's cheap (<1 ms) and safe to call defensively at the start of every episode.
@@ -74,7 +73,7 @@ Reset drops all of this and returns `{"type": "reset_ack"}`. It does **not** tou
 When to call it:
 - At the **start** of each new task / episode / rollout — including the very first one.
 - After any hard failure (client timeout, controller fault) where you're not sure the action buffer is still valid.
-- **Not** during normal step-to-step control. Calling `reset()` mid-episode forces the next `predict()` to pay full inference latency and throws away temporal ensembling.
+- **Not** during normal step-to-step control. Calling `reset()` mid-episode forces the next `predict()` to pay full inference latency and discards the remaining action chunk.
 
 Message shape:
 ```
