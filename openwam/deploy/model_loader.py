@@ -232,19 +232,26 @@ def load_from_checkpoint_dir(
 
 
 def repr_contract_from_cfg(cfg: DictConfig) -> dict:
-    """Checkpoint representation fields that an eval client must match."""
+    """Checkpoint representation fields that an eval client must match.
+
+    Optional legacy markers are advertised only when the training config
+    actually contains them.  Compact RoboCasa365 now defines gripper and mode
+    semantics as part of its representation and performs both projections in
+    the evaluation bridge, so its checkpoint contract needs only the
+    representation name.
+    """
     dims = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
-    # gripper_convention: a RECORDED marker (not a behavior switch — the reader is hard-coded to the
-    # pretrain convention). None = the ckpt config predates the marker, i.e. it was trained with the
-    # old RoboCasa-native +1=close gripper; a pretrain-convention client must REFUSE such ckpts
-    # (evaluating one would silently invert every grasp).
-    return {
+    gripper_convention = OmegaConf.select(cfg, "dataloader.gripper_convention", default=None)
+    contract = {
         "representation": str(
             OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
         ),
-        "binary_action_dims": [int(d) for d in (dims or [])],
-        "gripper_convention": OmegaConf.select(cfg, "dataloader.gripper_convention", default=None),
     }
+    if dims:
+        contract["binary_action_dims"] = [int(d) for d in dims]
+    if gripper_convention is not None:
+        contract["gripper_convention"] = gripper_convention
+    return contract
 
 
 def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
@@ -328,9 +335,10 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
         stats_path,
     )
 
-    # Command-aware extras (keys absent in older ckpts = historical behavior, no wrapper):
-    #   binary_action_dims — two-point {-1, +1} command dims (compact RoboCasa365: control_mode 14)
-    #     trained as raw ±1; snap the decoded output back to exact ±1.
+    # Legacy command-aware extras (keys absent = ordinary normalization):
+    #   binary_action_dims — optional compatibility support for older checkpoints whose
+    #     two-point commands bypassed normalization. New benchmark adapters own their
+    #     command projection at the environment boundary.
     #   base_proprio="global_pose" — the proprio normalizes with its own 'eef_base_pose_proprio'
     #     stats block (pose is meters/unit-circle, not command space), while actions keep action_mode's.
     binary_dims = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
@@ -368,7 +376,7 @@ class _CommandAwareNormalizer:
 
     * ``unnormalize`` (action OUT): continuous dims go through the inner stats inverse; each
       ``binary_dims`` dim is judged in the PRE-unnormalize space — the raw ±1 space the model was
-      trained in, since those targets bypassed normalization (robocasa365 binary_action_dims) — and
+      trained in, since those legacy targets bypassed normalization — and
       overridden to exact {-1, +1}. Judging the post-inverse value instead would corrupt the class
       under any non-identity stats (z-score: a correct +1 becomes ~-0.35 and snaps to -1).
       Threshold 0.5 — NOT the ±1 midpoint 0 — deliberately preserves the downstream conservative

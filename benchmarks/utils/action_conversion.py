@@ -133,6 +133,23 @@ def _matrix_to_axis_angle(R: np.ndarray) -> np.ndarray:
     return (axis * angle).astype(np.float32)
 
 
+def binarize_robocasa_action12(action: np.ndarray) -> np.ndarray:
+    """Project native RoboCasa gripper/mode commands to their legal two-point values.
+
+    RoboCasa's gym wrapper interprets both native ``gripper_close`` (dim 6) and
+    ``control_mode`` (dim 11) with the same inclusive threshold: values below
+    ``0.5`` map to ``-1`` and values at or above ``0.5`` map to ``+1``.  Keep
+    that policy at the evaluation boundary instead of encoding it in training
+    dataset configuration.
+    """
+    out = np.asarray(action, dtype=np.float32).reshape(-1).copy()
+    if out.shape != (12,):
+        raise ValueError(f"expected a 12-D RoboCasa action, got {out.shape}")
+    out[6] = 1.0 if float(out[6]) >= 0.5 else -1.0
+    out[11] = 1.0 if float(out[11]) >= 0.5 else -1.0
+    return out
+
+
 def eef10_to_robocasa12d(
     action: np.ndarray,
     proprio_eef_pos: np.ndarray,
@@ -169,15 +186,16 @@ def eef10_to_robocasa12d(
         control_mode: scalar native mode command; defaults to -1.0.
         clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
 
-    Gripper: the model dim ``act[9]`` is the PRETRAIN open-scale in ``[-1, +1]`` (**-1=close, +1=open**
-    — the training reader negates RoboCasa's native ``gripper_close`` so post-train matches the
-    pretrained gripper space; robotwin/BEHAVIOR/robocoin all train +1=open). Close only on a
-    CONFIDENT command: ``close (1.0) iff act[9] < -0.5``, else open — an uncertain / neutral output
-    (~0, the flow-matching prior mean) defaults to open, avoiding spurious grasps. No width
+    Gripper: model dim ``act[9]`` uses the fixed compact-representation open scale
+    ``[-1, +1]`` (**-1=close, +1=open**).  Convert it to RoboCasa's native
+    close scale with the sign-reversed official threshold: ``act[9] <= -0.5``
+    becomes close ``+1`` and larger values become open ``-1``. No width
     binarization — the model predicts the command directly, so there is no actuation-lag delay
-    (unlike deriving open/close from the achieved finger-separation width). Downstream, the robocasa
-    gym wrapper re-binarizes at 0.5 (>=0.5 -> close, <0.5 -> open), so the emitted {1.0, 0.0} are
-    real close/open commands.
+    (unlike deriving open/close from the achieved finger-separation width).
+
+    Mode: ``control_mode`` keeps RoboCasa's native sign and is projected with
+    the official inclusive threshold: ``>=0.5`` becomes ``+1`` and lower
+    values become ``-1``.
 
     Dataset/controller contract: the recorded action is a normalized OSC delta. RoboCasa365's
     controller metadata declares ``output_max=[0.05]*3+[0.5]*3``; pass those values when evaluating
@@ -210,19 +228,17 @@ def eef10_to_robocasa12d(
         pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
         rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
 
-    # Gripper: model dim [9] is the PRETRAIN open-scale in [-1,+1] (-1=close, +1=open — the reader
-    # NEGATES RoboCasa's native +1=close so post-train matches the pretrained gripper space). Close
-    # only on a CONFIDENT command: close (1.0) iff act[9] < -0.5, else open (0.0). An uncertain /
-    # neutral output (~0, the flow-matching prior mean) defaults to open, avoiding spurious grasps.
-    # ENV CONTRACT (measured + gym_wrapper.py:125): the wrapper binarizes at 0.5 — >=0.5 -> +1
-    # (close), <0.5 -> -1 (open) — so 0.0 here IS a real open command, not a hold.
-    gripper_cmd = 1.0 if float(act[9]) < -0.5 else 0.0
+    # Policy gripper is -1=close,+1=open; RoboCasa consumes +1=close,-1=open.
+    # The inclusive boundary exactly mirrors the official native >=0.5 rule
+    # after reversing the sign.
+    gripper_cmd = 1.0 if float(act[9]) <= -0.5 else -1.0
 
     base = np.zeros(4, np.float64) if base_motion is None else np.asarray(base_motion, np.float64).reshape(-1)
     if base.shape[0] != 4:
         raise ValueError(f"base_motion must be 4-D, got {base.shape[0]}")
+    mode_cmd = 1.0 if float(control_mode) >= 0.5 else -1.0
     # SERVER / slice_action order: eef_pos, eef_rot, grip, base_motion, control_mode.
-    return np.concatenate([pos_cmd, rot_cmd, [gripper_cmd], base, [float(control_mode)]]).astype(np.float32)
+    return np.concatenate([pos_cmd, rot_cmd, [gripper_cmd], base, [mode_cmd]]).astype(np.float32)
 
 
 def eef20d_to_robocasa12d(

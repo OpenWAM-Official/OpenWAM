@@ -197,7 +197,7 @@ def test_repo_template_declares_compact_contract():
     assert "mask_torso_action" not in cfg
 
 
-def test_hydra_compose_compact_maps_and_binary_dim():
+def test_hydra_compose_compact_maps_and_fixed_eval_semantics():
     import os
 
     from hydra import compose, initialize_config_dir
@@ -208,6 +208,9 @@ def test_hydra_compose_compact_maps_and_binary_dim():
         assert cfg.dataloader.action_mode == "robocasa365"
         assert list(cfg.dataloader.unify_action_map) == ["0-9", "68-72"]
         assert list(cfg.dataloader.unify_state_map) == ["0-9", "68-76"]
-        assert list(cfg.dataloader.binary_action_dims) == [14]
-        assert cfg.dataloader.gripper_convention == "pretrain"
+        assert "binary_action_dims" not in cfg.dataloader
+        assert "gripper_convention" not in cfg.dataloader
         assert "mask_torso_action" not in cfg.dataloader
+        assert "filter_static_segments" not in cfg.dataloader
+        assert "static_segment_threshold" not in cfg.dataloader
+        assert "max_static_retry" not in cfg.dataloader

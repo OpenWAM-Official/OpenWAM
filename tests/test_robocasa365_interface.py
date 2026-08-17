@@ -37,7 +37,6 @@ class _Client:
     def ping(self):
         return {
             "type": transport.PONG,
-            "gripper_convention": "pretrain",
             "representation": self.representation,
         }
 
@@ -82,9 +81,7 @@ def test_action15_roundtrip_uses_current_state_and_preserves_base_torso_mode():
     result = policy.act(obs, "prompt")
     np.testing.assert_allclose(result["action.end_effector_position"], [0.5, -0.25, 0.1], atol=2e-6)
     np.testing.assert_allclose(result["action.end_effector_rotation"], [0, 0, 0.2], atol=2e-6)
-    # The gym wrapper binarizes native values <0.5 to open (-1 internally),
-    # so the bridge emits the established explicit open value 0.0.
-    np.testing.assert_allclose(result["action.gripper_close"], [0.0])
+    np.testing.assert_allclose(result["action.gripper_close"], [-1.0])
     np.testing.assert_allclose(result["action.base_motion"], [0.2, -0.3, 0.4, 0.7])
     np.testing.assert_allclose(result["action.control_mode"], [1.0])
     assert len(client.payloads[0]["state"]) == 19
@@ -132,9 +129,38 @@ def test_representation_handshake_rejects_legacy_checkpoint():
 
 def test_raw_action12_passthrough():
     raw = np.arange(12, dtype=np.float32)
+    raw[6] = 0.49
+    raw[11] = 0.5
     policy = adapter.OpenWAMRoboCasa365Policy(
         _client=_Client(raw), osc_pos_scale=0.05, osc_rot_scale=0.5
     )
     result = policy.act(_obs(), "prompt")
     flattened = np.concatenate(list(result.values()))
-    np.testing.assert_allclose(flattened, raw)
+    expected = raw.copy()
+    expected[6] = -1.0
+    expected[11] = 1.0
+    np.testing.assert_allclose(flattened, expected)
+
+
+@pytest.mark.parametrize(
+    ("gripper_open_scale", "mode", "expected_gripper_close", "expected_mode"),
+    [
+        (-0.51, 0.49, 1.0, -1.0),
+        (-0.50, 0.50, 1.0, 1.0),
+        (-0.49, 0.51, -1.0, 1.0),
+        (0.00, 0.00, -1.0, -1.0),
+    ],
+)
+def test_eval_binarizes_gripper_and_mode_at_official_boundaries(
+    gripper_open_scale, mode, expected_gripper_close, expected_mode
+):
+    obs = _obs()
+    action = _action15(obs)
+    action[9] = gripper_open_scale
+    action[14] = mode
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=_Client(action), osc_pos_scale=0.05, osc_rot_scale=0.5
+    )
+    result = policy.act(obs, "prompt")
+    np.testing.assert_allclose(result["action.gripper_close"], [expected_gripper_close])
+    np.testing.assert_allclose(result["action.control_mode"], [expected_mode])

@@ -56,8 +56,6 @@ DEFAULT_ACTION_UNIFY_MAP = ["0-9", "68-72"]
 DEFAULT_STATE_UNIFY_MAP = ["0-9", "68-76"]
 ACTION_DIM_MASK = np.ones(ACTION_DIM, dtype=bool)
 STATE_DIM_MASK = np.ones(STATE_DIM, dtype=bool)
-CONTROL_MODE_DIM = 14
-_ALLOWED_BINARY_ACTION_DIMS = (CONTROL_MODE_DIM,)
 _DEPLOY_RESOLVABLE_MODES = ("min-max", "z-score")
 
 
@@ -125,14 +123,9 @@ class RoboCasa365Dataset(BaseDataset):
         camera_layout: Optional[list] = None,
         temporal_compression: int = 4,
         causal_temporal: bool = True,
-        filter_static_segments: bool = True,
-        static_segment_threshold: float = 1e-5,
-        max_static_retry: int = 3,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
         unify_state_map: Optional[Any] = None,
-        binary_action_dims: Optional[Any] = None,
-        gripper_convention: str = "pretrain",
         color_jitter: Optional[Any] = None,
         **_unused,
     ):
@@ -160,9 +153,6 @@ class RoboCasa365Dataset(BaseDataset):
         self.num_video_frames = len(self._video_sample_indices)
         self.multiview = bool(multiview)
         self.camera_layout = list(camera_layout) if camera_layout else [HEAD_CAMERA, WRIST_CAMERA, _MISSING_RIGHT]
-        self._filter_static_segments = bool(filter_static_segments)
-        self._static_segment_threshold = float(static_segment_threshold)
-        self._max_static_retry = int(max_static_retry)
         self._color_jitter = None
         if color_jitter and split == "train":
             get = color_jitter.get if hasattr(color_jitter, "get") else lambda key, default: default
@@ -172,16 +162,6 @@ class RoboCasa365Dataset(BaseDataset):
                 saturation=float(get("saturation", 0.2)),
                 hue=float(get("hue", 0.0)),
             )
-        if gripper_convention != "pretrain":
-            raise ValueError("RoboCasa365 compact data supports only -1=closed,+1=open ('pretrain')")
-
-        dims = tuple(int(value) for value in (binary_action_dims or ()))
-        bad = [value for value in dims if value not in _ALLOWED_BINARY_ACTION_DIMS]
-        if bad:
-            raise ValueError(
-                f"binary_action_dims {bad} invalid; only compact control_mode dim {CONTROL_MODE_DIM} is allowed"
-            )
-        self._binary_action_dims = dims
         self._unify_action = bool(unify_action)
         self._action_dst_index = None
         self._state_dst_index = None
@@ -326,10 +306,7 @@ class RoboCasa365Dataset(BaseDataset):
         values = np.asarray(action, np.float32)
         if self._action_dst_index is not None:
             values = unmap_from_unify(values, self._action_dst_index).astype(np.float32)
-        output = self._unnormalize_action(values)
-        for dim in self._binary_action_dims:
-            output[..., dim] = np.where(values[..., dim] > 0.5, 1.0, -1.0)
-        return output.astype(np.float32)
+        return self._unnormalize_action(values).astype(np.float32)
 
     def __len__(self) -> int:
         return len(self._val_samples) if self._val_samples is not None else len(self._window_index)
@@ -421,15 +398,6 @@ class RoboCasa365Dataset(BaseDataset):
         proprio_raw = state_rows[0:1].copy()
         action = apply_normalization(action_raw, self._action_stats, self.normalize_mode).astype(np.float32)
         proprio = apply_normalization(proprio_raw, self._state_stats, self.normalize_mode).astype(np.float32)
-        for dim in self._binary_action_dims:
-            values = action_raw[:n_valid_action, dim]
-            if values.size and np.any(np.abs(np.abs(values) - 1.0) > 1e-4):
-                raise ValueError(f"binary action dim {dim} contains non-±1 values: {np.unique(values)[:8]}")
-            action[:, dim] = action_raw[:, dim]
-        # Compare physical values before the independently fitted state/action
-        # normalizers.  In compact RoboCasa365 both slices are EEF xyz+rot6d,
-        # so equality means the commanded target is the achieved current pose.
-        is_static = bool(np.max(np.abs(action_raw[0, 0:9] - proprio_raw[0, 0:9])) < self._static_segment_threshold)
         if self._action_dst_index is not None:
             action, _ = map_to_unify(action, self._action_dst_index, UNIFY_DIM)
             proprio, _ = map_to_unify(proprio, self._state_dst_index, UNIFY_DIM)
@@ -460,26 +428,14 @@ class RoboCasa365Dataset(BaseDataset):
             "start_frame": start,
             "episode_length": episode_length,
             "task_name": self.task_name,
-            "_is_static": is_static,
         }
 
     def __getitem__(self, index):
         if self._val_samples is not None:
             local_index, start = self._val_samples[index]
-            return self._build_sample(local_index, start)
-        local_index, start = self._window_index[index]
+        else:
+            local_index, start = self._window_index[index]
         sample = self._build_sample(local_index, start)
-        if (
-            self._filter_static_segments
-            and self.split == "train"
-            and sample.get("_is_static")
-            and len(self._window_index) > 1
-        ):
-            for _ in range(self._max_static_retry):
-                local_index, start = self._window_index[random.randint(0, len(self._window_index) - 1)]
-                sample = self._build_sample(local_index, start)
-                if not sample.get("_is_static"):
-                    break
         if self._color_jitter is not None:
             sample["video"] = self._color_jitter.apply({"video": sample["video"]})["video"]
             sample["first_frame_image"] = [sample["video"][0]]
@@ -513,14 +469,9 @@ class MultiTaskRoboCasa365Dataset(BaseDataset):
             camera_layout=list(camera_layout) if camera_layout is not None else None,
             temporal_compression=int(get_cfg(config, "temporal_compression", 4)),
             causal_temporal=bool(get_cfg(config, "causal_temporal", True)),
-            filter_static_segments=bool(get_cfg(config, "filter_static_segments", True)),
-            static_segment_threshold=float(get_cfg(config, "static_segment_threshold", 1e-5)),
-            max_static_retry=int(get_cfg(config, "max_static_retry", 3)),
             unify_action=bool(get_cfg(config, "unify_action", False)),
             unify_action_map=get_cfg(config, "unify_action_map", None),
             unify_state_map=get_cfg(config, "unify_state_map", None),
-            binary_action_dims=get_cfg(config, "binary_action_dims", None),
-            gripper_convention=str(get_cfg(config, "gripper_convention", "pretrain")),
             color_jitter=get_cfg(config, "color_jitter", None),
             seed=int(get_cfg(config, "seed", 42)),
         )

@@ -126,6 +126,7 @@ def test_compact_nonunified_shapes_and_same_row_action(tmp_path):
         sample = dataset._build_sample(0, 1)
     assert sample["proprio"].shape == (1, STATE_DIM)
     assert sample["action"].shape == (32, ACTION_DIM)
+    assert "_is_static" not in sample
     # State row 1 is x=1 and action row 1 is target x=1.025. A next-state
     # implementation would have produced/read x around 2 here.
     np.testing.assert_allclose(sample["proprio"][0, 0], 1.0)
@@ -174,7 +175,6 @@ def test_separate_normalization_and_denormalization(tmp_path):
             height=64,
             width=96,
             unify_action=True,
-            binary_action_dims=[14],
         )
         sample = dataset[0]
     raw = dataset.denormalize_action(sample["action"].numpy())

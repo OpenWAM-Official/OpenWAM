@@ -23,10 +23,6 @@ split: train
 val_ratio: 0.0
 seed: 42
 
-filter_static_segments: true
-static_segment_threshold: 1.0e-5
-max_static_retry: 3
-
 # The converted Parquet columns are already physical and row-aligned:
 #   observation.state[19] = eef xyz3 + rot6d6 + gripper1 + base xyz3 + rot6d6
 #   action[15] = absolute eef xyz3 + rot6d6 + gripper1
@@ -41,13 +37,6 @@ normalization_stats_path: /path/to/robocasa365_openwam_v3/robocasa365_multitask_
 unify_action: true
 unify_action_map: ["0-9", "68-72"]
 unify_state_map: ["0-9", "68-76"]
-
-# Raw compact action dim 14 is control_mode {-1,+1}. Its full action-only
-# distribution is recorded in the stats artifact; min-max is therefore the
-# identity when both legal values are present.  The binary marker additionally
-# preserves exact legal output values at deployment.
-binary_action_dims: [14]
-gripper_convention: pretrain
 
 color_jitter:
   brightness: 0.2

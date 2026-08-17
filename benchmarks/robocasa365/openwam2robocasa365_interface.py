@@ -25,6 +25,7 @@ import numpy as np  # noqa: E402
 
 from benchmarks.utils import (  # noqa: E402
     WSPolicyClient,
+    binarize_robocasa_action12,
     build_payload,
     eef10_to_robocasa12d,
     encode_numpy_b64,
@@ -268,8 +269,6 @@ class OpenWAMRoboCasa365Policy:
         pong = self._client.ping()
         if pong.get("type") != transport.PONG:
             raise RuntimeError(f"OpenWAM server ping returned unexpected response: {pong}")
-        if pong.get("gripper_convention") != "pretrain":
-            raise RuntimeError("gripper convention mismatch: compact RoboCasa365 requires -1=closed,+1=open")
         if pong.get("representation") != REPRESENTATION:
             raise RuntimeError(
                 f"representation mismatch: eval requires {REPRESENTATION!r}, server advertises {pong.get('representation')!r}"
@@ -331,6 +330,7 @@ class OpenWAMRoboCasa365Policy:
             flat = self._bridge_action15(obs, flat)
         if flat.shape[0] != self._action_dim:
             raise ValueError(f"OpenWAM returned action dim {flat.shape[0]}, expected {self._action_dim}")
+        flat = binarize_robocasa_action12(flat)
         if self._debug:
             dump_obs_debug(
                 obs,
