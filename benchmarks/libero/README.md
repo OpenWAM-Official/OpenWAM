@@ -16,7 +16,6 @@ Because LIBERO both install the top-level package name
 | --- | --- |
 | `openwam2libero_interface.py` | WebSocket policy adapter from LIBERO observations to OpenWAM server payloads. |
 | `policy_config.yml` | Eval client config template. |
-| `policy_config_fastwam_aligned.yml` | FastWAM-aligned rollout protocol for comparable LIBERO evaluation. |
 | `single_eval.py` | Run one LIBERO task against an OpenWAM policy server. |
 | `single_eval.sh` | Shell wrapper that patches host/port/suite/task at runtime. |
 | `run_10epoch_all_suites.py` | Shared multi-GPU launcher for LIBERO. |
@@ -151,45 +150,6 @@ client converts it to the env's native 7-D OSC delta using the live controller
 `output_max` scales (probed automatically, falls back to 0.05 m / 0.5 rad).
 
 Use `POLICY_CONFIG_PATH=/path/to/custom.yml` to run with a copied config.
-
-### FastWAM-aligned protocol
-
-For an OpenWAM checkpoint trained with `configs/dataloader/libero.yaml`, start
-the server in synchronous receding-horizon mode. This matches FastWAM's 10-step
-replanning and 10 denoising steps without changing the checkpoint's own input
-and action representation:
-
-```bash
-python scripts/deploy.py \
-  --ckpt-dir /path/to/openwam_ckpt \
-  --port 8848 \
-  --denoise-steps 10 \
-  --denoise-mode sync \
-  --inference-mode sync \
-  --inference-horizon 10 \
-  --compile-enabled false \
-  optimization.dit_cache.enabled=false
-```
-
-Then select the aligned client config:
-
-```bash
-POLICY_CONFIG_PATH=benchmarks/libero/policy_config_fastwam_aligned.yml \
-bash benchmarks/libero/single_eval.sh ordinary libero_spatial 0 8848 127.0.0.1
-```
-
-The aligned protocol uses 50 trials per task, 30 open-gripper no-op steps,
-seed 42 once per task environment, 256x256 source-camera rendering, and a
-400-step horizon for `libero_spatial`, `libero_object`, and `libero_goal` or
-700 steps for `libero_10` and `libero_90`.
-
-Three FastWAM model-specific settings are deliberately not copied. OpenWAM
-sends the raw task instruction (the text used during this checkpoint's
-training), assembles the two cameras into its trained 384x320 L-shaped canvas,
-and uses the EEF10 absolute-pose bridge with a continuous gripper command.
-FastWAM instead wraps the instruction in its own prompt template, concatenates
-two 224x224 views, and predicts/binarizes native 7-D delta actions. Copying
-those settings would make this OpenWAM checkpoint out of distribution.
 
 Important defaults:
 

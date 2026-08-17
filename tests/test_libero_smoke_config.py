@@ -212,27 +212,6 @@ def test_libero_full_eval_uses_default_mujoco_version():
     assert "mujoco==3.3.2" in environment["dependencies"][-1]["pip"]
 
 
-def test_fastwam_aligned_policy_config_exists_and_matches_protocol():
-    repo_root = Path(__file__).resolve().parents[1]
-    policy = yaml.safe_load(
-        (repo_root / "benchmarks" / "libero" / "policy_config_fastwam_aligned.yml").read_text(
-            encoding="utf-8"
-        )
-    )
-
-    assert policy["num_trials"] == 50
-    assert policy["max_steps_by_suite"] == {
-        "libero_spatial": 400,
-        "libero_object": 400,
-        "libero_goal": 400,
-        "libero_10": 700,
-        "libero_90": 700,
-    }
-    assert policy["settle_steps"] == 30
-    assert policy["settle_action"] == [0, 0, 0, 0, 0, 0, -1]
-    assert policy["action_mode"] == "eef"
-
-
 
 
 
