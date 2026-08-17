@@ -17,13 +17,22 @@ suite: libero_spatial
 task_id: 0
 num_trials: 1
 max_steps: 600
-settle_steps: 10
-seed: 0
+max_steps_by_suite:
+  libero_spatial: 600
+  libero_object: 600
+  libero_goal: 600
+  libero_10: 700
+# Match FastWAM: seed the task environment once, before the trial loop.
+seed: 42
+reseed_each_trial: false
 fail_on_incomplete: false
 
+settle_steps: 30
+settle_action: [0, 0, 0, 0, 0, 0, -1]
+
 # Offscreen rendering.
-camera_height: 128
-camera_width: 128
+camera_height: 256
+camera_width: 256
 
 # Observation mapping from LIBERO obs dict to OpenWAM's fixed camera contract.
 head_camera_key: agentview_image
@@ -65,3 +74,12 @@ osc_rot_scale: null
 
 debug: false
 debug_dir: "./debug_libero"
+
+# Save every trial from the initialized state through settling and rollout.
+# Three MP4s are written per trial: agent view, wrist view, and the checkpoint's
+# 384x320 L-shaped model layout. A results.json file records success and paths.
+save_videos: true
+video_dir: "./evaluate_results/libero"
+video_fps: 20
+video_model_height: 384
+video_model_width: 320

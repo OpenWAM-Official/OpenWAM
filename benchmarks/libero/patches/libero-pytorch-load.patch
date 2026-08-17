@@ -1,0 +1,12 @@
+diff --git a/libero/libero/benchmark/__init__.py b/libero/libero/benchmark/__init__.py
+index 2b833d0..e648138 100644
+--- a/libero/libero/benchmark/__init__.py
++++ b/libero/libero/benchmark/__init__.py
+@@ -163,3 +163,6 @@ class Benchmark(abc.ABC):
+         )
+-        init_states = torch.load(init_states_path)
++        # PyTorch >= 2.6 defaults weights_only=True. LIBERO init-state files
++        # contain NumPy objects, so load this trusted local benchmark asset with
++        # the historical behavior explicitly enabled.
++        init_states = torch.load(init_states_path, weights_only=False)
+         return init_states

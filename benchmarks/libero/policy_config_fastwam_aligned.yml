@@ -1,0 +1,58 @@
+# FastWAM-aligned LIBERO rollout protocol for the OpenWAM EEF10 checkpoint.
+
+policy_name: openwam
+
+host: "127.0.0.1"
+port: 8848
+request_timeout: 300
+
+flavor: ordinary
+
+suite: libero_spatial
+task_id: 0
+num_trials: 50
+max_steps: 400
+max_steps_by_suite:
+  libero_spatial: 400
+  libero_object: 400
+  libero_goal: 400
+  libero_10: 700
+  libero_90: 700
+seed: 42
+reseed_each_trial: false
+fail_on_incomplete: false
+
+settle_steps: 30
+settle_action: [0, 0, 0, 0, 0, 0, -1]
+
+camera_height: 256
+camera_width: 256
+
+head_camera_key: agentview_image
+left_wrist_camera_key: robot0_eye_in_hand_image
+right_wrist_camera_key: null
+image_transform: rotate_180
+
+# Keep OpenWAM's trained representation while aligning the rollout protocol.
+action_mode: eef
+send_state: true
+state_keys:
+  - robot0_eef_pos
+  - robot0_eef_quat
+  - robot0_gripper_qpos
+state_dim: 10
+
+action_dim: 7
+action_indices: null
+action_clip: null
+osc_pos_scale: null
+osc_rot_scale: null
+
+debug: false
+debug_dir: "./debug_libero_fastwam_aligned"
+
+save_videos: true
+video_dir: "./evaluate_results/libero_fastwam_aligned"
+video_fps: 20
+video_model_height: 384
+video_model_width: 320

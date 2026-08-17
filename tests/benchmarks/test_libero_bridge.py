@@ -17,13 +17,12 @@ from benchmarks.utils import (
     libero_obs_to_eef10,
     libero_open_scale_to_gripper_cmd,
 )
-from openwam.dataloader.libero import (
+from scripts.convert_libero_to_absolute_eef10_v3 import (
     LIBERO_GRIPPER_WIDTH_OPEN,
     axis_angle_to_matrix,
-    gripper_cmd_to_open_scale,
-    gripper_qpos_to_cmd,
+    convert_state_action,
+    gripper_qpos_to_open_scale,
     matrix_to_rot6d,
-    state8_to_eef10,
 )
 
 _IDENT_R6D = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], np.float32)
@@ -39,14 +38,15 @@ def _axis_angle_to_quat_xyzw(aa: np.ndarray) -> np.ndarray:
 
 
 def test_client_proprio_matches_dataloader_repr():
-    """libero_obs_to_eef10 (live quat) == state8_to_eef10 (stored axis-angle)."""
+    """Live proprio matches the EEF10 state written by the converter."""
     rng = np.random.RandomState(7)
     for _ in range(8):
         aa = rng.uniform(-1.5, 1.5, size=3)
         pos = rng.uniform(-0.5, 0.5, size=3)
         qpos = np.array([rng.uniform(0, 0.04), rng.uniform(-0.04, 0)])
         state8 = np.concatenate([pos, aa, qpos]).astype(np.float32)[None]
-        from_state = state8_to_eef10(state8)[0]
+        source_action = np.zeros((1, 7), dtype=np.float32)
+        from_state = convert_state_action(state8, source_action)[0][0]
         from_obs = libero_obs_to_eef10(pos, _axis_angle_to_quat_xyzw(aa), qpos)
         np.testing.assert_allclose(from_obs, from_state, atol=1e-5)
 
@@ -54,7 +54,7 @@ def test_client_proprio_matches_dataloader_repr():
 def test_gripper_render_is_shared_between_train_and_eval():
     for width in (0.0, 0.02, LIBERO_GRIPPER_WIDTH_OPEN, 0.2, -0.1):
         assert libero_gripper_qpos_to_cmd(width) == pytest.approx(
-            float(gripper_qpos_to_cmd(np.array(width))), abs=1e-7
+            float(gripper_qpos_to_open_scale(np.array(width))), abs=1e-7
         )
     # OPEN-SCALE: fully open width -> +1, fully closed -> -1.
     assert libero_gripper_qpos_to_cmd(LIBERO_GRIPPER_WIDTH_OPEN) == 1.0  # open
@@ -62,10 +62,13 @@ def test_gripper_render_is_shared_between_train_and_eval():
 
 
 def test_gripper_open_scale_inverse_is_shared_between_train_and_eval():
-    """The bridge's negation is the exact inverse of the dataloader's render."""
-    for cmd in (-1.0, -0.4, 0.0, 0.4, 1.0):
-        open_scale = float(gripper_cmd_to_open_scale(np.array(cmd)))
-        assert libero_open_scale_to_gripper_cmd(open_scale) == pytest.approx(cmd, abs=1e-7)
+    """Converted Fast-WAM flags recover the equivalent LIBERO env command."""
+    state8 = np.zeros((2, 8), dtype=np.float32)
+    source_action = np.zeros((2, 7), dtype=np.float32)
+    source_action[:, 6] = [0.0, 1.0]  # close, open
+    action10 = convert_state_action(state8, source_action)[1]
+    assert libero_open_scale_to_gripper_cmd(action10[0, 9]) == 1.0
+    assert libero_open_scale_to_gripper_cmd(action10[1, 9]) == -1.0
     # LIBERO's env command space: +1 closes. A trained "open" (+1) must reach
     # the env as -1, or the gripper runs inverted for the whole episode.
     assert libero_open_scale_to_gripper_cmd(1.0) == -1.0

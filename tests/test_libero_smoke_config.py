@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import os
+import random
 import subprocess
 from pathlib import Path
 
@@ -29,6 +31,14 @@ def _load_interface_module(repo_root: Path):
 def _load_single_eval_module(repo_root: Path, monkeypatch):
     monkeypatch.syspath_prepend(str(repo_root / "benchmarks" / "libero"))
     return _load_module(repo_root, "benchmarks/libero/single_eval.py", "libero_single_eval")
+
+
+def _load_full_eval_module(repo_root: Path):
+    return _load_module(
+        repo_root,
+        "benchmarks/libero/run_10epoch_all_suites.py",
+        "libero_10epoch_full_eval",
+    )
 
 
 def _fake_libero_repo(root: Path):
@@ -88,6 +98,162 @@ def test_libero_single_eval_requires_typed_yaml(monkeypatch):
         single_eval._parse_optional_int("8", "state_dim")
     with pytest.raises(TypeError, match="YAML number"):
         single_eval._parse_optional_float("1.0", "action_clip")
+
+
+def test_libero_single_eval_resolves_contiguous_trial_range(monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    single_eval = _load_single_eval_module(repo_root, monkeypatch)
+
+    assert single_eval._resolve_trial_range({}) == (0, 1)
+    assert single_eval._resolve_trial_range({"trial_start": 25, "num_trials": 25}) == (25, 50)
+    with pytest.raises(ValueError, match="trial_start must be non-negative"):
+        single_eval._resolve_trial_range({"trial_start": -1, "num_trials": 25})
+    with pytest.raises(ValueError, match="num_trials must be positive"):
+        single_eval._resolve_trial_range({"trial_start": 0, "num_trials": 0})
+    with pytest.raises(TypeError, match="trial_start must be a YAML integer"):
+        single_eval._resolve_trial_range({"trial_start": "25", "num_trials": 25})
+
+
+def test_libero_single_eval_resolves_suite_specific_max_steps(monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    single_eval = _load_single_eval_module(repo_root, monkeypatch)
+    cfg = {
+        "max_steps": 600,
+        "max_steps_by_suite": {
+            "libero_spatial": 600,
+            "libero_object": 600,
+            "libero_goal": 600,
+            "libero_10": 700,
+        },
+    }
+
+    assert single_eval._resolve_max_steps(cfg, "libero_spatial") == 600
+    assert single_eval._resolve_max_steps(cfg, "libero_object") == 600
+    assert single_eval._resolve_max_steps(cfg, "libero_goal") == 600
+    assert single_eval._resolve_max_steps(cfg, "libero_10") == 700
+
+
+def test_libero_full_eval_maps_long_and_balances_all_tasks():
+    repo_root = Path(__file__).resolve().parents[1]
+    full_eval = _load_full_eval_module(repo_root)
+
+    suites = full_eval._resolve_suites("spatial,goal,object,long")
+    assert suites == ["libero_spatial", "libero_goal", "libero_object", "libero_10"]
+    jobs = full_eval._build_jobs(suites, {suite: 10 for suite in suites}, None)
+    slots = full_eval._build_replica_slots(list(range(8)), 8920)
+    assignments = full_eval._assign_jobs(jobs, slots)
+
+    assert len(jobs) == 40
+    assert {job for slot_jobs in assignments.values() for job in slot_jobs} == set(jobs)
+    for gpu in range(8):
+        gpu_slots = [slot for slot in slots if slot.gpu == gpu]
+        assert sum(len(assignments[slot]) for slot in gpu_slots) == 5
+        assert sorted(len(assignments[slot]) for slot in gpu_slots) == [2, 3]
+        assert assignments[gpu_slots[0]][0] != assignments[gpu_slots[1]][0]
+
+
+def test_libero_full_eval_sampling_matches_imagewam_per_suite_algorithm():
+    repo_root = Path(__file__).resolve().parents[1]
+    full_eval = _load_full_eval_module(repo_root)
+    suites = ["libero_spatial", "libero_goal", "libero_object", "libero_10"]
+    task_counts = {
+        "libero_spatial": 10,
+        "libero_goal": 10,
+        "libero_object": 10,
+        "libero_10": 10,
+    }
+
+    jobs = full_eval._build_jobs(
+        suites,
+        task_counts,
+        None,
+        sample_ratio=0.2,
+        sample_seed=42,
+    )
+    actual = {
+        suite: [job.task_id for job in jobs if job.suite == suite]
+        for suite in suites
+    }
+    expected = {}
+    for suite in suites:
+        sample_count = max(1, int(np.ceil(task_counts[suite] * 0.2)))
+        rng = random.Random(f"42:{suite}")
+        expected[suite] = sorted(rng.sample(range(task_counts[suite]), sample_count))
+
+    assert actual == expected
+    assert {suite: len(ids) for suite, ids in actual.items()} == {
+        "libero_spatial": 2,
+        "libero_goal": 2,
+        "libero_object": 2,
+        "libero_10": 2,
+    }
+    assert len(jobs) == 8
+
+
+def test_libero_full_eval_uses_default_mujoco_version():
+    repo_root = Path(__file__).resolve().parents[1]
+    full_eval = _load_full_eval_module(repo_root)
+
+    assert full_eval.REQUIRED_MUJOCO_VERSION == "3.3.2"
+    assert full_eval.DEFAULT_CKPT_DIR == Path(
+        "/path/to/openwam_checkpoints/new-openwam-libero-sft-10epoch-final"
+    )
+    assert full_eval.DEFAULT_CKPT_NAME == "checkpoint_step_10850.safetensors"
+    assert full_eval.DEFAULT_LIBERO_PATH == Path("/path/to/LIBERO")
+    assert full_eval.DEFAULT_LIBERO_PYTHON == Path(
+        "/path/to/miniconda3/envs/libero/bin/python"
+    )
+
+    environment = yaml.safe_load(
+        (repo_root / "benchmarks" / "libero" / "environment.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "mujoco==3.3.2" in environment["dependencies"][-1]["pip"]
+
+
+def test_fastwam_aligned_policy_config_exists_and_matches_protocol():
+    repo_root = Path(__file__).resolve().parents[1]
+    policy = yaml.safe_load(
+        (repo_root / "benchmarks" / "libero" / "policy_config_fastwam_aligned.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert policy["num_trials"] == 50
+    assert policy["max_steps_by_suite"] == {
+        "libero_spatial": 400,
+        "libero_object": 400,
+        "libero_goal": 400,
+        "libero_10": 700,
+        "libero_90": 700,
+    }
+    assert policy["settle_steps"] == 30
+    assert policy["settle_action"] == [0, 0, 0, 0, 0, 0, -1]
+    assert policy["action_mode"] == "eef"
+
+
+
+
+
+
+
+
+def test_libero_full_eval_uses_two_unique_ports_per_gpu():
+    repo_root = Path(__file__).resolve().parents[1]
+    full_eval = _load_full_eval_module(repo_root)
+
+    ports = [port for slot in range(8) for port in full_eval._server_ports(8920, slot)]
+    assert ports == list(range(8920, 8936))
+    assert len(ports) == len(set(ports))
+
+
+def test_libero_full_eval_uses_one_contiguous_fifty_trial_run():
+    repo_root = Path(__file__).resolve().parents[1]
+    full_eval = _load_full_eval_module(repo_root)
+    trial_run = full_eval.TrialRun(trial_start=0, num_trials=50)
+
+    assert range(trial_run.trial_start, trial_run.trial_stop) == range(0, 50)
 
 
 def test_libero_policy_reuses_ws_and_rotates_images(monkeypatch):
@@ -163,9 +329,11 @@ def test_libero_policy_reuses_ws_and_rotates_images(monkeypatch):
 def test_libero_shell_scripts_are_valid():
     repo_root = Path(__file__).resolve().parents[1]
     scripts = [
-        repo_root / "benchmarks" / "libero" / "run_smoke.sh",
-        repo_root / "benchmarks" / "libero" / "single_eval.sh",
-    ]
+                  repo_root / "benchmarks" / "libero" / "run_smoke.sh",
+                  repo_root / "benchmarks" / "libero" / "single_eval.sh",
+                  repo_root / "benchmarks" / "libero" / "setup_env.sh",
+                  repo_root / "benchmarks" / "libero" / "run_10epoch.sh",
+              ]
     result = subprocess.run(
         ["bash", "-n", *map(os.fspath, scripts)],
         cwd=repo_root,
@@ -189,6 +357,7 @@ def test_libero_shell_wrappers_resolve_python_from_path(tmp_path):
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "LIBERO_PATH": str(fake_repo),
+        "LIBERO_PYTHON": "python",
     }
 
     for script, args in (

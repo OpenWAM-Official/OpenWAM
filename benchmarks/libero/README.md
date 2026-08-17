@@ -5,10 +5,10 @@ OpenWAM policy server, mirroring the RoboTwin benchmark pattern: the benchmark
 process owns simulation and observations, while OpenWAM serving stays in the
 main model environment.
 
-Use official LIBERO repositories, assets, and datasets. This
-directory does not vendor benchmark assets or require project-specific paths.
+Use official LIBERO assets and datasets. Ordinary LIBERO
+evaluation is pinned to the validated MuJoCo 3.3.2 environment described below.
 Because LIBERO both install the top-level package name
-`libero`, install them into separate Python environments when using both.
+`libero`, keep them in separate Python environments when using both.
 
 ## Files
 
@@ -16,26 +16,62 @@ Because LIBERO both install the top-level package name
 | --- | --- |
 | `openwam2libero_interface.py` | WebSocket policy adapter from LIBERO observations to OpenWAM server payloads. |
 | `policy_config.yml` | Eval client config template. |
+| `policy_config_fastwam_aligned.yml` | FastWAM-aligned rollout protocol for comparable LIBERO evaluation. |
 | `single_eval.py` | Run one LIBERO task against an OpenWAM policy server. |
 | `single_eval.sh` | Shell wrapper that patches host/port/suite/task at runtime. |
+| `run_10epoch_all_suites.py` | Shared multi-GPU launcher for LIBERO. |
+| `run_10epoch.sh` | Run the complete evaluation with the default client environment. |
 | `run_smoke.sh` | Preflight `import`, `task`, or `env` checks for a prepared LIBERO install. |
 | `smoke_libero.py` | Preflight implementation; writes an isolated `config.yaml` before importing LIBERO. |
+| `environment.yml` | Reproducible conda and pip dependency pins for the default client environment. |
+| `setup_env.sh` | Create/update the default environment and LIBERO checkout. |
 
 ## Prerequisites
 
-1. Install LIBERO following their official README.
-2. Download the official assets/datasets required by that benchmark.
-3. Start an OpenWAM policy server separately:
+Ordinary LIBERO is fixed to the following tested installation:
+
+- Python 3.11.15
+- MuJoCo 3.3.2
+- robosuite 1.4.0
+- bddl 1.0.1
+- LIBERO commit `8f1084e3132a39270c3a13ebe37270a43ece2a01`
+- environment: `/path/to/miniconda3/envs/libero`
+- checkout: `/path/to/LIBERO`
+
+Create or reconcile that installation with:
+
+```bash
+bash benchmarks/libero/setup_env.sh
+```
+
+The setup script uses `environment.yml`, installs LIBERO editable,
+and applies the included compatibility patch needed by PyTorch 2.6 and newer.
+After installation, download the official assets/datasets required by LIBERO.
+
+
+
+- Python 3.11.15
+- MuJoCo 3.3.2
+- robosuite 1.4.0
+- bddl 1.0.1
+
+
+On a new machine, install the required rendering/archive libraries once and
+then run the reproducible setup. The setup downloads the official asset
+archive and verifies its SHA-256 checksum before extraction.
+
+
+Start an OpenWAM policy server separately for a single-task evaluation:
 
 ```bash
 bash scripts/deploy.sh --ckpt-dir /path/to/openwam_ckpt --port 8848
 ```
 
-Required environment variables for the benchmark client:
+Environment paths used by the benchmark client:
 
-| Required variables |
+| Paths |
 | --- |
-| `LIBERO_PATH=/path/to/LIBERO`, `LIBERO_PYTHON=/path/to/libero/env/bin/python` |
+| Defaults to the pinned paths above; `LIBERO_PATH` and `LIBERO_PYTHON` may override them. |
 
 Optional config roots:
 
@@ -48,43 +84,40 @@ they do not prompt interactively and do not clobber `~/.libero/config.yaml`.
 
 ## Training Data
 
-OpenWAM's `libero` dataloader consumes LeRobot v3 parquet/MP4 data. The
-recommended source is:
+OpenWAM's `libero` dataloader consumes the standalone canonical LeRobot v3
+dataset generated from the Fast-WAM source:
 
 ```bash
-hf download nvidia/LIBERO_LeRobot_v3 \
-  --repo-type dataset \
-  --local-dir /path/to/LIBERO_LeRobot_v3
+python scripts/convert_libero_to_absolute_eef10_v3.py \
+  --source /path/to/libero-fastwam \
+  --output /path/to/libero
 ```
 
-Normalization statistics load from `<dataset_dir>/meta/libero_normalization_stats.npy` and are auto-computed there on first use if the file is missing. To pre-compute them instead (required for multi-bucket roots, via `normalization_stats_path`):
+`configs/dataloader/libero.yaml` points to that output by default. Normalization statistics load from
+`<dataset_dir>/meta/libero_normalization_stats.npy` and are auto-computed
+there on first use if the file is missing. To pre-compute them instead:
 
 ```bash
 python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
   --config configs/dataloader/libero.yaml \
-  --output /path/to/LIBERO_LeRobot_v3/meta/libero_normalization_stats.npy
+  --output /path/to/libero/meta/libero_normalization_stats.npy
 ```
 
 ### EEF10 data contract
 
-The reader trains on the repo-standard single-arm **EEF10** representation
-`[xyz3, rot6d6, gripper1]` (world frame, full pose), not on LIBERO's native 7-D
-OSC delta:
+The reader accepts only row-aligned single-arm **EEF10**
+`[xyz3, rot6d6, gripper_open_scale1]` columns:
 
 - **Gripper direction.** The trained channel (dim 9) is an **open-scale**:
-  `-1 = closed, +1 = open` — the same direction as the pretraining mixture, and
-  the OPPOSITE of LIBERO's own `action[6]` (`+1 = close`). The dataloader
-  negates on the way in; the eval client negates back on the way out
-  (`libero_open_scale_to_gripper_cmd`), so the env always receives its native
-  convention. Checkpoints trained before this flip are **not** compatible with
-  the current client.
-- **Proprio** at window frame 0 is the achieved 8-D `observation.state`
-  rendered to EEF10 (axis-angle → rot6d; finger separation → [-1, +1]
-  open-scale, +1 = open).
-- **Action target** at step `t` is the **next frame's achieved pose**
-  (`state[t+1]` → xyz + rot6d) plus the recorded gripper command `action[t][6]`
-  negated into the open-scale — a full absolute pose target. The final window
-  step has no `t+1` and is masked out of the loss.
+  `-1 = closed, +1 = open`. The eval client negates it into LIBERO's native
+  robosuite command convention on the way out.
+- **Proprio** is the achieved EEF10 `observation.state` at window frame 0.
+  Its scalar gripper channel is the clipped finger aperture
+  `qpos[0]-qpos[1]` mapped to open-scale. This is the required 1-DoF EEF10
+  projection; the original two finger-joint values are not stored separately.
+- **Action target** at step `t` is the absolute OSC EEF10 goal stored in
+  `action[t]`. It is consumed from the same row without reconstruction or a
+  `t+1` shift; the final episode row remains a valid supervised action.
 - With `unify_action: true` and `unify_action_map: ["0-9"]` the 10 physical
   dims scatter into the unified 80-D pretraining space (left-arm slots); all
   other slots stay masked, so `model.architecture.action_dim=80` needs no
@@ -102,8 +135,6 @@ evaluation client applies the same transform to live simulator observations.
 Ordinary LIBERO:
 
 ```bash
-LIBERO_PATH=/path/to/LIBERO \
-LIBERO_PYTHON=/path/to/libero/bin/python \
 bash benchmarks/libero/single_eval.sh ordinary libero_spatial 0 8848 127.0.0.1
 ```
 
@@ -118,27 +149,116 @@ sends `agentview_image` as `head_camera`, `robot0_eye_in_hand_image` as
 with the dataloader. The server returns the raw EEF10 full-pose target; the
 client converts it to the env's native 7-D OSC delta using the live controller
 `output_max` scales (probed automatically, falls back to 0.05 m / 0.5 rad).
-`action_mode: native` keeps the legacy 7-D passthrough for checkpoints trained
-directly on raw OSC actions.
 
 Use `POLICY_CONFIG_PATH=/path/to/custom.yml` to run with a copied config.
+
+### FastWAM-aligned protocol
+
+For an OpenWAM checkpoint trained with `configs/dataloader/libero.yaml`, start
+the server in synchronous receding-horizon mode. This matches FastWAM's 10-step
+replanning and 10 denoising steps without changing the checkpoint's own input
+and action representation:
+
+```bash
+python scripts/deploy.py \
+  --ckpt-dir /path/to/openwam_ckpt \
+  --port 8848 \
+  --denoise-steps 10 \
+  --denoise-mode sync \
+  --inference-mode sync \
+  --inference-horizon 10 \
+  --compile-enabled false \
+  optimization.dit_cache.enabled=false
+```
+
+Then select the aligned client config:
+
+```bash
+POLICY_CONFIG_PATH=benchmarks/libero/policy_config_fastwam_aligned.yml \
+bash benchmarks/libero/single_eval.sh ordinary libero_spatial 0 8848 127.0.0.1
+```
+
+The aligned protocol uses 50 trials per task, 30 open-gripper no-op steps,
+seed 42 once per task environment, 256x256 source-camera rendering, and a
+400-step horizon for `libero_spatial`, `libero_object`, and `libero_goal` or
+700 steps for `libero_10` and `libero_90`.
+
+Three FastWAM model-specific settings are deliberately not copied. OpenWAM
+sends the raw task instruction (the text used during this checkpoint's
+training), assembles the two cameras into its trained 384x320 L-shaped canvas,
+and uses the EEF10 absolute-pose bridge with a continuous gripper command.
+FastWAM instead wraps the instruction in its own prompt template, concatenates
+two 224x224 views, and predicts/binarizes native 7-D delta actions. Copying
+those settings would make this OpenWAM checkpoint out of distribution.
 
 Important defaults:
 
 - `image_transform: rotate_180` matches the standard LIBERO/OpenVLA convention
   for robosuite offscreen images. Set it to `none` only for checkpoints trained
   on raw unrotated LIBERO frames.
-- `settle_steps: 10` runs zero actions after `set_init_state()` before querying
+- `settle_steps: 30` runs the configured settle action after `set_init_state()` before querying
   the policy, allowing objects to settle into a physical state.
 - `fail_on_incomplete: false` means the script exits successfully after a
   completed benchmark run even when success rate is below 100%. Set it to
   `true` for smoke tests that should fail unless every trial succeeds.
 
+## Full 10-epoch evaluation on eight GPUs
+
+The following command starts two independent copies of the 10-epoch policy on
+each GPU (ports 8920–8935). Every task is evaluated by one client/environment
+that runs trials 0–49 continuously. The two replicas on a GPU receive disjoint
+task queues, so they evaluate different tasks concurrently without splitting a
+task's RNG stream. The 40 tasks from LIBERO-SPATIAL, LIBERO-GOAL,
+LIBERO-OBJECT, and LIBERO-LONG (`libero_10` in the Python API) are distributed
+evenly, five tasks per GPU (three on one replica and two on the other). All
+videos, client/server logs, a run manifest, `summary.csv`, and `summary.json`
+are retained under the printed run directory.
+
+```bash
+/usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py
+```
+
+The launcher requires MuJoCo 3.3.2 from the default LIBERO environment,
+synchronous inference, and an inference horizon of 32. The
+default output root is the persistent data path
+`/path/to/OpenWAM/outputs/libero`. Useful preflight and
+recovery commands are shown below. The default rollout limit is 600 policy
+steps for SPATIAL, OBJECT, and GOAL, and 700 for LONG (`libero_10`).
+
+```bash
+# Enumerate and display the complete assignment without starting processes.
+/usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py --dry-run
+
+# One rollout of spatial task 0; only its assigned policy replica is started.
+/usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py --smoke --gpus 0
+
+# Resume an interrupted output directory; complete 50-trial task runs are skipped.
+/usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py \
+  --output-dir /path/to/existing/run
+
+# Rebuild statistics without starting servers or clients.
+/usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py \
+  --summarize-only --output-dir /path/to/existing/run
+```
+
+Each server is owned by the launcher and is stopped when the run finishes or
+is interrupted. The launcher never terminates unrelated server processes.
+
+Use `run_10epoch.sh` inside tmux for a persistent full evaluation:
+
+```bash
+tmux new-session -d -s libero_10ep \
+  "cd /path/to/OpenWAM && bash benchmarks/libero/run_10epoch.sh"
+
+# Override the sync/async action-execution horizon for this run.
+tmux new-session -d -s libero_10ep_h10 \
+  "cd /path/to/OpenWAM && INFERENCE_HORIZON=10 \
+   bash benchmarks/libero/run_10epoch.sh"
+```
+
 ## Smoke Tests
 
 ```bash
-LIBERO_PATH=/path/to/LIBERO \
-LIBERO_PYTHON=/path/to/libero/bin/python \
 bash benchmarks/libero/run_smoke.sh task
 ```
 

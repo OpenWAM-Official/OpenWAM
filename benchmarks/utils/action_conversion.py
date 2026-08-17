@@ -574,7 +574,7 @@ def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
 # unified output back to this raw 10-D and unnormalized it, so the client
 # receives/sends physical EEF10 and only bridges representation:
 #   * proprio: live obs (robot0_eef_pos / robot0_eef_quat / robot0_gripper_qpos)
-#     -> EEF10, byte-consistent with the dataloader's state8_to_eef10.
+#     -> EEF10, byte-consistent with the canonical dataset converter.
 #   * action: EEF10 full pose -> 7-D OSC delta using the live controller scales.
 #
 # The trained gripper channel (EEF10 dim 9) is an OPEN-SCALE: -1 = closed,
@@ -608,8 +608,9 @@ def libero_gripper_qpos_to_cmd(width) -> float:
 def libero_open_scale_to_gripper_cmd(value) -> float:
     """Trained open-scale gripper (+1 = open) -> LIBERO env command (+1 = close).
 
-    Exact inverse of the dataloader's ``gripper_cmd_to_open_scale``; the env's
-    gripper stays CONTINUOUS in [-1, +1] (no RoboCasa-style 0/1 thresholding).
+    The canonical dataset stores ``-1 = closed, +1 = open`` while robosuite's
+    environment command uses the opposite sign, so this is a fixed negation.
+    The env's gripper stays continuous in [-1, +1].
     """
     return float(np.clip(-float(value), -1.0, 1.0))
 
@@ -621,10 +622,9 @@ def libero_obs_to_eef10(
 ) -> np.ndarray:
     """Assemble the RAW 10-D EEF proprio from a live LIBERO obs (unnormalized).
 
-    Matches the dataloader's ``state8_to_eef10`` on the same physical state: the
-    dataset stores axis-angle (from this same quat via robosuite quat2axisangle),
-    so quat -> rot6d directly avoids the axis-angle round-trip while producing
-    the identical rotation columns.
+    Matches the EEF10 state written by the canonical dataset converter on the
+    same physical state. Converting the live quaternion directly to rot6d avoids
+    an unnecessary axis-angle round trip.
 
         eef10 = [robot0_eef_pos(3), rot6d(robot0_eef_quat xyzw, 6),
                  gripper_cmd(robot0_gripper_qpos[0] - [1], 1)]

@@ -1,48 +1,16 @@
-"""LIBERO LeRobot v3 dataloader (single-arm EEF10 -> unified 80-D).
+"""LIBERO LeRobot v3 dataloader for the canonical row-aligned EEF10 dataset.
 
-Targets the official ``nvidia/LIBERO_LeRobot_v3`` schema and the compatible
-``HuggingFaceVLA/libero`` conversion:
+The only accepted on-disk contract is::
 
-* action: 7-D OSC delta command ``[dpos3, drot_axis_angle3, gripper1]``
-  (the raw ``gripper1`` is LIBERO's own convention: ``+1 = close``)
-* observation.state: 8-D ``[eef_pos3, eef_axis_angle3, gripper_qpos2]`` (world frame)
-* observation.images.image: agent-view RGB
-* observation.images.wrist_image or image2: wrist RGB
-* task_index: language lookup through meta/tasks.parquet
+    observation.state = achieved [xyz3, rot6d6, gripper_open_scale1]
+    action            = absolute OSC goal [xyz3, rot6d6, gripper_open_scale1]
 
-The reader trains on the repo-standard single-arm **EEF10** representation::
+Both columns are world-frame, full-pose EEF10 values and are consumed directly
+from the same row. The reader performs no state/action representation conversion
+and no temporal shifting. The gripper convention is ``-1 = closed, +1 = open``.
 
-    eef10 = [xyz(3), rot6d(6), gripper_open_scale(1)]   (world frame, full pose)
-
-The trained gripper channel (dim 9) is an **open-scale**: ``-1 = closed,
-+1 = open``. This is the direction the pretraining mixture uses (AgiBotWorld /
-RoboCOIN / DROID / InternData-A1 all emit ``0 = closed, 1 = open`` before
-normalization), and it is the OPPOSITE of LIBERO's own recorded command, whose
-raw ``action[6]`` is ``+1 = close``. Both the achieved proprio and the action
-target are rendered into the open-scale here, and the eval bridge negates it
-back to the env's command space — see :func:`gripper_qpos_to_cmd`,
-:func:`gripper_cmd_to_open_scale`, and
-``benchmarks.utils.action_conversion.libero_open_scale_to_gripper_cmd``.
-
-* PROPRIO at window frame 0: the achieved ``observation.state`` rendered to
-  EEF10 (axis-angle -> rot6d; finger separation width -> [-1, +1] open-scale,
-  +1 = open — the same channel convention as the action gripper).
-* ACTION target at step ``t``: the **next frame's achieved pose**
-  (``state[t+1]`` -> xyz + rot6d) plus the **recorded gripper command**
-  ``action[t][6]`` negated into the open-scale — a full absolute pose target,
-  NOT the env's per-step OSC delta. The final window step has no ``t+1`` target
-  and is masked out of the loss (``_n_supervised_action_steps``). The eval
-  bridge (``benchmarks/utils/action_conversion.eef10_to_libero7d``) inverts the
-  full pose back to the env's 7-D OSC delta using live controller scales, and
-  negates the gripper back to ``+1 = close``.
-
-``unify_action: true`` scatters the 10 physical dims into the unified 80-D
-space via ``unify_action_map: ["0-9"]`` (left-arm slots; everything else stays
-masked). Action targets and achieved proprio share one global ``eef``
-normalization-statistics block computed from both pools; rot6d dims are pinned
-to identity. The stats block records :data:`GRIPPER_CONVENTION` so a stats file
-computed under the pre-flip (``+1 = close``) convention cannot be paired
-silently with open-scale data.
+With ``unify_action: true``, the 10 raw dimensions are normalized by one shared
+``eef`` statistics block and scattered into unified slots 0..9.
 """
 
 from __future__ import annotations
@@ -51,12 +19,12 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, ClassVar, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
-from openwam.dataloader.bases import LeRobotV3Reader, MultiLeRobotV3Reader
+from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.normalization import (
     ROT6D_DIMS_ARM10,
     STAT_KEYS,
@@ -69,98 +37,7 @@ logger = logging.getLogger(__name__)
 
 _ACTION_MODE = "eef"
 EEF10_DIM = 10
-STATE8_DIM = 8
-ACTION7_DIM = 7
-# Panda finger separation at fully open (m): gripper_qpos ~= [0.04, -0.04] open,
-# [~0, ~0] closed -> width = qpos[0] - qpos[1] in [0, 0.08]. Rendered into the
-# trained OPEN-SCALE (-1 = closed, +1 = open) so proprio and action gripper
-# share one convention. Kept in lockstep with
-# benchmarks/utils/action_conversion.LIBERO_GRIPPER_WIDTH_OPEN.
-LIBERO_GRIPPER_WIDTH_OPEN = 0.08
-
-# Direction of the trained gripper channel (EEF10 dim 9). Persisted into the
-# normalization stats payload by libero_stats_computation and verified at load
-# time: a stats file predating the open-scale flip carries a stale `mean` (the
-# quantity z-score consumes), and pairing it with open-scale data would offset
-# the gripper. min-max / quantile happen to be sign-symmetric here (min/max and
-# q01/q99 are +-1), so the guard warns rather than hard-fails on a legacy file.
 GRIPPER_CONVENTION = "minus1_closed_plus1_open"
-
-
-def axis_angle_to_matrix(aa: np.ndarray) -> np.ndarray:
-    """Rodrigues: ``(..., 3)`` rotation vector -> ``(..., 3, 3)`` rotation matrix.
-
-    Matches robosuite/LeRobot ``quat2axisangle`` semantics (rotvec = axis * angle),
-    so the stored ``observation.state[3:6]`` converts back to the same rotation.
-    """
-    aa = np.asarray(aa, dtype=np.float64)
-    angle = np.linalg.norm(aa, axis=-1, keepdims=True)  # (..., 1)
-    small = angle[..., 0] < 1e-8
-    axis = np.where(angle > 1e-8, aa / np.maximum(angle, 1e-8), 0.0)
-    x, y, z = axis[..., 0], axis[..., 1], axis[..., 2]
-    c = np.cos(angle[..., 0])
-    s = np.sin(angle[..., 0])
-    C = 1.0 - c
-    R = np.empty(aa.shape[:-1] + (3, 3), dtype=np.float64)
-    R[..., 0, 0] = c + x * x * C
-    R[..., 0, 1] = x * y * C - z * s
-    R[..., 0, 2] = x * z * C + y * s
-    R[..., 1, 0] = y * x * C + z * s
-    R[..., 1, 1] = c + y * y * C
-    R[..., 1, 2] = y * z * C - x * s
-    R[..., 2, 0] = z * x * C - y * s
-    R[..., 2, 1] = z * y * C + x * s
-    R[..., 2, 2] = c + z * z * C
-    R[small] = np.eye(3)
-    return R
-
-
-def matrix_to_rot6d(R: np.ndarray) -> np.ndarray:
-    """``(..., 3, 3)`` rotation matrix -> ``(..., 6)`` rot6d (first two columns)."""
-    R = np.asarray(R)
-    return np.concatenate([R[..., :, 0], R[..., :, 1]], axis=-1).astype(np.float32)
-
-
-def gripper_qpos_to_cmd(width: np.ndarray) -> np.ndarray:
-    """Achieved finger separation width -> [-1, +1] open-scale (+1 = open).
-
-    Linear over ``[0, LIBERO_GRIPPER_WIDTH_OPEN]``, clipped: a fully closed
-    hand (width 0) renders to -1 and a fully open one (width 0.08) to +1. The
-    eval client reproduces this exactly
-    (``benchmarks.utils.libero_gripper_qpos_to_cmd``).
-    """
-    return np.clip(2.0 * np.asarray(width, np.float64) / LIBERO_GRIPPER_WIDTH_OPEN - 1.0, -1.0, 1.0).astype(
-        np.float32
-    )
-
-
-def gripper_cmd_to_open_scale(cmd: np.ndarray) -> np.ndarray:
-    """LIBERO's recorded gripper command (+1 = close) -> open-scale (+1 = open).
-
-    LIBERO records a binary +-1 command in ``action[6]``; the trained channel
-    runs the other way, so the render is a plain negation. The eval bridge's
-    ``libero_open_scale_to_gripper_cmd`` is its exact inverse — change the two
-    in lockstep.
-    """
-    return np.clip(-np.asarray(cmd, np.float64), -1.0, 1.0).astype(np.float32)
-
-
-def state8_to_eef10(state: np.ndarray) -> np.ndarray:
-    """``(T, 8)`` observation.state -> ``(T, 10)`` raw EEF10 (achieved, unnormalized).
-
-    ``[pos3, rot6d(axis-angle), gripper_open_scale]`` — the gripper is the
-    ACHIEVED finger-separation width rendered into the open-scale. This is the
-    PROPRIO gripper; the ACTION gripper is replaced with the negated recorded
-    command in ``_raw_action_eef10`` (both live in the same [-1, +1] open-scale,
-    -1 = closed).
-    """
-    state = np.asarray(state, dtype=np.float64)
-    if state.ndim != 2 or state.shape[1] != STATE8_DIM:
-        raise ValueError(f"LIBERO observation.state must be (T, {STATE8_DIM}), got {state.shape}")
-    pos = state[:, 0:3].astype(np.float32)
-    rot6d = matrix_to_rot6d(axis_angle_to_matrix(state[:, 3:6]))
-    grip = gripper_qpos_to_cmd(state[:, 6] - state[:, 7])[:, None]
-    return np.concatenate([pos, rot6d, grip], axis=-1).astype(np.float32)
 
 
 def _as_priority(value: Optional[Sequence[str]], default: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -197,6 +74,7 @@ class LiberoDataset(LeRobotV3Reader):
     )
     CONFIG_KEYS: ClassVar[Tuple[str, ...]] = LeRobotV3Reader.CONFIG_KEYS + (
         "action_mode",
+        "gripper_convention",
         "head_camera_priority",
         "wrist_camera_priority",
         "prompt_columns",
@@ -208,6 +86,7 @@ class LiberoDataset(LeRobotV3Reader):
         dataset_dir: str,
         *,
         action_mode: str = _ACTION_MODE,
+        gripper_convention: str = GRIPPER_CONVENTION,
         head_camera_priority: Optional[Sequence[str]] = None,
         wrist_camera_priority: Optional[Sequence[str]] = None,
         prompt_columns: Optional[Sequence[str]] = None,
@@ -221,6 +100,11 @@ class LiberoDataset(LeRobotV3Reader):
             raise ValueError(
                 f"LIBERO currently supports only action_mode='eef', got {action_mode!r}. "
                 "EEF is raw 10-D: [xyz3, rot6d6, gripper1] (world frame, full pose)."
+            )
+        convention = str(gripper_convention).strip()
+        if convention != GRIPPER_CONVENTION:
+            raise ValueError(
+                f"LIBERO requires gripper_convention={GRIPPER_CONVENTION!r}, got {gripper_convention!r}"
             )
         unify_on = bool(unify_action)
         if unify_on and unify_action_map is None:
@@ -255,15 +139,10 @@ class LiberoDataset(LeRobotV3Reader):
         )
 
     def _train_min_window_len(self) -> int:
-        # The action target at step t is the ACHIEVED pose at t+1, so a window
-        # needs at least 2 frames to carry one real supervised step.
-        return 2
+        return 1
 
     def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
-        # The final window row has no t+1 achieved-pose target (clamped copy) —
-        # drop it from the loss. Full windows keep all T_action steps because
-        # the caller min-caps to num_frames - 1.
-        return max(0, actual_raw_len - 1)
+        return actual_raw_len
 
     def _post_init(self, info: dict) -> None:
         features = info.get("features", {}) or {}
@@ -274,19 +153,18 @@ class LiberoDataset(LeRobotV3Reader):
                 f"LIBERO {mode} requires height={expected_size[0]}, width={expected_size[1]}, "
                 f"got height={self._height}, width={self._width}"
             )
-        action = features.get("action", {})
+        if "action" not in features:
+            raise KeyError("LIBERO requires a row-aligned 10-D action column")
+        action = features["action"]
         shape = tuple(action.get("shape", ()))
-        if shape and shape != (ACTION7_DIM,):
-            raise ValueError(f"LIBERO action feature must have shape [{ACTION7_DIM}], got {shape}")
-        state = features.get("observation.state", {})
-        state_shape = tuple(state.get("shape", ()))
-        if state_shape and state_shape != (STATE8_DIM,):
-            raise ValueError(f"LIBERO observation.state feature must have shape [{STATE8_DIM}], got {state_shape}")
+        if shape != (EEF10_DIM,):
+            raise ValueError(f"LIBERO action feature must have shape [{EEF10_DIM}], got {shape}")
         if "observation.state" not in features:
-            raise KeyError(
-                "LIBERO EEF10 requires the 8-D observation.state column (achieved EEF pose + "
-                "gripper qpos); this conversion does not carry it."
-            )
+            raise KeyError("LIBERO requires a row-aligned 10-D observation.state column")
+        state = features["observation.state"]
+        state_shape = tuple(state.get("shape", ()))
+        if state_shape != (EEF10_DIM,):
+            raise ValueError(f"LIBERO observation.state feature must have shape [{EEF10_DIM}], got {state_shape}")
         self._prompt_columns = tuple(col for col in self._prompt_columns if col in features)
         self.NEEDED_COLS = self.NEEDED_COLS + self._prompt_columns
 
@@ -294,11 +172,7 @@ class LiberoDataset(LeRobotV3Reader):
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             return None
         if self._source_stats_path:
-            # An EXPLICIT path is never auto-built: multi-bucket runs share one
-            # POOLED stats file that must come from the offline
-            # libero_stats_computation script, and silently rebuilding it from
-            # a single bucket would corrupt that pooling. Missing file raises
-            # FileNotFoundError in load_stats_file.
+            # An explicit path is authoritative and is never silently rebuilt.
             stats_path = Path(self._source_stats_path)
         else:
             stats_path = self._dataset_dir / "meta" / "libero_normalization_stats.npy"
@@ -316,37 +190,13 @@ class LiberoDataset(LeRobotV3Reader):
         return global_stats
 
     def _check_gripper_convention(self, stats_path: Path) -> None:
-        """Reject stats computed under a different gripper direction.
-
-        An explicit mismatch is fatal. A file with no marker predates the
-        open-scale flip: only its ``mean`` (z-score) is actually stale, since
-        min/max and q01/q99 are +-1 and therefore sign-symmetric — so warn, and
-        escalate to an error only for the mode that would really be distorted.
-        """
+        """Require stats generated for the canonical EEF10 gripper convention."""
         recorded = load_stats_metadata(stats_path, action_mode=self.action_mode).get("gripper_convention")
         if recorded == GRIPPER_CONVENTION:
             return
-        rebuild = (
-            "Rerun openwam.dataloader.utils.stats_computation.libero_stats_computation "
-            f"to regenerate {stats_path}."
-        )
-        if recorded is not None:
-            raise ValueError(
-                f"LIBERO stats {stats_path} declare gripper_convention={recorded!r}, but this "
-                f"reader emits {GRIPPER_CONVENTION!r}. {rebuild}"
-            )
-        if str(self._normalize_mode) == "z-score":
-            raise ValueError(
-                f"LIBERO stats {stats_path} carry no gripper_convention marker, so they predate "
-                f"the {GRIPPER_CONVENTION!r} flip; their `mean` has the wrong sign on the gripper "
-                f"dim and normalize_mode='z-score' consumes it. {rebuild}"
-            )
-        logger.warning(
-            "LIBERO stats %s carry no gripper_convention marker (they predate the %r flip). "
-            "min-max / quantile are sign-symmetric on this dim so training is unaffected, but %s",
-            stats_path,
-            GRIPPER_CONVENTION,
-            rebuild,
+        raise ValueError(
+            f"LIBERO stats {stats_path} declare gripper_convention={recorded!r}, expected "
+            f"{GRIPPER_CONVENTION!r}. Regenerate the stats from the canonical EEF10 dataset."
         )
 
     def _build_default_stats(self, path: Path) -> None:
@@ -377,8 +227,7 @@ class LiberoDataset(LeRobotV3Reader):
 
         if rank == 0:
             logger.info(
-                "LIBERO(%s): no normalization stats at %s — computing from the dataset "
-                "(rank 0; other ranks wait)",
+                "LIBERO(%s): no normalization stats at %s — computing from the dataset (rank 0; other ranks wait)",
                 self._dataset_id,
                 path,
             )
@@ -392,44 +241,28 @@ class LiberoDataset(LeRobotV3Reader):
                 raise TimeoutError(f"timed out waiting for rank 0 to build LIBERO stats: {path}")
             time.sleep(poll_interval)
 
-    def _read_state8(self, win) -> np.ndarray:
-        state = np.stack(win["observation.state"].values).astype(np.float32)
-        if state.ndim != 2 or state.shape[1] != STATE8_DIM:
-            raise ValueError(f"LIBERO observation.state must be (T, {STATE8_DIM}), got {state.shape}")
-        return state
-
-    def _read_action7(self, win) -> np.ndarray:
-        action = np.stack(win["action"].values).astype(np.float32)
-        if action.ndim != 2 or action.shape[1] != ACTION7_DIM:
-            raise ValueError(f"LIBERO action must be (T, {ACTION7_DIM}), got {action.shape}")
-        return action
+    @staticmethod
+    def _read_eef10_column(win, column: str) -> np.ndarray:
+        values = np.stack(win[column].values).astype(np.float32)
+        if values.ndim != 2 or values.shape[1] != EEF10_DIM:
+            raise ValueError(f"LIBERO {column} must be (T, {EEF10_DIM}), got {values.shape}")
+        if not np.isfinite(values).all():
+            raise ValueError(f"LIBERO {column} contains NaN or infinity")
+        return values
 
     def _raw_action_eef10(self, win) -> np.ndarray:
-        """``(L, 10)`` raw absolute EEF10 targets: next-frame achieved pose +
-        recorded gripper command rendered into the open-scale. The final row has
-        no ``t+1`` and is a clamped copy — it carries no supervision (see
-        ``_n_supervised_action_steps``)."""
-        state = self._read_state8(win)
-        action7 = self._read_action7(win)
-        eef10 = state8_to_eef10(state)  # (L, 10) achieved
-        target = np.empty_like(eef10)
-        if eef10.shape[0] > 1:
-            target[:-1, 0:9] = eef10[1:, 0:9]  # next-frame achieved pose
-            # Recorded gripper COMMAND at exact timing, negated: LIBERO records
-            # +1 = close, the trained channel is +1 = open.
-            target[:-1, 9] = gripper_cmd_to_open_scale(action7[:-1, 6])
-        target[-1] = target[-2] if eef10.shape[0] > 1 else eef10[0]
-        return target
+        """Return the row-aligned absolute EEF10 action without conversion."""
+        return self._read_eef10_column(win, "action")
 
     def _raw_state_eef10(self, win) -> np.ndarray:
-        """``(L, 10)`` raw achieved EEF10 proprio (used by the stats script)."""
-        return state8_to_eef10(self._read_state8(win))
+        """Return the row-aligned achieved EEF10 state without conversion."""
+        return self._read_eef10_column(win, "observation.state")
 
     def _action_20d(self, win) -> np.ndarray:
         return apply_normalization(self._raw_action_eef10(win), self._normalization_stats, self._normalize_mode)
 
     def _proprio_20d(self, win) -> np.ndarray:
-        raw = state8_to_eef10(self._read_state8(win)[0:1])
+        raw = self._raw_state_eef10(win)[0:1]
         return apply_normalization(raw, self._normalization_stats, self._normalize_mode)
 
     def _resolve_prompt(self, row, win) -> str:
@@ -441,50 +274,11 @@ class LiberoDataset(LeRobotV3Reader):
                     return text
         return super()._resolve_prompt(row, win)
 
-    @classmethod
-    def _multibucket_wrapper(cls):
-        return MultiLiberoDataset
-
-
-class MultiLiberoDataset(MultiLeRobotV3Reader):
-    """Aggregate homogeneous LIBERO LeRobot v3 suite/task buckets."""
-
-    def __init__(self, buckets: List[LiberoDataset]):
-        super().__init__(buckets)
-        # Compare the RESOLVED paths: with normalization on and no explicit
-        # config path, every bucket auto-builds its own default stats file —
-        # different transforms per bucket must be rejected, not silently mixed.
-        source_paths = {bucket._resolved_stats_path for bucket in self._buckets}
-        if len(source_paths) != 1:
-            raise ValueError(
-                "MultiLiberoDataset requires one shared normalization_stats_path "
-                "(pooled stats from the libero_stats_computation script); "
-                f"buckets resolved {sorted(str(p) for p in source_paths)}"
-            )
-
-    @property
-    def normalization_stats_path(self) -> Optional[str]:
-        return self._buckets[0].normalization_stats_path
-
-    @classmethod
-    def from_config(cls, config, split: str = "train"):
-        return LiberoDataset.from_config(config, split)
-
-
 ROT6D_DIMS_EEF10 = ROT6D_DIMS_ARM10
 
 __all__ = [
-    "ACTION7_DIM",
     "EEF10_DIM",
     "GRIPPER_CONVENTION",
-    "LIBERO_GRIPPER_WIDTH_OPEN",
     "ROT6D_DIMS_EEF10",
-    "STATE8_DIM",
     "LiberoDataset",
-    "MultiLiberoDataset",
-    "axis_angle_to_matrix",
-    "gripper_cmd_to_open_scale",
-    "gripper_qpos_to_cmd",
-    "matrix_to_rot6d",
-    "state8_to_eef10",
 ]

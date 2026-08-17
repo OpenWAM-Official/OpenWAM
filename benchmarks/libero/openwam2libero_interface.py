@@ -10,7 +10,7 @@ FULL pose) mapped to the unified 80-D space. The deploy server gathers the
 model's unified output back to raw EEF10 and unnormalizes it, so this client:
 
 * sends the live proprio as raw EEF10 (``libero_obs_to_eef10`` — byte-consistent
-  with the dataloader's ``state8_to_eef10``), and
+  with the canonical dataset converter), and
 * converts the returned EEF10 full-pose target to the env's native 7-D OSC
   delta (``eef10_to_libero7d``) using the live controller scales, with the
   CURRENT achieved EEF pose as the delta reference.

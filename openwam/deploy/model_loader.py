@@ -214,8 +214,7 @@ def load_from_checkpoint_dir(
     # 6. Attach the action normalizer built from saved normalization_stats.npy + config.
     architecture.attach_normalizer(_build_normalizer(cfg, ckpt_dir))
 
-    # 7. Binary command dims for the FINAL legality projection (WAMPolicy.predict_action, AFTER all
-    # executor arithmetic — temporal ensembling can re-mix the snapped ±1 values into mid-band).
+    # 7. Binary command dims for the final legality projection at WAMPolicy.predict_action.
     # Authoritative source is the CKPT's dataloader config, never the deploy yaml: the training data
     # decided which dims are two-point commands, deploy config must not be able to alter that.
     _bd = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
@@ -383,9 +382,9 @@ class _CommandAwareNormalizer:
       ``action_inner`` unless the ckpt trained with ``base_proprio='global_pose'``, whose pose
       proprio has its own stats block.
 
-    NOTE: executors may still do arithmetic on the unnormalized actions (temporal ensembling mixes
-    overlapping chunks) — legality of the binary dims after that is restored by the FINAL projection
-    in ``WAMPolicy.predict_action`` (binary_command_dims), which runs after all executor arithmetic.
+    Executors do not mix overlapping chunks. The final projection in
+    ``WAMPolicy.predict_action`` remains a defense-in-depth wire-contract check
+    for raw or legacy engine outputs that land between the two legal commands.
 
     Duck-typed to the ``Normalizer`` surface (``.unnormalize`` / ``.normalize`` / ``.stats``), so it
     composes under :class:`_UnifyAwareNormalizer` unchanged (gather → unnormalize+snap in raw space;

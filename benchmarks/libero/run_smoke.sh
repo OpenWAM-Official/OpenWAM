@@ -2,8 +2,7 @@
 # Smoke launcher for LIBERO.
 #
 # Usage:
-#   LIBERO_PATH=/path/to/LIBERO LIBERO_PYTHON=/path/to/env/bin/python \
-#     bash benchmarks/libero/run_smoke.sh task
+#   bash benchmarks/libero/run_smoke.sh task
 #
 # Modes:
 #   import  - verify package import and generated LIBERO_CONFIG_PATH
@@ -13,12 +12,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_LIBERO_PATH="/path/to/LIBERO"
+DEFAULT_LIBERO_PYTHON="/path/to/miniconda3/envs/libero/bin/python"
 MODE="${1:-${LIBERO_SMOKE_MODE:-import}}"
 
-: "${LIBERO_PATH:?LIBERO_PATH must point to the ordinary LIBERO repo}"
+REPO_ROOT="${LIBERO_PATH:-${DEFAULT_LIBERO_PATH}}"
+export LIBERO_PATH="${REPO_ROOT}"
 export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_ROOT:-${HOME}/.libero-openwam}"
-PYTHON_BIN="${LIBERO_PYTHON:-python}"
-REPO_ROOT="${LIBERO_PATH}"
+PYTHON_BIN="${LIBERO_PYTHON:-${DEFAULT_LIBERO_PYTHON}}"
 
 case "${MODE}" in
     import|task|env) ;;
