@@ -25,7 +25,7 @@ optimization:
   decode_video: false         # false = skip VAE decode, return video=null (actions-only)
 
   dit_cache:
-    enabled: false            # DiT velocity cache: skip video DiT when prediction is stable
+    enabled: true            # DiT velocity cache: skip video DiT when prediction is stable
     cosine_threshold: 0.99    # Skip if cosine similarity to previous prediction exceeds this
     max_skips: 3              # Max consecutive skips before forcing recompute
 

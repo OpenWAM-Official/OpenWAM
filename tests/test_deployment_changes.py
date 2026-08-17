@@ -99,11 +99,11 @@ class TestDeploymentYaml:
         assert OmegaConf.select(cfg, "optimization.compile.cross_attn.torch_mode") == "default"
         assert OmegaConf.select(cfg, "optimization.compile.cross_attn.dynamic") is False
 
-    def test_optimization_dit_cache_defaults_off(self):
+    def test_optimization_dit_cache_enabled(self):
         from omegaconf import OmegaConf
 
         cfg = self._load()
-        assert not OmegaConf.select(cfg, "optimization.dit_cache.enabled")
+        assert OmegaConf.select(cfg, "optimization.dit_cache.enabled") is True
 
     def test_inference_execution_defaults(self):
         from omegaconf import OmegaConf
