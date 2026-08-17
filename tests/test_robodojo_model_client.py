@@ -37,7 +37,7 @@ from benchmarks.robodojo.smoke_robodojo import (
     run_debug_protocol_rollout,
 )
 from openwam.dataloader.transforms.multiview import format_prompt_for_inference
-from openwam.robodojo import (
+from benchmarks.robodojo.frames import (
     arms_to_eef20,
     env_relative_world_to_robot_base,
     robot_base_to_env_relative_world,
@@ -1108,7 +1108,10 @@ def test_runtime_import_provenance_rejects_mixed_filesystem_namespace(
 
 def test_real_configured_checkout_provenance_excludes_stale_luminis_release():
     openwam_root = Path(__file__).resolve().parents[1]
-    robodojo_root = Path("/home/user/Desktop/RoboDojo")
+    configured = os.environ.get("ROBODOJO_ROOT")
+    if not configured:
+        pytest.skip("ROBODOJO_ROOT is unset")
+    robodojo_root = Path(configured)
     if not robodojo_root.is_dir():
         pytest.skip("configured RoboDojo checkout is unavailable")
     code = (
@@ -1324,7 +1327,10 @@ def test_stdio_restore_failure_without_primary_is_explicit():
 
 def test_real_monitor_shutdown_then_reexec_has_healthy_stdio():
     openwam_root = Path(__file__).resolve().parents[1]
-    robodojo_root = Path("/home/user/Desktop/RoboDojo")
+    configured = os.environ.get("ROBODOJO_ROOT")
+    if not configured:
+        pytest.skip("ROBODOJO_ROOT is unset")
+    robodojo_root = Path(configured)
     if not robodojo_root.is_dir():
         pytest.skip("configured RoboDojo checkout is unavailable")
     task_config = (

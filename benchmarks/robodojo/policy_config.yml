@@ -1,5 +1,5 @@
 # RoboDojo lives in its own Isaac environment; this is the external checkout.
-robodojo_root: /home/user/Desktop/RoboDojo
+robodojo_root: /path/to/RoboDojo
 
 # Existing OpenWAM JSON WebSocket policy server.
 host: 127.0.0.1

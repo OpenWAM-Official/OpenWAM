@@ -140,11 +140,17 @@ def _matrix_to_quaternion(matrix: np.ndarray) -> np.ndarray:
 
 
 def quat_wxyz_to_rot6d(quaternion_wxyz: np.ndarray) -> np.ndarray:
-    """Convert unit wxyz quaternion(s) to first-two-column rotation 6D."""
+    """Convert unit wxyz quaternion(s) to first-two-column rotation 6D.
+
+    Unit-quaternion checks stay here. The 6D columns come from the shared
+    helper so RoboDojo cannot drift from other readers in unified slots
+    3-8 / 37-42.
+    """
     quaternion, output_dtype = _validated_quaternion(quaternion_wxyz, "quaternion_wxyz")
-    matrix = _quaternion_to_matrix(quaternion)
-    rot6d = np.concatenate((matrix[..., :, 0], matrix[..., :, 1]), axis=-1)
-    return rot6d.astype(output_dtype, copy=False)
+    # Imported here to avoid a circular import through the dataloader registry.
+    from openwam.dataloader.utils.eef import quat_wxyz_to_rot6d as shared_quat_wxyz_to_rot6d
+
+    return shared_quat_wxyz_to_rot6d(quaternion).astype(output_dtype, copy=False)
 
 
 def _validated_rot6d(value) -> tuple[np.ndarray, np.ndarray, np.dtype]:

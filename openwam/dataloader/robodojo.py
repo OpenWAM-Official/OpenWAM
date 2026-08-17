@@ -1,9 +1,16 @@
 """Formal RoboDojo ``arx_x5`` HDF5 dataloaders.
 
 RoboDojo records achieved end-effector poses as environment-origin-relative
-positions with world-frame wxyz orientations.  This reader applies the built-in
-dual-X5 base transforms, packs the result as raw EEF20, normalizes in that raw
+positions with world-frame wxyz orientations.  Dual-X5 constants and the
+env-origin → robot-base / EEF20 helpers live with the benchmark adapter in
+``benchmarks.robodojo.contract`` and ``benchmarks.robodojo.frames``.  This
+reader applies those transforms, packs raw EEF20, normalizes in that raw
 space, and only then scatters into OpenWAM's shared 80-D action space.
+
+Gripper channels are the official ``state/*_ee_joint_states`` values in
+``[0, 1]``: ``0`` is closed and ``1`` is open.  That is the same raw
+direction the pretraining mixture uses before normalization.  Closed-gripper
+float noise around ``-3e-17`` is clipped to ``0``.
 """
 
 from __future__ import annotations
@@ -39,18 +46,22 @@ from openwam.dataloader.utils.unify_action import (
     parse_unify_spec,
     unmap_from_unify,
 )
-from openwam.robodojo import (
+from benchmarks.robodojo.contract import (
     EEF20_DIM,
     ROBODOJO_EMBODIMENT,
-    arms_to_eef20,
     discover_episodes,
-    env_relative_world_to_robot_base,
     resolve_robodojo_calibration,
     validate_calibration,
     validate_embodiment,
 )
+from benchmarks.robodojo.frames import (
+    arms_to_eef20,
+    env_relative_world_to_robot_base,
+)
 
 DEPLOY_ACTION_MODE = "eef"
+# Raw EEF20 gripper: 0 = closed, 1 = open. Matches the pretrain mixture.
+GRIPPER_CONVENTION = "zero_closed_one_open"
 DEFAULT_ROBODOJO_CAMERA_LAYOUT = (
     "cam_head",
     "cam_left_wrist",
@@ -100,6 +111,14 @@ def _normalize_mode(value: Any) -> str | None:
             f"normalize_mode must be one of {sorted(YAML_TO_NORM_MODE)} or null, got {value!r}"
         )
     return mode
+
+
+def _reject_calibration_path(calibration_path: str | Path | None) -> None:
+    if calibration_path is not None:
+        raise ValueError(
+            "RoboDojo uses the built-in dual-X5 base constants; "
+            "calibration_path is not accepted"
+        )
 
 
 def calibration_fingerprint(calibration: Mapping[str, Any]) -> str:
@@ -480,6 +499,13 @@ def _load_validated_stats(
             "RoboDojo normalization stats calibration fingerprint mismatch: "
             f"stats={saved_fingerprint}, loaded_calibration={expected_fingerprint}"
         )
+    recorded_convention = metadata.get("gripper_convention")
+    if recorded_convention != GRIPPER_CONVENTION:
+        raise ValueError(
+            f"{stats_path}: metadata.gripper_convention must be "
+            f"{GRIPPER_CONVENTION!r} (0=closed, 1=open), got "
+            f"{recorded_convention!r}; regenerate the RoboDojo stats file"
+        )
     return validated
 
 
@@ -576,8 +602,7 @@ class RoboDojoDataset(BaseDataset):
                 f"got {self.target_camera!r}"
             )
 
-        # dual_x5 constants are the conversion source; leftover JSON paths are ignored.
-        _ = calibration_path
+        _reject_calibration_path(calibration_path)
         self.calibration = resolve_robodojo_calibration(calibration)
         self.calibration_fingerprint = calibration_fingerprint(self.calibration)
 
@@ -970,7 +995,8 @@ class MultiTaskRoboDojoDataset(BaseDataset):
         super().__init__()
         if dataset_dir is None:
             raise ValueError("RoboDojo dataset_dir is required")
-        dataset_kwargs.pop("calibration_path", None)
+        if "calibration_path" in dataset_kwargs:
+            _reject_calibration_path(dataset_kwargs.pop("calibration_path"))
         if tasks is not None:
             if train_tasks is not None:
                 raise ValueError("pass only one of tasks or train_tasks")
@@ -1070,6 +1096,7 @@ class MultiTaskRoboDojoDataset(BaseDataset):
 __all__ = [
     "DEFAULT_ROBODOJO_CAMERA_LAYOUT",
     "DEPLOY_ACTION_MODE",
+    "GRIPPER_CONVENTION",
     "MultiTaskRoboDojoDataset",
     "ROBODOJO_SOURCE_FRAME",
     "RoboDojoDataset",

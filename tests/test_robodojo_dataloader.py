@@ -14,6 +14,7 @@ from openwam.dataloader.registry import build_dataset
 from openwam.dataloader.robodojo import (
     DEFAULT_ROBODOJO_CAMERA_LAYOUT,
     DEPLOY_ACTION_MODE,
+    GRIPPER_CONVENTION,
     MultiTaskRoboDojoDataset,
     RoboDojoDataset,
     calibration_fingerprint,
@@ -21,10 +22,10 @@ from openwam.dataloader.robodojo import (
 )
 from openwam.dataloader.transforms.multiview import format_prompt_for_inference
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
-from openwam.robodojo import (
+from benchmarks.robodojo.contract import save_calibration
+from benchmarks.robodojo.frames import (
     arms_to_eef20,
     env_relative_world_to_robot_base,
-    save_calibration,
 )
 
 
@@ -202,6 +203,7 @@ def write_stats(path: Path, calibration: dict | None = None) -> Path:
                 "endpoint": "link6",
                 "embodiment": "arx_x5",
                 "calibration_fingerprint": calibration_fingerprint(calibration),
+                "gripper_convention": GRIPPER_CONVENTION,
             },
         },
     )
@@ -220,7 +222,6 @@ def build_single(
         data_root=formal_data_dir(root, task),
         dataset_root=root,
         task_name=task,
-        calibration_path=write_calibration(root),
         num_frames=kwargs.pop("num_frames", 5),
         height=kwargs.pop("height", 48),
         width=kwargs.pop("width", 64),
@@ -334,13 +335,11 @@ def test_normalize_raw20_then_scatter_to_80_and_inverse_denormalize(
     tmp_path: Path,
 ):
     write_episode(tmp_path, T=4)
-    calibration_path = write_calibration(tmp_path)
     stats_path = write_stats(tmp_path / "stats.npy")
     dataset = RoboDojoDataset(
         data_root=formal_data_dir(tmp_path, "pick_mug"),
         dataset_root=tmp_path,
         task_name="pick_mug",
-        calibration_path=calibration_path,
         normalization_stats_path=stats_path,
         normalize_mode="z-score",
         num_frames=4,
@@ -384,7 +383,6 @@ def test_unification_requires_explicit_complete_map(tmp_path: Path):
         "data_root": formal_data_dir(tmp_path, "pick_mug"),
         "dataset_root": tmp_path,
         "task_name": "pick_mug",
-        "calibration_path": write_calibration(tmp_path),
         "normalize_mode": None,
         "num_frames": 3,
         "height": 48,
@@ -414,7 +412,6 @@ def test_normalization_requires_existing_valid_stats_and_matching_fingerprint(
         "data_root": formal_data_dir(tmp_path, "pick_mug"),
         "dataset_root": tmp_path,
         "task_name": "pick_mug",
-        "calibration_path": write_calibration(tmp_path),
         "normalize_mode": "min-max",
         "num_frames": 3,
         "height": 48,
@@ -447,6 +444,46 @@ def test_normalization_requires_existing_valid_stats_and_matching_fingerprint(
     np.save(stale_rot6d, payload)
     with pytest.raises(ValueError, match=r"rot6d.*regenerate"):
         RoboDojoDataset(**common, normalization_stats_path=stale_rot6d)
+
+    flipped = write_stats(tmp_path / "flipped.npy")
+    payload = np.load(flipped, allow_pickle=True).item()
+    payload["metadata"]["gripper_convention"] = "one_closed_zero_open"
+    np.save(flipped, payload)
+    with pytest.raises(ValueError, match="gripper_convention"):
+        RoboDojoDataset(**common, normalization_stats_path=flipped)
+
+    missing_convention = write_stats(tmp_path / "missing_convention.npy")
+    payload = np.load(missing_convention, allow_pickle=True).item()
+    del payload["metadata"]["gripper_convention"]
+    np.save(missing_convention, payload)
+    with pytest.raises(ValueError, match="gripper_convention"):
+        RoboDojoDataset(**common, normalization_stats_path=missing_convention)
+
+
+def test_calibration_path_is_rejected(tmp_path: Path):
+    write_episode(tmp_path, T=3)
+    with pytest.raises(ValueError, match="calibration_path is not accepted"):
+        RoboDojoDataset(
+            data_root=formal_data_dir(tmp_path, "pick_mug"),
+            dataset_root=tmp_path,
+            task_name="pick_mug",
+            calibration_path=tmp_path / "calibration.json",
+            normalize_mode=None,
+            unify_action=False,
+            num_frames=3,
+            height=48,
+            width=64,
+        )
+    with pytest.raises(ValueError, match="calibration_path is not accepted"):
+        MultiTaskRoboDojoDataset(
+            dataset_dir=tmp_path,
+            calibration_path=tmp_path / "calibration.json",
+            normalize_mode=None,
+            unify_action=False,
+            num_frames=3,
+            height=48,
+            width=64,
+        )
 
 
 @pytest.mark.parametrize(
@@ -550,12 +587,10 @@ def test_episode_schema_rejects_non_jpeg_camera_storage_dtype(tmp_path: Path):
 
 def test_direct_reader_requires_verified_formal_dataset_root(tmp_path: Path):
     write_episode(tmp_path, T=3)
-    calibration = write_calibration(tmp_path)
     formal = RoboDojoDataset(
         data_root=formal_data_dir(tmp_path, "pick_mug"),
         dataset_root=tmp_path,
         task_name="pick_mug",
-        calibration_path=calibration,
         normalize_mode=None,
         unify_action=False,
         num_frames=3,
@@ -572,7 +607,6 @@ def test_direct_reader_requires_verified_formal_dataset_root(tmp_path: Path):
             data_root=flat_data,
             dataset_root=flat_root,
             task_name="pick_mug",
-            calibration_path=calibration,
             normalize_mode=None,
             unify_action=False,
             num_frames=3,
@@ -584,12 +618,10 @@ def test_direct_reader_requires_verified_formal_dataset_root(tmp_path: Path):
 def test_only_eef_arx_x5_num_frames_and_formal_layout_are_accepted(tmp_path: Path):
     write_episode(tmp_path, T=3)
     data_root = formal_data_dir(tmp_path, "pick_mug")
-    calibration = write_calibration(tmp_path)
     common = {
         "data_root": data_root,
         "dataset_root": tmp_path,
         "task_name": "pick_mug",
-        "calibration_path": calibration,
         "normalize_mode": None,
         "unify_action": False,
         "height": 48,
@@ -609,7 +641,6 @@ def test_only_eef_arx_x5_num_frames_and_formal_layout_are_accepted(tmp_path: Pat
     with pytest.raises(ValueError, match="flat.*not supported"):
         MultiTaskRoboDojoDataset(
             dataset_dir=flat,
-            calibration_path=calibration,
             normalize_mode=None,
             unify_action=False,
             num_frames=3,
@@ -623,11 +654,9 @@ def test_multitask_sorted_discovery_allowlist_holdout_and_shared_files(
 ):
     for index, task in enumerate(("task_b", "task_a", "task_holdout")):
         write_episode(tmp_path, task=task, episode=index, T=3)
-    calibration = write_calibration(tmp_path)
     stats = write_stats(tmp_path / "stats.npy")
     common = {
         "dataset_dir": tmp_path,
-        "calibration_path": calibration,
         "normalization_stats_path": stats,
         "normalize_mode": "min-max",
         "num_frames": 3,
@@ -694,14 +723,12 @@ def test_multitask_sorted_discovery_allowlist_holdout_and_shared_files(
 
 def test_registry_constructs_robodojo_and_exports_classes(tmp_path: Path):
     write_episode(tmp_path, T=3)
-    calibration = write_calibration(tmp_path)
     config = {
         "type": "robodojo",
         "dataset_dir": str(tmp_path),
         "task_name": "pick_mug",
         "embodiment": "arx_x5",
         "action_mode": "eef",
-        "calibration_path": str(calibration),
         "normalization_stats_path": None,
         "normalize_mode": None,
         "num_frames": 3,

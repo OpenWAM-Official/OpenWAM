@@ -10,9 +10,11 @@ The reader only accepts the formal layout:
 
 Each episode is converted from RoboDojo's env-origin xyz + world wxyz into
 per-arm robot-base **EEF20**, normalized in that 20-D space, then scattered
-into OpenWAM's unified 80-D slots `0-9` (left) and `34-43` (right). Evaluation
-inverts the same transform and returns native `left/right_ee_pose` + gripper
-so RoboDojo's IK runs. Joint-14 and LeRobot dumps are not supported.
+into OpenWAM's unified 80-D slots `0-9` (left) and `34-43` (right). Gripper
+channels stay in `[0, 1]` with **`0` closed and `1` open** — the same raw
+direction as the pretraining mixture. Evaluation inverts the same transform
+and returns native `left/right_ee_pose` + gripper so RoboDojo's IK runs.
+Joint-14 and LeRobot dumps are not supported.
 
 ## Download HDF5
 
@@ -50,7 +52,9 @@ python -m openwam.dataloader.utils.stats_computation.robodojo_stats_computation 
 ```
 
 The pool includes every achieved state and each real next-state target. The
-saved calibration fingerprint must match the built-in dual-X5 constants.
+saved calibration fingerprint must match the built-in dual-X5 constants, and
+`metadata.gripper_convention` is `zero_closed_one_open`. Recompute stats if
+you still have a file from before that marker.
 
 ## Train
 
@@ -146,13 +150,15 @@ under:
 
 ```text
 state/left_ee_poses             (T, 7), xyz+wxyz
-state/left_ee_joint_states      (T, 1), gripper in [0, 1]
+state/left_ee_joint_states      (T, 1), gripper in [0, 1]; 0=closed, 1=open
 state/right_ee_poses            (T, 7), xyz+wxyz
-state/right_ee_joint_states     (T, 1), gripper in [0, 1]
+state/right_ee_joint_states     (T, 1), gripper in [0, 1]; 0=closed, 1=open
 ```
 
-Closed-gripper float noise around `-3e-17` is accepted and clipped to `[0, 1]`.
-True out-of-range values are still rejected.
+Closed-gripper float noise around `-3e-17` is accepted and clipped to `0`.
+True out-of-range values are still rejected. The raw direction matches the
+pretraining mixture (`0` closed, `1` open); do not flip it when finetuning
+from `Pretrained_OpenWAM_Mutual_Final`.
 
 RoboDojo positions are relative to the Isaac environment origin while their
 orientations remain world-oriented. A measured transform for each X5
@@ -196,7 +202,7 @@ an already-loaded stale editable checkout cause an explicit startup error.
 
 Training and evaluation convert RoboDojo env-relative `xyz+wxyz` poses with
 the same constants as `env_cfg/robot/dual_x5.yml`, stored in
-`openwam/robodojo/contract.py`:
+`benchmarks/robodojo/contract.py`:
 
 ```python
 DUAL_X5_LEFT_BASE_POS = (-0.3, -0.45, 0.765)

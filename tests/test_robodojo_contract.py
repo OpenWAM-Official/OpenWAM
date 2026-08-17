@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from benchmarks.robodojo.calibrate_frames import calibrate_and_save, extract_live_calibration
-from openwam.robodojo.contract import (
+from benchmarks.robodojo.contract import (
     CALIBRATION_SCHEMA_VERSION,
     EEF20_LAYOUT,
     ENDPOINT_LINK_NAME,
@@ -23,7 +23,8 @@ from openwam.robodojo.contract import (
     validate_calibration,
     validate_embodiment,
 )
-from openwam.robodojo.frames import (
+from openwam.dataloader.utils.eef import quat_wxyz_to_rot6d as shared_quat_wxyz_to_rot6d
+from benchmarks.robodojo.frames import (
     arms_to_eef20,
     eef20_to_arms,
     env_relative_world_to_robot_base,
@@ -71,7 +72,7 @@ def test_contract_constants_pin_arx_x5_eef20_and_link6():
 
 
 def test_builtin_dual_x5_calibration_matches_robot_yaml_constants():
-    from openwam.robodojo.contract import (
+    from benchmarks.robodojo.contract import (
         DUAL_X5_LEFT_BASE_POS,
         DUAL_X5_LEFT_BASE_QUAT_WXYZ,
         DUAL_X5_RIGHT_BASE_POS,
@@ -179,14 +180,25 @@ def test_calibration_schema_rejects_unknown_fields_and_non_mapping():
 
 def test_wxyz_quaternion_convention_and_rot6d_round_trip():
     identity = np.array([1.0, 0.0, 0.0, 0.0])
-    np.testing.assert_allclose(quat_wxyz_to_rot6d(identity), [1, 0, 0, 0, 1, 0], atol=1e-12)
+    np.testing.assert_allclose(quat_wxyz_to_rot6d(identity), [1, 0, 0, 0, 1, 0], atol=2e-6)
 
     half_sqrt = 2**-0.5
     z_90_wxyz = np.array([half_sqrt, 0.0, 0.0, half_sqrt])
     rot6d = quat_wxyz_to_rot6d(z_90_wxyz)
-    np.testing.assert_allclose(rot6d, [0, 1, 0, -1, 0, 0], atol=1e-12)
+    np.testing.assert_allclose(rot6d, [0, 1, 0, -1, 0, 0], atol=2e-6)
     round_trip = rot6d_to_quat_wxyz(rot6d)
-    np.testing.assert_allclose(round_trip, z_90_wxyz, atol=1e-12)
+    np.testing.assert_allclose(round_trip, z_90_wxyz, atol=2e-6)
+
+
+def test_robodojo_rot6d_matches_shared_eef_helper():
+    rng = np.random.default_rng(0)
+    raw = rng.normal(size=(64, 4))
+    quaternions = raw / np.linalg.norm(raw, axis=-1, keepdims=True)
+    np.testing.assert_allclose(
+        quat_wxyz_to_rot6d(quaternions),
+        shared_quat_wxyz_to_rot6d(quaternions),
+        atol=2e-6,
+    )
 
 
 def test_eef20_left_right_slots_and_round_trip():
@@ -200,10 +212,10 @@ def test_eef20_left_right_slots_and_round_trip():
 
     assert eef20.shape == (1, 20)
     np.testing.assert_allclose(eef20[0, 0:3], left_pose[0, :3])
-    np.testing.assert_allclose(eef20[0, 3:9], [1, 0, 0, 0, 1, 0], atol=1e-12)
+    np.testing.assert_allclose(eef20[0, 3:9], [1, 0, 0, 0, 1, 0], atol=2e-6)
     assert eef20[0, 9] == 0.25
     np.testing.assert_allclose(eef20[0, 10:13], right_pose[0, :3])
-    np.testing.assert_allclose(eef20[0, 13:19], [0, 1, 0, -1, 0, 0], atol=1e-12)
+    np.testing.assert_allclose(eef20[0, 13:19], [0, 1, 0, -1, 0, 0], atol=2e-6)
     assert eef20[0, 19] == 0.75
 
     actual = eef20_to_arms(eef20)

@@ -21,6 +21,7 @@ from omegaconf import OmegaConf
 
 from openwam.dataloader.robodojo import (
     DEPLOY_ACTION_MODE,
+    GRIPPER_CONVENTION,
     ROBODOJO_SOURCE_FRAME,
     calibration_fingerprint,
     read_calibrated_eef20,
@@ -35,7 +36,7 @@ from openwam.dataloader.utils.normalization import (
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
     Accumulator,
 )
-from openwam.robodojo import (
+from benchmarks.robodojo.contract import (
     EEF20_DIM,
     ENDPOINT_LINK_NAME,
     ROBODOJO_EMBODIMENT,
@@ -79,6 +80,7 @@ def _metadata(
         "embodiment": ROBODOJO_EMBODIMENT,
         "tasks": list(tasks),
         "calibration_fingerprint": calibration_fingerprint(calibration),
+        "gripper_convention": GRIPPER_CONVENTION,
         "reservoir_cap": int(reservoir_cap),
         "reservoir_rows": int(reservoir_rows),
     }
@@ -106,7 +108,11 @@ def compute_robodojo_stats(
     if int(reservoir_cap) < 1:
         raise ValueError(f"reservoir_cap must be >= 1, got {reservoir_cap}")
 
-    _ = calibration_path
+    if calibration_path is not None:
+        raise ValueError(
+            "RoboDojo uses the built-in dual-X5 base constants; "
+            "calibration_path is not accepted"
+        )
     calibration = resolve_robodojo_calibration(calibration)
     tasks = resolve_robodojo_tasks(
         dataset_dir,

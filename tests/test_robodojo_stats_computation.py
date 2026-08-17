@@ -11,6 +11,7 @@ import yaml
 from omegaconf import OmegaConf
 
 from openwam.dataloader.robodojo import (
+    GRIPPER_CONVENTION,
     RoboDojoDataset,
     calibration_fingerprint,
     read_calibrated_eef20,
@@ -23,12 +24,11 @@ from openwam.dataloader.utils.stats_computation.robodojo_stats_computation impor
     iter_episode_eef20,
     main,
 )
-from openwam.robodojo import arx_x5_calibration
+from benchmarks.robodojo.contract import arx_x5_calibration
 from tests.test_robodojo_dataloader import (
     expected_raw_eef20,
     formal_data_dir,
     valid_calibration,
-    write_calibration,
     write_episode,
 )
 
@@ -63,11 +63,9 @@ def test_pools_all_states_and_only_real_next_state_targets_without_crossing_epis
 ):
     write_episode(tmp_path, task="task_a", episode=0, T=4)
     write_episode(tmp_path, task="task_a", episode=1, T=3)
-    calibration_path = write_calibration(tmp_path)
 
     payload = compute_robodojo_stats(
         dataset_dir=tmp_path,
-        calibration_path=calibration_path,
         task_name="task_a",
         reservoir_cap=100,
     )
@@ -87,6 +85,7 @@ def test_pools_all_states_and_only_real_next_state_targets_without_crossing_epis
     )
     assert metadata["endpoint"] == "link6"
     assert metadata["embodiment"] == "arx_x5"
+    assert metadata["gripper_convention"] == GRIPPER_CONVENTION
 
     episode_0 = expected_raw_eef20(4)
     episode_1 = expected_raw_eef20(3)
@@ -120,7 +119,6 @@ def test_rot6d_stats_are_pinned_to_identity_and_reservoir_is_bounded(
     write_episode(tmp_path, T=20)
     payload = compute_robodojo_stats(
         dataset_dir=tmp_path,
-        calibration_path=write_calibration(tmp_path),
         task_name="pick_mug",
         reservoir_cap=3,
     )
@@ -141,11 +139,9 @@ def test_stats_task_selection_matches_reader_train_and_holdout_rules(
 ):
     for task in ("task_b", "task_a", "task_holdout"):
         write_episode(tmp_path, task=task, T=3)
-    calibration = write_calibration(tmp_path)
 
     train = compute_robodojo_stats(
         dataset_dir=tmp_path,
-        calibration_path=calibration,
         train_tasks=["task_b", "task_a", "task_holdout"],
         holdout_tasks=["task_holdout"],
         split="train",
@@ -157,7 +153,6 @@ def test_stats_task_selection_matches_reader_train_and_holdout_rules(
 
     validation = compute_robodojo_stats(
         dataset_dir=tmp_path,
-        calibration_path=calibration,
         holdout_tasks=["task_holdout"],
         split="val",
         reservoir_cap=100,
@@ -169,7 +164,6 @@ def test_stats_task_selection_matches_reader_train_and_holdout_rules(
     with pytest.raises(FileNotFoundError, match="missing"):
         compute_robodojo_stats(
             dataset_dir=tmp_path,
-            calibration_path=calibration,
             train_tasks=["task_a", "missing"],
         )
 
@@ -178,13 +172,11 @@ def test_atomic_build_writes_deploy_payload_and_leaves_no_partial_file(
     tmp_path: Path,
 ):
     write_episode(tmp_path, T=4)
-    calibration = write_calibration(tmp_path)
     output = tmp_path / "stats.npy"
     np.save(output, {"stale": True})
 
     result = build_and_save_robodojo_stats(
         dataset_dir=tmp_path,
-        calibration_path=calibration,
         output=output,
         task_name="pick_mug",
         reservoir_cap=100,
@@ -217,7 +209,6 @@ def test_generated_stats_are_compatible_with_generic_deploy_normalizer(
     output = tmp_path / "normalization_stats.npy"
     build_and_save_robodojo_stats(
         dataset_dir=tmp_path,
-        calibration_path=write_calibration(tmp_path),
         output=output,
         task_name="pick_mug",
         reservoir_cap=100,
@@ -250,11 +241,9 @@ def test_generated_stats_are_compatible_with_generic_deploy_normalizer(
 
 
 def test_stats_reject_empty_data_and_non_npy_output(tmp_path: Path):
-    calibration = write_calibration(tmp_path)
     with pytest.raises((FileNotFoundError, ValueError), match="RoboDojo|empty"):
         compute_robodojo_stats(
             dataset_dir=tmp_path,
-            calibration_path=calibration,
             task_name="missing",
         )
 
@@ -262,8 +251,13 @@ def test_stats_reject_empty_data_and_non_npy_output(tmp_path: Path):
     with pytest.raises(ValueError, match=r"\.npy"):
         build_and_save_robodojo_stats(
             dataset_dir=tmp_path,
-            calibration_path=calibration,
             output=tmp_path / "stats.json",
+            task_name="pick_mug",
+        )
+    with pytest.raises(ValueError, match="calibration_path is not accepted"):
+        compute_robodojo_stats(
+            dataset_dir=tmp_path,
+            calibration_path=tmp_path / "calibration.json",
             task_name="pick_mug",
         )
 
@@ -272,7 +266,6 @@ def test_cli_requires_npy_and_succeeds_with_normalization_disabled_for_scan(
     tmp_path: Path,
 ):
     write_episode(tmp_path, task="task_a", T=4, jpeg_storage="fixed")
-    calibration = write_calibration(tmp_path)
     config = tmp_path / "robodojo.yaml"
     config.write_text(
         yaml.safe_dump(
@@ -285,7 +278,6 @@ def test_cli_requires_npy_and_succeeds_with_normalization_disabled_for_scan(
                 "split": "train",
                 "embodiment": "arx_x5",
                 "action_mode": "eef",
-                "calibration_path": str(calibration),
                 # Deliberately nonexistent: a stats scan must not try to load it.
                 "normalization_stats_path": str(tmp_path / "does-not-exist.npy"),
                 "normalize_mode": "min-max",

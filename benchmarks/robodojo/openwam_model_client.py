@@ -19,15 +19,17 @@ from PIL import Image
 
 from benchmarks.utils import WSPolicyClient, build_payload, encode_numpy_b64
 from openwam.dataloader.transforms.multiview import format_prompt_for_inference
-from openwam.robodojo import (
+from benchmarks.robodojo.contract import (
     EEF20_DIM,
     ROBODOJO_EMBODIMENT,
-    arms_to_eef20,
     arx_x5_calibration,
+    validate_calibration,
+)
+from benchmarks.robodojo.frames import (
+    arms_to_eef20,
     eef20_to_arms,
     env_relative_world_to_robot_base,
     robot_base_to_env_relative_world,
-    validate_calibration,
 )
 
 _CAMERA_TO_PAYLOAD = {
