@@ -169,6 +169,11 @@ def test_registry_and_default_yaml_use_canonical_libero_dataset():
     assert config.dataset_dir == "/path/to/libero"
     assert config.action_mode == "eef"
     assert config.gripper_convention == GRIPPER_CONVENTION
+    assert list(config.head_camera_priority) == ["observation.images.image"]
+    assert list(config.wrist_camera_priority) == [
+        "observation.images.wrist_image",
+        "observation.images.image2",
+    ]
     assert config.unify_action is True
     assert list(config.unify_action_map) == ["0-9"]
     assert OmegaConf.to_container(config.color_jitter, resolve=True) == {
@@ -326,13 +331,16 @@ def test_generated_stats_include_every_row_and_contract_marker(tmp_path: Path):
 
 def test_missing_default_stats_are_built_and_reused(tmp_path: Path):
     _write_bucket(tmp_path)
-    default_path = tmp_path / "meta" / "libero_normalization_stats.npy"
+    default_path = tmp_path / "meta" / "normalization_stats.npy"
     with _mock_decoder():
         dataset = _dataset(tmp_path, normalize_mode="min-max")
         sample = dataset[0]
         raw_sample = _dataset(tmp_path)[0]
 
+    assert Path(dataset.normalization_stats_path) == default_path
     payload = np.load(default_path, allow_pickle=True).item()
+    assert payload["eef"]["gripper_convention"] == GRIPPER_CONVENTION
+    assert payload["eef"]["action_rows"] == payload["eef"]["state_rows"] == EP_LENGTH
     smin = np.asarray(payload["eef"]["min"], np.float64)
     smax = np.asarray(payload["eef"]["max"], np.float64)
     rot = list(ROT6D_DIMS_EEF10)
@@ -352,7 +360,7 @@ def test_missing_default_stats_are_built_and_reused(tmp_path: Path):
         _dataset(tmp_path, normalize_mode="min-max")
 
 
-def test_libero_stats_generate_deploy_artifact_and_roundtrip(tmp_path: Path):
+def test_one_stats_file_serves_training_checkpoint_and_deployment(tmp_path: Path):
     _write_bucket(tmp_path)
     stats_path = tmp_path / "source_stats.npy"
     np.save(stats_path, {"eef": _unit_stats(2.0)})
@@ -367,9 +375,12 @@ def test_libero_stats_generate_deploy_artifact_and_roundtrip(tmp_path: Path):
         sample = dataset[0]
 
     deploy_path = Path(dataset.normalization_stats_path)
-    assert deploy_path == tmp_path / "meta" / "normalization_stats.npy"
+    assert deploy_path == stats_path
+    assert not (tmp_path / "meta" / "normalization_stats.npy").exists()
     checkpoint = tmp_path / "checkpoint"
     save_normalization_stats(str(checkpoint), dataset)
+    checkpoint_payload = np.load(checkpoint / "normalization_stats.npy", allow_pickle=True).item()
+    assert checkpoint_payload["eef"]["gripper_convention"] == GRIPPER_CONVENTION
     normalizer = _build_normalizer(
         OmegaConf.create(
             {

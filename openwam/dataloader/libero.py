@@ -11,6 +11,10 @@ and no temporal shifting. The gripper convention is ``-1 = closed, +1 = open``.
 
 With ``unify_action: true``, the 10 raw dimensions are normalized by one shared
 ``eef`` statistics block and scattered into unified slots 0..9.
+
+Training and deployment share the single authoritative artifact
+``meta/normalization_stats.npy``.  Its ``eef`` block is a superset of the six
+vectors deployment consumes and also carries the LIBERO representation metadata.
 """
 
 from __future__ import annotations
@@ -27,7 +31,6 @@ import pandas as pd
 from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.normalization import (
     ROT6D_DIMS_ARM10,
-    STAT_KEYS,
     apply_normalization,
     load_stats_file,
     load_stats_metadata,
@@ -38,6 +41,7 @@ logger = logging.getLogger(__name__)
 _ACTION_MODE = "eef"
 EEF10_DIM = 10
 GRIPPER_CONVENTION = "minus1_closed_plus1_open"
+NORMALIZATION_STATS_FILENAME = "normalization_stats.npy"
 
 
 def _as_priority(value: Optional[Sequence[str]], default: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -175,7 +179,7 @@ class LiberoDataset(LeRobotV3Reader):
             # An explicit path is authoritative and is never silently rebuilt.
             stats_path = Path(self._source_stats_path)
         else:
-            stats_path = self._dataset_dir / "meta" / "libero_normalization_stats.npy"
+            stats_path = self._dataset_dir / "meta" / NORMALIZATION_STATS_FILENAME
             if not stats_path.is_file():
                 self._build_default_stats(stats_path)
         self._resolved_stats_path = str(stats_path)
@@ -186,7 +190,11 @@ class LiberoDataset(LeRobotV3Reader):
             dim=self._raw_action_dim,
         )
         self._check_gripper_convention(stats_path)
-        self._write_deploy_normalizer_stats(global_stats, STAT_KEYS)
+        # The complete training payload is already deployment-compatible: the
+        # deploy reader selects the same ``eef`` block and ignores its extra
+        # provenance/quantile fields.  Surface this exact file to checkpointing
+        # instead of materializing a second, reduced artifact.
+        self.normalization_stats_path = str(stats_path)
         return global_stats
 
     def _check_gripper_convention(self, stats_path: Path) -> None:

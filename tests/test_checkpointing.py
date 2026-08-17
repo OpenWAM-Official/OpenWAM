@@ -231,6 +231,66 @@ def test_verify_resume_normalization_stats_rejects_allclose_only_match(tmp_path)
         verify_resume_normalization_stats(str(dst_dir), _Dataset())
 
 
+def test_verify_resume_normalization_stats_accepts_legacy_reduced_checkpoint(tmp_path):
+    import numpy as np
+
+    transform = {
+        "mean": np.zeros(3, dtype=np.float32),
+        "std": np.ones(3, dtype=np.float32),
+        "min": -np.ones(3, dtype=np.float32),
+        "max": np.ones(3, dtype=np.float32),
+        "q01": -np.ones(3, dtype=np.float32),
+        "q99": np.ones(3, dtype=np.float32),
+    }
+    full = {
+        "eef": {
+            **transform,
+            "q50": [0.0, 0.0, 0.0],
+            "action_rows": 100,
+            "state_rows": 100,
+            "gripper_convention": "minus1_closed_plus1_open",
+            "representation": "absolute_eef10",
+        }
+    }
+    src = tmp_path / "dataset_stats.npy"
+    dst_dir = tmp_path / "run"
+    dst_dir.mkdir()
+    np.save(src, full)
+    np.save(dst_dir / "normalization_stats.npy", {"eef": transform})
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    verify_resume_normalization_stats(str(dst_dir), _Dataset())
+
+
+def test_verify_resume_normalization_stats_rejects_shared_semantic_mismatch(tmp_path):
+    import numpy as np
+
+    transform = {
+        "mean": np.zeros(2, dtype=np.float32),
+        "std": np.ones(2, dtype=np.float32),
+        "min": -np.ones(2, dtype=np.float32),
+        "max": np.ones(2, dtype=np.float32),
+        "q01": -np.ones(2, dtype=np.float32),
+        "q99": np.ones(2, dtype=np.float32),
+    }
+    src = tmp_path / "dataset_stats.npy"
+    dst_dir = tmp_path / "run"
+    dst_dir.mkdir()
+    np.save(src, {"eef": {**transform, "gripper_convention": "minus1_closed_plus1_open"}})
+    np.save(
+        dst_dir / "normalization_stats.npy",
+        {"eef": {**transform, "gripper_convention": "plus1_closed_minus1_open"}},
+    )
+
+    class _Dataset:
+        normalization_stats_path = str(src)
+
+    with pytest.raises(ValueError, match="finetune_ckpt_path"):
+        verify_resume_normalization_stats(str(dst_dir), _Dataset())
+
+
 def test_setup_output_dir_verifies_stats_before_reusing_resume_run(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

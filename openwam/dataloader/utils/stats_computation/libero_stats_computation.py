@@ -9,6 +9,11 @@ The gripper dim (9) IS normalized, so these numbers are tied to the reader's
 gripper direction; the payload records it as ``gripper_convention`` and the
 reader validates the match at load time.
 
+The result is the sole ``meta/normalization_stats.npy`` artifact: training
+reads the complete payload directly, checkpointing copies that same file, and
+deployment selects the six normalization vectors it needs from the ``eef``
+block while ignoring the extra provenance fields.
+
 Example:
     python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
       --config configs/dataloader/libero.yaml \

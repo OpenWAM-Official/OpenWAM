@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 from openwam.dataloader.libero import LiberoDataset
 from scripts.convert_libero_to_absolute_eef10_v3 import (
+    DEFAULT_OUTPUT_ROOT,
     POSITION_SCALE,
     ROTATION_SCALE,
     convert_state_action,
 )
+
+
+def test_fastwam_converter_default_does_not_overwrite_canonical_libero() -> None:
+    assert DEFAULT_OUTPUT_ROOT == Path("/path/to/libero-fastwam-absolute-eef10-v3")
 
 
 def test_state_and_action_convert_to_one_eef10_contract_with_exact_roundtrip():

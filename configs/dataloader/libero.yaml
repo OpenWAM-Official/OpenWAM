@@ -17,6 +17,7 @@ head_camera_priority:
   - observation.images.image
 wrist_camera_priority:
   - observation.images.wrist_image
+  - observation.images.image2
 prompt_columns:
   - language_instruction
   - task

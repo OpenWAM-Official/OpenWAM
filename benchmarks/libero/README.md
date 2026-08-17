@@ -83,23 +83,33 @@ they do not prompt interactively and do not clobber `~/.libero/config.yaml`.
 
 ## Training Data
 
-OpenWAM's `libero` dataloader consumes the standalone canonical LeRobot v3
-dataset generated from the Fast-WAM source:
+OpenWAM's `libero` dataloader defaults to the standalone canonical LeRobot v3
+dataset converted from the official `lerobot/libero` snapshot:
+
+```bash
+python scripts/convert_lerobot_libero_to_absolute_eef10_v3.py \
+  --source /path/to/libero-lerobot \
+  --output /path/to/libero
+```
+
+The independent 20 FPS Fast-WAM conversion is retained under an explicit name:
 
 ```bash
 python scripts/convert_libero_to_absolute_eef10_v3.py \
   --source /path/to/libero-fastwam \
-  --output /path/to/libero
+  --output /path/to/libero-fastwam-absolute-eef10-v3
 ```
 
-`configs/dataloader/libero.yaml` points to that output by default. Normalization statistics load from
-`<dataset_dir>/meta/libero_normalization_stats.npy` and are auto-computed
-there on first use if the file is missing. To pre-compute them instead:
+`configs/dataloader/libero.yaml` points to the official-snapshot conversion at
+`/path/to/libero` by default. The single
+training/deployment normalization artifact is
+`<dataset_dir>/meta/normalization_stats.npy`; it is auto-computed there on first
+use if missing. To pre-compute it instead:
 
 ```bash
 python -m openwam.dataloader.utils.stats_computation.libero_stats_computation \
   --config configs/dataloader/libero.yaml \
-  --output /path/to/libero/meta/libero_normalization_stats.npy
+  --output /path/to/libero/meta/normalization_stats.npy
 ```
 
 ### EEF10 data contract

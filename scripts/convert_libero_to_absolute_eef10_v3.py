@@ -50,6 +50,8 @@ VIDEO_KEYS = (
     "observation.images.image",
     "observation.images.wrist_image",
 )
+DEFAULT_SOURCE_ROOT = Path("/path/to/libero-fastwam")
+DEFAULT_OUTPUT_ROOT = Path("/path/to/libero-fastwam-absolute-eef10-v3")
 EEF10_NAMES = [
     "eef_x",
     "eef_y",
@@ -589,7 +591,10 @@ def convert_dataset(
                 "osc_rotation_scale": ROTATION_SCALE,
             }
         )
-        with (temp / "meta" / "libero_normalization_stats.npy").open("wb") as handle:
+        # One authoritative artifact serves both training and deployment.  The
+        # deploy loader consumes the six standard vectors and ignores the extra
+        # representation/provenance fields in this full payload.
+        with (temp / "meta" / "normalization_stats.npy").open("wb") as handle:
             np.save(handle, {"eef": eef_stats})
 
         conversion = {
@@ -608,6 +613,7 @@ def convert_dataset(
             "rotation_formula": "goal_R = Exp(source_action_rotvec * 0.5) @ state_R",
             "gripper_formula": "open_scale = 2 * source_open_flag - 1",
             "roundtrip_max_abs_error": max_errors,
+            "normalization_stats_file": "meta/normalization_stats.npy",
             "independent_files": True,
             "video_reencoded": False,
         }
@@ -630,8 +636,8 @@ def convert_dataset(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=Path("/path/to/libero-fastwam"))
-    parser.add_argument("--output", type=Path, default=Path("/path/to/libero"))
+    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE_ROOT)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument(
         "--legacy-stats-root",
         type=Path,

@@ -7,6 +7,14 @@ import re
 
 logger = logging.getLogger(__name__)
 
+_NORMALIZATION_TRANSFORM_KEYS = ("mean", "std", "min", "max", "q01", "q99")
+_NORMALIZATION_SEMANTIC_KEYS = (
+    "gripper_convention",
+    "representation",
+    "osc_position_scale",
+    "osc_rotation_scale",
+)
+
 
 # --- Deploy assets (write-once) ---
 
@@ -89,15 +97,55 @@ def _normalization_stats_values_equal(left, right) -> bool:
     return left == right
 
 
+def _normalization_transforms_equal(left, right) -> bool:
+    """Compare effective transforms while allowing full-vs-legacy payloads.
+
+    Older checkpoints contain only the six vectors deployment consumes, while
+    unified dataset artifacts may additionally carry quantiles, row counts and
+    provenance.  Those extra fields do not change normalization coordinates.
+    Semantic markers remain strict whenever both sides provide them; a legacy
+    reduced checkpoint legitimately has none.
+    """
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    left_modes = {
+        key: value
+        for key, value in left.items()
+        if isinstance(value, dict) and any(field in value for field in _NORMALIZATION_TRANSFORM_KEYS)
+    }
+    right_modes = {
+        key: value
+        for key, value in right.items()
+        if isinstance(value, dict) and any(field in value for field in _NORMALIZATION_TRANSFORM_KEYS)
+    }
+    if not left_modes or left_modes.keys() != right_modes.keys():
+        return False
+    for mode in left_modes:
+        left_stats = left_modes[mode]
+        right_stats = right_modes[mode]
+        for field in _NORMALIZATION_TRANSFORM_KEYS:
+            if (field in left_stats) != (field in right_stats):
+                return False
+            if field in left_stats and not _normalization_stats_values_equal(left_stats[field], right_stats[field]):
+                return False
+        for field in _NORMALIZATION_SEMANTIC_KEYS:
+            if field in left_stats and field in right_stats:
+                if not _normalization_stats_values_equal(left_stats[field], right_stats[field]):
+                    return False
+    return True
+
+
 def verify_resume_normalization_stats(output_dir: str, dataset) -> None:
     """Fail fast when a resumed run's deploy stats diverge from the dataset's.
 
     Strict resume reuses the checkpoint-directory ``normalization_stats.npy``
     rather than refreshing it from the dataset. If that artifact is missing,
-    unreadable, legacy, or not equal to the dataset's current stats, training
-    would normalize with one transform while deployment kept another — and
-    restored weights/optimizer state remain in the old coordinates. Direct the
-    user to ``finetune_ckpt_path`` instead of silently continuing or replacing.
+    unreadable, or its effective six-vector transform differs from the dataset,
+    training would normalize with one transform while deployment kept another —
+    and restored weights/optimizer state remain in the old coordinates. A legacy
+    reduced artifact is accepted when those vectors match the unified full file;
+    shared semantic markers are still compared strictly. Direct the user to
+    ``finetune_ckpt_path`` instead of silently continuing or replacing.
     """
     import pickle
 
@@ -130,7 +178,9 @@ def verify_resume_normalization_stats(output_dir: str, dataset) -> None:
             "Use finetune_ckpt_path to warm-start instead of resume_ckpt_path."
         ) from exc
 
-    if not _normalization_stats_values_equal(ckpt_payload, data_payload):
+    if not _normalization_stats_values_equal(ckpt_payload, data_payload) and not _normalization_transforms_equal(
+        ckpt_payload, data_payload
+    ):
         raise ValueError(
             "resume blocked: checkpoint normalization_stats.npy does not match the "
             f"dataset stats at {src}. Restored weights/optimizer were trained under "
