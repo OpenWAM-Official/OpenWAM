@@ -132,7 +132,7 @@ def test_dlc_snapshot_exposes_robotwin_mode_custom_metrics(tmp_path):
 
     assert clean["value"] == "70.00%"
     assert clean["raw_value"] == 70.0
-    assert clean["source"] == "weighted_success"
+    assert clean["source"] == "live_weighted_success"
     assert clean["weighted_success"] == 7
     assert clean["weighted_total"] == 10
     assert randomized["value"] == "60.00%"
