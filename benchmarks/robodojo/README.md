@@ -26,6 +26,9 @@ state/right_ee_poses            (T, 7), xyz+wxyz
 state/right_ee_joint_states     (T, 1), gripper in [0, 1]
 ```
 
+Closed-gripper float noise around `-3e-17` is accepted and clipped to `[0, 1]`.
+True out-of-range values are still rejected.
+
 RoboDojo positions are relative to the Isaac environment origin while their
 orientations remain world-oriented. A measured transform for each X5
 `base_link` converts both into that arm's base frame. Training proprio and

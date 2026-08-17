@@ -71,6 +71,8 @@ _CAMERA_DATASETS = {
 }
 _REQUIRED_DATASETS = (*_POSE_KEYS, *_GRIPPER_KEYS, *_CAMERA_DATASETS.values(), "instruction")
 _QUATERNION_ATOL = 1e-6
+# Official HDF5 occasionally stores a closed gripper as ~-3e-17.
+_GRIPPER_ATOL = 1e-8
 _CANONICAL_UNIFY_DST_INDEX = np.asarray(
     [*range(10), *range(34, 44)],
     dtype=np.int64,
@@ -126,6 +128,15 @@ def _arm_pose_in_base(
     )
 
 
+def _sanitize_gripper(value: Any, *, source: str) -> np.ndarray:
+    gripper = np.asarray(value)
+    if gripper.dtype.kind not in "fiu" or not np.all(np.isfinite(gripper)):
+        raise ValueError(f"{source} must contain only finite gripper values")
+    if np.any((gripper < -_GRIPPER_ATOL) | (gripper > 1.0 + _GRIPPER_ATOL)):
+        raise ValueError(f"{source} gripper values must be within [0, 1]")
+    return np.clip(gripper, 0.0, 1.0)
+
+
 def read_calibrated_eef20(
     episode: h5py.File | h5py.Group | str | Path,
     calibration: Mapping[str, Any],
@@ -145,8 +156,14 @@ def read_calibrated_eef20(
     selection = slice(start, end)
     left_pose = np.asarray(episode[_POSE_KEYS[0]][selection])
     right_pose = np.asarray(episode[_POSE_KEYS[1]][selection])
-    left_gripper = np.asarray(episode[_GRIPPER_KEYS[0]][selection])
-    right_gripper = np.asarray(episode[_GRIPPER_KEYS[1]][selection])
+    left_gripper = _sanitize_gripper(
+        episode[_GRIPPER_KEYS[0]][selection],
+        source=_GRIPPER_KEYS[0],
+    )
+    right_gripper = _sanitize_gripper(
+        episode[_GRIPPER_KEYS[1]][selection],
+        source=_GRIPPER_KEYS[1],
+    )
     left_base = _arm_pose_in_base(left_pose, calibration, "left")
     right_base = _arm_pose_in_base(right_pose, calibration, "right")
     return arms_to_eef20(
@@ -254,15 +271,7 @@ def validate_robodojo_episode(path: str | Path) -> dict[str, Any]:
                 )
 
         for key in _GRIPPER_KEYS:
-            gripper = np.asarray(handle[key][()])
-            if gripper.dtype.kind not in "fiu" or not np.all(np.isfinite(gripper)):
-                raise ValueError(
-                    f"{episode_path}:{key} must contain only finite gripper values"
-                )
-            if np.any((gripper < 0.0) | (gripper > 1.0)):
-                raise ValueError(
-                    f"{episode_path}:{key} gripper values must be within [0, 1]"
-                )
+            _sanitize_gripper(handle[key][()], source=f"{episode_path}:{key}")
 
         instruction_dataset = handle["instruction"]
         if instruction_dataset.shape != ():

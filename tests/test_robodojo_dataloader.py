@@ -495,6 +495,22 @@ def test_episode_schema_is_validated_before_indexing(
         build_single(tmp_path, num_frames=3)
 
 
+def test_official_closed_gripper_float_noise_is_accepted_and_clipped(tmp_path: Path):
+    noise = -3.21e-17
+    path = write_episode(
+        tmp_path,
+        T=3,
+        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__(
+            (0, 0), noise
+        ),
+    )
+    dataset = build_single(tmp_path, num_frames=3)
+    raw = read_calibrated_eef20(path, valid_calibration())
+    assert raw[0, 9] == 0.0
+    sample = dataset[0]
+    assert float(sample["proprio"].numpy()[0, 9]) == 0.0
+
+
 def test_episode_schema_rejects_single_frame_empty_instruction_and_camera_mismatch(
     tmp_path: Path,
 ):

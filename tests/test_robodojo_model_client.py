@@ -468,6 +468,15 @@ def test_nested_observation_schema_rejects_malformed_inputs(mutation, message):
         client.call(func_name="update_obs", obs=obs)
 
 
+def test_observation_closed_gripper_float_noise_is_accepted_and_clipped():
+    client, transport, _ = make_client()
+    obs = valid_observation()
+    obs["state"]["left_ee_joint_state"] = np.array([-3.21e-17])
+    client.call(func_name="update_obs", obs=obs)
+    client.call(func_name="get_action")
+    assert transport.payloads[0]["state"][9] == 0.0
+
+
 @pytest.mark.parametrize("bad_obs", [[], [{}, {}], "not-an-observation"])
 def test_observation_wrapper_must_contain_exactly_one_mapping(bad_obs):
     client, _, _ = make_client()

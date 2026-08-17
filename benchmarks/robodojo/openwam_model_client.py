@@ -44,6 +44,8 @@ _STATE_FIELDS = (
 _EXPECTED_ARM_DIMS = [6, 6]
 _EXPECTED_EE_DIMS = [1, 1]
 _QUATERNION_ATOL = 1e-6
+# Official HDF5 / live obs occasionally store a closed gripper as ~-3e-17.
+_GRIPPER_ATOL = 1e-8
 
 
 def _finite_vector(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
@@ -71,9 +73,9 @@ def _validate_pose(value: Any, name: str) -> np.ndarray:
 
 def _validate_gripper(value: Any, name: str) -> np.ndarray:
     gripper = _finite_vector(value, (1,), name)
-    if np.any((gripper < 0.0) | (gripper > 1.0)):
+    if np.any((gripper < -_GRIPPER_ATOL) | (gripper > 1.0 + _GRIPPER_ATOL)):
         raise ValueError(f"{name} gripper value must be within [0, 1]")
-    return gripper
+    return np.clip(gripper, 0.0, 1.0)
 
 
 def _decode_instruction(value: Any) -> str:
