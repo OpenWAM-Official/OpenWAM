@@ -1,4 +1,129 @@
-# RoboDojo native evaluation
+# RoboDojo
+
+Train and evaluate OpenWAM on the official RoboDojo `arx_x5` HDF5 release.
+
+The reader only accepts the formal layout:
+
+```text
+<dataset_dir>/<task>/arx_x5/data/episode_*.hdf5
+```
+
+Each episode is converted from RoboDojo's env-origin xyz + world wxyz into
+per-arm robot-base **EEF20**, normalized in that 20-D space, then scattered
+into OpenWAM's unified 80-D slots `0-9` (left) and `34-43` (right). Evaluation
+inverts the same transform and returns native `left/right_ee_pose` + gripper
+so RoboDojo's IK runs. Joint-14 and LeRobot dumps are not supported.
+
+## Download HDF5
+
+The official HDF5 dump is about **523GB**. It typically contains **34**
+task folders. Hold out `dlc` from training. The eight **open** tasks are
+usually absent from this dump and can only be evaluated zero-shot.
+
+Requires `git` and `git-lfs`. Hugging Face and ModelScope are the only
+sources; LeRobot, depth, and real-robot packs are ignored.
+
+```bash
+# From the OpenWAM repo root. Default target: <openwam>/data/RoboDojo
+bash scripts/download_robodojo.sh huggingface
+# or
+bash scripts/download_robodojo.sh modelscope
+```
+
+Override the parent directory with `ROBO_DOJO_DATA_ROOT`. The script writes
+`<data_root>/RoboDojo` and that path is `dataloader.dataset_dir`. Do not point
+the dataloader at the parent of `RoboDojo`.
+
+Leave `configs/dataloader/robodojo.yaml` on the `/path/to/...` placeholders
+and pass real paths as Hydra overrides.
+
+## Compute stats
+
+The stats CLI reads the YAML file only. It does not accept Hydra overrides.
+Set `dataset_dir` and `holdout_tasks: [dlc]` in
+`configs/dataloader/robodojo.yaml` (or a local copy), then:
+
+```bash
+python -m openwam.dataloader.utils.stats_computation.robodojo_stats_computation \
+  --config configs/dataloader/robodojo.yaml \
+  --output /path/to/robodojo_arx_x5_eef20_stats.npy
+```
+
+The pool includes every achieved state and each real next-state target. The
+saved calibration fingerprint must match the built-in dual-X5 constants.
+
+## Train
+
+Finetune from `OpenWAM/Pretrained_OpenWAM_Mutual_Final`. A 1-GPU debug run
+OOMs on that checkpoint; use 8 GPUs and ZeRO-2 (`training.zero_stage=2` is
+the default).
+
+Pass the 20-step debug gate first:
+
+```bash
+torchrun --nproc_per_node=8 scripts/train.py dataloader=robodojo \
+  dataloader.dataset_dir=/path/to/RoboDojo \
+  dataloader.normalization_stats_path=/path/to/robodojo_arx_x5_eef20_stats.npy \
+  dataloader.holdout_tasks=[dlc] \
+  training.finetune_ckpt_path=/path/to/Pretrained_OpenWAM_Mutual_Final \
+  training.output_path=/path/to/openwam_robodojo_sft \
+  training.debug=true
+```
+
+Then full SFT:
+
+```bash
+torchrun --nproc_per_node=8 scripts/train.py dataloader=robodojo \
+  dataloader.dataset_dir=/path/to/RoboDojo \
+  dataloader.normalization_stats_path=/path/to/robodojo_arx_x5_eef20_stats.npy \
+  dataloader.holdout_tasks=[dlc] \
+  training.finetune_ckpt_path=/path/to/Pretrained_OpenWAM_Mutual_Final \
+  training.learning_rate=2e-5 \
+  training.num_epochs=1 \
+  training.output_path=/path/to/openwam_robodojo_sft
+```
+
+For one task, add `dataloader.task_name=stack_blocks`. The canonical unified
+map is `["0-9", "34-43"]`.
+
+## Evaluate
+
+Start the OpenWAM JSON server from the OpenWAM environment:
+
+```bash
+python -m openwam.deploy.server \
+  --ckpt-dir /path/to/openwam_robodojo_sft/<run> \
+  --host 0.0.0.0 \
+  --port 8848
+```
+
+Do not point RoboDojo's MsgPack client at this port. Then run smokes in order
+and a full single-task eval. Isaac evaluation needs a separate RoboDojo
+checkout and the `RoboDojo` conda env; see [Smoke progression](#smoke-progression)
+and [Full single-task evaluation](#full-single-task-evaluation).
+
+```bash
+bash benchmarks/robodojo/run_smoke.sh contract \
+  /path/to/RoboDojo stack_blocks
+bash benchmarks/robodojo/run_smoke.sh ping
+bash benchmarks/robodojo/run_smoke.sh debug stack_blocks
+bash benchmarks/robodojo/run_smoke.sh isaac stack_blocks
+
+conda run -n RoboDojo python -m benchmarks.robodojo.single_eval \
+  --config benchmarks/robodojo/policy_config.yml \
+  --robodojo-root /path/to/RoboDojo-checkout \
+  --host 127.0.0.1 \
+  --port 8848 \
+  --task stack_blocks \
+  --device-id 0 \
+  --seed 0 \
+  --eval-count 25
+```
+
+The rest of this file is the native-eval contract: how the adapter talks to
+RoboDojo, frame conversion, PhysX resume, and error mapping.
+
+## Native evaluation adapter
 
 This directory connects RoboDojo's native single-environment `arx_x5`
 evaluator to an already-running OpenWAM JSON WebSocket policy server. RoboDojo
@@ -83,46 +208,6 @@ DUAL_X5_RIGHT_BASE_QUAT_WXYZ = (0.707, 0.0, 0.0, 0.707)
 Do not pass a calibration JSON into the dataloader. Optional
 `--calibration-output` on `single_eval` is only a dump of live Isaac poses.
 
-## Pooled raw statistics
-
-After setting `dataset_dir` in `configs/dataloader/robodojo.yaml`:
-
-```bash
-python -m openwam.dataloader.utils.stats_computation.robodojo_stats_computation \
-  --config configs/dataloader/robodojo.yaml \
-  --output /data/robodojo_arx_x5_eef20_stats.npy
-```
-
-The pool includes every achieved state and each real next-state target. The
-saved calibration fingerprint must match the dataloader calibration.
-
-## Train
-
-Point the dataloader config at the formal root and pooled stats:
-
-```bash
-python scripts/train.py dataloader=robodojo \
-  dataloader.dataset_dir=/data/robodojo \
-  dataloader.normalization_stats_path=/data/robodojo_arx_x5_eef20_stats.npy
-```
-
-For one task, add `dataloader.task_name=stack_blocks`. The canonical unified map
-is `["0-9", "34-43"]`.
-
-## Start the OpenWAM server
-
-Run this in the OpenWAM environment with the RoboDojo checkpoint:
-
-```bash
-python -m openwam.deploy.server \
-  --ckpt-dir /checkpoints/robodojo \
-  --host 0.0.0.0 \
-  --port 8848
-```
-
-The evaluator connects to the reachable host configured in
-`policy_config.yml`; do not point RoboDojo's MsgPack client at this port.
-
 ## Smoke progression
 
 Run the checks in order:
@@ -130,7 +215,7 @@ Run the checks in order:
 ```bash
 # 1. Built-in dual_x5 conversion; add dataset root + task for formal HDF5.
 bash benchmarks/robodojo/run_smoke.sh contract \
-  /data/robodojo stack_blocks
+  /path/to/RoboDojo stack_blocks
 
 # 2. OpenWAM JSON server ping (no RoboDojo/Isaac import).
 bash benchmarks/robodojo/run_smoke.sh ping
@@ -172,7 +257,7 @@ initial launch (default `10`; set `0` to disable retries), with
 ```bash
 conda run -n RoboDojo python -m benchmarks.robodojo.single_eval \
   --config benchmarks/robodojo/policy_config.yml \
-  --robodojo-root /home/user/Desktop/RoboDojo \
+  --robodojo-root /path/to/RoboDojo-checkout \
   --host 127.0.0.1 \
   --port 8848 \
   --task stack_blocks \
