@@ -21,16 +21,16 @@ Bundled clients:
 
 ## 1. What the client sends
 
-One call per control step: three raw camera JPEGs + the task `prompt` — the exact string the model should see (the server forwards it verbatim; wrap it in your checkpoint's template first). Proprioceptive checkpoints also require a raw `state` vector whose length matches the checkpoint's `model.architecture.state_dim`.
+One call per control step: up to three lossless PNG camera frames + the task `prompt` — the exact string the model should see (the server forwards it verbatim; wrap it in your checkpoint's template first). Proprioceptive checkpoints also require a raw `state` vector whose length matches the checkpoint's `model.architecture.state_dim`.
 
 ```json
 // obs message (Client → Server)
 {
   "type": "obs",
   "images": {
-    "head_camera":        "<base64 JPEG>",    // required
-    "left_wrist_camera":  "<base64 JPEG>|null", // optional
-    "right_wrist_camera": "<base64 JPEG>|null"  // optional
+    "head_camera":        "<base64 PNG>",       // required
+    "left_wrist_camera":  "<base64 PNG>|null",  // optional
+    "right_wrist_camera": "<base64 PNG>|null"   // optional
   },
   "prompt": "pick up the red bottle",          // sent verbatim; wrap per your checkpoint's template
   "state":  [float, ...]                       // required when use_proprioception=true
@@ -47,7 +47,10 @@ Response (action message, Server → Client):
 
 ## 2. Three things you don't need to handle
 
-- **Image sizing / aspect ratio.** Server reads the checkpoint's `config.yaml` and resizes for you. Send the native camera output.
+- **Image sizing / aspect ratio.** Use the bundled benchmark adapter. RoboCasa365,
+  LIBERO, BEHAVIOR, EBench, VLABench, and RoboCasa-GR1 reproduce their unchanged
+  training readers' LANCZOS tile resize before sending; RoboTwin sends native
+  camera sizes because its reader performs BILINEAR composition directly.
 - **Action units.** For normalized checkpoints, the returned action is already denormalized to **physical units** (eef: xyz in meters, rot6d unitless, gripper 0-1; joint: radians). Feed it directly to your controller — do not multiply by any mean/std. If the checkpoint was trained with normalization disabled, deploy leaves actions and state in that raw training scale.
 - **Execution mode / chunking.** Whether the server runs the sync executor (buffer-and-replan) or the async one (background prefetch, `inference.inference_mode: async`) is invisible on the wire: the protocol is always one obs in, one action out.
 
@@ -89,7 +92,7 @@ Client helpers live under `benchmarks/utils/client.py` and can be imported direc
 ```python
 from benchmarks.utils import (
     build_payload,      # assemble the {"images": {...}, "prompt": ...} dict
-    encode_path_b64,    # JPEG path -> base64 str
+    encode_path_b64,    # PNG path -> base64 str
     WSPolicyClient,     # WebSocket transport — predict() / reset() / ping()
     ServerError,        # structured server error: .status / .code / .message
 )
@@ -105,9 +108,9 @@ with WSPolicyClient(ws_url, timeout=300.0, open_timeout=10.0) as client:
     client.reset()
 
     # --- per-step ---
-    head_b64  = encode_path_b64("/path/to/head.jpg")
-    left_b64  = encode_path_b64("/path/to/left.jpg")   # or None
-    right_b64 = encode_path_b64("/path/to/right.jpg")  # or None
+    head_b64  = encode_path_b64("/path/to/head.png")
+    left_b64  = encode_path_b64("/path/to/left.png")   # or None
+    right_b64 = encode_path_b64("/path/to/right.png")  # or None
     current_state = [0.0] * 20                         # replace with your raw proprio vector
 
     payload = build_payload(
@@ -132,7 +135,7 @@ The bundled test script ([scripts/inference_single_test.py](../scripts/inference
 |---|---|
 | `head_camera is required` | Missing or `null` head_camera |
 | `client must send 'images' dict` | Legacy single-field `image` payload (no longer supported) |
-| `failed to decode base64 JPEG` | Corrupted base64 or bad JPEG bytes |
+| `failed to decode base64 image` | Corrupted base64 or invalid image bytes |
 | `requires obs['state']` | Checkpoint uses proprioception but the payload omitted `state` |
 | `state dimension mismatch` | Payload `state` length differs from checkpoint `state_dim` |
 | `camera_layout` | Server config has fewer than 3 entries in `camera_layout` while multi-view is enabled — check the checkpoint |

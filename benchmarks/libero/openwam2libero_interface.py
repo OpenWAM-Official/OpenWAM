@@ -45,6 +45,7 @@ from benchmarks.utils import (  # noqa: E402
     eef10_to_libero7d,
     libero_obs_to_eef10,
     quat_xyzw_to_rot6d,
+    resize_for_lshape_slot,
     transport,
 )
 from benchmarks.utils.action_conversion import (  # noqa: E402
@@ -190,9 +191,11 @@ class OpenWAMLiberoPolicy:
 
     def act(self, obs: dict, prompt: str) -> np.ndarray:
         payload = client.build_payload(
-            head=client.encode_numpy_b64(self._image(obs, self._head_camera_key)),
-            left_wrist=self._maybe_encode(obs, self._left_wrist_camera_key),
-            right_wrist=self._maybe_encode(obs, self._right_wrist_camera_key),
+            head=client.encode_numpy_b64(
+                resize_for_lshape_slot(self._image(obs, self._head_camera_key), "head_camera")
+            ),
+            left_wrist=self._maybe_encode(obs, self._left_wrist_camera_key, "left_wrist_camera"),
+            right_wrist=self._maybe_encode(obs, self._right_wrist_camera_key, "right_wrist_camera"),
             prompt=prompt,
             state=self._state(obs),
         )
@@ -244,12 +247,12 @@ class OpenWAMLiberoPolicy:
             image = image[::-1, ::-1]
         return image
 
-    def _maybe_encode(self, obs: dict, key: str | None) -> str | None:
+    def _maybe_encode(self, obs: dict, key: str | None, slot: str) -> str | None:
         if not key:
             return None
         if key not in obs or obs[key] is None:
             return None
-        return client.encode_numpy_b64(self._image(obs, key))
+        return client.encode_numpy_b64(resize_for_lshape_slot(self._image(obs, key), slot))
 
     def _state(self, obs: dict) -> list[float] | None:
         if not self._send_state:

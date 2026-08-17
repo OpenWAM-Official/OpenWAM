@@ -147,9 +147,9 @@ class ObsPreprocessor:
                     raw = base64.b64decode(x)
                     return Image.open(io.BytesIO(raw)).convert("RGB")
                 except Exception as e:
-                    raise ObsValidationError(f"{ctx}: failed to decode base64 JPEG ({e})")
+                    raise ObsValidationError(f"{ctx}: failed to decode base64 image ({e})")
             raise ObsValidationError(
-                f"{ctx}: expected base64 JPEG string, raw bytes, or PIL.Image, got {type(x).__name__}"
+                f"{ctx}: expected base64 image string, raw bytes, or PIL.Image, got {type(x).__name__}"
             )
 
         # --- Payload shape validation ---

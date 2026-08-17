@@ -8,7 +8,7 @@ weights directly, so the RoboTwin client environment only needs::
 
 Protocol overview (WebSocket):
 
-    obs   — send 3 camera JPEGs + task prompt, get action vector
+    obs   — send 3 camera lossless PNGs + task prompt, get action vector
     reset — clear server episode state before a new rollout
     ping  — liveness probe
 
@@ -49,8 +49,8 @@ import cv2 as cv  # noqa: E402
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
-from benchmarks.utils import WSPolicyClient, action_conversion, client, transport  # noqa: E402
 from benchmarks.robotwin.prompt_template import format_prompt_for_inference  # noqa: E402
+from benchmarks.utils import WSPolicyClient, action_conversion, client, transport  # noqa: E402
 
 # --- Per-task step_lim overrides ---
 # A single YAML file of {task_name: int} lets users override RoboTwin's
@@ -268,7 +268,7 @@ class ModelClient:
         """Save all per-step debug data under debug_dir/ep{N:04d}/step_{N:04d}/.
 
         Files written:
-          head.jpg / left.jpg / right.jpg  — raw per-camera frames as client sent
+          head.png / left.png / right.png  — raw per-camera frames as client sent
                                              (missing wrist → *_missing.txt stub)
           meta.json                        — prompt, state, action, latency, step, episode
         """
@@ -282,7 +282,7 @@ class ModelClient:
                 with open(os.path.join(step_dir, f"{name}_missing.txt"), "w") as f:
                     f.write("client sent None for this camera\n")
             else:
-                cv.imwrite(os.path.join(step_dir, f"{name}.jpg"), cv.cvtColor(img, cv.COLOR_RGB2BGR))
+                cv.imwrite(os.path.join(step_dir, f"{name}.png"), cv.cvtColor(img, cv.COLOR_RGB2BGR))
 
         meta = {
             "episode": self._episode,

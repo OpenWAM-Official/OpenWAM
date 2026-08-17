@@ -39,7 +39,6 @@ def env_smoke(task: str, split: str, steps: int) -> None:
     import numpy as np  # noqa: PLC0415
     import robocasa  # noqa: F401,PLC0415
     import robocasa.wrappers.gym_wrapper  # noqa: F401,PLC0415
-
     from openwam2robocasa365_interface import ACTION_SLICES  # noqa: PLC0415
 
     env = gym.make(f"robocasa/{task}", split=split, enable_render=True)
@@ -95,7 +94,7 @@ def main(argv=None) -> int:
     parser.add_argument("--steps", type=int, default=int(os.environ.get("ROBOCASA365_SMOKE_STEPS", "1")))
     parser.add_argument("--host", default=os.environ.get("ROBOCASA365_POLICY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("ROBOCASA365_PORT", "8848")))
-    parser.add_argument("--state-dim", type=int, default=20)  # 20-D EEF proprio (25 for a mobile_base ckpt); env's raw 16-D state converted client-side
+    parser.add_argument("--state-dim", type=int, default=19)  # compact EEF10 + world base pose9
     args = parser.parse_args(argv)
 
     if args.mode == "import":

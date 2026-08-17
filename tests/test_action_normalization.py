@@ -317,6 +317,35 @@ def test_unify_proprio_in_matches_train_forward():
     np.testing.assert_allclose(_UnifyAwareNormalizer(inner, dst, UNIFY_DIM).normalize(raw), expected, atol=1e-6)
 
 
+def test_unify_supports_distinct_action15_and_state19_maps():
+    def flat(dim, low, high):
+        lo = np.full(dim, low, np.float32)
+        hi = np.full(dim, high, np.float32)
+        return {
+            "mean": (lo + hi) / 2,
+            "std": np.ones(dim, np.float32),
+            "min": lo,
+            "max": hi,
+            "q01": lo,
+            "q99": hi,
+        }
+
+    action_stats = flat(15, -1.0, 1.0)
+    state_stats = flat(19, -2.0, 2.0)
+    inner = Normalizer(mode="min_max", stats={**action_stats, "_normalize_stats": state_stats})
+    action_dst = parse_unify_spec(["0-9", "68-72"], UNIFY_DIM)
+    state_dst = parse_unify_spec(["0-9", "68-76"], UNIFY_DIM)
+    wrapper = _UnifyAwareNormalizer(inner, action_dst, UNIFY_DIM, state_dst_index=state_dst)
+
+    raw_state = np.linspace(-2, 2, 19, dtype=np.float32)[None]
+    expected_state, _ = map_to_unify(inner.normalize(raw_state), state_dst, UNIFY_DIM)
+    np.testing.assert_allclose(wrapper.normalize(raw_state), expected_state, atol=1e-6)
+
+    raw_action = np.linspace(-1, 1, 15, dtype=np.float32)[None]
+    unified_action, _ = map_to_unify(raw_action, action_dst, UNIFY_DIM)
+    np.testing.assert_allclose(wrapper.unnormalize(unified_action), raw_action, atol=1e-6)
+
+
 def test_unify_gather_only_when_inner_none():
     """inner=None: unnormalize only gathers (80->raw), normalize only scatters (raw->80)."""
     dst = _unify_dst()

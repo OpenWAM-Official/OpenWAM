@@ -80,9 +80,9 @@ def test_dump_obs_debug_robotwin_layout_and_meta(tmp_path):
         server_step=5,
         latency_ms=12.3,
     )
-    # robotwin-style per-camera JPGs + the montage
+    # Lossless per-camera PNGs + the montage.
     for stem in ("head", "left", "right"):
-        assert (out / f"{stem}.jpg").is_file()
+        assert (out / f"{stem}.png").is_file()
     assert (out / "cameras.png").is_file()
 
     meta = json.loads((out / "meta.json").read_text())
@@ -92,13 +92,17 @@ def test_dump_obs_debug_robotwin_layout_and_meta(tmp_path):
     assert meta["server_step"] == 5
     assert meta["latency_ms"] == 12.3
     assert meta["prompt"] == "open the drawer"
-    assert len(meta["state"]) == 20  # sent proprio is the 20-D EEF (not raw 16-D)
+    assert len(meta["state"]) == 19  # compact EEF10 + base pose9
     assert meta["action"] == [float(i) for i in range(12)]
     # enhancements
     assert meta["action_sliced"]["action.base_motion"] == [7.0, 8.0, 9.0, 10.0]
     assert meta["action_sliced"]["action.control_mode"] == [11.0]
     assert meta["state_breakdown"]["state.gripper_qpos"] == pytest.approx([0.01, 0.02])
-    assert meta["image_slots"]["head_camera"] == [64, 64]
+    assert meta["image_slots"] == {
+        "head_camera": [320, 256],
+        "left_wrist_camera": [160, 128],
+        "right_wrist_camera": [160, 128],
+    }
     assert meta["checks"] == {
         "state_dim_ok": True,
         "head_and_wrist_present": True,
@@ -109,8 +113,8 @@ def test_dump_obs_debug_robotwin_layout_and_meta(tmp_path):
 def test_dump_obs_debug_missing_wrist_writes_stub(tmp_path):
     obs = _make_obs()
     out = adapter.dump_obs_debug(obs, _payload(obs, right_wrist_camera_key=None), tmp_path / "s", action=None)
-    assert (out / "head.jpg").is_file()
-    assert (out / "left.jpg").is_file()
+    assert (out / "head.png").is_file()
+    assert (out / "left.png").is_file()
     assert not (out / "right.jpg").exists()
     assert (out / "right_missing.txt").is_file()
     meta = json.loads((out / "meta.json").read_text())

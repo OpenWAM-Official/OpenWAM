@@ -4,7 +4,7 @@ Provides a network-accessible policy server that wraps WAMPolicy with
 receding-horizon execution. Robot controllers connect over a single
 persistent WebSocket.
 
-The client is thin on purpose: it always sends raw per-camera JPEGs plus the
+The client is thin on purpose: it sends per-camera lossless PNGs plus the
 task prompt. Image composition and resize happen server-side, driven by the
 saved training config (``cfg.dataloader.multiview`` / ``camera_layout`` /
 ``height`` / ``width``). The server is prompt-agnostic — it forwards the prompt
@@ -15,10 +15,10 @@ Protocol (unified — same shape for single-view and multi-view checkpoints):
     Client → {
         "type": "obs",
         "images": {
-            "head_camera":        <base64_jpeg>,       # required; carries the view
-                                                       # training's target_camera referred to
-            "left_wrist_camera":  <base64_jpeg>|null,  # optional
-            "right_wrist_camera": <base64_jpeg>|null   # optional
+            "head_camera":        <base64_png>,       # required; carries the view
+                                                      # training's target_camera referred to
+            "left_wrist_camera":  <base64_png>|null,  # optional
+            "right_wrist_camera": <base64_png>|null   # optional
         },
         "prompt": "<prompt fed to the model verbatim>",
         "state":  [floats]                             # optional proprio
@@ -182,7 +182,7 @@ class PolicyServer:
 
         Args:
             obs: Observation dict with ``images`` (dict of camera name →
-                base64 JPEG / bytes / PIL.Image, with ``head_camera`` required
+                base64 image / bytes / PIL.Image, with ``head_camera`` required
                 and ``left_wrist_camera`` / ``right_wrist_camera`` optional),
                 the ``prompt`` (str, forwarded to the model verbatim), and
                 optional ``state`` (list of floats). Server does all image

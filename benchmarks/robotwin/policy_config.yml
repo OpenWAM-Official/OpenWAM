@@ -35,4 +35,4 @@ action_type: ee
 # action_indices: null    # optional index reordering of the returned action vector
 
 debug: false
-debug_dir: "./debug_images"  # where to save the raw per-camera JPEGs + meta.json
+debug_dir: "./debug_images"  # where to save the raw per-camera PNGs + meta.json

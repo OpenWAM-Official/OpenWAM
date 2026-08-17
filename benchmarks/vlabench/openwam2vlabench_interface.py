@@ -59,6 +59,7 @@ from benchmarks.utils import (  # noqa: E402
     WSPolicyClient,
     client,
     eef10_to_vlabench_ee,
+    resize_for_lshape_slot,
     transport,
     vlabench_obs_to_eef10,
 )
@@ -155,9 +156,11 @@ class OpenWAMVLABenchPolicy:
         """One control step: VLABench obs -> ``(pos, euler, gripper_state)``."""
         robot_base = self._robot_base(obs)
         payload = client.build_payload(
-            head=client.encode_numpy_b64(self._image(obs, self._head_idx, "head")),
-            left_wrist=self._maybe_encode(obs, self._left_idx, "left_wrist"),
-            right_wrist=self._maybe_encode(obs, self._right_idx, "right_wrist"),
+            head=client.encode_numpy_b64(
+                resize_for_lshape_slot(self._image(obs, self._head_idx, "head"), "head_camera")
+            ),
+            left_wrist=self._maybe_encode(obs, self._left_idx, "left_wrist", "left_wrist_camera"),
+            right_wrist=self._maybe_encode(obs, self._right_idx, "right_wrist", "right_wrist_camera"),
             prompt=self._prompt(obs),
             state=self._state(obs, robot_base),
         )
@@ -228,10 +231,11 @@ class OpenWAMVLABenchPolicy:
             )
         return np.ascontiguousarray(frames[index].astype(np.uint8, copy=False))
 
-    def _maybe_encode(self, obs: dict, index: int | None, label: str) -> str | None:
+    def _maybe_encode(self, obs: dict, index: int | None, label: str, slot: str) -> str | None:
         if index is None:
             return None
-        return client.encode_numpy_b64(self._image(obs, index, label))
+        image = resize_for_lshape_slot(self._image(obs, index, label), slot)
+        return client.encode_numpy_b64(image)
 
     def _state(self, obs: dict, robot_base: np.ndarray) -> list | None:
         if not self._send_state:

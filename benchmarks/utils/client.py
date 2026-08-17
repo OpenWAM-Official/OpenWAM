@@ -9,24 +9,58 @@ Client → server obs message (validated server-side by ``ObsPreprocessor.prepro
 
     {
       "images": {
-        "head_camera":        <base64 JPEG>,       # required
-        "left_wrist_camera":  <base64 JPEG>|null,  # optional
-        "right_wrist_camera": <base64 JPEG>|null   # optional
+        "head_camera":        <base64 PNG>,       # required
+        "left_wrist_camera":  <base64 PNG>|null,  # optional
+        "right_wrist_camera": <base64 PNG>|null   # optional
       },
       "prompt": "<prompt fed to the model verbatim>",
       "state":  [float, ...]                       # optional
     }
 
-Server reads the checkpoint's ``config.yaml`` and handles all image preprocessing
-(crop / resize / multi-view composition) internally, then returns actions already
-denormalized to physical units. The server is prompt-agnostic: it forwards the
-``prompt`` field to the model verbatim, so the caller sends the exact prompt the
-model should see (each benchmark owns its own prompt template).
+Server reads the checkpoint's ``config.yaml`` and performs final image
+composition. Benchmark adapters whose training readers pre-resized individual
+L-shape tiles first reproduce that resize with :func:`resize_for_lshape_slot`;
+the others send native camera sizes. The server returns actions already
+denormalized to physical units and forwards ``prompt`` verbatim.
 """
 
 import base64
 from pathlib import Path
 from typing import Optional
+
+# Canonical 384x320 L-shape slots used by the benchmark dataloaders that
+# pre-resize each decoded camera with Pillow LANCZOS before composition.
+L_SHAPE_HEAD_SIZE = (320, 256)  # (width, height)
+L_SHAPE_WRIST_SIZE = (160, 128)
+
+
+def resize_for_lshape_slot(image, slot: str):
+    """Reproduce the training readers' pre-composition LANCZOS resize.
+
+    This is intentionally an eval/client helper: the affected training readers
+    already decode the head camera at 320x256 and wrists at 160x128. Sending
+    those exact slot sizes makes the server's subsequent same-size paste a
+    no-op geometrically, without changing any training code.
+    """
+    import numpy as np
+    from PIL import Image
+
+    sizes = {
+        "head_camera": L_SHAPE_HEAD_SIZE,
+        "left_wrist_camera": L_SHAPE_WRIST_SIZE,
+        "right_wrist_camera": L_SHAPE_WRIST_SIZE,
+    }
+    if slot not in sizes:
+        raise ValueError(f"unknown L-shape image slot {slot!r}; expected one of {tuple(sizes)}")
+    value = np.asarray(image)
+    if value.ndim != 3 or value.shape[-1] != 3:
+        raise ValueError(f"{slot} image must be HxWx3 RGB, got {value.shape}")
+    value = np.ascontiguousarray(value.astype(np.uint8, copy=False))
+    pil = Image.fromarray(value)
+    target = sizes[slot]
+    if pil.size != target:
+        pil = pil.resize(target, Image.Resampling.LANCZOS)
+    return np.asarray(pil, dtype=np.uint8)
 
 
 class ServerError(RuntimeError):
@@ -66,14 +100,13 @@ def encode_path_b64(path: str) -> str:
 
 
 def encode_numpy_b64(image) -> str:
-    """Encode an H×W×3 RGB uint8 numpy array as base64 JPEG at source resolution.
+    """Encode an H×W×3 RGB uint8 numpy array as lossless base64 PNG.
 
     **Do not resize on the client.** All crop / resize / multi-view
-    composition happens server-side using the canvas size and interpolation
-    (Pillow LANCZOS for single-view, BILINEAR for the L-shape layout) that
-    the checkpoint was trained with. Any client-side resize would layer a
-    second, interpolation-mismatched step on top of that, diverging from
-    training-time preprocessing.
+    composition normally happens server-side. Benchmarks whose training reader
+    pre-resizes L-shape tiles must explicitly call :func:`resize_for_lshape_slot`
+    first; RoboTwin deliberately sends its original camera sizes because its
+    training reader also composes directly from the decoded originals.
 
     Lazy-imports Pillow so stdlib-only consumers of the other helpers in
     this module aren't forced to install it.
@@ -83,7 +116,7 @@ def encode_numpy_b64(image) -> str:
     from PIL import Image
 
     buf = io.BytesIO()
-    Image.fromarray(image).save(buf, format="JPEG")
+    Image.fromarray(image).save(buf, format="PNG", compress_level=1)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 

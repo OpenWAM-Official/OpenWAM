@@ -232,21 +232,16 @@ def load_from_checkpoint_dir(
 
 
 def repr_contract_from_cfg(cfg: DictConfig) -> dict:
-    """Ckpt representation-contract fields a mismatched eval config would violate SILENTLY.
-
-    All are semantics the action/proprio widths cannot reveal: velocity vs global_pose proprio are
-    both 25-D; mask_torso_action changes what reaches a LIVE actuator; binary_action_dims changes
-    the decode of two command dims. Defaults = the historical behavior of ckpts predating each key.
-    """
+    """Checkpoint representation fields that an eval client must match."""
     dims = OmegaConf.select(cfg, "dataloader.binary_action_dims", default=None)
     # gripper_convention: a RECORDED marker (not a behavior switch — the reader is hard-coded to the
     # pretrain convention). None = the ckpt config predates the marker, i.e. it was trained with the
     # old RoboCasa-native +1=close gripper; a pretrain-convention client must REFUSE such ckpts
     # (evaluating one would silently invert every grasp).
     return {
-        "base_proprio": str(OmegaConf.select(cfg, "dataloader.base_proprio", default="velocity")),
-        "mobile_base": bool(OmegaConf.select(cfg, "dataloader.mobile_base", default=False)),
-        "mask_torso_action": bool(OmegaConf.select(cfg, "dataloader.mask_torso_action", default=True)),
+        "representation": str(
+            OmegaConf.select(cfg, "dataloader.action_mode", default="joint")
+        ),
         "binary_action_dims": [int(d) for d in (dims or [])],
         "gripper_convention": OmegaConf.select(cfg, "dataloader.gripper_convention", default=None),
     }
@@ -255,14 +250,15 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
 def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
     """Build the RAW-space normalizer for both deploy directions, or ``None`` if disabled.
 
-    The returned ``Normalizer`` serves both: ``normalize`` maps the input
-    proprio state into training space, ``unnormalize`` maps the output action
-    back to physical units. proprio is a single-frame action
-    (``raw_actions[0:1]``), so both share one set of stats.
+    The returned ``Normalizer`` serves both directions: ``normalize`` maps the
+    input proprio state into training space and ``unnormalize`` maps model
+    actions back to physical units.
 
     Reads ``dataloader.normalize_mode`` / ``action_mode`` from the saved config;
     when enabled, loads ``normalization_stats.npy`` and wraps the requested stats
-    sub-dict. When disabled, returns ``None`` (no stats file required).
+    sub-dict. If a sibling ``<action_mode>_state`` block exists, the
+    ``Normalizer`` uses it for proprio while retaining the action block for
+    output unnormalization. When disabled, returns ``None``.
     """
     logger.info("[normalizer] Resolving deployment action normalizer from checkpoint dir: %s", ckpt_dir)
 
@@ -333,7 +329,7 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
     )
 
     # Command-aware extras (keys absent in older ckpts = historical behavior, no wrapper):
-    #   binary_action_dims — two-point {-1, +1} command dims (robocasa365: l_grip 9, control_mode 24)
+    #   binary_action_dims — two-point {-1, +1} command dims (compact RoboCasa365: control_mode 14)
     #     trained as raw ±1; snap the decoded output back to exact ±1.
     #   base_proprio="global_pose" — the proprio normalizes with its own 'eef_base_pose_proprio'
     #     stats block (pose is meters/unit-circle, not command space), while actions keep action_mode's.
@@ -378,9 +374,9 @@ class _CommandAwareNormalizer:
       Threshold 0.5 — NOT the ±1 midpoint 0 — deliberately preserves the downstream conservative
       boundaries byte-for-byte (bridge confident-close ``>0.5``, env control_mode ``>=0.5``): an
       uncertain mid-range output still lands on the safe side (open / arm mode).
-    * ``normalize`` (proprio IN): delegates to ``proprio_inner`` — the same object as
-      ``action_inner`` unless the ckpt trained with ``base_proprio='global_pose'``, whose pose
-      proprio has its own stats block.
+    * ``normalize`` (proprio IN): delegates to ``proprio_inner``. A plain
+      ``Normalizer`` may itself carry a directional ``<action_mode>_state``
+      stats block; legacy ``base_proprio='global_pose'`` uses a separate object.
 
     Executors do not mix overlapping chunks. The final projection in
     ``WAMPolicy.predict_action`` remains a defense-in-depth wire-contract check
@@ -436,11 +432,24 @@ class _UnifyAwareNormalizer:
     ``.normalize``), so ``base.py`` needs no change.
     """
 
-    def __init__(self, inner, dst_index: np.ndarray, unify_dim: int):
+    def __init__(
+        self,
+        inner,
+        action_dst_index: np.ndarray,
+        unify_dim: int,
+        state_dst_index: Optional[np.ndarray] = None,
+    ):
         from openwam.dataloader.utils.unify_action import map_to_unify, unmap_from_unify
 
         self._inner = inner
-        self._dst_index = np.asarray(dst_index, dtype=np.int64)
+        self._action_dst_index = np.asarray(action_dst_index, dtype=np.int64)
+        self._state_dst_index = np.asarray(
+            state_dst_index if state_dst_index is not None else action_dst_index,
+            dtype=np.int64,
+        )
+        # Backward-compatible introspection name: this has always meant the
+        # action gather map.
+        self._dst_index = self._action_dst_index
         self._unify_dim = int(unify_dim)
         self._map_to_unify = map_to_unify
         self._unmap_from_unify = unmap_from_unify
@@ -456,7 +465,7 @@ class _UnifyAwareNormalizer:
                 self._unify_dim,
             )
             return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
-        raw = self._unmap_from_unify(arr, self._dst_index)  # (..., unify_dim) -> (..., raw_dim)
+        raw = self._unmap_from_unify(arr, self._action_dst_index)
         return raw if self._inner is None else self._inner.unnormalize(raw)
 
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
@@ -464,7 +473,7 @@ class _UnifyAwareNormalizer:
         arr = np.asarray(x)
         if self._inner is not None:
             arr = self._inner.normalize(arr)
-        unified, _mask = self._map_to_unify(arr, self._dst_index, self._unify_dim)
+        unified, _mask = self._map_to_unify(arr, self._state_dst_index, self._unify_dim)
         return unified
 
     # Expose inner stats for callers that introspect (best-effort).
@@ -492,8 +501,9 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
     Unify ckpts: wrap in :class:`_UnifyAwareNormalizer` so the model's UNIFY_DIM output is gathered
     back to the raw width BEFORE unnormalize (and proprio scattered AFTER normalize) — the exact
     inverse of the train-time transform. FULLY GENERIC: the raw width and its stats come from the
-    reader's ``action_mode`` stats block (e.g. robocasa365 mobile → 25-D ``eef_base`` [arm20, base5]);
-    the base is part of the raw vector and needs no special-casing here.
+    reader's ``action_mode`` statistics. An optional ``unify_state_map`` allows
+    compact RoboCasa365's state19 and action15 to use distinct raw widths while
+    preserving the symmetric map used by older datasets.
     """
     inner = _build_inner_normalizer(cfg, ckpt_dir)
 
@@ -518,13 +528,23 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
             )
         spec = list(range(raw_dim))  # identity, mirrors robotwin.py reader fallback
 
-    dst_index = parse_unify_spec(spec, unify_dim)
+    action_dst_index = parse_unify_spec(spec, unify_dim)
+    # Most datasets use one symmetric raw layout. RoboCasa365 compact is
+    # intentionally asymmetric (action15 vs state19), so it declares a second
+    # map. Absence preserves every legacy checkpoint's behavior.
+    state_spec = OmegaConf.select(cfg, "dataloader.unify_state_map", default=None)
+    state_dst_index = action_dst_index if state_spec is None else parse_unify_spec(state_spec, unify_dim)
     logger.info(
-        "[normalizer/unify] unify_action ON: model emits %d-D unified actions → deploy gathers back "
-        "to %d raw dims (dst_index len=%d) %s unnormalize. Mirrors RoboTwinDataset.denormalize_action.",
+        "[normalizer/unify] ON: action %dD -> raw %dD; raw state %dD -> %dD unified; %s unnormalize.",
         unify_dim,
-        dst_index.shape[0],
-        dst_index.shape[0],
+        action_dst_index.shape[0],
+        state_dst_index.shape[0],
+        unify_dim,
         "then" if inner is not None else "(no stats, gather-only:)",
     )
-    return _UnifyAwareNormalizer(inner, dst_index, unify_dim)
+    return _UnifyAwareNormalizer(
+        inner,
+        action_dst_index,
+        unify_dim,
+        state_dst_index=state_dst_index,
+    )

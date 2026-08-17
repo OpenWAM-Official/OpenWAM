@@ -49,6 +49,7 @@ from benchmarks.utils import (  # noqa: E402
     WSPolicyClient,
     build_payload,
     encode_numpy_b64,
+    resize_for_lshape_slot,
 )
 from benchmarks.utils.action_conversion import (  # noqa: E402
     EBENCH_BASE_SOURCES,
@@ -157,9 +158,17 @@ class EBenchOpenWAMDriver:
             state_list = [float(v) for v in raw23]
 
         payload = build_payload(
-            head=encode_numpy_b64(np.asarray(head)),
-            left_wrist=encode_numpy_b64(np.asarray(left)) if left is not None else None,
-            right_wrist=encode_numpy_b64(np.asarray(right)) if right is not None else None,
+            head=encode_numpy_b64(resize_for_lshape_slot(np.asarray(head), "head_camera")),
+            left_wrist=(
+                encode_numpy_b64(resize_for_lshape_slot(np.asarray(left), "left_wrist_camera"))
+                if left is not None
+                else None
+            ),
+            right_wrist=(
+                encode_numpy_b64(resize_for_lshape_slot(np.asarray(right), "right_wrist_camera"))
+                if right is not None
+                else None
+            ),
             prompt=self._prompt,
             state=state_list,
         )

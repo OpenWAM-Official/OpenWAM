@@ -30,7 +30,8 @@ Public surface — the only names you need:
 
     WSPolicyClient        one persistent WS connection: ``predict`` / ``reset`` / ``ping``
     build_payload         assemble the obs message
-    encode_numpy_b64      HxWx3 RGB uint8 array  -> base64 JPEG
+    encode_numpy_b64      HxWx3 RGB uint8 array  -> lossless base64 PNG
+    resize_for_lshape_slot  reproduce a training reader's LANCZOS tile resize
     encode_path_b64       JPEG/PNG file path     -> base64
     ServerError           structured server error (``.status`` / ``.code`` / ``.message``)
 
@@ -49,6 +50,7 @@ from benchmarks.utils.action_conversion import (
     ebench_render_state_base,
     ebench_wrap_angle_rad,
     eef10_to_libero7d,
+    eef10_to_robocasa12d,
     eef10_to_vlabench_ee,
     eef20d_to_ee16d,
     eef20d_to_robocasa12d,
@@ -60,6 +62,7 @@ from benchmarks.utils.action_conversion import (
     r1pro_proprio_to_raw27,
     raw23_to_ebench_action,
     raw27_to_r1pro_action,
+    robocasa_state_to_eef10,
     robocasa_state_to_eef20d,
     robotwin_endpose_to_eef20d,
     rot6d_to_axis_angle,
@@ -72,6 +75,7 @@ from benchmarks.utils.client import (
     build_payload,
     encode_numpy_b64,
     encode_path_b64,
+    resize_for_lshape_slot,
     server_error_from_body,
 )
 from benchmarks.utils.transport import WSPolicyClient
@@ -88,11 +92,13 @@ __all__ = [
     "ebench_render_state_base",
     "ebench_wrap_angle_rad",
     "eef10_to_libero7d",
+    "eef10_to_robocasa12d",
     "eef10_to_vlabench_ee",
     "eef20d_to_ee16d",
     "eef20d_to_robocasa12d",
     "encode_numpy_b64",
     "encode_path_b64",
+    "resize_for_lshape_slot",
     "libero_gripper_qpos_to_cmd",
     "libero_obs_to_eef10",
     "libero_open_scale_to_gripper_cmd",
@@ -101,6 +107,7 @@ __all__ = [
     "r1pro_proprio_to_raw27",
     "raw23_to_ebench_action",
     "raw27_to_r1pro_action",
+    "robocasa_state_to_eef10",
     "robocasa_state_to_eef20d",
     "robotwin_endpose_to_eef20d",
     "rot6d_to_axis_angle",

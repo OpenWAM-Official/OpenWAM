@@ -12,6 +12,10 @@ actions with quaternion rotations::
 
 These helpers are pure numpy and have no dependency on the ``openwam`` package,
 so they can run in any benchmark client's Python environment.
+
+Compact RoboCasa365 uses a native single-arm 10-D EEF pose directly; its
+dedicated helpers intentionally avoid padding through the legacy dual-arm 20-D
+layout.
 """
 
 # Benchmark client envs can be as old as Python 3.8 (ordinary LIBERO):
@@ -129,7 +133,7 @@ def _matrix_to_axis_angle(R: np.ndarray) -> np.ndarray:
     return (axis * angle).astype(np.float32)
 
 
-def eef20d_to_robocasa12d(
+def eef10_to_robocasa12d(
     action: np.ndarray,
     proprio_eef_pos: np.ndarray,
     proprio_eef_rot6d: np.ndarray,
@@ -140,17 +144,13 @@ def eef20d_to_robocasa12d(
     control_mode: float = -1.0,
     clip: bool = True,
 ) -> np.ndarray:
-    """Bridge the model's 20-D **full** EEF pose to RoboCasa's 12-D **OSC delta** action.
+    """Bridge a single-arm 10-D **full** EEF pose to RoboCasa's 12-D OSC-delta action.
 
     RoboCasa365's ``RoboCasaGymEnv`` consumes a 12-D robosuite OSC_POSE + mobile-base
-    action; the OpenWAM model trained by ``RoboCasa365Dataset`` instead predicts a 20-D single-arm
-    EEF pose (left half ``[pos3, rot6d6, grip1]``, right half 0) that is a **full pose** (not a
-    per-step delta) expressed in the robot **base frame** (``robot0_base_to_eef_*``) — base-relative,
-    NOT world-frame. (Loosely called "absolute" elsewhere = full-not-delta; do not read it as
-    world-frame.) This is the dual of robotwin's client-side ``eef20d_to_ee16d`` — except robotwin's
-    env takes full 16-D poses, whereas RoboCasa's OSC controller takes *delta* commands scaled into
-    ``[-1, 1]``, so the conversion needs the current proprio (to form the delta) and the controller's
-    scaling.
+    action; the compact RoboCasa365 model instead predicts
+    ``[pos3, rot6d6, grip1]``: a **full pose** (not a per-step delta) expressed in the robot base
+    frame (``robot0_base_to_eef_*``). The OSC controller takes normalized delta commands, so this
+    conversion uses the current achieved EEF observation and the source controller scales.
 
     Output is the flat 12-D in the SERVER/``slice_action`` order (NOT modality.json
     order)::
@@ -158,17 +158,15 @@ def eef20d_to_robocasa12d(
         [eef_pos_cmd(3), eef_rot_cmd(3), gripper(1), base_motion(4), control_mode(1)]
 
     Args:
-        action: 20-D EEF action; only the left-arm 10 dims ``[pos3, rot6d6, grip1]`` are used.
+        action: 10-D EEF action ``[pos3, rot6d6, grip1]``.
         proprio_eef_pos: (3,) current base-frame EEF position (from ``state.end_effector_position_relative``
             = ``robot0_base_to_eef_pos``).
         proprio_eef_rot6d: (6,) current EEF rotation as rot6d (quat->rot6d of ``state.end_effector_rotation_relative``).
         pos_scale: robosuite OSC position ``output_max`` (metres mapped to action 1.0). **REQUIRED, env-specific** —
             read it from the eval env's OSC_POSE controller config; a wrong value drives wrong-magnitude motions.
         rot_scale: robosuite OSC rotation ``output_max`` (radians mapped to action 1.0). Same caveat as ``pos_scale``.
-        base_motion: (4,) base command [x/y/yaw vel, torso]; defaults to zeros — the arm-only (non-mobile)
-            ckpt fallback. A mobile_base ckpt passes the real base command through here.
-        control_mode: scalar; defaults to -1.0 ("achieved" mode) — the arm-only fallback. A mobile_base
-            ckpt passes the model's real control_mode (gym thresholds it at 0.5 → -1/+1).
+        base_motion: (4,) base command ``[x/y/yaw velocity, torso]``; defaults to zeros.
+        control_mode: scalar native mode command; defaults to -1.0.
         clip: clip the scaled eef commands to ``[-1, 1]`` (OSC action bounds).
 
     Gripper: the model dim ``act[9]`` is the PRETRAIN open-scale in ``[-1, +1]`` (**-1=close, +1=open**
@@ -181,15 +179,14 @@ def eef20d_to_robocasa12d(
     gym wrapper re-binarizes at 0.5 (>=0.5 -> close, <0.5 -> open), so the emitted {1.0, 0.0} are
     real close/open commands.
 
-    ENV CONTRACT (MEASURED on the real robocasa/OpenDrawer env, PandaOmron / default_pandaomron.json):
-    the eef action convention is **delta** (zero action -> no EEF motion; constant action -> constant
-    per-step displacement), matching the (target-current)/scale here. Steady per-step motion per
-    action 1.0: ~0.0126 m (pos) / ~0.102 rad (rot) -> use as pos_scale/rot_scale. control_mode -1 +
-    base 0 hold the fixed base. (Probed via env.step with known actions; see e2e plan.)
+    Dataset/controller contract: the recorded action is a normalized OSC delta. RoboCasa365's
+    controller metadata declares ``output_max=[0.05]*3+[0.5]*3``; pass those values when evaluating
+    the converted dataset. Smaller measured one-step achieved motion is controller dynamics, not a
+    replacement command scale.
     """
     act = np.asarray(action, dtype=np.float64).reshape(-1)
-    if act.shape[0] != 20:
-        raise ValueError(f"expected a 20-D EEF action, got {act.shape[0]}")
+    if act.shape[0] != 10:
+        raise ValueError(f"expected a 10-D EEF action, got {act.shape[0]}")
     cur_pos = np.asarray(proprio_eef_pos, np.float64).reshape(-1)
     if cur_pos.shape[0] != 3:
         raise ValueError(f"proprio_eef_pos must be 3-D, got {cur_pos.shape[0]}")
@@ -226,6 +223,33 @@ def eef20d_to_robocasa12d(
         raise ValueError(f"base_motion must be 4-D, got {base.shape[0]}")
     # SERVER / slice_action order: eef_pos, eef_rot, grip, base_motion, control_mode.
     return np.concatenate([pos_cmd, rot_cmd, [gripper_cmd], base, [float(control_mode)]]).astype(np.float32)
+
+
+def eef20d_to_robocasa12d(
+    action: np.ndarray,
+    proprio_eef_pos: np.ndarray,
+    proprio_eef_rot6d: np.ndarray,
+    *,
+    pos_scale: float,
+    rot_scale: float,
+    base_motion: np.ndarray | None = None,
+    control_mode: float = -1.0,
+    clip: bool = True,
+) -> np.ndarray:
+    """Legacy dual-arm wrapper; RoboCasa uses only the first arm's 10 dimensions."""
+    act = np.asarray(action).reshape(-1)
+    if act.shape[0] != 20:
+        raise ValueError(f"expected a 20-D EEF action, got {act.shape[0]}")
+    return eef10_to_robocasa12d(
+        act[:10],
+        proprio_eef_pos,
+        proprio_eef_rot6d,
+        pos_scale=pos_scale,
+        rot_scale=rot_scale,
+        base_motion=base_motion,
+        control_mode=control_mode,
+        clip=clip,
+    )
 
 
 def robotwin_endpose_to_eef20d(
@@ -269,17 +293,14 @@ def rc365_gripper_width_to_cmd(width) -> float:
     return float(np.clip(2.0 * float(width) / _RC365_GRIPPER_WIDTH_OPEN - 1.0, -1.0, 1.0))
 
 
-def robocasa_state_to_eef20d(
+def robocasa_state_to_eef10(
     eef_pos_rel: np.ndarray,
     eef_rot_rel_quat_xyzw: np.ndarray,
     gripper_qpos: np.ndarray,
 ) -> np.ndarray:
-    """Assemble the **20-D single-arm EEF proprio** from a RoboCasa365 obs, RAW (unnormalized).
+    """Assemble compact **10-D EEF proprio** from a RoboCasa365 observation.
 
-    Bit-identical to the dataloader's ``state_to_arm10`` + ``assemble_single_arm_left``
-    (``openwam.dataloader.robocasa365``): the eval client must send proprio in the SAME 20-D
-    representation the model was trained on (the env outputs a 16-D raw state; the client converts).
-    The server normalizes; send RAW here. Right-arm 10 dims are zero-padded.
+    Bit-identical to the compact dataloader's EEF conversion. The server normalizes this raw value.
 
         arm10 = [eef_pos_rel(3), rot6d(eef_rot_rel quat xyzw, 6), gripper(1)]
         gripper = rc365_gripper_width_to_cmd(gripper_qpos[0] - gripper_qpos[1])   ([-1,+1] command space)
@@ -293,9 +314,17 @@ def robocasa_state_to_eef20d(
             f"eef_rot_rel quat 4 (got {quat.shape[0]}), gripper_qpos 2 (got {qpos.shape[0]})"
         )
     grip = np.array([rc365_gripper_width_to_cmd(qpos[0] - qpos[1])], np.float32)
-    arm10 = np.concatenate([pos, quat_xyzw_to_rot6d(quat), grip], axis=-1)  # (10,)
+    return np.concatenate([pos, quat_xyzw_to_rot6d(quat), grip], axis=-1).astype(np.float32)
+
+
+def robocasa_state_to_eef20d(
+    eef_pos_rel: np.ndarray,
+    eef_rot_rel_quat_xyzw: np.ndarray,
+    gripper_qpos: np.ndarray,
+) -> np.ndarray:
+    """Legacy wrapper that zero-pads compact RoboCasa EEF state to dual-arm 20-D."""
     out = np.zeros(20, np.float32)
-    out[:10] = arm10  # single-arm LEFT; right half stays 0 (masked at train time)
+    out[:10] = robocasa_state_to_eef10(eef_pos_rel, eef_rot_rel_quat_xyzw, gripper_qpos)
     return out
 
 

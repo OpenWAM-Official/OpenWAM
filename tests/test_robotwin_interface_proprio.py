@@ -102,7 +102,13 @@ def _make_bypassed_client(*, send_state=True, state_dim=20):
 
 def test_step_forwards_state_payload_and_checks_dim(monkeypatch):
     model = _make_bypassed_client(send_state=True, state_dim=20)
-    monkeypatch.setattr(iface.client, "encode_numpy_b64", lambda img: "jpeg")
+    encoded_shapes = []
+
+    def capture_shape(img):
+        encoded_shapes.append(np.asarray(img).shape)
+        return "png"
+
+    monkeypatch.setattr(iface.client, "encode_numpy_b64", capture_shape)
     model._client = _StubClient({"action": [0.0] * 20})
 
     action = model.step(
@@ -115,6 +121,9 @@ def test_step_forwards_state_payload_and_checks_dim(monkeypatch):
 
     assert action.shape == (20,)
     assert model._client.captured["payload"]["state"] == [float(v) for v in range(20)]
+    # RoboTwin's training reader feeds decoded originals to the shared
+    # BILINEAR compositor, so its eval client must not LANCZOS-pre-resize.
+    assert encoded_shapes == [(2, 2, 3)]
 
 
 def test_step_rejects_wrong_state_dim_before_predict(monkeypatch):

@@ -76,22 +76,36 @@ def _make_env(cfg: dict):
 
 
 def _resolve_max_steps(cfg: dict) -> int:
-    """Per-task eval horizon: a step_limits.yml override for the task, else cfg['max_steps'] (500).
+    """Return RoboCasa's official per-task benchmark horizon.
 
-    Mirrors robotwin's per-task step_lim overrides — a single global max_steps under-/over-runs
-    tasks of different lengths. The env still terminates early on done/truncated, so this is a cap.
+    The installed RoboCasa registry is authoritative so horizon updates (for
+    example the v1.0.1 1.5x increase) automatically apply to this evaluator.
+    ``max_steps_override`` is intentionally explicit and exists only for short
+    smoke/debug runs; normal benchmark configs must leave it null.
     """
-    import os
-
     task = cfg.get("task", "OpenDrawer")
-    default = int(cfg.get("max_steps", 500))
-    path = os.path.join(os.path.dirname(__file__), "step_limits.yml")
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            overrides = yaml.safe_load(f) or {}
-        if task in overrides:
-            return int(overrides[task])
-    return default
+    override = _normalize_optional(cfg.get("max_steps_override"))
+    if override is not None:
+        value = int(override)
+        if value <= 0:
+            raise ValueError(f"max_steps_override must be positive or null, got {override!r}")
+        return value
+
+    try:
+        from robocasa.utils.dataset_registry_utils import get_task_horizon
+    except ImportError as exc:
+        raise RuntimeError(
+            "cannot import RoboCasa's official get_task_horizon; install/update the RoboCasa365 "
+            "evaluation environment instead of falling back to a local guessed horizon"
+        ) from exc
+
+    try:
+        horizon = int(get_task_horizon(task))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"task {task!r} has no official RoboCasa benchmark horizon") from exc
+    if horizon <= 0:
+        raise ValueError(f"official RoboCasa horizon for {task!r} must be positive, got {horizon}")
+    return horizon
 
 
 def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
@@ -108,21 +122,11 @@ def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
         ),
         image_transform=cfg.get("image_transform", "none"),
         state_keys=list(cfg.get("state_keys") or DEFAULT_STATE_KEYS),
-        # Default None → the policy auto-derives the expected proprio width (20-D EEF, or 25-D when
-        # mobile_base appends the base5 proprio). An explicit state_dim still overrides.
+        # Default None selects the compact 19-D state contract.
         state_dim=_parse_optional_int(cfg.get("state_dim"), "state_dim"),
         action_dim=int(cfg.get("action_dim", 12)),
         osc_pos_scale=cfg.get("osc_pos_scale"),
         osc_rot_scale=cfg.get("osc_rot_scale"),
-        # mobile ckpts: the client derives the base5 proprio (A′-rescaled body-frame base velocity)
-        # from the sim obs and sends 25-D [arm20, base5]. Must match the ckpt's dataloader.mobile_base.
-        mobile_base=_parse_bool(cfg.get("mobile_base", False), "mobile_base"),
-        # mask_torso_action: when the ckpt masked torso out of the action loss (default), the client
-        # zeros the torso command before the env. Must match the ckpt's dataloader.mask_torso_action.
-        mask_torso_action=_parse_bool(cfg.get("mask_torso_action", True), "mask_torso_action"),
-        # base_proprio: the ckpt's proprio base representation ("velocity" historical default;
-        # "global_pose" for ckpts trained with dataloader.base_proprio=global_pose).
-        base_proprio=str(cfg.get("base_proprio", "velocity")),
         debug=_parse_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_robocasa365"),
     )
@@ -142,15 +146,17 @@ def _rollout(env, policy, *, num_trials: int, max_steps: int, seed: int) -> int:
                 "reset obs has no 'annotation.human.task_description'; refusing to send an empty "
                 f"prompt to the policy. Got keys: {sorted(obs)}. Check the env's annotation key."
             )
-        # Wrap in the training-time template (robotwin parity) — the raw env
-        # instruction is out-of-distribution text conditioning for the model.
+        # RoboCasa365 training and eval both use the native task instruction.
         instruction = format_prompt_for_inference(obs["annotation.human.task_description"])
         policy.reset()
         success = bool(info.get("success", False))
         for _ in range(max_steps):
             obs, reward, done, truncated, info = env.step(policy.act(obs, instruction))
             success = success or bool(info.get("success", False))
-            if done or truncated:
+            # RoboCasa's official evaluators treat info["success"] as terminal;
+            # the underlying env is constructed with ignore_done=True, so its
+            # ordinary ``done`` flag is not a reliable success terminator.
+            if success or done or truncated:
                 break
         successes += int(success)
         print(f"[RESULT] trial={trial} success={success}")
@@ -161,7 +167,8 @@ def run_eval(cfg: dict) -> int:
     num_trials = int(cfg.get("num_trials", 5))
     max_steps = _resolve_max_steps(cfg)
     seed = int(cfg.get("seed", 0))
-    print(f"[eval] task={cfg.get('task')} max_steps={max_steps} (per-task step_limits.yml or cfg default)")
+    source = "max_steps_override" if _normalize_optional(cfg.get("max_steps_override")) is not None else "RoboCasa registry"
+    print(f"[eval] task={cfg.get('task')} max_steps={max_steps} (source={source})")
 
     # Nested try/finally so the already-connected policy is closed even if
     # _make_env raises (e.g. robocasa not installed), and so a failing

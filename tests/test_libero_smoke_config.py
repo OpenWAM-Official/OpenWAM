@@ -266,8 +266,14 @@ def test_libero_policy_reuses_ws_and_rotates_images(monkeypatch):
         def close(self):
             self.closed += 1
 
+    encoded_images = []
+
+    def capture_image(image):
+        encoded_images.append(np.asarray(image).copy())
+        return "encoded"
+
     monkeypatch.setattr(iface, "WSPolicyClient", FakeWSPolicyClient)
-    monkeypatch.setattr(iface.client, "encode_numpy_b64", lambda image: f"first={int(image[0, 0, 0])}")
+    monkeypatch.setattr(iface.client, "encode_numpy_b64", capture_image)
 
     policy = iface.OpenWAMLiberoPolicy()
     ws = instances[0]
@@ -295,7 +301,17 @@ def test_libero_policy_reuses_ws_and_rotates_images(monkeypatch):
     assert action[6] == 1.0
     assert ws.resets == 1
     assert ws.closed == 0
-    assert ws.predictions[0]["images"]["head_camera"] == "first=4"
+    assert ws.predictions[0]["images"]["head_camera"] == "encoded"
+    assert encoded_images[0].shape == (256, 320, 3)
+    raw_head = np.array(
+        [
+            [[1, 0, 0], [2, 0, 0]],
+            [[3, 0, 0], [4, 0, 0]],
+        ],
+        dtype=np.uint8,
+    )
+    expected_head = iface.resize_for_lshape_slot(raw_head[::-1, ::-1], "head_camera")
+    np.testing.assert_array_equal(encoded_images[0], expected_head)
     # The proprio sent is the raw EEF10 (identity rot6d; qpos [0.04, -0.04] is a
     # fully open hand, which the open-scale renders as +1).
     sent_state = ws.predictions[0]["state"]

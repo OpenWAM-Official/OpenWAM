@@ -15,7 +15,7 @@ from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from benchmarks.utils import WSPolicyClient, client, transport  # noqa: E402
+from benchmarks.utils import WSPolicyClient, client, resize_for_lshape_slot, transport  # noqa: E402
 from openwam.dataloader.utils.gr1_kinematics import EEF33_DIM, GR1Kinematics  # noqa: E402
 
 
@@ -114,9 +114,11 @@ class OpenWAMRoboCasaGR1Policy:
             raise ValueError(f"RoboCasa state dim {len(state)} != expected {self._state_dim}")
         prompt = str(obs.get(self._prompt_key) or obs.get(self._fallback_prompt_key) or obs.get("language", ""))
         payload = client.build_payload(
-            head=client.encode_numpy_b64(self._image(obs, self._head_camera_key)),
-            left_wrist=self._maybe_encode(obs, self._left_wrist_camera_key),
-            right_wrist=self._maybe_encode(obs, self._right_wrist_camera_key),
+            head=client.encode_numpy_b64(
+                resize_for_lshape_slot(self._image(obs, self._head_camera_key), "head_camera")
+            ),
+            left_wrist=self._maybe_encode(obs, self._left_wrist_camera_key, "left_wrist_camera"),
+            right_wrist=self._maybe_encode(obs, self._right_wrist_camera_key, "right_wrist_camera"),
             prompt=prompt,
             state=state,
         )
@@ -145,10 +147,10 @@ class OpenWAMRoboCasaGR1Policy:
             raise ValueError(f"Camera '{key}' must be HxWx3, got {image.shape}")
         return image.astype(np.uint8, copy=False)
 
-    def _maybe_encode(self, obs: Mapping, key: str | None) -> str | None:
+    def _maybe_encode(self, obs: Mapping, key: str | None, slot: str) -> str | None:
         if not key or key not in obs or obs[key] is None:
             return None
-        return client.encode_numpy_b64(self._image(obs, key))
+        return client.encode_numpy_b64(resize_for_lshape_slot(self._image(obs, key), slot))
 
     def _maybe_debug(
         self,

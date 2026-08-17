@@ -66,6 +66,7 @@ from benchmarks.utils import (  # noqa: E402
     encode_numpy_b64,
     r1pro_proprio_to_raw27,
     raw27_to_r1pro_action,
+    resize_for_lshape_slot,
     transport,  # noqa: E402
 )
 
@@ -219,9 +220,17 @@ class BehaviorBridge:
         state = self._build_state(obs)
 
         payload = build_payload(
-            head=encode_numpy_b64(head),
-            left_wrist=encode_numpy_b64(left) if left is not None else None,
-            right_wrist=encode_numpy_b64(right) if right is not None else None,
+            head=encode_numpy_b64(resize_for_lshape_slot(head, "head_camera")),
+            left_wrist=(
+                encode_numpy_b64(resize_for_lshape_slot(left, "left_wrist_camera"))
+                if left is not None
+                else None
+            ),
+            right_wrist=(
+                encode_numpy_b64(resize_for_lshape_slot(right, "right_wrist_camera"))
+                if right is not None
+                else None
+            ),
             prompt=prompt,
             state=state,
         )
