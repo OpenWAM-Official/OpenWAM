@@ -51,6 +51,12 @@ GRIPPER_CONVENTION = "minus1_closed_plus1_open"
 ROT6D_DIMS = tuple(range(3, 9))
 DEFAULT_SOURCE_ROOT = Path("/path/to/libero-lerobot")
 DEFAULT_OUTPUT_ROOT = Path("/path/to/libero")
+DEFAULT_SOURCE_REPO_ID = "lerobot/libero"
+DEFAULT_SOURCE_FPS = 10.0
+DEFAULT_VIDEO_KEYS = (
+    "observation.images.image",
+    "observation.images.image2",
+)
 EEF10_NAMES = [
     "eef_x",
     "eef_y",
@@ -262,19 +268,27 @@ def _source_revision(source: Path) -> str | None:
     return revision or None
 
 
-def _validate_source(source: Path, info: dict) -> tuple[list[Path], list[Path]]:
+def _validate_source(
+    source: Path,
+    info: dict,
+    *,
+    expected_fps: float = DEFAULT_SOURCE_FPS,
+    expected_video_keys: tuple[str, ...] = DEFAULT_VIDEO_KEYS,
+) -> tuple[list[Path], list[Path]]:
     if info.get("codebase_version") != "v3.0":
         raise ValueError(f"expected LeRobot v3.0, got {info.get('codebase_version')!r}")
-    if float(info.get("fps", 0.0)) != 10.0:
-        raise ValueError(f"expected the official 10 FPS lerobot/libero source, got {info.get('fps')!r}")
+    if float(info.get("fps", 0.0)) != float(expected_fps):
+        raise ValueError(f"expected a {expected_fps:g} FPS source, got {info.get('fps')!r}")
     features = info.get("features", {})
     if tuple(features.get("observation.state", {}).get("shape", ())) != (SOURCE_STATE_DIM,):
         raise ValueError("source observation.state must be 8-D")
     if tuple(features.get("action", {}).get("shape", ())) != (SOURCE_ACTION_DIM,):
         raise ValueError("source action must be 7-D")
     video_keys = [key for key, feature in features.items() if feature.get("dtype") == "video"]
-    if set(video_keys) != {"observation.images.image", "observation.images.image2"}:
-        raise ValueError(f"unexpected official LIBERO video keys: {video_keys}")
+    if set(video_keys) != set(expected_video_keys):
+        raise ValueError(
+            f"unexpected video keys: {video_keys}; expected {sorted(expected_video_keys)}"
+        )
 
     data_paths = sorted((source / "data").rglob("*.parquet"))
     video_paths = sorted((source / "videos").rglob("*.mp4"))
@@ -292,7 +306,15 @@ def _validate_source(source: Path, info: dict) -> tuple[list[Path], list[Path]]:
     return data_paths, video_paths
 
 
-def _write_readme(path: Path, *, info: dict, source: Path, revision: str | None) -> None:
+def _write_readme(
+    path: Path,
+    *,
+    info: dict,
+    source: Path,
+    revision: str | None,
+    source_repo_id: str = DEFAULT_SOURCE_REPO_ID,
+    dataset_title: str = "LIBERO",
+) -> None:
     revision_text = revision or "unknown local snapshot"
     text = f"""---
 license: apache-2.0
@@ -305,11 +327,11 @@ configs:
   data_files: data/*/*.parquet
 ---
 
-# LIBERO absolute EEF10 (LeRobot v3.0)
+# {dataset_title} absolute EEF10 (LeRobot v3.0)
 
-This local dataset was converted from `lerobot/libero` at revision
+This local dataset was converted from `{source_repo_id}` at revision
 `{revision_text}` (local source: `{source}`).  Its original parquet packing,
-episode offsets, tasks, 10 FPS timeline, and videos are preserved.
+episode offsets, tasks, {info['fps']:g} FPS timeline, and videos are preserved.
 
 Both primary robot columns use the row-aligned 10-D contract:
 
@@ -331,7 +353,16 @@ round-trip checks are recorded in `meta/conversion.json`.
     path.write_text(text, encoding="utf-8")
 
 
-def convert_dataset(source: Path, output: Path, *, workers: int = 8) -> dict[str, Any]:
+def convert_dataset(
+    source: Path,
+    output: Path,
+    *,
+    workers: int = 8,
+    source_repo_id: str = DEFAULT_SOURCE_REPO_ID,
+    expected_fps: float = DEFAULT_SOURCE_FPS,
+    expected_video_keys: tuple[str, ...] = DEFAULT_VIDEO_KEYS,
+    dataset_title: str = "LIBERO",
+) -> dict[str, Any]:
     source = source.resolve()
     output = output.resolve()
     if output.exists():
@@ -342,7 +373,12 @@ def convert_dataset(source: Path, output: Path, *, workers: int = 8) -> dict[str
         raise ValueError("workers must be positive")
 
     info = _read_json(source / "meta" / "info.json")
-    data_paths, video_paths = _validate_source(source, info)
+    data_paths, video_paths = _validate_source(
+        source,
+        info,
+        expected_fps=expected_fps,
+        expected_video_keys=expected_video_keys,
+    )
     revision = _source_revision(source)
     temp = output.with_name(f".{output.name}.building-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     if temp.exists():
@@ -467,7 +503,7 @@ def convert_dataset(source: Path, output: Path, *, workers: int = 8) -> dict[str
         conversion = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_root": str(source),
-            "source_repo_id": "lerobot/libero",
+            "source_repo_id": source_repo_id,
             "source_revision": revision,
             "output_representation": OUTPUT_REPRESENTATION,
             "state": "achieved [xyz3, rot6d6, gripper_open_scale1]",
@@ -499,7 +535,14 @@ def convert_dataset(source: Path, output: Path, *, workers: int = 8) -> dict[str
             "video_reencoded": False,
         }
         _write_json(temp / "meta" / "conversion.json", conversion)
-        _write_readme(temp / "README.md", info=output_info, source=source, revision=revision)
+        _write_readme(
+            temp / "README.md",
+            info=output_info,
+            source=source,
+            revision=revision,
+            source_repo_id=source_repo_id,
+            dataset_title=dataset_title,
+        )
 
         os.replace(temp, output)
         return {
