@@ -51,6 +51,43 @@ def test_ws_predict_wraps_obs_and_returns_action(monkeypatch):
     assert sent["type"] == "obs" and sent["prompt"] == "p"  # type added, payload preserved
 
 
+def test_ws_predict_once_wraps_obs_without_reconnect(monkeypatch):
+    client, fake = _ws_client_with(
+        monkeypatch,
+        json.dumps({"type": "action", "action": [3, 4]}),
+    )
+
+    out = client.predict_once({"images": {}, "prompt": "once"})
+
+    assert out["action"] == [3, 4]
+    assert json.loads(fake.sent[0]) == {
+        "type": "obs",
+        "images": {},
+        "prompt": "once",
+    }
+
+
+def test_ws_predict_once_never_resends_after_ambiguous_drop(monkeypatch):
+    dropping = _FakeWS("")
+    dropping.send = lambda msg: (_ for _ in ()).throw(OSError("ambiguous drop"))
+    healthy = _FakeWS(json.dumps({"type": "action", "action": [9]}))
+    conns = iter([dropping, healthy])
+    connects = {"n": 0}
+    client = WSPolicyClient("ws://h:8848")
+
+    def _fake_connect():
+        if client._ws is None:
+            connects["n"] += 1
+            client._ws = next(conns)
+
+    monkeypatch.setattr(client, "_connect", _fake_connect)
+
+    with pytest.raises(OSError, match="ambiguous drop"):
+        client.predict_once({})
+    assert connects["n"] == 1
+    assert healthy.sent == []
+
+
 def test_ws_reset_and_ping(monkeypatch):
     client, fake = _ws_client_with(monkeypatch, json.dumps({"type": "reset_ack"}))
     assert client.reset() == {"type": "reset_ack"}

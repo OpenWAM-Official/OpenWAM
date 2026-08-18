@@ -1,0 +1,29 @@
+# RoboDojo lives in its own Isaac environment; this is the external checkout.
+robodojo_root: /path/to/RoboDojo
+
+# Existing OpenWAM JSON WebSocket policy server.
+host: 127.0.0.1
+port: 8848
+timeout: 300.0
+
+# Native RoboDojo evaluator options.
+task: stack_blocks
+env_config: arx_x5
+device_id: 0
+num_envs: 1
+eval_batch: false
+eval_count: 1
+# Optional positive rollout cap. Leave null to preserve RoboDojo's task-native
+# max_steps; the Isaac smoke launcher supplies its own short override.
+max_steps: null
+seed: 0
+headless: true
+additional_info: openwam
+
+# Keep false for normal evaluation. When true, the adapter retains per-step
+# frame/action conversion metadata in memory without changing rollout behavior.
+debug: false
+
+# Optional path. When set, calibration is extracted after the first successful
+# reset exposes env_origins and before the first rollout.
+calibration_output: null
