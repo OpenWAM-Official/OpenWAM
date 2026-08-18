@@ -4,8 +4,9 @@ RoboDojo records achieved end-effector poses as environment-origin-relative
 positions with world-frame wxyz orientations.  Dual-X5 constants and the
 env-origin → robot-base / EEF20 helpers live in
 ``openwam.dataloader.robodojo_contract`` and
-``openwam.dataloader.utils.poses``.  This
-reader applies those transforms, packs raw EEF20, normalizes in that raw
+``openwam.dataloader.utils.poses``.  The Isaac eval runtime keeps pinned
+copies under ``benchmarks/robodojo/`` and must not import this package.
+This reader applies those transforms, packs raw EEF20, normalizes in that raw
 space, and only then scatters into OpenWAM's shared 80-D action space.
 
 Gripper channels are the official ``state/*_ee_joint_states`` values in
@@ -49,6 +50,8 @@ from openwam.dataloader.utils.unify_action import (
 )
 from openwam.dataloader.robodojo_contract import (
     EEF20_DIM,
+    GRIPPER_CONVENTION,
+    ROBODOJO_CONTRACT_ID,
     ROBODOJO_EMBODIMENT,
     discover_episodes,
     resolve_robodojo_calibration,
@@ -61,8 +64,6 @@ from openwam.dataloader.utils.poses import (
 )
 
 DEPLOY_ACTION_MODE = "eef"
-# Raw EEF20 gripper: 0 = closed, 1 = open. Matches the pretrain mixture.
-GRIPPER_CONVENTION = "zero_closed_one_open"
 DEFAULT_ROBODOJO_CAMERA_LAYOUT = (
     "cam_head",
     "cam_left_wrist",
@@ -506,6 +507,13 @@ def _load_validated_stats(
             f"{stats_path}: metadata.gripper_convention must be "
             f"{GRIPPER_CONVENTION!r} (0=closed, 1=open), got "
             f"{recorded_convention!r}; regenerate the RoboDojo stats file"
+        )
+    recorded_contract = metadata.get("contract_id")
+    if recorded_contract != ROBODOJO_CONTRACT_ID:
+        raise ValueError(
+            f"{stats_path}: metadata.contract_id must be "
+            f"{ROBODOJO_CONTRACT_ID!r}, got {recorded_contract!r}; "
+            "regenerate the RoboDojo stats file"
         )
     return validated
 
@@ -1099,6 +1107,7 @@ __all__ = [
     "DEPLOY_ACTION_MODE",
     "GRIPPER_CONVENTION",
     "MultiTaskRoboDojoDataset",
+    "ROBODOJO_CONTRACT_ID",
     "ROBODOJO_SOURCE_FRAME",
     "RoboDojoDataset",
     "calibration_fingerprint",

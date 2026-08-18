@@ -203,6 +203,7 @@ def write_stats(path: Path, calibration: dict | None = None) -> Path:
                 "endpoint": "link6",
                 "embodiment": "arx_x5",
                 "calibration_fingerprint": calibration_fingerprint(calibration),
+                "contract_id": "robodojo-eef20-v1",
                 "gripper_convention": GRIPPER_CONVENTION,
             },
         },
@@ -458,6 +459,20 @@ def test_normalization_requires_existing_valid_stats_and_matching_fingerprint(
     np.save(missing_convention, payload)
     with pytest.raises(ValueError, match="gripper_convention"):
         RoboDojoDataset(**common, normalization_stats_path=missing_convention)
+
+    wrong_contract = write_stats(tmp_path / "wrong_contract.npy")
+    payload = np.load(wrong_contract, allow_pickle=True).item()
+    payload["metadata"]["contract_id"] = "robodojo-eef20-v0"
+    np.save(wrong_contract, payload)
+    with pytest.raises(ValueError, match="contract_id"):
+        RoboDojoDataset(**common, normalization_stats_path=wrong_contract)
+
+    missing_contract = write_stats(tmp_path / "missing_contract.npy")
+    payload = np.load(missing_contract, allow_pickle=True).item()
+    del payload["metadata"]["contract_id"]
+    np.save(missing_contract, payload)
+    with pytest.raises(ValueError, match="contract_id"):
+        RoboDojoDataset(**common, normalization_stats_path=missing_contract)
 
 
 def test_calibration_path_is_rejected(tmp_path: Path):

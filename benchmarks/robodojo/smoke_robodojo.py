@@ -25,15 +25,53 @@ from benchmarks.robodojo.single_eval import (
     verify_runtime_import_provenance,
 )
 from benchmarks.utils import WSPolicyClient
-from openwam.dataloader.robodojo_contract import (
+from benchmarks.robodojo.contract import (
     arx_x5_calibration,
     discover_episodes,
     validate_calibration,
 )
-from openwam.dataloader.utils.poses import robot_base_to_env_relative_world
+from benchmarks.robodojo.frames import (
+    arms_to_eef20,
+    env_relative_world_to_robot_base,
+    robot_base_to_env_relative_world,
+)
 
 _OPENWAM_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_CONFIG = Path(__file__).with_name("policy_config.yml")
+_GRIPPER_ATOL = 1e-8
+
+
+def _read_formal_eef20(episode_path: Path, calibration: dict[str, Any]) -> np.ndarray:
+    """Convert one official HDF5 episode with the eval-side EEF20 helpers."""
+    import h5py
+
+    with h5py.File(episode_path, "r") as handle:
+        left_pose = np.asarray(handle["state/left_ee_poses"])
+        right_pose = np.asarray(handle["state/right_ee_poses"])
+        left_raw = np.asarray(handle["state/left_ee_joint_states"])
+        right_raw = np.asarray(handle["state/right_ee_joint_states"])
+        if np.any((left_raw < -_GRIPPER_ATOL) | (left_raw > 1.0 + _GRIPPER_ATOL)):
+            raise ValueError("left gripper values must be within [0, 1]")
+        if np.any((right_raw < -_GRIPPER_ATOL) | (right_raw > 1.0 + _GRIPPER_ATOL)):
+            raise ValueError("right gripper values must be within [0, 1]")
+        left_gripper = np.clip(left_raw, 0.0, 1.0)
+        right_gripper = np.clip(right_raw, 0.0, 1.0)
+        left_arm = calibration["arms"]["left"]
+        right_arm = calibration["arms"]["right"]
+        return arms_to_eef20(
+            env_relative_world_to_robot_base(
+                left_pose,
+                left_arm["base_pos_relative_to_env_origin"],
+                left_arm["base_quat_wxyz"],
+            ),
+            left_gripper,
+            env_relative_world_to_robot_base(
+                right_pose,
+                right_arm["base_pos_relative_to_env_origin"],
+                right_arm["base_quat_wxyz"],
+            ),
+            right_gripper,
+        ).astype(np.float32, copy=False)
 
 
 def contract_smoke(
@@ -47,7 +85,7 @@ def contract_smoke(
     if calibration_path is None:
         calibration = arx_x5_calibration()
     else:
-        from openwam.dataloader.robodojo_contract import load_calibration
+        from benchmarks.robodojo.contract import load_calibration
 
         calibration = load_calibration(calibration_path)
     print(
@@ -59,15 +97,8 @@ def contract_smoke(
     if dataset_root is None:
         return
 
-    from openwam.dataloader.robodojo import (
-        read_calibrated_eef20,
-        validate_robodojo_episode,
-    )
-
     episodes = discover_episodes(dataset_root, task)
-    for episode in episodes:
-        validate_robodojo_episode(episode)
-    raw = read_calibrated_eef20(episodes[0], calibration)
+    raw = _read_formal_eef20(episodes[0], calibration)
     if raw.ndim != 2 or raw.shape[1] != 20 or not np.all(np.isfinite(raw)):
         raise ValueError(
             f"formal RoboDojo conversion must produce finite (T, 20), got {raw.shape}"
@@ -174,7 +205,7 @@ def debug_smoke(
     if calibration_path is None:
         calibration = arx_x5_calibration()
     else:
-        from openwam.dataloader.robodojo_contract import load_calibration
+        from benchmarks.robodojo.contract import load_calibration
 
         calibration = load_calibration(calibration_path)
 

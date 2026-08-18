@@ -1,12 +1,9 @@
-"""RoboDojo dataset layout, dual-X5 constants, and calibration schema.
+"""Eval-side RoboDojo dataset layout, dual-X5 constants, and calibration schema.
 
-Generic pose / EEF20 math lives in ``openwam.dataloader.utils.poses``.
-This module only holds the numbers and file-layout rules the reader needs.
-
-The Isaac eval runtime keeps a pinned copy in
-``benchmarks/robodojo/contract.py``. The two must stay aligned on
-``ROBODOJO_CONTRACT_ID``; ``tests/test_robodojo_runtime_boundary.py`` checks
-that. Production modules on either side must not import the other.
+Pinned copy of ``openwam/dataloader/robodojo_contract.py``. Isaac / RoboDojo
+eval must not import OpenWAM; training must not import this package. Stay
+aligned on ``ROBODOJO_CONTRACT_ID`` — see
+``tests/test_robodojo_runtime_boundary.py``.
 """
 
 from __future__ import annotations

@@ -17,20 +17,20 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from benchmarks.utils import WSPolicyClient, build_payload, encode_numpy_b64
-from openwam.dataloader.transforms.multiview import format_prompt_for_inference
-from openwam.dataloader.robodojo_contract import (
+from benchmarks.robodojo.contract import (
     EEF20_DIM,
     ROBODOJO_EMBODIMENT,
     arx_x5_calibration,
     validate_calibration,
 )
-from openwam.dataloader.utils.poses import (
+from benchmarks.robodojo.frames import (
     arms_to_eef20,
     eef20_to_arms,
     env_relative_world_to_robot_base,
     robot_base_to_env_relative_world,
 )
+from benchmarks.robodojo.prompt_template import format_prompt_for_inference
+from benchmarks.utils import WSPolicyClient, build_payload, encode_numpy_b64
 
 _CAMERA_TO_PAYLOAD = {
     "cam_head": "head_camera",

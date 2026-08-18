@@ -22,6 +22,7 @@ from omegaconf import OmegaConf
 from openwam.dataloader.robodojo import (
     DEPLOY_ACTION_MODE,
     GRIPPER_CONVENTION,
+    ROBODOJO_CONTRACT_ID,
     ROBODOJO_SOURCE_FRAME,
     calibration_fingerprint,
     read_calibrated_eef20,
@@ -80,6 +81,7 @@ def _metadata(
         "embodiment": ROBODOJO_EMBODIMENT,
         "tasks": list(tasks),
         "calibration_fingerprint": calibration_fingerprint(calibration),
+        "contract_id": ROBODOJO_CONTRACT_ID,
         "gripper_convention": GRIPPER_CONVENTION,
         "reservoir_cap": int(reservoir_cap),
         "reservoir_rows": int(reservoir_rows),

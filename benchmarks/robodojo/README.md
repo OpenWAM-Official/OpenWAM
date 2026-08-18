@@ -202,7 +202,10 @@ an already-loaded stale editable checkout cause an explicit startup error.
 
 Training and evaluation convert RoboDojo env-relative `xyz+wxyz` poses with
 the same constants as `env_cfg/robot/dual_x5.yml`, stored in
-`openwam/dataloader/robodojo_contract.py`:
+`openwam/dataloader/robodojo_contract.py` (training) and the pinned copy
+`benchmarks/robodojo/contract.py` (Isaac eval). The shared identifier is
+`robodojo-eef20-v1`. Production code on either side must not import the other;
+`tests/test_robodojo_runtime_boundary.py` pins the two copies. Constants:
 
 ```python
 DUAL_X5_LEFT_BASE_POS = (-0.3, -0.45, 0.765)

@@ -85,6 +85,7 @@ def test_pools_all_states_and_only_real_next_state_targets_without_crossing_epis
     )
     assert metadata["endpoint"] == "link6"
     assert metadata["embodiment"] == "arx_x5"
+    assert metadata["contract_id"] == "robodojo-eef20-v1"
     assert metadata["gripper_convention"] == GRIPPER_CONVENTION
 
     episode_0 = expected_raw_eef20(4)
