@@ -22,8 +22,8 @@ from openwam.dataloader.robodojo import (
 )
 from openwam.dataloader.transforms.multiview import format_prompt_for_inference
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
-from benchmarks.robodojo.contract import save_calibration
-from benchmarks.robodojo.frames import (
+from openwam.dataloader.robodojo_contract import save_calibration
+from openwam.dataloader.utils.poses import (
     arms_to_eef20,
     env_relative_world_to_robot_base,
 )

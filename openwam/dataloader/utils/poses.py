@@ -1,14 +1,17 @@
-"""Pure NumPy frame and EEF20 conversions for RoboDojo.
+"""Generic NumPy pose-frame and bimanual EEF20 conversions.
 
-RoboDojo source poses use ``[x, y, z, qw, qx, qy, qz]``. Source positions
-are relative to the Isaac environment origin while source orientations remain
-in the world frame. The helpers below apply a measured per-arm base transform
-so OpenWAM stores both position and orientation in that arm's robot-base frame.
+These helpers express a pose whose translation is relative to an environment
+origin and whose orientation is still world-frame, into a robot-base frame
+given that arm's base pose. They also pack / unpack the canonical 20-D EEF
+layout. Dataset-specific numbers (for example dual-X5 base poses) stay with
+the reader that owns them.
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+from openwam.dataloader.utils.eef import quat_wxyz_to_rot6d as shared_quat_wxyz_to_rot6d
 
 _QUATERNION_ATOL = 1e-6
 _ROT6D_DEGENERACY_EPS = 1e-8
@@ -142,14 +145,13 @@ def _matrix_to_quaternion(matrix: np.ndarray) -> np.ndarray:
 def quat_wxyz_to_rot6d(quaternion_wxyz: np.ndarray) -> np.ndarray:
     """Convert unit wxyz quaternion(s) to first-two-column rotation 6D.
 
-    Unit-quaternion checks stay here. The 6D columns come from the shared
-    helper so RoboDojo cannot drift from other readers in unified slots
-    3-8 / 37-42.
+    Unit-quaternion checks stay here. The 6D columns come from
+    :func:`openwam.dataloader.utils.eef.quat_wxyz_to_rot6d` so readers cannot
+    drift in unified slots 3-8 / 37-42. That helper casts to float32
+    internally, so even float64 input is returned at float32 precision
+    (then upcast to ``output_dtype``).
     """
     quaternion, output_dtype = _validated_quaternion(quaternion_wxyz, "quaternion_wxyz")
-    # Imported here to avoid a circular import through the dataloader registry.
-    from openwam.dataloader.utils.eef import quat_wxyz_to_rot6d as shared_quat_wxyz_to_rot6d
-
     return shared_quat_wxyz_to_rot6d(quaternion).astype(output_dtype, copy=False)
 
 

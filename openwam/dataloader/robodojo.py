@@ -2,8 +2,9 @@
 
 RoboDojo records achieved end-effector poses as environment-origin-relative
 positions with world-frame wxyz orientations.  Dual-X5 constants and the
-env-origin → robot-base / EEF20 helpers live with the benchmark adapter in
-``benchmarks.robodojo.contract`` and ``benchmarks.robodojo.frames``.  This
+env-origin → robot-base / EEF20 helpers live in
+``openwam.dataloader.robodojo_contract`` and
+``openwam.dataloader.utils.poses``.  This
 reader applies those transforms, packs raw EEF20, normalizes in that raw
 space, and only then scatters into OpenWAM's shared 80-D action space.
 
@@ -46,7 +47,7 @@ from openwam.dataloader.utils.unify_action import (
     parse_unify_spec,
     unmap_from_unify,
 )
-from benchmarks.robodojo.contract import (
+from openwam.dataloader.robodojo_contract import (
     EEF20_DIM,
     ROBODOJO_EMBODIMENT,
     discover_episodes,
@@ -54,7 +55,7 @@ from benchmarks.robodojo.contract import (
     validate_calibration,
     validate_embodiment,
 )
-from benchmarks.robodojo.frames import (
+from openwam.dataloader.utils.poses import (
     arms_to_eef20,
     env_relative_world_to_robot_base,
 )

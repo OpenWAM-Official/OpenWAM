@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from benchmarks.robodojo.calibrate_frames import calibrate_and_save, extract_live_calibration
-from benchmarks.robodojo.contract import (
+from openwam.dataloader.robodojo_contract import (
     CALIBRATION_SCHEMA_VERSION,
     EEF20_LAYOUT,
     ENDPOINT_LINK_NAME,
@@ -24,7 +24,7 @@ from benchmarks.robodojo.contract import (
     validate_embodiment,
 )
 from openwam.dataloader.utils.eef import quat_wxyz_to_rot6d as shared_quat_wxyz_to_rot6d
-from benchmarks.robodojo.frames import (
+from openwam.dataloader.utils.poses import (
     arms_to_eef20,
     eef20_to_arms,
     env_relative_world_to_robot_base,
@@ -72,7 +72,7 @@ def test_contract_constants_pin_arx_x5_eef20_and_link6():
 
 
 def test_builtin_dual_x5_calibration_matches_robot_yaml_constants():
-    from benchmarks.robodojo.contract import (
+    from openwam.dataloader.robodojo_contract import (
         DUAL_X5_LEFT_BASE_POS,
         DUAL_X5_LEFT_BASE_QUAT_WXYZ,
         DUAL_X5_RIGHT_BASE_POS,

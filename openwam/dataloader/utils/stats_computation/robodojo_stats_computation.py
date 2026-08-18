@@ -36,7 +36,7 @@ from openwam.dataloader.utils.normalization import (
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
     Accumulator,
 )
-from benchmarks.robodojo.contract import (
+from openwam.dataloader.robodojo_contract import (
     EEF20_DIM,
     ENDPOINT_LINK_NAME,
     ROBODOJO_EMBODIMENT,

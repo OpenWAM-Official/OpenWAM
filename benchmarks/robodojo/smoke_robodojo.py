@@ -25,12 +25,12 @@ from benchmarks.robodojo.single_eval import (
     verify_runtime_import_provenance,
 )
 from benchmarks.utils import WSPolicyClient
-from benchmarks.robodojo.contract import (
+from openwam.dataloader.robodojo_contract import (
     arx_x5_calibration,
     discover_episodes,
     validate_calibration,
 )
-from benchmarks.robodojo.frames import robot_base_to_env_relative_world
+from openwam.dataloader.utils.poses import robot_base_to_env_relative_world
 
 _OPENWAM_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_CONFIG = Path(__file__).with_name("policy_config.yml")
@@ -47,7 +47,7 @@ def contract_smoke(
     if calibration_path is None:
         calibration = arx_x5_calibration()
     else:
-        from benchmarks.robodojo.contract import load_calibration
+        from openwam.dataloader.robodojo_contract import load_calibration
 
         calibration = load_calibration(calibration_path)
     print(
@@ -174,7 +174,7 @@ def debug_smoke(
     if calibration_path is None:
         calibration = arx_x5_calibration()
     else:
-        from benchmarks.robodojo.contract import load_calibration
+        from openwam.dataloader.robodojo_contract import load_calibration
 
         calibration = load_calibration(calibration_path)
 

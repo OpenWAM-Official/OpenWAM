@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from benchmarks.robodojo.contract import (
+from openwam.dataloader.robodojo_contract import (
     CALIBRATION_SCHEMA_VERSION,
     ENDPOINT_LINK_NAME,
     ENDPOINT_POSE_FRAME_CONTRACT,

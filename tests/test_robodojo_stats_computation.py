@@ -24,7 +24,7 @@ from openwam.dataloader.utils.stats_computation.robodojo_stats_computation impor
     iter_episode_eef20,
     main,
 )
-from benchmarks.robodojo.contract import arx_x5_calibration
+from openwam.dataloader.robodojo_contract import arx_x5_calibration
 from tests.test_robodojo_dataloader import (
     expected_raw_eef20,
     formal_data_dir,

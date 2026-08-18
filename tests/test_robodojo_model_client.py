@@ -37,7 +37,7 @@ from benchmarks.robodojo.smoke_robodojo import (
     run_debug_protocol_rollout,
 )
 from openwam.dataloader.transforms.multiview import format_prompt_for_inference
-from benchmarks.robodojo.frames import (
+from openwam.dataloader.utils.poses import (
     arms_to_eef20,
     env_relative_world_to_robot_base,
     robot_base_to_env_relative_world,

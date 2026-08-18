@@ -1,4 +1,8 @@
-"""Versioned RoboDojo dataset, EEF20, and calibration contract."""
+"""RoboDojo dataset layout, dual-X5 constants, and calibration schema.
+
+Generic pose / EEF20 math lives in ``openwam.dataloader.utils.poses``.
+This module only holds the numbers and file-layout rules the reader needs.
+"""
 
 from __future__ import annotations
 

@@ -202,7 +202,7 @@ an already-loaded stale editable checkout cause an explicit startup error.
 
 Training and evaluation convert RoboDojo env-relative `xyz+wxyz` poses with
 the same constants as `env_cfg/robot/dual_x5.yml`, stored in
-`benchmarks/robodojo/contract.py`:
+`openwam/dataloader/robodojo_contract.py`:
 
 ```python
 DUAL_X5_LEFT_BASE_POS = (-0.3, -0.45, 0.765)
