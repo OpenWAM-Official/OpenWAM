@@ -16,6 +16,7 @@ from openwam.dataloader.robodojo import (
     calibration_fingerprint,
     read_calibrated_eef20,
 )
+from openwam.dataloader.robodojo_contract import arx_x5_calibration
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
 from openwam.dataloader.utils.stats_computation.robodojo_stats_computation import (
     atomic_save_stats_npy,
@@ -24,7 +25,6 @@ from openwam.dataloader.utils.stats_computation.robodojo_stats_computation impor
     iter_episode_eef20,
     main,
 )
-from openwam.dataloader.robodojo_contract import arx_x5_calibration
 from tests.test_robodojo_dataloader import (
     expected_raw_eef20,
     formal_data_dir,

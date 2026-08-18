@@ -20,9 +20,9 @@ from openwam.dataloader.robodojo import (
     calibration_fingerprint,
     read_calibrated_eef20,
 )
+from openwam.dataloader.robodojo_contract import save_calibration
 from openwam.dataloader.transforms.multiview import format_prompt_for_inference
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
-from openwam.dataloader.robodojo_contract import save_calibration
 from openwam.dataloader.utils.poses import (
     arms_to_eef20,
     env_relative_world_to_robot_base,

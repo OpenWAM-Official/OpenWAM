@@ -29,14 +29,6 @@ from openwam.dataloader.robodojo import (
     resolve_robodojo_tasks,
     validate_robodojo_episode,
 )
-from openwam.dataloader.utils.normalization import (
-    ROT6D_DIMS_EEF20,
-    STAT_KEYS,
-    pin_rot6d_identity,
-)
-from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
-    Accumulator,
-)
 from openwam.dataloader.robodojo_contract import (
     EEF20_DIM,
     ENDPOINT_LINK_NAME,
@@ -44,6 +36,14 @@ from openwam.dataloader.robodojo_contract import (
     discover_episodes,
     resolve_robodojo_calibration,
     validate_embodiment,
+)
+from openwam.dataloader.utils.normalization import (
+    ROT6D_DIMS_EEF20,
+    STAT_KEYS,
+    pin_rot6d_identity,
+)
+from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import (
+    Accumulator,
 )
 
 DEFAULT_RESERVOIR_CAP = 1_000_000

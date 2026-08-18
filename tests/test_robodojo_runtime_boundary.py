@@ -14,11 +14,11 @@ import pytest
 
 import benchmarks.robodojo.contract as eval_contract
 import benchmarks.robodojo.frames as eval_frames
+import openwam.dataloader.robodojo_contract as train_contract
+import openwam.dataloader.utils.poses as train_poses
 from benchmarks.robodojo.prompt_template import (
     format_prompt_for_inference as eval_prompt,
 )
-import openwam.dataloader.robodojo_contract as train_contract
-import openwam.dataloader.utils.poses as train_poses
 from openwam.dataloader.robodojo import calibration_fingerprint
 from openwam.dataloader.transforms.multiview import (
     format_prompt_for_inference as train_prompt,
