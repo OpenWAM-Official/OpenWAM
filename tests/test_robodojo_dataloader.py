@@ -22,6 +22,7 @@ from openwam.dataloader.robodojo import (
 )
 from openwam.dataloader.robodojo_contract import save_calibration
 from openwam.dataloader.transforms.multiview import format_prompt_for_inference
+from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20
 from openwam.dataloader.utils.poses import (
     arms_to_eef20,
@@ -141,6 +142,13 @@ def write_episode(
             elif jpeg_storage == "fixed":
                 width = max(len(value) for value in values)
                 handle.create_dataset(key, data=np.asarray(values, dtype=f"S{width}"))
+            elif jpeg_storage == "padded":
+                width = max(len(value) for value in values)
+                padded = np.zeros((T, width), dtype=np.uint8)
+                for index, value in enumerate(values):
+                    encoded = np.frombuffer(value, dtype=np.uint8)
+                    padded[index, : encoded.size] = encoded
+                handle.create_dataset(key, data=padded)
             else:
                 raise ValueError(jpeg_storage)
         handle.create_dataset("instruction", data=instruction)
@@ -263,7 +271,7 @@ def test_formal_reader_applies_live_calibration_and_state_t_plus_one_targets(
     assert sample["active_arm"] == "both"
 
 
-@pytest.mark.parametrize("jpeg_storage", ["fixed", "vlen"])
+@pytest.mark.parametrize("jpeg_storage", ["fixed", "vlen", "padded"])
 def test_instruction_and_three_camera_l_shape_support(
     tmp_path: Path, jpeg_storage: str
 ):
@@ -291,6 +299,73 @@ def test_instruction_and_three_camera_l_shape_support(
     assert frame[5, 32, 0] > 200
     assert frame[42, 8, 1] > 200
     assert frame[42, 56, 2] > 190
+
+
+def test_color_jitter_is_configured_for_train_only_and_updates_first_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    write_episode(tmp_path, T=3)
+    jitter_config = {
+        "brightness": 0.2,
+        "contrast": 0.2,
+        "saturation": 0.2,
+        "hue": 0.0,
+    }
+    clean = build_single(tmp_path, num_frames=3, color_jitter=None)
+    train = build_single(tmp_path, num_frames=3, color_jitter=jitter_config)
+    validation = build_single(
+        tmp_path,
+        num_frames=3,
+        color_jitter=jitter_config,
+        split="val",
+    )
+
+    assert isinstance(train._color_jitter, VideoColorJitter)
+    assert train._color_jitter.brightness == 0.2
+    assert clean._color_jitter is None
+    assert validation._color_jitter is None
+
+    # Fixed factors make the pixel-level assertion deterministic while still
+    # exercising the production transform on the complete assembled clip.
+    monkeypatch.setattr("random.uniform", lambda lower, upper: upper)
+    clean_sample = clean[0]
+    jittered_sample = train[0]
+    assert any(
+        not np.array_equal(np.asarray(before), np.asarray(after))
+        for before, after in zip(clean_sample["video"], jittered_sample["video"])
+    )
+    assert jittered_sample["first_frame_image"][0] is jittered_sample["video"][0]
+
+
+def test_from_config_threads_color_jitter_to_all_tasks(tmp_path: Path):
+    for task in ("task_a", "task_b"):
+        write_episode(tmp_path, task=task, T=3)
+    config = {
+        "dataset_dir": str(tmp_path),
+        "normalize_mode": None,
+        "num_frames": 3,
+        "height": 48,
+        "width": 64,
+        "video_stride": 1,
+        "unify_action": False,
+        "color_jitter": {
+            "brightness": 0.1,
+            "contrast": 0.2,
+            "saturation": 0.3,
+            "hue": 0.0,
+        },
+    }
+
+    dataset = MultiTaskRoboDojoDataset.from_config(config, split="train")
+    assert all(
+        isinstance(task_dataset._color_jitter, VideoColorJitter)
+        for task_dataset in dataset._sub_datasets
+    )
+    assert all(
+        task_dataset._color_jitter.saturation == 0.3
+        for task_dataset in dataset._sub_datasets
+    )
 
 
 def test_short_and_tail_windows_repeat_last_values_and_mask_padding(tmp_path: Path):
@@ -596,7 +671,21 @@ def test_episode_schema_rejects_non_jpeg_camera_storage_dtype(tmp_path: Path):
             "vision/cam_head/colors",
             data=np.arange(3, dtype=np.uint8),
         )
-    with pytest.raises(ValueError, match=r"fixed byte-string.*vlen uint8"):
+    with pytest.raises(ValueError, match=r"fixed byte-string.*vlen/padded uint8"):
+        build_single(tmp_path, num_frames=3)
+
+
+def test_episode_schema_rejects_two_dimensional_non_uint8_camera_storage(
+    tmp_path: Path,
+):
+    path = write_episode(tmp_path, T=3)
+    with h5py.File(path, "a") as handle:
+        del handle["vision/cam_head/colors"]
+        handle.create_dataset(
+            "vision/cam_head/colors",
+            data=np.zeros((3, 32), dtype=np.int16),
+        )
+    with pytest.raises(ValueError, match=r"fixed/vlen JPEG entries.*padded uint8"):
         build_single(tmp_path, num_frames=3)
 
 

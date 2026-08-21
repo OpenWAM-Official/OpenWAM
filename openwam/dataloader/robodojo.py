@@ -51,6 +51,7 @@ from openwam.dataloader.transforms.normalize import (
     YAML_TO_NORM_MODE,
     Normalizer,
 )
+from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, STAT_KEYS
 from openwam.dataloader.utils.poses import (
     arms_to_eef20,
@@ -236,9 +237,15 @@ def validate_robodojo_episode(path: str | Path) -> dict[str, Any]:
         for key in _CAMERA_DATASETS.values():
             dataset = handle[key]
             shape = dataset.shape
-            if len(shape) != 1:
+            is_padded_uint8 = (
+                len(shape) == 2
+                and shape[1] > 0
+                and dataset.dtype == np.dtype(np.uint8)
+            )
+            if len(shape) != 1 and not is_padded_uint8:
                 raise ValueError(
-                    f"{episode_path}:{key} must have exact shape (T,), got {shape}"
+                    f"{episode_path}:{key} must have shape (T,) for fixed/vlen "
+                    f"JPEG entries or (T, max_jpeg_bytes) for padded uint8, got {shape}"
                 )
             variable_dtype = h5py.check_dtype(vlen=dataset.dtype)
             is_fixed_bytes = dataset.dtype.kind == "S"
@@ -246,10 +253,10 @@ def validate_robodojo_episode(path: str | Path) -> dict[str, Any]:
                 variable_dtype is not None
                 and np.dtype(variable_dtype) == np.dtype(np.uint8)
             )
-            if not is_fixed_bytes and not is_vlen_uint8:
+            if not is_fixed_bytes and not is_vlen_uint8 and not is_padded_uint8:
                 raise ValueError(
                     f"{episode_path}:{key} must use fixed byte-string dtype or "
-                    f"HDF5 vlen uint8 storage, got dtype {dataset.dtype}"
+                    f"HDF5 vlen/padded uint8 storage, got dtype {dataset.dtype}"
                 )
 
         lengths = {
@@ -312,7 +319,7 @@ def _jpeg_bytes(value: Any) -> bytes:
     if isinstance(value, np.ndarray):
         if value.dtype != np.dtype(np.uint8) or value.ndim != 1:
             raise ValueError(
-                "RoboDojo variable-length JPEG entries must be one-dimensional uint8"
+                "RoboDojo vlen/padded JPEG entries must be one-dimensional uint8"
             )
         return value.tobytes()
     if isinstance(value, np.bytes_):
@@ -321,7 +328,7 @@ def _jpeg_bytes(value: Any) -> bytes:
         return bytes(value)
     raise ValueError(
         f"unsupported RoboDojo JPEG entry type {type(value).__name__}; "
-        "expected fixed bytes or variable-length uint8"
+        "expected fixed bytes or vlen/padded uint8"
     )
 
 
@@ -550,6 +557,7 @@ class RoboDojoDataset(BaseDataset):
         target_camera: str = "cam_head",
         unify_action: bool = True,
         unify_action_map: Any = None,
+        color_jitter: Any = None,
     ):
         super().__init__()
         if action_mode != DEPLOY_ACTION_MODE:
@@ -590,6 +598,23 @@ class RoboDojoDataset(BaseDataset):
         self.num_video_frames = len(self._video_sample_indices)
         self.multiview = bool(multiview)
         self.target_camera = str(target_camera)
+
+        # Apply one sampled set of color factors to the assembled clip.  The
+        # transform is intentionally train-only so validation/deployment input
+        # remains unchanged.
+        self._color_jitter = None
+        if color_jitter and split == "train":
+            jitter_get = (
+                color_jitter.get
+                if hasattr(color_jitter, "get")
+                else lambda key, default: default
+            )
+            self._color_jitter = VideoColorJitter(
+                brightness=float(jitter_get("brightness", 0.2)),
+                contrast=float(jitter_get("contrast", 0.2)),
+                saturation=float(jitter_get("saturation", 0.2)),
+                hue=float(jitter_get("hue", 0.0)),
+            )
 
         if camera_layout is None:
             camera_layout = DEFAULT_ROBODOJO_CAMERA_LAYOUT
@@ -875,6 +900,11 @@ class RoboDojoDataset(BaseDataset):
                 axis=0,
             )
 
+        if self._color_jitter is not None:
+            sampled_video = self._color_jitter.apply(
+                {"video": sampled_video}
+            )["video"]
+
         # Binding order: raw EEF20 -> normalize -> unified 80-D scatter.
         transformed = states
         if self._normalizer is not None:
@@ -983,6 +1013,7 @@ class MultiTaskRoboDojoDataset(BaseDataset):
             target_camera=_config_get(config, "target_camera", "cam_head"),
             unify_action=bool(_config_get(config, "unify_action", True)),
             unify_action_map=_config_get(config, "unify_action_map", None),
+            color_jitter=_config_get(config, "color_jitter", None),
         )
 
     def __init__(

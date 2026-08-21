@@ -36,3 +36,12 @@ width: 320
 multiview: true
 camera_layout: [cam_head, cam_left_wrist, cam_right_wrist]
 target_camera: cam_head
+
+# Load-time color jitter, using the same random factors across every frame in
+# one clip for temporal consistency. Applied to the assembled view on train
+# only; set to null or false to disable.
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
