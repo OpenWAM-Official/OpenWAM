@@ -3,6 +3,7 @@ import json
 import os
 import random
 import subprocess
+from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
@@ -133,6 +134,37 @@ def test_libero_single_eval_resolves_suite_specific_max_steps(monkeypatch):
     assert single_eval._resolve_max_steps(cfg, "libero_10") == 700
 
 
+
+
+
+
+def test_libero_ordinary_protocol_uses_requested_eval_defaults():
+    repo_root = Path(__file__).resolve().parents[1]
+    policy = yaml.safe_load((repo_root / "benchmarks" / "libero" / "policy_config.yml").read_text(encoding="utf-8"))
+
+    assert policy["max_steps"] == 600
+    assert policy["num_trials"] == 50
+    assert policy["max_steps_by_suite"] == {
+        "libero_spatial": 600,
+        "libero_object": 600,
+        "libero_goal": 600,
+        "libero_10": 700,
+    }
+    assert policy["seed"] == 42
+    assert policy["rng_mode"] == "environment"
+    assert policy["reseed_each_trial"] is False
+    assert policy["settle_steps"] == 30
+    assert policy["settle_action"] == [0, 0, 0, 0, 0, 0, -1]
+    assert policy["camera_height"] == 256
+    assert policy["camera_width"] == 256
+
+    full_eval = _load_full_eval_module(repo_root)
+    assert full_eval.LIBERO_PROTOCOL_VERSION == "openwam-libero-seed42-settle30-gripm1-h10-v1"
+    args = full_eval._build_parser().parse_args([])
+    assert args.inference_mode == "sync"
+    assert args.inference_horizon == 10
+
+
 def test_libero_full_eval_maps_long_and_balances_all_tasks():
     repo_root = Path(__file__).resolve().parents[1]
     full_eval = _load_full_eval_module(repo_root)
@@ -170,10 +202,7 @@ def test_libero_full_eval_sampling_matches_imagewam_per_suite_algorithm():
         sample_ratio=0.2,
         sample_seed=42,
     )
-    actual = {
-        suite: [job.task_id for job in jobs if job.suite == suite]
-        for suite in suites
-    }
+    actual = {suite: [job.task_id for job in jobs if job.suite == suite] for suite in suites}
     expected = {}
     for suite in suites:
         sample_count = max(1, int(np.ceil(task_counts[suite] * 0.2)))
@@ -200,16 +229,65 @@ def test_libero_full_eval_uses_default_mujoco_version():
     )
     assert full_eval.DEFAULT_CKPT_NAME == "checkpoint_step_10850.safetensors"
     assert full_eval.DEFAULT_LIBERO_PATH == Path("/path/to/LIBERO")
-    assert full_eval.DEFAULT_LIBERO_PYTHON == Path(
-        "/path/to/miniconda3/envs/libero/bin/python"
+    assert full_eval.DEFAULT_LIBERO_PYTHON == Path("/path/to/miniconda3/envs/libero/bin/python")
+
+    environment = yaml.safe_load((repo_root / "benchmarks" / "libero" / "environment.yml").read_text(encoding="utf-8"))
+    pip_dependencies = environment["dependencies"][-1]["pip"]
+    assert "numpy==1.22.4" in pip_dependencies
+    assert "opencv-python==4.6.0.66" in pip_dependencies
+    assert "robomimic==0.2.0" in pip_dependencies
+    assert "robosuite==1.4.0" in pip_dependencies
+    assert "bddl==1.0.1" in pip_dependencies
+    assert "mujoco==3.3.2" in pip_dependencies
+
+
+
+
+
+
+def test_libero_resume_rejects_protocol_mismatch(tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    full_eval = _load_full_eval_module(repo_root)
+    signature = {
+        "protocol_version": full_eval.LIBERO_PROTOCOL_VERSION,
+        "policy_config_sha256": "official-config",
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps({"resume_signature": signature}), encoding="utf-8")
+
+    full_eval._validate_resume_signature(tmp_path, signature)
+    with pytest.raises(RuntimeError, match="different evaluation protocol"):
+        full_eval._validate_resume_signature(
+            tmp_path,
+            signature | {"policy_config_sha256": "changed-config"},
+        )
+
+    legacy_output = tmp_path / "legacy"
+    legacy_output.mkdir()
+    (legacy_output / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="legacy evaluation"):
+        full_eval._validate_resume_signature(legacy_output, signature)
+
+
+def test_libero_ordinary_launcher_enforces_pinned_protocol():
+    repo_root = Path(__file__).resolve().parents[1]
+    full_eval = _load_full_eval_module(repo_root)
+    args = Namespace(
+        
+        policy_config=repo_root / "benchmarks" / "libero" / "policy_config.yml",
+        num_trials=50,
+        trial_start=0,
+        seed=None,
+        smoke=False,
+        inference_mode="sync",
+        inference_horizon=10,
+        denoise_mode="sync",
+        denoise_steps=10,
     )
 
-    environment = yaml.safe_load(
-        (repo_root / "benchmarks" / "libero" / "environment.yml").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert "mujoco==3.3.2" in environment["dependencies"][-1]["pip"]
+    full_eval._validate_ordinary_protocol(args)
+    args.inference_horizon = 32
+    with pytest.raises(ValueError, match="horizon 10"):
+        full_eval._validate_ordinary_protocol(args)
 
 
 

@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
-INFERENCE_HORIZON="${INFERENCE_HORIZON:-32}"
+INFERENCE_HORIZON="${INFERENCE_HORIZON:-10}"
 RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/outputs/libero/10epoch_horizon${INFERENCE_HORIZON}_${RUN_TAG}}"
 SERVER_PYTHON="${SERVER_PYTHON:-/usr/bin/python3.12}"
 LIBERO_PYTHON="${LIBERO_PYTHON:-/path/to/miniconda3/envs/libero/bin/python}"

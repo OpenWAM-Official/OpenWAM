@@ -11,6 +11,13 @@ LIBERO_REMOTE="https://github.com/Lifelong-Robot-Learning/LIBERO.git"
 LIBERO_COMMIT="8f1084e3132a39270c3a13ebe37270a43ece2a01"
 ENV_FILE="${SCRIPT_DIR}/environment.yml"
 LIBERO_PATCH="${SCRIPT_DIR}/patches/libero-pytorch-load.patch"
+UPSTREAM_REQUIREMENTS="${LIBERO_PATH}/requirements.txt"
+
+# Do not inherit machine-global pip indexes: the environment file declares the
+# only extra index it needs (PyTorch CPU wheels).
+export PIP_CONFIG_FILE=/dev/null
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_PROGRESS_BAR=off
 
 [[ -x "${CONDA_BIN}" ]] || {
     echo "[ERROR] Miniconda not found at ${CONDA_BIN}" >&2
@@ -39,25 +46,47 @@ else
 fi
 
 if [[ -x "${ENV_PREFIX}/bin/python" ]]; then
-    "${CONDA_BIN}" env update --prefix "${ENV_PREFIX}" --file "${ENV_FILE}"
+    "${CONDA_BIN}" --no-plugins env update --solver classic \
+        --prefix "${ENV_PREFIX}" --file "${ENV_FILE}"
 else
-    "${CONDA_BIN}" env create --prefix "${ENV_PREFIX}" --file "${ENV_FILE}"
+    "${CONDA_BIN}" --no-plugins env create --solver classic \
+        --prefix "${ENV_PREFIX}" --file "${ENV_FILE}"
 fi
 
+"${ENV_PREFIX}/bin/python" -m pip install --requirement "${UPSTREAM_REQUIREMENTS}"
 "${ENV_PREFIX}/bin/python" -m pip install --no-deps --editable "${LIBERO_PATH}"
 # LIBERO's setup.py uses a namespace-style outer ``libero/`` directory that
 # modern PEP 660 editable discovery leaves unmapped. Pin the checkout root on
 # sys.path explicitly so ``import libero`` remains valid after a fresh install.
 site_packages="$("${ENV_PREFIX}/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
 printf '%s\n' "${LIBERO_PATH}" > "${site_packages}/libero_source.pth"
+"${ENV_PREFIX}/bin/python" -m pip check
 "${ENV_PREFIX}/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import libero
 import mujoco
 
 assert mujoco.__version__ == "3.3.2", mujoco.__version__
-assert metadata.version("robosuite") == "1.4.0"
-assert metadata.version("bddl") == "1.0.1"
+expected = {
+    "hydra-core": "1.2.0",
+    "numpy": "1.22.4",
+    "wandb": "0.13.1",
+    "easydict": "1.9",
+    "transformers": "4.21.1",
+    "opencv-python": "4.6.0.66",
+    "robomimic": "0.2.0",
+    "einops": "0.4.1",
+    "thop": "0.1.1-2209072238",
+    "robosuite": "1.4.0",
+    "bddl": "1.0.1",
+    "future": "0.18.2",
+    "matplotlib": "3.5.3",
+    "cloudpickle": "2.1.0",
+    "gym": "0.25.2",
+}
+for package, required in expected.items():
+    actual = metadata.version(package)
+    assert actual == required, f"{package}: expected {required}, found {actual}"
 assert any(path.endswith("/LIBERO/libero") for path in libero.__path__), list(libero.__path__)
-print("LIBERO evaluation environment ready: MuJoCo 3.3.2")
+print("LIBERO evaluation environment ready with official requirements and MuJoCo 3.3.2")
 PY

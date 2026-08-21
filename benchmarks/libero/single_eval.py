@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -128,6 +129,15 @@ def _parse_settle_action(value, action_dim: int) -> np.ndarray:
     if not np.all(np.isfinite(action)):
         raise ValueError(f"settle_action values must be finite, got {value!r}")
     return action
+
+
+
+
+def _resolve_rng_mode(cfg: dict) -> str:
+    mode = cfg.get("rng_mode", "environment")
+    if mode != "environment":
+        raise ValueError(f"rng_mode must be 'environment', got {mode!r}")
+    return mode
 
 
 def _transform_video_frame(obs: dict, key: str, image_transform: str) -> np.ndarray:
@@ -255,8 +265,13 @@ def _make_env(task, cfg: dict):
     )
 
 
+
+
 def run_eval(cfg: dict) -> int:
     _write_libero_config()
+
+    seed = int(cfg.get("seed", 42))
+    rng_mode = _resolve_rng_mode(cfg)
 
     from libero.libero import benchmark
 
@@ -276,7 +291,6 @@ def run_eval(cfg: dict) -> int:
     settle_steps = int(cfg.get("settle_steps", 10))
     action_dim = int(cfg.get("action_dim", 7))
     settle_action = _parse_settle_action(cfg.get("settle_action"), action_dim)
-    seed = int(cfg.get("seed", 42))
     reseed_each_trial = _require_bool(cfg.get("reseed_each_trial", False), "reseed_each_trial")
     fail_on_incomplete = _require_bool(cfg.get("fail_on_incomplete", False), "fail_on_incomplete")
     save_videos = _require_bool(cfg.get("save_videos", False), "save_videos")
@@ -291,14 +305,14 @@ def run_eval(cfg: dict) -> int:
         print(f"[libero-eval] video/output directory={run_dir}")
     init_states = task_suite.get_task_init_states(task_id)
     env = _make_env(task, cfg)
-    if not reseed_each_trial:
+    if rng_mode == "environment" and not reseed_each_trial:
         # FastWAM seeds the environment once before the episode loop. Repeated
         # reset()/set_init_state() calls then advance the same simulator RNG.
         env.seed(seed)
     print(
         f"[libero-eval] trials={trial_start}:{trial_stop} count={num_trials} max_steps={max_steps} "
         f"settle_steps={settle_steps} seed={seed} "
-        f"reseed_each_trial={reseed_each_trial}"
+        f"rng_mode={rng_mode} reseed_each_trial={reseed_each_trial}"
     )
 
     policy = OpenWAMLiberoPolicy(
@@ -388,7 +402,9 @@ def run_eval(cfg: dict) -> int:
             "max_steps": max_steps,
             "settle_steps": settle_steps,
             "seed": seed,
+            "rng_mode": rng_mode,
             "reseed_each_trial": reseed_each_trial,
+            "policy_config_sha256": cfg.get("policy_config_sha256"),
             "camera_height": int(cfg.get("camera_height", 128)),
             "camera_width": int(cfg.get("camera_width", 128)),
             "trials": trial_results,
@@ -413,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = _load_config(args.config)
+    cfg["policy_config_sha256"] = hashlib.sha256(args.config.read_bytes()).hexdigest()
     for key in [
         "host",
         "port",

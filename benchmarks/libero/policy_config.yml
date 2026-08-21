@@ -15,15 +15,16 @@ request_timeout: 300
 # Benchmark task selection.
 suite: libero_spatial
 task_id: 0
-num_trials: 1
+num_trials: 50
 max_steps: 600
 max_steps_by_suite:
   libero_spatial: 600
   libero_object: 600
   libero_goal: 600
   libero_10: 700
-# Match FastWAM: seed the task environment once, before the trial loop.
+# Seed the task environment once before the trial loop.
 seed: 42
+rng_mode: environment
 reseed_each_trial: false
 fail_on_incomplete: false
 

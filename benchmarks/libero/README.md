@@ -5,8 +5,9 @@ OpenWAM policy server, mirroring the RoboTwin benchmark pattern: the benchmark
 process owns simulation and observations, while OpenWAM serving stays in the
 main model environment.
 
-Use official LIBERO assets and datasets. Ordinary LIBERO
-evaluation is pinned to the validated MuJoCo 3.3.2 environment described below.
+Use official LIBERO assets and datasets. Ordinary LIBERO mirrors
+the official direct dependency versions and pins the validated MuJoCo 3.3.2
+resolution described below.
 Because LIBERO both install the top-level package name
 `libero`, keep them in separate Python environments when using both.
 
@@ -27,9 +28,14 @@ Because LIBERO both install the top-level package name
 
 ## Prerequisites
 
-Ordinary LIBERO is fixed to the following tested installation:
+Ordinary LIBERO is fixed to the following tested installation. Its direct
+dependencies mirror the official `requirements.txt`; MuJoCo 3.3.2 is retained
+as the compatible resolution for the unbounded `robosuite==1.4.0` dependency:
 
-- Python 3.11.15
+- Python 3.10 (required by the official `numpy==1.22.4` pin)
+- NumPy 1.22.4
+- OpenCV 4.6.0.66
+- robomimic 0.2.0
 - MuJoCo 3.3.2
 - robosuite 1.4.0
 - bddl 1.0.1
@@ -47,12 +53,17 @@ The setup script uses `environment.yml`, installs LIBERO editable,
 and applies the included compatibility patch needed by PyTorch 2.6 and newer.
 After installation, download the official assets/datasets required by LIBERO.
 
+Its environment mirrors the versions in the official `requirements.txt`. The official `robosuite==1.4.0` requirement leaves MuJoCo unbounded above, but current MuJoCo 3.11 is incompatible with it; the environment therefore locks the known-good 3.3.2 resolution. The resolved version is also recorded in every run manifest:
 
-
-- Python 3.11.15
-- MuJoCo 3.3.2
+- Python 3.10 (required by the official `numpy==1.22.4` pin)
+- NumPy 1.22.4
+- OpenCV 4.6.0.66
+- robomimic 0.2.0
 - robosuite 1.4.0
 - bddl 1.0.1
+- MuJoCo 3.3.2 (compatibility resolution for an unpinned transitive dependency)
+- wand 0.7.2 and scikit-image 0.19.3 (reproducible resolutions for the
+  two packages left unpinned by `extra_requirements.txt`)
 
 
 On a new machine, install the required rendering/archive libraries once and
@@ -166,8 +177,6 @@ Important defaults:
 - `image_transform: rotate_180` matches the standard LIBERO/OpenVLA convention
   for robosuite offscreen images. Set it to `none` only for checkpoints trained
   on raw unrotated LIBERO frames.
-- `settle_steps: 30` runs the configured settle action after `set_init_state()` before querying
-  the policy, allowing objects to settle into a physical state.
 - `fail_on_incomplete: false` means the script exits successfully after a
   completed benchmark run even when success rate is below 100%. Set it to
   `true` for smoke tests that should fail unless every trial succeeds.
@@ -176,24 +185,23 @@ Important defaults:
 
 The following command starts two independent copies of the 10-epoch policy on
 each GPU (ports 8920–8935). Every task is evaluated by one client/environment
-that runs trials 0–49 continuously. The two replicas on a GPU receive disjoint
-task queues, so they evaluate different tasks concurrently without splitting a
-task's RNG stream. The 40 tasks from LIBERO-SPATIAL, LIBERO-GOAL,
-LIBERO-OBJECT, and LIBERO-LONG (`libero_10` in the Python API) are distributed
-evenly, five tasks per GPU (three on one replica and two on the other). All
-videos, client/server logs, a run manifest, `summary.csv`, and `summary.json`
-are retained under the printed run directory.
+that runs trials 0–49 continuously. Replicas pull whole tasks from one dynamic
+queue, so an idle replica immediately receives the next task without splitting
+a task's RNG stream. A failed task is returned to the queue up to three times;
+an endpoint is retired after three consecutive client failures. All videos,
+client/server logs, a run manifest, `summary.csv`, and `summary.json` are
+retained under the printed run directory.
 
 ```bash
 /usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py
 ```
 
 The launcher requires MuJoCo 3.3.2 from the default LIBERO environment,
-synchronous inference, and an inference horizon of 32. The
+synchronous inference, and an inference horizon of 10. The
 default output root is the persistent data path
 `/path/to/OpenWAM/outputs/libero`. Useful preflight and
-recovery commands are shown below. The default rollout limit is 600 policy
-steps for SPATIAL, OBJECT, and GOAL, and 700 for LONG (`libero_10`).
+recovery commands are shown below. The ordinary-LIBERO rollout limit is 600
+policy steps for SPATIAL, GOAL, and OBJECT, and 700 for LONG (`libero_10`).
 
 ```bash
 # Enumerate and display the complete assignment without starting processes.
@@ -202,7 +210,8 @@ steps for SPATIAL, OBJECT, and GOAL, and 700 for LONG (`libero_10`).
 # One rollout of spatial task 0; only its assigned policy replica is started.
 /usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py --smoke --gpus 0
 
-# Resume an interrupted output directory; complete 50-trial task runs are skipped.
+# Resume an interrupted output directory. Completed task/trial ranges are preserved,
+# and only unfinished jobs are rebalanced across the available workers.
 /usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py \
   --output-dir /path/to/existing/run
 
@@ -220,7 +229,7 @@ Use `run_10epoch.sh` inside tmux for a persistent full evaluation:
 tmux new-session -d -s libero_10ep \
   "cd /path/to/OpenWAM && bash benchmarks/libero/run_10epoch.sh"
 
-# Override the sync/async action-execution horizon for this run.
+# The wrapper defaults to the pinned synchronous horizon of 10.
 tmux new-session -d -s libero_10ep_h10 \
   "cd /path/to/OpenWAM && INFERENCE_HORIZON=10 \
    bash benchmarks/libero/run_10epoch.sh"
