@@ -10,6 +10,7 @@ from scipy.spatial.transform import Rotation
 
 from benchmarks.robocasa365 import openwam2robocasa365_interface as adapter
 from benchmarks.utils import transport
+from openwam.deploy.obs_preprocess import ObsPreprocessor
 
 
 def _rot6d(matrix: np.ndarray) -> np.ndarray:
@@ -25,6 +26,7 @@ def _obs(*, eef_position=(0.1, -0.2, 0.4), eef_quat=(0, 0, 0, 1)) -> dict:
         "state.gripper_qpos": np.array([0.04, -0.04], np.float32),
         "video.robot0_agentview_left": np.zeros((16, 16, 3), np.uint8),
         "video.robot0_eye_in_hand": np.zeros((16, 16, 3), np.uint8),
+        "video.robot0_agentview_right": np.full((16, 16, 3), 255, np.uint8),
     }
 
 
@@ -88,10 +90,50 @@ def test_action15_roundtrip_uses_current_state_and_preserves_base_torso_mode():
     sent_images = client.payloads[0]["images"]
     head = Image.open(io.BytesIO(base64.b64decode(sent_images["head_camera"])))
     wrist = Image.open(io.BytesIO(base64.b64decode(sent_images["left_wrist_camera"])))
-    assert head.format == wrist.format == "PNG"
+    right = Image.open(io.BytesIO(base64.b64decode(sent_images["right_wrist_camera"])))
+    assert head.format == wrist.format == right.format == "PNG"
     assert head.size == (320, 256)
     assert wrist.size == (160, 128)
-    assert sent_images["right_wrist_camera"] is None
+    assert right.size == (160, 128)
+    np.testing.assert_array_equal(np.asarray(right)[0, 0], [255, 255, 255])
+
+
+def test_default_right_agentview_is_required_when_configured():
+    obs = _obs()
+    del obs[adapter.DEFAULT_RIGHT_CAMERA_KEY]
+    policy = adapter.OpenWAMRoboCasa365Policy(
+        _client=_Client(_action15(obs)), osc_pos_scale=0.05, osc_rot_scale=0.5
+    )
+    with pytest.raises(KeyError, match=adapter.DEFAULT_RIGHT_CAMERA_KEY):
+        policy.act(obs, "prompt")
+
+
+def test_client_server_path_places_right_agentview_in_bottom_right():
+    obs = _obs()
+    payload = adapter.build_obs_payload(
+        obs,
+        head_camera_key=adapter.DEFAULT_HEAD_CAMERA_KEY,
+        left_wrist_camera_key=adapter.DEFAULT_LEFT_WRIST_CAMERA_KEY,
+        right_wrist_camera_key=adapter.DEFAULT_RIGHT_CAMERA_KEY,
+        image_transform="none",
+        state_keys=adapter.DEFAULT_STATE_KEYS,
+        prompt="prompt",
+    )
+    processed = ObsPreprocessor(
+        multiview=True,
+        camera_layout=[
+            "observation.images.robot0_agentview_left",
+            "observation.images.robot0_eye_in_hand",
+            "observation.images.robot0_agentview_right",
+        ],
+        img_height=384,
+        img_width=320,
+    ).preprocess(payload)
+    image = np.asarray(processed["image"])
+    assert image.shape == (384, 320, 3)
+    assert image[:256].max() == 0
+    assert image[256:, :160].max() == 0
+    assert image[256:, 160:].min() == 255
 
 
 def test_base_mode_still_anchors_to_current_observation_not_previous_target():

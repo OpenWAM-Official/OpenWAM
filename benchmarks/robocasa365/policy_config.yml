@@ -13,7 +13,9 @@ seed: 0
 
 head_camera_key: video.robot0_agentview_left
 left_wrist_camera_key: video.robot0_eye_in_hand
-right_wrist_camera_key: null
+# This is an agent view, but it is transported in OpenWAM's fixed bottom-right
+# "right_wrist_camera" image slot to match the training L-shape layout.
+right_wrist_camera_key: video.robot0_agentview_right
 image_transform: none
 
 # Used for debug breakdown. The transmitted policy state is always compact 19-D:

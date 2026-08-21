@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import pytest
 from PIL import Image
 
 import openwam.dataloader.robocasa365 as rc
@@ -18,6 +19,7 @@ EP_LENGTH = 40
 PROMPT = "Open the right drawer."
 HEAD = rc.HEAD_CAMERA
 WRIST = rc.WRIST_CAMERA
+RIGHT = rc.RIGHT_CAMERA
 
 
 def _stats(dim: int) -> dict:
@@ -46,6 +48,9 @@ def _make_repo(root: Path, tasks=("OpenDrawer",), episodes_per_task: int = 2) ->
         "features": {
             "observation.state": {"dtype": "float32", "shape": [STATE_DIM]},
             "action": {"dtype": "float32", "shape": [ACTION_DIM]},
+            HEAD: {"dtype": "video", "shape": [256, 256, 3]},
+            WRIST: {"dtype": "video", "shape": [256, 256, 3]},
+            RIGHT: {"dtype": "video", "shape": [256, 256, 3]},
         },
     }
     (root / "meta" / "info.json").write_text(json.dumps(info), encoding="utf-8")
@@ -82,7 +87,7 @@ def _make_repo(root: Path, tasks=("OpenDrawer",), episodes_per_task: int = 2) ->
                 "source_prefix": f"pretrain/atomic/{task}/20250820",
                 "source_episode_index": episode_index,
             }
-            for camera in (HEAD, WRIST):
+            for camera in (HEAD, WRIST, RIGHT):
                 row[f"videos/{camera}/chunk_index"] = 0
                 row[f"videos/{camera}/file_index"] = 0
                 row[f"videos/{camera}/from_timestamp"] = offset / 20
@@ -94,7 +99,7 @@ def _make_repo(root: Path, tasks=("OpenDrawer",), episodes_per_task: int = 2) ->
         root / "data" / "chunk-000" / "file-000.parquet"
     )
     pd.DataFrame(episode_rows).to_parquet(root / "meta" / "episodes" / "chunk-000" / "file-000.parquet")
-    for camera in (HEAD, WRIST):
+    for camera in (HEAD, WRIST, RIGHT):
         path = root / "videos" / camera / "chunk-000"
         path.mkdir(parents=True)
         (path / "file-000.mp4").write_bytes(b"")
@@ -103,8 +108,14 @@ def _make_repo(root: Path, tasks=("OpenDrawer",), episodes_per_task: int = 2) ->
 
 @contextmanager
 def _mock_video():
-    def decode(_path, frame_indices, height, width):
-        return [Image.new("RGB", (width, height), (0, 0, 0)) for _ in frame_indices]
+    def decode(path, frame_indices, height, width):
+        if RIGHT in path:
+            color = (0, 0, 255)
+        elif WRIST in path:
+            color = (0, 255, 0)
+        else:
+            color = (255, 0, 0)
+        return [Image.new("RGB", (width, height), color) for _ in frame_indices]
 
     with patch.object(rc, "decode_video_frames", side_effect=decode):
         yield
@@ -189,6 +200,10 @@ def test_prompt_and_video_contract(tmp_path):
     assert sample["prompt"] == PROMPT
     assert len(sample["video"]) == 9
     assert sample["video"][0].size == (320, 384)
+    pixels = np.asarray(sample["video"][0])
+    np.testing.assert_array_equal(pixels[0, 0], [255, 0, 0])
+    np.testing.assert_array_equal(pixels[300, 0], [0, 255, 0])
+    np.testing.assert_array_equal(pixels[300, 319], [0, 0, 255])
 
 
 def test_rejects_native_unconverted_schema(tmp_path):
@@ -204,3 +219,13 @@ def test_rejects_native_unconverted_schema(tmp_path):
         assert "state19/action15" in str(error)
     else:
         raise AssertionError("native schema should be rejected")
+
+
+def test_multiview_rejects_dataset_without_right_agentview(tmp_path):
+    root = _make_repo(tmp_path / "repo")
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    del info["features"][RIGHT]
+    info_path.write_text(json.dumps(info))
+    with pytest.raises(ValueError, match="robot0_agentview_right"):
+        RoboCasa365Dataset(str(root), normalize_mode=None, multiview=True)

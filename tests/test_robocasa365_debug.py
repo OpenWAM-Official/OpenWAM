@@ -40,8 +40,8 @@ def _make_obs():
 
 
 def _payload(obs, *, right_wrist_camera_key="video.robot0_agentview_right"):
-    # Test fixture fills ALL 3 slots to exercise the full dump path; the production
-    # mapping leaves right_wrist=None (see test_dump_obs_debug_missing_wrist_writes_stub).
+    # The production mapping fills all three slots. Passing None explicitly still
+    # exercises the supported legacy/debug black-slot path below.
     return adapter.build_obs_payload(
         obs,
         head_camera_key="video.robot0_agentview_left",
@@ -119,5 +119,5 @@ def test_dump_obs_debug_missing_wrist_writes_stub(tmp_path):
     assert (out / "right_missing.txt").is_file()
     meta = json.loads((out / "meta.json").read_text())
     assert meta["image_slots"]["right_wrist_camera"] is None
-    assert meta["checks"]["head_and_wrist_present"] is True  # head + wrist present; right_wrist is the black placeholder
+    assert meta["checks"]["head_and_wrist_present"] is True  # head + left wrist remain present
     assert "action_dim_is_12" not in meta["checks"]  # action omitted

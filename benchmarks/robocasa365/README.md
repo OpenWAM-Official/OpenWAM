@@ -41,9 +41,11 @@ in every source dataset. They are configured in `policy_config.yml`.
 
 - `robot0_agentview_left` is sent as the head camera;
 - `robot0_eye_in_hand` is sent as the left wrist camera;
-- the unused right-wrist slot is black-filled;
+- `robot0_agentview_right` is sent through the fixed `right_wrist_camera`
+  transport field and fills the bottom-right slot;
 - eval reproduces the unchanged training reader's LANCZOS slot resize
-  (`320x256` head, `160x128` wrist) and transports both views as lossless PNG;
+  (`320x256` head, `160x128` bottom views) and transports all three views as
+  lossless PNG;
 - the native task instruction is sent unchanged, with no prompt prefix or
   suffix, matching the training dataloader.
 

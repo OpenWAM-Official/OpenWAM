@@ -46,6 +46,9 @@ ACTION_DIM = 12
 POLICY_ACTION_DIM = 15
 STATE_DIM = 19
 REPRESENTATION = "robocasa365"
+DEFAULT_HEAD_CAMERA_KEY = "video.robot0_agentview_left"
+DEFAULT_LEFT_WRIST_CAMERA_KEY = "video.robot0_eye_in_hand"
+DEFAULT_RIGHT_CAMERA_KEY = "video.robot0_agentview_right"
 
 DEFAULT_STATE_KEYS = [
     "state.base_position",
@@ -132,7 +135,14 @@ def build_obs_payload(
     return build_payload(
         head=encode(head_camera_key, required=True, slot="head_camera"),
         left_wrist=encode(left_wrist_camera_key, required=False, slot="left_wrist_camera"),
-        right_wrist=encode(right_wrist_camera_key, required=False, slot="right_wrist_camera"),
+        # The transport calls this fixed L-shape slot "right_wrist_camera",
+        # but RoboCasa365 intentionally fills it with robot0_agentview_right.
+        # An explicit None still permits the legacy black-slot behavior.
+        right_wrist=encode(
+            right_wrist_camera_key,
+            required=bool(right_wrist_camera_key),
+            slot="right_wrist_camera",
+        ),
         prompt=prompt,
         state=assemble_state19_proprio(obs),
     )
@@ -236,9 +246,9 @@ class OpenWAMRoboCasa365Policy:
         host: str = "127.0.0.1",
         port: int = 8848,
         request_timeout: int = 300,
-        head_camera_key: str = "video.robot0_agentview_left",
-        left_wrist_camera_key: Optional[str] = "video.robot0_eye_in_hand",
-        right_wrist_camera_key: Optional[str] = None,
+        head_camera_key: str = DEFAULT_HEAD_CAMERA_KEY,
+        left_wrist_camera_key: Optional[str] = DEFAULT_LEFT_WRIST_CAMERA_KEY,
+        right_wrist_camera_key: Optional[str] = DEFAULT_RIGHT_CAMERA_KEY,
         image_transform: str = "none",
         state_keys: Optional[list] = None,
         state_dim: Optional[int] = None,
@@ -352,6 +362,9 @@ class OpenWAMRoboCasa365Policy:
 __all__ = [
     "ACTION_DIM",
     "ACTION_SLICES",
+    "DEFAULT_HEAD_CAMERA_KEY",
+    "DEFAULT_LEFT_WRIST_CAMERA_KEY",
+    "DEFAULT_RIGHT_CAMERA_KEY",
     "DEFAULT_STATE_KEYS",
     "OpenWAMRoboCasa365Policy",
     "POLICY_ACTION_DIM",

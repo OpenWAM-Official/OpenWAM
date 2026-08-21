@@ -20,6 +20,9 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from openwam2robocasa365_interface import (  # noqa: E402
+    DEFAULT_HEAD_CAMERA_KEY,
+    DEFAULT_LEFT_WRIST_CAMERA_KEY,
+    DEFAULT_RIGHT_CAMERA_KEY,
     DEFAULT_STATE_KEYS,
     OpenWAMRoboCasa365Policy,
 )
@@ -113,12 +116,12 @@ def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
         host=cfg.get("host", "127.0.0.1"),
         port=int(cfg.get("port", 8848)),
         request_timeout=int(cfg.get("request_timeout", 300)),
-        head_camera_key=cfg.get("head_camera_key", "video.robot0_agentview_left"),
+        head_camera_key=cfg.get("head_camera_key", DEFAULT_HEAD_CAMERA_KEY),
         left_wrist_camera_key=_normalize_optional(
-            cfg.get("left_wrist_camera_key", "video.robot0_eye_in_hand")
+            cfg.get("left_wrist_camera_key", DEFAULT_LEFT_WRIST_CAMERA_KEY)
         ),
         right_wrist_camera_key=_normalize_optional(
-            cfg.get("right_wrist_camera_key")  # default null: server black-fills the unused 2nd-wrist slot
+            cfg.get("right_wrist_camera_key", DEFAULT_RIGHT_CAMERA_KEY)
         ),
         image_transform=cfg.get("image_transform", "none"),
         state_keys=list(cfg.get("state_keys") or DEFAULT_STATE_KEYS),

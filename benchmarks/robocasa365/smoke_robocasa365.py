@@ -75,8 +75,10 @@ def roundtrip_smoke(host: str, port: int, state_dim: int) -> None:
             raise SystemExit(f"unexpected ping response: {pong}")
         payload = build_payload(
             head=encode_numpy_b64(black),
-            left_wrist=encode_numpy_b64(black),  # head (agentview) + wrist (eye_in_hand)
-            right_wrist=None,  # unused 2nd-wrist slot -> server black-fills
+            left_wrist=encode_numpy_b64(black),
+            # The real client sends robot0_agentview_right in this fixed
+            # transport slot; the smoke image is intentionally synthetic.
+            right_wrist=encode_numpy_b64(black),
             prompt="smoke",
             state=[0.0] * state_dim,
         )

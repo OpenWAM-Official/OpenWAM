@@ -44,7 +44,8 @@ from openwam.dataloader.utils.video_io import decode_video_frames
 
 HEAD_CAMERA = "observation.images.robot0_agentview_left"
 WRIST_CAMERA = "observation.images.robot0_eye_in_hand"
-_MISSING_RIGHT = "__missing_right_wrist__"
+RIGHT_CAMERA = "observation.images.robot0_agentview_right"
+VIDEO_CAMERAS = (HEAD_CAMERA, WRIST_CAMERA, RIGHT_CAMERA)
 _HEAD_SLOT_H, _HEAD_SLOT_W = 256, 320
 _WRIST_SLOT_H, _WRIST_SLOT_W = 128, 160
 
@@ -72,7 +73,7 @@ def _task_from_source_prefix(prefix: str) -> str:
 def _episodes_with_offsets(data_root: str) -> pd.DataFrame:
     episodes = load_episodes_parquet(Path(data_root))
     episodes["_data_row_offset"] = compute_file_local_offsets(episodes, "data/chunk_index", "data/file_index")
-    for camera in (HEAD_CAMERA, WRIST_CAMERA):
+    for camera in VIDEO_CAMERAS:
         chunk_key = f"videos/{camera}/chunk_index"
         if chunk_key in episodes.columns:
             episodes[f"_voff/{camera}"] = compute_file_local_offsets(episodes, chunk_key, f"videos/{camera}/file_index")
@@ -152,7 +153,7 @@ class RoboCasa365Dataset(BaseDataset):
         self._video_sample_indices = list(range(0, self.num_frames, self.video_stride))
         self.num_video_frames = len(self._video_sample_indices)
         self.multiview = bool(multiview)
-        self.camera_layout = list(camera_layout) if camera_layout else [HEAD_CAMERA, WRIST_CAMERA, _MISSING_RIGHT]
+        self.camera_layout = list(camera_layout) if camera_layout else list(VIDEO_CAMERAS)
         self._color_jitter = None
         if color_jitter and split == "train":
             get = color_jitter.get if hasattr(color_jitter, "get") else lambda key, default: default
@@ -192,6 +193,13 @@ class RoboCasa365Dataset(BaseDataset):
                 f"RoboCasa365 compact reader requires state{STATE_DIM}/action{ACTION_DIM}; got {state_shape}/{action_shape}. "
                 "Run scripts/convert_robocasa365_compact_v3.py first."
             )
+        required_cameras = VIDEO_CAMERAS if self.multiview else (HEAD_CAMERA,)
+        missing_camera_features = [camera for camera in required_cameras if camera not in info.get("features", {})]
+        if missing_camera_features:
+            raise ValueError(
+                "RoboCasa365 video feature(s) required by the configured view layout are missing: "
+                f"{missing_camera_features}"
+            )
         self._data_path_tmpl = info["data_path"]
         self._video_path_tmpl = info["video_path"]
 
@@ -202,6 +210,18 @@ class RoboCasa365Dataset(BaseDataset):
             ].reset_index(drop=True)
         if episodes_frame.empty:
             raise FileNotFoundError(f"No episodes for task {self.task_name!r} under {self.data_root}")
+        required_video_columns = {
+            column
+            for camera in required_cameras
+            for column in (
+                f"_voff/{camera}",
+                f"videos/{camera}/chunk_index",
+                f"videos/{camera}/file_index",
+            )
+        }
+        missing_video_columns = sorted(required_video_columns.difference(episodes_frame.columns))
+        if missing_video_columns:
+            raise ValueError(f"RoboCasa365 episode metadata is missing required video columns: {missing_video_columns}")
         episodes, self._ep_meta = [], {}
         for _, row in episodes_frame.iterrows():
             episode_index = int(row["episode_index"])
@@ -212,7 +232,7 @@ class RoboCasa365Dataset(BaseDataset):
                 "row_offset": int(row["_data_row_offset"]),
                 "voff": {
                     camera: int(row[f"_voff/{camera}"])
-                    for camera in (HEAD_CAMERA, WRIST_CAMERA)
+                    for camera in VIDEO_CAMERAS
                     if f"_voff/{camera}" in episodes_frame.columns
                 },
                 "vcf": {
@@ -220,7 +240,7 @@ class RoboCasa365Dataset(BaseDataset):
                         int(row[f"videos/{camera}/chunk_index"]),
                         int(row[f"videos/{camera}/file_index"]),
                     )
-                    for camera in (HEAD_CAMERA, WRIST_CAMERA)
+                    for camera in VIDEO_CAMERAS
                     if f"videos/{camera}/chunk_index" in episodes_frame.columns
                 },
             }
@@ -335,23 +355,23 @@ class RoboCasa365Dataset(BaseDataset):
         metadata = self._ep_meta[episode_index]
         local = [start + offset for offset in self._video_sample_indices if start + offset < actual_end]
         if self.multiview:
-            head_chunk, head_file = metadata["vcf"][HEAD_CAMERA]
-            wrist_chunk, wrist_file = metadata["vcf"][WRIST_CAMERA]
-            head = decode_video_frames(
-                self._video_path(HEAD_CAMERA, head_chunk, head_file),
-                [metadata["voff"][HEAD_CAMERA] + index for index in local],
-                _HEAD_SLOT_H,
-                _HEAD_SLOT_W,
-            )
-            wrist = decode_video_frames(
-                self._video_path(WRIST_CAMERA, wrist_chunk, wrist_file),
-                [metadata["voff"][WRIST_CAMERA] + index for index in local],
-                _WRIST_SLOT_H,
-                _WRIST_SLOT_W,
-            )
+            camera_frames = {}
+            for camera in VIDEO_CAMERAS:
+                chunk, file_index = metadata["vcf"][camera]
+                slot_h, slot_w = (
+                    (_HEAD_SLOT_H, _HEAD_SLOT_W)
+                    if camera == HEAD_CAMERA
+                    else (_WRIST_SLOT_H, _WRIST_SLOT_W)
+                )
+                camera_frames[camera] = decode_video_frames(
+                    self._video_path(camera, chunk, file_index),
+                    [metadata["voff"][camera] + index for index in local],
+                    slot_h,
+                    slot_w,
+                )
             frames = [
                 assemble_multiview_layout(
-                    {HEAD_CAMERA: head[index], WRIST_CAMERA: wrist[index]},
+                    {camera: camera_frames[camera][index] for camera in VIDEO_CAMERAS},
                     self.camera_layout,
                     self.height,
                     self.width,
@@ -553,8 +573,12 @@ __all__ = [
     "ACTION_STATS_KEY",
     "DEFAULT_ACTION_UNIFY_MAP",
     "DEFAULT_STATE_UNIFY_MAP",
+    "HEAD_CAMERA",
     "MultiTaskRoboCasa365Dataset",
+    "RIGHT_CAMERA",
     "RoboCasa365Dataset",
     "STATE_DIM",
     "STATE_STATS_KEY",
+    "VIDEO_CAMERAS",
+    "WRIST_CAMERA",
 ]

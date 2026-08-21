@@ -179,6 +179,7 @@ def test_build_policy_uses_compact_defaults(monkeypatch):
     monkeypatch.setattr(single_eval, "OpenWAMRoboCasa365Policy", _Capture)
     single_eval._build_policy({"osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
     assert captured["state_dim"] is None
+    assert captured["right_wrist_camera_key"] == "video.robot0_agentview_right"
     assert "mobile_base" not in captured
     assert "base_proprio" not in captured
     assert "mask_torso_action" not in captured
@@ -193,6 +194,7 @@ def test_repo_template_declares_compact_contract():
     assert cfg["osc_pos_scale"] == 0.05
     assert cfg["osc_rot_scale"] == 0.5
     assert cfg["max_steps_override"] is None
+    assert cfg["right_wrist_camera_key"] == "video.robot0_agentview_right"
     assert "max_steps" not in cfg
     assert "mask_torso_action" not in cfg
 
@@ -208,6 +210,11 @@ def test_hydra_compose_compact_maps_and_fixed_eval_semantics():
         assert cfg.dataloader.action_mode == "robocasa365"
         assert list(cfg.dataloader.unify_action_map) == ["0-9", "68-72"]
         assert list(cfg.dataloader.unify_state_map) == ["0-9", "68-76"]
+        assert list(cfg.dataloader.camera_layout) == [
+            "observation.images.robot0_agentview_left",
+            "observation.images.robot0_eye_in_hand",
+            "observation.images.robot0_agentview_right",
+        ]
         assert "binary_action_dims" not in cfg.dataloader
         assert "gripper_convention" not in cfg.dataloader
         assert "mask_torso_action" not in cfg.dataloader
