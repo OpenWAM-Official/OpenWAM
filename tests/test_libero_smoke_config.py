@@ -268,7 +268,7 @@ def test_libero_resume_rejects_protocol_mismatch(tmp_path):
         full_eval._validate_resume_signature(legacy_output, signature)
 
 
-def test_libero_ordinary_launcher_enforces_pinned_protocol():
+def test_libero_ordinary_launcher_allows_runtime_tuning(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     full_eval = _load_full_eval_module(repo_root)
     args = Namespace(
@@ -285,9 +285,16 @@ def test_libero_ordinary_launcher_enforces_pinned_protocol():
     )
 
     full_eval._validate_ordinary_protocol(args)
+    custom_policy = yaml.safe_load(args.policy_config.read_text(encoding="utf-8"))
+    custom_policy["camera_height"] = 128
+    custom_policy["camera_width"] = 160
+    args.policy_config = tmp_path / "ordinary-custom.yml"
+    args.policy_config.write_text(yaml.safe_dump(custom_policy), encoding="utf-8")
+    args.inference_mode = "async"
     args.inference_horizon = 32
-    with pytest.raises(ValueError, match="horizon 10"):
-        full_eval._validate_ordinary_protocol(args)
+    args.denoise_mode = "async"
+    args.denoise_steps = 5
+    full_eval._validate_ordinary_protocol(args)
 
 
 

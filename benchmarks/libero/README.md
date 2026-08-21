@@ -196,9 +196,10 @@ retained under the printed run directory.
 /usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py
 ```
 
-The launcher requires MuJoCo 3.3.2 from the default LIBERO environment,
-synchronous inference, and an inference horizon of 10. The
-default output root is the persistent data path
+The launcher requires MuJoCo 3.3.2 from the default LIBERO environment. It
+defaults to synchronous inference with horizon 10 and synchronous 10-step
+denoising, but these runtime parameters are user-configurable. The default
+output root is the persistent data path
 `/path/to/OpenWAM/outputs/libero`. Useful preflight and
 recovery commands are shown below. The ordinary-LIBERO rollout limit is 600
 policy steps for SPATIAL, GOAL, and OBJECT, and 700 for LONG (`libero_10`).
@@ -229,7 +230,7 @@ Use `run_10epoch.sh` inside tmux for a persistent full evaluation:
 tmux new-session -d -s libero_10ep \
   "cd /path/to/OpenWAM && bash benchmarks/libero/run_10epoch.sh"
 
-# The wrapper defaults to the pinned synchronous horizon of 10.
+# The wrapper defaults to synchronous horizon 10; this can be overridden.
 tmux new-session -d -s libero_10ep_h10 \
   "cd /path/to/OpenWAM && INFERENCE_HORIZON=10 \
    bash benchmarks/libero/run_10epoch.sh"

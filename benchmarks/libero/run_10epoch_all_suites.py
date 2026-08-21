@@ -1034,12 +1034,6 @@ def _validate_protocol(args: argparse.Namespace) -> None:
         errors.append("rng_mode must be 'environment'")
     if cfg.get("reseed_each_trial") is not False:
         errors.append("reseed_each_trial must be false")
-    if cfg.get("camera_height") != 256 or cfg.get("camera_width") != 256:
-        errors.append("camera resolution must be 256x256")
-    if args.inference_mode != "sync" or args.inference_horizon != 10:
-        errors.append("inference must be synchronous with horizon 10")
-    if args.denoise_mode != "sync" or args.denoise_steps != 10:
-        errors.append("denoising must be synchronous with 10 steps")
     if errors:
         raise ValueError("LIBERO pinned protocol violation:\n  - " + "\n  - ".join(errors))
 
