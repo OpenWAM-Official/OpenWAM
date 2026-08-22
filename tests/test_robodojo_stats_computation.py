@@ -58,6 +58,70 @@ def test_reader_and_stats_use_bit_identical_calibrated_raw_eef20(tmp_path: Path)
     np.testing.assert_array_equal(reader_rows, expected_raw_eef20(6))
 
 
+@pytest.mark.parametrize("embodiment", ["arx_x5", "piper", "piper_x"])
+def test_real_stats_preserve_native_pose_and_load_for_each_embodiment(
+    tmp_path: Path,
+    embodiment: str,
+):
+    episode = write_episode(
+        tmp_path,
+        T=5,
+        embodiment=embodiment,
+        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__(
+            (0, 0), -0.04
+        ),
+    )
+    output = tmp_path / f"{embodiment}_stats.npy"
+    payload = compute_robodojo_stats(
+        dataset_dir=tmp_path,
+        embodiment=embodiment,
+        dataset_variant="real",
+        reservoir_cap=100,
+    )
+    atomic_save_stats_npy(output, payload)
+
+    metadata = payload["metadata"]
+    assert metadata["dataset_variant"] == "real"
+    assert metadata["embodiment"] == embodiment
+    assert metadata["source_frame"] == (
+        "per_arm_robot_base_position_and_orientation_wxyz"
+    )
+    assert metadata["target_frame"] == "per_arm_robot_base"
+    assert metadata["pose_transform"] == (
+        "identity_before_quaternion_to_rot6d"
+    )
+    assert metadata["contract_id"] == "robodojo-real-native-eef20-v1"
+    assert "frame_contract_fingerprint" in metadata
+    assert "calibration_fingerprint" not in metadata
+
+    dataset = RoboDojoDataset(
+        data_root=formal_data_dir(tmp_path, "pick_mug", embodiment),
+        dataset_root=tmp_path,
+        task_name="pick_mug",
+        embodiment=embodiment,
+        dataset_variant="real",
+        normalization_stats_path=output,
+        normalize_mode="min-max",
+        unify_action=False,
+        num_frames=5,
+        height=48,
+        width=64,
+        video_stride=1,
+    )
+    with h5py.File(episode, "r") as handle:
+        raw = read_calibrated_eef20(
+            handle,
+            None,
+            dataset_variant="real",
+            embodiment=embodiment,
+        )
+    np.testing.assert_allclose(
+        dataset.denormalize_action(dataset[0]["action"].numpy()),
+        raw[1:],
+        atol=2e-6,
+    )
+
+
 def test_pools_all_states_and_only_real_next_state_targets_without_crossing_episodes(
     tmp_path: Path,
 ):
@@ -66,7 +130,6 @@ def test_pools_all_states_and_only_real_next_state_targets_without_crossing_epis
 
     payload = compute_robodojo_stats(
         dataset_dir=tmp_path,
-        task_name="task_a",
         reservoir_cap=100,
     )
 
@@ -120,7 +183,6 @@ def test_rot6d_stats_are_pinned_to_identity_and_reservoir_is_bounded(
     write_episode(tmp_path, T=20)
     payload = compute_robodojo_stats(
         dataset_dir=tmp_path,
-        task_name="pick_mug",
         reservoir_cap=3,
     )
     eef = payload["eef"]
@@ -135,38 +197,21 @@ def test_rot6d_stats_are_pinned_to_identity_and_reservoir_is_bounded(
     assert payload["metadata"]["reservoir_rows"] == 3
 
 
-def test_stats_task_selection_matches_reader_train_and_holdout_rules(
-    tmp_path: Path,
-):
+def test_stats_scan_all_discovered_tasks(tmp_path: Path):
     for task in ("task_b", "task_a", "task_holdout"):
         write_episode(tmp_path, task=task, T=3)
 
-    train = compute_robodojo_stats(
+    payload = compute_robodojo_stats(
         dataset_dir=tmp_path,
-        train_tasks=["task_b", "task_a", "task_holdout"],
-        holdout_tasks=["task_holdout"],
-        split="train",
         reservoir_cap=100,
     )
-    assert train["metadata"]["tasks"] == ["task_a", "task_b"]
-    assert train["metadata"]["state_rows"] == 6
-    assert train["metadata"]["action_rows"] == 4
-
-    validation = compute_robodojo_stats(
-        dataset_dir=tmp_path,
-        holdout_tasks=["task_holdout"],
-        split="val",
-        reservoir_cap=100,
-    )
-    assert validation["metadata"]["tasks"] == ["task_holdout"]
-    assert validation["metadata"]["state_rows"] == 3
-    assert validation["metadata"]["action_rows"] == 2
-
-    with pytest.raises(FileNotFoundError, match="missing"):
-        compute_robodojo_stats(
-            dataset_dir=tmp_path,
-            train_tasks=["task_a", "missing"],
-        )
+    assert payload["metadata"]["tasks"] == [
+        "task_a",
+        "task_b",
+        "task_holdout",
+    ]
+    assert payload["metadata"]["state_rows"] == 9
+    assert payload["metadata"]["action_rows"] == 6
 
 
 def test_atomic_build_writes_deploy_payload_and_leaves_no_partial_file(
@@ -179,7 +224,6 @@ def test_atomic_build_writes_deploy_payload_and_leaves_no_partial_file(
     result = build_and_save_robodojo_stats(
         dataset_dir=tmp_path,
         output=output,
-        task_name="pick_mug",
         reservoir_cap=100,
     )
 
@@ -211,7 +255,6 @@ def test_generated_stats_are_compatible_with_generic_deploy_normalizer(
     build_and_save_robodojo_stats(
         dataset_dir=tmp_path,
         output=output,
-        task_name="pick_mug",
         reservoir_cap=100,
     )
     config = OmegaConf.create(
@@ -245,7 +288,6 @@ def test_stats_reject_empty_data_and_non_npy_output(tmp_path: Path):
     with pytest.raises((FileNotFoundError, ValueError), match="RoboDojo|empty"):
         compute_robodojo_stats(
             dataset_dir=tmp_path,
-            task_name="missing",
         )
 
     write_episode(tmp_path, T=3)
@@ -253,13 +295,11 @@ def test_stats_reject_empty_data_and_non_npy_output(tmp_path: Path):
         build_and_save_robodojo_stats(
             dataset_dir=tmp_path,
             output=tmp_path / "stats.json",
-            task_name="pick_mug",
         )
     with pytest.raises(ValueError, match="calibration_path is not accepted"):
         compute_robodojo_stats(
             dataset_dir=tmp_path,
             calibration_path=tmp_path / "calibration.json",
-            task_name="pick_mug",
         )
 
 
@@ -273,9 +313,6 @@ def test_cli_requires_npy_and_succeeds_with_normalization_disabled_for_scan(
             {
                 "type": "robodojo",
                 "dataset_dir": str(tmp_path),
-                "task_name": "task_a",
-                "train_tasks": None,
-                "holdout_tasks": None,
                 "split": "train",
                 "embodiment": "arx_x5",
                 "action_mode": "eef",

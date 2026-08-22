@@ -88,8 +88,12 @@ def source_arrays(T: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarra
     return left, left_grip, right, right_grip
 
 
-def formal_data_dir(root: Path, task: str) -> Path:
-    data = root / task / "arx_x5" / "data"
+def formal_data_dir(
+    root: Path,
+    task: str,
+    embodiment: str = "arx_x5",
+) -> Path:
+    data = root / task / embodiment / "data"
     data.mkdir(parents=True, exist_ok=True)
     return data
 
@@ -102,9 +106,10 @@ def write_episode(
     T: int = 5,
     jpeg_storage: str = "vlen",
     instruction: str | bytes = "Pick up the mug.",
+    embodiment: str = "arx_x5",
     mutate=None,
 ) -> Path:
-    data = formal_data_dir(root, task)
+    data = formal_data_dir(root, task, embodiment)
     path = data / f"episode_{episode:04d}.hdf5"
     left, left_grip, right, right_grip = source_arrays(T)
     arrays = {
@@ -227,10 +232,12 @@ def build_single(
     normalization_stats_path: Path | None = None,
     **kwargs,
 ) -> RoboDojoDataset:
+    embodiment = kwargs.pop("embodiment", "arx_x5")
     return RoboDojoDataset(
-        data_root=formal_data_dir(root, task),
+        data_root=formal_data_dir(root, task, embodiment),
         dataset_root=root,
         task_name=task,
+        embodiment=embodiment,
         num_frames=kwargs.pop("num_frames", 5),
         height=kwargs.pop("height", 48),
         width=kwargs.pop("width", 64),
@@ -269,6 +276,51 @@ def test_formal_reader_applies_live_calibration_and_state_t_plus_one_targets(
     assert sample["episode_path"] == str(episode)
     assert sample["task_name"] == "pick_mug"
     assert sample["active_arm"] == "both"
+
+
+@pytest.mark.parametrize("embodiment", ["arx_x5", "piper", "piper_x"])
+def test_real_reader_preserves_native_pose_and_clips_only_gripper_sensor_noise(
+    tmp_path: Path,
+    embodiment: str,
+):
+    noise = -0.04 if embodiment != "arx_x5" else -0.01
+    episode = write_episode(
+        tmp_path,
+        T=4,
+        embodiment=embodiment,
+        mutate=lambda arrays: arrays["state/left_ee_joint_states"].__setitem__(
+            (0, 0), noise
+        ),
+    )
+    dataset = build_single(
+        tmp_path,
+        num_frames=4,
+        dataset_variant="real",
+        embodiment=embodiment,
+    )
+
+    left, left_grip, right, right_grip = source_arrays(4)
+    left_grip[0, 0] = 0.0
+    expected = arms_to_eef20(left, left_grip, right, right_grip).astype(np.float32)
+    with h5py.File(episode, "r") as handle:
+        raw = read_calibrated_eef20(
+            handle,
+            None,
+            dataset_variant="real",
+            embodiment=embodiment,
+        )
+
+    assert dataset.calibration is None
+    assert dataset.dataset_variant == "real"
+    assert dataset.source_frame == (
+        "per_arm_robot_base_position_and_orientation_wxyz"
+    )
+    np.testing.assert_array_equal(raw, expected)
+    sample = dataset[0]
+    np.testing.assert_array_equal(sample["proprio"].numpy(), expected[0:1])
+    np.testing.assert_array_equal(sample["action"].numpy(), expected[1:])
+    assert sample["dataset_variant"] == "real"
+    assert sample["embodiment"] == embodiment
 
 
 @pytest.mark.parametrize("jpeg_storage", ["fixed", "vlen", "padded"])
@@ -480,7 +532,7 @@ def test_unification_requires_explicit_complete_map(tmp_path: Path):
         )
 
 
-def test_normalization_requires_existing_valid_stats_and_matching_fingerprint(
+def test_normalization_auto_generates_or_validates_explicit_stats(
     tmp_path: Path,
 ):
     write_episode(tmp_path, T=3)
@@ -494,8 +546,17 @@ def test_normalization_requires_existing_valid_stats_and_matching_fingerprint(
         "width": 64,
         "unify_action": False,
     }
-    with pytest.raises(ValueError, match="normalization_stats_path"):
-        RoboDojoDataset(**common)
+    automatic = RoboDojoDataset(**common)
+    expected_automatic = (
+        tmp_path / "meta" / "robodojo_sim_arx_x5_eef20_stats.npy"
+    )
+    assert automatic.normalization_stats_path == str(expected_automatic)
+    assert expected_automatic.is_file()
+    assert expected_automatic.with_suffix(".npy.lock").is_file()
+    # A second construction discovers the complete file instead of recomputing.
+    assert RoboDojoDataset(**common).normalization_stats_path == str(
+        expected_automatic
+    )
     with pytest.raises(FileNotFoundError, match="normalization"):
         RoboDojoDataset(
             **common, normalization_stats_path=tmp_path / "missing.npy"
@@ -719,7 +780,9 @@ def test_direct_reader_requires_verified_formal_dataset_root(tmp_path: Path):
         )
 
 
-def test_only_eef_arx_x5_num_frames_and_formal_layout_are_accepted(tmp_path: Path):
+def test_only_eef_supported_embodiment_num_frames_and_formal_layout_are_accepted(
+    tmp_path: Path,
+):
     write_episode(tmp_path, T=3)
     data_root = formal_data_dir(tmp_path, "pick_mug")
     common = {
@@ -753,9 +816,7 @@ def test_only_eef_arx_x5_num_frames_and_formal_layout_are_accepted(tmp_path: Pat
         )
 
 
-def test_multitask_sorted_discovery_allowlist_holdout_and_shared_files(
-    tmp_path: Path,
-):
+def test_multitask_discovers_all_tasks_sorted_and_shares_files(tmp_path: Path):
     for index, task in enumerate(("task_b", "task_a", "task_holdout")):
         write_episode(tmp_path, task=task, episode=index, T=3)
     stats = write_stats(tmp_path / "stats.npy")
@@ -774,12 +835,11 @@ def test_multitask_sorted_discovery_allowlist_holdout_and_shared_files(
     train = MultiTaskRoboDojoDataset(
         **common,
         split="train",
-        train_tasks=["task_b", "task_a", "task_holdout"],
-        holdout_tasks=["task_holdout"],
     )
     assert [dataset.task_name for dataset in train._sub_datasets] == [
         "task_a",
         "task_b",
+        "task_holdout",
     ]
     assert all(
         dataset.normalization_stats_path == str(stats)
@@ -796,33 +856,30 @@ def test_multitask_sorted_discovery_allowlist_holdout_and_shared_files(
         atol=2e-6,
     )
 
-    validation = MultiTaskRoboDojoDataset(
-        **common,
-        split="val",
-        holdout_tasks=["task_holdout"],
-    )
-    assert [dataset.task_name for dataset in validation._sub_datasets] == [
-        "task_holdout"
-    ]
 
-    single = MultiTaskRoboDojoDataset(
-        **common,
-        split="train",
-        task_name="task_b",
-    )
-    assert [dataset.task_name for dataset in single._sub_datasets] == ["task_b"]
+def test_multitask_auto_stats_use_meta_and_cover_the_discovered_corpus(
+    tmp_path: Path,
+):
+    for task in ("task_b", "task_a"):
+        write_episode(tmp_path, task=task, T=3)
 
-    with pytest.raises(FileNotFoundError, match="missing_task"):
-        MultiTaskRoboDojoDataset(
-            **common,
-            train_tasks=["task_a", "missing_task"],
-        )
-    with pytest.raises(ValueError, match="empty"):
-        MultiTaskRoboDojoDataset(
-            **common,
-            train_tasks=["task_holdout"],
-            holdout_tasks=["task_holdout"],
-        )
+    dataset = MultiTaskRoboDojoDataset(
+        dataset_dir=tmp_path,
+        normalize_mode="min-max",
+        num_frames=3,
+        height=48,
+        width=64,
+        video_stride=1,
+        unify_action=False,
+    )
+    expected = tmp_path / "meta" / "robodojo_sim_arx_x5_eef20_stats.npy"
+    assert dataset.normalization_stats_path == str(expected)
+    assert all(
+        sub_dataset.normalization_stats_path == str(expected)
+        for sub_dataset in dataset._sub_datasets
+    )
+    payload = np.load(expected, allow_pickle=True).item()
+    assert payload["metadata"]["tasks"] == ["task_a", "task_b"]
 
 
 def test_registry_constructs_robodojo_and_exports_classes(tmp_path: Path):
@@ -830,7 +887,6 @@ def test_registry_constructs_robodojo_and_exports_classes(tmp_path: Path):
     config = {
         "type": "robodojo",
         "dataset_dir": str(tmp_path),
-        "task_name": "pick_mug",
         "embodiment": "arx_x5",
         "action_mode": "eef",
         "normalization_stats_path": None,
@@ -847,8 +903,6 @@ def test_registry_constructs_robodojo_and_exports_classes(tmp_path: Path):
         ],
         "unify_action": True,
         "unify_action_map": ["0-9", "34-43"],
-        "train_tasks": None,
-        "holdout_tasks": None,
     }
     dataset = build_dataset(config, split="train")
     assert isinstance(dataset, MultiTaskRoboDojoDataset)

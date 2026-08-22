@@ -1,4 +1,4 @@
-"""RoboDojo dataset layout, dual-X5 constants, and calibration schema.
+"""RoboDojo dataset layout, frame contracts, and sim calibration schema.
 
 Generic pose / EEF20 math lives in ``openwam.dataloader.utils.poses``.
 This module only holds the numbers and file-layout rules the reader needs.
@@ -19,13 +19,29 @@ from typing import Any
 import numpy as np
 
 ROBODOJO_CONTRACT_ID = "robodojo-eef20-v1"
+ROBODOJO_REAL_CONTRACT_ID = "robodojo-real-native-eef20-v1"
 ROBODOJO_EMBODIMENT = "arx_x5"
+ROBODOJO_SIM_VARIANT = "sim"
+ROBODOJO_REAL_VARIANT = "real"
+ROBODOJO_DATASET_VARIANTS = (ROBODOJO_SIM_VARIANT, ROBODOJO_REAL_VARIANT)
+ROBODOJO_REAL_EMBODIMENTS = ("arx_x5", "piper", "piper_x")
 CALIBRATION_SCHEMA_VERSION = 1
+REAL_FRAME_SCHEMA_VERSION = 1
 ENDPOINT_LINK_NAME = "link6"
 ENDPOINT_POSE_FRAME_CONTRACT = "rigid_terminal_arm_frame_independent_of_gripper_motion"
+REAL_ENDPOINT_NAME = "recorded_ee_pose"
+ROBODOJO_SIM_SOURCE_FRAME = (
+    "env_origin_relative_position_world_orientation_wxyz"
+)
+ROBODOJO_REAL_SOURCE_FRAME = "per_arm_robot_base_position_and_orientation_wxyz"
+ROBODOJO_TARGET_FRAME = "per_arm_robot_base"
 ARM_NAMES = ("left", "right")
 # Raw EEF20 gripper: 0 = closed, 1 = open. Matches the pretrain mixture.
 GRIPPER_CONVENTION = "zero_closed_one_open"
+# The input may contain small negative sensor excursions
+# within a small negative range. Values within this configured noise envelope are clipped to 0;
+# larger excursions remain schema errors.
+ROBODOJO_REAL_GRIPPER_SENSOR_ATOL = 0.05
 
 # Source of truth: RoboDojo ``env_cfg/robot/dual_x5.yml``.
 # The first listed robot is ``left_arm``; the second is ``right_arm``.
@@ -54,13 +70,55 @@ _ARM_CALIBRATION_KEYS = {
 _QUATERNION_ATOL = 1e-6
 
 
-def validate_embodiment(embodiment: str) -> None:
-    """Reject every embodiment other than dual-arm ``arx_x5``."""
-    if embodiment != ROBODOJO_EMBODIMENT:
+def validate_dataset_variant(dataset_variant: str) -> None:
+    """Validate the explicit simulation/real dataset release selector."""
+    if dataset_variant not in ROBODOJO_DATASET_VARIANTS:
         raise ValueError(
-            "RoboDojo's only supported OpenWAM embodiment is "
-            f"'{ROBODOJO_EMBODIMENT}', got {embodiment!r}"
+            "RoboDojo dataset_variant must be one of "
+            f"{list(ROBODOJO_DATASET_VARIANTS)}, got {dataset_variant!r}"
         )
+
+
+def validate_embodiment(
+    embodiment: str,
+    *,
+    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+) -> None:
+    """Validate an embodiment against the selected RoboDojo release."""
+    validate_dataset_variant(dataset_variant)
+    supported = (
+        (ROBODOJO_EMBODIMENT,)
+        if dataset_variant == ROBODOJO_SIM_VARIANT
+        else ROBODOJO_REAL_EMBODIMENTS
+    )
+    if embodiment not in supported:
+        if dataset_variant == ROBODOJO_SIM_VARIANT:
+            raise ValueError(
+                "RoboDojo sim's only supported OpenWAM embodiment is "
+                f"'{ROBODOJO_EMBODIMENT}', got {embodiment!r}"
+            )
+        raise ValueError(
+            f"RoboDojo {dataset_variant}'s supported OpenWAM embodiments are "
+            f"{list(supported)}, got {embodiment!r}"
+        )
+
+
+def robodojo_real_frame_contract(embodiment: str) -> dict[str, Any]:
+    """Return the native, identity-pose contract for one real embodiment."""
+    validate_embodiment(embodiment, dataset_variant=ROBODOJO_REAL_VARIANT)
+    return {
+        "schema_version": REAL_FRAME_SCHEMA_VERSION,
+        "dataset_variant": ROBODOJO_REAL_VARIANT,
+        "embodiment": embodiment,
+        "source_frame": ROBODOJO_REAL_SOURCE_FRAME,
+        "target_frame": ROBODOJO_TARGET_FRAME,
+        "pose_transform": "identity_before_quaternion_to_rot6d",
+        "endpoint": REAL_ENDPOINT_NAME,
+        "gripper_convention": GRIPPER_CONVENTION,
+        "gripper_preprocessing": "clip_sensor_noise_to_[0,1]",
+        "gripper_sensor_atol": ROBODOJO_REAL_GRIPPER_SENSOR_ATOL,
+        "contract_id": ROBODOJO_REAL_CONTRACT_ID,
+    }
 
 
 def _validate_task_name(task: str) -> None:
@@ -81,13 +139,14 @@ def discover_episodes(
     task: str,
     *,
     embodiment: str = ROBODOJO_EMBODIMENT,
+    dataset_variant: str = ROBODOJO_SIM_VARIANT,
 ) -> list[Path]:
-    """Discover only the formal ``<root>/<task>/arx_x5/data`` layout.
+    """Discover only the formal ``<root>/<task>/<embodiment>/data`` layout.
 
     The historical flat demo layout at ``<root>/arx_x5/data`` is deliberately
     rejected rather than used as a fallback.
     """
-    validate_embodiment(embodiment)
+    validate_embodiment(embodiment, dataset_variant=dataset_variant)
     _validate_task_name(task)
     root = Path(dataset_root)
     data_dir = root / task / embodiment / "data"
@@ -327,12 +386,25 @@ __all__ = [
     "FORMAL_EPISODE_GLOB",
     "GRIPPER_CONVENTION",
     "ROBODOJO_CONTRACT_ID",
+    "ROBODOJO_DATASET_VARIANTS",
     "ROBODOJO_EMBODIMENT",
+    "ROBODOJO_REAL_CONTRACT_ID",
+    "ROBODOJO_REAL_EMBODIMENTS",
+    "ROBODOJO_REAL_GRIPPER_SENSOR_ATOL",
+    "ROBODOJO_REAL_SOURCE_FRAME",
+    "ROBODOJO_REAL_VARIANT",
+    "ROBODOJO_SIM_SOURCE_FRAME",
+    "ROBODOJO_SIM_VARIANT",
+    "ROBODOJO_TARGET_FRAME",
+    "REAL_ENDPOINT_NAME",
+    "REAL_FRAME_SCHEMA_VERSION",
     "arx_x5_calibration",
     "discover_episodes",
     "load_calibration",
+    "robodojo_real_frame_contract",
     "resolve_robodojo_calibration",
     "save_calibration",
     "validate_calibration",
+    "validate_dataset_variant",
     "validate_embodiment",
 ]

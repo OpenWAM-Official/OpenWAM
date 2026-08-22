@@ -23,16 +23,23 @@ from openwam.dataloader.robodojo import (
     DEPLOY_ACTION_MODE,
     GRIPPER_CONVENTION,
     ROBODOJO_CONTRACT_ID,
-    ROBODOJO_SOURCE_FRAME,
+    ROBODOJO_REAL_CONTRACT_ID,
+    ROBODOJO_REAL_SOURCE_FRAME,
+    ROBODOJO_REAL_VARIANT,
+    ROBODOJO_SIM_SOURCE_FRAME,
+    ROBODOJO_SIM_VARIANT,
     calibration_fingerprint,
     read_calibrated_eef20,
+    real_frame_contract_fingerprint,
     resolve_robodojo_tasks,
     validate_robodojo_episode,
 )
 from openwam.dataloader.robodojo_contract import (
     EEF20_DIM,
     ENDPOINT_LINK_NAME,
+    REAL_ENDPOINT_NAME,
     ROBODOJO_EMBODIMENT,
+    ROBODOJO_TARGET_FRAME,
     discover_episodes,
     resolve_robodojo_calibration,
     validate_embodiment,
@@ -51,41 +58,76 @@ DEFAULT_RESERVOIR_CAP = 1_000_000
 
 def iter_episode_eef20(
     episode_paths: Iterable[str | Path],
-    calibration: Mapping,
+    calibration: Mapping | None,
+    *,
+    dataset_variant: str = ROBODOJO_SIM_VARIANT,
+    embodiment: str = ROBODOJO_EMBODIMENT,
 ):
-    """Yield each episode's validated raw calibrated EEF20 state rows."""
+    """Yield each episode's validated release-specific EEF20 state rows."""
     for episode_path in episode_paths:
         path = Path(episode_path)
-        validate_robodojo_episode(path)
+        validate_robodojo_episode(path, dataset_variant=dataset_variant)
         with h5py.File(path, "r") as handle:
-            yield read_calibrated_eef20(handle, calibration)
+            yield read_calibrated_eef20(
+                handle,
+                calibration,
+                dataset_variant=dataset_variant,
+                embodiment=embodiment,
+            )
 
 
 def _metadata(
     *,
     tasks: Sequence[str],
-    calibration: Mapping,
+    calibration: Mapping | None,
+    dataset_variant: str,
+    embodiment: str,
     state_rows: int,
     action_rows: int,
     reservoir_cap: int,
     reservoir_rows: int,
 ) -> dict:
-    return {
+    metadata = {
         "pool": "action_state",
         "action_rows": int(action_rows),
         "state_rows": int(state_rows),
         "num_timesteps": int(action_rows + state_rows),
-        "source_frame": ROBODOJO_SOURCE_FRAME,
-        "target_frame": "per_arm_robot_base",
-        "endpoint": ENDPOINT_LINK_NAME,
-        "embodiment": ROBODOJO_EMBODIMENT,
+        "dataset_variant": dataset_variant,
+        "target_frame": ROBODOJO_TARGET_FRAME,
+        "embodiment": embodiment,
         "tasks": list(tasks),
-        "calibration_fingerprint": calibration_fingerprint(calibration),
-        "contract_id": ROBODOJO_CONTRACT_ID,
         "gripper_convention": GRIPPER_CONVENTION,
+        "action_target": "state[1:T]",
         "reservoir_cap": int(reservoir_cap),
         "reservoir_rows": int(reservoir_rows),
     }
+    if dataset_variant == ROBODOJO_REAL_VARIANT:
+        metadata.update(
+            {
+                "source_frame": ROBODOJO_REAL_SOURCE_FRAME,
+                "endpoint": REAL_ENDPOINT_NAME,
+                "pose_transform": "identity_before_quaternion_to_rot6d",
+                "frame_contract_fingerprint": real_frame_contract_fingerprint(
+                    embodiment
+                ),
+                "contract_id": ROBODOJO_REAL_CONTRACT_ID,
+                "gripper_preprocessing": "clip_sensor_noise_to_[0,1]",
+            }
+        )
+    else:
+        if calibration is None:
+            raise ValueError("RoboDojo sim stats metadata requires calibration")
+        metadata.update(
+            {
+                "source_frame": ROBODOJO_SIM_SOURCE_FRAME,
+                "endpoint": ENDPOINT_LINK_NAME,
+                "pose_transform": "env_origin_world_to_per_arm_robot_base",
+                "calibration_fingerprint": calibration_fingerprint(calibration),
+                "contract_id": ROBODOJO_CONTRACT_ID,
+                "gripper_preprocessing": "clip_float_noise_to_[0,1]",
+            }
+        )
+    return metadata
 
 
 def compute_robodojo_stats(
@@ -93,11 +135,9 @@ def compute_robodojo_stats(
     *,
     calibration: Mapping | None = None,
     calibration_path: str | Path | None = None,
-    task_name: str | None = None,
-    train_tasks: Sequence[str] | None = None,
-    holdout_tasks: Sequence[str] | None = None,
-    split: str = "train",
+    tasks: Sequence[str] | None = None,
     embodiment: str = ROBODOJO_EMBODIMENT,
+    dataset_variant: str = ROBODOJO_SIM_VARIANT,
     action_mode: str = DEPLOY_ACTION_MODE,
     reservoir_cap: int = DEFAULT_RESERVOIR_CAP,
 ) -> dict:
@@ -106,23 +146,29 @@ def compute_robodojo_stats(
         raise ValueError(
             f"RoboDojo stats support only action_mode='eef', got {action_mode!r}"
         )
-    validate_embodiment(embodiment)
+    validate_embodiment(embodiment, dataset_variant=dataset_variant)
     if int(reservoir_cap) < 1:
         raise ValueError(f"reservoir_cap must be >= 1, got {reservoir_cap}")
 
     if calibration_path is not None:
         raise ValueError(
-            "RoboDojo uses the built-in dual-X5 base constants; "
+            "RoboDojo uses a built-in frame contract; "
             "calibration_path is not accepted"
         )
-    calibration = resolve_robodojo_calibration(calibration)
+    if dataset_variant == ROBODOJO_REAL_VARIANT:
+        if calibration is not None:
+            raise ValueError(
+                "RoboDojo_real uses native per-arm base poses; calibration "
+                "must be None"
+            )
+        resolved_calibration = None
+    else:
+        resolved_calibration = resolve_robodojo_calibration(calibration)
     tasks = resolve_robodojo_tasks(
         dataset_dir,
-        split=split,
-        task_name=task_name,
-        train_tasks=train_tasks,
-        holdout_tasks=holdout_tasks,
+        tasks=tasks,
         embodiment=embodiment,
+        dataset_variant=dataset_variant,
     )
 
     accumulator = Accumulator(
@@ -137,8 +183,14 @@ def compute_robodojo_stats(
             dataset_dir,
             task,
             embodiment=embodiment,
+            dataset_variant=dataset_variant,
         )
-        for states in iter_episode_eef20(episode_paths, calibration):
+        for states in iter_episode_eef20(
+            episode_paths,
+            resolved_calibration,
+            dataset_variant=dataset_variant,
+            embodiment=embodiment,
+        ):
             states = np.asarray(states, dtype=np.float32).reshape(-1, EEF20_DIM)
             if states.shape[0] < 2:
                 raise ValueError(
@@ -162,7 +214,9 @@ def compute_robodojo_stats(
     pin_rot6d_identity(eef, ROT6D_DIMS_EEF20)
     metadata = _metadata(
         tasks=tasks,
-        calibration=calibration,
+        calibration=resolved_calibration,
+        dataset_variant=dataset_variant,
+        embodiment=embodiment,
         state_rows=state_rows,
         action_rows=action_rows,
         reservoir_cap=int(reservoir_cap),
@@ -272,11 +326,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     build_and_save_robodojo_stats(
         dataset_dir=dataset_dir,
         output=output,
-        task_name=config.get("task_name"),
-        train_tasks=config.get("train_tasks"),
-        holdout_tasks=config.get("holdout_tasks"),
-        split=str(config.get("split", "train")),
         embodiment=str(config.get("embodiment", ROBODOJO_EMBODIMENT)),
+        dataset_variant=str(
+            config.get("dataset_variant", ROBODOJO_SIM_VARIANT)
+        ),
         action_mode=str(config.get("action_mode", DEPLOY_ACTION_MODE)),
         reservoir_cap=args.reservoir_cap,
     )
