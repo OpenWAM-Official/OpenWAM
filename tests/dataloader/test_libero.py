@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,7 @@ from openwam.dataloader.libero import (
     LiberoDataset,
 )
 from openwam.dataloader.registry import build_dataset, list_registered_datasets
+from openwam.dataloader.transforms.video import VideoColorJitter
 from openwam.dataloader.utils.normalization import pin_rot6d_identity
 from openwam.dataloader.utils.stats_computation.libero_stats_computation import (
     _compute_global_stats,
@@ -231,6 +233,56 @@ def test_libero_consumes_state_and_action_row_aligned(tmp_path: Path):
     assert sample["video"][0].getpixel((10, 10)) == (255, 0, 0)
     assert sample["video"][0].getpixel((10, 300)) == (0, 255, 0)
     assert sample["video"][0].getpixel((250, 300)) == (0, 0, 0)
+
+
+def test_color_jitter_excludes_only_the_missing_camera_slot(tmp_path: Path):
+    _write_bucket(tmp_path)
+
+    def _decode_with_real_black_pixels(path, frame_indices, h, w):
+        color = (255, 0, 0) if HEAD in str(path) else (0, 255, 0)
+        frame = Image.new("RGB", (w, h), color)
+        if HEAD in str(path):
+            # Real black content inside a valid camera must still be jittered;
+            # only the structurally missing bottom-right slot is excluded.
+            frame.paste((0, 0, 0), (0, 0, w // 4, h // 4))
+        return [frame.copy() for _ in frame_indices]
+
+    dataset = _dataset(
+        tmp_path,
+        color_jitter={"brightness": 0.0, "contrast": 0.2, "saturation": 0.0, "hue": 0.0},
+    )
+    with (
+        patch(
+            "openwam.dataloader.bases.lerobot_v3_reader._decode_video_frames",
+            side_effect=_decode_with_real_black_pixels,
+        ),
+        patch(
+            "openwam.dataloader.transforms.video.random.uniform",
+            side_effect=[0.0, -0.2, 0.0],
+        ),
+    ):
+        frame = dataset[0]["video"][0]
+
+    # Missing right-wrist slot remains byte-exact black under contrast < 1.
+    assert frame.getpixel((250, 300)) == (0, 0, 0)
+    # A black pixel belonging to the valid head view is not mistaken for padding.
+    assert frame.getpixel((10, 10)) != (0, 0, 0)
+    # Non-black camera content is still augmented.
+    assert frame.getpixel((200, 100)) != (255, 0, 0)
+
+
+def test_zero_exclusion_mask_matches_original_color_jitter_path():
+    rng = np.random.default_rng(42)
+    source = Image.fromarray(rng.integers(0, 256, size=(65, 97, 3), dtype=np.uint8))
+    jitter = VideoColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)
+
+    random.seed(1234)
+    unmasked = jitter({"video": [source.copy()]})["video"][0]
+    random.seed(1234)
+    zero_mask = Image.new("L", source.size, 0)
+    masked = jitter({"video": [source.copy()], "video_jitter_exclusion_masks": [zero_mask]})["video"][0]
+
+    np.testing.assert_array_equal(np.asarray(masked), np.asarray(unmasked))
 
 
 def test_final_episode_row_is_a_real_supervised_action(tmp_path: Path):

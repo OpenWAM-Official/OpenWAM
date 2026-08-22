@@ -8,7 +8,7 @@ in a sample to maintain temporal consistency.
 import random
 from typing import Optional, Tuple
 
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageOps, ImageStat
 
 from openwam.dataloader.transforms.base import ModalityTransform
 
@@ -97,7 +97,9 @@ class VideoRandomCrop(ModalityTransform):
 class VideoColorJitter(ModalityTransform):
     """Random color jitter applied consistently across all frames.
 
-    Only active during training.
+    Only active during training. Callers may provide one PIL ``L`` mask per
+    frame under ``video_jitter_exclusion_masks``; white regions are excluded
+    from contrast statistics and restored after augmentation.
 
     Args:
         brightness: Max brightness change factor.
@@ -126,16 +128,46 @@ class VideoColorJitter(ModalityTransform):
         if "video" not in data or not data["video"]:
             return data
 
+        exclusion_masks = data.get("video_jitter_exclusion_masks")
+        if exclusion_masks is not None and len(exclusion_masks) != len(data["video"]):
+            raise ValueError(
+                "video_jitter_exclusion_masks must have the same length as video: "
+                f"{len(exclusion_masks)} != {len(data['video'])}"
+            )
+
         # Sample random factors (same for all frames)
         b_factor = 1.0 + random.uniform(-self.brightness, self.brightness)
         c_factor = 1.0 + random.uniform(-self.contrast, self.contrast)
         s_factor = 1.0 + random.uniform(-self.saturation, self.saturation)
 
         augmented = []
-        for frame in data["video"]:
+        for index, frame in enumerate(data["video"]):
+            original = frame
+            exclusion_mask = exclusion_masks[index] if exclusion_masks is not None else None
+            if exclusion_mask is not None and exclusion_mask.size != frame.size:
+                raise ValueError(
+                    "video jitter exclusion mask must match its frame size: "
+                    f"{exclusion_mask.size} != {frame.size}"
+                )
+
             frame = ImageEnhance.Brightness(frame).enhance(b_factor)
-            frame = ImageEnhance.Contrast(frame).enhance(c_factor)
+            if exclusion_mask is None:
+                frame = ImageEnhance.Contrast(frame).enhance(c_factor)
+            else:
+                # PIL contrast blends against the image's grayscale mean. Compute
+                # that mean from valid camera slots only, so structural black
+                # padding neither changes nor biases the visible views.
+                valid_mask = ImageOps.invert(exclusion_mask.convert("L"))
+                stats = ImageStat.Stat(frame.convert("L"), mask=valid_mask)
+                if stats.count[0] > 0:
+                    mean = int(stats.mean[0] + 0.5)
+                    baseline = Image.new("L", frame.size, mean).convert(frame.mode)
+                    frame = Image.blend(baseline, frame, c_factor)
             frame = ImageEnhance.Color(frame).enhance(s_factor)
+            if exclusion_mask is not None:
+                # Restore excluded slots after all operations. Valid-view black
+                # pixels are intentionally unmasked and still receive jitter.
+                frame.paste(original, mask=exclusion_mask.convert("L"))
             augmented.append(frame)
 
         data["video"] = augmented

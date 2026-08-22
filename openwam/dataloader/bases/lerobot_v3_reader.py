@@ -873,10 +873,22 @@ class LeRobotV3Reader(BaseDataset):
 
         # 5) video — decode head (+ optional wrist) frames into the canvas
         real_local_indices = self._video_sample_indices[self._video_sample_indices < actual_raw_len]
-        video = self._decode_window_video(row, ep_local, offset, real_local_indices, idx)
         if self._color_jitter is not None:
             # Same jitter factors across the whole clip (temporal consistency).
-            video = self._color_jitter.apply({"video": video})["video"]
+            video, exclusion_masks = self._decode_window_video(
+                row,
+                ep_local,
+                offset,
+                real_local_indices,
+                idx,
+                return_missing_masks=True,
+            )
+            jitter_input = {"video": video}
+            if exclusion_masks is not None:
+                jitter_input["video_jitter_exclusion_masks"] = exclusion_masks
+            video = self._color_jitter.apply(jitter_input)["video"]
+        else:
+            video = self._decode_window_video(row, ep_local, offset, real_local_indices, idx)
         video_mask = torch.from_numpy(self._video_sample_indices < actual_raw_len)
 
         return {
@@ -978,9 +990,19 @@ class LeRobotV3Reader(BaseDataset):
 
     # ----- video ------------------------------------------------------------
 
-    def _decode_window_video(self, row, ep_local: int, offset: int, real_local_indices: np.ndarray, idx: int) -> List:
+    def _decode_window_video(
+        self,
+        row,
+        ep_local: int,
+        offset: int,
+        real_local_indices: np.ndarray,
+        idx: int,
+        *,
+        return_missing_masks: bool = False,
+    ):
         """Decode the window's frames into a list of PIL images (single-view) or
-        L-shape multiview canvases, with last-real-frame padding.
+        L-shape multiview canvases, with last-real-frame padding. Optionally
+        return per-frame masks for structurally missing multiview slots.
 
         Head decode failure is fatal (raises → ``_safe_get`` retries). Wrist
         (auxiliary) decode failure is tolerated (black slot)."""
@@ -1025,18 +1047,33 @@ class LeRobotV3Reader(BaseDataset):
                 right_frames = right_frames + [right_frames[-1]] * pad
 
         if not self._multiview:
+            if return_missing_masks:
+                return head_frames, None
             return head_frames
 
         video = []
+        missing_masks = [] if return_missing_masks else None
         for fi in range(self._num_video_frames):
             frames_dict: Dict[str, Any] = {self._head_camera: head_frames[fi]}
             if left_frames and self._left_wrist_camera:
                 frames_dict[self._left_wrist_camera] = left_frames[fi]
             if right_frames and self._right_wrist_camera:
                 frames_dict[self._right_wrist_camera] = right_frames[fi]
-            video.append(
-                assemble_multiview_layout(frames_dict, self._camera_layout, out_h=self._height, out_w=self._width)
+            assembled = assemble_multiview_layout(
+                frames_dict,
+                self._camera_layout,
+                out_h=self._height,
+                out_w=self._width,
+                return_missing_mask=return_missing_masks,
             )
+            if return_missing_masks:
+                frame, missing_mask = assembled
+                video.append(frame)
+                missing_masks.append(missing_mask)
+            else:
+                video.append(assembled)
+        if return_missing_masks:
+            return video, missing_masks
         return video
 
     def _decode_one_camera(self, camera, row, ep_local, offset, real_local_indices, *, kind: str) -> List:

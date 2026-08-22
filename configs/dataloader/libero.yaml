@@ -35,8 +35,8 @@ enable_action_supervision: true
 
 # Train-only color augmentation. One shared set of factors is sampled per clip
 # and applied after the head/wrist views have been assembled, preserving
-# temporal consistency. Val/deploy inputs are unchanged. Set to null or false
-# to disable.
+# temporal consistency. Structurally missing camera slots are masked out and
+# remain black. Val/deploy inputs are unchanged. Set to null or false to disable.
 color_jitter:
   brightness: 0.2
   contrast: 0.2

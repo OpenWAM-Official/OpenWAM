@@ -9,6 +9,8 @@ client owns its own copy in ``benchmarks/robotwin/prompt_template.py``).
 Keeping these in a transform module avoids deploy → dataset hard-coupling.
 """
 
+from typing import Tuple, Union
+
 from PIL import Image
 
 # Single source of truth for the L-shape multiview layout used by RoboTwin
@@ -49,7 +51,8 @@ def assemble_multiview_layout(
     out_h: int,
     out_w: int,
     top_height_ratio: float = 2.0 / 3.0,
-) -> Image.Image:
+    return_missing_mask: bool = False,
+) -> Union[Image.Image, Tuple[Image.Image, Image.Image]]:
     """3-camera L-shape composition (FastWAM / RoboTwin compatible).
 
     Layout with the default ratio:
@@ -67,9 +70,14 @@ def assemble_multiview_layout(
         camera_layout: ordered list of 3 camera names (top, bot-left, bot-right).
         out_h, out_w: final canvas size in pixels.
         top_height_ratio: fraction of height allocated to the top camera.
+        return_missing_mask: Also return an ``L``-mode mask whose white pixels
+            identify slots with no source frame. This lets image augmentation
+            exclude structural black padding without treating real black pixels
+            inside a valid camera image as padding.
 
     Returns:
-        PIL Image of size ``(out_w, out_h)``.
+        PIL Image of size ``(out_w, out_h)``. If ``return_missing_mask`` is
+        true, returns ``(image, missing_mask)`` instead.
     """
     if len(camera_layout) != 3:
         raise ValueError(f"multiview layout expects 3 cameras, got {len(camera_layout)}: {camera_layout}")
@@ -80,19 +88,28 @@ def assemble_multiview_layout(
     right_w = out_w - half_w
 
     canvas = Image.new("RGB", (out_w, out_h), (0, 0, 0))
+    missing_mask = Image.new("L", (out_w, out_h), 0) if return_missing_mask else None
 
     top_frame = frames_by_camera.get(camera_layout[0])
     if top_frame is not None:
         canvas.paste(_stretch_resize(top_frame, top_h, out_w), (0, 0))
+    elif missing_mask is not None:
+        missing_mask.paste(255, (0, 0, out_w, top_h))
 
     bl_frame = frames_by_camera.get(camera_layout[1])
     if bl_frame is not None:
         canvas.paste(_stretch_resize(bl_frame, bottom_h, half_w), (0, top_h))
+    elif missing_mask is not None:
+        missing_mask.paste(255, (0, top_h, half_w, out_h))
 
     br_frame = frames_by_camera.get(camera_layout[2])
     if br_frame is not None:
         canvas.paste(_stretch_resize(br_frame, bottom_h, right_w), (half_w, top_h))
+    elif missing_mask is not None:
+        missing_mask.paste(255, (half_w, top_h, out_w, out_h))
 
+    if missing_mask is not None:
+        return canvas, missing_mask
     return canvas
 
 
