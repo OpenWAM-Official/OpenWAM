@@ -68,11 +68,9 @@ class LiberoDataset(LeRobotV3Reader):
     HEAD_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
         "observation.images.image",
         "observation.images.agentview_image",
-        "observation.images.front",
     )
     WRIST_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
         "observation.images.wrist_image",
-        "observation.images.wrist",
         "observation.images.image2",
         "observation.images.robot0_eye_in_hand_image",
     )

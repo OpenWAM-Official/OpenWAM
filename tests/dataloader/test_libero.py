@@ -165,7 +165,8 @@ def _unit_stats(scale: float = 2.0) -> dict:
 
 
 def test_registry_and_default_yaml_use_canonical_libero_dataset():
-    assert "libero" in list_registered_datasets()
+    registered = list_registered_datasets()
+    assert "libero" in registered
     config = OmegaConf.load("configs/dataloader/libero.yaml")
     assert config.type == "libero"
     assert config.dataset_dir == "/path/to/libero"
