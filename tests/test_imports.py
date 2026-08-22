@@ -17,12 +17,8 @@ def test_import_data_base():
 def test_import_data_robotwin():
     from openwam.dataloader.robotwin import (  # noqa: F401
         ROBOTWIN_ALL_TASKS,
-        ROBOTWIN_HOLDOUT_TASKS,
-        ROBOTWIN_TRAIN_TASKS,
     )
 
-    assert len(ROBOTWIN_TRAIN_TASKS) == 50  # All tasks in training by default
-    assert len(ROBOTWIN_HOLDOUT_TASKS) == 0
     assert len(ROBOTWIN_ALL_TASKS) == 50
 
 

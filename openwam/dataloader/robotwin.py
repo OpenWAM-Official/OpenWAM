@@ -59,28 +59,8 @@ BACKBONE_SUPPORTED_RESOLUTIONS: dict = {
     "ti2v": None,  # any (h%32==0, w%32==0) is valid
 }
 
-# ---------------------------------------------------------------------------
-# RoboTwin 2.0 task split (42 train / 8 holdout)
-#
-# Holdout tasks cover diverse skill types so each category retains training
-# coverage.  The selection aligns with 6 of the 8 tasks evaluated in the
-# RoboTwin 2.0 paper (Table 3, Section 4.3).
-# ---------------------------------------------------------------------------
-
-# All 50 tasks participate in training by default.
-# Uncomment below to hold out 8 tasks for OOD evaluation:
-# ROBOTWIN_HOLDOUT_TASKS = [
-#     "handover_block",       # handover
-#     "move_can_pot",         # place/move
-#     "open_laptop",          # open
-#     "pick_dual_bottles",    # pick
-#     "place_object_basket",  # place
-#     "press_stapler",        # press
-#     "stack_bowls_two",      # stack
-#     "turn_switch",          # rotate
-# ]
-ROBOTWIN_HOLDOUT_TASKS = []
-
+# Known RoboTwin 2.0 task catalog. Dataset loading discovers the tasks that are
+# actually present on disk instead of using this list as a train/val selector.
 ROBOTWIN_ALL_TASKS = [
     "adjust_bottle",
     "beat_block_hammer",
@@ -134,8 +114,6 @@ ROBOTWIN_ALL_TASKS = [
     "turn_switch",
 ]
 
-ROBOTWIN_TRAIN_TASKS = sorted(t for t in ROBOTWIN_ALL_TASKS if t not in ROBOTWIN_HOLDOUT_TASKS)
-
 # ---------------------------------------------------------------------------
 # Action mode constants
 # ---------------------------------------------------------------------------
@@ -157,13 +135,27 @@ def discover_robotwin_roots(
         dataset_dir: Top-level directory (e.g. ``/path/to/robotwin_2_0/dataset``).
         robot: Robot name (e.g. ``"aloha-agilex"``).
         variant: ``"clean_50"`` or ``"randomized_500"``.
-        tasks: List of task names.  Defaults to ``ROBOTWIN_TRAIN_TASKS``.
+        tasks: Optional internal task restriction.  When omitted, every task
+            directory containing the requested robot/variant is discovered.
 
     Returns:
         List of ``(task_name, data_root)`` tuples for tasks that exist on disk.
     """
     if tasks is None:
-        tasks = ROBOTWIN_TRAIN_TASKS
+        if not os.path.isdir(dataset_dir):
+            return []
+        tasks = sorted(
+            entry
+            for entry in os.listdir(dataset_dir)
+            if os.path.isdir(
+                os.path.join(
+                    dataset_dir,
+                    entry,
+                    f"{robot}_{variant}",
+                    "data",
+                )
+            )
+        )
 
     roots = []
     for task in tasks:
@@ -1038,7 +1030,8 @@ class MultiTaskRoboTwinDataset(BaseDataset):
         robot: Target robot name (e.g. ``"aloha-agilex"``).
         variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``
             (merges clean_50 + randomized_500 into a single dataset).
-        tasks: List of task names.  Defaults to ``ROBOTWIN_TRAIN_TASKS``.
+        tasks: Optional internal task restriction. Defaults to every task
+            discovered on disk.
         normalization_stats_path: Path to shared action stats (.npy).
         action_mode: ``"joint"`` (14D) or ``"eef"`` (20D).
         **kwargs: Forwarded to each ``RoboTwinDataset`` (num_frames, height,
@@ -1050,12 +1043,7 @@ class MultiTaskRoboTwinDataset(BaseDataset):
 
     @classmethod
     def from_config(cls, config, split: str = "train"):
-        """Build from Hydra DictConfig or dict, handling task resolution.
-
-        Resolves ``task_name`` / ``train_tasks`` / ``holdout_tasks`` from config
-        into a concrete task list, then constructs the dataset.  This is the
-        preferred entry point when building via the dataset registry.
-        """
+        """Build from Hydra DictConfig or dict and discover all tasks on disk."""
 
         def _get(key, default=None):
             if hasattr(config, key):
@@ -1065,20 +1053,6 @@ class MultiTaskRoboTwinDataset(BaseDataset):
                 val = config.get(key, default)
                 return default if val is None else val
             return default
-
-        # ---- Task resolution ----
-        task_name = _get("task_name", None)
-        if task_name:
-            tasks = [task_name]
-        else:
-            train_tasks = _get("train_tasks", None)
-            holdout_tasks = _get("holdout_tasks", None)
-            if train_tasks:
-                tasks = list(train_tasks)
-            elif holdout_tasks:
-                tasks = sorted(t for t in ROBOTWIN_ALL_TASKS if t not in holdout_tasks)
-            else:
-                tasks = ROBOTWIN_TRAIN_TASKS
 
         # Optional camera_layout may be a ListConfig; normalize to a plain list
         _cam_layout = _get("camera_layout", None)
@@ -1094,8 +1068,6 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             dataset_dir=_get("dataset_dir"),
             robot=_get("robot", "aloha-agilex"),
             variant=_get("variant", "both"),
-            tasks=tasks,
-            task_name=task_name,  # drives single- vs multi-task stats filename
             normalization_stats_path=_get("normalization_stats_path", None),
             normalize_mode=_norm_mode,
             action_mode=_get("action_mode", "eef"),
@@ -1125,14 +1097,12 @@ class MultiTaskRoboTwinDataset(BaseDataset):
         robot: str,
         variant: str = "clean_50",
         tasks: Optional[list] = None,
-        task_name: Optional[str] = None,
         normalization_stats_path: Optional[str] = None,
         action_mode: str = "joint",
         **kwargs,
     ):
         super().__init__()
         self.action_mode = action_mode
-        self.task_name = task_name
 
         # ---- Resolve variant(s) ----
         if variant == "both":
@@ -1149,10 +1119,9 @@ class MultiTaskRoboTwinDataset(BaseDataset):
                 all_roots.append((display, data_root, v))
 
         if not all_roots:
-            task_list = tasks or ROBOTWIN_TRAIN_TASKS
             raise FileNotFoundError(
                 f"No task data found in {dataset_dir} for robot={robot}, "
-                f"variant={variant}. Checked {len(task_list)} tasks."
+                f"variant={variant}."
             )
 
         print(
@@ -1165,15 +1134,8 @@ class MultiTaskRoboTwinDataset(BaseDataset):
         if isinstance(_norm_mode_kw, str) and _norm_mode_kw.lower() in ("none", "null", ""):
             _norm_mode_kw = None
 
-        # Single-task vs multi-task is decided by task_name (single when a specific
-        # task was named in the yaml; multi when task_name=null / unset).
-        _is_single_task = bool(task_name)
-        if _is_single_task:
-            _default_stats_name = f"{task_name}_{robot}_{variant}_stats.npy"
-            _scope_label = f"single-task ({task_name})"
-        else:
-            _default_stats_name = f"{robot}_{variant}_stats.npy"
-            _scope_label = "multi-task"
+        _default_stats_name = f"{robot}_{variant}_stats.npy"
+        _scope_label = "multi-task"
 
         if _norm_mode_kw is None:
             print(

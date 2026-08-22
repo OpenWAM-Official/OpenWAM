@@ -352,7 +352,8 @@ def compute_multitask_robotwin_stats(
         dataset_dir: Top-level RoboTwin dataset directory.
         robot: Robot embodiment name.
         variant: ``"clean_50"``, ``"randomized_500"``, or ``"both"``.
-        tasks: Optional list of task names. Defaults to all training tasks.
+        tasks: Optional internal task restriction. Defaults to every task
+            discovered on disk.
         checkpoint_path: When set, the function persists a per-task NPZ
             shard into ``<checkpoint_path>.partial/shards_v1/`` after each
             task-root is processed. A subsequent call recomputes the shard
@@ -476,22 +477,6 @@ def _load_yaml_config(path: str) -> dict:
     return OmegaConf.to_container(cfg, resolve=True)
 
 
-def _resolve_tasks_from_config(cfg: dict) -> Optional[list]:
-    """Match the task-resolution semantics of ``MultiTaskRoboTwinDataset.from_config``."""
-    from openwam.dataloader.robotwin import ROBOTWIN_ALL_TASKS, ROBOTWIN_TRAIN_TASKS
-
-    task_name = cfg.get("task_name")
-    if task_name:
-        return [task_name]
-    train_tasks = cfg.get("train_tasks")
-    holdout_tasks = cfg.get("holdout_tasks")
-    if train_tasks:
-        return list(train_tasks)
-    if holdout_tasks:
-        return sorted(t for t in ROBOTWIN_ALL_TASKS if t not in holdout_tasks)
-    return ROBOTWIN_TRAIN_TASKS
-
-
 def _print_summary(stats: dict) -> None:
     for mode in _MODES:
         sub = stats.get(mode)
@@ -535,7 +520,7 @@ def main():
         type=str,
         default=None,
         help="Output .npy path (default: "
-        "<data_root>/<task_name>_<robot>_<variant>_stats.npy for single-task; "
+        "<data_root>/<task>_<robot>_<variant>_stats.npy for single-task; "
         "<dataset_dir>/<robot>_<variant>_stats.npy for multi-task)",
     )
     args = parser.parse_args()
@@ -549,11 +534,11 @@ def main():
     data_root = args.data_root  # data_root is not a yaml concept, CLI-only
     robot = args.robot or cfg.get("robot", "aloha-agilex")
     variant = args.variant or cfg.get("variant", "clean_50")
-    tasks = parse_tasks_file(args.tasks_file) if args.tasks_file else _resolve_tasks_from_config(cfg)
+    tasks = parse_tasks_file(args.tasks_file) if args.tasks_file else None
     output = args.output
 
     if data_root:
-        # Single-task CLI: infer task_name from layout .../<task>/<robot>_<variant>/data
+        # Single-task CLI: infer the task directory from the formal layout.
         inferred_task = os.path.basename(os.path.abspath(os.path.join(data_root, "..", "..")))
         if inferred_task:
             stats_name = f"{inferred_task}_{robot}_{variant}_stats.npy"

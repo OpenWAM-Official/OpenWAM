@@ -1184,21 +1184,17 @@ def test_registry_robotwin_multitask_removed():
     assert "robotwin_multitask" not in DATASET_REGISTRY
 
 
-def test_from_config_task_resolution_single_task():
-    """from_config with task_name set resolves to [task_name]."""
+def test_from_config_uses_directory_discovery_without_task_selectors():
+    """from_config leaves task discovery to the multi-task dataset."""
     from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
 
     config = {
         "type": "robotwin",
         "dataset_dir": "/dummy",
-        "task_name": "adjust_bottle",
         "robot": "aloha-agilex",
         "variant": "clean_50",
     }
 
-    # We can't construct a real dataset without data, but we can test
-    # that from_config calls __init__ with the right tasks list by
-    # monkeypatching __init__.
     captured = {}
     original_init = MultiTaskRoboTwinDataset.__init__
 
@@ -1217,48 +1213,27 @@ def test_from_config_task_resolution_single_task():
     finally:
         MultiTaskRoboTwinDataset.__init__ = original_init
 
-    assert captured["tasks"] == ["adjust_bottle"]
+    assert "tasks" not in captured
+    assert "task_name" not in captured
     assert captured["split"] == "train"
 
 
-def test_from_config_task_resolution_holdout():
-    """from_config with holdout_tasks excludes them from training tasks."""
-    from openwam.dataloader.robotwin import (
-        ROBOTWIN_ALL_TASKS,
-        MultiTaskRoboTwinDataset,
+def test_discover_robotwin_roots_loads_every_task_directory(tmp_path):
+    from openwam.dataloader.robotwin import discover_robotwin_roots
+
+    for task in ("task_b", "task_a", "custom_task"):
+        (tmp_path / task / "test-robot_clean_50" / "data").mkdir(parents=True)
+    (tmp_path / "wrong_variant" / "test-robot_randomized_500" / "data").mkdir(
+        parents=True
     )
+    (tmp_path / "not_a_task").mkdir()
 
-    holdout = ["open_laptop", "turn_switch"]
-    config = {
-        "type": "robotwin",
-        "dataset_dir": "/dummy",
-        "task_name": None,
-        "train_tasks": None,
-        "holdout_tasks": holdout,
-        "robot": "aloha-agilex",
-        "variant": "clean_50",
-    }
-
-    captured = {}
-    original_init = MultiTaskRoboTwinDataset.__init__
-
-    def mock_init(self, **kwargs):
-        captured.update(kwargs)
-        raise _SkipInit()
-
-    class _SkipInit(Exception):
-        pass
-
-    MultiTaskRoboTwinDataset.__init__ = mock_init
-    try:
-        MultiTaskRoboTwinDataset.from_config(config, split="train")
-    except _SkipInit:
-        pass
-    finally:
-        MultiTaskRoboTwinDataset.__init__ = original_init
-
-    expected = sorted(t for t in ROBOTWIN_ALL_TASKS if t not in holdout)
-    assert captured["tasks"] == expected
+    roots = discover_robotwin_roots(
+        str(tmp_path),
+        "test-robot",
+        "clean_50",
+    )
+    assert [task for task, _ in roots] == ["custom_task", "task_a", "task_b"]
 
 
 def test_from_config_via_registry():
@@ -1269,7 +1244,6 @@ def test_from_config_via_registry():
     config = {
         "type": "robotwin",
         "dataset_dir": "/dummy",
-        "task_name": "adjust_bottle",
         "robot": "aloha-agilex",
         "variant": "clean_50",
     }
@@ -1293,5 +1267,6 @@ def test_from_config_via_registry():
         MultiTaskRoboTwinDataset.__init__ = original_init
 
     assert captured["dataset_dir"] == "/dummy"
-    assert captured["tasks"] == ["adjust_bottle"]
+    assert "tasks" not in captured
+    assert "task_name" not in captured
     assert captured["action_mode"] == "eef"
