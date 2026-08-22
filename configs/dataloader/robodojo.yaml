@@ -3,11 +3,11 @@ type: robodojo
 # Formal layout only:
 #   <dataset_dir>/<task>/<embodiment>/data/episode_*.hdf5
 # dataset_variant=real keeps the recorded per-arm base EEF pose unchanged.
-dataset_dir: /path/to/OpenWAM/data/RoboDojo_real
-dataset_variant: real            # sim: env/world -> arm base; real: native pose
+dataset_dir: /path/to/OpenWAM/data/RoboDojo
+dataset_variant: sim            # sim: env/world -> arm base; real: native pose
 split: train
 
-embodiment: piper_x              # real: arx_x5, piper, piper_x; sim: arx_x5
+embodiment: arx_x5              # real: arx_x5, piper, piper_x; sim: arx_x5
 action_mode: eef                 # only supported mode; raw representation is EEF20
 
 # Stats are discovered/generated under <dataset_dir>/meta/ for this variant
