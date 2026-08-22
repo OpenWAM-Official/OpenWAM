@@ -255,6 +255,10 @@ def test_libero_resume_rejects_protocol_mismatch(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({"resume_signature": signature}), encoding="utf-8")
 
     full_eval._validate_resume_signature(tmp_path, signature)
+    full_eval._validate_resume_signature(
+        tmp_path,
+        signature | {"render_gpus": [0, 1, 2, 3, 5]},
+    )
     with pytest.raises(RuntimeError, match="different evaluation protocol"):
         full_eval._validate_resume_signature(
             tmp_path,

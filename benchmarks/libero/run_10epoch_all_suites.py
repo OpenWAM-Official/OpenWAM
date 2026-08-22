@@ -44,6 +44,10 @@ DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "libero"
 REQUIRED_MUJOCO_VERSION = "3.3.2"
 LIBERO_PROTOCOL_VERSION = "openwam-libero-seed42-settle30-gripm1-h10-v1"
 
+# Scheduling-only fields may change across a checkpointed evaluation. They do
+# not alter simulator state, observations, policy settings, or task selection.
+RESUME_OPERATIONAL_FIELDS = frozenset({"render_gpus"})
+
 SUITE_ALIASES = {
     "spatial": "libero_spatial",
     "goal": "libero_goal",
@@ -519,7 +523,13 @@ def _validate_resume_signature(output_dir: Path, expected: dict) -> None:
         raise RuntimeError(
             f"cannot resume legacy evaluation at {output_dir}: it has no protocol signature; use a new output directory"
         )
-    differing = sorted(key for key in set(actual) | set(expected) if actual.get(key) != expected.get(key))
+    differing = sorted(
+        key
+        for key in set(actual) | set(expected)
+        if key not in RESUME_OPERATIONAL_FIELDS and actual.get(key) != expected.get(key)
+    )
+    if not differing:
+        return
     details = ", ".join(f"{key}={actual.get(key)!r}->{expected.get(key)!r}" for key in differing)
     raise RuntimeError(f"cannot resume {output_dir} with a different evaluation protocol: {details}")
 
@@ -665,7 +675,14 @@ def _dynamic_worker(
     registry: ProcessRegistry,
     stop_event: threading.Event,
 ) -> list[TaskJob]:
-    """Pull tasks on demand and return failed requests to the shared queue."""
+    """Pull tasks on demand and return failed requests to the shared queue.
+
+    Consecutive client crashes open a per-worker circuit breaker.  The worker
+    pauses before pulling another request, then rejoins the queue instead of
+    retiring permanently.  Native simulator / EGL failures can be transient;
+    permanently removing a healthy policy endpoint after a short burst leaves
+    the rest of a long evaluation needlessly under-provisioned.
+    """
     failed = []
     consecutive_failures = 0
     initial_delay = (slot.port - args.base_port) * args.client_start_stagger
@@ -720,11 +737,19 @@ def _dynamic_worker(
                 failed.append(job)
                 if consecutive_failures >= args.worker_max_consecutive_failures:
                     print(
-                        f"[quarantine] gpu={slot.gpu} replica={slot.replica} "
-                        f"port={slot.port} consecutive_failures={consecutive_failures}",
+                        f"[cooldown] gpu={slot.gpu} replica={slot.replica} "
+                        f"port={slot.port} consecutive_failures={consecutive_failures} "
+                        f"delay={args.worker_recovery_delay:g}s",
                         flush=True,
                     )
-                    return failed
+                    if stop_event.wait(args.worker_recovery_delay):
+                        return failed
+                    consecutive_failures = 0
+                    print(
+                        f"[recovered] gpu={slot.gpu} replica={slot.replica} "
+                        f"port={slot.port} pulling from shared queue",
+                        flush=True,
+                    )
                 continue
             next_attempt = attempt + 1
             if stop_event.wait(args.client_retry_delay):
@@ -739,11 +764,19 @@ def _dynamic_worker(
             )
             if consecutive_failures >= args.worker_max_consecutive_failures:
                 print(
-                    f"[quarantine] gpu={slot.gpu} replica={slot.replica} "
-                    f"port={slot.port} consecutive_failures={consecutive_failures}",
+                    f"[cooldown] gpu={slot.gpu} replica={slot.replica} "
+                    f"port={slot.port} consecutive_failures={consecutive_failures} "
+                    f"delay={args.worker_recovery_delay:g}s",
                     flush=True,
                 )
-                return failed
+                if stop_event.wait(args.worker_recovery_delay):
+                    return failed
+                consecutive_failures = 0
+                print(
+                    f"[recovered] gpu={slot.gpu} replica={slot.replica} "
+                    f"port={slot.port} pulling from shared queue",
+                    flush=True,
+                )
         finally:
             work_queue.task_done()
 
@@ -1003,6 +1036,8 @@ def _preflight(args: argparse.Namespace) -> None:
         raise ValueError("--client-retry-delay must be non-negative")
     if args.worker_max_consecutive_failures <= 0:
         raise ValueError("--worker-max-consecutive-failures must be positive")
+    if args.worker_recovery_delay < 0:
+        raise ValueError("--worker-recovery-delay must be non-negative")
     if args.client_start_stagger < 0:
         raise ValueError("--client-start-stagger must be non-negative")
 
@@ -1158,7 +1193,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--worker-max-consecutive-failures",
         type=int,
         default=3,
-        help="retire an endpoint after this many consecutive client failures (default: 3)",
+        help="cool down an endpoint after this many consecutive client failures (default: 3)",
+    )
+    parser.add_argument(
+        "--worker-recovery-delay",
+        type=float,
+        default=30.0,
+        help="seconds before a cooled-down endpoint rejoins the shared queue (default: 30)",
     )
     parser.add_argument(
         "--client-start-stagger",
@@ -1278,6 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
         "client_max_attempts": args.client_max_attempts,
         "client_retry_delay": args.client_retry_delay,
         "worker_max_consecutive_failures": args.worker_max_consecutive_failures,
+        "worker_recovery_delay": args.worker_recovery_delay,
         "client_start_stagger": args.client_start_stagger,
         "policy_config": str(args.policy_config),
         "seed_override": args.seed,

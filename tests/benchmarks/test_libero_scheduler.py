@@ -69,6 +69,7 @@ def test_dynamic_worker_requeues_failure_behind_pending_requests(monkeypatch, tm
         base_port=8920,
         client_start_stagger=0,
         worker_max_consecutive_failures=3,
+        worker_recovery_delay=0,
     )
     slot = ReplicaSlot(gpu=0, gpu_slot=0, replica=0, port=8920)
     trial_run = TrialRun(trial_start=0, num_trials=1)
@@ -96,6 +97,47 @@ def test_dynamic_worker_requeues_failure_behind_pending_requests(monkeypatch, tm
         (second, 1),
         (first, 2),
     ]
+
+
+def test_dynamic_worker_recovers_after_consecutive_failures(monkeypatch, tmp_path, capsys):
+    job = TaskJob("libero_spatial", 8)
+    calls = []
+
+    def fake_run_client(*args, **kwargs):
+        calls.append(kwargs["attempt"])
+        return kwargs["attempt"] == 4
+
+    monkeypatch.setattr(scheduler, "_run_client", fake_run_client)
+    args = SimpleNamespace(
+        client_max_attempts=4,
+        client_retry_delay=0,
+        base_port=8920,
+        client_start_stagger=0,
+        worker_max_consecutive_failures=3,
+        worker_recovery_delay=0,
+    )
+    work_queue = queue.Queue()
+    work_queue.put(QueuedTask(job))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            _dynamic_worker,
+            args,
+            slot=ReplicaSlot(gpu=4, gpu_slot=4, replica=0, port=8928),
+            work_queue=work_queue,
+            trial_run=TrialRun(trial_start=0, num_trials=1),
+            output_dir=tmp_path,
+            registry=ProcessRegistry(),
+            stop_event=threading.Event(),
+        )
+        work_queue.join()
+        work_queue.put(None)
+        assert future.result(timeout=2) == []
+
+    assert calls == [1, 2, 3, 4]
+    output = capsys.readouterr().out
+    assert "[cooldown] gpu=4 replica=0" in output
+    assert "[recovered] gpu=4 replica=0" in output
 
 
 def test_render_devices_can_be_decoupled_from_policy_gpus():

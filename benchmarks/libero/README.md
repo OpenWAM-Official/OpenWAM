@@ -188,9 +188,11 @@ each GPU (ports 8920–8935). Every task is evaluated by one client/environment
 that runs trials 0–49 continuously. Replicas pull whole tasks from one dynamic
 queue, so an idle replica immediately receives the next task without splitting
 a task's RNG stream. A failed task is returned to the queue up to three times;
-an endpoint is retired after three consecutive client failures. All videos,
-client/server logs, a run manifest, `summary.csv`, and `summary.json` are
-retained under the printed run directory.
+after three consecutive client failures an endpoint enters a 30-second cooldown
+and then rejoins the shared queue. Configure the circuit breaker with
+`--worker-max-consecutive-failures` and `--worker-recovery-delay`. All videos,
+client/server logs, a run manifest, `summary.csv`, and `summary.json` are retained
+under the printed run directory.
 
 ```bash
 /usr/bin/python3.12 benchmarks/libero/run_10epoch_all_suites.py
