@@ -1048,7 +1048,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
         actions: Optional[torch.Tensor] = None,
         lambda_video: float = 1.0,
         lambda_action: float = 1.0,
-        decoupled_sampler=None,
         **inputs,
     ) -> dict:
         """Compute joint video-action flow matching loss.
@@ -1068,7 +1067,6 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 be passed via ``inputs["actions"]``.
             lambda_video: Weight for video loss term.
             lambda_action: Weight for action loss term.
-            decoupled_sampler: Optional DecoupledFlowMatchLoss.
             **inputs: Preprocessed video/text tensors plus forward-time flags.
 
         Returns:
@@ -1089,15 +1087,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         B = inputs["input_latents"].shape[0]
 
         # --- Sample video timesteps ---
-        if decoupled_sampler is not None:
-            video_t, decoupled_action_t = decoupled_sampler.sample_timesteps(B, device="cpu")
-            num_ts = len(vb.scheduler.timesteps)
-            video_timestep_ids = (
-                (video_t / decoupled_sampler.num_train_timesteps * num_ts).long().clamp(min_tb, max_tb - 1)
-            )
-        else:
-            decoupled_action_t = None
-            video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
+        video_timestep_ids = torch.randint(min_tb, max_tb, (B,))
 
         video_timesteps = vb.scheduler.timesteps[video_timestep_ids].to(dtype=_dtype, device=_device)
         video_sigmas = vb.scheduler.sigmas[video_timestep_ids].to(dtype=_dtype, device=_device)
@@ -1121,15 +1111,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             None,
         )
         if lambda_action > 0 and actions is not None:
-            if decoupled_action_t is not None:
-                num_ts_a = len(action_scheduler.timesteps)
-                action_timestep_ids = (
-                    (decoupled_action_t / decoupled_sampler.num_train_timesteps * num_ts_a)
-                    .long()
-                    .clamp(0, num_ts_a - 1)
-                )
-            else:
-                action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
+            action_timestep_ids = torch.randint(0, len(action_scheduler.timesteps), (B,))
 
             action_timesteps = action_scheduler.timesteps[action_timestep_ids].to(dtype=_dtype, device=_device)
             action_sigmas = action_scheduler.sigmas[action_timestep_ids].to(dtype=_dtype, device=_device)

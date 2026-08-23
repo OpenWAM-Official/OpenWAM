@@ -254,7 +254,6 @@ def test_trainer_reads_freeze_from_the_merged_cfg(tmp_path, monkeypatch):
             "initialize_model_on_cpu": False,
             "lambda_video": 1.0,
             "lambda_action": 1.0,
-            "timestep_sampling": None,
             "use_gradient_checkpointing": False,
             "use_gradient_checkpointing_offload": False,
             "max_timestep_boundary": 1.0,

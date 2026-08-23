@@ -118,23 +118,6 @@ def test_denoise_async_is_noop(cfg, expected):
     assert denoise_async_is_noop(normalize_denoise_config(cfg)) is expected
 
 
-def test_build_timestep_sampler_default_is_none():
-    from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
-
-    assert build_timestep_sampler(None) is None
-    assert build_timestep_sampler("default") is None
-    assert build_timestep_sampler("randint") is None
-
-
-def test_build_timestep_sampler_rejects_unknown():
-    from openwam.model.architectures.utils.timestep_sampling import build_timestep_sampler
-
-    with pytest.raises(ValueError, match="Unknown training.timestep_sampling"):
-        build_timestep_sampler("bogus")
-    with pytest.raises(ValueError, match="Unknown training.timestep_sampling"):
-        build_timestep_sampler("independent_uniform_shift")
-
-
 def test_make_schedule_async_structure():
     from openwam.deploy.denoise_schedule import make_schedule
 
@@ -232,37 +215,6 @@ def test_schedule_variance_shift_offset_lead_flip_swaps_streams():
     res_v = schedule_variance_shift(v, a, num_steps=12, lead="video", alpha=9.0, offset=0.3)
     assert [tv for tv, _ in res_a] == [ta for _, ta in res_v]
     assert [ta for _, ta in res_a] == [tv for tv, _ in res_v]
-
-
-def test_variance_shift_timestep_sampler():
-    import torch
-
-    from openwam.model.architectures.utils.timestep_sampling import (
-        VarianceShiftTimestepSampler,
-        build_timestep_sampler,
-    )
-
-    s = build_timestep_sampler("variance_shift", num_train_timesteps=1000, lead="action", alpha=9.0)
-    assert isinstance(s, VarianceShiftTimestepSampler)
-
-    torch.manual_seed(0)
-    v_t, a_t = s.sample_timesteps(64, device="cpu")
-    assert v_t.shape == (64,) and a_t.shape == (64,)
-    # action leads -> cleaner -> higher grid-position value on average
-    assert float(a_t.mean()) > float(v_t.mean())
-
-    # Reproducible from the ambient global RNG (the trainer seeds it per step).
-    torch.manual_seed(0)
-    v2, a2 = s.sample_timesteps(64, device="cpu")
-    assert torch.allclose(v_t, v2) and torch.allclose(a_t, a2)
-
-
-@pytest.mark.parametrize("alpha", [0.0, 0.5, float("nan"), float("inf")])
-def test_variance_shift_timestep_sampler_rejects_invalid_alpha(alpha):
-    from openwam.model.architectures.utils.timestep_sampling import VarianceShiftTimestepSampler
-
-    with pytest.raises(ValueError, match="alpha must be finite and >= 1"):
-        VarianceShiftTimestepSampler(alpha=alpha)
 
 
 def test_action_scheduler_is_action_scheduler_instance():
