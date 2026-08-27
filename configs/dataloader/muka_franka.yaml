@@ -1,0 +1,39 @@
+type: muka_franka
+
+# Hugging Face: ewykric/muka_franka_lerobot_v3 (LeRobot v3, 15 fps).
+# Raw state/action: [xyz3, extrinsic XYZ Euler3, gripper_closedness1].
+# The reader converts both to [xyz3, rot6d6, gripper_open_scale1], with the
+# pretrained convention -1=closed / +1=open.
+dataset_dir: /path/to/muka_franka_lerobot_v3
+action_mode: eef
+gripper_convention: minus1_closed_plus1_open
+
+# Normalize raw EEF10, then scatter to the shared 80-D left-arm block:
+# [0:3)=xyz, [3:9)=rot6d, [9]=gripper. All other slots remain zero/masked.
+unify_action: true
+unify_action_map: ["0-9"]
+normalize_mode: min-max
+
+head_camera_priority:
+  - observation.images.left
+wrist_camera_priority:
+  - observation.images.left_wrist
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+
+# Follow the published train split; no additional holdout override is applied.
+#
+#
+split: train
+enable_action_supervision: true
+
+# color_jitter:
+#   brightness: 0.2
+#   contrast: 0.2
+#   saturation: 0.2
+#   hue: 0.0

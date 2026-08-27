@@ -80,6 +80,7 @@ def _register_builtins():
     from openwam.dataloader.interndata_a1 import InternDataA1Dataset
     from openwam.dataloader.libero import LiberoDataset
     from openwam.dataloader.mixture import MixtureDataset
+    from openwam.dataloader.muka_franka import MukaFrankaDataset
     from openwam.dataloader.oxe_droid import OxeDroidDataset
     from openwam.dataloader.robocasa365 import MultiTaskRoboCasa365Dataset
     from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset
@@ -97,6 +98,7 @@ def _register_builtins():
     register_dataset("robocoin")(MultiRobotCOINDataset)
     register_dataset("ebench")(EBenchDataset)
     register_dataset("libero")(LiberoDataset)
+    register_dataset("muka_franka")(MukaFrankaDataset)
     register_dataset("oxe_droid")(OxeDroidDataset)
     register_dataset("robocasa365")(MultiTaskRoboCasa365Dataset)
     # Registered on the SINGLE-bucket class: its from_config returns either one
