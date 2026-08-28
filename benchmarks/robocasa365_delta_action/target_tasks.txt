@@ -1,0 +1,58 @@
+# RoboCasa365 official eval targets (the multi-task leaderboard set).
+# Source: robocasa dataset_registry.py TARGET_TASKS (18 atomic + 32 composite = 50; 16 seen + 16 unseen).
+# Use with multi_eval.sh: ROBOCASA365_DELTA_ACTION_PYTHON=... bash multi_eval.sh --split target target_tasks.txt
+# One task per line; `#` comments and blank lines are ignored.
+#
+# ── Atomic (18) ──────────────────────────────────────────────────────────────
+CloseBlenderLid
+CloseFridge
+CloseToasterOvenDoor
+CoffeeSetupMug
+NavigateKitchen
+OpenCabinet
+OpenDrawer
+OpenStandMixerHead
+PickPlaceCounterToCabinet
+PickPlaceCounterToStove
+PickPlaceDrawerToCounter
+PickPlaceSinkToCounter
+PickPlaceToasterToCounter
+SlideDishwasherRack
+TurnOffStove
+TurnOnElectricKettle
+TurnOnMicrowave
+TurnOnSinkFaucet
+#
+# ── Composite (32: 16 seen + 16 zero-shot unseen; split by split_group at eval) ─────
+ArrangeBreadBasket
+ArrangeTea
+BreadSelection
+CategorizeCondiments
+CuttingToolSelection
+DeliverStraw
+GarnishPancake
+GatherTableware
+GetToastedBread
+HeatKebabSandwich
+KettleBoiling
+LoadDishwasher
+MakeIceLemonade
+PackIdenticalLunches
+PanTransfer
+PortionHotDogs
+PreSoakPan
+PrepareCoffee
+RecycleBottlesByType
+RinseSinkBasin
+ScrubCuttingBoard
+SearingMeat
+SeparateFreezerRack
+SetUpCuttingStation
+StackBowlsCabinet
+SteamInMicrowave
+StirVegetables
+StoreLeftoversInBowl
+WaffleReheat
+WashFruitColander
+WashLettuce
+WeighIngredients
