@@ -1,0 +1,50 @@
+type: robocasa365_delta_action
+
+# Independent native-delta RoboCasa365 LeRobot v3 conversions. Atomic and
+# composite share one schema and are read as one 300-task collection.
+dataset_dir:
+  - /path/to/robocasa365_delta_action_v3/robocasa365-pretrain-atomic
+  - /path/to/robocasa365_delta_action_v3/robocasa365-pretrain-composite
+task_name: null
+task_roots: null
+
+# One raw state per sample and a 32-step same-row action horizon.
+num_frames: 33
+video_stride: 4
+window_stride: 1
+repeat: 1
+
+height: 384
+width: 320
+multiview: true
+camera_layout:
+  - observation.images.robot0_agentview_left
+  - observation.images.robot0_eye_in_hand
+  - observation.images.robot0_agentview_right
+
+split: train
+val_ratio: 0.0
+seed: 42
+
+# The converted Parquet columns are row-aligned:
+#   observation.state[19] = eef xyz3 + rot6d6 + gripper1 + base xyz3 + rot6d6
+#   action[15] = native normalized delta xyz3
+#                + rot6d(Exp(native normalized delta rotvec3))
+#                + flipped gripper1
+#                + native base vx/vy/vyaw + torso + control_mode
+# The rotation command is not multiplied by 0.5 and is not composed with state.
+action_mode: robocasa365_delta_action
+normalize_mode: min-max
+normalization_stats_path: /path/to/robocasa365_delta_action_v3/robocasa365_delta_action_multitask_compact_stats.npy
+
+# State and action have different raw widths and independent normalization
+# blocks. There is no 20-D/25-D intermediate.
+unify_action: true
+unify_action_map: ["0-9", "68-72"]
+unify_state_map: ["0-9", "68-76"]
+
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
