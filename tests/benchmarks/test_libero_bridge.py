@@ -51,7 +51,7 @@ def test_native_eef10_bridge_preserves_native_delta_and_flips_gripper_only() -> 
 
     np.testing.assert_array_equal(action7[:3], action10[:3])
     np.testing.assert_allclose(action7[3:6], rotvec, atol=2e-6)
-    assert action7[6] == -0.8
+    assert action7[6] == pytest.approx(-0.8)
 
 
 def test_native_eef10_bridge_clips_runtime_command_directly() -> None:

@@ -1,0 +1,36 @@
+name: libero
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  # NumPy 1.22.4 from the upstream requirements does not support Python 3.11.
+  - python=3.10
+  - pip=26.2.1
+  - setuptools=84.0.0
+  - wheel=0.48.0
+  - libegl=1.7.0
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      # Model-independent packages declared by LIBERO/requirements.txt.
+      - hydra-core==1.2.0
+      - numpy==1.22.4
+      - wandb==0.13.1
+      - easydict==1.9
+      - transformers==4.21.1
+      - opencv-python==4.6.0.66
+      - robomimic==0.2.0
+      - einops==0.4.1
+      - thop==0.1.1.post2209072238
+      - robosuite==1.4.0
+      - bddl==1.0.1
+      - future==0.18.2
+      - matplotlib==3.5.3
+      - cloudpickle==2.1.0
+      - gym==0.25.2
+      # Thin OpenWAM client dependencies.
+      - torch==2.7.1+cpu
+      - mujoco==3.3.2
+      - imageio==2.37.4
+      - imageio-ffmpeg==0.6.0
+      - PyYAML==6.0.3
+      - websockets==13.1

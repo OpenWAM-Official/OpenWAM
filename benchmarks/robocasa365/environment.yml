@@ -1,0 +1,16 @@
+name: robocasa365
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  # RoboCasa365 v1.0.1 officially targets Python 3.11. Its editable install
+  # supplies the simulator stack (NumPy, MuJoCo, Gymnasium, LeRobot, etc.).
+  - python=3.11
+  - pip=26.2.1
+  - setuptools=84.0.0
+  - wheel=0.48.0
+  - libegl=1.7.0
+  - pip:
+      # Thin OpenWAM client dependencies not owned by RoboCasa.
+      - websockets==15.0.1
+      - PyYAML==6.0.3

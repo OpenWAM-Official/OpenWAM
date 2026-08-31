@@ -3,6 +3,22 @@
 This client connects the RoboCasa simulator to an OpenWAM server trained on the
 canonical RoboCasa365 native-action LeRobot v3 conversion.
 
+## Workflow inventory
+
+| Stage | Files |
+|---|---|
+| Reproducible isolated client environment | `environment.yml`, `setup_env.sh` |
+| Simulator/client preflight | `run_smoke.sh`, `smoke_robocasa365.py` |
+| Policy-client configuration | `policy_config.yml` |
+| OpenWAM WebSocket/action adapter | `openwam2robocasa365_interface.py` |
+| One-task client/evaluator | `single_eval.sh`, `single_eval.py` |
+| Official target-list evaluation + CSV | `multi_eval.sh`, `target_tasks.txt` |
+| Managed server → client → evaluation | `run_eval.sh` |
+
+The simulator and thin client run in their own RoboCasa365 environment; the
+model server runs in the normal OpenWAM environment. This separation prevents
+the simulator's pinned NumPy/MuJoCo stack from changing the model runtime.
+
 ## Representation contract
 
 The simulator exposes native state16 and consumes native action12. The policy
@@ -48,9 +64,50 @@ is sign-inverted back to RoboCasa's native close command.
 - the native task instruction is sent unchanged, with no prompt prefix or
   suffix, matching the training dataloader.
 
-## Running
+## 1. Create and verify the client environment
 
-Start the server with a `robocasa365` checkpoint, then run:
+The setup pins RoboCasa `1.0.1` and the compatible robosuite master revision,
+creates the conda environment, installs both repositories, sets up macros, and
+downloads the official kitchen assets (about 10 GB):
+
+```bash
+CONDA_BIN=/path/to/conda \
+ROBOCASA365_ENV_PREFIX=/path/to/envs/robocasa365 \
+ROBOCASA365_PATH=/path/to/robocasa \
+ROBOSUITE_PATH=/path/to/robosuite \
+  bash benchmarks/robocasa365/setup_env.sh
+```
+
+Set `ROBOCASA365_DOWNLOAD_ASSETS=0` only when assets are already available or
+when intentionally preparing dependencies first. Then run the preflight from
+weakest to strongest:
+
+```bash
+ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
+  bash benchmarks/robocasa365/run_smoke.sh import
+ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
+  bash benchmarks/robocasa365/run_smoke.sh env OpenDrawer
+```
+
+## 2. Manual server and client startup
+
+Start the server in the OpenWAM environment:
+
+```bash
+bash scripts/deploy.sh \
+  --ckpt-dir /path/to/robocasa365_checkpoint \
+  --ckpt-name checkpoint_step_10000.safetensors \
+  --device cuda:0 --port 8848
+```
+
+Optionally verify the client/server wire path without creating a simulator:
+
+```bash
+ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
+  bash benchmarks/robocasa365/run_smoke.sh roundtrip
+```
+
+Then run one task:
 
 ```bash
 ROBOCASA365_PYTHON=/path/to/robocasa/env/bin/python \
@@ -74,6 +131,37 @@ ROBOCASA365_PYTHON=... bash benchmarks/robocasa365/run_smoke.sh roundtrip
 
 Set `debug: true` in `policy_config.yml` to write per-step camera, state19, and
 native action12 inspection bundles.
+
+## 3. Managed end-to-end evaluation
+
+`run_eval.sh` owns the complete lifecycle for one policy server: it starts the
+server, waits for its TCP endpoint, launches the isolated client, evaluates one
+task or the official target list, and stops the server on success, failure, or
+interrupt.
+
+One task:
+
+```bash
+SERVER_PYTHON=/path/to/openwam/bin/python \
+ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
+  bash benchmarks/robocasa365/run_eval.sh \
+    /path/to/checkpoint checkpoint_step_10000.safetensors OpenDrawer
+```
+
+All official target tasks:
+
+```bash
+SERVER_PYTHON=/path/to/openwam/bin/python \
+ROBOCASA365_PYTHON=/path/to/envs/robocasa365/bin/python \
+OUTPUT_DIR=outputs/robocasa365/full \
+  bash benchmarks/robocasa365/run_eval.sh \
+    /path/to/checkpoint checkpoint_step_10000.safetensors target
+```
+
+Useful overrides are `SERVER_DEVICE`, `HOST`, `PORT`, `SPLIT`,
+`SERVER_START_TIMEOUT`, `OUTPUT_DIR`, and `ROBOCASA365_POLICY_CONFIG`. Server
+and client logs are preserved under `OUTPUT_DIR`; multi-task evaluation also
+writes `tasks/summary_<split>.csv`.
 
 The rollout horizon is read directly from RoboCasa's official
 `robocasa.utils.dataset_registry_utils.get_task_horizon(task)` registry. Leave
