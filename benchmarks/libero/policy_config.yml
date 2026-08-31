@@ -1,18 +1,9 @@
-# OpenWAM LIBERO benchmark client config.
-#
-# This file is a template. `single_eval.sh` patches host/port at runtime; all
-# other fields can be overridden by copying the file and passing
-# `POLICY_CONFIG_PATH=/path/to/custom.yml`.
-
-policy_name: openwam
-
-# OpenWAM policy server connection.
+# OpenWAM LIBERO native-action benchmark client.
+policy_name: openwam_libero
 host: "127.0.0.1"
 port: 8848
 request_timeout: 300
 
-
-# Benchmark task selection.
 suite: libero_spatial
 task_id: 0
 num_trials: 50
@@ -22,65 +13,31 @@ max_steps_by_suite:
   libero_object: 600
   libero_goal: 600
   libero_10: 700
-# Seed the task environment once before the trial loop.
 seed: 42
 rng_mode: environment
 reseed_each_trial: false
 fail_on_incomplete: false
 
 settle_steps: 30
+# Runtime LIBERO action is native 7-D OSC: delta xyz3 + delta rotvec3 + gripper.
 settle_action: [0, 0, 0, 0, 0, 0, -1]
 
-# Offscreen rendering.
 camera_height: 256
 camera_width: 256
-
-# Observation mapping from LIBERO obs dict to OpenWAM's fixed camera contract.
 head_camera_key: agentview_image
 left_wrist_camera_key: robot0_eye_in_hand_image
 right_wrist_camera_key: null
-
-# Standard LIBERO/OpenVLA evaluation rotates offscreen robosuite images by 180
-# degrees before policy input. Set to `none` only for checkpoints trained on raw
-# unrotated LIBERO frames.
 image_transform: rotate_180
 
-# Action handling.
-#   eef    - the checkpoint predicts the raw 10-D EEF pose [xyz3, rot6d6, grip1]
-#            (unified 80-D gathered/denormalized server-side); the client sends
-#            the EEF10 proprio and converts the returned full pose to the env's
-#            native 7-D OSC delta using the live controller scales.
-#   native - legacy 7-D OSC passthrough for checkpoints trained on raw actions.
-action_mode: eef
-
-# Proprioception. EEF checkpoints REQUIRE the 10-D EEF proprio; the client
-# assembles it from robot0_eef_pos / robot0_eef_quat / robot0_gripper_qpos
-# (state_keys is only used by action_mode: native).
-send_state: true
-state_keys:
-  - robot0_eef_pos
-  - robot0_eef_quat
-  - robot0_gripper_qpos
+# The server-side checkpoint must have been trained from
+# configs/dataloader/libero.yaml. It returns raw native-action
+# EEF10 after normalization/unification is inverted server-side.
+action_mode: libero
 state_dim: 10
-
-# LIBERO environments execute 7-D single-arm OSC delta actions.
-action_dim: 7
+send_state: true
 action_indices: null
 action_clip: null
 
-# robosuite OSC_POSE output_max (metres / radians per unit action). null lets
-# the client probe the live env controller (falls back to 0.05 / 0.5).
-osc_pos_scale: null
-osc_rot_scale: null
-
 debug: false
 debug_dir: "./debug_libero"
-
-# Save every trial from the initialized state through settling and rollout.
-# Three MP4s are written per trial: agent view, wrist view, and the checkpoint's
-# 384x320 L-shaped model layout. A results.json file records success and paths.
-save_videos: true
-video_dir: "./evaluate_results/libero"
-video_fps: 20
-video_model_height: 384
-video_model_width: 320
+result_dir: "./evaluate_results/libero"

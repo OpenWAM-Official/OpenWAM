@@ -1,11 +1,11 @@
-"""RoboCasa365 compact LeRobot v3 reader.
+"""Canonical RoboCasa365 compact native-action LeRobot v3 reader.
 
-The converted dataset stores row-aligned physical semantics directly:
+The converted dataset stores row-aligned compact semantics directly:
 
 * ``observation.state`` (19-D) = achieved EEF ``xyz3 + rot6d6 + gripper1``
   followed by world base ``xyz3 + rot6d6``.
-* ``action`` (15-D) = current-state-anchored absolute EEF target
-  ``xyz3 + rot6d6 + gripper1`` followed by the native base command
+* ``action`` (15-D) = native normalized EEF delta
+  ``xyz3 + rot6d(Exp(delta_rotvec)) + gripper1`` followed by the native base command
   ``vx + vy + vyaw + torso + control_mode``.
 
 There is no 20-D or 25-D intermediate. With unified training enabled, state

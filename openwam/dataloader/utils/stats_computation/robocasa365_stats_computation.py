@@ -1,4 +1,4 @@
-"""Normalization statistics for compact RoboCasa365 state19/action15 v3 data."""
+"""Normalization statistics for canonical compact RoboCasa365 state19/action15 v3 data."""
 
 from __future__ import annotations
 
@@ -19,9 +19,7 @@ from openwam.dataloader.robocasa365 import (
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
 from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import atomic_save_stats_npy
 from scripts.convert_robocasa365_compact_v3 import (
-    SHARED_EEF_STATS_DIM,
     StatsAccumulator,
-    _shared_eef_rows,
     _stats_payload,
 )
 
@@ -61,16 +59,14 @@ def _iter_arrays(data_root: str, task_name: str | None = None):
 def _compute(items, label: str) -> dict:
     action_acc = StatsAccumulator(ACTION_DIM, seed=71)
     state_acc = StatsAccumulator(STATE_DIM, seed=73)
-    shared_eef_acc = StatsAccumulator(SHARED_EEF_STATS_DIM, seed=79)
     total = 0
     for index, (state, action) in enumerate(items, 1):
         state_acc.update(state)
         action_acc.update(action)
-        shared_eef_acc.update(_shared_eef_rows(state, action))
         total += state.shape[0]
         if index % 10 == 0:
             print(f"  [{label}] {index} batches, {total:,} rows", flush=True)
-    return _stats_payload(action_acc, state_acc, shared_eef_acc)
+    return _stats_payload(action_acc, state_acc)
 
 
 def compute_normalization_stats(data_root: str, task_name: str | None = None, **_unused) -> dict:

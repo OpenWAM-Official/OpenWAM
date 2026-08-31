@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
-"""Convert the official ``lerobot/libero`` v3 dataset to absolute EEF10.
+"""Convert ``lerobot/libero`` to native-action EEF10.
 
-This converter is intentionally separate from
-``convert_libero_to_absolute_eef10_v3.py``.  The latter consumes four Fast-WAM
-20 Hz buckets with one episode per parquet/video.  The official LeRobot copy is
-a single 10 Hz dataset whose parquet and video files contain several episodes.
-Those files and the episode offsets must remain packed exactly as they are.
+The official LeRobot LIBERO dataset stores the primary columns as::
 
-Source rows:
+    observation.state = [eef_xyz3, eef_axis_angle3, finger_qpos2]
+    action            = [native_normalized_delta_xyz3,
+                         native_normalized_delta_axis_angle3,
+                         native_close_scale1]
 
-* ``observation.state`` = achieved ``[xyz3, axis_angle3, finger_qpos2]``
-* ``action`` = native continuous LIBERO OSC
-  ``[delta_xyz3, delta_axis_angle3, close_scale1]``
+This converter changes only the representation of those columns.  The state
+becomes the achieved EEF10 value ``[xyz3, rot6d6, open_scale1]``.  The action
+keeps the native LIBERO command itself: its first three values are copied
+unchanged, its native rotation vector is encoded as ``rot6d(Exp(rotvec))``
+without applying an OSC physical scale or composing it with the state, and its
+continuous gripper command is negated to match OpenWAM's pretraining contract
+(``-1 = closed, +1 = open``).
 
-Output rows:
-
-* ``observation.state`` = achieved ``[xyz3, rot6d6, open_scale1]``
-* ``action`` = absolute OSC goal ``[xyz3, rot6d6, open_scale1]``
-
-LIBERO's native gripper direction is ``+1 = close``.  OpenWAM's EEF10
-contract is the opposite: ``-1 = closed, +1 = open``.  The native gripper
-channel is continuous and is therefore negated without thresholding.
+The LeRobot v3 packing, episode offsets, task metadata, and video bytes are
+preserved while the native action semantics remain unchanged.
 """
 
 from __future__ import annotations
@@ -40,17 +37,17 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+OUTPUT_REPRESENTATION = "native_delta_eef10"
+ACTION_STATS_KEY = "libero"
+STATE_STATS_KEY = f"{ACTION_STATS_KEY}_state"
 EEF10_DIM = 10
 SOURCE_ACTION_DIM = 7
 SOURCE_STATE_DIM = 8
 LIBERO_GRIPPER_WIDTH_OPEN = 0.08
-POSITION_SCALE = 0.05
-ROTATION_SCALE = 0.5
-OUTPUT_REPRESENTATION = "absolute_eef10"
 GRIPPER_CONVENTION = "minus1_closed_plus1_open"
 ROT6D_DIMS = tuple(range(3, 9))
 DEFAULT_SOURCE_ROOT = Path("/path/to/libero-lerobot")
-DEFAULT_OUTPUT_ROOT = Path("/path/to/libero")
+DEFAULT_OUTPUT_ROOT = Path("/path/to/libero_native_action_v3")
 DEFAULT_SOURCE_REPO_ID = "lerobot/libero"
 DEFAULT_SOURCE_FPS = 10.0
 DEFAULT_VIDEO_KEYS = (
@@ -68,6 +65,19 @@ EEF10_NAMES = [
     "rot6d_col1_y",
     "rot6d_col1_z",
     "gripper_open_scale",
+]
+
+NATIVE_ACTION_NAMES = [
+    "eef_native_delta_x",
+    "eef_native_delta_y",
+    "eef_native_delta_z",
+    "eef_native_delta_rot6d_col0_x",
+    "eef_native_delta_rot6d_col0_y",
+    "eef_native_delta_rot6d_col0_z",
+    "eef_native_delta_rot6d_col1_x",
+    "eef_native_delta_rot6d_col1_y",
+    "eef_native_delta_rot6d_col1_z",
+    "gripper_open_command",
 ]
 
 
@@ -143,63 +153,6 @@ def gripper_qpos_to_open_scale(width: np.ndarray) -> np.ndarray:
     """Map achieved Panda finger separation to ``-1 closed / +1 open``."""
     value = 2.0 * np.asarray(width, np.float64) / LIBERO_GRIPPER_WIDTH_OPEN - 1.0
     return np.clip(value, -1.0, 1.0).astype(np.float32)
-
-
-def convert_state_action(
-    state8: np.ndarray,
-    action7: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
-    """Convert row-aligned official LeRobot LIBERO state/actions to EEF10.
-
-    ``action7`` is the native normalized OSC command, not a metric pose delta.
-    Position and rotation commands are scaled by robosuite's LIBERO OSC_POSE
-    output maxima (0.05 m and 0.5 rad) before composing an absolute goal with
-    the achieved state on the same row.
-    """
-    state8 = np.asarray(state8, np.float64)
-    action7 = np.asarray(action7, np.float64)
-    if state8.ndim != 2 or state8.shape[1] != SOURCE_STATE_DIM:
-        raise ValueError(f"source state must be (T, {SOURCE_STATE_DIM}), got {state8.shape}")
-    if action7.shape != (state8.shape[0], SOURCE_ACTION_DIM):
-        raise ValueError(f"source action must be {(state8.shape[0], SOURCE_ACTION_DIM)}, got {action7.shape}")
-    if not np.isfinite(state8).all() or not np.isfinite(action7).all():
-        raise ValueError("source state/action contains NaN or infinity")
-    if np.any(np.abs(action7[:, :6]) > 1.0 + 1e-5):
-        raise ValueError("source OSC position/rotation command falls outside [-1, 1]")
-    if np.any(np.abs(action7[:, 6]) > 1.0 + 1e-5):
-        raise ValueError("source continuous gripper command falls outside [-1, 1]")
-
-    current_rotation = axis_angle_to_matrix(state8[:, 3:6])
-    finger_width = state8[:, 6] - state8[:, 7]
-    state_gripper = gripper_qpos_to_open_scale(finger_width)[:, None]
-    state10 = np.concatenate(
-        [state8[:, 0:3].astype(np.float32), matrix_to_rot6d(current_rotation), state_gripper],
-        axis=1,
-    ).astype(np.float32)
-
-    delta_rotation = axis_angle_to_matrix(action7[:, 3:6] * ROTATION_SCALE)
-    goal_rotation = delta_rotation @ current_rotation
-    goal_position = state8[:, 0:3] + action7[:, 0:3] * POSITION_SCALE
-    # Native LIBERO: +1 close.  Canonical EEF10: +1 open.  Keep continuity.
-    action_gripper = -action7[:, 6:7]
-    action10 = np.concatenate(
-        [goal_position.astype(np.float32), matrix_to_rot6d(goal_rotation), action_gripper.astype(np.float32)],
-        axis=1,
-    ).astype(np.float32)
-
-    recovered_position = (action10[:, 0:3].astype(np.float64) - state8[:, 0:3]) / POSITION_SCALE
-    rebuilt_goal_rotation = rot6d_to_matrix(action10[:, 3:9])
-    recovered_delta_rotation = rebuilt_goal_rotation @ np.swapaxes(current_rotation, -1, -2)
-    recovered_rotation = matrix_to_axis_angle(recovered_delta_rotation) / ROTATION_SCALE
-    recovered_gripper = -action10[:, 9].astype(np.float64)
-    errors = {
-        "position": float(np.max(np.abs(recovered_position - action7[:, 0:3]), initial=0.0)),
-        "rotation": float(np.max(np.abs(recovered_rotation - action7[:, 3:6]), initial=0.0)),
-        "gripper": float(np.max(np.abs(recovered_gripper - action7[:, 6]), initial=0.0)),
-    }
-    if errors["position"] > 2e-6 or errors["rotation"] > 2e-6 or errors["gripper"] > 1e-7:
-        raise ValueError(f"absolute EEF10 round-trip failed: {errors}")
-    return state10, action10, errors
 
 
 def _read_json(path: Path) -> dict:
@@ -286,9 +239,7 @@ def _validate_source(
         raise ValueError("source action must be 7-D")
     video_keys = [key for key, feature in features.items() if feature.get("dtype") == "video"]
     if set(video_keys) != set(expected_video_keys):
-        raise ValueError(
-            f"unexpected video keys: {video_keys}; expected {sorted(expected_video_keys)}"
-        )
+        raise ValueError(f"unexpected video keys: {video_keys}; expected {sorted(expected_video_keys)}")
 
     data_paths = sorted((source / "data").rglob("*.parquet"))
     video_paths = sorted((source / "videos").rglob("*.mp4"))
@@ -304,6 +255,66 @@ def _validate_source(
     if not (source / "meta" / "stats.json").is_file():
         raise FileNotFoundError(source / "meta" / "stats.json")
     return data_paths, video_paths
+
+
+def convert_state_action(
+    state8: np.ndarray,
+    action7: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+    """Convert source rows to achieved-state/native-action EEF10.
+
+    No temporal shift is performed.  In particular, ``action[:3]`` remains
+    the source normalized command and ``action[3:9]`` is only a geometric
+    encoding of the source normalized rotation vector.  The conversion is
+    therefore invertible (up to rot6d's usual numerical projection), which is
+    checked before any parquet row is written.
+    """
+    state8 = np.asarray(state8, np.float64)
+    action7 = np.asarray(action7, np.float64)
+    if state8.ndim != 2 or state8.shape[1] != SOURCE_STATE_DIM:
+        raise ValueError(f"source state must be (T, {SOURCE_STATE_DIM}), got {state8.shape}")
+    if action7.shape != (state8.shape[0], SOURCE_ACTION_DIM):
+        raise ValueError(f"source action must be {(state8.shape[0], SOURCE_ACTION_DIM)}, got {action7.shape}")
+    if not np.isfinite(state8).all() or not np.isfinite(action7).all():
+        raise ValueError("source state/action contains NaN or infinity")
+    if np.any(np.abs(action7[:, :6]) > 1.0 + 1e-5):
+        raise ValueError("source native position/rotation command falls outside [-1, 1]")
+    if np.any(np.abs(action7[:, 6]) > 1.0 + 1e-5):
+        raise ValueError("source continuous gripper command falls outside [-1, 1]")
+
+    current_rotation = axis_angle_to_matrix(state8[:, 3:6])
+    finger_width = state8[:, 6] - state8[:, 7]
+    state_gripper = gripper_qpos_to_open_scale(finger_width)[:, None]
+    state10 = np.concatenate(
+        [state8[:, 0:3].astype(np.float32), matrix_to_rot6d(current_rotation), state_gripper],
+        axis=1,
+    ).astype(np.float32)
+
+    # Native LIBERO command: do not multiply by 0.5 rad, do not compose with
+    # current_rotation, and do not add/scalar-scale xyz.  Exp is used solely
+    # to encode the source rotvec as the first two columns of SO(3).
+    native_delta_rotation = axis_angle_to_matrix(action7[:, 3:6])
+    action_gripper = -action7[:, 6:7]
+    action10 = np.concatenate(
+        [
+            action7[:, 0:3].astype(np.float32),
+            matrix_to_rot6d(native_delta_rotation),
+            action_gripper.astype(np.float32),
+        ],
+        axis=1,
+    ).astype(np.float32)
+
+    recovered_position = action10[:, 0:3].astype(np.float64)
+    recovered_rotation = matrix_to_axis_angle(rot6d_to_matrix(action10[:, 3:9]))
+    recovered_gripper = -action10[:, 9].astype(np.float64)
+    errors = {
+        "position": float(np.max(np.abs(recovered_position - action7[:, 0:3]), initial=0.0)),
+        "rotation": float(np.max(np.abs(recovered_rotation - action7[:, 3:6]), initial=0.0)),
+        "gripper": float(np.max(np.abs(recovered_gripper - action7[:, 6]), initial=0.0)),
+    }
+    if errors["position"] > 2e-7 or errors["rotation"] > 3e-6 or errors["gripper"] > 1e-7:
+        raise ValueError(f"native action EEF10 round-trip failed: {errors}")
+    return state10, action10, errors
 
 
 def _write_readme(
@@ -327,24 +338,30 @@ configs:
   data_files: data/*/*.parquet
 ---
 
-# {dataset_title} absolute EEF10 (LeRobot v3.0)
+# {dataset_title} native delta-action EEF10 (LeRobot v3.0)
 
 This local dataset was converted from `{source_repo_id}` at revision
 `{revision_text}` (local source: `{source}`).  Its original parquet packing,
 episode offsets, tasks, {info['fps']:g} FPS timeline, and videos are preserved.
 
-Both primary robot columns use the row-aligned 10-D contract:
+Both primary robot columns use a 10-D interface:
 
 * `observation.state`: achieved `[xyz3, rot6d6, gripper_open_scale1]`
-* `action`: absolute OSC goal `[xyz3, rot6d6, gripper_open_scale1]`
+* `action`: native normalized LIBERO `[delta_xyz3, delta_rot6d6, gripper_open_command1]`
 
-The gripper convention is `-1 = closed, +1 = open`.  Native LIBERO actions
-use the opposite continuous gripper direction.  Absolute action goals are
-constructed as `goal_xyz = state_xyz + delta_xyz * 0.05` and
-`goal_R = Exp(delta_rotvec * 0.5) @ state_R`.
+The action xyz values are copied unchanged from the source.  The action
+rotation is `rot6d(Exp(source_delta_axis_angle))`; no 0.05 m or 0.5 rad OSC
+scale is applied and it is not composed with the achieved state.  Native
+LIBERO uses `+1 = close`; the action gripper is negated to match the OpenWAM
+pretraining convention `-1 = closed, +1 = open`.  State gripper is projected
+from the achieved finger separation as
+`clip(2 * (qpos0 - qpos1) / 0.08 - 1, -1, 1)`.
 
-The sole training/deployment normalization artifact is
-`meta/normalization_stats.npy`.
+The training/deployment normalization artifact is
+`meta/normalization_stats.npy`.  It contains separate
+`libero` (action) and `libero_state` (state) blocks.
+The canonical reader uses these direction-specific blocks so
+achieved-state and command statistics are never mixed.
 
 Dataset totals: {info['total_episodes']} episodes, {info['total_frames']} frames,
 {info['total_tasks']} tasks, {info['fps']} FPS.  Full provenance and numerical
@@ -363,6 +380,7 @@ def convert_dataset(
     expected_video_keys: tuple[str, ...] = DEFAULT_VIDEO_KEYS,
     dataset_title: str = "LIBERO",
 ) -> dict[str, Any]:
+    """Convert every packed parquet while independently copying immutable files."""
     source = source.resolve()
     output = output.resolve()
     if output.exists():
@@ -380,7 +398,9 @@ def convert_dataset(
         expected_video_keys=expected_video_keys,
     )
     revision = _source_revision(source)
-    temp = output.with_name(f".{output.name}.building-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+    temp = output.with_name(
+        f".{output.name}.building-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    )
     if temp.exists():
         raise FileExistsError(temp)
     temp.mkdir(parents=True)
@@ -420,7 +440,12 @@ def convert_dataset(
             )
             state_gripper_projection["max_abs_finger_joint_sum"] = max(
                 state_gripper_projection["max_abs_finger_joint_sum"],
-                float(np.max(np.abs(state8[:, 6].astype(np.float64) + state8[:, 7].astype(np.float64)), initial=0.0)),
+                float(
+                    np.max(
+                        np.abs(state8[:, 6].astype(np.float64) + state8[:, 7].astype(np.float64)),
+                        initial=0.0,
+                    )
+                ),
             )
             source_gripper_min = min(source_gripper_min, float(np.min(action7[:, 6], initial=np.inf)))
             source_gripper_max = max(source_gripper_max, float(np.max(action7[:, 6], initial=-np.inf)))
@@ -464,7 +489,7 @@ def convert_dataset(
         output_features["action"] = {
             "dtype": "float32",
             "shape": [EEF10_DIM],
-            "names": {"motors": EEF10_NAMES},
+            "names": {"motors": NATIVE_ACTION_NAMES},
             "fps": info["fps"],
         }
         output_info = dict(info)
@@ -479,26 +504,37 @@ def convert_dataset(
         standard_stats["action"] = _feature_stats(action_all)
         _write_json(temp / "meta" / "stats.json", standard_stats)
 
-        pooled = np.concatenate([action_all, state_all], axis=0)
-        eef_stats = _feature_stats(pooled)
-        _pin_rot6d_identity(eef_stats)
-        eef_stats.update(
+        action_stats = _feature_stats(action_all)
+        state_stats = _feature_stats(state_all)
+        _pin_rot6d_identity(action_stats)
+        _pin_rot6d_identity(state_stats)
+        action_stats.update(
             {
-                "num_timesteps": int(pooled.shape[0]),
-                "pool": "action_state",
-                "action_rows": int(action_all.shape[0]),
-                "state_rows": int(state_all.shape[0]),
+                "num_timesteps": int(action_all.shape[0]),
+                "pool": "action_only",
                 "gripper_convention": GRIPPER_CONVENTION,
                 "representation": OUTPUT_REPRESENTATION,
-                "osc_position_scale": POSITION_SCALE,
-                "osc_rotation_scale": ROTATION_SCALE,
+                "action_semantics": "native normalized LIBERO delta command",
             }
         )
-        # One complete payload is both the training source and the deployment
-        # artifact.  Deployment selects its six required vectors from ``eef``
-        # and safely ignores the additional metadata and quantiles.
+        state_stats.update(
+            {
+                "num_timesteps": int(state_all.shape[0]),
+                "pool": "state_only",
+                "gripper_convention": GRIPPER_CONVENTION,
+                "representation": OUTPUT_REPRESENTATION,
+                "state_semantics": "achieved EEF pose",
+            }
+        )
         with (temp / "meta" / "normalization_stats.npy").open("wb") as handle:
-            np.save(handle, {"eef": eef_stats}, allow_pickle=True)
+            np.save(
+                handle,
+                {
+                    ACTION_STATS_KEY: action_stats,
+                    STATE_STATS_KEY: state_stats,
+                },
+                allow_pickle=True,
+            )
 
         conversion = {
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -512,14 +548,20 @@ def convert_dataset(
                 **state_gripper_projection,
                 "source_joint_pair_is_not_bijectively_recoverable": True,
             },
-            "action": "absolute OSC goal [xyz3, rot6d6, gripper_open_scale1]",
-            "position_formula": "goal_xyz = state_xyz + source_action_xyz * 0.05",
-            "rotation_formula": "goal_R = Exp(source_action_rotvec * 0.5) @ state_R",
-            "gripper_formula": "open_scale = -source_native_close_scale",
+            "action": "native normalized LIBERO [delta_xyz3, delta_rot6d6, gripper_open_command1]",
+            "action_position_formula": "output_xyz = source_action_xyz (copied unchanged)",
+            "action_rotation_formula": "output_rot6d = rot6d(Exp(source_action_rotvec))",
+            "action_rotation_scale_applied": 1.0,
+            "rot6d_normalization": "identity",
+            "action_gripper_formula": "open_command = -source_native_close_command",
             "source_gripper_observed_range": [source_gripper_min, source_gripper_max],
             "source_gripper_is_continuous": True,
             "roundtrip_max_abs_error": max_errors,
             "normalization_stats_file": "meta/normalization_stats.npy",
+            "normalization_stats_keys": {
+                "action": ACTION_STATS_KEY,
+                "state": STATE_STATS_KEY,
+            },
             "preserved": {
                 "fps": info["fps"],
                 "episodes": info["total_episodes"],

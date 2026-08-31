@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Evaluate OpenWAM on a list of RoboCasa365 tasks (mobile + fixed) against an already-running server.
+# Evaluate the canonical RoboCasa365 native-action policy on a task list.
 # Mirrors benchmarks/robotwin/multi_eval.sh. Tasks run sequentially (the client resets server
 # state at the start of every episode); per-task "Success rate" lines are aggregated into a CSV.
 #

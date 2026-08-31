@@ -1,4 +1,4 @@
-"""RoboCasa365 deploy prompt handling.
+"""Canonical RoboCasa365 deploy prompt handling.
 
 The OpenWAM policy server is *prompt-agnostic*: it forwards whatever ``prompt``
 a client sends straight to the model (see ``openwam/deploy/obs_preprocess.py``).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke checks for a RoboCasa365 install + the OpenWAM WebSocket path.
+"""Canonical smoke checks for a RoboCasa365 install + the OpenWAM WebSocket path.
 
 Modes:
   import     - import robocasa + gym wrapper; confirm robocasa/<Task> registration
@@ -7,7 +7,8 @@ Modes:
   roundtrip  - ping + predict a dummy obs against a running OpenWAM server (no sim)
 
 robocasa / robosuite / MuJoCo live in a separate env; run with
-``ROBOCASA365_PYTHON``. ``roundtrip`` only needs ``benchmarks.utils`` deps.
+``ROBOCASA365_PYTHON``. ``roundtrip`` only needs
+``benchmarks.utils`` dependencies.
 
 For per-step obs/action inspection during a real eval, set ``debug: true`` in
 ``policy_config.yml`` (the adapter dumps ``ep{N}/step_{N}/`` bundles).
@@ -93,7 +94,9 @@ def main(argv=None) -> int:
     parser.add_argument("--mode", choices=["import", "env", "roundtrip"], default="import")
     parser.add_argument("--task", default=os.environ.get("ROBOCASA365_SMOKE_TASK", "OpenDrawer"))
     parser.add_argument("--split", default=os.environ.get("ROBOCASA365_SMOKE_SPLIT", "target"))
-    parser.add_argument("--steps", type=int, default=int(os.environ.get("ROBOCASA365_SMOKE_STEPS", "1")))
+    parser.add_argument(
+        "--steps", type=int, default=int(os.environ.get("ROBOCASA365_SMOKE_STEPS", "1"))
+    )
     parser.add_argument("--host", default=os.environ.get("ROBOCASA365_POLICY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("ROBOCASA365_PORT", "8848")))
     parser.add_argument("--state-dim", type=int, default=19)  # compact EEF10 + world base pose9

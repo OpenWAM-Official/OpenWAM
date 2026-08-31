@@ -1,17 +1,18 @@
 type: libero
 
-# Canonical standalone LeRobot v3 dataset. Both streams are already row-aligned
-# in the same physical EEF10 schema:
-#   observation.state = achieved [xyz3, rot6d6, gripper_open_scale1]
-#   action            = absolute OSC goal [xyz3, rot6d6, gripper_open_scale1]
-dataset_dir: /path/to/libero
-action_mode: eef
+# Canonical LIBERO dataset. The reader accepts only the native-action
+# conversion metadata produced by scripts/convert_lerobot_libero_to_eef10_v3.py.
+dataset_dir: /path/to/benchmark_data/libero
+action_mode: libero
 gripper_convention: minus1_closed_plus1_open
 
-# Normalize raw EEF10, then scatter into the canonical left-arm slots 0..9.
+# Normalize action and achieved state from their separate native-action stats
+# blocks, then scatter both 10-D streams into the canonical left-arm slots.
 unify_action: true
 unify_action_map: ["0-9"]
 normalize_mode: min-max
+# Rot6d slots (3:9) are always identity-mapped by the canonical reader; this
+# is enforced even if a stale/custom stats file contains non-identity values.
 
 head_camera_priority:
   - observation.images.image
@@ -33,12 +34,5 @@ multiview: true
 split: train
 enable_action_supervision: true
 
-# Train-only color augmentation. One shared set of factors is sampled per clip
-# and applied after the head/wrist views have been assembled, preserving
-# temporal consistency. Structurally missing camera slots are masked out and
-# remain black. Val/deploy inputs are unchanged. Set to null or false to disable.
-color_jitter:
-  brightness: 0.2
-  contrast: 0.2
-  saturation: 0.2
-  hue: 0.0
+# The benchmark bridge decodes the model's native 10-D action to LIBERO's
+# runtime 7-D OSC command without absolute-goal composition or controller scale.

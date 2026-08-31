@@ -83,7 +83,6 @@ def _register_builtins():
     from openwam.dataloader.muka_franka import MukaFrankaDataset
     from openwam.dataloader.oxe_droid import OxeDroidDataset
     from openwam.dataloader.robocasa365 import MultiTaskRoboCasa365Dataset
-    from openwam.dataloader.robocasa365_delta_action import MultiTaskRoboCasa365DeltaActionDataset
     from openwam.dataloader.robocasa_gr1 import MultiRoboCasaGR1Dataset
     from openwam.dataloader.robocoin import MultiRobotCOINDataset
     from openwam.dataloader.robodojo import MultiTaskRoboDojoDataset
@@ -102,7 +101,6 @@ def _register_builtins():
     register_dataset("muka_franka")(MukaFrankaDataset)
     register_dataset("oxe_droid")(OxeDroidDataset)
     register_dataset("robocasa365")(MultiTaskRoboCasa365Dataset)
-    register_dataset("robocasa365_delta_action")(MultiTaskRoboCasa365DeltaActionDataset)
     # Registered on the SINGLE-bucket class: its from_config returns either one
     # bucket or a MultiInternDataA1Dataset depending on whether dataset_dir
     # points at a bucket or at the dataset root.

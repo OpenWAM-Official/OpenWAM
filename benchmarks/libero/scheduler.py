@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate an OpenWAM checkpoint on all four LIBERO suites.
+"""Shared scheduler for the canonical OpenWAM LIBERO benchmark.
 
 Every policy-server replica pulls its next task from one shared request queue.
 A failed client request is placed at the back of that queue (up to the configured
@@ -42,7 +42,7 @@ DEFAULT_SERVER_PYTHON = Path("/usr/bin/python3.12")
 DEFAULT_POLICY_CONFIG = SCRIPT_DIR / "policy_config.yml"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "libero"
 REQUIRED_MUJOCO_VERSION = "3.3.2"
-LIBERO_PROTOCOL_VERSION = "openwam-libero-seed42-settle30-gripm1-h10-v1"
+LIBERO_PROTOCOL_VERSION = "openwam-libero-native-action-seed42-settle30-v1"
 
 # Scheduling-only fields may change across a checkpointed evaluation. They do
 # not alter simulator state, observations, policy settings, or task selection.
@@ -560,8 +560,8 @@ def _client_command(
         str(trial_run.trial_start),
         "--num-trials",
         str(trial_run.num_trials),
-        "--video-dir",
-        str(run_dir),
+        "--result-dir",
+        str(run_dir / "attempt_01"),
     ]
     if args.seed is not None:
         command.extend(("--seed", str(args.seed)))

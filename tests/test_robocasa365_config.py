@@ -177,7 +177,7 @@ def test_build_policy_uses_compact_defaults(monkeypatch):
             captured.update(kw)
 
     monkeypatch.setattr(single_eval, "OpenWAMRoboCasa365Policy", _Capture)
-    single_eval._build_policy({"osc_pos_scale": 0.05, "osc_rot_scale": 0.5})
+    single_eval._build_policy({})
     assert captured["state_dim"] is None
     assert captured["right_wrist_camera_key"] == "video.robot0_agentview_right"
     assert "mobile_base" not in captured
@@ -191,8 +191,6 @@ def test_repo_template_declares_compact_contract():
     tmpl = Path(single_eval.__file__).parent / "policy_config.yml"
     cfg = _yaml.safe_load(tmpl.read_text())
     assert cfg["state_dim"] == 19
-    assert cfg["osc_pos_scale"] == 0.05
-    assert cfg["osc_rot_scale"] == 0.5
     assert cfg["max_steps_override"] is None
     assert cfg["right_wrist_camera_key"] == "video.robot0_agentview_right"
     assert "max_steps" not in cfg
@@ -221,3 +219,17 @@ def test_hydra_compose_compact_maps_and_fixed_eval_semantics():
         assert "filter_static_segments" not in cfg.dataloader
         assert "static_segment_threshold" not in cfg.dataloader
         assert "max_static_retry" not in cfg.dataloader
+        assert all(
+            path.startswith("/path/to/benchmark_data/robocasa365/")
+            for path in cfg.dataloader.dataset_dir
+        )
+        assert cfg.dataloader.normalization_stats_path.endswith(
+            "robocasa365_multitask_compact_stats.npy"
+        )
+
+
+def test_only_canonical_robocasa365_dataset_is_registered():
+    from openwam.dataloader.registry import DATASET_REGISTRY
+    from openwam.dataloader.robocasa365 import MultiTaskRoboCasa365Dataset
+
+    assert DATASET_REGISTRY["robocasa365"] is MultiTaskRoboCasa365Dataset

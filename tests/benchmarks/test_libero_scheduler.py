@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import benchmarks.libero.run_10epoch_all_suites as scheduler
-from benchmarks.libero.run_10epoch_all_suites import (
+import benchmarks.libero.scheduler as scheduler
+from benchmarks.libero.scheduler import (
     ProcessRegistry,
     QueuedTask,
     ReplicaSlot,

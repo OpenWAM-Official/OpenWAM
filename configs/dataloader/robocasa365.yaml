@@ -1,10 +1,10 @@
 type: robocasa365
 
-# Independent compact LeRobot v3 conversions. Atomic and composite have the
-# same schema and are read as one 300-task training collection.
+# Independent native-delta RoboCasa365 LeRobot v3 conversions. Atomic and
+# composite share one schema and are read as one 300-task collection.
 dataset_dir:
-  - /path/to/robocasa365_openwam_v3/robocasa365-pretrain-atomic
-  - /path/to/robocasa365_openwam_v3/robocasa365-pretrain-composite
+  - /path/to/benchmark_data/robocasa365/robocasa365-pretrain-atomic
+  - /path/to/benchmark_data/robocasa365/robocasa365-pretrain-composite
 task_name: null
 task_roots: null
 
@@ -26,17 +26,19 @@ split: train
 val_ratio: 0.0
 seed: 42
 
-# The converted Parquet columns are already physical and row-aligned:
+# The converted Parquet columns are row-aligned:
 #   observation.state[19] = eef xyz3 + rot6d6 + gripper1 + base xyz3 + rot6d6
-#   action[15] = absolute eef xyz3 + rot6d6 + gripper1
-#                + base vx/vy/vyaw + torso + control_mode
-# State t and action t are paired directly. No next-frame state is used.
+#   action[15] = native normalized delta xyz3
+#                + rot6d(Exp(native normalized delta rotvec3))
+#                + flipped gripper1
+#                + native base vx/vy/vyaw + torso + control_mode
+# The rotation command is not multiplied by 0.5 and is not composed with state.
 action_mode: robocasa365
 normalize_mode: min-max
-normalization_stats_path: /path/to/robocasa365_openwam_v3/robocasa365_multitask_compact_stats.npy
+normalization_stats_path: /path/to/benchmark_data/robocasa365/robocasa365_multitask_compact_stats.npy
 
-# State and action intentionally use different raw widths and different maps.
-# There is no 20-D/25-D intermediate.
+# State and action have different raw widths and independent normalization
+# blocks. There is no 20-D/25-D intermediate.
 unify_action: true
 unify_action_map: ["0-9", "68-72"]
 unify_state_map: ["0-9", "68-76"]

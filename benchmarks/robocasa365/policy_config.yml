@@ -1,4 +1,4 @@
-# OpenWAM compact RoboCasa365 benchmark client config.
+# OpenWAM RoboCasa365 native-action benchmark client config.
 host: 127.0.0.1
 port: 8848
 request_timeout: 300
@@ -29,13 +29,9 @@ state_keys:
 state_dim: 19
 
 # RoboCasaGymEnv consumes native action12. The policy server returns compact
-# action15, which the client converts to action12 using the current achieved EEF.
+# native-delta action15; the client converts rot6d back to the original 3-D
+# normalized rotation vector and restores the gripper sign.
 action_dim: 12
-
-# These are the OSC_POSE output_max values recorded in every source dataset.
-# Position units are metres; rotation units are radians.
-osc_pos_scale: 0.05
-osc_rot_scale: 0.5
 
 debug: false
 debug_dir: ./debug_robocasa365

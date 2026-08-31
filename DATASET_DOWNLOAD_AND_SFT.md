@@ -14,6 +14,10 @@ mkdir -p "${DATA_ROOT}"
 ```text
 ${DATA_ROOT}/
 ├── libero-lerobot-v3/
+├── libero_native_action_v3/   # canonical conversion workspace
+├── benchmark_data/
+│   ├── libero/                 # canonical LIBERO training snapshot
+│   └── robocasa365/            # canonical RoboCasa365 training snapshot
 ├── robocasa-gr1-24k/          # NVIDIA LeRobot v2.0 buckets
 ├── robocasa-gr1-eef-v20/      # trusted EEF-enriched source
 ├── robocasa-gr1-eef-v30/      # OpenWAM v3 re-index
@@ -87,9 +91,24 @@ du -sh \
 
 test -f "${DATA_ROOT}/libero-lerobot-v3/meta/info.json"
 
+python scripts/convert_lerobot_libero_to_eef10_v3.py \
+  --source "${DATA_ROOT}/libero-lerobot-v3" \
+  --output "${DATA_ROOT}/libero_native_action_v3"
+
+test -f "${DATA_ROOT}/libero_native_action_v3/meta/conversion.json"
+test -f "${DATA_ROOT}/libero_native_action_v3/meta/normalization_stats.npy"
+
+mkdir -p "${DATA_ROOT}/benchmark_data/libero"
+rsync -a "${DATA_ROOT}/libero_native_action_v3/" \
+  "${DATA_ROOT}/benchmark_data/libero/"
+
 ROBOCASA_GR1_PATH="${DATA_ROOT}/robocasa-gr1-tabletop-tasks" \
 bash benchmarks/robocasa_gr1/run_smoke.sh import
 ```
+
+LIBERO 的标准 reader 只接受上述 native-action EEF10 转换。转换目录用于
+生成和审计，训练固定读取独立快照 `${DATA_ROOT}/benchmark_data/libero`，
+避免后续重跑转换时污染正在使用的数据。
 
 NVIDIA GR1 下载目录已经是 LeRobot v2.0（不是 HDF5），但当前 reader
 要求 v3 metadata/path contract。用仓库脚本非破坏性转换：
@@ -213,4 +232,3 @@ training.gradient_accumulation_steps=1
 ```
 
 保持 global batch 64。24k 多任务数据先训练 30k steps，每 2k steps 评测；成功率仍持续上升时再延长至 60k steps。
-

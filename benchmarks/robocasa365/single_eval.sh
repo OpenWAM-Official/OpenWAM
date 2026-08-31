@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one RoboCasa365 task against an already-running OpenWAM policy server.
+# Run one canonical RoboCasa365 native-action task against an OpenWAM policy server.
 #
 # Start the server first (in the OpenWAM env):
 #   bash scripts/deploy.sh --ckpt-dir /path/to/robocasa365_ckpt --port 8848
@@ -19,7 +19,7 @@ port="${3:-${ROBOCASA365_PORT:-8848}}"
 host="${4:-${ROBOCASA365_POLICY_HOST:-127.0.0.1}}"
 
 python_bin="${ROBOCASA365_PYTHON:-python}"
-policy_config="${POLICY_CONFIG_PATH:-${SCRIPT_DIR}/policy_config.yml}"
+policy_config="${ROBOCASA365_POLICY_CONFIG:-${SCRIPT_DIR}/policy_config.yml}"
 [[ -f "${policy_config}" ]] || { echo "[ERROR] policy config not found: ${policy_config}" >&2; exit 1; }
 
 export PYTHONPATH="${REPO_ROOT}:${SCRIPT_DIR}:${PYTHONPATH:-}"

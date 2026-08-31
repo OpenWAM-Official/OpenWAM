@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one RoboCasa365 task against an already-running OpenWAM policy server.
+"""Run one canonical RoboCasa365 native-action task against an OpenWAM policy server.
 
 The OpenWAM server owns the model / checkpoint / preprocessing; this script only
 drives the RoboCasa365 robosuite sim and forwards observations over WebSocket.
@@ -128,8 +128,6 @@ def _build_policy(cfg: dict) -> OpenWAMRoboCasa365Policy:
         # Default None selects the compact 19-D state contract.
         state_dim=_parse_optional_int(cfg.get("state_dim"), "state_dim"),
         action_dim=int(cfg.get("action_dim", 12)),
-        osc_pos_scale=cfg.get("osc_pos_scale"),
-        osc_rot_scale=cfg.get("osc_rot_scale"),
         debug=_parse_bool(cfg.get("debug", False), "debug"),
         debug_dir=cfg.get("debug_dir", "./debug_robocasa365"),
     )

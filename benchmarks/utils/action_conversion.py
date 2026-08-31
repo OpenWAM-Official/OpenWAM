@@ -606,21 +606,10 @@ def r1pro_proprio_to_raw27(proprio: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # LIBERO (single-arm Panda, 7-D OSC delta)                        #
 # --------------------------------------------------------------------------- #
-# Mirrors of the trainer's rendering in openwam/dataloader/libero.py — the eval
-# and training ends of the same contract. tests/benchmarks/test_libero_bridge.py
-# pins each pair together; change them in lockstep.
-#
-# The OpenWAM LIBERO checkpoint predicts a raw 10-D single-arm EEF pose
-# (world frame, FULL pose — not the env's per-step OSC delta)::
-#
-#     eef10 = [xyz(3), rot6d(6), gripper_cmd(1)]
-#
-# The deploy server's _UnifyAwareNormalizer already gathered the model's 80-D
-# unified output back to this raw 10-D and unnormalized it, so the client
-# receives/sends physical EEF10 and only bridges representation:
-#   * proprio: live obs (robot0_eef_pos / robot0_eef_quat / robot0_gripper_qpos)
-#     -> EEF10, byte-consistent with the canonical dataset converter.
-#   * action: EEF10 full pose -> 7-D OSC delta using the live controller scales.
+# Shared rendering helpers for the canonical native-action LIBERO reader and
+# benchmark client. The checkpoint predicts native EEF10 action commands and
+# the benchmark-specific rot6d-to-rotvec bridge lives in
+# benchmarks/libero/openwam2libero_interface.py.
 #
 # The trained gripper channel (EEF10 dim 9) is an OPEN-SCALE: -1 = closed,
 # +1 = open (the pretraining-mixture direction). LIBERO's own action[6] runs the
@@ -632,11 +621,6 @@ LIBERO_ACTION7_DIM = 7
 # Panda finger separation at fully open (m). MUST stay in lockstep with
 # openwam.dataloader.libero.LIBERO_GRIPPER_WIDTH_OPEN.
 LIBERO_GRIPPER_WIDTH_OPEN = 0.08
-# robosuite OSC_POSE defaults for the LIBERO pin (output_max = 0.05 m / 0.5 rad
-# per unit action). Prefer reading the LIVE controller's output_max; these are
-# the documented fallbacks the client uses when the env probe is unavailable.
-LIBERO_OSC_POS_SCALE_DEFAULT = 0.05
-LIBERO_OSC_ROT_SCALE_DEFAULT = 0.5
 
 
 def libero_gripper_qpos_to_cmd(width) -> float:
@@ -684,58 +668,6 @@ def libero_obs_to_eef10(
         )
     grip = np.array([libero_gripper_qpos_to_cmd(qpos[0] - qpos[1])], np.float32)
     return np.concatenate([pos, quat_xyzw_to_rot6d(quat[None])[0], grip], axis=-1).astype(np.float32)
-
-
-def eef10_to_libero7d(
-    action: np.ndarray,
-    ref_pos: np.ndarray,
-    ref_rot6d: np.ndarray,
-    *,
-    pos_scale: float = LIBERO_OSC_POS_SCALE_DEFAULT,
-    rot_scale: float = LIBERO_OSC_ROT_SCALE_DEFAULT,
-    clip: bool = True,
-) -> np.ndarray:
-    """Bridge the model's 10-D FULL EEF pose to LIBERO's 7-D OSC delta action.
-
-    The dual of ``eef20d_to_robocasa12d`` reduced to a fixed-base single arm:
-    position difference divided by the controller position scale, rotation via
-    ``R_target @ R_ref.T`` -> axis-angle divided by the rotation scale, gripper
-    NEGATED from the trained open-scale (+1 = open) back into LIBERO's own
-    command space (+1 = close) and clipped. LIBERO's gripper stays CONTINUOUS in
-    [-1, +1] — no RoboCasa-style 0/1 thresholding.
-
-    Args:
-        action: (10,) EEF10 ``[xyz3, rot6d6, grip1]`` (world frame, physical).
-        ref_pos: (3,) current achieved EEF position (world frame).
-        ref_rot6d: (6,) current achieved EEF rotation as rot6d.
-        pos_scale / rot_scale: robosuite OSC ``output_max`` (metres / radians
-            mapped to action 1.0). Read from the live controller when possible.
-        clip: clip the scaled pos/rot commands to [-1, 1] (OSC action bounds).
-    """
-    act = np.asarray(action, np.float64).reshape(-1)
-    if act.shape[0] != LIBERO_EEF10_DIM:
-        raise ValueError(f"expected a {LIBERO_EEF10_DIM}-D EEF action, got {act.shape[0]}")
-    ref_pos = np.asarray(ref_pos, np.float64).reshape(-1)
-    if ref_pos.shape[0] != 3:
-        raise ValueError(f"ref_pos must be 3-D, got {ref_pos.shape[0]}")
-    if not (float(pos_scale) > 0.0 and float(rot_scale) > 0.0):
-        raise ValueError(
-            f"pos_scale and rot_scale must be > 0 (got pos={pos_scale}, rot={rot_scale}); "
-            "set them from the eval env's OSC_POSE output_max."
-        )
-
-    pos_cmd = (act[0:3] - ref_pos) / float(pos_scale)
-
-    R_t = _rot6d_to_matrix(act[3:9])
-    R_c = _rot6d_to_matrix(np.asarray(ref_rot6d, np.float64).reshape(-1))
-    rot_cmd = _matrix_to_axis_angle(R_t @ R_c.T).astype(np.float64) / float(rot_scale)
-
-    if clip:
-        pos_cmd = np.clip(pos_cmd, -1.0, 1.0)
-        rot_cmd = np.clip(rot_cmd, -1.0, 1.0)
-
-    grip_cmd = libero_open_scale_to_gripper_cmd(act[9])
-    return np.concatenate([pos_cmd, rot_cmd, [grip_cmd]]).astype(np.float32)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build independent RoboCasa365 LeRobot v3 datasets with compact state/action.
+"""Build independent RoboCasa365 LeRobot v3 datasets with native delta actions.
 
 The authoritative numeric source is the per-task RoboCasa365 LeRobot v2.1 tree
 under ``robocasa365/pretrain``.  The published v3 mirror is used only as the
@@ -11,13 +11,16 @@ Output robot columns:
 
 * ``observation.state`` (19-D): achieved EEF xyz3 + rot6d6 + gripper1,
   followed by world base xyz3 + rot6d6.
-* ``action`` (15-D): current-state-anchored absolute EEF xyz3 + rot6d6 +
-  gripper1, followed by base vx/vy/vyaw + torso + control_mode.
+* ``action`` (15-D): native normalized EEF delta xyz3 + the same native
+  normalized delta rotation command represented as rot6d6 + gripper1,
+  followed by base vx/vy/vyaw + torso + control_mode.
 
-The source normalized OSC command on row ``t`` is composed with state ``t``:
-``goal_xyz = eef_xyz + 0.05 * delta_xyz`` and
-``goal_R = Exp(0.5 * delta_rotvec) @ eef_R``.  No next-frame state and no
-control-mode-dependent reference are used.
+The EEF command comes only from the source action on row ``t``.  In particular,
+``action[0:3] = source_action[5:8]`` and
+``action[3:9] = rot6d(Exp(source_action[8:11]))``.  The rotation command is not
+multiplied by the controller's physical ``0.5`` output scale and is not
+composed with the achieved EEF state.  No next-frame state or mode-dependent
+reference is used.
 """
 
 from __future__ import annotations
@@ -43,16 +46,15 @@ SOURCE_STATE_DIM = 16
 SOURCE_ACTION_DIM = 12
 STATE_DIM = 19
 ACTION_DIM = 15
-SHARED_EEF_STATS_DIM = 4  # xyz3 + gripper1, pooled across state and action
 POSITION_SCALE = 0.05
 ROTATION_SCALE = 0.5
 GRIPPER_WIDTH_OPEN = 0.1
-REPRESENTATION = "robocasa365_compact_absolute_eef_v1"
+REPRESENTATION = "robocasa365_compact_native_delta_eef_v1"
 ACTION_STATS_KEY = "robocasa365"
 STATE_STATS_KEY = f"{ACTION_STATS_KEY}_state"
 DEFAULT_SOURCE_PRETRAIN = Path("/path/to/robocasa365/pretrain")
 DEFAULT_PACKED_V3_ROOT = Path("/path/to/robocasa365_v3")
-DEFAULT_OUTPUT_ROOT = Path("/path/to/robocasa365_openwam_v3")
+DEFAULT_OUTPUT_ROOT = Path("/path/to/robocasa365_native_action_v3")
 SPLIT_REPO_NAMES = {
     "atomic": "robocasa365-pretrain-atomic",
     "composite": "robocasa365-pretrain-composite",
@@ -79,15 +81,15 @@ STATE_NAMES = [
     "base_rot6d_col1_z",
 ]
 ACTION_NAMES = [
-    "eef_target_x",
-    "eef_target_y",
-    "eef_target_z",
-    "eef_target_rot6d_col0_x",
-    "eef_target_rot6d_col0_y",
-    "eef_target_rot6d_col0_z",
-    "eef_target_rot6d_col1_x",
-    "eef_target_rot6d_col1_y",
-    "eef_target_rot6d_col1_z",
+    "eef_native_delta_x",
+    "eef_native_delta_y",
+    "eef_native_delta_z",
+    "eef_native_delta_rot6d_col0_x",
+    "eef_native_delta_rot6d_col0_y",
+    "eef_native_delta_rot6d_col0_z",
+    "eef_native_delta_rot6d_col1_x",
+    "eef_native_delta_rot6d_col1_y",
+    "eef_native_delta_rot6d_col1_z",
     "gripper_open_command",
     "base_vx_command",
     "base_vy_command",
@@ -133,7 +135,7 @@ def rot6d_to_matrix(rot6d: np.ndarray) -> np.ndarray:
 
 
 def convert_state_action(state16: np.ndarray, action12: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
-    """Convert row-aligned native RoboCasa state/action to compact physical semantics."""
+    """Convert row-aligned native RoboCasa state/action to compact delta semantics."""
     state16 = np.asarray(state16, np.float64)
     action12 = np.asarray(action12, np.float64)
     if state16.ndim != 2 or state16.shape[1] != SOURCE_STATE_DIM:
@@ -164,33 +166,30 @@ def convert_state_action(state16: np.ndarray, action12: np.ndarray) -> tuple[np.
         axis=1,
     ).astype(np.float32)
 
-    delta_rotation = Rotation.from_rotvec(action12[:, 8:11] * ROTATION_SCALE).as_matrix()
-    target_rotation = delta_rotation @ eef_rotation
-    target_position = state16[:, 7:10] + action12[:, 5:8] * POSITION_SCALE
+    # Keep the normalized source command itself.  Exp maps the native 3-D
+    # rotation vector into SO(3) solely so it can be represented as rot6d; the
+    # controller's physical 0.5-radian scale is deliberately not applied here.
+    delta_rotation = Rotation.from_rotvec(action12[:, 8:11]).as_matrix()
     action15 = np.concatenate(
         [
-            target_position,
-            matrix_to_rot6d(target_rotation),
+            action12[:, 5:8],
+            matrix_to_rot6d(delta_rotation),
             -action12[:, 11:12],
             action12[:, 0:5],
         ],
         axis=1,
     ).astype(np.float32)
 
-    recovered_position = (action15[:, 0:3].astype(np.float64) - state16[:, 7:10]) / POSITION_SCALE
-    recovered_target_rotation = rot6d_to_matrix(action15[:, 3:9])
-    recovered_delta = recovered_target_rotation @ np.swapaxes(eef_rotation, -1, -2)
-    recovered_rotation = Rotation.from_matrix(recovered_delta).as_rotvec() / ROTATION_SCALE
+    recovered_position = action15[:, 0:3].astype(np.float64)
+    recovered_delta = rot6d_to_matrix(action15[:, 3:9])
+    recovered_rotation = Rotation.from_matrix(recovered_delta).as_rotvec()
     errors = {
         "position": float(np.max(np.abs(recovered_position - action12[:, 5:8]), initial=0.0)),
         "rotation": float(np.max(np.abs(recovered_rotation - action12[:, 8:11]), initial=0.0)),
         "gripper": float(np.max(np.abs(-action15[:, 9] - action12[:, 11]), initial=0.0)),
         "base": float(np.max(np.abs(action15[:, 10:15] - action12[:, 0:5]), initial=0.0)),
     }
-    # The converted columns are intentionally float32.  At metre-scale absolute
-    # positions, subtracting the current pose before dividing by 0.05 has a
-    # worst-case few-e-6 normalized-command quantization error.
-    if errors["position"] > 1e-5 or errors["rotation"] > 3e-6 or errors["gripper"] > 1e-7 or errors["base"] > 1e-7:
+    if errors["position"] > 1e-7 or errors["rotation"] > 3e-6 or errors["gripper"] > 1e-7 or errors["base"] > 1e-7:
         raise ValueError(f"compact action round-trip failed: {errors}")
     return state19, action15, errors
 
@@ -288,42 +287,12 @@ def _pin_dims(stats: dict[str, np.ndarray], dims: Iterable[int]) -> None:
         stats[key][list(dims)] = value
 
 
-def _shared_eef_rows(state: np.ndarray, action: np.ndarray) -> np.ndarray:
-    """Return xyz+gripper rows pooled across achieved state and commanded action."""
-    state = np.asarray(state, np.float32)
-    action = np.asarray(action, np.float32)
-    if state.ndim != 2 or state.shape[1] != STATE_DIM:
-        raise ValueError(f"shared EEF stats expected state (N,{STATE_DIM}), got {state.shape}")
-    if action.ndim != 2 or action.shape[1] != ACTION_DIM:
-        raise ValueError(f"shared EEF stats expected action (N,{ACTION_DIM}), got {action.shape}")
-    return np.concatenate(
-        [
-            np.concatenate([state[:, 0:3], state[:, 9:10]], axis=1),
-            np.concatenate([action[:, 0:3], action[:, 9:10]], axis=1),
-        ],
-        axis=0,
-    )
-
-
 def _stats_payload(
     action_acc: StatsAccumulator,
     state_acc: StatsAccumulator,
-    shared_eef_acc: StatsAccumulator,
 ) -> dict:
     action = action_acc.finish()
     state = state_acc.finish()
-    shared_eef = shared_eef_acc.finish()
-
-    # EEF xyz and gripper have matching physical semantics on the achieved-state
-    # and absolute-command sides.  Fit them on the union and write the same
-    # transform into both directional blocks.  Base state is a world pose while
-    # base action is a velocity/command, so their independently accumulated
-    # statistics intentionally remain separate.
-    for key in STAT_KEYS:
-        action[key][0:3] = shared_eef[key][0:3]
-        action[key][9] = shared_eef[key][3]
-        state[key][0:3] = shared_eef[key][0:3]
-        state[key][9] = shared_eef[key][3]
 
     # Rot6D is a geometric representation rather than six independent scalar
     # quantities.  Preserve it exactly under every supported normalization mode.
@@ -333,11 +302,10 @@ def _stats_payload(
         {
             "representation": REPRESENTATION,
             "gripper_convention": "minus1_closed_plus1_open",
-            "osc_position_scale": POSITION_SCALE,
-            "osc_rotation_scale": ROTATION_SCALE,
+            "native_delta_rotation_scale_applied": False,
             "normalization_scope": {
-                "eef_xyz_gripper": "pooled_state_action",
-                "eef_rot6d": "identity",
+                "native_delta_xyz_gripper": "action_only",
+                "native_delta_rot6d": "identity",
                 "base_vx_vy_vyaw_torso_mode": "action_only",
             },
             "rot6d_identity_dims": list(range(3, 9)),
@@ -347,7 +315,7 @@ def _stats_payload(
         {
             "representation": REPRESENTATION,
             "normalization_scope": {
-                "eef_xyz_gripper": "pooled_state_action",
+                "eef_xyz_gripper": "state_only",
                 "eef_rot6d": "identity",
                 "base_xyz": "state_only",
                 "base_rot6d": "identity",
@@ -359,7 +327,6 @@ def _stats_payload(
         ACTION_STATS_KEY: action,
         STATE_STATS_KEY: state,
         "num_timesteps": int(action_acc.count),
-        "num_shared_eef_values": int(shared_eef_acc.count),
         "quantiles": f"deterministic priority sample <= {action_acc._sample_limit} rows",
     }
 
@@ -523,18 +490,20 @@ configs:
   data_files: data/*/*.parquet
 ---
 
-# RoboCasa365 {split}: compact absolute EEF (LeRobot v3.0)
+# RoboCasa365 {split}: compact native delta EEF (LeRobot v3.0)
 
 Independent conversion from `{source}`.  Videos are byte-preserving file copies;
 the output contains no hardlinks or symlinks to its sources.
 
 * `observation.state` (19-D): achieved EEF `[xyz3, rot6d6, gripper1]` + world
   base `[xyz3, rot6d6]`.
-* `action` (15-D): current-state-anchored absolute EEF target
-  `[xyz3, rot6d6, gripper1]` + `[base_vx, base_vy, base_vyaw, torso, control_mode]`.
+* `action` (15-D): native normalized EEF delta
+  `[xyz3, rot6d(Exp(delta_rotvec)), gripper1]` +
+  `[base_vx, base_vy, base_vyaw, torso, control_mode]`.
 * Gripper convention: `-1 = closed`, `+1 = open`.
-* OSC conversion: `target_xyz = state_xyz + 0.05 * source_delta_xyz` and
-  `target_R = Exp(0.5 * source_delta_rotvec) @ state_R` on the same row.
+* Delta conversion: xyz is copied directly from the normalized source command;
+  rotation is represented as `rot6d(Exp(source_delta_rotvec))` with no `0.5`
+  scaling and no composition with state.
 
 Totals: {info["total_episodes"]} episodes, {info["total_frames"]} frames,
 {info["total_tasks"]} prompt strings, {info["fps"]} FPS.
@@ -551,7 +520,6 @@ def convert_split(
     workers: int,
     global_action_stats: StatsAccumulator | None = None,
     global_state_stats: StatsAccumulator | None = None,
-    global_shared_eef_stats: StatsAccumulator | None = None,
 ) -> dict[str, Any]:
     repo_name = SPLIT_REPO_NAMES[split]
     packed = (packed_root / repo_name).resolve()
@@ -574,7 +542,6 @@ def convert_split(
     temp.mkdir(parents=True)
     action_acc = StatsAccumulator(ACTION_DIM, seed=41 if split == "atomic" else 43)
     state_acc = StatsAccumulator(STATE_DIM, seed=47 if split == "atomic" else 53)
-    shared_eef_acc = StatsAccumulator(SHARED_EEF_STATS_DIM, seed=67 if split == "atomic" else 69)
     max_errors = {key: 0.0 for key in ("position", "rotation", "gripper", "base")}
     episodes = _load_episodes(packed)
     tasks_table = pq.read_table(packed / "meta" / "tasks.parquet")
@@ -617,14 +584,10 @@ def convert_split(
                 max_errors[key] = max(max_errors[key], value)
             state_acc.update(state19)
             action_acc.update(action15)
-            shared_eef_rows = _shared_eef_rows(state19, action15)
-            shared_eef_acc.update(shared_eef_rows)
             if global_state_stats is not None:
                 global_state_stats.update(state19)
             if global_action_stats is not None:
                 global_action_stats.update(action15)
-            if global_shared_eef_stats is not None:
-                global_shared_eef_stats.update(shared_eef_rows)
             converted = _replace_column(table, "observation.state", state19)
             converted = _replace_column(converted, "action", action15)
             pq.write_table(converted, target_data, compression="zstd")
@@ -671,7 +634,7 @@ def convert_split(
         output_info["features"] = features
         _write_json(temp / "meta" / "info.json", output_info)
 
-        stats_payload = _stats_payload(action_acc, state_acc, shared_eef_acc)
+        stats_payload = _stats_payload(action_acc, state_acc)
         with (temp / "meta" / "normalization_stats.npy").open("wb") as handle:
             np.save(handle, stats_payload, allow_pickle=True)
         _write_json(
@@ -714,8 +677,10 @@ def convert_split(
             "same_row_state_action": True,
             "uses_next_state": False,
             "mode_dependent_eef_reference": False,
-            "osc_position_scale": POSITION_SCALE,
-            "osc_rotation_scale": ROTATION_SCALE,
+            "source_osc_position_scale": POSITION_SCALE,
+            "source_osc_rotation_scale": ROTATION_SCALE,
+            "source_action_delta_xyz_copied_directly": True,
+            "source_action_delta_rotation_scale_applied": False,
             "verified_source_episodes": verified_episodes,
             "roundtrip_max_abs_error": max_errors,
             "video_reencoded": False,
@@ -765,7 +730,6 @@ def convert_all(
     output_root.mkdir(parents=True)
     global_action = StatsAccumulator(ACTION_DIM, seed=59)
     global_state = StatsAccumulator(STATE_DIM, seed=61)
-    global_shared_eef = StatsAccumulator(SHARED_EEF_STATS_DIM, seed=71)
     results = []
     try:
         for split in selected:
@@ -778,10 +742,9 @@ def convert_all(
                     workers=workers,
                     global_action_stats=global_action,
                     global_state_stats=global_state,
-                    global_shared_eef_stats=global_shared_eef,
                 )
             )
-        global_payload = _stats_payload(global_action, global_state, global_shared_eef)
+        global_payload = _stats_payload(global_action, global_state)
         stats_path = output_root / "robocasa365_multitask_compact_stats.npy"
         with stats_path.open("wb") as handle:
             np.save(handle, global_payload, allow_pickle=True)

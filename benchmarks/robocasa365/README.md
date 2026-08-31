@@ -1,16 +1,17 @@
 # RoboCasa365 evaluation
 
 This client connects the RoboCasa simulator to an OpenWAM server trained on the
-compact RoboCasa365 LeRobot v3 conversion.
+canonical RoboCasa365 native-action LeRobot v3 conversion.
 
 ## Representation contract
 
 The simulator exposes native state16 and consumes native action12. The policy
-uses the converted dataset's physical representation:
+uses the converted dataset's compact representation:
 
 - state19: achieved EEF `xyz3 + rot6d6 + gripper1`, followed by world base
   `xyz3 + rot6d6`;
-- action15: absolute EEF target `xyz3 + rot6d6 + gripper1`, followed by
+- action15: native normalized EEF delta
+  `xyz3 + rot6d(Exp(delta_rotvec3)) + gripper1`, followed by
   `base_vx + base_vy + base_vyaw + torso + control_mode`.
 
 Training scatters state and action independently into the 80-D shared model
@@ -21,21 +22,19 @@ state19  [0:10] -> [0:10], [10:19] -> [68:77]
 action15 [0:10] -> [0:10], [10:15] -> [68:73]
 ```
 
-The server gathers and de-normalizes action15. The client converts its absolute
-EEF target back to native OSC using the current achieved EEF observation:
+The server gathers and de-normalizes action15. The client directly reconstructs
+the native OSC command:
 
 ```text
-delta_xyz    = (target_xyz - current_xyz) / 0.05
-delta_rotvec = Log(target_R @ current_R.T) / 0.5
+native_delta_xyz    = action15[0:3]
+native_delta_rotvec = Log(rot6d_to_matrix(action15[3:9]))
+native_gripper      = -action15[9]
 ```
 
-This conversion never uses the previous commanded target, including when
-`control_mode=+1`. The base velocity, torso, and control mode are passed through
-to the native action. Gripper convention is `-1=closed, +1=open` on the policy
-side and is flipped to RoboCasa's native close command at the bridge.
-
-The scales `0.05 m` and `0.5 rad` are the `OSC_POSE.output_max` values recorded
-in every source dataset. They are configured in `policy_config.yml`.
+No current state, previous target, `0.05` position scale, or `0.5` rotation
+scale participates in the action bridge. Base velocity, torso, and control mode
+pass through. Gripper convention is `-1=closed, +1=open` on the policy side and
+is sign-inverted back to RoboCasa's native close command.
 
 ## Cameras and prompt
 
@@ -51,7 +50,7 @@ in every source dataset. They are configured in `policy_config.yml`.
 
 ## Running
 
-Start the OpenWAM server with a compact RoboCasa365 checkpoint, then run:
+Start the server with a `robocasa365` checkpoint, then run:
 
 ```bash
 ROBOCASA365_PYTHON=/path/to/robocasa/env/bin/python \
@@ -87,9 +86,9 @@ matching the official RoboCasa evaluators.
 The default dataloader config reads the two independent converted repos:
 
 ```text
-/path/to/robocasa365_openwam_v3/robocasa365-pretrain-atomic
-/path/to/robocasa365_openwam_v3/robocasa365-pretrain-composite
+/path/to/benchmark_data/robocasa365/robocasa365-pretrain-atomic
+/path/to/benchmark_data/robocasa365/robocasa365-pretrain-composite
 ```
 
 Both have identical LeRobot v3 schemas. The shared statistics file is
-`/path/to/robocasa365_openwam_v3/robocasa365_multitask_compact_stats.npy`.
+`/path/to/benchmark_data/robocasa365/robocasa365_multitask_compact_stats.npy`.

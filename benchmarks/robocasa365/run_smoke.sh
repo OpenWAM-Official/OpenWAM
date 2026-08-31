@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke launcher for RoboCasa365.
+# Smoke launcher for the canonical RoboCasa365 benchmark.
 #
 # Usage (run inside the separate robocasa365 env):
 #   ROBOCASA365_PYTHON=/path/to/robocasa365/env/bin/python \

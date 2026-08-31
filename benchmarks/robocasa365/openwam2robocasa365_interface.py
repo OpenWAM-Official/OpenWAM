@@ -1,9 +1,10 @@
-"""OpenWAM evaluation adapter for compact RoboCasa365 state19/action15.
+"""OpenWAM evaluation adapter for canonical RoboCasa365 native-action state19/action15.
 
 The client sends the same 19-D physical state stored by the converted training
-dataset. The server returns a 15-D compact action. Its absolute EEF target is
-always converted back to a native normalized OSC delta relative to the current
-achieved EEF observation; base velocity, torso, and control_mode pass through.
+dataset. The server returns a 15-D compact action whose EEF portion already
+represents the native normalized delta command. Rot6d is inverted to the native
+3-D rotation vector without applying the controller's 0.5 physical scale and
+without using the current achieved EEF observation.
 """
 
 from __future__ import annotations
@@ -27,11 +28,11 @@ from benchmarks.utils import (  # noqa: E402
     WSPolicyClient,
     binarize_robocasa_action12,
     build_payload,
-    eef10_to_robocasa12d,
     encode_numpy_b64,
     quat_xyzw_to_rot6d,
     resize_for_lshape_slot,
     robocasa_state_to_eef10,
+    rot6d_to_axis_angle,
     transport,
 )
 
@@ -239,7 +240,7 @@ def dump_obs_debug(
 
 
 class OpenWAMRoboCasa365Policy:
-    """WebSocket client that bridges compact action15 to RoboCasa's native action12."""
+    """Bridge native-delta compact action15 to RoboCasa's native action12."""
 
     def __init__(
         self,
@@ -253,8 +254,6 @@ class OpenWAMRoboCasa365Policy:
         state_keys: Optional[list] = None,
         state_dim: Optional[int] = None,
         action_dim: int = ACTION_DIM,
-        osc_pos_scale: Optional[float] = None,
-        osc_rot_scale: Optional[float] = None,
         debug: bool = False,
         debug_dir: str = "./debug_robocasa365",
         _client=None,
@@ -269,8 +268,6 @@ class OpenWAMRoboCasa365Policy:
         self._state_keys = list(state_keys) if state_keys else list(DEFAULT_STATE_KEYS)
         self._state_dim = STATE_DIM if state_dim is None else int(state_dim)
         self._action_dim = int(action_dim)
-        self._osc_pos_scale = osc_pos_scale
-        self._osc_rot_scale = osc_rot_scale
         self._debug = bool(debug)
         self._debug_dir = debug_dir
         self._episode = -1
@@ -284,7 +281,8 @@ class OpenWAMRoboCasa365Policy:
                 f"representation mismatch: eval requires {REPRESENTATION!r}, server advertises {pong.get('representation')!r}"
             )
         print(
-            f"[OpenWAMRoboCasa365Policy] state_dim={self._state_dim} policy_action_dim={POLICY_ACTION_DIM} "
+            f"[OpenWAMRoboCasa365Policy] state_dim={self._state_dim} "
+            f"policy_action_dim={POLICY_ACTION_DIM} "
             f"env_action_dim={self._action_dim} image_transform={image_transform}"
         )
 
@@ -298,29 +296,19 @@ class OpenWAMRoboCasa365Policy:
         if ack.get("type") != transport.RESET_ACK:
             raise RuntimeError(f"OpenWAM server reset returned unexpected response: {ack}")
 
-    def _bridge_action15(self, obs: dict, action15: np.ndarray) -> np.ndarray:
-        if self._osc_pos_scale is None or self._osc_rot_scale is None:
-            raise ValueError("osc_pos_scale and osc_rot_scale are required for compact action15 bridging")
+    def _bridge_action15(self, action15: np.ndarray) -> np.ndarray:
         action15 = np.asarray(action15, np.float32).reshape(-1)
         if action15.shape != (POLICY_ACTION_DIM,):
             raise ValueError(f"expected compact action15, got {action15.shape}")
-        current_position = np.asarray(obs["state.end_effector_position_relative"], np.float32).reshape(-1)[:3]
-        current_rot6d = quat_xyzw_to_rot6d(
-            np.asarray(obs["state.end_effector_rotation_relative"], np.float32).reshape(-1)[:4]
-        )
+        delta_xyz = np.clip(action15[0:3], -1.0, 1.0)
+        delta_rotvec = np.clip(rot6d_to_axis_angle(action15[3:9]), -1.0, 1.0)
+        native_gripper = -action15[9:10]
         base5 = action15[10:15]
-        # Always invert relative to the current achieved observation. The
-        # controller consumes the resulting normalized delta and owns its
-        # internal achieved/desired goal-update behavior.
-        return eef10_to_robocasa12d(
-            action15[:10],
-            proprio_eef_pos=current_position,
-            proprio_eef_rot6d=current_rot6d,
-            pos_scale=float(self._osc_pos_scale),
-            rot_scale=float(self._osc_rot_scale),
-            base_motion=base5[:4],
-            control_mode=float(base5[4]),
-        )
+        # Environment flat order is EEF xyz3 + rotvec3 + gripper1 + base4 +
+        # control_mode1.  Dataset source order is rearranged into this contract.
+        return np.concatenate(
+            [delta_xyz, delta_rotvec, native_gripper, base5[:4], base5[4:5]]
+        ).astype(np.float32)
 
     def act(self, obs: dict, prompt: str) -> dict:
         payload = build_obs_payload(
@@ -337,7 +325,7 @@ class OpenWAMRoboCasa365Policy:
         response = self._client.predict(payload)
         flat = np.asarray(response["action"], np.float32).reshape(-1)
         if flat.shape[0] == POLICY_ACTION_DIM:
-            flat = self._bridge_action15(obs, flat)
+            flat = self._bridge_action15(flat)
         if flat.shape[0] != self._action_dim:
             raise ValueError(f"OpenWAM returned action dim {flat.shape[0]}, expected {self._action_dim}")
         flat = binarize_robocasa_action12(flat)

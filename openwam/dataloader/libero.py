@@ -1,27 +1,17 @@
-"""LIBERO LeRobot v3 dataloader for the canonical row-aligned EEF10 dataset.
+"""Canonical LeRobot v3 reader for LIBERO native-action EEF10.
 
-The only accepted on-disk contract is::
+The canonical on-disk contract is achieved EEF10 state plus native normalized
+LIBERO action encoded as
+``[delta_xyz3, rot6d(Exp(delta_axis_angle3)), gripper_open_command]``.
 
-    observation.state = achieved [xyz3, rot6d6, gripper_open_scale1]
-    action            = absolute OSC goal [xyz3, rot6d6, gripper_open_scale1]
-
-Both columns are world-frame, full-pose EEF10 values and are consumed directly
-from the same row. The reader performs no state/action representation conversion
-and no temporal shifting. The gripper convention is ``-1 = closed, +1 = open``.
-
-With ``unify_action: true``, the 10 raw dimensions are normalized by one shared
-``eef`` statistics block and scattered into unified slots 0..9.
-
-Training and deployment share the single authoritative artifact
-``meta/normalization_stats.npy``.  Its ``eef`` block is a superset of the six
-vectors deployment consumes and also carries the LIBERO representation metadata.
+The reader accepts only datasets whose conversion metadata declares the exact
+``native_delta_eef10`` representation.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import os
-import time
 from pathlib import Path
 from typing import Any, ClassVar, Optional, Sequence, Tuple
 
@@ -32,16 +22,42 @@ from openwam.dataloader.bases import LeRobotV3Reader
 from openwam.dataloader.utils.normalization import (
     ROT6D_DIMS_ARM10,
     apply_normalization,
-    load_stats_file,
-    load_stats_metadata,
+    materialize_eef_stats,
 )
 
 logger = logging.getLogger(__name__)
 
-_ACTION_MODE = "eef"
+ACTION_MODE = "libero"
+ACTION_STATS_KEY = ACTION_MODE
+STATE_STATS_KEY = f"{ACTION_MODE}_state"
+OUTPUT_REPRESENTATION = "native_delta_eef10"
 EEF10_DIM = 10
 GRIPPER_CONVENTION = "minus1_closed_plus1_open"
 NORMALIZATION_STATS_FILENAME = "normalization_stats.npy"
+EEF10_NAMES = [
+    "eef_x",
+    "eef_y",
+    "eef_z",
+    "rot6d_col0_x",
+    "rot6d_col0_y",
+    "rot6d_col0_z",
+    "rot6d_col1_x",
+    "rot6d_col1_y",
+    "rot6d_col1_z",
+    "gripper_open_scale",
+]
+NATIVE_ACTION_NAMES = [
+    "eef_native_delta_x",
+    "eef_native_delta_y",
+    "eef_native_delta_z",
+    "eef_native_delta_rot6d_col0_x",
+    "eef_native_delta_rot6d_col0_y",
+    "eef_native_delta_rot6d_col0_z",
+    "eef_native_delta_rot6d_col1_x",
+    "eef_native_delta_rot6d_col1_y",
+    "eef_native_delta_rot6d_col1_z",
+    "gripper_open_command",
+]
 
 
 def _as_priority(value: Optional[Sequence[str]], default: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -57,13 +73,19 @@ def _pick_feature(features: dict, priorities: Sequence[str]) -> Optional[str]:
 
 
 class LiberoDataset(LeRobotV3Reader):
-    """Single-bucket LIBERO reader for LeRobot v3 parquet/video datasets."""
+    """Single-bucket canonical native-action LIBERO reader.
+
+    State and action are both 10-D on disk, but are normalized from separate
+    stats blocks because state xyz is a metric achieved pose whereas action xyz
+    is a normalized controller command.  ``unify_action`` remains available for
+    the normal 80-D model interface and maps both streams to slots 0..9.
+    """
 
     DATASET_NAME = "LIBERO"
     ACTION_DIM = EEF10_DIM
     NEEDED_COLS = ("action", "observation.state", "task_index")
     PROMPT_FILE_REQUIRED = True
-    DEPLOY_ACTION_MODE = _ACTION_MODE
+    DEPLOY_ACTION_MODE = ACTION_MODE
 
     HEAD_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
         "observation.images.image",
@@ -87,7 +109,7 @@ class LiberoDataset(LeRobotV3Reader):
         self,
         dataset_dir: str,
         *,
-        action_mode: str = _ACTION_MODE,
+        action_mode: str = ACTION_MODE,
         gripper_convention: str = GRIPPER_CONVENTION,
         head_camera_priority: Optional[Sequence[str]] = None,
         wrist_camera_priority: Optional[Sequence[str]] = None,
@@ -98,34 +120,30 @@ class LiberoDataset(LeRobotV3Reader):
         **kwargs: Any,
     ):
         mode = str(action_mode).strip().lower()
-        if mode != _ACTION_MODE:
+        if mode != ACTION_MODE:
             raise ValueError(
-                f"LIBERO currently supports only action_mode='eef', got {action_mode!r}. "
-                "EEF is raw 10-D: [xyz3, rot6d6, gripper1] (world frame, full pose)."
+                f"LIBERO supports only action_mode={ACTION_MODE!r}, got {action_mode!r}."
             )
         convention = str(gripper_convention).strip()
         if convention != GRIPPER_CONVENTION:
             raise ValueError(
                 f"LIBERO requires gripper_convention={GRIPPER_CONVENTION!r}, got {gripper_convention!r}"
             )
-        unify_on = bool(unify_action)
-        if unify_on and unify_action_map is None:
+        if bool(unify_action) and unify_action_map is None:
             raise ValueError(
                 "LIBERO unify_action=true requires an explicit unify_action_map; "
                 'set ["0-9"] for the canonical single-arm left-slot mapping'
             )
+
         self.action_mode = mode
+        self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
+        self._state_normalization_stats: Optional[dict] = None
         self._head_priority = _as_priority(head_camera_priority, self.HEAD_CAMERA_PRIORITY)
         self._wrist_priority = _as_priority(wrist_camera_priority, self.WRIST_CAMERA_PRIORITY)
-        self._prompt_columns = _as_priority(
-            prompt_columns,
-            ("language_instruction", "task", "prompt"),
-        )
-        self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
-        self._resolved_stats_path: Optional[str] = None  # set by _load_stats when normalization is on
+        self._prompt_columns = _as_priority(prompt_columns, ("language_instruction", "task", "prompt"))
         super().__init__(
             dataset_dir=dataset_dir,
-            unify_action=unify_on,
+            unify_action=bool(unify_action),
             unify_action_map=unify_action_map,
             **kwargs,
         )
@@ -140,12 +158,6 @@ class LiberoDataset(LeRobotV3Reader):
             None,
         )
 
-    def _train_min_window_len(self) -> int:
-        return 1
-
-    def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
-        return actual_raw_len
-
     def _post_init(self, info: dict) -> None:
         features = info.get("features", {}) or {}
         expected_size = (384, 320) if self._multiview else (256, 320)
@@ -155,100 +167,85 @@ class LiberoDataset(LeRobotV3Reader):
                 f"LIBERO {mode} requires height={expected_size[0]}, width={expected_size[1]}, "
                 f"got height={self._height}, width={self._width}"
             )
-        if "action" not in features:
-            raise KeyError("LIBERO requires a row-aligned 10-D action column")
-        action = features["action"]
-        shape = tuple(action.get("shape", ()))
-        if shape != (EEF10_DIM,):
-            raise ValueError(f"LIBERO action feature must have shape [{EEF10_DIM}], got {shape}")
-        if "observation.state" not in features:
-            raise KeyError("LIBERO requires a row-aligned 10-D observation.state column")
-        state = features["observation.state"]
-        state_shape = tuple(state.get("shape", ()))
-        if state_shape != (EEF10_DIM,):
-            raise ValueError(f"LIBERO observation.state feature must have shape [{EEF10_DIM}], got {state_shape}")
+        for column in ("observation.state", "action"):
+            shape = tuple(features.get(column, {}).get("shape", ()))
+            if shape != (EEF10_DIM,):
+                raise ValueError(
+                    f"LIBERO {column} feature must have shape [{EEF10_DIM}], got {shape}"
+                )
+
+        conversion_path = self._dataset_dir / "meta" / "conversion.json"
+        if not conversion_path.is_file():
+            raise FileNotFoundError(
+                f"LIBERO requires {conversion_path}; use "
+                "scripts/convert_lerobot_libero_to_eef10_v3.py"
+            )
+        with conversion_path.open(encoding="utf-8") as handle:
+            conversion = json.load(handle)
+        if conversion.get("output_representation") != OUTPUT_REPRESENTATION:
+            raise ValueError(
+                f"{conversion_path} declares output_representation={conversion.get('output_representation')!r}, "
+                f"expected {OUTPUT_REPRESENTATION!r}; this is not a native-delta LIBERO dataset"
+            )
+
         self._prompt_columns = tuple(col for col in self._prompt_columns if col in features)
         self.NEEDED_COLS = self.NEEDED_COLS + self._prompt_columns
 
     def _load_stats(self, info: dict):
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
+            self._state_normalization_stats = None
             return None
-        if self._source_stats_path:
-            # An explicit path is authoritative and is never silently rebuilt.
-            stats_path = Path(self._source_stats_path)
-        else:
-            stats_path = self._dataset_dir / "meta" / NORMALIZATION_STATS_FILENAME
-            if not stats_path.is_file():
-                self._build_default_stats(stats_path)
-        self._resolved_stats_path = str(stats_path)
-        global_stats = load_stats_file(
-            stats_path,
-            action_mode=self.action_mode,
-            normalize_mode=str(self._normalize_mode),
-            dim=self._raw_action_dim,
-        )
-        self._check_gripper_convention(stats_path)
-        # The complete training payload is already deployment-compatible: the
-        # deploy reader selects the same ``eef`` block and ignores its extra
-        # provenance/quantile fields.  Surface this exact file to checkpointing
-        # instead of materializing a second, reduced artifact.
-        self.normalization_stats_path = str(stats_path)
-        return global_stats
-
-    def _check_gripper_convention(self, stats_path: Path) -> None:
-        """Require stats generated for the canonical EEF10 gripper convention."""
-        recorded = load_stats_metadata(stats_path, action_mode=self.action_mode).get("gripper_convention")
-        if recorded == GRIPPER_CONVENTION:
-            return
-        raise ValueError(
-            f"LIBERO stats {stats_path} declare gripper_convention={recorded!r}, expected "
-            f"{GRIPPER_CONVENTION!r}. Regenerate the stats from the canonical EEF10 dataset."
-        )
-
-    def _build_default_stats(self, path: Path) -> None:
-        """Build the default per-bucket stats file, coordinated across ranks.
-
-        Rank 0 owns the full parquet scan (minutes over the complete dataset)
-        and writes atomically; other ranks poll for the file. ``dist.barrier()``
-        is deliberately avoided — a minutes-long scan would trip NCCL's
-        collective timeout (the ebench precedent).
-        """
-        # Lazy import: the stats module imports this reader at module level.
-        from openwam.dataloader.utils.stats_computation.libero_stats_computation import (
-            build_and_save_libero_stats,
-        )
-
-        try:
-            import torch.distributed as dist
-
-            dist_ready = dist.is_available() and dist.is_initialized()
-        except Exception:
-            dist_ready = False
-        if dist_ready:
-            rank = dist.get_rank()
-        else:
-            # torchrun sets RANK before init_process_group; honor it so
-            # pre-init constructions still elect a single builder.
-            rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
-
-        if rank == 0:
-            logger.info(
-                "LIBERO(%s): no normalization stats at %s — computing from the dataset (rank 0; other ranks wait)",
-                self._dataset_id,
-                path,
+        stats_path = Path(self._source_stats_path) if self._source_stats_path else self._dataset_dir / "meta" / NORMALIZATION_STATS_FILENAME
+        if not stats_path.is_file():
+            raise FileNotFoundError(
+                f"LIBERO normalize_mode={self._normalize_mode!r} but {stats_path} is missing; "
+                "conversion writes meta/normalization_stats.npy"
             )
-            build_and_save_libero_stats(self, path)
-            return
 
-        deadline = time.monotonic() + float(os.environ.get("OPENWAM_STATS_WAIT_TIMEOUT_S", 12 * 60 * 60))
-        poll_interval = float(os.environ.get("OPENWAM_STATS_POLL_INTERVAL_S", 10))
-        while not path.is_file():
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"timed out waiting for rank 0 to build LIBERO stats: {path}")
-            time.sleep(poll_interval)
+        raw = np.load(stats_path, allow_pickle=True).item()
+        if not isinstance(raw, dict):
+            raise ValueError(f"{stats_path} must contain a dictionary payload")
+        if ACTION_STATS_KEY not in raw or STATE_STATS_KEY not in raw:
+            raise KeyError(
+                f"{stats_path} must contain {ACTION_STATS_KEY!r} and {STATE_STATS_KEY!r} blocks"
+            )
+        action_raw = raw[ACTION_STATS_KEY]
+        state_raw = raw[STATE_STATS_KEY]
+
+        action_stats = materialize_eef_stats(
+            dict(action_raw),
+            self._normalize_mode,
+            dim=self._raw_action_dim,
+            strict_minmax=False,
+            source_hint=f"{stats_path}:{ACTION_STATS_KEY}",
+            force_rot6d_identity=True,
+        )
+        self._state_normalization_stats = materialize_eef_stats(
+            dict(state_raw),
+            self._normalize_mode,
+            dim=self._raw_action_dim,
+            strict_minmax=False,
+            source_hint=f"{stats_path}:{STATE_STATS_KEY}",
+            force_rot6d_identity=True,
+        )
+        for key, block in ((ACTION_STATS_KEY, action_raw), (STATE_STATS_KEY, state_raw)):
+            recorded = block.get("gripper_convention")
+            if recorded != GRIPPER_CONVENTION:
+                raise ValueError(
+                    f"{stats_path}:{key} declares gripper_convention={recorded!r}, expected {GRIPPER_CONVENTION!r}"
+                )
+            representation = block.get("representation")
+            if representation is not None and representation != OUTPUT_REPRESENTATION:
+                raise ValueError(
+                    f"{stats_path}:{key} declares representation={representation!r}, expected {OUTPUT_REPRESENTATION!r}"
+                )
+        self.normalization_stats_path = str(stats_path)
+        return action_stats
 
     @staticmethod
     def _read_eef10_column(win, column: str) -> np.ndarray:
+        if column not in win:
+            raise KeyError(f"LIBERO parquet window is missing {column!r}")
         values = np.stack(win[column].values).astype(np.float32)
         if values.ndim != 2 or values.shape[1] != EEF10_DIM:
             raise ValueError(f"LIBERO {column} must be (T, {EEF10_DIM}), got {values.shape}")
@@ -256,35 +253,50 @@ class LiberoDataset(LeRobotV3Reader):
             raise ValueError(f"LIBERO {column} contains NaN or infinity")
         return values
 
+    def _normalize_array(self, arr: np.ndarray, stats: Optional[dict] = None) -> np.ndarray:
+        """Normalize non-rotation dimensions while preserving rot6d exactly.
+
+        Rot6d stores the first two columns of an SO(3) matrix. It is already
+        bounded and geometrically coupled, so an affine per-dimension transform
+        would change the represented rotation. The stats loader pins these
+        dimensions to identity values as a first line of defense; this explicit
+        overwrite is the hard runtime guarantee, including custom statistics.
+        """
+        raw = np.asarray(arr, dtype=np.float32)
+        normalized = apply_normalization(
+            arr,
+            self._normalization_stats if stats is None else stats,
+            self._normalize_mode,
+        )
+        output = np.array(normalized, dtype=np.float32, copy=True)
+        output[..., ROT6D_DIMS_ARM10] = raw[..., ROT6D_DIMS_ARM10]
+        return output
+
     def _raw_action_eef10(self, win) -> np.ndarray:
-        """Return the row-aligned absolute EEF10 action without conversion."""
+        """Return row-aligned native delta-action EEF10 values."""
         return self._read_eef10_column(win, "action")
 
     def _raw_state_eef10(self, win) -> np.ndarray:
-        """Return the row-aligned achieved EEF10 state without conversion."""
+        """Return row-aligned achieved-state EEF10 values."""
         return self._read_eef10_column(win, "observation.state")
 
-    def _action_20d(self, win) -> np.ndarray:
-        return apply_normalization(self._raw_action_eef10(win), self._normalization_stats, self._normalize_mode)
+    def _action_20d(self, win: pd.DataFrame) -> Optional[np.ndarray]:
+        return self._normalize_array(self._raw_action_eef10(win))
 
-    def _proprio_20d(self, win) -> np.ndarray:
-        raw = self._raw_state_eef10(win)[0:1]
-        return apply_normalization(raw, self._normalization_stats, self._normalize_mode)
+    def _proprio_20d(self, win: pd.DataFrame) -> Optional[np.ndarray]:
+        return self._normalize_array(self._raw_state_eef10(win)[0:1], self._state_normalization_stats)
 
-    def _resolve_prompt(self, row, win) -> str:
-        for column in self._prompt_columns:
-            value = win[column].iloc[0]
-            if value is not None and not pd.isna(value):
-                text = str(value).strip()
-                if text:
-                    return text
-        return super()._resolve_prompt(row, win)
 
 ROT6D_DIMS_EEF10 = ROT6D_DIMS_ARM10
 
 __all__ = [
+    "ACTION_MODE",
+    "ACTION_STATS_KEY",
     "EEF10_DIM",
     "GRIPPER_CONVENTION",
-    "ROT6D_DIMS_EEF10",
     "LiberoDataset",
+    "NATIVE_ACTION_NAMES",
+    "OUTPUT_REPRESENTATION",
+    "ROT6D_DIMS_EEF10",
+    "STATE_STATS_KEY",
 ]
