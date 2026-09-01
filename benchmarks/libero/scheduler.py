@@ -187,7 +187,7 @@ def _parse_task_ids(value: str) -> list[int] | None:
 
 
 def _parse_task_sample_ratio(value: str) -> float | None:
-    """Parse ImageWAM-compatible per-suite task sampling ratios."""
+    """Parse an optional per-suite task sampling ratio."""
     ratio = float(value)
     if ratio <= 0.0 or ratio > 1.0:
         raise argparse.ArgumentTypeError("task sample ratio must be in (0, 1]")
@@ -213,9 +213,8 @@ def _build_jobs(
     for suite in suites:
         count = task_counts[suite]
         if sample_ratio is not None:
-            # Match references/ImageWAM/experiments/libero/run_libero_manager.py:
-            # sample independently within each suite using a suite-qualified seed,
-            # then restore task-id order for deterministic scheduling and output.
+            # Adapted from ImageWAM's MIT-licensed LIBERO task sampler. Sample
+            # independently per suite and restore task-id order for stable output.
             sample_count = max(1, int(math.ceil(count * sample_ratio)))
             rng = random.Random(f"{sample_seed}:{suite}")
             task_ids = sorted(rng.sample(range(count), sample_count))
@@ -1091,7 +1090,7 @@ def _print_plan(
     if args.task_sample_ratio is not None:
         sampled_by_suite = {suite: sum(job.suite == suite for job in jobs) for suite in args.suites}
         print(
-            f"sampling   : ImageWAM-compatible ratio={args.task_sample_ratio:g}, "
+            f"sampling   : ratio={args.task_sample_ratio:g}, "
             f"seed={args.task_sample_seed}, tasks={sampled_by_suite}"
         )
     print(f"trials     : {trial_run.trial_start}:{trial_run.trial_stop} continuous in one environment per task")
@@ -1141,16 +1140,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--task-sample-ratio",
         type=_parse_task_sample_ratio,
         default=None,
-        help=(
-            "sample this fraction independently within every suite using the "
-            "references/ImageWAM algorithm; mutually exclusive with --task-ids"
-        ),
+        help="sample this fraction independently within every suite; mutually exclusive with --task-ids",
     )
     parser.add_argument(
         "--task-sample-seed",
         type=int,
         default=42,
-        help="seed used by --task-sample-ratio (ImageWAM default: 42)",
+        help="seed used by --task-sample-ratio",
     )
     parser.add_argument("--trial-start", type=int, default=0)
     parser.add_argument(

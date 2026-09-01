@@ -5,5 +5,11 @@ Source attribution:
 - Derived from DiffSynth-Studio (Apache 2.0)
 - Original Wan-related implementation previously lived in OpenWAM's vendored
   video-backbone package.
+- `camera_controller.py` includes camera-pose and ray-conditioning utilities
+  adapted from CameraCtrl (<https://github.com/hehao13/CameraCtrl>), upstream
+  revision UNKNOWN, under the Apache License 2.0. The file was modified for
+  integration with OpenWAM's Wan backbone and adapter interface.
 
 OpenWAM keeps the original Apache 2.0 license in `license/LICENSE`.
+An additional canonical copy is available at
+`third_party/licenses/Apache-2.0.txt`.

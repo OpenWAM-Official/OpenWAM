@@ -1,3 +1,9 @@
+# Source: https://github.com/black-forest-labs/flux2/blob/main/src/flux2/autoencoder.py
+# Upstream revision: UNKNOWN (the original internal import did not record a commit SHA).
+# License: Apache-2.0; see third_party/licenses/Apache-2.0.txt.
+# Modified by OpenWAM contributors: decoder functionality was removed and
+# OpenWAM checkpoint conversion/encoder integration was added.
+
 """FLUX.2 VAE encoder — extracted, decoder-free.
 
 Only the *encoder* half of the FLUX.2-dev VAE is vendored here, lifted verbatim

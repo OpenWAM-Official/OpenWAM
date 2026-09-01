@@ -5,6 +5,12 @@ Expert + frozen Qwen3-VL. Loss = video + action only; understanding is trained
 through those supervised streams.
 """
 
+# Source: https://github.com/thu-ml/Motus.
+# Upstream revision: UNKNOWN (the original internal import did not record a commit SHA).
+# License: Apache-2.0; see third_party/licenses/Apache-2.0.txt.
+# Modified by OpenWAM contributors: the tri-expert architecture was restructured
+# for OpenWAM registries, modular backbones, configuration, and lifecycle rules.
+
 import logging
 from typing import Callable, Optional, Tuple
 

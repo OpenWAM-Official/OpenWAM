@@ -76,9 +76,11 @@ def prepare_vjepa_imports_and_patch():
     """Import the vendored ViT modules + install the RoPE dtype monkey-patch.
     Idempotent. Returns the ``vision_transformer`` module.
 
-    The ViT lives in-tree alongside this loader (Apache-2.0, lifted from
-    facebookresearch/vjepa2 @ ``vjepa2_1``) — no ``third_party`` submodule or
-    ``sys.path`` bootstrap is needed.
+    The ViT lives in-tree alongside this loader (MIT-licensed, adapted from
+    facebookresearch/vjepa2 at commit
+    ``ce64921e94f0ffdc330c00fc62618157894b74be``) — no ``third_party``
+    submodule or ``sys.path`` bootstrap is needed. See
+    ``third_party/licenses/V-JEPA2-MIT.txt``.
 
     The RoPE dtype monkey-patch root-cause-fixes a V-JEPA / SDPA dtype mismatch
     under mixed precision: upstream ``rotate_queries_or_keys`` builds its sin/cos

@@ -1,6 +1,6 @@
 """Map heterogeneous per-robot action vectors into a unified action space.
 
-Different robots emit different raw action layouts (multi-joint, OXE
+Different robots emit different raw action layouts (multi-joint vectors,
 single-arm EEF, ...). To train one model over a
 shared action head, each dataset declares — in its yaml — which raw dims map to
 which slots of a single unified space of width ``UNIFY_DIM``. This module is the
