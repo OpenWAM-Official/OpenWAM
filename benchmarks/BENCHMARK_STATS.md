@@ -31,6 +31,48 @@ RoboCasa GR1 action/state conventions reported by DIAL:
 | LIBERO-Goal | 10 | ~500 | Common public setup uses 50 demonstrations per task. |
 | LIBERO-Long | 10 | ~500 | Common public setup uses 50 demonstrations per task. |
 
+### VLABench
+
+Official standard finetune release
+([`VLABench/vlabench_primitive_ft_lerobot_video`](https://huggingface.co/datasets/VLABench/vlabench_primitive_ft_lerobot_video)),
+10 primitive tasks x 500 episodes. Note `vlabench_primitive_ft_dataset` redirects to
+`VLABench/raw_primitive_datasets` — the pre-conversion tarballs, not this LeRobot v3 release:
+
+| Split | Tasks | Episodes | Frames | Storage | Notes |
+|---|---:|---:|---:|---:|---|
+| `vlabench_primitive_ft_lerobot_video` | 10 (128 instruction variants) | 5,000 | 575,101 | ~13 GB | LeRobot v3, Franka Panda, 10 fps, 480x480 AV1 video per camera. |
+
+Conventions:
+
+- Three cameras: `image` (forward), `wrist_image`, `second_image` (the "right"
+  external view).
+- 7D state and action `[x, y, z, roll, pitch, yaw, gripper]`, absolute EE pose
+  in the **robot base** frame; the reader converts to 10D EEF
+  `[xyz3, rot6d6, grip1]` and scatters into unified slots 0-9.
+- The two gripper columns carry **opposite** polarity (state 1 = closed,
+  action 1 = open) because of an upstream Franka `get_ee_open_state` bug. Both
+  are passed through verbatim so training and rollout agree. See
+  [`openwam/dataloader/vlabench.py`](../openwam/dataloader/vlabench.py).
+
+Evaluation is closed-loop in simulation over five fixed episode tracks; budget
+30-60 minutes per task per process (VLABench renders every camera's RGB, depth
+and segmentation each step, plus per-step IK).
+
+**Upstream data defect.** The LeRobot conversion's `meta/episodes` is corrupt on
+the Hub (not a damaged download): it writes
+`dataset_from_index = length * episode_index`, as if every episode were the
+length of the current one, and mis-assigns `data/chunk_index` /
+`data/file_index` in step with it — 3,952 of 5,000 episodes point at the wrong
+parquet shard. A loader that trusts those columns pairs each video clip with a
+*different* episode's actions and prompt, which trains on systematically
+mismatched supervision. `length` itself is sound (it sums to `total_frames` and
+matches each episode's video frame count), the episodes are packed into shards
+contiguously in `episode_index` order, and the video metadata is correct
+(one mp4 per episode), so the true layout is exactly recoverable —
+`VLABenchDataset._add_data_offsets` rebuilds it from real parquet row counts.
+Worth keeping in mind when comparing against published numbers trained on this
+same conversion.
+
 ## Training Cost References
 
 GPU-hour values below are planning estimates unless the source publishes wall
@@ -86,3 +128,17 @@ Additional published LIBERO references:
 | OpenVLA-OFT PD&AC Cont-Diffusion | 96.9% | 98.1% | 95.5% | 91.1% | 95.4% |
 | OpenVLA-OFT, original unfiltered data | 95.2% | 94.2% | 95.2% | 93.2% | 94.5% |
 | OpenVLA-OFT, latest comparison table | 97.6% | 98.4% | 97.9% | 94.5% | 97.1% |
+
+### VLABench
+
+Track 1 (in-distribution) success rates published in the VLABench README
+(2025/11/10). The maintainers' own summary of this table is
+"Action representation matters" — the two Pi-fast rows differ only in action
+representation and are 22 points apart.
+
+| Method / checkpoint | Track 1 success | Details |
+|---|---:|---|
+| `pi0-fast-ft-primitive-10task-deltachunk` | 51.2% | Delta chunk, described upstream as the "aligned transform". |
+| `pi0-primitive-10task` | 47.0% | Pi0 finetuned on the 10 primitive tasks. |
+| `pi05-primitive-10task` | 40.6% | Pi0.5 finetuned on the 10 primitive tasks. |
+| `pi0-fast-primitive-10task` | 29.1% | Relative chunk, the "official transform". |
