@@ -111,9 +111,9 @@ _ACT_RGRIP = 22
 # ── observation.state[256] ACHIEVED proprio offsets ──────────────────────────
 # The 256-D vector is the robot's `proprio_obs` list concatenated in a fixed
 # order. That list ships in every episode's meta/episodes/*.json → `config` →
-# robots[0].proprio_obs; we decoded it (n_dof=28) and verified every offset
-# through redundant relationships (sin(qpos) agrees with the redundant sine block; quat ‖·‖==1;
-# base_qvel == d(base_qpos)/dt). These are the ACHIEVED (measured) states — what
+# robots[0].proprio_obs. The layout is checked through the redundant sin(qpos),
+# unit-quaternion, and base-velocity relationships. These are the ACHIEVED
+# (measured) states — what
 # proprio must be sourced from (NOT the action command, which the model never
 # sees at deploy). Layout of the blocks we read:
 #   [158:165] arm_left_qpos   [165:172] arm_left_qpos_sin
@@ -296,10 +296,9 @@ class BehaviorDataset(LeRobotV3Reader):
     PROMPT_SOURCE = "episode_annotated"
     # min-max, deviating from the robocoin-family quantile default: BEHAVIOR is
     # a closed-loop scored benchmark, and quantile saturates beyond-q99 training
-    # targets to 1.0 — the policy learns a soft cap near q99 (a fraction of the
-    # demos' top base speed in the relevant normalization distribution, dims [20:22)). Robust
-    # quantile stays the right default for pretrain corpora that never deploy
-    # closed-loop; see configs/dataloader/behavior.yaml for the full rationale.
+    # targets to 1.0, reducing the available closed-loop command range. Robust
+    # quantile remains useful for pretraining corpora that never deploy
+    # closed-loop; see configs/dataloader/behavior.yaml for the rationale.
     DEFAULT_NORMALIZE_MODE = "min-max"
     # Tolerate any wrist-camera decode failure (→ black slot), mirroring RoboCOIN.
     WRIST_DECODE_TOLERATED = (Exception,)

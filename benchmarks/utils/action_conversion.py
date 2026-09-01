@@ -532,9 +532,9 @@ def raw27_to_r1pro_action(action: np.ndarray, *, clip_passthrough: bool = True) 
 # produce byte-identical output on the same 256-D state.
 #
 # Offsets decoded from the robot's ``proprio_obs`` list (each episode's
-# meta/episodes/*.json → ``config`` → ``robots[0].proprio_obs``) and verified
-# through redundant relationships (sin(qpos) agrees with the redundant sine block; quat ‖·‖==1; base_qvel
-# == d(base_qpos)/dt). eef pose is achieved; gripper/base/trunk are mapped into the
+# meta/episodes/*.json → ``config`` → ``robots[0].proprio_obs``) and checked
+# through the redundant sin(qpos), unit-quaternion, and base-velocity
+# relationships. EEF pose is achieved; gripper/base/trunk are mapped into the
 # action's normalized command space (see the two helpers below).
 _PP_L_POS = slice(186, 189)
 _PP_L_QUAT = slice(189, 193)  # xyzw

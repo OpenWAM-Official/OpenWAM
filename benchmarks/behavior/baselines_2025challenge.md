@@ -65,6 +65,7 @@
 
 - **引用**：tech report `opengalaxea.github.io/G05/`（**无 arXiv / DOI**；前身 G0 = arXiv:2509.00576，建议双引）
 - **base**：**Qwen3.5-2B 单一统一自回归 decoder**（VLM-as-actor；27-D 统一动作空间 + 可学 cross-embodiment tokenizer）。⚠️ **不是**双系统 + action expert —— 那是前身 G0
+- **硬件 / batch**：BEHAVIOR 专属**均未披露**（报告里 16×H20 / 4–10 h 是**真机 R1 微调**、batch 1024 是 **RoboTwin**，都不属于 BEHAVIOR）
 - **iters / epochs**：BEHAVIOR 后训练 **1 epoch 与 4 epochs** 两档，co-train 全部 10000 episodes / 50 任务；预训练 ~120k steps
 - **优化**：预训练 AdamW β(0.9, 0.95) wd 1e-2，peak **1e-5**，4000 warmup → 92% 后 cosine 衰到 peak 的 30%（vision tower 全程不冻）；BEHAVIOR 专属 LR 未单独披露
 - **口径**：Standard、低分辨率 RGB，50 任务 ×10，单 generalist ckpt，2 次平均，Task-Success Score（BDDL 谓词比例，部分给分）

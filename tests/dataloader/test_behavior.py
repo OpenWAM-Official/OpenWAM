@@ -1001,10 +1001,8 @@ class TestActionModes:
 class TestMinMaxDefault:
     """BEHAVIOR is a closed-loop scored benchmark: its default flipped from the
     robocoin-family quantile to min-max so training targets are not saturated
-    at [q01, q99] (base velocity dims lose a substantial fraction of the demos' top speed:
-    q99 is substantially below max). These tests pin the new default and the
-    deploy-side min_max normalize being training-identical (clipped,
-    constant-dim safe)."""
+    beyond [q01, q99]. These tests pin the new default and the deploy-side
+    min_max normalize being training-identical (clipped, constant-dim safe)."""
 
     def test_default_normalize_mode_is_min_max(self, tmp_path):
         from openwam.dataloader.behavior import BehaviorDataset

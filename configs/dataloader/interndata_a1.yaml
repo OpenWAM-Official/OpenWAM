@@ -1,34 +1,63 @@
 type: interndata_a1
 
-# Public InternData-A1 root. Override with INTERNDATA_A1_ROOT.
+# Public InternData-A1 LeRobot v3 root. Override with INTERNDATA_A1_ROOT.
 dataset_dir: ${oc.env:INTERNDATA_A1_ROOT,/path/to/InternData-A1}
 
-# Optional alternate location for generated stats.
+# Per-embodiment stats normally live below dataset_dir. Use an alternate root
+# when the dataset mount is read-only.
 stats_root: null
 
-# Optional CSV containing per-episode head/tail trimming metadata.
+# Optional CSV containing per-episode head/tail trimming metadata. Stats encode
+# whether trimming was active and are rejected if their population differs.
 trim_csv: null
 
+# 33 raw frames at stride 4 produce 9 video frames. The latter must satisfy the
+# Wan VAE temporal constraint: (num_video_frames - 1) % 4 == 0.
 num_frames: 33
 video_stride: 4
 window_stride: 1
 
+# multiview=true builds a 384x320 L-shaped canvas: 256x320 head camera above
+# two 128x160 wrist cameras.
 height: 384
 width: 320
 multiview: true
+
+# Public A1 buckets normally expose only a train split. Stats are train-derived.
 split: train
 
+# action/state use *_ee_to_robot_pose: a rigid terminal-arm attachment in the
+# robot frame shared by both arms. It may be a hand base, final arm link, or
+# gripper mount rather than a literal flange. Native *_tcp_to_robot_pose is not
+# used because the shared contract requires a gripper-independent endpoint.
+
+# The same color-jitter factors are applied to every frame in one training clip.
 color_jitter:
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2
   hue: 0.0
 
+# Stats are per embodiment because gripper units differ. Source gripper
+# positions are converted to the shared raw aperture convention 0=closed,
+# 1=open before normalization; rot6d stats are identity-pinned. Supported
+# modes are null/none, min-max, z-score, and quantile.
+# Generate matching stats with:
+#   python -m openwam.dataloader.utils.stats_computation.interndata_a1_stats_computation \
+#       --dataset_dir /path/to/InternData-A1 --stats_root /path/to/InternData-A1 \
+#       [--trim_csv /path/to/trim.csv] --split train
 normalize_mode: quantile
+
+# false keeps values available but masks action and proprio supervision.
 enable_action_supervision: true
 
+# Raw 20-D EEF layout:
+#   [L xyz3, L rot6d6, L grip1, R xyz3, R rot6d6, R grip1].
+# It is scattered into left slots 0:10 and right slots 34:44 of the shared
+# 80-D head. Every enabled mixture source must use the same action width.
 unify_action: true
 unify_action_map: ["0-9", "34-43"]
 
-# null uses the complete dataset. Set a positive value to cap sampled hours.
+# null uses the complete filtered dataset. A positive float caps effective
+# footage in hours by reproducibly subsampling episodes with project.seed.
 total_hours: null

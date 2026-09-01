@@ -1,4 +1,14 @@
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""Generate per-embodiment 20-D EEF stats for InternData-A1.
+
+The generator uses the reader's schema detection, quaternion conversion,
+gripper scaling, exclusions, split selection, and trim bounds so the emitted
+vectors match training exactly.  Both action and state streams contribute.
+Stats are pooled per embodiment, not per task bucket, and rot6d plus any
+single-arm padding dimensions are pinned to identity.
+
+Output files live under ``<stats_root>/meta/stats_<embodiment>.json`` and carry
+a certificate for the exact source and retained population.
+"""
 
 
 
@@ -109,7 +119,7 @@ logger = logging.getLogger(__name__)
 
 EEF20_DIM = 20
 
-
+# Single-arm readers reserve the right-arm half as masked zero padding.
 RIGHT_ARM_DIMS_EEF20: Tuple[int, ...] = tuple(range(ARM10_DIM, EEF20_DIM))
 
 
@@ -118,6 +128,7 @@ RIGHT_ARM_DIMS_EEF20: Tuple[int, ...] = tuple(range(ARM10_DIM, EEF20_DIM))
 
 
 
+# Reuse reader-owned column tables so stats and runtime cannot drift.
 _SIDES: Dict[str, Dict[str, Sequence]] = {
     "bimanual": _BIMANUAL_SIDES,
     "single_arm": _SINGLE_ARM_SIDES,
@@ -125,7 +136,7 @@ _SIDES: Dict[str, Dict[str, Sequence]] = {
 
 
 def _arm10(table, spec, grip_scale: float) -> np.ndarray:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Build one arm's ``(N, 10)`` ``[xyz, rot6d, grip]`` block from a parquet table."""
     pose_col, grip_col = spec
     pose = np.asarray(table[pose_col].to_pylist(), dtype=np.float32)
     grip = np.asarray(table[grip_col].to_pylist(), dtype=np.float32).reshape(len(pose), 1) / grip_scale
@@ -134,7 +145,12 @@ def _arm10(table, spec, grip_scale: float) -> np.ndarray:
 
 
 def _eef20(table, sides, kind: str, grip_scales) -> np.ndarray:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Assemble the ``(N, 20)`` EEF for one stream; right half zero for single-arm.
+
+    Must stay bit-identical to ``InternDataA1Dataset._eef20`` — including the
+    per-bucket gripper rescale — or the stats describe a different distribution
+    than the reader actually emits.
+    """
 
 
 
@@ -150,7 +166,7 @@ def _eef20(table, sides, kind: str, grip_scales) -> np.ndarray:
 
 
 def _bucket_info(bucket: Path) -> Tuple[str, str, str]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Return ``(embodiment, robot_type, arm_layout)`` for a bucket."""
     with open(bucket / "meta" / "info.json") as f:
         info = json.load(f)
     layout = detect_arm_layout(info.get("features", {}) or {})
@@ -159,7 +175,14 @@ def _bucket_info(bucket: Path) -> Tuple[str, str, str]:
 
 
 def classify_buckets(buckets: Sequence[Path]) -> Dict[str, Dict]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Group every discovered bucket by embodiment, failing on unreadable metadata.
+
+    A shared per-embodiment stats file is safe only when every discovered bucket
+    is either scanned successfully or is empty by construction under the chosen
+    split.  Silently omitting a bucket whose ``info.json`` cannot be classified
+    would create the same partial-normalizer failure as dropping a bucket later
+    in the parquet scan, only before the worker pool has a chance to report it.
+    """
 
 
 
@@ -182,7 +205,26 @@ def classify_buckets(buckets: Sequence[Path]) -> Dict[str, Dict]:
 
 
 def _kept_episodes(bucket: Path) -> Optional[set]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Episode indices the reader will actually emit for this bucket.
+
+    ``meta/episodes`` minus ``meta/excluded_episodes.json``. Both halves matter
+    for a cleaned view: ``data/`` (and ``meta/episodes`` itself) are symlinks to
+    the source, so the parquet shards physically contain every deleted episode.
+    Deletions live only in the exclusion list — which is precisely why the
+    cleaned view cannot express them by dropping manifest rows: the reader
+    derives file-local offsets as a cumsum over surviving rows, so a shortened
+    manifest would slide every later episode onto the wrong frames.
+
+    Returns ``None`` only when the manifest is unreadable — the caller treats
+    that as "cannot filter". An **empty set is meaningful and different**: it
+    means the manifest was read and nothing survives, so every row must be
+    excluded. Conflating the two would silently pool a fully-deleted bucket's
+    rows into the statistics.
+
+    Raises when the exclusion list exists but cannot be parsed: continuing would
+    quietly include episodes the reader drops, and the caller already skips
+    (and logs) a bucket that raises.
+    """
 
 
 
@@ -213,7 +255,7 @@ def _kept_episodes(bucket: Path) -> Optional[set]:
 
 
 def _manifest_episodes(bucket: Path) -> Optional[set]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Every episode index listed in ``meta/episodes``, or ``None`` if unreadable."""
     files = sorted((bucket / "meta" / "episodes").rglob("*.parquet"))
     if not files:
         return None
@@ -227,7 +269,19 @@ def _manifest_episodes(bucket: Path) -> Optional[set]:
 
 
 def _assert_reader_can_load(bucket: Path, shards: Sequence) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Refuse a bucket the reader would refuse, for the same reasons.
+
+    ``len(rows) > 0`` proves rows were read; it does not prove a reader can
+    consume them. A shard truncated by one row, a manifest whose ranges overlap,
+    a missing middle shard — each of those still yields plenty of rows here
+    while :meth:`InternDataA1Dataset._add_data_offsets` raises. Statistics
+    pooled from a bucket no reader can open describe a population that will
+    never be trained on, and nothing downstream distinguishes them.
+
+    Deliberately the reader's checks, called through the reader's functions,
+    rather than a parallel implementation of the same idea — a second
+    implementation is how the two sides diverged in the first place.
+    """
 
 
 
@@ -268,7 +322,17 @@ def _assert_reader_can_load(bucket: Path, shards: Sequence) -> None:
 
 
 def _split_episodes(bucket: Path, split: str) -> Optional[set]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Episode indices belonging to ``split``, or ``None`` when info.json has no splits.
+
+    The reader applies `info.json`'s split ranges before anything else, so a
+    corpus whose splits actually partition the episodes would otherwise have its
+    val rows pooled into the train normalizer. A1's shipped splits happen to
+    cover every episode, which is exactly why this gap could sit unnoticed —
+    the equivalence is a property of the current data, not of the code.
+
+    Resolved through the reader's own `apply_info_splits` rather than by parsing
+    the range here, so the two cannot disagree about what a split string means.
+    """
 
 
 
@@ -312,7 +376,16 @@ def _split_episodes(bucket: Path, split: str) -> Optional[set]:
 
 def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
               min_len: int) -> Optional[np.ndarray]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Which rows belong in the statistics: kept episodes, minus trimmed head/tail.
+
+    ``kept is None`` means "manifest unreadable, cannot filter"; an **empty set
+    excludes everything** (see :func:`_kept_episodes`). Testing ``not kept``
+    would collapse those two into "no filter" and pool a fully-deleted bucket
+    back in.
+
+    Returns ``None`` only when there is genuinely nothing to filter, so the
+    plain path stays allocation-free and byte-identical to before.
+    """
 
 
 
@@ -357,7 +430,19 @@ def _row_mask(table, kept: Optional[set], trim: Optional[Dict[int, Tuple]],
 
 
 def _scan_bucket(args) -> Tuple[str, np.ndarray, bool, dict]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Read one bucket's parquet shards and return its stacked (N, 20) rows.
+
+    Runs in a worker process; returns the raw rows rather than a per-bucket
+    Accumulator so the parent can merge them into one reservoir in a fixed
+    (submission) order — see ``compute_stats_for_embodiment``.
+
+    Per-bucket Accumulators are not ruled out by determinism — a fixed-order,
+    seeded, weighted reservoir merge would be deterministic too. They are ruled
+    out because no such merge exists on ``Accumulator`` and writing a
+    statistically correct one is not worth it here. Worth knowing if the parent's
+    memory ever needs work: it currently holds every bucket's array until the
+    pool drains.
+    """
 
 
 
@@ -516,7 +601,13 @@ def compute_stats_for_embodiment(
     min_len: int = 2,
     split: str = "train",
 ) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Pool every bucket of one embodiment into a single 20-D stats dict.
+
+    ``trim_csv`` keys on the bucket path RELATIVE to ``root`` — the same id the
+    reader uses (bucket basenames repeat across embodiments). Without ``root``
+    the relative id cannot be formed, so trimming is skipped rather than matched
+    on an ambiguous basename.
+    """
 
 
 
@@ -530,7 +621,15 @@ def compute_stats_for_embodiment(
     n_ok = 0
 
     def _rel_id(d: Path) -> str:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Bucket key, in the exact form the reader resolves against.
+
+        `--dataset_dir` pointing straight at a bucket is a supported mode, and
+        there `relative_to(root)` is `'.'` — a key no trim CSV contains and one
+        the reader (whose id is then the bare directory name) cannot
+        suffix-match. Left as-is it silently skips the trim on the stats side
+        while the reader applies it, and writes `exclusions: {".": ...}` that the
+        reader rejects outright.
+        """
 
 
 

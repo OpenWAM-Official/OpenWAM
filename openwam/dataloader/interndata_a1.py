@@ -1,4 +1,21 @@
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""InternData-A1 LeRobot v3 reader with real action/state supervision.
+
+The reader auto-detects single-arm and bimanual schemas from ``info.features``.
+Pose fields are ``xyz + quaternion(wxyz)`` in the shared robot frame and refer
+to the rigid arm-side controller attachment, before any task-specific TCP.
+Quaternions are explicitly reordered to xyzw before conversion to rot6d.
+
+The canonical EEF layout is ``[L_xyz(3), L_rot6d(6), L_grip,
+R_xyz(3), R_rot6d(6), R_grip]``.  Single-arm Franka buckets occupy the left
+half and mask the zero-padded right half.  Gripper positions are divided by
+the declared full-open stroke so the emitted value is an aperture fraction in
+``[0, 1]``; supported hardware variants are detected from bucket statistics.
+
+Actions are next-state relabels and are read row-aligned.  Episode-terminal
+clamped actions are excluded from supervision.  Normalization is pooled per
+embodiment, with rot6d and padded dimensions pinned to identity.  Bucket
+discovery is recursive because published task buckets have variable depth.
+"""
 
 
 
@@ -190,9 +207,10 @@ _ACTION_DIM = EEF_DIM
 
 
 
+# Distinguish a missing config key from one explicitly set to null.
 _CONFIG_SENTINEL = object()
 
-
+# Public info.json robot_type values mapped to stats-file suffixes.
 ROBOT_TYPE_TO_EMBODIMENT: Dict[str, str] = {
     "Franka": "franka",
     "ARX Lift-2": "lift2",
@@ -235,6 +253,7 @@ ROBOT_TYPE_TO_EMBODIMENT: Dict[str, str] = {
 
 
 
+# Convert native gripper positions to aperture fractions (0 closed, 1 open).
 GRIPPER_FULL_OPEN = {
     "franka": 0.08,
     "lift2": 0.088,
@@ -242,16 +261,34 @@ GRIPPER_FULL_OPEN = {
     "split_aloha": 0.1,
 }
 
+# Some embodiments publish more than one supported gripper stroke.
 GRIPPER_ALT_FULL_OPEN = {
     "franka": 1.0,
 }
 
 
+# Values far beyond the selected stroke are surfaced but remain non-fatal.
 _GRIPPER_SANE_MAX = 1.25
 
 
 def resolve_gripper_scale(bucket_dir: Path, embodiment: str, grip_col: str) -> float:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Return the divisor mapping ``grip_col`` in this bucket onto [0, 1].
+
+    Reads the bucket's own ``meta/stats.json`` (published with every LeRobot v3
+    bucket, so this costs one small JSON read at construction). For an embodiment
+    with a single gripper this is just the declared stroke. For one shipping two
+    variants (franka: panda 0.08 m vs Robotiq 1.0) the observed max is matched to
+    whichever declared stroke it is closer to **in log space** — the two differ by
+    12.5x, so the assignment is unambiguous even for a bucket that only ever
+    half-opens (0.04 is 2x from 0.08 but 25x from 1.0).
+
+    Falls back to the primary stroke when stats are missing or the column is
+    absent, which is the majority regime for every embodiment.
+
+    Selecting the alt stroke is never silent — it rescales the whole bucket's
+    gripper dim by 12.5x off a single order statistic, so it is logged, and
+    logged at WARNING when the bucket's ``mean`` does not corroborate the pick.
+    """
 
 
 
@@ -408,7 +445,12 @@ _WRIST_SINGLE_ARM = "images.rgb.hand"
 
 
 def detect_arm_layout(features: Dict[str, Any]) -> str:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Return ``"bimanual"`` or ``"single_arm"`` from an ``info.features`` dict.
+
+    Detection keys off the pose feature this reader actually consumes rather
+    than ``robot_type``, so a bucket with an unlisted robot_type still loads as
+    long as its schema is one of the two known shapes.
+    """
 
 
 
@@ -427,7 +469,13 @@ def detect_arm_layout(features: Dict[str, Any]) -> str:
 
 
 def embodiment_key(robot_type: str, arm_layout: str) -> str:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Map ``info.robot_type`` to the short key used in the stats filename.
+
+    Unknown robot types fall back to a slug of the raw string so a newly added
+    embodiment gets its own stats bucket instead of silently borrowing another
+    one's scale. The fallback is logged because it means the stats-computation
+    script must be re-run to produce the matching file.
+    """
 
 
 
@@ -448,7 +496,37 @@ def embodiment_key(robot_type: str, arm_layout: str) -> str:
 
 
 def discover_a1_buckets(root: Path) -> List[Path]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Recursively find every LeRobot bucket (a dir holding ``meta/info.json``).
+
+    The A1 tree nests buckets at two different depths (see module docstring), so
+    a fixed-depth glob misses half the dataset. Each branch is pruned as soon as
+    a bucket is found — buckets never nest — which keeps the walk off the
+    ``data/`` and ``videos/`` subtrees where essentially all the inodes live.
+
+    Symlinks ARE followed. Carving a subset out of a large tree by symlinking
+    buckets (rather than copying them) is the realistic usage, and the base
+    reader's root mode follows symlinks too — ``os.walk``'s ``followlinks=False``
+    default would silently skip every such bucket and report the tree as empty.
+
+    A visited ``(st_dev, st_ino)`` set then makes each directory yield at most
+    one bucket path. Unguarded, a symlink cycle does NOT hang: each lap adds one
+    symlink component until resolution hits ``MAXSYMLINKS`` (40 on Linux) and the
+    walk stops on its own — but it emits many aliases of every bucket reachable
+    through the cycle, i.e. silently duplicated training data. Which alias
+    survives is decided by traversal order, so ``dirnames`` is sorted below: raw
+    ``readdir`` order is a filesystem-instance property (ext4 htree hashing is
+    seeded per mkfs), and without the sort the same tree on two machines can keep
+    different aliases — shifting every later bucket's index, hence the per-bucket
+    subsample seeds in ``build_multibucket`` and the stats merge order. With it,
+    the lexicographically-first path always wins.
+
+    Dot-prefixed directories are skipped: ``extract_interndata_a1_v30.sh`` stages
+    every archive through ``<cat>/<emb>/.partial_<name>/`` and logs into
+    ``.extract_logs/``. A SIGKILL / OOM / node preemption bypasses that script's
+    cleanup entirely, so a half-extracted staging tree whose ``meta/`` was already
+    written would otherwise be discovered as a complete bucket and then fail at
+    ``__getitem__`` mid-training.
+    """
 
 
 
@@ -520,7 +598,22 @@ _SHARD_FILE_RE = re.compile(r"file-(\d+)\.parquet")
 
 
 def parse_shard_path(path) -> Optional[Tuple[int, int]]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """``(chunk, file)`` for a CANONICAL LeRobot shard path, else ``None``.
+
+    ``fullmatch`` on both components: ``file-000.backup.parquet`` matches the
+    ``file-*.parquet`` glob but is not a shard. A copy left beside the original
+    doubled the stats row count while the reader ignored it.
+
+    Canonical means the name is exactly what ``info.json``'s ``data_path``
+    template emits — ``chunk-{chunk_index:03d}/file-{file_index:03d}.parquet``.
+    Sampling rebuilds the path from that template, never from the name found on
+    disk, so accepting a name the template cannot produce enumerates a file that
+    can never be read: an earlier revision took ``file-0.parquet``, scanned its
+    rows into the statistics and let the reader construct windows over them,
+    and only the first real data load failed — on a *different*, non-existent
+    padded path. The round-trip also collapses aliases: ``file-00.parquet`` and
+    ``file-000.parquet`` would otherwise both claim shard 0.
+    """
 
 
 
@@ -548,7 +641,14 @@ def parse_shard_path(path) -> Optional[Tuple[int, int]]:
 
 
 def iter_data_shards(bucket) -> List[Tuple[int, int, Path]]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Every data shard of ``bucket`` as ``(chunk, file, path)``, in index order.
+
+    Ordered by the PARSED indices, not by path: row offsets accumulate in this
+    order, so under a lexical sort an unpadded ``file-10`` would follow
+    ``file-1`` and shift every subsequent shard's boundary. A1 ships zero-padded
+    names where the two agree, which is exactly why sorting on the parsed value
+    costs nothing and removes the dependency on that padding.
+    """
 
 
 
@@ -565,7 +665,19 @@ def iter_data_shards(bucket) -> List[Tuple[int, int, Path]]:
 
 
 def load_excluded_episodes(bucket) -> set:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """``meta/excluded_episodes.json`` as a set of ints; empty set when absent.
+
+    Strict by design. The base reader keeps the JSON values verbatim and tests
+    them with ``isin`` against an integer ``episode_index`` column, so a file
+    holding ``["0"]`` excludes NOTHING there — while an ``int()`` cast in the
+    stats generator excluded episode 0. Same file, two populations, no error.
+
+    Rejecting non-integers is the one resolution that cannot drift: it gives
+    both sides the same answer by construction rather than by keeping two casts
+    in agreement. Every file this repo emits contains plain ints, so nothing
+    valid is refused. ``bool`` is excluded explicitly because it passes
+    ``isinstance(x, int)`` and would silently become episode 0/1.
+    """
 
 
 
@@ -598,7 +710,19 @@ def load_excluded_episodes(bucket) -> set:
 
 
 def validate_manifest_ranges(from_idx, to_idx, lengths, episode_idx, who: str) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """The manifest's ``[from, to)`` ranges must tile ``[0, total)`` exactly.
+
+    A per-episode capacity check and an equal grand total are BOTH satisfied by
+    ranges that overlap: ``[0,4) [2,6) [8,12)`` ends at 12 and every range fits
+    inside a 12-row shard, yet episode 1 reads two of episode 0's rows and two
+    of its own. The ranges are the only statement of which rows belong to whom,
+    so they have to be checked as a partition — individually valid ranges say
+    nothing about whether they carve the file up consistently.
+
+    ``length`` is checked against the range width for the same reason: the
+    reader uses ``to - from`` to size the window and ``length`` to bound it, so
+    the two disagreeing means one of them is describing a different episode.
+    """
 
 
 
@@ -657,7 +781,13 @@ def validate_manifest_ranges(from_idx, to_idx, lengths, episode_idx, who: str) -
 
 
 def _shard_episode_bounds(pf) -> Optional[Tuple[int, int]]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Return the min/max ``episode_index`` advertised by an open shard.
+
+    Row-group metadata is preferred.  If statistics are absent, the function
+    reads the run-length-encoded ``episode_index`` column instead of treating
+    missing evidence as success.  ``None`` means the column itself is absent.
+    The result is an envelope check, not proof of row order within the shard.
+    """
 
 
 
@@ -699,7 +829,7 @@ def _shard_episode_bounds(pf) -> Optional[Tuple[int, int]]:
 
 @dataclass(frozen=True)
 class _A1TrimSnapshot:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """One immutable parse of the exact trim CSV bytes used for construction."""
 
     path: str
     sha256: str
@@ -721,7 +851,12 @@ def _trim_file_signature(path: Path) -> Tuple[int, int, int, int]:
 
 
 def _load_trim_snapshot(path) -> _A1TrimSnapshot:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Read, hash and parse one trim artifact from the same byte snapshot.
+
+    Root mode constructs many readers, so a successful parse is cached while the
+    file's stat signature is unchanged.  The SHA-256 is persisted in normalization
+    stats; the reader compares it before accepting those stats.
+    """
 
 
 
@@ -795,12 +930,12 @@ def _load_trim_snapshot(path) -> _A1TrimSnapshot:
 
 
 def _load_trim_spec(path) -> Dict[str, Dict[int, Tuple[int, Optional[int], Optional[int]]]]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Compatibility wrapper returning the parsed mapping from a pinned snapshot."""
     return _load_trim_snapshot(path).spec
 
 
 def _assert_trim_snapshot_current(snapshot: _A1TrimSnapshot, *, context: str) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Fail if the configured trim bytes changed after the snapshot was pinned."""
     try:
         actual_sha256 = hashlib.sha256(Path(snapshot.path).read_bytes()).hexdigest()
     except OSError as e:
@@ -813,12 +948,34 @@ def _assert_trim_snapshot_current(snapshot: _A1TrimSnapshot, *, context: str) ->
 
 
 class AmbiguousBucketKey(LookupError):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """A bare bucket name matches several keys, so the bucket cannot be identified."""
 
 
 def resolve_bucket_key(keys, dataset_id: str, bucket_dir, *, what: str,
                        source: str) -> Optional[str]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Resolve a bucket onto a key in a mapping keyed by bucket path.
+
+    **Shared by the reader and the stats generator on purpose** — they used to
+    resolve differently, so the same trim CSV could be applied by one and skipped
+    by the other while digest provenance saw nothing wrong.
+
+    Matching is by EXACT key only, tried against progressively longer tails of
+    this bucket's real path. A bare-suffix match is deliberately not used: these
+    maps are frequently sparse (a trim CSV lists only trimmed buckets; a coverage
+    map only successfully scanned ones), and in a sparse map a unique suffix
+    proves nothing about identity. For example, with `good/…/apple`
+    scanned and `bad/…/apple` skipped, a reader for `bad` matched the sole
+    `apple` suffix and accepted statistics computed entirely from `good`.
+
+    So an exact miss for an already-qualified id stays a miss, and an unqualified
+    id is resolved from the directory tree rather than from the map's contents.
+
+    Raises :class:`AmbiguousBucketKey` only when the path itself cannot
+    disambiguate — the caller must decide, because silently picking one would
+    apply another bucket's numbers and regenerating produces the same names
+    (``<cat>/<emb>/<task>/<object>`` is a documented depth, so repeating leaf
+    names is expected).
+    """
 
 
 
@@ -872,7 +1029,21 @@ def resolve_bucket_key(keys, dataset_id: str, bucket_dir, *, what: str,
 
 
 def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int, int]]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Decide one episode's kept span, or ``None`` to leave it whole.
+
+    Shared by the reader and the stats script **on purpose**. They must make the
+    identical keep/skip call: if the stats path trimmed an episode the reader
+    leaves whole, the normalizer would describe a distribution the reader never
+    emits. Two copies of these four conditions would drift silently — nothing
+    downstream compares them.
+
+    Returns ``None`` when the entry should not be applied at all:
+      * stale — recorded ``total_frames`` disagrees with the manifest length
+        (the signature of a CSV built against a different corpus version);
+      * a no-op (head 0, tail == length);
+      * the trim would leave fewer than ``min_len`` frames, i.e. not even one
+        usable window — better a whole episode than a degenerate one.
+    """
 
 
 
@@ -900,7 +1071,14 @@ def resolve_trim_bounds(entry, length: int, min_len: int) -> Optional[Tuple[int,
 
 
 def effective_a1_population_provenance(eps_df, trim_spec: Optional[Dict[int, Tuple]], min_len: int) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Digest the exact post-split/post-exclusion episode spans used by A1.
+
+    ``eps_df`` is the reader population immediately before trim application.
+    Hashing the global manifest start, raw length and effective relative
+    ``[head, tail)`` span detects changes to the manifest mapping, exclusion set
+    or trim bounds even when the bucket name and aggregate row count stay the
+    same.  The stats generator calls this same function on its selected manifest.
+    """
 
 
 
@@ -952,7 +1130,13 @@ def _validate_a1_root_stats_contributors(
     stats_root: Path,
     sub_dirs: List[Path],
 ) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Bind every pooled per-embodiment stats file to the current root set.
+
+    A leaf-level membership check cannot detect a contributor directory removed
+    after stats generation: all surviving leaves still find themselves in the
+    file even though its pooled values include the removed bucket. Root mode has
+    the authoritative discovered set, so compare it before bucket fan-out.
+    """
 
 
 
@@ -1007,7 +1191,13 @@ def _validate_a1_root_stats_contributors(
 
 
 class InternDataA1Dataset(LeRobotV3Reader):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Single-bucket reader for one InternData-A1 v3.0 task (LeRobot v3).
+
+    Emits the canonical 20-D ``xyz + rot6d + gripper`` bimanual EEF with real
+    action / proprio supervision. Bimanual buckets fill all 20 dims; franka
+    buckets fill ``[0:10)`` and mask the rest. All window / offset / video /
+    prompt machinery is inherited from :class:`LeRobotV3Reader`.
+    """
 
 
 
@@ -1045,7 +1235,16 @@ class InternDataA1Dataset(LeRobotV3Reader):
         _trim_snapshot: Optional[_A1TrimSnapshot] = None,
         **kwargs,
     ):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """
+        Args:
+            a1_stats_root: directory holding ``meta/stats_<embodiment>.json``.
+                Defaults to ``dataset_dir`` itself (single-bucket use); in root
+                mode :meth:`from_config` passes the dataset root so every bucket
+                shares one per-embodiment stats file.
+            trim_csv: optional path to a quality-audit trim list; see
+                :meth:`_filter_episodes`. ``None`` (default) disables trimming and
+                the reader stays byte-identical to before.
+        """
 
 
 
@@ -1091,11 +1290,16 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
     def _load_excluded_episode_indices(self) -> set[int]:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Use the strict exclusion snapshot pinned before base construction."""
         return set(self._a1_excluded_episode_indices)
 
     def _resolve_cameras(self, info: dict):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Detect the arm layout, then pick cameras and per-bucket columns.
+
+        Runs before the episode index / stats / data reads, which is the
+        supported point to set instance ``NEEDED_COLS`` and ``ACTION_DIM_MASK``
+        (the base consults both after this hook, including for the unify mask).
+        """
 
 
 
@@ -1149,7 +1353,14 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return head, left_wrist, right_wrist
 
     def _add_data_offsets(self, eps) -> None:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Resolve data-shard and row offsets from physical parquet lengths.
+
+        Manifest file indices can be stale at shard boundaries.  Global
+        ``dataset_from_index`` values are therefore located against cumulative
+        physical shard lengths.  The method validates manifest ranges, total
+        row coverage, per-episode shard capacity, and the shard's advertised
+        episode envelope before publishing offsets.
+        """
 
 
 
@@ -1269,7 +1480,13 @@ class InternDataA1Dataset(LeRobotV3Reader):
         eps["_data_row_offset"] = offsets
 
     def _add_episode_offsets(self, eps) -> None:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Rebuild camera-frame offsets from file-local timestamps.
+
+        ``round(from_timestamp * fps)`` is independent of which manifest rows
+        survived filtering, so dropped episodes cannot shift later video away
+        from its action/state rows.  Missing timestamps and invalid fps values
+        fail explicitly rather than leaving one camera on a stale offset.
+        """
 
 
 
@@ -1381,7 +1598,12 @@ class InternDataA1Dataset(LeRobotV3Reader):
             eps[self._video_offset_col(cam)] = off
 
     def _trim_min_len(self) -> int:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Minimum frames an episode must keep to be worth trimming.
+
+        Named so `_load_stats` can quote the same number the stats generator
+        must have been given (`--min_keep`): the same trim CSV under a different
+        bound produces a different kept population.
+        """
 
 
 
@@ -1390,7 +1612,21 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return self._num_frames if self._split == "val" else self._train_min_window_len()
 
     def _match_bucket_key(self, keys, what: str) -> Optional[str]:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Map this bucket onto a key in a mapping keyed by bucket path.
+
+        Both the trim CSV's ``dataset`` column and the stats file's
+        ``exclusions`` map are keyed by the bucket path **relative to the
+        dataset root**, which is exactly what root mode already uses as
+        ``dataset_id`` (see ``_per_bucket`` in :meth:`from_config`) — so the
+        common case is a direct hit.
+
+        Single-bucket mode is the awkward one: ``_dataset_id`` falls back to the
+        bare directory name. A1 bucket names repeat across embodiments
+        (``pick_beef_sandwich_on_conveyor`` exists under both lift2 and
+        split_aloha), so a bare name is accepted only when it resolves
+        uniquely — an ambiguous one is refused rather than guessed, since
+        matching the wrong bucket would apply another embodiment's numbers.
+        """
 
 
 
@@ -1424,7 +1660,14 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return snapshot
 
     def _filter_episodes(self, eps_df):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Trim motionless episode heads/tails from an optional trim artifact.
+
+        Trimming adjusts data and video frame offsets together and shortens the
+        episode length; it does not splice mid-episode pauses.  Bounds are
+        integer frame offsets, avoiding timestamp rounding skew.  Entries whose
+        recorded length no longer matches the manifest are rejected as stale,
+        and the exact retained population is bound into normalization stats.
+        """
 
 
 
@@ -1537,7 +1780,11 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return eps_df.reset_index(drop=True)
 
     def _train_min_window_len(self) -> int:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Require >= 2 rows so every train window keeps >= 1 supervised step.
+
+        A 1-row episode would lose its only action step to the episode-boundary
+        drop in :meth:`_n_supervised_action_steps` and yield an all-masked sample.
+        """
 
 
 
@@ -1545,7 +1792,13 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return 2
 
     def _n_supervised_action_steps(self, actual_raw_len: int) -> int:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Drop the clamped final action of an episode-truncated window.
+
+        ``actions[t] == states[t+1]`` holds for every row except the episode's
+        last, where the relabeling has no successor and repeats the previous
+        target instead. ``actual_raw_len < num_frames`` means the window ran into
+        the episode end, so its last row carries that fabricated target.
+        """
 
 
 
@@ -1557,7 +1810,28 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return max(0, actual_raw_len - 1)
 
     def _check_stats_population(self, raw: dict, stats_path) -> None:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Refuse stats computed over a different population than this reader reads.
+
+        Trimmed and untrimmed stats describe different distributions — trimming
+        removes the motionless head/tail, which pulls the positional means
+        toward the moving span — and NOTHING in the numbers says which is which.
+        The same is true of a val-derived file loaded by a train reader, of a
+        different ``--min_keep``, and of a bucket that dropped out of the scan
+        but still loads the shared per-embodiment file. Each was reproduced end
+        to end through the real generator and reader; each mis-scales every
+        action for the whole run with no error anywhere.
+
+        The broad policy fields below catch split/trim/min-keep/coverage
+        mismatches.  A trimming reader additionally requires schema-v2
+        provenance: a hash of the exact trim CSV bytes and a per-bucket digest
+        of the selected manifest spans after exclusions and trim resolution.
+        The stats worker creates that certificate from the same immutable trim
+        snapshot and strict exclusion parser used to select its parquet rows.
+
+        Missing block -> refuse. A stats file that cannot say what it covers is
+        exactly the unverifiable pairing this exists to prevent, and the fix is
+        one generator re-run.
+        """
 
 
 
@@ -1739,7 +2013,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
                     )
 
     def _load_stats(self, info: dict):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Load per-embodiment 20-D EEF stats (``meta/stats_<embodiment>.json``)."""
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             return None
         stats_path = self._a1_stats_root / "meta" / f"stats_{self._embodiment}.json"
@@ -1790,7 +2064,13 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return stats
 
     def _post_init(self, info: dict) -> None:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Sanity-check the quaternion magnitude on a small sample of rows.
+
+        Catches a wrong field routed into the pose slot / un-normalized
+        quaternions. It canNOT catch a wxyz<->xyzw reorder (both are unit-norm);
+        that convention is fixed by the dataset's own ``names`` metadata
+        (``quaternion.w`` first) and covered by the reader's unit tests.
+        """
 
 
 
@@ -1812,7 +2092,11 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
     def _arm10(self, win, spec, n: int, grip_scale: float) -> np.ndarray:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Build one arm's ``(n, 10)`` ``[xyz(3), rot6d(6), grip(1)]`` block.
+
+        ``grip_scale`` maps the raw gripper column onto a normalized aperture in
+        [0, 1] — see :func:`resolve_gripper_scale`.
+        """
 
 
 
@@ -1824,7 +2108,12 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return np.concatenate([pose[:, 0:3], rot6d, grip], axis=-1)
 
     def _eef20(self, win, kind: str, n: int) -> np.ndarray:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Assemble the ``(n, 20)`` bimanual EEF for ``kind`` in {state, action}.
+
+        Single-arm buckets fill ``[0:10)`` and leave ``[10:20)`` zero; those dims
+        are excluded from supervision by ``ACTION_DIM_MASK`` and pinned to
+        identity stats so normalization leaves the zeros untouched.
+        """
 
 
 
@@ -1838,7 +2127,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
         return out
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Apply this bucket's per-embodiment normalization to a ``(..., 20)`` array."""
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
 
     def _action_20d(self, win) -> np.ndarray:
@@ -1870,7 +2159,14 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
     @classmethod
     def from_config(cls, config, split: str = "train") -> Any:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Build one bucket, or recursively discover every bucket under a root.
+
+        Overrides the base because A1 buckets sit at variable depth (2 or 3
+        levels below the embodiment dir), which the base's single-level
+        ``iterdir`` scan cannot see. Everything else — the shared window kwargs,
+        the ``total_hours`` water-fill, per-bucket failure tolerance — is
+        delegated to the same :func:`build_multibucket` the other readers use.
+        """
 
 
 
@@ -1960,7 +2256,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
 
 
 class MultiInternDataA1Dataset(MultiLeRobotV3Reader):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Aggregate InternData-A1 task buckets across supported embodiments."""
 
     def __init__(self, buckets):
         super().__init__(buckets)
