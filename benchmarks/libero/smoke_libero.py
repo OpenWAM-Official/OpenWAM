@@ -86,7 +86,11 @@ def _language_from_task_name(task_name: str) -> str:
         match = re.search(r"SCENE\d+_(.*)", task_name)
         if match:
             return match.group(1).replace("_", " ")
-    return task_name.replace("_", " ")
+    return re.sub(
+        r"_(?:table|tb|light|language|view|add|level\d+|noise|robot|background)_?\d*$",
+        "",
+        task_name,
+    ).replace("_", " ")
 
 
 def task_smoke(suite: str, task_id: int) -> None:
