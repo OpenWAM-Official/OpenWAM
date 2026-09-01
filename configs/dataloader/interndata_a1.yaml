@@ -1,0 +1,34 @@
+type: interndata_a1
+
+# Public InternData-A1 root. Override with INTERNDATA_A1_ROOT.
+dataset_dir: ${oc.env:INTERNDATA_A1_ROOT,/path/to/InternData-A1}
+
+# Optional alternate location for generated stats.
+stats_root: null
+
+# Optional CSV containing per-episode head/tail trimming metadata.
+trim_csv: null
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+height: 384
+width: 320
+multiview: true
+split: train
+
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
+
+normalize_mode: quantile
+enable_action_supervision: true
+
+unify_action: true
+unify_action_map: ["0-9", "34-43"]
+
+# null uses the complete dataset. Set a positive value to cap sampled hours.
+total_hours: null

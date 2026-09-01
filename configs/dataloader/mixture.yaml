@@ -1,0 +1,28 @@
+# Public pretraining-mixture example. Dataset paths and optional budgets are
+# inherited from each standalone config and should be set by the user.
+defaults:
+  - agibotworld@datasets.agibotworld
+  - robocoin@datasets.robocoin
+  - oxe_droid@datasets.oxe_droid
+  - interndata_a1@datasets.interndata_a1
+  - _self_
+
+type: mixture
+weight_strategy: proportional
+
+datasets:
+  agibotworld:
+    enabled: true
+    weight: 1.0
+
+  robocoin:
+    enabled: true
+    weight: 1.0
+
+  oxe_droid:
+    enabled: true
+    weight: 1.0
+
+  interndata_a1:
+    enabled: true
+    weight: 1.0
