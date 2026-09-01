@@ -1,32 +1,67 @@
 type: robocoin
 
+# Root containing RoboCOIN LeRobot v3 task buckets and
+# meta/stats_<robot_type>.json. The reader discovers buckets recursively and
+# dispatches samples through MultiRobotCOINDataset.
 dataset_dir: /path/to/pretrain_dataset/RoboCOIN_clean
 
+# eef_sim_pose_* uses RoboCOIN's unified base axes, but the physical endpoint
+# varies by embodiment. Treat it as a rigid, gripper-independent terminal-arm
+# frame; do not apply one blanket task-TCP offset across robot types.
 
+# 33 raw frames at stride 4 produce 9 video frames. The latter must satisfy the
+# Wan VAE temporal constraint: (num_video_frames - 1) % 4 == 0.
 num_frames: 33
 video_stride: 4
 window_stride: 1
 
+# Optional per-episode head/tail trim manifest. Leave null to load the full
+# public dataset. Episode indices are dataset-version-specific; after changing
+# the manifest, regenerate normalization stats from that exact population.
 trim_csv: null
 
+# multiview=true builds a 384x320 L-shaped canvas: 256x320 head camera above
+# two 128x160 wrist cameras. Missing wrist cameras become blank tiles.
 height: 384
 width: 320
 
+# Head and wrist keys are resolved from the public per-embodiment camera names.
 multiview: true
 
+# Uses info.json["splits"][split] when available; train otherwise uses the full
+# episode table.
 split: train
 
+# Load-time color jitter uses the same sampled factors for every frame in a
+# training clip.
 color_jitter:
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2
   hue: 0.0
 
+# Loads per-robot-type stats from
+# <dataset_dir>/meta/stats_<robot_type>.json. Scalar grippers are canonicalized
+# to aperture 0=closed, 1=open; dexterous-hand joints retain their joint-angle
+# semantics. Stats are bound to the same split, exclusions, and trim manifest;
+# rot6d dimensions are identity-pinned. Supported modes are null/none, min-max,
+# z-score, and quantile. Generate matching stats with:
+#   python -m openwam.dataloader.utils.stats_computation.robocoin_stats_computation \
+#       --dataset_dir /path/to/RoboCOIN [--trim_csv /path/to/trim.csv] --split train
 normalize_mode: quantile
 
+# false keeps values available but masks action and proprio supervision.
 enable_action_supervision: true
 
+# Shared 80-D layout:
+#   0:9 left EEF pose, 9 left grip, 10:34 left hand,
+#   34:43 right EEF pose, 43 right grip, 44:68 right hand, 68:80 reserved.
+# Gripper embodiments scatter two 10-D EEF arms into 0:10 and 34:44.
+# Dexterous-hand embodiments scatter pose and available finger joints while
+# masking scalar-gripper and unused hand slots.
 unify_action: true
 unify_action_map: ["0-9", "34-43"]
 
+# null uses the complete filtered dataset. A positive float caps effective
+# footage in hours by reproducibly water-filling episode samples across buckets.
 total_hours: null
