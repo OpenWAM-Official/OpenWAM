@@ -109,6 +109,17 @@ def _make_env(task, cfg: dict):
     )
 
 
+def _make_env_with_randomization_retries(task, cfg: dict, max_attempts: int = 5):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _make_env(task, cfg)
+        except Exception as exc:
+            if exc.__class__.__name__ != "RandomizationError" or attempt == max_attempts:
+                raise
+            print(f"[warning] LIBERO placement sampling failed; retrying ({attempt}/{max_attempts})", flush=True)
+    raise AssertionError("unreachable")
+
+
 def run_eval(cfg: dict) -> int:
     if str(cfg.get("action_mode", "")).strip().lower() != "libero":
         raise ValueError("LIBERO runner requires action_mode: libero")
@@ -135,7 +146,7 @@ def run_eval(cfg: dict) -> int:
     fail_on_incomplete = _require_bool(cfg.get("fail_on_incomplete", False), "fail_on_incomplete")
 
     init_states = task_suite.get_task_init_states(task_id)
-    env = _make_env(task, cfg)
+    env = _make_env_with_randomization_retries(task, cfg)
     if not reseed_each_trial:
         env.seed(seed)
     policy = OpenWAMLiberoPolicy(
