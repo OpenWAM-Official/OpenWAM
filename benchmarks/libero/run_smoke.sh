@@ -16,8 +16,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_LIBERO_PATH="/path/to/LIBERO"
 DEFAULT_LIBERO_PYTHON="/path/to/miniconda3/envs/libero/bin/python"
-MODE="${1:-${LIBERO_SMOKE_MODE:-import}}"
 
+MODE="${1:-${LIBERO_SMOKE_MODE:-import}}"
 EXTERNAL_REPO="${LIBERO_PATH:-${DEFAULT_LIBERO_PATH}}"
 export LIBERO_PATH="${EXTERNAL_REPO}"
 export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_ROOT:-${HOME}/.libero-openwam}"
@@ -44,7 +44,7 @@ else
     }
 fi
 [[ -d "${EXTERNAL_REPO}" ]] || {
-    echo "[ERROR] Repository not found: ${EXTERNAL_REPO}" >&2
+    echo "[ERROR] LIBERO repository not found: ${EXTERNAL_REPO}" >&2
     exit 1
 }
 
@@ -53,6 +53,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${LIBERO_SMOKE_GPU:-0}}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 export MUJOCO_EGL_DEVICE_ID="${MUJOCO_EGL_DEVICE_ID:-${LIBERO_SMOKE_GPU:-0}}"
+
 echo "[libero-smoke] mode=${MODE} python=${PYTHON_BIN}"
 echo "[libero-smoke] repo=${EXTERNAL_REPO}"
 echo "[libero-smoke] config=${LIBERO_CONFIG_PATH}"

@@ -61,14 +61,10 @@ SUITE_ALIASES = {
     "libero_10": "libero_10",
 }
 
-
-
 @dataclass(frozen=True)
 class TaskJob:
     suite: str
     task_id: int
-
-
 
 
 @dataclass(frozen=True)
@@ -227,8 +223,6 @@ def _build_jobs(
     return jobs
 
 
-
-
 def _build_replica_slots(gpus: list[int], base_port: int, replicas_per_gpu: int = 2) -> list[ReplicaSlot]:
     return [
         ReplicaSlot(gpu=gpu, gpu_slot=gpu_slot, replica=replica, port=port)
@@ -281,7 +275,6 @@ def _write_libero_config(config_root: Path, libero_path: Path) -> None:
 def _client_env(
     base_env: dict[str, str],
     *,
-    
     libero_path: Path,
     config_root: Path,
     render_gpu: int,
@@ -291,13 +284,11 @@ def _client_env(
     pieces = [str(libero_path), str(SCRIPT_DIR)]
     if old_pythonpath:
         pieces.append(old_pythonpath)
-    path_variable = "LIBERO_PATH"
-    config_variable = "LIBERO_CONFIG_ROOT"
     env.update(
         {
             "PYTHONPATH": os.pathsep.join(pieces),
-            path_variable: str(libero_path),
-            config_variable: str(config_root),
+            "LIBERO_PATH": str(libero_path),
+            "LIBERO_CONFIG_ROOT": str(config_root),
             "LIBERO_CONFIG_PATH": str(config_root),
             "MUJOCO_GL": "egl",
             "PYOPENGL_PLATFORM": "egl",
@@ -318,7 +309,6 @@ def _enumerate_task_counts(suites: list[str], *, libero_python: Path, libero_pat
         _write_libero_config(config_root, libero_path)
         env = _client_env(
             os.environ,
-            
             libero_path=libero_path,
             config_root=config_root,
             render_gpu=0,
@@ -482,9 +472,8 @@ def _resume_signature(
         json.dumps(jobs_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return {
-        "protocol_version": (LIBERO_PROTOCOL_VERSION),
+        "protocol_version": LIBERO_PROTOCOL_VERSION,
         "checkpoint": str(args.ckpt_dir / args.ckpt_name),
-        
         "policy_config_sha256": _file_sha256(args.policy_config),
         "seed_override": args.seed,
         "effective_seed": effective_seed,
@@ -545,8 +534,6 @@ def _client_command(
         str(SCRIPT_DIR / "single_eval.py"),
         "--config",
         str(args.policy_config),
-        
-        
         "--suite",
         job.suite,
         "--task-id",
@@ -612,7 +599,6 @@ def _run_client(
     log_handle.flush()
     env = _client_env(
         os.environ,
-        
         libero_path=args.libero_path,
         config_root=config_root,
         render_gpu=_render_device_for_slot(args, slot),
@@ -940,7 +926,6 @@ def _summarize(
                 "tasks_expected": len(rows),
             }
         )
-
     total_successes = sum(row["successes"] for row in suite_rows)
     total_trials = sum(row["trials"] for row in suite_rows)
     summary = {
@@ -1070,8 +1055,6 @@ def _validate_protocol(args: argparse.Namespace) -> None:
         errors.append("reseed_each_trial must be false")
     if errors:
         raise ValueError("LIBERO pinned protocol violation:\n  - " + "\n  - ".join(errors))
-
-
 
 
 def _print_plan(
@@ -1240,7 +1223,6 @@ def main(argv: list[str] | None = None) -> int:
 
     task_counts = _enumerate_task_counts(
         args.suites,
-        
         libero_python=args.libero_python,
         libero_path=args.libero_path,
     )
@@ -1295,7 +1277,6 @@ def main(argv: list[str] | None = None) -> int:
     manifest = {
         "checkpoint": str(args.ckpt_dir / args.ckpt_name),
         "created_at": datetime.now().isoformat(),
-        
         "server_mode": args.server_mode,
         "inference_mode": args.inference_mode,
         "inference_horizon": args.inference_horizon,

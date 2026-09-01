@@ -1,13 +1,14 @@
 # LIBERO evaluation
 
-This directory contains the complete OpenWAM evaluation path for LIBERO: reproducible client environments, simulator preflight,
+This directory contains the complete OpenWAM evaluation path for
+LIBERO: a reproducible client environment, simulator preflight,
 policy-client configuration, manual single-task evaluation, and managed
 multi-GPU evaluation that starts and stops its own OpenWAM servers.
 
 ## Workflow inventory
 
-| Stage | Ordinary LIBERO |
-| --- | --- |
+| Stage | Files |
+|---|---|
 | Environment lock | `environment.yml` |
 | Install repo, patch, dependencies, assets | `setup_env.sh` |
 | Import/task/simulator preflight | `run_smoke.sh` + `smoke_libero.py` |
@@ -17,8 +18,8 @@ multi-GPU evaluation that starts and stops its own OpenWAM servers.
 | Managed server + client queue + summary | `run_eval.sh` → `run_all_suites.py` |
 | Scheduling/resume implementation | `scheduler.py` |
 
-The compatibility changes required by the pinned upstream checkouts live under
-`patches/`; the setup scripts apply them idempotently and reject an unexpected
+The compatibility change required by the pinned upstream checkout lives under
+`patches/`; the setup script applies it idempotently and rejects an unexpected
 checkout instead of silently evaluating different code.
 
 ## Representation contract
@@ -48,8 +49,6 @@ runtime command is the negation (`+1 = close, -1 = open`).
 The simulator/client environment is intentionally separate from the OpenWAM
 server environment.
 
-Ordinary LIBERO:
-
 ```bash
 CONDA_BIN=/path/to/conda \
 LIBERO_ENV_PREFIX=/path/to/envs/libero \
@@ -57,10 +56,7 @@ LIBERO_PATH=/path/to/LIBERO \
   bash benchmarks/libero/setup_env.sh
 ```
 
-
-
-
-The setup scripts pin the upstream commits and MuJoCo `3.3.2`.
+The setup script pins the upstream commit and MuJoCo `3.3.2`.
 
 ## 2. Verify the environment before loading a model
 
@@ -72,7 +68,8 @@ bash benchmarks/libero/run_smoke.sh task
 bash benchmarks/libero/run_smoke.sh env
 ```
 
-
+Useful overrides are `LIBERO_PYTHON`, `LIBERO_PATH`, `LIBERO_CONFIG_ROOT`,
+`LIBERO_SMOKE_SUITE`, `LIBERO_SMOKE_TASK_ID`, and `LIBERO_SMOKE_GPU`.
 
 ## 3. Manual server and single-task client
 

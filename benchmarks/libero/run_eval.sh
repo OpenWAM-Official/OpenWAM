@@ -28,6 +28,7 @@ fi
     echo "Usage: bash benchmarks/libero/run_eval.sh CKPT_DIR CKPT_NAME [options]" >&2
     exit 2
 }
+
 CLIENT_PYTHON="${LIBERO_PYTHON:-/path/to/miniconda3/envs/libero/bin/python}"
 CLIENT_REPO="${LIBERO_PATH:-/path/to/LIBERO}"
 POLICY_CONFIG="${POLICY_CONFIG_PATH:-${SCRIPT_DIR}/policy_config.yml}"
@@ -51,6 +52,7 @@ BASE_PORT="${BASE_PORT:-8920}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/libero/${RUN_TAG}}"
 mkdir -p "${OUTPUT_DIR}"
+
 echo "[libero] checkpoint=${CKPT_DIR}/${CKPT_NAME}"
 echo "[libero] client_python=${CLIENT_PYTHON} client_repo=${CLIENT_REPO}"
 echo "[libero] output=${OUTPUT_DIR}"

@@ -24,13 +24,12 @@ from openwam2libero_interface import OpenWAMLiberoPolicy  # noqa: E402
 
 
 def _repo_root() -> Path:
-    env_name = "LIBERO_PATH"
-    raw_root = os.environ.get(env_name, "")
+    raw_root = os.environ.get("LIBERO_PATH", "")
     if not raw_root:
-        raise SystemExit(f"{env_name} is not set")
+        raise SystemExit("LIBERO_PATH is not set")
     root = Path(raw_root).expanduser().resolve()
     if not root.is_dir():
-        raise SystemExit(f"{env_name} does not point to a LIBERO repo: {root}")
+        raise SystemExit(f"LIBERO_PATH does not point to a LIBERO repo: {root}")
     return root
 
 
@@ -38,10 +37,7 @@ def _write_libero_config() -> None:
     repo_root = _repo_root()
     benchmark_root = repo_root / "libero" / "libero"
     config_root = Path(
-        os.environ.get(
-            "LIBERO_CONFIG_ROOT",
-            Path.home() / (".libero-openwam"),
-        )
+        os.environ.get("LIBERO_CONFIG_ROOT", Path.home() / ".libero-openwam")
     ).expanduser()
     config_root.mkdir(parents=True, exist_ok=True)
     config = {
@@ -98,8 +94,6 @@ def _parse_settle_action(value, action_dim: int = 7) -> np.ndarray:
     return result
 
 
-
-
 def _make_env(task, cfg: dict):
     from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
@@ -115,11 +109,11 @@ def _make_env(task, cfg: dict):
     )
 
 
-
-
 def run_eval(cfg: dict) -> int:
     if str(cfg.get("action_mode", "")).strip().lower() != "libero":
         raise ValueError("LIBERO runner requires action_mode: libero")
+    if cfg.get("rng_mode", "environment") != "environment":
+        raise ValueError("LIBERO runner requires rng_mode: environment")
     _write_libero_config()
 
     seed = int(cfg.get("seed", 42))
@@ -142,7 +136,7 @@ def run_eval(cfg: dict) -> int:
 
     init_states = task_suite.get_task_init_states(task_id)
     env = _make_env(task, cfg)
-    if cfg.get("rng_mode", "environment") == "environment" and not reseed_each_trial:
+    if not reseed_each_trial:
         env.seed(seed)
     policy = OpenWAMLiberoPolicy(
         host=cfg.get("host", "127.0.0.1"),

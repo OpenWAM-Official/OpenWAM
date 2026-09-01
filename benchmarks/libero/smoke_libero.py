@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke checks for LIBERO installations."""
+"""Smoke checks for a LIBERO installation."""
 
 from __future__ import annotations
 
@@ -15,13 +15,12 @@ import yaml
 
 
 def _repo_root() -> Path:
-    env_name = "LIBERO_PATH"
-    raw_root = os.environ.get(env_name, "")
+    raw_root = os.environ.get("LIBERO_PATH", "")
     if not raw_root:
-        raise SystemExit(f"{env_name} is not set")
+        raise SystemExit("LIBERO_PATH is not set")
     root = Path(raw_root).expanduser()
     if not root.is_dir():
-        raise SystemExit(f"{env_name} does not exist: {root}")
+        raise SystemExit(f"LIBERO_PATH does not exist: {root}")
     return root.resolve()
 
 
@@ -33,9 +32,8 @@ def _benchmark_root(repo_root: Path) -> Path:
 
 
 def _config_root() -> Path:
-    default = Path.home() / (".libero-openwam")
-    env_name = "LIBERO_CONFIG_ROOT"
-    raw_root = os.environ.get(env_name, os.environ.get("LIBERO_CONFIG_PATH", str(default)))
+    default = Path.home() / ".libero-openwam"
+    raw_root = os.environ.get("LIBERO_CONFIG_ROOT", os.environ.get("LIBERO_CONFIG_PATH", str(default)))
     return Path(raw_root).expanduser().resolve()
 
 

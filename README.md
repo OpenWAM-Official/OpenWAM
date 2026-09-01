@@ -73,7 +73,7 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 |---|---|---|
 | RoboTwin eval | Supported | All 50 tasks; see `benchmarks/robotwin/` |
 | SimplerEnv eval | Planned | Requires external environment setup |
-| LIBERO eval | Supported | LIBERO; see `benchmarks/libero/` |
+| LIBERO eval | Supported | See `benchmarks/libero/` |
 | RoboCasa365 eval | Supported | Native state19/action15 contract; see `benchmarks/robocasa365/` |
 | RoboCasa GR1 eval | Supported | GR1 tabletop tasks; see `benchmarks/robocasa_gr1/` |
 | VLABench eval | Supported | 10 primitive tasks across 6 evaluation tracks; see `benchmarks/vlabench/` |

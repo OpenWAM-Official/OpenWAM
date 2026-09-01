@@ -29,8 +29,6 @@ def _native_client_command(args, job, trial_run, port, run_dir):
         str(BENCHMARK_DIR / "single_eval.py"),
         "--config",
         str(args.policy_config),
-        
-        
         "--suite",
         job.suite,
         "--task-id",
@@ -56,19 +54,17 @@ def _native_client_command(args, job, trial_run, port, run_dir):
 
 
 def _native_client_env(base_env, *, libero_path, config_root, render_gpu):
-    """Set LIBERO paths and conservative thread defaults."""
+    """Set isolated LIBERO paths and conservative thread defaults."""
     env = dict(base_env)
     old_pythonpath = env.get("PYTHONPATH", "")
     pieces = [str(REPO_ROOT), str(libero_path), str(BENCHMARK_DIR)]
     if old_pythonpath:
         pieces.append(old_pythonpath)
-    path_variable = "LIBERO_PATH"
-    config_variable = "LIBERO_CONFIG_ROOT"
     env.update(
         {
             "PYTHONPATH": os.pathsep.join(pieces),
-            path_variable: str(libero_path),
-            config_variable: str(config_root),
+            "LIBERO_PATH": str(libero_path),
+            "LIBERO_CONFIG_ROOT": str(config_root),
             "LIBERO_CONFIG_PATH": str(config_root),
             "MUJOCO_GL": "egl",
             "PYOPENGL_PLATFORM": "egl",
@@ -111,11 +107,14 @@ def main(argv: list[str] | None = None) -> int:
     scheduler._client_command = _native_client_command
     scheduler._client_env = _native_client_env
     scheduler._read_result = _native_read_result
-    # The lightweight launcher may not have websockets installed. A listening TCP
-    # socket is sufficient here; the client performs the real websocket ping.
+    # The lightweight launcher interpreter may not have the ``websockets``
+    # package installed even though the isolated LIBERO client does. A
+    # listening TCP socket is sufficient here: deploy.py binds only after its
+    # policy is initialized, and the client performs the real websocket ping.
     scheduler._websocket_server_is_ready = scheduler._port_is_open
 
     args = list(sys.argv[1:] if argv is None else argv)
+    # A full run is a strict superset of a previously sampled run.
     # In this standalone entry point we may intentionally reuse valid results
     # from that subset; the checkpoint/config/trial protocol is still checked
     # normally, while only the task-list hash/count are allowed to change.
@@ -124,7 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         scheduler.RESUME_OPERATIONAL_FIELDS = frozenset(
             set(scheduler.RESUME_OPERATIONAL_FIELDS) | {"jobs_sha256", "jobs_count"}
         )
-    # Keep the canonical config as the default while allowing an explicit config.
+    # Keep the canonical config as the default while allowing an explicit config
+    # for experiments.
     if "--policy-config" not in args:
         args.extend(("--policy-config", str(BENCHMARK_DIR / "policy_config.yml")))
     # Require the canonical action mode before launching any workers.

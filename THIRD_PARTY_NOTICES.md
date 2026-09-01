@@ -165,4 +165,3 @@ license.
 - Modifications: `benchmarks/libero/patches/libero-pytorch-load.patch` makes
   the pinned checkout explicit about loading its trusted NumPy-containing
   init-state assets under newer PyTorch releases.
-
