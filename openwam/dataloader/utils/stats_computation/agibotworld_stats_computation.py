@@ -89,8 +89,6 @@ from openwam.dataloader.utils.lerobotv3 import (
 )
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
-
-
 _COL_WIDTH = {
     "action.ee_base": 18, "observation.state.ee_base": 18,
     "action.gripper": 2, "observation.state.gripper": 2,

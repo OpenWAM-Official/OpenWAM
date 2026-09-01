@@ -100,11 +100,6 @@ from openwam.dataloader.utils.lerobotv3 import (
 from openwam.dataloader.utils.normalization import materialize_eef_stats
 from openwam.dataloader.utils.oxe_schema import droid_euler7_to_arm10, droid_pose6_closedness_to_arm10
 
-
-
-
-
-
 _PLACEHOLDER_RE = re.compile(
     r"^(?:no[\s_-]*action\.?|not[\s_-]*action|no[\s_-]*instruction|n/?a|null|none|nothing|test"
     r"|[.\-_/]+|pree|pm|op)$"

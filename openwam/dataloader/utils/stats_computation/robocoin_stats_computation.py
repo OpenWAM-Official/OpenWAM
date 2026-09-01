@@ -99,10 +99,6 @@ from openwam.dataloader.utils.lerobotv3 import (
 )
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, pin_rot6d_identity
 
-
-
-
-
 RESERVOIR_CAP = 1_000_000
 
 

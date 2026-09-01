@@ -84,8 +84,6 @@ from openwam.dataloader.interndata_a1 import (
     _BIMANUAL_SIDES,
     _SINGLE_ARM_SIDES,
     _assert_trim_snapshot_current,
-
-
     _load_trim_snapshot,
     detect_arm_layout,
     discover_a1_buckets,
