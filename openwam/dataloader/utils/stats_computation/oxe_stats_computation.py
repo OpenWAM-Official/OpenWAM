@@ -1,4 +1,11 @@
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""Compute per-dataset 10-D EEF normalization stats for OXE readers.
+
+Each schema converts state and action to ``xyz(3) + rot6d(6) + grip(1)`` and
+pools the two streams into ``meta/eef_stats.json``.  For DROID, the scan uses
+the arm-side wrist/gripper-mount streams, applies the canonical prompt
+exclusions, inverts gripper closedness, and records data-population provenance.
+Rot6d dimensions are pinned to identity before output.
+"""
 
 
 
@@ -146,7 +153,7 @@ def _convert_action(rows: Dict[str, np.ndarray], action_fn: str) -> np.ndarray:
 
 
 def _table_rows(table: pa.Table, cols: List[str]) -> Dict[str, np.ndarray]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Convert selected Arrow columns to stacked numpy rows."""
     out: Dict[str, np.ndarray] = {}
     for c in cols:
         col_data = table.column(c).to_pylist()
@@ -159,7 +166,7 @@ def _table_rows(table: pa.Table, cols: List[str]) -> Dict[str, np.ndarray]:
 
 
 def _load_shard(path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Load one parquet shard, returning a dict {col: ndarray-of-stacked-rows}."""
     return _table_rows(pq.read_table(path, memory_map=True, columns=cols), cols)
 
 
@@ -170,7 +177,11 @@ def compute_dataset_stats(
     *,
     split: str = "train",
 ) -> Tuple[dict, int, int]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Walk a dataset's data parquets, convert to 10-D EEF, aggregate stats.
+
+    Returns:
+        (stats_dict, n_state_samples, n_action_samples)
+    """
 
 
 
@@ -286,7 +297,7 @@ def compute_dataset_stats(
 
 
 def _print_stats_table(stats: dict, name: str) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Per-dim summary for human eyeballing."""
     dim_names = ["x", "y", "z", "r6_0", "r6_1", "r6_2", "r6_3", "r6_4", "r6_5", "grip"]
     print(f"\n  {name}  (n_samples={stats['n_samples']:,})")
     print(f"  {'dim':<6} {'min':>10} {'max':>10} {'q01':>10} {'q99':>10} {'mean':>10} {'std':>10}")

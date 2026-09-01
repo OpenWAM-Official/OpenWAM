@@ -110,11 +110,10 @@ _CONFIG_MISSING = object()
 
 # Process-global LRU for decoded parquet shards, shared across all bucket
 # instances. A per-instance cache (the previous maxsize=32 design) is a memory
-# bomb under shuffled training: many buckets x many shards x one copy per
-# DataLoader worker grows unbounded (substantial memory per step and rank, node OOM at
-# sustained distributed runs) while the random access pattern gives ~0 hit rate.
-# A small global cache keeps sequential scans fast at a fixed bounded memory per worker
-# ceiling (largest shards decode to large tables).
+# risk under shuffled training: bucket count, shard count, and DataLoader
+# workers multiply the number of retained tables while random access provides
+# little reuse. A small global cache keeps sequential scans fast with bounded
+# per-worker memory.
 @functools.lru_cache(maxsize=4)
 def _read_data_table_cached(path: str, columns: Tuple[str, ...]):
     try:

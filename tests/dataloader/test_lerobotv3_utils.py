@@ -282,7 +282,7 @@ def _fake_bucket_classes(failures: dict):
 class TestBuildMultibucketErrorPolicy:
     """Which per-bucket failures are tolerated, and which abort the launch.
 
-    The tolerance is deliberate — one truncated shard in a large multi-bucket root must
+    The tolerance is deliberate — one truncated shard in a large root must
     not kill a training run — but it is exactly wrong for a failure that proves
     the DATA is broken, because dropping that bucket removes a slice of the
     training set behind a single WARNING.

@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""Compute per-robot-type EEF and hand stats for RoboCOIN.
+
+Published Euler-XYZ pose and gripper columns are converted to the reader's
+20-D EEF layout, then action and state rows are pooled together.  Dexterous
+buckets additionally produce a left-then-right hand-joint stats block while
+their absent scalar-grip slots remain masked.  Means, variances and extrema
+are streamed exactly; quantiles use a bounded uniform reservoir.
+
+Rot6d dimensions are pinned to identity, and each output records contributor,
+exclusion, trim, and retained-population provenance required by the reader.
+"""
 
 
 
@@ -103,7 +113,7 @@ RESERVOIR_CAP = 1_000_000
 
 
 class Accumulator:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Online mean/std/min/max accumulator + reservoir for q01/q99."""
 
     def __init__(self, dim: int = 20, reservoir_cap: int = RESERVOIR_CAP, seed: int = 0):
         self.dim = dim
@@ -120,7 +130,7 @@ class Accumulator:
         self._res_seen = 0
 
     def update(self, batch: np.ndarray):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Update with (N, dim) array using Welford's online algorithm."""
         for i in range(len(batch)):
             x = batch[i].astype(np.float64)
             self.count += 1
@@ -133,7 +143,7 @@ class Accumulator:
         self._reservoir_add(np.asarray(batch, dtype=np.float32))
 
     def update_batch(self, batch: np.ndarray):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Batch update (more efficient for large arrays)."""
         n = len(batch)
         if n == 0:
             return
@@ -161,7 +171,7 @@ class Accumulator:
             self.max_val = np.maximum(self.max_val, batch_max)
 
     def _reservoir_add(self, batch: np.ndarray):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Feed (N, dim) rows into the reservoir (vectorized Algorithm R)."""
         n = len(batch)
         if n == 0:
             return
@@ -208,7 +218,7 @@ class Accumulator:
 
 
 def discover_datasets_by_robot_type(root: str) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Group datasets by robot_type."""
     groups = {}
     for name in sorted(os.listdir(root)):
         if is_robocoin_bucket_excluded(name):
@@ -240,7 +250,24 @@ _HAND_RAW_COLS = ["action", "observation.state"]
 
 
 def _classify_dataset(ds_dir: str, *, fail_closed: bool = False):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Classify one dataset and return its dex-hand finger layout if any.
+
+    Reads ``meta/info.json`` ONCE and returns ``(kind, layout)``:
+      * ``kind`` is one of:
+          ``"grip"``   — has ``gripper_open_scale_*`` (real gripper);
+          ``"dex"``    — pose, no gripper, a valid finger layout;
+          ``"nogrip"`` — pose, no gripper, but the finger gate failed
+                         (single-handed / >MAX_HAND_DOF / action-state disagree);
+          ``"other"``  — no pose column at all (its files won't pool into `eef`).
+      * ``layout`` is ``(idx_action_LR, idx_state_LR, kL, kR)`` for ``"dex"`` (the
+        left-then-right ``*_hand_joint_*`` indices within the raw ``action`` /
+        ``observation.state`` arrays), else ``None``.
+
+    ``"dex"`` and ``"nogrip"`` both zero-fill the gripper slots (9/19) when pooled,
+    so both must be kept out of a robot_type that also has ``"grip"`` datasets (the
+    caller's mixed-bucket guard treats them alike). Uses the shared
+    :func:`dex_finger_layout` gate so the stats producer and the reader agree.
+    """
 
 
 
@@ -287,7 +314,7 @@ def _classify_dataset(ds_dir: str, *, fail_closed: bool = False):
 
 
 def _slice_file_to_global_spans(df, file_start: int, file_end: int, kept_spans):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Select intersections with kept global spans using physical file offsets."""
     pieces = []
     for span_start, span_end in kept_spans:
         if span_end <= file_start:
@@ -312,7 +339,24 @@ def compute_stats_for_robot_type(
     split: str = "train",
     _trim_snapshot=None,
 ) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Compute unified action+state EEF stats across all datasets of one robot type.
+
+    Each parquet row contributes TWO 20-D points to the pool: one from action
+    columns and one from state columns. The accumulator sees their union, so
+    min/max end up as the per-dim envelope across both streams and mean/std
+    reflect the joint distribution.
+
+    For dexterous-hand types (no gripper), a second accumulator pools the raw
+    ``*_hand_joint_*`` finger values (action + state) into a ``hand`` stats block
+    of width ``kL + kR`` (left then right), used to normalize the finger dims the
+    reader scatters into the 80-D hand slots under unify_action.
+
+    With ``trim_csv`` set, every stream is restricted to the same split,
+    exclusion and manifest-based trim spans as the reader and all
+    file/manifest errors fail closed.
+
+    Returns a dict ready to dump: ``{"eef": <20-D stats>, "hand": <finger stats>?}``.
+    """
 
 
 

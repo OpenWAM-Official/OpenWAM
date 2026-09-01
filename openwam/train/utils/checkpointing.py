@@ -200,10 +200,9 @@ def save_weights(accelerator, architecture, output_path: str, global_step: int, 
     Only rank-0 writes. ZeRO-1/2 (this repo's only stages, see
     ``training.zero_stage``) replicates the bf16 params on every rank, so
     ``get_state_dict`` is rank-local: non-writers return immediately —
-    otherwise every rank clone the full state dict to host memory
-    at once, a burst that has exhausted memory-constrained nodes at save time. Pruning is
-    the caller's job, run after the full state is also written so the two
-    lines stay in lockstep.
+    otherwise every rank can clone the full state dict to host memory at once
+    and exhaust the node during checkpointing. Pruning is the caller's job, run
+    after the full state is also written so the two lines stay in lockstep.
     """
     from tqdm import tqdm
 

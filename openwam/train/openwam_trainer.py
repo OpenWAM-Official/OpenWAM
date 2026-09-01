@@ -389,9 +389,9 @@ class OpenWAMTrainer:
 
         ``MixtureDataset`` already owns a shuffled virtual index map and
         reshuffles it in ``set_epoch``.  Do not wrap it in PyTorch's
-        ``RandomSampler``: on the large mixture that would build a
-        second full-size permutation (and convert it to Python integers) in
-        every rank.  Other datasets keep the standard DataLoader shuffle.
+        ``RandomSampler``: on a large mixture that would build a second full-size
+        permutation, convert it to Python integers, and duplicate it in every
+        rank. Other datasets keep the standard DataLoader shuffle.
 
         When ``cfg.project.seed`` is set, wires a per-rank ``generator`` and a
         ``worker_init_fn`` so dataset-side randomness is reproducible across

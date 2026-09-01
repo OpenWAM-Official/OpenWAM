@@ -1,4 +1,19 @@
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""LeRobot v3 reader for the DROID portion of OXE.
+
+The reader uses the rigid arm-side wrist/gripper-mount frame: achieved state is
+read from ``observation_gripper_pose6d`` and commanded action from
+``action_wrist_pose``.  The physically distinct task-TCP and clipped-delta
+streams are intentionally not mixed into the same action slots.  Euler XYZ
+poses are converted to a 10-D single-arm EEF vector and placed in the left arm
+of the shared schema.  Raw gripper closedness is inverted to the project-wide
+``0=closed, 1=open`` convention.
+
+Prompt text resolves from ``tasks.parquet`` and a deterministic per-row fallback
+chain.  Episodes without any resolvable prompt must be represented by the
+canonical exclusion artifact.  The reader validates prompt inputs, manifest
+ranges, exclusions, and normalization provenance so stale artifacts fail
+before training.
+"""
 
 
 
@@ -100,6 +115,7 @@ from openwam.dataloader.utils.lerobotv3 import (
 from openwam.dataloader.utils.normalization import materialize_eef_stats
 from openwam.dataloader.utils.oxe_schema import droid_euler7_to_arm10, droid_pose6_closedness_to_arm10
 
+# Present-but-empty instructions fall through to the next prompt source.
 _PLACEHOLDER_RE = re.compile(
     r"^(?:no[\s_-]*action\.?|not[\s_-]*action|no[\s_-]*instruction|n/?a|null|none|nothing|test"
     r"|[.\-_/]+|pree|pm|op)$"
@@ -107,6 +123,7 @@ _PLACEHOLDER_RE = re.compile(
 
 
 
+# Versioned contracts keep prompt exclusions and EEF stats tied to source data.
 DROID_PROMPT_EXCLUSION_SCHEMA_VERSION = 3
 DROID_PROMPT_EXCLUSION_KEY = "droid_prompt_exclusions"
 DROID_PROMPT_INDEPENDENT_EXCLUSIONS_KEY = "independently_owned_episode_indices"
@@ -138,7 +155,7 @@ DROID_PROMPT_SOURCE_COLUMNS = ("episode_index", "task_index", *DROID_PROMPT_FALL
 
 
 def _validate_droid_eef_stats_contract(value) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Reject stats from a different pose frame or gripper conversion."""
     if not isinstance(value, dict) or set(value) != set(DROID_EEF_STATS_CONTRACT):
         raise ValueError(f"expected exactly {DROID_EEF_STATS_CONTRACT!r}")
     if type(value["schema_version"]) is not int or value["schema_version"] != DROID_EEF_STATS_CONTRACT_VERSION:
@@ -151,7 +168,7 @@ def _validate_droid_eef_stats_contract(value) -> None:
 
 
 def _clean_text(value) -> str:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Strip a raw prompt candidate, or return ``""`` when it carries no instruction."""
     if value is None or not isinstance(value, str):
         return ""
     text = value.strip()
@@ -196,7 +213,12 @@ def resolve_droid_stats_population(
     *,
     split: str = "train",
 ) -> tuple[pd.DataFrame, dict]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Resolve and certify the exact DROID population used for normalization.
+
+    The raw data-population digest deliberately describes the pre-split corpus.
+    This second certificate binds the stats to the selected info.json split and
+    prompt-exclusion set, including each episode's physical manifest range.
+    """
 
 
 
@@ -247,7 +269,7 @@ def read_droid_prompt_population_shard(
     dataset_dir: str | Path,
     shard: LeRobotV3DataShard,
 ) -> pa.Table:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Read and validate the prompt rows addressed by one manifest shard."""
     try:
         return read_lerobot_v3_population_shard(
             Path(dataset_dir),
@@ -259,7 +281,14 @@ def read_droid_prompt_population_shard(
 
 
 def digest_droid_prompt_shard(table: pa.Table) -> str:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Hash the logical prompt-bearing values of one data shard.
+
+    Numeric IDs are normalized to little-endian int64. Fallback text is
+    normalized to one combined large-string array with an explicit validity
+    vector and nulls filled to empty before hashing offsets/data. This keeps the
+    digest independent of parquet row groups, compression, and dictionary
+    encoding while preserving row order and null-vs-empty distinctions.
+    """
 
 
 
@@ -330,7 +359,7 @@ def compute_droid_prompt_inputs_digest(
     tasks_sha256: str | None = None,
     population: LeRobotV3DataPopulation | None = None,
 ) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Hash tasks and the exact prompt population addressed by the reader."""
     root = Path(dataset_dir)
     resolved_population = population or resolve_lerobot_v3_data_population(root)
     tasks_digest = tasks_sha256 if tasks_sha256 is not None else _sha256_file(root / "meta" / "tasks.parquet")
@@ -395,7 +424,7 @@ def load_droid_prompt_exclusions(
     *,
     population: LeRobotV3DataPopulation | None = None,
 ) -> tuple[dict, set[int]]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Load and validate the prompt-generator provenance required by this reader."""
     root = Path(dataset_dir)
     path = root / "meta" / "excluded_episodes.json"
     if not path.exists():
@@ -536,7 +565,7 @@ class OxeDroidDataset(LeRobotV3Reader):
         )
 
     def _load_excluded_episode_indices(self) -> set[int]:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Reuse the canonical set validated with the prompt certificate."""
         return set(self._droid_excluded_episode_indices)
 
     def _load_stats(self, info: dict) -> Optional[dict]:
@@ -598,7 +627,16 @@ class OxeDroidDataset(LeRobotV3Reader):
         return stats
 
     def _resolve_prompt(self, row, win: pd.DataFrame) -> str:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """tasks.parquet text, else the first non-placeholder fallback column.
+
+        Raises when every source is blank. This is a **backstop, not a runtime
+        degradation path**: those episodes must already be gone from the index
+        via ``meta/excluded_episodes.json`` (see the module docstring). Relying
+        on ``_safe_get`` to retry past them does NOT work — its ``idx + 1`` walk
+        stays inside the same episode, and the condition is all-or-nothing per
+        episode, so any episode longer than ``_GETITEM_MAX_RETRIES`` frames
+        exhausts the retries and kills the DataLoader worker.
+        """
 
 
 
@@ -624,7 +662,8 @@ class OxeDroidDataset(LeRobotV3Reader):
         raise ValueError(
             f"{self.DATASET_NAME} task_index={task_idx} has a blank prompt and every fallback "
             f"column {list(self.PROMPT_FALLBACK_COLS)} is blank too (episode_index="
-            f"{int(row['episode_index'])}). Generate meta/excluded_episodes.json with scripts/write_droid_prompt_exclusions.py before loading the dataset."
+            f"{int(row['episode_index'])}). Generate meta/excluded_episodes.json with "
+            "scripts/write_droid_prompt_exclusions.py before loading the dataset."
         )
 
     def _action_20d(self, win: pd.DataFrame) -> np.ndarray:

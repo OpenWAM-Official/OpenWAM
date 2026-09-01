@@ -1,4 +1,10 @@
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""Weighted co-training over heterogeneous action datasets.
+
+``MixtureDataset`` wraps already-normalized dataset readers behind one virtual
+index space.  Sampling can be proportional, inverse-size, or manually weighted;
+all strategies preserve each source's native sample semantics and expose the
+selected source name with every item.
+"""
 
 
 
@@ -74,7 +80,31 @@ logger = logging.getLogger(__name__)
 
 
 class MixtureDataset(BaseDataset):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Weighted mixture of multiple action datasets.
+
+    Samples are drawn from sub-datasets according to normalized weights.
+    Each sub-dataset contributes ``round(total_real * weight_i)`` virtual
+    samples; samples cycle if the virtual count exceeds the real dataset size.
+    The virtual index list is shuffled once with a fixed seed.
+
+    Args:
+        datasets:             List of BaseDataset instances.
+        weights:              Sampling weight per dataset (normalized to sum=1).
+                              If None, defaults to dataset sizes — equivalent to
+                              ``weight_strategy=proportional``: every real sample
+                              visited exactly once per virtual epoch.
+        seed:                 Random seed for reproducible index shuffling.
+        names:                Optional human-readable name per sub-dataset (for
+                              logging and ``get_dataset`` lookup). Defaults to
+                              ``source_<i>``.
+        strict_action_dim:    When True, mismatched sub-dataset ``action_dim``
+                              raises ValueError. When False (legacy auto-pad path,
+                              opt-in via ``action_dim_override``), the max dim is
+                              used and smaller actions are zero-padded with a warning.
+        action_dim_override:  Only consulted when ``strict_action_dim=False``.
+                              Forces the output action_dim regardless of
+                              sub-source dims; smaller actions are zero-padded.
+    """
 
 
 
@@ -174,7 +204,46 @@ class MixtureDataset(BaseDataset):
         )
 
     def set_epoch(self, epoch: int) -> None:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Re-shuffle the virtual index_map for this epoch.
+
+        Repeated calls for the same epoch are no-ops.  Accelerate's
+        ``DataLoaderShard.set_epoch`` forwards to datasets that implement this
+        method, while the trainer also calls the underlying dataset directly;
+        without the idempotence guard that pair would rebuild the full index
+        map twice at every epoch boundary.  The map built by the
+        constructor already represents epoch 0, so its first ``set_epoch(0)``
+        is also intentionally free.
+
+        ===================================================================
+        ⚠️  CALLER REQUIREMENT — READ BEFORE USE  ⚠️
+
+        This method mutates ``self._index_map`` in place. Under
+        ``torch.utils.data.DataLoader`` with ``num_workers > 0``, each
+        worker holds a forked copy of the dataset object; calling
+        ``set_epoch`` on the parent only updates the parent's copy. To make
+        the new shuffle visible inside the workers, the caller MUST:
+
+          1. Use ``persistent_workers=False`` (workers are re-forked every
+             epoch, so they pick up the parent's updated state on each
+             epoch boundary), AND
+          2. Call ``set_epoch(epoch)`` BEFORE constructing / iterating the
+             DataLoader for that epoch (typically at the top of the
+             per-epoch loop in the trainer).
+
+        With ``persistent_workers=True`` the workers never see the new
+        index_map — set_epoch becomes a silent no-op for sampling, and
+        every epoch reuses the init-time shuffle. Use a custom Sampler
+        instead if persistent workers are required.
+        ===================================================================
+
+        Mirrors ``torch.utils.data.distributed.DistributedSampler.set_epoch``:
+        without this call the index_map keeps its init-time shuffle for the
+        entire run — fine under ``proportional`` (full coverage every epoch
+        regardless) but ``inverse_size`` / ``manual`` strategies will
+        systematically miss any samples whose virtual_n < N.
+
+        Safe to skip; default behavior is identical to the previous releases.
+        """
 
 
 
@@ -221,7 +290,12 @@ class MixtureDataset(BaseDataset):
         self._build_index_map()
 
     def _build_index_map(self):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Build the shuffled ``(dataset_idx, sample_idx)`` virtual index.
+
+        The map uses ``int32`` storage.  Empty and zero-weight sources are
+        skipped explicitly, while non-empty sources cycle through their real
+        indices to reach the requested virtual weight.
+        """
 
 
 
@@ -308,7 +382,10 @@ class MixtureDataset(BaseDataset):
         return list(self._names)
 
     def get_dataset(self, name: str) -> BaseDataset:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Return the sub-dataset registered under ``name``.
+
+        Raises ``KeyError`` with a helpful list when ``name`` is unknown.
+        """
 
 
 
@@ -319,14 +396,62 @@ class MixtureDataset(BaseDataset):
         return self._datasets[idx]
 
     def dataset_sample_counts(self) -> Dict[str, int]:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Per-source virtual-sample counts, keyed by source name."""
         di_col = self._index_map[:, 0]
         counts = np.bincount(di_col, minlength=len(self._datasets))
         return {self._names[i]: int(c) for i, c in enumerate(counts)}
 
     @classmethod
     def from_config(cls, config, split: str = "train") -> "MixtureDataset":
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Build from a Hydra/OmegaConf config.
+
+        Sub-sources live under the ``datasets:`` key. Two layouts:
+
+        **dict** (recommended, used by ``configs/dataloader/mixture.yaml``).
+        Sub-source config is composed in via Hydra ``defaults``
+        (``<name>@datasets.<name>``); the per-source block under ``datasets:``
+        only carries ``enabled`` / ``weight`` overrides. The dict key is the
+        source name (used in logging, ``sample['_dataset_name']``,
+        ``get_dataset(name)`` lookup, CLI override path
+        ``dataloader.datasets.<name>.<field>``).
+
+        .. code-block:: yaml
+
+            defaults:
+              - robocoin@datasets.robocoin
+              - oxe_droid@datasets.oxe_droid
+              - _self_
+            type: mixture
+            weight_strategy: manual
+            datasets:
+              robocoin: {enabled: true, weight: 1.0}
+              oxe_droid: {enabled: true, weight: 0.3}
+
+        **list** (legacy list form).
+        ``datasets:`` is a list of inline configs; the source name is derived
+        from the ``type`` field (with ``source_<i>`` fallback and a numeric
+        suffix to disambiguate duplicate types).
+
+        .. code-block:: yaml
+
+            datasets:
+              - type: robotwin
+                enabled: true
+                weight: 1.0
+                dataset_dir: /path/to/data
+                ...
+
+        Weight strategy (controlled by ``config.weight_strategy``):
+          manual         — use the ``weight`` field on each sub-dataset entry.
+          uniform        — ignore ``weight`` fields; each enabled source contributes
+                           equal virtual samples regardless of size.
+          inverse_size   — weight_i ∝ 1 / (len(ds_i) × num_frames_i): small sources
+                           are oversampled, large sources undersampled. (Renamed
+                           from the misleading legacy name ``token``.)
+          proportional   — weight_i ∝ len(ds_i): virtual_n_i == len(ds_i) exactly,
+                           every real sample is visited exactly once per virtual
+                           epoch (full coverage, no waste, no duplication).
+        """
 
 
 
@@ -392,7 +517,12 @@ class MixtureDataset(BaseDataset):
             return copied
 
         def _normalize_entries(datasets_cfg):
-            """Public implementation. Dataset-specific audit notes were removed."""
+            """Return ``[(name, cfg), ...]`` preserving insertion order.
+
+            Detects dict-style (Hydra defaults composition) vs list-style
+            (legacy inline). For list-style, derives the name from the
+            ``type`` field with index fallback.
+            """
 
 
 

@@ -53,7 +53,7 @@ training:
   keep_last_k_ckpts: 1           # Rolling window: keep only the last K checkpoints
 
   # --- Finetune / Resume (mutually exclusive; both point to a training output dir, latest step auto-selected) ---
-  finetune_ckpt_path: /path/to/openwam_checkpoints/pretrained_final_dualsystem_jointselfattention_mutual   # non-null: warm-start from latest weights in this dir (step from 0, new output dir)
+  finetune_ckpt_path: null   # non-null: warm-start from latest weights in this dir (step from 0, new output dir)
   resume_ckpt_path: null     # non-null: resume full state from latest in this dir (output reuses this dir)
 
   # --- Data loading ---

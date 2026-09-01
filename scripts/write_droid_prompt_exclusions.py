@@ -1,4 +1,12 @@
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""Write DROID prompt exclusions for episodes with no resolvable instruction.
+
+The scan applies the reader's task lookup, placeholder cleaning, and fallback
+chain to every manifest-addressed row.  It refuses partially resolvable
+episodes and missing task indices, preserves independently owned exclusions,
+and publishes the canonical union atomically.  The generated certificate binds
+the result to tasks, the data-path template, episode ranges, and all prompt
+inputs consumed by the reader.  Use ``--dry-run`` to inspect without writing.
+"""
 
 
 
@@ -104,7 +112,7 @@ def _init(dataset_dir: str, task_text: dict[int, str]) -> None:
 
 
 def _scan_shard(shard: LeRobotV3DataShard) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Resolve the prompt chain for every row of one shard; return per-episode verdicts."""
     assert _TASK_TEXT is not None and _DATASET_DIR is not None
     rel_path = shard.relative_path
     path = _DATASET_DIR / rel_path
@@ -165,7 +173,7 @@ def _parse_episode_indices(value, field: str) -> set[int]:
 
 
 def _is_original_generator_artifact(previous: dict, existing: set[int]) -> bool:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Recognize the legacy top-level artifact shape emitted by this generator."""
     if set(previous) != {"reason", "generated", "episode_indices", "stats"}:
         return False
     if previous["reason"] != PROMPT_REASON or not isinstance(previous["generated"], str):
@@ -199,7 +207,7 @@ def _is_original_generator_artifact(previous: dict, existing: set[int]) -> bool:
 
 
 def _load_existing_ownership(out: Path) -> tuple[dict, dict, set[int]]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Read and validate the current ownership ledger."""
     if not out.exists():
         return {}, {}, set()
     try:
@@ -243,7 +251,7 @@ def _load_existing_ownership(out: Path) -> tuple[dict, dict, set[int]]:
 
 
 def _validate_total_frames(root: Path, rows_scanned: int) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Keep generator success aligned with the reader's row-count contract."""
     info_path = root / "meta" / "info.json"
     if not info_path.exists():
         return
@@ -266,7 +274,7 @@ def _validate_total_frames(root: Path, rows_scanned: int) -> None:
 
 
 def _validate_source_snapshot(root, population, tasks_path, tasks_sha256, results, rows) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Recheck every scan input immediately before publishing."""
     _validate_total_frames(root, rows)
     current_population = resolve_lerobot_v3_data_population(root)
     if current_population != population:

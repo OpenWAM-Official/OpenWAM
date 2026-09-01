@@ -57,11 +57,10 @@ def _warn_seek_fallback(video_path: str, min_idx: int, max_idx: int, reason: str
 def decode_video_frames(video_path: str, frame_indices: List[int], height: int, width: int) -> List[Image.Image]:
     """Decode requested frames via PyAV with seek-to-keyframe optimization.
 
-    Repacked file-NNN.mp4 holds many episodes (many frames) so naive
-    sequential-from-frame-0 decode dominates worker time and starves GPU
-    (observed as communication spinwait rather than compute). Seek to keyframe
-    just before min(frame_indices) and decode forward — bounded to ~GOP
-    frames per call (one GOP rather than the full prefix).
+    Repacked file-NNN.mp4 can hold many episodes, so decoding sequentially from
+    frame zero can dominate worker time. Seek to the keyframe immediately
+    before ``min(frame_indices)`` and decode forward, bounding the usual work to
+    roughly one GOP rather than the full prefix.
 
     Falls back to seek(0) + sequential when PTS rounding misses a target.
 

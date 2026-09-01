@@ -80,7 +80,7 @@ def _filter(tmp_path: Path, eps: pd.DataFrame, rows: list[dict]) -> pd.DataFrame
 
 @pytest.fixture(autouse=True)
 def _isolate_trim_cache():
-    # Immutable trim snapshots are cached for the many bucket readers.
+    # Immutable trim snapshots are shared by many bucket readers.
     # Tests reuse tmp_path names across separate pytest processes, so isolate it.
     from openwam.dataloader import robocoin
 

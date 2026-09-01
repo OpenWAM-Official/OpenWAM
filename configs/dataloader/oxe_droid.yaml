@@ -1,11 +1,18 @@
 type: oxe_droid
 
+# Root of the DROID LeRobot v3 conversion. Before generating stats, create the
+# deterministic no-prompt exclusion manifest with:
+#   python scripts/write_droid_prompt_exclusions.py --dataset-dir /path/to/Droid
 dataset_dir: /path/to/pretrain_dataset/Droid
 
+# DROID is 10 fps. A 33-frame window spans 3.2 seconds; stride 4 yields 9 video
+# frames and satisfies the Wan VAE temporal constraint.
 num_frames: 33
 video_stride: 4
 window_stride: 1
 
+# Source cameras are 180x320. multiview=true builds a 384x320 L-shaped canvas:
+# 256x320 primary view, 128x160 wrist view, and a blank right-wrist tile.
 height: 384
 width: 320
 
@@ -13,17 +20,35 @@ multiview: true
 
 split: train
 
+# DROID exposes separate moving task-TCP and rigid wrist/mount streams. The
+# reader intentionally uses action_wrist_pose and
+# observation_gripper_pose6d + state[6], in the robot-base frame. Raw gripper
+# values are inverted to the shared aperture convention 0=closed, 1=open.
+
+# Load-time color jitter uses the same sampled factors for every frame in a
+# training clip.
 color_jitter:
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2
   hue: 0.0
 
+# Loads <dataset_dir>/meta/eef_stats.json. Its strict contract records source
+# columns and the exclusion population, rejecting stale TCP-based statistics.
+# rot6d stats are identity-pinned. Supported modes are null/none, min-max,
+# z-score, and quantile. Generate matching stats with:
+#   python -m openwam.dataloader.utils.stats_computation.oxe_stats_computation \
+#       --dataset DROID --dataset-dir /path/to/Droid
 normalize_mode: quantile
 
+# false keeps values available but masks action and proprio supervision.
 enable_action_supervision: true
 
+# Scatter the single active 10-D arm into the left EEF slots 0:10 of the shared
+# 80-D head. The zero-padded right half maps to 34:44 and remains masked.
 unify_action: true
 unify_action_map: ["0-9", "34-43"]
 
+# null uses the complete post-exclusion dataset. A positive float caps effective
+# footage in hours by reproducibly subsampling episodes with project.seed.
 total_hours: null

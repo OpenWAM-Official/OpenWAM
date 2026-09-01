@@ -83,8 +83,7 @@ def seed_everything(seed: int, *, rank: int = 0) -> None:
     non-deterministic kernels and would crash with
     ``RuntimeError: not implemented for deterministic``.  Loss reproducibility
     therefore relies on cudnn-deterministic + a fixed cuBLAS workspace, which
-    bounds residual non-determinism to bf16 reduction noise (small across a
-    short validation run).
+    leaves only small bf16 reduction noise on non-deterministic paths.
     """
     seed_process(seed, rank=rank)
     if torch.cuda.is_available():

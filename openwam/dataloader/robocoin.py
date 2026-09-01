@@ -1,4 +1,20 @@
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""RoboCOIN LeRobot v3 reader with real action/state supervision.
+
+Grippered buckets consume the published ``eef_sim_pose_*`` Euler-XYZ poses and
+``gripper_open_scale_*`` values, producing the canonical 20-D bimanual EEF
+layout.  The pose follows a rigid terminal-arm attachment in the robot base
+frame and the gripper convention is ``0=closed, 1=open``.
+
+Dexterous-hand buckets have no scalar gripper columns.  Without unification
+they emit pose with masked grip slots; with unification they append left/right
+finger joints and scatter pose/fingers into the corresponding 80-D slots while
+leaving scalar-grip and unused hand slots masked.
+
+Rows are temporally aligned: action row ``t`` is supervised at row ``t``.
+Normalization is pooled per robot type over action and state, with rot6d
+dimensions pinned to identity.  Optional episode trimming and exclusions are
+validated against the exact manifest population before stats are accepted.
+"""
 
 
 
@@ -118,15 +134,13 @@ _STATE_DIM = _ACTION_DIM
 
 
 
+# One canonical denylist is shared by reader and stats discovery.
 ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS = MappingProxyType(
     {
         "Airbot_MMK2_storage_peach_pear": MappingProxyType(
             {
                 "robot_type": "airbot_mmk2",
-                "reason": (
-                    "the public action-unit contract is incompatible with the required unified hand representation; "
-                    "pooling this bucket would violate shared hand normalization semantics"
-                ),
+                "reason": "fails the public action-unit contract and must not enter normalization statistics",
             }
         ),
     }
@@ -136,12 +150,12 @@ _WHOLE_BUCKET_EXCLUSIONS_POLICY = "drop_whole_bucket_before_reader_and_stats_dis
 
 
 def is_robocoin_bucket_excluded(dataset_dir) -> bool:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Whether ``dataset_dir`` is excluded as one indivisible task bucket."""
     return Path(dataset_dir).name in ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS
 
 
 def robocoin_bucket_exclusions_provenance(robot_type: str) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Canonical whole-bucket exclusion contract for one robot-type stats file."""
     datasets = {
         dataset_id: dict(entry)
         for dataset_id, entry in ROBOCOIN_WHOLE_BUCKET_EXCLUSIONS.items()
@@ -155,7 +169,7 @@ def robocoin_bucket_exclusions_provenance(robot_type: str) -> dict:
 
 
 def _validate_whole_bucket_exclusions_provenance(actual, *, robot_type, stats_path) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Fail closed when stats for an affected robot type predate its denylist."""
     expected = robocoin_bucket_exclusions_provenance(robot_type)
     if expected["datasets"]:
         if actual != expected:
@@ -173,7 +187,7 @@ def _validate_whole_bucket_exclusions_provenance(actual, *, robot_type, stats_pa
 
 
 def _discover_data_parquets(dataset_dir: Path, data_path_template: str):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Return canonical numeric RoboCOIN data shards in reader order."""
     if not isinstance(data_path_template, str) or not data_path_template:
         raise DataContractError(
             f"RoboCOIN({Path(dataset_dir).name}): info.json data_path must be a non-empty string, "
@@ -253,7 +267,11 @@ GRIP_EXCLUDED_DIM_MASK[19] = False
 
 
 def _finger_indices(feature: dict):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Indices of left/right dexterous-hand joints within an action/state array.
+
+    Reads the ``names`` (or ``names.motors``) list from one info.features entry
+    and returns ``(left_idx, right_idx)`` for ``*_hand_joint_*`` motors.
+    """
 
 
 
@@ -275,7 +293,18 @@ MAX_HAND_DOF = 24
 
 
 def dex_finger_layout(features: dict):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Validated dexterous-hand finger layout for one ``info.features`` dict.
+
+    A bucket qualifies as dexterous-hand ONLY when it has the unified pose column
+    but NO ``gripper_open_scale_*`` columns, AND both hands carry
+    ``1..MAX_HAND_DOF`` ``*_hand_joint_*`` motors with the action and state finger
+    counts agreeing. Returns ``(aL, aR, sL, sR)`` — the left/right finger indices
+    within the raw ``action`` / ``observation.state`` arrays — when all hold, else
+    ``None``.
+
+    Single source of truth for the dex-bucket gate, shared by the reader
+    (:meth:`RoboCOINDataset.__init__`) and the stats script so they cannot drift.
+    """
 
 
 
@@ -299,7 +328,15 @@ def dex_finger_layout(features: dict):
 
 
 def _build_dex_unify_map(k_left: int, k_right: int):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """``dst_index`` (single-list spec) for a dex-hand raw action laid out as
+    ``[L_pos(3), L_rot6d(6), L_fingers(kL), R_pos(3), R_rot6d(6), R_fingers(kR)]``.
+
+    Maps pose → shared 80-D pose slots [0:9)/[R_POS:R_POS+9) and fingers → the
+    dedicated hand slots [10:10+kL)/[R_HAND:R_HAND+kR) (front-aligned; the unused
+    tail of each MAX_HAND_DOF-wide hand region and the gripper slots stay unmapped
+    → masked). All right-side offsets are derived from MAX_HAND_DOF so the layout
+    follows the hand width automatically (currently: R pose 34:43, R hand 44:68).
+    """
 
 
 
@@ -386,7 +423,7 @@ _TRIM_CSV_COLUMNS = (
 def _excluded_episodes_provenance(
     snapshots: dict[str, ExcludedEpisodesSnapshot],
 ) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Serialize the exact effective blacklist for every stats contributor."""
     return {
         "schema_version": _EXCLUDED_EPISODES_SCHEMA_VERSION,
         "policy": _EXCLUDED_EPISODES_POLICY,
@@ -406,7 +443,7 @@ def _validate_excluded_episodes_provenance(
     num_datasets,
     stats_path: Path,
 ) -> dict[str, ExcludedEpisodesSnapshot]:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Validate every bucket population pooled into one robot-type stats file."""
     expected_keys = {"schema_version", "policy", "datasets"}
     if (
         not isinstance(actual, dict)
@@ -491,7 +528,14 @@ def _validate_stats_population_provenance(
     num_datasets,
     stats_path: Path,
 ) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Validate every contributor to one pooled robot-type stats file.
+
+    Checking only the leaf currently being constructed is insufficient: a
+    sibling bucket contributes to the same pooled numbers, so changing that
+    sibling's train split would stale normalization for this leaf too.  Rebuild
+    the exact physical train spans for every contributor using the immutable
+    trim/exclusion snapshots already validated above.
+    """
 
 
 
@@ -578,7 +622,7 @@ def _validate_stats_population_provenance(
 
 @dataclass(frozen=True)
 class _TrimSnapshot:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Parsed trim rules and provenance derived from one immutable byte snapshot."""
 
     path: str
     spec: dict
@@ -602,7 +646,7 @@ class _TrimSnapshot:
 
 
 class _TrimSnapshotConfig:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Overlay one pinned snapshot onto dict, DictConfig, or namespace configs."""
 
     def __init__(self, base, snapshot: _TrimSnapshot):
         self._base = base
@@ -620,7 +664,7 @@ class _TrimSnapshotConfig:
 
 
 def _trim_csv_int(row, name: str, *, path: str, line_number: int, required: bool = False):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Parse one optional integer field, with actionable CSV error context."""
     raw = row.get(name)
     value = raw.strip() if isinstance(raw, str) else ""
     if not value:
@@ -636,7 +680,19 @@ def _trim_csv_int(row, name: str, *, path: str, line_number: int, required: bool
 
 
 def _load_trim_snapshot(path) -> _TrimSnapshot:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Read, parse, and hash one immutable trim CSV byte snapshot.
+
+    Cached per unchanged path: MultiRobotCOINDataset builds one reader per
+    bucket, and each would otherwise re-read the same large CSV.
+
+    Expected columns — ``dataset``, ``episode_index``, ``total_frames``,
+    ``trim_head_to``, ``trim_tail_from``. Empty trim fields mean "no trim on that
+    end". ``total_frames`` is required and carried through as a staleness check
+    (see :meth:`RoboCOINDataset._filter_episodes`). Invalid files fail fast; only
+    a completely parsed snapshot is cached. The parsed spec and SHA-256 always
+    come from the same bytes, so a path replacement cannot pair old spans with
+    new provenance inside one reader construction or stats scan.
+    """
 
 
 
@@ -753,7 +809,7 @@ def _load_trim_snapshot(path) -> _TrimSnapshot:
 
 
 def _load_trim_spec(path) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Return the parsed spec from one cached immutable trim snapshot."""
     return {
         dataset: dict(entries)
         for dataset, entries in _load_trim_snapshot(path).spec.items()
@@ -761,7 +817,7 @@ def _load_trim_spec(path) -> dict:
 
 
 def _assert_trim_snapshot_current(snapshot: _TrimSnapshot, *, context: str) -> None:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Fail if the configured path changed after ``snapshot`` was pinned."""
     try:
         actual_sha256 = hashlib.sha256(Path(snapshot.path).read_bytes()).hexdigest()
     except OSError as e:
@@ -779,7 +835,12 @@ def _assert_trim_snapshot_current(snapshot: _TrimSnapshot, *, context: str) -> N
 
 
 def _validate_trim_manifest(dataset_id: str, manifest, spec: dict) -> dict:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Validate one bucket's trim spec against its full pre-split manifest.
+
+    Returns ``{episode_index: (head, tail)}`` relative spans. Unknown IDs and
+    every ``total_frames`` mismatch are data-contract failures, including rows
+    outside the selected split or later excluded by the reader.
+    """
 
 
 
@@ -805,7 +866,7 @@ def _validate_trim_manifest(dataset_id: str, manifest, spec: dict) -> dict:
             f"RoboCOIN({dataset_id}): trim list references {len(unknown)} unknown episode_index "
             f"value(s) absent from the full pre-split manifest (episode_index={unknown_ids}). "
             "Refusing dataset construction; re-run "
-            "the public trim-manifest generator against the current corpus."
+            "Regenerate the trim manifest against the current corpus before retrying."
         )
 
     stale = sorted(ep for ep, (_, _, total) in spec.items() if int(total) != manifest_lengths[ep])
@@ -816,7 +877,7 @@ def _validate_trim_manifest(dataset_id: str, manifest, spec: dict) -> dict:
             f"(episode_index={stale_ids}): recorded total_frames disagrees with the full manifest "
             "length. Refusing dataset construction because episode indices shift after physical "
             "deletion and same-length collisions cannot be detected individually. Re-run "
-            "the public trim-manifest generator against the current corpus."
+            "Regenerate the trim manifest against the current corpus before retrying."
         )
 
     return {
@@ -834,7 +895,15 @@ def _stats_population_spans(
     excluded_episode_indices,
     info: dict | None = None,
 ):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Return physical kept spans plus a digest of the exact stats population.
+
+    The order deliberately mirrors the reader: validate trims against the full
+    pre-split manifest, apply ``info.json`` split membership, drop exclusions,
+    then apply the head/tail span.  The digest binds each surviving episode to
+    its physical global ``[start, end)`` rows, so changing a split range cannot
+    be hidden by merely leaving a top-level ``split: train`` label in an old
+    stats file.
+    """
 
 
 
@@ -903,7 +972,11 @@ def _stats_population_spans(
 
 
 def _resolve_robocoin_cameras(features: dict) -> tuple:
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Resolve head / left-wrist / right-wrist camera keys from info.json features.
+
+    Returns:
+        (head_cam, left_wrist_cam, right_wrist_cam) — each is a string or None.
+    """
 
 
 
@@ -933,7 +1006,13 @@ def _resolve_robocoin_cameras(features: dict) -> tuple:
 
 
 class RoboCOINDataset(LeRobotV3Reader):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Single-dataset reader for one RoboCOIN task bucket (LeRobot v3).
+
+    Bimanual 20-D EEF with real action/state supervision and per-robot-type
+    in-reader normalization. All window / offset / video / pickle machinery is
+    inherited from :class:`LeRobotV3Reader`; only RoboCOIN-specific bits are
+    overridden below.
+    """
 
 
 
@@ -957,7 +1036,20 @@ class RoboCOINDataset(LeRobotV3Reader):
 
     def __init__(self, dataset_dir, *, unify_action: bool = False, unify_action_map=None,
                  trim_csv=None, _trim_snapshot=None, **kwargs):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Detect dexterous-hand + unify buckets and wire finger encoding.
+
+        Default (unify off, or grippered bucket): byte-identical to the inherited
+        behavior. When ``unify_action=True`` AND this bucket is dexterous-hand
+        (``eef_sim_pose_*`` present but no ``gripper_open_scale_*``), the reader
+        emits a wider raw action ``[pose(18) + fingers(kL+kR)]`` and a per-bucket
+        ``unify_action_map`` that scatters fingers into the dedicated 80-D hand
+        slots [10:34)/[44:68) (overriding any config map). Requires unify so the
+        variable-width raw collapses to the uniform 80-D head.
+
+        ``trim_csv``: optional path to a quality-audit trim list; see
+        :meth:`_filter_episodes`. ``None`` (default) disables trimming and the
+        reader stays byte-identical to before.
+        """
 
 
 
@@ -1048,7 +1140,7 @@ class RoboCOINDataset(LeRobotV3Reader):
         self._trim_snapshot = None
 
     def _get_trim_snapshot(self):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Pin one snapshot for every stage of this reader construction."""
         if self._trim_csv is None:
             return None
         snapshot = getattr(self, "_trim_snapshot", None)
@@ -1061,14 +1153,23 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
     def _load_excluded_episode_indices(self) -> set[int]:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Pin the exact exclusion population consumed by filtering and stats."""
         self._excluded_episodes_snapshot = load_excluded_episodes_snapshot(
             self._dataset_dir
         )
         return set(self._excluded_episodes_snapshot.episode_indices)
 
     def _resolve_cameras(self, info: dict):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Resolve cameras by info.features priority, record robot_type, and
+        detect whether this bucket carries unified gripper columns.
+
+        Dexterous-hand buckets have no ``gripper_open_scale_*`` columns; for
+        those we shadow ``NEEDED_COLS`` (drop the grip columns so the parquet
+        read doesn't fail) and set an instance ``ACTION_DIM_MASK`` that masks
+        the two grip slots out of supervision. The base ``__init__`` reads
+        ``self.ACTION_DIM_MASK`` after this hook (incl. the unify-mask build),
+        so setting it here is the supported extension point.
+        """
 
 
 
@@ -1098,7 +1199,14 @@ class RoboCOINDataset(LeRobotV3Reader):
         return head, left_wrist, right_wrist
 
     def _filter_episodes(self, eps_df):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Apply optional head/tail trim rules without breaking alignment.
+
+        Data-row and every camera-frame offset move by the same integer head
+        count, and length becomes the retained ``[head, tail)`` span.  The
+        method never removes mid-episode pauses.  A trim entry is accepted only
+        when its recorded manifest identity and frame count still match; the
+        same retained-population contract is required by stats generation.
+        """
 
 
 
@@ -1243,7 +1351,16 @@ class RoboCOINDataset(LeRobotV3Reader):
         self._add_data_offsets_from_files(eps)
 
     def _add_data_offsets_from_files(self, eps):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Resolve data parquet file + row offset from actual parquet row counts.
+
+        Some RoboCOIN episode metadata has stale ``data/file_index`` values at
+        file boundaries. The parquet files themselves are globally contiguous
+        and ``dataset_from_index`` is correct, so use real file row counts as
+        the source of truth for data lookup.
+
+        Reads parquet metadata in parallel to avoid a serial startup bottleneck
+        when a bucket has many parquet shards.
+        """
 
 
 
@@ -1280,7 +1397,7 @@ class RoboCOINDataset(LeRobotV3Reader):
         eps["_data_row_offset"] = global_starts - starts[file_pos]
 
     def _load_stats(self, info: dict):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Load per-robot-type stats (``../meta/stats_<robot_type>.json`` 'eef')."""
         if not self._normalize_mode or self._normalize_mode in ("none", "null"):
             return None
         stats_path = self._dataset_dir.parent / "meta" / f"stats_{self._robot_type}.json"
@@ -1414,7 +1531,13 @@ class RoboCOINDataset(LeRobotV3Reader):
         return combined
 
     def _normalize_array(self, arr: np.ndarray) -> np.ndarray:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Apply per-bucket normalization to a (..., 20) array.
+
+        Thin wrapper around :func:`apply_normalization` — kept on the class to
+        preserve the call sites in the action/proprio hooks and the test suite.
+        Returns the input untouched when ``normalize_mode`` is null / stats
+        were not loaded.
+        """
 
 
 
@@ -1424,7 +1547,12 @@ class RoboCOINDataset(LeRobotV3Reader):
         return apply_normalization(arr, self._normalization_stats, self._normalize_mode)
 
     def _grip_or_zeros(self, win, col: str, n: int) -> np.ndarray:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Stack ``n`` rows of a gripper column, or zeros for dex-hand buckets.
+
+        Dex-hand buckets lack ``gripper_open_scale_*``; the (n, 2) zero fill
+        flows through ``eef14_to_eef20`` into the two grip slots, which are
+        masked out of supervision by ``GRIP_EXCLUDED_DIM_MASK``.
+        """
 
 
 
@@ -1435,7 +1563,13 @@ class RoboCOINDataset(LeRobotV3Reader):
         return np.zeros((n, 2), dtype=np.float32)
 
     def _dex_raw(self, eef12: np.ndarray, raw_arr: np.ndarray, fidx) -> np.ndarray:
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Assemble + normalize a dex-hand raw action/state vector.
+
+        ``[L_pos(3), L_rot6d(6), L_fingers(kL), R_pos(3), R_rot6d(6), R_fingers(kR)]``
+        — pose from ``eef_sim_pose`` (grip dropped), fingers sliced from the raw
+        ``action`` / ``observation.state`` array. Width = 18 + kL + kR; the base
+        unify scatter places these into the 80-D pose + hand slots.
+        """
 
 
 
@@ -1472,7 +1606,7 @@ class RoboCOINDataset(LeRobotV3Reader):
 
     @classmethod
     def from_config(cls, config, split: str = "train"):
-        """Public implementation. Dataset-specific audit notes were removed."""
+        """Validate global QC inputs and exclude whole buckets before fan-out."""
         from openwam.dataloader.utils import get_cfg
 
         dataset_dir = get_cfg(config, "dataset_dir")
@@ -1568,7 +1702,7 @@ class RoboCOINDataset(LeRobotV3Reader):
 
 
 class MultiRobotCOINDataset(MultiLeRobotV3Reader):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Aggregate of N RoboCOIN per-task buckets across multiple robot types."""
 
     def __init__(self, buckets: List[RoboCOINDataset]):
         super().__init__(buckets)

@@ -27,8 +27,6 @@ width: 320
 multiview: true
 
 # Follow the published train split; no additional holdout override is applied.
-#
-#
 split: train
 enable_action_supervision: true
 
