@@ -306,7 +306,13 @@ OpenWAM builds on ideas and components from:
 
 ## License
 
-OpenWAM is released under the MIT License. See `LICENSE`.
+OpenWAM is released under the [MIT License](LICENSE). Third-party source
+attribution and license terms are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Contributors
+
+The sanitized per-commit history and its human contribution snapshot are
+documented in [CONTRIBUTORS.md](CONTRIBUTORS.md), including verified co-author credit.
 
 ## Citation
 
