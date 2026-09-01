@@ -540,8 +540,8 @@ class TestGripperHarmonization:
         np.testing.assert_allclose(ds[0]["action"].numpy()[:, 9], raw.ravel()[:8] / 0.08, atol=1e-5)
 
     def test_binary_openness_bucket_is_left_alone(self, tmp_path, patch_decode):
-        """A normalized Franka bucket already store 0/1 — dividing them by
-        the 0.08 stroke would blow them up to 12.5."""
+        """A normalized Franka bucket stores 0/1; applying the metric stroke
+        again would incorrectly amplify its values."""
         d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
         self._write_bucket_stats(d, {"states.gripper.position": 1.0})
         ds = InternDataA1Dataset(str(d), normalize_mode=None, num_frames=9, video_stride=4)
@@ -634,11 +634,9 @@ class TestGripperHarmonization:
         assert "does not clear the primary stroke" not in caplog.text
 
     def test_glitch_max_flipping_a_panda_bucket_warns(self, tmp_path, patch_decode, caplog):
-        """The log-space flip sits at sqrt(0.08*1.0)=0.283, and this dataset's sim
-        synthetic outliers can cross the decision boundary (an extreme outlier versus the normal stroke). One glitch row at
-        an in-range synthetic maximum therefore reclassifies a panda bucket as Robotiq and squashes
-        its real values 12.5x — and that maximum stays under _GRIPPER_SANE_MAX, so the
-        out-of-range warning never fires. The mean must escalate it."""
+        """A synthetic in-range maximum above the log-space decision boundary
+        can misclassify a metric bucket as the alternate variant while evading
+        the out-of-range guard. The mean must still escalate that decision."""
         d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
         (d / "meta" / "stats.json").write_text(
             json.dumps({"states.gripper.position": {"min": [0.0], "max": [0.4], "mean": [0.04]}})
