@@ -596,7 +596,7 @@ class TestGripperHarmonization:
         assert ds._grip_scale[0] == pytest.approx(0.08)
 
     def test_out_of_range_outlier_warns(self, tmp_path, patch_decode, caplog):
-        """A synthetic outlier — surfaced, not fatal."""
+        """An extreme synthetic outlier is surfaced as a warning, not made fatal."""
         d = _make_bucket(tmp_path, "cat/genie1/task", robot_type="Genie-1")
         self._write_bucket_stats(d, {"states.left_gripper.position": 100.0, "states.right_gripper.position": 1.0})
         with caplog.at_level("WARNING"):
@@ -617,8 +617,8 @@ class TestGripperHarmonization:
 
         The level is asserted, not just the text: `caplog.at_level("INFO")`
         captures WARNING too, so a text-only assert would stay green if this
-        branch were collapsed into `logger.warning` — which would mean warning
-        fatigue on every legitimate alternate-stroke bucket.
+        branch were collapsed into `logger.warning`, which would create warning
+        fatigue for every legitimate alternate-stroke bucket.
         """
         d = _make_bucket(tmp_path, "cat/franka/task", layout="single_arm", robot_type="Franka")
         (d / "meta" / "stats.json").write_text(
@@ -868,10 +868,9 @@ class TestCleanedViewOffsets:
     ``_data_row_offset`` is a ``groupby(chunk, file).cumsum()`` over the rows
     currently in ``eps_df``. A cleaned view symlinks ``data/`` at the untouched
     source shards, so a shortened manifest makes every deleted episode's length
-    vanish from that sum and slides each later episode onto earlier frames —
-    In one affected case, many episodes displaced, worst-case large offset
-    frames, with no error at runtime. ``meta/excluded_episodes.json`` is applied
-    after the offsets are computed, so it does not have this failure mode.
+    vanish from that sum and silently slides later episodes onto earlier frames.
+    ``meta/excluded_episodes.json`` is applied after the offsets are computed,
+    so it does not have this failure mode.
     """
 
     def test_excluded_first_episode_leaves_the_second_at_its_physical_offset(
@@ -957,11 +956,10 @@ class TestStaleShardIndex:
     """`data/file_index` goes stale at shard boundaries: the episode that starts a
     new shard keeps the previous file's index.
 
-    In affected multi-shard buckets, affected multi-shard buckets showed boundary failures (~shards-1
-    episodes each, many episodes total), single-shard buckets remained clean. The
-    base `groupby(chunk,file).cumsum()` then points those episodes into the
-    PREVIOUS shard — a valid row range that reads back real numbers, so it pairs
-    an episode with another one's frames and raises nothing.
+    In affected multi-shard buckets, the base
+    `groupby(chunk,file).cumsum()` points boundary episodes into the previous
+    shard — a valid row range that reads back real numbers, so it pairs an
+    episode with another one's frames and raises nothing.
     """
 
     def _two_shard_bucket(self, tmp_path):
