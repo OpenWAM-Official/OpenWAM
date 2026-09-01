@@ -1,5 +1,11 @@
-# Public pretraining-mixture example. Dataset paths and optional budgets are
-# inherited from each standalone config and should be set by the user.
+# Sub-source fields, including total_hours, are inherited from each standalone
+# config. This file carries only enabled/weight flags and mixture-level knobs.
+# Override inherited fields by name, for example:
+#   dataloader.datasets.robocoin.normalize_mode=null
+#   dataloader.datasets.robocoin.total_hours=<public_budget_hours>
+#
+# To add a dataset, register its reader, add configs/dataloader/<name>.yaml,
+# then add a Hydra default and a datasets.<name> entry here.
 defaults:
   - agibotworld@datasets.agibotworld
   - robocoin@datasets.robocoin
@@ -8,6 +14,11 @@ defaults:
   - _self_
 
 type: mixture
+
+# manual uses each entry's weight; uniform gives each enabled source equal
+# virtual samples; inverse_size favors smaller sources; proportional samples in
+# proportion to the final per-source window counts. Under proportional mode the
+# weight fields below are intentionally inert.
 weight_strategy: proportional
 
 datasets:
