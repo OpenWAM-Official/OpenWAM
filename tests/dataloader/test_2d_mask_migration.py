@@ -1,4 +1,4 @@
-"""Regression tests for the 2-D mask migration (plans/oxe_dataloaders.md §7.4).
+"""Regression tests for the 2-D action-mask migration.
 
 Verifies that RoboCOIN / EgoDex / RoboTwin readers emit the new 2-D
 ``action_mask`` / ``proprio_mask`` shapes, and that the 2-D mask is
@@ -6,8 +6,7 @@ exactly a per-dim broadcast of the legacy 1-D time mask (every valid
 timestep has every dim valid).
 
 We exercise the helper builders in ``utils/eef.py`` plus a small
-end-to-end test that instantiates RoboCOIN against a synthetic bucket
-(reusing the scaffolding from ``test_data_budget.py``).
+end-to-end test that instantiates RoboCOIN against a synthetic bucket.
 """
 
 from __future__ import annotations
@@ -61,7 +60,7 @@ class TestActionMask2dBuilder:
     def test_2d_mask_equals_broadcast_of_1d(self):
         """The 2-D mask must equal the legacy 1-D time mask broadcast across D.
         This is the equivalence that gives RoboCOIN/EgoDex/RoboTwin loss
-        numerical identity (plans/oxe_dataloaders.md §3.1)."""
+        numerical identity."""
         T_action, D, n_valid = 32, 20, 7
         # Legacy 1-D contract
         legacy_1d = np.zeros(T_action, dtype=bool)

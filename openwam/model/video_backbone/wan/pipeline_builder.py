@@ -175,8 +175,7 @@ def build_training_pipeline(cfg: DictConfig, *, skip_native_vae: bool = False):
             list to drop the native VAE weight file before it is loaded.
             Used by :meth:`Wan22Ti2v.from_pretrained` on the
             irreversible external-encoder path so the ~1.5GB Wan2.2 VAE
-            never materializes on CPU only to be released immediately
-            after. See [docs/external_video_encoder.md](../../docs/external_video_encoder.md) §6.
+            never materializes on CPU only to be released immediately.
 
     Returns:
         Initialized WanVideoPipeline ready for training.

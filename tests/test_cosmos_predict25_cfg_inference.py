@@ -9,8 +9,8 @@ Covers two layers:
    ``input_latents`` placeholder from the explicit ``num_frames / height /
    width`` kwargs, so tests don't need a configured VAE.
 
-The GPU smoke for end-to-end deploy round-trip lives in
-``tests/test_cosmos_predict25_deploy_smoke.py``.
+The GPU inference smoke lives in
+``tests/test_cosmos_predict25_real_inference.py``.
 """
 
 from __future__ import annotations

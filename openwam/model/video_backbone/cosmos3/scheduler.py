@@ -15,7 +15,6 @@ PR huggingface/diffusers#14272), so the reference numbers from current main
 reflect a grid NVIDIA did not intend. OpenWAM's shifted-flow Euler grid (this
 adapter, default shift 5.0 = the 480p train value) matches the intended
 semantics; multi-step UniPC correction is a possible later deploy enhancement.
-See docs/plans/cosmos3-edge-backbone.md.
 """
 
 from __future__ import annotations

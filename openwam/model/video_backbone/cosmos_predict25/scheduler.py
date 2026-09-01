@@ -2,7 +2,7 @@
 
 OpenWAM's training loop pulls four attributes off ``video_backbone.scheduler``:
 ``timesteps``, ``sigmas``, ``linear_timesteps_weights``, ``num_train_timesteps``
-(see ``openwam/model/base.py``). Cosmos-Predict2.5 is rectified flow with an
+(see ``openwam/model/architectures/base.py``). Cosmos-Predict2.5 is rectified flow with an
 optional shift parameter; this adapter mirrors the Wan ``FlowMatchScheduler``
 public surface so both backbones look identical to the trainer.
 

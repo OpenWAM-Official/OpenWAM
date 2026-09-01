@@ -11,7 +11,7 @@ that a window actually reads the REPAIRED shard rather than the published one.
 The bucket carries the upstream metadata bug verbatim: ``dataset_from_index =
 length * episode_index`` with ``data/file_index`` mis-assigned in step with it.
 Follows the synthetic-bucket + patched-``_decode_video_frames`` pattern of
-``test_libero.py`` / ``test_oxe_bcz.py``, so no mp4 encoder is needed.
+``test_libero.py``, so no mp4 encoder is needed.
 """
 
 from __future__ import annotations

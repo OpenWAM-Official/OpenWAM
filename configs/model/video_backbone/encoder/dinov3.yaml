@@ -9,8 +9,8 @@
 # modeling_*.py runs at load) — only point model_path at directories you trust.
 
 name: dinov3
-# [Required] HF DINOv3 snapshot dir: config.json + modeling_*.py + safetensors. Deploy host
-# must read it too (DINOv3 re-reads HF config at deploy; see docs/external_video_encoder.md §6).
+# [Required] HF DINOv3 snapshot dir: config.json + modeling_*.py + safetensors.
+# The deploy host must also be able to read this directory because it reloads the HF config.
 model_path: /path/to/DINOv3
 
 # Optional frozen S-VAE feature reducer (raw embed_dim → svae_target_dim). When set, post-pool

@@ -1,9 +1,8 @@
 """Shared in-reader normalization helpers.
 
 Hosts ``apply_normalization``, the pure function form of RoboCOIN's
-private ``_normalize_array``. Lifted out so the new OXE readers can share
-the same min-max / z-score / null code paths, plus add a quantile mode
-in step 3 of plans/oxe_dataloaders.md.
+private ``_normalize_array``. Lifted out so OXE readers can share the same
+min-max / z-score / null code paths, including quantile normalization.
 
 Each reader keeps its own ``self._normalization_stats`` dict (loaded at
 __init__ from a per-dataset stats json) and calls ``apply_normalization``

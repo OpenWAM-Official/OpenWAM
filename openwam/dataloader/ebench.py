@@ -406,7 +406,7 @@ def _load_excluded_indices(dataset_dir: Path) -> set:
     """Parse ``meta/excluded_episodes.json`` into a set (missing file → empty).
 
     Accepts both the family/scanner schema ``{"episode_indices": [...]}``
-    (LeRobotV3Reader / scripts/scan_dataset.py output) and a bare list.
+    emitted by :class:`LeRobotV3Reader` tooling and a bare list.
     Module-level so the offline stats scan (``ebench_stats_computation``)
     applies the exact exclusion semantics the reader does.
     """
@@ -1012,8 +1012,7 @@ class EBenchDataset(BaseDataset):
         #     immediately — retrying would mask a data bug as sample churn;
         #   * the retry walks to the NEXT EPISODE's first window, not idx+1.
         #     EBench stores one mp4 per episode, so idx+1 inside a long broken
-        #     episode would reopen the same bad file 64 times and still die
-        #     (the base-class flaw scripts/scan_dataset.py documents).
+        #     episode would reopen the same bad file 64 times and still fail.
         for attempt in range(_GETITEM_MAX_RETRIES):
             try:
                 return self._getitem_impl(idx)

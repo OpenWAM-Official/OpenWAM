@@ -563,61 +563,6 @@ def test_mot_driver_runs_through_cosmos_predict25_5d_state():
     assert torch.isfinite(vstate.hidden_states).all()
 
 
-# ----------------------------------------------------------------------
-# GPU parity gate — real Cosmos block: monolithic vs split @ bf16 atol=1e-3
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.skip(
-    reason="Tests the generic-MoT-loop-compile feature (backbone.supports_generic_mot_compile, "
-    "joint_self_attn._mot_loop_compile_skip_reason, apply_compile_optimizations/_compiled_mot_loop) "
-    "which does not exist in this repo — confirmed unreferenced anywhere in openwam/. The reference "
-    "also imports action_backbone.joint_action_dit (here it's separate_action_dit). Not portable "
-    "without porting that whole feature; out of scope for the backbone port."
-)
-def test_cosmos_predict25_joint_self_attn_auto_compile_is_safe_noop():
-    """CosmosPredict25 needs a dedicated helper because dynamic tensors live in extras."""
-
-    from openwam.model.action_backbone.joint_action_dit import ActionDiT
-    from openwam.model.architectures.dual_system.joint_self_attn import (
-        DualSystemSelfAttnArchitecture,
-        _mot_loop_compile_skip_reason,
-    )
-    from openwam.model.video_backbone.cosmos_predict25_backbone import CosmosPredict25VideoBackbone
-
-    backbone = CosmosPredict25VideoBackbone(
-        net=_build_rich_wrapper(num_blocks=1).dit,
-        dim=16,
-        num_layers=1,
-        num_heads=4,
-        head_dim=4,
-        context_dim=12,
-        freeze=False,
-    )
-    assert backbone.supports_generic_mot_compile is False
-    assert "CosmosPredict25" in _mot_loop_compile_skip_reason(backbone)
-    arch = DualSystemSelfAttnArchitecture()
-    arch.video_backbone = backbone
-    arch.action_backbone = ActionDiT(
-        action_dim=7,
-        dim=16,
-        ffn_dim=32,
-        num_heads=4,
-        num_layers=1,
-        video_dim=16,
-        bridge_layers=(0,),
-        variant="joint_self_attn",
-        attn_head_dim=4,
-        text_dim=12,
-    )
-    arch._mot_driver_kwargs = {"attention_mask_mode": "bidirectional", "mot_checkpoint_mixed_attn": True}
-    arch.build_mot_driver()
-
-    arch.apply_compile_optimizations({"mode": "auto", "self_attn": {"enabled": True}})
-
-    assert arch._compiled_mot_loop is None
-
-
 @pytest.mark.gpu
 def test_real_block_split_matches_monolithic(stub_reason1):
     """Numerical parity on a real CosmosPredict25-2B block: ``pre + attn_op + post``

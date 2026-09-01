@@ -8,8 +8,7 @@ packing in ``cosmos3/text_pack.py``; component construction in
 ``cosmos3/pipeline_builder.py`` (imported lazily inside :meth:`from_pretrained`
 so this module stays CPU-CI safe).
 
-Architecture recap (see docs/plans/cosmos3-edge-backbone.md): the und (text)
-stream is causal, frozen, and computationally independent of the gen (video)
+The und (text) stream is causal, frozen, and computationally independent of the gen (video)
 stream, so :meth:`preprocess_input_for_train` runs the whole und tower once
 under ``no_grad`` and caches the per-layer gen-facing K/V; the und final hidden
 (2048-wide) doubles as the ``context`` tensor the action stream consumes

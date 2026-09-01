@@ -30,7 +30,7 @@ hooks on :class:`VideoEncoder` (``Conv3d(D, dit_dim, (1,2,2), (1,2,2))``
 and ``Linear(dit_dim, D * 4)``), giving a token count identical to the
 Wan VAE path on the same input frames.
 
-See [docs/external_video_encoder.md] for the framework contract.
+The framework contract is defined by :class:`VideoEncoder`.
 """
 
 from __future__ import annotations

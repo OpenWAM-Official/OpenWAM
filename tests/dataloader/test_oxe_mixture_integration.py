@@ -90,9 +90,8 @@ class TestMixtureSampleShapes:
         assert s["proprio_mask"].ndim == 1
 
     def test_mixed_batch_collate_works(self):
-        # End-to-end-ish: build a mixture from FakeActionDataset only
-        # (deliberate; the real OXE readers' integration is tested in
-        # tests/dataloader/test_oxe_bcz.py etc). This pins that mixing
+        # End-to-end-ish: build a mixture from FakeActionDataset only.
+        # Reader-level behavior is covered separately; this pins that mixing
         # multiple sources with the new mask shape contract still collates.
         from openwam.dataloader.mixture import MixtureDataset
         from tests.dataloader.conftest import FakeActionDataset

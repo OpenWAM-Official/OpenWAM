@@ -40,7 +40,7 @@ OpenWAM/
 │   ├── train/         # OpenWAMTrainer, flow-match loss, checkpointing, optimizer utils
 │   └── deploy/        # Policy server, model loader, inference engine, executors, optimizations
 ├── scripts/           # Entrypoints: train.sh, deploy.sh, inference tests, SVAE / LAPA tooling
-├── configs/           # Hydra configs for model, dataloader, accelerate, deploy
+├── configs/           # Hydra configs for model, dataloader, training, deploy
 ├── tests/             # Unit tests
 ├── benchmarks/
 │   ├── robotwin/      # RoboTwin eval client, single / multi / DLC-parallel eval scripts
@@ -163,9 +163,9 @@ Available groups: `wan22_ti2v_5b` (Wan2.2-TI2V-5B, default), `wan21_vace_1_3b` (
 >
 > **Cosmos-Predict2.5:** `name` is validated (only `cosmos_predict25_2b` today; others raise), and the weights are located by `model_path` (bundle root) **plus** `model_variant` (e.g. `base/post-trained`) — so for cosmos both `model_path` and `model_variant` are load-bearing, not `name`. The action-side `text_dim` auto-derives from the backbone (1024), so no manual override is needed.
 >
-> **Cosmos3-Edge:** `name` is validated (only `cosmos3_edge`); weights load from the diffusers-style bundle at `model_path` (`transformer/` + `vae/` + `text_tokenizer/`, modeling code vendored under `cosmos3/_vendor/`). No external text encoder — the bundled tokenizer + the frozen und text stream encode prompts inline, and `text_dim` auto-derives (2048), so `joint_cross_attn` needs no action_backbone overrides. Supported variants: `joint_cross_attn`, `joint_self_attn`, `idm`, and `shared_backbone`/{`vanilla`,`moe`} (`tri_system` is rejected — its driver does not widen the joint mask for the und prefix K/V). Launcher: `scripts/train_cosmos3_edge_default_weights.sh`; design notes in `docs/plans/cosmos3-edge-backbone.md`.
+> **Cosmos3-Edge:** `name` is validated (only `cosmos3_edge`); weights load from the diffusers-style bundle at `model_path` (`transformer/` + `vae/` + `text_tokenizer/`, modeling code vendored under `cosmos3/_vendor/`). No external text encoder — the bundled tokenizer + the frozen und text stream encode prompts inline, and `text_dim` auto-derives (2048), so `joint_cross_attn` needs no action_backbone overrides. Supported variants: `joint_cross_attn`, `joint_self_attn`, `idm`, and `shared_backbone`/{`vanilla`,`moe`} (`tri_system` is rejected — its driver does not widen the joint mask for the und prefix K/V). Launch with `bash scripts/train.sh model=dual_system model/video_backbone=cosmos3_edge`.
 
-Distributed training configs in `configs/accelerate/`: `deepspeed_zero1.yaml`, `deepspeed_zero2.yaml`.
+Distributed-training settings, including mixed precision and the DeepSpeed ZeRO stage, live under `training` in `configs/train.yaml` and can be overridden through Hydra CLI arguments.
 
 ### 2. Deployment
 

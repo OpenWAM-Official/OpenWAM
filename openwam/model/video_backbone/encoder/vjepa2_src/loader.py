@@ -179,11 +179,9 @@ def load_vit_weights(vit: nn.Module, model_path: str, manifest: dict) -> None:
 def load_vit(model_path: str, manifest: dict) -> nn.Module:
     """Validate arch/rope, import+patch, build a zero-weight shell, load weights.
 
-    Single entry point exercised end-to-end by the PR #83 V9/V10 regression
-    tests. ``check_arch_use_rope_consistency`` runs BEFORE
-    ``prepare_vjepa_imports_and_patch`` so the manifest-internal ValueError
-    stays correct in environments where the ``third_party/vjepa2`` submodule
-    isn't initialized — matches the PR #83 review invariant.
+    ``check_arch_use_rope_consistency`` runs before module construction so a
+    manifest mismatch raises a clear ``ValueError`` without requiring model
+    weights or an external checkout.
     """
     check_arch_use_rope_consistency(manifest)
     vit_encoder = prepare_vjepa_imports_and_patch()

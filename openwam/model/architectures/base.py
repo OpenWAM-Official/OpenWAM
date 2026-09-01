@@ -300,12 +300,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     "consume a different encoder's latent space. Set "
                     "from_scratch=true to activate the encoder swap (and re-init "
                     "the DiT), or remove the encoder block to keep the native "
-                    "Wan VAE path. See docs/external_video_encoder.md §1."
+                    "Wan VAE path."
                 )
             logger.info(
                 "video_backbone.encoder is set but from_scratch=false; "
                 "encoder block IGNORED, using native pipe.vae. Set from_scratch=true "
-                "to activate the encoder swap. See docs/external_video_encoder.md."
+                "to activate the encoder swap."
             )
 
         text_dim = self._cfg_get(cfg, "text_dim", None)
@@ -1267,8 +1267,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         The two paths are *mathematically equivalent* whenever the 2D mask
         is a broadcast of the 1D time mask across all D dims (i.e. every
         valid timestep has every dim valid): both reduce to
-        sum_{t,d}(loss_{t,d}) / (N_valid_t * D). Verified by §7.4 regression
-        tests under plans/oxe_dataloaders.md.
+        sum_{t,d}(loss_{t,d}) / (N_valid_t * D). This equivalence is covered by
+        the 2-D action-mask regression tests.
 
         A (T, 2) per-hand mask is handled by the legacy 2D path
         (rank-3 mask, per-element broadcasting), unchanged by this migration.

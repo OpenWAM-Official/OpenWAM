@@ -2,7 +2,7 @@
 # (causal und text stream + bidirectional gen video stream; no cross-attention,
 # no external text encoder; modeling code vendored under
 # openwam/model/video_backbone/cosmos3/_vendor/). Switch on CLI:
-# model/video_backbone=cosmos3_edge. See docs/plans/cosmos3-edge-backbone.md.
+# model/video_backbone=cosmos3_edge.
 #
 # Geometry auto-derives (dim 2048 / 28 layers / 16 heads × head_dim 128), and
 # the action-side context width auto-derives from text_dim = 2048 (the und

@@ -19,7 +19,7 @@ Unlike :mod:`dinov3`, this encoder adds **no** trailing LayerNorm: the FLUX.2 VA
 already ends its encode with a non-affine BatchNorm that whitens the latent
 per-channel (see :class:`FluxVaeEncoderCore`), which is the direct analogue of
 Wan VAE's per-channel z-score ``(mu - mean) / std``
-(``openwam/model/video_backbone/wan/vae.py`` ``WanVideoVAE.encode``). DINOv3's
+(``openwam/model/video_backbone/wan/models/vae.py`` ``WanVideoVAE.encode``). DINOv3's
 ViT features have no such built-in whitening, which is why it needs the extra
 LayerNorm and this encoder does not — matching the user's "logically aligned with
 Wan VAE" requirement without bolting on a redundant second normalizer.
@@ -28,7 +28,7 @@ The DiT's ``patch_embedding`` / ``head.head`` are rebuilt from the default hooks
 on :class:`VideoEncoder` (``Conv3d(128, dit_dim, (1,2,2), (1,2,2))`` and
 ``Linear(dit_dim, 128 * 4)``), giving a token count identical to the Wan VAE path.
 
-See [docs/external_video_encoder.md] for the framework contract.
+The framework contract is defined by :class:`VideoEncoder`.
 """
 
 from __future__ import annotations

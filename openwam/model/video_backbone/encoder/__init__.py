@@ -22,8 +22,8 @@ Adding a new encoder:
   4. Add ``from .xxx import XxxEncoder  # noqa: F401`` at the bottom of this
      file to trigger registration on import.
 
-The author NEVER needs to touch ``wan_backbone.py`` / ``dit.py`` /
-``base.py``. See [docs/external_video_encoder.md](docs/external_video_encoder.md).
+The author NEVER needs to touch ``wan_backbone.py`` / ``dit.py``; the public
+encoder contract is defined in this package's ``base.py``.
 """
 
 from __future__ import annotations

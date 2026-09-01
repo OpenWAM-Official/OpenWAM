@@ -41,44 +41,14 @@ To keep shared configs stable and avoid environment-specific breakage:
 3. Prefer runtime overrides instead:
    - Hydra CLI overrides, e.g. `dataloader.dataset_dir=... dataloader.stats_path=...`
    - Local, untracked config files for personal environments
-   - `sandbox/` launch scripts that inject local override arguments (see [§Sandbox](#sandbox-测试场))
+   - Local, untracked launch scripts that inject runtime override arguments
 4. If a config file change is unavoidable, explain the necessity in the PR description.
-
-## Sandbox (测试场)
-
-
-**用途**：
-
-- 环境特定路径（OSS mount、本机 dataset / weight 路径）注入入口
-- smoke / 100-iter 回归脚本（验证某次 refactor 没破坏，配套 W&B run id）
-- 临时 ablation / 调参实验 launcher
-- 跑某条数据 / 某个机型的一次性配置
-
-**入仓动机**：让别人能复现"我这次 PR / smoke 跑了什么"，但**入仓的脚本只是
-reference**，别人换机器要 fork。`sandbox/` 不是 production training entry。
-
-**写入规则**：
-
-| 必须 | 禁止 |
-|---|---|
-| 走 `scripts/train.sh`（统一 entry），享受 wandb 协议 / git SHA / run-name 自动注入 | 直接 `torchrun` 绕过协议层 |
-| 环境特定值通过 env var + Hydra CLI override 传入 | 修改 `configs/**/*.yaml` 来塞本机路径 |
-| 头部注释里写清楚跑过的机器 / OSS layout / W&B run | token / 密钥写脚本里 |
-| 一个目录 = 一个 smoke 主题，入口固定叫 `run_smoke.sh` | 把 `sandbox/` 设成 CI / production entry |
-
-**判断 sandbox vs scripts**：
-
-- `scripts/` 跨机器 portable，是给所有 contributor 用的训练入口
-- `sandbox/<topic>/` 只针对一台机器 / 一次性实验，本人 PR 要带、改完不一定继续维护
-
-如果你写的脚本属于"任何人在任何机器上都该这么跑"，应该升级到 `scripts/`；
-否则留在 `sandbox/`。
 
 ## Code Style
 
 - Ruff handles linting and formatting (configured in `pyproject.toml`)
 - Line length limit: 120 characters
-- Import sorting: ruff isort (first-party = `open_wam`)
+- Import sorting: ruff isort (first-party = `openwam`)
 - `third_party/` is excluded from linting
 
 ## Dependency Management
@@ -116,17 +86,9 @@ reference**，别人换机器要 fork。`sandbox/` 不是 production training en
 
 **新 PR 引入的新 dep 必须按上面规则双向 pin**。`pyproject.toml` 历史上的 hygiene 债已于 2026-04-30 一次性 audit 完成（27 个 dep 全部双向 pin）。
 
-## Follow-ups & Engineering Debt
-
-
-- [`plans/`](plans/)：前瞻设计 / 架构规划
-
-每条 follow-up 必须带：现状、目标、**为什么没做**（blockers）、**什么时候重新评估**（触发器）、触发后动作。**不要把 follow_ups.md 当 idea dump**，会死。
-
-
 ## Project Structure
 
-- `open_wam/` - main package (all new code goes here)
+- `openwam/` - main package (all new code goes here)
 - `scripts/` - Hydra entrypoints (train, infer, eval)
 - `configs/` - Hydra config groups
 - `tests/` - pytest test suite
@@ -135,16 +97,11 @@ reference**，别人换机器要 fork。`sandbox/` 不是 production training en
 ## Adding a New Component
 
 ### New dataset
-1. Create a reader inheriting from `openwam.dataloader.bases.BaseDataset` (single-bucket LeRobot v3 readers subclass `LeRobotV3Reader`)
-2. Register it in `open_wam/data/registry.py`
-3. Add a config in `configs/data/my_dataset.yaml`
+1. Create `openwam/dataloader/my_dataset.py` with a reader inheriting from `openwam.dataloader.bases.BaseDataset` (single-bucket LeRobot v3 readers subclass `LeRobotV3Reader`)
+2. Import and register it in `openwam/dataloader/registry.py`
+3. Add a config in `configs/dataloader/my_dataset.yaml`
 
 ### New architecture
-1. Create `open_wam/models/architectures/my_arch.py` inheriting from `BaseWAMArchitecture`
+1. Create the implementation under `openwam/model/architectures/<framework>/`, inheriting from `BaseWAMArchitecture`
 2. Register with `@register_architecture("my_arch")`
-3. Add a config in `configs/model/architecture/my_arch.yaml`
-
-### New evaluator
-1. Create `open_wam/evaluation/my_evaluator.py` inheriting from `BaseEvaluator`
-2. Register in `open_wam/evaluation/registry.py`
-3. Add a config in `configs/eval/my_eval.yaml`
+3. Add or update the corresponding model config under `configs/model/`

@@ -1,6 +1,6 @@
 """Numerical equivalence tests for the 2-D action_mask loss path.
 
-The 2-D mask migration (plans/oxe_dataloaders.md step 2) changes
+The 2-D mask path allows
 ``LeRobot3VideoActionModel._compute_action_loss`` to accept either
 shape:
 
