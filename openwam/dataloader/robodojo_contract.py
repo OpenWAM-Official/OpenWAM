@@ -38,9 +38,8 @@ ROBODOJO_TARGET_FRAME = "per_arm_robot_base"
 ARM_NAMES = ("left", "right")
 # Raw EEF20 gripper: 0 = closed, 1 = open. Matches the pretrain mixture.
 GRIPPER_CONVENTION = "zero_closed_one_open"
-# The input may contain small negative sensor excursions
-# within a small negative range. Values within this configured noise envelope are clipped to 0;
-# larger excursions remain schema errors.
+# Small negative sensor excursions within the configured tolerance are clipped
+# to zero; larger excursions remain schema errors.
 ROBODOJO_REAL_GRIPPER_SENSOR_ATOL = 0.05
 
 # Source of truth: RoboDojo ``env_cfg/robot/dual_x5.yml``.
