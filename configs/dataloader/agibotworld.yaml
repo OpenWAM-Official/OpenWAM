@@ -1,33 +1,69 @@
 type: agibotworld
 
+# Root containing AgiBotWorld-Beta LeRobot v3 task buckets. Each bucket has
+# meta/info.json, data/, videos/, meta/tasks.parquet, and meta/stats.json.
 dataset_dir: /path/to/pretrain_dataset/AgiBotWorld-Beta
 
+# 33 raw frames at stride 4 produce 9 video frames. The latter must satisfy the
+# Wan VAE temporal constraint: (num_video_frames - 1) % 4 == 0.
 num_frames: 33
 video_stride: 4
 window_stride: 1
 
+# Apply the public segment_flag/segment_delta annotations: keep, trim the
+# leading or trailing static region, or drop a no-motion segment.
 use_segment_annotations: true
 
+# Drop an episode if segment trimming removes at least this fraction. Set null
+# to retain every trimmed episode.
 segment_max_trim_ratio: 0.7
 
+# multiview=true builds a 384x320 L-shaped canvas: 256x320 head camera above
+# two 128x160 wrist cameras. These dimensions are required in multiview mode.
 height: 384
 width: 320
 
+# Camera fields are observation.images.head, hand_left, and hand_right.
 multiview: true
 
+# Uses info.json["splits"][split] when available; train otherwise uses the full
+# episode table.
 split: train
 
+# action.ee_base and observation.state.ee_base are robot-base poses of the
+# axis-7 arm flange, not a gripper-center/task TCP. No universal flange-to-TCP
+# calibration exists across the release's gripper and dex-hand embodiments.
 
+# Load-time color jitter uses the same sampled factors for every frame in a
+# clip and is active only for the training split.
 color_jitter:
   brightness: 0.2
   contrast: 0.2
   saturation: 0.2
   hue: 0.0
 
+# Loads pooled stats from <dataset_root>/meta/stats_g2a.json. Action and state
+# use separate stats; rot6d dimensions are identity-pinned. Before
+# normalization, gripper aperture is canonicalized to 0=closed, 1=open.
+# Supported modes: null/none, min-max, z-score, and quantile.
+# Generate stats with:
+#   python -m openwam.dataloader.utils.stats_computation.agibotworld_stats_computation \
+#       --dataset_dir /path/to/pretrain_dataset/AgiBotWorld-Beta \
+#       --segment-max-trim-ratio 0.7
 normalize_mode: quantile
 
+# false keeps values available but masks action and proprio supervision.
 enable_action_supervision: true
 
+# Scatter each bucket into the shared 80-D action/proprio layout:
+#   0:9 left EEF pose, 9 left grip, 10:34 left hand,
+#   34:43 right EEF pose, 43 right grip, 44:68 right hand,
+#   68 move-x, 69 move-y, 70 move-yaw, 71:80 reserved.
+# Gripper buckets map the two 10-D EEF arms into 0:10 and 34:44. Dex-hand
+# buckets map pose and available finger joints while masking unused slots. Base
+# commands occupy 68/70; differential drive has no lateral-velocity slot.
 unify_action: true
 
+# null uses the complete filtered dataset. A positive float caps effective
+# footage in hours by reproducibly subsampling episodes with project.seed.
 total_hours: null

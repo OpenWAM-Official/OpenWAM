@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Public implementation. Dataset-specific audit notes were removed."""
+"""Generate flavor-aware normalization stats for AgiBotWorld-Beta.
+
+One stats set is pooled across task buckets of the shared embodiment.  Each
+column is accumulated only where it carries signal: pose everywhere, gripper
+for grippered buckets, fingers for dexterous-hand buckets, and base velocity
+independently for moving action/proprio streams.  Grippers are converted to
+``0=closed, 1=open`` before accumulation.
+
+State spans include every retained row; action spans omit the unsupervised
+episode-terminal target.  Means, variances and extrema merge exactly, while
+quantiles use a bounded uniform reservoir.  The output records the manifest,
+exclusion, and effective segment population consumed by the reader.
+"""
 
 
 
@@ -89,6 +101,7 @@ from openwam.dataloader.utils.lerobotv3 import (
 )
 from openwam.dataloader.utils.stats_computation.robocoin_stats_computation import Accumulator
 
+# Native column widths; flavor/motion selection happens per bucket.
 _COL_WIDTH = {
     "action.ee_base": 18, "observation.state.ee_base": 18,
     "action.gripper": 2, "observation.state.gripper": 2,
@@ -102,7 +115,7 @@ GLOBAL_CAP = 1_000_000
 
 
 def _columns_for(name: str, action_moving: bool, state_moving: bool):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Which _COL_WIDTH keys this bucket contributes to (flavor + motion aware)."""
     is_dex = name in _DEX_BUCKET_IDS
     cols = ["action.ee_base", "observation.state.ee_base"]
     if is_dex:
@@ -122,7 +135,7 @@ def _partial_bucket(
     use_segment_annotations: bool = True,
     segment_max_trim_ratio: float | None = 0.7,
 ):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Worker: stream one reader-identical bucket population into partial stats."""
     name = os.path.basename(bucket_dir.rstrip("/"))
     action_moving, state_moving = _bucket_base_motion_flags(bucket_dir)
     want = {
@@ -234,7 +247,8 @@ def _partial_bucket(
 
 
 def _merge_reservoir(r1, n1, r2, n2, rng):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Uniform sample (≤ GLOBAL_CAP) of the union of two streams from their uniform
+    reservoirs r1 (over n1 rows) and r2 (over n2 rows), weighted by row count."""
 
     if len(r1) == 0:
         return r2[:GLOBAL_CAP].copy()
@@ -249,7 +263,7 @@ def _merge_reservoir(r1, n1, r2, n2, rng):
 
 
 def _merge_into(g: dict, partial: dict, rng):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Merge one bucket's partial into the running global state (per column)."""
     for c, p in partial.items():
         if c not in g:
             g[c] = {k: p[k] for k in ("count", "mean", "m2", "min", "max", "res")}
@@ -271,7 +285,7 @@ def _merge_into(g: dict, partial: dict, rng):
 
 
 def _finalize(g: dict, contrib: dict):
-    """Public implementation. Dataset-specific audit notes were removed."""
+    """Global state → per-column stats dict ready to dump."""
     out = {}
     for c, s in g.items():
         std = np.sqrt(s["m2"] / max(s["count"], 1))
