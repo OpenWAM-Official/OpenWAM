@@ -22,6 +22,28 @@ common base origin. Achieving that stronger equivalence requires
 per-embodiment calibrated rigid transforms, which several public releases do
 not provide.
 
+## RoboDojo `arx_x5`
+
+RoboDojo is supported only for the dual-arm `arx_x5` embodiment. Its HDF5 and
+live-observation source pose is `[xyz, quaternion wxyz]`: `xyz` is world
+translation with `scene.env_origins[env_idx]` subtracted, while the quaternion
+is still a world-frame orientation. Treating that mixed source pose as already
+robot-base-relative is incorrect.
+
+OpenWAM converts that pose with the dual-X5 base constants from RoboDojo
+`env_cfg/robot/dual_x5.yml`, stored in
+`openwam/dataloader/robodojo_contract.py`. The shared transform in
+`openwam/dataloader/utils/poses.py` then expresses both position and
+orientation in the corresponding left or right robot-base frame. Isaac eval
+uses a pinned copy under `benchmarks/robodojo/` (`robodojo-eef20-v1`) and must
+not import OpenWAM. The canonical raw model layout is:
+
+`[L xyz3, L rot6d6, L grip1, R xyz3, R rot6d6, R grip1]`.
+
+For both X5 arms, the represented rigid terminal endpoint is `link6`. It is
+independent of gripper/finger articulation and therefore satisfies the
+terminal-arm contract above; no gripper-center or task-TCP offset is applied.
+
 ## Active datasets
 
 | Dataset | Reader source used for pose | Physical endpoint | Decision |
