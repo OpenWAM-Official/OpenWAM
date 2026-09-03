@@ -2,7 +2,7 @@
 # cfg.model.video_backbone.* (group path matches the package). Switch backbone
 # on CLI: model/video_backbone=cosmos_predict25.
 # DiT geometry auto-derived (context_dim=1024). Architectures: dual_system
-# (joint_cross_attn / joint_self_attn / idm) and shared_backbone (vanilla / moe,
+# (joint_cross_attn / joint_self_attn / idm) and single_system (vanilla / moe,
 # via the flat 3D block forward in cosmos_predict25.shared_block). idm uses
 # per-frame timesteps + the backbone-owned merge in cosmos_predict25.idm_merge.
 #

@@ -51,6 +51,6 @@ __all__ = [
 # ``registry`` / ``base`` without circular issues). Adding a new
 # encoder = adding a new line here and a new file alongside.
 from openwam.model.video_backbone.encoder.dinov3 import DinoV3VideoEncoder  # noqa: E402, F401
-from openwam.model.video_backbone.encoder.flux_vae import FluxVAEVideoEncoder  # noqa: E402, F401
-from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: E402, F401
-from openwam.model.video_backbone.encoder.wan_vae import WanVideoVAEEncoder  # noqa: E402, F401
+from openwam.model.video_backbone.encoder.flux2_vae import FluxVAEVideoEncoder  # noqa: E402, F401
+from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder  # noqa: E402, F401
+from openwam.model.video_backbone.encoder.wan22_vae import WanVideoVAEEncoder  # noqa: E402, F401

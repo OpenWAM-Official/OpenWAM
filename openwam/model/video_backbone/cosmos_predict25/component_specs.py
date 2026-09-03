@@ -5,7 +5,7 @@ next to the checkpoint *for the DiT path*. The DiT (``MinimalV1LVGDiT``, ~3.9
 GB) and VAE (``Wan2pt1VAEInterface``'s inner ``WanVAE_``, ~485 MB) are
 registered as ``nn.Module`` children of :class:`CosmosPredict25VideoBackbone`, so
 their params flow through the architecture's unified ``state_dict`` and are
-saved into the same safetensors as every other dual_system / shared_backbone
+saved into the same safetensors as every other dual_system / single_system
 weight.
 
 The Cosmos-Reason1-7B text encoder (~16 GB Qwen2.5-VL) **also** flows through

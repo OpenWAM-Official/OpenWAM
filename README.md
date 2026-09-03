@@ -10,7 +10,7 @@ The repository is organized around the `openwam/` package and currently supports
 - Hydra-based training and deployment entrypoints
 - WAM-specific action/video scheduling and receding-horizon execution
 - RoboTwin dataset adapter with multi-task, multi-view support
-- Two WAM architecture families: dual-system and shared backbone variants
+- Two WAM architecture families: dual-system and single system variants
 - A policy server for robot deployment workflows
 
 ## What OpenWAM Focuses On
@@ -30,7 +30,7 @@ OpenWAM/
 ├── openwam/
 │   ├── dataloader/    # Dataset adapters (RoboTwin), transforms, processors, registry
 │   ├── model/
-│   │   ├── architectures/    # WAM families: dual_system, shared_backbone, tri_system
+│   │   ├── architectures/    # WAM families: dual_system, single_system, tri_system
 │   │   ├── action_backbone/  # ActionBackbone ABCs, separate ActionDiT, shared action backbone,
 │   │   │                     #   latent action encoder/decoder, scheduler
 │   │   ├── video_backbone/   # VideoBackbone ABC, Wan backbones, encoder/ (VAE / DINOv3 / V-JEPA 2.1)
@@ -56,8 +56,8 @@ OpenWAM/
 
 | Architecture | Variant | Description |
 |---|---|---|
-| `shared_backbone` | `vanilla` | Single shared DiT carries video + action + state tokens in one sequence |
-| `shared_backbone` | `moe` | Shared DiT with mixture-of-experts FFN layers (expert FFN on the bridge layers) |
+| `single_system` | `vanilla` | Single shared DiT carries video + action + state tokens in one sequence |
+| `single_system` | `moe` | Shared DiT with mixture-of-experts FFN layers (expert FFN on the bridge layers) |
 | `dual_system` | `joint_self_attn` | Separate ActionDiT + video DiT, fused per layer via one mixed self-attention (MoT driver). |
 | `dual_system` | `joint_cross_attn` | Video DiT runs to completion → bridge features → ActionDiT runs once with cross-attention to them. Sub-variants via `detach_bridge`: `false` lets action gradients flow back into the video DiT, `true` blocks them (ActionDiT trains on detached video features) |
 | `dual_system` | `idm` | Inverse-dynamics-style teacher-forcing training + two-stage inference; Wan, Cosmos-Predict2.5 and Cosmos3-Edge |
@@ -202,7 +202,7 @@ bash scripts/train.sh \
 
 Drop `training.debug=true` for a full run. Loss weights (`lambda_video` / `lambda_action`) live in `configs/train.yaml`; each architecture's frozen pretrained components are its `configs/model/*.yaml` top-level `freeze:` list.
 
-**Architecture** is picked via `model=<framework>` (`dual_system` | `shared_backbone` | `tri_system`) and `model.architecture.variant` (see the [Architectures](#architectures) table).
+**Architecture** is picked via `model=<framework>` (`dual_system` | `single_system` | `tri_system`) and `model.architecture.variant` (see the [Architectures](#architectures) table).
 
 **Video backbone** is a Hydra group composed under each framework yaml (default `wan22_ti2v_5b`). Switch via `model/video_backbone=`:
 
@@ -217,7 +217,7 @@ Available groups: `wan22_ti2v_5b` (Wan2.2-TI2V-5B, default), `wan21_vace_1_3b` (
 >
 > **Cosmos-Predict2.5:** `name` is validated (only `cosmos_predict25_2b` today; others raise), and the weights are located by `model_path` (bundle root) **plus** `model_variant` (e.g. `base/post-trained`) — so for cosmos both `model_path` and `model_variant` are load-bearing, not `name`. The action-side `text_dim` auto-derives from the backbone (1024), so no manual override is needed.
 >
-> **Cosmos3-Edge:** `name` is validated (only `cosmos3_edge`); weights load from the diffusers-style bundle at `model_path` (`transformer/` + `vae/` + `text_tokenizer/`, modeling code vendored under `cosmos3/_vendor/`). No external text encoder — the bundled tokenizer + the frozen und text stream encode prompts inline, and `text_dim` auto-derives (2048), so `joint_cross_attn` needs no action_backbone overrides. Supported variants: `joint_cross_attn`, `joint_self_attn`, `idm`, and `shared_backbone`/{`vanilla`,`moe`} (`tri_system` is rejected — its driver does not widen the joint mask for the und prefix K/V). Launch with `bash scripts/train.sh model=dual_system model/video_backbone=cosmos3_edge`.
+> **Cosmos3-Edge:** `name` is validated (only `cosmos3_edge`); weights load from the diffusers-style bundle at `model_path` (`transformer/` + `vae/` + `text_tokenizer/`, modeling code vendored under `cosmos3/_vendor/`). No external text encoder — the bundled tokenizer + the frozen und text stream encode prompts inline, and `text_dim` auto-derives (2048), so `joint_cross_attn` needs no action_backbone overrides. Supported variants: `joint_cross_attn`, `joint_self_attn`, `idm`, and `single_system`/{`vanilla`,`moe`} (`tri_system` is rejected — its driver does not widen the joint mask for the und prefix K/V). Launch with `bash scripts/train.sh model=dual_system model/video_backbone=cosmos3_edge`.
 
 Distributed-training settings, including mixed precision and the DeepSpeed ZeRO stage, live under `training` in `configs/train.yaml` and can be overridden through Hydra CLI arguments.
 

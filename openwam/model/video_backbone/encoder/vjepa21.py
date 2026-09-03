@@ -25,14 +25,14 @@ from torchvision import transforms as T
 from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
 from openwam.model.video_backbone.encoder.registry import register_video_encoder
 from openwam.model.video_backbone.encoder.svae import reducer
-from openwam.model.video_backbone.encoder.vjepa2_src import loader
+from openwam.model.video_backbone.encoder.vjepa21_src import loader
 
 logger = logging.getLogger(__name__)
 
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
 
-# vjepa2_1_forward selects how the condition (frame 0) latent is obtained in
+# vjepa21_forward selects how the condition (frame 0) latent is obtained in
 # ``batch_encode`` (see its docstring): ``"video"`` (default) routes a dup'd
 # 2-frame clip through the video branch; ``"mixed"`` routes f0 through the
 # image branch. The default is a deliberate departure from pre-PR-#92
@@ -43,7 +43,7 @@ _VJEPA21_FORWARD_DEFAULT: _VJEPA21Forward = "video"
 _VJEPA21_FORWARD_ALLOWED: tuple[_VJEPA21Forward, ...] = get_args(_VJEPA21Forward)
 
 
-@register_video_encoder("vjepa2_1")
+@register_video_encoder("vjepa21")
 class VJEPA21VideoEncoder(VideoEncoder):
     """V-JEPA 2.1 video encoder.
 
@@ -58,7 +58,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         *,
         embed_dim: int,
         variant: str,
-        vjepa2_1_forward: _VJEPA21Forward = _VJEPA21_FORWARD_DEFAULT,
+        vjepa21_forward: _VJEPA21Forward = _VJEPA21_FORWARD_DEFAULT,
         svae_path: str | None = None,
         svae_target_dim: int | None = None,
         svae_config: dict | None = None,
@@ -69,9 +69,9 @@ class VJEPA21VideoEncoder(VideoEncoder):
         # sin/cos table), mismatching bf16 V at SDPA on this frozen ViT.
         self._m = vit
         self._variant = variant
-        if vjepa2_1_forward not in _VJEPA21_FORWARD_ALLOWED:
-            raise ValueError(f"vjepa2_1_forward must be one of {_VJEPA21_FORWARD_ALLOWED}, got {vjepa2_1_forward!r}.")
-        self._vjepa2_1_forward: _VJEPA21Forward = vjepa2_1_forward
+        if vjepa21_forward not in _VJEPA21_FORWARD_ALLOWED:
+            raise ValueError(f"vjepa21_forward must be one of {_VJEPA21_FORWARD_ALLOWED}, got {vjepa21_forward!r}.")
+        self._vjepa21_forward: _VJEPA21Forward = vjepa21_forward
         self._raw_embed_dim = int(embed_dim)
         # Optional non-linear S-VAE reducer, applied AFTER the cond+target cat
         # (see ``batch_encode``). When enabled it advertises ``latent_dim`` as
@@ -113,7 +113,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         return self._variant
 
     @property
-    def vjepa2_1_forward(self) -> _VJEPA21Forward:
+    def vjepa21_forward(self) -> _VJEPA21Forward:
         """How the condition (frame 0) latent is computed in ``batch_encode``.
 
         ``"video"`` (default) — dup frame 0 to a 2-frame clip and route it
@@ -121,7 +121,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         ``"mixed"`` — route frame 0 through the V-JEPA 2.1 image branch
         (tubelet=1).
         """
-        return self._vjepa2_1_forward
+        return self._vjepa21_forward
 
     def preprocess_video(self, frames: List[Image.Image]) -> torch.Tensor:
         """List[PIL] -> (1, 3, T, H, W) in ImageNet-normalized space."""
@@ -184,7 +184,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         if video.dtype != m_dtype:
             video = video.to(m_dtype)
         f0 = video[:, :, 0:1]
-        if self._vjepa2_1_forward == "mixed":
+        if self._vjepa21_forward == "mixed":
             z_cond = self._vit_grid(f0)
         else:
             z_cond = self._vit_grid(torch.cat([f0, f0], dim=2))
@@ -252,7 +252,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
         cls,
         model_path: str,
         *,
-        vjepa2_1_forward: _VJEPA21Forward = _VJEPA21_FORWARD_DEFAULT,
+        vjepa21_forward: _VJEPA21Forward = _VJEPA21_FORWARD_DEFAULT,
         svae_path: str | None = None,
         svae_target_dim: int | None = None,
     ) -> "VJEPA21VideoEncoder":
@@ -267,7 +267,7 @@ class VJEPA21VideoEncoder(VideoEncoder):
             vit,
             embed_dim=int(manifest["embed_dim"]),
             variant=str(manifest["variant"]),
-            vjepa2_1_forward=vjepa2_1_forward,
+            vjepa21_forward=vjepa21_forward,
             svae_path=svae_path,
             svae_target_dim=svae_target_dim,
         )
@@ -305,22 +305,22 @@ class VJEPA21VideoEncoder(VideoEncoder):
         vit_encoder = loader.prepare_vjepa_imports_and_patch()
         with torch.device(device):
             vit = loader.build_vit_from_manifest(vit_encoder, manifest)
-        # ``vjepa2_1_forward`` is a runtime knob plumbed through the yaml
+        # ``vjepa21_forward`` is a runtime knob plumbed through the yaml
         # ``encoder`` block so a checkpoint+yaml pair rebuilds the same encoder
         # the run trained. We warn (only) when a saved yaml omits it: that is
         # the pre-PR-#92 checkpoint signature, and those ckpts are NOT forward-
         # compatible (temporal_compression 2→4 + the 2-pass target rewrite) and
         # must be retrained. ``encoder_cfg is None`` (programmatic callers) is
         # not warned — there is no saved yaml to fix.
-        vjepa2_1_forward = loader.read_vjepa2_1_forward_from_cfg(encoder_cfg, _VJEPA21_FORWARD_DEFAULT)
-        if encoder_cfg is not None and not loader.cfg_has_vjepa2_1_forward(encoder_cfg):
+        vjepa21_forward = loader.read_vjepa21_forward_from_cfg(encoder_cfg, _VJEPA21_FORWARD_DEFAULT)
+        if encoder_cfg is not None and not loader.cfg_has_vjepa21_forward(encoder_cfg):
             logger.warning(
                 "VJEPA21VideoEncoder.from_skeleton: saved encoder yaml has no "
-                "``vjepa2_1_forward`` field; defaulting to %r. A pre-PR-#92 "
+                "``vjepa21_forward`` field; defaulting to %r. A pre-PR-#92 "
                 "checkpoint is NOT forward-compatible (temporal_compression 2→4 "
                 "+ 2-pass target rewrite) and must be retrained; setting "
-                "``vjepa2_1_forward: mixed`` only restores the cond-frame branch.",
-                vjepa2_1_forward,
+                "``vjepa21_forward: mixed`` only restores the cond-frame branch.",
+                vjepa21_forward,
             )
         # Reducer rebuild: the sidecar config (if the training ckpt carried an
         # S-VAE) sizes a zero-weight shell here; strict ``load_checkpoint``
@@ -330,19 +330,19 @@ class VJEPA21VideoEncoder(VideoEncoder):
         svae_target_dim = reducer.read_target_dim_from_cfg(encoder_cfg)
         logger.info(
             "VJEPA21VideoEncoder.from_skeleton: %s instantiated from %s "
-            "(embed_dim=%d, variant=%s, vjepa2_1_forward=%s, svae=%s) — weights pending checkpoint load",
+            "(embed_dim=%d, variant=%s, vjepa21_forward=%s, svae=%s) — weights pending checkpoint load",
             manifest["arch_name"],
             manifest_dir,
             int(manifest["embed_dim"]),
             str(manifest["variant"]),
-            vjepa2_1_forward,
+            vjepa21_forward,
             "on" if svae_config is not None else "off",
         )
         return cls(
             vit,
             embed_dim=int(manifest["embed_dim"]),
             variant=str(manifest["variant"]),
-            vjepa2_1_forward=vjepa2_1_forward,
+            vjepa21_forward=vjepa21_forward,
             svae_config=svae_config,
             svae_target_dim=svae_target_dim,
         )

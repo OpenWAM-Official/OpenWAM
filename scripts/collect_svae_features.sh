@@ -9,8 +9,8 @@
 # Required CLI overrides (external encoders only). Select the encoder via these
 # FIELD overrides — the ``model/video_backbone/encoder=<name>`` group-select idiom does NOT
 # resolve from this nested entry config (Hydra searches the group relative to
-# the config's own dir), and the collector refuses the default wan_vae anyway:
-#   model.video_backbone.encoder.name=vjepa2_1
+# the config's own dir), and the collector refuses the default wan22_vae anyway:
+#   model.video_backbone.encoder.name=vjepa21
 #   model.video_backbone.encoder.model_path=<weights dir>
 # (``model.video_backbone.from_scratch`` is NOT needed here — the collector
 # builds only the encoder, not the full architecture, so that flag is inert.)
@@ -21,7 +21,7 @@
 #   svae_collect.output_dir=/path         # results root; per-run subdir auto-created
 #
 # ── Single-node (auto-detect GPUs) ──
-#   bash scripts/collect_svae_features.sh model.video_backbone.encoder.name=vjepa2_1 \
+#   bash scripts/collect_svae_features.sh model.video_backbone.encoder.name=vjepa21 \
 #       model.video_backbone.encoder.model_path=/path
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail

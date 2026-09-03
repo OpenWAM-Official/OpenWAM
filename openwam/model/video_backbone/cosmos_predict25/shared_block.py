@@ -1,8 +1,8 @@
-"""3D-sequence Cosmos block forward for shared-backbone support.
+"""3D-sequence Cosmos block forward for single-system support.
 
 The standard Cosmos block (``block_split.py`` / ``dit_forward.py``) operates on a
 5D grid ``(B, T, H, W, D)`` with per-frame modulation and reshapes ``flat ↔ 5D``
-with fixed ``T,H,W``. SharedBackbone appends non-grid action/state tokens into
+with fixed ``T,H,W``. SingleSystem appends non-grid action/state tokens into
 the video DiT's own sequence, which breaks that reshape.
 
 This module runs the same Cosmos block submodules (``layer_norm_*``,

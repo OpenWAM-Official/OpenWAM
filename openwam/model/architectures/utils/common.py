@@ -1,7 +1,7 @@
 """Architecture-side helpers shared across WAM frameworks.
 
 Bridge-layer resolution, latent-mask downsampling, and the video
-tokens-per-frame derivation used by the MoT drivers and the SharedBackbone
+tokens-per-frame derivation used by the MoT drivers and the SingleSystem
 mask builder.
 """
 

@@ -2,7 +2,7 @@
 # encoder + from_scratch. Wan2.1 family: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p.
 
 defaults:
-  - encoder: wan_vae   # external encoder subgroup; CLI: model/video_backbone/encoder=dinov3
+  - encoder: wan22_vae   # external encoder subgroup; CLI: model/video_backbone/encoder=dinov3
   - _self_
 
 name: wan22_ti2v_5b   # any H,W % 32 == 0

@@ -65,7 +65,7 @@ def merge_branches(noisy: BlockLoopState, cond: BlockLoopState) -> Tuple[BlockLo
             raise ValueError(
                 f"cosmos3 IDM merge: {name} branch has {got} tokens but grid T·H·W={want}; "
                 "the gen sequence must hold exactly the video tokens at merge time "
-                "(shared-backbone tokens must not be injected before IDM merge)."
+                "(single-system tokens must not be injected before IDM merge)."
             )
 
     s_noisy = _tokens(noisy)

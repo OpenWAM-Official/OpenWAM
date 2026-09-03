@@ -28,7 +28,7 @@ from openwam.model.video_backbone.encoder.registry import register_video_encoder
 logger = logging.getLogger(__name__)
 
 
-def _resolve_wan_vae_class_for_file(file_path: str):
+def _resolve_wan22_vae_class_for_file(file_path: str):
     """Hash-match a VAE weight file against ``MODEL_CONFIGS`` to pick the
     correct concrete class (``WanVideoVAE`` z=16 for Wan2.1 vs.
     ``WanVideoVAE38`` z=48 for Wan2.2) plus its state-dict converter.
@@ -84,7 +84,7 @@ def _vae_output_to_image(t: Tensor, *, min_value=-1.0, max_value=1.0) -> Image.I
     return Image.fromarray(img.numpy())
 
 
-@register_video_encoder("wan_vae")
+@register_video_encoder("wan22_vae")
 class WanVideoVAEEncoder(VideoEncoder):
     """:class:`VideoEncoder` wrapping the Wan VAE family.
 
@@ -135,7 +135,7 @@ class WanVideoVAEEncoder(VideoEncoder):
         from openwam.model.video_backbone.wan.shared.core.loader.model import load_model
 
         vae_file = _find_vae_file(model_path)
-        vae_class, converter = _resolve_wan_vae_class_for_file(vae_file)
+        vae_class, converter = _resolve_wan22_vae_class_for_file(vae_file)
         vae = load_model(
             vae_class,
             path=vae_file,

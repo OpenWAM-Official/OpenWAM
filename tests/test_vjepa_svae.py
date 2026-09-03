@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from openwam.model.video_backbone.encoder.svae import _CHECKPOINT_FORMAT_VERSION, reducer
-from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
 
 class _MockVJEPAViT(nn.Module):

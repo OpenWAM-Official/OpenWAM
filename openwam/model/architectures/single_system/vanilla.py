@@ -1,64 +1,60 @@
-"""SharedBackbone MoE architecture.
+"""SingleSystem Vanilla architecture.
 
 Action tokens are concatenated to the video token sequence and ride
-through the shared video DiT blocks. At the configured ``bridge_layers``
-the action tokens receive an extra expert FFN correction for
-modality-specific capacity.
+through every video DiT block as part of the shared sequence. Unlike
+the MoE variant there are no expert FFN corrections — the raw shared
+backbone learns the modality boundary itself. Output is taken from
+the trailing action segment of the final hidden state via a small MLP.
 """
 
 from __future__ import annotations
 
 from typing import Optional, Tuple
 
-import torch
 from torch import Tensor
 
-from openwam.model.action_backbone.shared_action_backbone import SharedMoEActionBackbone
+from openwam.model.action_backbone.shared_action_backbone import SharedVanillaActionBackbone
 from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.architectures.registry import register_architecture
-from openwam.model.architectures.shared_backbone.state import (
+from openwam.model.architectures.single_system.state import (
     align_state_tokens_to_action_batch,
     attach_shared_attention_mask,
 )
-from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import (
     ACTION_SEES_VIDEO,
     set_video_attention_mask_mode,
     validate_attention_mask_mode,
 )
-from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
 
 @register_architecture(
-    "shared_backbone_moe",
+    "single_system_vanilla",
     status="supported",
-    note="SharedBackbone MoE: action tokens share the video DiT with expert FFN at configured layers.",
-    framework="shared_backbone",
-    variant="moe",
+    note="SingleSystem vanilla: action tokens share the video DiT with no expert FFN.",
+    framework="single_system",
+    variant="vanilla",  # Also serves as default for framework="single_system" when variant is unset
 )
-class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
+class SingleSystemVanillaArchitecture(BaseWAMArchitecture):
+    """SingleSystem vanilla: video DiT processes both video and action tokens."""
+
     def __init__(self, cfg=None):
         super().__init__(cfg)
         if cfg is None:
             return
-        vb = self.video_backbone
+        action_dim = int(cfg.get("action_dim", 20))
         video_dim = self._resolve_video_dim(cfg)
-        num_layers = vb.num_layers if vb is not None else None
+        max_action_len = int(cfg.get("max_action_len", 512))
         action_decoder_hidden_dim = cfg.get("action_decoder_hidden_dim")
         use_proprioception = bool(cfg.get("use_proprioception", False))
         state_dim = int(cfg.get("state_dim", 0) or 0)
         self.attention_mask_mode = validate_attention_mask_mode(str(cfg.get("attention_mask_mode", ACTION_SEES_VIDEO)))
         self.video_attention_mask_mode = str(cfg.get("video_attention_mask_mode", "first_frame_causal"))
-        if vb is not None:
-            set_video_attention_mask_mode(vb, self.video_attention_mask_mode)
-
-        bridge_layers = resolve_bridge_layers(cfg, num_layers=num_layers)
-
-        self.action_backbone = SharedMoEActionBackbone(
-            action_dim=int(cfg.get("action_dim", 20)),
+        if self.video_backbone is not None:
+            set_video_attention_mask_mode(self.video_backbone, self.video_attention_mask_mode)
+        self.action_backbone = SharedVanillaActionBackbone(
+            action_dim=action_dim,
             video_dim=video_dim,
-            expert_ffn_dim=int(cfg.get("expert_ffn_dim", 4096)),
-            bridge_layers=bridge_layers,
+            max_action_len=max_action_len,
             action_decoder_hidden_dim=action_decoder_hidden_dim,
             use_proprioception=use_proprioception,
             state_dim=state_dim,
@@ -81,15 +77,9 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
                 "video_backbone is None — pass pipe= to build_architecture or "
                 "architecture.__init__ to enable forward()."
             )
-        invalid_bridge_layers = [layer for layer in ab.bridge_layers if layer >= vb.num_layers]
-        if invalid_bridge_layers:
-            raise ValueError(
-                f"bridge_layers {invalid_bridge_layers} exceed video_backbone.num_layers={vb.num_layers}. "
-                "SharedBackbone MoE expert layers must match the actual video backbone depth."
-            )
         set_video_attention_mask_mode(vb, getattr(self, "video_attention_mask_mode", None))
 
-        # SharedBackbone needs per-token (4D) t_mod so action/state tokens can
+        # SingleSystem needs per-token (4D) t_mod so action/state tokens can
         # extend it cleanly via inject_shared_tokens. TI2V-5B produces 4D
         # natively (seperated_timestep + fuse_vae_embedding_in_latents); other
         # Wan backbones broadcast a global timestep when this flag is set.
@@ -108,11 +98,7 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
             **pipeline_inputs,
         )
 
-        if noisy_actions is None or ab is None:
-            action_tokens = None
-            t_mod = None
-        else:
-            action_tokens, t_mod = ab.encode(noisy_actions, action_timestep)
+        action_tokens = None if noisy_actions is None or ab is None else ab.encode(noisy_actions, action_timestep)
         state_tokens = None if ab is None else ab.encode_state(proprio)
         if action_tokens is not None:
             state_tokens = align_state_tokens_to_action_batch(state_tokens, action_tokens.shape[0])
@@ -127,7 +113,7 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
             shared_timestep = action_timestep if action_timestep is not None else pipeline_inputs.get("timestep")
             if shared_timestep is None:
                 raise ValueError(
-                    "SharedBackbone state-token conditioning requires `action_timestep` or video `timestep`."
+                    "SingleSystem state-token conditioning requires `action_timestep` or video `timestep`."
                 )
             vstate = vb.inject_shared_tokens(
                 vstate,
@@ -147,26 +133,6 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
 
         for block_id in range(vb.num_layers):
             vstate = vb.run_block(block_id, vstate)
-            if n_action and block_id in ab.bridge_layers:
-                n_video = vstate.hidden_states.shape[1] - n_action - n_state
-                x_action = gradient_checkpoint_forward(
-                    lambda x, t, _bid=block_id: ab.apply_expert(_bid, x, t),
-                    use_gradient_checkpointing and self.training,
-                    use_gradient_checkpointing_offload,
-                    vstate.hidden_states[:, n_video : n_video + n_action, :],
-                    t_mod,
-                )
-                if n_state:
-                    vstate.hidden_states = torch.cat(
-                        [
-                            vstate.hidden_states[:, :n_video, :],
-                            x_action,
-                            vstate.hidden_states[:, n_video + n_action :, :],
-                        ],
-                        dim=1,
-                    )
-                else:
-                    vstate.hidden_states = torch.cat([vstate.hidden_states[:, :n_video, :], x_action], dim=1)
 
         if n_action == 0:
             if n_state:
@@ -177,4 +143,4 @@ class SharedBackboneMoEArchitecture(BaseWAMArchitecture):
         return vb.finalize(vstate), ab.decode(action_tail)
 
 
-__all__ = ["SharedBackboneMoEArchitecture"]
+__all__ = ["SingleSystemVanillaArchitecture"]

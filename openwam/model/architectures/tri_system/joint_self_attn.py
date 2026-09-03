@@ -371,7 +371,7 @@ class TriSystemJointSelfAttnArchitecture(BaseWAMArchitecture):
             action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
 
         # Same 4D + clean-prefix-aligned t_mod opt-in as the dual_system /
-        # shared_backbone forwards. TI2V fires its own branch first so these
+        # single_system forwards. TI2V fires its own branch first so these
         # kwargs are inert there. VACE and I2V both work here: VACE routes its
         # condition through ``vace_context`` → per-video-block ``vace_hints``
         # (applied in ``post_attn_at_layer`` → ``apply_post_block_residuals``,

@@ -1,6 +1,6 @@
-"""Shared-backbone token injection helpers for the Cosmos3-Edge backbone.
+"""Single-system token injection helpers for the Cosmos3-Edge backbone.
 
-The shared-backbone architectures ride action (and an optional state) token on
+The single-system architectures ride action (and an optional state) token on
 the video DiT's own sequence. On Cosmos3 this is unusually direct: the gen
 stream is already a flat ``(B, S, D)`` sequence and the model has **no AdaLN**
 (timestep conditioning is an additive embedding on the token itself), so

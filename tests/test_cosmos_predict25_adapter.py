@@ -71,14 +71,14 @@ def test_self_attn_paths_raise_with_clear_message():
         bb.post_attn_at_layer(0, dummy_state, attn_out=torch.zeros(1, 4, bb.dim), post_state={})
 
 
-def test_shared_backbone_now_supported():
-    """Cosmos now supports shared-backbone (via the 3D block forward).
+def test_single_system_now_supported():
+    """Cosmos now supports single-system (via the 3D block forward).
 
     The inject/extract methods are overridden (no longer the raising ABC
     default) and ``assert_ready_for_shared_tokens`` is a no-op (Cosmos carries
     per-token modulation in ``extras``, not ``time_mod``). The full inject →
     run → extract round-trip is covered in
-    ``test_cosmos_predict25_shared_backbone.py`` (needs a runnable DiT)."""
+    ``test_cosmos_predict25_single_system.py`` (needs a runnable DiT)."""
     from openwam.model.video_backbone.base import VideoBackbone
 
     bb = _build_backbone()

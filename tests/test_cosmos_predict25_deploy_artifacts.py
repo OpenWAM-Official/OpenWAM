@@ -1,6 +1,6 @@
 """CPU unit tests for CosmosPredict25 deploy-artifact contract (Fix #2 v2).
 
-CosmosPredict25 follows the same convention as dual_system / shared_backbone for
+CosmosPredict25 follows the same convention as dual_system / single_system for
 the weights it owns: **everything goes into the unified safetensors**, no
 external file copy. Reviewer @d-finite's original complaint
 (`tokenizer.pth` unreachable on a deploy host without `/path/to`) is
@@ -288,7 +288,7 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
         {
             "model": {
                 "framework": "wam",
-                "variant": "shared_backbone_vanilla",
+                "variant": "single_system_vanilla",
                 "video_backbone": {
                     "name": "cosmos_predict25_5b",
                     "text_encoder_path": "/path/to/model",
@@ -318,9 +318,9 @@ def test_model_loader_detects_reason1_state_component_through_omegaconf(tmp_path
         return arch
 
     resolved = MagicMock()
-    resolved.registry_name = "shared_backbone_vanilla"
+    resolved.registry_name = "single_system_vanilla"
     resolved.canonical.framework = "wam"
-    resolved.canonical.variant = "shared_backbone_vanilla"
+    resolved.canonical.variant = "single_system_vanilla"
     resolved.params = {"video_backbone": dict(saved_cfg.model.video_backbone)}
 
     from openwam.deploy import model_loader

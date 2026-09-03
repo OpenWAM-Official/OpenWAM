@@ -122,8 +122,8 @@ def test_import_architecture_registry():
     assert "dual_system_cross_attn" in supported
     assert "dual_system_self_attn" in supported
     assert "dual_system_idm" in supported
-    assert "shared_backbone_vanilla" in supported
-    assert "shared_backbone_moe" in supported
+    assert "single_system_vanilla" in supported
+    assert "single_system_moe" in supported
     # tri_system is registered with status="supported". Both
     # list_supported_architectures and the full registry
     # surface it; we keep both assertions as a regression guard against
@@ -166,16 +166,16 @@ def test_import_architecture_registry():
             "video_dim": 128,
             "idm_video_cond_noise_prob": 0.5,
         },
-        "shared_backbone_moe": {
-            "framework": "shared_backbone",
+        "single_system_moe": {
+            "framework": "single_system",
             "variant": "moe",
             "action_dim": 7,
             "video_dim": 128,
             "expert_ffn_dim": 256,
             "bridge_layers": (0, 1),
         },
-        "shared_backbone_vanilla": {
-            "framework": "shared_backbone",
+        "single_system_vanilla": {
+            "framework": "single_system",
             "variant": "vanilla",
             "action_dim": 7,
             "video_dim": 128,

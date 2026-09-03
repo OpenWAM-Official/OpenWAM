@@ -30,8 +30,8 @@ Usage (single node, auto-detect GPUs):
     cd /path/to/workspace/openwam/openwam-feat-encoder-svae
     bash scripts/collect_svae_features.sh \
         training.batch_size=4 \
-        model.video_backbone.encoder.name=vjepa2_1 \
-        model.video_backbone.encoder.model_path=/path/to/weights/vjepa2_1
+        model.video_backbone.encoder.name=vjepa21 \
+        model.video_backbone.encoder.model_path=/path/to/weights/vjepa21
 """
 
 from __future__ import annotations
@@ -119,12 +119,12 @@ def main(cfg: DictConfig) -> None:
     shuffle_seed = int(proj_seed) if proj_seed is not None else 0
 
     encoder_name = cfg.model.video_backbone.encoder.name
-    if encoder_name == "wan_vae":
+    if encoder_name == "wan22_vae":
         raise ValueError(
-            "S-VAE feature collection does not apply to wan_vae (the native VAE has no "
-            "high-dim raw feature to reduce). Pick vjepa2_1 (or another external encoder) "
+            "S-VAE feature collection does not apply to wan22_vae (the native VAE has no "
+            "high-dim raw feature to reduce). Pick vjepa21 (or another external encoder) "
             "via FIELD overrides on the CLI, e.g. "
-            "model.video_backbone.encoder.name=vjepa2_1 "
+            "model.video_backbone.encoder.name=vjepa21 "
             "model.video_backbone.encoder.model_path=<weights dir> "
             "(the 'model/video_backbone/encoder=...' group-select idiom does not resolve from this "
             "nested entry config)."

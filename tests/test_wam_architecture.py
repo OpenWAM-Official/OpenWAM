@@ -96,14 +96,14 @@ def test_architecture_module_layout_imports():
         DualSystemIDMArchitecture,
         DualSystemSelfAttnArchitecture,
     )
-    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
-    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
+    from openwam.model.architectures.single_system.moe import SingleSystemMoEArchitecture
+    from openwam.model.architectures.single_system.vanilla import SingleSystemVanillaArchitecture
 
     assert DualSystemCrossAttnArchitecture is not None
     assert DualSystemIDMArchitecture is not None
     assert DualSystemSelfAttnArchitecture is not None
-    assert SharedBackboneMoEArchitecture is not None
-    assert SharedBackboneVanillaArchitecture is not None
+    assert SingleSystemMoEArchitecture is not None
+    assert SingleSystemVanillaArchitecture is not None
 
 
 def test_architecture_state_types_import():
@@ -122,10 +122,10 @@ def test_architecture_support_lists():
     assert "dual_system_cross_attn" in supported
     assert "dual_system_self_attn" in supported
     assert "dual_system_idm" in supported
-    assert "shared_backbone_vanilla" in supported
-    assert "shared_backbone_moe" in supported
-    assert get_architecture_support("shared_backbone_moe").status == "supported"
-    assert get_architecture_support("shared_backbone_vanilla").status == "supported"
+    assert "single_system_vanilla" in supported
+    assert "single_system_moe" in supported
+    assert get_architecture_support("single_system_moe").status == "supported"
+    assert get_architecture_support("single_system_vanilla").status == "supported"
 
 
 def _make_tiny_wan_backbone_for_compile_test():
@@ -363,18 +363,18 @@ def test_build_architecture_dual_system():
     assert arch.action_backbone is not None
 
 
-def test_build_architecture_shared_backbone_moe():
+def test_build_architecture_single_system_moe():
     from openwam.model import build_architecture
 
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
         "bridge_layers": (1, 3),
     }
-    arch = build_architecture("shared_backbone_moe", cfg)
+    arch = build_architecture("single_system_moe", cfg)
     assert arch.action_dim == 7
     assert arch.bridge_layers == (1, 3)
     assert arch.action_backbone is not None
@@ -382,11 +382,11 @@ def test_build_architecture_shared_backbone_moe():
 
 
 def test_build_architecture_shared():
-    """Shared backbone vanilla should build successfully."""
+    """Single system vanilla should build successfully."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
-    arch = build_architecture("shared_backbone_vanilla", cfg)
+    arch = build_architecture("single_system_vanilla", cfg)
     assert arch.action_dim == 7
     assert arch.bridge_layers == ()
 
@@ -437,19 +437,19 @@ def test_dual_system_prepare_and_extract():
     assert action_pred.shape == (B, T_action, 7)
 
 
-def test_shared_backbone_moe_encode_apply_decode():
+def test_single_system_moe_encode_apply_decode():
     """Smoke test: MoE encode → apply_expert at expert layers → decode."""
     from openwam.model import build_architecture
 
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
         "bridge_layers": (0, 1),
     }
-    arch = build_architecture("shared_backbone_moe", cfg)
+    arch = build_architecture("single_system_moe", cfg)
     arch.eval()
     ab = arch.action_backbone
 
@@ -471,12 +471,12 @@ def test_shared_backbone_moe_encode_apply_decode():
     assert action_pred.shape == (B, T_action, 7)
 
 
-def test_shared_backbone_encode_decode():
+def test_single_system_encode_decode():
     """Smoke test: vanilla encode + decode shapes."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 10}
-    arch = build_architecture("shared_backbone_vanilla", cfg)
+    arch = build_architecture("single_system_vanilla", cfg)
     arch.eval()
     ab = arch.action_backbone
 
@@ -491,12 +491,12 @@ def test_shared_backbone_encode_decode():
     assert action_pred.shape == (B, T_action, 7)
 
 
-def test_shared_backbone_output_head_init():
-    """SharedBackbone output head (ActionOutputMLP) uses small-random init."""
+def test_single_system_output_head_init():
+    """SingleSystem output head (ActionOutputMLP) uses small-random init."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
-    arch = build_architecture("shared_backbone_vanilla", cfg)
+    arch = build_architecture("single_system_vanilla", cfg)
     head = arch.action_backbone.action_output_head
     assert torch.all(head.layer1.bias == 0)
     assert torch.all(head.layer2.bias == 0)
@@ -1226,45 +1226,45 @@ def test_tri_system_joint_self_attn_compile_auto_sets_mot_loop():
 
 
 def test_moe_uses_expert_layers():
-    """SharedBackbone moe variant exposes expert layer ids."""
+    """SingleSystem moe variant exposes expert layer ids."""
     from openwam.model import build_architecture
 
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
         "bridge_layers": (1, 3),
     }
-    arch = build_architecture("shared_backbone_moe", cfg)
+    arch = build_architecture("single_system_moe", cfg)
     assert arch.bridge_layers == (1, 3)
     assert frozenset(arch.action_backbone.bridge_layers) == {1, 3}
 
 
-def test_shared_backbone_has_no_expert_layers():
-    """SharedBackbone vanilla has no expert layers."""
+def test_single_system_has_no_expert_layers():
+    """SingleSystem vanilla has no expert layers."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 128, "num_action_tokens": 5}
-    arch = build_architecture("shared_backbone_vanilla", cfg)
+    arch = build_architecture("single_system_vanilla", cfg)
     assert arch.bridge_layers == ()
 
 
-def test_normalize_architecture_spec_shared_backbone():
+def test_normalize_architecture_spec_single_system():
     from openwam.model.architectures.registry import normalize_architecture_spec
 
-    spec = normalize_architecture_spec("shared_backbone_vanilla", {"action_dim": 7})
-    assert spec.framework == "shared_backbone"
+    spec = normalize_architecture_spec("single_system_vanilla", {"action_dim": 7})
+    assert spec.framework == "single_system"
     assert spec.variant == "vanilla"
     assert spec.options == {}
 
 
-def test_normalize_architecture_spec_shared_backbone_moe():
+def test_normalize_architecture_spec_single_system_moe():
     from openwam.model.architectures.registry import normalize_architecture_spec
 
-    spec = normalize_architecture_spec("shared_backbone_moe", {"action_dim": 7})
-    assert spec.framework == "shared_backbone"
+    spec = normalize_architecture_spec("single_system_moe", {"action_dim": 7})
+    assert spec.framework == "single_system"
     assert spec.variant == "moe"
     assert spec.options == {}
 
@@ -1327,7 +1327,7 @@ def test_resolve_architecture_config_from_canonical_fields():
 
     model_cfg = SimpleNamespace(
         architecture={
-            "framework": "shared_backbone",
+            "framework": "single_system",
             "variant": "moe",
             "action_dim": 20,
             "expert_ffn_dim": 512,
@@ -1336,20 +1336,20 @@ def test_resolve_architecture_config_from_canonical_fields():
     )
     resolved = resolve_architecture_config(model_cfg, video_dim=192)
 
-    assert resolved.registry_name == "shared_backbone_moe"
-    assert resolved.canonical.framework == "shared_backbone"
+    assert resolved.registry_name == "single_system_moe"
+    assert resolved.canonical.framework == "single_system"
     assert resolved.canonical.variant == "moe"
-    assert resolved.params["framework"] == "shared_backbone"
+    assert resolved.params["framework"] == "single_system"
     assert resolved.params["variant"] == "moe"
     assert resolved.params["video_dim"] == 192
 
 
-def test_build_architecture_injects_framework_and_variant_for_shared_backbone():
+def test_build_architecture_injects_framework_and_variant_for_single_system():
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
-    arch = build_architecture("shared_backbone_vanilla", cfg)
-    assert arch.cfg["framework"] == "shared_backbone"
+    arch = build_architecture("single_system_vanilla", cfg)
+    assert arch.cfg["framework"] == "single_system"
     assert arch.cfg["variant"] == "vanilla"
 
 
@@ -1373,19 +1373,19 @@ def test_build_architecture_injects_framework_variant_and_detach_option():
     assert arch.cfg["detach_bridge"] is True
 
 
-def test_build_architecture_shared_backbone_moe_canonical_config():
+def test_build_architecture_single_system_moe_canonical_config():
     from openwam.model import build_architecture
 
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": 7,
         "video_dim": 128,
         "expert_ffn_dim": 256,
         "bridge_layers": (1, 3),
     }
-    arch = build_architecture("shared_backbone_moe", cfg)
-    assert arch.cfg["framework"] == "shared_backbone"
+    arch = build_architecture("single_system_moe", cfg)
+    assert arch.cfg["framework"] == "single_system"
     assert arch.cfg["variant"] == "moe"
 
 

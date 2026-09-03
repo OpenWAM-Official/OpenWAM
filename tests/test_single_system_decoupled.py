@@ -1,4 +1,4 @@
-"""Verify SharedBackbone architectures own their forward end-to-end.
+"""Verify SingleSystem architectures own their forward end-to-end.
 
 After the decoupling refactor, the architecture's forward drives the video
 DiT block loop directly and calls action-backbone helpers (encode / decode
@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
-from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
-from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
+from openwam.model.architectures.single_system.moe import SingleSystemMoEArchitecture
+from openwam.model.architectures.single_system.vanilla import SingleSystemVanillaArchitecture
 
 
 @dataclass
@@ -23,7 +23,7 @@ class _StubBlockLoopState:
     """Minimal shape mirroring ``BlockLoopState``; only the fields the architecture
     forwards actually read from / write to.
 
-    ``t_mod`` is a 4D dummy so the SharedBackbone fail-fast on per-token t_mod mode
+    ``t_mod`` is a 4D dummy so the SingleSystem fail-fast on per-token t_mod mode
     (architecture forward enforces ``vstate.time_mod.dim() == 4``) is satisfied without
     plumbing real per-token AdaLN values through the stub."""
 
@@ -126,9 +126,9 @@ class _StubVideoBackbone(nn.Module):
 
 
 def _make_vanilla(video_dim=64, num_layers=4):
-    arch = SharedBackboneVanillaArchitecture(
+    arch = SingleSystemVanillaArchitecture(
         cfg={
-            "framework": "shared_backbone",
+            "framework": "single_system",
             "variant": "vanilla",
             "action_dim": 7,
             "video_dim": video_dim,
@@ -140,9 +140,9 @@ def _make_vanilla(video_dim=64, num_layers=4):
 
 
 def _make_moe(video_dim=64, num_layers=4, bridge_layers=(0, 2)):
-    arch = SharedBackboneMoEArchitecture(
+    arch = SingleSystemMoEArchitecture(
         cfg={
-            "framework": "shared_backbone",
+            "framework": "single_system",
             "variant": "moe",
             "action_dim": 7,
             "video_dim": video_dim,
@@ -265,7 +265,7 @@ def test_moe_forward_passes_joint_mask_to_every_video_block():
 
 
 def test_action_backbone_does_not_implement_run_block():
-    """Crucial: SharedBackbone's action backbone must NOT carry a run_block method
+    """Crucial: SingleSystem's action backbone must NOT carry a run_block method
     that would let it drive the video loop. The architecture owns control flow."""
     vanilla = _make_vanilla()
     moe = _make_moe()

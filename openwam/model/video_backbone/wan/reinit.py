@@ -38,7 +38,7 @@ def adapt_dit_to_external_encoder(
     dit_patch_size: Optional[Tuple[int, int, int]],
 ) -> None:
     """Rebuild ``backbone.dit`` ``patch_embedding`` / ``head.head`` / ``patch_size``
-    / ``in_dim`` to match an external encoder's latent shape (``wan_vae`` is a
+    / ``in_dim`` to match an external encoder's latent shape (``wan22_vae`` is a
     no-op shape-wise; non-VAE encoders adapt the first conv / final Linear).
 
     ``patch_size`` must be synced because ``unpatchify`` rearranges by it; a
@@ -89,7 +89,7 @@ def reinit_dit_from_scratch(
     are deterministic and left alone.
 
     ``external_encoder``: when provided, rebuild patch_embedding / head.head via
-    its hooks BEFORE the reset loop (no-op shape-wise for ``wan_vae``); ``None``
+    its hooks BEFORE the reset loop (no-op shape-wise for ``wan22_vae``); ``None``
     keeps the "reset weights only, don't touch shapes" behavior. ``verbose``
     prints a rank-0 BEFORE/AFTER summary via ``print`` (independent of logging).
     """
@@ -110,7 +110,7 @@ def reinit_dit_from_scratch(
     is_main = rank == 0
 
     # Rebuild patch_embedding + head.head BEFORE reset_parameters (no-op
-    # shape-wise for wan_vae). The subsequent reset re-inits them again —
+    # shape-wise for wan22_vae). The subsequent reset re-inits them again —
     # harmless duplicate random init in the same distribution.
     if external_encoder is not None:
         adapt_dit_to_external_encoder(backbone, external_encoder, dit_patch_size)

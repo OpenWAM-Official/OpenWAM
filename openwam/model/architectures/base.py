@@ -2,7 +2,7 @@
 
 Supported architecture families:
 
-1. **Shared Backbone** (`framework=shared_backbone`)
+1. **Single System** (`framework=single_system`)
    Action tokens are concatenated to the video DiT sequence and ride
    through the shared blocks. Variants: `vanilla` (no extra capacity) /
    `moe` (expert FFN at selected layers).
@@ -135,7 +135,7 @@ class ActionState:
 
     Only ``DualSystemSelfAttnArchitecture`` needs this — its action stream is
     threaded through ``DualSystemMoTDriver``, which mutates the payload across
-    layers. SharedBackbone and DualSystem cross-attn don't go through this
+    layers. SingleSystem and DualSystem cross-attn don't go through this
     container.
 
     Fields:
@@ -271,13 +271,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
         elif enc_cfg is not None and source is None:
             # Training with encoder block set but from_scratch=false. Two
             # sub-cases:
-            #   (a) ``encoder.name == "wan_vae"`` (the default-yaml template
+            #   (a) ``encoder.name == "wan22_vae"`` (the default-yaml template
             #       value) — stay silent (INFO only). Native ``pipe.vae``
-            #       and the wan_vae external encoder are bit-identical, so
+            #       and the wan22_vae external encoder are bit-identical, so
             #       nothing is lost; the default yaml ships the
             #       ``encoder:`` block as a discoverable hint and
             #       fail-fast here would break every default config.
-            #   (b) ``encoder.name`` is anything else (``vjepa2_1`` /
+            #   (b) ``encoder.name`` is anything else (``vjepa21`` /
             #       ``dinov3`` / ...) — that is an explicit
             #       choice that *cannot* take effect under
             #       ``from_scratch=false``: the pre-trained DiT's first
@@ -292,7 +292,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 enc_name = str(enc_cfg.get("name", ""))
             else:
                 enc_name = str(getattr(enc_cfg, "name", ""))
-            if enc_name and enc_name != "wan_vae":
+            if enc_name and enc_name != "wan22_vae":
                 raise ValueError(
                     f"video_backbone.encoder.name='{enc_name}' is incompatible "
                     "with from_scratch=false: the pre-trained DiT's first conv "
@@ -366,7 +366,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # ``cfg.project.seed`` which ``OpenWAMTrainer`` applies before
         # architecture construction. Applies uniformly to every architecture
         # that builds its video backbone via this method (dual_system /
-        # shared_backbone / tri_system).
+        # single_system / tri_system).
         #
         # IMPORTANT: gated on ``source is None`` (training path only). On
         # deploy, ``cfg.video_backbone.from_scratch`` is True because the

@@ -1,9 +1,9 @@
 """FLUX.2 VAE video encoder tests.
 
-Covers ``openwam/model/video_backbone/encoder/flux_vae.py`` and the
-diffusers->BFL state-dict converter in ``flux/flux_vae_src.py``:
+Covers ``openwam/model/video_backbone/encoder/flux2_vae.py`` and the
+diffusers->BFL state-dict converter in ``flux/flux2_vae_src.py``:
 
-- F1   registry round-trip (``register_video_encoder("flux_vae")``)
+- F1   registry round-trip (``register_video_encoder("flux2_vae")``)
 - F2   spec invariants (z_dim/spatial from the loaded core, fixed temporal=4,
        causal=True, dit_patch_size=(1,2,2), pixel_decode=False)
 - F3   preprocess shape + [-1, 1] range (matches Wan VAE, not ImageNet)
@@ -60,7 +60,7 @@ class _MockFluxCore(nn.Module):
 
 
 def _build_encoder(*, z_dim: int = 128, spatial_compression: int = 16):
-    from openwam.model.video_backbone.encoder.flux_vae import FluxVAEVideoEncoder
+    from openwam.model.video_backbone.encoder.flux2_vae import FluxVAEVideoEncoder
 
     return FluxVAEVideoEncoder(_MockFluxCore(z_dim=z_dim, spatial_compression=spatial_compression))
 
@@ -70,12 +70,12 @@ def _build_encoder(*, z_dim: int = 128, spatial_compression: int = 16):
 # ---------------------------------------------------------------------------
 
 
-def test_F1_flux_vae_registration_round_trip():
+def test_F1_flux2_vae_registration_round_trip():
     from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
-    from openwam.model.video_backbone.encoder.flux_vae import FluxVAEVideoEncoder
+    from openwam.model.video_backbone.encoder.flux2_vae import FluxVAEVideoEncoder
 
-    assert "flux_vae" in _VIDEO_ENCODER_REGISTRY
-    assert _VIDEO_ENCODER_REGISTRY["flux_vae"] is FluxVAEVideoEncoder
+    assert "flux2_vae" in _VIDEO_ENCODER_REGISTRY
+    assert _VIDEO_ENCODER_REGISTRY["flux2_vae"] is FluxVAEVideoEncoder
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ def test_F1_flux_vae_registration_round_trip():
 # ---------------------------------------------------------------------------
 
 
-def test_F2_flux_vae_spec_invariants():
+def test_F2_flux2_vae_spec_invariants():
     """Token-count parity with Wan VAE depends on temporal=4, causal=True,
     dit_patch_size=(1,2,2); z_dim/spatial come from the loaded core."""
     enc = _build_encoder(z_dim=128, spatial_compression=16)
@@ -101,7 +101,7 @@ def test_F2_flux_vae_spec_invariants():
 # ---------------------------------------------------------------------------
 
 
-def test_F3_flux_vae_preprocess_minus_one_to_one():
+def test_F3_flux2_vae_preprocess_minus_one_to_one():
     """``preprocess_video`` rescales [0,255] -> [-1,1] (Wan VAE range, not
     ImageNet): black -> -1, white -> +1, gray 128 -> ~0."""
     enc = _build_encoder()
@@ -121,7 +121,7 @@ def test_F3_flux_vae_preprocess_minus_one_to_one():
 
 
 @pytest.mark.parametrize("T_pixel, T_lat", [(1, 1), (5, 2), (9, 3)])
-def test_F4_flux_vae_batch_encode_t_lat_shapes(T_pixel, T_lat):
+def test_F4_flux2_vae_batch_encode_t_lat_shapes(T_pixel, T_lat):
     """``(B, 3, T, H, W) → (B, z_dim, 1 + (T-1)/4, H/16, W/16)``."""
     enc = _build_encoder(z_dim=128, spatial_compression=16)
     v = torch.randn(2, 3, T_pixel, 32, 48)
@@ -134,7 +134,7 @@ def test_F4_flux_vae_batch_encode_t_lat_shapes(T_pixel, T_lat):
 # ---------------------------------------------------------------------------
 
 
-def test_F5_flux_vae_causal_pool_keeps_frame0_and_means_rest():
+def test_F5_flux2_vae_causal_pool_keeps_frame0_and_means_rest():
     """Frame ``t`` constant == ``t+1`` -> pooled[0]==1, pooled[1]==mean(2,3,4,5)==3.5.
     The latent passes through with no extra normalization (the VAE's bn lives
     inside ``core.encode``, mocked away here), so values survive verbatim."""
@@ -153,13 +153,13 @@ def test_F5_flux_vae_causal_pool_keeps_frame0_and_means_rest():
 # ---------------------------------------------------------------------------
 
 
-def test_F6a_flux_vae_T_not_1_mod_4_raises():
+def test_F6a_flux2_vae_T_not_1_mod_4_raises():
     enc = _build_encoder()
     with pytest.raises(ValueError, match=r"T ≡ 1 \(mod 4\)"):
         enc.batch_encode(torch.randn(1, 3, 4, 32, 32))  # (4-1)%4 = 3 ≠ 0
 
 
-def test_F6b_flux_vae_H_not_divisible_by_spatial_raises():
+def test_F6b_flux2_vae_H_not_divisible_by_spatial_raises():
     enc = _build_encoder(spatial_compression=16)
     with pytest.raises(ValueError, match=r"divisible by spatial_compression"):
         enc.batch_encode(torch.randn(1, 3, 5, 40, 32))  # 40 % 16 != 0
@@ -170,7 +170,7 @@ def test_F6b_flux_vae_H_not_divisible_by_spatial_raises():
 # ---------------------------------------------------------------------------
 
 
-def test_F7_flux_vae_decode_and_to_frames_raise():
+def test_F7_flux2_vae_decode_and_to_frames_raise():
     enc = _build_encoder()
     with pytest.raises(NotImplementedError):
         enc.decode(torch.randn(1, 128, 1, 2, 2))
@@ -213,7 +213,7 @@ def test_F8_converter_round_trips_into_core():
     """A synthetic diffusers state-dict (built by inverse-mapping a tiny real
     core's keys, with attention weights squeezed to 2D) must convert back to a
     dict that strict-loads into the core."""
-    from openwam.model.video_backbone.encoder.flux_vae_src import (
+    from openwam.model.video_backbone.encoder.flux2_vae_src import (
         FluxVaeEncoderCore,
         convert_diffusers_encoder_sd,
     )
@@ -244,7 +244,7 @@ def test_F8_converter_round_trips_into_core():
 # ---------------------------------------------------------------------------
 
 
-def test_F9_flux_vae_default_hooks_wan_parity():
+def test_F9_flux2_vae_default_hooks_wan_parity():
     enc = _build_encoder(z_dim=128, spatial_compression=16)
     inp = enc.build_dit_input_proj(dit_dim=1536)
     assert isinstance(inp, nn.Conv3d)
@@ -266,7 +266,7 @@ def test_F9_flux_vae_default_hooks_wan_parity():
 def test_F10_core_rejects_non_square_pack():
     """spatial_compression is a single scalar, so a non-square pack (ps[0] !=
     ps[1]) would silently describe only one axis — the core must reject it."""
-    from openwam.model.video_backbone.encoder.flux_vae_src import FluxVaeEncoderCore
+    from openwam.model.video_backbone.encoder.flux2_vae_src import FluxVaeEncoderCore
 
     with pytest.raises(ValueError, match=r"square pixel-shuffle pack"):
         FluxVaeEncoderCore(ch=32, ch_mult=[1, 2], z_channels=4, num_res_blocks=1, ps=(2, 4))
@@ -275,7 +275,7 @@ def test_F10_core_rejects_non_square_pack():
 def test_F11_converter_rejects_missing_bn_stats():
     """A checkpoint without the FLUX.2 BatchNorm whitening stats is not an
     AutoencoderKLFlux2; the converter must say so instead of a bare KeyError."""
-    from openwam.model.video_backbone.encoder.flux_vae_src import (
+    from openwam.model.video_backbone.encoder.flux2_vae_src import (
         FluxVaeEncoderCore,
         convert_diffusers_encoder_sd,
     )

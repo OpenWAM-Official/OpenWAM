@@ -153,12 +153,12 @@ def test_moe_dit_instantiate():
     assert dit.num_experts == 2
 
 
-def test_shared_backbone_instantiate():
-    """SharedBackboneArchitecture should instantiate."""
+def test_single_system_instantiate():
+    """SingleSystemArchitecture should instantiate."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
-    arch = build_architecture("shared_backbone_vanilla", cfg)
+    arch = build_architecture("single_system_vanilla", cfg)
     assert arch.action_dim == 7
 
 
@@ -206,12 +206,12 @@ def test_action_encoder_timestep_mismatch_raises():
         enc(actions, torch.rand(2, 7))
 
 
-def test_shared_backbone_encode_uses_action_encoder():
+def test_single_system_encode_uses_action_encoder():
     """SharedVanillaActionBackbone.encode should run ActionEncoder without learned PE."""
     from openwam.model.action_backbone.components import ActionEncoder
-    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
+    from openwam.model.architectures.single_system.vanilla import SingleSystemVanillaArchitecture
 
-    arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
+    arch = SingleSystemVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     assert isinstance(arch.action_backbone.input_proj, ActionEncoder)
     assert not hasattr(arch.action_backbone, "pos_encoding")
 
@@ -221,11 +221,11 @@ def test_shared_backbone_encode_uses_action_encoder():
     assert tokens.shape == (2, 16, 128)
 
 
-def test_shared_backbone_encode_per_token_timestep():
+def test_single_system_encode_per_token_timestep():
     """SharedVanillaActionBackbone.encode should accept (B, T) per-token timestep."""
-    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
+    from openwam.model.architectures.single_system.vanilla import SingleSystemVanillaArchitecture
 
-    arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
+    arch = SingleSystemVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     actions = torch.randn(2, 16, 14)
     timestep = torch.rand(2, 16)  # per-token
     tokens = arch.action_backbone.encode(actions, timestep)
@@ -235,9 +235,9 @@ def test_shared_backbone_encode_per_token_timestep():
 def test_moe_encode_uses_action_encoder():
     """SharedMoEActionBackbone.encode wires ActionEncoder."""
     from openwam.model.action_backbone.components import ActionEncoder
-    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
+    from openwam.model.architectures.single_system.moe import SingleSystemMoEArchitecture
 
-    arch = SharedBackboneMoEArchitecture(
+    arch = SingleSystemMoEArchitecture(
         cfg={
             "action_dim": 14,
             "video_dim": 128,
@@ -257,9 +257,9 @@ def test_moe_encode_uses_action_encoder():
 
 def test_moe_encode_per_token_timestep():
     """MoE encode should build per-token ExpertFFN AdaLN under (B, T) timestep."""
-    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
+    from openwam.model.architectures.single_system.moe import SingleSystemMoEArchitecture
 
-    arch = SharedBackboneMoEArchitecture(
+    arch = SingleSystemMoEArchitecture(
         cfg={
             "action_dim": 14,
             "video_dim": 128,
@@ -312,9 +312,9 @@ def test_expert_ffn_block_per_token_matches_broadcast():
 
 def test_moe_encode_per_sample_keeps_tmod_rank3():
     """Per-sample timestep must still produce (B, 3, dim) t_mod (no regression)."""
-    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
+    from openwam.model.architectures.single_system.moe import SingleSystemMoEArchitecture
 
-    arch = SharedBackboneMoEArchitecture(
+    arch = SingleSystemMoEArchitecture(
         cfg={
             "action_dim": 14,
             "video_dim": 128,
@@ -339,7 +339,7 @@ def test_action_output_mlp_shape():
 
 
 def test_state_encoder_accepts_single_deploy_state():
-    """SharedBackbone state encoder should match dual-system's [D] deploy proprio input."""
+    """SingleSystem state encoder should match dual-system's [D] deploy proprio input."""
     from openwam.model.action_backbone.components import StateEncoder
 
     enc = StateEncoder(state_dim=14, hidden_dim=64)
@@ -359,12 +359,12 @@ def test_action_output_mlp_small_random_init():
         assert w.abs().max() < 0.2, "weights should be small (std ~ 0.02)"
 
 
-def test_shared_backbone_uses_action_output_mlp():
-    """SharedBackbone wires ActionOutputMLP as its output head."""
+def test_single_system_uses_action_output_mlp():
+    """SingleSystem wires ActionOutputMLP as its output head."""
     from openwam.model.action_backbone.components import DEFAULT_ACTION_DECODER_HIDDEN_DIM, ActionOutputMLP
-    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
+    from openwam.model.architectures.single_system.vanilla import SingleSystemVanillaArchitecture
 
-    arch = SharedBackboneVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
+    arch = SingleSystemVanillaArchitecture(cfg={"action_dim": 14, "video_dim": 128, "max_action_len": 64})
     assert isinstance(arch.action_backbone.action_output_head, ActionOutputMLP)
     assert arch.action_backbone.action_output_head.layer1.out_features == DEFAULT_ACTION_DECODER_HIDDEN_DIM
 
@@ -375,11 +375,11 @@ def test_shared_backbone_uses_action_output_mlp():
     assert pred.shape == (2, 16, 14)
 
 
-def test_shared_backbone_action_decoder_hidden_dim_can_be_overridden():
-    """SharedBackbone decoder default aligns with dual-system dim but still supports explicit config."""
-    from openwam.model.architectures.shared_backbone.vanilla import SharedBackboneVanillaArchitecture
+def test_single_system_action_decoder_hidden_dim_can_be_overridden():
+    """SingleSystem decoder default aligns with dual-system dim but still supports explicit config."""
+    from openwam.model.architectures.single_system.vanilla import SingleSystemVanillaArchitecture
 
-    arch = SharedBackboneVanillaArchitecture(
+    arch = SingleSystemVanillaArchitecture(
         cfg={
             "action_dim": 14,
             "video_dim": 128,
@@ -394,9 +394,9 @@ def test_shared_backbone_action_decoder_hidden_dim_can_be_overridden():
 def test_moe_expert_uses_action_output_mlp():
     """MoE architecture wires ActionOutputMLP as its output head."""
     from openwam.model.action_backbone.components import DEFAULT_ACTION_DECODER_HIDDEN_DIM, ActionOutputMLP
-    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
+    from openwam.model.architectures.single_system.moe import SingleSystemMoEArchitecture
 
-    arch = SharedBackboneMoEArchitecture(
+    arch = SingleSystemMoEArchitecture(
         cfg={
             "action_dim": 14,
             "video_dim": 128,

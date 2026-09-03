@@ -9,9 +9,9 @@
 # final hidden) — unlike predict2.5, joint_cross_attn needs NO
 # action_backbone num_heads/attn_head_dim overrides.
 # Supported architecture variants: dual_system/{joint_cross_attn,
-# joint_self_attn, idm} and shared_backbone/{vanilla, moe}. joint_self_attn and
+# joint_self_attn, idm} and single_system/{vanilla, moe}. joint_self_attn and
 # idm ride MoT via cached-und prefix K/V + GQA KV-expand (see
-# BlockLoopState.prefix_kv_*); shared_backbone appends action/state tokens
+# BlockLoopState.prefix_kv_*); single_system appends action/state tokens
 # directly to the flat gen sequence (no AdaLN to expand, unlike predict2.5).
 # tri_system is rejected: its driver does not widen the joint mask for the und
 # prefix K/V.

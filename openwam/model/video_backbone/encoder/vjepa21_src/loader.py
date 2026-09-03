@@ -1,4 +1,4 @@
-"""V-JEPA 2.1 ViT + manifest loading for :class:`..vjepa2_1.VJEPA21VideoEncoder`.
+"""V-JEPA 2.1 ViT + manifest loading for :class:`..vjepa21.VJEPA21VideoEncoder`.
 
 The vendored-ViT-coupled, weight-loading concerns: manifest read/validate, the
 vendored-ViT import + RoPE dtype monkey-patch, the zero-weight ViT construction,
@@ -93,8 +93,8 @@ def prepare_vjepa_imports_and_patch():
     ``_openwam_dtype_safe`` sentinel so repeated calls (training reload, deploy
     skeleton + later weight load, EMA replicas) do not re-wrap.
     """
-    from openwam.model.video_backbone.encoder.vjepa2_src import modules as vjepa_modules
-    from openwam.model.video_backbone.encoder.vjepa2_src import vision_transformer as vit_encoder
+    from openwam.model.video_backbone.encoder.vjepa21_src import modules as vjepa_modules
+    from openwam.model.video_backbone.encoder.vjepa21_src import vision_transformer as vit_encoder
 
     if not getattr(vjepa_modules.rotate_queries_or_keys, "_openwam_dtype_safe", False):
         _orig_rotate = vjepa_modules.rotate_queries_or_keys
@@ -217,29 +217,29 @@ def resolve_manifest_dir(ckpt_dir: str | None) -> str:
     )
 
 
-def cfg_has_vjepa2_1_forward(encoder_cfg: Any) -> bool:
-    """Whether the saved encoder yaml carries the ``vjepa2_1_forward`` key at all
+def cfg_has_vjepa21_forward(encoder_cfg: Any) -> bool:
+    """Whether the saved encoder yaml carries the ``vjepa21_forward`` key at all
     (yaml-``null`` counts as present). ``from_skeleton`` uses this — vs.
-    :func:`read_vjepa2_1_forward_from_cfg`, which collapses absent/null to the
+    :func:`read_vjepa21_forward_from_cfg`, which collapses absent/null to the
     default — to fire the pre-PR-checkpoint migration warning only when the
     operator truly omitted the key.
     """
     if encoder_cfg is None:
         return False
     if isinstance(encoder_cfg, dict):
-        return "vjepa2_1_forward" in encoder_cfg
+        return "vjepa21_forward" in encoder_cfg
     _MISSING = object()
-    return getattr(encoder_cfg, "vjepa2_1_forward", _MISSING) is not _MISSING
+    return getattr(encoder_cfg, "vjepa21_forward", _MISSING) is not _MISSING
 
 
-def read_vjepa2_1_forward_from_cfg(encoder_cfg: Any, default: str) -> str:
-    """Pick ``vjepa2_1_forward`` from the saved yaml; absent / yaml-null collapse
+def read_vjepa21_forward_from_cfg(encoder_cfg: Any, default: str) -> str:
+    """Pick ``vjepa21_forward`` from the saved yaml; absent / yaml-null collapse
     to ``default``. The caller's ``__init__`` validates the returned value.
     """
     if encoder_cfg is None:
         return default
     if isinstance(encoder_cfg, dict):
-        value = encoder_cfg.get("vjepa2_1_forward")
+        value = encoder_cfg.get("vjepa21_forward")
     else:
-        value = getattr(encoder_cfg, "vjepa2_1_forward", None)
+        value = getattr(encoder_cfg, "vjepa21_forward", None)
     return default if value is None else str(value)

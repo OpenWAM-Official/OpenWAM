@@ -210,7 +210,7 @@ class DualSystemCrossAttnArchitecture(BaseWAMArchitecture):
             positions = torch.arange(action_context.shape[1], device=action_context.device)
             action_context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
         # Same 4D + clean-prefix-aligned t_mod opt-in as the joint_self_attn /
-        # shared_backbone / IDM forwards. TI2V fires its own branch first so
+        # single_system / IDM forwards. TI2V fires its own branch first so
         # these kwargs are inert there. VACE and I2V do NOT emit
         # ``first_frame_latents`` (VACE routes via ``vace_context``, I2V via
         # the ``y`` channel), so ``zero_clean_prefix_t_mod`` is structurally

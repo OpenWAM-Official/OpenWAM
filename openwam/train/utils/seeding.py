@@ -1,6 +1,6 @@
 """Deterministic-seeding helpers used by the OpenWAM trainer.
 
-``OpenWAMTrainer`` (dual_system / shared_backbone / tri_system path) reads
+``OpenWAMTrainer`` (dual_system / single_system / tri_system path) reads
 the ``cfg.project.seed`` yaml field (or the ``OPENWAM_SEED`` env var) to opt
 in to deterministic mode. The FastWAM-style seeding intentionally does NOT
 touch cudnn or cuBLAS, so FSDP / fused-attention kernels stay usable. It

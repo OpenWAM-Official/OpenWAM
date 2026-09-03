@@ -1,4 +1,4 @@
-"""SharedBackbone action backbones (vanilla + MoE).
+"""SingleSystem action backbones (vanilla + MoE).
 
 Both share :class:`SharedActionBackbone` (action I/O: input projection, output
 head, normalization buffers, scheduler) and differ only in how action tokens
@@ -17,7 +17,7 @@ for MoE ``apply_expert(layer_id, ...)`` when ``layer_id in bridge_layers``).
 References (MoE):
 - BAGEL (ByteDance Seed): Shared attention + expert FFN for multimodal
   understanding and generation (arXiv:2505.14683).
-- DreamZero: Shared backbone WAM with action+video in same DiT.
+- DreamZero: Single system WAM with action+video in same DiT.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from openwam.model.action_backbone.components import (
 
 
 class SharedVanillaActionBackbone(SharedActionBackbone):
-    """Action-side I/O for SharedBackbone vanilla.
+    """Action-side I/O for SingleSystem vanilla.
 
     Holds (via :class:`SharedActionBackbone`):
       - ``input_proj``: action_dim -> video_dim (fuses timestep)
@@ -135,7 +135,7 @@ class ExpertFFNBlock(nn.Module):
 
 
 class SharedMoEActionBackbone(SharedActionBackbone):
-    """Action-side helpers for SharedBackbone MoE.
+    """Action-side helpers for SingleSystem MoE.
 
     Owns (beyond :class:`SharedActionBackbone`'s action I/O):
       - ``time_embedding`` / ``time_projection``: produce the AdaLN t_mod

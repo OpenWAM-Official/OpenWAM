@@ -16,7 +16,7 @@ under ``no_grad`` and caches the per-layer gen-facing K/V; the und final hidden
 encoder; timestep conditioning is additive on noisy-frame tokens only.
 
 Supported architectures: ``dual_system`` / {``joint_cross_attn``,
-``joint_self_attn``, ``idm``} and ``shared_backbone`` / {``vanilla``, ``moe``},
+``joint_self_attn``, ``idm``} and ``single_system`` / {``vanilla``, ``moe``},
 all verified on real weights for both training and deploy. ``joint_self_attn``
 and ``idm`` ride MoT via the und-prefix-KV declaration + GQA KV-expand;
 ``tri_system`` is rejected (its driver does not widen the joint mask).
@@ -439,7 +439,7 @@ class Cosmos3EdgeVideoBackbone(VideoBackbone):
         return idm_merge.split_branches(merged, noisy, cond)
 
     # ================================================================
-    # Shared-backbone: action/state tokens ride the gen stream
+    # Single-system: action/state tokens ride the gen stream
     # ================================================================
 
     def assert_ready_for_shared_tokens(self, state: BlockLoopState) -> None:

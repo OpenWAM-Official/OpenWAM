@@ -38,7 +38,7 @@ here. Full license texts are included under `third_party/licenses/`.
 - Copyright: Meta Platforms, Inc. and affiliates.
 - License: MIT; see `third_party/licenses/V-JEPA2-MIT.txt`.
 - OpenWAM use: vendored and adapted V-JEPA ViT components under
-  `openwam/model/video_backbone/encoder/vjepa2_src/`.
+  `openwam/model/video_backbone/encoder/vjepa21_src/`.
 - Modifications: packaged in-tree, coupled to an OpenWAM manifest/weight loader,
   and patched for OpenWAM's dtype and encoder contracts.
 
@@ -51,7 +51,7 @@ here. Full license texts are included under `third_party/licenses/`.
 - License for the upstream inference source: Apache License 2.0; see
   `third_party/licenses/Apache-2.0.txt`.
 - OpenWAM use: encoder-side autoencoder implementation in
-  `openwam/model/video_backbone/encoder/flux_vae_src/autoencoder.py`.
+  `openwam/model/video_backbone/encoder/flux2_vae_src/autoencoder.py`.
 - Modifications: removed decoder-only functionality and added OpenWAM-specific
   checkpoint conversion and encoder integration.
 

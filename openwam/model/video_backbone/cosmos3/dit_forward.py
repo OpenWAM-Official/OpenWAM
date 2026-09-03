@@ -309,7 +309,7 @@ def _gen_block_forward(
     ``[und K/V ; gen K/V]`` (GQA) + gen MLP. Mirrors the upstream layer body.
 
     ``gen_mask`` is an optional ``(S, S)`` (or ``(B, 1, S, S)``) bool mask over
-    the gen block of the key axis — the shared-backbone path passes the joint
+    the gen block of the key axis — the single-system path passes the joint
     cross-modal mask there so injected action/state tokens obey the configured
     visibility. ``None`` keeps the gen block fully visible (the plain video path).
     """
@@ -356,7 +356,7 @@ def _gen_block_forward(
 def run_block(net, block_id: int, state: BlockLoopState) -> BlockLoopState:
     layer = net.layers[block_id]
     k_und, v_und = state.extras["und_kv"][block_id]
-    # Shared-backbone mode rides the same block forward: action/state tokens are
+    # Single-system mode rides the same block forward: action/state tokens are
     # just extra gen tokens (Cosmos3 has no AdaLN, so there is no per-frame
     # modulation to expand — unlike the predict2.5 shared path).
     state.hidden_states = gradient_checkpoint_forward(

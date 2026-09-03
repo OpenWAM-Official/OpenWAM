@@ -61,7 +61,7 @@ def test_factor_one_no_round_up(capsys):
     assert "num_frames" not in out, f"unexpected round-up message: {out!r}"
 
 
-def test_wan_vae_factor_four_already_compliant_no_round_up(capsys):
+def test_wan22_vae_factor_four_already_compliant_no_round_up(capsys):
     """Wan VAE: factor=4, remainder=1, num_frames=9 satisfies 9 % 4 == 1.
     Method returns 9 unchanged and prints nothing."""
     pipe = _StubPipe(time_division_factor=4, time_division_remainder=1)
@@ -70,7 +70,7 @@ def test_wan_vae_factor_four_already_compliant_no_round_up(capsys):
     assert "num_frames" not in out
 
 
-def test_wan_vae_factor_four_round_up_still_works(capsys):
+def test_wan22_vae_factor_four_round_up_still_works(capsys):
     """Regression guard: the fix must NOT break legitimate round-up for
     factor > 1. num_frames=8, factor=4, remainder=1 → round up to 9."""
     pipe = _StubPipe(time_division_factor=4, time_division_remainder=1)

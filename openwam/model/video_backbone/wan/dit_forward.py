@@ -46,7 +46,7 @@ def build_time_modulation(
         time_embed = dit.time_embedding(time_sinusoid.to(latents.dtype)).reshape(batch_size, -1, dit.dim)
         time_modulation = dit.time_projection(time_embed).unflatten(2, (6, dit.dim))
     elif force_per_token_t_mod:
-        # Non-TI2V backbones under joint-attention / shared_backbone need 4D
+        # Non-TI2V backbones under joint-attention / single_system need 4D
         # t_mod. Compute the time embedding once on (B,) and broadcast to
         # (B, L, dim) — a per-token MLP would repeat the stack L times.
         batch_size = latents.shape[0]
@@ -93,7 +93,7 @@ def apply_post_block_residuals(block_id: int, state) -> None:
             # dual_system / video-only: hint spans the full sequence.
             state.hidden_states = state.hidden_states + current_vace_hint
         elif state.hidden_states.shape[1] > vace_len:
-            # shared_backbone: residual applies only to the leading video
+            # single_system: residual applies only to the leading video
             # slice; action/state tokens get VACE via self-attention.
             video_slice = state.hidden_states[:, :vace_len] + current_vace_hint
             state.hidden_states = torch.cat([video_slice, state.hidden_states[:, vace_len:]], dim=1)
@@ -103,6 +103,6 @@ def apply_post_block_residuals(block_id: int, state) -> None:
             raise ValueError(
                 f"apply_post_block_residuals: state.hidden_states.shape[1]={state.hidden_states.shape[1]} "
                 f"< vace_hint.shape[1]={vace_len} at block {block_id}; "
-                "this is unreachable under dual_system or shared_backbone today—"
+                "this is unreachable under dual_system or single_system today—"
                 "investigate the upstream caller before patching this branch."
             )

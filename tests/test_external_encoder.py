@@ -190,15 +190,15 @@ class _FakeWanVAEModule(nn.Module):
         return torch.zeros(B, 3, T * 4, H * self.upsampling_factor, W * self.upsampling_factor)
 
 
-def test_B1_wan_vae_registered():
-    """Importing the encoder package registers wan_vae under that name."""
+def test_B1_wan22_vae_registered():
+    """Importing the encoder package registers wan22_vae under that name."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
 
-    assert "wan_vae" in _VIDEO_ENCODER_REGISTRY
-    assert _VIDEO_ENCODER_REGISTRY["wan_vae"] is WanVideoVAEEncoder
+    assert "wan22_vae" in _VIDEO_ENCODER_REGISTRY
+    assert _VIDEO_ENCODER_REGISTRY["wan22_vae"] is WanVideoVAEEncoder
 
 
-def test_B2_wan_vae_default_hooks_match_wan21():
+def test_B2_wan22_vae_default_hooks_match_wan21():
     """Wan2.1 family: z_dim=16, upsampling_factor=8 → Conv3d(16, dit, (1,2,2), (1,2,2))."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
 
@@ -216,7 +216,7 @@ def test_B2_wan_vae_default_hooks_match_wan21():
     assert (out.in_features, out.out_features) == (1536, 16 * 4)  # z_dim * prod((1,2,2))
 
 
-def test_B3_wan_vae_default_hooks_match_wan22():
+def test_B3_wan22_vae_default_hooks_match_wan22():
     """Wan2.2 family: z_dim=48, upsampling_factor=16. Same kernel layout, only z_dim differs."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
 
@@ -230,7 +230,7 @@ def test_B3_wan_vae_default_hooks_match_wan22():
     assert out.out_features == 48 * 4
 
 
-def test_B4_wan_vae_pixel_decode_true_by_default():
+def test_B4_wan22_vae_pixel_decode_true_by_default():
     """Wan VAE has a real pixel decoder → properties.pixel_decode inherits the dataclass
     default ``True``. Confirms WanVideoVAEEncoder doesn't accidentally flip it."""
     from openwam.model.video_backbone.encoder import WanVideoVAEEncoder
@@ -804,7 +804,7 @@ def test_D2_encoder_block_with_from_scratch_false_silently_ignored(monkeypatch, 
             "name": "wan22_ti2v_5b",
             "model_path": "/dummy",
             "from_scratch": False,
-            "encoder": {"name": "wan_vae", "model_path": "/dummy"},
+            "encoder": {"name": "wan22_vae", "model_path": "/dummy"},
         }
     }
     _run_init_video_backbone(cfg)
@@ -858,7 +858,7 @@ def test_D2b_deploy_with_encoder_block_and_from_scratch_false_keeps_native_vae(m
             "name": "wan22_ti2v_5b",
             "model_path": "/dummy",
             "from_scratch": False,
-            "encoder": {"name": "wan_vae", "model_path": "/dummy"},
+            "encoder": {"name": "wan22_vae", "model_path": "/dummy"},
             "_source": {"components": [{"attr": "vae", "model_class": "x", "extra_kwargs": {}}]},
         }
     }
@@ -906,7 +906,7 @@ def test_D3_encoder_built_when_from_scratch_true_and_encoder_set(monkeypatch):
             "name": "wan22_ti2v_5b",
             "model_path": "/dummy",
             "from_scratch": True,
-            "encoder": {"name": "wan_vae", "model_path": "/dummy"},
+            "encoder": {"name": "wan22_vae", "model_path": "/dummy"},
         }
     }
     _run_init_video_backbone(cfg)
@@ -1164,7 +1164,7 @@ def test_M3b_from_pretrained_routes_skip_native_vae():
         pb_mod.build_training_pipeline = original_btp
 
 
-def test_M3c_wan_vae_encoder_from_skeleton_matches_from_pretrained_topology():
+def test_M3c_wan22_vae_encoder_from_skeleton_matches_from_pretrained_topology():
     """``WanVideoVAEEncoder.from_skeleton(entry)`` (deploy-time, zero
     weights) must produce a state_dict with the EXACT same key set as
     ``WanVideoVAEEncoder(loaded_vae)`` (training-time). Otherwise the
@@ -1212,12 +1212,12 @@ def test_M3d_build_external_encoder_skeleton_picks_vae_entry_from_source():
         register_video_encoder,
     )
 
-    # Use the real wan_vae registry entry — it owns the from_skeleton
+    # Use the real wan22_vae registry entry — it owns the from_skeleton
     # implementation that the deploy path will route through in
     # production.
-    assert _VIDEO_ENCODER_REGISTRY["wan_vae"] is WanVideoVAEEncoder
+    assert _VIDEO_ENCODER_REGISTRY["wan22_vae"] is WanVideoVAEEncoder
 
-    enc_cfg = {"name": "wan_vae", "model_path": "/unused-on-deploy-path"}
+    enc_cfg = {"name": "wan22_vae", "model_path": "/unused-on-deploy-path"}
     source = {
         "components": [
             {
@@ -1422,8 +1422,8 @@ def test_M3f_train_save_deploy_state_dict_topology_matches():
     )
 
 
-def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimizer():
-    """End-to-end check for the ``from_scratch=true + encoder.name=wan_vae``
+def test_D8_wan22_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimizer():
+    """End-to-end check for the ``from_scratch=true + encoder.name=wan22_vae``
     path: starting from the yaml freeze list, walk the actual production
     code (``BaseWAMArchitecture.freeze_modules`` →
     ``build_trainable_parameters``) and verify ZERO encoder parameters survive
@@ -1518,7 +1518,7 @@ def test_D8_wan_vae_path_end_to_end_freeze_excludes_encoder_params_from_optimize
     "yaml_path",
     [
         "configs/model/dual_system.yaml",
-        "configs/model/shared_backbone.yaml",
+        "configs/model/single_system.yaml",
         "configs/model/tri_system.yaml",
     ],
 )
@@ -1551,12 +1551,12 @@ def test_D7_model_yaml_freezes_encoder(yaml_path):
 
 @pytest.mark.parametrize(
     "model_name",
-    ["dual_system", "shared_backbone", "tri_system"],
+    ["dual_system", "single_system", "tri_system"],
 )
 def test_E_composed_encoder_block(model_name):
     """Each framework composes video_backbone from the Hydra `video_backbone`
-    group (default wan.yaml → encoder/wan_vae.yaml); the composed config must
-    expose video_backbone.encoder: {name=wan_vae, model_path=...} so the
+    group (default wan.yaml → encoder/wan22_vae.yaml); the composed config must
+    expose video_backbone.encoder: {name=wan22_vae, model_path=...} so the
     encoder-gate path is identical across architectures."""
     import os
     import pathlib
@@ -1572,7 +1572,7 @@ def test_E_composed_encoder_block(model_name):
 
     enc = cfg.model.video_backbone.get("encoder")
     assert enc is not None, f"{model_name} missing video_backbone.encoder"
-    assert enc.name == "wan_vae", f"{model_name} default encoder.name should be wan_vae, got {enc.name!r}"
+    assert enc.name == "wan22_vae", f"{model_name} default encoder.name should be wan22_vae, got {enc.name!r}"
     assert "model_path" in enc, f"{model_name} encoder block missing model_path"
     extras = set(enc.keys()) - {"name", "model_path"}
     assert extras == set(), f"{model_name} encoder block has extra fields {extras}"
@@ -1617,24 +1617,24 @@ class _MockVJEPAViT(nn.Module):
 
 def _build_vjepa_encoder(embed_dim: int = 8):
     """Construct a ``VJEPA21VideoEncoder`` around the mock ViT, no weights load."""
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     vit = _MockVJEPAViT(embed_dim=embed_dim)
     return VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="mock")
 
 
 def test_V1_vjepa21_registration_round_trip():
-    """``register_video_encoder("vjepa2_1")`` exposes the class via the registry."""
+    """``register_video_encoder("vjepa21")`` exposes the class via the registry."""
     from openwam.model.video_backbone.encoder import _VIDEO_ENCODER_REGISTRY
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: F401
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder  # noqa: F401
 
-    assert "vjepa2_1" in _VIDEO_ENCODER_REGISTRY
-    assert _VIDEO_ENCODER_REGISTRY["vjepa2_1"] is VJEPA21VideoEncoder
+    assert "vjepa21" in _VIDEO_ENCODER_REGISTRY
+    assert _VIDEO_ENCODER_REGISTRY["vjepa21"] is VJEPA21VideoEncoder
 
 
 def test_V2_vjepa21_from_pretrained_missing_manifest(tmp_path):
     """``from_pretrained`` on a dir without ``manifest.json`` raises FileNotFoundError."""
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     with pytest.raises(FileNotFoundError, match="manifest.json"):
         VJEPA21VideoEncoder.from_pretrained(str(tmp_path))
@@ -1672,7 +1672,7 @@ def test_V5_vjepa21_batch_encode_t_lat_shapes():
     T_pixel == 1 -> T_lat == 1; T_pixel == 5 -> T_lat == 2; T_pixel == 9
     -> T_lat == 3 (== 1 + (T_pixel - 1) / 4).
 
-    Independent of ``vjepa2_1_forward`` — both modes preserve the
+    Independent of ``vjepa21_forward`` — both modes preserve the
     (1 cond + N_target/4 target) layout the host backbone consumes. The
     /4 factor comes from ViT tubelet=2 followed by the encoder-side
     avg-pool over time with stride=2 (Wan VAE parity). T_pixel=5 is the
@@ -1756,47 +1756,47 @@ class _SpyVJEPAViT(nn.Module):
         return self._proj(seed)
 
 
-def _build_vjepa_spy_encoder(*, embed_dim: int = 8, vjepa2_1_forward: str = "video"):
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+def _build_vjepa_spy_encoder(*, embed_dim: int = 8, vjepa21_forward: str = "video"):
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     vit = _SpyVJEPAViT(embed_dim=embed_dim)
-    enc = VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="spy", vjepa2_1_forward=vjepa2_1_forward)
+    enc = VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="spy", vjepa21_forward=vjepa21_forward)
     return enc, vit
 
 
 def test_V6b_vjepa21_forward_default_is_video():
-    """No-kwarg construction picks ``vjepa2_1_forward="video"`` — the
+    """No-kwarg construction picks ``vjepa21_forward="video"`` — the
     intended default after this PR (so cond and target both come from the
     V-JEPA video branch).
     """
     enc = _build_vjepa_encoder()
-    assert enc.vjepa2_1_forward == "video"
+    assert enc.vjepa21_forward == "video"
 
 
 def test_V6c_vjepa21_invalid_forward_raises():
-    """Constructing with an unknown ``vjepa2_1_forward`` value fails fast
+    """Constructing with an unknown ``vjepa21_forward`` value fails fast
     at __init__ rather than producing a confusing branch-routing error
     inside ``batch_encode``.
     """
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
-    with pytest.raises(ValueError, match="vjepa2_1_forward must be one of"):
+    with pytest.raises(ValueError, match="vjepa21_forward must be one of"):
         VJEPA21VideoEncoder(
             _MockVJEPAViT(embed_dim=8),
             embed_dim=8,
             variant="mock",
-            vjepa2_1_forward="image",  # type: ignore[arg-type]
+            vjepa21_forward="image",  # type: ignore[arg-type]
         )
 
 
 def test_V6d_vjepa21_video_mode_cond_dups_frame_zero():
-    """``vjepa2_1_forward="video"``: cond pass dups frame 0 and routes the
+    """``vjepa21_forward="video"``: cond pass dups frame 0 and routes the
     2-frame clip through the video branch (T=2). Target pass prepends the
     same dup'd pair to N target frames (T=2+N). Two video-branch forwards
     total — no image-branch call. The encoder-side avg-pool is invisible
     in the call_log (it happens after the forwards complete).
     """
-    enc, vit = _build_vjepa_spy_encoder(vjepa2_1_forward="video")
+    enc, vit = _build_vjepa_spy_encoder(vjepa21_forward="video")
     # T_pixel=9 → N_target=8, so target-pass clip has T=2+8=10.
     z = enc.batch_encode(torch.randn(1, 3, 9, 32, 32))
     assert z.shape == (1, 8, 3, 2, 2)  # 1 cond + 2 pooled target = 3 latent slices
@@ -1805,12 +1805,12 @@ def test_V6d_vjepa21_video_mode_cond_dups_frame_zero():
 
 
 def test_V6e_vjepa21_mixed_mode_cond_uses_image_branch():
-    """``vjepa2_1_forward="mixed"``: cond pass routes frame 0 through the
+    """``vjepa21_forward="mixed"``: cond pass routes frame 0 through the
     image branch (T=1). Target pass is unchanged — still the prepend-and-
     drop-then-avg-pool path (T=2+N). One image-branch + one video-branch
     forward.
     """
-    enc, vit = _build_vjepa_spy_encoder(vjepa2_1_forward="mixed")
+    enc, vit = _build_vjepa_spy_encoder(vjepa21_forward="mixed")
     z = enc.batch_encode(torch.randn(1, 3, 9, 32, 32))
     assert z.shape == (1, 8, 3, 2, 2)
     ts = [c["T"] for c in vit.call_log]
@@ -1827,7 +1827,7 @@ def test_V6f_vjepa21_target_pass_drops_prepended_slice():
     the drop we'd have ``1 + 1 + N/2 = 2 + N/2`` raw latents, then ``(2 +
     N/2) / 2`` after pool. With the drop, ``1 + N/4`` (N=8 → 1 + 2 = 3).
     """
-    enc, vit = _build_vjepa_spy_encoder(vjepa2_1_forward="video")
+    enc, vit = _build_vjepa_spy_encoder(vjepa21_forward="video")
     z = enc.batch_encode(torch.randn(1, 3, 9, 32, 32))
     assert z.shape[2] == 3  # 1 cond + 2 pooled target; both steps verified
     # Second call is the target pass with 2 prepended + 8 targets.
@@ -1839,8 +1839,8 @@ def test_V6g_vjepa21_t_pixel_1_honours_forward_mode():
     pass only. The forward mode still selects the branch: ``video`` dups,
     ``mixed`` goes single-frame.
     """
-    enc_v, vit_v = _build_vjepa_spy_encoder(vjepa2_1_forward="video")
-    enc_m, vit_m = _build_vjepa_spy_encoder(vjepa2_1_forward="mixed")
+    enc_v, vit_v = _build_vjepa_spy_encoder(vjepa21_forward="video")
+    enc_m, vit_m = _build_vjepa_spy_encoder(vjepa21_forward="mixed")
     z_v = enc_v.batch_encode(torch.randn(1, 3, 1, 32, 32))
     z_m = enc_m.batch_encode(torch.randn(1, 3, 1, 32, 32))
     assert z_v.shape == z_m.shape == (1, 8, 1, 2, 2)
@@ -1903,11 +1903,11 @@ class _NaNPropagatingVJEPAViT(nn.Module):
         return self._proj(flat)
 
 
-def _build_vjepa_nan_propagating_encoder(*, embed_dim: int = 8, vjepa2_1_forward: str = "video"):
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+def _build_vjepa_nan_propagating_encoder(*, embed_dim: int = 8, vjepa21_forward: str = "video"):
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     vit = _NaNPropagatingVJEPAViT(embed_dim=embed_dim)
-    return VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="nan-prop", vjepa2_1_forward=vjepa2_1_forward)
+    return VJEPA21VideoEncoder(vit, embed_dim=embed_dim, variant="nan-prop", vjepa21_forward=vjepa21_forward)
 
 
 @pytest.mark.parametrize("mode", ["video", "mixed"])
@@ -1922,13 +1922,13 @@ def test_V6j_vjepa21_cond_does_not_leak_target_pixels(mode):
     latent. NaN propagates through the avg-pool (mean of any NaN-tainted
     group is NaN), so the post-pool target slices stay NaN-tainted too.
     """
-    enc = _build_vjepa_nan_propagating_encoder(vjepa2_1_forward=mode)
+    enc = _build_vjepa_nan_propagating_encoder(vjepa21_forward=mode)
     video = torch.zeros(1, 3, 9, 32, 32)
     video[:, :, 1:] = float("nan")  # target frames poisoned; frame 0 still clean
     z = enc.batch_encode(video)
     assert z.shape == (1, 8, 3, 2, 2)
     assert not torch.isnan(z[:, :, 0:1]).any(), (
-        f"cond latent contains NaN under vjepa2_1_forward={mode!r} — target frames are leaking into the cond pass"
+        f"cond latent contains NaN under vjepa21_forward={mode!r} — target frames are leaking into the cond pass"
     )
     # ``.all()`` is the right strength here: every target pixel frame is
     # NaN, the tubelet=2 pool groups each contain at least one NaN frame
@@ -1947,15 +1947,15 @@ def test_V6j_vjepa21_cond_does_not_leak_target_pixels(mode):
 
 def test_V6i_vjepa21_from_pretrained_forwards_yaml_field(tmp_path, monkeypatch):
     """End-to-end yaml plumbing: ``build_video_encoder`` packs
-    ``vjepa2_1_forward`` from cfg into ``from_pretrained(...)`` kwargs, and
+    ``vjepa21_forward`` from cfg into ``from_pretrained(...)`` kwargs, and
     the constructed encoder reflects the chosen mode. Uses the fake-imports
     helper so no actual V-JEPA weights are needed.
     """
     import json as _json
 
     from openwam.model.video_backbone.encoder import build_video_encoder
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
-    from openwam.model.video_backbone.encoder.vjepa2_1 import loader as _vjepa_loader
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import loader as _vjepa_loader
 
     # Wire fake vjepa2 modules; route the arch wrapper to our spy ViT.
     # ``vit_kwargs`` from ``_build_vit_from_manifest`` does NOT include
@@ -1988,13 +1988,13 @@ def test_V6i_vjepa21_from_pretrained_forwards_yaml_field(tmp_path, monkeypatch):
 
     enc = build_video_encoder(
         {
-            "name": "vjepa2_1",
+            "name": "vjepa21",
             "model_path": str(tmp_path),
-            "vjepa2_1_forward": "mixed",
+            "vjepa21_forward": "mixed",
         }
     )
     assert isinstance(enc, VJEPA21VideoEncoder)
-    assert enc.vjepa2_1_forward == "mixed"
+    assert enc.vjepa21_forward == "mixed"
 
 
 def test_V7_vjepa21_default_dit_input_proj_shape():
@@ -2028,7 +2028,7 @@ def test_V8_vjepa21_from_pretrained_rejects_manifest_geometry_mismatch(tmp_path,
     """
     import json as _json
 
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2060,7 +2060,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
     crash, exercised against the canonical manifest the production checkpoint
     ships with.
     """
-    from openwam.model.video_backbone.encoder.vjepa2_1 import loader as _vjepa_loader
+    from openwam.model.video_backbone.encoder.vjepa21 import loader as _vjepa_loader
 
     captured_kwargs: dict = {}
 
@@ -2080,9 +2080,9 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
     fake_vjepa_modules = types.SimpleNamespace(
         rotate_queries_or_keys=lambda x, pos, n_registers, has_cls_first: x,
     )
-    vjepa2_src = "openwam.model.video_backbone.encoder.vjepa2_src"
-    monkeypatch.setitem(sys.modules, f"{vjepa2_src}.vision_transformer", fake_module)
-    monkeypatch.setitem(sys.modules, f"{vjepa2_src}.modules", fake_vjepa_modules)
+    vjepa21_src = "openwam.model.video_backbone.encoder.vjepa21_src"
+    monkeypatch.setitem(sys.modules, f"{vjepa21_src}.vision_transformer", fake_module)
+    monkeypatch.setitem(sys.modules, f"{vjepa21_src}.modules", fake_vjepa_modules)
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2108,7 +2108,7 @@ def test_V9_vjepa21_load_vit_no_double_use_rope_on_rope_arch(monkeypatch):
 def test_V10_vjepa21_load_vit_rope_arch_with_use_rope_false_fails_fast():
     """Manifest with ``arch_name=*_rope`` and ``use_rope=False`` is contradictory —
     we raise a ``ValueError`` at load time instead of silently overriding."""
-    from openwam.model.video_backbone.encoder.vjepa2_1 import loader as _vjepa_loader
+    from openwam.model.video_backbone.encoder.vjepa21 import loader as _vjepa_loader
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2155,11 +2155,11 @@ def _install_fake_vjepa_modules(monkeypatch, wrapper_factory):
         rotate_queries_or_keys=lambda x, pos, n_registers, has_cls_first: x,
     )
     # ``loader.prepare_vjepa_imports_and_patch`` does
-    # ``from ...vjepa2_src import vision_transformer, modules`` — inject the
+    # ``from ...vjepa21_src import vision_transformer, modules`` — inject the
     # fakes at those sys.modules keys so no real (timm-dependent) ViT loads.
-    vjepa2_src = "openwam.model.video_backbone.encoder.vjepa2_src"
-    monkeypatch.setitem(sys.modules, f"{vjepa2_src}.vision_transformer", vision_transformer)
-    monkeypatch.setitem(sys.modules, f"{vjepa2_src}.modules", fake_vjepa_modules)
+    vjepa21_src = "openwam.model.video_backbone.encoder.vjepa21_src"
+    monkeypatch.setitem(sys.modules, f"{vjepa21_src}.vision_transformer", vision_transformer)
+    monkeypatch.setitem(sys.modules, f"{vjepa21_src}.modules", fake_vjepa_modules)
 
 
 def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
@@ -2169,7 +2169,7 @@ def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
     """
     import json as _json
 
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2211,24 +2211,24 @@ def test_V11_vjepa21_from_skeleton_happy_path(tmp_path, monkeypatch):
     assert captured["tubelet_size"] == 2
 
 
-def test_V11b_vjepa21_from_skeleton_propagates_vjepa2_1_forward(tmp_path, monkeypatch, caplog):
+def test_V11b_vjepa21_from_skeleton_propagates_vjepa21_forward(tmp_path, monkeypatch, caplog):
     """Deploy-side knob plumbing — positive path. Pair to ``test_V11`` which
     omits the field (default branch) and ``test_W9`` / ``test_W9b`` which
     cover the rejection side on V-JEPA 2:
 
-    - ``encoder_cfg={"vjepa2_1_forward": "mixed", ...}`` → the built
-      encoder reports ``vjepa2_1_forward == "mixed"`` and the migration
+    - ``encoder_cfg={"vjepa21_forward": "mixed", ...}`` → the built
+      encoder reports ``vjepa21_forward == "mixed"`` and the migration
       warning is silent (the field is present, so this is NOT a pre-PR
       checkpoint).
     - ``encoder_cfg`` without the field → resolved mode is the default
       AND the migration warning fires once, so an operator who deploys
-      a pre-PR checkpoint without hand-adding ``vjepa2_1_forward: mixed``
+      a pre-PR checkpoint without hand-adding ``vjepa21_forward: mixed``
       sees a noisy signal instead of a silently-divergent cond latent.
     """
     import json as _json
     import logging
 
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     manifest = {
         "arch_name": "vit_giant_xformers_rope",
@@ -2253,31 +2253,31 @@ def test_V11b_vjepa21_from_skeleton_propagates_vjepa2_1_forward(tmp_path, monkey
 
     # --- Path A: field explicit → no warning ---
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.encoder.vjepa2_1"):
+    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.encoder.vjepa21"):
         enc_mixed = VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "ignored", "extra_kwargs": {}},
-            encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path), "vjepa2_1_forward": "mixed"},
+            encoder_cfg={"name": "vjepa21", "model_path": str(tmp_path), "vjepa21_forward": "mixed"},
             ckpt_dir=str(tmp_path),
         )
-    assert enc_mixed.vjepa2_1_forward == "mixed"
+    assert enc_mixed.vjepa21_forward == "mixed"
     # Render via ``getMessage()`` (not ``r.message``) so the assertion compares
     # against the formatted log line — robust to %-substitutions and parity
     # with ``test_W17``'s path B style.
-    assert not any("vjepa2_1_forward" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records), (
-        "explicit vjepa2_1_forward must NOT trip the pre-PR-checkpoint warning"
+    assert not any("vjepa21_forward" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records), (
+        "explicit vjepa21_forward must NOT trip the pre-PR-checkpoint warning"
     )
 
     # --- Path B: field absent → default + warning ---
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.encoder.vjepa2_1"):
+    with caplog.at_level(logging.WARNING, logger="openwam.model.video_backbone.encoder.vjepa21"):
         enc_default = VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "ignored", "extra_kwargs": {}},
-            encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
+            encoder_cfg={"name": "vjepa21", "model_path": str(tmp_path)},
             ckpt_dir=str(tmp_path),
         )
-    assert enc_default.vjepa2_1_forward == "video"  # current _VJEPA21_FORWARD_DEFAULT
+    assert enc_default.vjepa21_forward == "video"  # current _VJEPA21_FORWARD_DEFAULT
     warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("vjepa2_1_forward" in m and "mixed" in m for m in warning_msgs), (
+    assert any("vjepa21_forward" in m and "mixed" in m for m in warning_msgs), (
         f"expected migration warning naming the field and the legacy ``mixed`` value; got: {warning_msgs}"
     )
 
@@ -2288,7 +2288,7 @@ def test_V12_vjepa21_from_skeleton_requires_ckpt_dir():
     fallback). components_entry alone doesn't carry ViT geometry (it's the
     Wan VAE class).
     """
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     with pytest.raises(FileNotFoundError, match=r"ckpt_dir"):
         VJEPA21VideoEncoder.from_skeleton(
@@ -2304,20 +2304,20 @@ def test_V13_vjepa21_from_skeleton_ignores_model_path_without_ckpt_dir(tmp_path)
     """
     import json as _json
 
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     # model_path HAS a manifest, but no ckpt_dir is given → must still fail.
     (tmp_path / "manifest.json").write_text(_json.dumps(_build_vjepa_manifest_payload()))
     with pytest.raises(FileNotFoundError, match=r"ckpt_dir"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
-            encoder_cfg={"name": "vjepa2_1", "model_path": str(tmp_path)},
+            encoder_cfg={"name": "vjepa21", "model_path": str(tmp_path)},
         )
 
 
 def test_V14_vjepa21_from_skeleton_missing_manifest(tmp_path):
     """``ckpt_dir`` that has no ``manifest.json`` → FileNotFoundError."""
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     with pytest.raises(FileNotFoundError, match="manifest.json"):
         VJEPA21VideoEncoder.from_skeleton(
@@ -2356,7 +2356,7 @@ def test_V15_vjepa21_from_skeleton_prefers_ckpt_dir_manifest(tmp_path, monkeypat
     """
     import json as _json
 
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     ckpt_dir = tmp_path / "ckpt"
     ckpt_dir.mkdir()
@@ -2372,7 +2372,7 @@ def test_V15_vjepa21_from_skeleton_prefers_ckpt_dir_manifest(tmp_path, monkeypat
     # (which has no manifest fallback after A3).
     enc = VJEPA21VideoEncoder.from_skeleton(
         components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
-        encoder_cfg={"name": "vjepa2_1", "model_path": "/nonexistent/unmounted/path"},
+        encoder_cfg={"name": "vjepa21", "model_path": "/nonexistent/unmounted/path"},
         ckpt_dir=str(ckpt_dir),
     )
     assert isinstance(enc, VJEPA21VideoEncoder)
@@ -2387,7 +2387,7 @@ def test_V16_vjepa21_from_skeleton_no_model_path_fallback(tmp_path):
     """
     import json as _json
 
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     ckpt_dir = tmp_path / "ckpt"
     ckpt_dir.mkdir()  # no manifest.json here
@@ -2398,7 +2398,7 @@ def test_V16_vjepa21_from_skeleton_no_model_path_fallback(tmp_path):
     with pytest.raises(FileNotFoundError, match="manifest.json"):
         VJEPA21VideoEncoder.from_skeleton(
             components_entry={"attr": "vae", "model_class": "Wan", "extra_kwargs": {}},
-            encoder_cfg={"name": "vjepa2_1", "model_path": str(encoder_src)},
+            encoder_cfg={"name": "vjepa21", "model_path": str(encoder_src)},
             ckpt_dir=str(ckpt_dir),
         )
 
@@ -2407,7 +2407,7 @@ def test_V17_vjepa21_from_skeleton_no_manifest_names_ckpt_dir(tmp_path):
     """Missing manifest fails with an error naming ckpt_dir — the only source
     consulted (no encoder.model_path fallback after A3).
     """
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder
 
     ckpt_dir = tmp_path / "ckpt"
     ckpt_dir.mkdir()  # empty
@@ -2444,7 +2444,7 @@ def test_V18_vjepa21_save_deploy_assets_copies_manifest(tmp_path, monkeypatch):
     # copy hook, which is a method on the encoder *instance*).
     enc = _build_vjepa_encoder(embed_dim=1408)
     cfg = OmegaConf.create(
-        {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(encoder_src)}}}}
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa21", "model_path": str(encoder_src)}}}}
     )
     enc.save_deploy_assets(str(output_dir), cfg)
 
@@ -2458,7 +2458,7 @@ def test_V19_vjepa21_save_deploy_assets_missing_cfg_raises(tmp_path):
     raises — :meth:`from_skeleton` has no fallback, so a checkpoint saved
     without its manifest can't be deployed.
     """
-    from openwam.model.video_backbone.encoder.vjepa2_1 import VJEPA21VideoEncoder  # noqa: F401
+    from openwam.model.video_backbone.encoder.vjepa21 import VJEPA21VideoEncoder  # noqa: F401
 
     enc = _build_vjepa_encoder(embed_dim=1408)
 
@@ -2476,7 +2476,7 @@ def test_V19_vjepa21_save_deploy_assets_missing_cfg_raises(tmp_path):
     empty_src = tmp_path / "empty"
     empty_src.mkdir()
     cfg = OmegaConf.create(
-        {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(empty_src)}}}}
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa21", "model_path": str(empty_src)}}}}
     )
     with pytest.raises(FileNotFoundError, match="manifest.json"):
         enc.save_deploy_assets(str(output_dir), cfg)
@@ -2502,7 +2502,7 @@ def test_V20_vjepa21_save_deploy_assets_io_error_raises(tmp_path, monkeypatch):
     output_dir.mkdir()
     enc = _build_vjepa_encoder(embed_dim=1408)
     cfg = OmegaConf.create(
-        {"model": {"video_backbone": {"encoder": {"name": "vjepa2_1", "model_path": str(encoder_src)}}}}
+        {"model": {"video_backbone": {"encoder": {"name": "vjepa21", "model_path": str(encoder_src)}}}}
     )
 
     def _boom(*args, **kwargs):
@@ -2532,9 +2532,9 @@ def test_V21_vjepa21_feature_norm_keys_present_in_state_dict():
     assert "feature_norm.bias" in keys, "feature_norm.bias is missing from V-JEPA encoder state_dict."
 
 
-def test_X1_flux_vae_save_deploy_assets_self_contained(tmp_path):
+def test_X1_flux2_vae_save_deploy_assets_self_contained(tmp_path):
     """``FluxVAEVideoEncoder.save_deploy_assets`` copies the FLUX.2 VAE
-    config.json into ``<ckpt>/flux_vae/config.json``, and ``_resolve_config_dir``
+    config.json into ``<ckpt>/flux2_vae/config.json``, and ``_resolve_config_dir``
     reads only that checkpoint-local copy — deploy is strictly self-contained
     (no ``encoder.model_path`` fallback). Mirrors V-JEPA's manifest
     self-containment (test_V18).
@@ -2545,7 +2545,7 @@ def test_X1_flux_vae_save_deploy_assets_self_contained(tmp_path):
     """
     from omegaconf import OmegaConf
 
-    from openwam.model.video_backbone.encoder.flux_vae import _FLUX_CKPT_SUBDIR, FluxVAEVideoEncoder
+    from openwam.model.video_backbone.encoder.flux2_vae import _FLUX_CKPT_SUBDIR, FluxVAEVideoEncoder
 
     src = tmp_path / "flux_src"
     src.mkdir()
@@ -2571,17 +2571,17 @@ def test_X1_flux_vae_save_deploy_assets_self_contained(tmp_path):
         FluxVAEVideoEncoder._resolve_config_dir(str(empty_ckpt))
 
 
-def test_X2_flux_vae_save_deploy_assets_missing_cfg_raises(tmp_path):
+def test_X2_flux2_vae_save_deploy_assets_missing_cfg_raises(tmp_path):
     """Strict self-contained: ``save_deploy_assets`` raises on an unresolvable
     cfg (no ``encoder.model_path``) — :meth:`from_skeleton` has no fallback, so
     a checkpoint saved without its config sidecar can't be deployed.
     """
-    from openwam.model.video_backbone.encoder.flux_vae import FluxVAEVideoEncoder
+    from openwam.model.video_backbone.encoder.flux2_vae import FluxVAEVideoEncoder
 
     enc = FluxVAEVideoEncoder.__new__(FluxVAEVideoEncoder)
     with pytest.raises(FileNotFoundError):
         enc.save_deploy_assets(str(tmp_path), cfg={})  # no encoder.model_path -> raise
-    assert not (tmp_path / "flux_vae").exists()
+    assert not (tmp_path / "flux2_vae").exists()
 
 
 def test_Y1_dinov3_save_deploy_assets_self_contained(tmp_path):

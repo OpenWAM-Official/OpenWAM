@@ -1,7 +1,7 @@
 """Shared components for action model architectures.
 
 These building blocks are reused across DualSystem (``ActionDiT``) and
-SharedBackbone (``SharedVanillaActionBackbone`` / ``SharedMoEActionBackbone``).
+SingleSystem (``SharedVanillaActionBackbone`` / ``SharedMoEActionBackbone``).
 """
 
 import logging
@@ -193,9 +193,9 @@ class ActionEncoder(nn.Module):
 
 
 class StateEncoder(nn.Module):
-    """Project proprioceptive state into one shared-backbone state token.
+    """Project proprioceptive state into one single-system state token.
 
-    The first shared-backbone proprio path uses a single current-state token:
+    The first single-system proprio path uses a single current-state token:
     input ``(D,)``, ``(B, D)`` or ``(B, 1, D)`` and output
     ``(B, 1, hidden_dim)``.
     """
@@ -231,7 +231,7 @@ class ActionOutputMLP(nn.Module):
 
     A plain Linear -> ReLU -> Linear stack with small-random weight
     initialization (N(0, 0.02), zero bias) on both layers. Used by
-    SharedBackbone / MoE architectures; DualSystem's ActionDiT decodes with a
+    SingleSystem / MoE architectures; DualSystem's ActionDiT decodes with a
     single ``Linear(dim, action_dim)``.
 
     Args:

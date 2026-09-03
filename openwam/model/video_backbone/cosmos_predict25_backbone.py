@@ -25,7 +25,7 @@ state_dict (``vae.*`` / ``reason1.*``). Identity is preserved, so the facade's
 moved explicitly in :meth:`set_dtype_device` via ``cosmos_predict25/_vae_utils.py``.
 
 Scope: ``dual_system`` + ``joint_cross_attn`` / ``joint_self_attn``, plus IDM
-teacher-forcing (``cosmos_predict25/idm_merge.py``) and the shared-backbone mode
+teacher-forcing (``cosmos_predict25/idm_merge.py``) and the single-system mode
 that rides action/state tokens on the video DiT (:meth:`inject_shared_tokens`).
 VACE is rejected. Freeze policy is owned by the training-strategy /
 model freeze list, reached via native ``nn.Module.get_submodule`` dotted paths
@@ -307,7 +307,7 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         return idm_merge.split_branches(merged, noisy, cond)
 
     # ------------------------------------------------------------------
-    # Shared-backbone: action/state tokens ride the video DiT (3D mode)
+    # Single-system: action/state tokens ride the video DiT (3D mode)
     # ------------------------------------------------------------------
 
     def assert_ready_for_shared_tokens(self, state: BlockLoopState) -> None:
@@ -373,7 +373,7 @@ class CosmosPredict25VideoBackbone(VideoBackbone):
         n_state = int(n_state or 0)
         if state.extras.get("extra_per_block_pos_emb") is not None:
             raise NotImplementedError(
-                "CosmosPredict25 shared-backbone supports only the rope position variant "
+                "CosmosPredict25 single-system supports only the rope position variant "
                 "(extra_per_block_pos_emb must be None)."
             )
         B = state.hidden_states.shape[0]

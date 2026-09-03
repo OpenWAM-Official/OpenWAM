@@ -1,5 +1,5 @@
 defaults:
-  - model: dual_system            # [Optional]: dual_system(default), shared_backbone, tri_system
+  - model: dual_system            # [Optional]: dual_system(default), single_system, tri_system
   - dataloader: robotwin          # [Optional]: robocoin, robotwin(default), robocasa_gr1, libero, mixture
   - _self_
 

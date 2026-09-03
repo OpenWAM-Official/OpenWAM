@@ -190,14 +190,14 @@ class VideoEncoder(ABC, nn.Module):
         * ``ckpt_dir`` — the deploy-side checkpoint directory. Use this for
           per-encoder structural artifacts that the training-side
           :meth:`save_deploy_assets` hook wrote next to the safetensors
-          (V-JEPA 2.1's ``manifest.json``, dinov3 / flux_vae's
+          (V-JEPA 2.1's ``manifest.json``, dinov3 / flux2_vae's
           ``config.json``). These encoders are strictly self-contained: they
           read only from ``ckpt_dir`` and a missing artifact raises —
           ``encoder.model_path`` is never consulted at deploy time.
         * ``encoder_cfg`` — the yaml ``model.video_backbone.encoder`` block
           (a dict / DictConfig with ``name`` and ``model_path``). Used for
           non-structural runtime knobs an encoder still needs at deploy time
-          (e.g. V-JEPA 2.1's ``vjepa2_1_forward`` / ``svae_target_dim``), not
+          (e.g. V-JEPA 2.1's ``vjepa21_forward`` / ``svae_target_dim``), not
           as a weights / geometry source.
 
         Default implementation raises so non-supporting encoders fail

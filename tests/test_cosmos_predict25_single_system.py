@@ -1,7 +1,7 @@
-"""SharedBackbone (vanilla + moe) support for the CosmosPredict25 video backbone.
+"""SingleSystem (vanilla + moe) support for the CosmosPredict25 video backbone.
 
 Cosmos keeps its DiT state as a 5D grid ``(B,T,H,W,D)`` with per-frame modulation,
-so non-grid action/state tokens can't be appended directly. SharedBackbone runs
+so non-grid action/state tokens can't be appended directly. SingleSystem runs
 the ``[video|action|state]`` sequence through a flat 3D block forward
 (``cosmos_predict25.shared_block``). These CPU tests use the ``_RichCosmosBlock``
 fakes (shared with the joint_self_attn suite) to validate:
@@ -213,7 +213,7 @@ def test_inject_extract_round_trip():
 
 
 def test_shared_mask_blocks_action_from_video_queries():
-    from openwam.model.architectures.shared_backbone.state import attach_shared_attention_mask
+    from openwam.model.architectures.single_system.state import attach_shared_attention_mask
     from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
 
     backbone = _build_rich_wrapper(num_blocks=1)
@@ -246,7 +246,7 @@ def _make_shared_arch(variant, num_blocks=2):
 
     backbone = _build_rich_wrapper(num_blocks=num_blocks)
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": variant,
         "action_dim": 7,
         "video_dim": 16,
@@ -256,7 +256,7 @@ def _make_shared_arch(variant, num_blocks=2):
     if variant == "moe":
         cfg["expert_ffn_dim"] = 32
         cfg["bridge_layers"] = tuple(range(num_blocks))
-    arch = build_architecture(f"shared_backbone_{variant}", cfg)
+    arch = build_architecture(f"single_system_{variant}", cfg)
     arch.video_backbone = backbone
     arch._device = torch.device("cpu")
     arch._dtype = torch.float32
@@ -272,7 +272,7 @@ def _forward_inputs(B=1):
     )
 
 
-def test_shared_backbone_vanilla_forward_cosmos():
+def test_single_system_vanilla_forward_cosmos():
     arch = _make_shared_arch("vanilla")
     actions = torch.randn(1, 3, 7)
     video_out, action_pred = arch(actions, torch.tensor([0.5]), **_forward_inputs())
@@ -280,7 +280,7 @@ def test_shared_backbone_vanilla_forward_cosmos():
     assert video_out.shape == (1, 16, 2, 8, 8) and torch.isfinite(video_out).all()
 
 
-def test_shared_backbone_moe_forward_cosmos():
+def test_single_system_moe_forward_cosmos():
     arch = _make_shared_arch("moe")
     actions = torch.randn(1, 3, 7)
     video_out, action_pred = arch(actions, torch.tensor([0.5]), **_forward_inputs())
@@ -288,7 +288,7 @@ def test_shared_backbone_moe_forward_cosmos():
     assert torch.isfinite(video_out).all()
 
 
-def test_shared_backbone_video_only_forward_cosmos():
+def test_single_system_video_only_forward_cosmos():
     # noisy_actions=None → pure video path (no shared tokens, normal 5D loop).
     arch = _make_shared_arch("vanilla")
     video_out, action_pred = arch(None, None, **_forward_inputs())

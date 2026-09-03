@@ -1,4 +1,4 @@
-"""shared_backbone (vanilla / moe) support for cosmos3_edge — CPU tests.
+"""single_system (vanilla / moe) support for cosmos3_edge — CPU tests.
 
 Cosmos3's gen stream is already a flat ``(B, S, D)`` sequence and the model has
 no AdaLN, so injection is a concat plus identity rotary rows and an additive
@@ -11,7 +11,7 @@ import torch
 
 pytest.importorskip("diffusers")
 
-from openwam.model.architectures.shared_backbone.state import attach_shared_attention_mask  # noqa: E402
+from openwam.model.architectures.single_system.state import attach_shared_attention_mask  # noqa: E402
 from openwam.model.video_backbone import Cosmos3EdgeVideoBackbone  # noqa: E402
 from openwam.model.video_backbone.cosmos3 import dit_forward, shared_block, text_pack  # noqa: E402
 from openwam.model.video_backbone.cosmos3._vendor.transformer_cosmos3 import (  # noqa: E402

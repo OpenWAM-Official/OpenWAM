@@ -271,13 +271,13 @@ class VideoBackbone(ABC, nn.Module):
     ) -> BlockLoopState:
         """Append action (+ optional state) tokens as ``[video][action][state]``,
         extending RoPE / time_mod to match. Pair with :meth:`extract_shared_tokens`."""
-        raise NotImplementedError(f"{type(self).__name__} does not support shared-backbone.")
+        raise NotImplementedError(f"{type(self).__name__} does not support single-system.")
 
     def extract_shared_tokens(
         self, state: BlockLoopState, n_action: int, *, n_state: int = 0
     ) -> Tuple[BlockLoopState, Tensor]:
         """Slice action/state tokens off the sequence tail. Returns ``(state, action_tokens)``."""
-        raise NotImplementedError(f"{type(self).__name__} does not support shared-backbone.")
+        raise NotImplementedError(f"{type(self).__name__} does not support single-system.")
 
     def assert_ready_for_shared_tokens(self, state: BlockLoopState) -> None:
         """Validate the prepared state can carry action/state shared tokens.
@@ -289,7 +289,7 @@ class VideoBackbone(ABC, nn.Module):
         ``extras``) override this to a no-op."""
         if state.time_mod.dim() != 4:
             raise RuntimeError(
-                f"{type(self).__name__} shared-backbone requires the video backbone to run in per-token "
+                f"{type(self).__name__} single-system requires the video backbone to run in per-token "
                 "t_mod mode (e.g. dit.seperated_timestep=True with fuse_vae_embedding_in_latents=True). "
                 f"Got vstate.time_mod with dim={state.time_mod.dim()}; action/state timestep would be "
                 "silently ignored otherwise."

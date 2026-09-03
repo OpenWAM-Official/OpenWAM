@@ -194,7 +194,7 @@ class _MockVideoBackbone(VideoBackbone):
         x = torch.randn(B, num_tokens, self._dim)
         # Per-token t_mod (B, T, 6, dim) mirrors Wan2.2-TI2V-5B's
         # ``seperated_timestep=True + fuse_vae_embedding_in_latents=True`` mode,
-        # which is what production runs and what SharedBackbone's forward
+        # which is what production runs and what SingleSystem's forward
         # fail-fast enforces.
         t_mod = torch.zeros(B, num_tokens, 6, self._dim)
         freq_dim = self._dim // 2
@@ -686,7 +686,7 @@ def test_architecture_variant_strings_for_sampler_guard():
     for name in (
         "dual_system_cross_attn",
         "dual_system_idm",
-        "shared_backbone_vanilla",
-        "shared_backbone_moe",
+        "single_system_vanilla",
+        "single_system_moe",
     ):
         assert normalize_architecture_spec(name).variant != "joint_self_attn"

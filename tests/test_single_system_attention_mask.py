@@ -1,4 +1,4 @@
-"""SharedBackbone attention mask layout and Wan adapter behavior tests."""
+"""SingleSystem attention mask layout and Wan adapter behavior tests."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from openwam.model.architectures.shared_backbone.state import attach_shared_attention_mask
+from openwam.model.architectures.single_system.state import attach_shared_attention_mask
 from openwam.model.architectures.utils.mask_modes import (
     ACTION_SEES_VIDEO,
     ISOLATED,
@@ -121,7 +121,7 @@ def _build_mask_via_attach(vb, *, n_video, n_action, n_state=0, mode=ACTION_SEES
     return state.extras["shared_attention_mask"]
 
 
-def test_shared_backbone_attach_mask_requires_extras():
+def test_single_system_attach_mask_requires_extras():
     vb = _make_wan_backbone()
     state = BlockLoopState(
         hidden_states=torch.zeros(1, 7, vb.dim),
@@ -138,7 +138,7 @@ def test_shared_backbone_attach_mask_requires_extras():
         attach_shared_attention_mask(vb, state, n_action=2, attention_mask_mode=ACTION_SEES_VIDEO)
 
 
-def test_shared_backbone_attach_mask_rejects_unknown_mode():
+def test_single_system_attach_mask_rejects_unknown_mode():
     vb = _make_wan_backbone()
     state = BlockLoopState(
         hidden_states=torch.zeros(1, 7, vb.dim),
@@ -155,7 +155,7 @@ def test_shared_backbone_attach_mask_rejects_unknown_mode():
         attach_shared_attention_mask(vb, state, n_action=2, attention_mask_mode="bidirectional")
 
 
-def test_shared_backbone_set_video_attention_mask_mode_warns_when_not_settable(caplog):
+def test_single_system_set_video_attention_mask_mode_warns_when_not_settable(caplog):
     class ReadOnlyBackbone:
         @property
         def video_attention_mask_mode(self):
@@ -167,7 +167,7 @@ def test_shared_backbone_set_video_attention_mask_mode_warns_when_not_settable(c
     assert "does not expose a settable property" in caplog.text
 
 
-def test_shared_backbone_action_rope_defaults_to_1d():
+def test_single_system_action_rope_defaults_to_1d():
     vb = _make_wan_backbone(dim=32, num_heads=4)
     base = _identity_freqs(seq_len=2, head_dim=vb.head_dim)
 
@@ -209,7 +209,7 @@ def test_wan_action_tmod_rejects_mismatched_shapes():
         action_tokens.build_action_t_mod(torch.rand(2, 2), n_action_tokens=3, dit=vb._dit, batch_size=2)
 
 
-def test_shared_backbone_attention_mask_action_sees_video_layout():
+def test_single_system_attention_mask_action_sees_video_layout():
     vb = _make_wan_backbone()
     mask = _build_mask_via_attach(vb, n_video=5, n_action=3, mode=ACTION_SEES_VIDEO)
     Sv, Sa = 5, 3
@@ -221,7 +221,7 @@ def test_shared_backbone_attention_mask_action_sees_video_layout():
     assert mask[Sv:, Sv:].all()
 
 
-def test_shared_backbone_attention_mask_layout_with_state():
+def test_single_system_attention_mask_layout_with_state():
     vb = _make_wan_backbone()
     mask = _build_mask_via_attach(vb, n_video=5, n_action=3, n_state=2, mode=ACTION_SEES_VIDEO)
     Sv, Sa, Ss = 5, 3, 2
@@ -248,7 +248,7 @@ def test_shared_backbone_attention_mask_layout_with_state():
         (ISOLATED, False, False),
     ],
 )
-def test_shared_backbone_cross_modal_modes_with_state_tail(mode, v_sees_a, a_sees_all_v):
+def test_single_system_cross_modal_modes_with_state_tail(mode, v_sees_a, a_sees_all_v):
     """All four modes drive the shared mask; the state token stays a read-only
     tail (everyone sees it, it sees only itself). v↔v here is bidirectional
     (mock backbone), so tokens_per_frame=1 makes only the first video row a
@@ -274,7 +274,7 @@ def test_shared_backbone_cross_modal_modes_with_state_tail(mode, v_sees_a, a_see
         assert not mask[Sv:u_start, ff:Sv].any()
 
 
-def test_shared_backbone_joint_mask_blocks_action_from_video_queries():
+def test_single_system_joint_mask_blocks_action_from_video_queries():
     torch.manual_seed(0)
     vb = _make_wan_backbone()
     vb.video_attention_mask_mode = "bidirectional"

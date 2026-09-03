@@ -1,4 +1,4 @@
-# Shared-Backbone WAM: action tokens concatenated into the video DiT sequence.
+# Single-System WAM: action tokens concatenated into the video DiT sequence.
 # Variant via `architecture.variant`: vanilla (plain shared DiT) | moe (+ expert
 # FFN on action tokens). Action tokens project directly to video_backbone.dim.
 # Video backbone from the `video_backbone` group (default Wan2.2-TI2V-5B).
@@ -25,7 +25,7 @@ freeze:
   - video_backbone.video_encoder
 
 architecture:
-  framework: shared_backbone
+  framework: single_system
   variant: vanilla   # vanilla | moe; CLI: model.architecture.variant=moe
   # action_dim/state_dim default 80 (unified cross-robot action space, unify_action=true).
   # For dataloaders shipping unify_action=false (robotwin and deprecated OXE variants)

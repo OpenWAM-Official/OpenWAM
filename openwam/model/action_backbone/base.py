@@ -3,7 +3,7 @@
 Two independent roots, because the two architecture families drive the action
 stream through genuinely different contracts and share no common base:
 
-- :class:`SharedActionBackbone` — for SharedBackbone (vanilla / MoE): action
+- :class:`SharedActionBackbone` — for SingleSystem (vanilla / MoE): action
   tokens ride the video DiT sequence, so the contract is ``encode`` /
   ``encode_state`` / ``decode``. Holds the shared action I/O modules.
 - :class:`ActionDiTBackbone` — for the DualSystem / tri-system ActionDiT: a
@@ -36,7 +36,7 @@ from openwam.model.action_backbone.scheduler import ActionScheduler
 
 
 class SharedActionBackbone(nn.Module, ABC):
-    """ABC for SharedBackbone action backbones (vanilla / MoE).
+    """ABC for SingleSystem action backbones (vanilla / MoE).
 
     Action tokens project directly into ``video_dim`` and are concatenated into
     the video DiT sequence; the architecture's forward runs the video block loop
@@ -71,7 +71,7 @@ class SharedActionBackbone(nn.Module, ABC):
         self._use_proprioception = bool(use_proprioception)
         self.state_dim = int(state_dim or 0)
         if self._use_proprioception and self.state_dim <= 0:
-            raise ValueError("use_proprioception=True requires state_dim > 0 for SharedBackbone state tokens.")
+            raise ValueError("use_proprioception=True requires state_dim > 0 for SingleSystem state tokens.")
 
     def _init_action_input(self) -> None:
         """Create action input projection + optional state encoder (first init step)."""
@@ -126,7 +126,7 @@ class SharedActionBackbone(nn.Module, ABC):
         if not self._use_proprioception:
             return None
         if proprio is None:
-            raise ValueError("SharedBackbone use_proprioception=True requires `proprio`.")
+            raise ValueError("SingleSystem use_proprioception=True requires `proprio`.")
         assert self.state_encoder is not None
         return self.state_encoder(proprio)
 

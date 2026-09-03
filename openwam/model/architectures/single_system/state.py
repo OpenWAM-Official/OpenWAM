@@ -1,4 +1,4 @@
-"""State-token helpers for SharedBackbone architectures."""
+"""State-token helpers for SingleSystem architectures."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def attach_shared_attention_mask(
 ) -> None:
     """Build the shared-sequence mask and stash it on ``state.extras``.
 
-    The shared backbone concatenates action (and an optional state token) into
+    The single system concatenates action (and an optional state token) into
     the video DiT sequence, so the mask travels through ``state.extras`` for
     ``WanVideoBackbone.run_block`` to consume. Layout ``[video, action, state]``
     is the unified cross-modal mask with the state token as a read-only tail.
@@ -52,12 +52,12 @@ def attach_shared_attention_mask(
     if n_action < 0 or n_state < 0:
         raise ValueError(f"n_action and n_state must be non-negative, got {n_action}, {n_state}")
     if n_action + n_state <= 0:
-        raise ValueError("SharedBackbone attention mask requires at least one action or state token.")
+        raise ValueError("SingleSystem attention mask requires at least one action or state token.")
 
     extras = getattr(state, "extras", None)
     if extras is None:
         raise RuntimeError(
-            "SharedBackbone attention_mask_mode requires BlockLoopState.extras "
+            "SingleSystem attention_mask_mode requires BlockLoopState.extras "
             "so video_backbone.run_block() can consume shared_attention_mask."
         )
 
@@ -65,7 +65,7 @@ def attach_shared_attention_mask(
     s_video = total - n_action - n_state
     if s_video <= 0:
         raise ValueError(
-            f"SharedBackbone attention mask expected video tokens before action/state tails, "
+            f"SingleSystem attention mask expected video tokens before action/state tails, "
             f"got total={total}, n_action={n_action}, n_state={n_state}."
         )
 
@@ -73,7 +73,7 @@ def attach_shared_attention_mask(
         video_backbone,
         s_video=s_video,
         s_action=n_action,
-        video_tokens_per_frame=compute_video_tokens_per_frame(state, "SharedBackbone"),
+        video_tokens_per_frame=compute_video_tokens_per_frame(state, "SingleSystem"),
         mode=mode,
         device=state.hidden_states.device,
         n_readonly_tail=n_state,

@@ -1,4 +1,4 @@
-"""Action / state token t_mod + 1D RoPE helpers for shared-backbone
+"""Action / state token t_mod + 1D RoPE helpers for single-system
 (DreamZero-style) action injection.
 
 Free functions consumed by ``WanBase.inject_shared_tokens`` — the DiT

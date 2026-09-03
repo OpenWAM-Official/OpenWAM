@@ -1,6 +1,6 @@
-# SharedBackbone action backbone (cfg.model.action_backbone.*): action tokens
+# SingleSystem action backbone (cfg.model.action_backbone.*): action tokens
 # share the video DiT sequence. The variant (vanilla | moe) is selected by
-# `model.architecture.variant` in configs/model/shared_backbone.yaml.
+# `model.architecture.variant` in configs/model/single_system.yaml.
 # vanilla ignores `expert_ffn_dim`; moe applies an expert FFN to action tokens at
 # the layers named by `bridge_layers` / `bridge_interval` (architecture block).
 action_decoder_hidden_dim: 1024   # shared action decoder MLP width

@@ -1,4 +1,4 @@
-"""Helpers for the V-JEPA 2.1 encoder (the ``encoder/vjepa2_1.py`` subclass).
+"""Helpers for the V-JEPA 2.1 encoder (the ``encoder/vjepa21.py`` subclass).
 
 ``loader`` builds the ViT from a manifest; ``vision_transformer`` + ``modules`` +
 ``patch_embed`` + ``masks_utils`` + ``tensors`` are MIT-licensed ViT code adapted

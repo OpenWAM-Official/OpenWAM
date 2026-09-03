@@ -193,7 +193,7 @@ def test_video_backbone_name_mismatch_raises(tmp_path, capture):
 def test_architecture_framework_mismatch_raises(tmp_path, capture):
     """A different framework is a different architecture class and state_dict."""
     ckpt_dir = _write_ckpt_cfg(tmp_path)
-    cfg = _live_cfg(architecture__framework="shared_backbone")
+    cfg = _live_cfg(architecture__framework="single_system")
 
     with pytest.raises(ValueError, match="model.architecture.framework"):
         cml.build_architecture_from_ckpt_dir(ckpt_dir, weights_required=True, override_cfg=cfg)

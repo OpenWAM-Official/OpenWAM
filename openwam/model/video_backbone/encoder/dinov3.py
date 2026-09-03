@@ -52,7 +52,7 @@ from openwam.model.video_backbone.encoder.svae import reducer
 
 # Checkpoint-local namespace for the DINOv3 HF config, so a self-contained deploy
 # reads ``<ckpt>/dinov3/config.json`` instead of needing the original
-# ``encoder.model_path`` reachable (mirrors flux_vae / V-JEPA's sidecar).
+# ``encoder.model_path`` reachable (mirrors flux2_vae / V-JEPA's sidecar).
 _DINOV3_CKPT_SUBDIR = "dinov3"
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ _IMAGENET_STD = (0.229, 0.224, 0.225)
 def _preprocess_image(image: Image.Image, *, dtype, device) -> Tensor:
     """PIL image -> ``(1, 3, H, W)`` tensor in ImageNet-normalized space.
 
-    Mirrors :func:`openwam.model.video_backbone.encoder.wan_vae._preprocess_image`
+    Mirrors :func:`openwam.model.video_backbone.encoder.wan22_vae._preprocess_image`
     in structure (``np.array`` + ``repeat`` to broadcast a leading batch axis)
     but swaps the ``[-1, 1]`` linear rescale for ImageNet mean/std normalize.
     """
@@ -115,7 +115,7 @@ class DinoV3VideoEncoder(VideoEncoder):
     Per-frame ViT encoding + parameter-free causal mean pool along T to align
     with Wan VAE's temporal semantics. The DiT-side ``patch_embedding`` and
     ``head.head`` are rebuilt from :class:`VideoEncoder`'s default hooks so
-    dinov3 reuses the exact same projection structure as the wan_vae path.
+    dinov3 reuses the exact same projection structure as the wan22_vae path.
 
     No ``decode`` / ``to_frames`` (``properties.pixel_decode=False``) — the ABC
     defaults raise ``NotImplementedError`` with a contract-aware message.
@@ -206,7 +206,7 @@ class DinoV3VideoEncoder(VideoEncoder):
         # Gradient enablement is the caller's responsibility — the host
         # backbone's ``preprocess`` / ``prepare_inputs`` already wrap the
         # encode path in ``@torch.no_grad`` for the frozen-feature use case
-        # (matches ``wan_vae`` / ``vjepa2_1``). Not pinning ``no_grad`` here
+        # (matches ``wan22_vae`` / ``vjepa21``). Not pinning ``no_grad`` here
         # leaves room for adapter / LoRA / partial-unfreeze experiments.
         outputs = self._m(flat)
         # ``trust_remote_code=True`` lets each DINOv3 snapshot ship its own

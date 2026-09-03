@@ -3,8 +3,8 @@
 For each of:
     - dual_system_cross_attn
     - dual_system_self_attn
-    - shared_backbone_vanilla
-    - shared_backbone_moe
+    - single_system_vanilla
+    - single_system_moe
 
 verify that:
   1. The architecture builds from a yaml-shaped config (canonical
@@ -69,18 +69,18 @@ def _build_arch(registry_name: str, cfg: dict, *, num_layers: int = WAN_NUM_LAYE
 
 
 def _build_shared_moe_arch(cfg: dict, *, num_layers: int = WAN_NUM_LAYERS):
-    """Build SharedBackbone MoE with the mock backbone present during __init__.
+    """Build SingleSystem MoE with the mock backbone present during __init__.
 
     MoE interval mode must resolve from the actual video_backbone.num_layers,
     so unlike other variants this cannot be initialized first and patched later.
     """
-    from openwam.model.architectures.shared_backbone.moe import SharedBackboneMoEArchitecture
+    from openwam.model.architectures.single_system.moe import SingleSystemMoEArchitecture
 
     cfg = dict(cfg)
     cfg.setdefault("video_dim", WAN_VIDEO_DIM)
     num_heads = int(cfg.get("num_heads", 4))
 
-    class _SharedMoEWithMockBackbone(SharedBackboneMoEArchitecture):
+    class _SharedMoEWithMockBackbone(SingleSystemMoEArchitecture):
         def _init_video_backbone(self, _cfg):
             self.video_backbone = _MockVideoBackbone(dim=WAN_VIDEO_DIM, num_layers=num_layers, num_heads=num_heads)
 
@@ -385,49 +385,49 @@ def test_dual_system_self_attn_rejects_interval_gt_1():
 
 
 # ---------------------------------------------------------------------------
-# 3. shared_backbone_vanilla
+# 3. single_system_vanilla
 # ---------------------------------------------------------------------------
 
 
-def test_shared_backbone_vanilla_loads_and_runs():
-    """Vanilla SharedBackbone has no experts — action rides the video DiT."""
+def test_single_system_vanilla_loads_and_runs():
+    """Vanilla SingleSystem has no experts — action rides the video DiT."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "vanilla",
         "action_dim": ACTION_DIM,
         "max_action_len": 64,
     }
-    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch = _build_arch("single_system_vanilla", cfg)
 
     assert arch.action_backbone.bridge_layers == ()
 
     n_params = _count_params(arch.action_backbone)
-    print(f"\n[shared_backbone_vanilla] action_backbone params: {n_params:,}")
+    print(f"\n[single_system_vanilla] action_backbone params: {n_params:,}")
     out = _run_compute_loss(arch)
     assert torch.isfinite(out["loss"])
 
 
-def test_shared_backbone_vanilla_with_proprio_loads_and_runs():
-    """Vanilla SharedBackbone can consume proprio as a trailing state token."""
+def test_single_system_vanilla_with_proprio_loads_and_runs():
+    """Vanilla SingleSystem can consume proprio as a trailing state token."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "vanilla",
         "action_dim": ACTION_DIM,
         "max_action_len": 64,
         "use_proprioception": True,
         "state_dim": ACTION_DIM,
     }
-    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch = _build_arch("single_system_vanilla", cfg)
 
     assert arch.uses_proprioception
     out = _run_compute_loss(arch)
     assert torch.isfinite(out["loss"])
 
 
-def test_shared_backbone_vanilla_with_proprio_requires_state_dim():
-    """SharedBackbone state-token path fails loudly when state_dim is missing."""
+def test_single_system_vanilla_with_proprio_requires_state_dim():
+    """SingleSystem state-token path fails loudly when state_dim is missing."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "vanilla",
         "action_dim": ACTION_DIM,
         "max_action_len": 64,
@@ -435,20 +435,20 @@ def test_shared_backbone_vanilla_with_proprio_requires_state_dim():
     }
 
     with pytest.raises(ValueError, match="state_dim"):
-        _build_arch("shared_backbone_vanilla", cfg)
+        _build_arch("single_system_vanilla", cfg)
 
 
-def test_shared_backbone_vanilla_with_proprio_requires_proprio():
+def test_single_system_vanilla_with_proprio_requires_proprio():
     """When enabled, proprio must be provided explicitly to the forward path."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "vanilla",
         "action_dim": ACTION_DIM,
         "max_action_len": 64,
         "use_proprioception": True,
         "state_dim": ACTION_DIM,
     }
-    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch = _build_arch("single_system_vanilla", cfg)
     arch.init_training_schedulers(1000)
     actions = torch.randn(1, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
@@ -457,17 +457,17 @@ def test_shared_backbone_vanilla_with_proprio_requires_proprio():
         arch.compute_loss(**inputs, actions=actions)
 
 
-def test_shared_backbone_vanilla_with_proprio_validates_state_shape():
+def test_single_system_vanilla_with_proprio_validates_state_shape():
     """The shared state encoder accepts only [B, D] or [B, 1, D] with matching D."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "vanilla",
         "action_dim": ACTION_DIM,
         "max_action_len": 64,
         "use_proprioception": True,
         "state_dim": ACTION_DIM,
     }
-    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch = _build_arch("single_system_vanilla", cfg)
 
     with pytest.raises(ValueError, match="last dim"):
         arch.action_backbone.encode_state(torch.randn(1, ACTION_DIM + 1))
@@ -475,17 +475,17 @@ def test_shared_backbone_vanilla_with_proprio_validates_state_shape():
         arch.action_backbone.encode_state(torch.randn(1, 2, ACTION_DIM))
 
 
-def test_shared_backbone_vanilla_with_proprio_broadcasts_single_state():
+def test_single_system_vanilla_with_proprio_broadcasts_single_state():
     """A single deploy-style proprio state broadcasts to the action/video batch."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "vanilla",
         "action_dim": ACTION_DIM,
         "max_action_len": 64,
         "use_proprioception": True,
         "state_dim": ACTION_DIM,
     }
-    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch = _build_arch("single_system_vanilla", cfg)
     arch.init_training_schedulers(1000)
     actions = torch.randn(2, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=2, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
@@ -495,17 +495,17 @@ def test_shared_backbone_vanilla_with_proprio_broadcasts_single_state():
     assert torch.isfinite(out["loss"])
 
 
-def test_shared_backbone_vanilla_with_proprio_rejects_bad_batch_match():
+def test_single_system_vanilla_with_proprio_rejects_bad_batch_match():
     """State-token batch size must match action/video batch unless it is a singleton."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "vanilla",
         "action_dim": ACTION_DIM,
         "max_action_len": 64,
         "use_proprioception": True,
         "state_dim": ACTION_DIM,
     }
-    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch = _build_arch("single_system_vanilla", cfg)
     arch.init_training_schedulers(1000)
     actions = torch.randn(2, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=2, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
@@ -515,17 +515,17 @@ def test_shared_backbone_vanilla_with_proprio_rejects_bad_batch_match():
         arch.compute_loss(**inputs, actions=actions)
 
 
-def test_shared_backbone_vanilla_with_proprio_conditions_video_only_path():
+def test_single_system_vanilla_with_proprio_conditions_video_only_path():
     """State tokens should still condition video when no action stream is stepped."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "vanilla",
         "action_dim": ACTION_DIM,
         "max_action_len": 64,
         "use_proprioception": True,
         "state_dim": ACTION_DIM,
     }
-    arch = _build_arch("shared_backbone_vanilla", cfg)
+    arch = _build_arch("single_system_vanilla", cfg)
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
     inputs["latents"] = inputs["input_latents"]
 
@@ -543,14 +543,14 @@ def test_shared_backbone_vanilla_with_proprio_conditions_video_only_path():
 
 
 # ---------------------------------------------------------------------------
-# 4. shared_backbone_moe
+# 4. single_system_moe
 # ---------------------------------------------------------------------------
 
 
-def test_shared_backbone_moe_default_all_layers():
+def test_single_system_moe_default_all_layers():
     """MoE with ``bridge_layers: null + bridge_interval: 1``: one expert per video DiT layer."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 1024,
@@ -565,15 +565,15 @@ def test_shared_backbone_moe_default_all_layers():
     assert len(arch.action_backbone.expert_blocks) == WAN_NUM_LAYERS
 
     n_params = _count_params(arch.action_backbone)
-    print(f"\n[shared_backbone_moe / default-all-layers] action_backbone params: {n_params:,}")
+    print(f"\n[single_system_moe / default-all-layers] action_backbone params: {n_params:,}")
     out = _run_compute_loss(arch)
     assert torch.isfinite(out["loss"])
 
 
-def test_shared_backbone_moe_with_proprio_loads_and_runs():
-    """MoE SharedBackbone can consume proprio without applying experts to state tokens."""
+def test_single_system_moe_with_proprio_loads_and_runs():
+    """MoE SingleSystem can consume proprio without applying experts to state tokens."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 256,
@@ -589,10 +589,10 @@ def test_shared_backbone_moe_with_proprio_loads_and_runs():
     assert torch.isfinite(out["loss"])
 
 
-def test_shared_backbone_moe_interval_uses_video_backbone_num_layers():
+def test_single_system_moe_interval_uses_video_backbone_num_layers():
     """MoE expert_interval resolves from the attached video backbone depth."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 256,
@@ -605,10 +605,10 @@ def test_shared_backbone_moe_interval_uses_video_backbone_num_layers():
     assert arch.action_backbone.bridge_layers == (0, 2)
 
 
-def test_shared_backbone_moe_default_expert_ffn_dim_matches_yaml_default():
-    """Direct construction should use the same expert_ffn_dim default as shared_backbone.yaml."""
+def test_single_system_moe_default_expert_ffn_dim_matches_yaml_default():
+    """Direct construction should use the same expert_ffn_dim default as single_system.yaml."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "bridge_layers": [0],
@@ -619,12 +619,12 @@ def test_shared_backbone_moe_default_expert_ffn_dim_matches_yaml_default():
     assert arch.action_backbone.expert_blocks[0].ffn[0].out_features == 4096
 
 
-def test_shared_backbone_moe_interval_requires_video_backbone():
+def test_single_system_moe_interval_requires_video_backbone():
     """Interval mode should not fall back to num_dit_layers/30 without a backbone."""
     from openwam.model import build_architecture
 
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "video_dim": WAN_VIDEO_DIM,
@@ -634,20 +634,20 @@ def test_shared_backbone_moe_interval_requires_video_backbone():
     }
 
     with pytest.raises(ValueError, match="num_layers must be provided"):
-        build_architecture("shared_backbone_moe", cfg)
+        build_architecture("single_system_moe", cfg)
 
 
-def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth():
+def test_single_system_moe_forward_rejects_expert_layers_beyond_backbone_depth():
     """Explicit expert layers can build without a backbone but must match the attached backbone at forward."""
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "video_dim": WAN_VIDEO_DIM,
         "expert_ffn_dim": 256,
         "bridge_layers": [0, 5],
     }
-    arch = _build_arch("shared_backbone_moe", cfg, num_layers=4)
+    arch = _build_arch("single_system_moe", cfg, num_layers=4)
     arch.init_training_schedulers(1000)
     actions = torch.randn(1, T_ACTION, ACTION_DIM)
     inputs = _make_fake_loss_inputs(B=1, action_dim=ACTION_DIM, T_action=T_ACTION, video_dim=WAN_VIDEO_DIM)
@@ -656,11 +656,11 @@ def test_shared_backbone_moe_forward_rejects_expert_layers_beyond_backbone_depth
         arch.compute_loss(**inputs, actions=actions)
 
 
-def test_shared_backbone_moe_explicit_expert_layers():
+def test_single_system_moe_explicit_expert_layers():
     """Explicit expert_layers controls which video DiT layers carry an expert FFN."""
     bridge_layers = (1, 4, 7, 10, 13, 16, 19, 22, 25, 28)
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": ACTION_DIM,
         "expert_ffn_dim": 1024,
@@ -672,7 +672,7 @@ def test_shared_backbone_moe_explicit_expert_layers():
     assert len(arch.action_backbone.expert_blocks) == len(bridge_layers) == 10
 
     n_params = _count_params(arch.action_backbone)
-    print(f"\n[shared_backbone_moe / explicit-10] action_backbone params: {n_params:,}")
+    print(f"\n[single_system_moe / explicit-10] action_backbone params: {n_params:,}")
     _run_compute_loss(arch)
 
 
@@ -714,14 +714,14 @@ def test_shared_backbone_moe_explicit_expert_layers():
             WAN_NUM_LAYERS,
         ),
         (
-            "shared_backbone_vanilla",
-            {"framework": "shared_backbone", "variant": "vanilla", "action_dim": ACTION_DIM, "max_action_len": 64},
+            "single_system_vanilla",
+            {"framework": "single_system", "variant": "vanilla", "action_dim": ACTION_DIM, "max_action_len": 64},
             0,
         ),
         (
-            "shared_backbone_moe",
+            "single_system_moe",
             {
-                "framework": "shared_backbone",
+                "framework": "single_system",
                 "variant": "moe",
                 "action_dim": ACTION_DIM,
                 "expert_ffn_dim": 1024,
@@ -734,7 +734,7 @@ def test_shared_backbone_moe_explicit_expert_layers():
 )
 def test_all_variants_load_and_run(registry_name, cfg, expected_selected_count):
     """Parametric smoke: every variant builds, has expected selected layer count, runs loss."""
-    if registry_name == "shared_backbone_moe":
+    if registry_name == "single_system_moe":
         arch = _build_shared_moe_arch(cfg)
     else:
         arch = _build_arch(registry_name, cfg)
@@ -764,7 +764,7 @@ def test_all_variants_load_and_run(registry_name, cfg, expected_selected_count):
 # ``OmegaConf.load`` the yaml directly and don't exercise compose, so this
 # block fills that gap.
 
-_FRAMEWORKS = ("dual_system", "shared_backbone", "tri_system")
+_FRAMEWORKS = ("dual_system", "single_system", "tri_system")
 _BACKBONES = ("wan22_ti2v_5b", "wan21_vace_1_3b", "wan21_i2v_14b_480p")
 # Backbone-specific dummy weights dir for the compose smoke test. Mirrors the
 # real on-disk directory names so the production cross-check in

@@ -3,7 +3,7 @@
     from openwam.model.action_backbone import ActionDiT, SharedVanillaActionBackbone
 
 Unlike video/vlm there is no registry — each architecture constructs its action
-backbone directly (dual-system builds ``ActionDiT`` with a variant; shared-backbone
+backbone directly (dual-system builds ``ActionDiT`` with a variant; single-system
 builds ``SharedVanillaActionBackbone`` / ``SharedMoEActionBackbone``), so this file
 only re-exports the public classes.
 """

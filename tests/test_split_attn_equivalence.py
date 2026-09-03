@@ -3,7 +3,7 @@ produce numerically identical output to ``DiTBlock.forward`` / ``SelfAttnActionD
 
 The split is the foundation of the joint self-attention path. If it diverges
 from the plain block forward, every test that uses ``run_block`` (vanilla /
-MoE SharedBackbone) silently keeps working while the new path quietly
+MoE SingleSystem) silently keeps working while the new path quietly
 produces wrong outputs. This file pins the equivalence at zero atol.
 """
 

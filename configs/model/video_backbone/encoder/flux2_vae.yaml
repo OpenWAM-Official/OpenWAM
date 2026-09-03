@@ -1,6 +1,6 @@
 # FLUX.2-dev image VAE (diffusers AutoencoderKLFlux2) as external video encoder.
 # Activate via CLI:
-#   model.video_backbone.from_scratch=true model/video_backbone/encoder=flux_vae
+#   model.video_backbone.from_scratch=true model/video_backbone/encoder=flux2_vae
 # Spec temporal contract is (4, true), same as the native Wan VAE.
 # Structural fields (z_dim=128/spatial_compression=16/...) read from diffusers config.json
 # at model_path, NOT yaml. It's a 2D per-frame VAE + parameter-free causal mean pool over
@@ -8,7 +8,7 @@
 # from_scratch=true is REQUIRED: Wan DiT first conv is bound to native VAE z_dim=48,
 # FLUX.2 emits z_dim=128; reinit_dit_from_scratch rebuilds patch_embedding/head.
 
-name: flux_vae
+name: flux2_vae
 # [Required] diffusers AutoencoderKLFlux2 snapshot dir: config.json +
 # diffusion_pytorch_model.safetensors. Deploy host must read it too (re-reads config at deploy).
 model_path: /path/to/FLUX.2-dev_VAE

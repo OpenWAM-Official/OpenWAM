@@ -45,7 +45,7 @@ from PIL import Image
 from torch import Tensor
 
 from openwam.model.video_backbone.encoder.base import VideoEncoder, VideoEncoderProperties
-from openwam.model.video_backbone.encoder.flux_vae_src import (
+from openwam.model.video_backbone.encoder.flux2_vae_src import (
     FluxVaeEncoderCore,
     convert_diffusers_encoder_sd,
 )
@@ -54,9 +54,9 @@ from openwam.model.video_backbone.encoder.registry import register_video_encoder
 logger = logging.getLogger(__name__)
 
 # Checkpoint-local namespace for the FLUX.2 VAE structural config, so a
-# self-contained deploy reads ``<ckpt>/flux_vae/config.json`` instead of needing
+# self-contained deploy reads ``<ckpt>/flux2_vae/config.json`` instead of needing
 # the original ``encoder.model_path`` reachable (mirrors V-JEPA's manifest.json).
-_FLUX_CKPT_SUBDIR = "flux_vae"
+_FLUX_CKPT_SUBDIR = "flux2_vae"
 
 
 def _causal_temporal_pool(x: Tensor) -> Tensor:
@@ -74,7 +74,7 @@ def _causal_temporal_pool(x: Tensor) -> Tensor:
 def _preprocess_image(image: Image.Image, *, dtype, device) -> Tensor:
     """PIL image -> ``(1, 3, H, W)`` tensor in ``[-1, 1]``.
 
-    Mirrors :func:`openwam.model.video_backbone.encoder.wan_vae._preprocess_image`
+    Mirrors :func:`openwam.model.video_backbone.encoder.wan22_vae._preprocess_image`
     (FLUX.2 VAE expects the same ``[-1, 1]`` pixel range as Wan VAE; see
     ``references/flux2/sampling.py`` ``default_images_prep`` = ``2 * x - 1``).
     """
@@ -83,7 +83,7 @@ def _preprocess_image(image: Image.Image, *, dtype, device) -> Tensor:
     return repeat(arr, "H W C -> B C H W", B=1)
 
 
-def _read_flux_vae_config(model_path: str) -> dict:
+def _read_flux2_vae_config(model_path: str) -> dict:
     """Read the diffusers ``AutoencoderKLFlux2`` ``config.json`` structural fields.
 
     Returns the kwargs :class:`FluxVaeEncoderCore` needs. ``block_out_channels``
@@ -128,7 +128,7 @@ def _find_vae_weights(model_path: str) -> str:
     raise RuntimeError(f"Multiple safetensors candidates in {model_path}: {hits}")
 
 
-@register_video_encoder("flux_vae")
+@register_video_encoder("flux2_vae")
 class FluxVAEVideoEncoder(VideoEncoder):
     """:class:`VideoEncoder` wrapping the FLUX.2-dev image VAE encoder.
 
@@ -136,7 +136,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
     with Wan VAE's temporal semantics. ``z_dim`` / ``spatial_compression`` are
     read from the loaded core (which sized itself from the on-disk
     ``config.json``). The DiT-side projections reuse :class:`VideoEncoder`'s
-    default hooks so flux_vae shares the exact Wan VAE token layout.
+    default hooks so flux2_vae shares the exact Wan VAE token layout.
 
     No ``decode`` / ``to_frames`` (``properties.pixel_decode=False``) — only the
     encoder half of the VAE is loaded, so the ABC defaults raise
@@ -190,7 +190,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
         flat = rearrange(video, "B C T H W -> (B T) C H W")
         # Gradient enablement is the caller's responsibility — the host backbone's
         # preprocess / prepare_inputs already wrap the encode path in
-        # ``@torch.no_grad`` for the frozen-feature use case (matches wan_vae /
+        # ``@torch.no_grad`` for the frozen-feature use case (matches wan22_vae /
         # dinov3). The VAE is in the ``video_backbone.video_encoder`` freeze list.
         z = self._core.encode(flat)  # (B*T, z_dim, H/sc, W/sc)
         grid = rearrange(z, "(B T) D H W -> B D T H W", B=b, T=t)
@@ -203,7 +203,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
     def from_pretrained(cls, model_path: str, **kw: Any) -> "FluxVAEVideoEncoder":
         from safetensors.torch import load_file
 
-        core_kwargs = _read_flux_vae_config(model_path)
+        core_kwargs = _read_flux2_vae_config(model_path)
         core = FluxVaeEncoderCore(**core_kwargs)
         weights = _find_vae_weights(model_path)
         sd = load_file(weights)
@@ -233,12 +233,12 @@ class FluxVAEVideoEncoder(VideoEncoder):
         fills them in (including the BatchNorm running stats). ``components_entry``
         is ignored: its ``vae`` entry is the Wan VAE placeholder, not the FLUX
         core. The config is read strictly from
-        ``<ckpt_dir>/flux_vae/config.json`` (written by :meth:`save_deploy_assets`);
+        ``<ckpt_dir>/flux2_vae/config.json`` (written by :meth:`save_deploy_assets`);
         deploy is self-contained, with no ``encoder.model_path`` fallback — a
         checkpoint saved without its config sidecar fails loudly here.
         """
         config_dir = cls._resolve_config_dir(ckpt_dir)
-        core_kwargs = _read_flux_vae_config(config_dir)
+        core_kwargs = _read_flux2_vae_config(config_dir)
         with torch.device(device):
             core = FluxVaeEncoderCore(**core_kwargs)
         core = core.to(dtype=torch.bfloat16).eval()
@@ -253,7 +253,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
 
     def save_deploy_assets(self, output_dir: str, cfg: Any) -> None:
         """Copy the FLUX.2 VAE ``config.json`` into
-        ``<output_dir>/flux_vae/config.json`` so deploy is self-contained.
+        ``<output_dir>/flux2_vae/config.json`` so deploy is self-contained.
 
         Strict self-contained: an unresolvable cfg / missing source / copy IO
         error all raise, because :meth:`from_skeleton` reads the config only
@@ -298,7 +298,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
     def _resolve_config_dir(ckpt_dir: str | None) -> str:
         """Return the dir holding a readable FLUX.2 VAE ``config.json`` at deploy time.
 
-        Strictly self-contained: only ``<ckpt_dir>/flux_vae/config.json`` (written
+        Strictly self-contained: only ``<ckpt_dir>/flux2_vae/config.json`` (written
         by :meth:`save_deploy_assets`) is consulted; there is no
         ``encoder.model_path`` fallback. A missing config is a hard error.
         """
@@ -308,7 +308,7 @@ class FluxVAEVideoEncoder(VideoEncoder):
         raise FileNotFoundError(
             "FluxVAEVideoEncoder.from_skeleton: no readable config.json at "
             f"ckpt_dir={ckpt_cfg!r}. Re-save the checkpoint with the current "
-            "code, which writes flux_vae/config.json into ckpt_dir."
+            "code, which writes flux2_vae/config.json into ckpt_dir."
         )
 
 

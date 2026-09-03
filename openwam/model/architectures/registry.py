@@ -10,8 +10,8 @@ Canonical registry names (one per concrete architecture class):
     dual_system_cross_attn  / DualSystemCrossAttnArchitecture
     dual_system_self_attn   / DualSystemSelfAttnArchitecture
     dual_system_idm         / DualSystemIDMArchitecture
-    shared_backbone_vanilla / SharedBackboneVanillaArchitecture
-    shared_backbone_moe     / SharedBackboneMoEArchitecture
+    single_system_vanilla / SingleSystemVanillaArchitecture
+    single_system_moe     / SingleSystemMoEArchitecture
     tri_system_joint_self_attn / TriSystemJointSelfAttnArchitecture
 
 Usage:

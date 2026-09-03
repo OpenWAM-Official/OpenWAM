@@ -400,7 +400,7 @@ def build_cosmos_predict25_pipeline(
     # Deploy path (`ckpt_dir` non-None): the DiT params live inside the saved
     # safetensors (`CosmosPredict25VideoBackbone.net` is a registered nn.Module
     # child of the wrapper, so its state goes through OpenWAM's unified
-    # save/load like any other dual_system / shared_backbone weight). We
+    # save/load like any other dual_system / single_system weight). We
     # therefore skip the eager `*_ema_bf16.pt` load and let
     # `arch.load_checkpoint` populate `net` from the safetensors. Training
     # path keeps the eager bootstrap so a fresh run starts from the released

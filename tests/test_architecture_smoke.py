@@ -3,8 +3,8 @@
 Each architecture exposes a different action-backbone contract:
   - joint_cross_attn → ActionDiT.forward(action_tokens, bridges, timestep)
   - joint_self_attn  → DualSystemMoTDriver coordinates pre/post_attn_at_layer
-  - shared_backbone vanilla → encode / decode helpers; architecture forward drives vb loop
-  - shared_backbone moe → encode / apply_expert(layer_id, ...) / decode helpers
+  - single_system vanilla → encode / decode helpers; architecture forward drives vb loop
+  - single_system moe → encode / apply_expert(layer_id, ...) / decode helpers
 
 These tests exercise each path with fake tensors; no GPU required.
 """
@@ -83,19 +83,19 @@ def test_dual_system_self_attn_has_mot_driver():
     assert hasattr(arch, "_mot_driver")
 
 
-def test_shared_backbone_moe_flow():
-    """SharedBackbone MoE: encode → apply_expert at each expert layer → decode."""
+def test_single_system_moe_flow():
+    """SingleSystem MoE: encode → apply_expert at each expert layer → decode."""
     from openwam.model import build_architecture
 
     cfg = {
-        "framework": "shared_backbone",
+        "framework": "single_system",
         "variant": "moe",
         "action_dim": 7,
         "video_dim": 64,
         "expert_ffn_dim": 128,
         "bridge_layers": (0, 2),
     }
-    arch = build_architecture("shared_backbone_moe", cfg)
+    arch = build_architecture("single_system_moe", cfg)
     ab = arch.action_backbone
 
     B, T_action = 2, 5
@@ -112,12 +112,12 @@ def test_shared_backbone_moe_flow():
     assert pred.shape == (B, T_action, 7)
 
 
-def test_shared_backbone_flow():
-    """SharedBackbone vanilla: encode → decode roundtrip."""
+def test_single_system_flow():
+    """SingleSystem vanilla: encode → decode roundtrip."""
     from openwam.model import build_architecture
 
     cfg = {"action_dim": 7, "video_dim": 64, "num_action_tokens": 5}
-    arch = build_architecture("shared_backbone_vanilla", cfg)
+    arch = build_architecture("single_system_vanilla", cfg)
     ab = arch.action_backbone
 
     B, T_action = 2, 5
@@ -188,5 +188,5 @@ def test_all_architectures_registered():
     assert "dual_system_cross_attn" in supported
     assert "dual_system_self_attn" in supported
     assert "dual_system_idm" in supported
-    assert "shared_backbone_vanilla" in supported
-    assert "shared_backbone_moe" in supported
+    assert "single_system_vanilla" in supported
+    assert "single_system_moe" in supported
