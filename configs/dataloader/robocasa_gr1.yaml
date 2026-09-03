@@ -7,8 +7,8 @@ dataset_dir: /path/to/robocasa-gr1-eef33-lerobot-v3
 # Only EEF is supported. Raw EEF33:
 # [L xyz3+rot6d6+hand6, R xyz3+rot6d6+hand6, waist3].
 action_mode: eef
-eef_action_column: eef33_action
-eef_state_column: eef33_state
+eef_action_column: eef_action
+eef_state_column: observation.eef_state
 
 # Native annotation.human.coarse_action is an integer class ID, not text.
 # Resolve task_index through converted meta/tasks.parquet. Missing/blank prompt

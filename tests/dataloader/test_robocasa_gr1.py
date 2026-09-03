@@ -46,8 +46,8 @@ def _write_bucket(bucket: Path, *, include_wrist: bool = False) -> None:
 
     features = {
         HEAD_CAM: {"dtype": "video"},
-        "eef33_action": {"shape": [EEF33_DIM]},
-        "eef33_state": {"shape": [EEF33_DIM]},
+        "eef_action": {"shape": [EEF33_DIM]},
+        "observation.eef_state": {"shape": [EEF33_DIM]},
         "annotation.human.coarse_action": {"dtype": "string"},
         "task_index": {"dtype": "int64"},
     }
@@ -91,8 +91,8 @@ def _write_bucket(bucket: Path, *, include_wrist: bool = False) -> None:
     df = pd.DataFrame(
         {
             "annotation.human.coarse_action": ["pick cup"] * EP_LENGTH,
-            "eef33_action": list(eef),
-            "eef33_state": list(state),
+            "eef_action": list(eef),
+            "observation.eef_state": list(state),
             "task_index": [0] * EP_LENGTH,
         }
     )
@@ -423,6 +423,12 @@ def test_robocasa_config_wires_reader_color_jitter():
     cfg = OmegaConf.load("configs/dataloader/robocasa_gr1.yaml")
     assert cfg.color_jitter.brightness == 0.2
     assert "transforms" not in cfg
+
+
+def test_robocasa_config_uses_renamed_eef_columns():
+    cfg = OmegaConf.load("configs/dataloader/robocasa_gr1.yaml")
+    assert cfg.eef_action_column == "eef_action"
+    assert cfg.eef_state_column == "observation.eef_state"
 
 
 def test_robocasa_config_normalizes_min_max_without_stats_path():
