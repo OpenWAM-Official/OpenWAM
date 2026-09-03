@@ -42,6 +42,6 @@ train:
 
   # wandb (rank-0). project: null to disable; entity/run_name overridable on CLI/env.
   wandb:
-    project: open-wam-svae
+    project: openwam-svae
     run_name: null
     entity: null

@@ -113,7 +113,6 @@ def test_joint_mode_basic():
             action_mode="joint",
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
         )
         assert ds.action_dim == 14
         assert ds.action_mode == "joint"
@@ -153,7 +152,6 @@ def test_short_episode_pads_and_masks():
             width=32,
             action_mode="joint",
             val_ratio=0.0,
-            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -198,7 +196,6 @@ def test_long_episode_tail_windows_are_included_and_padded():
             width=32,
             action_mode="joint",
             val_ratio=0.0,
-            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -286,7 +283,6 @@ def test_build_sample_rejects_window_without_valid_action_label():
             width=32,
             action_mode="joint",
             val_ratio=0.0,
-            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -364,7 +360,6 @@ def test_tail_masks_flow_through_prepare_inputs_and_loss():
             width=32,
             action_mode="joint",
             val_ratio=0.0,
-            filter_static_segments=False,
             normalize_mode=None,
         )
         arch = _make_tiny_arch()
@@ -456,7 +451,6 @@ def test_video_stride_does_not_affect_action_length():
             width=32,
             action_mode="joint",
             val_ratio=0.0,
-            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -489,7 +483,6 @@ def test_joint_mode_minmax_normalization():
             normalization_stats_path=stats_path,
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
         )
 
         sample = ds[0]
@@ -522,7 +515,6 @@ def test_joint_mode_gripper_continuous():
             normalization_stats_path=stats_path,
             val_ratio=0.0,
             video_stride=1,  # num_video_frames=5 → (5-1)%4=0 ✓
-            filter_static_segments=False,
         )
 
         sample = ds[0]
@@ -558,7 +550,6 @@ def test_joint_mode_denormalize_roundtrip():
             normalization_stats_path=stats_path,
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
         )
 
         # normalized = -1 → raw = min = 0 under min-max
@@ -588,7 +579,6 @@ def test_eef_mode_basic():
             action_mode="eef",
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
             normalize_mode=None,  # raw values for this test
         )
         assert ds.action_dim == 20
@@ -620,7 +610,6 @@ def test_eef_mode_minmax_normalization():
             normalize_mode="min-max",
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
         )
         assert ds.normalization_stats is not None and "min" in ds.normalization_stats
 
@@ -660,7 +649,6 @@ def test_eef_mode_zscore_normalization():
             normalize_mode="z-score",
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
         )
         sample = ds[0]
         actions = sample["action"].numpy()
@@ -694,7 +682,6 @@ def test_eef_roundtrip_denormalize():
                 normalize_mode=mode,
                 val_ratio=0.0,
                 video_stride=1,
-                filter_static_segments=False,
             )
             raw = np.random.RandomState(0).uniform(-1, 1, size=(7, 20)).astype(np.float32)
             normed = ds._normalizer.normalize(raw)
@@ -721,7 +708,6 @@ def test_eef_gripper_raw_values():
             action_mode="eef",
             val_ratio=0.0,
             video_stride=2,  # (9-1)%2==0 and (5-1)%4==0 for VAE ✓
-            filter_static_segments=False,
             normalize_mode=None,  # keep raw gripper values for this assertion
         )
 
@@ -758,7 +744,6 @@ def test_eef_denormalize_passthrough():
             action_mode="eef",
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
             normalize_mode=None,
         )
 
@@ -796,7 +781,6 @@ def test_multi_variant_discovery():
             action_mode="joint",
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
         )
 
         # Should have 4 sub-datasets (2 tasks × 2 variants)
@@ -825,7 +809,6 @@ def test_multi_variant_single_variant_compat():
             action_mode="joint",
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
         )
 
         assert len(ds._sub_datasets) == 1
@@ -1154,7 +1137,6 @@ def test_multitask_peer_rank_waits_for_shared_stats(monkeypatch, tmp_path):
             width=32,
             val_ratio=0.0,
             video_stride=1,
-            filter_static_segments=False,
         )
     finally:
         worker.join(timeout=1)

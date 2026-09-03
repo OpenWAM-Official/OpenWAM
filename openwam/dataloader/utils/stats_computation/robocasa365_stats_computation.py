@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -18,10 +19,147 @@ from openwam.dataloader.robocasa365 import (
 )
 from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, load_episodes_parquet
 from openwam.dataloader.utils.stats_computation.robotwin_stats_computation import atomic_save_stats_npy
-from scripts.convert_robocasa365_compact_v3 import (
-    StatsAccumulator,
-    _stats_payload,
-)
+
+# Inlined from the retired RoboCasa365 compact-v3 converter so the stats
+# tool stays self-contained.
+REPRESENTATION = "robocasa365_compact_native_delta_eef_v1"
+
+
+class StatsAccumulator:
+    """Exact streaming moments/range plus a bounded deterministic quantile sample."""
+
+    def __init__(self, dim: int, *, seed: int, sample_limit: int = 250_000):
+        self.dim = dim
+        self.count = 0
+        self.mean = np.zeros(dim, np.float64)
+        self.m2 = np.zeros(dim, np.float64)
+        self.minimum = np.full(dim, np.inf, np.float64)
+        self.maximum = np.full(dim, -np.inf, np.float64)
+        self._sample = np.empty((0, dim), np.float32)
+        self._priority = np.empty((0,), np.float64)
+        self._sample_limit = sample_limit
+        self._rng = np.random.default_rng(seed)
+
+    def update(self, values: np.ndarray) -> None:
+        values = np.asarray(values, np.float32)
+        if values.ndim != 2 or values.shape[1] != self.dim or values.shape[0] == 0:
+            raise ValueError(f"stats expected nonempty (N,{self.dim}), got {values.shape}")
+        batch = values.astype(np.float64)
+        n = batch.shape[0]
+        batch_mean = batch.mean(axis=0)
+        batch_m2 = np.square(batch - batch_mean).sum(axis=0)
+        if self.count == 0:
+            self.mean = batch_mean
+            self.m2 = batch_m2
+        else:
+            delta = batch_mean - self.mean
+            total = self.count + n
+            self.mean += delta * n / total
+            self.m2 += batch_m2 + np.square(delta) * self.count * n / total
+        self.count += n
+        self.minimum = np.minimum(self.minimum, batch.min(axis=0))
+        self.maximum = np.maximum(self.maximum, batch.max(axis=0))
+
+        take = min(n, 10_000)
+        indices = self._rng.choice(n, size=take, replace=False) if take < n else np.arange(n)
+        sample = values[indices]
+        priority = self._rng.random(take)
+        self._sample = np.concatenate([self._sample, sample], axis=0)
+        self._priority = np.concatenate([self._priority, priority])
+        if self._sample.shape[0] > self._sample_limit:
+            keep = np.argpartition(self._priority, -self._sample_limit)[-self._sample_limit :]
+            self._sample = self._sample[keep]
+            self._priority = self._priority[keep]
+
+    def merge(self, other: "StatsAccumulator") -> None:
+        if other.dim != self.dim or other.count == 0:
+            if other.dim != self.dim:
+                raise ValueError("cannot merge stats with different dimensions")
+            return
+        if self.count == 0:
+            self.count = other.count
+            self.mean = other.mean.copy()
+            self.m2 = other.m2.copy()
+            self.minimum = other.minimum.copy()
+            self.maximum = other.maximum.copy()
+        else:
+            total = self.count + other.count
+            delta = other.mean - self.mean
+            self.m2 += other.m2 + np.square(delta) * self.count * other.count / total
+            self.mean += delta * other.count / total
+            self.count = total
+            self.minimum = np.minimum(self.minimum, other.minimum)
+            self.maximum = np.maximum(self.maximum, other.maximum)
+        self._sample = np.concatenate([self._sample, other._sample], axis=0)
+        self._priority = np.concatenate([self._priority, other._priority])
+        if self._sample.shape[0] > self._sample_limit:
+            keep = np.argpartition(self._priority, -self._sample_limit)[-self._sample_limit :]
+            self._sample = self._sample[keep]
+            self._priority = self._priority[keep]
+
+    def finish(self) -> dict[str, np.ndarray]:
+        if self.count == 0:
+            raise ValueError("cannot finish empty stats")
+        std = np.sqrt(self.m2 / self.count)
+        q01, q99 = np.quantile(self._sample.astype(np.float64), [0.01, 0.99], axis=0)
+        return {
+            "mean": self.mean.astype(np.float32),
+            "std": std.astype(np.float32),
+            "min": self.minimum.astype(np.float32),
+            "max": self.maximum.astype(np.float32),
+            "q01": q01.astype(np.float32),
+            "q99": q99.astype(np.float32),
+        }
+
+
+def _pin_dims(stats: dict[str, np.ndarray], dims: Iterable[int]) -> None:
+    identity = {"mean": 0.0, "std": 1.0, "min": -1.0, "max": 1.0, "q01": -1.0, "q99": 1.0}
+    for key, value in identity.items():
+        stats[key][list(dims)] = value
+
+
+def _stats_payload(
+    action_acc: StatsAccumulator,
+    state_acc: StatsAccumulator,
+) -> dict:
+    action = action_acc.finish()
+    state = state_acc.finish()
+
+    # Rot6D is a geometric representation rather than six independent scalar
+    # quantities.  Preserve it exactly under every supported normalization mode.
+    _pin_dims(action, range(3, 9))
+    _pin_dims(state, (*range(3, 9), *range(13, 19)))
+    action.update(
+        {
+            "representation": REPRESENTATION,
+            "gripper_convention": "minus1_closed_plus1_open",
+            "native_delta_rotation_scale_applied": False,
+            "normalization_scope": {
+                "native_delta_xyz_gripper": "action_only",
+                "native_delta_rot6d": "identity",
+                "base_vx_vy_vyaw_torso_mode": "action_only",
+            },
+            "rot6d_identity_dims": list(range(3, 9)),
+        }
+    )
+    state.update(
+        {
+            "representation": REPRESENTATION,
+            "normalization_scope": {
+                "eef_xyz_gripper": "state_only",
+                "eef_rot6d": "identity",
+                "base_xyz": "state_only",
+                "base_rot6d": "identity",
+            },
+            "rot6d_identity_dims": [*range(3, 9), *range(13, 19)],
+        }
+    )
+    return {
+        ACTION_STATS_KEY: action,
+        STATE_STATS_KEY: state,
+        "num_timesteps": int(action_acc.count),
+        "quantiles": f"deterministic priority sample <= {action_acc._sample_limit} rows",
+    }
 
 
 def _iter_arrays(data_root: str, task_name: str | None = None):

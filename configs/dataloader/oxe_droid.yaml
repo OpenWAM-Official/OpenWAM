@@ -1,8 +1,7 @@
 type: oxe_droid
 
-# Root of the DROID LeRobot v3 conversion. Before generating stats, create the
-# deterministic no-prompt exclusion manifest with:
-#   python scripts/write_droid_prompt_exclusions.py --dataset-dir /path/to/Droid
+# Root of the DROID LeRobot v3 conversion. The reader requires the deterministic
+# no-prompt exclusion manifest (meta/excluded_episodes.json) to be present.
 dataset_dir: /path/to/pretrain_dataset/Droid
 
 # DROID is 10 fps. A 33-frame window spans 3.2 seconds; stride 4 yields 9 video

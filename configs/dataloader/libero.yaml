@@ -1,7 +1,7 @@
 type: libero
 
 # Canonical LIBERO dataset. The reader accepts only the native-action
-# conversion metadata produced by scripts/convert_lerobot_libero_to_eef10_v3.py.
+# conversion metadata (meta/conversion.json).
 dataset_dir: /path/to/benchmark_data/libero
 action_mode: libero
 gripper_convention: minus1_closed_plus1_open

@@ -1,4 +1,4 @@
-"""Verify that all open_wam modules can be imported successfully."""
+"""Verify that all openwam modules can be imported successfully."""
 
 
 def test_import_openwam():

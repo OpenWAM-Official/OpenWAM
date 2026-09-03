@@ -216,9 +216,6 @@ def test_hydra_compose_compact_maps_and_fixed_eval_semantics():
         assert "binary_action_dims" not in cfg.dataloader
         assert "gripper_convention" not in cfg.dataloader
         assert "mask_torso_action" not in cfg.dataloader
-        assert "filter_static_segments" not in cfg.dataloader
-        assert "static_segment_threshold" not in cfg.dataloader
-        assert "max_static_retry" not in cfg.dataloader
         assert all(
             path.startswith("/path/to/benchmark_data/robocasa365/")
             for path in cfg.dataloader.dataset_dir

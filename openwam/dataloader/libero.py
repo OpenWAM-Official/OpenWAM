@@ -177,8 +177,7 @@ class LiberoDataset(LeRobotV3Reader):
         conversion_path = self._dataset_dir / "meta" / "conversion.json"
         if not conversion_path.is_file():
             raise FileNotFoundError(
-                f"LIBERO requires {conversion_path}; use "
-                "scripts/convert_lerobot_libero_to_eef10_v3.py"
+                f"LIBERO requires {conversion_path} (native-action conversion metadata)"
             )
         with conversion_path.open(encoding="utf-8") as handle:
             conversion = json.load(handle)

@@ -1,7 +1,7 @@
 # EBench bridge defaults, consumed via:
 #   python benchmarks/ebench/openwam2ebench_interface.py --config benchmarks/ebench/policy_config.yml
 # Keys map 1:1 to the CLI flags (argparse dests); explicit CLI flags override
-# these values. Never commit machine-specific paths (CONTRIBUTING.md).
+# these values. Never commit machine-specific paths.
 
 # --- GenManip eval server (north) ---
 # Local server: http://<host>:8087 (ray_eval_server.py).

@@ -294,8 +294,8 @@ class TestBucketDiscovery:
         assert discover_a1_buckets(tmp_path) == []
 
     def test_skips_killed_tar_staging_dirs(self, tmp_path):
-        """extract_interndata_a1_v30.sh stages into <cat>/<emb>/.partial_<name>/.
-        SIGKILL/OOM/preemption bypasses its cleanup, so a half-extracted tree
+        """Archive extraction stages into <cat>/<emb>/.partial_<name>/.
+        SIGKILL/OOM/preemption bypasses the extractor cleanup, so a half-extracted tree
         that already has meta/ must not be mistaken for a complete bucket — it
         would construct fine and then die at __getitem__ mid-training."""
         good = _make_bucket(tmp_path, "cat/emb/good")

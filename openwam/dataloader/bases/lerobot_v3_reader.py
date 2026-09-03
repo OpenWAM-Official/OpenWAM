@@ -336,7 +336,7 @@ class LeRobotV3Reader(BaseDataset):
         # LeRobot v2.1: per-episode parquet + meta/episodes.jsonl) can supply
         # the same eps DataFrame contract without reimplementing __init__.
         self._eps_df = self._build_episode_index(info)
-        # Stable universe for scan_dataset's over-exclusion guardrail. Capture
+        # Stable universe for external scan tools' over-exclusion guardrails. Capture
         # it before this reader applies the mutable exclusion artifact; using a
         # post-exclusion length plus a later artifact snapshot races concurrent
         # exclusion writers and can overstate the denominator.

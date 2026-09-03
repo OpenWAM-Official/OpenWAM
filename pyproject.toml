@@ -3,45 +3,35 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "open-wam"
+name = "openwam"
 version = "0.1.0"
-description = "OpenWAM: A Modular Open-Source Library for Systematic WAM Training, Inference and Deployment"
+description = "OpenWAM: An Open, Modular Exploration Towards Systematic World–Action Model Pretraining"
 authors = [{ name = "OpenWAM Contributors" }]
 license = { text = "MIT" }
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24,<3",
     "Pillow>=10,<13",
-    # cosmos3 uses SDPA's enable_gqa (torch 2.5+); repo intent is 2.7.1+cu128.
     "torch>=2.5,<3",
     "torchvision>=0.15,<1",
     "transformers>=5.5,<6",
+    "diffusers>=0.38,<1",
     "imageio>=2.28,<3",
     "imageio[ffmpeg]>=2.28,<3",
-    "joblib>=1.3,<2",
-    "pyarrow>=14,<22",
+    "pyarrow>=14,<26",
     "PyYAML>=6,<7",
     "safetensors>=0.4,<1",
     "einops>=0.7,<1",
     "sentencepiece>=0.1.99,<1",
-    "protobuf>=4.25,<7",
+    "protobuf>=5,<8",
     "modelscope>=1.13,<2",
     "ftfy>=6.1,<7",
     "opencv-python>=4.7,<5",
     "h5py>=3.8,<4",
-    "lpips>=0.1.4,<1",
     "pandas>=2.0,<4",
     "scipy>=1.10,<2",
-    "scikit-image>=0.21,<1",
     "accelerate>=1.0,<2",
     "deepspeed>=0.18.5,<0.19",
-    "peft>=0.10,<1",
-    # >=4 is required to read LeRobot v3 parquet written by datasets 4.x: those
-    # files declare the `List` feature type, which 3.x does not know
-    # ("Feature type 'List' not found"), so RoboCOIN cannot be opened through
-    # LeRobotDataset under the old <4 pin. The upper bound tracks lerobot's own
-    # `datasets>=4.0.0,<5.0.0` so the two cannot drift apart.
-    "datasets>=4.0,<5",
     "tqdm>=4.66,<5",
     "wandb>=0.16,<1",
     "hydra-core>=1.3,<2",
@@ -50,7 +40,6 @@ dependencies = [
     "msgpack>=1,<2",
     "av>=12,<18",
     "timm>=1.0.20,<1.1",
-    "lerobot @ git+https://github.com/huggingface/lerobot.git@d656da8ccca5989ff0a2207e81fbfa2c2d5bafb1",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -58,52 +47,19 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-[tool.setuptools.packages.find]
-where = ["./"]
-include = ["openwam", "openwam.*"]
-
 [project.optional-dependencies]
-# CUDA backend. Explicit torch/torchvision pin for GPU hosts. Install the
-# matching CUDA wheels from PyTorch's index, e.g.:
-#   pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e '.[cuda,dev]'
-# cu128 is required for Blackwell (sm_120) GPUs.
-cuda = ["torch>=2.5,<3", "torchvision>=0.15,<1"]
-# Cosmos3-Edge video backbone (Cosmos3EdgeVideoBackbone). Unlike the
-# predict2.5 extra this one is installable: the vendored transformer under
-# openwam/model/video_backbone/cosmos3/_vendor/ only needs diffusers for
-# AutoencoderKLWan and a handful of support imports, all stable since 0.38.
-# Kept out of the base dependencies because nothing else under openwam/ imports
-# diffusers and the module-level import of cosmos3_backbone is deliberately
-# diffusers-free — build_cosmos3_pipeline lazy-imports it and raises an install
-# hint when missing, so CPU-only CI passes without this extra.
-cosmos3 = ["diffusers>=0.38,<1"]
-# Cosmos-Predict2.5 video backbone (CosmosPredict25VideoBackbone).
-#
-# The cosmos-oss / cosmos-cuda / cosmos-predict2 distributions are not published
-# on PyPI as standalone wheels (cosmos-oss==0.1.0 resolves to "no matching
-# distribution found"). We track upstream as a git submodule at
-# third_party/cosmos-predict2.5/ (pinned to tag v1.5.2, commit 441b8974) and
-# install it via scripts/install_cosmos_predict25.sh — pip does not support
-# relative paths in pyproject.toml dependencies, so this extra stays empty as
-# documentation only. CPU-only CI continues to pass without it because
-# openwam/model/video_backbone/cosmos_predict25/ lazy-imports cosmos_predict2
-# inside build_cosmos_predict25_pipeline.
-#
-# To install on a CUDA host (also needs CUDA toolkit + cuDNN headers for
-# transformer-engine to compile):
-#     git submodule update --init third_party/cosmos-predict2.5
-#     bash scripts/install_cosmos_predict25.sh
-cosmos_predict25 = []
-# Dev / test toolchain — pytest is referenced by Makefile (`make test`,
-# `make test-full`) and tests/conftest.py; ruff drives `make lint` / `make format`.
-# Kept out of the base dependencies so non-dev installs stay slim.
 dev = [
     "pytest>=8,<10",
     "ruff>=0.4,<1",
+    "pre-commit>=3.5,<5",
 ]
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["./"]
+include = ["openwam", "openwam.*"]
 
 [project.scripts]
 openwam-serve = "openwam.deploy.server:main"
@@ -121,11 +77,3 @@ ignore = ["E501", "E741"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["openwam"]
-
-# NOTE: pytest configuration lives in the repo-root `pytest.ini`. pytest reads a
-# single config file and `pytest.ini` wins over pyproject.toml (it prints
-# "ignoring pytest config in pyproject.toml" otherwise), so a
-# `[tool.pytest.ini_options]` block here would be dead config. The `gpu` / `data`
-# markers are registered in `tests/conftest.py` (pytest_configure); the core
-# `make test` gate deselects gpu-marked tests via `-m "not gpu"` (an expression
-# filter that needs no registration). Run them with `make test-full` / `pytest -m gpu`.

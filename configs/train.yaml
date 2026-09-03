@@ -60,10 +60,10 @@ training:
   dataset_num_workers: 8          # DataLoader num_workers (0 = main process)
 
 project:
-  name: open-wam
+  name: openwam
   output_dir: outputs/${now:%Y-%m-%d_%H-%M-%S}
   seed: 42
   wandb:
-    project: open-wam
+    project: openwam
     run_name: null
     entity: null

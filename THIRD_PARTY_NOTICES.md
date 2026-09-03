@@ -133,26 +133,6 @@ This notice covers source code only. Cosmos model weights are distributed
 separately under NVIDIA's applicable model terms, not the Apache-2.0 source
 license.
 
-## openpi and msgpack-numpy codec
-
-- Primary source: <https://github.com/Physical-Intelligence/openpi>, file
-  `packages/openpi-client/src/openpi_client/msgpack_numpy.py`.
-- Primary-source revision: **UNKNOWN** (the original import did not record a
-  commit SHA).
-- Primary-source license: Apache License 2.0; see
-  `third_party/licenses/Apache-2.0.txt`.
-- Earlier source identified by openpi:
-  <https://github.com/lebedov/msgpack-numpy>.
-- Earlier-source revision: **UNKNOWN**.
-- Earlier-source copyright: 2013-2022 Lev E. Givon.
-- Earlier-source license: BSD 3-Clause; see
-  `third_party/licenses/msgpack-numpy-BSD-3-Clause.txt`.
-- OpenWAM use: the wire-compatible NumPy/msgpack codec in
-  `benchmarks/behavior/msgpack_numpy.py`.
-- Modifications: repackaged as a dependency-light benchmark helper with
-  OpenWAM documentation and annotations while retaining openpi's restricted
-  dtype behavior and wire layout.
-
 ## LIBERO
 
 - Source: <https://github.com/Lifelong-Robot-Learning/LIBERO>

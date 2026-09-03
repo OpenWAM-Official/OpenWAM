@@ -429,7 +429,7 @@ def load_droid_prompt_exclusions(
     path = root / "meta" / "excluded_episodes.json"
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} is missing. Run scripts/write_droid_prompt_exclusions.py before constructing OXE-DROID."
+            f"{path} is missing. Provide the prompt-exclusion manifest before constructing OXE-DROID."
         )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -504,7 +504,7 @@ def load_droid_prompt_exclusions(
             raise ValueError(f"{DROID_PROMPT_INPUTS_DIGEST_KEY} does not match tasks.parquet and prompt source columns")
     except (KeyError, OSError, TypeError, ValueError) as exc:
         raise ValueError(
-            f"{path} is stale or malformed ({exc}). Re-run scripts/write_droid_prompt_exclusions.py."
+            f"{path} is stale or malformed ({exc}). Regenerate the prompt-exclusion manifest."
         ) from exc
     return payload, canonical
 
@@ -662,8 +662,8 @@ class OxeDroidDataset(LeRobotV3Reader):
         raise ValueError(
             f"{self.DATASET_NAME} task_index={task_idx} has a blank prompt and every fallback "
             f"column {list(self.PROMPT_FALLBACK_COLS)} is blank too (episode_index="
-            f"{int(row['episode_index'])}). Generate meta/excluded_episodes.json with "
-            "scripts/write_droid_prompt_exclusions.py before loading the dataset."
+            f"{int(row['episode_index'])}). Generate meta/excluded_episodes.json "
+            "before loading the dataset."
         )
 
     def _action_20d(self, win: pd.DataFrame) -> np.ndarray:

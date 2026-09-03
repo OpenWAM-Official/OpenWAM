@@ -27,9 +27,9 @@ sources; LeRobot, depth, and real-robot packs are ignored.
 
 ```bash
 # From the OpenWAM repo root. Default target: <openwam>/data/RoboDojo
-bash scripts/download_robodojo.sh huggingface
+bash benchmarks/robodojo/download_robodojo.sh huggingface
 # or
-bash scripts/download_robodojo.sh modelscope
+bash benchmarks/robodojo/download_robodojo.sh modelscope
 ```
 
 Override the parent directory with `ROBO_DOJO_DATA_ROOT`. The script writes

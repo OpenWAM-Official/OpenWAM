@@ -28,7 +28,7 @@ Alignment notes (family = robocoin/behavior stats modules):
     (``_raw23_from_frame`` -> ``_ee_pose_gripper_base_to_raw23``: wxyz
     quat->rot6d, two-finger averaging, base column passthrough) so the stats
     are computed over byte-identical numbers to what the reader feeds the
-    model — zero layout drift, the behavior_stats_computation precedent;
+    model — zero layout drift;
   * moments accumulate in RoboCOIN's streaming :class:`Accumulator` (exact
     mean/std/min/max, reservoir q01/q99) and the 12 rot6d dims (3:9 / 13:19 —
     the eef-20 layout EBench's raw-23 prefix shares) are pinned to identity

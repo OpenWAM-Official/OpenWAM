@@ -30,36 +30,12 @@ For a short machine-migration setup flow, start with
    python robocasa/scripts/download_tabletop_assets.py -y
    ```
 
-2. Optionally download the official 24k GR1 demonstrations:
-
-   ```bash
-   hf download nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim \
-     --repo-type dataset \
-     --include "gr1_unified.*/**" \
-     --local-dir /path/to/robocasa-gr1-24k
-   ```
-
-   These folders are LeRobot **v2.0** with native 44-D joint/body vectors.
-   This integration trains base-frame EEF33, so run the checked-in MuJoCo FK
-   enrichment and v3 conversion:
-
-   ```bash
-   export ROBOCASA_GR1_PATH=/path/to/robocasa-gr1-tabletop-tasks
-   export ROBOCASA_PYTHON=/path/to/robocasa-gr1/bin/python
-   export OPENWAM_PYTHON=/path/to/openwam/bin/python
-   bash scripts/prepare_robocasa_gr1_eef33.sh \
-     /path/to/robocasa-gr1-24k \
-     /path/to/robocasa-gr1-eef33-v20 \
-     /path/to/robocasa-gr1-eef33-v30
-   ```
+2. Optionally download the converted EEF33 demonstrations (LeRobot v3,
+   HuggingFace release link TBD) to `/path/to/robocasa-gr1-eef33-v30`.
 
    EEF33 is
    `[L xyz3, L rot6d6, L hand6, R xyz3, R rot6d6, R hand6, waist3]`.
-   Poses are relative to `robot0_base`, making enrichment deterministic across
-   randomized world placements. The converter rejects joint-only buckets.
-   The converter hard-links payloads by default, so conversion is fast and does
-   not duplicate the large parquet/MP4 data. Use `--link-mode symlink` across
-   mount layouts, or `--link-mode copy` only when duplication is intended.
+   Poses are relative to `robot0_base`.
 
    `configs/dataloader/robocasa_gr1.yaml` accepts only
    EEF33. Its exact unified map is
@@ -98,24 +74,6 @@ bash benchmarks/robocasa_gr1/run_smoke.sh env
 
 For render-enabled smoke tests and machine migration notes, see
 [`RENDERING.md`](RENDERING.md).
-
-Inspect a converted training sample, save the composed image and ColorJitter
-comparison, and validate action/prompt contracts:
-
-```bash
-python scripts/inspect_robocasa_gr1_dataloader.py \
-  --config configs/dataloader/robocasa_gr1.yaml \
-  --dataset-dir /path/to/robocasa-gr1-eef33-v30 \
-  --sample-index 0 \
-  --output-dir validation_outputs/robocasa_gr1_sample0
-```
-
-The output directory contains plain/jittered composed PNGs, a temporal contact
-sheet, a difference image, and `inspection_report.json`. The report checks that
-the single real ego view occupies the top 256×320 slot, both absent wrist slots
-are black, ColorJitter changes pixels, and the resolved task prompt is non-empty.
-For EEF/unify configs it additionally checks rot6d orthonormality, identity
-normalization on rotation components, and the EEF33↔unified80 map round-trip.
 
 ## Evaluation
 

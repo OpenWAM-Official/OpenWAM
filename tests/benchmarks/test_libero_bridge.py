@@ -11,10 +11,41 @@ from benchmarks.libero.openwam2libero_interface import (
     OpenWAMLiberoPolicy,
     native_eef10_to_libero7d,
 )
-from scripts.convert_lerobot_libero_to_eef10_v3 import (
-    axis_angle_to_matrix,
-    matrix_to_rot6d,
-)
+
+
+# Rotation fixtures inlined from the retired LIBERO EEF10 converter.
+def axis_angle_to_matrix(axis_angle: np.ndarray) -> np.ndarray:
+    """Convert rotation vectors to rotation matrices with Rodrigues' formula."""
+    value = np.asarray(axis_angle, dtype=np.float64)
+    if value.shape[-1:] != (3,):
+        raise ValueError(f"axis-angle values must end in dimension 3, got {value.shape}")
+    angle = np.linalg.norm(value, axis=-1, keepdims=True)
+    small = angle[..., 0] < 1e-8
+    axis = np.where(angle > 1e-8, value / np.maximum(angle, 1e-8), 0.0)
+    x, y, z = axis[..., 0], axis[..., 1], axis[..., 2]
+    cosine = np.cos(angle[..., 0])
+    sine = np.sin(angle[..., 0])
+    one_minus_cosine = 1.0 - cosine
+    matrix = np.empty(value.shape[:-1] + (3, 3), dtype=np.float64)
+    matrix[..., 0, 0] = cosine + x * x * one_minus_cosine
+    matrix[..., 0, 1] = x * y * one_minus_cosine - z * sine
+    matrix[..., 0, 2] = x * z * one_minus_cosine + y * sine
+    matrix[..., 1, 0] = y * x * one_minus_cosine + z * sine
+    matrix[..., 1, 1] = cosine + y * y * one_minus_cosine
+    matrix[..., 1, 2] = y * z * one_minus_cosine - x * sine
+    matrix[..., 2, 0] = z * x * one_minus_cosine - y * sine
+    matrix[..., 2, 1] = z * y * one_minus_cosine + x * sine
+    matrix[..., 2, 2] = cosine + z * z * one_minus_cosine
+    matrix[small] = np.eye(3)
+    return matrix
+
+
+def matrix_to_rot6d(matrix: np.ndarray) -> np.ndarray:
+    """Store the first two columns of a rotation matrix, column by column."""
+    value = np.asarray(matrix)
+    if value.shape[-2:] != (3, 3):
+        raise ValueError(f"rotation matrices must end in shape (3, 3), got {value.shape}")
+    return np.concatenate([value[..., :, 0], value[..., :, 1]], axis=-1).astype(np.float32)
 
 
 class _Client:

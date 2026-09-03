@@ -520,9 +520,9 @@ def discover_a1_buckets(root: Path) -> List[Path]:
     subsample seeds in ``build_multibucket`` and the stats merge order. With it,
     the lexicographically-first path always wins.
 
-    Dot-prefixed directories are skipped: ``extract_interndata_a1_v30.sh`` stages
+    Dot-prefixed directories are skipped: archive extraction stages
     every archive through ``<cat>/<emb>/.partial_<name>/`` and logs into
-    ``.extract_logs/``. A SIGKILL / OOM / node preemption bypasses that script's
+    ``.extract_logs/``. A SIGKILL / OOM / node preemption bypasses the extractor's
     cleanup entirely, so a half-extracted staging tree whose ``meta/`` was already
     written would otherwise be discovered as a complete bucket and then fail at
     ``__getitem__`` mid-training.
@@ -2223,7 +2223,7 @@ class InternDataA1Dataset(LeRobotV3Reader):
         if not sub_dirs:
             raise FileNotFoundError(
                 f"{cls.__name__}: no buckets with meta/info.json found anywhere under {root}. "
-                "Did the tar.gz archives get extracted? (see scripts/extract_interndata_a1_v30.sh)"
+                "Did the tar.gz archives get extracted?"
             )
         logger.info("%s.from_config: root mode, %d buckets under %s", cls.__name__, len(sub_dirs), root)
 

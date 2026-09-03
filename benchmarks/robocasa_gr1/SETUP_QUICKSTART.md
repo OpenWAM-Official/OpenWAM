@@ -42,27 +42,8 @@ python robocasa/scripts/download_tabletop_assets.py -y
 This downloads the simulator assets only. The demonstration dataset is optional
 for benchmark smoke/eval.
 
-Optional dataset download:
-
-```bash
-hf download nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim \
-  --repo-type dataset \
-  --include "gr1_unified.*/**" \
-  --local-dir /path/to/bench_deps/robocasa-gr1-24k
-
-export ROBOCASA_GR1_PATH=/path/to/bench_deps/robocasa-gr1-tabletop-tasks
-export ROBOCASA_GR1_PYTHON="$CONDA_PREFIX/bin/python"
-export OPENWAM_PYTHON=/path/to/openwam/bin/python
-bash scripts/prepare_robocasa_gr1_eef33.sh \
-  /path/to/bench_deps/robocasa-gr1-24k \
-  /path/to/bench_deps/robocasa-gr1-eef33-v20 \
-  /path/to/bench_deps/robocasa-gr1-eef33-v30
-```
-
-The public folders are LeRobot v2.0 with native 44-D joint/body state/action,
-not HDF5 and not EEF33. This integration does not train joint mode. The wrapper
-uses the exact RoboCasa MuJoCo model for base-frame FK, writes EEF33
-action/state, converts to v3, and computes separate action/state statistics.
+Optional dataset download: fetch the converted EEF33 LeRobot v3 dataset
+(HuggingFace release link TBD) to `/path/to/bench_deps/robocasa-gr1-eef33-v30`.
 
 Approximate dataset size:
 

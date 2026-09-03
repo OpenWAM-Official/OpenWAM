@@ -61,14 +61,6 @@ target_camera: head_camera        # camera used in single-view mode (ignored whe
 #   null      → disable, keep raw physical units
 normalize_mode: min-max
 
-# --- Static-segment filtering (training only) ---
-# Skips windows whose first commanded action is almost identical to the current
-# state (|action[0] - proprio| < threshold). Retries with a random window up to
-# max_static_retry times.
-filter_static_segments: true
-static_segment_threshold: 1.0e-5
-max_static_retry: 3
-
 # ── Video augmentation (optional) ─────────────────────────────────────────────
 # color_jitter: load-time color jitter applied by the reader to each clip, with
 # the SAME random factors across all frames (temporal consistency), TRAIN split

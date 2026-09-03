@@ -191,7 +191,7 @@ class RoboCasa365Dataset(BaseDataset):
         if state_shape != (STATE_DIM,) or action_shape != (ACTION_DIM,):
             raise ValueError(
                 f"RoboCasa365 compact reader requires state{STATE_DIM}/action{ACTION_DIM}; got {state_shape}/{action_shape}. "
-                "Run scripts/convert_robocasa365_compact_v3.py first."
+                "The dataset must be the compact v3 conversion."
             )
         required_cameras = VIDEO_CAMERAS if self.multiview else (HEAD_CAMERA,)
         missing_camera_features = [camera for camera in required_cameras if camera not in info.get("features", {})]

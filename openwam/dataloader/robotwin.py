@@ -318,9 +318,6 @@ class RoboTwinDataset(BaseDataset):
         variant: str = "clean_50",
         backbone: Optional[str] = None,
         action_mode: str = "joint",
-        filter_static_segments: bool = True,
-        static_segment_threshold: float = 1e-5,
-        max_static_retry: int = 3,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
         # Optional load-time video color jitter, applied consistently across a
@@ -336,9 +333,6 @@ class RoboTwinDataset(BaseDataset):
         self._unify_action = bool(unify_action)
         self._unify_action_map = unify_action_map
         self.normalize_mode = normalize_mode if normalize_mode not in ("", "none", "null") else None
-        self._filter_static_segments = bool(filter_static_segments)
-        self._static_segment_threshold = float(static_segment_threshold)
-        self._max_static_retry = int(max_static_retry)
 
         # ── load-time video augmentation ──────────────────────────────────
         # Color jitter is applied in __getitem__ to the decoded clip (same
@@ -944,16 +938,6 @@ class RoboTwinDataset(BaseDataset):
             action_mask = action_mask & dim_valid.unsqueeze(0)
             proprio_mask = proprio_mask & dim_valid.unsqueeze(0)
 
-        # Step-0-only by design: drop "hasn't-started-yet" windows, not
-        # tail windows where the first action label is padding.
-        # action_mask is now (T, D); collapse to per-timestep validity via
-        # time_validity (the source 1-D bool used to build the 2-D mask).
-        if self.num_action_steps > 0 and bool(time_validity[0]):
-            first_delta_max = float(np.max(np.abs(action_np[0] - proprio_np[0])))
-            is_static = first_delta_max < self._static_segment_threshold
-        else:
-            is_static = False
-
         prompt = self._get_prompt(ep_idx)
 
         ep_key = f"episode_{ep_idx}"
@@ -981,7 +965,6 @@ class RoboTwinDataset(BaseDataset):
             "episode_length": ep_len,
             "task_name": self.task_name,
             "active_arm": active_arm,
-            "_is_static": is_static,
         }
 
     def __getitem__(self, idx):
@@ -991,23 +974,6 @@ class RoboTwinDataset(BaseDataset):
             ep_idx, start = self._window_index[idx]
 
         sample = self._build_sample(ep_idx, start)
-
-        # Training-only: resample on static segments (keep val deterministic)
-        if (
-            self._filter_static_segments
-            and self.split == "train"
-            and sample["_is_static"]
-            and len(self._window_index) > 1
-        ):
-            for _ in range(self._max_static_retry):
-                rand_idx = random.randint(0, len(self._window_index) - 1)
-                ep_idx2, start2 = self._window_index[rand_idx]
-                alt = self._build_sample(ep_idx2, start2)
-                if not alt["_is_static"]:
-                    sample = alt
-                    break
-
-        sample.pop("_is_static", None)
         if self._color_jitter is not None:
             # Same jitter factors across the whole clip (temporal consistency).
             sample["video"] = self._color_jitter.apply({"video": sample["video"]})["video"]
@@ -1083,9 +1049,6 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             multiview=bool(_get("multiview", True)),
             camera_layout=_cam_layout,
             backbone=_get("backbone", None),
-            filter_static_segments=bool(_get("filter_static_segments", True)),
-            static_segment_threshold=float(_get("static_segment_threshold", 1e-5)),
-            max_static_retry=int(_get("max_static_retry", 3)),
             unify_action=bool(_get("unify_action", False)),
             unify_action_map=_get("unify_action_map", None),
             color_jitter=_get("color_jitter", None),

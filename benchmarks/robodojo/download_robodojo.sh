@@ -30,15 +30,15 @@ usage() {
 Download official RoboDojo HDF5 for OpenWAM.
 
 Usage:
-  bash scripts/download_robodojo.sh <source>
+  bash benchmarks/robodojo/download_robodojo.sh <source>
 
 Sources:
   huggingface
   modelscope
 
 Examples:
-  bash scripts/download_robodojo.sh huggingface
-  bash scripts/download_robodojo.sh modelscope
+  bash benchmarks/robodojo/download_robodojo.sh huggingface
+  bash benchmarks/robodojo/download_robodojo.sh modelscope
 
 The OpenWAM dataloader only reads HDF5 (~523GB):
 

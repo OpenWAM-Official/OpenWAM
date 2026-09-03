@@ -13,8 +13,6 @@ The repository is organized around the `openwam/` package and currently supports
 - Two WAM architecture families: dual-system and shared backbone variants
 - A policy server for robot deployment workflows
 
-![Architecture](assets_repo/arch.png)
-
 ## What OpenWAM Focuses On
 
 OpenWAM is not a VLA clone. Its core direction is to use a video world model as the control backbone.
@@ -48,7 +46,7 @@ OpenWAM/
 │   ├── robocasa365/   # RoboCasa365 native-action eval client
 │   ├── robocasa_gr1/  # RoboCasa GR1 tabletop eval client
 │   └── vlabench/      # VLABench eval client, single / multi-GPU track sweeps
-├── assets_repo/       # Architecture diagrams
+├── assets/            # Base-model checkpoints (created by the download script; git-ignored)
 └── third_party/       # Vendored externals (Cosmos-Predict2.5 submodule)
 ```
 
@@ -78,19 +76,28 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 | RoboCasa GR1 eval | Supported | GR1 tabletop tasks; see `benchmarks/robocasa_gr1/` |
 | VLABench eval | Supported | 10 primitive tasks across 6 evaluation tracks; see `benchmarks/vlabench/` |
 | Calvin eval | Planned | Requires external environment setup |
-| BEHAVIOR-1K eval | Planned | Requires external environment setup |
 
 ## Installation
 
 ### Base installation
 
-```bash
-conda create -n openwam python=3.12
+Create an environment with **conda**:
 
+```bash
+# Requires Python >= 3.10
+conda create -n openwam python=3.10
 conda activate openwam
 ```
 
-We recommend using PyTorch 2.7.1 with CUDA 12.8 （others may also work）:
+or with **venv**:
+
+```bash
+# Requires Python >= 3.10 (check with `python3 --version`)
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+We recommend using PyTorch 2.7.1 with CUDA 12.8 (others may also work):
 
 ```bash
 pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
@@ -106,12 +113,60 @@ pip install -e .
 
 ### 0. Data Preparation
 
-**Download the video backbone (Wan2.2-TI2V-5B):**
+**Download the video backbone:**
+
+Run the interactive downloader to fetch the checkpoint you need. It saves the
+weights under `assets/video_backbone_ckpt/` (or a directory you choose) and
+points the matching config under `configs/model/video_backbone/` at the
+download automatically:
 
 ```bash
-huggingface-cli download Wan-AI/Wan2.2-TI2V-5B \
-  --local-dir /path/to/Wan2.2-TI2V-5B
+python scripts/download_video_backbone.py
 ```
+
+Available models: `Wan2.2-TI2V-5B`, `Wan2.1-VACE-1.3B`, `Wan2.1-I2V-14B-480P`,
+`Cosmos-Predict2.5-2B` (HuggingFace only; also fetches `Cosmos-Reason1-7B` as
+its text encoder), and `Cosmos3-Edge` — each available from HuggingFace or
+ModelScope.
+
+<details>
+<summary>Example session: downloading Wan2.2-TI2V-5B from HuggingFace</summary>
+
+```text
+$ python scripts/download_video_backbone.py
+OpenWAM video-backbone checkpoint downloader
+
+Storage location
+  Default: /path/to/OpenWAM/assets/video_backbone_ckpt
+Storage path (press Enter for the default):            # press Enter
+Created default directory /path/to/OpenWAM/assets/video_backbone_ckpt
+
+Select the model to download
+  (1) Wan2.2-TI2V-5B
+  (2) Wan2.1-VACE-1.3B
+  (3) Wan2.1-I2V-14B-480P
+  (4) Cosmos-Predict2.5-2B
+  (5) Cosmos3-Edge
+Model number: 1                                        # type 1
+
+Select the download source
+  (1) huggingface
+  (2) modelscope
+Source number: 1                                       # type 1
+
+Wan2.2-TI2V-5B needs about 34.2 GB under /path/to/OpenWAM/assets/video_backbone_ckpt.
+Start the download? [Y/n]                              # press Enter to confirm
+Downloading Wan-AI/Wan2.2-TI2V-5B -> /path/to/OpenWAM/assets/video_backbone_ckpt/Wan2.2-TI2V-5B
+Fetching 23 files: 100%|██████████████████| 23/23 [12:41<00:00, 33.1s/it]
+
+Done. Wan2.2-TI2V-5B is saved under:
+  /path/to/OpenWAM/assets/video_backbone_ckpt/Wan2.2-TI2V-5B
+Updated configs/model/video_backbone/wan22_ti2v_5b.yaml: model_path -> /path/to/OpenWAM/assets/video_backbone_ckpt/Wan2.2-TI2V-5B
+```
+
+Interrupted or partial downloads resume automatically on the next run.
+
+</details>
 
 **Download the RoboTwin dataset:**
 
@@ -140,7 +195,6 @@ bash scripts/train.sh \
   dataloader.dataset_dir=/path/to/robotwin_2_0/dataset \
   dataloader.task_name=adjust_bottle \
   dataloader.variant=clean_50 \
-  model.video_backbone.model_path=/path/to/Wan2.2-TI2V-5B \
   training.debug=true \
   training.batch_size=1 \
   training.output_path=/path/to/output_dir
@@ -276,26 +330,34 @@ Benchmark support status is listed under [Support Status](#benchmarks-and-evalua
 
 ## Development
 
-Run the core test suite:
+### Dev setup
+
+On top of the base installation, install the dev toolchain and (optionally) the
+pre-commit hooks:
 
 ```bash
-make test
+pip install -e '.[dev]'
+
+# Optional but recommended: ruff runs automatically on each commit
+pre-commit install
 ```
 
-Full validation (compile check + tests):
+### Common commands
 
 ```bash
-make check
+make test      # run the core test suite
+make lint      # check code quality with ruff
+make format    # auto-format code
+make check     # compile check + tests
+make all       # lint + tests (full validation)
 ```
 
-Lint and format:
+### Before submitting a PR
 
-```bash
-make lint      # check for issues
-make format    # auto-fix formatting
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and PR guidelines.
+1. Run `make all` and make sure it passes.
+2. Add tests for new functionality under `tests/`.
+3. Update `README.md` if you changed user-visible behavior.
+4. Keep commits focused: one logical change per commit.
 
 ## Acknowledgements
 
@@ -308,11 +370,6 @@ OpenWAM builds on ideas and components from:
 
 OpenWAM is released under the [MIT License](LICENSE). Third-party source
 attribution and license terms are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Contributors
-
-The sanitized per-commit history and its human contribution snapshot are
-documented in [CONTRIBUTORS.md](CONTRIBUTORS.md), including verified co-author credit.
 
 ## Citation
 

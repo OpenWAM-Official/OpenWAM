@@ -2,10 +2,7 @@
 !/data/robotwin/
 /models
 /diffusers
-others/
-.chrome-tmp/
 .claude/
-.serena/
 .vscode/
 
 
@@ -22,9 +19,6 @@ outputs/
 *.mv
 log*.txt
 wandb/
-
-# Local planning scratch
-plans/w0/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -49,7 +43,6 @@ sdist/
 var/
 wheels/
 share/python-wheels/
-previous_codebase/
 references/
 # third_party/ holds submodules (currently cosmos-predict2.5). Build outputs
 # and bytecode that the submodule produces locally should not contaminate it.
@@ -194,17 +187,9 @@ cython_debug/
 CLAUDE.md
 AGENTS.md
 
-# Policy-server / client per-step debug artifacts
-server_debug/
-debug_images/
-debug_vlabench/
-
 # Benchmark client eval outputs (metrics, videos, per-job logs).
 # The glob also covers archived runs kept alongside, e.g. _eval_out_bad/.
 benchmarks/vlabench/_eval_out*/
-
-# Scratch experiments — large checkpoints/logs, never commit
-sandbox/
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
@@ -212,10 +197,9 @@ sandbox/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/.wan_video.py.swp
-graphify-out/
-
-# Local Cosmos25 training launcher (not tracked; uses default pretrained weights)
-scripts/train_cosmos25_default_weights.sh
 
 # uv lockfile (not tracked; project does not pin a uv workflow)
 uv.lock
+
+# Base-model / produced checkpoints (populated by scripts/download_video_backbone.py)
+assets/

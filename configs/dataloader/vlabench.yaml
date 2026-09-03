@@ -25,8 +25,8 @@ type: vlabench
 # video paired with a DIFFERENT episode's actions and prompt. The reader
 # rebuilds the mapping from real parquet row counts; see
 # openwam/dataloader/vlabench.py::_add_data_offsets.
-# Placeholder per CONTRIBUTING.md's config policy — machine-specific dataset
-# mounts must not land in shared configs. Point it at your local copy with a
+# Placeholder — machine-specific dataset mounts must not land in shared
+# configs. Point it at your local copy with a
 # Hydra override: dataloader.dataset_dir=/path/to/vlabench_primitive_ft_lerobot_video
 dataset_dir: /TODO/vlabench_primitive_ft_lerobot_video
 

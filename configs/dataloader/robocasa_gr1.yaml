@@ -1,13 +1,7 @@
 type: robocasa_gr1
 
-# Input must already contain simulator-backed EEF33 columns. The public NVIDIA
-# joint44 files do not; enrich them before running the re-indexer:
-#   python scripts/enrich_robocasa_gr1_joint44_to_eef33.py \
-#     --input /path/to/robocasa-gr1-v20 \
-#     --output /path/to/robocasa-gr1-eef33-v20
-#   python scripts/convert_robocasa_gr1_v20_to_v30.py \
-#     --input /path/to/robocasa-gr1-eef33-v20 \
-#     --output /path/to/robocasa-gr1-eef33-v30
+# Input must already contain simulator-backed EEF33 columns (the public NVIDIA
+# joint44 files do not; use the converted EEF33 LeRobot v3 release).
 dataset_dir: /path/to/robocasa-gr1-eef33-lerobot-v3
 
 # Only EEF is supported. Raw EEF33:
