@@ -33,7 +33,7 @@ training:
   zero_stage: 2                   # DeepSpeed ZeRO stage: 1 or 2 (CLI override: training.zero_stage=1)
 
   # --- Memory optimization ---
-  use_gradient_checkpointing: false       # Recompute activations in backward instead of storing them: saves memory
+  use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
                                          # costs ~1 extra forward (standard term; cf. PyTorch/HF)
   use_gradient_checkpointing_offload: false  # Offload checkpointed activations to CPU
   initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
@@ -48,7 +48,7 @@ training:
   min_timestep_boundary: 0.0      # Lower bound (fraction of total timesteps)
 
   # --- Checkpoint ---
-  output_path: /path/to/openwam_checkpoints           # Base directory for checkpoint output
+  output_path: outputs/openwam_checkpoints            # Base directory for checkpoint output (relative to the launch cwd)
   save_steps: 2000                # Save checkpoint every N steps (0 or null = disable saving)
   keep_last_k_ckpts: 1           # Rolling window: keep only the last K checkpoints
 
