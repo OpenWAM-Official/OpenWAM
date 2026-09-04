@@ -7,6 +7,8 @@
 #   bash scripts/train.sh training.zero_stage=1
 #
 # ── Single-node (auto-detect GPUs) ──
+# Training defaults to ALL visible GPUs (8-GPU launch on a standard node);
+# narrow it only via an explicit NPROC_PER_NODE / CUDA_VISIBLE_DEVICES override.
 #   bash scripts/train.sh
 #   bash scripts/train.sh training.learning_rate=5e-5
 #   NPROC_PER_NODE=4 bash scripts/train.sh

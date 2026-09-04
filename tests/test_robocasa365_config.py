@@ -216,7 +216,9 @@ def test_hydra_compose_compact_maps_and_fixed_eval_semantics():
         assert "binary_action_dims" not in cfg.dataloader
         assert "gripper_convention" not in cfg.dataloader
         assert "mask_torso_action" not in cfg.dataloader
-        assert cfg.dataloader.dataset_dir == "/path/to/robocasa365_data"
+        # dataset_dir is user-mutable (the benchmark downloader rewrites it in
+        # place), so only require a single umbrella string, not a specific value.
+        assert isinstance(cfg.dataloader.dataset_dir, str) and cfg.dataloader.dataset_dir
         assert cfg.dataloader.normalization_stats_path is None
 
 

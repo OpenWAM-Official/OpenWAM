@@ -50,6 +50,8 @@ training:
   # --- Checkpoint ---
   output_path: outputs/openwam_checkpoints            # Base directory for checkpoint output (relative to the launch cwd)
   save_steps: 2000                # Save checkpoint every N steps (0 or null = disable saving)
+  save_full_states_for_resume: false  # Also save resumable full state (optimizer/scheduler/RNG) at each save;
+                                      # required for training.resume_ckpt_path, costs extra disk per checkpoint
   keep_last_k_ckpts: 1           # Rolling window: keep only the last K checkpoints
 
   # --- Finetune / Resume (mutually exclusive; both point to a training output dir, latest step auto-selected) ---

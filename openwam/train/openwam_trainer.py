@@ -229,6 +229,7 @@ class OpenWAMTrainer:
             if save_steps is not None:
                 save_steps = int(save_steps)
         keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
+        save_full_states_for_resume = bool(getattr(t, "save_full_states_for_resume", False))
 
         # Finetune warm-start weights were already loaded at architecture
         # construction (__init__, self-contained ckpt-dir path). Step stays 0.
@@ -356,10 +357,12 @@ class OpenWAMTrainer:
                     output_path=output_path,
                 )
 
-                # save_steps: write both lines (weights + full state), then prune in lockstep.
+                # save_steps: write the weights line (+ the resumable full state when
+                # save_full_states_for_resume=true), then prune in lockstep.
                 if save_steps and global_step > 0 and global_step % save_steps == 0:
                     save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
-                    save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
+                    if save_full_states_for_resume:
+                        save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
                     if is_main:
                         manage_checkpoints(output_path, keep_last_k)
 
@@ -448,8 +451,9 @@ class OpenWAMTrainer:
         resume_state_dir = find_latest_accel_state(resume_path) if resume_path else None
         if resume_path and resume_state_dir is None:
             raise FileNotFoundError(
-                f"resume_ckpt_path={resume_path} has no usable accel_state_step_*; a finished "
-                f"run keeps only weights — use finetune_ckpt_path to warm-start instead."
+                f"resume_ckpt_path={resume_path} has no usable accel_state_step_*; full states "
+                f"are only written when training.save_full_states_for_resume=true (and a finished run drops "
+                f"them) — use finetune_ckpt_path to warm-start from weights instead."
             )
         if resume_state_dir is not None:
             output_path = os.path.dirname(resume_state_dir)
