@@ -201,5 +201,5 @@ benchmarks/vlabench/_eval_out*/
 # uv lockfile (not tracked; project does not pin a uv workflow)
 uv.lock
 
-# Base-model / produced checkpoints (populated by scripts/download_video_backbone.py)
+# Downloaded checkpoints and benchmark data (populated by scripts/download_assets/)
 assets/

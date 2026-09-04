@@ -257,7 +257,7 @@ bash multi_eval.sh -m demo_clean -n run1 -d /path/to/ckpt_dir tasks.txt
 
 `dlc_parallel_eval.sh` is the cluster entrypoint for large runs. Launch the same command on every DLC worker. Each node starts one OpenWAM server per local worker, waits for the server to accept connections, then starts RoboTwin slot supervisors that claim episodes from the rank-0 dispatcher.
 
-This script does **not** require pre-starting OpenWAM servers with `NUM_GPUS>1 scripts/deploy.sh`; it starts and cleans up its own local servers on every node. It still requires a RoboTwin Python environment for the simulator/client process.
+This script does **not** require pre-starting OpenWAM servers with `NUM_GPUS=N bash scripts/deploy.sh`; it starts and cleans up its own local servers on every node. It still requires a RoboTwin Python environment for the simulator/client process.
 
 By default, each local policy server is launched as:
 
