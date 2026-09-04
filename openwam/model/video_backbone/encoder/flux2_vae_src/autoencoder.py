@@ -1,6 +1,6 @@
 # Source: https://github.com/black-forest-labs/flux2/blob/main/src/flux2/autoencoder.py
 # Upstream revision: UNKNOWN (the original internal import did not record a commit SHA).
-# License: Apache-2.0; see third_party/licenses/Apache-2.0.txt.
+# License: Apache-2.0; see the repository-level LICENSE (Apache-2.0).
 # Modified by OpenWAM contributors: decoder functionality was removed and
 # OpenWAM checkpoint conversion/encoder integration was added.
 

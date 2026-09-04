@@ -7,7 +7,7 @@ through those supervised streams.
 
 # Source: https://github.com/thu-ml/Motus.
 # Upstream revision: UNKNOWN (the original internal import did not record a commit SHA).
-# License: Apache-2.0; see third_party/licenses/Apache-2.0.txt.
+# License: Apache-2.0; see the repository-level LICENSE (Apache-2.0).
 # Modified by OpenWAM contributors: the tri-expert architecture was restructured
 # for OpenWAM registries, modular backbones, configuration, and lifecycle rules.
 

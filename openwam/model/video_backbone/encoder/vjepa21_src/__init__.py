@@ -5,5 +5,5 @@
 from facebookresearch/vjepa2 at commit
 ``ce64921e94f0ffdc330c00fc62618157894b74be``, so this subsystem needs no
 ``third_party/vjepa2`` submodule. See
-``third_party/licenses/V-JEPA2-MIT.txt``.
+the upstream MIT license (Copyright Meta Platforms, Inc. and affiliates).
 """

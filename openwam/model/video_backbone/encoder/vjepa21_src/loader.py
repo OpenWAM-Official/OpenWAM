@@ -80,7 +80,7 @@ def prepare_vjepa_imports_and_patch():
     facebookresearch/vjepa2 at commit
     ``ce64921e94f0ffdc330c00fc62618157894b74be``) — no ``third_party``
     submodule or ``sys.path`` bootstrap is needed. See
-    ``third_party/licenses/V-JEPA2-MIT.txt``.
+    the upstream MIT license (Copyright Meta Platforms, Inc. and affiliates).
 
     The RoPE dtype monkey-patch root-cause-fixes a V-JEPA / SDPA dtype mismatch
     under mixed precision: upstream ``rotate_queries_or_keys`` builds its sin/cos

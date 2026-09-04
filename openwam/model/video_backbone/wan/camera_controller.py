@@ -1,7 +1,7 @@
 # Portions derived from:
 # https://github.com/hehao13/CameraCtrl/blob/main/inference.py
 # Upstream revision: UNKNOWN (the original internal import did not record a commit SHA).
-# License: Apache-2.0; see third_party/licenses/Apache-2.0.txt.
+# License: Apache-2.0; see the repository-level LICENSE (Apache-2.0).
 # Modified by OpenWAM contributors: camera utilities were integrated with the
 # OpenWAM Wan backbone and adapter interface.
 

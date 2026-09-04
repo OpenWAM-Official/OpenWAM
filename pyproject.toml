@@ -7,7 +7,7 @@ name = "openwam"
 version = "0.1.0"
 description = "OpenWAM: An Open, Modular Exploration Towards Systematic World–Action Model Pretraining"
 authors = [{ name = "OpenWAM Contributors" }]
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24,<3",
@@ -43,7 +43,7 @@ dependencies = [
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
 ]
 
