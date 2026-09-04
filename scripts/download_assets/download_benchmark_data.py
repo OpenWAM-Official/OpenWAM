@@ -113,10 +113,13 @@ BENCHMARKS: dict[str, Benchmark] = {
     "4": Benchmark("LIBERO", "OpenWAM/LIBERO", "libero", approx_gb=1.9, config="libero.yaml"),
     "5": Benchmark(
         "VLABench",
-        "VLABench/vlabench_primitive_ft_lerobot_video",
+        "OpenWAM/VLABench",
         "vlabench",
-        approx_gb=13.0,
+        approx_gb=13.2,
         config="vlabench.yaml",
+        # Mirror of VLABench/vlabench_primitive_ft_lerobot_video repacked into
+        # 16 large tars (the upstream repo's ~19k small files download at
+        # request-latency, not bandwidth); unpacked automatically.
     ),
     "6": Benchmark(
         "EBench",
@@ -130,7 +133,13 @@ BENCHMARKS: dict[str, Benchmark] = {
         "RoboCasa365", "OpenWAM/RoboCasa365", "robocasa365", approx_gb=78.0, config="robocasa365.yaml"
     ),
     "8": Benchmark(
-        "RoboCasa_GR1", "OpenWAM/RoboCasa_GR1", "robocasa-gr1", approx_gb=42.0, config="robocasa_gr1.yaml"
+        "RoboCasa_GR1",
+        "OpenWAM/RoboCasa_GR1",
+        "robocasa-gr1",
+        approx_gb=43.9,
+        config="robocasa_gr1.yaml",
+        # 24 per-task tars + loose meta/ (the flat layout's ~48k small files
+        # download at request-latency, not bandwidth); unpacked automatically.
     ),
 }
 
@@ -281,8 +290,69 @@ def _extract_zips(bench: Benchmark, target: Path) -> None:
         zip_path.unlink()
 
 
+def _extracted_tar_ignores(target: Path) -> list[str]:
+    """Ignore patterns for root tars an earlier run already unpacked and removed.
+
+    Tar names encode their extraction path: ``videos__image__chunk-000.tar``
+    unpacks to ``videos/image/chunk-000``. Any directory that exists therefore
+    maps back to the archive that produced it (patterns for directories that
+    never had an archive are harmless no-ops).
+    """
+    if not target.is_dir():
+        return []
+    ignores = []
+    for d1 in target.iterdir():
+        if not d1.is_dir() or d1.name in {".cache", ".extract_tmp", "meta"}:
+            continue
+        ignores.append(f"{d1.name}.tar")
+        for d2 in d1.iterdir():
+            if not d2.is_dir():
+                continue
+            ignores.append(f"{d1.name}__{d2.name}.tar")
+            for d3 in d2.iterdir():
+                if d3.is_dir():
+                    ignores.append(f"{d1.name}__{d2.name}__{d3.name}.tar")
+    return ignores
+
+
+def _extract_tars(bench: Benchmark, target: Path) -> None:
+    """Unpack every root ``<a>__<b>.tar`` to ``<a>/<b>``, then drop the archive.
+
+    Extraction goes through a temp dir and is moved into place afterwards, so
+    an interrupted unpack never leaves a half-filled directory that the resume
+    logic would mistake for a finished one.
+    """
+    import shutil as _shutil
+    import tarfile
+
+    tmp_root = target / ".extract_tmp"
+    _shutil.rmtree(tmp_root, ignore_errors=True)
+    tars = sorted(target.glob("*.tar"))
+    if not tars:
+        return
+    print(bold(f"Extracting {len(tars)} archives"))
+    for i, tar_path in enumerate(tars, 1):
+        rel = tar_path.name[: -len(".tar")].replace("__", "/")
+        print(f"  [{i}/{len(tars)}] {tar_path.name} -> {rel}/")
+        _shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir()
+        with tarfile.open(tar_path) as tf:
+            tf.extractall(tmp_root)
+        src = tmp_root / rel
+        if not src.is_dir():
+            raise RuntimeError(f"{tar_path.name} did not contain the expected member {rel}/")
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _shutil.rmtree(dest, ignore_errors=True)
+        _shutil.move(str(src), str(dest))
+        tar_path.unlink()
+    _shutil.rmtree(tmp_root, ignore_errors=True)
+
+
 _POST_DOWNLOAD = {
     "robotwin2.0": _extract_zips,
+    "vlabench": _extract_tars,
+    "robocasa-gr1": _extract_tars,
 }
 
 
@@ -321,15 +391,16 @@ def download(bench: Benchmark, root: Path, expected: int) -> Path:
         print(yellow(f"{target} already has content — resuming/skipping finished files."))
     print(bold(f"Downloading {bench.repo_id} -> {target}"))
     print(yellow(
-        "The repo file list is fetched first — for repos with tens of "
-        "thousands of files (e.g. RoboCasa_GR1, EBench) the bar can sit at "
-        "0% for minutes before bytes start landing."
+        "The repo file list is fetched first — for repos with many files "
+        "the bar can sit at 0% for minutes before bytes start landing."
     ))
 
-    # Zips already unpacked (and removed) by an earlier run must not be
+    # Archives already unpacked (and removed) by an earlier run must not be
     # re-downloaded just because the archive itself is gone.
     ignore = list(bench.ignore_patterns) if bench.ignore_patterns else []
     ignore += _extracted_zip_ignores(target)
+    if _POST_DOWNLOAD.get(bench.subdir) is _extract_tars:
+        ignore += _extracted_tar_ignores(target)
 
     watch = sys.stdout.isatty()
     stop = threading.Event()
