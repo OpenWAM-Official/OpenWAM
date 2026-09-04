@@ -8,7 +8,7 @@ configs/model/video_backbone/encoder/ at the download so training picks it up
 without manual editing.
 
 Usage:
-    python scripts/download_visual_encoder.py
+    python scripts/download_assets/download_visual_encoder.py
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = REPO_ROOT / "configs" / "model" / "video_backbone" / "encoder"
 DEFAULT_ROOT = Path.cwd() / "assets" / "visual_encoder_ckpt"
 

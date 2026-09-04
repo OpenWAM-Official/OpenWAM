@@ -7,7 +7,7 @@ normalization stats exist — computing them with the matching script under
 openwam/dataloader/utils/stats_computation/ when they are missing.
 
 Usage:
-    python scripts/download_benchmark_data.py
+    python scripts/download_assets/download_benchmark_data.py
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = REPO_ROOT / "configs" / "dataloader"
 DEFAULT_ROOT = Path.cwd() / "assets" / "benchmark_data"
 
@@ -79,11 +79,16 @@ class Benchmark:
 BENCHMARKS: dict[str, Benchmark] = {
     "1": Benchmark(
         "RoboTwin2.0",
-        "OpenWAM/RoboTwin2.0",
+        "TianxingChen/RoboTwin2.0",
         "robotwin2.0",
-        approx_gb=523.0,
+        approx_gb=415.0,
         config="robotwin.yaml",
         dataset_subpath="dataset",
+        # Official upstream zips: 100 large archives transfer far better than
+        # the ~110k extracted files. They are unpacked (and removed) right
+        # after the download; the stats step then computes the normalization
+        # stats from the extracted corpus.
+        allow_patterns=("dataset/*aloha-agilex*.zip",),
     ),
     "2": Benchmark(
         "RoboDojo",
@@ -243,6 +248,44 @@ def _watch_progress(target: Path, expected: int, stop: threading.Event) -> None:
         _draw_bar(done, expected, speed, final=False)
 
 
+def _extracted_zip_ignores(target: Path) -> list[str]:
+    """Ignore patterns for archives an earlier run already unpacked and removed."""
+    dataset_dir = target / "dataset"
+    if not dataset_dir.is_dir():
+        return []
+    return [
+        f"dataset/{d.parent.name}/{d.name}.zip"
+        for d in sorted(dataset_dir.glob("*/aloha-agilex*"))
+        if d.is_dir()
+    ]
+
+
+def _extract_zips(bench: Benchmark, target: Path) -> None:
+    """Unpack every downloaded archive next to itself, then drop the archive.
+
+    Archives are processed one at a time so the transient disk overhead stays
+    bounded by the largest single zip. Each carries its own top-level
+    directory (e.g. aloha-agilex_clean_50/), so extraction lands the
+    canonical layout directly.
+    """
+    import zipfile
+
+    zips = sorted((target / "dataset").glob("*/aloha-agilex*.zip"))
+    if not zips:
+        return
+    print(bold(f"Extracting {len(zips)} archives"))
+    for i, zip_path in enumerate(zips, 1):
+        print(f"  [{i}/{len(zips)}] {zip_path.relative_to(target)}")
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(zip_path.parent)
+        zip_path.unlink()
+
+
+_POST_DOWNLOAD = {
+    "robotwin2.0": _extract_zips,
+}
+
+
 def _already_relocated(bench: Benchmark, target: Path) -> bool:
     """A strip_prefix benchmark whose content already sits at the folder root."""
     if bench.strip_prefix is None or not target.is_dir():
@@ -277,6 +320,16 @@ def download(bench: Benchmark, root: Path, expected: int) -> Path:
     if target.is_dir() and any(target.iterdir()):
         print(yellow(f"{target} already has content — resuming/skipping finished files."))
     print(bold(f"Downloading {bench.repo_id} -> {target}"))
+    print(yellow(
+        "The repo file list is fetched first — for repos with tens of "
+        "thousands of files (e.g. RoboCasa_GR1, EBench) the bar can sit at "
+        "0% for minutes before bytes start landing."
+    ))
+
+    # Zips already unpacked (and removed) by an earlier run must not be
+    # re-downloaded just because the archive itself is gone.
+    ignore = list(bench.ignore_patterns) if bench.ignore_patterns else []
+    ignore += _extracted_zip_ignores(target)
 
     watch = sys.stdout.isatty()
     stop = threading.Event()
@@ -292,7 +345,8 @@ def download(bench: Benchmark, root: Path, expected: int) -> Path:
             repo_type="dataset",
             local_dir=str(target),
             allow_patterns=list(bench.allow_patterns) if bench.allow_patterns else None,
-            ignore_patterns=list(bench.ignore_patterns) if bench.ignore_patterns else None,
+            ignore_patterns=ignore or None,
+            max_workers=32,  # these corpora are dominated by many small files
         )
     finally:
         stop.set()
@@ -488,6 +542,9 @@ def main() -> None:
         sys.exit(0)
 
     target = download(bench, root, expected)
+    post = _POST_DOWNLOAD.get(bench.subdir)
+    if post:
+        post(bench, target)
     ensure_stats(bench, target)
 
     print()

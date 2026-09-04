@@ -11,18 +11,18 @@
 #   train.features_dir=<dir written by collect_svae_features.py>
 #
 # ── Single node (auto-detect GPUs) ──
-#   bash scripts/train_svae.sh train.features_dir=/path/<encoder>_<ts>
-#   NPROC_PER_NODE=4 bash scripts/train_svae.sh train.features_dir=...
+#   bash scripts/svae_train/train_svae.sh train.features_dir=/path/<encoder>_<ts>
+#   NPROC_PER_NODE=4 bash scripts/svae_train/train_svae.sh train.features_dir=...
 #
 # ── Multi-node (env vars set by the cloud scheduler; 2 nodes shown) ──
-#   NNODES=2 NODE_RANK=0 MASTER_ADDR=192.0.2.1 bash scripts/train_svae.sh train.features_dir=...
-#   NNODES=2 NODE_RANK=1 MASTER_ADDR=192.0.2.1 bash scripts/train_svae.sh train.features_dir=...
+#   NNODES=2 NODE_RANK=0 MASTER_ADDR=192.0.2.1 bash scripts/svae_train/train_svae.sh train.features_dir=...
+#   NNODES=2 NODE_RANK=1 MASTER_ADDR=192.0.2.1 bash scripts/svae_train/train_svae.sh train.features_dir=...
 #
 # Single-GPU without torchrun also works (Accelerate runs single-process):
-#   CUDA_VISIBLE_DEVICES=0 python scripts/train_svae.py train.features_dir=...
+#   CUDA_VISIBLE_DEVICES=0 python scripts/svae_train/train_svae.py train.features_dir=...
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 if [[ "${OPENWAM_VERBOSE_NCCL:-0}" == "1" ]]; then
     export NCCL_DEBUG=INFO
@@ -54,5 +54,5 @@ torchrun \
     --node_rank "${NODE_RANK}" \
     --master_addr "${MASTER_ADDR}" \
     --master_port "${MASTER_PORT}" \
-    scripts/train_svae.py \
+    scripts/svae_train/train_svae.py \
     "$@"

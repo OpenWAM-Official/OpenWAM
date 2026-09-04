@@ -50,4 +50,5 @@ optimization:
       dynamic: false           # Fixed-shape trimodal MoT-loop compile for tri_system_joint_self_attn
 
   prompt_embed_cache:
+    enabled: true             # false = skip prompt -> text embedding caching entirely
     maxsize: 32               # LRU cap for prompt -> text embeddings cache

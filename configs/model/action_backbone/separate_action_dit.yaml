@@ -1,16 +1,10 @@
 # ActionDiT action backbone (cfg.model.action_backbone.*) for dual/tri-system.
-# Geometry auto-resolves from video_backbone (num_layers/video_dim/num_heads/
-# attn_head_dim, hard head parity); dim/ffn_dim are free. Raw context width comes
-# from architecture.text_dim (shared with the video stream) — do NOT set it here.
-# The ActionDiT predicts real actions.
+# Geometry (num_layers/video_dim/num_heads/attn_head_dim) auto-resolves from the
+# video backbone; context width comes from architecture.text_dim — set neither here.
 dim: 1024
 ffn_dim: 4096
-# ACTION scheduler α-shift (symmetric to video shift_video); single source of
-# truth for train + deploy.
-shift_action: 5.0
+shift_action: 5.0   # flow-matching α-shift for the ACTION scheduler (train + deploy single source of truth)
 
-# Cosmos-Predict2.5 dual_system joint_cross_attn only: pin 16×64=1024 (action stream is
-# 1024 wide; auto-resolve's 16×128=2048 wastes attention compute). Struct mode
-# needs `+` for these absent fields:
+# Cosmos-Predict2.5 joint_cross_attn only: pin 16x64=1024 heads via
 #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
-# Do NOT add for joint_self_attn — MoT needs per-layer 16×128 parity.
+# (do NOT add for joint_self_attn — MoT needs per-layer 16x128 parity).

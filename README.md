@@ -79,8 +79,6 @@ All architectures are selected via `configs/model/<framework>.yaml` with `archit
 
 ## Installation
 
-### Base installation
-
 Create an environment with **conda**:
 
 ```bash
@@ -109,11 +107,9 @@ Then install OpenWAM:
 pip install -e .
 ```
 
-## Quick Start
+## Assets Preparation
 
-### 0. Data Preparation
-
-**Download the video backbone:**
+### 1. Download the Video Backbone
 
 Run the interactive downloader to fetch the checkpoint you need. It saves the
 weights under `assets/video_backbone_ckpt/` (or a directory you choose) and
@@ -121,7 +117,7 @@ points the matching config under `configs/model/video_backbone/` at the
 download automatically:
 
 ```bash
-python scripts/download_video_backbone.py
+python scripts/download_assets/download_video_backbone.py
 ```
 
 Available models: `Wan2.2-TI2V-5B`, `Wan2.1-VACE-1.3B`, `Wan2.1-I2V-14B-480P`,
@@ -133,7 +129,7 @@ ModelScope.
 <summary>Example session: downloading Wan2.2-TI2V-5B from HuggingFace</summary>
 
 ```text
-$ python scripts/download_video_backbone.py
+$ python scripts/download_assets/download_video_backbone.py
 OpenWAM video-backbone checkpoint downloader
 
 Storage location
@@ -168,23 +164,45 @@ Interrupted or partial downloads resume automatically on the next run.
 
 </details>
 
-**Download the RoboTwin dataset:**
+### 2. Download the Benchmark Data
 
-Full dataset or individual task zips can be downloaded from the HuggingFace Hub. For example, to download a single task:
-
-```bash
-huggingface-cli download TianxingChen/RoboTwin2.0 \
-  dataset/adjust_bottle/aloha-agilex_clean_50.zip \
-  --repo-type dataset \
-  --local-dir /path/to/robotwin_2_0
-```
-
-After downloading, unzip the task files:
+Run the interactive downloader to fetch the benchmark you need. It saves the
+data under `assets/benchmark_data/<benchmark>/` (or a directory you choose),
+verifies the in-dataset normalization stats (computing them on the spot when
+the source ships none), and points `dataset_dir` in the matching config under
+`configs/dataloader/` at the download automatically:
 
 ```bash
-cd /path/to/robotwin_2_0/dataset/adjust_bottle
-unzip aloha-agilex_clean_50.zip
+python scripts/download_assets/download_benchmark_data.py
 ```
+
+Available benchmarks: `RoboTwin2.0`, `RoboDojo`, `RoboDojo-Real`, `LIBERO`,
+`VLABench`, `EBench`, `RoboCasa365`, `RoboCasa_GR1`. RoboTwin2.0 comes from
+the official upstream zips (`aloha-agilex` embodiment) and is unpacked — with
+the archives cleaned up — automatically.
+
+### 3. Download the VLM Backbone (Optional)
+
+Only the `tri_system` architecture consumes a VLM backbone. The downloader
+saves the weights under `assets/vlm_backbone_ckpt/` and updates
+`configs/model/vlm_backbone/` accordingly:
+
+```bash
+python scripts/download_assets/download_vlm_backbone.py
+```
+
+### 4. Download the Visual Encoders (Optional)
+
+Only needed for video-backbone variants that plug in an external visual
+encoder (`configs/model/video_backbone/encoder/`). The downloader saves the
+weights under `assets/visual_encoder_ckpt/` and updates the encoder configs
+accordingly:
+
+```bash
+python scripts/download_assets/download_visual_encoder.py
+```
+
+## Quick Start
 
 ### 1. Training
 
@@ -227,6 +245,12 @@ Deploy a trained checkpoint as a WebSocket policy server:
 
 ```bash
 bash scripts/deploy.sh /path/to/checkpoint_dir
+```
+
+To serve one checkpoint from several GPUs at once, set `NUM_GPUS` — GPU `i` gets port `PORT_BASE + i` (default base 8848) and logs under `logs/deploy_gpu*.log`; Ctrl+C stops the whole fleet (`PORT_BASE`, `GPU_START`, `LOG_DIR` are also overridable):
+
+```bash
+NUM_GPUS=8 bash scripts/deploy.sh /path/to/checkpoint_dir
 ```
 
 This reads `configs/deploy.yaml` for base settings and the `config.yaml` saved inside the checkpoint for model architecture. The latest `checkpoint_step_*.safetensors` is loaded automatically; use `--ckpt-name` to pin one.
@@ -299,10 +323,10 @@ The client always sends a 3-camera payload (head required, wrists optional); the
 
 ```bash
 # Smoke test with 3 random images (no files needed)
-python scripts/inference_single_test.py --test
+python scripts/inference_test/inference_single_test.py --test
 
 # With real images
-python scripts/inference_single_test.py \
+python scripts/inference_test/inference_single_test.py \
   --server ws://127.0.0.1:8848 \
   --head-camera /path/to/head.jpg \
   --left-wrist-camera /path/to/left.jpg \

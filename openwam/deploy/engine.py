@@ -171,7 +171,8 @@ class JointInferenceEngine(BaseInferenceEngine):
         if name == "vace_cache":
             return not bool(value)
         if name == "prompt_embed_cache":
-            return (
+            # None means the cache was disabled by config — dropping it is a no-op.
+            return value is None or (
                 isinstance(value, _BoundedPromptEmbedCache)
                 and len(value) == 0
                 and value._maxsize == DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE
@@ -213,13 +214,20 @@ class JointInferenceEngine(BaseInferenceEngine):
         # VACE context cache for closed-loop reuse
         self._vace_cache: dict = {}
 
-        # Prompt-keyed text embedding cache (bounded LRU).
+        # Prompt-keyed text embedding cache (bounded LRU). enabled: false turns
+        # it off entirely: the backbones treat a None cache as "never cache".
+        cache_enabled = True
         cache_maxsize = DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE
         if optimization is not None:
             cache_cfg = getattr(optimization, "prompt_embed_cache", None)
             if cache_cfg is not None:
+                cache_enabled = bool(getattr(cache_cfg, "enabled", True))
                 cache_maxsize = int(getattr(cache_cfg, "maxsize", cache_maxsize))
-        self._prompt_embed_cache = _BoundedPromptEmbedCache(maxsize=cache_maxsize)
+        if cache_enabled:
+            self._prompt_embed_cache = _BoundedPromptEmbedCache(maxsize=cache_maxsize)
+        else:
+            self._prompt_embed_cache = None
+            logger.info("prompt_embed_cache disabled by config")
 
     def _init_cfg(self):
         """Resolve Classifier-Free Guidance from cfg.inference (CosmosPredict25 only; cfg_scale=1.0 is a no-op).

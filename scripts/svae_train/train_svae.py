@@ -1,7 +1,7 @@
 """Standalone S-VAE trainer (data-parallel via Accelerate + torchrun).
 
 Reads the feature shards + per-channel stats written by
-``scripts/collect_svae_features.py``, fits the S-VAE reconstruction + KL
+``scripts/svae_train/collect_svae_features.py``, fits the S-VAE reconstruction + KL
 objective, and writes ``svae.pt`` for the encoder's ``svae_path`` to load:
 
     {"format_version": 2,
@@ -17,10 +17,10 @@ The S-VAE is small (a few M params) and fully replicated, so plain DDP is the
 right tool — no DeepSpeed/ZeRO. We use HuggingFace Accelerate exactly like
 ``scripts/train.py``: launched under ``torchrun`` it scales from 1 GPU to many
 nodes with no code change (and runs single-process when invoked as plain
-``python``). Launch via ``scripts/train_svae.sh``:
+``python``). Launch via ``scripts/svae_train/train_svae.sh``:
 
     cd /path/to/workspace/openwam/openwam-feat-encoder-svae
-    bash scripts/train_svae.sh train.features_dir=/path/to/<encoder>_<ts>
+    bash scripts/svae_train/train_svae.sh train.features_dir=/path/to/<encoder>_<ts>
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Dataset
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class _ShardedFeatureDataset(Dataset):
         shards = sorted(glob.glob(str(features_dir / "features_rank*_part*.pt")))
         if not shards:
             raise FileNotFoundError(
-                f"No features_rank*_part*.pt shards under {features_dir}. Run scripts/collect_svae_features.py first."
+                f"No features_rank*_part*.pt shards under {features_dir}. Run scripts/svae_train/collect_svae_features.py first."
             )
         self._parts: list[torch.Tensor] = []
         self._cum: list[int] = []  # cumulative clip counts (exclusive-end per part)

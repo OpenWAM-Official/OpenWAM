@@ -3,14 +3,14 @@
 Fires N back-to-back predict requests over a single connection to exercise
 the server under sustained load: latency stability, no state leak / crash /
 OOM across requests, and -- with ``--reset-every`` -- periodic reset behaviour.
-Reuses the client contract and helpers from ``scripts/inference_single_test.py``.
+Reuses the client contract and helpers from ``scripts/inference_test/inference_single_test.py``.
 
 Usage:
     # Back-to-back requests with fresh random images (no files needed; defaults: 128 requests, log every step)
-    python scripts/inference_continuous_test.py --test
+    python scripts/inference_test/inference_continuous_test.py --test
 
     # Real head camera, 100 requests, reset every 20, 100 ms apart
-    python scripts/inference_continuous_test.py \
+    python scripts/inference_test/inference_continuous_test.py \
         --head-camera /path/to/head.jpg --prompt "pick up the red bottle" \
         -n 100 --reset-every 20 --interval 0.1
 """
@@ -22,7 +22,7 @@ import sys
 import time
 
 _SCRIPTS = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_SCRIPTS)
+_ROOT = os.path.dirname(os.path.dirname(_SCRIPTS))
 sys.path.insert(0, _ROOT)  # benchmarks.utils
 sys.path.insert(0, _SCRIPTS)  # inference_single_test (same dir)
 

@@ -19,7 +19,7 @@ dataset with no duplicates (unlike ``DistributedSampler``, which pads).
 Features are written in bounded-size chunks (``features_rank{r}_part{p}.pt``) so
 a full-dataset collection never has to fit in host RAM; a global per-channel
 ``stats.pt`` (mean/std for the S-VAE input standardisation) is accumulated
-online. ``scripts/train_svae.py`` memory-maps the shards to fit the S-VAE over
+online. ``scripts/svae_train/train_svae.py`` memory-maps the shards to fit the S-VAE over
 multiple epochs.
 
 Requires ``model.video_backbone.encoder.svae_path`` unset (collect on a RAW
@@ -28,7 +28,7 @@ encoder) — also enforced by ``batch_encode_pooled_for_svae_training``.
 Usage (single node, auto-detect GPUs):
 
     cd /path/to/workspace/openwam/openwam-feat-encoder-svae
-    bash scripts/collect_svae_features.sh \
+    bash scripts/svae_train/collect_svae_features.sh \
         training.batch_size=4 \
         model.video_backbone.encoder.name=vjepa21 \
         model.video_backbone.encoder.model_path=/path/to/weights/vjepa21
@@ -48,7 +48,7 @@ import torch
 import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 logger = logging.getLogger(__name__)
 

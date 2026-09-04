@@ -1,49 +1,26 @@
-# Cosmos-Predict2.5 2B video backbone (dual-system). Fields land in
-# cfg.model.video_backbone.* (group path matches the package). Switch backbone
-# on CLI: model/video_backbone=cosmos_predict25.
-# DiT geometry auto-derived (context_dim=1024). Architectures: dual_system
-# (joint_cross_attn / joint_self_attn / idm) and single_system (vanilla / moe,
-# via the flat 3D block forward in cosmos_predict25.shared_block). idm uses
-# per-frame timesteps + the backbone-owned merge in cosmos_predict25.idm_merge.
-#
-# Freeze policy lives in the model freeze list (the train launcher pins
-# video_backbone.vae + video_backbone.reason1; the DiT `dit` is
-# TRAINABLE by default). Don't add a `freeze:` knob here — add `video_backbone.dit`
-# to the freeze list in an override instead.
-#
-# Action-side context width (context_dim=1024, not Wan's 4096) now AUTO-DERIVES
-# from this backbone's text_dim — no `model.action_backbone.text_dim` override
-# needed (explicit cfg/CLI still wins).
-# joint_cross_attn still needs (action stream is only 1024 wide):
+# Cosmos-Predict2.5-2B video backbone (cfg.model.video_backbone.*). DiT geometry
+# and the action-side context width (text_dim=1024) auto-derive. Works with
+# dual_system (joint_cross_attn | joint_self_attn | idm), single_system
+# (vanilla | moe) and tri_system. Freeze policy lives in the model-level freeze
+# list (vae + reason1 pinned there; the DiT is trainable by default).
+# joint_cross_attn only: also pass
 #   +model.action_backbone.num_heads=16 +model.action_backbone.attn_head_dim=64
-# Do NOT add those for joint_self_attn — MoT needs per-layer 16×128 parity.
+# (do NOT add these for joint_self_attn — MoT needs per-layer 16x128 parity).
 
 name: cosmos_predict25_2b
-# Bundle root; build_cosmos_predict25_pipeline globs <model_variant>/<uuid>_ema_bf16.pt.
-model_path: /path/to/Cosmos-Predict2.5-2B
+model_path: /path/to/Cosmos-Predict2.5-2B  # [Required] bundle root; <model_variant>/<uuid>_ema_bf16.pt is globbed inside
 model_variant: base/post-trained   # base/{pre,post}-trained | base/distilled | auto/multiview | robot/multiview-agibot | robot/action-cond
 
-# Cosmos-Reason1-7B bundle root, run inline as the live text encoder (required
-# on the training path). Checkpoints save Reason1 into safetensors + copy
-# structural files under <ckpt_dir>/reason1/, so deploy needs no external path.
+# Cosmos-Reason1-7B bundle root, run inline as the live text encoder (training
+# only; checkpoints embed it, so deploy needs no external path).
 text_encoder_path: /path/to/Cosmos-Reason1-7B
 
-# CFG dropout: substitutes "" for prompts with prob p, only when training=True.
-# text_encoder_dropout_seed defaults to null (nondeterministic); set an int for
-# reproducibility via +model.video_backbone.text_encoder_dropout_seed=<int>.
-text_encoder_dropout: 0.0
+text_encoder_dropout: 0.0  # CFG dropout: prob of substituting "" for prompts (training only); seed via +model.video_backbone.text_encoder_dropout_seed=<int>
 
-vae: wan2pt1                                        # wan2pt1 (Cosmos-Predict2.5 tokenizer; stride 4×8×8, z_dim=16) | none (caller supplies latents)
+vae: wan2pt1       # wan2pt1 (Cosmos-Predict2.5 tokenizer; stride 4x8x8, z_dim=16) | none (caller supplies latents)
 
-# Matches upstream rectified-flow shift=5; training target/noising identical to Wan.
-# Named shift_video to match the Wan backbone's video-scheduler shift knob.
-shift_video: 5.0
+shift_video: 5.0   # flow-matching α-shift for the video scheduler (train + deploy single source of truth)
 
-# sac_mode (default: none) = Cosmos SAC selective activation checkpointing,
-# applied to the DiT blocks after weight load. Trades compute for VRAM. The key
-# is omitted here (defaults to none); set via the `+` append form, e.g.
-# +model.video_backbone.sac_mode=mm_only:
-#   none       = raw, keep all activations (fastest, most VRAM)
-#   mm_only    = recompute non-matmul/attn ops at backward, keep the expensive
-#                matmul/attention outputs (memory/compute sweet spot)
-#   block_wise = recompute the whole block (max VRAM savings, most recompute)
+# Optional (append via +model.video_backbone.sac_mode=...): Cosmos selective
+# activation checkpointing on the DiT blocks, trades compute for VRAM —
+# none (default) | mm_only | block_wise.

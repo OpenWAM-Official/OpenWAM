@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Interactive downloader for video-backbone base checkpoints.
+"""Interactive downloader for VLM-backbone base checkpoints.
 
-Fetches the pretrained weights a from-scratch OpenWAM training run needs
-(Wan2.x / Cosmos families) into the assets checkpoint directory, then points
-the matching config under configs/model/video_backbone/ at the download so
-training picks it up without manual editing.
+Fetches the pretrained understanding-expert weights the tri_system
+architecture needs (Qwen3-VL family) into the assets checkpoint directory,
+then points the matching config under configs/model/vlm_backbone/ at the
+download so training picks it up without manual editing.
 
 Usage:
-    python scripts/download_video_backbone.py
+    python scripts/download_assets/download_vlm_backbone.py
 """
 
 from __future__ import annotations
@@ -27,9 +27,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_DIR = REPO_ROOT / "configs" / "model" / "video_backbone"
-DEFAULT_ROOT = Path.cwd() / "assets" / "video_backbone_ckpt"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+CONFIG_DIR = REPO_ROOT / "configs" / "model" / "vlm_backbone"
+DEFAULT_ROOT = Path.cwd() / "assets" / "vlm_backbone_ckpt"
 
 # ── terminal colors ──────────────────────────────────────────────────────────
 _USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -72,7 +72,7 @@ class Download:
 @dataclass(frozen=True)
 class Model:
     name: str
-    config: str                       # yaml under configs/model/video_backbone/
+    config: str                       # yaml under configs/model/vlm_backbone/
     downloads: tuple[Download, ...]
     config_fields: tuple[str, ...]    # yaml field per download, positionally matched
     hf_only: bool = False
@@ -80,45 +80,10 @@ class Model:
 
 MODELS: dict[str, Model] = {
     "1": Model(
-        name="Wan2.2-TI2V-5B",
-        config="wan22_ti2v_5b.yaml",
-        downloads=(Download("Wan-AI/Wan2.2-TI2V-5B", "Wan2.2-TI2V-5B", approx_gb=34.2),),
-        config_fields=("model_path",),
-    ),
-    "2": Model(
-        name="Wan2.1-VACE-1.3B",
-        config="wan21_vace_1_3b.yaml",
-        downloads=(Download("Wan-AI/Wan2.1-VACE-1.3B", "Wan2.1-VACE-1.3B", approx_gb=19.0),),
-        config_fields=("model_path",),
-    ),
-    "3": Model(
-        name="Wan2.1-I2V-14B-480P",
-        config="wan21_i2v_14b_480p.yaml",
-        downloads=(Download("Wan-AI/Wan2.1-I2V-14B-480P", "Wan2.1-I2V-14B-480P", approx_gb=82.3),),
-        config_fields=("model_path",),
-    ),
-    "4": Model(
-        name="Cosmos-Predict2.5-2B",
-        config="cosmos_predict25.yaml",
-        downloads=(
-            Download(
-                "nvidia/Cosmos-Predict2.5-2B",
-                "Cosmos-Predict2.5-2B",
-                approx_gb=4.6,
-                allow_patterns=("base/post-trained/*", "tokenizer.pth"),
-            ),
-            Download("nvidia/Cosmos-Reason1-7B", "Cosmos-Reason1-7B", approx_gb=16.6),
-        ),
-        config_fields=("model_path", "text_encoder_path"),
-        hf_only=True,
-    ),
-    "5": Model(
-        name="Cosmos3-Edge",
-        config="cosmos3_edge.yaml",
-        downloads=(
-            Download("nvidia/Cosmos3-Edge", "Cosmos3-Edge", approx_gb=9.2, ms_id="nv-community/Cosmos3-Edge"),
-        ),
-        config_fields=("model_path",),
+        name="Qwen3-VL-2B-Instruct",
+        config="qwen3_vl_2b.yaml",
+        downloads=(Download("Qwen/Qwen3-VL-2B-Instruct", "Qwen3-VL-2B-Instruct", approx_gb=4.3),),
+        config_fields=("checkpoint_path",),
     ),
 }
 
@@ -310,7 +275,7 @@ def write_config(model: Model, targets: list[Path]) -> None:
 
 
 def main() -> None:
-    print(bold("OpenWAM video-backbone checkpoint downloader"))
+    print(bold("OpenWAM VLM-backbone checkpoint downloader"))
     print()
     root = choose_storage_root()
     model = choose_model()

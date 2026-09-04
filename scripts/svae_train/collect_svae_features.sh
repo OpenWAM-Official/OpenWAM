@@ -21,11 +21,11 @@
 #   svae_collect.output_dir=/path         # results root; per-run subdir auto-created
 #
 # ── Single-node (auto-detect GPUs) ──
-#   bash scripts/collect_svae_features.sh model.video_backbone.encoder.name=vjepa21 \
+#   bash scripts/svae_train/collect_svae_features.sh model.video_backbone.encoder.name=vjepa21 \
 #       model.video_backbone.encoder.model_path=/path
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 if [[ "${OPENWAM_VERBOSE_NCCL:-0}" == "1" ]]; then
     export NCCL_DEBUG=INFO
@@ -60,5 +60,5 @@ torchrun \
     --node_rank "${NODE_RANK}" \
     --master_addr "${MASTER_ADDR}" \
     --master_port "${MASTER_PORT}" \
-    scripts/collect_svae_features.py \
+    scripts/svae_train/collect_svae_features.py \
     "$@"

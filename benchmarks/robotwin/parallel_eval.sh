@@ -2,7 +2,7 @@
 # Parallel RoboTwin evaluation across N already-running OpenWAM servers, with
 # EPISODE-LEVEL dynamic scheduling via a central dispatcher.
 #
-# Pairs with scripts/deploy_multi.sh: worker i -> port = PORT_BASE + i.
+# Pairs with NUM_GPUS>1 scripts/deploy.sh: worker i -> port = PORT_BASE + i.
 #
 # Unlike the old whole-task queue, the schedulable unit here is a single
 # episode. Each GPU slot runs a supervisor loop that keeps launching

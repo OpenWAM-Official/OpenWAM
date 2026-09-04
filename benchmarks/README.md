@@ -124,7 +124,7 @@ with WSPolicyClient(ws_url, timeout=300.0, open_timeout=10.0) as client:
         raise
 ```
 
-The bundled test script ([scripts/inference_single_test.py](../scripts/inference_single_test.py)) imports from here, so it doubles as a reference integration. For a full real-robot adapter, see [benchmarks/robotwin/openwam2robotwin_interface.py](robotwin/openwam2robotwin_interface.py).
+The bundled test script ([scripts/inference_test/inference_single_test.py](../scripts/inference_test/inference_single_test.py)) imports from here, so it doubles as a reference integration. For a full real-robot adapter, see [benchmarks/robotwin/openwam2robotwin_interface.py](robotwin/openwam2robotwin_interface.py).
 
 ## 6. Error cheatsheet
 
@@ -140,7 +140,7 @@ The bundled test script ([scripts/inference_single_test.py](../scripts/inference
 ## 7. See also
 
 - Starting the server: [root README → Deployment](../README.md#deployment)
-- Reference client: [scripts/inference_single_test.py](../scripts/inference_single_test.py)
+- Reference client: [scripts/inference_test/inference_single_test.py](../scripts/inference_test/inference_single_test.py)
 
 ## 8. Web control dashboard
 

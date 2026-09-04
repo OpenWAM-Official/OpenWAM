@@ -1,24 +1,13 @@
-# Tri-system: video DiT + ActionDiT + Understanding Expert (Qwen3-VL). Reuses
-# the dual-system joint_self_attn action backbone + understanding tokens as a
-# third mixed-attention stream. Only joint_self_attn is supported.
-# Video backbone from the Hydra `video_backbone` group (default Wan2.2-TI2V-5B).
-# Works on CosmosPredict25 too (CLI: model/video_backbone=cosmos_predict25): the
-# trimodal driver counts video tokens as grid_frames·H·W and drives the 5D-grid
-# stream via vb.pre/post_attn_at_layer — the same backbone-agnostic path as
-# dual_system joint_self_attn; no Cosmos-specific code.
+# Tri-System WAM: video DiT + ActionDiT + Understanding Expert (Qwen3-VL) in one
+# trimodal mixed attention. Only joint_self_attn is supported.
 
 defaults:
-  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25
-  - action_backbone: separate_action_dit # ActionDiT (dual/tri only support ActionDiT)
-  - vlm_backbone: qwen3_vl_2b      # Qwen3-VL understanding backbone (tri only)
+  - video_backbone: wan22_ti2v_5b        # wan22_ti2v_5b | wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25 (cosmos3_edge is rejected)
+  - action_backbone: separate_action_dit # dual/tri only support ActionDiT
+  - vlm_backbone: qwen3_vl_2b            # understanding backbone (tri only)
   - _self_
 
-# Frozen pretrained components (freeze_modules walks each via get_submodule;
-# missing paths silently skipped — image_encoder None on TI2V/VACE, _encoder
-# only on the from_scratch external-encoder path). The list spans backbones:
-# `text_encoder`/`vae` are Wan; `reason1` is the CosmosPredict25 text-encoder child
-# (Cosmos `vae` is also a real child, so the same `video_backbone.vae` entry
-# covers it). Each no-ops on backbones that lack the path.
+# Pretrained components kept frozen; entries missing on the active backbone are skipped.
 freeze:
   - video_backbone.text_encoder
   - video_backbone.reason1
@@ -27,47 +16,32 @@ freeze:
   - video_backbone.video_encoder
   - vlm_backbone.vlm_model
 
-# understanding_expert MUST stay under `architecture:` — it is an architecture-level
-# trainable expert (module sibling of vlm_backbone), forwarded via the architecture
-# block. vlm_backbone is now a top-level group (model.vlm_backbone), forwarded like
-# video_backbone.
+# understanding_expert stays under `architecture:` (trainable expert forwarded via
+# the architecture block); vlm_backbone is a top-level group like video_backbone.
 architecture:
   framework: tri_system
-  variant: joint_self_attn
-  # action_dim/state_dim default 80 (unified cross-robot action space, unify_action=true).
-  # For robotwin action_mode=eef (20D) override both to 20; action_mode=joint (14D qpos) to 14.
-  action_dim: 80
-  use_proprioception: true
-  state_dim: 80
+  variant: joint_self_attn   # only joint_self_attn
 
-  # Cross-modal visibility (video<->action).
-  # Two invariants: v<->v controlled by video_attention_mask_mode; a<->a always mutually visible.
-  # Understanding is a read-only tail: everyone attends to it, it attends only to itself.
-  # Modes:
-  #   <mutual>             video sees action (except first-frame rows), action sees all video
-  #   <action_sees_video>  video can't see action, action sees all video
-  #   <video_sees_action>  video sees action (except first-frame rows), action sees only first frame
-  #   <isolated>           video can't see action, action sees only first frame
+  action_dim: 80             # 80 = unified action space (unify_action=true); raw width otherwise (e.g. robotwin eef=20, joint=14)
+  use_proprioception: true   # true = dataloader must provide sample["proprio"], appended as one proprio token
+  state_dim: 80              # proprio width; required when use_proprioception=true
+
+  # Video<->action visibility (understanding is a read-only tail: all attend to it, it attends only to itself):
+  #   mutual | action_sees_video | video_sees_action | isolated
   attention_mask_mode: mutual
-  # v↔v visibility. Modes:
-  #   <bidirectional>       every frame attends every frame (no temporal order)
-  #   <per_frame_causal>    frame t attends frames 0..t; full attention within a frame
-  #   <first_frame_causal>  first frame attends only itself; all later frames attend everything
+  # Video<->video visibility: first_frame_causal | per_frame_causal | bidirectional
   video_attention_mask_mode: first_frame_causal
 
-  # grad-checkpoint the mixed attention. The [V+A+U] sequence can be thousands of
-  # tokens — disabling typically OOMs Wan22 + Qwen3-VL.
-  mot_checkpoint_mixed_attn: true
-
-  # joint_self_attn enforces 1:1 with vb.num_layers, so keep bridge_interval=1
-  # (sparse patterns raise in TriSystemMoTDriver.__init__).
+  # joint_self_attn enforces 1:1 with vb.num_layers — keep bridge_interval=1.
   bridge_layers: null
   bridge_interval: 1
 
-  # Understanding expert: VLM hidden → `dim` via vlm_projector_type, then joins
+  mot_checkpoint_mixed_attn: true  # grad-checkpoint the mixed attention; disabling typically OOMs Wan22 + Qwen3-VL
+
+  # Understanding expert: VLM hidden -> dim via vlm_projector_type, then joins the
   # trimodal attention at every video layer (num_layers auto = vb.num_layers).
   understanding_expert:
-    dim: 512                        # understanding stream hidden dim (Motus default)
+    dim: 512                        # understanding stream hidden dim
     ffn_dim: 2048
     vlm_projector_type: mlp3x_silu  # linear | mlp{N}x_silu (N-layer SiLU MLP)
     eps: 1.0e-5

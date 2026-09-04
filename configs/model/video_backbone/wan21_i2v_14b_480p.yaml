@@ -4,4 +4,4 @@
 name: wan21_i2v_14b_480p
 model_path: /path/to/Wan2.1-I2V-14B-480P  # [Required] weights dir
 
-shift_video: 5.0       # Flow-matching α-shift (VIDEO scheduler); single source of truth for train + inference
+shift_video: 5.0      # flow-matching α-shift for the video scheduler (train + deploy single source of truth)

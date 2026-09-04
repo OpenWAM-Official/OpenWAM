@@ -13,15 +13,15 @@ Server picks the right preprocessing branch based on its checkpoint's
 
 Usage:
     # Quick smoke test with 3 random images (no files needed)
-    python scripts/inference_single_test.py --test
+    python scripts/inference_test/inference_single_test.py --test
 
     # Real head camera, wrist cameras sent as null (server black-fills if multiview):
-    python scripts/inference_single_test.py \
+    python scripts/inference_test/inference_single_test.py \
         --head-camera /path/to/head.jpg \
         --prompt "pick up the red bottle"
 
     # All three real cameras
-    python scripts/inference_single_test.py \
+    python scripts/inference_test/inference_single_test.py \
         --head-camera /path/to/head.jpg \
         --left-wrist-camera /path/to/left.jpg \
         --right-wrist-camera /path/to/right.jpg \
@@ -36,7 +36,7 @@ import os
 import sys
 
 # Canonical client helpers live under benchmarks.utils — add project root so import works.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from benchmarks.utils.client import build_payload, encode_path_b64  # noqa: E402
 from benchmarks.utils.transport import WSPolicyClient  # noqa: E402

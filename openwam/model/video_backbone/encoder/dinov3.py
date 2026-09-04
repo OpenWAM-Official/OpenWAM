@@ -262,7 +262,7 @@ class DinoV3VideoEncoder(VideoEncoder):
         Returns the ``(B, embed_dim, T_lat, H/16, W/16)`` tensor the S-VAE
         consumes — BEFORE the trailing LayerNorm — so the reducer trains on the
         un-whitened distribution (matches the V-JEPA 2.1 contract used by
-        :mod:`scripts.collect_svae_features`). Fails fast if an S-VAE is already
+        :mod:`scripts.svae_train.collect_svae_features`). Fails fast if an S-VAE is already
         attached: statistics must be collected on a raw encoder.
         """
         if self._svae is not None:

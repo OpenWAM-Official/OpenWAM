@@ -1,29 +1,14 @@
-# Dual-System WAM: separate ActionDiT + video DiT. Variants:
-#   joint_cross_attn: video runs to completion → bridge features → ActionDiT
-#                     runs once with cross-attention to them. On CosmosPredict25
-#                     the 5D-grid bridge (B,T,H,W,D) is flattened to (B,T·H·W,D)
-#                     tokens before the cross-attn (backbone-agnostic; no hook).
-#   joint_self_attn:  MoTJointDriver runs one mixed self-attention per layer;
-#                     requires num_layers/num_heads/head_dim parity across backbones.
-#   idm:              teacher-forcing training + two-stage inference. Supported
-#                     on Wan, CosmosPredict25 and Cosmos3-Edge (the backbone owns
-#                     the noisy/cond branch merge; Cosmos uses per-frame timesteps,
-#                     Cosmos3 concatenates on the token axis — no AdaLN to merge).
-# Video backbone composed from the Hydra `video_backbone` group; CLI: model/video_backbone=cosmos_predict25.
+# Dual-System WAM: separate ActionDiT + video DiT.
+#   joint_cross_attn: video runs to completion; ActionDiT cross-attends its bridge features.
+#   joint_self_attn:  one mixed video/action self-attention per layer (MoT).
+#   idm:              teacher-forcing training + two-stage inference.
 
 defaults:
-  - video_backbone: wan22_ti2v_5b # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25 | cosmos3_edge
-  - action_backbone: separate_action_dit # ActionDiT (dual/tri only support ActionDiT)
+  - video_backbone: wan22_ti2v_5b        # wan22_ti2v_5b | wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25 | cosmos3_edge
+  - action_backbone: separate_action_dit # dual/tri only support ActionDiT
   - _self_
 
-# Frozen pretrained components (freeze_modules walks each via get_submodule;
-# missing paths silently skipped — image_encoder None on TI2V/VACE, _encoder
-# only on the from_scratch external-encoder path). The list spans backbones:
-# `text_encoder`/`vae` are Wan; `reason1` is the CosmosPredict25 text-encoder child
-# (Cosmos `vae` is also a real child, so the same `video_backbone.vae` entry
-# covers it). Cosmos3-Edge has no text-encoder child at all — its und (text) tower
-# lives inside the transformer and is frozen by the builder — but its `vae` is a
-# real child too. Each entry no-ops on backbones that lack the path.
+# Pretrained components kept frozen; entries missing on the active backbone are skipped.
 freeze:
   - video_backbone.text_encoder
   - video_backbone.reason1
@@ -33,36 +18,23 @@ freeze:
 
 architecture:
   framework: dual_system
-  variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm (all three on Wan / CosmosPredict25 / Cosmos3-Edge)
-  # action_dim/state_dim default 80 (unified cross-robot action space, unify_action=true).
-  # For dataloaders shipping unify_action=false (robotwin and deprecated OXE variants)
-  # override both to the raw width: robotwin action_mode=eef (20D) → 20; action_mode=joint (14D qpos) → 14.
-  action_dim: 80
+  variant: joint_self_attn   # joint_self_attn | joint_cross_attn | idm
 
-  # When true, dataloader must provide sample["proprio"]; one proprio token is
-  # appended to the text context before the backbones consume it.
-  use_proprioception: true
-  state_dim: 80                  # required when use_proprioception=true
+  action_dim: 80             # 80 = unified action space (unify_action=true); raw width otherwise (e.g. robotwin eef=20, joint=14)
+  use_proprioception: true   # true = dataloader must provide sample["proprio"], appended as one proprio token
+  state_dim: 80              # proprio width; required when use_proprioception=true
 
-  # ActionDiT layer selection. joint_cross_attn: which video layers feed the
-  # bridge. joint_self_attn/idm: sizes ActionDiT (must match vb.num_layers).
-  # bridge_layers: explicit list, OR null + bridge_interval (1=all, 2=every other).
+  # Video<->action visibility (joint_self_attn only; idm locks action_sees_video):
+  #   mutual | action_sees_video | video_sees_action | isolated
+  attention_mask_mode: mutual
+  # Video<->video visibility: first_frame_causal | per_frame_causal | bidirectional
+  video_attention_mask_mode: first_frame_causal
+
+  # ActionDiT layer selection: explicit list, or null + bridge_interval (1 = every layer, 2 = every other).
+  # joint_cross_attn: which video layers feed the bridge; joint_self_attn/idm: sizes ActionDiT.
   bridge_layers: null
   bridge_interval: 1
 
-  # MoT options (joint_self_attn / idm only; ignored by joint_cross_attn).
-  mot_checkpoint_mixed_attn: true       # grad-checkpoint the mixed attention (VRAM ↓, +1 recompute/layer)
-  # Cross-modal visibility (video<->action). Two invariants: v<->v controlled by
-  # video_attention_mask_mode; a<->a always mutually visible. Modes:
-  #   mutual             video sees action (except first-frame rows), action sees all video
-  #   action_sees_video  video can't see action, action sees all video
-  #   video_sees_action  video sees action (except first-frame rows), action sees only first frame
-  #   isolated           video can't see action, action sees only first frame
-  # joint_self_attn only; joint_cross_attn ignores this (no joint mask);
-  # idm locks action_sees_video internally (do not override).
-  attention_mask_mode: mutual
-  # v↔v block layout; idm also uses it for the teacher-forcing + cache-prefill submasks.
-  video_attention_mask_mode: first_frame_causal   # first_frame_causal | per_frame_causal | bidirectional
-
+  mot_checkpoint_mixed_attn: true  # joint_self_attn/idm only: grad-checkpoint the mixed attention (VRAM down)
   detach_bridge: false             # joint_cross_attn only
   idm_video_cond_noise_prob: 0.5   # idm only

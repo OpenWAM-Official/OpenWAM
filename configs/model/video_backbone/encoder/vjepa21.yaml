@@ -1,25 +1,17 @@
-# V-JEPA 2.1 ViT-g/384 external video encoder (arXiv:2603.14482). Activate via CLI:
+# V-JEPA 2.1 ViT-g/384 external video encoder. Activate via:
 #   model.video_backbone.from_scratch=true model.video_backbone.shift_video=12.0 model/video_backbone/encoder=vjepa21
-# Spec temporal contract is (4, true), same as the native Wan VAE.
-# Structural fields (z_dim=1408/spatial_compression=16/...) read from the weights'
-# manifest.json, NOT yaml.
-# from_scratch=true is REQUIRED: Wan DiT first conv expects native VAE z_dim=48, V-JEPA emits 1408.
+# from_scratch=true is REQUIRED (V-JEPA emits z_dim=1408 vs the native 48).
+# Structural fields are read from the weights' manifest.json, not yaml.
 
 name: vjepa21
-# [Required] Dir with manifest.json + the checkpoint_file it names (e.g.
-# vjepa2_1_vitg_384.pt; arch=vit_giant_xformers_rope, patch=16, tubelet=2, img=384).
-model_path: /path/to/vjepa21
+model_path: /path/to/vjepa21  # [Required] dir with manifest.json + the checkpoint file it names
 
-# Cond (frame-0) latent path; only controls the cond pass (targets always use the
-# prepend-and-drop video forward):
-#   video (default): dup frame 0 → 2-frame clip through the video branch (tubelet=2).
-#   mixed (legacy):  frame 0 through the image branch (tubelet=1).
+# Cond (frame-0) latent path; targets always use the video forward:
+#   video (default): dup frame 0 -> 2-frame clip through the video branch
+#   mixed (legacy):  frame 0 through the image branch
 vjepa21_forward: video
 
-# Optional frozen S-VAE feature reducer (raw embed_dim → svae_target_dim). When set, post-pool
-# features are compressed and the encoder advertises svae_target_dim as its DiT-facing z_dim
-# (e.g. 48 to match Wan VAE). Leave both null for the raw 1408-d path. svae_path: trained
-# svae.pt (weights travel in the main checkpoint; deploy rebuilds from a svae_config.json
-# sidecar). svae_target_dim: optional cross-check vs the S-VAE latent_dim.
-svae_path: null
-svae_target_dim: null
+# Optional frozen S-VAE feature reducer (raw embed_dim -> svae_target_dim, e.g. 48
+# to match the Wan VAE z_dim); train via scripts/svae_train/. Leave both null for the raw path.
+svae_path: null         # trained svae.pt (weights travel in the main checkpoint)
+svae_target_dim: null   # optional cross-check vs the S-VAE latent_dim

@@ -1,22 +1,13 @@
 # Single-System WAM: action tokens concatenated into the video DiT sequence.
-# Variant via `architecture.variant`: vanilla (plain shared DiT) | moe (+ expert
-# FFN on action tokens). Action tokens project directly to video_backbone.dim.
-# Video backbone from the `video_backbone` group (default Wan2.2-TI2V-5B).
-# CosmosPredict25 is supported: it runs the shared [video|action|state] sequence
-# through a flat 3D block forward (cosmos_predict25.shared_block), since its DiT
-# state is a 5D grid that can't host non-grid tokens directly.
+#   vanilla: plain shared DiT.
+#   moe:     + expert FFN on action tokens.
 
 defaults:
-  - video_backbone: wan22_ti2v_5b     # default; CLI: model/video_backbone=wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25
+  - video_backbone: wan22_ti2v_5b # wan22_ti2v_5b | wan21_vace_1_3b | wan21_i2v_14b_480p | cosmos_predict25 | cosmos3_edge
   - action_backbone: shared_action_backbone
   - _self_
 
-# Frozen pretrained components (freeze_modules walks each via get_submodule;
-# missing paths silently skipped — image_encoder None on TI2V/VACE, _encoder
-# only on the from_scratch external-encoder path). The list spans backbones:
-# `text_encoder`/`vae` are Wan; `reason1` is the CosmosPredict25 text-encoder child
-# (Cosmos `vae` is also a real child, so the same `video_backbone.vae` entry
-# covers it). Each no-ops on backbones that lack the path.
+# Pretrained components kept frozen; entries missing on the active backbone are skipped.
 freeze:
   - video_backbone.text_encoder
   - video_backbone.reason1
@@ -26,35 +17,18 @@ freeze:
 
 architecture:
   framework: single_system
-  variant: vanilla   # vanilla | moe; CLI: model.architecture.variant=moe
-  # action_dim/state_dim default 80 (unified cross-robot action space, unify_action=true).
-  # For dataloaders shipping unify_action=false (robotwin and deprecated OXE variants)
-  # override both to the raw width: robotwin action_mode=eef (20D) → 20; action_mode=joint (14D qpos) → 14.
-  action_dim: 80
+  variant: vanilla   # vanilla | moe
 
-  # When true, dataloader must provide sample["proprio"] ([state_dim] or
-  # [1, state_dim]); encoded as one state token after the action tokens:
-  #   [video tokens][action tokens][state token].
-  use_proprioception: true
-  state_dim: 80
+  action_dim: 80             # 80 = unified action space (unify_action=true); raw width otherwise (e.g. robotwin eef=20, joint=14)
+  use_proprioception: true   # true = dataloader must provide sample["proprio"], encoded as one state token: [video][action][state]
+  state_dim: 80              # proprio width; required when use_proprioception=true
 
-  # Cross-modal visibility (video<->action).
-  # Two invariants: v<->v controlled by video_attention_mask_mode; a<->a always mutually visible.
-  # The state token (proprio) is a read-only tail: everyone attends to it, it attends only to itself.
-  # Modes:
-  #   <mutual>             video sees action (except first-frame rows), action sees all video
-  #   <action_sees_video>  video can't see action, action sees all video
-  #   <video_sees_action>  video sees action (except first-frame rows), action sees only first frame
-  #   <isolated>           video can't see action, action sees only first frame
+  # Video<->action visibility (the state token is a read-only tail: all attend to it, it attends only to itself):
+  #   mutual | action_sees_video | video_sees_action | isolated
   attention_mask_mode: mutual
-  # v↔v visibility. Modes:
-  #   <bidirectional>       every frame attends every frame (no temporal order)
-  #   <per_frame_causal>    frame t attends frames 0..t; full attention within a frame
-  #   <first_frame_causal>  first frame attends only itself; all later frames attend everything
+  # Video<->video visibility: first_frame_causal | per_frame_causal | bidirectional
   video_attention_mask_mode: first_frame_causal
 
-  # moe only: which video DiT layers apply an expert FFN to action tokens
-  # (vanilla ignores). Same schema/name as dual/tri_system bridge_layers.
-  # bridge_layers: explicit list, OR null + bridge_interval (1=all, 2=every other).
+  # moe only: which video layers apply the expert FFN — explicit list, or null + bridge_interval (1 = every layer, 2 = every other).
   bridge_layers: null
   bridge_interval: 1

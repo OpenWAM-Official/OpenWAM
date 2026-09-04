@@ -517,7 +517,7 @@ class TestJointEngineCompileFlags:
         engine._architecture_generate_warned_dropped_kwargs = set()
         return engine
 
-    def _make_engine(self, compile_enabled=False, return_arch=False):
+    def _make_engine(self, compile_enabled=False, return_arch=False, prompt_cache_cfg=None):
         from omegaconf import OmegaConf
 
         from openwam.deploy.engine import JointInferenceEngine
@@ -545,6 +545,8 @@ class TestJointEngineCompileFlags:
                 },
             }
         )
+        if prompt_cache_cfg is not None:
+            cfg.optimization.prompt_embed_cache = prompt_cache_cfg
 
         arch = MagicMock()
         with patch("torch.compile") as mock_compile:
@@ -570,6 +572,34 @@ class TestJointEngineCompileFlags:
         mock_compile.assert_not_called()
         compile_cfg = arch.apply_compile_optimizations.call_args.args[0]
         assert OmegaConf.select(compile_cfg, "enabled") is True
+
+    def test_prompt_embed_cache_default_is_bounded_default(self):
+        engine, _ = self._make_engine()
+        from openwam.deploy.engine import DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE, _BoundedPromptEmbedCache
+
+        assert isinstance(engine._prompt_embed_cache, _BoundedPromptEmbedCache)
+        assert engine._prompt_embed_cache._maxsize == DEFAULT_PROMPT_EMBED_CACHE_MAXSIZE
+
+    def test_prompt_embed_cache_maxsize_from_config(self):
+        engine, _ = self._make_engine(prompt_cache_cfg={"enabled": True, "maxsize": 8})
+        assert engine._prompt_embed_cache._maxsize == 8
+
+    def test_prompt_embed_cache_enabled_false_disables_cache(self):
+        engine, _ = self._make_engine(prompt_cache_cfg={"enabled": False, "maxsize": 8})
+        assert engine._prompt_embed_cache is None
+
+    def test_generate_kwarg_filter_treats_disabled_cache_drop_as_noop(self, caplog):
+        class _StrictArchitecture:
+            def generate(self, *, schedule, prompt):
+                return {"schedule": schedule, "prompt": prompt}
+
+        engine = self._make_filter_engine(_StrictArchitecture())
+        caplog.set_level("WARNING", logger="openwam.deploy.engine")
+        filtered = engine._filter_architecture_generate_kwargs(
+            {"schedule": object(), "prompt": "pick up the cube", "prompt_embed_cache": None}
+        )
+        assert set(filtered) == {"schedule", "prompt"}
+        assert not [r for r in caplog.records if "does not accept deploy kwarg" in r.getMessage()]
 
     def test_generate_kwarg_filter_warns_once_for_meaningful_drops(self, caplog):
         class _StrictArchitecture:

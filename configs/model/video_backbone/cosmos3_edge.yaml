@@ -1,59 +1,31 @@
-# Cosmos3-Edge (4B) video backbone — NVIDIA's dual-stream unified transformer
-# (causal und text stream + bidirectional gen video stream; no cross-attention,
-# no external text encoder; modeling code vendored under
-# openwam/model/video_backbone/cosmos3/_vendor/). Switch on CLI:
-# model/video_backbone=cosmos3_edge.
-#
-# Geometry auto-derives (dim 2048 / 28 layers / 16 heads × head_dim 128), and
-# the action-side context width auto-derives from text_dim = 2048 (the und
-# final hidden) — unlike predict2.5, joint_cross_attn needs NO
-# action_backbone num_heads/attn_head_dim overrides.
-# Supported architecture variants: dual_system/{joint_cross_attn,
-# joint_self_attn, idm} and single_system/{vanilla, moe}. joint_self_attn and
-# idm ride MoT via cached-und prefix K/V + GQA KV-expand (see
-# BlockLoopState.prefix_kv_*); single_system appends action/state tokens
-# directly to the flat gen sequence (no AdaLN to expand, unlike predict2.5).
-# tri_system is rejected: its driver does not widen the joint mask for the und
-# prefix K/V.
-#
-# Freeze policy: the und (text) pathway + token embedding are frozen at build
-# time (`freeze_und`, the und tower runs under no_grad regardless), and
-# `video_backbone.vae` in the model freeze list covers the Wan2.2 VAE child.
-# The gen pathway (`video_backbone.dit` gen half + proj heads) is TRAINABLE by
-# default — freeze via the model freeze list, not here.
+# Cosmos3-Edge (4B) video backbone — NVIDIA dual-stream unified transformer
+# (causal und text stream + bidirectional gen video stream; no external text
+# encoder; modeling code vendored under openwam/model/video_backbone/cosmos3/).
+# Geometry and the action-side context width (text_dim=2048) auto-derive — no
+# action_backbone overrides needed for joint_cross_attn. Works with
+# dual_system (joint_cross_attn | joint_self_attn | idm) and single_system
+# (vanilla | moe); tri_system is rejected. The und pathway is frozen at build
+# (freeze_und below); the gen pathway is trainable by default.
 
 name: cosmos3_edge
-# Diffusers-style bundle root (transformer/ + vae/ + text_tokenizer/).
-model_path: /path/to/assets/Cosmos3-Edge
+model_path: /path/to/assets/Cosmos3-Edge  # [Required] diffusers-style bundle root (transformer/ + vae/ + text_tokenizer/)
 
-# Rectified-flow α-shift for the video scheduler (train + deploy single source
-# of truth). NVIDIA's Cosmos3 train shifts are resolution-keyed
-# {256: 3, 480: 5, 720: 10}; 5.0 matches the 480p regime this repo trains at.
-# Known deviation (recorded): NVIDIA samples train timesteps from a `waver`
-# distribution; OpenWAM samples uniformly over the shifted grid.
+# Flow-matching α-shift for the video scheduler (train + deploy single source of
+# truth). NVIDIA's resolution-keyed train shifts are {256: 3, 480: 5, 720: 10};
+# 5.0 matches the 480p regime this repo trains at.
 shift_video: 5.0
 
-# Prompt handling — mirrors the native pipeline defaults (model_index ships
-# default_use_system_prompt=false; duration+resolution metadata templates on).
+# Prompt handling — mirrors the native pipeline defaults.
 use_system_prompt: false
-prompt_templates: true
+prompt_templates: true    # duration + resolution metadata sentences in the prompt
 max_text_tokens: 512
 
-# Clip frame rate, used for the duration sentence in the prompt templates and
-# for the vision mRoPE temporal scaling (inert while it equals the model's
-# base_fps of 24). NOTE: this is an ASSUMPTION, not a measurement — nothing in
-# the dataloader stack reports a clip fps, and `video_stride` sub-sampling means
-# the clip rate is not the source rate either (robotwin: num_frames=33,
-# video_stride=4 → 9 frames spanning 32 raw frames). Left at 24 so existing
-# checkpoints stay reproducible. Set the real rate when known, or drop the
-# (then-false) duration sentence with prompt_duration_template=false; the
-# resolution sentence is derived from the actual frames and stays correct.
+# Assumed clip frame rate for the duration sentence + vision mRoPE temporal
+# scaling (inert while it equals the model's base_fps of 24). Set the real rate
+# when known, or drop the duration sentence with prompt_duration_template=false.
 fps: 24.0
 prompt_duration_template: true
 
-# CFG dropout: substitutes "" for prompts with prob p, only when training=True.
-# Seed via +model.video_backbone.text_encoder_dropout_seed=<int> for repro.
-text_encoder_dropout: 0.0
+text_encoder_dropout: 0.0  # CFG dropout: prob of substituting "" for prompts (training only); seed via +model.video_backbone.text_encoder_dropout_seed=<int>
 
-# Freeze the und (text) pathway + token embedding at build.
-freeze_und: true
+freeze_und: true   # freeze the und (text) pathway + token embedding at build
